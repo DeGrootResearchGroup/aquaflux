@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# JAX / XLA
+*.pb
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Claude local (worktrees + machine-local settings are not shared)
+.claude/worktrees/
+.claude/settings.local.json
+
+# Internal design notes: the loose top-level design-note markdown files are NOT part of
+# the public repository — they are internal working documents (eventually folded into
+# user-facing docs). Ignore every top-level *.md except the two that belong in the repo.
+# Anything under docs/ (and any other nested *.md) is unaffected by these anchored rules.
+/*.md
+!/README.md
+!/CLAUDE.md
+
+# Precursor codebases and source papers: external prior-art kept locally for reference
+# only. These are NOT part of the public repository and must never be committed.
+/reference/
+/reference_codes/

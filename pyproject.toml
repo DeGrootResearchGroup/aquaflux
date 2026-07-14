@@ -1,0 +1,111 @@
+# PEP 639 SPDX license metadata needs setuptools >= 77.
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aquaflux"
+# Single-sourced from ``aquaflux.__version__`` via [tool.setuptools.dynamic]
+# below, so the version lives in exactly one place (aquaflux/__init__.py).
+dynamic = ["version"]
+description = "Differentiable unstructured finite-volume flow solver in JAX, purpose-built to couple with aquakin for reactive environmental transport"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Christopher DeGroot", email = "christopher.degroot@uwo.ca" }]
+keywords = ["cfd", "finite-volume", "differentiable", "jax", "unstructured", "adjoint"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    # JAX core (AD + jit). Floors are the tested baseline; no upper caps
+    # (upper-bounding deps propagates to consumers and causes resolver
+    # conflicts — pin exact versions for CI in a committed constraints lock).
+    "jax>=0.10",
+    "jaxlib>=0.10",
+    # equinox: jit/grad-native OO modules (`equinox.Module`). The mesh, geometry, and
+    # the strategy hierarchies (operators/schemes/BCs/solvers) are Modules. Already a
+    # transitive dependency (diffrax and lineax are built on equinox), so no new
+    # footprint — pinned explicitly because the code imports it directly.
+    "equinox>=0.11",
+    # lineax: JAX-native linear solves with implicit differentiation — the
+    # linear-solve adjoint seam (briefing §10). `jax.scipy.sparse.linalg` is the
+    # fallback. The coupled block preconditioner is the top research risk;
+    # `jaxamg` is the first build-on candidate to evaluate (briefing §11.8).
+    "lineax>=0.0.5",
+    # Diffrax: transient integration, shared with aquakin. The PDE core is a
+    # DAE-residual engine; aquakin's ODE reactors are the special case.
+    "diffrax>=0.7",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    # NOTE: pydantic + pyyaml are intentionally NOT dependencies yet. The
+    # YAML→AST DSL is the LAST layer (dsl-design-note.md §6); it is added when
+    # that milestone starts, not before. Do not add them to scaffold empty
+    # structure.
+]
+
+[project.optional-dependencies]
+# `lint` pins the linter so a new ruff release cannot turn the gate red without
+# a deliberate bump. Capped to the 0.15 series; raise the cap intentionally.
+lint = ["ruff>=0.15,<0.16"]
+# `test` is the fast-gate toolchain.
+test = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[project.urls]
+Repository = "https://github.com/DeGrootResearchGroup/aquaflux"
+
+[tool.setuptools.dynamic]
+version = { attr = "aquaflux.__version__" }
+
+[tool.setuptools.packages.find]
+# Only package `aquaflux*`. The repo root also holds design docs, `reference/`
+# (PDFs), and `reference_codes/` (the C++/Fortran blueprints) — none are code.
+include = ["aquaflux*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# Lint only the package. Design docs, references, and reference_codes are
+# out of scope for the style gate.
+src = ["aquaflux", "tests"]
+
+[tool.ruff.lint]
+#   E,W  pycodestyle     F   pyflakes            I    isort
+#   B    flake8-bugbear  RUF ruff-specific       NPY  numpy (incl. NumPy-2.0 API)
+#   PIE  flake8-pie      ICN import-conventions  FA   future-annotations
+#   UP   pyupgrade
+# Fresh codebase: start strict, keep it strict (no deferred-issue backlog to
+# carry). Add rules deliberately; do not silence findings with blanket ignores.
+select = ["E", "F", "W", "I", "B", "RUF", "NPY", "PIE", "ICN", "FA", "UP"]
+ignore = [
+    # `ruff format` owns line width; E501 on un-splittable lines (URLs, refs) is
+    # noise, not an actionable finding.
+    "E501",
+    # Intentional scientific Unicode in docstrings/comments (µ, α, β, ×, ⁻, °, ∇).
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Package __init__ re-export files carry deliberate import ordering — e.g.
+# aquaflux/__init__.py must enable JAX x64 before any submodule import that
+# builds JAX state (documented in CLAUDE.md).
+"**/__init__.py" = ["I001", "E402"]
+
+[tool.pytest.ini_options]
+markers = [
+    "validation: scientific validation against analytical/published solutions (slow)",
+    "slow: multi-minute solves; excluded from the fast gate, run in full on merge",
+]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["aquaflux"]
+branch = true
