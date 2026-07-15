@@ -15,6 +15,7 @@ from .advection import (
 )
 from .diffusion import DiffusionFlux
 from .face_flux import FaceContext, FaceFluxOperator
+from .residual import ResidualAssembler
 from .transient import TransientTerm
 
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     "FaceFluxOperator",
     "FirstOrderUpwind",
     "LimitedUpwind",
+    "ResidualAssembler",
     "TransientTerm",
 ]
