@@ -3,8 +3,9 @@
 :class:`OpenFOAMReader` is the only layer that touches the filesystem: it reads the polyMesh files,
 delegates their text to the :mod:`.grammar` parsers, assembles the arrays into a 3D mesh
 (:func:`.assembler.assemble`), and — for a two-dimensional case, encoded as a one-cell-thick mesh
-capped by two ``empty`` patches — collapses the through-thickness direction to return a genuine 2D
-mesh. Only ASCII polyMesh files are supported; a binary file is reported rather than misread.
+capped by ``empty`` patches — collapses the through-thickness direction to return a genuine 2D
+mesh. The caps may be two separate patches or a single ``frontAndBack`` patch (the standard
+convention). Only ASCII polyMesh files are supported; a binary file is reported rather than misread.
 """
 
 from __future__ import annotations
@@ -123,7 +124,8 @@ class OpenFOAMReader(MeshReader):
         -------
         Mesh
             The assembled mesh: 3D in general, or the collapsed 2D mesh when the case is one cell
-            thick between two ``empty`` patches.
+            thick between its ``empty`` patches (whether those are two separate front/back patches
+            or a single ``frontAndBack`` patch).
         """
         data = self.read_polymesh()
         mesh = assemble(data)

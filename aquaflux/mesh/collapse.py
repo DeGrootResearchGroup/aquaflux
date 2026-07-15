@@ -1,13 +1,13 @@
 """Collapse a one-cell-thick extruded 3D mesh to the equivalent genuine 2D mesh.
 
 Some 3D mesh sources represent a two-dimensional problem as a **single layer of cells**
-extruded a short distance along one axis, capped on both sides by a pair of planar boundary
-patches normal to that axis. The through-thickness direction carries no physics — it exists only
-because the source format has no genuine 2D mode. :func:`collapse_extruded_direction` removes it,
-returning a ``dim == 2`` :class:`~aquaflux.mesh.Mesh` whose cells map one-to-one onto the original
-layer:
+extruded a short distance along one axis, capped on both sides by planar boundary faces normal to
+that axis. The through-thickness direction carries no physics — it exists only because the source
+format has no genuine 2D mode. :func:`collapse_extruded_direction` removes it, returning a
+``dim == 2`` :class:`~aquaflux.mesh.Mesh` whose cells map one-to-one onto the original layer:
 
-- the two capping patches (named by the caller) are dropped along with the through-thickness axis;
+- the capping faces (named by the caller as one or more patches) are dropped along with the
+  through-thickness axis;
 - coincident front/back nodes collapse to one node per in-plane position;
 - every remaining face is an extruded side quad, which reduces to the 2D edge joining its two
   distinct in-plane endpoints;
@@ -35,17 +35,20 @@ _RELATIVE_TOLERANCE = 1e-8
 def collapse_extruded_direction(mesh: Mesh, removed_patch_names: Sequence[str]) -> Mesh:
     """Collapse a one-cell-thick extruded 3D mesh to the equivalent 2D mesh.
 
-    The two named patches must be the planar caps normal to the extruded axis (the front and back
-    of the layer). The extruded axis is inferred from them: it is the single axis along which each
-    cap's nodes share a constant coordinate, the two caps lying at different constants.
+    The named patches together hold the planar caps normal to the extruded axis (the front and back
+    of the layer). The extruded axis is inferred from them: each cap face is normal to one shared
+    axis, and the caps lie at exactly two positions along it. The caps may be given as two separate
+    patches (a distinct front and back) or as a single patch spanning both planes — the standard
+    OpenFOAM ``frontAndBack`` convention — since the faces are pooled before the axis is inferred.
 
     Parameters
     ----------
     mesh : Mesh
-        A 3D mesh that is one cell thick along one axis, capped by the two named patches.
+        A 3D mesh that is one cell thick along one axis, capped by the named patches.
     removed_patch_names : sequence of str
-        The names of exactly the two capping face patches (e.g. an OpenFOAM case's front/back
-        ``empty`` patches). Both must exist in ``mesh.face_patches``.
+        The names of the capping face patches (e.g. an OpenFOAM case's front/back ``empty`` patches,
+        or a single ``frontAndBack`` patch). Each must exist in ``mesh.face_patches``, and their
+        faces together must form the two parallel caps of one extrusion.
 
     Returns
     -------
@@ -56,14 +59,14 @@ def collapse_extruded_direction(mesh: Mesh, removed_patch_names: Sequence[str]) 
     Raises
     ------
     ValueError
-        If ``mesh`` is not 3D; if ``removed_patch_names`` does not name exactly two patches; if a
-        named cap is not planar and normal to a single axis, or the two caps share their constant
-        coordinate; or if removing the caps leaves a face that is not an extruded quad (so the mesh
-        is not a genuine one-cell-thick extrusion of the removed patches).
+        If ``mesh`` is not 3D; if ``removed_patch_names`` is empty or names no faces; if a cap face
+        is not planar and normal to a single axis, the caps are normal to different axes, or they do
+        not lie on exactly two parallel planes; or if removing the caps leaves a face that is not an
+        extruded quad (so the mesh is not a genuine one-cell-thick extrusion of the removed patches).
     """
     removed = list(removed_patch_names)
-    if len(removed) != 2:
-        raise ValueError(f"expected exactly two capping patches to remove; got {removed}")
+    if not removed:
+        raise ValueError("expected at least one capping patch to remove; got none")
 
     node_coords = np.asarray(mesh.node_coords)
     if node_coords.shape[1] != 3:
@@ -78,14 +81,19 @@ def collapse_extruded_direction(mesh: Mesh, removed_patch_names: Sequence[str]) 
     offsets = np.asarray(mesh.face_nodes.offsets)
     indices = np.asarray(mesh.face_nodes.face_node_indices)
 
-    cap_masks = [np.asarray(mesh.face_patches.mask(name)) for name in removed]
-    extruded_axis = _extruded_axis(removed, cap_masks, offsets, indices, node_coords, tolerance)
+    removed_faces_mask = np.zeros(mesh.n_faces, dtype=bool)
+    for name in removed:
+        removed_faces_mask |= np.asarray(mesh.face_patches.mask(name))
+    cap_faces = np.nonzero(removed_faces_mask)[0]
+    if cap_faces.size == 0:
+        raise ValueError(f"capping patches {removed} contain no faces")
+
+    extruded_axis = _extruded_axis(removed, cap_faces, offsets, indices, node_coords, tolerance)
     kept_axes = [axis for axis in range(3) if axis != extruded_axis]
 
     node_map, new_coords = _collapse_nodes(node_coords[:, kept_axes], tolerance)
 
-    removed_faces = cap_masks[0] | cap_masks[1]
-    kept_faces = np.nonzero(~removed_faces)[0]
+    kept_faces = np.nonzero(~removed_faces_mask)[0]
     edge_nodes = _side_faces_to_edges(kept_faces, offsets, indices, node_map)
 
     edge_offsets = np.arange(kept_faces.size + 1) * 2
@@ -106,41 +114,53 @@ def collapse_extruded_direction(mesh: Mesh, removed_patch_names: Sequence[str]) 
 
 def _extruded_axis(
     removed: list[str],
-    cap_masks: list[np.ndarray],
+    cap_faces: np.ndarray,
     offsets: np.ndarray,
     indices: np.ndarray,
     node_coords: np.ndarray,
     tolerance: float,
 ) -> int:
-    """Infer the extruded axis: the single axis each cap is constant along, the caps differing on it."""
-    axes = []
+    """Infer the extruded axis from the pooled cap faces.
+
+    Every cap face must be planar and normal to one shared axis, and the caps must lie at exactly
+    two positions along it (the front and back of the extrusion). The faces are pooled across all
+    named patches beforehand, so it makes no difference whether the caps arrive as two separate
+    patches or as one patch spanning both planes.
+    """
+    axis: int | None = None
     constants = []
-    for name, mask in zip(removed, cap_masks, strict=True):
-        faces = np.nonzero(mask)[0]
-        if faces.size == 0:
-            raise ValueError(f"capping patch '{name}' is empty")
-        nodes = np.unique(np.concatenate([indices[offsets[f] : offsets[f + 1]] for f in faces]))
+    for face in cap_faces:
+        nodes = indices[offsets[face] : offsets[face + 1]]
         spread = np.ptp(node_coords[nodes], axis=0)
         flat = np.nonzero(spread <= tolerance)[0]
         if flat.size != 1:
             raise ValueError(
-                f"capping patch '{name}' is not planar and normal to a single axis "
-                f"(constant along {flat.size} axes)"
+                f"capping face {int(face)} is not planar and normal to a single axis "
+                f"(constant along {flat.size} axes); patches {removed} are not extrusion caps"
             )
-        axis = int(flat[0])
-        axes.append(axis)
+        face_axis = int(flat[0])
+        if axis is None:
+            axis = face_axis
+        elif face_axis != axis:
+            raise ValueError(
+                f"capping faces are normal to different axes ({axis} and {face_axis}); "
+                f"patches {removed} must be the two ends of one extrusion"
+            )
         constants.append(float(node_coords[nodes, axis].mean()))
-    if axes[0] != axes[1]:
+    planes = _distinct_values(np.asarray(constants), tolerance)
+    if planes.size != 2:
         raise ValueError(
-            f"capping patches '{removed[0]}' and '{removed[1]}' are normal to different axes "
-            f"({axes[0]} and {axes[1]}); they must be the two ends of one extrusion"
+            f"capping patches {removed} must lie on exactly two parallel planes normal to one axis "
+            f"(the front and back of the extrusion); found {planes.size}"
         )
-    if abs(constants[0] - constants[1]) <= tolerance:
-        raise ValueError(
-            f"capping patches '{removed[0]}' and '{removed[1]}' lie at the same coordinate; "
-            "they must be the front and back of the extrusion"
-        )
-    return axes[0]
+    return axis
+
+
+def _distinct_values(values: np.ndarray, tolerance: float) -> np.ndarray:
+    """Collapse ``values`` to the distinct ones, merging any within ``tolerance`` of each other."""
+    ordered = np.sort(values)
+    keep = np.concatenate(([True], np.diff(ordered) > tolerance))
+    return ordered[keep]
 
 
 def _collapse_nodes(in_plane: np.ndarray, tolerance: float) -> tuple[np.ndarray, np.ndarray]:

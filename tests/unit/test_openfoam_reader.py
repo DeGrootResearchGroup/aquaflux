@@ -61,6 +61,20 @@ def test_reads_and_collapses_2d_slab():
     np.testing.assert_allclose(_sorted_areas(mesh), _sorted_areas(reference))
 
 
+def test_reads_and_collapses_2d_slab_single_frontandback():
+    # The standard OpenFOAM 2D form: a single "frontAndBack" empty patch instead of two caps.
+    mesh = read_openfoam(_FIXTURES / "polymesh_2d_slab_frontandback")
+    assert mesh.dim == 2
+    assert mesh.n_cells == 2
+    names = set(mesh.face_patches.names)
+    assert "frontAndBack" not in names
+    assert {"left", "right", "bottom", "top"} <= names
+
+    reference = structured_grid_2d(2, 1, lx=2.0, ly=1.0)
+    np.testing.assert_allclose(_sorted_volumes(mesh), _sorted_volumes(reference))
+    np.testing.assert_allclose(_sorted_areas(mesh), _sorted_areas(reference))
+
+
 def test_reader_resolves_case_directory(tmp_path):
     # A reader pointed at a case directory finds constant/polyMesh under it.
     case = tmp_path / "case"

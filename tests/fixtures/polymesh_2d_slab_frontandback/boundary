@@ -1,0 +1,46 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| aquaflux test fixture                                                       |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       polyBoundaryMesh;
+    location    "constant/polyMesh";
+    object      boundary;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+5
+(
+    left
+    {
+        type            patch;
+        nFaces          1;
+        startFace       1;
+    }
+    right
+    {
+        type            patch;
+        nFaces          1;
+        startFace       2;
+    }
+    bottom
+    {
+        type            wall;
+        nFaces          2;
+        startFace       3;
+    }
+    top
+    {
+        type            wall;
+        nFaces          2;
+        startFace       5;
+    }
+    frontAndBack
+    {
+        type            empty;
+        nFaces          4;
+        startFace       7;
+    }
+)

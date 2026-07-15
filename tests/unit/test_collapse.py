@@ -46,6 +46,47 @@ def test_collapsed_slab_matches_structured_grid_2d(nx, ny):
     np.testing.assert_allclose(got["areas"], want["areas"])
 
 
+@pytest.mark.parametrize(("nx", "ny"), [(2, 1), (3, 2), (4, 4)])
+def test_collapse_single_frontandback_patch(nx, ny):
+    # The standard OpenFOAM 2D convention: one "empty" patch holding both the front and back
+    # planes, rather than two separate caps. Collapsing it must match the two-cap result.
+    from aquaflux.mesh import Mesh
+
+    slab = structured_grid_3d(nx, ny, 1, lx=2.0, ly=3.0, lz=0.5, named_boundaries=True)
+    front_and_back = np.concatenate(
+        [
+            np.asarray(slab.face_patches.indices("back")),
+            np.asarray(slab.face_patches.indices("front")),
+        ]
+    )
+    merged = Mesh.from_csr(
+        slab.node_coords,
+        slab.face_nodes.offsets,
+        slab.face_nodes.face_node_indices,
+        slab.face_cells.owner,
+        slab.face_cells.neighbour,
+        n_cells=slab.n_cells,
+        face_patches={
+            **{name: np.asarray(slab.face_patches.indices(name)) for name in ("left", "right", "bottom", "top")},
+            "frontAndBack": front_and_back,
+        },
+    )
+    collapsed = collapse_extruded_direction(merged, ["frontAndBack"])
+    reference = structured_grid_2d(nx, ny, lx=2.0, ly=3.0)
+
+    got = _geometry_invariants(collapsed)
+    want = _geometry_invariants(reference)
+    assert got["dim"] == want["dim"] == 2
+    assert got["n_cells"] == want["n_cells"]
+    assert got["n_faces"] == want["n_faces"]
+    assert got["n_interior"] == want["n_interior"]
+    np.testing.assert_allclose(got["volumes"], want["volumes"])
+    np.testing.assert_allclose(got["areas"], want["areas"])
+    names = set(collapsed.face_patches.names)
+    assert "frontAndBack" not in names
+    assert {"left", "right", "bottom", "top"} <= names
+
+
 def test_collapse_drops_caps_and_keeps_side_patches():
     slab = structured_grid_3d(3, 2, 1, named_boundaries=True)
     collapsed = collapse_extruded_direction(slab, ["back", "front"])
@@ -90,9 +131,16 @@ def test_cell_zones_survive_collapse():
     np.testing.assert_array_equal(np.asarray(collapsed.cell_zones.indices("left_half")), zone_cells)
 
 
-def test_requires_exactly_two_patches():
+def test_requires_at_least_one_patch():
     slab = structured_grid_3d(2, 1, 1, named_boundaries=True)
-    with pytest.raises(ValueError, match="exactly two"):
+    with pytest.raises(ValueError, match="at least one"):
+        collapse_extruded_direction(slab, [])
+
+
+def test_single_cap_plane_rejected():
+    # Only one of the two caps: the removed faces span a single plane, not the two an extrusion needs.
+    slab = structured_grid_3d(2, 1, 1, named_boundaries=True)
+    with pytest.raises(ValueError, match="two parallel planes"):
         collapse_extruded_direction(slab, ["back"])
 
 
