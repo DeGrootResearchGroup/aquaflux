@@ -1,6 +1,6 @@
-"""Material properties: per-cell physical property fields (density, viscosity, conductivity, ...).
+"""Properties: per-cell physical property fields (density, viscosity, conductivity, ...).
 
-A :class:`MaterialProperty` is a *single* named property that evaluates to a per-cell array from the
+A :class:`Property` is a *single* named property that evaluates to a per-cell array from the
 cell partition and (for state-dependent kinds) the current state fields. Three field-independent
 kinds are built here, from least to most spatially resolved:
 
@@ -16,7 +16,7 @@ viscosity) is a later addition that consumes the ``fields`` argument.
 
 Property values are **plain scalars**, not wrapped arrays: a property is differentiated by passing
 its value as a traced argument (constructing the property inside the differentiated function), the
-same pattern the boundary Biot number uses — so a material parameter is a first-class sensitivity /
+same pattern the boundary Biot number uses — so a property parameter is a first-class sensitivity /
 estimation target with no extra ceremony.
 """
 
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from aquaflux.mesh import CellZones
 
 
-class MaterialProperty(eqx.Module):
+class Property(eqx.Module):
     """A single per-cell physical property, evaluated from the cell partition and state fields."""
 
     @abc.abstractmethod
@@ -52,14 +52,14 @@ class MaterialProperty(eqx.Module):
         """
 
 
-class Constant(MaterialProperty):
+class Constant(Property):
     """A uniform property value everywhere.
 
     Attributes
     ----------
     value : float
         The property value — a plain scalar; a tracer flows through it when the property is
-        differentiated (e.g. a material-parameter sensitivity).
+        differentiated (e.g. a property-parameter sensitivity).
     """
 
     value: float
@@ -68,7 +68,7 @@ class Constant(MaterialProperty):
         return jnp.full((cell_zones.label.shape[0],), self.value)
 
 
-class ZoneConstant(MaterialProperty):
+class ZoneConstant(Property):
     """A separate constant value per named cell zone.
 
     Build with :meth:`from_dict`. Each cell's value is looked up by its zone label, so a
@@ -118,7 +118,7 @@ class ZoneConstant(MaterialProperty):
         return self.values[cell_zones.label]
 
 
-class FieldProperty(MaterialProperty):
+class FieldProperty(Property):
     """An arbitrary per-cell field of property values, supplied directly.
 
     The point between :class:`Constant` (one value everywhere) and :class:`ZoneConstant` (one value

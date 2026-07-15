@@ -1,4 +1,4 @@
-"""Unit tests for the material-property model (physics-free, no mesh geometry)."""
+"""Unit tests for the property model (physics-free, no mesh geometry)."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.materials import Constant, FieldProperty, MaterialModel, ZoneConstant
 from aquaflux.mesh import CellZones
+from aquaflux.properties import Constant, FieldProperty, PropertyModel, ZoneConstant
 
 
 def _two_zones(n_cells: int = 6) -> CellZones:
@@ -91,12 +91,12 @@ def test_field_property_rejects_wrong_length() -> None:
         FieldProperty(values=jnp.ones(3)).evaluate(CellZones.default(5), {})
 
 
-# --- MaterialModel ---------------------------------------------------------------------
+# --- PropertyModel ---------------------------------------------------------------------
 
 
-def test_material_model_evaluates_all_named_properties() -> None:
+def test_property_model_evaluates_all_named_properties() -> None:
     zones = _two_zones()
-    model = MaterialModel(
+    model = PropertyModel(
         properties={
             "density": Constant(value=1.2),
             "viscosity": ZoneConstant.from_dict(zones, {"fluid": 1e-3, "solid": 1e6}),
@@ -108,24 +108,24 @@ def test_material_model_evaluates_all_named_properties() -> None:
     np.testing.assert_allclose(np.asarray(props["viscosity"]), [1e-3, 1e-3, 1e-3, 1e6, 1e6, 1e6])
 
 
-def test_material_model_require_flags_missing_property() -> None:
-    model = MaterialModel(properties={"density": Constant(value=1.0)})
+def test_property_model_require_flags_missing_property() -> None:
+    model = PropertyModel(properties={"density": Constant(value=1.0)})
     model.require("density")  # present -> no error
     with pytest.raises(ValueError, match="missing required property"):
         model.require("viscosity")
 
 
-def test_material_model_require_lists_every_missing_property() -> None:
-    model = MaterialModel(properties={"density": Constant(value=1.0)})
+def test_property_model_require_lists_every_missing_property() -> None:
+    model = PropertyModel(properties={"density": Constant(value=1.0)})
     with pytest.raises(ValueError, match="missing required properties") as excinfo:
         model.require("viscosity", "conductivity")
     message = str(excinfo.value)
     assert "viscosity" in message and "conductivity" in message
 
 
-def test_material_model_evaluate_threads_state_fields() -> None:
+def test_property_model_evaluate_threads_state_fields() -> None:
     """``evaluate`` accepts and forwards a state-field mapping (the state-dependent seam)."""
     zones = _two_zones()
-    model = MaterialModel(properties={"density": Constant(value=1.0)})
+    model = PropertyModel(properties={"density": Constant(value=1.0)})
     props = model.evaluate(zones, {"temperature": jnp.full(zones.label.shape[0], 300.0)})
     assert jnp.allclose(props["density"], 1.0)

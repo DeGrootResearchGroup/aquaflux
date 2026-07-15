@@ -2,7 +2,7 @@
 
 The diffusive flux through a face is ``Gamma (grad phi . n) A``. Its normal derivative is
 built to be **flux-continuous across the face**, so that a jump in the diffusion coefficient
-(different materials / zones sharing a face) is handled natively. Requiring
+(different properties / zones sharing a face) is handled natively. Requiring
 
     Gamma_P grad phi|_P . n  =  Gamma_N grad phi|_N . n
 
@@ -57,9 +57,9 @@ class DiffusionFlux(FaceFluxOperator):
     Attributes
     ----------
     coefficient : str
-        The name of the material property this operator uses as its diffusion coefficient
+        The name of the property this operator uses as its diffusion coefficient
         ``Gamma`` (``"diffusivity"`` for a generic scalar, ``"conductivity"`` for heat,
-        ``"viscosity"`` for momentum) — read from ``context.materials``. Static.
+        ``"viscosity"`` for momentum) — read from ``context.properties``. Static.
     """
 
     coefficient: str = eqx.field(static=True, default="diffusivity")
@@ -73,7 +73,7 @@ class DiffusionFlux(FaceFluxOperator):
 
         phi_owner, phi_neighbour = field[owner], field[neighbour]
         grad_owner, grad_neighbour = context.gradient[owner], context.gradient[neighbour]
-        gamma = context.materials[self.coefficient]
+        gamma = context.properties[self.coefficient]
         gamma_owner, gamma_neighbour = gamma[owner], gamma[neighbour]
 
         d_p = x_ip - x_cell[owner]

@@ -9,7 +9,7 @@ The volume is baked into the returned value: the operator owns its own volume qu
 :class:`~aquaflux.discretization.face_flux.FaceFluxOperator` bakes in the face area, so the assembler
 composes integrated contributions uniformly.
 
-The per-cell state a source needs (the solved field, cell gradient, material properties, cell
+The per-cell state a source needs (the solved field, cell gradient, properties, cell
 volume) is gathered from the shared :class:`~aquaflux.discretization.face_flux.FaceContext`. A
 coefficient or field held fixed for the evaluation is carried as constructor state, as
 :class:`~aquaflux.discretization.advection.AdvectionFlux` carries its prescribed mass flux.
@@ -45,7 +45,7 @@ class VolumeSource(eqx.Module):
             The cell field the source acts on, shape ``(n_cells,)``.
         context : FaceContext
             The shared per-evaluation inputs; the source gathers the cell-oriented fields it needs
-            (``geometry.cell.volume``, the reconstructed ``gradient``, ``materials``) from it.
+            (``geometry.cell.volume``, the reconstructed ``gradient``, ``properties``) from it.
 
         Returns
         -------

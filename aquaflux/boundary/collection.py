@@ -6,7 +6,7 @@ and set the result into the patch's face rows. The iteration is identical; only 
 (a scalar face value vs. a flow velocity / pressure / mass-flux).
 
 :class:`BoundaryConditions` is the named ``{patch: closure}`` collection — constructed the same way
-as a material model (``BoundaryConditions({"left": ..., "right": ...})``) and handed to an
+as a property model (``BoundaryConditions({"left": ..., "right": ...})``) and handed to an
 assembler's ``build``. The assembler binds it to the mesh once via :meth:`resolve` (turning patch
 *names* into concrete boundary-face indices, off the jit path) and then composes :meth:`apply` — the
 one iterate-gather-scatter fold — inside the residual. Neither assembler re-open-codes the loop, and
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 class BoundaryConditions(eqx.Module):
     """A named ``{patch: closure}`` boundary-condition collection, bound to a mesh on demand.
 
-    Construct from a mapping of patch name to boundary closure, exactly as a material model is
+    Construct from a mapping of patch name to boundary closure, exactly as a property model is
     constructed from a mapping of property name to property —
     ``BoundaryConditions({"left": Dirichlet(1.0), "right": ZeroGradient()})``. The collection is
     initially *unbound*: it knows patch names, not face indices. An assembler's ``build`` binds it

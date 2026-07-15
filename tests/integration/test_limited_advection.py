@@ -28,8 +28,8 @@ from aquaflux.discretization import (
     LimitedUpwind,
     ResidualAssembler,
 )
-from aquaflux.materials import Constant, MaterialModel
 from aquaflux.mesh import structured_grid_2d
+from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, Limiter, VenkatakrishnanLimiter
 from aquaflux.solve import ImplicitNewtonSolver, newton_step
 
@@ -58,7 +58,7 @@ def _assembler(nx, gamma, scheme):
     assembler = ResidualAssembler.build(
         mesh,
         geom,
-        MaterialModel({"diffusivity": Constant(gamma)}),
+        PropertyModel({"diffusivity": Constant(gamma)}),
         (AdvectionFlux(mass_flux=mdot, scheme=scheme), DiffusionFlux()),
         BoundaryConditions(
             {
@@ -165,7 +165,7 @@ def test_limiter_reduces_overshoot_on_advected_step() -> None:
         assembler = ResidualAssembler.build(
             mesh,
             geom,
-            MaterialModel({"diffusivity": Constant(1e-4)}),
+            PropertyModel({"diffusivity": Constant(1e-4)}),
             (
                 AdvectionFlux(mass_flux=mdot, scheme=LimitedUpwind(limiter=limiter)),
                 DiffusionFlux(),

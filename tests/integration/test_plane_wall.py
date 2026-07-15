@@ -30,8 +30,8 @@ import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Convective, ZeroGradient
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler, TransientTerm
-from aquaflux.materials import Constant, MaterialModel
 from aquaflux.mesh import structured_grid_2d
+from aquaflux.properties import Constant, PropertyModel
 from aquaflux.solve import NewtonSolver
 
 # --- analytical oracle -----------------------------------------------------------------
@@ -74,7 +74,7 @@ def solve_wall(bi, mesh, geometry, fo_final=1.0, n_steps=400):
     assembler = ResidualAssembler.build(
         mesh,
         geometry,
-        MaterialModel({"diffusivity": Constant(1.0)}),
+        PropertyModel({"diffusivity": Constant(1.0)}),
         (DiffusionFlux(),),
         BoundaryConditions(
             {
@@ -127,7 +127,7 @@ def test_gate_a_one_newton_step_converges() -> None:
     assembler = ResidualAssembler.build(
         mesh,
         geom,
-        MaterialModel({"diffusivity": Constant(1.0)}),
+        PropertyModel({"diffusivity": Constant(1.0)}),
         (DiffusionFlux(),),
         BoundaryConditions(
             {

@@ -50,10 +50,10 @@ class FaceContext(eqx.Module):
         Reconstructed cell gradient shared across operators, shape ``(n_cells, dim)``. Formed once
         per evaluation (a linear solve on skewed grids), so it is a context field rather than
         re-solved per operator; zeros when no gradient scheme is injected.
-    materials : mapping of {str: jnp.ndarray}
-        The evaluated per-cell material properties, ``{name: (n_cells,) array}`` (density,
-        viscosity, conductivity, ...), from the assembler's ``MaterialModel``. An operator reads
-        the property it names (``context.materials[self.coefficient]``); this is one context field
+    properties : mapping of {str: jnp.ndarray}
+        The evaluated per-cell properties, ``{name: (n_cells,) array}`` (density,
+        viscosity, conductivity, ...), from the assembler's ``PropertyModel``. An operator reads
+        the property it names (``context.properties[self.coefficient]``); this is one context field
         regardless of how many properties exist, so adding a property never changes the shape here.
     """
 
@@ -61,7 +61,7 @@ class FaceContext(eqx.Module):
     geometry: MeshGeometry
     boundary_values: jnp.ndarray
     gradient: jnp.ndarray
-    materials: Mapping[str, jnp.ndarray]
+    properties: Mapping[str, jnp.ndarray]
 
 
 class FaceFluxOperator(eqx.Module):

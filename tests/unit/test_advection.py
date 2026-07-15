@@ -46,7 +46,7 @@ def _single_face(phi_owner, phi_neighbour, *, grad=(0.0, 0.0), boundary_value=0.
         geometry=geometry,
         boundary_values=jnp.array([boundary_value]),
         gradient=gradient,
-        materials={},  # the advection schemes read no material property
+        properties={},  # the advection schemes read no property
     )
     return field, context
 

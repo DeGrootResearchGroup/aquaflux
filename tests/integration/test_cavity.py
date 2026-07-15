@@ -22,8 +22,8 @@ import pytest
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall
-from aquaflux.materials import Constant, MaterialModel
 from aquaflux.mesh import structured_grid_2d
+from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import ImplicitNewtonSolver, newton_step
 
@@ -43,7 +43,7 @@ def _cavity(n, mu=MU, scheme=None):
     return MomentumContinuity.build(
         mesh,
         geom,
-        MaterialModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
+        PropertyModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
         CompactGreenGauss(),
         BoundaryConditions(
             {

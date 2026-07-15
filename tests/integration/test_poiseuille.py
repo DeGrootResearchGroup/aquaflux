@@ -21,8 +21,8 @@ import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
-from aquaflux.materials import Constant, MaterialModel
 from aquaflux.mesh import structured_grid_2d
+from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss
 from aquaflux.solve import NewtonSolver
 
@@ -43,7 +43,7 @@ def _solve(nx, ny, mu=MU):
     assembler = MomentumContinuity.build(
         mesh,
         geom,
-        MaterialModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
+        PropertyModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
         CorrectedGreenGauss(),
         BoundaryConditions(
             {

@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import numpy as np
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall, VelocityInlet
-from aquaflux.materials import Constant, MaterialModel
+from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss
 from aquaflux.solve import NewtonSolver
 
@@ -38,7 +38,7 @@ def _solve_couette(n: int = 8, perturb: float = 0.2, seed: int = 2):
     assembler = MomentumContinuity.build(
         mesh,
         geom,
-        MaterialModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
+        PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
         CorrectedGreenGauss(),
         BoundaryConditions(
             {

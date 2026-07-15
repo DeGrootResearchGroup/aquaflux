@@ -45,8 +45,8 @@ from aquaflux.boundary import BoundaryConditions
 from .face_flux import FaceContext
 
 if TYPE_CHECKING:
-    from aquaflux.materials import MaterialModel
     from aquaflux.mesh import Mesh, MeshGeometry
+    from aquaflux.properties import PropertyModel
     from aquaflux.schemes import GradientScheme
 
     from .face_flux import FaceFluxOperator
@@ -71,7 +71,7 @@ class ResidualAssembler(eqx.Module):
     geometry : MeshGeometry
         Face and cell metrics — areas, owner-outward normals, centroids, volumes (computed once,
         shared).
-    materials : MaterialModel
+    properties : PropertyModel
         The named per-cell physical properties, evaluated each residual and threaded to the flux
         operators (via the context) and the boundary closures.
     flux_operators : tuple of FaceFluxOperator
@@ -86,7 +86,7 @@ class ResidualAssembler(eqx.Module):
         corrections. ``None`` reconstructs no gradient (exact on orthogonal grids, where the
         correction vanishes identically).
     coefficient : str
-        The material property the flux-type boundary closures (Robin/Neumann) use as their
+        The property the flux-type boundary closures (Robin/Neumann) use as their
         diffusion coefficient ``Gamma`` (static; matches the ``DiffusionFlux.coefficient`` of the
         equation's diffusion term).
     boundary : BoundaryConditions
@@ -95,7 +95,7 @@ class ResidualAssembler(eqx.Module):
 
     mesh: Mesh
     geometry: MeshGeometry
-    materials: MaterialModel
+    properties: PropertyModel
     flux_operators: tuple[FaceFluxOperator, ...]
     source_operators: tuple[VolumeSource, ...]
     transient: TransientTerm | None
@@ -108,7 +108,7 @@ class ResidualAssembler(eqx.Module):
         cls,
         mesh: Mesh,
         geometry: MeshGeometry,
-        materials: MaterialModel,
+        properties: PropertyModel,
         flux_operators: tuple[FaceFluxOperator, ...],
         boundary: BoundaryConditions,
         *,
@@ -125,7 +125,7 @@ class ResidualAssembler(eqx.Module):
             The mesh; its ``face_patches`` name the boundary faces.
         geometry : MeshGeometry
             Geometry from ``mesh.geometry()``.
-        materials : MaterialModel
+        properties : PropertyModel
             The named per-cell physical properties; the diffusion term reads its coefficient by
             name, and the flux-type boundary closures read ``coefficient``.
         flux_operators : tuple of FaceFluxOperator
@@ -149,7 +149,7 @@ class ResidualAssembler(eqx.Module):
         return cls(
             mesh=mesh,
             geometry=geometry,
-            materials=materials,
+            properties=properties,
             flux_operators=flux_operators,
             source_operators=source_operators,
             transient=transient,
@@ -159,7 +159,7 @@ class ResidualAssembler(eqx.Module):
         )
 
     def boundary_values(
-        self, phi: jnp.ndarray, gradient: jnp.ndarray, materials: dict[str, jnp.ndarray]
+        self, phi: jnp.ndarray, gradient: jnp.ndarray, properties: dict[str, jnp.ndarray]
     ) -> jnp.ndarray:
         """Weak boundary face values ``phi_ip`` for every face, shape ``(n_faces,)``.
 
@@ -172,14 +172,14 @@ class ResidualAssembler(eqx.Module):
             Cell field, shape ``(n_cells,)``.
         gradient : jnp.ndarray
             Cell gradients, shape ``(n_cells, dim)`` (used by the closures' corrections).
-        materials : dict of {str: jnp.ndarray}
+        properties : dict of {str: jnp.ndarray}
             The evaluated per-cell properties; the flux-type closures read
-            ``materials[self.coefficient]`` as ``Gamma``.
+            ``properties[self.coefficient]`` as ``Gamma``.
         """
         centroid = self.geometry.cell.centroid
         # The diffusion coefficient for the flux-type (Robin/Neumann) closures; zeros when the model
         # has no such property (a pure-advection problem with only value/inflow BCs ignores it).
-        gamma = materials.get(self.coefficient, jnp.zeros(self.mesh.n_cells, dtype=phi.dtype))
+        gamma = properties.get(self.coefficient, jnp.zeros(self.mesh.n_cells, dtype=phi.dtype))
 
         def closure(bc, faces, owner):
             face_centroid = self.geometry.face.centroid[faces]
@@ -203,7 +203,7 @@ class ResidualAssembler(eqx.Module):
         self,
         gradient: jnp.ndarray,
         boundary_values: jnp.ndarray,
-        materials: dict[str, jnp.ndarray],
+        properties: dict[str, jnp.ndarray],
     ) -> FaceContext:
         """The shared per-face inputs each flux operator gathers from."""
         return FaceContext(
@@ -211,7 +211,7 @@ class ResidualAssembler(eqx.Module):
             geometry=self.geometry,
             boundary_values=boundary_values,
             gradient=gradient,
-            materials=materials,
+            properties=properties,
         )
 
     def _scatter(self, face_flux: jnp.ndarray) -> jnp.ndarray:
@@ -219,7 +219,7 @@ class ResidualAssembler(eqx.Module):
         return self.mesh.face_cells.scatter_conservative(face_flux)
 
     def _gradient(
-        self, phi: jnp.ndarray, materials: dict[str, jnp.ndarray]
+        self, phi: jnp.ndarray, properties: dict[str, jnp.ndarray]
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Cell gradients and the boundary values consistent with them.
 
@@ -234,11 +234,11 @@ class ResidualAssembler(eqx.Module):
         n_cells = self.mesh.n_cells
         if self.gradient_scheme is None:
             gradient = jnp.zeros((n_cells, dim), dtype=phi.dtype)
-            return gradient, self.boundary_values(phi, gradient, materials)
+            return gradient, self.boundary_values(phi, gradient, properties)
         zero_grad = jnp.zeros((n_cells, dim), dtype=phi.dtype)
-        leading_bvals = self.boundary_values(phi, zero_grad, materials)
+        leading_bvals = self.boundary_values(phi, zero_grad, properties)
         gradient = self.gradient_scheme.gradients(phi, self.mesh, self.geometry, leading_bvals)
-        return gradient, self.boundary_values(phi, gradient, materials)
+        return gradient, self.boundary_values(phi, gradient, properties)
 
     def gradient(self, phi: jnp.ndarray) -> jnp.ndarray:
         """Reconstructed cell gradients of ``phi``, shape ``(n_cells, dim)``.
@@ -254,8 +254,8 @@ class ResidualAssembler(eqx.Module):
         phi : jnp.ndarray
             Cell field, shape ``(n_cells,)``.
         """
-        materials = self.materials.evaluate(self.mesh.cell_zones)
-        return self._gradient(phi, materials)[0]
+        properties = self.properties.evaluate(self.mesh.cell_zones)
+        return self._gradient(phi, properties)[0]
 
     def residual(
         self,
@@ -285,9 +285,9 @@ class ResidualAssembler(eqx.Module):
             The residual ``accumulation + net outward flux - volume sources``, shape
             ``(n_cells,)``.
         """
-        materials = self.materials.evaluate(self.mesh.cell_zones)
-        gradient, boundary_values = self._gradient(phi, materials)
-        context = self._context(gradient, boundary_values, materials)
+        properties = self.properties.evaluate(self.mesh.cell_zones)
+        gradient, boundary_values = self._gradient(phi, properties)
+        context = self._context(gradient, boundary_values, properties)
 
         face_flux = jnp.zeros(self.mesh.n_faces, dtype=phi.dtype)
         for operator in self.flux_operators:

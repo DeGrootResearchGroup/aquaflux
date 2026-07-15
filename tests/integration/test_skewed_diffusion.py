@@ -27,7 +27,7 @@ import jax.numpy as jnp
 import numpy as np
 from aquaflux.boundary import BoundaryConditions, DirichletField
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler
-from aquaflux.materials import Constant, MaterialModel
+from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, GradientScheme
 from aquaflux.solve import NewtonSolver
 
@@ -60,7 +60,7 @@ def _skewed_laplace(gradient_scheme, n=12, perturb=0.25, seed=1):
     assembler = ResidualAssembler.build(
         mesh,
         geom,
-        MaterialModel({"diffusivity": Constant(1.0)}),
+        PropertyModel({"diffusivity": Constant(1.0)}),
         (DiffusionFlux(),),
         BoundaryConditions({"left": bc, "right": bc, "bottom": bc, "top": bc}),
         gradient_scheme=gradient_scheme,
@@ -128,7 +128,7 @@ def test_gate_c_residual_is_differentiable_on_skewed_mesh() -> None:
         scaled = ResidualAssembler.build(
             mesh,
             assembler.geometry,
-            MaterialModel({"diffusivity": Constant(1.0)}),
+            PropertyModel({"diffusivity": Constant(1.0)}),
             (DiffusionFlux(),),
             BoundaryConditions({"left": bc, "right": bc, "bottom": bc, "top": bc}),
             gradient_scheme=CorrectedGreenGauss(),
