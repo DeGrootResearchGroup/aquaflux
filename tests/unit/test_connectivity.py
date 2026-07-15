@@ -104,6 +104,29 @@ def test_face_cells_scatter_broadcasts_vector_contributions():
     np.testing.assert_allclose(np.asarray(result[:, 1]), [-4, -1, -2])
 
 
+def test_combine_face_values_takes_interior_then_boundary():
+    """Interior faces get the interior values; boundary faces get the boundary values."""
+    fc = _line_face_cells()  # faces 0,1 interior; faces 2,3 boundary
+    interior_values = jnp.array([10.0, 11.0, 12.0, 13.0])
+    boundary_values = jnp.array([20.0, 21.0, 22.0, 23.0])
+    got = fc.combine_face_values(interior_values, boundary_values)
+    np.testing.assert_array_equal(np.asarray(got), [10.0, 11.0, 22.0, 23.0])
+    # a scalar boundary placeholder (the diffusion denom-guard usage) broadcasts over all faces
+    guarded = fc.combine_face_values(interior_values, 1.0)
+    np.testing.assert_array_equal(np.asarray(guarded), [10.0, 11.0, 1.0, 1.0])
+
+
+def test_combine_face_values_broadcasts_over_vector_fields():
+    """The per-face interior mask broadcasts over trailing component axes."""
+    fc = _line_face_cells()
+    interior_values = jnp.arange(8.0).reshape(4, 2)  # (n_faces, dim)
+    boundary_values = jnp.full((4, 2), -1.0)
+    got = fc.combine_face_values(interior_values, boundary_values)
+    expected = np.asarray(interior_values).copy()
+    expected[2:] = -1.0  # boundary faces
+    np.testing.assert_array_equal(np.asarray(got), expected)
+
+
 # --------------------------------------------------------------------------- FaceNodeConnectivity
 # Two faces sharing an edge: a triangle [0,1,2] and a quad [1,2,3,4]. CSR offsets = [0, 3, 7].
 

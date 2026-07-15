@@ -63,7 +63,7 @@ class CellGeometry(eqx.Module):
         ones = jnp.ones(face_cells.owner.shape[0], dtype=face_centroids.dtype)
         count = face_cells.scatter_symmetric(ones)
         centroid_sum = face_cells.scatter_symmetric(face_centroids)
-        return centroid_sum / count[:, None]
+        return scale(centroid_sum, 1.0 / count)
 
     @classmethod
     def from_faces(
@@ -92,5 +92,5 @@ class CellGeometry(eqx.Module):
         flux = dot(centroid, normal) * area
         volume = face_cells.scatter_conservative(flux) / dim
         centroid_sum = face_cells.scatter_conservative(scale(centroid, flux))
-        cell_centroid = centroid_sum / ((dim + 1) * volume)[:, None]
+        cell_centroid = scale(centroid_sum, 1.0 / ((dim + 1) * volume))
         return cls(volume=volume, centroid=cell_centroid)

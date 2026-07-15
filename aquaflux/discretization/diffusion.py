@@ -86,12 +86,12 @@ class DiffusionFlux(FaceFluxOperator):
 
         # Interior: two-sided, flux-continuous normal derivative (Gamma-jump in denom).
         denom = dpn - (gamma_owner / gamma_neighbour) * dnn
-        denom_safe = jnp.where(fc.interior, denom, 1.0)  # boundary branch unused; keep grad finite
+        denom_safe = fc.combine_face_values(denom, 1.0)  # boundary branch unused; keep grad finite
         normal_grad_interior = ((phi_neighbour - phi_owner) + corr_n - corr_p) / denom_safe
 
         # Boundary: one-sided normal derivative to the weak face value.
         normal_grad_boundary = (context.boundary_values - phi_owner - corr_p) / dpn
 
-        normal_grad = jnp.where(fc.interior, normal_grad_interior, normal_grad_boundary)
+        normal_grad = fc.combine_face_values(normal_grad_interior, normal_grad_boundary)
         # Owner-outward flux of phi is down-gradient (Fourier): -Gamma (grad phi . n) A.
         return -gamma_owner * normal_grad * area

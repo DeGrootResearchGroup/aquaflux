@@ -111,7 +111,7 @@ class FirstOrderUpwind(AdvectionScheme):
         interior_value = _upwind_value(field, outflow, fc)
         # Boundary: outflow carries the owner value; inflow takes the weak boundary value.
         boundary_value = jnp.where(outflow, field[fc.owner], context.boundary_values)
-        return jnp.where(fc.interior, interior_value, boundary_value)
+        return fc.combine_face_values(interior_value, boundary_value)
 
 
 class LimitedUpwind(AdvectionScheme):

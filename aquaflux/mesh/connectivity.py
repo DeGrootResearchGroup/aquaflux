@@ -26,6 +26,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax.ops import segment_max, segment_min, segment_sum
 
+from aquaflux.vectors import scale
+
 
 def interior_mask(neighbour):
     """Boolean per-face mask, ``True`` on interior faces.
@@ -100,6 +102,35 @@ class FaceCellConnectivity(eqx.Module):
         (``field[conn.safe_neighbour]``).
         """
         return jnp.where(self.interior, self.neighbour, self.owner)
+
+    def combine_face_values(
+        self, interior_values: jnp.ndarray, boundary_values: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Assemble a full per-face field from its interior and boundary parts.
+
+        Returns ``interior_values`` on interior faces and ``boundary_values`` on boundary faces —
+        the complete per-face array a scheme forms once it has computed a value for the interior
+        faces (an interpolation, a reconstruction, a flux branch) and holds the boundary-face
+        values separately. The per-face ``interior`` mask broadcasts over any trailing component
+        axes, so scalar ``(n_faces,)`` and vector ``(n_faces, dim)`` face fields both work.
+
+        Parameters
+        ----------
+        interior_values : jnp.ndarray
+            The value on interior faces, shape ``(n_faces, ...)``; its boundary-face entries are
+            ignored (typically a harmless placeholder left by the interior formula).
+        boundary_values : jnp.ndarray
+            The value on boundary faces, shape broadcastable to ``interior_values``; its
+            interior-face entries are ignored.
+
+        Returns
+        -------
+        jnp.ndarray
+            The combined per-face field, shape ``(n_faces, ...)`` — ``interior_values`` where
+            interior, ``boundary_values`` elsewhere.
+        """
+        mask = _broadcast_face_mask(self.interior, interior_values.ndim)
+        return jnp.where(mask, interior_values, boundary_values)
 
     def scatter(self, owner_contrib: jnp.ndarray, neighbour_contrib: jnp.ndarray) -> jnp.ndarray:
         """Scatter per-face contributions to cells: owner gets ``owner_contrib``, its interior
@@ -325,4 +356,4 @@ class FaceNodeConnectivity(eqx.Module):
 
     def vertex_mean(self, node_coords: jnp.ndarray) -> jnp.ndarray:
         """Mean of each face's node coordinates, shape ``(n_faces, dim)``."""
-        return self.reduce_to_faces(self.gather_node_coords(node_coords)) / self.counts[:, None]
+        return scale(self.reduce_to_faces(self.gather_node_coords(node_coords)), 1.0 / self.counts)
