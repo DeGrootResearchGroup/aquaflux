@@ -1,12 +1,15 @@
 """Material properties: per-cell physical property fields (density, viscosity, conductivity, ...).
 
 A :class:`MaterialProperty` is a *single* named property that evaluates to a per-cell array from the
-cell partition and (for state-dependent kinds) the current state fields. Two field-independent kinds
-are built here:
+cell partition and (for state-dependent kinds) the current state fields. Three field-independent
+kinds are built here, from least to most spatially resolved:
 
 - :class:`Constant` — one uniform value everywhere.
 - :class:`ZoneConstant` — a separate constant per named cell zone (fluid vs. solid conductivity, a
   per-zone porosity, ...), broadcast through the :class:`~aquaflux.mesh.CellZones` labels.
+- :class:`FieldProperty` — an arbitrary per-cell field of values supplied directly, for a property
+  that varies cell-by-cell in a way no zone or constant captures (an externally computed field, or a
+  coefficient frozen from a previous solve).
 
 A state-dependent kind (a value computed from a field through a formula, e.g. temperature-dependent
 viscosity) is a later addition that consumes the ``fields`` argument.
@@ -113,3 +116,30 @@ class ZoneConstant(MaterialProperty):
 
     def evaluate(self, cell_zones, fields):
         return self.values[cell_zones.label]
+
+
+class FieldProperty(MaterialProperty):
+    """An arbitrary per-cell field of property values, supplied directly.
+
+    The point between :class:`Constant` (one value everywhere) and :class:`ZoneConstant` (one value
+    per zone): a full per-cell array, for a property that varies cell-by-cell in a way no zone or
+    constant captures -- an externally computed field, or a coefficient frozen from a previous solve
+    and refreshed between iterations (an effective viscosity ``mu + mu_t`` recomputed each outer
+    sweep, say). ``values`` is a differentiable leaf, so gradients flow through the supplied field.
+
+    Attributes
+    ----------
+    values : jnp.ndarray
+        The per-cell property values, shape ``(n_cells,)``.
+    """
+
+    values: jnp.ndarray
+
+    def evaluate(self, cell_zones, fields):
+        n_cells = cell_zones.label.shape[0]
+        if self.values.shape[0] != n_cells:
+            raise ValueError(
+                f"FieldProperty: values has length {self.values.shape[0]} but the partition has "
+                f"{n_cells} cells"
+            )
+        return self.values

@@ -3,10 +3,12 @@
 Everything the solver needs reduces to one discrete residual per cell — the finite-volume
 conservation balance
 
-    R_P = accumulation_P + sum_faces(owner-outward flux),
+    R_P = accumulation_P + sum_faces(owner-outward flux) - sum_sources(cell integral of S dV),
 
-which vanishes at the converged solution. Each operator returns the owner-outward flux of the
-conserved quantity (advection ``+ mdot phi``, diffusion ``- Gamma grad phi . n A``). :class:`ResidualAssembler` builds it by
+which vanishes at the converged solution. Each flux operator returns the owner-outward flux of the
+conserved quantity (advection ``+ mdot phi``, diffusion ``- Gamma grad phi . n A``); each volume
+source returns its cell integral (production positive), which leaves the balance as a sink.
+:class:`ResidualAssembler` builds it by
 
 1. reconstructing cell gradients once (the injected :class:`GradientScheme`, if any) so
    every flux operator shares a single gradient field;
@@ -16,7 +18,9 @@ conserved quantity (advection ``+ mdot phi``, diffusion ``- Gamma grad phi . n A
    :class:`~aquaflux.discretization.diffusion.FaceFluxOperator`, and scattering the
    owner-outward face flux back to cells with ``segment_sum`` (owner ``+``, neighbour
    ``-``; boundary faces to the owner only);
-4. adding the injected transient (accumulation) term.
+4. subtracting each injected volume source (its cell integral, from a
+   :class:`~aquaflux.discretization.source.VolumeSource`);
+5. adding the injected transient (accumulation) term.
 
 The Jacobian and adjoint are never assembled here — they come from automatic
 differentiation of this ``R``. No hand-derived linearization coefficients live in this
@@ -46,6 +50,7 @@ if TYPE_CHECKING:
     from aquaflux.schemes import GradientScheme
 
     from .face_flux import FaceFluxOperator
+    from .source import VolumeSource
     from .transient import TransientTerm
 
 
@@ -71,6 +76,9 @@ class ResidualAssembler(eqx.Module):
         operators (via the context) and the boundary closures.
     flux_operators : tuple of FaceFluxOperator
         Face-flux operators summed into the transport term.
+    source_operators : tuple of VolumeSource
+        Volume-source operators subtracted from the balance (each returns its cell integral,
+        production positive); empty for a flux-only equation.
     transient : TransientTerm or None
         Accumulation term; ``None`` for a steady residual.
     gradient_scheme : GradientScheme or None
@@ -89,6 +97,7 @@ class ResidualAssembler(eqx.Module):
     geometry: MeshGeometry
     materials: MaterialModel
     flux_operators: tuple[FaceFluxOperator, ...]
+    source_operators: tuple[VolumeSource, ...]
     transient: TransientTerm | None
     gradient_scheme: GradientScheme | None
     coefficient: str = eqx.field(static=True)
@@ -105,6 +114,7 @@ class ResidualAssembler(eqx.Module):
         *,
         coefficient: str = "diffusivity",
         transient: TransientTerm | None = None,
+        source_operators: tuple[VolumeSource, ...] = (),
         gradient_scheme: GradientScheme | None = None,
     ) -> ResidualAssembler:
         """Build an assembler from injected operators, schemes, and boundary closures.
@@ -129,6 +139,9 @@ class ResidualAssembler(eqx.Module):
             (default ``"diffusivity"``; match the equation's ``DiffusionFlux.coefficient``).
         transient : TransientTerm, optional
             Accumulation term; omit for a steady residual.
+        source_operators : tuple of VolumeSource, optional
+            Volume-source terms subtracted from the balance (default none); each returns its cell
+            integral, production positive.
         gradient_scheme : GradientScheme, optional
             Cell-gradient reconstruction for the non-orthogonal corrections; omit on
             orthogonal grids.
@@ -138,6 +151,7 @@ class ResidualAssembler(eqx.Module):
             geometry=geometry,
             materials=materials,
             flux_operators=flux_operators,
+            source_operators=source_operators,
             transient=transient,
             gradient_scheme=gradient_scheme,
             coefficient=coefficient,
@@ -268,7 +282,8 @@ class ResidualAssembler(eqx.Module):
         Returns
         -------
         jnp.ndarray
-            The residual ``accumulation + net outward flux``, shape ``(n_cells,)``.
+            The residual ``accumulation + net outward flux - volume sources``, shape
+            ``(n_cells,)``.
         """
         materials = self.materials.evaluate(self.mesh.cell_zones)
         gradient, boundary_values = self._gradient(phi, materials)
@@ -280,6 +295,10 @@ class ResidualAssembler(eqx.Module):
         # Each operator returns the owner-outward flux of the conserved quantity; the residual
         # is the finite-volume balance accumulation + sum of net outward face fluxes.
         residual = self._scatter(face_flux)
+        # A volume source is produced inside the cell, so it leaves the balance as a sink: each
+        # returns its cell integral (production positive) and is subtracted from the residual.
+        for operator in self.source_operators:
+            residual = residual - operator.source(phi, context)
         if self.transient is not None:
             residual = residual + self.transient.residual(
                 phi, phi_old, phi_older, dt, first_step, self.geometry.cell.volume
