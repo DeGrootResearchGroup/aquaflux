@@ -233,7 +233,7 @@ class ResidualAssembler(eqx.Module):
         diffusive flux ``-gamma * gradient`` of a converged field. Returns zeros when no
         gradient scheme is injected (orthogonal grids, where the correction vanishes). Its
         accuracy on skewed grids is the scheme's: ``CorrectedGreenGauss`` caps near first
-        order, ``BetchenGradient`` restores second order.
+        order, ``HessianCorrectedGradient`` restores second order.
 
         Parameters
         ----------

@@ -132,3 +132,64 @@ def perturbed_grid_3d(
     """
     mesh = structured_grid_3d(nx, ny, nz, lx, ly, lz, named_boundaries=named_boundaries)
     return _displace_interior(mesh, (nx, ny, nz), (lx, ly, lz), perturb, seed)
+
+
+def columnwise_perturbed_grid_3d(
+    nx: int,
+    ny: int,
+    nz: int,
+    lx: float = 1.0,
+    ly: float = 1.0,
+    lz: float = 1.0,
+    perturb: float = 0.2,
+    seed: int = 0,
+    named_boundaries: bool = False,
+) -> Mesh:
+    """A hexahedral grid skewed **in-plane** so every cell face stays exactly planar.
+
+    Each interior column of nodes (a fixed ``(i, j)`` for all ``k``) is displaced by the *same*
+    random ``(x, y)`` offset, with ``z`` left on its layer plane. Because the displacement is
+    constant along ``z``, every face remains planar — the top/bottom faces are the displaced quads
+    lying in their ``z`` plane, and the side faces are straight extrusions of an edge — while the
+    cells become genuinely non-orthogonal (skewed) in ``x``–``y``.
+
+    This is the 3D counterpart of :func:`perturbed_grid_2d` for schemes whose accuracy depends on
+    planar faces (e.g. a Green–Gauss face integral being exact for a quadratic field). A fully
+    perturbed hex grid (:func:`perturbed_grid_3d`) *warps* its quad faces, which breaks that
+    property for every Green–Gauss scheme and masks the true skewed-mesh order of accuracy; keeping
+    faces planar isolates the skew.
+
+    Parameters
+    ----------
+    nx, ny, nz : int
+        Number of cells along x, y, z.
+    lx, ly, lz : float
+        Domain extent along each axis.
+    perturb : float
+        In-plane displacement amplitude as a fraction of the cell size (0 = orthogonal).
+    seed : int
+        Seed for the reproducible displacement.
+    named_boundaries : bool
+        Passed through to :func:`~aquaflux.mesh.structured_grid_3d`.
+
+    Returns
+    -------
+    Mesh
+    """
+    mesh = structured_grid_3d(nx, ny, nz, lx, ly, lz, named_boundaries=named_boundaries)
+    if not perturb:
+        return mesh
+    hx, hy = lx / nx, ly / ny
+    # Node lattice raveled in C-order ((z, y, x), x fastest) — matches node_coords.
+    _iz, iy, ix = np.meshgrid(
+        np.arange(nz + 1), np.arange(ny + 1), np.arange(nx + 1), indexing="ij"
+    )
+    xy_interior = (ix > 0) & (ix < nx) & (iy > 0) & (iy < ny)  # all z-layers of an interior column
+    rng = np.random.default_rng(seed)
+    # One (x, y) offset per (j, i) column, broadcast identically across every z-layer.
+    dx = np.broadcast_to(rng.uniform(-perturb * hx, perturb * hx, (ny + 1, nx + 1)), ix.shape)
+    dy = np.broadcast_to(rng.uniform(-perturb * hy, perturb * hy, (ny + 1, nx + 1)), ix.shape)
+    offsets = np.stack(
+        [(xy_interior * dx).ravel(), (xy_interior * dy).ravel(), np.zeros(ix.size)], axis=1
+    )
+    return eqx.tree_at(lambda m: m.node_coords, mesh, mesh.node_coords + jnp.asarray(offsets))
