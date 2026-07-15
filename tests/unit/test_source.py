@@ -14,8 +14,8 @@ import jax
 import jax.numpy as jnp
 from aquaflux.boundary import BoundaryConditions, ZeroGradient
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler, VolumeSource
-from aquaflux.materials import Constant, MaterialModel
 from aquaflux.mesh import structured_grid_2d
+from aquaflux.properties import Constant, PropertyModel
 
 
 class _ConstantSource(VolumeSource):
@@ -40,14 +40,14 @@ class _LinearSink(VolumeSource):
         return -self.rate * field * context.geometry.cell.volume
 
 
-def _assembler(source_operators, *, flux_operators=(), materials=None):
+def _assembler(source_operators, *, flux_operators=(), properties=None):
     """A source-only (by default) steady assembler on a two-cell grid."""
     mesh = structured_grid_2d(2, 1)
-    materials = MaterialModel({}) if materials is None else materials
+    properties = PropertyModel({}) if properties is None else properties
     asm = ResidualAssembler.build(
         mesh,
         mesh.geometry(),
-        materials,
+        properties,
         flux_operators,
         BoundaryConditions({} if flux_operators == () else {"boundary": ZeroGradient()}),
         source_operators=source_operators,
@@ -71,10 +71,10 @@ def test_multiple_sources_sum() -> None:
 
 def test_source_composes_additively_with_flux() -> None:
     """Adding a source shifts the flux-only residual by exactly minus that source, nothing else."""
-    materials = MaterialModel({"diffusivity": Constant(1.0)})
-    _, asm_flux = _assembler((), flux_operators=(DiffusionFlux(),), materials=materials)
+    properties = PropertyModel({"diffusivity": Constant(1.0)})
+    _, asm_flux = _assembler((), flux_operators=(DiffusionFlux(),), properties=properties)
     _, asm_both = _assembler(
-        (_ConstantSource(value=4.0),), flux_operators=(DiffusionFlux(),), materials=materials
+        (_ConstantSource(value=4.0),), flux_operators=(DiffusionFlux(),), properties=properties
     )
     phi = jnp.array([1.0, 4.0])  # a non-uniform field so the diffusion flux is non-zero
     assert jnp.allclose(asm_both.residual(phi), asm_flux.residual(phi) - 4.0)
@@ -97,7 +97,7 @@ def test_source_is_differentiable_in_field_and_coefficient() -> None:
         return ResidualAssembler.build(
             mesh,
             geometry,
-            MaterialModel({}),
+            PropertyModel({}),
             (),
             BoundaryConditions({}),
             source_operators=(_LinearSink(rate=rate),),

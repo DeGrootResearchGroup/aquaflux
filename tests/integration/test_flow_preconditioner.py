@@ -16,8 +16,8 @@ import numpy as np
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, NoSlipWall
-from aquaflux.materials import Constant, MaterialModel
 from aquaflux.mesh import permute_cells
+from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import newton_step
 
@@ -32,7 +32,7 @@ def _build(mesh, mu=MU, pin=0):
     return MomentumContinuity.build(
         mesh,
         geom,
-        MaterialModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
+        PropertyModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
         CompactGreenGauss(),
         BoundaryConditions(
             {

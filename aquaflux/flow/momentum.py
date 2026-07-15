@@ -43,8 +43,8 @@ from .state import BlockStateLayout
 
 if TYPE_CHECKING:
     from aquaflux.discretization import AdvectionScheme
-    from aquaflux.materials import MaterialModel
     from aquaflux.mesh import Mesh, MeshGeometry
+    from aquaflux.properties import PropertyModel
     from aquaflux.schemes import GradientScheme
 
 
@@ -60,7 +60,7 @@ class MomentumContinuity(eqx.Module):
         Topology (owner/neighbour connectivity, patch labels).
     geometry : MeshGeometry
         Face and cell metrics (areas, owner-outward normals, centroids, volumes).
-    materials : MaterialModel
+    properties : PropertyModel
         The fluid properties, supplying per-cell ``"viscosity"`` (the momentum diffusion
         coefficient) and ``"density"`` (:attr:`viscosity` / :attr:`density` evaluate them).
     gradient_scheme : GradientScheme
@@ -76,7 +76,7 @@ class MomentumContinuity(eqx.Module):
 
     mesh: Mesh
     geometry: MeshGeometry
-    materials: MaterialModel
+    properties: PropertyModel
     gradient_scheme: GradientScheme
     advection_scheme: AdvectionScheme | None
     boundary: BoundaryConditions
@@ -90,7 +90,7 @@ class MomentumContinuity(eqx.Module):
         cls,
         mesh: Mesh,
         geometry: MeshGeometry,
-        materials: MaterialModel,
+        properties: PropertyModel,
         gradient_scheme: GradientScheme,
         boundary: BoundaryConditions,
         *,
@@ -102,12 +102,12 @@ class MomentumContinuity(eqx.Module):
 
         ``boundary`` is a :class:`~aquaflux.boundary.BoundaryConditions` collection of per-patch
         flow closures (``BoundaryConditions({name: FlowBoundary})``), bound to ``mesh.face_patches``
-        internally. ``materials`` must supply ``"viscosity"`` and ``"density"``. ``pressure_pin``
+        internally. ``properties`` must supply ``"viscosity"`` and ``"density"``. ``pressure_pin``
         fixes the pressure at one cell (its continuity equation is replaced by
         ``p = pressure_pin_value``) — required for a closed domain (all-wall, no pressure outlet),
         where pressure is otherwise defined only up to a constant.
         """
-        materials.require("viscosity", "density")
+        properties.require("viscosity", "density")
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells
         owner = face_cells.owner
@@ -125,7 +125,7 @@ class MomentumContinuity(eqx.Module):
         return cls(
             mesh=mesh,
             geometry=geometry,
-            materials=materials,
+            properties=properties,
             gradient_scheme=gradient_scheme,
             advection_scheme=advection_scheme,
             boundary=boundary.resolve(mesh.face_patches),
@@ -154,17 +154,17 @@ class MomentumContinuity(eqx.Module):
         """A zero flat state vector, shape ``((dim + 1) n_cells,)``."""
         return self._layout.zeros()
 
-    # --- material properties -----------------------------------------------------------
+    # --- properties -----------------------------------------------------------
 
     @property
     def viscosity(self) -> jnp.ndarray:
         """Per-cell dynamic viscosity — the momentum diffusion coefficient, shape ``(n_cells,)``."""
-        return self.materials.evaluate(self.mesh.cell_zones)["viscosity"]
+        return self.properties.evaluate(self.mesh.cell_zones)["viscosity"]
 
     @property
     def density(self) -> jnp.ndarray:
         """Per-cell density, shape ``(n_cells,)``."""
-        return self.materials.evaluate(self.mesh.cell_zones)["density"]
+        return self.properties.evaluate(self.mesh.cell_zones)["density"]
 
     # --- boundary assembly -------------------------------------------------------------
 
@@ -352,7 +352,7 @@ class MomentumContinuity(eqx.Module):
                 geometry=self.geometry,
                 boundary_values=boundary_velocity[:, i],
                 gradient=grad_velocity[:, i],
-                materials={"viscosity": viscosity},
+                properties={"viscosity": viscosity},
             )
             face_flux = (
                 diffusion.face_flux(component, context) + pressure_face * normal[:, i] * area

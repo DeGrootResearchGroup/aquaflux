@@ -13,7 +13,7 @@ from aquaflux.flow import (
     damped_jacobi_solve,
     pressure_schur_laplacian,
 )
-from aquaflux.materials import Constant, MaterialModel
+from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 
 from tests.support.meshes import perturbed_grid_2d
@@ -27,7 +27,7 @@ def _geometry(n, perturb=0.0):
     return MomentumContinuity.build(
         mesh,
         geom,
-        MaterialModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
+        PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
         CompactGreenGauss(),
         BoundaryConditions(walls),
     )

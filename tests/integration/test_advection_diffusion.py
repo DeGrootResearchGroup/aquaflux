@@ -24,8 +24,8 @@ from aquaflux.discretization import (
     FirstOrderUpwind,
     ResidualAssembler,
 )
-from aquaflux.materials import Constant, MaterialModel
 from aquaflux.mesh import structured_grid_2d
+from aquaflux.properties import Constant, PropertyModel
 from aquaflux.solve import NewtonSolver
 
 from tests.support.fields import face_mass_flux
@@ -46,7 +46,7 @@ def _solve(nx):
     assembler = ResidualAssembler.build(
         mesh,
         geom,
-        MaterialModel({"diffusivity": Constant(GAMMA)}),
+        PropertyModel({"diffusivity": Constant(GAMMA)}),
         (AdvectionFlux(mass_flux=mdot, scheme=FirstOrderUpwind()), DiffusionFlux()),
         BoundaryConditions(
             {
@@ -87,7 +87,7 @@ def test_upwind_solve_is_differentiable() -> None:
         assembler = ResidualAssembler.build(
             mesh,
             geom,
-            MaterialModel({"diffusivity": Constant(gamma)}),
+            PropertyModel({"diffusivity": Constant(gamma)}),
             (AdvectionFlux(mass_flux=mdot, scheme=FirstOrderUpwind()), DiffusionFlux()),
             BoundaryConditions(
                 {

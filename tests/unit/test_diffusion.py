@@ -14,7 +14,6 @@ import jax.numpy as jnp
 import numpy as np
 from aquaflux.boundary import BoundaryConditions, ZeroGradient
 from aquaflux.discretization import DiffusionFlux, FaceContext, FaceFluxOperator, ResidualAssembler
-from aquaflux.materials import Constant, MaterialModel
 from aquaflux.mesh import (
     CellGeometry,
     FaceCellConnectivity,
@@ -22,6 +21,7 @@ from aquaflux.mesh import (
     MeshGeometry,
     structured_grid_2d,
 )
+from aquaflux.properties import Constant, PropertyModel
 
 
 def _single_face(
@@ -62,7 +62,7 @@ def _single_face(
         geometry=geometry,
         boundary_values=jnp.array([boundary_value]),
         gradient=gradient,
-        materials={"diffusivity": jnp.ones(n_cells)},
+        properties={"diffusivity": jnp.ones(n_cells)},
     )
     return field, context
 
@@ -124,7 +124,7 @@ def test_scatter_is_conservative_and_signed() -> None:
     asm = ResidualAssembler.build(
         mesh,
         geom,
-        MaterialModel({"diffusivity": Constant(1.0)}),
+        PropertyModel({"diffusivity": Constant(1.0)}),
         (_StubFlux(value=5.0),),
         BoundaryConditions({}),
     )
@@ -152,7 +152,7 @@ def test_operator_recovers_laplacian_second_order() -> None:
         asm = ResidualAssembler.build(
             mesh,
             geom,
-            MaterialModel({"diffusivity": Constant(1.0)}),
+            PropertyModel({"diffusivity": Constant(1.0)}),
             (DiffusionFlux(),),
             BoundaryConditions({"boundary": ZeroGradient()}),
         )

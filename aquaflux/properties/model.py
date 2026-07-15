@@ -1,4 +1,4 @@
-"""The material model: the named collection of properties a set of physics models requires."""
+"""The property model: the named collection of properties a set of physics models requires."""
 
 from __future__ import annotations
 
@@ -8,27 +8,27 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax.numpy as jnp
 
-from .property import MaterialProperty
+from .property import Property
 
 if TYPE_CHECKING:
     from aquaflux.mesh import CellZones
 
 
-class MaterialModel(eqx.Module):
-    """The named material properties a problem's models consume (density, viscosity, ...).
+class PropertyModel(eqx.Module):
+    """The named properties a problem's models consume (density, viscosity, ...).
 
-    Each entry is a single :class:`~aquaflux.materials.property.MaterialProperty`; operators name the
+    Each entry is a single :class:`~aquaflux.properties.property.Property`; operators name the
     property they need (e.g. a diffusion coefficient), and the model resolves the name to a per-cell
     array via :meth:`evaluate`. Adding a property is adding an entry — the abstraction and the
     consumers' context shape do not change.
 
     Attributes
     ----------
-    properties : dict of {str: MaterialProperty}
+    properties : dict of {str: Property}
         The property object for each name.
     """
 
-    properties: dict[str, MaterialProperty]
+    properties: dict[str, Property]
 
     def evaluate(
         self, cell_zones: CellZones, fields: Mapping[str, jnp.ndarray] | None = None
@@ -55,6 +55,6 @@ class MaterialModel(eqx.Module):
         missing = [n for n in names if n not in self.properties]
         if missing:
             raise ValueError(
-                f"material model is missing required propert{'y' if len(missing) == 1 else 'ies'} "
+                f"property model is missing required propert{'y' if len(missing) == 1 else 'ies'} "
                 f"{missing}; it supplies {sorted(self.properties)}"
             )
