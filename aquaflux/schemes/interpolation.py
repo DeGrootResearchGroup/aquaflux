@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
 
-from aquaflux.vectors import dot, norm_squared
+from aquaflux.vectors import dot, norm_squared, scale
 
 if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, MeshGeometry
@@ -84,3 +84,57 @@ def interpolate_owner_neighbour(
     """
     g = factor.reshape(factor.shape + (1,) * (cell_field.ndim - 1))  # broadcast over trailing dims
     return (1.0 - g) * cell_field[face_cells.owner] + g * cell_field[face_cells.safe_neighbour]
+
+
+def interpolate_to_face(
+    cell_field: jnp.ndarray,
+    cell_gradient: jnp.ndarray,
+    factor: jnp.ndarray,
+    face_cells: FaceCellConnectivity,
+    geometry: MeshGeometry,
+) -> jnp.ndarray:
+    """Second-order face value at the integration point ``x_ip`` (the face centroid).
+
+    Extends :func:`interpolate_owner_neighbour` from the projection foot ``x_g = x_P + g·d`` to the
+    true face centroid by adding the skewness correction ``grad·(x_ip − x_g)`` — the term that
+    :func:`interpolate_owner_neighbour` deliberately omits. The interpolated cell gradient supplies
+    the directional derivative across the ``x_g → x_ip`` offset, so on a skewed grid the face value
+    stays second-order; on an orthogonal grid ``x_ip = x_g`` and the correction is zero, reducing to
+    the plain blend.
+
+    Works for a scalar field (``cell_gradient`` shape ``(n_cells, dim)``) or a vector field
+    (``(n_cells, dim, dim)`` with ``cell_gradient[c, i, j] = ∂field_i/∂x_j``): the gradient's **last**
+    axis is the spatial derivative contracted with the offset.
+
+    On a boundary face (``g = 0``, no neighbour) the blend is the owner value and the correction is
+    ``grad_owner·(x_ip − x_P)``, i.e. a one-sided extrapolation from the owner cell to the face
+    centroid — exact for a linear field. Callers that supply their own boundary-face values (e.g. the
+    flow mass flux) mask these out.
+
+    Parameters
+    ----------
+    cell_field : jnp.ndarray
+        Per-cell values, shape ``(n_cells, ...)`` (scalar or vector per cell).
+    cell_gradient : jnp.ndarray
+        Per-cell gradient of ``cell_field``, shape ``(n_cells, ..., dim)`` — one extra trailing
+        spatial axis relative to ``cell_field``.
+    factor : jnp.ndarray
+        The projection factor ``g`` per face, shape ``(n_faces,)`` (from :func:`interpolation_factor`).
+    face_cells : FaceCellConnectivity
+        The face→cell incidence (``mesh.face_cells``).
+    geometry : MeshGeometry
+        The mesh metrics; reads the cell and face centroids for the ``x_ip − x_g`` offset.
+
+    Returns
+    -------
+    jnp.ndarray
+        The face value at ``x_ip``, shape ``(n_faces, ...)`` matching ``cell_field``'s trailing shape.
+    """
+    blend = interpolate_owner_neighbour(cell_field, factor, face_cells)
+    grad_face = interpolate_owner_neighbour(cell_gradient, factor, face_cells)
+    cell_centroid = geometry.cell.centroid
+    x_p = cell_centroid[face_cells.owner]
+    d = cell_centroid[face_cells.safe_neighbour] - x_p
+    skewness = geometry.face.centroid - (x_p + scale(d, factor))  # x_ip − x_g, shape (n_faces, dim)
+    correction = jnp.einsum("f...j,fj->f...", grad_face, skewness)
+    return blend + correction
