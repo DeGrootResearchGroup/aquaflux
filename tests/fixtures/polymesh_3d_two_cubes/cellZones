@@ -1,0 +1,36 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| aquaflux test fixture                                                       |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       regIOobject;
+    location    "constant/polyMesh";
+    object      cellZones;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+2
+(
+    left
+    {
+        type            cellZone;
+        cellLabels      List<label>
+1
+(
+0
+)
+;
+    }
+    right
+    {
+        type            cellZone;
+        cellLabels      List<label>
+1
+(
+1
+)
+;
+    }
+)

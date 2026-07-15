@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from .cell import CellGeometry
+from .collapse import collapse_extruded_direction
 from .connectivity import (
     FaceCellConnectivity,
     FaceNodeConnectivity,
@@ -55,6 +56,7 @@ __all__ = [
     "cell_adjacency_csr",
     "centroid_iteration_shift",
     "closed_cell_residual",
+    "collapse_extruded_direction",
     "face_geometry_scheme",
     "face_planarity",
     "interior_mask",
