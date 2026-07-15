@@ -1,30 +1,18 @@
-"""The volume-source operator contract: a per-cell volumetric source term of the residual.
+"""The volume-source operator contract: a volumetric source term of the cell residual.
 
-Not every finite-volume term is a face flux. A *volume source* is generated or consumed within the
-cell itself rather than transported across its faces -- a chemical reaction rate, a turbulence
-production or dissipation rate, a distributed heat release. Written as a source density ``S(phi)``
-per unit volume, such a term contributes its cell integral ``integral over the cell of S dV`` to the
-conservation balance.
+A concrete operator returns the *volume-integrated* source in each cell (shape ``(n_cells,)``),
+**production positive**. The residual engine subtracts it, forming
 
-**Sign convention.** A concrete operator returns the *volume-integrated* source in each cell (shape
-``(n_cells,)``), with **production positive** -- a term that adds to ``phi``; a sink is simply a
-negative source. The residual engine forms the finite-volume balance
+    R = accumulation + sum_faces(owner-outward flux) - sum_sources(cell integral of S dV).
 
-    R = accumulation + sum_faces(owner-outward flux) - sum_sources(cell integral of S dV),
+The volume is baked into the returned value: the operator owns its own volume quadrature, as a
+:class:`~aquaflux.discretization.face_flux.FaceFluxOperator` bakes in the face area, so the assembler
+composes integrated contributions uniformly.
 
-so a source enters the residual with a minus sign, and at steady state a cell's net outward flux
-equals what is produced inside it. The volume is baked into the returned value -- the operator owns
-its own volume quadrature, exactly as a :class:`~aquaflux.discretization.face_flux.FaceFluxOperator`
-bakes the face area into its flux -- so the assembler composes integrated contributions uniformly
-and never multiplies by a metric of its own.
-
-A source gathers whatever per-cell state it needs -- the solved field, the reconstructed cell
-gradient, material properties, the cell volume -- from the shared
-:class:`~aquaflux.discretization.face_flux.FaceContext`, the same context the flux operators
-receive; it reads the cell-oriented fields and ignores the face-only ones. Data held fixed for the
-evaluation (a lagged coefficient, or a field supplied by a coupled equation) is carried on the
-operator as constructor state, the same way
-:class:`~aquaflux.discretization.advection.AdvectionFlux` carries its prescribed face mass flux.
+The per-cell state a source needs (the solved field, cell gradient, material properties, cell
+volume) is gathered from the shared :class:`~aquaflux.discretization.face_flux.FaceContext`. A
+coefficient or field held fixed for the evaluation is carried as constructor state, as
+:class:`~aquaflux.discretization.advection.AdvectionFlux` carries its prescribed mass flux.
 """
 
 from __future__ import annotations
