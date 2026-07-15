@@ -60,6 +60,8 @@ import abc
 import equinox as eqx
 import jax.numpy as jnp
 
+from aquaflux.vectors import dot, norm_squared, scale
+
 from .connectivity import FaceNodeConnectivity
 
 
@@ -83,7 +85,7 @@ def _safe_magnitude(vectors: jnp.ndarray) -> jnp.ndarray:
     jnp.ndarray
         Magnitudes, shape ``(...,)``.
     """
-    sq = jnp.sum(vectors * vectors, axis=-1)
+    sq = norm_squared(vectors)
     return jnp.where(sq > 0.0, jnp.sqrt(jnp.where(sq > 0.0, sq, 1.0)), 0.0)
 
 
@@ -258,11 +260,11 @@ class PolygonFaceGeometry(FaceGeometryScheme):
         # Signed projected area of each fan triangle onto the (unit) face normal. Summed per face
         # this is exactly |S|, so it is the correct area-weight — and it is negative for a
         # reflex-vertex triangle, which the unsigned |d_i| would wrongly add.
-        signed = jnp.sum(directed * normal[face_nodes.face_of_incidence], axis=1)
+        signed = dot(directed, normal[face_nodes.face_of_incidence])
         safe_area = jnp.where(area > 0.0, area, 1.0)[
             :, None
         ]  # degenerate face -> 0 centroid, no NaN
-        centroid = face_nodes.reduce_to_faces(signed[:, None] * tri_centroid) / safe_area
+        centroid = face_nodes.reduce_to_faces(scale(tri_centroid, signed)) / safe_area
         total_tri_area = face_nodes.reduce_to_faces(_safe_magnitude(directed))
         return area, centroid, normal, total_tri_area
 

@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
 
+from aquaflux.vectors import scale
+
 from .face import PolygonFaceGeometry
 
 if TYPE_CHECKING:
@@ -36,7 +38,7 @@ def closed_cell_residual(mesh: Mesh) -> jnp.ndarray:
         against a small multiple of a representative ``face_area`` to flag bad cells.
     """
     face_geometry = mesh.geometry().face
-    area_vector = face_geometry.area[:, None] * face_geometry.normal  # owner-outward S_f
+    area_vector = scale(face_geometry.normal, face_geometry.area)  # owner-outward S_f
     # a closed cell has Σ outward face area-vectors = 0: the conservative scatter of S_f.
     per_cell = mesh.face_cells.scatter_conservative(area_vector)
     return jnp.linalg.norm(per_cell, axis=1)

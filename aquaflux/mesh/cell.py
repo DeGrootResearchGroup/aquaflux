@@ -21,6 +21,8 @@ from __future__ import annotations
 import equinox as eqx
 import jax.numpy as jnp
 
+from aquaflux.vectors import dot, scale
+
 from .connectivity import FaceCellConnectivity
 from .face import FaceGeometry
 
@@ -87,8 +89,8 @@ class CellGeometry(eqx.Module):
 
         # (x_ip . n) A with the owner-outward normal; the neighbour sees the opposite sign, so
         # both accumulations are conservative scatters of this owner-outward face quantity.
-        flux = jnp.sum(centroid * normal, axis=1) * area
+        flux = dot(centroid, normal) * area
         volume = face_cells.scatter_conservative(flux) / dim
-        centroid_sum = face_cells.scatter_conservative(centroid * flux[:, None])
+        centroid_sum = face_cells.scatter_conservative(scale(centroid, flux))
         cell_centroid = centroid_sum / ((dim + 1) * volume)[:, None]
         return cls(volume=volume, centroid=cell_centroid)
