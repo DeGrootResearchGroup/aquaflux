@@ -10,10 +10,11 @@ concern operators compose, not something the numerics own.
 from __future__ import annotations
 
 from .model import MaterialModel
-from .property import Constant, MaterialProperty, ZoneConstant
+from .property import Constant, FieldProperty, MaterialProperty, ZoneConstant
 
 __all__ = [
     "Constant",
+    "FieldProperty",
     "MaterialModel",
     "MaterialProperty",
     "ZoneConstant",

@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.materials import Constant, MaterialModel, ZoneConstant
+from aquaflux.materials import Constant, FieldProperty, MaterialModel, ZoneConstant
 from aquaflux.mesh import CellZones
 
 
@@ -66,6 +66,29 @@ def test_zone_constant_allows_empty_zone_omitted() -> None:
     zones = _two_zones()
     vals = ZoneConstant.from_dict(zones, {"fluid": 2.0, "solid": 3.0}).evaluate(zones, {})
     assert not bool(jnp.any(jnp.isnan(vals)))  # every real cell got a real value
+
+
+# --- FieldProperty ---------------------------------------------------------------------
+
+
+def test_field_property_returns_the_supplied_field() -> None:
+    values = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    vals = FieldProperty(values=values).evaluate(CellZones.default(5), {})
+    np.testing.assert_allclose(np.asarray(vals), [1.0, 2.0, 3.0, 4.0, 5.0])
+
+
+def test_field_property_is_differentiable_in_its_field() -> None:
+    zones = CellZones.default(3)
+
+    def total(scale):
+        return jnp.sum(FieldProperty(values=scale * jnp.array([1.0, 2.0, 3.0])).evaluate(zones, {}))
+
+    assert float(jax.grad(total)(2.0)) == 6.0  # d/dscale of scale * (1 + 2 + 3)
+
+
+def test_field_property_rejects_wrong_length() -> None:
+    with pytest.raises(ValueError, match="values has length 3 but the partition has 5 cells"):
+        FieldProperty(values=jnp.ones(3)).evaluate(CellZones.default(5), {})
 
 
 # --- MaterialModel ---------------------------------------------------------------------
