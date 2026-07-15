@@ -7,6 +7,7 @@ Pure functions of boundary-cell state + face geometry + BC parameters.
 
 from __future__ import annotations
 
+from .collection import BoundaryConditions
 from .conditions import (
     BoundaryCondition,
     Convective,
@@ -15,14 +16,13 @@ from .conditions import (
     Neumann,
     ZeroGradient,
 )
-from .patch import apply_per_patch
 
 __all__ = [
     "BoundaryCondition",
+    "BoundaryConditions",
     "Convective",
     "Dirichlet",
     "DirichletField",
     "Neumann",
     "ZeroGradient",
-    "apply_per_patch",
 ]

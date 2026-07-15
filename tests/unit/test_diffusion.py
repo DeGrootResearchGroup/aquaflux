@@ -12,7 +12,7 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 import numpy as np
-from aquaflux.boundary import ZeroGradient
+from aquaflux.boundary import BoundaryConditions, ZeroGradient
 from aquaflux.discretization import DiffusionFlux, FaceContext, FaceFluxOperator, ResidualAssembler
 from aquaflux.materials import Constant, MaterialModel
 from aquaflux.mesh import (
@@ -122,7 +122,11 @@ def test_scatter_is_conservative_and_signed() -> None:
     mesh = structured_grid_2d(2, 1)
     geom = mesh.geometry()
     asm = ResidualAssembler.build(
-        mesh, geom, MaterialModel({"diffusivity": Constant(1.0)}), (_StubFlux(value=5.0),), {}
+        mesh,
+        geom,
+        MaterialModel({"diffusivity": Constant(1.0)}),
+        (_StubFlux(value=5.0),),
+        BoundaryConditions({}),
     )
     residual = asm.residual(jnp.zeros(mesh.n_cells))  # steady: residual = net outward flux
     # The one interior face has owner cell 0, neighbour cell 1; +5 leaves the owner, enters nb.
@@ -150,7 +154,7 @@ def test_operator_recovers_laplacian_second_order() -> None:
             geom,
             MaterialModel({"diffusivity": Constant(1.0)}),
             (DiffusionFlux(),),
-            {"boundary": ZeroGradient()},
+            BoundaryConditions({"boundary": ZeroGradient()}),
         )
         # Steady residual = net outward diffusive flux = -(diffusion into the cell).
         diffusion_in = -asm.residual(phi)

@@ -23,9 +23,10 @@ differentiation of this ``R``. No hand-derived linearization coefficients live i
 module; it only *composes* geometry (from ``mesh``), schemes (from ``schemes``), operators,
 and boundary closures.
 
-Boundary patches are resolved to concrete face-index arrays once, at build time (via
-:meth:`build`), because the label-to-index lookup is data-dependent and cannot run under
-``jit``. The assembled index arrays are then constant inputs to the differentiable residual.
+Boundary patches are resolved to concrete face-index arrays once, ahead of the solve (via
+:meth:`aquaflux.boundary.BoundaryConditions.resolve`), because the label-to-index lookup is
+data-dependent and cannot run under ``jit``. The resolved index arrays are then constant inputs
+to the differentiable residual.
 """
 
 from __future__ import annotations
@@ -35,12 +36,11 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax.numpy as jnp
 
-from aquaflux.boundary import apply_per_patch
+from aquaflux.boundary import BoundaryConditions
 
 from .face_flux import FaceContext
 
 if TYPE_CHECKING:
-    from aquaflux.boundary.conditions import BoundaryCondition
     from aquaflux.materials import MaterialModel
     from aquaflux.mesh import Mesh, MeshGeometry
     from aquaflux.schemes import GradientScheme
@@ -52,8 +52,9 @@ if TYPE_CHECKING:
 class ResidualAssembler(eqx.Module):
     """Assemble the cell residual ``R(phi)`` from injected operators, schemes, and closures.
 
-    Construct with :meth:`build` (it resolves boundary patch names to face indices). The
-    module is an ``equinox.Module`` pytree, so differentiating a converged solve with respect
+    Construct with :meth:`build` (it binds the injected
+    :class:`~aquaflux.boundary.BoundaryConditions` to the mesh's face patches). The module is
+    an ``equinox.Module`` pytree, so differentiating a converged solve with respect
     to a boundary parameter (e.g. the Biot number held inside a
     :class:`~aquaflux.boundary.conditions.Convective` closure) is differentiation with
     respect to a leaf of this tree.
@@ -80,13 +81,8 @@ class ResidualAssembler(eqx.Module):
         The material property the flux-type boundary closures (Robin/Neumann) use as their
         diffusion coefficient ``Gamma`` (static; matches the ``DiffusionFlux.coefficient`` of the
         equation's diffusion term).
-    boundary_names : tuple of str
-        Boundary patch names (static), aligned with ``boundary_conditions`` and
-        ``boundary_faces``.
-    boundary_conditions : tuple of BoundaryCondition
-        The closure for each named patch.
-    boundary_faces : tuple of jnp.ndarray
-        Concrete face-index array for each named patch (resolved at build time).
+    boundary : BoundaryConditions
+        The named per-patch closures, resolved to their boundary-face indices.
     """
 
     mesh: Mesh
@@ -96,9 +92,7 @@ class ResidualAssembler(eqx.Module):
     transient: TransientTerm | None
     gradient_scheme: GradientScheme | None
     coefficient: str = eqx.field(static=True)
-    boundary_names: tuple[str, ...] = eqx.field(static=True)
-    boundary_conditions: tuple[BoundaryCondition, ...]
-    boundary_faces: tuple[jnp.ndarray, ...]
+    boundary: BoundaryConditions
 
     @classmethod
     def build(
@@ -107,13 +101,13 @@ class ResidualAssembler(eqx.Module):
         geometry: MeshGeometry,
         materials: MaterialModel,
         flux_operators: tuple[FaceFluxOperator, ...],
-        boundary: dict[str, BoundaryCondition],
+        boundary: BoundaryConditions,
         *,
         coefficient: str = "diffusivity",
         transient: TransientTerm | None = None,
         gradient_scheme: GradientScheme | None = None,
     ) -> ResidualAssembler:
-        """Build an assembler, resolving each boundary patch name to its face indices.
+        """Build an assembler from injected operators, schemes, and boundary closures.
 
         Parameters
         ----------
@@ -126,9 +120,10 @@ class ResidualAssembler(eqx.Module):
             name, and the flux-type boundary closures read ``coefficient``.
         flux_operators : tuple of FaceFluxOperator
             Face-flux operators (e.g. one :class:`DiffusionFlux`).
-        boundary : dict of {str: BoundaryCondition}
-            Boundary condition per patch name. Every boundary face must lie in a named patch
-            present here, or its flux reads an unset (zero) face value.
+        boundary : BoundaryConditions
+            The named ``{patch: closure}`` collection (``BoundaryConditions({name: bc})``), bound to
+            ``mesh.face_patches`` internally. Every boundary face must lie in a named patch present
+            here, or its flux reads an unset (zero) face value.
         coefficient : str
             The property the flux-type boundary closures use as their diffusion coefficient
             (default ``"diffusivity"``; match the equation's ``DiffusionFlux.coefficient``).
@@ -138,9 +133,6 @@ class ResidualAssembler(eqx.Module):
             Cell-gradient reconstruction for the non-orthogonal corrections; omit on
             orthogonal grids.
         """
-        names = tuple(boundary.keys())
-        conditions = tuple(boundary.values())
-        faces = tuple(jnp.asarray(mesh.face_patches.indices(name)) for name in names)
         return cls(
             mesh=mesh,
             geometry=geometry,
@@ -149,9 +141,7 @@ class ResidualAssembler(eqx.Module):
             transient=transient,
             gradient_scheme=gradient_scheme,
             coefficient=coefficient,
-            boundary_names=names,
-            boundary_conditions=conditions,
-            boundary_faces=faces,
+            boundary=boundary.resolve(mesh.face_patches),
         )
 
     def boundary_values(
@@ -189,9 +179,7 @@ class ResidualAssembler(eqx.Module):
                 face_centroid,
             )
 
-        return apply_per_patch(
-            self.boundary_conditions,
-            self.boundary_faces,
+        return self.boundary.apply(
             self.mesh.face_cells,
             jnp.zeros(self.mesh.n_faces, dtype=phi.dtype),
             closure,
