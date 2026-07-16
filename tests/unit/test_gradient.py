@@ -236,6 +236,37 @@ def test_swept_is_differentiable() -> None:
     assert not bool(jnp.any(jnp.isnan(sens)))
 
 
+def test_swept_default_sweeps_is_four() -> None:
+    """The default sweep count is the validated, cheap 4 — the well-conditioned A_g converges in a
+    few sweeps, so the earlier 16 was over-provisioned."""
+    assert SweptGradientSolve().sweeps == 4
+
+
+def test_swept_warns_once_when_underresolved() -> None:
+    """The free residual check warns (a single host-side message) only when the sweeps are
+    under-resolved; a converged solve, or ``warn_tol=None``, is silent."""
+    import warnings as _warnings
+
+    from aquaflux.schemes import gradient as _gradient
+
+    mesh = perturbed_grid_2d(12, 12, perturb=0.2)
+    geom = mesh.geometry()
+    phi = _trig(geom.cell.centroid)
+    bvals = _trig(geom.face.centroid)
+
+    def warnings_emitted(warn_tol) -> int:
+        _gradient._GRADIENT_UNCONVERGED_WARNED = False  # reset the once-per-process guard
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            scheme = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=4, warn_tol=warn_tol))
+            jax.block_until_ready(scheme.gradients(phi, mesh, geom, bvals))
+        return sum("SweptGradientSolve" in str(w.message) for w in caught)
+
+    assert warnings_emitted(1e-12) == 1  # unreachable tolerance -> exactly one warning
+    assert warnings_emitted(5e-2) == 0  # converged at 4 sweeps -> silent (the default)
+    assert warnings_emitted(None) == 0  # check disabled -> silent
+
+
 # --- Hessian-corrected gradient (Hessian Schur-eliminated) -----------------------------
 
 
