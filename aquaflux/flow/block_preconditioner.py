@@ -388,10 +388,13 @@ class BlockPreconditioner(eqx.Module):
         def make(state: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
             velocity, _ = self.assembler.unpack(jax.lax.stop_gradient(state))
             # Isotropic (component-averaged) a_P for the Schur/velocity blocks; the directional
-            # per-component form enters only the operator's Rhie--Chow coefficient.
+            # per-component form enters only the operator's Rhie--Chow coefficient. The
+            # preconditioner needs a_P frozen, so stop_gradient it here (the residual uses the
+            # differentiable a_P): the state is already detached, and this keeps M a constant
+            # operator even if make() is ever called on a live state.
             a_p = jnp.mean(
-                self.assembler.lagged_momentum_diagonal(velocity), axis=1
-            )  # stop_gradient-ed
+                jax.lax.stop_gradient(self.assembler.momentum_matrix_diagonal(velocity)), axis=1
+            )
             schur_solve = self.schur.apply(a_p)
             velocity_solve = self.velocity.apply(a_p)
             divergence = self._divergence(state) if self.block_triangular else None
