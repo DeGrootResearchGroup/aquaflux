@@ -62,15 +62,31 @@ def _implicit_solve_fwd(residual_fn, phi0, theta, rtol, atol, max_steps, solver,
     return phi_star, (phi_star, theta)
 
 
+def _adjoint_preconditioner(preconditioner, phi_star, example):
+    """Transpose ``M^T`` of the forward preconditioner, as a left preconditioner for the adjoint.
+
+    The forward ``M = preconditioner(phi*)`` approximates ``J^{-1}``; the adjoint solves the
+    transpose system ``J^T lambda = v``, whose consistent left preconditioner is ``M^T ~ J^{-T}``,
+    obtained by transposing the (linear) preconditioner matvec with :func:`jax.linear_transpose`.
+    It is mesh-independent wherever ``M`` is -- the adjoint GMRES iteration count stays flat under
+    refinement instead of growing with the system size. ``None`` in, ``None`` out.
+    """
+    if preconditioner is None:
+        return None
+    m = preconditioner(phi_star)
+    transpose = jax.linear_transpose(m, example)
+    return lambda u: transpose(u)[0]
+
+
 def _implicit_solve_bwd(residual_fn, rtol, atol, max_steps, solver, preconditioner, residuals, cotangent):
-    # The preconditioner is forward-only: the transpose of the block-triangular forward
-    # preconditioner is not a good preconditioner for J^T, so the adjoint solve is left
-    # unpreconditioned here (a proper transpose preconditioner is future work).
-    del preconditioner
     phi_star, theta = residuals
-    # Transpose Jacobian solve: (dR/dphi)^T lambda = cotangent.
+    # Transpose Jacobian solve: (dR/dphi)^T lambda = cotangent, left-preconditioned by M^T so the
+    # adjoint solve is mesh-independent (unpreconditioned it grows with the system size).
     _, vjp_phi = jax.vjp(lambda p: residual_fn(p, theta), phi_star)
-    lam = solve_linear(lambda u: vjp_phi(u)[0], cotangent, solver=solver)
+    adjoint_precond = _adjoint_preconditioner(preconditioner, phi_star, cotangent)
+    lam = solve_linear(
+        lambda u: vjp_phi(u)[0], cotangent, solver=solver, preconditioner=adjoint_precond
+    )
     # Parameter cotangent -(dR/dtheta)^T lambda: negate lambda so no pytree (float0) negation.
     _, vjp_theta = jax.vjp(lambda th: residual_fn(phi_star, th), theta)
     (theta_cotangent,) = vjp_theta(-lam)
@@ -97,10 +113,11 @@ class ImplicitNewtonSolver(eqx.Module):
         Linear solver for the Newton and adjoint solves; ``None`` uses the package default.
     preconditioner : callable or None
         A factory ``phi -> M`` giving the left preconditioner ``M`` (a matvec approximating
-        ``J^{-1}``) for the **forward** Newton solves, built at the current iterate (e.g.
-        :meth:`aquaflux.flow.BlockPreconditioner.factory`). ``None`` solves unpreconditioned —
-        usable only on small or well-conditioned systems; the coupled flow saddle-point needs one.
-        The adjoint (transpose) solve is currently left unpreconditioned. Static.
+        ``J^{-1}``), built at the current iterate (e.g.
+        :meth:`aquaflux.flow.BlockPreconditioner.factory`). Used for **both** the forward Newton
+        solves and, transposed to ``M^T``, the adjoint (transpose) solve, so gradients are
+        mesh-independent too. ``None`` solves unpreconditioned — usable only on small or
+        well-conditioned systems; the coupled flow saddle-point needs one. Static.
     """
 
     rtol: float = eqx.field(static=True, default=1e-10)
