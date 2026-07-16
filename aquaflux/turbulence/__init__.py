@@ -6,12 +6,15 @@ strain-rate magnitude they consume in
 :func:`~aquaflux.turbulence.strain.strain_rate_magnitude`; the k and omega volumetric source terms
 (production, destruction, cross-diffusion) as :mod:`~aquaflux.turbulence.sources` operators; and the
 boundary values (near-wall omega, inlet k and omega) in :mod:`~aquaflux.turbulence.boundary`; and
-the assembly of the k and omega transport equations in :mod:`~aquaflux.turbulence.transport`.
+the assembly of the k and omega transport equations in :mod:`~aquaflux.turbulence.transport`; and
+the segregated outer loop coupling the flow and turbulence solves in
+:func:`~aquaflux.turbulence.driver.solve_segregated`.
 """
 
 from __future__ import annotations
 
 from .boundary import inlet_k, inlet_omega, omega_wall_value
+from .driver import solve_segregated
 from .sources import (
     KDestruction,
     KProduction,
@@ -35,5 +38,6 @@ __all__ = [
     "inlet_k",
     "inlet_omega",
     "omega_wall_value",
+    "solve_segregated",
     "strain_rate_magnitude",
 ]
