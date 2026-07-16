@@ -282,17 +282,25 @@ class MomentumContinuity(eqx.Module):
         mdot = face_cells.combine_face_values(interior_flux, 0.0)
         return self._boundary_mass_flux(velocity, pressure, grad_pressure, d_coeff, mdot)
 
-    def lagged_momentum_diagonal(
+    def momentum_matrix_diagonal(
         self, velocity: jnp.ndarray, grad_velocity: jnp.ndarray | None = None
     ) -> jnp.ndarray:
-        """Lagged momentum-matrix diagonal ``a_P`` (``stop_gradient``-ed).
+        """Momentum-matrix diagonal ``a_P`` as a differentiable function of the velocity state.
 
-        Its convective part uses a velocity-flux estimate (no pressure correction) to avoid the
-        ``a_P`` <-> ``mdot`` circularity. Shared by the residual (Rhie--Chow coefficient) and the
-        block preconditioner (velocity block). ``grad_velocity`` reconstructs the lagged momentum to
-        the integration point (consistent with the mass flux); omit it for the cheap leading-order
-        estimate the preconditioner uses (``a_P`` is a lagged coefficient, so either is exact at
-        convergence).
+        The convective part uses a velocity-flux **estimate** for the mass flux (the interpolated
+        momentum, no pressure correction) instead of the Rhie--Chow ``mdot`` itself: that estimate
+        is what breaks the ``a_P`` <-> ``mdot`` circularity, and it makes ``a_P`` a genuine,
+        non-circular function of the velocity. It is deliberately **not** ``stop_gradient``-ed.
+        ``a_P`` enters the Rhie--Chow coefficient ``V / a_P``, whose damping term is non-zero for a
+        non-linear pressure field, so the converged solution's sensitivity to ``a_P`` is real;
+        freezing it would leave the implicit-function-theorem adjoint linearising a different
+        residual than the one being driven to zero (the converged *value* is unchanged, but the
+        *sensitivity* is not). ``grad_velocity`` reconstructs the estimated momentum to the
+        integration point (consistent with the mass flux); omit it for the cheap leading-order
+        estimate.
+
+        The block preconditioner needs ``a_P`` as a *frozen* coefficient; it ``stop_gradient``-s the
+        result itself (and evaluates it at a ``stop_gradient``-ed state).
         """
         mdot_estimate = None
         if self.advection_scheme is not None:
@@ -310,15 +318,13 @@ class MomentumContinuity(eqx.Module):
                     momentum, grad_momentum, self.interp_factor, self.mesh.face_cells, self.geometry
                 )
             mdot_estimate = dot(momentum_face, self.geometry.face.normal) * self.geometry.face.area
-        return jax.lax.stop_gradient(
-            momentum_diagonal(
-                self.mesh.face_cells,
-                self.geometry,
-                self.viscosity,
-                self.normal_distance,
-                self.interp_factor,
-                mdot_lagged=mdot_estimate,
-            )
+        return momentum_diagonal(
+            self.mesh.face_cells,
+            self.geometry,
+            self.viscosity,
+            self.normal_distance,
+            self.interp_factor,
+            mdot_lagged=mdot_estimate,
         )
 
     def _momentum_residual(
@@ -386,9 +392,9 @@ class MomentumContinuity(eqx.Module):
         grad_pressure = self.gradient_scheme.gradients(
             pressure, self.mesh, self.geometry, boundary_pressure
         )
-        a_p = self.lagged_momentum_diagonal(
+        a_p = self.momentum_matrix_diagonal(
             velocity, grad_velocity
-        )  # (n_cells, dim), per component
+        )  # (n_cells, dim), per component; differentiable (see the method docstring)
         d_coeff = self.geometry.cell.volume[:, None] / a_p  # Rhie--Chow coefficient V / a_P
         mdot = self._mass_flux(velocity, grad_velocity, pressure, grad_pressure, d_coeff)
 

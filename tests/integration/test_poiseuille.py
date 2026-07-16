@@ -79,7 +79,10 @@ def test_poiseuille_stokes_converges_in_one_newton_step() -> None:
 
 
 def test_poiseuille_solve_is_differentiable() -> None:
-    """Reverse-mode gradient of a flow functional w.r.t. viscosity flows through the coupled solve."""
+    """Reverse-mode gradient w.r.t. viscosity **matches central finite differences**, not merely
+    finite. Fully-developed channel flow with a prescribed inlet profile is viscosity-independent
+    in velocity (mu sets the pressure gradient, not u), so d(mean u_x)/dmu = 0 -- a sharp check
+    that the adjoint is consistent (a frozen-a_P adjoint returns a finite but wrong value here)."""
 
     def mean_speed(mu):
         _, _, assembler, state = _solve(16, 12, mu=mu)
@@ -87,7 +90,11 @@ def test_poiseuille_solve_is_differentiable() -> None:
         return jnp.mean(velocity[:, 0])
 
     grad = float(jax.grad(mean_speed)(MU))
+    h = 1e-6
+    fd = float((mean_speed(MU + h) - mean_speed(MU - h)) / (2.0 * h))
     assert np.isfinite(grad)
+    assert abs(fd) < 1e-4  # velocity is (essentially) viscosity-independent
+    assert abs(grad - fd) < 1e-4  # the adjoint agrees with finite differences
 
 
 @pytest.mark.validation
