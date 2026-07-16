@@ -26,11 +26,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 
 from aquaflux.boundary import BoundaryConditions
-from aquaflux.discretization import AdvectionFlux, DiffusionFlux, FaceContext
+from aquaflux.discretization import AdvectionFlux, DiffusionFlux, FaceContext, FixedValueCells
 from aquaflux.schemes.interpolation import (
     interpolate_owner_neighbour,
     interpolate_to_face,
@@ -376,9 +375,10 @@ class MomentumContinuity(eqx.Module):
         """
         residual = self._scatter(mdot)
         if self.pressure_pin is not None:
-            residual = residual.at[self.pressure_pin].set(
-                pressure[self.pressure_pin] - self.pressure_pin_value
+            fix = FixedValueCells(
+                jnp.array([self.pressure_pin]), jnp.array([self.pressure_pin_value])
             )
+            residual = fix.apply(residual, pressure)
         return residual
 
     def residual(self, state: jnp.ndarray) -> jnp.ndarray:
