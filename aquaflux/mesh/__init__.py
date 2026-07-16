@@ -14,6 +14,7 @@ from .connectivity import (
     FaceNodeConnectivity,
     interior_mask,
 )
+from .distance import distance_to_patches
 from .face import (
     EdgeFaceGeometry,
     FaceGeometry,
@@ -57,6 +58,7 @@ __all__ = [
     "centroid_iteration_shift",
     "closed_cell_residual",
     "collapse_extruded_direction",
+    "distance_to_patches",
     "face_geometry_scheme",
     "face_planarity",
     "interior_mask",
