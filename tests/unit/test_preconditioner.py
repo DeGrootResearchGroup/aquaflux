@@ -10,6 +10,8 @@ from aquaflux.boundary import BoundaryConditions
 from aquaflux.flow import (
     MomentumContinuity,
     NoSlipWall,
+    PressureOutlet,
+    VelocityInlet,
     damped_jacobi_solve,
     pressure_schur_laplacian,
 )
@@ -71,6 +73,45 @@ def test_schur_laplacian_pin_row_is_identity() -> None:
     assert float(diagonal[0]) == 1.0
     p = jnp.asarray(np.random.default_rng(1).standard_normal(asm.mesh.n_cells))
     assert float(matvec(p)[0]) == float(p[0])
+
+
+def test_schur_boundary_diagonal_removes_the_null_space() -> None:
+    """A boundary (pressure-outlet) diagonal turns the singular pure-Neumann Schur into a definite
+    operator: the constant leaves the null space and every eigenvalue is positive."""
+    asm = _geometry(6)
+    n = asm.mesh.n_cells
+    a_p = jnp.ones(n)
+    args = (asm.mesh.face_cells, asm.geometry, asm.interp_factor, asm.normal_distance, a_p, asm.density)
+
+    neumann, _ = pressure_schur_laplacian(*args)
+    assert jnp.allclose(neumann(jnp.ones(n)), 0.0, atol=1e-12)  # constant is a null vector
+
+    boundary = jnp.zeros(n).at[0].set(3.0).at[1].set(1.5)  # outlet stiffness on two cells
+    stiffened, diagonal = pressure_schur_laplacian(*args, boundary_diagonal=boundary)
+    ones = stiffened(jnp.ones(n))
+    assert not jnp.allclose(ones, 0.0, atol=1e-9)  # constant no longer in the null space
+    assert jnp.allclose(ones, boundary, atol=1e-9)  # Ŝ·1 = boundary diagonal (Laplacian part is 0)
+    assert float(jnp.dot(jnp.ones(n), stiffened(jnp.ones(n)))) > 0.0  # positive on the constant
+    # The extra diagonal lands exactly where the outlet coupling was placed.
+    plain_diag = pressure_schur_laplacian(*args)[1]
+    assert jnp.allclose(diagonal - plain_diag, boundary, atol=1e-12)
+
+
+def test_pressure_schur_coefficient_only_from_pressure_outlet() -> None:
+    """Only a pressure-fixing outlet contributes to the Schur boundary diagonal; a wall or a
+    velocity inlet sets its mass flux independently of pressure and so contributes nothing."""
+    d_coeff = jnp.array([2.0, 0.5])
+    area = jnp.array([1.0, 1.0])
+    normal_distance = jnp.array([0.25, 0.5])
+    rho = jnp.array([1.0, 1.0])
+    outlet = PressureOutlet(pressure=0.0).pressure_schur_coefficient(
+        d_coeff, area, normal_distance, rho
+    )
+    assert jnp.allclose(outlet, rho * d_coeff * area / normal_distance)
+    assert bool(jnp.all(outlet > 0.0))
+    for closure in (NoSlipWall(), VelocityInlet(velocity=(1.0, 0.0))):
+        contrib = closure.pressure_schur_coefficient(d_coeff, area, normal_distance, rho)
+        assert jnp.allclose(contrib, 0.0)
 
 
 def test_damped_jacobi_is_linear_in_rhs() -> None:

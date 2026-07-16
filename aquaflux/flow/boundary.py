@@ -169,6 +169,37 @@ class FlowBoundary(eqx.Module):
             Owner-cell density per face, shape ``(n,)``.
         """
 
+    def pressure_schur_coefficient(
+        self,
+        d_coeff_owner: jnp.ndarray,
+        area: jnp.ndarray,
+        normal_distance: jnp.ndarray,
+        rho_owner: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Per-face pressure--pressure coupling this patch adds to its owner cell's Schur diagonal.
+
+        The linearisation of the patch mass flux with respect to the owner pressure. It is non-zero
+        only where the boundary *fixes* the pressure (a :class:`PressureOutlet`), whose Rhie--Chow
+        flux drives the owner cell toward the imposed ``p_b`` and so couples ``mdot`` to ``p_owner``;
+        a wall or a velocity inlet sets its mass flux independently of pressure, so the base returns
+        zero. This is the boundary analogue of the interior Schur face coefficient, and it is what
+        makes the open-domain (inlet/outlet) pressure Schur non-singular — its interior part alone is
+        a pure-Neumann Laplacian. Consumed only by the frozen SIMPLE preconditioner; it never enters
+        the residual.
+
+        Parameters
+        ----------
+        d_coeff_owner : jnp.ndarray
+            Owner Rhie--Chow coefficient ``V / a_P`` per face, shape ``(n,)``.
+        area : jnp.ndarray
+            Face areas, shape ``(n,)``.
+        normal_distance : jnp.ndarray
+            Owner-centroid-to-face normal distance ``d . n``, shape ``(n,)``.
+        rho_owner : jnp.ndarray
+            Owner-cell density per face, shape ``(n,)``.
+        """
+        return jnp.zeros_like(area)
+
 
 class NoSlipWall(FlowBoundary):
     """A stationary solid wall: zero velocity, zero-gradient pressure, no through-flow."""
@@ -307,3 +338,9 @@ class PressureOutlet(FlowBoundary):
         interpolated = dot(grad_pressure_owner, normal)
         d_hat = dot(normal * normal, d_coeff_owner)  # directional V/a_P projected on the normal
         return rho * (u_normal - d_hat * (compact - interpolated)) * area
+
+    def pressure_schur_coefficient(self, d_coeff_owner, area, normal_distance, rho_owner):
+        # d(mdot)/d(p_owner) of the mass flux above: the compact term -rho d_hat (p_b - p_owner)/(d.n)
+        # contributes +rho d_hat A / (d.n) to the owner's continuity--pressure coupling. The Schur uses
+        # an isotropic V/a_P, for which d_hat = V/a_P, matching the interior face coefficient.
+        return rho_owner * d_coeff_owner * area / normal_distance

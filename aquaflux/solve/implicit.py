@@ -30,7 +30,7 @@ import jax.numpy as jnp
 import lineax as lx
 
 from .linear import default_linear_solver, solve_linear
-from .newton import newton_step
+from .newton import newton_correction
 
 # Inexact-Newton forward solver: each Newton step's linear solve need only make Newton progress,
 # not be exact — the next step corrects the leftover. A loose relative tolerance cuts the GMRES
@@ -42,7 +42,38 @@ from .newton import newton_step
 _INEXACT_FORWARD_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-3)
 
 
-def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner):
+def _damped_newton_step(residual_fn, phi, solver, preconditioner, line_search_steps):
+    """One Newton step with a monotone backtracking line search on the residual norm.
+
+    ``line_search_steps == 0`` recovers the undamped full step ``phi + delta``. Otherwise the step
+    length ``alpha`` is halved (up to ``line_search_steps`` times) until
+    ``||R(phi + alpha delta)|| < ||R(phi)||`` — the globalization a convection-dominated open flow
+    needs, where the full Newton step from a uniform field overshoots and diverges. A full step is
+    kept unchanged whenever it already reduces the residual, so a well-behaved iterate (near the
+    root, or a linear residual) is unaffected. The search only reshapes the forward path; the IFT
+    adjoint depends solely on the converged state, so it stays gradient-transparent.
+    """
+    delta, r = newton_correction(residual_fn, phi, solver=solver, preconditioner=preconditioner)
+    if line_search_steps == 0:
+        return phi + delta
+    r_norm = jnp.linalg.norm(r)
+
+    # Backtracking over a fixed ladder alpha in {1, 1/2, ..., 1/2**line_search_steps}: keep the
+    # *largest* rung that reduces the residual (locked in by ``accepted``), falling back to the
+    # smallest if none does. A fixed (unrolled) count keeps the step a constant-length operation, so
+    # it composes with the ``while_loop`` and the IFT ``custom_vjp`` without a data-dependent branch.
+    alpha = 1.0
+    chosen = 0.5**line_search_steps  # smallest rung, used if nothing reduces the residual
+    accepted = jnp.asarray(False)
+    for _ in range(line_search_steps + 1):
+        reduces = (jnp.linalg.norm(residual_fn(phi + alpha * delta)) < r_norm) & ~accepted
+        chosen = jnp.where(reduces, alpha, chosen)
+        accepted = accepted | reduces
+        alpha = 0.5 * alpha
+    return phi + chosen * delta
+
+
+def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner, line_search):
     """Newton iterate to convergence (``lax.while_loop``); returns the converged field."""
     residual_norm_0 = jnp.linalg.norm(residual_fn(phi0, theta))
 
@@ -52,8 +83,8 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditi
 
     def body(carry):
         phi, step, _ = carry
-        phi = newton_step(
-            lambda p: residual_fn(p, theta), phi, solver=solver, preconditioner=preconditioner
+        phi = _damped_newton_step(
+            lambda p: residual_fn(p, theta), phi, solver, preconditioner, line_search
         )
         return phi, step + 1, jnp.linalg.norm(residual_fn(phi, theta))
 
@@ -61,17 +92,23 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditi
     return phi
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(0, 3, 4, 5, 6, 7, 8))
+@partial(jax.custom_vjp, nondiff_argnums=(0, 3, 4, 5, 6, 7, 8, 9))
 def _implicit_solve(
-    residual_fn, phi0, theta, rtol, atol, max_steps, solver, adjoint_solver, preconditioner
+    residual_fn, phi0, theta, rtol, atol, max_steps, solver, adjoint_solver, preconditioner,
+    line_search,
 ):
-    return _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner)
+    return _forward(
+        residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner, line_search
+    )
 
 
 def _implicit_solve_fwd(
-    residual_fn, phi0, theta, rtol, atol, max_steps, solver, adjoint_solver, preconditioner
+    residual_fn, phi0, theta, rtol, atol, max_steps, solver, adjoint_solver, preconditioner,
+    line_search,
 ):
-    phi_star = _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner)
+    phi_star = _forward(
+        residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner, line_search
+    )
     return phi_star, (phi_star, theta)
 
 
@@ -92,7 +129,8 @@ def _adjoint_preconditioner(preconditioner, phi_star, example):
 
 
 def _implicit_solve_bwd(
-    residual_fn, rtol, atol, max_steps, solver, adjoint_solver, preconditioner, residuals, cotangent
+    residual_fn, rtol, atol, max_steps, solver, adjoint_solver, preconditioner, line_search,
+    residuals, cotangent,
 ):
     phi_star, theta = residuals
     # Transpose Jacobian solve: (dR/dphi)^T lambda = cotangent, left-preconditioned by M^T so the
@@ -141,6 +179,13 @@ class ImplicitNewtonSolver(eqx.Module):
         solves and, transposed to ``M^T``, the adjoint (transpose) solve, so gradients are
         mesh-independent too. ``None`` solves unpreconditioned — usable only on small or
         well-conditioned systems; the coupled flow saddle-point needs one. Static.
+    line_search : int
+        Maximum step-halvings in the forward step's backtracking line search (static). Each Newton
+        step takes the largest ``alpha in {1, 1/2, 1/4, ...}`` (up to this many halvings) that
+        reduces the residual norm — the globalization a convection-dominated open flow needs, where
+        the undamped full step overshoots from a uniform initial field and diverges. A full step is
+        kept whenever it already reduces the residual, so a well-behaved or linear solve is
+        unchanged. ``0`` disables it (pure full Newton). The IFT adjoint is unaffected either way.
     """
 
     rtol: float = eqx.field(static=True, default=1e-10)
@@ -151,6 +196,7 @@ class ImplicitNewtonSolver(eqx.Module):
     preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None = (
         eqx.field(static=True, default=None)
     )
+    line_search: int = eqx.field(static=True, default=10)
 
     def solve(
         self,
@@ -180,5 +226,5 @@ class ImplicitNewtonSolver(eqx.Module):
         )
         return _implicit_solve(
             residual_fn, phi0, theta, self.rtol, self.atol, self.max_steps, solver, adjoint_solver,
-            self.preconditioner,
+            self.preconditioner, self.line_search,
         )

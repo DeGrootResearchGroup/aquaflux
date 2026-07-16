@@ -37,7 +37,8 @@ def newton_step(
     The Jacobian ``J = dR/dphi`` is applied matrix-free via a forward-mode directional
     derivative (``jax.jvp``); the linear solve is the differentiable
     :func:`~aquaflux.solve.linear.solve_linear`. Shared by :class:`NewtonSolver` and the
-    implicit-function-theorem solver.
+    implicit-function-theorem solver. A globalized driver instead takes the raw correction from
+    :func:`newton_correction` and damps it with a line search.
 
     Parameters
     ----------
@@ -52,15 +53,32 @@ def newton_step(
         ``J^{-1}``) for the step's linear solve; built at the current iterate. ``M``'s
         coefficients must be ``stop_gradient``-ed so preconditioning stays gradient-transparent.
     """
+    delta, _ = newton_correction(residual_fn, phi, solver=solver, preconditioner=preconditioner)
+    return phi + delta
+
+
+def newton_correction(
+    residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
+    phi: jnp.ndarray,
+    solver: lx.AbstractLinearSolver | None = None,
+    preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """The raw Newton correction ``delta`` (solving ``J delta = -R(phi)``) and the residual ``R(phi)``.
+
+    Separated from :func:`newton_step` so a globalized driver can damp the step (a line search on
+    ``phi + alpha delta``) using the same matrix-free, differentiable solve. Returns ``(delta, r)``
+    with ``r = R(phi)`` so a caller doing a line search need not recompute it.
+    """
     r = residual_fn(phi)
 
     def jacobian_vector_product(v, _phi=phi):
         return jax.jvp(residual_fn, (_phi,), (v,))[1]
 
     preconditioner_matvec = None if preconditioner is None else preconditioner(phi)
-    return phi + solve_linear(
+    delta = solve_linear(
         jacobian_vector_product, -r, solver=solver, preconditioner=preconditioner_matvec
     )
+    return delta, r
 
 
 class NewtonSolver(eqx.Module):

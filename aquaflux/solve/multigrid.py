@@ -205,10 +205,18 @@ def level_coefficients(
     return tuple(coeffs), tuple(diagonals)
 
 
-def _matvec(level: _Level, coeff: jnp.ndarray, p: jnp.ndarray) -> jnp.ndarray:
-    """Graph-Laplacian matvec ``A p`` at a level; pinned row returns ``p[pin]`` (identity)."""
+def _matvec(
+    level: _Level, coeff: jnp.ndarray, p: jnp.ndarray, diag_extra: jnp.ndarray | None = None
+) -> jnp.ndarray:
+    """Graph-Laplacian matvec ``A p`` at a level; pinned row returns ``p[pin]`` (identity).
+
+    ``diag_extra`` is an optional per-cell diagonal added to the operator (a Dirichlet boundary
+    stiffness, e.g. a pressure outlet), making ``A = Laplacian + diag(diag_extra)``.
+    """
     flux = coeff * (p[level.owner] - p[level.nb])
     result = segment_sum(flux, level.owner, level.n) - segment_sum(flux, level.nb, level.n)
+    if diag_extra is not None:
+        result = result + diag_extra * p
     if level.pin >= 0:
         result = result.at[level.pin].set(p[level.pin])
     return result
@@ -222,11 +230,12 @@ def _smooth(
     x: jnp.ndarray,
     sweeps: int,
     omega: float,
+    diag_extra: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """A few damped-Jacobi sweeps ``x <- x + omega D^-1 (b - A x)``, holding the pinned cell."""
     inv_diagonal = 1.0 / diagonal
     for _ in range(sweeps):
-        x = x + omega * inv_diagonal * (b - _matvec(level, coeff, x))
+        x = x + omega * inv_diagonal * (b - _matvec(level, coeff, x, diag_extra))
         if level.pin >= 0:
             x = x.at[level.pin].set(b[level.pin])
     return x
@@ -243,20 +252,23 @@ def v_cycle(
     coarse_sweeps: int = 30,
     omega: float = 0.7,
     level_index: int = 0,
+    diag_extras: tuple[jnp.ndarray, ...] | None = None,
 ) -> jnp.ndarray:
     """One multigrid V-cycle for ``A x = b`` at ``level_index`` (recursion unrolled at trace time).
 
     A single fixed V-cycle is a constant linear operator in ``b`` (the smoother sweeps and the coarse
-    recursion are all fixed-length), so it is a valid frozen left preconditioner.
+    recursion are all fixed-length), so it is a valid frozen left preconditioner. ``diag_extras``, when
+    given, is the per-level Dirichlet boundary diagonal added to each level's operator.
     """
     level = hierarchy.levels[level_index]
     coeff, diagonal = coeffs[level_index], diagonals[level_index]
+    extra = None if diag_extras is None else diag_extras[level_index]
     if level.agg is None:  # coarsest level: smooth to (near-)solve the small system
-        return _smooth(level, coeff, diagonal, b, jnp.zeros_like(b), coarse_sweeps, omega)
+        return _smooth(level, coeff, diagonal, b, jnp.zeros_like(b), coarse_sweeps, omega, extra)
 
     next_level = hierarchy.levels[level_index + 1]
-    x = _smooth(level, coeff, diagonal, b, jnp.zeros_like(b), pre_sweeps, omega)
-    residual = b - _matvec(level, coeff, x)
+    x = _smooth(level, coeff, diagonal, b, jnp.zeros_like(b), pre_sweeps, omega, extra)
+    residual = b - _matvec(level, coeff, x, extra)
     coarse_residual = segment_sum(residual, level.agg, next_level.n)
     if next_level.pin >= 0:  # the pinned row is an identity Dirichlet condition: zero error there
         coarse_residual = coarse_residual.at[next_level.pin].set(0.0)
@@ -270,11 +282,12 @@ def v_cycle(
         coarse_sweeps=coarse_sweeps,
         omega=omega,
         level_index=level_index + 1,
+        diag_extras=diag_extras,
     )
     x = x + coarse_error[level.agg]  # prolong (piecewise-constant) and correct
     if level.pin >= 0:
         x = x.at[level.pin].set(b[level.pin])
-    return _smooth(level, coeff, diagonal, b, x, post_sweeps, omega)
+    return _smooth(level, coeff, diagonal, b, x, post_sweeps, omega, extra)
 
 
 def multigrid_solve(
@@ -288,6 +301,7 @@ def multigrid_solve(
     post_sweeps: int = 2,
     coarse_sweeps: int = 30,
     omega: float = 0.7,
+    diag_extras: tuple[jnp.ndarray, ...] | None = None,
 ) -> jnp.ndarray:
     """A **fixed** number of V-cycles for ``A x = b`` — the mesh-independent, constant-linear inner
     solve for the SIMPLE pressure Schur.
@@ -309,6 +323,10 @@ def multigrid_solve(
         Damped-Jacobi sweep counts (static).
     omega : float
         Jacobi damping factor.
+    diag_extras : tuple of jnp.ndarray, optional
+        Per-level Dirichlet boundary diagonal added to each level's operator (e.g. a pressure-outlet
+        stiffness that de-singularises an otherwise pure-Neumann Schur). The ``diagonals`` passed in
+        must already include it, so the Jacobi smoother scales by the true diagonal.
 
     Returns
     -------
@@ -316,9 +334,10 @@ def multigrid_solve(
         The approximate solution ``x``, shape ``(n_cells,)``.
     """
     fine = hierarchy.levels[0]
+    fine_extra = None if diag_extras is None else diag_extras[0]
     x = jnp.zeros_like(b)
     for _ in range(cycles):
-        residual = b - _matvec(fine, coeffs[0], x)
+        residual = b - _matvec(fine, coeffs[0], x, fine_extra)
         x = x + v_cycle(
             hierarchy,
             coeffs,
@@ -328,6 +347,7 @@ def multigrid_solve(
             post_sweeps=post_sweeps,
             coarse_sweeps=coarse_sweeps,
             omega=omega,
+            diag_extras=diag_extras,
         )
     return x
 
