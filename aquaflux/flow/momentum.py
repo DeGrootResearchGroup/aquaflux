@@ -23,7 +23,7 @@ checkerboarding. The mass flux and the lagged momentum diagonal ``a_P`` come fro
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -45,6 +45,22 @@ if TYPE_CHECKING:
     from aquaflux.mesh import Mesh, MeshGeometry
     from aquaflux.properties import PropertyModel
     from aquaflux.schemes import GradientScheme
+
+
+class _FlowFields(NamedTuple):
+    """The per-evaluation flow quantities the residual assembles once and shares.
+
+    Bundled so the residual and the public coupling accessors (:meth:`MomentumContinuity.mass_flux`,
+    :meth:`MomentumContinuity.velocity_gradient`) compute them one way, in one place.
+    """
+
+    velocity: jnp.ndarray  # (n_cells, dim)
+    pressure: jnp.ndarray  # (n_cells,)
+    boundary_velocity: jnp.ndarray  # (n_faces, dim)
+    boundary_pressure: jnp.ndarray  # (n_faces,)
+    grad_velocity: jnp.ndarray  # (n_cells, dim, dim), [c, i, j] = d u_i/d x_j
+    grad_pressure: jnp.ndarray  # (n_cells, dim)
+    mdot: jnp.ndarray  # (n_faces,) Rhie--Chow face mass flux
 
 
 class MomentumContinuity(eqx.Module):
@@ -381,8 +397,12 @@ class MomentumContinuity(eqx.Module):
             residual = fix.apply(residual, pressure)
         return residual
 
-    def residual(self, state: jnp.ndarray) -> jnp.ndarray:
-        """Coupled momentum + continuity residual for the flat state, same shape as ``state``."""
+    def _flow_fields(self, state: jnp.ndarray) -> _FlowFields:
+        """Assemble the shared flow quantities for ``state`` (boundary fields, gradients, ``mdot``).
+
+        The one place the velocity/pressure gradients and the Rhie--Chow mass flux are formed, so the
+        residual and the public coupling accessors stay consistent.
+        """
         velocity, pressure = self.unpack(state)
         boundary_velocity, boundary_pressure = self._boundary_fields(velocity, pressure)
         grad_velocity = self._velocity_gradient(velocity, boundary_velocity)
@@ -397,10 +417,50 @@ class MomentumContinuity(eqx.Module):
         )  # (n_cells, dim), per component; differentiable (see the method docstring)
         d_coeff = self.geometry.cell.volume[:, None] / a_p  # Rhie--Chow coefficient V / a_P
         mdot = self._mass_flux(velocity, grad_velocity, pressure, grad_pressure, d_coeff)
-
-        pressure_face = self._face_pressure(pressure, grad_pressure, boundary_pressure)
-        velocity_residual = self._momentum_residual(
-            velocity, grad_velocity, boundary_velocity, pressure_face, mdot
+        return _FlowFields(
+            velocity,
+            pressure,
+            boundary_velocity,
+            boundary_pressure,
+            grad_velocity,
+            grad_pressure,
+            mdot,
         )
-        pressure_residual = self._continuity_residual(mdot, pressure)
+
+    def residual(self, state: jnp.ndarray) -> jnp.ndarray:
+        """Coupled momentum + continuity residual for the flat state, same shape as ``state``."""
+        f = self._flow_fields(state)
+        pressure_face = self._face_pressure(f.pressure, f.grad_pressure, f.boundary_pressure)
+        velocity_residual = self._momentum_residual(
+            f.velocity, f.grad_velocity, f.boundary_velocity, pressure_face, f.mdot
+        )
+        pressure_residual = self._continuity_residual(f.mdot, f.pressure)
         return self.pack(velocity_residual, pressure_residual)
+
+    def mass_flux(self, state: jnp.ndarray) -> jnp.ndarray:
+        """The Rhie--Chow face mass flux ``mdot`` for ``state``, shape ``(n_faces,)``.
+
+        This is the *same* face flux that closes continuity, so a scalar transported by this flow
+        (a turbulence field, a species) must advect on it -- rebuilding ``(u . n) A`` from the cell
+        velocities is non-conservative and violates discrete continuity. The coupling seam for
+        scalar transport: evaluate on the converged flow ``state``.
+
+        Parameters
+        ----------
+        state : jnp.ndarray
+            The flat flow state ``[vel_0..vel_{dim-1}, pressure]``, shape ``((dim + 1) n_cells,)``.
+        """
+        return self._flow_fields(state).mdot
+
+    def velocity_gradient(self, state: jnp.ndarray) -> jnp.ndarray:
+        """The per-cell velocity-gradient tensor for ``state``, shape ``(n_cells, dim, dim)``.
+
+        ``[c, i, j] = d u_i / d x_j``; its symmetric part is the mean strain rate a turbulence model
+        consumes. Evaluate on the converged flow ``state``.
+
+        Parameters
+        ----------
+        state : jnp.ndarray
+            The flat flow state ``[vel_0..vel_{dim-1}, pressure]``, shape ``((dim + 1) n_cells,)``.
+        """
+        return self._flow_fields(state).grad_velocity
