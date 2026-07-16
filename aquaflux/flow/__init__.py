@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .block_preconditioner import BlockPreconditioner
 from .boundary import FlowBoundary, MovingWall, NoSlipWall, PressureOutlet, VelocityInlet
+from .continuation import PseudoTransientContinuation
 from .momentum import MomentumContinuity
 from .preconditioner import damped_jacobi_solve, pressure_schur_laplacian
 from .rhie_chow import interior_mass_flux, momentum_diagonal
@@ -21,6 +22,7 @@ __all__ = [
     "MovingWall",
     "NoSlipWall",
     "PressureOutlet",
+    "PseudoTransientContinuation",
     "VelocityInlet",
     "damped_jacobi_solve",
     "interior_mass_flux",

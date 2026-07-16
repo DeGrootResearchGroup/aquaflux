@@ -435,30 +435,44 @@ class BlockPreconditioner(eqx.Module):
 
         return divergence
 
+    def frozen_momentum_diagonal(self, state: jnp.ndarray) -> jnp.ndarray:
+        """The isotropic, frozen momentum diagonal ``a_P`` at ``state``, shape ``(n_cells,)``.
+
+        Isotropic (component-averaged) ``a_P`` for the Schur/velocity blocks; the directional
+        per-component form enters only the operator's Rhie--Chow coefficient. The preconditioner
+        needs ``a_P`` frozen, so ``stop_gradient`` it here (the residual uses the differentiable
+        ``a_P``): the state is already detached, and this keeps ``M`` a constant operator even if
+        called on a live state. Exposed so a continuation driver (implicit under-relaxation) can
+        form its diagonal shift from the *same* ``a_P`` the preconditioner inverts.
+        """
+        velocity, _ = self.assembler.unpack(jax.lax.stop_gradient(state))
+        return jnp.mean(
+            jax.lax.stop_gradient(self.assembler.momentum_matrix_diagonal(velocity)), axis=1
+        )
+
+    def apply_at(
+        self, state: jnp.ndarray, a_p: jnp.ndarray
+    ) -> Callable[[jnp.ndarray], jnp.ndarray]:
+        """The preconditioner matvec ``M`` at ``state`` for a supplied (frozen) diagonal ``a_P``.
+
+        Splits the ``state -> M`` factory so a caller can pass an *effective* ``a_P`` — e.g. the
+        under-relaxed ``a_P (1 + β)`` an implicit-continuation step uses, matching the shifted
+        Jacobian it inverts — instead of always the bare diagonal :meth:`frozen_momentum_diagonal`
+        returns. ``a_P`` is the isotropic per-cell diagonal, shape ``(n_cells,)``.
+        """
+        schur_solve = self.schur.apply(a_p)
+        velocity_solve = self.velocity.apply(a_p)
+        divergence = self._divergence(state) if self.block_triangular else None
+
+        def apply(v: jnp.ndarray) -> jnp.ndarray:
+            velocity_residual, pressure_residual = self.assembler.unpack(v)
+            velocity_correction = velocity_solve(velocity_residual)
+            if divergence is not None:  # block-triangular: correct the pressure RHS by D·δu
+                pressure_residual = pressure_residual - divergence(velocity_correction)
+            return self.assembler.pack(velocity_correction, schur_solve(pressure_residual))
+
+        return apply
+
     def factory(self) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
         """Return the ``state -> M`` factory the Newton step applies (``M`` frozen at that iterate)."""
-
-        def make(state: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
-            velocity, _ = self.assembler.unpack(jax.lax.stop_gradient(state))
-            # Isotropic (component-averaged) a_P for the Schur/velocity blocks; the directional
-            # per-component form enters only the operator's Rhie--Chow coefficient. The
-            # preconditioner needs a_P frozen, so stop_gradient it here (the residual uses the
-            # differentiable a_P): the state is already detached, and this keeps M a constant
-            # operator even if make() is ever called on a live state.
-            a_p = jnp.mean(
-                jax.lax.stop_gradient(self.assembler.momentum_matrix_diagonal(velocity)), axis=1
-            )
-            schur_solve = self.schur.apply(a_p)
-            velocity_solve = self.velocity.apply(a_p)
-            divergence = self._divergence(state) if self.block_triangular else None
-
-            def apply(v: jnp.ndarray) -> jnp.ndarray:
-                velocity_residual, pressure_residual = self.assembler.unpack(v)
-                velocity_correction = velocity_solve(velocity_residual)
-                if divergence is not None:  # block-triangular: correct the pressure RHS by D·δu
-                    pressure_residual = pressure_residual - divergence(velocity_correction)
-                return self.assembler.pack(velocity_correction, schur_solve(pressure_residual))
-
-            return apply
-
-        return make
+        return lambda state: self.apply_at(state, self.frozen_momentum_diagonal(state))
