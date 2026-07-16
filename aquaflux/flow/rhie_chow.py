@@ -13,10 +13,14 @@ and the interpolated pressure gradient, which vanishes as the mesh resolves, so 
 preserved.
 
 ``a_P`` is the diagonal of the momentum equation (viscous + convective central coefficient, plus
-transient). It is a **lagged stabilization coefficient**, not part of the AD Jacobian: the
-Rhie--Chow term vanishes at convergence (continuity holds for any positive ``a_P``), so freezing
-it affects only the convergence path, not the converged solution. It is therefore assembled here
-from the standard central-coefficient formula rather than differentiated.
+transient). Its convective part uses a velocity-flux *estimate* for the mass flux (not the
+Rhie--Chow ``mdot`` itself), which breaks the ``a_P`` <-> ``mdot`` circularity and makes ``a_P`` a
+non-circular function of the velocity. It is assembled here from the central-coefficient formula
+but, unlike a classical lagged coefficient, it is **differentiated** in the residual: ``a_P``
+enters ``V / a_P``, whose damping term is non-zero for a non-linear pressure field, so it genuinely
+affects the converged solution's sensitivity — freezing it (``stop_gradient``) would leave the
+implicit-function-theorem adjoint linearising a different residual than the one solved. The block
+preconditioner, which needs a constant operator, freezes ``a_P`` on its side.
 """
 
 from __future__ import annotations

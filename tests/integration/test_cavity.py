@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall
+from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, NoSlipWall
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -72,18 +72,25 @@ def test_cavity_nonlinear_newton_converges() -> None:
 
 
 def test_cavity_solve_is_differentiable() -> None:
-    """Reverse-mode gradient through the nonlinear cavity solve (IFT) is finite."""
+    """Reverse-mode gradient through the nonlinear cavity solve **matches central finite
+    differences** -- not merely finite. A broken (e.g. frozen-a_P) adjoint returns a finite but
+    wrong value here; only an FD comparison catches it."""
+    n = 20
+    precond = BlockPreconditioner.build(_cavity(n)).factory()  # stop_gradient-ed; reuse across mu
+    solver = ImplicitNewtonSolver(max_steps=30, preconditioner=precond)
 
     def mean_speed(mu):
-        assembler = _cavity(24, mu=mu)
-        state = ImplicitNewtonSolver(max_steps=30).solve(
-            lambda s, a: a.residual(s), assembler.initial_state(), assembler
-        )
+        assembler = _cavity(n, mu=mu)
+        state = solver.solve(lambda s, a: a.residual(s), assembler.initial_state(), assembler)
         velocity, _ = assembler.unpack(state)
         return jnp.mean(jnp.abs(velocity[:, 0]))
 
     grad = float(jax.grad(mean_speed)(MU))
+    h = 1e-5  # MU = 0.01
+    fd = float((mean_speed(MU + h) - mean_speed(MU - h)) / (2.0 * h))
     assert np.isfinite(grad)
+    assert abs(fd) > 1e-2  # a genuinely non-zero sensitivity
+    assert abs(grad - fd) <= 3e-2 * abs(fd)  # first-order upwind is non-smooth, so a loose tol
 
 
 @pytest.mark.validation
