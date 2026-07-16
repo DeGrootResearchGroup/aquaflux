@@ -60,6 +60,7 @@ class _SchurGeometry(eqx.Module):
 
     face_cells: FaceCellConnectivity
     mesh_geometry: MeshGeometry
+    boundary: object
     interp_factor: jnp.ndarray
     normal_distance: jnp.ndarray
     rho: jnp.ndarray
@@ -71,6 +72,7 @@ class _SchurGeometry(eqx.Module):
         return cls(
             assembler.mesh.face_cells,
             assembler.geometry,
+            assembler.boundary,
             assembler.interp_factor,
             assembler.normal_distance,
             assembler.density,
@@ -89,6 +91,26 @@ class _SchurGeometry(eqx.Module):
                 self.rho,
             )
         )
+
+    def boundary_diagonal(self, a_p: jnp.ndarray) -> jnp.ndarray:
+        """The (frozen) per-cell pressure-Schur boundary stiffness at momentum diagonal ``a_P``.
+
+        Each boundary patch adds its :meth:`~aquaflux.flow.boundary.FlowBoundary.pressure_schur_coefficient`
+        (non-zero only for a pressure-fixing outlet) to its owner cell's Schur diagonal — the term that
+        de-singularises the open-domain Schur, whose interior part is a pure-Neumann Laplacian. Zero
+        everywhere for a closed all-wall domain (regularised instead by the pin).
+        """
+        face = self.mesh_geometry.face
+        d_coeff = self.mesh_geometry.cell.volume / a_p  # isotropic V/a_P per cell
+        per_face = self.boundary.apply(
+            self.face_cells,
+            jnp.zeros(face.area.shape),
+            lambda bc, faces, owner: bc.pressure_schur_coefficient(
+                d_coeff[owner], face.area[faces], self.normal_distance[faces], self.rho[owner]
+            ),
+        )
+        n_cells = self.mesh_geometry.cell.volume.shape[0]
+        return jax.lax.stop_gradient(segment_sum(per_face, self.face_cells.owner, n_cells))
 
 
 # --- pressure-Schur inner solvers (strategy family) ------------------------------------
@@ -123,6 +145,7 @@ class DampedJacobiSchur(InnerSchurSolver):
             a_p,
             g.rho,
             g.pressure_pin,
+            boundary_diagonal=g.boundary_diagonal(a_p),
         )
         return lambda rp: damped_jacobi_solve(
             matvec, diagonal, rp, self.sweeps, self.omega, g.pressure_pin
@@ -155,8 +178,27 @@ class AggregationSchur(InnerSchurSolver):
     def apply(self, a_p: jnp.ndarray) -> _PressureSolve:
         coeff = self.geometry.coefficient(a_p)[self.interior_faces]
         coeffs, diagonals = level_coefficients(self.hierarchy, coeff)
+        # Propagate the boundary (outlet) diagonal up the aggregation — piecewise-constant Galerkin
+        # makes a coarse cell's stiffness the sum over its fine members — and fold it into each
+        # level's operator, so A = Laplacian + diag(boundary) is non-singular at every level. All-zero
+        # (and a no-op) for a closed all-wall domain, which the pin regularises instead.
+        levels = self.hierarchy.levels
+        extra = self.geometry.boundary_diagonal(a_p)
+        extras = []
+        for index, level in enumerate(levels):
+            extras.append(extra)
+            if level.agg is not None:
+                extra = segment_sum(extra, level.agg, levels[index + 1].n)
+        diagonals = tuple(d + e for d, e in zip(diagonals, extras, strict=True))
+        diag_extras = tuple(extras)
         return lambda rp: multigrid_solve(
-            self.hierarchy, coeffs, diagonals, rp, cycles=self.v_cycles, omega=self.omega
+            self.hierarchy,
+            coeffs,
+            diagonals,
+            rp,
+            cycles=self.v_cycles,
+            omega=self.omega,
+            diag_extras=diag_extras,
         )
 
 
@@ -203,8 +245,16 @@ class SmoothedAmgSchur(InnerSchurSolver):
             axis=1,
         )
         reference_coeff = np.asarray(geometry.coefficient(reference_a_p))[interior]
+        # A pressure-fixing outlet adds a boundary diagonal that de-singularises the Schur; freeze it
+        # at the reference a_P (all-zero for a closed all-wall domain, which the pin handles instead).
+        reference_boundary = np.asarray(geometry.boundary_diagonal(reference_a_p))
         hierarchy = build_smoothed_hierarchy(
-            owner_e, nb_e, reference_coeff, n_cells, pin=geometry.pressure_pin
+            owner_e,
+            nb_e,
+            reference_coeff,
+            n_cells,
+            pin=geometry.pressure_pin,
+            boundary_diagonal=reference_boundary,
         )
         return cls(
             geometry,
@@ -221,6 +271,9 @@ class SmoothedAmgSchur(InnerSchurSolver):
         diag_cur = segment_sum(current_coeff, self.owner, self.n_cells) + segment_sum(
             current_coeff, self.nb, self.n_cells
         )
+        # The reference hierarchy carries the boundary (outlet) stiffness in its diagonal, so the
+        # current diagonal must include it too for the symmetric rescaling to be consistent.
+        diag_cur = diag_cur + self.geometry.boundary_diagonal(a_p)
         if self.geometry.pressure_pin is not None:
             diag_cur = diag_cur.at[self.geometry.pressure_pin].set(1.0)
         inv_scale = jnp.sqrt(self.hierarchy.levels[0].diagonal / diag_cur)

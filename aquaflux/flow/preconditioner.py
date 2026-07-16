@@ -84,6 +84,7 @@ def pressure_schur_laplacian(
     a_p: jnp.ndarray,
     rho: jnp.ndarray,
     pressure_pin: int | None = None,
+    boundary_diagonal: jnp.ndarray | None = None,
 ) -> tuple[Callable[[jnp.ndarray], jnp.ndarray], jnp.ndarray]:
     """The compact Rhie--Chow pressure Laplacian ``Ŝ`` (the SIMPLE Schur approximation).
 
@@ -114,6 +115,11 @@ def pressure_schur_laplacian(
     pressure_pin : int, optional
         Index of a pinned pressure cell (its continuity row is replaced by ``p = const``); its Laplacian
         row is set to identity so the inner solve leaves it fixed.
+    boundary_diagonal : jnp.ndarray, optional
+        Per-cell pressure--pressure stiffness added to the diagonal from pressure-fixing boundary faces
+        (a :class:`~aquaflux.flow.PressureOutlet`). This is the boundary coupling that makes the
+        open-domain Schur non-singular; ``None`` (or all-zero, for a closed domain) leaves the
+        pure-Neumann interior Laplacian, regularised instead by ``pressure_pin``.
 
     Returns
     -------
@@ -129,14 +135,20 @@ def pressure_schur_laplacian(
         schur_face_coefficient(face_cells, geometry, interp_factor, normal_distance, a_p, rho)
     )
 
-    # Symmetric M-matrix Laplacian: each interior face adds c_f to both incident diagonals.
+    # Symmetric M-matrix Laplacian: each interior face adds c_f to both incident diagonals; a
+    # pressure-fixing boundary face adds its coupling to its owner's diagonal only (the boundary
+    # pressure is prescribed, so there is no off-diagonal term).
     diagonal = face_cells.scatter_symmetric(coeff)
+    if boundary_diagonal is not None:
+        diagonal = diagonal + jax.lax.stop_gradient(boundary_diagonal)
     if pressure_pin is not None:  # pinned row is identity (continuity replaced by p = const)
         diagonal = diagonal.at[pressure_pin].set(1.0)
 
     def matvec(p: jnp.ndarray) -> jnp.ndarray:
         flux = coeff * (p[owner] - p[nb])  # owner-outward; zero on boundary faces
         result = face_cells.scatter_conservative(flux)
+        if boundary_diagonal is not None:
+            result = result + jax.lax.stop_gradient(boundary_diagonal) * p
         if pressure_pin is not None:
             result = result.at[pressure_pin].set(p[pressure_pin])
         return result
