@@ -33,7 +33,7 @@ from .linear import solve_linear
 from .newton import newton_step
 
 
-def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver):
+def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner):
     """Newton iterate to convergence (``lax.while_loop``); returns the converged field."""
     residual_norm_0 = jnp.linalg.norm(residual_fn(phi0, theta))
 
@@ -43,24 +43,30 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver):
 
     def body(carry):
         phi, step, _ = carry
-        phi = newton_step(lambda p: residual_fn(p, theta), phi, solver=solver)
+        phi = newton_step(
+            lambda p: residual_fn(p, theta), phi, solver=solver, preconditioner=preconditioner
+        )
         return phi, step + 1, jnp.linalg.norm(residual_fn(phi, theta))
 
     phi, _, _ = jax.lax.while_loop(cond, body, (phi0, 0, residual_norm_0))
     return phi
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(0, 3, 4, 5, 6))
-def _implicit_solve(residual_fn, phi0, theta, rtol, atol, max_steps, solver):
-    return _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver)
+@partial(jax.custom_vjp, nondiff_argnums=(0, 3, 4, 5, 6, 7))
+def _implicit_solve(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner):
+    return _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner)
 
 
-def _implicit_solve_fwd(residual_fn, phi0, theta, rtol, atol, max_steps, solver):
-    phi_star = _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver)
+def _implicit_solve_fwd(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner):
+    phi_star = _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner)
     return phi_star, (phi_star, theta)
 
 
-def _implicit_solve_bwd(residual_fn, rtol, atol, max_steps, solver, residuals, cotangent):
+def _implicit_solve_bwd(residual_fn, rtol, atol, max_steps, solver, preconditioner, residuals, cotangent):
+    # The preconditioner is forward-only: the transpose of the block-triangular forward
+    # preconditioner is not a good preconditioner for J^T, so the adjoint solve is left
+    # unpreconditioned here (a proper transpose preconditioner is future work).
+    del preconditioner
     phi_star, theta = residuals
     # Transpose Jacobian solve: (dR/dphi)^T lambda = cotangent.
     _, vjp_phi = jax.vjp(lambda p: residual_fn(p, theta), phi_star)
@@ -89,12 +95,21 @@ class ImplicitNewtonSolver(eqx.Module):
         Maximum Newton iterations (static).
     solver : lineax.AbstractLinearSolver or None
         Linear solver for the Newton and adjoint solves; ``None`` uses the package default.
+    preconditioner : callable or None
+        A factory ``phi -> M`` giving the left preconditioner ``M`` (a matvec approximating
+        ``J^{-1}``) for the **forward** Newton solves, built at the current iterate (e.g.
+        :meth:`aquaflux.flow.BlockPreconditioner.factory`). ``None`` solves unpreconditioned —
+        usable only on small or well-conditioned systems; the coupled flow saddle-point needs one.
+        The adjoint (transpose) solve is currently left unpreconditioned. Static.
     """
 
     rtol: float = eqx.field(static=True, default=1e-10)
     atol: float = eqx.field(static=True, default=1e-12)
     max_steps: int = eqx.field(static=True, default=50)
     solver: lx.AbstractLinearSolver | None = None
+    preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None = (
+        eqx.field(static=True, default=None)
+    )
 
     def solve(
         self,
@@ -119,5 +134,6 @@ class ImplicitNewtonSolver(eqx.Module):
             The converged field, shape ``(n_cells,)``.
         """
         return _implicit_solve(
-            residual_fn, phi0, theta, self.rtol, self.atol, self.max_steps, self.solver
+            residual_fn, phi0, theta, self.rtol, self.atol, self.max_steps, self.solver,
+            self.preconditioner,
         )
