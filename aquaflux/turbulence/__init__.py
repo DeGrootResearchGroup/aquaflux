@@ -5,7 +5,8 @@ constant blend, and the eddy viscosity -- live in :class:`~aquaflux.turbulence.s
 strain-rate magnitude they consume in
 :func:`~aquaflux.turbulence.strain.strain_rate_magnitude`; the k and omega volumetric source terms
 (production, destruction, cross-diffusion) as :mod:`~aquaflux.turbulence.sources` operators; and the
-boundary values (near-wall omega, inlet k and omega) in :mod:`~aquaflux.turbulence.boundary`.
+boundary values (near-wall omega, inlet k and omega) in :mod:`~aquaflux.turbulence.boundary`; and
+the assembly of the k and omega transport equations in :mod:`~aquaflux.turbulence.transport`.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from .sources import (
 )
 from .sst import SSTModel
 from .strain import strain_rate_magnitude
+from .transport import SSTClosureFields, SSTTurbulence
 
 __all__ = [
     "KDestruction",
@@ -27,7 +29,9 @@ __all__ = [
     "OmegaCrossDiffusion",
     "OmegaDestruction",
     "OmegaProduction",
+    "SSTClosureFields",
     "SSTModel",
+    "SSTTurbulence",
     "inlet_k",
     "inlet_omega",
     "omega_wall_value",
