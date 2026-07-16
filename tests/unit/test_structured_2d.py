@@ -12,7 +12,7 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.mesh import closed_cell_residual, structured_grid_2d
+from aquaflux.mesh import closed_cell_residual, graded_nodes, structured_grid_2d
 
 from tests.support.meshes import perturbed_grid_2d
 
@@ -56,3 +56,45 @@ def test_perturbation_preserves_domain_and_closure() -> None:
     assert np.isclose(float(jnp.sum(cg.volume)), 1.0)  # boundary nodes fixed => area preserved
     assert float(jnp.max(jnp.abs(closed_cell_residual(mesh)))) < 1e-10
     assert float(jnp.std(cg.volume)) > 0.0  # cell areas now vary
+
+
+def test_graded_nodes_span_and_symmetry() -> None:
+    """Double-sided grading spans the axis exactly, clusters at both walls, and is symmetric."""
+    nodes = graded_nodes(10, 2.0, growth=1.3)
+    assert nodes.shape == (11,)
+    assert np.isclose(nodes[0], 0.0) and np.isclose(nodes[-1], 2.0)
+    sizes = np.diff(nodes)
+    assert np.all(sizes > 0.0)  # strictly increasing nodes
+    assert np.allclose(sizes, sizes[::-1])  # symmetric about the centre
+    assert sizes[0] < sizes[len(sizes) // 2]  # finest at the wall, coarsest at the centre
+    assert np.isclose(sizes[1] / sizes[0], 1.3)  # geometric cell-to-cell ratio
+
+
+def test_graded_nodes_one_sided_is_monotone() -> None:
+    """One-sided grading is finest at 0 and coarsens monotonically to the far end."""
+    nodes = graded_nodes(8, 1.0, growth=1.2, both_sides=False)
+    sizes = np.diff(nodes)
+    assert np.all(np.diff(sizes) > 0.0)  # every cell larger than the last
+    assert np.allclose(sizes[1:] / sizes[:-1], 1.2)
+
+
+def test_graded_nodes_uniform_when_growth_one() -> None:
+    assert np.allclose(graded_nodes(5, 1.0, growth=1.0), np.linspace(0.0, 1.0, 6))
+
+
+def test_graded_grid_area_and_closure() -> None:
+    """A wall-graded structured grid still recovers the box area with closed cells."""
+    y = graded_nodes(16, 1.0, growth=1.2)
+    mesh = structured_grid_2d(8, 16, lx=2.0, ly=1.0, y_nodes=y)
+    cg = mesh.geometry().cell
+    assert mesh.n_cells == 8 * 16
+    assert np.isclose(float(jnp.sum(cg.volume)), 2.0)  # exact area despite non-uniform spacing
+    assert float(jnp.std(cg.volume)) > 0.0  # cells vary in the graded direction
+    assert float(jnp.max(jnp.abs(closed_cell_residual(mesh)))) < 1e-10
+
+
+def test_structured_grid_rejects_bad_node_coordinates() -> None:
+    with pytest.raises(ValueError, match="shape"):
+        structured_grid_2d(4, 4, y_nodes=np.linspace(0.0, 1.0, 4))  # wrong length (need ny+1)
+    with pytest.raises(ValueError, match="increasing"):
+        structured_grid_2d(4, 4, x_nodes=np.array([0.0, 0.3, 0.2, 0.7, 1.0]))  # not monotone

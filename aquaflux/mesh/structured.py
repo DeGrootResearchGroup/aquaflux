@@ -16,6 +16,48 @@ import numpy as np
 from .mesh import Mesh
 
 
+def graded_nodes(n: int, length: float, growth: float, *, both_sides: bool = True) -> np.ndarray:
+    """Node coordinates on ``[0, length]`` with geometric cell growth (finest at the wall(s)).
+
+    Returns ``n + 1`` monotonically increasing positions whose cell sizes follow a geometric
+    progression: adjacent cells differ by the factor ``growth``, with the *smallest* cells at the
+    boundary and coarsening inward. This is the wall-normal grading a wall-resolved boundary layer
+    needs — a small ``y`` at the wall (so ``y+ < 1`` for the near-wall cell) without paying a uniform
+    fine spacing across the whole channel.
+
+    Parameters
+    ----------
+    n : int
+        Number of cells along the axis.
+    length : float
+        Axis length; the returned positions span ``[0, length]`` exactly.
+    growth : float
+        Cell-to-cell size ratio (``> 0``). ``1`` is uniform; ``> 1`` clusters cells toward the
+        wall(s). The near-wall cell size is ``length`` times ``growth`` raised to the negative
+        half-span, normalised — pick ``growth`` to hit a target first-cell height.
+    both_sides : bool
+        When ``True`` (a channel between two walls) the mesh is symmetric, fine at *both* ends and
+        coarsest at the centre. When ``False`` (a single wall) it is fine at ``0`` and coarsens
+        monotonically to ``length``.
+
+    Returns
+    -------
+    np.ndarray
+        Node coordinates, shape ``(n + 1,)``, with ``[0] == 0`` and ``[-1] == length``.
+    """
+    if n < 1:
+        raise ValueError(f"n must be >= 1, got {n}")
+    if growth <= 0.0:
+        raise ValueError(f"growth must be > 0, got {growth}")
+    index = np.arange(n)
+    # Cells at "wall distance" `exponent` (in cells) get size growth**exponent, so the smallest sit
+    # at the wall(s); the double-sided distance min(i, n-1-i) is symmetric for even and odd n alike.
+    exponent = np.minimum(index, n - 1 - index) if both_sides else index
+    sizes = np.asarray(growth, dtype=float) ** exponent
+    positions = np.concatenate([[0.0], np.cumsum(sizes)])
+    return length * positions / positions[-1]
+
+
 class _FaceFamilyBuilder:
     """Accumulate the face families of a structured grid, then emit a :class:`Mesh`.
 
@@ -90,6 +132,9 @@ def structured_grid_2d(
     lx: float = 1.0,
     ly: float = 1.0,
     named_boundaries: bool = False,
+    *,
+    x_nodes: np.ndarray | None = None,
+    y_nodes: np.ndarray | None = None,
 ) -> Mesh:
     """A structured quad grid on ``[0, lx] x [0, ly]`` with ``nx * ny`` cells.
 
@@ -102,19 +147,36 @@ def structured_grid_2d(
     nx, ny : int
         Number of cells in x and y.
     lx, ly : float
-        Domain size.
+        Domain size. Ignored on an axis whose node coordinates are given explicitly.
     named_boundaries : bool
         When ``True``, tag the four boundary sides as named face patches ``"left"``
         (x = 0), ``"right"`` (x = lx), ``"bottom"`` (y = 0), ``"top"`` (y = ly), so a
         different boundary condition can be attached to each. The sides are known exactly
         during construction (no geometric detection). Default ``False`` leaves the plain
         ``"interior"`` / ``"boundary"`` split.
+    x_nodes, y_nodes : np.ndarray, optional
+        Explicit, monotonically increasing node coordinates along each axis, shape ``(nx + 1,)`` /
+        ``(ny + 1,)``. Only the coordinates change — the connectivity is identical — so this is how
+        a **graded** mesh is built (e.g. :func:`graded_nodes` for a wall-resolved boundary layer).
+        Default (``None``) is uniform spacing ``lx / nx`` / ``ly / ny``.
 
     Returns
     -------
     Mesh
     """
-    hx, hy = lx / nx, ly / ny
+
+    def _axis(nodes: np.ndarray | None, n: int, length: float) -> np.ndarray:
+        if nodes is None:
+            return np.linspace(0.0, length, n + 1)
+        nodes = np.asarray(nodes, dtype=float)
+        if nodes.shape != (n + 1,):
+            raise ValueError(f"node coordinates must have shape ({n + 1},), got {nodes.shape}")
+        if np.any(np.diff(nodes) <= 0.0):
+            raise ValueError("node coordinates must be strictly increasing")
+        return nodes
+
+    x = _axis(x_nodes, nx, lx)
+    y = _axis(y_nodes, ny, ly)
 
     def nid(i, j):  # node index; nodes span [0, n*] inclusive on each axis
         return j * (nx + 1) + i
@@ -124,7 +186,7 @@ def structured_grid_2d(
 
     # Node coordinates, raveled in the same C-order as ``nid`` (j slowest, i fastest).
     jj, ii = np.meshgrid(np.arange(ny + 1), np.arange(nx + 1), indexing="ij")
-    coords = np.stack([(ii * hx).ravel(), (jj * hy).ravel()], axis=1)
+    coords = np.stack([x[ii].ravel(), y[jj].ravel()], axis=1)
 
     builder = _FaceFamilyBuilder()
 

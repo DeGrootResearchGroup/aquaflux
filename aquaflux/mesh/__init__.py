@@ -34,7 +34,7 @@ from .reorder import (
     ReverseCuthillMcKee,
     permute_cells,
 )
-from .structured import structured_grid_2d, structured_grid_3d
+from .structured import graded_nodes, structured_grid_2d, structured_grid_3d
 
 __all__ = [
     "CellGeometry",
@@ -61,6 +61,7 @@ __all__ = [
     "distance_to_patches",
     "face_geometry_scheme",
     "face_planarity",
+    "graded_nodes",
     "interior_mask",
     "permute_cells",
     "structured_grid_2d",
