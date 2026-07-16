@@ -37,6 +37,7 @@ from .sources import (
     OmegaDestruction,
     OmegaProduction,
 )
+from .strain import strain_rate_magnitude
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -171,6 +172,69 @@ class SSTTurbulence(eqx.Module):
         """Effective kinematic diffusivity ``nu + blend(F1, inner, outer) nu_t`` as a property."""
         sigma = self.model.blend(f1, inner, outer)
         return FieldProperty(values=self.molecular_viscosity + sigma * nu_t)
+
+    def eddy_viscosity(
+        self, velocity_gradient: jnp.ndarray, k: jnp.ndarray, omega: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Kinematic eddy viscosity ``nu_t`` for the current state, shape ``(n_cells,)``.
+
+        The quantity the flow solve needs (as ``mu_t = rho nu_t``) to close the momentum viscosity.
+
+        Parameters
+        ----------
+        velocity_gradient : jnp.ndarray
+            The velocity-gradient tensor, shape ``(n_cells, dim, dim)`` (from the flow solve).
+        k, omega : jnp.ndarray
+            The current turbulence fields, shape ``(n_cells,)``.
+        """
+        strain = strain_rate_magnitude(velocity_gradient)
+        return self.model.eddy_viscosity(
+            k, omega, strain, self.molecular_viscosity, self.wall_distance
+        )
+
+    def _field_gradient(self, field: jnp.ndarray, boundary: BoundaryConditions) -> jnp.ndarray:
+        """Reconstruct the cell gradient of a turbulence field with its boundary closures.
+
+        Reuses the residual assembler's leading-order gradient reconstruction (the injected gradient
+        scheme evaluated with the field's boundary values), so the boundary handling is not
+        re-implemented here.
+        """
+        assembler = ResidualAssembler.build(
+            self.mesh,
+            self.geometry,
+            PropertyModel({}),
+            (),
+            boundary,
+            gradient_scheme=self.gradient_scheme,
+        )
+        return assembler.gradient(field)
+
+    def closure_fields(
+        self, velocity_gradient: jnp.ndarray, k: jnp.ndarray, omega: jnp.ndarray
+    ) -> SSTClosureFields:
+        """Assemble the frozen SST closure fields for the current state.
+
+        Computes the strain rate from the velocity gradient, reconstructs ``grad k`` and
+        ``grad omega`` with their boundary closures, and evaluates ``F1`` and the eddy viscosity --
+        the fields the k and omega equation builders freeze for a sweep.
+
+        Parameters
+        ----------
+        velocity_gradient : jnp.ndarray
+            The velocity-gradient tensor, shape ``(n_cells, dim, dim)``.
+        k, omega : jnp.ndarray
+            The current turbulence fields, shape ``(n_cells,)``.
+        """
+        strain = strain_rate_magnitude(velocity_gradient)
+        grad_k = self._field_gradient(k, self.k_boundary)
+        grad_omega = self._field_gradient(omega, self.omega_boundary)
+        f1 = self.model.f1(
+            k, omega, self.molecular_viscosity, self.wall_distance, grad_k, grad_omega
+        )
+        nu_t = self.model.eddy_viscosity(
+            k, omega, strain, self.molecular_viscosity, self.wall_distance
+        )
+        return SSTClosureFields(nu_t, strain, f1, grad_k, grad_omega, omega)
 
     def k_residual(
         self, mdot: jnp.ndarray, closure: SSTClosureFields

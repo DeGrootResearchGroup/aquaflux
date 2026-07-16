@@ -107,3 +107,42 @@ def test_k_residual_is_differentiable_in_a_closure_field() -> None:
         return jnp.sum(turb.k_residual(jnp.zeros(mesh.n_faces), closure)(k) ** 2)
 
     assert not bool(jnp.isnan(jax.grad(loss)(1.0)))
+
+
+def _shear(n, gamma=2.0):
+    """A uniform simple-shear velocity gradient (du_x/dy = gamma), so S = gamma."""
+    return jnp.tile(jnp.array([[[0.0, gamma], [0.0, 0.0]]]), (n, 1, 1))
+
+
+def test_eddy_viscosity_matches_the_model() -> None:
+    mesh, turb = _turbulence()
+    n = mesh.n_cells
+    k, omega = jnp.full(n, 0.01), jnp.full(n, 10.0)
+    nu_t = turb.eddy_viscosity(_shear(n), k, omega)
+    expected = SSTModel().eddy_viscosity(
+        k, omega, jnp.full(n, 2.0), jnp.full(n, NU), turb.wall_distance
+    )
+    assert jnp.allclose(nu_t, expected)
+    assert bool(jnp.all(nu_t > 0.0))
+
+
+def test_closure_fields_are_well_formed() -> None:
+    """The strain rate, blending function, gradients, and eddy viscosity are sensible."""
+    mesh, turb = _turbulence()
+    n = mesh.n_cells
+    k, omega = jnp.full(n, 0.01), jnp.full(n, 10.0)
+    closure = turb.closure_fields(_shear(n), k, omega)
+    assert jnp.allclose(closure.strain_rate, 2.0)
+    assert bool(jnp.all(closure.nu_t > 0.0))
+    assert bool(jnp.all((closure.f1 >= 0.0) & (closure.f1 <= 1.0)))  # F1 = tanh(.) in [0, 1]
+    assert closure.grad_k.shape == (n, mesh.dim)
+    assert closure.grad_omega.shape == (n, mesh.dim)
+    assert jnp.allclose(closure.omega, omega)
+
+
+def test_eddy_viscosity_is_differentiable_in_k() -> None:
+    mesh, turb = _turbulence()
+    n = mesh.n_cells
+    omega = jnp.full(n, 10.0)
+    g = jax.grad(lambda k: jnp.sum(turb.eddy_viscosity(_shear(n), k, omega)))(jnp.full(n, 0.01))
+    assert not bool(jnp.any(jnp.isnan(g)))
