@@ -13,6 +13,7 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
+import lineax as lx
 import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions
@@ -21,6 +22,7 @@ from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, N
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, SweptGradientSolve
 from aquaflux.solve import ImplicitNewtonSolver
+from aquaflux.solve.implicit import _INEXACT_FORWARD_SOLVER
 
 from tests.support.meshes import perturbed_grid_2d
 
@@ -119,6 +121,52 @@ def test_adjoint_preconditioner_is_a_drop_in() -> None:
     g_preconditioned = viscosity_grad(precond)  # M forward + M^T adjoint
     g_unpreconditioned = viscosity_grad(None)  # unpreconditioned both
     assert abs(g_preconditioned - g_unpreconditioned) <= 1e-6 * abs(g_unpreconditioned)
+
+
+@pytest.mark.validation
+def test_inexact_newton_matches_tight_solve_with_fewer_matvecs() -> None:
+    """Inexact Newton (the default loose forward linear solve) reaches the same converged state and
+    the same viscosity gradient as a tight forward solve, while doing strictly fewer matvecs per
+    Newton step. The forward tolerance is a convergence-rate knob, not an accuracy one: the outer
+    loop drives the residual to the nonlinear tolerance regardless, and the adjoint stays tight.
+    """
+    n, mu0 = 12, 0.02
+    precond = BlockPreconditioner.build(_cavity(mu0, n, FirstOrderUpwind())).factory()
+    tight = lx.GMRES(rtol=1e-10, atol=1e-10)
+
+    def converged_and_grad(forward_solver):
+        solver = ImplicitNewtonSolver(max_steps=30, preconditioner=precond, solver=forward_solver)
+        assembler = _cavity(mu0, n, FirstOrderUpwind())
+        state = solver.solve(_residual, assembler.initial_state(), assembler)
+
+        def f(mu):
+            a = _cavity(mu, n, FirstOrderUpwind())
+            return _mean_speed(a, solver.solve(_residual, a.initial_state(), a))
+
+        return state, float(jax.grad(f)(mu0))
+
+    state_inexact, grad_inexact = converged_and_grad(None)  # default: inexact forward, tight adjoint
+    state_tight, grad_tight = converged_and_grad(tight)  # tight forward throughout
+    # Same converged field (both driven to the nonlinear tolerance) and same gradient (tight adjoint).
+    assert jnp.allclose(state_inexact, state_tight, atol=1e-7)
+    assert abs(grad_inexact - grad_tight) <= 1e-6 * abs(grad_tight)
+
+    # Strictly fewer matvecs: on the Jacobian at a representative mid-solve iterate, the default
+    # inexact forward GMRES converges in fewer steps (hence matvecs) than the tight one.
+    assembler = _cavity(mu0, n, FirstOrderUpwind())
+    phi = ImplicitNewtonSolver(max_steps=2, preconditioner=precond, solver=tight).solve(
+        _residual, assembler.initial_state(), assembler
+    )
+    apply_m = precond(phi)
+    residual = assembler.residual(phi)
+    operator = lx.FunctionLinearOperator(
+        lambda v: apply_m(jax.jvp(assembler.residual, (phi,), (v,))[1]),
+        jax.ShapeDtypeStruct(residual.shape, residual.dtype),
+    )
+    rhs = apply_m(-residual)
+    steps_inexact = int(lx.linear_solve(operator, rhs, _INEXACT_FORWARD_SOLVER).stats["num_steps"])
+    steps_tight = int(lx.linear_solve(operator, rhs, tight).stats["num_steps"])
+    assert steps_inexact < steps_tight
 
 
 @pytest.mark.validation

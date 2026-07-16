@@ -29,8 +29,17 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
-from .linear import solve_linear
+from .linear import default_linear_solver, solve_linear
 from .newton import newton_step
+
+# Inexact-Newton forward solver: each Newton step's linear solve need only make Newton progress,
+# not be exact — the next step corrects the leftover. A loose relative tolerance cuts the GMRES
+# matvec count per step several-fold; the few extra Newton steps it costs still net a large
+# speedup, and the converged state is unchanged (the outer loop drives the residual to the
+# nonlinear tolerance regardless of how accurately each inner solve was taken). The adjoint solve,
+# by contrast, is taken once at the converged state and sets the gradient accuracy directly, so it
+# defaults to the tight :func:`default_linear_solver`.
+_INEXACT_FORWARD_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-3)
 
 
 def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner):
@@ -52,12 +61,16 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditi
     return phi
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(0, 3, 4, 5, 6, 7))
-def _implicit_solve(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner):
+@partial(jax.custom_vjp, nondiff_argnums=(0, 3, 4, 5, 6, 7, 8))
+def _implicit_solve(
+    residual_fn, phi0, theta, rtol, atol, max_steps, solver, adjoint_solver, preconditioner
+):
     return _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner)
 
 
-def _implicit_solve_fwd(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner):
+def _implicit_solve_fwd(
+    residual_fn, phi0, theta, rtol, atol, max_steps, solver, adjoint_solver, preconditioner
+):
     phi_star = _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, preconditioner)
     return phi_star, (phi_star, theta)
 
@@ -78,14 +91,17 @@ def _adjoint_preconditioner(preconditioner, phi_star, example):
     return lambda u: transpose(u)[0]
 
 
-def _implicit_solve_bwd(residual_fn, rtol, atol, max_steps, solver, preconditioner, residuals, cotangent):
+def _implicit_solve_bwd(
+    residual_fn, rtol, atol, max_steps, solver, adjoint_solver, preconditioner, residuals, cotangent
+):
     phi_star, theta = residuals
     # Transpose Jacobian solve: (dR/dphi)^T lambda = cotangent, left-preconditioned by M^T so the
-    # adjoint solve is mesh-independent (unpreconditioned it grows with the system size).
+    # adjoint solve is mesh-independent (unpreconditioned it grows with the system size). This solve
+    # sets the gradient accuracy, so it uses the (tight) adjoint solver, not the inexact forward one.
     _, vjp_phi = jax.vjp(lambda p: residual_fn(p, theta), phi_star)
     adjoint_precond = _adjoint_preconditioner(preconditioner, phi_star, cotangent)
     lam = solve_linear(
-        lambda u: vjp_phi(u)[0], cotangent, solver=solver, preconditioner=adjoint_precond
+        lambda u: vjp_phi(u)[0], cotangent, solver=adjoint_solver, preconditioner=adjoint_precond
     )
     # Parameter cotangent -(dR/dtheta)^T lambda: negate lambda so no pytree (float0) negation.
     _, vjp_theta = jax.vjp(lambda th: residual_fn(phi_star, th), theta)
@@ -110,7 +126,14 @@ class ImplicitNewtonSolver(eqx.Module):
     max_steps : int
         Maximum Newton iterations (static).
     solver : lineax.AbstractLinearSolver or None
-        Linear solver for the Newton and adjoint solves; ``None`` uses the package default.
+        Linear solver for the forward Newton steps. ``None`` uses an **inexact-Newton** default (a
+        loose-tolerance GMRES): each step's solve need only make Newton progress, since the next
+        step corrects it, which cuts the matvec count per step several-fold. The converged state is
+        unaffected — the loop still drives the residual to ``rtol``/``atol``.
+    adjoint_solver : lineax.AbstractLinearSolver or None
+        Linear solver for the adjoint (transpose) solve. ``None`` uses the tight
+        :func:`default_linear_solver`, because this single solve at the converged state sets the
+        gradient accuracy directly and should not be loosened along with the forward steps.
     preconditioner : callable or None
         A factory ``phi -> M`` giving the left preconditioner ``M`` (a matvec approximating
         ``J^{-1}``), built at the current iterate (e.g.
@@ -124,6 +147,7 @@ class ImplicitNewtonSolver(eqx.Module):
     atol: float = eqx.field(static=True, default=1e-12)
     max_steps: int = eqx.field(static=True, default=50)
     solver: lx.AbstractLinearSolver | None = None
+    adjoint_solver: lx.AbstractLinearSolver | None = None
     preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None = (
         eqx.field(static=True, default=None)
     )
@@ -150,7 +174,11 @@ class ImplicitNewtonSolver(eqx.Module):
         jnp.ndarray
             The converged field, shape ``(n_cells,)``.
         """
+        solver = self.solver if self.solver is not None else _INEXACT_FORWARD_SOLVER
+        adjoint_solver = (
+            self.adjoint_solver if self.adjoint_solver is not None else default_linear_solver()
+        )
         return _implicit_solve(
-            residual_fn, phi0, theta, self.rtol, self.atol, self.max_steps, self.solver,
+            residual_fn, phi0, theta, self.rtol, self.atol, self.max_steps, solver, adjoint_solver,
             self.preconditioner,
         )
