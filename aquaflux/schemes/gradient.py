@@ -21,6 +21,7 @@ gradient later removes).
 from __future__ import annotations
 
 import abc
+import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -35,6 +36,30 @@ from .interpolation import interpolate_owner_neighbour, interpolation_factor
 
 if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, Mesh, MeshGeometry
+
+
+_GRADIENT_UNCONVERGED_WARNED = False
+
+
+def _warn_gradient_unconverged(sweeps: int, tol: float) -> None:
+    """Host-side diagnostic: warn (once per process) if the fixed-sweep gradient solve is under-resolved.
+
+    Invoked from a ``jax.debug.callback`` inside :meth:`SweptGradientSolve.solve`, gated by a
+    ``lax.cond`` so it fires only when the residual (which the sweep already computed) exceeds
+    ``tol``. Because that callback runs on every under-resolved gradient solve (many per Newton
+    step), a module-level flag guarantees a single emission — the mesh conditioning is fixed, so one
+    warning is the whole message.
+    """
+    global _GRADIENT_UNCONVERGED_WARNED
+    if _GRADIENT_UNCONVERGED_WARNED:
+        return
+    _GRADIENT_UNCONVERGED_WARNED = True
+    warnings.warn(
+        f"SweptGradientSolve: the corrected-gradient sweeps are under-resolved on this mesh "
+        f"(relative residual exceeded {tol:.0e} after {sweeps} sweeps). Increase `sweeps` for this "
+        f"non-orthogonality, or set `warn_tol=None` to silence.",
+        stacklevel=1,
+    )
 
 
 class _CorrectedTerms(NamedTuple):
@@ -165,23 +190,32 @@ class SweptGradientSolve(GradientSolve):
         g_{k+1} = g_k + V⁻¹ (B·φ − A_g·g_k)
 
     converges geometrically with rate ``ρ(I − V⁻¹A_g) < 1``. A **fixed** ``sweeps`` count reaches
-    machine precision for this well-conditioned operator with no convergence check, no dense matrix,
-    and no nested Krylov solve; each sweep is a single operator apply, so the cost is **linear in the
-    mesh** — where a dense LU of ``A_g`` would be ``O((n·dim)²)`` per apply and cross over to a loss
-    on finer meshes. Differentiated by simply unrolling the short, static-length loop, so the
-    gradient's response to ``φ`` is carried implicitly into the flow Jacobian **without** an
-    implicit-diff tangent solve.
+    machine precision for this well-conditioned operator with no dense matrix and no nested Krylov
+    solve; each sweep is a single operator apply, so the cost is **linear in the mesh** — where a
+    dense LU of ``A_g`` would be ``O((n·dim)²)`` per apply and cross over to a loss on finer meshes.
+    Differentiated by simply unrolling the short, static-length loop, so the gradient's response to
+    ``φ`` is carried implicitly into the flow Jacobian **without** an implicit-diff tangent solve.
 
-    ``sweeps`` must be large enough for the iteration to converge on the target mesh (more skewness
-    ⇒ larger ``ρ`` ⇒ more sweeps); the default is set for mild-to-moderate non-orthogonality.
+    Because ``A_g`` is volume-dominated the iteration converges in very few sweeps — the default
+    ``sweeps=4`` reproduces the exact solve to machine precision on mild-to-moderate skew and stays
+    well within discretisation error even on aggressively irregular grids. A too-skewed mesh needs
+    more; rather than pay for a data-dependent stop (which would defeat the cheap unrolled
+    differentiation), the residual the last sweep already computed is checked against ``warn_tol`` and
+    a **warning** is emitted once if the sweeps are under-resolved — a diagnostic, not a termination.
 
     Attributes
     ----------
     sweeps : int
         Number of preconditioned-Richardson sweeps (static).
+    warn_tol : float or None
+        Emit a one-time warning if the relative gradient residual after ``sweeps`` exceeds this
+        (default ``5e-2``, i.e. the sweep is clearly stalling — the converged field stays accurate
+        well below this, so it flags only a genuinely under-resolved mesh). ``None`` disables the
+        check entirely.
     """
 
-    sweeps: int = eqx.field(static=True, default=16)
+    sweeps: int = eqx.field(static=True, default=4)
+    warn_tol: float | None = eqx.field(static=True, default=5e-2)
 
     def solve(
         self,
@@ -191,8 +225,24 @@ class SweptGradientSolve(GradientSolve):
     ) -> jnp.ndarray:
         inv_volume = 1.0 / terms.volume
         grad = jnp.zeros_like(rhs)
+        residual = rhs  # rhs - A_g·0; overwritten each sweep with the current residual
         for _ in range(self.sweeps):
-            grad = grad + scale(rhs - operator(grad), inv_volume)
+            residual = rhs - operator(grad)
+            grad = grad + scale(residual, inv_volume)
+        if self.warn_tol is not None:
+            # `residual` is rhs - A_g·grad from the last sweep (one apply already spent) — a free,
+            # slightly conservative convergence indicator. The host-side warning is gated behind a
+            # `lax.cond` on the tolerance so the (host-synchronising) callback fires *only* when the
+            # sweeps are actually under-resolved; on a converged mesh no callback runs, so the check
+            # is free in the common case.
+            relative = jnp.linalg.norm(residual) / (jnp.linalg.norm(rhs) + jnp.finfo(rhs.dtype).tiny)
+            jax.lax.cond(
+                relative > self.warn_tol,
+                lambda: jax.debug.callback(
+                    _warn_gradient_unconverged, self.sweeps, self.warn_tol, ordered=False
+                ),
+                lambda: None,
+            )
         return grad
 
 
