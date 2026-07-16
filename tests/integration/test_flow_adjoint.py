@@ -97,6 +97,31 @@ def test_stokes_pressure_viscosity_adjoint_matches_fd() -> None:
 
 
 @pytest.mark.validation
+def test_adjoint_preconditioner_is_a_drop_in() -> None:
+    """The M^T-preconditioned adjoint returns the *same* gradient as the unpreconditioned adjoint.
+
+    M^T (the transpose of the forward block preconditioner) only changes the adjoint Krylov path
+    -- it makes the transpose solve mesh-independent -- so it must not perturb the gradient it
+    computes."""
+    n = 8
+
+    def viscosity_grad(preconditioner):
+        solver = ImplicitNewtonSolver(max_steps=20, preconditioner=preconditioner)
+
+        def f(mu):
+            assembler = _cavity(mu, n, FirstOrderUpwind())
+            state = solver.solve(_residual, assembler.initial_state(), assembler)
+            return _mean_speed(assembler, state)
+
+        return float(jax.grad(f)(0.02))
+
+    precond = BlockPreconditioner.build(_cavity(0.02, n, FirstOrderUpwind())).factory()
+    g_preconditioned = viscosity_grad(precond)  # M forward + M^T adjoint
+    g_unpreconditioned = viscosity_grad(None)  # unpreconditioned both
+    assert abs(g_preconditioned - g_unpreconditioned) <= 1e-6 * abs(g_unpreconditioned)
+
+
+@pytest.mark.validation
 def test_navier_stokes_viscosity_adjoint_matches_fd() -> None:
     """The full nonlinear coupled adjoint (with convection) matches finite differences.
 
