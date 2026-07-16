@@ -66,16 +66,30 @@ def newton_step(
 class NewtonSolver(eqx.Module):
     """Fixed-iteration Newton solver with a matrix-free, differentiable linear step.
 
+    The Newton step is compiled **once** (with the iterate as the only traced argument) and the
+    compiled graph is reused across iterations. Iterating an un-jitted :func:`newton_step` rebuilds
+    the Jacobian-vector-product operator and the preconditioner as fresh closures every step, which
+    forces XLA to recompile the whole preconditioned linear solve each iteration — the dominant cost
+    of the naive loop.
+
     Attributes
     ----------
     iterations : int
         Number of Newton iterations (static). One is exact for a linear residual.
     solver : lineax.AbstractLinearSolver or None
         The linear solver for each Newton step; ``None`` uses the package default.
+    preconditioner : callable or None
+        A factory ``phi -> M`` giving the left preconditioner ``M`` (a matvec approximating
+        ``J^{-1}``) for each step's linear solve, built at the current iterate (e.g.
+        :meth:`aquaflux.flow.BlockPreconditioner.factory`). ``None`` solves unpreconditioned. Static
+        (its coefficients are ``stop_gradient``-ed by the factory, so it stays gradient-transparent).
     """
 
     iterations: int = eqx.field(static=True, default=1)
     solver: lx.AbstractLinearSolver | None = None
+    preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None = (
+        eqx.field(static=True, default=None)
+    )
 
     def solve(
         self,
@@ -96,7 +110,14 @@ class NewtonSolver(eqx.Module):
         jnp.ndarray
             The converged field, shape ``(n_cells,)``.
         """
+
+        @eqx.filter_jit
+        def step(phi: jnp.ndarray) -> jnp.ndarray:
+            return newton_step(
+                residual_fn, phi, solver=self.solver, preconditioner=self.preconditioner
+            )
+
         phi = phi0
         for _ in range(self.iterations):
-            phi = newton_step(residual_fn, phi, solver=self.solver)
+            phi = step(phi)
         return phi
