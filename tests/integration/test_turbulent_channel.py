@@ -16,6 +16,7 @@ import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax.numpy as jnp
 import lineax as lx
+import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
@@ -43,7 +44,7 @@ NU = 2e-4  # Re = rho U H / mu = 5000
 INTENSITY, LENGTH_SCALE = 0.05, 0.07 * H
 
 
-def _channel(nx=48, ny=40, growth=1.18):
+def _channel(nx=48, ny=40, growth=1.18, *, explicit_production_limiter=True):
     y_nodes = graded_nodes(ny, H, growth)
     mesh = structured_grid_2d(nx, ny, lx=L, ly=H, named_boundaries=True, y_nodes=y_nodes)
     geometry = mesh.geometry()
@@ -90,6 +91,7 @@ def _channel(nx=48, ny=40, growth=1.18):
                 "top": ZeroGradient(),
             }
         ),
+        explicit_production_limiter=explicit_production_limiter,
     )
     return mesh, momentum, turbulence, k_in, omega_in
 
@@ -132,6 +134,42 @@ def test_high_reynolds_turbulent_channel_solves() -> None:
     # Genuinely turbulent: the closure produces an eddy viscosity well above molecular.
     nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
     assert float(jnp.max(nu_t) / NU) > 1.0
+
+
+@pytest.mark.slow
+def test_exact_production_limiter_solves_with_the_preconditioner() -> None:
+    """The scalar preconditioner rescues the *exact* (non-Patankar) k-linearization.
+
+    With ``explicit_production_limiter=False`` the k-Jacobian keeps the production limiter's exact
+    derivative, which is indefinite where the cap is active -- an unpreconditioned solve stagnates
+    there. The convection-diffusion preconditioner reconstructs the operator well enough to rescue it,
+    so the exact-Newton k-solve converges (to machine precision -- exact Newton is quadratic). This
+    documents that the earlier exact-linearization failure was the preconditioner's diagonal bug, not
+    an unsolvable operator, and that the exact linearization is a usable option.
+    """
+    mesh, momentum, turbulence, k_in, omega_in = _channel(32, 24, explicit_production_limiter=False)
+    geometry = momentum.geometry
+    n = mesh.n_cells
+
+    # A limiter-active state: strong synthetic shear (high strain) at the small inlet k, so the cap
+    # bites over much of the field -- where the exact and Patankar linearizations actually differ.
+    velocity_gradient = jnp.zeros((n, mesh.dim, mesh.dim)).at[:, 0, 1].set(50.0)  # du_x/dy shear
+    k = jnp.full(n, k_in)
+    omega = jnp.full(n, omega_in)
+    closure = turbulence.closure_fields(velocity_gradient, k, omega)
+    mdot = RHO * U_IN * geometry.face.normal[:, 0] * geometry.face.area  # a uniform-flow mass flux
+
+    production = np.asarray(closure.nu_t * closure.strain_rate**2)
+    cap = np.asarray(10.0 * turbulence.model.beta_star * k * closure.omega)
+    assert int(np.sum(production > cap)) > n // 4  # the cap is genuinely active over the field
+
+    residual = turbulence.k_residual(mdot, closure)
+    preconditioner = turbulence.k_preconditioner(mdot, closure, k)
+    gmres = lx.GMRES(rtol=1e-8, atol=1e-8, restart=32, stagnation_iters=32)
+    solved = NewtonSolver(iterations=6, solver=gmres, preconditioner=preconditioner).solve(
+        residual, k
+    )
+    assert float(jnp.linalg.norm(residual(solved))) < 1e-8
 
 
 def _with_viscosity(momentum, mu):

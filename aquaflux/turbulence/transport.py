@@ -108,6 +108,14 @@ class SSTTurbulence(eqx.Module):
     k_boundary, omega_boundary : BoundaryConditions
         The scalar boundary closures for each field (Dirichlet inlet / wall, zero-gradient outlet;
         the omega wall is imposed by cell fixation, so its wall closure is a placeholder).
+    explicit_production_limiter : bool
+        How the k-production limiter is linearized for the forward k-solve (static). ``True``
+        (default) freezes the cap's ``k`` (:attr:`KProduction.explicit_limiter`), giving an M-matrix
+        the k-solve converges on unpreconditioned -- a robust modified-Newton step. ``False`` keeps
+        the exact Jacobian, whose active cap is indefinite: it needs the scalar preconditioner (which
+        rescues it) but then converges quadratically. The converged field is the same either way (the
+        residual value is identical); only the forward path differs, so the coupled adjoint (built on
+        the exact residual) is unaffected.
     """
 
     model: SSTModel
@@ -121,6 +129,7 @@ class SSTTurbulence(eqx.Module):
     wall_cells: jnp.ndarray
     k_boundary: BoundaryConditions
     omega_boundary: BoundaryConditions
+    explicit_production_limiter: bool = eqx.field(static=True, default=True)
 
     @classmethod
     def build(
@@ -135,6 +144,8 @@ class SSTTurbulence(eqx.Module):
         wall_patches: Sequence[str],
         k_boundary: BoundaryConditions,
         omega_boundary: BoundaryConditions,
+        *,
+        explicit_production_limiter: bool = True,
     ) -> SSTTurbulence:
         """Build the assembler, deriving the wall distance and wall-adjacent cell set.
 
@@ -143,6 +154,9 @@ class SSTTurbulence(eqx.Module):
         wall_patches : sequence of str
             The boundary patches treated as walls; their wall distance is computed and their
             owner cells become the ``omega`` fixation set.
+        explicit_production_limiter : bool
+            Linearization of the k-production limiter for the forward solve (see the class
+            attribute); ``True`` (default) is the robust unpreconditioned-solvable choice.
 
         The remaining arguments are stored directly (see the class attributes).
         """
@@ -161,6 +175,7 @@ class SSTTurbulence(eqx.Module):
             wall_cells=wall_cells,
             k_boundary=k_boundary,
             omega_boundary=omega_boundary,
+            explicit_production_limiter=explicit_production_limiter,
         )
 
     def _volume_flux(self, mdot: jnp.ndarray) -> jnp.ndarray:
@@ -263,7 +278,7 @@ class SSTTurbulence(eqx.Module):
                     closure.strain_rate,
                     closure.omega,
                     self.model,
-                    explicit_limiter=True,
+                    explicit_limiter=self.explicit_production_limiter,
                 ),
                 KDestruction(closure.omega, self.model),
             ),
