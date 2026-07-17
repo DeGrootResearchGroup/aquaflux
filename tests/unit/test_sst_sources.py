@@ -67,7 +67,9 @@ def test_k_production_explicit_limiter_keeps_the_value_but_drops_the_k_derivativ
     but removes its ``k``-derivative where the cap is active -- so the k-equation Jacobian loses the
     destabilizing feedback term and stays an M-matrix, while the residual is unchanged."""
     context, _ = _context_and_volume()
-    args = dict(nu_t=_cell(10.0, 10.0), strain_rate=_cell(1.0, 1.0), omega=_cell(1.0, 1.0), model=MODEL)
+    args = dict(
+        nu_t=_cell(10.0, 10.0), strain_rate=_cell(1.0, 1.0), omega=_cell(1.0, 1.0), model=MODEL
+    )
     exact = KProduction(**args)
     explicit = KProduction(**args, explicit_limiter=True)
     k = _cell(1.0, 1.0)  # cap active (ν_t S² = 10 > 10 β* k ω)
