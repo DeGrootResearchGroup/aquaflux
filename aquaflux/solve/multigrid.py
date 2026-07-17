@@ -38,6 +38,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 from jax.ops import segment_sum
+from scipy.sparse.csgraph import reverse_cuthill_mckee
 
 
 class _Level(NamedTuple):
@@ -60,6 +61,30 @@ class MultigridHierarchy(NamedTuple):
     levels: tuple[_Level, ...]
 
 
+def _rcm_order(owner: np.ndarray, nb: np.ndarray, n: int) -> np.ndarray:
+    """A locality-preserving cell visit order (reverse Cuthill--McKee) for the greedy aggregation.
+
+    The two-pass aggregation is greedy in the order it visits cells, so a spatially-local order gives
+    compact, well-shaped aggregates and a near-optimal coarse space, whereas an arbitrary cell
+    numbering gives irregular aggregates and a measurably worse V-cycle contraction. Reverse
+    Cuthill--McKee supplies that order from the level's own adjacency graph. The graph is undirected,
+    so the ``(owner, nb)`` edges are symmetrized before the ordering.
+
+    This is applied per level to the level's *own* operator graph — the fine graph and every
+    Galerkin-coarse graph alike — so the coarsening is ordering-robust throughout the hierarchy
+    without renumbering the mesh: only the aggregation's visit sequence changes, not any cell label
+    the caller sees.
+    """
+    symmetric = sp.coo_matrix(
+        (
+            np.ones(2 * len(owner)),
+            (np.concatenate([owner, nb]), np.concatenate([nb, owner])),
+        ),
+        shape=(n, n),
+    ).tocsr()
+    return reverse_cuthill_mckee(symmetric, symmetric_mode=True)
+
+
 def _aggregate(owner: np.ndarray, nb: np.ndarray, n: int) -> tuple[np.ndarray, int]:
     """Two-pass aggregation (Vaněk et al.): seed clean aggregates, then attach leftovers.
 
@@ -67,21 +92,25 @@ def _aggregate(owner: np.ndarray, nb: np.ndarray, n: int) -> tuple[np.ndarray, i
     still free — giving well-shaped, ~stencil-sized aggregates. Pass 2 attaches each remaining cell to
     an adjacent existing aggregate (rare orphans seed their own). This yields a healthy coarsening
     ratio (~4× in 2D) with no singletons, which a naive one-pass greedy does not.
+
+    Both passes visit cells in a locality-preserving order (:func:`_rcm_order`) so the greedy seeding
+    is robust to the incoming cell numbering — an arbitrary order otherwise degrades the coarse space.
     """
     adjacency: list[list[int]] = [[] for _ in range(n)]
     for o, m in zip(owner.tolist(), nb.tolist(), strict=True):
         adjacency[o].append(m)
         adjacency[m].append(o)
+    order = _rcm_order(owner, nb, n).tolist()
     aggregate = np.full(n, -1, dtype=np.int64)
     count = 0
-    for i in range(n):  # pass 1: seed from cells in a fully-free neighbourhood
+    for i in order:  # pass 1: seed from cells in a fully-free neighbourhood
         if aggregate[i] != -1 or any(aggregate[j] != -1 for j in adjacency[i]):
             continue
         aggregate[i] = count
         for j in adjacency[i]:
             aggregate[j] = count
         count += 1
-    for i in range(n):  # pass 2: attach leftovers to an adjacent aggregate (else seed their own)
+    for i in order:  # pass 2: attach leftovers to an adjacent aggregate (else seed their own)
         if aggregate[i] != -1:
             continue
         neighbour_aggregates = [aggregate[j] for j in adjacency[i] if aggregate[j] != -1]

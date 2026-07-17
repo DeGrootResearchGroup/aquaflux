@@ -206,43 +206,25 @@ def test_smoothed_aggregation_v_cycle_is_mesh_independent() -> None:
     assert fine < 1.8 * coarse  # bounded — not the ~0.97-degrading unsmoothed behaviour
 
 
-def test_ordering_affects_coarse_space_and_rcm_restores_it() -> None:
-    """Cell ordering affects the V-cycle contraction *through the aggregation coarse space*, and
-    reverse Cuthill--McKee restores the good rate a scramble destroys.
+def test_aggregation_coarse_space_is_ordering_robust() -> None:
+    """The V-cycle contraction does not depend on the incoming cell numbering: the aggregation
+    visits cells in a locality-preserving (reverse Cuthill--McKee) order taken from each level's own
+    graph, so a scrambled numbering yields the same compact aggregates a spatially-local one does.
 
-    The smoother (damped Jacobi / Chebyshev) is a polynomial in the operator and the coarse solve
-    is direct, so both are exactly permutation-invariant. But the *greedy* aggregation visits
-    cells in index order: a spatially-local numbering (the natural structured one) yields compact
-    aggregates and a good factor (~0.25); a scrambled numbering yields irregular aggregates and a
-    markedly worse factor (~0.45). RCM re-localizes the numbering and recovers the good factor.
-    This is why the large-mesh pipeline reorders (RCM) before building the preconditioner — it is
-    a coarse-space effect, not a smoother effect."""
+    The smoother (damped Jacobi / Chebyshev) is a polynomial in the operator and the coarse solve is
+    direct, so both are exactly permutation-invariant. The *greedy* aggregation is the only
+    ordering-sensitive piece — it seeds aggregates in visit order — so ordering that visit internally
+    is what makes the whole coarse space ordering-robust. Without it a scramble degrades the factor
+    markedly (~0.25 -> ~0.45); with it the scramble stays near the natural rate. This is why no mesh
+    renumbering is needed upstream: the aggregation re-localizes each level itself."""
     owner, nb, ncell = _poisson(24)
     natural = _pinned_v_cycle_factor(owner, nb, ncell, 0)
 
     perm = np.random.default_rng(1).permutation(ncell)  # perm[old] = new
-    o_s, m_s = perm[owner], perm[nb]
-    scrambled = _pinned_v_cycle_factor(o_s, m_s, ncell, int(perm[0]))
+    scrambled = _pinned_v_cycle_factor(perm[owner], perm[nb], ncell, int(perm[0]))
 
-    # RCM the scrambled graph (via a tiny stand-in Mesh carrying just the connectivity we need).
-    rcm_of_scramble = _rcm_reordered_factor(o_s, m_s, ncell)
-
-    assert natural < 0.35  # good ordering: strong contraction
-    assert scrambled > natural + 0.1  # scrambling measurably degrades the coarse space
-    assert rcm_of_scramble < natural + 0.1  # RCM restores the near-natural rate
-
-
-def _rcm_reordered_factor(owner, nb, ncell):
-    """Contraction factor after RCM-reordering a graph given by (owner, nb) edges."""
-    from scipy.sparse import coo_matrix
-    from scipy.sparse.csgraph import reverse_cuthill_mckee
-
-    rows = np.concatenate([owner, nb])
-    cols = np.concatenate([nb, owner])
-    graph = coo_matrix((np.ones(rows.shape[0]), (rows, cols)), shape=(ncell, ncell)).tocsr()
-    old_order = reverse_cuthill_mckee(graph, symmetric_mode=True)  # old_order[new] = old
-    relabel = np.argsort(old_order)  # relabel[old] = new
-    return _pinned_v_cycle_factor(relabel[owner], relabel[nb], ncell, int(relabel[owner[0]]))
+    assert natural < 0.35  # good contraction on the natural numbering
+    assert scrambled < natural + 0.1  # a scramble no longer degrades it — RCM is applied internally
 
 
 def test_smoothed_multigrid_is_linear_in_rhs() -> None:
