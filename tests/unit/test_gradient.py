@@ -23,6 +23,7 @@ from aquaflux.mesh.quality import face_planarity
 from aquaflux.schemes import (
     CompactGreenGauss,
     CorrectedGreenGauss,
+    GmresGradientSolve,
     HessianCorrectedGradient,
     SweptGradientSolve,
 )
@@ -299,6 +300,25 @@ def test_hessian_schur_matches_coupled_solve() -> None:
     schur = HessianCorrectedGradient(schur=True).gradients(phi, mesh, geom, bvals)
     coupled = HessianCorrectedGradient(schur=False).gradients(phi, mesh, geom, bvals)
     assert jnp.allclose(schur, coupled, atol=1e-10)
+
+
+def test_hessian_accepts_an_injected_solve_strategy() -> None:
+    """The linear solve is an injected `GradientSolve`, exactly as in `CorrectedGreenGauss`: the
+    default is GMRES, and a (sufficiently-swept) `SweptGradientSolve` reaches the same reconstruction
+    on both the Schur and the full-coupled paths — the solve strategy is orthogonal to the
+    discretization. (The sweep needs many iterations here because the gradient-Hessian coupling is
+    strong; GMRES is the practical default.)"""
+    mesh = perturbed_grid_2d(16, 16, perturb=0.2)
+    geom = mesh.geometry()
+    phi = _quadratic(geom.cell.centroid)
+    bvals = _quadratic(geom.face.centroid)
+    assert isinstance(HessianCorrectedGradient().solver, GmresGradientSolve)
+    gmres = HessianCorrectedGradient().gradients(phi, mesh, geom, bvals)
+    for schur in (True, False):
+        swept = HessianCorrectedGradient(
+            solver=SweptGradientSolve(sweeps=80, warn_tol=None), schur=schur
+        ).gradients(phi, mesh, geom, bvals)
+        assert jnp.allclose(gmres, swept, atol=1e-8)
 
 
 def test_hessian_beats_compact_and_corrected_on_irregular() -> None:
