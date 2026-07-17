@@ -14,8 +14,11 @@ import jax.numpy as jnp
 import numpy as np
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.solve.multigrid import (
+    _convection_diffusion_csr,
+    build_convection_hierarchy,
     build_hierarchy,
     build_smoothed_hierarchy,
+    convection_multigrid_solve,
     level_coefficients,
     multigrid_solve,
     smoothed_multigrid_solve,
@@ -250,5 +253,98 @@ def test_smoothed_multigrid_is_linear_in_rhs() -> None:
 
     def solve(r):
         return smoothed_multigrid_solve(hierarchy, r, cycles=2)
+
+    assert jnp.allclose(solve(1.5 * r1 - 0.5 * r2), 1.5 * solve(r1) - 0.5 * solve(r2), atol=1e-10)
+
+
+# --- convection-diffusion (nonsymmetric) aggregation ------------------------------------
+
+
+def _convective_grid(n, mu, speed):
+    """Interior edges of an ``n x n`` grid with a uniform streamwise mass flux (strong convection).
+
+    Returns ``(owner, nb, viscous, mdot, n_cells, boundary_diagonal)`` for a convection-diffusion
+    operator whose x-faces carry the flux ``speed / n`` (cell Peclet ``speed / (n mu)``) and whose
+    boundary diagonal makes it a nonsingular M-matrix (Dirichlet on all sides, outflow at the right).
+    """
+    mesh = structured_grid_2d(n, n)
+    owner = np.asarray(mesh.face_cells.owner)
+    nb = np.asarray(mesh.face_cells.neighbour)
+    interior = nb >= 0
+    o, m = owner[interior], nb[interior]
+    h = 1.0 / n
+    ncell = mesh.n_cells
+    coords = np.asarray(mesh.geometry().cell.centroid)
+    # Streamwise (x) faces connect cells that differ in the x-centroid; they carry the mass flux.
+    x_face = np.abs(coords[o, 0] - coords[m, 0]) > np.abs(coords[o, 1] - coords[m, 1])
+    viscous = np.full(o.shape, mu)  # mu * A/(d.n) with A = d.n = h on a unit grid
+    mdot = np.where(x_face, speed * h, 0.0)
+    # Boundary diagonal: a Dirichlet stiffness on every border cell plus outflow convection at the
+    # right column, enough to make the operator diagonally dominant and nonsingular.
+    bd = np.zeros(ncell)
+    on_border = (
+        (coords[:, 0] < h) | (coords[:, 0] > 1 - h) | (coords[:, 1] < h) | (coords[:, 1] > 1 - h)
+    )
+    bd[on_border] += mu
+    bd[coords[:, 0] > 1 - h] += speed * h  # outflow leaves the owner at the right boundary
+    return o, m, viscous, mdot, ncell, bd
+
+
+def _dense(owner, nb, visc, mdot, n, bd):
+    a = np.asarray(_convection_diffusion_csr(owner, nb, visc, mdot, n).toarray())
+    a[np.diag_indices(n)] += bd
+    return jnp.asarray(a)
+
+
+def test_convection_operator_is_a_nonsymmetric_m_matrix() -> None:
+    """The convection-diffusion operator has a positive diagonal, non-positive off-diagonals, and is
+    nonsymmetric exactly when there is a mass flux (symmetric viscous limit at zero flux)."""
+    owner, nb, visc, mdot, n, bd = _convective_grid(6, mu=1e-2, speed=1.0)
+    a = np.asarray(_dense(owner, nb, visc, mdot, n, bd))
+    off = a - np.diag(np.diag(a))
+    assert np.all(np.diag(a) > 0.0)
+    assert np.all(off <= 1e-12)  # M-matrix: off-diagonals non-positive
+    assert not np.allclose(a, a.T)  # convection makes it nonsymmetric
+    a0 = np.asarray(_dense(owner, nb, visc, np.zeros_like(mdot), n, bd))
+    assert np.allclose(a0, a0.T)  # zero flux -> symmetric viscous operator
+
+
+def test_convection_v_cycle_preconditions_gmres_at_high_peclet() -> None:
+    """The frozen convection-diffusion V-cycle accelerates GMRES on the strongly-convective operator —
+    its actual role as a left preconditioner. On a fixed, small Krylov budget the preconditioned solve
+    reaches a residual orders of magnitude below the unpreconditioned one, at a cell Peclet number
+    where the operator is convection-dominated."""
+    owner, nb, visc, mdot, n, bd = _convective_grid(24, mu=1e-3, speed=1.0)  # cell Peclet ~40
+    hierarchy = build_convection_hierarchy(owner, nb, visc, mdot, n, boundary_diagonal=bd)
+    a = _dense(owner, nb, visc, mdot, n, bd)
+    b = jnp.asarray(np.random.default_rng(0).standard_normal(n))
+
+    def matvec(x):
+        return a @ x
+
+    def preconditioner(r):
+        return convection_multigrid_solve(hierarchy, r, cycles=1)
+
+    budget = dict(tol=0.0, atol=0.0, maxiter=1, restart=20)  # a fixed 20-vector Krylov budget
+    plain, _ = jax.scipy.sparse.linalg.gmres(matvec, b, **budget)
+    pre, _ = jax.scipy.sparse.linalg.gmres(matvec, b, M=preconditioner, **budget)
+    rb = float(jnp.linalg.norm(b))
+    plain_residual = float(jnp.linalg.norm(matvec(plain) - b)) / rb
+    pre_residual = float(jnp.linalg.norm(matvec(pre) - b)) / rb
+    assert pre_residual < 1e-3  # the preconditioned solve makes real progress on the same budget
+    assert pre_residual < 0.05 * plain_residual  # far below the unpreconditioned residual
+
+
+def test_convection_multigrid_is_linear_in_rhs() -> None:
+    """A fixed cycle/sweep count makes the convection V-cycle a constant linear operator (so it is a
+    valid frozen left preconditioner that transposes cleanly for the adjoint)."""
+    owner, nb, visc, mdot, n, bd = _convective_grid(8, mu=1e-2, speed=1.0)
+    hierarchy = build_convection_hierarchy(owner, nb, visc, mdot, n, boundary_diagonal=bd)
+    rng = np.random.default_rng(1)
+    r1 = jnp.asarray(rng.standard_normal(n))
+    r2 = jnp.asarray(rng.standard_normal(n))
+
+    def solve(r):
+        return convection_multigrid_solve(hierarchy, r, cycles=2)
 
     assert jnp.allclose(solve(1.5 * r1 - 0.5 * r2), 1.5 * solve(r1) - 0.5 * solve(r2), atol=1e-10)

@@ -30,6 +30,7 @@ converged solution (the outer solve terminates on the true residual).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import NamedTuple
 
 import jax.numpy as jnp
@@ -555,22 +556,31 @@ def _chebyshev_smooth(
     return x
 
 
+_Smoother = Callable[["_SparseLevel", jnp.ndarray, jnp.ndarray], jnp.ndarray]
+
+
 def _smoothed_v_cycle(
-    hierarchy: SmoothedHierarchy, b: jnp.ndarray, level_index: int, degree: int, lo_frac: float
+    hierarchy: SmoothedHierarchy, b: jnp.ndarray, level_index: int, smoother: _Smoother
 ) -> jnp.ndarray:
-    """One V-cycle on the frozen smoothed-aggregation hierarchy (recursion unrolled at trace time)."""
+    """One V-cycle on a frozen sparse-operator hierarchy (recursion unrolled at trace time).
+
+    The pre/post ``smoother`` is injected — a symmetric-part-agnostic seam so the symmetric
+    (Chebyshev) and nonsymmetric convection-diffusion (damped-Jacobi) paths share this one recursion,
+    the prolongation/restriction, and the direct coarse solve. ``smoother(level, b, x) -> x`` applies a
+    fixed, matrix-free relaxation for ``A x = b`` starting from ``x`` on that level.
+    """
     level = hierarchy.levels[level_index]
     if level.coarse_inv is not None:  # coarsest: an actual (dense pseudo-inverse) solve
         return level.coarse_inv @ b
 
-    x = _chebyshev_smooth(level, b, jnp.zeros_like(b), degree, lo_frac)  # pre-smooth
+    x = smoother(level, b, jnp.zeros_like(b))  # pre-smooth
     residual = b - _sparse_apply(level, x)
     coarse_residual = segment_sum(
         level.p_val * residual[level.p_frow], level.p_ccol, hierarchy.levels[level_index + 1].n
     )
-    coarse_error = _smoothed_v_cycle(hierarchy, coarse_residual, level_index + 1, degree, lo_frac)
+    coarse_error = _smoothed_v_cycle(hierarchy, coarse_residual, level_index + 1, smoother)
     x = x + segment_sum(level.p_val * coarse_error[level.p_ccol], level.p_frow, level.n)  # prolong
-    return _chebyshev_smooth(level, b, x, degree, lo_frac)  # post-smooth
+    return smoother(level, b, x)  # post-smooth
 
 
 def smoothed_multigrid_solve(
@@ -607,8 +617,193 @@ def smoothed_multigrid_solve(
     jnp.ndarray
         The approximate solution ``x``, shape ``(n_cells,)``.
     """
+
+    def smoother(level: _SparseLevel, rhs: jnp.ndarray, guess: jnp.ndarray) -> jnp.ndarray:
+        return _chebyshev_smooth(level, rhs, guess, degree, lo_frac)
+
     x = jnp.zeros_like(b)
     for _ in range(cycles):
         residual = b - _sparse_apply(hierarchy.levels[0], x)
-        x = x + _smoothed_v_cycle(hierarchy, residual, 0, degree, lo_frac)
+        x = x + _smoothed_v_cycle(hierarchy, residual, 0, smoother)
+    return x
+
+
+# --- nonsymmetric (convection-diffusion) smoothed aggregation ---------------------------
+#
+# The symmetric path above builds its hierarchy on a graph Laplacian, so a point smoother (Chebyshev)
+# and constant-preserving aggregation resolve the smooth error. A momentum block with strong convection
+# is a different operator: first-order upwind adds a **nonsymmetric** off-diagonal ``max(±mdot, 0)`` to
+# the viscous coupling, and its error modes are advected along the flow, not smooth in the Laplacian
+# sense — so a Laplacian-only AMG (even rescaled by the convective diagonal) is not Peclet-robust and
+# stalls once the cell Peclet number grows.
+#
+# The convection-aware hierarchy carries the true nonsymmetric operator ``A = viscous + upwind`` up the
+# coarse levels: aggregation and the smoothed prolongation use the **symmetric part** ``(A + Aᵀ)/2`` (so
+# the coarse space is well-shaped and the prolongation smoothing is stable), while the Galerkin coarse
+# operator ``A_c = Pᵀ A P`` is formed from the **true** ``A`` — the standard way to keep the coarse
+# operators convection-aware. The upwind convection-diffusion operator is a diagonally dominant M-matrix
+# (positive diagonal, non-positive off-diagonals), so a **damped-Jacobi** smoother — matrix-free, a
+# fixed linear operator, and safe on the operator's positive-real-part spectrum where a Chebyshev
+# interval smoother is not — is the robust choice. Built once off-jit at a frozen reference mass flux
+# and applied as a frozen matrix-free V-cycle, exactly like the symmetric path.
+
+
+def _convection_diffusion_csr(
+    owner: np.ndarray, nb: np.ndarray, visc: np.ndarray, mdot: np.ndarray, n: int
+) -> sp.csr_matrix:
+    """First-order-upwind convection-diffusion operator ``A`` as a scipy CSR matrix (nonsymmetric).
+
+    Each interior edge ``(owner P, neighbour N)`` carries a symmetric viscous coupling ``visc`` and a
+    first-order-upwind convective coupling from the owner-outward face mass flux ``mdot``: an outflow
+    (``mdot > 0``) advects the owner value, an inflow the neighbour value. The resulting entries are
+
+        A[P, N] = -(visc + max(-mdot, 0)),   A[N, P] = -(visc + max(mdot, 0)),
+
+    with the matching diagonal contributions ``visc + max(mdot, 0)`` at P and ``visc + max(-mdot, 0)``
+    at N — so ``A`` is a diagonally dominant M-matrix, nonsymmetric wherever ``mdot != 0``.
+    """
+    o, m = np.asarray(owner), np.asarray(nb)
+    v, f = np.asarray(visc), np.asarray(mdot)
+    up_out = np.maximum(f, 0.0)  # outflow leaves the owner: owner value is upwind
+    up_in = np.maximum(-f, 0.0)  # inflow enters the owner: neighbour value is upwind
+    rows = np.concatenate([o, m, o, m])
+    cols = np.concatenate([m, o, o, m])
+    vals = np.concatenate([-(v + up_in), -(v + up_out), v + up_out, v + up_in])
+    return sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
+
+
+def build_convection_hierarchy(
+    owner: np.ndarray,
+    nb: np.ndarray,
+    visc: np.ndarray,
+    mdot: np.ndarray,
+    n: int,
+    boundary_diagonal: np.ndarray | None = None,
+    *,
+    omega_smooth: float = 2.0 / 3.0,
+    max_coarse: int = 16,
+    max_levels: int = 20,
+) -> SmoothedHierarchy:
+    """Build the nonsymmetric convection-diffusion aggregation hierarchy — call once, off the jit path.
+
+    The frozen reference operator is ``A = viscous + first-order-upwind convection`` (see
+    :func:`_convection_diffusion_csr`); the symmetric part drives aggregation and prolongation smoothing
+    while the Galerkin coarse operators keep the true nonsymmetric ``A``.
+
+    Parameters
+    ----------
+    owner, nb : np.ndarray
+        Fine-level interior-face edges, shape ``(n_edges,)`` each.
+    visc : np.ndarray
+        Per-edge viscous coefficient ``mu_f A_f / (d.n)_f``, shape ``(n_edges,)``.
+    mdot : np.ndarray
+        Reference owner-outward face mass flux on the interior edges, shape ``(n_edges,)`` — the frozen
+        convective linearisation the hierarchy is built at.
+    n : int
+        Number of fine cells.
+    boundary_diagonal : np.ndarray, optional
+        Extra diagonal ``(n_cells,)`` from boundary faces (Dirichlet velocity walls/inlet + outlet
+        convection), making the operator diagonally dominant and nonsingular.
+    omega_smooth : float
+        Prolongation-smoothing damping factor; the applied damping is ``omega_smooth * 2 / lambda_max``
+        (``lambda_max`` of the symmetric part per level).
+    max_coarse : int
+        Stop coarsening once a level has at most this many cells (solved directly there).
+    max_levels : int
+        Hard cap on the number of levels.
+
+    Returns
+    -------
+    SmoothedHierarchy
+        Frozen finest-to-coarsest general-sparse levels for :func:`convection_multigrid_solve`.
+    """
+    a = _convection_diffusion_csr(owner, nb, visc, mdot, n)
+    if boundary_diagonal is not None:
+        a = a + sp.diags(np.asarray(boundary_diagonal))
+    levels: list[_SparseLevel] = []
+    while True:
+        a_sym = (0.5 * (a + a.T)).tocsr()  # aggregation + prolongation use the symmetric part
+        d_inv = sp.diags(1.0 / a.diagonal())
+        # Two spectral estimates with different roles: the symmetric part's real ``lambda_max`` sets the
+        # constant-preserving prolongation smoothing; the **true** (nonsymmetric) operator's spectral
+        # radius sets the damped-Jacobi relaxation. The Galerkin coarse operators pick up large complex
+        # eigenvalues the symmetric part misses, so damping by the symmetric estimate alone makes the
+        # coarse-level smoother diverge — the smoother must see the true spectral radius.
+        lam_sym = _spectral_radius(d_inv @ a_sym)
+        lam_true = _spectral_radius(d_inv @ a)
+        if a.shape[0] <= max_coarse or len(levels) + 1 >= max_levels:
+            # Coarsest: a direct (dense pseudo-inverse) solve — pinv handles the nonsymmetric operator.
+            levels.append(_sparse_level(a, lam_true, np.linalg.pinv(a.toarray()), None, 0))
+            break
+        upper = sp.triu(a_sym, k=1).tocoo()  # aggregate on the symmetric graph
+        aggregate, n_coarse = _aggregate(upper.row, upper.col, a.shape[0])
+        tentative = sp.csr_matrix(
+            (np.ones(a.shape[0]), (np.arange(a.shape[0]), aggregate)), shape=(a.shape[0], n_coarse)
+        )
+        prolongation = (
+            tentative - (omega_smooth * 2.0 / lam_sym) * (d_inv @ (a_sym @ tentative))
+        ).tocsr()
+        levels.append(_sparse_level(a, lam_true, None, prolongation.tocoo(), n_coarse))
+        a = (prolongation.T @ a @ prolongation).tocsr()  # Galerkin coarse operator from the true A
+    return SmoothedHierarchy(tuple(levels))
+
+
+def _jacobi_smooth(
+    level: _SparseLevel, b: jnp.ndarray, x: jnp.ndarray, sweeps: int, omega: float
+) -> jnp.ndarray:
+    """Damped-Jacobi smoother ``x <- x + (omega / lambda_max) D^-1 (b - A x)`` (``sweeps`` times).
+
+    Matrix-free and a fixed linear operator. The relaxation is scaled by the per-level ``lambda_max``
+    (of the symmetric part) so ``omega`` in ``(0, 1]`` is a mesh- and scale-independent damping — the
+    high-frequency-smoothing choice for the M-matrix convection-diffusion operator, where a Chebyshev
+    interval smoother (assuming a real spectrum) is not safe.
+    """
+    alpha = omega / level.lam_max
+    inv_diagonal = 1.0 / level.diagonal
+    for _ in range(sweeps):
+        x = x + alpha * inv_diagonal * (b - _sparse_apply(level, x))
+    return x
+
+
+def convection_multigrid_solve(
+    hierarchy: SmoothedHierarchy,
+    b: jnp.ndarray,
+    *,
+    cycles: int = 1,
+    sweeps: int = 2,
+    omega: float = 0.8,
+) -> jnp.ndarray:
+    """A **fixed** number of convection-diffusion V-cycles for ``A x = b`` — the Peclet-robust,
+    constant-linear inner solve for the momentum (velocity) block.
+
+    The hierarchy is frozen (built once off-jit at a reference mass flux); a fixed cycle count with a
+    fixed damped-Jacobi smoother and a direct coarse solve makes ``b -> x`` a constant linear operator,
+    so it is a valid frozen left preconditioner under plain GMRES and transposes cleanly for the adjoint.
+
+    Parameters
+    ----------
+    hierarchy : SmoothedHierarchy
+        From :func:`build_convection_hierarchy`.
+    b : jnp.ndarray
+        Right-hand side, shape ``(n_cells,)``.
+    cycles : int
+        Number of V-cycles (static).
+    sweeps : int
+        Damped-Jacobi pre/post sweeps per level (static).
+    omega : float
+        Jacobi damping factor in ``(0, 1]`` (static).
+
+    Returns
+    -------
+    jnp.ndarray
+        The approximate solution ``x``, shape ``(n_cells,)``.
+    """
+
+    def smoother(level: _SparseLevel, rhs: jnp.ndarray, guess: jnp.ndarray) -> jnp.ndarray:
+        return _jacobi_smooth(level, rhs, guess, sweeps, omega)
+
+    x = jnp.zeros_like(b)
+    for _ in range(cycles):
+        residual = b - _sparse_apply(hierarchy.levels[0], x)
+        x = x + _smoothed_v_cycle(hierarchy, residual, 0, smoother)
     return x
