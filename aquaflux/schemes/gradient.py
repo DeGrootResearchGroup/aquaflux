@@ -235,7 +235,9 @@ class SweptGradientSolve(GradientSolve):
             # `lax.cond` on the tolerance so the (host-synchronising) callback fires *only* when the
             # sweeps are actually under-resolved; on a converged mesh no callback runs, so the check
             # is free in the common case.
-            relative = jnp.linalg.norm(residual) / (jnp.linalg.norm(rhs) + jnp.finfo(rhs.dtype).tiny)
+            relative = jnp.linalg.norm(residual) / (
+                jnp.linalg.norm(rhs) + jnp.finfo(rhs.dtype).tiny
+            )
             jax.lax.cond(
                 relative > self.warn_tol,
                 lambda: jax.debug.callback(
