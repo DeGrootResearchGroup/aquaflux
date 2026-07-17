@@ -473,21 +473,24 @@ class BlockPreconditioner(eqx.Module):
     so ``D`` is a constant operator (adjoint-transparent).
 
     The pressure Schur is scaled either by the momentum diagonal ``a_P`` (SIMPLE, ``Ŝ ~ B diag(V/a_P)
-    B^T``) or, when ``schur_diagonal`` is set, by a frozen velocity-independent diagonal ``Q̂ = ρ V / k``
-    (MSIMPLER, a mass-matrix scaling), giving the constant-coefficient pressure Poisson ``Ŝ ~ B
-    diag(k/ρ) B^T``. Because ``Q̂`` does not track the velocity, the MSIMPLER Schur — unlike ``V/a_P``
-    — does not degrade as convection strengthens (Klaij & Vuik 2013, for exactly this collocated-FV
-    coupled discretization), which carries the coupled solve past the Reynolds number where the
-    ``a_P``-Schur stalls. The scale ``k`` (see :meth:`build`) matches its magnitude to the SIMPLE Schur
-    at the operating convection. Only the Schur uses ``Q̂``; the velocity block always uses the true
-    ``a_P``.
+    B^T``) or, when ``schur_mass_diagonal`` is set, by a frozen velocity-independent diagonal
+    ``Q̂ = ρ V / k`` (MSIMPLER, a mass-matrix scaling), giving the constant-coefficient pressure Poisson
+    ``Ŝ ~ B diag(k/ρ) B^T``. Because ``Q̂`` does not track the velocity, the MSIMPLER Schur — unlike
+    ``V/a_P`` — does not degrade as convection strengthens (Klaij & Vuik 2013, for exactly this
+    collocated-FV coupled discretization), which carries the coupled solve past the Reynolds number
+    where the ``a_P``-Schur stalls. The hierarchy is frozen at the mass matrix ``ρ V`` (``k = 1``); the
+    scale ``k`` is applied per iterate in :meth:`apply_at`, auto-calibrated to ``mean(V / a_P)`` from
+    the real momentum diagonal (see :meth:`_msimpler_scale`) so its magnitude matches the SIMPLE Schur
+    at the operating convection with no assumption on the characteristic speed. Only the Schur uses
+    ``Q̂``; the velocity block always uses the true ``a_P``.
     """
 
     assembler: MomentumContinuity
     schur: InnerSchurSolver
     velocity: VelocityBlockSolver
     block_triangular: bool = eqx.field(static=True)
-    schur_diagonal: jnp.ndarray | None = None
+    schur_mass_diagonal: jnp.ndarray | None = None
+    msimpler_scale: float | None = eqx.field(static=True, default=None)
 
     @classmethod
     def build(
@@ -530,12 +533,12 @@ class BlockPreconditioner(eqx.Module):
             Schur is a constant-coefficient pressure Poisson (coefficient ``k · A/(d·n)``) that stays
             Re-robust — the fix that carries the coupled solve past the ``a_P``-Schur stall.
         msimpler_scale : float, optional
-            The MSIMPLER scale ``k`` (only for ``schur_scaling="msimpler"``). It must set the Schur
+            The MSIMPLER scale ``k`` (only for ``schur_scaling="msimpler"``). It sets the Schur
             magnitude to the operating convection, or the block preconditioner is unbalanced and
-            stalls. ``None`` (default) calibrates it automatically to ``mean(V / a_P)`` at a unit
-            streamwise reference speed — matching the SIMPLE Schur magnitude while staying
-            velocity-independent. Pass an explicit value for a problem whose characteristic speed is
-            far from one.
+            stalls. ``None`` (default) calibrates it automatically, per iterate, to ``mean(V / a_P)``
+            from the **real** momentum diagonal at the current flow — which encodes the true velocity
+            / density / viscosity scale, so it matches the SIMPLE Schur magnitude with no assumption
+            on the characteristic speed. Pass an explicit value only to pin ``k`` (e.g. for a study).
         v_cycles : int
             Multigrid V-cycles per apply (``"smoothed"`` / ``"multigrid"``).
         jacobi_sweeps : int
@@ -557,22 +560,17 @@ class BlockPreconditioner(eqx.Module):
         interior = np.asarray(assembler.mesh.face_cells.interior)
         interior_faces = jnp.asarray(interior_faces_np)
 
-        # MSIMPLER's frozen Schur diagonal Q̂ = ρ V / k (per cell), which replaces a_P; ``None`` keeps
-        # the classical SIMPLE (a_P) Schur. The scale ``k`` sets the constant Schur coefficient to
-        # ``k · A/(d·n)``; auto-calibrated to mean(V/a_P) at unit streamwise speed so it matches the
-        # SIMPLE Schur magnitude at the operating convection (a mismatched scale unbalances the block
-        # preconditioner and stalls GMRES) while staying velocity-independent.
-        schur_diagonal = None
+        # MSIMPLER replaces the SIMPLE Schur scaling ``a_P`` with a frozen, velocity-independent
+        # diagonal ``Q̂ = ρ V / k``; ``None`` keeps the classical SIMPLE (a_P) Schur. The hierarchy is
+        # built at the **mass matrix ``ρ V`` (k = 1)** — the constant-coefficient pressure Poisson
+        # ``A/(d·n)``; the operating scale ``k`` is applied per iterate in :meth:`apply_at` (the
+        # symmetric rescaling absorbs a scalar exactly). ``k`` is auto-calibrated there to
+        # ``mean(V / a_P)`` from the **real** momentum diagonal, so it tracks the true velocity /
+        # density / viscosity scale with no unit-speed assumption; ``msimpler_scale`` overrides it.
+        schur_mass_diagonal = None
         if schur_scaling == "msimpler":
-            scale = msimpler_scale
-            if scale is None:
-                reference_velocity = jnp.zeros((n_cells, assembler.mesh.dim)).at[:, 0].set(1.0)
-                reference_a_p = jnp.mean(
-                    assembler.momentum_matrix_diagonal(reference_velocity), axis=1
-                )
-                scale = jnp.mean(assembler.geometry.cell.volume / reference_a_p)
-            schur_diagonal = jax.lax.stop_gradient(
-                assembler.density * assembler.geometry.cell.volume / scale
+            schur_mass_diagonal = jax.lax.stop_gradient(
+                assembler.density * assembler.geometry.cell.volume
             )
 
         if inner == "smoothed":
@@ -585,7 +583,7 @@ class BlockPreconditioner(eqx.Module):
                 interior_faces,
                 n_cells,
                 v_cycles,
-                reference_diagonal=schur_diagonal,
+                reference_diagonal=schur_mass_diagonal,
             )
             velocity_block: VelocityBlockSolver
             if velocity == "convection":
@@ -603,7 +601,8 @@ class BlockPreconditioner(eqx.Module):
                 schur,
                 velocity_block,
                 block_triangular=True,
-                schur_diagonal=schur_diagonal,
+                schur_mass_diagonal=schur_mass_diagonal,
+                msimpler_scale=msimpler_scale,
             )
         if inner == "multigrid":
             schur = AggregationSchur.build(
@@ -616,7 +615,8 @@ class BlockPreconditioner(eqx.Module):
             schur,
             DiagonalVelocity(),
             block_triangular=False,
-            schur_diagonal=schur_diagonal,
+            schur_mass_diagonal=schur_mass_diagonal,
+            msimpler_scale=msimpler_scale,
         )
 
     def _divergence(self, state: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
@@ -650,6 +650,23 @@ class BlockPreconditioner(eqx.Module):
             jax.lax.stop_gradient(self.assembler.momentum_matrix_diagonal(velocity)), axis=1
         )
 
+    def _msimpler_scale(self, state: jnp.ndarray) -> jnp.ndarray:
+        """The MSIMPLER scale ``k`` at ``state`` — ``mean(V / a_P)`` from the real momentum diagonal.
+
+        ``k`` sets the frozen Schur diagonal ``Q̂ = ρ V / k`` (Schur coefficient ``k · A/(d·n)``). It is
+        calibrated from the **actual** momentum diagonal ``a_P`` at the current flow — which encodes
+        the true velocity / density / viscosity scale — so the MSIMPLER Schur magnitude matches the
+        SIMPLE Schur at the operating convection with **no unit-speed assumption** (an air/water or
+        otherwise non-unit-speed problem calibrates itself). The **un-shifted** diagonal is used (via
+        :meth:`frozen_momentum_diagonal`, not the continuation's shifted ``a_P``): an early large
+        pseudo-transient shift would give a spuriously large ``a_P``, hence a spuriously weak Schur.
+        ``msimpler_scale`` overrides the calibration with a fixed value.
+        """
+        if self.msimpler_scale is not None:
+            return jnp.asarray(float(self.msimpler_scale))
+        a_p = self.frozen_momentum_diagonal(state)
+        return jnp.mean(self.assembler.geometry.cell.volume / a_p)
+
     def apply_at(
         self, state: jnp.ndarray, a_p: jnp.ndarray
     ) -> Callable[[jnp.ndarray], jnp.ndarray]:
@@ -660,11 +677,15 @@ class BlockPreconditioner(eqx.Module):
         Jacobian it inverts — instead of always the bare diagonal :meth:`frozen_momentum_diagonal`
         returns. ``a_P`` is the isotropic per-cell diagonal, shape ``(n_cells,)``.
 
-        The velocity block always inverts at the supplied ``a_P``; the Schur uses the frozen
-        MSIMPLER diagonal ``Q̂`` instead when set (it is velocity-independent, so it ignores both
-        ``a_P`` and any continuation shift), else the same ``a_P`` (classical SIMPLE).
+        The velocity block always inverts at the supplied ``a_P``; the Schur uses the frozen MSIMPLER
+        mass-matrix diagonal ``Q̂ = ρ V / k`` instead when set (velocity-independent, so it ignores the
+        continuation shift), with ``k`` calibrated per iterate from the real un-shifted ``a_P`` (see
+        :meth:`_msimpler_scale`); else it uses the supplied ``a_P`` (classical SIMPLE).
         """
-        schur_a_p = a_p if self.schur_diagonal is None else self.schur_diagonal
+        if self.schur_mass_diagonal is None:
+            schur_a_p = a_p
+        else:  # MSIMPLER: Q̂ = ρ V / k with the operating-scale k
+            schur_a_p = self.schur_mass_diagonal / self._msimpler_scale(state)
         schur_solve = self.schur.apply(schur_a_p)
         velocity_solve = self.velocity.apply(a_p)
         divergence = self._divergence(state) if self.block_triangular else None

@@ -37,11 +37,13 @@ from aquaflux.solve import ImplicitNewtonSolver
 H, L, U_IN, RHO = 1.0, 4.0, 1.0, 1.0
 
 
-def _channel(nx, ny, mu, *, wall_growth=1.0):
+def _channel(nx, ny, mu, *, wall_growth=1.0, u_in=U_IN):
     """The plane channel of :mod:`tests.integration.test_channel`, at viscosity ``mu``.
 
     ``wall_growth > 1`` grades the wall-normal spacing (finest at both walls) so the near-wall cell
-    resolves a boundary layer — the mesh a turbulent-channel validation needs.
+    resolves a boundary layer — the mesh a turbulent-channel validation needs. ``u_in`` sets the inlet
+    speed (default ``U_IN``); vary it (with ``mu`` scaled to hold the Reynolds number) to change the
+    characteristic velocity scale.
     """
     y_nodes = graded_nodes(ny, H, wall_growth) if wall_growth != 1.0 else None
     mesh = structured_grid_2d(nx, ny, lx=L, ly=H, named_boundaries=True, y_nodes=y_nodes)
@@ -52,7 +54,7 @@ def _channel(nx, ny, mu, *, wall_growth=1.0):
         CompactGreenGauss(),
         BoundaryConditions(
             {
-                "left": VelocityInlet(velocity=(U_IN, 0.0)),
+                "left": VelocityInlet(velocity=(u_in, 0.0)),
                 "right": PressureOutlet(pressure=0.0),
                 "bottom": NoSlipWall(),
                 "top": NoSlipWall(),
@@ -238,6 +240,44 @@ def test_msimpler_schur_matches_simple_at_moderate_reynolds() -> None:
 
     grad = float(jax.grad(mean_speed)(2e-3))
     assert np.isfinite(grad)
+
+
+def test_msimpler_scale_tracks_the_characteristic_speed() -> None:
+    """MSIMPLER's ``k`` auto-calibrates to the operating scale, with no unit-speed assumption.
+
+    ``k = mean(V / a_P)`` is taken from the *real* momentum diagonal, which is convection-dominated
+    (``a_P ~ ρ U``), so at a fixed Reynolds number scaling the inlet speed by ``s`` scales ``k`` by
+    ``1/s``. A fluid or nondimensionalisation whose characteristic speed is far from one therefore
+    calibrates itself — the case that previously needed a manual ``msimpler_scale``.
+    """
+    from aquaflux.flow import BlockPreconditioner
+
+    def scale_at(u_in):
+        mu = RHO * u_in * H / 500.0  # fixed Re = 500; mu scales with the speed
+        assembler = _channel(32, 24, mu, wall_growth=1.15, u_in=u_in)
+        preconditioner = BlockPreconditioner.build(assembler, schur_scaling="msimpler")
+        # Evaluate at a uniform inlet-speed flow — the operating scale the Schur must match.
+        velocity = jnp.zeros((assembler.mesh.n_cells, assembler.mesh.dim)).at[:, 0].set(u_in)
+        state = assembler.pack(velocity, jnp.zeros(assembler.mesh.n_cells))
+        return float(preconditioner._msimpler_scale(state))
+
+    unit = scale_at(1.0)
+    assert 50.0 < scale_at(0.01) / unit < 200.0  # ~100x slower speed -> ~100x larger k
+    assert 0.005 < scale_at(100.0) / unit < 0.02  # ~100x faster speed -> ~100x smaller k
+
+
+@pytest.mark.slow
+def test_msimpler_auto_scale_converges_at_non_unit_speed() -> None:
+    """The auto-calibrated ``k`` carries the MSIMPLER solve at a characteristic speed far from one,
+    with no manual ``msimpler_scale`` — the unit-speed assumption is gone. A deliberately mis-scaled
+    ``k`` (the old unit-speed calibration) still converges here only because the continuation escalates
+    its damping to compensate, but ~4x slower; the auto-calibration is what keeps it well-conditioned.
+    """
+    u_in = 100.0
+    assembler = _channel(32, 24, RHO * u_in * H / 500.0, wall_growth=1.15, u_in=u_in)  # Re 500
+    continuation = PseudoTransientContinuation.build(assembler, schur_scaling="msimpler")
+    state = _solve(assembler, continuation=continuation, max_steps=200)
+    assert float(jnp.linalg.norm(assembler.residual(state))) < 1e-8
 
 
 @pytest.mark.slow
