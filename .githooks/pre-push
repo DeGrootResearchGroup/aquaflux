@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+#
+# Pre-push hook: run the same ruff gate CI will enforce, so a formatting or lint
+# slip is caught locally instead of turning a required check red on the PR:
+#     ruff check aquaflux tests
+#     ruff format --check aquaflux tests
+#
+# Enable it once per clone (git does not install repo hooks automatically):
+#     git config core.hooksPath .githooks
+#
+# Bypass for a one-off push with:  git push --no-verify
+#
+set -euo pipefail
+
+# Use whatever ruff is on PATH (the project's pinned one after
+# `pip install -e ".[lint]"`). If ruff is not installed, warn but do not block
+# the push -- a contributor without the lint extra should not be stuck.
+if ! command -v ruff >/dev/null 2>&1; then
+  echo "pre-push: ruff not found on PATH -- skipping the lint gate." >&2
+  echo "          install it with:  pip install -e \".[lint]\"" >&2
+  exit 0
+fi
+
+fail=0
+
+echo "pre-push: ruff check aquaflux tests" >&2
+if ! ruff check aquaflux tests; then
+  echo "pre-push: 'ruff check' reported errors (see above)." >&2
+  fail=1
+fi
+
+echo "pre-push: ruff format --check aquaflux tests" >&2
+if ! ruff format --check aquaflux tests; then
+  echo "pre-push: files are not formatted -- run 'ruff format aquaflux tests', commit, and re-push." >&2
+  fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo "pre-push: blocked. Fix the ruff issues above (or 'git push --no-verify' to bypass)." >&2
+  exit 1
+fi
+
+echo "pre-push: ruff gate clean." >&2
