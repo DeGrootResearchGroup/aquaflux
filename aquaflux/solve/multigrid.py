@@ -68,7 +68,7 @@ def _rcm_order(owner: np.ndarray, nb: np.ndarray, n: int) -> np.ndarray:
     compact, well-shaped aggregates and a near-optimal coarse space, whereas an arbitrary cell
     numbering gives irregular aggregates and a measurably worse V-cycle contraction. Reverse
     Cuthill--McKee supplies that order from the level's own adjacency graph. The graph is undirected,
-    so the ``(owner, nb)`` edges are symmetrised before the ordering.
+    so the ``(owner, nb)`` edges are symmetrized before the ordering.
 
     This is applied per level to the level's *own* operator graph — the fine graph and every
     Galerkin-coarse graph alike — so the coarsening is ordering-robust throughout the hierarchy
