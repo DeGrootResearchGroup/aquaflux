@@ -1,0 +1,52 @@
+name: CI
+
+# The ruff gate. This is the same pair of commands the local pre-push hook runs
+# (.githooks/pre-push), so a contributor who enables the hook sees a failure
+# before pushing rather than as a red check on the PR. The hook is opt-in per
+# clone (`git config core.hooksPath .githooks`); this workflow is not, which is
+# why the gate lives here as well as there.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push to a pull request makes the in-flight run obsolete; don't burn a
+# runner on it. `head_ref` is set only for pull_request events, so a push to
+# `main` falls back to the always-unique `run_id` and merges never cancel each
+# other -- every commit on `main` keeps its own gate result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          # Lint results do not depend on the interpreter -- ruff reads its own
+          # `target-version` from pyproject.toml. This version only governs the
+          # install below, and 3.12 is the floor the runtime dependencies
+          # actually resolve on (jax/numpy/scipy require >= 3.12).
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Installs ruff at the version pinned by the `lint` extra, so the gate
+      # cannot move under us when a new ruff is released. Deliberately the same
+      # command the hook and the README tell contributors to run, so CI and a
+      # local check cannot drift apart.
+      - name: Install the pinned linter
+        run: pip install -e ".[lint]"
+
+      - name: ruff check
+        run: ruff check aquaflux tests
+
+      # Report a formatting slip even when `ruff check` already failed -- one red
+      # run should show every problem to fix, not just the first.
+      - name: ruff format --check
+        if: ${{ !cancelled() }}
+        run: ruff format --check aquaflux tests
