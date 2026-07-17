@@ -55,3 +55,30 @@ def test_pressure_outlet() -> None:
     expected = 1.0 * (2.0 - 0.4 * ((0.0 - 1.5) / 0.5 - 3.0)) * 2.0
     got = float(bc.mass_flux(VEL, P, GRADP, DCOEFF, NORMAL, AREA, DN, CENTROID, 1.0)[0])
     assert abs(got - expected) < 1e-12
+
+
+def test_only_prescribing_patches_declare_a_reference_velocity() -> None:
+    """A patch reports the velocity it *imposes* on the flow, not the velocity it happens to see.
+
+    This is the characteristic scale a convection-aware momentum block sizes its frozen convective
+    linearisation from, so it must come from patches that drive the flow (an inlet, a moving wall)
+    and not from one that merely responds to it.
+    """
+    inlet = VelocityInlet(velocity=(4.0, 0.0)).reference_velocity(NORMAL, CENTROID)
+    assert jnp.allclose(inlet, jnp.array([[4.0, 0.0]]))
+    lid = MovingWall(velocity=(1.0, 0.0)).reference_velocity(NORMAL, CENTROID)
+    assert jnp.allclose(lid, jnp.array([[1.0, 0.0]]))
+    # A stationary wall drives nothing, and an outlet prescribes no velocity at all — even though its
+    # own face velocity is the (non-zero) owner value it sees, which is a response, not a scale.
+    assert jnp.allclose(NoSlipWall().reference_velocity(NORMAL, CENTROID), 0.0)
+    assert jnp.allclose(PressureOutlet(pressure=0.0).reference_velocity(NORMAL, CENTROID), 0.0)
+
+
+def test_reference_velocity_follows_an_inlet_profile() -> None:
+    """A spatially-varying inlet reports its profile, evaluated per face centroid."""
+    bc = VelocityInlet(velocity=lambda x: jnp.stack([x[:, 1], jnp.zeros(x.shape[0])], axis=1))
+    centroid = jnp.array([[0.0, 0.25], [0.0, 0.75]])
+    normal = jnp.array([[1.0, 0.0], [1.0, 0.0]])
+    assert jnp.allclose(
+        bc.reference_velocity(normal, centroid), jnp.array([[0.25, 0.0], [0.75, 0.0]])
+    )

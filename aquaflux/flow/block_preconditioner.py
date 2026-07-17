@@ -472,6 +472,37 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
         return solve
 
 
+def _characteristic_reference_state(assembler: MomentumContinuity) -> jnp.ndarray:
+    """A uniform flow at the characteristic velocity the boundaries drive, shape ``((dim+1) n,)``.
+
+    The convection-aware velocity block freezes its convective linearisation at the mass flux of a
+    representative operating state, so that state has to carry the operating convective scale (cell
+    Peclet ``rho U dx / mu``) — a cold zero state carries none, and would silently reduce the block to
+    the viscous one it exists to replace.
+
+    The scale is taken from the boundaries, which already state it: each patch declares the velocity
+    it prescribes (see :meth:`~aquaflux.flow.boundary.FlowBoundary.reference_velocity`), and the
+    fastest of them is the characteristic speed a Reynolds number is formed from — the inlet speed of
+    a channel, the lid speed of a driven cavity. A uniform field at that velocity is Peclet-
+    representative wherever the flow is driven, and assumes nothing about the speed's magnitude,
+    direction, or units. Taking the fastest rather than an average is the safe side of the estimate:
+    these hierarchies stay stable as the cell Peclet rises, whereas under-estimating the convection
+    drifts the block back toward the Peclet-blind viscous one.
+
+    A domain that prescribes no velocity anywhere (every patch a stationary wall) drives no flow, and
+    yields a zero state — correctly, since there is no convection for the block to be aware of.
+    """
+    face = assembler.geometry.face
+    prescribed = assembler.boundary.apply(
+        assembler.mesh.face_cells,
+        jnp.zeros((assembler.mesh.n_faces, assembler.mesh.dim)),
+        lambda bc, faces, owner: bc.reference_velocity(face.normal[faces], face.centroid[faces]),
+    )
+    fastest = prescribed[jnp.argmax(jnp.sum(prescribed**2, axis=1))]
+    velocity = jnp.broadcast_to(fastest, (assembler.mesh.n_cells, assembler.mesh.dim))
+    return jax.lax.stop_gradient(assembler.pack(velocity, jnp.zeros(assembler.mesh.n_cells)))
+
+
 # --- the composed preconditioner -------------------------------------------------------
 
 
@@ -532,14 +563,17 @@ class BlockPreconditioner(eqx.Module):
             bounds the reachable Reynolds number. ``"convection"`` and ``"convection-air"`` build a
             convection-aware hierarchy on the frozen ``viscous + first-order-upwind`` operator (see
             :class:`SmoothedAmgConvectionVelocity`), which stays a good momentum-block approximation as
-            convection strengthens and needs a representative ``reference_state``: ``"convection"`` is
-            the stable two-level method, ``"convection-air"`` the reduction-based (lAIR) hierarchy that
-            is Peclet-robust *and* mesh-independent (scales to large meshes).
+            convection strengthens: ``"convection"`` is the stable two-level method,
+            ``"convection-air"`` the reduction-based (lAIR) hierarchy that is Peclet-robust *and*
+            mesh-independent (scales to large meshes). Both freeze their convective linearisation at
+            ``reference_state``, taken from the boundary conditions unless given.
         reference_state : jnp.ndarray, optional
             A representative operating flow state whose Rhie--Chow mass flux freezes the convective
-            linearisation of the ``velocity="convection"`` block. ``None`` uses a cold (zero-flux)
-            state, which reduces that block to the viscous one; pass a representative flow (e.g. a
-            uniform inlet field) to activate the convection awareness.
+            linearisation of the convection-aware velocity blocks. ``None`` (default) derives one from
+            the boundary conditions — a uniform flow at the fastest velocity any patch prescribes — so
+            the frozen linearisation carries the operating cell Peclet with no assumption on the flow
+            speed. Pass a state only to pin the linearisation to a better-known operating point (for
+            instance a previously converged flow).
         schur_scaling : {"simple", "msimpler"}
             How the pressure Schur is scaled. ``"simple"`` uses the momentum diagonal ``a_P`` (the
             classical SIMPLE Schur ``V / a_P``, which degrades as convection strengthens);
@@ -604,7 +638,7 @@ class BlockPreconditioner(eqx.Module):
             velocity_block: VelocityBlockSolver
             if velocity in ("convection", "convection-air"):
                 if reference_state is None:
-                    reference_state = assembler.initial_state()
+                    reference_state = _characteristic_reference_state(assembler)
                 velocity_block = SmoothedAmgConvectionVelocity.build(
                     assembler,
                     owner_e,
