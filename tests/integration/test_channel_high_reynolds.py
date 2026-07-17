@@ -174,6 +174,27 @@ def test_continuation_solve_is_differentiable() -> None:
     assert abs(grad - finite_difference) < 1e-3 * abs(finite_difference)
 
 
+def test_escalation_recovers_an_underdamped_step() -> None:
+    """The step-acceptance escalation makes ``β₀`` robust rather than a per-case knob.
+
+    An intentionally under-damped ``β₀`` produces a shifted step that diverges (the divergence guard
+    rejects it), so without escalation the march makes no progress and stalls. Escalating the damping
+    until the step descends is what recovers convergence — so ``β₀`` only sets the starting damping,
+    and being too small is self-corrected rather than fatal.
+    """
+    assembler = _channel(40, 32, 1e-3, wall_growth=1.2)  # Re = 1000, wall-graded
+
+    def residual_after_solve(max_escalations):
+        continuation = PseudoTransientContinuation.build(
+            assembler, schur_scaling="msimpler", beta0=0.2, max_escalations=max_escalations
+        )
+        state = _solve(assembler, continuation=continuation, max_steps=150)
+        return float(jnp.linalg.norm(assembler.residual(state)))
+
+    assert residual_after_solve(0) > 1e-6  # under-damped, no escalation: stalls
+    assert residual_after_solve(6) < 1e-8  # escalation recovers convergence
+
+
 @pytest.mark.slow
 def test_msimpler_schur_reaches_beyond_the_simple_schur() -> None:
     """The MSIMPLER pressure Schur carries the solve past the Reynolds number where SIMPLE stalls.

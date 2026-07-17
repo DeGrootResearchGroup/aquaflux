@@ -33,6 +33,8 @@ def solve_linear(
     b: jnp.ndarray,
     solver: lx.AbstractLinearSolver | None = None,
     preconditioner: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+    *,
+    throw: bool = True,
 ) -> jnp.ndarray:
     """Solve ``A x = b`` for ``x`` given the linear map ``matvec(x) = A x``.
 
@@ -50,6 +52,11 @@ def solve_linear(
         ``x -> M(A(x))`` and ``M(b)``. ``M``'s internal coefficients must be constant with
         respect to any outer differentiation (``stop_gradient``-ed by the caller), so that
         preconditioning accelerates convergence without perturbing the solution or its gradient.
+    throw : bool
+        If ``True`` (default), a non-convergent solve raises. If ``False``, it instead returns the
+        solver's last iterate without raising — for a caller that tests the result and recovers (an
+        adaptive continuation that escalates damping when the shifted solve fails to converge). The
+        returned iterate may not solve the system; the caller must check it.
 
     Returns
     -------
@@ -69,4 +76,4 @@ def solve_linear(
     operator = lx.FunctionLinearOperator(
         preconditioned_matvec, jax.ShapeDtypeStruct(b.shape, b.dtype)
     )
-    return lx.linear_solve(operator, rhs, solver=solver).value
+    return lx.linear_solve(operator, rhs, solver=solver, throw=throw).value
