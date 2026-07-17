@@ -15,6 +15,8 @@ import numpy as np
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.solve.multigrid import (
     _convection_diffusion_csr,
+    air_multigrid_solve,
+    build_convection_air_hierarchy,
     build_convection_hierarchy,
     build_hierarchy,
     build_smoothed_hierarchy,
@@ -348,3 +350,53 @@ def test_convection_multigrid_is_linear_in_rhs() -> None:
         return convection_multigrid_solve(hierarchy, r, cycles=2)
 
     assert jnp.allclose(solve(1.5 * r1 - 0.5 * r2), 1.5 * solve(r1) - 0.5 * solve(r2), atol=1e-10)
+
+
+# --- local approximate ideal restriction (lAIR) -----------------------------------------
+
+
+def test_air_v_cycle_is_mesh_independent_at_high_peclet() -> None:
+    """The reduction-based (lAIR) V-cycle converges the strongly-convective operator with a **flat**
+    per-cycle contraction as the mesh refines — the Peclet-robust, mesh-independent property the
+    two-level aggregation method (and deep Galerkin recursion) lack. For a convection-dominated
+    operator the approximate ideal restriction is nearly exact, so a few cycles behave like a direct
+    solve regardless of the mesh size."""
+    contractions = []
+    for n in (24, 48):  # cell Peclet ~40; a 4x change in cell count
+        owner, nb, visc, mdot, ncell, bd = _convective_grid(n, mu=1e-3, speed=1.0)
+        hierarchy = build_convection_air_hierarchy(
+            owner, nb, visc, mdot, ncell, boundary_diagonal=bd
+        )
+        a = _dense(owner, nb, visc, mdot, ncell, bd)
+        b = jnp.asarray(np.random.default_rng(0).standard_normal(ncell))
+        x = jnp.zeros(ncell)
+        norms = [1.0]
+        for _ in range(4):
+            x = x + air_multigrid_solve(hierarchy, b - a @ x, cycles=1)
+            norms.append(float(jnp.linalg.norm(a @ x - b)) / float(jnp.linalg.norm(b)))
+        # geometric-mean per-cycle contraction over the cycles above the machine floor
+        ratios = [norms[k + 1] / norms[k] for k in range(len(norms) - 1) if norms[k] > 1e-11]
+        contractions.append(float(np.exp(np.mean(np.log(ratios)))))
+    assert max(contractions) < 0.1  # strong contraction at high Peclet
+    assert abs(contractions[1] - contractions[0]) < 0.05  # ~mesh-independent across the refinement
+
+
+def test_air_multigrid_is_linear_and_transposable() -> None:
+    """A fixed cycle/sweep count makes the lAIR V-cycle a constant linear operator that transposes
+    cleanly (``R != Pᵀ``), so it is a valid frozen left preconditioner for the forward solve and its
+    ``M^T`` adjoint."""
+    owner, nb, visc, mdot, n, bd = _convective_grid(12, mu=1e-2, speed=1.0)
+    hierarchy = build_convection_air_hierarchy(owner, nb, visc, mdot, n, boundary_diagonal=bd)
+    rng = np.random.default_rng(1)
+    r1 = jnp.asarray(rng.standard_normal(n))
+    r2 = jnp.asarray(rng.standard_normal(n))
+
+    def solve(r):
+        return air_multigrid_solve(hierarchy, r, cycles=2)
+
+    assert jnp.allclose(solve(1.5 * r1 - 0.5 * r2), 1.5 * solve(r1) - 0.5 * solve(r2), atol=1e-10)
+
+    # transpose consistency: <u, M r1> == <M^T u, r1>
+    transpose = jax.linear_transpose(solve, r1)
+    u = jnp.asarray(rng.standard_normal(n))
+    assert jnp.allclose(jnp.dot(u, solve(r1)), jnp.dot(transpose(u)[0], r1), rtol=1e-9)
