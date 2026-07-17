@@ -5,8 +5,8 @@ paths:
 
 # Rules — `aquaflux/schemes/` (first-class swappable numerics)
 
-> **Provenance boundary (binding).** This file cites the C++/Fortran precursors and the
-> design notes to inform *your* understanding — that is its job, and why it loads into your
+> **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform
+> *your* understanding — that is its job, and why it loads into your
 > context. Per the root `CLAUDE.md` **Comment Convention**, none of that provenance may
 > reach the shipped surface (`.py` comments/docstrings, `docs/`): cite the *math*, never the
 > reference code, the `.claude/` rules, the design notes, or the author's own papers.
@@ -100,7 +100,7 @@ root `CLAUDE.md` Engineering Principles.
   realization, not a factorization.
 
 ## Binding decisions
-- **Physics and numerics are separate** (`dsl-design-note.md` §3, briefing §7). Scheme
+- **Physics and numerics are separate.** Scheme
   classes live here; operators in `discretization/` consume them via constructor
   injection. An operator never inlines a scheme choice.
 - **Scheme classes are the DRY mechanism** (CLAUDE Principle 2): one scheme class defined
@@ -108,15 +108,15 @@ root `CLAUDE.md` Engineering Principles.
   operators.
 - **Published bottleneck to respect:** Gauss gradients are not formally 2nd-order and
   cap accuracy on skewed grids — for *both* the primary and differentiated fields
-  (DeGroot 2019, `reference-code-findings.md` §D.2). This is *why* the block is
+  (DeGroot 2019). This is *why* the block is
   swappable. Keep the interface clean enough that upgrading it is a drop-in.
 
 ## Testability seam
 Each scheme is tested by reconstructing an analytic field on a refined-mesh sequence and
 asserting the measured order of accuracy — with **no physics involved** (the gradient's
-exact oracle is `∇f` of a known `f`). Use `structured_grid_2d(..., perturb=)` for the
-refinement sequence; **measure error on interior cells only** (boundary cells reconstruct
+exact oracle is `∇f` of a known `f`). Use `tests/support/meshes.py::perturbed_grid_2d` for
+the refinement sequence; **measure error on interior cells only** (boundary cells reconstruct
 at lower order and pollute the rate), and use **random** perturbation (not smooth) to
 expose the true skewed-grid order (smooth perturbations cancel errors and flatter the
-scheme). This harness is also the §11.2 experiment that decides whether the implicit
-gradient earns Schur.
+scheme). This harness is also the experiment that decides whether the implicit gradient
+earns its Schur coupling.

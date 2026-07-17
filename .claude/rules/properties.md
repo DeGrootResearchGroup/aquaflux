@@ -5,8 +5,8 @@ paths:
 
 # Rules — `aquaflux/properties/` (physical property model)
 
-> **Provenance boundary (binding).** This file cites the C++/Fortran precursors and the
-> design notes to inform *your* understanding — that is its job, and why it loads into your
+> **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform
+> *your* understanding — that is its job, and why it loads into your
 > context. Per the root `CLAUDE.md` **Comment Convention**, none of that provenance may
 > reach the shipped surface (`.py` comments/docstrings, `docs/`): cite the *math*, never the
 > reference code, the `.claude/` rules, the design notes, or the author's own papers.
@@ -14,8 +14,7 @@ paths:
 Physical properties (density, viscosity, conductivity, diffusivity, ...) as per-cell fields,
 **decoupled from the numerics**. The C++ precursor put a "transport coefficient" object *inside*
 discretization — the wrong layer. Properties are a physical-model concern operators *consume*; this
-module owns them. Full design in `properties-design-note.md`. Governed by the root `CLAUDE.md`
-Engineering Principles.
+module owns them. Governed by the root `CLAUDE.md` Engineering Principles.
 
 ## Module layout
 - `property.py` — **`Property`** (interface, `evaluate(cell_zones, fields) -> (n_cells,)`) →
@@ -63,7 +62,7 @@ the velocity as the momentum `interp(ρu)·n` (not `interp(ρ)·interp(u)`); the
 Schur term uses the face density `interp(ρ)`. Constant-density is bit-for-bit unchanged; genuine
 variable-density Rhie–Chow physics is not yet validated.
 
-## Not yet built (staged — see `properties-design-note.md`)
+## Not yet built (staged)
 - **Stage 3 — `Calculated`.** A value computed from state fields via a formula (temperature-dependent
   viscosity, ...): `field_names` (static) + differentiable `params` + `formula(params, *fields)`,
   evaluated inside the residual so AD carries its state-dependence into the Jacobian (the limiter

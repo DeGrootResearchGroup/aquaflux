@@ -11,16 +11,13 @@ reactive-transport package) for water and environmental engineering reactors. It
 is *not* a general-purpose CFD code — it is a bespoke tool for the CFD ∩ water
 intersection.
 
-Detailed subsystem guidance is **split out of this file** so it loads only when
-relevant rather than every session:
-
-- **Path-scoped rules** under `.claude/rules/*.md` carry `paths:` frontmatter and
-  auto-load when you read or edit files matching their glob.
-- **On-demand design docs** at the repo root are the authoritative design record —
-  read them when a task needs the detail. They are **internal working documents, not part
-  of the shipped repository** (gitignored; to be folded into user-facing `docs/` later), so
-  they inform your work but must **never** be cross-referenced from `.py` comments/docstrings
-  (see the Comment Convention).
+Detailed subsystem guidance is **split out of this file** into **path-scoped rules** under
+`.claude/rules/*.md`: each carries `paths:` frontmatter and auto-loads when you read or edit a
+file matching its glob, so it loads only when relevant rather than every session. Together with
+this file, those rules are the project's design record — they carry the *why* behind each
+subsystem and must **stand on their own** (a contributor has the `.claude/` tree but none of the
+author's private working notes). When a rule would otherwise point at an external note, inline
+the fact instead.
 
 When you change a subsystem, the matching rule below is the authoritative
 guidance for it — keep it updated as part of the change (this file's Post-Change
@@ -40,20 +37,6 @@ Checklist still governs).
 | `.claude/rules/solve.md` | `aquaflux/solve/**` | Newton on the residual, linear solve with implicit differentiation / `custom_vjp`, the preconditioner risk |
 | `.claude/rules/flow.md` | `aquaflux/flow/**` | coupled p–U block: momentum (reusing advection/diffusion) + Rhie–Chow continuity, lagged `a_P`, monolithic AD-Jacobian solve |
 | `.claude/rules/io.md` | `aquaflux/io/**` | mesh import: the `MeshReader` strategy + the OpenFOAM polyMesh reader (ASCII); parse→assemble→collapse seams, empty-patch 2D collapse (a `mesh/` transform), reserved-name guard |
-
-**On-demand design docs (the design record — read when needed):**
-
-| Doc | Contents |
-|---|---|
-| `differentiable-cfd-project-briefing.md` | the master briefing: scope, the coupled-p–U bet, the Schur-coupling contribution, the bounded novelty claim, framing, open questions |
-| `dsl-design-note.md` | the YAML→AST equation DSL — **the last layer**, built against a validated hardcoded core; §6 sequencing is binding |
-| `preconditioner-design-note.md` | the coupled p–U **outer block preconditioner** (the top research risk) — literature synthesis + chosen direction: block-triangular SIMPLE-type Schur from the lagged `a_P` + frozen multigrid inner. Read before building any preconditioner |
-| `properties-design-note.md` | the **property model** — `Property` (constant / per-zone / calculated, scalar per-cell) collected in a `PropertyModel`, a separate layer from the numerics; the staged plan to retire the loose `gamma`/`mu`/`rho` handling. Read before wiring properties into operators |
-| `parallelization-design-note.md` | **distributed-memory scaling** — Scotch partition → `shard_map` + `ppermute` halo exchange (chosen over the auto-partitioner for unstructured), the automatic-adjoint-of-collectives win, single-device baseline, staged plan. Read before any partitioning / multi-device work |
-| `reference-code-findings.md` | architectural maps of the C++/Fortran reference codes + analysis of the author's two AD papers (self-citable prior art) |
-| `milestone-0-spec.md` | **the first build target**: differentiable transient diffusion, gated on the plane-wall analytical sensitivity ∂θ/∂Bi |
-| `reference/` | the two AD papers (DeGroot 2018, 2019) as PDFs |
-| `reference_codes/` | the C++ framework (architecture to replicate) and Fortran code (p–U coupling reference) |
 
 ---
 
@@ -142,7 +125,7 @@ Rules, with FVM-specific teeth:
   term — each is defined *once*, in one module, and imported everywhere it is
   needed. Never re-derive a formula inline "just here."
 - **Schemes are first-class objects precisely to avoid duplication** — one scheme
-  defined once, consumed by many equations (`dsl-design-note.md` §3). Never inline
+  defined once, consumed by many equations. Never inline
   a scheme choice into an operator.
 - **Constants and geometric mappings live in a single module.** No magic numbers
   scattered across kernels.
@@ -233,16 +216,17 @@ found and fixed**; treat them as binding, not aspirational.
 | Mesh | static connectivity arrays + `segment_sum` scatter | XLA-friendly graph/message-passing layout |
 | Eventual model format | YAML → AST (deferred) | the DSL is the **last** layer; not a dependency yet |
 
-The coupled-block preconditioner is the **top research risk** (briefing §5/§10). The
-first build-on candidate to evaluate is `jaxamg` (briefing §11.8) — do not assume it;
-verify its adjoint is implicit-diff and that it preconditions a *block* system.
+The coupled-block preconditioner is the **top research risk**. The first build-on candidate
+to evaluate is `jaxamg` — do not assume it; verify its adjoint is implicit-diff and that it
+preconditions a *block* system. (See `.claude/rules/solve.md` for the chosen block-triangular
+SIMPLE-type direction and the known traps.)
 
 ---
 
 ## Architecture
 
-The authoritative architecture is in `differentiable-cfd-project-briefing.md`; this
-is the orientation.
+This section is the architectural orientation; the subsystem rules under `.claude/rules/`
+carry the per-package detail.
 
 **Object-oriented over a struct-of-arrays substrate.** The mesh and fields are stored
 as flat arrays (struct-of-arrays: one array holding data for *all* elements, never one
@@ -263,7 +247,7 @@ face→cell / face→node index arrays and the boundary convention. Operators, s
 and even the mesh geometry *compose* it, so each writes only physics/math (Principle 2;
 see `.claude/rules/mesh.md`). The Jacobian and adjoint come from **AD** — there are **no
 hand-derived linearization coefficients** anywhere (the central simplification over the
-reference codes; see `reference-code-findings.md` §C). Each operator writes the full
+reference codes). Each operator writes the full
 physical flux as one honest residual term; AD assembles the matrix.
 
 **Vector algebra lives in one leaf, `aquaflux/vectors.py`.** Per-element operations on fields
@@ -285,11 +269,10 @@ Mesh (SoA topology) + FaceGeometry/CellGeometry            (classes)
    → Newton + implicit-diff linear solve → converged state (and its exact adjoint)
 ```
 
-A Layer-0 escape hatch still lets an advanced user supply a raw flux/source **closure**
-(per `dsl-design-note.md` §7.1) — but aquaflux's own built-in operators, schemes, and
-BCs are OO strategy classes, not closures. The DSL that eventually emits terms is the
-last layer (`dsl-design-note.md` §6). Current build target: `milestone-0-spec.md`
-(hardcoded transient diffusion, no DSL).
+A Layer-0 escape hatch still lets an advanced user supply a raw flux/source **closure** —
+but aquaflux's own built-in operators, schemes, and BCs are OO strategy classes, not
+closures. The DSL that eventually emits terms is the last layer. Current build target:
+hardcoded transient diffusion, no DSL.
 
 ### JAX x64 Mode
 
@@ -320,7 +303,7 @@ pytest                                     # everything
 ### Canonical tests (must always pass once implemented)
 
 - **Primary field (analytical):** plane wall with convection vs the closed-form θ
-  (`milestone-0-spec.md` Gate A).
+  (Gate A).
 - **Sensitivity (analytical) — the point of the project:** `jax.grad` of the converged
   solver w.r.t. `Bi` vs the closed-form ∂θ/∂Bi (Gate B). Every integration suite must
   include an explicit test that `grad` flows through `solve()` without error and without
@@ -348,13 +331,11 @@ this is the exact leak that had to be scrubbed once, so treat it as binding:
    docstring must never say "See `.claude/rules/mesh.md`" or "per `CLAUDE.md`". They are
    tracked in the repository but remain Claude-facing, so the ban is broader than docstrings —
    see the standalone **Claude-Facing-File Reference Ban** below.
-3. **The internal design notes** — the loose top-level `*.md` design record
-   (`differentiable-cfd-project-briefing.md`, `preconditioner-design-note.md`,
-   `parallelization-design-note.md`, `dsl-design-note.md`, the milestone specs,
-   `reference-code-findings.md`). These are internal working documents that are **not part
-   of the shipped repository** (they are gitignored, to be folded into user-facing docs
-   later). Never write "see preconditioner-design-note.md §4" in code — inline the reasoning
-   as prose. (Files under `docs/` **are** shipped and may be cross-referenced.)
+3. **The internal design notes** — the author's private working notes for this project (design
+   records, briefings, milestone specs) kept **outside the repository**. A contributor does not
+   have them, so a comment that says "see the preconditioner design note §4" points at nothing.
+   Never cite one in code — inline the reasoning as prose. (Files under `docs/` **are** shipped
+   and may be cross-referenced.)
 4. **Self-citations to the author's own papers** — do not name the author's own prior work
    as provenance ("the DeGroot-2019 wall", "the DeGroot–Straatman flux"). State the
    *physics* instead ("the Green–Gauss accuracy ceiling on skewed grids", "a flux-continuous
@@ -371,13 +352,14 @@ notes, the author's own PDFs) rot immediately and confuse anyone outside this pr
 *published third-party science, cited properly = fine; pointers to this project's own
 private / internal / Claude-only artifacts = never.*
 
-> **Note for Claude specifically.** The `.claude/rules/*.md` files and the internal design
-> notes **do** and **should** reference the C++/Fortran precursors and each other freely —
-> that provenance is exactly their job, and it is why they load into *your* context. The
-> boundary is the **shipped surface** (`.py` files and `docs/`): what informs your
-> understanding must not leak into a comment or docstring. When a rule file tells you a class
-> "mirrors the C++ `Face<T,3>`", the code comment must say "polygon centre-fan vector area",
-> **not** "mirrors the C++".
+> **Note for Claude specifically.** The `.claude/rules/*.md` files reference the C++/Fortran
+> precursors freely — that provenance is exactly their job, and why they load into *your*
+> context. What they must **not** do is point at the author's private design notes (a
+> contributor does not have them): inline the fact instead. The boundary for shipped code is
+> the **shipped surface** (`.py` files and `docs/`): what informs your understanding must not
+> leak into a comment or docstring. When a rule file tells you a class "mirrors the C++
+> `Face<T,3>`", the code comment must say "polygon centre-fan vector area", **not** "mirrors
+> the C++".
 
 ## Claude-Facing-File Reference Ban
 
@@ -592,10 +574,11 @@ After **every code change**, before considering the task complete, review and ac
 4. **CLAUDE.md** — does this file need updating? (New architecture decision, public API
    change, package-structure change, new dependency.)
 
-5. **Design docs** — does a decision made during implementation change a design doc
-   (`differentiable-cfd-project-briefing.md`, `dsl-design-note.md`, a milestone spec)?
-   The design docs are the project's record — keep them true. Resolve/annotate the
-   relevant open question when a build resolves it.
+5. **Subsystem rules (`.claude/rules/*.md`)** — does a decision made during implementation change
+   the matching rule (a new binding decision, a resolved open question, a changed interface)?
+   These rules are the project's per-subsystem design record — keep them true, and inline the
+   fact rather than pointing at any private note. (If you keep private design notes as well,
+   update those too, but the committed rule is the record contributors rely on.)
 
 6. **CHANGELOG.md** — once one exists (add at first release-worthy change): user-visible
    API/behaviour changes only, under `[Unreleased]`.

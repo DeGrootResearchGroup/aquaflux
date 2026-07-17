@@ -5,8 +5,8 @@ paths:
 
 # Rules — `aquaflux/solve/` (Newton + implicitly-differentiated linear solve)
 
-> **Provenance boundary (binding).** This file cites the C++/Fortran precursors and the
-> design notes to inform *your* understanding — that is its job, and why it loads into your
+> **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform
+> *your* understanding — that is its job, and why it loads into your
 > context. Per the root `CLAUDE.md` **Comment Convention**, none of that provenance may
 > reach the shipped surface (`.py` comments/docstrings, `docs/`): cite the *math*, never the
 > reference code, the `.claude/` rules, the design notes, or the author's own papers.
@@ -61,7 +61,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   differentiated through cleanly (forward-mode `jvp` inside the outer Newton).
 
 ## Binding decisions
-- **Two-level implicit differentiation** (briefing §9 Framing 1): IFT on the converged
+- **Two-level implicit differentiation**: IFT on the converged
   Newton state (skip Newton iterations) + `custom_vjp`/adjoint on each linear solve
   (skip Krylov iterations). **Neither loop is unrolled onto the tape.** Say "no loops on
   the differentiation path," not "no loops."
@@ -69,8 +69,8 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   diff; add a `custom_vjp` only where the library's differentiation is not exact through
   the converged solve. **Verify** the adjoint is a single transpose solve, not an
   unrolled iteration — this is the whole correctness claim.
-- The **preconditioner is the top research risk** (briefing §5/§10). **Literature synthesis is
-  done — see `preconditioner-design-note.md` for the chosen direction and the traps.** Headline: a
+- The **preconditioner is the top research risk.** Literature synthesis is done; the chosen
+  direction and the traps follow. Headline: a
   **block-triangular SIMPLE-type** preconditioner using the lagged `a_P` for the Schur approximation,
   with a **fixed-cycle multigrid inner** pressure solve built once off-jit and frozen; keep the inner
   *fixed* (constant operator) so plain GMRES + the verified transparent-left-PC suffices (a *variable*
@@ -78,7 +78,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   scalar-only** (no coupled/saddle-point, no AMD/TPU) — usable at most as a pressure-Poisson *inner*
   escape-hatch on NVIDIA hardware, **not** the coupled solver or an architectural commitment. Do not
   adopt it on the README's word. **`LSC` original / `PCD` carry equal-order/FEM traps** (use stabilized
-  LSC for Rhie–Chow; PCD needs FEM-BC re-derivation) — details in the design note.
+  LSC for Rhie–Chow; PCD needs FEM-BC re-derivation).
 - **Where preconditioning must attach — measured, do not repeat the wrong lever.** For the
   skewed lid-driven cavity (`CorrectedGreenGauss`, `FirstOrderUpwind`) the per-Newton-step cost
   splits cleanly: the **outer coupled saddle-point GMRES takes 67 steps at 432 dof, 127 at 768
@@ -111,8 +111,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   preconditioner (the 67→127 outer iterations), which is independent of the gradient scheme.
 - **Gate C (the improvement-over-reference claim):** on a non-orthogonal mesh the AD-exact
   Jacobian must converge the linear problem in **one** Newton step, where the reference
-  needed several (`milestone-0-spec.md`, `reference-code-findings.md` §D.3). Guard this
-  with a test.
+  needed several. Guard this with a test.
 
 ## Testability seam
 - The Newton solver is a class constructed with an **injected residual object and

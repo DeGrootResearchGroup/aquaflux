@@ -5,30 +5,30 @@ paths:
 
 # Rules — `aquaflux/flow/` (coupled pressure–velocity)
 
-> **Provenance boundary (binding).** This file cites the C++/Fortran precursors and the
-> design notes to inform *your* understanding — that is its job, and why it loads into your
+> **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform
+> *your* understanding — that is its job, and why it loads into your
 > context. Per the root `CLAUDE.md` **Comment Convention**, none of that provenance may
 > reach the shipped surface (`.py` comments/docstrings, `docs/`): cite the *math*, never the
 > reference code, the `.claude/` rules, the design notes, or the author's own papers.
 
-The coupled p–U block — the project's central bet (briefing §5/§10). Solved **monolithically**
+The coupled p–U block — the project's central bet. Solved **monolithically**
 `(u, v[, w], p)` per cell, not segregated SIMPLE/PISO. Governed by the root `CLAUDE.md`
 Engineering Principles.
 
 ## Status — BUILT (steady laminar, Poiseuille-validated)
 - **`momentum.py` — `MomentumContinuity`.** The coupled residual over the flat state
-  `[vel_0..vel_{dim-1}, pressure]` (briefing's system-first layout; `pack`/`unpack` convert to
+  `[vel_0..vel_{dim-1}, pressure]` (the system-first layout; `pack`/`unpack` convert to
   `(velocity, pressure)`). Per component the momentum balance is a scalar transport of `u_i`
   — advection (`mdot·u_i`) + viscous diffusion (μ as the coefficient) + pressure force
   (`p_f n_i A`) — **reusing `AdvectionFlux` and `DiffusionFlux` verbatim**: per component it builds
-  a `FaceContext` (materials `{"viscosity": μ}` via `DiffusionFlux(coefficient="viscosity")`, the
+  a `FaceContext` (properties `{"viscosity": μ}` via `DiffusionFlux(coefficient="viscosity")`, the
   component gradient, the boundary velocity) and calls the shared operators' `face_flux(component,
   context)`; only the pressure term is new. Continuity is `Σ mdot_f = 0`. The whole Jacobian comes
   from AD; solved by the existing `NewtonSolver` / `ImplicitNewtonSolver`. **Fluid properties come
-  from a `MaterialModel`** (`build(mesh, geom, materials, gradient_scheme, boundary, …)`, must supply
+  from a `PropertyModel`** (`build(mesh, geom, properties, gradient_scheme, boundary, …)`, must supply
   `"viscosity"`+`"density"`; `.viscosity`/`.density` evaluate them per-cell) — see
-  `.claude/rules/materials.md`. **`boundary` is a `BoundaryConditions({name: FlowBoundary})`**
-  collection (constructed like a `MaterialModel`), bound inside `build` via
+  `.claude/rules/properties.md`. **`boundary` is a `BoundaryConditions({name: FlowBoundary})`**
+  collection (constructed like a `PropertyModel`), bound inside `build` via
   `boundary.resolve(mesh.face_patches)` to a single `boundary` field (not three parallel
   `names`/`conditions`/`faces` tuples); `_apply_per_patch` now just binds `mesh.face_cells` to
   `boundary.apply` — do not reintroduce the loose-tuple form or a bare-dict arg (see
@@ -119,8 +119,7 @@ Engineering Principles.
   step 92→11 (432 dof), 191→19 (768), 309→25 (1200) — **~8–12× fewer iterations**, an exact drop-in
   (update diff ~1e-7) and adjoint-transparent (`tests/{unit/test_preconditioner,integration/test_flow_preconditioner}.py`).
   The count still *grows* with mesh because the Jacobi inner is not h-independent — **Stage 2 (a
-  fixed-cycle multigrid inner, built once off-jit and frozen) is what flattens it at >1M cells.** See
-  `preconditioner-design-note.md`.
+  fixed-cycle multigrid inner, built once off-jit and frozen) is what flattens it at >1M cells.**
 
 ## Binding decisions
 - **`a_P` (momentum diagonal) is a LAGGED stabilization coefficient, not the AD Jacobian.**
@@ -134,7 +133,7 @@ Engineering Principles.
   the 4×4-per-face block `A(0:6,4,4)` **by hand** in an outer **Picard** loop with lagged
   coefficients, one **BiCGStab** solve (default PC, **no AMG** — "reasonable convergence" for
   laminar/porous). Our version replaces the hand-assembled block with the AD Jacobian and Newton;
-  the block **preconditioner is the top research risk** (briefing §5/§10) — `lineax` GMRES is the
+  the block **preconditioner is the top research risk** — `lineax` GMRES is the
   current default; AMG (`jaxamg`, unverified) is deferred exactly as the reference deferred it.
 - **Reuse over reimplementation (Principle 2).** Momentum viscous/advection are the existing
   operators with μ as the diffusion coefficient and `mdot` as the mass flux — do **not** re-derive
@@ -147,7 +146,7 @@ Engineering Principles.
   subtract the transient component of `a_P` in the mass-flux d-coefficient** — use `a_P^{RC} = a_P −
   ρV/Δt` (spatial only), not the full `a_P`, or the pressure smoothing (and the `-C` block) vanishes as
   `Δt → 0`, giving checkerboarding *and* a singular SIMPLE Schur in the preconditioner (author's ANSYS
-  experience; see `preconditioner-design-note.md` §10.5 — two `a_P` roles: spatial for Rhie–Chow/`-C`,
+  experience — two `a_P` roles: spatial for Rhie–Chow/`-C`,
   full for SIMPLE's `diag(F)⁻¹`). `momentum_diagonal` already carries an unused `dt` seam. Then **energy
   coupling** (the scalar transport already exists — couple the temperature field to the flow).
 - **Outer block preconditioner — Stage 2: MESH-INDEPENDENT AMG inner is done; the residual is the Schur

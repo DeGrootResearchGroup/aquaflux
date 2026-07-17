@@ -5,8 +5,8 @@ paths:
 
 # Rules — `aquaflux/discretization/` (the Layer-0 residual substrate)
 
-> **Provenance boundary (binding).** This file cites the C++/Fortran precursors and the
-> design notes to inform *your* understanding — that is its job, and why it loads into your
+> **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform
+> *your* understanding — that is its job, and why it loads into your
 > context. Per the root `CLAUDE.md` **Comment Convention**, none of that provenance may
 > reach the shipped surface (`.py` comments/docstrings, `docs/`): cite the *math*, never the
 > reference code, the `.claude/` rules, the design notes, or the author's own papers.
@@ -23,8 +23,8 @@ Principles.
   (`aquaflux.mesh.FaceCellConnectivity`, the substrate-wide operator; see the mesh rule): operators
   gather by **direct indexing** with `face_cells.owner` / `face_cells.safe_neighbour`, and
   `ResidualAssembler._scatter` delegates to `face_cells.scatter_conservative`. So this module owns
-  the *physics* (the flux operators), not the `segment_sum` mechanics.
-  Reference: `reference-code-findings.md` §A.3 (C++ `FaceFluxAccumulator`).
+  the *physics* (the flux operators), not the `segment_sum` mechanics (the role the C++
+  `FaceFluxAccumulator` plays).
 - **No monolithic gathered-state bundle.** Operators are handed a lean shared
   `FaceContext` (`face_flux.py`) — `{face_cells, geometry, boundary_values, gradient, properties}`,
   only the cross-operator or expensive-to-form-once inputs (the reconstructed gradient is a solve, so
@@ -39,8 +39,7 @@ Principles.
   `FaceState` union-of-all-operators bundle + free `gather_face_state` are **deleted** — do not
   reintroduce a god-bundle that every operator must agree on.
 - The per-operator closures for Milestone 0: **diffusion** (the DeGroot–Straatman
-  non-orthogonal-corrected flux, `reference-code-findings.md` §D.1 / §B.6) and the
-  **transient** term (BDF1 at step 1, BDF2 after).
+  non-orthogonal-corrected flux) and the **transient** term (BDF1 at step 1, BDF2 after).
 - The `VolumeSource` seam (zero for pure diffusion, but wired) — this is where turbulence
   production/dissipation and aquakin reaction sources attach. **BUILT** (`source.py`): the
   `VolumeSource` ABC returns the *volume-integrated* source per cell (`∫_cell S dV`, production
@@ -149,12 +148,11 @@ Principles.
 
 ## Binding decisions
 - **No hand-derived linearization. Ever.** The reference codes carry `coeff0`/`coeff1`
-  (C++) and hand-assembled block coefficients (Fortran); **AD deletes all of it**
-  (`reference-code-findings.md` §C.2, §D.3). Write the **full physical flux** as one
-  residual term — including the non-orthogonal correction **in the residual**, not
-  deferred to an explicit RHS as both references must do. AD then puts the correction
-  *in the matrix*, giving a more accurate operator than either reference. This is a
-  Milestone-0 deliverable, not incidental (`milestone-0-spec.md` §5).
+  (C++) and hand-assembled block coefficients (Fortran); **AD deletes all of it**. Write
+  the **full physical flux** as one residual term — including the non-orthogonal correction
+  **in the residual**, not deferred to an explicit RHS as both references must do. AD then
+  puts the correction *in the matrix*, giving a more accurate operator than either reference.
+  This is a Milestone-0 deliverable, not incidental.
 - **Operators are strategy classes** (CLAUDE Principle 1): each is an `equinox.Module`
   implementing a common face-flux / volume-source `Protocol`, constructed with its
   injected schemes, coefficients, and the geometry it reads. Methods are side-effect-free
@@ -162,11 +160,11 @@ Principles.
 - **Operators are injected into the assembly engine, not hard-wired.** The residual
   assembler is constructed with a list of operator strategy objects; it does not import
   specific operators. A test can assemble a residual from a single stub operator. (A
-  Layer-0 escape hatch may accept a raw closure per `dsl-design-note.md` §7.1, but
-  built-in operators are strategy classes.)
+  Layer-0 escape hatch may accept a raw closure, but built-in operators are strategy
+  classes.)
 - **System-first**: the residual is over the whole state vector with a shared DOF
-  layout, never a per-equation matrix (briefing §7). Coupling is inferred by AD from
-  which unknowns a term reads.
+  layout, never a per-equation matrix. Coupling is inferred by AD from which unknowns a
+  term reads.
 
 ## Testability seam
 - The scatter engine must be testable with a hand-made 2–3 cell mesh and a stub
@@ -174,7 +172,7 @@ Principles.
 - Each operator ships an **order-of-accuracy unit test** on an analytic field
   (CLAUDE Principle 1), independent of any solve.
 - The AD Jacobian of the diffusion operator is checked against the C++ non-orthogonal
-  diffusion calculator as a golden numerical oracle (briefing §11.3).
+  diffusion calculator as a golden numerical oracle.
 
 ## One-source-of-truth watch
 Face geometry comes from `aquaflux/mesh`; interpolation/gradient come from

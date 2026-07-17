@@ -5,8 +5,8 @@ paths:
 
 # Rules — `aquaflux/io/` (mesh import/export)
 
-> **Provenance boundary (binding).** This file may cite the C++/Fortran precursors and the design
-> notes to inform *your* understanding. Per the root `CLAUDE.md` **Comment Convention**, none of
+> **Provenance boundary (binding).** This file may cite the C++/Fortran precursors to inform *your*
+> understanding. Per the root `CLAUDE.md` **Comment Convention**, none of
 > that provenance may reach the shipped surface (`.py` comments/docstrings, `docs/`): cite the
 > *math/format*, never the reference code, the `.claude/` rules, the design notes, or the author's
 > own papers. **Acronyms:** spell out compressed-sparse-row (CSR) at first use per file.
