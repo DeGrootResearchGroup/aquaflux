@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook: keep the docs that describe the code from drifting.
+#
+# Whenever a commit changes library or test code, the files that *describe* that
+# code must move with it, in the same change (the Post-Change Checklist
+# "Documentation sync" item): the matching .claude/rules/*.md, CLAUDE.md,
+# README.md, and any affected docs/ page. This is how MaterialModel -> PropertyModel,
+# structured_grid_2d(perturb=), and "git/CI not set up" went stale.
+#
+# This hook does NOT block -- whether a given change needs a doc update is a
+# judgement a script cannot make -- it just surfaces the rule at the moment you
+# commit code, so it is not forgotten.
+#
+# Enable it once per clone (git does not install repo hooks automatically):
+#     git config core.hooksPath .githooks
+#
+# Bypass for a one-off commit with:  git commit --no-verify
+#
+set -euo pipefail
+
+# Only remind when the staged change actually touches Python code (added, copied,
+# modified, or renamed) -- a docs/config-only commit needs no reminder.
+if git diff --cached --name-only --diff-filter=ACMR | grep -qE '^(aquaflux|tests)/.*\.py$'; then
+  echo "pre-commit reminder: this commit changes code -- did you update the docs that" >&2
+  echo "describe it, in this same commit? (Post-Change Checklist -> Documentation sync)" >&2
+  echo "  - the matching .claude/rules/*.md (names, signatures, file paths, BUILT status)" >&2
+  echo "  - CLAUDE.md (architecture / public API / package structure / deps / workflow)" >&2
+  echo "  - README.md and any affected docs/ page" >&2
+  echo "Docs and code land together. (Not blocking; 'git commit --no-verify' to skip.)" >&2
+fi
+
+exit 0

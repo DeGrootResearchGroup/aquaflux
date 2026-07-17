@@ -453,6 +453,13 @@ gate is available locally through the committed pre-push hook (`.githooks/pre-pu
 it once per clone with `git config core.hooksPath .githooks`, and it runs the identical two
 commands before every push, so a slip is caught locally instead of as a red check on the PR.
 
+The same `core.hooksPath` setting also enables the committed **pre-commit** hook
+(`.githooks/pre-commit`): when a commit touches `.py` code it prints a **non-blocking** reminder
+to update the docs that describe that code (the Post-Change Checklist's **Documentation sync**
+item) — the guard against the `.claude/rules/`, `CLAUDE.md`, `README`, and `docs/` drifting out
+of step with the code. It never blocks a commit (doc-sync is a judgement a script cannot make);
+bypass its output with `git commit --no-verify`.
+
 ### Documentation
 
 User-facing docs live in `docs/` as a **Sphinx site written in MyST Markdown**, mirroring
@@ -571,16 +578,26 @@ After **every code change**, before considering the task complete, review and ac
    - New analytical/published benchmark → validation test.
    - Bug fix → regression test.
 
-4. **CLAUDE.md** — does this file need updating? (New architecture decision, public API
-   change, package-structure change, new dependency.)
+4. **Documentation sync (binding — this is how the docs stop drifting).** A code change is
+   **not complete** until every file that *describes* the changed code is updated in the **same
+   change** — docs move with code, never "fix it later." When you rename a symbol, change a
+   signature/default, move a file, add a dependency, or change behaviour, update each of these
+   that applies (grep the repo for the old name/path to find every mention):
+   - **The matching `.claude/rules/*.md`** — the per-subsystem design record: binding decisions,
+     interfaces, class/function names, file paths, and `BUILT` / `Not yet built` status. Inline
+     the fact rather than pointing at any private note.
+   - **`CLAUDE.md`** — architecture decision, public-API or package-structure change, new
+     dependency, or workflow/tooling change.
+   - **`README.md`** — public API, install/dependencies, examples, or the feature list.
+   - **`docs/`** — any Sphinx page whose prose or cross-references the change touches.
 
-5. **Subsystem rules (`.claude/rules/*.md`)** — does a decision made during implementation change
-   the matching rule (a new binding decision, a resolved open question, a changed interface)?
-   These rules are the project's per-subsystem design record — keep them true, and inline the
-   fact rather than pointing at any private note. (If you keep private design notes as well,
-   update those too, but the committed rule is the record contributors rely on.)
+   Rule of thumb: if a reader of one of these files would now be **misled** by what it says,
+   fixing it is part of your change, not a follow-up. (The `MaterialModel`→`PropertyModel`,
+   `structured_grid_2d(perturb=)`, and "git/CI not set up" drifts were all exactly this gap.)
+   The committed **`.githooks/pre-commit`** reminder surfaces this whenever a commit touches
+   `.py` code.
 
-6. **CHANGELOG.md** — once one exists (add at first release-worthy change): user-visible
+5. **CHANGELOG.md** — once one exists (add at first release-worthy change): user-visible
    API/behaviour changes only, under `[Unreleased]`.
 
 If the answer to any of the above is yes, make those updates as part of the same task
