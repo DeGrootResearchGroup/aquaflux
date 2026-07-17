@@ -30,6 +30,7 @@ converged solution (the outer solve terminates on the true residual).
 
 from __future__ import annotations
 
+import heapq
 from collections.abc import Callable
 from typing import NamedTuple
 
@@ -649,7 +650,12 @@ def smoothed_multigrid_solve(
 
 
 def _convection_diffusion_csr(
-    owner: np.ndarray, nb: np.ndarray, visc: np.ndarray, mdot: np.ndarray, n: int
+    owner: np.ndarray,
+    nb: np.ndarray,
+    visc: np.ndarray,
+    mdot: np.ndarray,
+    n: int,
+    boundary_diagonal: np.ndarray | None = None,
 ) -> sp.csr_matrix:
     """First-order-upwind convection-diffusion operator ``A`` as a scipy CSR matrix (nonsymmetric).
 
@@ -661,6 +667,7 @@ def _convection_diffusion_csr(
 
     with the matching diagonal contributions ``visc + max(mdot, 0)`` at P and ``visc + max(-mdot, 0)``
     at N — so ``A`` is a diagonally dominant M-matrix, nonsymmetric wherever ``mdot != 0``.
+    ``boundary_diagonal`` (per cell) adds the boundary-face stiffness to the diagonal.
     """
     o, m = np.asarray(owner), np.asarray(nb)
     v, f = np.asarray(visc), np.asarray(mdot)
@@ -669,7 +676,10 @@ def _convection_diffusion_csr(
     rows = np.concatenate([o, m, o, m])
     cols = np.concatenate([m, o, o, m])
     vals = np.concatenate([-(v + up_in), -(v + up_out), v + up_out, v + up_in])
-    return sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
+    a = sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
+    if boundary_diagonal is not None:
+        a = a + sp.diags(np.asarray(boundary_diagonal))
+    return a.tocsr()
 
 
 def build_convection_hierarchy(
@@ -717,9 +727,7 @@ def build_convection_hierarchy(
     SmoothedHierarchy
         Frozen finest-to-coarsest general-sparse levels for :func:`convection_multigrid_solve`.
     """
-    a = _convection_diffusion_csr(owner, nb, visc, mdot, n)
-    if boundary_diagonal is not None:
-        a = a + sp.diags(np.asarray(boundary_diagonal))
+    a = _convection_diffusion_csr(owner, nb, visc, mdot, n, boundary_diagonal)
     levels: list[_SparseLevel] = []
     while True:
         a_sym = (0.5 * (a + a.T)).tocsr()  # aggregation + prolongation use the symmetric part
@@ -806,4 +814,377 @@ def convection_multigrid_solve(
     for _ in range(cycles):
         residual = b - _sparse_apply(hierarchy.levels[0], x)
         x = x + _smoothed_v_cycle(hierarchy, residual, 0, smoother)
+    return x
+
+
+# --- local approximate ideal restriction (lAIR) -----------------------------------------
+#
+# Aggregation multigrid (symmetric or convection-diffusion above) coarsens by grouping cells and, for
+# strong convection, its deep Galerkin recursion is not stable: the coarse operators lose the flow
+# structure and the coarse correction amplifies error. Reduction-based AMG takes the opposite view. A
+# coarse/fine (C/F) splitting partitions the unknowns; with ``A = [[A_ff, A_fc], [A_cf, A_cc]]`` the
+# *ideal* restriction ``R = [-A_cf A_ff⁻¹, I]`` makes the coarse operator the exact Schur complement, so
+# eliminating the F-points reproduces the fine operator's coarse action. For a convection-dominated
+# operator (nearly triangular in the flow ordering) that elimination is nearly exact, so a few V-cycles
+# behave almost like a direct solve — and the recursion is Peclet-robust and mesh-independent where
+# aggregation is not (Manteuffel, Ruge & Southworth, SISC 2018; Southworth et al.).
+#
+# lAIR (local AIR) approximates ``A_cf A_ff⁻¹`` by a **local** solve per C-point: over the F-neighbours
+# within a few steps, solve ``A_ff[N,N]^T z = -A[g, N]^T`` for the restriction weights. Interpolation is
+# the cheap ``one-point`` rule (each F-point takes its strongest C-neighbour); the smoother is FC-Jacobi
+# (a few F-point sweeps then a C-point sweep) — the F-relaxation is what makes it work for advection. The
+# whole setup is integer/sparse graph work done once off the jit path in scipy/numpy; the apply is
+# frozen ``segment_sum`` matvecs over ``R`` / ``P`` / ``A_c`` and a masked FC-Jacobi, and transposes for
+# the adjoint (``R != Pᵀ`` is handled by the transpose of the linear apply).
+
+
+class _AirLevel(NamedTuple):
+    """One lAIR level: the operator, its restriction and prolongation, and the C/F masks — all frozen.
+
+    Unlike :class:`_SparseLevel` (which stores one prolongation and takes ``R = Pᵀ``), a reduction-based
+    level carries an **independent** restriction ``R`` (fine → coarse) and prolongation ``P`` (coarse →
+    fine), plus the fine/coarse masks the FC-Jacobi smoother relaxes over.
+    """
+
+    n: int  # cells at this level (static)
+    row: jnp.ndarray  # (nnz,) COO row of the level operator A
+    col: jnp.ndarray  # (nnz,) COO col
+    val: jnp.ndarray  # (nnz,) COO value
+    diagonal: jnp.ndarray  # (n,) diagonal of A
+    f_mask: jnp.ndarray  # (n,) 1.0 on fine points, else 0.0
+    c_mask: jnp.ndarray  # (n,) 1.0 on coarse points, else 0.0
+    r_row: jnp.ndarray | None  # (rnnz,) restriction COO coarse row; None on coarsest
+    r_col: jnp.ndarray | None  # (rnnz,) restriction COO fine col
+    r_val: jnp.ndarray | None  # (rnnz,) restriction value
+    p_row: jnp.ndarray | None  # (pnnz,) prolongation COO fine row; None on coarsest
+    p_col: jnp.ndarray | None  # (pnnz,) prolongation COO coarse col
+    p_val: jnp.ndarray | None  # (pnnz,) prolongation value
+    coarse_inv: jnp.ndarray | None  # dense pseudo-inverse (coarsest level only); None otherwise
+    n_coarse: int  # next-coarser cell count (static; 0 on coarsest)
+
+
+class AirHierarchy(NamedTuple):
+    """A built lAIR hierarchy: reduction-based levels, finest to coarsest."""
+
+    levels: tuple[_AirLevel, ...]
+
+
+def _strength_classical(a: sp.csr_matrix, theta: float) -> sp.csr_matrix:
+    """Classical strength graph ``S``: ``S[i,j]=1`` iff ``|A_ij| >= theta · max_{k!=i}|A_ik|``.
+
+    Row ``i`` marks the connections cell ``i`` *depends on strongly* — for an upwind operator these are
+    the flow-aligned couplings that must be honoured by the coarsening and the restriction.
+    """
+    a = a.tocsr()
+    n = a.shape[0]
+    abs_a = a.copy()
+    abs_a.data = np.abs(abs_a.data)
+    rows: list[int] = []
+    cols: list[int] = []
+    indptr, indices, data = abs_a.indptr, abs_a.indices, abs_a.data
+    for i in range(n):
+        s, e = indptr[i], indptr[i + 1]
+        ci, vi = indices[s:e], data[s:e]
+        off = ci != i
+        if not off.any():
+            continue
+        m = vi[off].max()
+        if m == 0.0:
+            continue
+        strong = ci[off][vi[off] >= theta * m]
+        rows.extend([i] * len(strong))
+        cols.extend(strong.tolist())
+    return sp.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
+
+
+def _rs_split(strength: sp.csr_matrix) -> np.ndarray:
+    """Ruge--Stueben first-pass C/F splitting (greedy, influence-weighted). Returns 1 = C, 0 = F.
+
+    Repeatedly makes the highest-influence undecided point coarse (a point's influence is how many
+    others depend strongly on it), marks its dependents fine, and boosts the influence of what a new
+    fine point depends on — so coarse points cover the strong connections. A max-heap keeps it
+    ``O(nnz log n)``.
+    """
+    strength = strength.tocsr()
+    n = strength.shape[0]
+    dependents = strength.T.tocsr()  # dependents[i] = points that depend on i (its influence set)
+    influence = np.asarray(strength.sum(axis=0)).ravel().astype(float)
+    split = np.full(n, -1, dtype=np.int64)
+    heap = [(-influence[i], i) for i in range(n)]
+    heapq.heapify(heap)
+    while heap:
+        neg, i = heapq.heappop(heap)
+        if split[i] != -1 or -neg != influence[i]:
+            continue  # stale heap entry (influence was bumped since this was pushed)
+        split[i] = 1  # coarse
+        for j in dependents.indices[dependents.indptr[i] : dependents.indptr[i + 1]]:
+            if split[j] == -1:
+                split[j] = 0  # a dependent of a coarse point becomes fine
+                row = strength.indices[strength.indptr[j] : strength.indptr[j + 1]]
+                for k in row:  # boost the influence of what this fine point depends on
+                    if split[k] == -1:
+                        influence[k] += 1.0
+                        heapq.heappush(heap, (-influence[k], k))
+    split[split == -1] = 1  # any leftovers -> coarse (a safe singleton)
+    return split
+
+
+def _one_point_interpolation(a: sp.csr_matrix, split: np.ndarray) -> sp.csr_matrix:
+    """One-point interpolation ``P``: each F-point takes its strongest C-neighbour; C-points injected."""
+    a = a.tocsr()
+    n = a.shape[0]
+    coarse = np.where(split == 1)[0]
+    coarse_index = -np.ones(n, dtype=np.int64)
+    coarse_index[coarse] = np.arange(len(coarse))
+    abs_a = a.copy()
+    abs_a.data = np.abs(abs_a.data)
+    rows: list[int] = []
+    cols: list[int] = []
+    vals: list[float] = []
+    for i in range(n):
+        if split[i] == 1:
+            rows.append(i)
+            cols.append(int(coarse_index[i]))
+            vals.append(1.0)
+            continue
+        s, e = abs_a.indptr[i], abs_a.indptr[i + 1]
+        ci, vi = abs_a.indices[s:e], abs_a.data[s:e]
+        c_neighbour = (split[ci] == 1) & (ci != i)
+        if c_neighbour.any():
+            j = ci[c_neighbour][np.argmax(vi[c_neighbour])]
+            rows.append(i)
+            cols.append(int(coarse_index[j]))
+            vals.append(1.0)  # an F-point with no C-neighbour interpolates nothing (zero row)
+    return sp.csr_matrix((vals, (rows, cols)), shape=(n, len(coarse)))
+
+
+def _lair_restriction(a: sp.csr_matrix, split: np.ndarray, degree: int) -> sp.csr_matrix:
+    """lAIR restriction ``R``: per C-point, a local approximate-ideal solve over its F-neighbourhood.
+
+    The ideal restriction row for coarse point ``g`` solves ``R_g A_ff = -A[g, F]``; localised to the
+    F-points ``N`` within ``degree`` steps of ``g`` this is the small dense solve ``A_ff[N,N]^T z =
+    -A[g, N]^T``, with the identity entry ``R[g, g] = 1``.
+    """
+    a = a.tocsr()
+    n = a.shape[0]
+    coarse = np.where(split == 1)[0]
+    coarse_index = -np.ones(n, dtype=np.int64)
+    coarse_index[coarse] = np.arange(len(coarse))
+    fine = split == 0
+    indptr, indices = a.indptr, a.indices
+    rows: list[int] = []
+    cols: list[int] = []
+    vals: list[float] = []
+    for g in coarse:
+        ci = int(coarse_index[g])
+        rows.append(ci)
+        cols.append(int(g))
+        vals.append(1.0)  # identity on the C-point itself
+        neighbourhood: set[int] = set()
+        frontier = {int(g)}
+        for _ in range(degree):  # F-points within `degree` steps of g
+            nxt: set[int] = set()
+            for u in frontier:
+                for v in indices[indptr[u] : indptr[u + 1]]:
+                    v = int(v)
+                    if fine[v] and v not in neighbourhood:
+                        neighbourhood.add(v)
+                        nxt.add(v)
+            frontier = nxt
+        if not neighbourhood:
+            continue
+        nb = np.array(sorted(neighbourhood))
+        a_ff = a[np.ix_(nb, nb)].toarray()
+        rhs = np.asarray(a[g, nb].todense()).ravel()
+        try:
+            z = np.linalg.solve(a_ff.T, -rhs)
+        except np.linalg.LinAlgError:
+            z = np.linalg.lstsq(a_ff.T, -rhs, rcond=None)[0]
+        rows.extend([ci] * len(nb))
+        cols.extend(nb.tolist())
+        vals.extend(z.tolist())
+    return sp.csr_matrix((vals, (rows, cols)), shape=(len(coarse), n))
+
+
+def _air_level(a: sp.csr_matrix, split: np.ndarray, restriction, prolongation) -> _AirLevel:
+    """Freeze a scipy operator, its C/F masks, and (optional) restriction/prolongation into JAX arrays."""
+    a_coo = a.tocoo()
+    coarsest = restriction is None
+    r = None if coarsest else restriction.tocoo()
+    p = None if coarsest else prolongation.tocoo()
+    return _AirLevel(
+        n=a.shape[0],
+        row=jnp.asarray(a_coo.row),
+        col=jnp.asarray(a_coo.col),
+        val=jnp.asarray(a_coo.data),
+        diagonal=jnp.asarray(a.diagonal()),
+        f_mask=jnp.asarray((split == 0).astype(np.float64)),
+        c_mask=jnp.asarray((split == 1).astype(np.float64)),
+        r_row=None if coarsest else jnp.asarray(r.row),
+        r_col=None if coarsest else jnp.asarray(r.col),
+        r_val=None if coarsest else jnp.asarray(r.data),
+        p_row=None if coarsest else jnp.asarray(p.row),
+        p_col=None if coarsest else jnp.asarray(p.col),
+        p_val=None if coarsest else jnp.asarray(p.data),
+        coarse_inv=jnp.asarray(np.linalg.pinv(a.toarray())) if coarsest else None,
+        n_coarse=0 if coarsest else prolongation.shape[1],
+    )
+
+
+def build_air_hierarchy(
+    a: sp.csr_matrix,
+    *,
+    theta: float = 0.25,
+    degree: int = 2,
+    max_coarse: int = 20,
+    max_levels: int = 20,
+) -> AirHierarchy:
+    """Build the lAIR hierarchy — call once, off the jit path (uses ``scipy.sparse`` / ``numpy``).
+
+    Parameters
+    ----------
+    a : scipy.sparse matrix
+        The (nonsymmetric) fine operator, e.g. a frozen convection-diffusion momentum block.
+    theta : float
+        Classical strength-of-connection threshold in ``(0, 1)`` for the C/F splitting.
+    degree : int
+        The F-neighbourhood radius (in graph steps) of the local approximate-ideal restriction solves.
+    max_coarse : int
+        Stop coarsening once a level has at most this many cells (solved directly there).
+    max_levels : int
+        Hard cap on the number of levels.
+
+    Returns
+    -------
+    AirHierarchy
+        Frozen finest-to-coarsest reduction-based levels for :func:`air_multigrid_solve`.
+    """
+    a = a.tocsr()
+    levels: list[_AirLevel] = []
+    while True:
+        n = a.shape[0]
+        if n <= max_coarse or len(levels) + 1 >= max_levels:
+            levels.append(_air_level(a, np.ones(n, dtype=np.int64), None, None))
+            break
+        split = _rs_split(_strength_classical(a, theta))
+        n_coarse = int((split == 1).sum())
+        if n_coarse == 0 or n_coarse == n:  # degenerate coarsening -> solve here
+            levels.append(_air_level(a, np.ones(n, dtype=np.int64), None, None))
+            break
+        prolongation = _one_point_interpolation(a, split)
+        restriction = _lair_restriction(a, split, degree)
+        levels.append(_air_level(a, split, restriction, prolongation))
+        a = (restriction @ a @ prolongation).tocsr()  # Galerkin coarse operator R A P
+    return AirHierarchy(tuple(levels))
+
+
+def build_convection_air_hierarchy(
+    owner: np.ndarray,
+    nb: np.ndarray,
+    visc: np.ndarray,
+    mdot: np.ndarray,
+    n: int,
+    boundary_diagonal: np.ndarray | None = None,
+    *,
+    theta: float = 0.25,
+    degree: int = 2,
+    max_coarse: int = 20,
+    max_levels: int = 20,
+) -> AirHierarchy:
+    """Build the lAIR hierarchy for a first-order-upwind convection-diffusion operator — off-jit.
+
+    Assembles the frozen ``viscous + upwind`` momentum operator (:func:`_convection_diffusion_csr`, the
+    same one :func:`build_convection_hierarchy` uses) and coarsens it by reduction (:func:`build_air_hierarchy`).
+    The arguments match :func:`build_convection_hierarchy`; see :func:`build_air_hierarchy` for the lAIR
+    parameters.
+    """
+    a = _convection_diffusion_csr(owner, nb, visc, mdot, n, boundary_diagonal)
+    return build_air_hierarchy(
+        a, theta=theta, degree=degree, max_coarse=max_coarse, max_levels=max_levels
+    )
+
+
+def _coo_apply(row, col, val, x: jnp.ndarray, n_out: int) -> jnp.ndarray:
+    """General sparse matvec ``M x`` for a COO operator with ``n_out`` output rows."""
+    return segment_sum(val * x[col], row, n_out)
+
+
+def _fc_jacobi(
+    level: _AirLevel, b: jnp.ndarray, x: jnp.ndarray, f_iters: int, c_iters: int, omega: float
+) -> jnp.ndarray:
+    """FC-Jacobi smoother: ``f_iters`` F-point damped-Jacobi sweeps then ``c_iters`` C-point sweeps.
+
+    Each sweep relaxes only the fine (or coarse) block via the mask, matrix-free and a fixed linear
+    operator. The F-relaxation is the reduction-based smoother that suppresses the F-point error the
+    ideal restriction is built to eliminate.
+    """
+    inv_diagonal = 1.0 / level.diagonal
+    for _ in range(f_iters):
+        x = x + omega * level.f_mask * inv_diagonal * (b - _sparse_apply(level, x))
+    for _ in range(c_iters):
+        x = x + omega * level.c_mask * inv_diagonal * (b - _sparse_apply(level, x))
+    return x
+
+
+def _air_v_cycle(
+    hierarchy: AirHierarchy,
+    b: jnp.ndarray,
+    level_index: int,
+    f_iters: int,
+    c_iters: int,
+    omega: float,
+) -> jnp.ndarray:
+    """One reduction-based V-cycle (recursion unrolled at trace time), pre/post FC-Jacobi smoothed."""
+    level = hierarchy.levels[level_index]
+    if level.coarse_inv is not None:  # coarsest: a direct (dense pseudo-inverse) solve
+        return level.coarse_inv @ b
+
+    x = _fc_jacobi(level, b, jnp.zeros_like(b), f_iters, c_iters, omega)  # pre-smooth
+    residual = b - _sparse_apply(level, x)
+    coarse_residual = _coo_apply(level.r_row, level.r_col, level.r_val, residual, level.n_coarse)
+    coarse_error = _air_v_cycle(
+        hierarchy, coarse_residual, level_index + 1, f_iters, c_iters, omega
+    )
+    x = x + _coo_apply(level.p_row, level.p_col, level.p_val, coarse_error, level.n)  # prolong
+    return _fc_jacobi(level, b, x, f_iters, c_iters, omega)  # post-smooth
+
+
+def air_multigrid_solve(
+    hierarchy: AirHierarchy,
+    b: jnp.ndarray,
+    *,
+    cycles: int = 1,
+    f_iters: int = 2,
+    c_iters: int = 1,
+    omega: float = 1.0,
+) -> jnp.ndarray:
+    """A **fixed** number of lAIR V-cycles for ``A x = b`` — the Peclet-robust, mesh-independent inner
+    solve for a convection-dominated (velocity) block.
+
+    The hierarchy is frozen (built once off-jit); a fixed cycle count with fixed FC-Jacobi smoothing
+    and a direct coarse solve makes ``b -> x`` a constant linear operator, so it is a valid frozen left
+    preconditioner under plain GMRES and transposes cleanly for the adjoint.
+
+    Parameters
+    ----------
+    hierarchy : AirHierarchy
+        From :func:`build_air_hierarchy`.
+    b : jnp.ndarray
+        Right-hand side, shape ``(n_cells,)``.
+    cycles : int
+        Number of V-cycles (static).
+    f_iters, c_iters : int
+        Fine- and coarse-point Jacobi sweeps per smoother application (static).
+    omega : float
+        Jacobi damping factor (static).
+
+    Returns
+    -------
+    jnp.ndarray
+        The approximate solution ``x``, shape ``(n_cells,)``.
+    """
+    x = jnp.zeros_like(b)
+    for _ in range(cycles):
+        residual = b - _sparse_apply(hierarchy.levels[0], x)
+        x = x + _air_v_cycle(hierarchy, residual, 0, f_iters, c_iters, omega)
     return x

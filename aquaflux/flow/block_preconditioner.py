@@ -31,6 +31,8 @@ from jax.ops import segment_sum
 
 from aquaflux.schemes.interpolation import interpolate_owner_neighbour
 from aquaflux.solve.multigrid import (
+    air_multigrid_solve,
+    build_convection_air_hierarchy,
     build_convection_hierarchy,
     build_hierarchy,
     build_smoothed_hierarchy,
@@ -46,7 +48,7 @@ from .rhie_chow import momentum_diagonal
 
 if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, MeshGeometry
-    from aquaflux.solve.multigrid import MultigridHierarchy, SmoothedHierarchy
+    from aquaflux.solve.multigrid import AirHierarchy, MultigridHierarchy, SmoothedHierarchy
 
     from .momentum import MomentumContinuity
 
@@ -371,13 +373,18 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
     diagonal is exactly the momentum diagonal ``a_P`` at the reference, so the per-iterate symmetric
     rescaling to the current ``a_P`` is diagonal-exact — the same tracking the viscous block uses.
 
-    The convection-diffusion operator is a diagonally dominant M-matrix inverted by a damped-Jacobi
-    V-cycle (matrix-free, transposable for the adjoint). The reference mass flux is taken from a
-    representative operating state supplied at build time; a cold (zero-flux) reference reduces this to
-    the viscous block.
+    The reference mass flux is taken from a representative operating state supplied at build time; a
+    cold (zero-flux) reference reduces this to the viscous block. Two coarsening strategies (all
+    matrix-free and transposable for the adjoint), selected by ``method``:
+
+    * ``"twolevel"`` — a single aggregation with a direct coarse solve, inverted by a damped-Jacobi
+      V-cycle. Stable across cell Peclet, but the direct coarse solve does not scale to large meshes.
+    * ``"air"`` — a reduction-based hierarchy (local approximate ideal restriction) that coarsens all
+      the way down and stays Peclet-robust and mesh-independent, inverted by an FC-Jacobi V-cycle.
     """
 
-    hierarchy: SmoothedHierarchy
+    hierarchy: SmoothedHierarchy | AirHierarchy
+    method: str = eqx.field(static=True)
     dim: int = eqx.field(static=True)
     v_cycles: int = eqx.field(static=True)
     sweeps: int = eqx.field(static=True)
@@ -394,6 +401,7 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
         v_cycles: int,
         reference_state: jnp.ndarray,
         *,
+        method: str = "twolevel",
         sweeps: int = 2,
         omega: float = 0.8,
     ) -> SmoothedAmgConvectionVelocity:
@@ -427,34 +435,38 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
         np.add.at(interior_diagonal, owner_e, viscous_int + np.maximum(mdot_int, 0.0))
         np.add.at(interior_diagonal, nb_e, viscous_int + np.maximum(-mdot_int, 0.0))
         boundary_diagonal = np.asarray(reference_a_p) - interior_diagonal
-        # A single aggregation with a direct coarse solve (two-level): the aggregation coarse space
-        # stays a stable correction at high cell Peclet, where a deeper Galerkin recursion does not.
-        hierarchy = build_convection_hierarchy(
-            owner_e,
-            nb_e,
-            viscous_int,
-            mdot_int,
-            n_cells,
-            boundary_diagonal=boundary_diagonal,
-            max_levels=2,
+        args = (owner_e, nb_e, viscous_int, mdot_int, n_cells)
+        hierarchy: SmoothedHierarchy | AirHierarchy
+        if method == "air":
+            # Reduction-based (lAIR) coarsening: coarsens fully and stays Peclet-robust /
+            # mesh-independent, so it scales where the two-level direct coarse solve cannot.
+            hierarchy = build_convection_air_hierarchy(*args, boundary_diagonal=boundary_diagonal)
+        elif method == "twolevel":
+            # A single aggregation with a direct coarse solve: the aggregation coarse space stays a
+            # stable correction at high cell Peclet, where a deeper Galerkin recursion does not.
+            hierarchy = build_convection_hierarchy(
+                *args, boundary_diagonal=boundary_diagonal, max_levels=2
+            )
+        else:
+            raise ValueError(f"unknown convection method {method!r}; use 'twolevel' or 'air'")
+        return cls(hierarchy, method, assembler.mesh.dim, v_cycles, sweeps, omega)
+
+    def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
+        """One momentum-component inner solve: the reduction-based (lAIR) or two-level V-cycle."""
+        if self.method == "air":
+            return air_multigrid_solve(self.hierarchy, b, cycles=self.v_cycles)
+        return convection_multigrid_solve(
+            self.hierarchy, b, cycles=self.v_cycles, sweeps=self.sweeps, omega=self.omega
         )
-        return cls(hierarchy, assembler.mesh.dim, v_cycles, sweeps, omega)
 
     def apply(self, a_p: jnp.ndarray) -> _VelocitySolve:
+        # Rescale the frozen reference operator's solve to the current a_P: A_cur ≈ D A_ref D with
+        # D = sqrt(a_P / diag_ref), so A_cur⁻¹ ≈ D⁻¹ A_ref⁻¹ D⁻¹ (diagonal-exact, since diag_ref = a_P
+        # at the reference). The convection off-diagonal structure stays frozen at the reference.
         inv_scale = jnp.sqrt(self.hierarchy.levels[0].diagonal / a_p)
 
         def solve(ru: jnp.ndarray) -> jnp.ndarray:
-            columns = [
-                inv_scale
-                * convection_multigrid_solve(
-                    self.hierarchy,
-                    inv_scale * ru[:, i],
-                    cycles=self.v_cycles,
-                    sweeps=self.sweeps,
-                    omega=self.omega,
-                )
-                for i in range(self.dim)
-            ]
+            columns = [inv_scale * self._inner_solve(inv_scale * ru[:, i]) for i in range(self.dim)]
             return jnp.stack(columns, axis=1)
 
         return solve
@@ -514,13 +526,15 @@ class BlockPreconditioner(eqx.Module):
             The coupled flow residual assembler.
         inner : {"smoothed", "multigrid", "jacobi"}
             The inner pressure-Schur solver strategy.
-        velocity : {"smoothed", "convection"}
+        velocity : {"smoothed", "convection", "convection-air"}
             The velocity-block strategy (only for ``inner="smoothed"``). ``"smoothed"`` builds an AMG
             on the viscous (symmetric) momentum operator — mesh-independent but Peclet-blind, so it
-            bounds the reachable Reynolds number. ``"convection"`` builds a convection-aware AMG on the
-            frozen ``viscous + first-order-upwind`` operator (see
+            bounds the reachable Reynolds number. ``"convection"`` and ``"convection-air"`` build a
+            convection-aware hierarchy on the frozen ``viscous + first-order-upwind`` operator (see
             :class:`SmoothedAmgConvectionVelocity`), which stays a good momentum-block approximation as
-            convection strengthens; it needs a representative ``reference_state``.
+            convection strengthens and needs a representative ``reference_state``: ``"convection"`` is
+            the stable two-level method, ``"convection-air"`` the reduction-based (lAIR) hierarchy that
+            is Peclet-robust *and* mesh-independent (scales to large meshes).
         reference_state : jnp.ndarray, optional
             A representative operating flow state whose Rhie--Chow mass flux freezes the convective
             linearisation of the ``velocity="convection"`` block. ``None`` uses a cold (zero-flux)
@@ -550,8 +564,10 @@ class BlockPreconditioner(eqx.Module):
             raise ValueError(
                 f"unknown inner solver {inner!r}; use 'smoothed', 'multigrid' or 'jacobi'"
             )
-        if velocity not in ("smoothed", "convection"):
-            raise ValueError(f"unknown velocity block {velocity!r}; use 'smoothed' or 'convection'")
+        if velocity not in ("smoothed", "convection", "convection-air"):
+            raise ValueError(
+                f"unknown velocity block {velocity!r}; use 'smoothed', 'convection' or 'convection-air'"
+            )
         if schur_scaling not in ("simple", "msimpler"):
             raise ValueError(f"unknown schur_scaling {schur_scaling!r}; use 'simple' or 'msimpler'")
         geometry = _SchurGeometry.of(assembler)
@@ -586,11 +602,18 @@ class BlockPreconditioner(eqx.Module):
                 reference_diagonal=schur_mass_diagonal,
             )
             velocity_block: VelocityBlockSolver
-            if velocity == "convection":
+            if velocity in ("convection", "convection-air"):
                 if reference_state is None:
                     reference_state = assembler.initial_state()
                 velocity_block = SmoothedAmgConvectionVelocity.build(
-                    assembler, owner_e, nb_e, interior, n_cells, v_cycles, reference_state
+                    assembler,
+                    owner_e,
+                    nb_e,
+                    interior,
+                    n_cells,
+                    v_cycles,
+                    reference_state,
+                    method="air" if velocity == "convection-air" else "twolevel",
                 )
             else:
                 velocity_block = SmoothedAmgVelocity.build(

@@ -329,3 +329,41 @@ def test_convection_velocity_block_is_differentiable() -> None:
         2 * step
     )
     assert abs(grad - finite_difference) < 1e-2 * abs(finite_difference)
+
+
+@pytest.mark.slow
+def test_air_velocity_block_converges_and_is_differentiable() -> None:
+    """The reduction-based (lAIR) velocity block converges the wall-graded channel and stays
+    reverse-differentiable.
+
+    ``velocity="convection-air"`` coarsens the frozen convection-diffusion momentum operator by local
+    approximate ideal restriction — Peclet-robust *and* mesh-independent (so it scales where the
+    two-level ``"convection"`` block's direct coarse solve cannot). Its restriction and prolongation
+    differ (``R != Pᵀ``) but the frozen apply still transposes cleanly, so the implicit-function-theorem
+    adjoint is untouched and the gradient matches finite differences.
+    """
+    continuation = PseudoTransientContinuation.build(
+        _channel(32, 24, 2e-3, wall_growth=1.15),  # Re = 500, wall-graded
+        schur_scaling="msimpler",
+        velocity="convection-air",
+        reference_state=_uniform_reference(_channel(32, 24, 2e-3, wall_growth=1.15)),
+    )
+
+    def mean_speed(mu):
+        assembler = _channel(32, 24, mu, wall_growth=1.15)
+        state = _solve(assembler, continuation=continuation)
+        velocity, _ = assembler.unpack(state)
+        return jnp.mean(jnp.abs(velocity[:, 0]))
+
+    assembler = _channel(32, 24, 2e-3, wall_growth=1.15)
+    state = _solve(assembler, continuation=continuation)
+    assert float(jnp.linalg.norm(assembler.residual(state))) < 1e-8
+
+    grad = float(jax.grad(mean_speed)(2e-3))
+    assert np.isfinite(grad)
+
+    step = 2e-3 * 1e-3
+    finite_difference = (float(mean_speed(2e-3 + step)) - float(mean_speed(2e-3 - step))) / (
+        2 * step
+    )
+    assert abs(grad - finite_difference) < 1e-2 * abs(finite_difference)
