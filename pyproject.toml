@@ -49,9 +49,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# `lint` pins the linter so a new ruff release cannot turn the gate red without
-# a deliberate bump. Capped to the 0.15 series; raise the cap intentionally.
-lint = ["ruff>=0.15,<0.16"]
+# `lint` pins the linters so a new release cannot turn the gate red without a
+# deliberate bump. ruff is capped to the 0.15 series; codespell to the 2.x
+# series. Raise a cap intentionally.
+lint = ["ruff>=0.15,<0.16", "codespell>=2.3,<3"]
 # `test` is the fast-gate toolchain.
 test = [
     "pytest>=8.0",
@@ -98,6 +99,17 @@ ignore = [
 # aquaflux/__init__.py must enable JAX x64 before any submodule import that
 # builds JAX state (documented in CLAUDE.md).
 "**/__init__.py" = ["I001", "E402"]
+
+[tool.codespell]
+# Spelling gate for the Canadian convention (see the Spelling Convention section
+# of CLAUDE.md). The convention is a mix — British `-our`/`-re`/`-lled` but
+# American `-ize`/`-yze` — so no stock dictionary matches it: an off-the-shelf
+# `en-GB_to_en-US` list would wrongly "correct" `colour`/`centre`/`neighbour`.
+# `tools/canadian-spelling.dict` is therefore a targeted custom list of the
+# `-ise`/`-yse` spellings of `-ize`/`-yze` words only; codespell's built-in
+# dictionaries are deliberately not enabled, so it flags nothing else.
+dictionary = "tools/canadian-spelling.dict"
+skip = "*.pyc,.git,build,dist,*.egg-info,.ruff_cache,.pytest_cache"
 
 [tool.pytest.ini_options]
 markers = [

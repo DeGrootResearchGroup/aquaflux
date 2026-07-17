@@ -1,10 +1,10 @@
 name: CI
 
-# The ruff gate. This is the same pair of commands the local pre-push hook runs
-# (.githooks/pre-push), so a contributor who enables the hook sees a failure
-# before pushing rather than as a red check on the PR. The hook is opt-in per
-# clone (`git config core.hooksPath .githooks`); this workflow is not, which is
-# why the gate lives here as well as there.
+# The ruff + codespell gate. This is the same set of commands the local pre-push
+# hook runs (.githooks/pre-push), so a contributor who enables the hook sees a
+# failure before pushing rather than as a red check on the PR. The hook is opt-in
+# per clone (`git config core.hooksPath .githooks`); this workflow is not, which
+# is why the gate lives here as well as there.
 on:
   pull_request:
   push:
@@ -35,18 +35,23 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      # Installs ruff at the version pinned by the `lint` extra, so the gate
-      # cannot move under us when a new ruff is released. Deliberately the same
-      # command the hook and the README tell contributors to run, so CI and a
-      # local check cannot drift apart.
-      - name: Install the pinned linter
+      # Installs ruff and codespell at the versions pinned by the `lint` extra,
+      # so the gate cannot move under us when a new release is published.
+      # Deliberately the same command the hook and the README tell contributors
+      # to run, so CI and a local check cannot drift apart.
+      - name: Install the pinned linters
         run: pip install -e ".[lint]"
 
       - name: ruff check
         run: ruff check aquaflux tests
 
-      # Report a formatting slip even when `ruff check` already failed -- one red
+      # Report later failures even when an earlier step already failed -- one red
       # run should show every problem to fix, not just the first.
       - name: ruff format --check
         if: ${{ !cancelled() }}
         run: ruff format --check aquaflux tests
+
+      # Canadian spelling gate (custom dictionary; config in pyproject.toml).
+      - name: codespell
+        if: ${{ !cancelled() }}
+        run: codespell aquaflux tests
