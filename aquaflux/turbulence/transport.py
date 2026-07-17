@@ -30,6 +30,7 @@ from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import FieldProperty, PropertyModel
 
 from .boundary import omega_wall_value
+from .preconditioner import scalar_transport_preconditioner
 from .sources import (
     KDestruction,
     KProduction,
@@ -257,7 +258,13 @@ class SSTTurbulence(eqx.Module):
             ),
             self.k_boundary,
             source_operators=(
-                KProduction(closure.nu_t, closure.strain_rate, closure.omega, self.model),
+                KProduction(
+                    closure.nu_t,
+                    closure.strain_rate,
+                    closure.omega,
+                    self.model,
+                    explicit_limiter=True,
+                ),
                 KDestruction(closure.omega, self.model),
             ),
             gradient_scheme=self.gradient_scheme,
@@ -306,3 +313,58 @@ class SSTTurbulence(eqx.Module):
             return wall_fix.apply(assembler.residual(omega), omega)
 
         return residual
+
+    def k_preconditioner(
+        self,
+        mdot: jnp.ndarray,
+        closure: SSTClosureFields,
+        reference: jnp.ndarray,
+        *,
+        method: str = "twolevel",
+    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
+        """A convection-diffusion AMG preconditioner for the k-equation linear solve.
+
+        Frozen for the sweep's ``closure`` and ``mdot`` (the same fields ``k_residual`` uses), it
+        makes the k-solve's Krylov iteration mesh-independent at the high cell Peclet where an
+        unpreconditioned solve would otherwise cost ``O(N)`` iterations (or stall). See
+        :func:`~aquaflux.turbulence.preconditioner.scalar_transport_preconditioner`.
+        """
+        diffusivity = self._diffusivity(
+            closure.nu_t, closure.f1, self.model.sigma_k1, self.model.sigma_k2
+        )
+        return scalar_transport_preconditioner(
+            self.mesh,
+            self.geometry,
+            diffusivity.values,
+            self._volume_flux(mdot),
+            self.k_residual(mdot, closure),
+            reference,
+            method=method,
+        )
+
+    def omega_preconditioner(
+        self,
+        mdot: jnp.ndarray,
+        closure: SSTClosureFields,
+        reference: jnp.ndarray,
+        *,
+        method: str = "twolevel",
+    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
+        """A convection-diffusion AMG preconditioner for the omega-equation linear solve.
+
+        As :meth:`k_preconditioner`, with the omega diffusivity and the near-wall fixed cells detached
+        from the coarsening (their rows are the value fixation, not a transport balance).
+        """
+        diffusivity = self._diffusivity(
+            closure.nu_t, closure.f1, self.model.sigma_omega1, self.model.sigma_omega2
+        )
+        return scalar_transport_preconditioner(
+            self.mesh,
+            self.geometry,
+            diffusivity.values,
+            self._volume_flux(mdot),
+            self.omega_residual(mdot, closure),
+            reference,
+            method=method,
+            fixed_cells=self.wall_cells,
+        )

@@ -1,0 +1,139 @@
+"""Integration: the segregated k-omega SST driver solves a genuinely turbulent channel.
+
+The qualitative cavity check (:mod:`tests.integration.test_turbulent_cavity`) runs at low Reynolds
+number. Here the open channel is driven to a convective, wall-resolved Reynolds number where the k
+and omega transport equations are strongly convection-dominated -- the regime whose exact-Jacobian
+linear solve stalls unless the production limiter is made explicit (``KProduction.explicit_limiter``,
+set by ``k_residual``), which restores the M-matrix the Krylov solve needs. The flow block uses the
+high-Reynolds preconditioned continuation (reused across sweeps); the scalar solves are a plain
+(unpreconditioned) Krylov Newton, so this test isolates that the *linearization* -- not a scalar
+preconditioner -- is what makes the high-Re turbulent solve converge.
+"""
+
+from __future__ import annotations
+
+import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
+import jax.numpy as jnp
+import lineax as lx
+import pytest
+from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
+from aquaflux.discretization import FirstOrderUpwind
+from aquaflux.flow import (
+    MomentumContinuity,
+    NoSlipWall,
+    PressureOutlet,
+    VelocityInlet,
+    reused_flow_solve,
+)
+from aquaflux.mesh import graded_nodes, structured_grid_2d
+from aquaflux.properties import Constant, FieldProperty, PropertyModel
+from aquaflux.schemes import CompactGreenGauss
+from aquaflux.solve import NewtonSolver
+from aquaflux.turbulence import (
+    SSTModel,
+    SSTTurbulence,
+    inlet_k,
+    inlet_omega,
+    solve_segregated,
+)
+
+RHO, U_IN, H, L = 1.0, 1.0, 1.0, 6.0
+NU = 2e-4  # Re = rho U H / mu = 5000
+INTENSITY, LENGTH_SCALE = 0.05, 0.07 * H
+
+
+def _channel(nx=48, ny=40, growth=1.18):
+    y_nodes = graded_nodes(ny, H, growth)
+    mesh = structured_grid_2d(nx, ny, lx=L, ly=H, named_boundaries=True, y_nodes=y_nodes)
+    geometry = mesh.geometry()
+    model = SSTModel()
+    k_in = float(inlet_k(jnp.array(U_IN), INTENSITY))
+    omega_in = float(inlet_omega(jnp.array(k_in), LENGTH_SCALE, model))
+    momentum = MomentumContinuity.build(
+        mesh,
+        geometry,
+        PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
+        CompactGreenGauss(),
+        BoundaryConditions(
+            {
+                "left": VelocityInlet(velocity=(U_IN, 0.0)),
+                "right": PressureOutlet(pressure=0.0),
+                "bottom": NoSlipWall(),
+                "top": NoSlipWall(),
+            }
+        ),
+        advection_scheme=FirstOrderUpwind(),
+    )
+    turbulence = SSTTurbulence.build(
+        model,
+        mesh,
+        geometry,
+        CompactGreenGauss(),
+        FirstOrderUpwind(),
+        density=RHO,
+        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        wall_patches=["bottom", "top"],
+        k_boundary=BoundaryConditions(
+            {
+                "left": Dirichlet(k_in),
+                "right": ZeroGradient(),
+                "bottom": Dirichlet(0.0),
+                "top": Dirichlet(0.0),
+            }
+        ),
+        omega_boundary=BoundaryConditions(
+            {
+                "left": Dirichlet(omega_in),
+                "right": ZeroGradient(),
+                "bottom": ZeroGradient(),
+                "top": ZeroGradient(),
+            }
+        ),
+    )
+    return mesh, momentum, turbulence, k_in, omega_in
+
+
+@pytest.mark.slow
+def test_high_reynolds_turbulent_channel_solves() -> None:
+    mesh, momentum, turbulence, k_in, omega_in = _channel()
+
+    # A frozen preconditioner at a representative eddy viscosity, reused across the sweeps.
+    reference = jnp.full(mesh.n_cells, RHO * 21 * NU)
+    reference_momentum = _with_viscosity(momentum, reference)
+    solve_flow = reused_flow_solve(
+        reference_momentum, schur_scaling="msimpler", velocity="convection"
+    )
+    gmres = lx.GMRES(rtol=1e-8, atol=1e-8, restart=32, stagnation_iters=32)
+
+    def solve_scalar(residual, state, preconditioner):
+        return NewtonSolver(iterations=6, solver=gmres, preconditioner=preconditioner).solve(
+            residual, state
+        )
+
+    flow, k, omega = solve_segregated(
+        momentum,
+        turbulence,
+        solve_flow,
+        solve_scalar,
+        momentum.initial_state(),
+        jnp.full(mesh.n_cells, k_in),
+        jnp.full(mesh.n_cells, omega_in),
+        density=RHO,
+        sweeps=8,
+        relaxation=0.5,
+    )
+
+    # Finite and physical.
+    assert not bool(jnp.any(jnp.isnan(flow)))
+    assert float(jnp.min(k)) >= 0.0
+    assert float(jnp.min(omega)) > 0.0
+
+    # Genuinely turbulent: the closure produces an eddy viscosity well above molecular.
+    nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
+    assert float(jnp.max(nu_t) / NU) > 1.0
+
+
+def _with_viscosity(momentum, mu):
+    properties = PropertyModel({**momentum.properties.properties, "viscosity": FieldProperty(mu)})
+    return eqx.tree_at(lambda m: m.properties, momentum, properties)
