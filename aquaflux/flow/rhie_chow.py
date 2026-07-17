@@ -19,7 +19,7 @@ non-circular function of the velocity. It is assembled here from the central-coe
 but, unlike a classical lagged coefficient, it is **differentiated** in the residual: ``a_P``
 enters ``V / a_P``, whose damping term is non-zero for a non-linear pressure field, so it genuinely
 affects the converged solution's sensitivity — freezing it (``stop_gradient``) would leave the
-implicit-function-theorem adjoint linearising a different residual than the one solved. The block
+implicit-function-theorem adjoint linearizing a different residual than the one solved. The block
 preconditioner, which needs a constant operator, freezes ``a_P`` on its side.
 """
 

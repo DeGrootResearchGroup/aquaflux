@@ -189,7 +189,7 @@ class FlowBoundary(eqx.Module):
     ) -> jnp.ndarray:
         """Per-face pressure--pressure coupling this patch adds to its owner cell's Schur diagonal.
 
-        The linearisation of the patch mass flux with respect to the owner pressure. It is non-zero
+        The linearization of the patch mass flux with respect to the owner pressure. It is non-zero
         only where the boundary *fixes* the pressure (a :class:`PressureOutlet`), whose Rhie--Chow
         flux drives the owner cell toward the imposed ``p_b`` and so couples ``mdot`` to ``p_owner``;
         a wall or a velocity inlet sets its mass flux independently of pressure, so the base returns
@@ -221,8 +221,8 @@ class FlowBoundary(eqx.Module):
         velocity at all (its face velocity is whatever reaches it, however fast, which is a *response*
         to the flow rather than a scale imposed on it).
 
-        This is what a convection-aware momentum block sizes its frozen convective linearisation
-        from, so that linearisation carries the operating cell Peclet without being told the flow
+        This is what a convection-aware momentum block sizes its frozen convective linearization
+        from, so that linearization carries the operating cell Peclet without being told the flow
         speed. Consumed only by the frozen preconditioner; it never enters the residual.
 
         Parameters

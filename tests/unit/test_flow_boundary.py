@@ -61,7 +61,7 @@ def test_only_prescribing_patches_declare_a_reference_velocity() -> None:
     """A patch reports the velocity it *imposes* on the flow, not the velocity it happens to see.
 
     This is the characteristic scale a convection-aware momentum block sizes its frozen convective
-    linearisation from, so it must come from patches that drive the flow (an inlet, a moving wall)
+    linearization from, so it must come from patches that drive the flow (an inlet, a moving wall)
     and not from one that merely responds to it.
     """
     inlet = VelocityInlet(velocity=(4.0, 0.0)).reference_velocity(NORMAL, CENTROID)

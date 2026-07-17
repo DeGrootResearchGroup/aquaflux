@@ -119,7 +119,7 @@ def pressure_schur_laplacian(
         Per-cell pressure--pressure stiffness added to the diagonal from pressure-fixing boundary faces
         (a :class:`~aquaflux.flow.PressureOutlet`). This is the boundary coupling that makes the
         open-domain Schur non-singular; ``None`` (or all-zero, for a closed domain) leaves the
-        pure-Neumann interior Laplacian, regularised instead by ``pressure_pin``.
+        pure-Neumann interior Laplacian, regularized instead by ``pressure_pin``.
 
     Returns
     -------
