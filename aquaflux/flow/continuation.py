@@ -50,6 +50,7 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
+from aquaflux.solve.implicit import ImplicitNewtonSolver
 from aquaflux.solve.linear import solve_linear
 
 from .block_preconditioner import BlockPreconditioner
@@ -242,3 +243,56 @@ class PseudoTransientContinuation(eqx.Module):
             return phi_next
 
         return step
+
+
+def reused_flow_solve(
+    reference: MomentumContinuity,
+    *,
+    max_steps: int = 80,
+    **build_kwargs: object,
+) -> Callable[[MomentumContinuity, jnp.ndarray], jnp.ndarray]:
+    """A ``solve_flow(momentum, state)`` that builds its preconditioned continuation **once** and
+    reuses it across calls whose effective viscosity differs.
+
+    A segregated outer loop (e.g. the k--omega SST driver) re-solves the momentum system every sweep
+    with an updated eddy viscosity ``nu + nu_t``. Building a fresh continuation each sweep rebuilds
+    the (off-jit) block-preconditioner AMG hierarchies and, because each is a new object, retraces
+    and recompiles the whole solve — a per-sweep cost that grows with mesh size. This helper builds
+    the continuation once from ``reference`` and returns a jitted solve, so a sweep changes only the
+    viscosity *values* passed as the residual parameters: the compiled solve is reused and nothing is
+    rebuilt.
+
+    Freezing the preconditioner at one viscosity stays effective across the sweeps because the
+    preconditioner only accelerates the Krylov iteration (it never enters the converged residual or
+    the adjoint), and a larger eddy viscosity makes the momentum operator *more* diffusion-dominated
+    (lower cell Peclet) — the regime the frozen block preconditioner already handles best. Build
+    ``reference`` at a representative operating viscosity (e.g. the initial eddy-viscosity estimate);
+    a laminar reference also works but a mid-range one keeps the frozen ``a_P`` closest to the sweeps.
+
+    Parameters
+    ----------
+    reference : MomentumContinuity
+        The flow assembler whose (effective) viscosity sets the frozen preconditioner. Its molecular
+        or effective viscosity only calibrates the accelerator; each solve is driven to the residual
+        of the ``momentum`` it is called with.
+    max_steps : int
+        Maximum Newton/continuation iterations per solve.
+    **build_kwargs
+        Forwarded to :meth:`PseudoTransientContinuation.build` (e.g. ``schur_scaling="msimpler"``,
+        ``velocity="convection"``, ``beta0``).
+
+    Returns
+    -------
+    callable
+        ``solve_flow(momentum, state) -> state`` solving ``momentum.residual`` from ``state`` with the
+        frozen preconditioned continuation. Reverse-differentiable in ``momentum`` (the underlying
+        implicit-function-theorem adjoint is unchanged; the ``jit`` wrapper is transparent to it).
+    """
+    continuation = PseudoTransientContinuation.build(reference, **build_kwargs)
+    solver = ImplicitNewtonSolver(max_steps=max_steps, continuation=continuation)
+
+    @eqx.filter_jit
+    def solve_flow(momentum: MomentumContinuity, state: jnp.ndarray) -> jnp.ndarray:
+        return solver.solve(lambda s, m: m.residual(s), state, momentum)
+
+    return solve_flow

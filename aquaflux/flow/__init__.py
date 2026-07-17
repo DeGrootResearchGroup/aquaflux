@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from .block_preconditioner import BlockPreconditioner
 from .boundary import FlowBoundary, MovingWall, NoSlipWall, PressureOutlet, VelocityInlet
-from .continuation import PseudoTransientContinuation
+from .continuation import PseudoTransientContinuation, reused_flow_solve
 from .momentum import MomentumContinuity
 from .preconditioner import damped_jacobi_solve, pressure_schur_laplacian
 from .rhie_chow import interior_mass_flux, momentum_diagonal
@@ -28,4 +28,5 @@ __all__ = [
     "interior_mass_flux",
     "momentum_diagonal",
     "pressure_schur_laplacian",
+    "reused_flow_solve",
 ]
