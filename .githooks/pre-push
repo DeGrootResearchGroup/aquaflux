@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 #
-# Pre-push hook: run the same ruff gate CI will enforce, so a formatting or lint
-# slip is caught locally instead of turning a required check red on the PR:
+# Pre-push hook: run the same gate CI will enforce, so a formatting, lint, or
+# spelling slip is caught locally instead of turning a required check red on the
+# PR:
 #     ruff check aquaflux tests
 #     ruff format --check aquaflux tests
+#     codespell aquaflux tests
 #
 # Enable it once per clone (git does not install repo hooks automatically):
 #     git config core.hooksPath .githooks
@@ -35,9 +37,23 @@ if ! ruff format --check aquaflux tests; then
   fail=1
 fi
 
+# codespell enforces the Canadian spelling convention (config in pyproject.toml).
+# Guarded like ruff above: a contributor without the lint extra is warned, not
+# blocked.
+if ! command -v codespell >/dev/null 2>&1; then
+  echo "pre-push: codespell not found on PATH -- skipping the spelling check." >&2
+  echo "          install it with:  pip install -e \".[lint]\"" >&2
+else
+  echo "pre-push: codespell aquaflux tests" >&2
+  if ! codespell aquaflux tests; then
+    echo "pre-push: spelling issues (see above) -- fix them (or run 'codespell -w aquaflux tests'), commit, and re-push." >&2
+    fail=1
+  fi
+fi
+
 if [ "$fail" -ne 0 ]; then
-  echo "pre-push: blocked. Fix the ruff issues above (or 'git push --no-verify' to bypass)." >&2
+  echo "pre-push: blocked. Fix the issues above (or 'git push --no-verify' to bypass)." >&2
   exit 1
 fi
 
-echo "pre-push: ruff gate clean." >&2
+echo "pre-push: gate clean." >&2
