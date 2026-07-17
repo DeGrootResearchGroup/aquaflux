@@ -229,25 +229,31 @@ class SmoothedAmgSchur(InnerSchurSolver):
         interior_faces: jnp.ndarray,
         n_cells: int,
         v_cycles: int,
+        reference_diagonal: jnp.ndarray | None = None,
     ) -> SmoothedAmgSchur:
-        # Reference coefficient from a unit-viscosity a_P: the multigrid is scale-invariant, so a
-        # concrete reference keeps the (scipy) build valid even inside a differentiated region.
-        # The preconditioner's Schur uses an isotropic (component-averaged) a_P; the directional
-        # per-component form enters only the operator's Rhie--Chow coefficient.
-        reference_a_p = jnp.mean(
-            momentum_diagonal(
-                geometry.face_cells,
-                geometry.mesh_geometry,
-                jnp.ones(n_cells),
-                geometry.normal_distance,
-                geometry.interp_factor,
-            ),
-            axis=1,
-        )
-        reference_coeff = np.asarray(geometry.coefficient(reference_a_p))[interior]
+        # Reference diagonal for the frozen hierarchy, fed to the Schur coefficient ``V / d``. SIMPLE
+        # uses a unit-viscosity momentum ``a_P`` (the multigrid is scale-invariant, so a concrete
+        # reference keeps the scipy build valid even inside a differentiated region), with the
+        # per-iterate convective ``a_P`` restored by the symmetric rescaling in :meth:`apply`.
+        # MSIMPLER instead supplies the velocity mass-matrix diagonal ``rho V`` — a velocity-
+        # independent scaling that does not degrade as convection strengthens, so its rescaling is the
+        # identity. The isotropic (component-averaged) form is used; the directional per-component
+        # ``a_P`` enters only the operator's Rhie--Chow coefficient.
+        if reference_diagonal is None:
+            reference_diagonal = jnp.mean(
+                momentum_diagonal(
+                    geometry.face_cells,
+                    geometry.mesh_geometry,
+                    jnp.ones(n_cells),
+                    geometry.normal_distance,
+                    geometry.interp_factor,
+                ),
+                axis=1,
+            )
+        reference_coeff = np.asarray(geometry.coefficient(reference_diagonal))[interior]
         # A pressure-fixing outlet adds a boundary diagonal that de-singularises the Schur; freeze it
-        # at the reference a_P (all-zero for a closed all-wall domain, which the pin handles instead).
-        reference_boundary = np.asarray(geometry.boundary_diagonal(reference_a_p))
+        # at the reference diagonal (all-zero for a closed all-wall domain, which the pin handles).
+        reference_boundary = np.asarray(geometry.boundary_diagonal(reference_diagonal))
         hierarchy = build_smoothed_hierarchy(
             owner_e,
             nb_e,
@@ -361,12 +367,23 @@ class BlockPreconditioner(eqx.Module):
     block additionally sees the divergence of the velocity predictor (``δp = Ŝ⁻¹(r_p − D·δu)``), giving
     the Murphy--Golub--Wathen 2-eigenvalue structure; ``D·δu`` is a ``jvp`` through the frozen residual,
     so ``D`` is a constant operator (adjoint-transparent).
+
+    The pressure Schur is scaled either by the momentum diagonal ``a_P`` (SIMPLE, ``Ŝ ~ B diag(V/a_P)
+    B^T``) or, when ``schur_diagonal`` is set, by a frozen velocity-independent diagonal ``Q̂ = ρ V / k``
+    (MSIMPLER, a mass-matrix scaling), giving the constant-coefficient pressure Poisson ``Ŝ ~ B
+    diag(k/ρ) B^T``. Because ``Q̂`` does not track the velocity, the MSIMPLER Schur — unlike ``V/a_P``
+    — does not degrade as convection strengthens (Klaij & Vuik 2013, for exactly this collocated-FV
+    coupled discretization), which carries the coupled solve past the Reynolds number where the
+    ``a_P``-Schur stalls. The scale ``k`` (see :meth:`build`) matches its magnitude to the SIMPLE Schur
+    at the operating convection. Only the Schur uses ``Q̂``; the velocity block always uses the true
+    ``a_P``.
     """
 
     assembler: MomentumContinuity
     schur: InnerSchurSolver
     velocity: VelocityBlockSolver
     block_triangular: bool = eqx.field(static=True)
+    schur_diagonal: jnp.ndarray | None = None
 
     @classmethod
     def build(
@@ -374,6 +391,8 @@ class BlockPreconditioner(eqx.Module):
         assembler: MomentumContinuity,
         *,
         inner: str = "smoothed",
+        schur_scaling: str = "simple",
+        msimpler_scale: float | None = None,
         v_cycles: int = 1,
         jacobi_sweeps: int = 30,
         omega: float = 0.7,
@@ -386,6 +405,19 @@ class BlockPreconditioner(eqx.Module):
             The coupled flow residual assembler.
         inner : {"smoothed", "multigrid", "jacobi"}
             The inner pressure-Schur solver strategy.
+        schur_scaling : {"simple", "msimpler"}
+            How the pressure Schur is scaled. ``"simple"`` uses the momentum diagonal ``a_P`` (the
+            classical SIMPLE Schur ``V / a_P``, which degrades as convection strengthens);
+            ``"msimpler"`` uses a **frozen, velocity-independent** diagonal ``Q̂ = ρ V / k`` so the
+            Schur is a constant-coefficient pressure Poisson (coefficient ``k · A/(d·n)``) that stays
+            Re-robust — the fix that carries the coupled solve past the ``a_P``-Schur stall.
+        msimpler_scale : float, optional
+            The MSIMPLER scale ``k`` (only for ``schur_scaling="msimpler"``). It must set the Schur
+            magnitude to the operating convection, or the block preconditioner is unbalanced and
+            stalls. ``None`` (default) calibrates it automatically to ``mean(V / a_P)`` at a unit
+            streamwise reference speed — matching the SIMPLE Schur magnitude while staying
+            velocity-independent. Pass an explicit value for a problem whose characteristic speed is
+            far from one.
         v_cycles : int
             Multigrid V-cycles per apply (``"smoothed"`` / ``"multigrid"``).
         jacobi_sweeps : int
@@ -397,27 +429,63 @@ class BlockPreconditioner(eqx.Module):
             raise ValueError(
                 f"unknown inner solver {inner!r}; use 'smoothed', 'multigrid' or 'jacobi'"
             )
+        if schur_scaling not in ("simple", "msimpler"):
+            raise ValueError(f"unknown schur_scaling {schur_scaling!r}; use 'simple' or 'msimpler'")
         geometry = _SchurGeometry.of(assembler)
         n_cells = assembler.mesh.n_cells
         owner_e, nb_e, interior_faces_np = assembler.mesh.face_cells.interior_edges()
         interior = np.asarray(assembler.mesh.face_cells.interior)
         interior_faces = jnp.asarray(interior_faces_np)
 
+        # MSIMPLER's frozen Schur diagonal Q̂ = ρ V / k (per cell), which replaces a_P; ``None`` keeps
+        # the classical SIMPLE (a_P) Schur. The scale ``k`` sets the constant Schur coefficient to
+        # ``k · A/(d·n)``; auto-calibrated to mean(V/a_P) at unit streamwise speed so it matches the
+        # SIMPLE Schur magnitude at the operating convection (a mismatched scale unbalances the block
+        # preconditioner and stalls GMRES) while staying velocity-independent.
+        schur_diagonal = None
+        if schur_scaling == "msimpler":
+            scale = msimpler_scale
+            if scale is None:
+                reference_velocity = jnp.zeros((n_cells, assembler.mesh.dim)).at[:, 0].set(1.0)
+                reference_a_p = jnp.mean(
+                    assembler.momentum_matrix_diagonal(reference_velocity), axis=1
+                )
+                scale = jnp.mean(assembler.geometry.cell.volume / reference_a_p)
+            schur_diagonal = jax.lax.stop_gradient(
+                assembler.density * assembler.geometry.cell.volume / scale
+            )
+
         if inner == "smoothed":
             schur: InnerSchurSolver = SmoothedAmgSchur.build(
-                geometry, assembler, owner_e, nb_e, interior, interior_faces, n_cells, v_cycles
+                geometry,
+                assembler,
+                owner_e,
+                nb_e,
+                interior,
+                interior_faces,
+                n_cells,
+                v_cycles,
+                reference_diagonal=schur_diagonal,
             )
             velocity: VelocityBlockSolver = SmoothedAmgVelocity.build(
                 assembler, owner_e, nb_e, interior, n_cells, v_cycles
             )
-            return cls(assembler, schur, velocity, block_triangular=True)
+            return cls(
+                assembler, schur, velocity, block_triangular=True, schur_diagonal=schur_diagonal
+            )
         if inner == "multigrid":
             schur = AggregationSchur.build(
                 geometry, owner_e, nb_e, interior_faces, n_cells, v_cycles, omega
             )
         else:
             schur = DampedJacobiSchur(geometry, jacobi_sweeps, omega)
-        return cls(assembler, schur, DiagonalVelocity(), block_triangular=False)
+        return cls(
+            assembler,
+            schur,
+            DiagonalVelocity(),
+            block_triangular=False,
+            schur_diagonal=schur_diagonal,
+        )
 
     def _divergence(self, state: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
         """The velocity predictor's divergence ``δu -> D·δu`` as a jvp through the frozen residual."""
@@ -459,8 +527,13 @@ class BlockPreconditioner(eqx.Module):
         under-relaxed ``a_P (1 + β)`` an implicit-continuation step uses, matching the shifted
         Jacobian it inverts — instead of always the bare diagonal :meth:`frozen_momentum_diagonal`
         returns. ``a_P`` is the isotropic per-cell diagonal, shape ``(n_cells,)``.
+
+        The velocity block always inverts at the supplied ``a_P``; the Schur uses the frozen
+        MSIMPLER diagonal ``Q̂`` instead when set (it is velocity-independent, so it ignores both
+        ``a_P`` and any continuation shift), else the same ``a_P`` (classical SIMPLE).
         """
-        schur_solve = self.schur.apply(a_p)
+        schur_a_p = a_p if self.schur_diagonal is None else self.schur_diagonal
+        schur_solve = self.schur.apply(schur_a_p)
         velocity_solve = self.velocity.apply(a_p)
         divergence = self._divergence(state) if self.block_triangular else None
 

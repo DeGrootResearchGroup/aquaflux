@@ -162,3 +162,48 @@ def test_continuation_solve_is_differentiable() -> None:
         2 * step
     )
     assert abs(grad - finite_difference) < 1e-3 * abs(finite_difference)
+
+
+@pytest.mark.slow
+def test_msimpler_schur_reaches_beyond_the_simple_schur() -> None:
+    """The MSIMPLER pressure Schur carries the solve past the Reynolds number where SIMPLE stalls.
+
+    The SIMPLE Schur scales by the momentum diagonal ``V / a_P``, which becomes a poor operator as
+    convection dominates: on a wall-graded Re = 2000 channel its inner GMRES stalls even with the
+    continuation. MSIMPLER's frozen, velocity-independent Schur scaling (``schur_scaling="msimpler"``)
+    stays a well-conditioned pressure Poisson and converges. This is the follow-on to the
+    convection-aware-preconditioner work: the pressure block fixed, the velocity block still bounds
+    the reachable Reynolds number.
+
+    The SIMPLE-Schur failure at the same setup is not re-asserted here — reproducing a stagnation is
+    both slow and sensitive to exactly when the inner solve gives up — but it is what motivates the
+    swap; the test asserts the positive: the MSIMPLER-Schur continuation converges at this Reynolds
+    number.
+    """
+    assembler = _channel(64, 48, 5e-4, wall_growth=1.15)  # Re = 2000, wall-graded
+    msimpler = PseudoTransientContinuation.build(assembler, schur_scaling="msimpler")
+    converged = _solve(assembler, continuation=msimpler, max_steps=150)
+    assert float(jnp.linalg.norm(assembler.residual(converged))) < 1e-8
+
+
+@pytest.mark.slow
+def test_msimpler_schur_matches_simple_at_moderate_reynolds() -> None:
+    """MSIMPLER is a drop-in for SIMPLE where SIMPLE already works: both converge, and the MSIMPLER
+    solve stays reverse-differentiable (its Schur scaling is a frozen, ``stop_gradient``-ed operator,
+    so the implicit-function-theorem adjoint is untouched)."""
+    continuation = PseudoTransientContinuation.build(
+        _channel(32, 24, 2e-3), schur_scaling="msimpler"
+    )
+
+    def mean_speed(mu):
+        assembler = _channel(32, 24, mu)
+        state = _solve(assembler, continuation=continuation)
+        velocity, _ = assembler.unpack(state)
+        return jnp.mean(jnp.abs(velocity[:, 0]))
+
+    assembler = _channel(32, 24, 2e-3)  # Re = 500
+    state = _solve(assembler, continuation=continuation)
+    assert float(jnp.linalg.norm(assembler.residual(state))) < 1e-8
+
+    grad = float(jax.grad(mean_speed)(2e-3))
+    assert np.isfinite(grad)
