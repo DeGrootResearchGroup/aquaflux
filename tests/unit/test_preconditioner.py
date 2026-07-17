@@ -6,19 +6,26 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from aquaflux.boundary import BoundaryConditions
+from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import (
     MomentumContinuity,
+    MovingWall,
     NoSlipWall,
     PressureOutlet,
     VelocityInlet,
     damped_jacobi_solve,
     pressure_schur_laplacian,
 )
+from aquaflux.flow.block_preconditioner import _characteristic_reference_state
+from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 
 from tests.support.meshes import perturbed_grid_2d
+
+H, NY = 1.0, 6  # channel height and wall-normal count: the vertical interior faces have area H / NY
 
 
 def _geometry(n, perturb=0.0):
@@ -33,6 +40,83 @@ def _geometry(n, perturb=0.0):
         CompactGreenGauss(),
         BoundaryConditions(walls),
     )
+
+
+def _channel(u_in):
+    """A small open channel driven by a uniform velocity inlet at speed ``u_in``."""
+    mesh = structured_grid_2d(10, NY, lx=4.0, ly=H, named_boundaries=True)
+    return MomentumContinuity.build(
+        mesh,
+        mesh.geometry(),
+        PropertyModel({"viscosity": Constant(1e-2), "density": Constant(1.0)}),
+        CompactGreenGauss(),
+        BoundaryConditions(
+            {
+                "left": VelocityInlet(velocity=(u_in, 0.0)),
+                "right": PressureOutlet(pressure=0.0),
+                "bottom": NoSlipWall(),
+                "top": NoSlipWall(),
+            }
+        ),
+        advection_scheme=FirstOrderUpwind(),
+    )
+
+
+@pytest.mark.parametrize("u_in", [0.01, 1.0, 100.0])
+def test_reference_state_tracks_the_boundary_driven_velocity_scale(u_in) -> None:
+    """The derived reference is a uniform flow at the prescribed inlet velocity, whatever its scale.
+
+    This is what makes the convection-aware velocity block freeze its linearisation at the operating
+    cell Peclet without being handed a characteristic speed: the inlet already states it, at any
+    magnitude (a slow-water or fast-air nondimensionalisation alike).
+    """
+    assembler = _channel(u_in)
+    velocity, pressure = assembler.unpack(_characteristic_reference_state(assembler))
+    assert jnp.allclose(velocity, jnp.array([u_in, 0.0]))
+    assert jnp.allclose(pressure, 0.0)
+
+
+def test_reference_state_convects_where_a_cold_state_does_not() -> None:
+    """The reference state carries the inlet's convection into the *interior* faces, where a cold
+    state carries none.
+
+    The frozen momentum operator takes its upwind term from this mass flux, so a zero-flux state
+    would leave the operator purely viscous — silently turning the convection-aware block back into
+    the Peclet-blind one it exists to replace.
+    """
+    assembler = _channel(2.0)
+    interior = np.asarray(assembler.mesh.face_cells.interior)
+    reference = assembler.mass_flux(_characteristic_reference_state(assembler))[interior]
+    cold = assembler.mass_flux(assembler.initial_state())[interior]
+
+    assert jnp.allclose(cold, 0.0)
+    # The streamwise faces carry the full inlet flux rho * u_in * (H / NY); the wall-normal ones,
+    # whose normals are orthogonal to the uniform flow, carry none.
+    assert abs(float(jnp.max(jnp.abs(reference))) - 2.0 * (H / NY)) < 1e-12
+
+
+def test_reference_state_is_driven_by_a_moving_wall_too() -> None:
+    """A driven cavity states its scale on a moving wall rather than an inlet, and is picked up the
+    same way; a domain with no prescribed velocity at all drives no flow, so its reference is zero."""
+    mesh = structured_grid_2d(6, 6, lx=1.0, ly=1.0, named_boundaries=True)
+    walls = {side: NoSlipWall() for side in ("top", "bottom", "left", "right")}
+
+    def _cavity(conditions):
+        return MomentumContinuity.build(
+            mesh,
+            mesh.geometry(),
+            PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
+            CompactGreenGauss(),
+            BoundaryConditions(conditions),
+        )
+
+    lid = _cavity({**walls, "top": MovingWall(velocity=(2.5, 0.0))})
+    velocity, _ = lid.unpack(_characteristic_reference_state(lid))
+    assert jnp.allclose(velocity, jnp.array([2.5, 0.0]))
+
+    closed = _cavity(walls)
+    velocity, _ = closed.unpack(_characteristic_reference_state(closed))
+    assert jnp.allclose(velocity, 0.0)
 
 
 def test_schur_laplacian_is_conservative_and_spd() -> None:
@@ -81,7 +165,14 @@ def test_schur_boundary_diagonal_removes_the_null_space() -> None:
     asm = _geometry(6)
     n = asm.mesh.n_cells
     a_p = jnp.ones(n)
-    args = (asm.mesh.face_cells, asm.geometry, asm.interp_factor, asm.normal_distance, a_p, asm.density)
+    args = (
+        asm.mesh.face_cells,
+        asm.geometry,
+        asm.interp_factor,
+        asm.normal_distance,
+        a_p,
+        asm.density,
+    )
 
     neumann, _ = pressure_schur_laplacian(*args)
     assert jnp.allclose(neumann(jnp.ones(n)), 0.0, atol=1e-12)  # constant is a null vector

@@ -75,16 +75,6 @@ def _solve(assembler, *, continuation=None, max_steps=120, **kwargs):
     return solver.solve(lambda s, a: a.residual(s), assembler.initial_state(), assembler)
 
 
-def _uniform_reference(assembler):
-    """A uniform inlet-speed flow state, used to freeze the convection-aware velocity block.
-
-    Its Rhie--Chow mass flux carries the operating convective scale (cell Peclet ``rho U dx / mu``),
-    so the frozen ``viscous + upwind`` momentum operator the block builds is Peclet-representative.
-    """
-    velocity = jnp.zeros((assembler.mesh.n_cells, assembler.mesh.dim)).at[:, 0].set(U_IN)
-    return assembler.pack(velocity, jnp.zeros(assembler.mesh.n_cells))
-
-
 @pytest.mark.parametrize(
     ("nx", "ny", "mu"),
     [(24, 16, 5e-3), (32, 24, 2e-3), (40, 32, 1e-3)],  # Re = 200, 500, 1000
@@ -286,17 +276,17 @@ def test_convection_velocity_block_converges_at_high_reynolds() -> None:
 
     The default velocity block builds its AMG on the viscous (symmetric) momentum operator, so it is
     Peclet-blind; ``velocity="convection"`` instead builds it on the frozen ``viscous + first-order-
-    upwind`` operator (at the uniform-inlet reference flux), staying a good momentum-block
-    approximation as convection strengthens. Paired with the MSIMPLER Schur it drives the coupled
-    steady residual well below the tolerance a segregated under-relaxed scheme could reach — a *true*
-    steady residual, since the terminal phase is undamped coupled Newton.
+    upwind`` operator, staying a good momentum-block approximation as convection strengthens. Its
+    reference flux comes from the inlet, with no reference state passed. Paired with the MSIMPLER
+    Schur it drives the coupled steady residual well below the tolerance a segregated under-relaxed
+    scheme could reach — a *true* steady residual, since the terminal phase is undamped coupled
+    Newton.
     """
     assembler = _channel(64, 48, 5e-4, wall_growth=1.15)  # Re = 2000, wall-graded
     continuation = PseudoTransientContinuation.build(
         assembler,
         schur_scaling="msimpler",
         velocity="convection",
-        reference_state=_uniform_reference(assembler),
     )
     converged = _solve(assembler, continuation=continuation, max_steps=150)
     assert float(jnp.linalg.norm(assembler.residual(converged))) < 1e-8
@@ -306,13 +296,12 @@ def test_convection_velocity_block_converges_at_high_reynolds() -> None:
 def test_convection_velocity_block_is_differentiable() -> None:
     """The convection-velocity-block solve stays reverse-differentiable: its hierarchy is frozen and
     ``stop_gradient``-ed (only accelerates the Krylov iteration), so the implicit-function-theorem
-    adjoint is untouched. Built once outside ``jax.grad`` with a concrete reference state and reused.
+    adjoint is untouched. Built once outside ``jax.grad`` from concrete parameters and reused.
     """
     continuation = PseudoTransientContinuation.build(
         _channel(32, 24, 2e-3, wall_growth=1.15),  # Re = 500, wall-graded
         schur_scaling="msimpler",
         velocity="convection",
-        reference_state=_uniform_reference(_channel(32, 24, 2e-3, wall_growth=1.15)),
     )
 
     def mean_speed(mu):
@@ -346,7 +335,6 @@ def test_air_velocity_block_converges_and_is_differentiable() -> None:
         _channel(32, 24, 2e-3, wall_growth=1.15),  # Re = 500, wall-graded
         schur_scaling="msimpler",
         velocity="convection-air",
-        reference_state=_uniform_reference(_channel(32, 24, 2e-3, wall_growth=1.15)),
     )
 
     def mean_speed(mu):

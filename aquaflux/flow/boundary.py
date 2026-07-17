@@ -90,6 +90,17 @@ def _pressure_face(closure, pressure_owner: jnp.ndarray) -> jnp.ndarray:
     return _leading_order_face_value(closure, pressure_owner, placeholder, placeholder)
 
 
+def _prescribed_reference_velocity(bc, normal: jnp.ndarray, centroid: jnp.ndarray) -> jnp.ndarray:
+    """The prescribed face velocity of a patch that imposes one, shape ``(n, dim)``.
+
+    A prescribed velocity is a Dirichlet value: it does not depend on the owner cell, so evaluating
+    the patch's own face closure at a quiescent interior returns it exactly — including a
+    spatially-varying profile, which is a function of the face centroids alone. Reusing the closure
+    keeps the prescribed value defined in one place per patch.
+    """
+    return bc.velocity_face(jnp.zeros(centroid.shape), normal, centroid)
+
+
 def _component(profile, i: int):
     """The ``i``-th scalar component of a vector-valued velocity profile ``x -> (n, dim)``."""
     return lambda face_centroid: profile(face_centroid)[:, i]
@@ -200,6 +211,29 @@ class FlowBoundary(eqx.Module):
         """
         return jnp.zeros_like(area)
 
+    def reference_velocity(self, normal: jnp.ndarray, centroid: jnp.ndarray) -> jnp.ndarray:
+        """The velocity this patch *prescribes* on the flow, shape ``(n, dim)``.
+
+        The patch's contribution to the characteristic velocity scale: what the boundary drives the
+        flow with, independent of whatever the interior develops. It is non-zero only where the
+        boundary imposes a velocity — a :class:`VelocityInlet` or a :class:`MovingWall` — so the base
+        returns zero: a stationary wall drives nothing, and a :class:`PressureOutlet` prescribes no
+        velocity at all (its face velocity is whatever reaches it, however fast, which is a *response*
+        to the flow rather than a scale imposed on it).
+
+        This is what a convection-aware momentum block sizes its frozen convective linearisation
+        from, so that linearisation carries the operating cell Peclet without being told the flow
+        speed. Consumed only by the frozen preconditioner; it never enters the residual.
+
+        Parameters
+        ----------
+        normal : jnp.ndarray
+            Owner-outward unit normals, shape ``(n, dim)``.
+        centroid : jnp.ndarray
+            Face centroids, shape ``(n, dim)`` (for a spatially-varying prescribed profile).
+        """
+        return jnp.zeros(centroid.shape)
+
 
 class NoSlipWall(FlowBoundary):
     """A stationary solid wall: zero velocity, zero-gradient pressure, no through-flow."""
@@ -264,6 +298,9 @@ class MovingWall(FlowBoundary):
     ):
         return jnp.zeros(area.shape)
 
+    def reference_velocity(self, normal, centroid):
+        return _prescribed_reference_velocity(self, normal, centroid)
+
 
 class VelocityInlet(FlowBoundary):
     """A prescribed-velocity inlet (optionally a profile), with zero-gradient pressure.
@@ -300,6 +337,9 @@ class VelocityInlet(FlowBoundary):
     ):
         u_in = self.velocity_face(velocity_owner, normal, centroid)
         return rho * dot(u_in, normal) * area
+
+    def reference_velocity(self, normal, centroid):
+        return _prescribed_reference_velocity(self, normal, centroid)
 
 
 class PressureOutlet(FlowBoundary):
