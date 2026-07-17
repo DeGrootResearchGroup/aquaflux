@@ -53,10 +53,18 @@ dependencies = [
 # deliberate bump. ruff is capped to the 0.15 series; codespell to the 2.x
 # series. Raise a cap intentionally.
 lint = ["ruff>=0.15,<0.16", "codespell>=2.3,<3"]
-# `test` is the fast-gate toolchain.
+# `test` is the CI toolchain. pytest-xdist parallelizes within a job (`-n`);
+# pytest-split shards the suite across jobs (`--splits`/`--group`) so each runs
+# in a fresh process, which bounds the JAX/XLA memory a long-lived run
+# accumulates (the flow-solve integration and validation tests otherwise grow
+# past the hosted runner's RAM); pytest-timeout fails a deadlocked test by name
+# instead of hanging the job.
 test = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
+    "pytest-xdist>=3.6",
+    "pytest-split>=0.9",
+    "pytest-timeout>=2.3",
 ]
 
 [project.urls]
