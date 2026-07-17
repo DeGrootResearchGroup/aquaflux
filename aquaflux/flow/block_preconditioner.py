@@ -103,7 +103,7 @@ class _SchurGeometry(eqx.Module):
         Each boundary patch adds its :meth:`~aquaflux.flow.boundary.FlowBoundary.pressure_schur_coefficient`
         (non-zero only for a pressure-fixing outlet) to its owner cell's Schur diagonal — the term that
         de-singularises the open-domain Schur, whose interior part is a pure-Neumann Laplacian. Zero
-        everywhere for a closed all-wall domain (regularised instead by the pin).
+        everywhere for a closed all-wall domain (regularized instead by the pin).
         """
         face = self.mesh_geometry.face
         d_coeff = self.mesh_geometry.cell.volume / a_p  # isotropic V/a_P per cell
@@ -186,7 +186,7 @@ class AggregationSchur(InnerSchurSolver):
         # Propagate the boundary (outlet) diagonal up the aggregation — piecewise-constant Galerkin
         # makes a coarse cell's stiffness the sum over its fine members — and fold it into each
         # level's operator, so A = Laplacian + diag(boundary) is non-singular at every level. All-zero
-        # (and a no-op) for a closed all-wall domain, which the pin regularises instead.
+        # (and a no-op) for a closed all-wall domain, which the pin regularizes instead.
         levels = self.hierarchy.levels
         extra = self.geometry.boundary_diagonal(a_p)
         extras = []
@@ -409,7 +409,7 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
         mu = jax.lax.stop_gradient(assembler.viscosity)
         mu_face = interpolate_owner_neighbour(mu, assembler.interp_factor, face_cells)
         viscous = mu_face * assembler.geometry.face.area / assembler.normal_distance  # (n_faces,)
-        # Frozen reference convective linearisation: the Rhie--Chow mass flux of a representative
+        # Frozen reference convective linearization: the Rhie--Chow mass flux of a representative
         # operating state (the same flux the momentum diagonal's convective part is built from below,
         # so the operator diagonal matches ``a_P`` exactly and the per-iterate rescaling is exact).
         reference_mdot = jax.lax.stop_gradient(assembler.mass_flux(reference_state))  # (n_faces,)
@@ -475,7 +475,7 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
 def _characteristic_reference_state(assembler: MomentumContinuity) -> jnp.ndarray:
     """A uniform flow at the characteristic velocity the boundaries drive, shape ``((dim+1) n,)``.
 
-    The convection-aware velocity block freezes its convective linearisation at the mass flux of a
+    The convection-aware velocity block freezes its convective linearization at the mass flux of a
     representative operating state, so that state has to carry the operating convective scale (cell
     Peclet ``rho U dx / mu``) — a cold zero state carries none, and would silently reduce the block to
     the viscous one it exists to replace.
@@ -565,14 +565,14 @@ class BlockPreconditioner(eqx.Module):
             :class:`SmoothedAmgConvectionVelocity`), which stays a good momentum-block approximation as
             convection strengthens: ``"convection"`` is the stable two-level method,
             ``"convection-air"`` the reduction-based (lAIR) hierarchy that is Peclet-robust *and*
-            mesh-independent (scales to large meshes). Both freeze their convective linearisation at
+            mesh-independent (scales to large meshes). Both freeze their convective linearization at
             ``reference_state``, taken from the boundary conditions unless given.
         reference_state : jnp.ndarray, optional
             A representative operating flow state whose Rhie--Chow mass flux freezes the convective
-            linearisation of the convection-aware velocity blocks. ``None`` (default) derives one from
+            linearization of the convection-aware velocity blocks. ``None`` (default) derives one from
             the boundary conditions — a uniform flow at the fastest velocity any patch prescribes — so
-            the frozen linearisation carries the operating cell Peclet with no assumption on the flow
-            speed. Pass a state only to pin the linearisation to a better-known operating point (for
+            the frozen linearization carries the operating cell Peclet with no assumption on the flow
+            speed. Pass a state only to pin the linearization to a better-known operating point (for
             instance a previously converged flow).
         schur_scaling : {"simple", "msimpler"}
             How the pressure Schur is scaled. ``"simple"`` uses the momentum diagonal ``a_P`` (the

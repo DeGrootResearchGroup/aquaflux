@@ -146,7 +146,7 @@ def test_continuation_solve_is_differentiable() -> None:
 
     The continuation (like the preconditioner) is built once outside ``jax.grad`` with concrete
     parameters and reused across ``mu``; its diagonal shift vanishes at convergence, so the IFT
-    adjoint linearises the same steady residual it would without it.
+    adjoint linearizes the same steady residual it would without it.
     """
     continuation = PseudoTransientContinuation.build(_channel(24, 16, 5e-3))
 

@@ -708,7 +708,7 @@ def build_convection_hierarchy(
         Per-edge viscous coefficient ``mu_f A_f / (d.n)_f``, shape ``(n_edges,)``.
     mdot : np.ndarray
         Reference owner-outward face mass flux on the interior edges, shape ``(n_edges,)`` — the frozen
-        convective linearisation the hierarchy is built at.
+        convective linearization the hierarchy is built at.
     n : int
         Number of fine cells.
     boundary_diagonal : np.ndarray, optional

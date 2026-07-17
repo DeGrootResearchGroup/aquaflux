@@ -66,7 +66,7 @@ def _channel(u_in):
 def test_reference_state_tracks_the_boundary_driven_velocity_scale(u_in) -> None:
     """The derived reference is a uniform flow at the prescribed inlet velocity, whatever its scale.
 
-    This is what makes the convection-aware velocity block freeze its linearisation at the operating
+    This is what makes the convection-aware velocity block freeze its linearization at the operating
     cell Peclet without being handed a characteristic speed: the inlet already states it, at any
     magnitude (a slow-water or fast-air nondimensionalisation alike).
     """

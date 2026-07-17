@@ -34,7 +34,7 @@ def graded_nodes(n: int, length: float, growth: float, *, both_sides: bool = Tru
     growth : float
         Cell-to-cell size ratio (``> 0``). ``1`` is uniform; ``> 1`` clusters cells toward the
         wall(s). The near-wall cell size is ``length`` times ``growth`` raised to the negative
-        half-span, normalised — pick ``growth`` to hit a target first-cell height.
+        half-span, normalized — pick ``growth`` to hit a target first-cell height.
     both_sides : bool
         When ``True`` (a channel between two walls) the mesh is symmetric, fine at *both* ends and
         coarsest at the centre. When ``False`` (a single wall) it is fine at ``0`` and coarsens

@@ -25,7 +25,7 @@ The strength ramps to zero on the residual (switched-evolution-relaxation): ``β
 so the first steps are strongly damped (robust from a uniform cold start) and the last steps recover
 the undamped Newton step (``β → 0``, quadratic terminal convergence). The **shift vanishes at
 convergence** — the fixed point ``δ = 0`` forces ``R(φ*) = 0`` exactly, the *unshifted* steady
-residual — so the implicit-function-theorem adjoint (which linearises ``R`` at ``φ*``, never the
+residual — so the implicit-function-theorem adjoint (which linearizes ``R`` at ``φ*``, never the
 shifted operator) is untouched: continuation only reshapes the forward path, like the line search it
 replaces.
 

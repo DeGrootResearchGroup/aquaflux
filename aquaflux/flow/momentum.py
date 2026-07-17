@@ -308,7 +308,7 @@ class MomentumContinuity(eqx.Module):
         non-circular function of the velocity. It is deliberately **not** ``stop_gradient``-ed.
         ``a_P`` enters the Rhie--Chow coefficient ``V / a_P``, whose damping term is non-zero for a
         non-linear pressure field, so the converged solution's sensitivity to ``a_P`` is real;
-        freezing it would leave the implicit-function-theorem adjoint linearising a different
+        freezing it would leave the implicit-function-theorem adjoint linearizing a different
         residual than the one being driven to zero (the converged *value* is unchanged, but the
         *sensitivity* is not). ``grad_velocity`` reconstructs the estimated momentum to the
         integration point (consistent with the mass flux); omit it for the cheap leading-order

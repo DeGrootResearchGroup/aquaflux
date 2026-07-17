@@ -198,7 +198,7 @@ class SweptGradientSolve(GradientSolve):
 
     Because ``A_g`` is volume-dominated the iteration converges in very few sweeps — the default
     ``sweeps=4`` reproduces the exact solve to machine precision on mild-to-moderate skew and stays
-    well within discretisation error even on aggressively irregular grids. A too-skewed mesh needs
+    well within discretization error even on aggressively irregular grids. A too-skewed mesh needs
     more; rather than pay for a data-dependent stop (which would defeat the cheap unrolled
     differentiation), the residual the last sweep already computed is checked against ``warn_tol`` and
     a **warning** is emitted once if the sweeps are under-resolved — a diagnostic, not a termination.
@@ -232,7 +232,7 @@ class SweptGradientSolve(GradientSolve):
         if self.warn_tol is not None:
             # `residual` is rhs - A_g·grad from the last sweep (one apply already spent) — a free,
             # slightly conservative convergence indicator. The host-side warning is gated behind a
-            # `lax.cond` on the tolerance so the (host-synchronising) callback fires *only* when the
+            # `lax.cond` on the tolerance so the (host-synchronizing) callback fires *only* when the
             # sweeps are actually under-resolved; on a converged mesh no callback runs, so the check
             # is free in the common case.
             relative = jnp.linalg.norm(residual) / (
