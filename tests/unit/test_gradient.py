@@ -273,7 +273,9 @@ def test_swept_warns_once_when_underresolved() -> None:
 def test_hessian_reconstructs_quadratic_exactly_on_irregular() -> None:
     """The Hessian-corrected scheme captures the exact 2nd derivative, so quadratics are exact on any mesh —
     where compact GG is inconsistent and corrected GG is only ~1st order."""
-    err = _interior_gradient_error(HessianCorrectedGradient(), 16, _quadratic, _quadratic_grad, perturb=0.2)
+    err = _interior_gradient_error(
+        HessianCorrectedGradient(), 16, _quadratic, _quadratic_grad, perturb=0.2
+    )
     assert err < 1e-10
 
 

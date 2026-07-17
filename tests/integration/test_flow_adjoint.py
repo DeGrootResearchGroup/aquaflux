@@ -39,8 +39,12 @@ def _cavity(mu, n, advection):
         PropertyModel({"viscosity": Constant(mu), "density": Constant(RHO)}),
         CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=16)),
         BoundaryConditions(
-            {"top": MovingWall(velocity=(1.0, 0.0)), "bottom": NoSlipWall(),
-             "left": NoSlipWall(), "right": NoSlipWall()}
+            {
+                "top": MovingWall(velocity=(1.0, 0.0)),
+                "bottom": NoSlipWall(),
+                "left": NoSlipWall(),
+                "right": NoSlipWall(),
+            }
         ),
         advection_scheme=advection,
         pressure_pin=0,
@@ -145,7 +149,9 @@ def test_inexact_newton_matches_tight_solve_with_fewer_matvecs() -> None:
 
         return state, float(jax.grad(f)(mu0))
 
-    state_inexact, grad_inexact = converged_and_grad(None)  # default: inexact forward, tight adjoint
+    state_inexact, grad_inexact = converged_and_grad(
+        None
+    )  # default: inexact forward, tight adjoint
     state_tight, grad_tight = converged_and_grad(tight)  # tight forward throughout
     # Same converged field (both driven to the nonlinear tolerance) and same gradient (tight adjoint).
     assert jnp.allclose(state_inexact, state_tight, atol=1e-7)

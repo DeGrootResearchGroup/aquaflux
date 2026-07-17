@@ -81,7 +81,14 @@ def test_schur_boundary_diagonal_removes_the_null_space() -> None:
     asm = _geometry(6)
     n = asm.mesh.n_cells
     a_p = jnp.ones(n)
-    args = (asm.mesh.face_cells, asm.geometry, asm.interp_factor, asm.normal_distance, a_p, asm.density)
+    args = (
+        asm.mesh.face_cells,
+        asm.geometry,
+        asm.interp_factor,
+        asm.normal_distance,
+        a_p,
+        asm.density,
+    )
 
     neumann, _ = pressure_schur_laplacian(*args)
     assert jnp.allclose(neumann(jnp.ones(n)), 0.0, atol=1e-12)  # constant is a null vector

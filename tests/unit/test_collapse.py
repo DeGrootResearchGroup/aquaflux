@@ -67,7 +67,10 @@ def test_collapse_single_frontandback_patch(nx, ny):
         slab.face_cells.neighbour,
         n_cells=slab.n_cells,
         face_patches={
-            **{name: np.asarray(slab.face_patches.indices(name)) for name in ("left", "right", "bottom", "top")},
+            **{
+                name: np.asarray(slab.face_patches.indices(name))
+                for name in ("left", "right", "bottom", "top")
+            },
             "frontAndBack": front_and_back,
         },
     )
