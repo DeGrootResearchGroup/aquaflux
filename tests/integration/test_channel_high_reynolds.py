@@ -28,6 +28,7 @@ from aquaflux.flow import (
     PressureOutlet,
     PseudoTransientContinuation,
     VelocityInlet,
+    reused_flow_solve,
 )
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
@@ -346,6 +347,51 @@ def test_air_velocity_block_converges_and_is_differentiable() -> None:
     assembler = _channel(32, 24, 2e-3, wall_growth=1.15)
     state = _solve(assembler, continuation=continuation)
     assert float(jnp.linalg.norm(assembler.residual(state))) < 1e-8
+
+    grad = float(jax.grad(mean_speed)(2e-3))
+    assert np.isfinite(grad)
+
+    step = 2e-3 * 1e-3
+    finite_difference = (float(mean_speed(2e-3 + step)) - float(mean_speed(2e-3 - step))) / (
+        2 * step
+    )
+    assert abs(grad - finite_difference) < 1e-2 * abs(finite_difference)
+
+
+@pytest.mark.slow
+def test_reused_flow_solve_converges_across_viscosities() -> None:
+    """``reused_flow_solve`` builds its preconditioned continuation once and drives solves whose
+    effective viscosity differs to convergence — the segregated-turbulence reuse pattern.
+
+    A segregated k--omega SST loop re-solves the momentum system every sweep at an updated eddy
+    viscosity ``nu + nu_t``. Rebuilding the block-preconditioner continuation each sweep re-runs its
+    off-jit AMG setup and recompiles the solve; ``reused_flow_solve`` builds it once and reuses it, a
+    frozen accelerator that stays effective because a larger effective viscosity only makes the
+    momentum operator more diffusion-dominated (lower cell Peclet). One build applied across a
+    viscosity sweep, each solve converging, confirms the reuse holds.
+    """
+    reference = _channel(32, 24, 1e-3, wall_growth=1.15)  # a mid-sweep reference viscosity
+    solve_flow = reused_flow_solve(reference, schur_scaling="msimpler", velocity="convection")
+    for mu in (2e-3, 1e-3, 5e-4):  # Re = 500, 1000, 2000 — a viscosity sweep on the frozen build
+        assembler = _channel(32, 24, mu, wall_growth=1.15)
+        state = solve_flow(assembler, assembler.initial_state())
+        assert float(jnp.linalg.norm(assembler.residual(state))) < 1e-8
+
+
+@pytest.mark.slow
+def test_reused_flow_solve_is_differentiable() -> None:
+    """A solve driven by the reused (jitted) flow solver stays reverse-differentiable: the frozen
+    preconditioner only accelerates the Krylov iteration, so the implicit-function-theorem adjoint is
+    unchanged and the ``jit`` wrapper is transparent to it.
+    """
+    reference = _channel(32, 24, 2e-3, wall_growth=1.15)
+    solve_flow = reused_flow_solve(reference, schur_scaling="msimpler", velocity="convection")
+
+    def mean_speed(mu):
+        assembler = _channel(32, 24, mu, wall_growth=1.15)
+        state = solve_flow(assembler, assembler.initial_state())
+        velocity, _ = assembler.unpack(state)
+        return jnp.mean(jnp.abs(velocity[:, 0]))
 
     grad = float(jax.grad(mean_speed)(2e-3))
     assert np.isfinite(grad)
