@@ -30,6 +30,7 @@ from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import FieldProperty, PropertyModel
 
 from .boundary import omega_wall_value
+from .preconditioner import scalar_transport_preconditioner
 from .sources import (
     KDestruction,
     KProduction,
@@ -107,6 +108,14 @@ class SSTTurbulence(eqx.Module):
     k_boundary, omega_boundary : BoundaryConditions
         The scalar boundary closures for each field (Dirichlet inlet / wall, zero-gradient outlet;
         the omega wall is imposed by cell fixation, so its wall closure is a placeholder).
+    explicit_production_limiter : bool
+        How the k-production limiter is linearized for the forward k-solve (static). ``True``
+        (default) freezes the cap's ``k`` (:attr:`KProduction.explicit_limiter`), giving an M-matrix
+        the k-solve converges on unpreconditioned -- a robust modified-Newton step. ``False`` keeps
+        the exact Jacobian, whose active cap is indefinite: it needs the scalar preconditioner (which
+        rescues it) but then converges quadratically. The converged field is the same either way (the
+        residual value is identical); only the forward path differs, so the coupled adjoint (built on
+        the exact residual) is unaffected.
     """
 
     model: SSTModel
@@ -120,6 +129,7 @@ class SSTTurbulence(eqx.Module):
     wall_cells: jnp.ndarray
     k_boundary: BoundaryConditions
     omega_boundary: BoundaryConditions
+    explicit_production_limiter: bool = eqx.field(static=True, default=True)
 
     @classmethod
     def build(
@@ -134,6 +144,8 @@ class SSTTurbulence(eqx.Module):
         wall_patches: Sequence[str],
         k_boundary: BoundaryConditions,
         omega_boundary: BoundaryConditions,
+        *,
+        explicit_production_limiter: bool = True,
     ) -> SSTTurbulence:
         """Build the assembler, deriving the wall distance and wall-adjacent cell set.
 
@@ -142,6 +154,9 @@ class SSTTurbulence(eqx.Module):
         wall_patches : sequence of str
             The boundary patches treated as walls; their wall distance is computed and their
             owner cells become the ``omega`` fixation set.
+        explicit_production_limiter : bool
+            Linearization of the k-production limiter for the forward solve (see the class
+            attribute); ``True`` (default) is the robust unpreconditioned-solvable choice.
 
         The remaining arguments are stored directly (see the class attributes).
         """
@@ -160,6 +175,7 @@ class SSTTurbulence(eqx.Module):
             wall_cells=wall_cells,
             k_boundary=k_boundary,
             omega_boundary=omega_boundary,
+            explicit_production_limiter=explicit_production_limiter,
         )
 
     def _volume_flux(self, mdot: jnp.ndarray) -> jnp.ndarray:
@@ -257,7 +273,13 @@ class SSTTurbulence(eqx.Module):
             ),
             self.k_boundary,
             source_operators=(
-                KProduction(closure.nu_t, closure.strain_rate, closure.omega, self.model),
+                KProduction(
+                    closure.nu_t,
+                    closure.strain_rate,
+                    closure.omega,
+                    self.model,
+                    explicit_limiter=self.explicit_production_limiter,
+                ),
                 KDestruction(closure.omega, self.model),
             ),
             gradient_scheme=self.gradient_scheme,
@@ -306,3 +328,58 @@ class SSTTurbulence(eqx.Module):
             return wall_fix.apply(assembler.residual(omega), omega)
 
         return residual
+
+    def k_preconditioner(
+        self,
+        mdot: jnp.ndarray,
+        closure: SSTClosureFields,
+        reference: jnp.ndarray,
+        *,
+        method: str = "twolevel",
+    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
+        """A convection-diffusion AMG preconditioner for the k-equation linear solve.
+
+        Frozen for the sweep's ``closure`` and ``mdot`` (the same fields ``k_residual`` uses), it
+        makes the k-solve's Krylov iteration mesh-independent at the high cell Peclet where an
+        unpreconditioned solve would otherwise cost ``O(N)`` iterations (or stall). See
+        :func:`~aquaflux.turbulence.preconditioner.scalar_transport_preconditioner`.
+        """
+        diffusivity = self._diffusivity(
+            closure.nu_t, closure.f1, self.model.sigma_k1, self.model.sigma_k2
+        )
+        return scalar_transport_preconditioner(
+            self.mesh,
+            self.geometry,
+            diffusivity.values,
+            self._volume_flux(mdot),
+            self.k_residual(mdot, closure),
+            reference,
+            method=method,
+        )
+
+    def omega_preconditioner(
+        self,
+        mdot: jnp.ndarray,
+        closure: SSTClosureFields,
+        reference: jnp.ndarray,
+        *,
+        method: str = "twolevel",
+    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
+        """A convection-diffusion AMG preconditioner for the omega-equation linear solve.
+
+        As :meth:`k_preconditioner`, with the omega diffusivity and the near-wall fixed cells detached
+        from the coarsening (their rows are the value fixation, not a transport balance).
+        """
+        diffusivity = self._diffusivity(
+            closure.nu_t, closure.f1, self.model.sigma_omega1, self.model.sigma_omega2
+        )
+        return scalar_transport_preconditioner(
+            self.mesh,
+            self.geometry,
+            diffusivity.values,
+            self._volume_flux(mdot),
+            self.omega_residual(mdot, closure),
+            reference,
+            method=method,
+            fixed_cells=self.wall_cells,
+        )

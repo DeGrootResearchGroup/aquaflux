@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import equinox as eqx
+import jax
 import jax.numpy as jnp
 
 from aquaflux.discretization import VolumeSource
@@ -48,6 +50,16 @@ class KProduction(VolumeSource):
     prevent unphysical build-up in stagnation regions. The cap depends on the solved ``k``; the eddy
     viscosity, strain rate, and ``ω`` are held fixed.
 
+    Where the cap is active it makes production an *increasing* function of ``k``, whose exact
+    linearization is a negative diagonal contribution (production feeds ``k`` back into itself) that
+    can destroy the diagonal dominance of the k-equation's Jacobian and stall its linear solve at
+    high Reynolds number. ``explicit_limiter`` freezes the cap's ``k`` (a Patankar / deferred-
+    correction treatment: production is evaluated with the current ``k`` but not differentiated
+    through it), keeping the residual value exact while removing that destabilizing term from the
+    Jacobian, so the forward solve sees an M-matrix. It is a **forward-solve device only**: the
+    default (``False``) is the exact operator, which the coupled sensitivity residual uses so the
+    adjoint stays exact.
+
     Attributes
     ----------
     nu_t : jnp.ndarray
@@ -58,16 +70,20 @@ class KProduction(VolumeSource):
         Specific dissipation rate per cell, shape ``(n_cells,)`` (frozen).
     model : SSTModel
         The model constants (reads ``beta_star``).
+    explicit_limiter : bool
+        Freeze the cap's ``k`` for the linearization (a forward-solve stabilization); static.
     """
 
     nu_t: jnp.ndarray
     strain_rate: jnp.ndarray
     omega: jnp.ndarray
     model: SSTModel
+    explicit_limiter: bool = eqx.field(static=True, default=False)
 
     def source(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
         production = self.nu_t * self.strain_rate**2
-        limit = _PRODUCTION_LIMIT_RATIO * self.model.beta_star * field * self.omega
+        cap_field = jax.lax.stop_gradient(field) if self.explicit_limiter else field
+        limit = _PRODUCTION_LIMIT_RATIO * self.model.beta_star * cap_field * self.omega
         return jnp.minimum(production, limit) * context.geometry.cell.volume
 
 

@@ -32,8 +32,8 @@ def _solve_flow(momentum, state):
     return solver.solve(lambda s, m: m.residual(s), state, momentum)
 
 
-def _solve_scalar(residual, state):
-    return NewtonSolver(iterations=5).solve(residual, state)
+def _solve_scalar(residual, state, preconditioner=None):
+    return NewtonSolver(iterations=5, preconditioner=preconditioner).solve(residual, state)
 
 
 def _cavity():

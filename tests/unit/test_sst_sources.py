@@ -62,6 +62,27 @@ def test_k_production_limited() -> None:
     assert jnp.allclose(op.source(_cell(1.0, 1.0), context), cap * volume)
 
 
+def test_k_production_explicit_limiter_keeps_the_value_but_drops_the_k_derivative() -> None:
+    """``explicit_limiter`` (a forward-solve stabilization) leaves the production *value* identical
+    but removes its ``k``-derivative where the cap is active -- so the k-equation Jacobian loses the
+    destabilizing feedback term and stays an M-matrix, while the residual is unchanged."""
+    context, _ = _context_and_volume()
+    args = dict(
+        nu_t=_cell(10.0, 10.0), strain_rate=_cell(1.0, 1.0), omega=_cell(1.0, 1.0), model=MODEL
+    )
+    exact = KProduction(**args)
+    explicit = KProduction(**args, explicit_limiter=True)
+    k = _cell(1.0, 1.0)  # cap active (ν_t S² = 10 > 10 β* k ω)
+
+    # Same forward value.
+    assert jnp.allclose(exact.source(k, context), explicit.source(k, context))
+    # Exact linearization is non-zero (the cap feeds k back); the explicit one is zero.
+    d_exact = jax.jacobian(lambda f: exact.source(f, context))(k)
+    d_explicit = jax.jacobian(lambda f: explicit.source(f, context))(k)
+    assert float(jnp.max(jnp.abs(jnp.diag(d_exact)))) > 0.0
+    assert float(jnp.max(jnp.abs(d_explicit))) == 0.0
+
+
 def test_k_destruction_is_a_negative_sink() -> None:
     context, volume = _context_and_volume()
     op = KDestruction(omega=_cell(3.0, 3.0), model=MODEL)

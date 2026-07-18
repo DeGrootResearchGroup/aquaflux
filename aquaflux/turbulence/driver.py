@@ -57,7 +57,7 @@ def solve_segregated(
     momentum: MomentumContinuity,
     turbulence: SSTTurbulence,
     solve_flow: Callable[[MomentumContinuity, jnp.ndarray], jnp.ndarray],
-    solve_scalar: Callable[[Callable[[jnp.ndarray], jnp.ndarray], jnp.ndarray], jnp.ndarray],
+    solve_scalar: Callable[..., jnp.ndarray],
     flow: jnp.ndarray,
     k: jnp.ndarray,
     omega: jnp.ndarray,
@@ -67,6 +67,7 @@ def solve_segregated(
     relaxation: float = 0.7,
     k_floor: float = 1e-8,
     omega_floor: float = 1e-8,
+    scalar_preconditioner: str | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system by the segregated Picard loop.
 
@@ -81,7 +82,9 @@ def solve_segregated(
         ``solve_flow(momentum, state) -> state`` solves the momentum residual of the (re-viscosified)
         assembler from ``state`` (e.g. a preconditioned Newton solve).
     solve_scalar : callable
-        ``solve_scalar(residual, state) -> state`` solves a scalar residual function from ``state``.
+        ``solve_scalar(residual, state, preconditioner) -> state`` solves a scalar residual function
+        from ``state``. ``preconditioner`` is a ``phi -> M`` factory (or ``None``) the solve may use to
+        precondition its linear steps.
     flow : jnp.ndarray
         The initial flat flow state ``[vel..., pressure]``, shape ``((dim + 1) n_cells,)``.
     k, omega : jnp.ndarray
@@ -94,6 +97,10 @@ def solve_segregated(
         Under-relaxation factor for ``k`` and ``omega`` in ``(0, 1]``.
     k_floor, omega_floor : float
         Positive floors applied to ``k`` and ``omega`` after each sweep.
+    scalar_preconditioner : {"twolevel", "air"} or None
+        When set, build a convection-diffusion AMG preconditioner for each k/omega solve (the given
+        multigrid method) and pass it to ``solve_scalar`` -- the mesh-independent scalar solve a
+        high-Reynolds case needs. ``None`` passes ``None`` (an unpreconditioned scalar solve).
 
     Returns
     -------
@@ -108,8 +115,18 @@ def solve_segregated(
 
         closure = turbulence.closure_fields(momentum.velocity_gradient(flow), k, omega)
         mdot = momentum.mass_flux(flow)
-        k_solved = solve_scalar(turbulence.k_residual(mdot, closure), k)
+        k_precond = (
+            None
+            if scalar_preconditioner is None
+            else turbulence.k_preconditioner(mdot, closure, k, method=scalar_preconditioner)
+        )
+        k_solved = solve_scalar(turbulence.k_residual(mdot, closure), k, k_precond)
         k = jnp.maximum(_relax(k, k_solved, relaxation), k_floor)
-        omega_solved = solve_scalar(turbulence.omega_residual(mdot, closure), omega)
+        omega_precond = (
+            None
+            if scalar_preconditioner is None
+            else turbulence.omega_preconditioner(mdot, closure, omega, method=scalar_preconditioner)
+        )
+        omega_solved = solve_scalar(turbulence.omega_residual(mdot, closure), omega, omega_precond)
         omega = jnp.maximum(_relax(omega, omega_solved, relaxation), omega_floor)
     return flow, k, omega
