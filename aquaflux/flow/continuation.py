@@ -21,23 +21,14 @@ coarse core) is relaxed uniformly in relative terms, which a single global ``Δt
 preconditioner inverts the *same* shifted diagonal ``a_P (1 + β)``, which restores its diagonal
 dominance and makes the inner GMRES converge again.
 
-The strength ramps to zero on the residual (switched-evolution-relaxation): ``β = β₀ (‖R‖/‖R₀‖)^p``,
-so the first steps are strongly damped (robust from a uniform cold start) and the last steps recover
-the undamped Newton step (``β → 0``, quadratic terminal convergence). The **shift vanishes at
-convergence** — the fixed point ``δ = 0`` forces ``R(φ*) = 0`` exactly, the *unshifted* steady
-residual — so the implicit-function-theorem adjoint (which linearizes ``R`` at ``φ*``, never the
-shifted operator) is untouched: continuation only reshapes the forward path, like the line search it
-replaces.
-
-The ``β₀`` that schedule needs, though, is not universal — the damping a cold start requires grows
-with the Reynolds number and the mesh, and too small a ``β₀`` lets an early step's shifted system
-diverge (the linear solve fails, or the step overshoots) before the schedule can react. So each step
-is **closed-loop**: it accepts its shifted correction only if the residual stays finite and bounded,
-and otherwise **escalates the damping and retries** (a smaller pseudo-timestep) until the step is
-accepted. This is the globalization an open-loop schedule lacks — it turns ``β₀`` into a starting
-guess (too small is recovered by escalation; too large only slows the march) rather than a per-case
-knob, and it cannot diverge to a non-finite iterate. The retry does not change the fixed point, so
-the converged state and its adjoint are unchanged.
+Everything that is *not* flow-specific — the switched-evolution-relaxation schedule
+``β = β₀ (‖R‖/‖R₀‖)^p`` (strong damping from a cold start, ``β → 0`` recovering the undamped Newton
+step at convergence), the shifted linear solve, and the closed-loop accept/escalate loop that turns
+``β₀`` into a starting guess rather than a per-case knob — lives in the residual-agnostic
+:class:`aquaflux.solve.PseudoTransientStep`. This module supplies only the flow's choices through a
+:class:`MomentumShiftPolicy`: the velocity ``a_P`` shift above and the matching shifted SIMPLE
+preconditioner. Because the shift vanishes at the fixed point (``R(φ*) = 0`` exactly), the
+implicit-function-theorem adjoint is untouched — continuation only reshapes the forward path.
 """
 
 from __future__ import annotations
@@ -48,36 +39,80 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import lineax as lx
 
+from aquaflux.solve.continuation import PseudoTransientStep, ShiftTerm
 from aquaflux.solve.implicit import ImplicitNewtonSolver
-from aquaflux.solve.linear import solve_linear
 
 from .block_preconditioner import BlockPreconditioner
 
 if TYPE_CHECKING:
     from .momentum import MomentumContinuity
 
-_ResidualFn = Callable[[jnp.ndarray], jnp.ndarray]
-_Stepper = Callable[[_ResidualFn, jnp.ndarray, jnp.ndarray, lx.AbstractLinearSolver], jnp.ndarray]
 
-# Inexact-Newton forward solver for the pseudo-transient march: a loose *relative* tolerance (each
-# shifted step need only make Newton progress; the next step corrects the leftover) but a *tight*
-# absolute floor and a generous restart/stagnation budget. The march drives the residual far below
-# the ``1e-3`` absolute floor the plain inexact solver uses, and once ``‖R‖`` nears that floor the
-# linear solve would stop taking a step and the outer march would stall short of the nonlinear
-# tolerance — so the absolute term must not cap the terminal convergence. The looser stagnation
-# budget also rides out the stiffer shifted operators a graded, high-Reynolds mesh produces.
-_INEXACT_CONTINUATION_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-10, restart=40, stagnation_iters=40)
+class MomentumShiftPolicy(eqx.Module):
+    """The coupled-flow shift policy for pseudo-transient continuation (see the module docstring).
+
+    Supplies the two flow-specific choices :class:`~aquaflux.solve.PseudoTransientStep` needs: it
+    shifts **only the velocity block**, by the block preconditioner's frozen momentum diagonal
+    ``a_P`` — the coupled-Newton form of SIMPLE velocity under-relaxation (effective diagonal
+    ``a_P (1 + β)`` ⇔ relaxation ``1 / (1 + β)``) — and preconditions the shifted system with the
+    block-SIMPLE preconditioner at that *same* under-relaxed diagonal, restoring its diagonal
+    dominance. Being proportional to ``a_P`` (not a global ``V / Δt``) makes the damping
+    scale-invariant across a graded, wall-resolved mesh.
+
+    Attributes
+    ----------
+    preconditioner : BlockPreconditioner
+        The block-SIMPLE preconditioner, applied at the shifted diagonal ``a_P (1 + β)`` each step,
+        and the source of the frozen ``a_P`` the shift is formed from.
+    """
+
+    preconditioner: BlockPreconditioner
+
+    def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
+        """The base velocity shift diagonal and the ``β -> M`` shifted preconditioner at ``phi``.
+
+        Parameters
+        ----------
+        phi : jnp.ndarray
+            The flat coupled state ``[vel_0..vel_{dim-1}, pressure]``, shape ``((dim + 1) n_cells,)``.
+
+        Returns
+        -------
+        ShiftTerm
+            ``diagonal`` places the isotropic per-cell ``a_P`` on every velocity component and zero on
+            pressure (the full-state base shift ``d``); ``make_preconditioner(β)`` returns the block
+            preconditioner at the under-relaxed diagonal ``a_P (1 + β)``.
+        """
+        block = self.preconditioner
+        a_p = block.frozen_momentum_diagonal(phi)  # isotropic per-cell a_P, (n_cells,)
+        assembler = block.assembler
+        n_cells = assembler.mesh.n_cells
+        # a_P on every velocity component, zero on pressure — the full-state base shift d(φ). The
+        # engine scales it by β and adds β·d to the Jacobian diagonal (velocity DOFs only).
+        diagonal = assembler.pack(
+            jnp.broadcast_to(a_p[:, None], (n_cells, assembler.mesh.dim)), jnp.zeros(n_cells)
+        )
+
+        def make_preconditioner(
+            relaxation: jnp.ndarray,
+        ) -> Callable[[jnp.ndarray], jnp.ndarray]:
+            # Invert the same under-relaxed diagonal a_P (1 + β) the shift adds to the Jacobian, so
+            # the preconditioner matches the shifted operator. Frozen: the coefficient is detached.
+            return block.apply_at(phi, jax.lax.stop_gradient(a_p * (1.0 + relaxation)))
+
+        return ShiftTerm(diagonal, make_preconditioner)
 
 
 class PseudoTransientContinuation(eqx.Module):
     """Implicit under-relaxation continuation for the coupled flow solve (see the module docstring).
 
     Plugs into :class:`~aquaflux.solve.ImplicitNewtonSolver` as its ``forward_step`` strategy: the
-    forward Newton loop uses the diagonally shifted step this object supplies (in place of the
-    default line search), while the (converged, well-conditioned) adjoint solve keeps using the bare
-    block preconditioner. Build it from a flow assembler with :meth:`build`.
+    forward Newton loop uses the diagonally shifted step this supplies (in place of the default line
+    search), while the (converged, well-conditioned) adjoint solve uses the bare block
+    preconditioner. It wires a :class:`MomentumShiftPolicy` into the residual-agnostic
+    :class:`~aquaflux.solve.PseudoTransientStep` engine, which owns the schedule, the shifted solve,
+    and the accept/escalate loop. Build it from a flow assembler with :meth:`build`.
 
     Attributes
     ----------
@@ -86,27 +121,22 @@ class PseudoTransientContinuation(eqx.Module):
         and (unshifted) as the adjoint preconditioner.
     beta0 : float
         *Initial* under-relaxation strength ``β₀`` (static) — the damping the first attempt of each
-        step tries, ``β = β₀ (‖R‖/‖R₀‖)^p``. With the step-acceptance escalation below, ``β₀`` is a
-        starting guess rather than a per-case knob: too small is recovered by escalation, too large
-        only costs a slower march. The effective SIMPLE velocity relaxation is ``1/(1+β)``.
+        step tries, ``β = β₀ (‖R‖/‖R₀‖)^p``. With the step-acceptance escalation, ``β₀`` is a starting
+        guess rather than a per-case knob: too small is recovered by escalation, too large only costs
+        a slower march. The effective SIMPLE velocity relaxation is ``1/(1+β)``.
     exponent : float
-        Switched-evolution-relaxation exponent ``p`` in ``β = β₀ (‖R‖/‖R₀‖)^p`` (static). ``1``
-        ramps the shift linearly with the residual norm.
+        Switched-evolution-relaxation exponent ``p`` in ``β = β₀ (‖R‖/‖R₀‖)^p`` (static). ``1`` ramps
+        the shift linearly with the residual norm.
     max_escalations : int
-        Maximum damping escalations per step (static). If a step's shifted solve fails to reduce the
-        residual (an ill-conditioned shifted system, or an overshoot), ``β`` is multiplied by
-        :attr:`escalation_factor` and the step retried, up to this many times — the acceptance test
-        the bare pseudo-transient march lacks. A well-behaved step is accepted on the first attempt
-        (no extra cost); a cold-start step that would otherwise diverge is damped until it descends,
-        so the march cannot blow up. ``0`` disables escalation (the plain single-attempt step).
+        Maximum damping escalations per step (static). A step's shifted solve that fails to descend is
+        re-damped (``β *= escalation_factor``) and retried, up to this many times; a well-behaved step
+        is accepted on the first attempt. ``0`` disables escalation.
     escalation_factor : float
         Factor ``> 1`` by which ``β`` grows on each rejected attempt (static).
     divergence_cap : float
         The divergence threshold (static): an attempt is rejected (and the damping escalated) if its
-        residual is non-finite or exceeds ``divergence_cap × ‖R₀‖``. Measured against the *initial*
-        residual because the pseudo-transient march is non-monotone — it oscillates around and below
-        ``‖R₀‖`` — so the guard must catch a genuine blow-up above the starting scale without rejecting
-        a healthy transient. Lenient by default; lower it only to intervene on divergence sooner.
+        residual is non-finite or exceeds ``divergence_cap × ‖R₀‖`` — measured against the *initial*
+        residual, since the non-monotone march oscillates around and below ``‖R₀‖``.
     """
 
     preconditioner: BlockPreconditioner
@@ -150,117 +180,36 @@ class PseudoTransientContinuation(eqx.Module):
             preconditioner, beta0, exponent, max_escalations, escalation_factor, divergence_cap
         )
 
+    def _engine(self) -> PseudoTransientStep:
+        """The residual-agnostic engine, configured with the flow shift policy and adjoint."""
+        return PseudoTransientStep(
+            MomentumShiftPolicy(self.preconditioner),
+            beta0=self.beta0,
+            exponent=self.exponent,
+            max_escalations=self.max_escalations,
+            escalation_factor=self.escalation_factor,
+            divergence_cap=self.divergence_cap,
+            adjoint_preconditioner_factory=self.preconditioner.factory(),
+        )
+
+    def stepper(self) -> Callable:
+        """The shifted-Newton forward step ``(residual_fn, φ, ‖R₀‖, solver) -> φ_next``."""
+        return self._engine().stepper()
+
+    def default_solver(self):
+        """The forward-loop solver for the pseudo-transient march when the caller supplies none."""
+        return self._engine().default_solver()
+
     def adjoint_preconditioner(
         self,
     ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
         """The bare (unshifted) ``state -> M`` factory for the adjoint solve at the converged state.
 
         The adjoint is taken once at ``φ*``, where ``β → 0`` and the operator is already the
-        well-conditioned steady Jacobian, so it needs no pseudo-transient shift — the ordinary
-        block preconditioner is the consistent choice.
+        well-conditioned steady Jacobian, so it needs no pseudo-transient shift — the ordinary block
+        preconditioner is the consistent choice.
         """
         return self.preconditioner.factory()
-
-    def default_solver(self) -> lx.AbstractLinearSolver:
-        """The forward-loop solver for the pseudo-transient march when the caller supplies none.
-
-        A loose relative tolerance with a tight absolute floor and a generous restart/stagnation
-        budget, so the march is not capped short of the nonlinear tolerance and rides out the
-        stiffer shifted operators a graded, high-Reynolds mesh produces.
-        """
-        return _INEXACT_CONTINUATION_SOLVER
-
-    def stepper(self) -> _Stepper:
-        """Return the accepted shifted-Newton step ``(residual_fn, φ, ‖R₀‖, solver) -> φ_next``.
-
-        The closure captures the preconditioner and the flow layout (both frozen); it is what the
-        Newton driver calls each forward iteration in place of a line-searched step. It is the only
-        surface the generic solver sees, so the solver never imports any flow specifics.
-
-        Each step forms the shifted-Newton correction at ``β = β₀ (‖R‖/‖R₀‖)^p`` and **accepts it only
-        if it reduces the residual**; otherwise it escalates the damping (``β *= escalation_factor``)
-        and retries, up to :attr:`max_escalations`. This is the globalization the bare march lacks: a
-        cold-start step whose shifted system is ill-conditioned (or whose full step overshoots) is
-        re-damped until it descends, so the march cannot diverge to a non-finite iterate — while a
-        well-behaved step is accepted on the first attempt at no extra solve. The retry uses a
-        non-throwing linear solve so a non-convergent attempt is *rejected and re-damped* rather than
-        raising. ``β`` still vanishes at the fixed point, so the converged state and the IFT adjoint
-        are unchanged.
-        """
-        block = self.preconditioner
-        assembler = block.assembler
-        n_cells = assembler.mesh.n_cells
-        beta0, exponent = self.beta0, self.exponent
-        max_escalations, escalation_factor = self.max_escalations, self.escalation_factor
-        divergence_cap = self.divergence_cap
-
-        def step(
-            residual_fn: _ResidualFn,
-            phi: jnp.ndarray,
-            residual_norm_0: jnp.ndarray,
-            solver: lx.AbstractLinearSolver,
-        ) -> jnp.ndarray:
-            residual = residual_fn(phi)
-            residual_norm = jnp.linalg.norm(residual)
-            a_p = block.frozen_momentum_diagonal(phi)
-            # Switched-evolution-relaxation: strong damping while the residual is large, none as it
-            # vanishes (β → 0 recovers the undamped Newton step and its terminal quadratic rate).
-            base_relaxation = beta0 * (residual_norm / residual_norm_0) ** exponent
-
-            def attempt(relaxation: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
-                # The shift only reshapes the forward path (like the preconditioner it damps), so it
-                # is detached: it never perturbs the converged state or its adjoint.
-                shift = jax.lax.stop_gradient(relaxation * a_p)  # velocity diagonal shift β a_P
-
-                def shifted_jacobian(tangent: jnp.ndarray) -> jnp.ndarray:
-                    # True Jacobian-vector product plus the pseudo-transient diagonal on velocity DOFs.
-                    jvp = jax.jvp(residual_fn, (phi,), (tangent,))[1]
-                    velocity_tangent, _ = assembler.unpack(tangent)
-                    return jvp + assembler.pack(
-                        shift[:, None] * velocity_tangent, jnp.zeros(n_cells)
-                    )
-
-                # Preconditioner inverts the *same* shifted diagonal a_P (1 + β) it is damped by. The
-                # solve does not throw: a non-convergent shifted system yields a candidate the
-                # acceptance test rejects (triggering more damping), rather than raising.
-                preconditioner = block.apply_at(phi, a_p + shift)
-                delta = solve_linear(
-                    shifted_jacobian,
-                    -residual,
-                    solver=solver,
-                    preconditioner=preconditioner,
-                    throw=False,
-                )
-                candidate = phi + delta
-                return candidate, jnp.linalg.norm(residual_fn(candidate))
-
-            # Accept the first attempt that does not *diverge*, escalating the damping on rejection.
-            # Pseudo-transient steps are legitimately non-monotone, so the test is a divergence guard,
-            # not a descent test: reject only a non-finite candidate or one that has blown up past
-            # ``divergence_cap × ‖R₀‖`` — measured against the *initial* residual, since the healthy
-            # march oscillates around and below ‖R₀‖ while a diverging one explodes above it. The shift
-            # itself is the globalization, and more shift (a smaller pseudo-timestep) is what a rejected
-            # step needs. The loop exits as soon as an attempt is accepted, so a healthy first attempt
-            # costs a single solve; only a diverging step pays for extra, more-damped attempts.
-            divergence_norm = divergence_cap * residual_norm_0
-
-            def cond(state: tuple) -> jnp.ndarray:
-                _, _, attempts, accepted = state
-                return (~accepted) & (attempts <= max_escalations)
-
-            def body(state: tuple) -> tuple:
-                relaxation, best, attempts, _ = state
-                candidate, candidate_norm = attempt(relaxation)
-                accept = jnp.isfinite(candidate_norm) & (candidate_norm < divergence_norm)
-                best = jnp.where(accept, candidate, best)
-                return relaxation * escalation_factor, best, attempts + 1, accept
-
-            _, phi_next, _, _ = jax.lax.while_loop(
-                cond, body, (base_relaxation, phi, 0, jnp.asarray(False))
-            )
-            return phi_next
-
-        return step
 
 
 def reused_flow_solve(

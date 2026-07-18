@@ -65,6 +65,22 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   reintroduce them). Each strategy's shift vanishes at the fixed point, so the converged state and
   the IFT adjoint are strategy-independent. When adding a globalization (e.g. a monotone/forcing
   acceptance), add a `ForwardStep` — do **not** grow a branch in `_forward`.
+- **`continuation.py` — BUILT (`PseudoTransientStep`, residual-agnostic).** The pseudo-transient
+  continuation engine lives **here in `solve/`, not in `flow/`** — it is a `ForwardStep`
+  (`stepper`/`default_solver`/`adjoint_preconditioner`) that owns the switched-evolution-relaxation
+  schedule `β = β₀(‖R‖/‖R₀‖)^p`, the diagonally-shifted solve `(J + diag(βd))δ = −R`
+  (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop` (divergence guard
+  against `divergence_cap·‖R₀‖`). The **only** problem-specific choices — which DOFs shift, the base
+  shift magnitude `d(φ)`, and the shifted-operator preconditioner — come from an injected
+  **`ShiftPolicy`** (`shift_term(φ) -> ShiftTerm(diagonal, make_preconditioner)`; `ShiftTerm.diagonal`
+  is the full-state base shift, `make_preconditioner(β)` the frozen shifted `M`). So the engine is
+  reusable for **any** nonlinear residual (reaction/energy/turbulence), not just the coupled flow —
+  verified in `tests/unit/test_pseudo_transient.py`, which drives it on a scalar root with a trivial
+  policy (no mesh, no flow). The flow application is `aquaflux/flow/continuation.py`'s
+  `MomentumShiftPolicy` (velocity-block `a_P` shift + shifted SIMPLE preconditioner), wired in by the
+  thin `PseudoTransientContinuation` adapter (unchanged `build(assembler, …)` and pytree). When a new
+  nonlinear residual needs pseudo-time globalization, write a `ShiftPolicy` — do **not** re-implement
+  the march.
 - **Gate C — PASSED (`tests/integration/test_skewed_diffusion.py`).** With
   `CorrectedGreenGauss` injected into the residual on a 25%-skewed mesh, one Newton step
   drives `‖R‖` ~24 → ~1e-12 and reproduces a harmonic linear field to ~5e-13 (linear-exact
