@@ -33,7 +33,7 @@ from aquaflux.flow import (
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import ImplicitNewtonSolver
+from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver
 
 H, L, U_IN, RHO = 1.0, 4.0, 1.0, 1.0
 
@@ -72,7 +72,7 @@ def _reynolds(mu):
 def _solve(assembler, *, continuation=None, max_steps=120, **kwargs):
     if continuation is None:
         continuation = PseudoTransientContinuation.build(assembler)
-    solver = ImplicitNewtonSolver(max_steps=max_steps, continuation=continuation, **kwargs)
+    solver = ImplicitNewtonSolver(max_steps=max_steps, forward_step=continuation, **kwargs)
     return solver.solve(lambda s, a: a.residual(s), assembler.initial_state(), assembler)
 
 
@@ -99,7 +99,10 @@ def test_continuation_is_necessary_beyond_the_laminar_floor() -> None:
     from aquaflux.flow import BlockPreconditioner
 
     line_searched = ImplicitNewtonSolver(
-        max_steps=40, preconditioner=BlockPreconditioner.build(assembler).factory()
+        max_steps=40,
+        forward_step=DampedNewtonStep(
+            preconditioner=BlockPreconditioner.build(assembler).factory()
+        ),
     )
     try:
         undamped = line_searched.solve(

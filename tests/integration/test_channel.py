@@ -34,7 +34,7 @@ from aquaflux.flow import (
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import ImplicitNewtonSolver
+from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver
 
 H, L, U_IN, RHO = 1.0, 4.0, 1.0, 1.0
 MU = 0.01  # Re = rho U H / mu = 100
@@ -60,10 +60,11 @@ def _channel(nx=16, ny=8, mu=MU):
     )
 
 
-def _solve(assembler, precond=None, **kwargs):
+def _solve(assembler, precond=None, line_search=10, **kwargs):
     if precond is None:
         precond = BlockPreconditioner.build(assembler).factory()
-    solver = ImplicitNewtonSolver(max_steps=30, preconditioner=precond, **kwargs)
+    forward_step = DampedNewtonStep(preconditioner=precond, line_search=line_search)
+    solver = ImplicitNewtonSolver(max_steps=30, forward_step=forward_step, **kwargs)
     return solver.solve(lambda s, a: a.residual(s), assembler.initial_state(), assembler)
 
 

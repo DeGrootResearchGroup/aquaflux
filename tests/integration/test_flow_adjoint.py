@@ -21,7 +21,7 @@ from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, NoSlipWall
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, SweptGradientSolve
-from aquaflux.solve import ImplicitNewtonSolver
+from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver
 from aquaflux.solve.implicit import _INEXACT_FORWARD_SOLVER
 
 from tests.support.meshes import perturbed_grid_2d
@@ -59,7 +59,9 @@ def _adjoint_and_fd(functional, mu0, *, advection, n, h):
     differentiated function would capture the ``mu`` tracer).
     """
     precond = BlockPreconditioner.build(_cavity(mu0, n, advection)).factory()
-    solver = ImplicitNewtonSolver(max_steps=20, preconditioner=precond)
+    solver = ImplicitNewtonSolver(
+        max_steps=20, forward_step=DampedNewtonStep(preconditioner=precond)
+    )
 
     def f(mu):
         assembler = _cavity(mu, n, advection)
@@ -112,7 +114,9 @@ def test_adjoint_preconditioner_is_a_drop_in() -> None:
     n = 8
 
     def viscosity_grad(preconditioner):
-        solver = ImplicitNewtonSolver(max_steps=20, preconditioner=preconditioner)
+        solver = ImplicitNewtonSolver(
+            max_steps=20, forward_step=DampedNewtonStep(preconditioner=preconditioner)
+        )
 
         def f(mu):
             assembler = _cavity(mu, n, FirstOrderUpwind())
@@ -139,7 +143,11 @@ def test_inexact_newton_matches_tight_solve_with_fewer_matvecs() -> None:
     tight = lx.GMRES(rtol=1e-10, atol=1e-10)
 
     def converged_and_grad(forward_solver):
-        solver = ImplicitNewtonSolver(max_steps=30, preconditioner=precond, solver=forward_solver)
+        solver = ImplicitNewtonSolver(
+            max_steps=30,
+            forward_step=DampedNewtonStep(preconditioner=precond),
+            solver=forward_solver,
+        )
         assembler = _cavity(mu0, n, FirstOrderUpwind())
         state = solver.solve(_residual, assembler.initial_state(), assembler)
 
@@ -160,9 +168,9 @@ def test_inexact_newton_matches_tight_solve_with_fewer_matvecs() -> None:
     # Strictly fewer matvecs: on the Jacobian at a representative mid-solve iterate, the default
     # inexact forward GMRES converges in fewer steps (hence matvecs) than the tight one.
     assembler = _cavity(mu0, n, FirstOrderUpwind())
-    phi = ImplicitNewtonSolver(max_steps=2, preconditioner=precond, solver=tight).solve(
-        _residual, assembler.initial_state(), assembler
-    )
+    phi = ImplicitNewtonSolver(
+        max_steps=2, forward_step=DampedNewtonStep(preconditioner=precond), solver=tight
+    ).solve(_residual, assembler.initial_state(), assembler)
     apply_m = precond(phi)
     residual = assembler.residual(phi)
     operator = lx.FunctionLinearOperator(

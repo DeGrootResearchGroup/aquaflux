@@ -33,30 +33,39 @@ import lineax as lx
 from .linear import default_linear_solver, solve_linear
 from .newton import newton_correction
 
-# The step a continuation strategy supplies: given the (single-argument) residual, the current
+# The step a forward-step strategy supplies: given the (single-argument) residual, the current
 # iterate, the starting residual norm, and the linear solver, return the next iterate.
-_ContinuationStep = Callable[
+_ForwardStep = Callable[
     [Callable[[jnp.ndarray], jnp.ndarray], jnp.ndarray, jnp.ndarray, lx.AbstractLinearSolver],
     jnp.ndarray,
 ]
 
 
-class Continuation(Protocol):
-    """A globalization strategy that replaces the forward Newton step (e.g. pseudo-transient).
+class ForwardStep(Protocol):
+    """A globalized Newton forward-step strategy (line search, pseudo-transient continuation, ...).
 
-    Structural interface only, so the generic solver stays free of any flow specifics. A concrete
-    continuation (e.g. :class:`aquaflux.flow.PseudoTransientContinuation`) supplies the per-step
-    :meth:`stepper` used in the forward loop and an :meth:`adjoint_preconditioner` for the converged
-    transpose solve.
+    The single point of variation in the forward loop: given the residual, the current iterate, the
+    starting residual norm, and the linear solver, a strategy returns the next iterate. Every
+    strategy must reduce to the undamped Newton step near the root and impose no shift at the fixed
+    point, so the converged state solves the unshifted ``R = 0`` and the implicit-function-theorem
+    adjoint is independent of which strategy produced the forward path.
+
+    Structural interface only (a ``Protocol``), so the generic solver stays free of any flow
+    specifics. The concrete strategies are :class:`DampedNewtonStep` (the default backtracking line
+    search) and :class:`aquaflux.flow.PseudoTransientContinuation` (the high-Reynolds march).
     """
 
-    def stepper(self) -> _ContinuationStep:
+    def stepper(self) -> _ForwardStep:
         """The forward step ``(residual_fn, phi, residual_norm_0, solver) -> phi_next``."""
+
+    def default_solver(self) -> lx.AbstractLinearSolver:
+        """The forward-loop linear solver to use when the caller supplies none (an inexact-Newton
+        default whose tolerances suit this strategy's march)."""
 
     def adjoint_preconditioner(
         self,
-    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
-        """The ``state -> M`` preconditioner factory for the adjoint (transpose) solve."""
+    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None:
+        """The ``state -> M`` preconditioner factory for the adjoint (transpose) solve, or ``None``."""
 
 
 # Inexact-Newton forward solver: each Newton step's linear solve need only make Newton progress,
@@ -67,15 +76,6 @@ class Continuation(Protocol):
 # by contrast, is taken once at the converged state and sets the gradient accuracy directly, so it
 # defaults to the tight :func:`default_linear_solver`.
 _INEXACT_FORWARD_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-3)
-
-# Inexact-Newton forward solver for a continuation march: same loose relative tolerance, but a
-# *tight* absolute floor and generous restart/stagnation budget. Continuation drives the residual
-# far below the ``1e-3`` absolute floor the plain inexact solver uses, and once ``‖R‖`` nears that
-# floor the linear solve would stop taking a step and the outer march would stall short of the
-# nonlinear tolerance — so the absolute term must not cap the terminal convergence. The looser
-# stagnation budget also rides out the stiffer shifted operators a graded, high-Reynolds mesh
-# produces.
-_INEXACT_CONTINUATION_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-10, restart=40, stagnation_iters=40)
 
 
 def _damped_newton_step(residual_fn, phi, solver, preconditioner, line_search_steps):
@@ -109,25 +109,68 @@ def _damped_newton_step(residual_fn, phi, solver, preconditioner, line_search_st
     return phi + chosen * delta
 
 
-def _forward(
-    residual_fn,
-    phi0,
-    theta,
-    rtol,
-    atol,
-    max_steps,
-    solver,
-    preconditioner,
-    line_search,
-    continuation_step,
-):
+class DampedNewtonStep(eqx.Module):
+    """Backtracking-line-searched Newton step — the default forward-step strategy.
+
+    Each step takes the largest ``alpha in {1, 1/2, ..., 2**-line_search}`` that reduces the
+    residual norm (a full step whenever the full step already reduces it), so a well-behaved or
+    linear solve runs undamped while a convection-dominated open flow — whose full Newton step from
+    a uniform initial field overshoots and diverges — is damped back onto a descent path.
+    ``line_search == 0`` is pure full Newton. The search only reshapes the forward path; the
+    implicit-function-theorem adjoint depends solely on the converged state, so it is unaffected.
+
+    Attributes
+    ----------
+    preconditioner : callable or None
+        A factory ``phi -> M`` giving the left preconditioner ``M`` (a matvec approximating
+        ``J^{-1}``) for each Newton step's linear solve, built at the current iterate (e.g.
+        :meth:`aquaflux.flow.BlockPreconditioner.factory`). Used for the forward steps and,
+        transposed, for the adjoint (transpose) solve, so gradients are mesh-independent too.
+        ``None`` solves unpreconditioned — usable only on small or well-conditioned systems; the
+        coupled flow saddle-point needs one. Static.
+    line_search : int
+        Maximum step-halvings in the backtracking line search (static). ``0`` disables it (pure
+        full Newton).
+    """
+
+    preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None = (
+        eqx.field(static=True, default=None)
+    )
+    line_search: int = eqx.field(static=True, default=10)
+
+    def stepper(self) -> _ForwardStep:
+        """The line-searched Newton step ``(residual_fn, phi, ‖R₀‖, solver) -> phi_next``."""
+        preconditioner = self.preconditioner
+        line_search = self.line_search
+
+        def step(residual_fn, phi, residual_norm_0, solver):
+            # The starting norm is unused: each step's line search is decided from the residual at
+            # the current iterate, not the initial one.
+            del residual_norm_0
+            return _damped_newton_step(residual_fn, phi, solver, preconditioner, line_search)
+
+        return step
+
+    def default_solver(self) -> lx.AbstractLinearSolver:
+        """The inexact-Newton forward solver (loose relative tolerance; the next step corrects the
+        leftover, cutting the matvec count per step several-fold with the converged state unchanged)."""
+        return _INEXACT_FORWARD_SOLVER
+
+    def adjoint_preconditioner(
+        self,
+    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None:
+        """The forward preconditioner, reused (transposed) for the adjoint solve."""
+        return self.preconditioner
+
+
+def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn):
     """Newton iterate to convergence (``lax.while_loop``); returns the converged field.
 
-    With ``continuation_step`` set, each iteration is the pseudo-transient (diagonally shifted) step
-    it supplies instead of the line-searched Newton step — the globalization a convection-dominated
-    open flow needs at high Reynolds number, where the block preconditioner would otherwise stall
-    the inner GMRES. The shift vanishes at the fixed point, so the converged field solves the same
-    unshifted ``R(phi, theta) = 0`` and the stopping test is unchanged.
+    Each iteration applies the injected ``forward_step_fn`` — the globalized Newton step the
+    :class:`ForwardStep` strategy supplies (a backtracking line search by default, a pseudo-transient
+    continuation for a high-Reynolds convective flow). Every strategy's shift vanishes at the fixed
+    point, so the converged field solves the same unshifted ``R(phi, theta) = 0`` and the stopping
+    test is unchanged.
     """
     residual_norm_0 = jnp.linalg.norm(residual_fn(phi0, theta))
 
@@ -141,17 +184,14 @@ def _forward(
         def residual_theta(p):
             return residual_fn(p, theta)
 
-        if continuation_step is None:
-            phi = _damped_newton_step(residual_theta, phi, solver, preconditioner, line_search)
-        else:
-            phi = continuation_step(residual_theta, phi, residual_norm_0, solver)
+        phi = forward_step_fn(residual_theta, phi, residual_norm_0, solver)
         return phi, step + 1, jnp.linalg.norm(residual_fn(phi, theta))
 
     phi, _, _ = jax.lax.while_loop(cond, body, (phi0, 0, residual_norm_0))
     return phi
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(0, 3, 4, 5, 6, 7, 8, 9, 10))
+@partial(jax.custom_vjp, nondiff_argnums=(0, 3, 4, 5, 6, 7, 8, 9))
 def _implicit_solve(
     residual_fn,
     phi0,
@@ -161,22 +201,10 @@ def _implicit_solve(
     max_steps,
     solver,
     adjoint_solver,
-    preconditioner,
-    line_search,
-    continuation_step,
+    adjoint_preconditioner,
+    forward_step_fn,
 ):
-    return _forward(
-        residual_fn,
-        phi0,
-        theta,
-        rtol,
-        atol,
-        max_steps,
-        solver,
-        preconditioner,
-        line_search,
-        continuation_step,
-    )
+    return _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn)
 
 
 def _implicit_solve_fwd(
@@ -188,22 +216,10 @@ def _implicit_solve_fwd(
     max_steps,
     solver,
     adjoint_solver,
-    preconditioner,
-    line_search,
-    continuation_step,
+    adjoint_preconditioner,
+    forward_step_fn,
 ):
-    phi_star = _forward(
-        residual_fn,
-        phi0,
-        theta,
-        rtol,
-        atol,
-        max_steps,
-        solver,
-        preconditioner,
-        line_search,
-        continuation_step,
-    )
+    phi_star = _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn)
     return phi_star, (phi_star, theta)
 
 
@@ -230,9 +246,8 @@ def _implicit_solve_bwd(
     max_steps,
     solver,
     adjoint_solver,
-    preconditioner,
-    line_search,
-    continuation_step,
+    adjoint_preconditioner,
+    forward_step_fn,
     residuals,
     cotangent,
 ):
@@ -241,7 +256,7 @@ def _implicit_solve_bwd(
     # adjoint solve is mesh-independent (unpreconditioned it grows with the system size). This solve
     # sets the gradient accuracy, so it uses the (tight) adjoint solver, not the inexact forward one.
     _, vjp_phi = jax.vjp(lambda p: residual_fn(p, theta), phi_star)
-    adjoint_precond = _adjoint_preconditioner(preconditioner, phi_star, cotangent)
+    adjoint_precond = _adjoint_preconditioner(adjoint_preconditioner, phi_star, cotangent)
     lam = solve_linear(
         lambda u: vjp_phi(u)[0], cotangent, solver=adjoint_solver, preconditioner=adjoint_precond
     )
@@ -268,40 +283,26 @@ class ImplicitNewtonSolver(eqx.Module):
     max_steps : int
         Maximum Newton iterations (static).
     solver : lineax.AbstractLinearSolver or None
-        Linear solver for the forward Newton steps. ``None`` uses an **inexact-Newton** default (a
-        loose-tolerance GMRES): each step's solve need only make Newton progress, since the next
-        step corrects it, which cuts the matvec count per step several-fold. The converged state is
-        unaffected — the loop still drives the residual to ``rtol``/``atol``. When ``continuation``
-        is set, the ``None`` default instead uses a variant with a tight *absolute* floor, so the
-        pseudo-transient march is not capped short of the nonlinear tolerance near convergence.
+        Linear solver for the forward Newton steps. ``None`` uses the forward-step strategy's own
+        default (:meth:`ForwardStep.default_solver`) — an **inexact-Newton** GMRES whose tolerances
+        suit that strategy's march (a loose relative tolerance for the line search, plus a tight
+        *absolute* floor for the pseudo-transient continuation so its march is not capped short of
+        the nonlinear tolerance near convergence). The converged state is unaffected — the loop
+        still drives the residual to ``rtol``/``atol``.
     adjoint_solver : lineax.AbstractLinearSolver or None
         Linear solver for the adjoint (transpose) solve. ``None`` uses the tight
         :func:`default_linear_solver`, because this single solve at the converged state sets the
         gradient accuracy directly and should not be loosened along with the forward steps.
-    preconditioner : callable or None
-        A factory ``phi -> M`` giving the left preconditioner ``M`` (a matvec approximating
-        ``J^{-1}``), built at the current iterate (e.g.
-        :meth:`aquaflux.flow.BlockPreconditioner.factory`). Used for **both** the forward Newton
-        solves and, transposed to ``M^T``, the adjoint (transpose) solve, so gradients are
-        mesh-independent too. ``None`` solves unpreconditioned — usable only on small or
-        well-conditioned systems; the coupled flow saddle-point needs one. Static.
-    line_search : int
-        Maximum step-halvings in the forward step's backtracking line search (static). Each Newton
-        step takes the largest ``alpha in {1, 1/2, 1/4, ...}`` (up to this many halvings) that
-        reduces the residual norm — the globalization a convection-dominated open flow needs, where
-        the undamped full step overshoots from a uniform initial field and diverges. A full step is
-        kept whenever it already reduces the residual, so a well-behaved or linear solve is
-        unchanged. ``0`` disables it (pure full Newton). The IFT adjoint is unaffected either way.
-        Ignored when ``continuation`` is set (which supplies its own globalization).
-    continuation : Continuation or None
-        A continuation strategy (e.g. :class:`aquaflux.flow.PseudoTransientContinuation`) whose
-        pseudo-transient step replaces the line-searched Newton step in the forward loop (static).
-        This is the globalization a *high-Reynolds* convective flow needs — the line search alone
-        leaves the inner GMRES stalling on the block preconditioner once convection dominates. Its
-        diagonal shift vanishes at the fixed point, so the converged state and the IFT adjoint are
-        the same as without it. When set and ``preconditioner`` is ``None``, the adjoint solve uses
-        the continuation's own (unshifted) preconditioner. ``None`` keeps the plain line-searched
-        Newton loop.
+    forward_step : ForwardStep
+        The globalized forward-step strategy that supplies each Newton iteration (static): a
+        :class:`DampedNewtonStep` backtracking line search by default, or an
+        :class:`aquaflux.flow.PseudoTransientContinuation` for a high-Reynolds convective flow. The
+        strategy also owns the forward preconditioner and, transposed, the adjoint preconditioner
+        (via :meth:`ForwardStep.adjoint_preconditioner`), so gradients are mesh-independent too.
+        Every strategy's shift vanishes at the fixed point, so the converged state and the IFT
+        adjoint are the same regardless of which is used. Defaults to an unpreconditioned
+        ``DampedNewtonStep`` — pass ``DampedNewtonStep(preconditioner=...)`` for a coupled flow,
+        which needs one.
     """
 
     rtol: float = eqx.field(static=True, default=1e-10)
@@ -309,11 +310,7 @@ class ImplicitNewtonSolver(eqx.Module):
     max_steps: int = eqx.field(static=True, default=50)
     solver: lx.AbstractLinearSolver | None = None
     adjoint_solver: lx.AbstractLinearSolver | None = None
-    preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None = (
-        eqx.field(static=True, default=None)
-    )
-    line_search: int = eqx.field(static=True, default=10)
-    continuation: Continuation | None = None
+    forward_step: ForwardStep = eqx.field(default_factory=DampedNewtonStep)
 
     def solve(
         self,
@@ -337,22 +334,14 @@ class ImplicitNewtonSolver(eqx.Module):
         jnp.ndarray
             The converged field, shape ``(n_cells,)``.
         """
-        if self.solver is not None:
-            solver = self.solver
-        elif self.continuation is not None:
-            solver = _INEXACT_CONTINUATION_SOLVER  # tight absolute floor for the terminal march
-        else:
-            solver = _INEXACT_FORWARD_SOLVER
+        forward = self.forward_step
+        solver = self.solver if self.solver is not None else forward.default_solver()
         adjoint_solver = (
             self.adjoint_solver if self.adjoint_solver is not None else default_linear_solver()
         )
-        continuation_step = None if self.continuation is None else self.continuation.stepper()
-        # The adjoint solve (at the converged, unshifted state) reuses the continuation's own
-        # preconditioner when the caller supplies only a continuation, so a high-Re solve needs just
-        # one strategy for both the forward globalization and the mesh-independent adjoint.
-        preconditioner = self.preconditioner
-        if preconditioner is None and self.continuation is not None:
-            preconditioner = self.continuation.adjoint_preconditioner()
+        # The strategy owns both the forward step and the adjoint preconditioner (the same
+        # preconditioner it applies forward, transposed at the converged state), so a high-Re solve
+        # needs a single strategy for both the forward globalization and the mesh-independent adjoint.
         return _implicit_solve(
             residual_fn,
             phi0,
@@ -362,7 +351,6 @@ class ImplicitNewtonSolver(eqx.Module):
             self.max_steps,
             solver,
             adjoint_solver,
-            preconditioner,
-            self.line_search,
-            continuation_step,
+            forward.adjoint_preconditioner(),
+            forward.stepper(),
         )

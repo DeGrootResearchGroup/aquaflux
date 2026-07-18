@@ -52,6 +52,19 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   nonlinear residual (the flux limiter). `newton_step` is shared with `NewtonSolver`. Verified
   (`test_implicit_solve.py`): converges a nonlinear root, gradient matches the closed form to
   1e-10, and is iteration-count-independent. Used by the limited-advection solve.
+- **Forward globalization is ONE injected strategy — `forward_step: ForwardStep`.** The forward
+  Newton loop has a single point of variation: `ImplicitNewtonSolver` takes one `forward_step`
+  implementing the `ForwardStep` protocol (`stepper()` → the per-step
+  `(residual_fn, phi, ‖R₀‖, solver) -> phi_next`; `default_solver()` → the inexact-Newton forward
+  GMRES for that march; `adjoint_preconditioner()` → the converged-state transpose preconditioner).
+  Two concrete strategies: **`DampedNewtonStep`** (default — the backtracking line search, holding
+  the forward/adjoint preconditioner and the line-search count) and **`PseudoTransientContinuation`**
+  (`aquaflux/flow/`, the high-Reynolds diagonally-shifted march). `_forward` calls the injected step
+  unconditionally — there is **no `if continuation is None` branch**, and **no separate
+  `line_search`/`preconditioner`/`continuation` constructor args** (they were unified here; do not
+  reintroduce them). Each strategy's shift vanishes at the fixed point, so the converged state and
+  the IFT adjoint are strategy-independent. When adding a globalization (e.g. a monotone/forcing
+  acceptance), add a `ForwardStep` — do **not** grow a branch in `_forward`.
 - **Gate C — PASSED (`tests/integration/test_skewed_diffusion.py`).** With
   `CorrectedGreenGauss` injected into the residual on a 25%-skewed mesh, one Newton step
   drives `‖R‖` ~24 → ~1e-12 and reproduces a harmonic linear field to ~5e-13 (linear-exact
