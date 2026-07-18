@@ -148,7 +148,9 @@ class LimitedUpwind(AdvectionScheme):
         phi_upwind = _upwind_value(field, outflow, fc)
         psi_upwind = _upwind_value(psi, outflow, fc)
         grad_upwind = _upwind_value(gradient, outflow, fc)
-        x_upwind = _upwind_value(x_cell, outflow, fc)
+        # The upwind *position* (unlike the field/gradient values) takes the neighbour's periodic
+        # image across a seam, so the reconstruction offset x_ip - x_upwind is the physical gap.
+        x_upwind = jnp.where(outflow[:, None], x_cell[fc.owner], fc.neighbour_centroid(x_cell))
         reconstruction = phi_upwind + psi_upwind * dot(
             grad_upwind, context.geometry.face.centroid - x_upwind
         )

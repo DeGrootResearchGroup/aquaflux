@@ -50,7 +50,7 @@ def interpolation_factor(
     cell_centroid = geometry.cell.centroid
     interior = face_cells.interior
     x_p = cell_centroid[face_cells.owner]
-    d = cell_centroid[face_cells.safe_neighbour] - x_p
+    d = face_cells.neighbour_centroid(cell_centroid) - x_p  # periodic-image neighbour across a seam
     dd = jnp.where(interior, norm_squared(d), 1.0)  # avoid 0/0 on boundary faces
     return jnp.where(interior, dot(geometry.face.centroid - x_p, d) / dd, 0.0)
 
@@ -134,7 +134,7 @@ def interpolate_to_face(
     grad_face = interpolate_owner_neighbour(cell_gradient, factor, face_cells)
     cell_centroid = geometry.cell.centroid
     x_p = cell_centroid[face_cells.owner]
-    d = cell_centroid[face_cells.safe_neighbour] - x_p
+    d = face_cells.neighbour_centroid(cell_centroid) - x_p  # periodic-image neighbour across a seam
     skewness = geometry.face.centroid - (x_p + scale(d, factor))  # x_ip − x_g, shape (n_faces, dim)
     correction = jnp.einsum("f...j,fj->f...", grad_face, skewness)
     return blend + correction

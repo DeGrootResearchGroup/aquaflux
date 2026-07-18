@@ -71,11 +71,17 @@ class FaceCellConnectivity(eqx.Module):
         Neighbour cell index per face (``< 0`` marks a boundary face).
     n_cells : int
         Number of cells to scatter into (static).
+    neighbour_offset : jnp.ndarray or None, shape ``(n_faces, dim)``
+        Per-face translation added to the neighbour cell's centroid to give its **periodic image**
+        as seen from the owner — nonzero only on the wrap faces of a periodic seam, ``+L`` along the
+        periodic axis (see :meth:`neighbour_centroid`). ``None`` (the default) means a zero offset
+        everywhere: an ordinary non-periodic mesh, stored without allocating the array.
     """
 
     owner: jnp.ndarray
     neighbour: jnp.ndarray
     n_cells: int = eqx.field(static=True)
+    neighbour_offset: jnp.ndarray | None = None
 
     @property
     def interior(self) -> jnp.ndarray:
@@ -102,6 +108,33 @@ class FaceCellConnectivity(eqx.Module):
         (``field[conn.safe_neighbour]``).
         """
         return jnp.where(self.interior, self.neighbour, self.owner)
+
+    def neighbour_centroid(self, cell_centroid: jnp.ndarray) -> jnp.ndarray:
+        """Neighbour cell centroids gathered per face, shifted to their **periodic image**.
+
+        Every displacement-forming operator (the owner→neighbour vector a diffusion, gradient, or
+        Rhie--Chow term needs) must gather the neighbour centroid through *this* accessor rather than
+        indexing ``cell_centroid[safe_neighbour]`` directly. On an ordinary interior or boundary face
+        the two agree; across a periodic seam the raw neighbour centroid sits a full period away, so
+        the owner→neighbour vector would be wrong — adding :attr:`neighbour_offset` (``+L`` on the
+        wrap faces) returns the neighbour's periodic image, making the seam delta identical to an
+        ordinary interior face. Only geometric *position* is shifted; field *values* are periodic and
+        gather unchanged off :attr:`safe_neighbour`.
+
+        Parameters
+        ----------
+        cell_centroid : jnp.ndarray, shape ``(n_cells, dim)``
+            Per-cell centroids.
+
+        Returns
+        -------
+        jnp.ndarray, shape ``(n_faces, dim)``
+            The (periodic-image) neighbour centroid per face.
+        """
+        neighbour_centroid = cell_centroid[self.safe_neighbour]
+        if self.neighbour_offset is None:
+            return neighbour_centroid
+        return neighbour_centroid + self.neighbour_offset
 
     def combine_face_values(
         self, interior_values: jnp.ndarray, boundary_values: jnp.ndarray

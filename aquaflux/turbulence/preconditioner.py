@@ -100,7 +100,10 @@ def scalar_transport_preconditioner(
     gamma_face = interpolate_owner_neighbour(
         gamma, interpolation_factor(face_cells, geometry), face_cells
     )
-    d = geometry.cell.centroid[face_cells.safe_neighbour] - geometry.cell.centroid[face_cells.owner]
+    d = (
+        face_cells.neighbour_centroid(geometry.cell.centroid)
+        - geometry.cell.centroid[face_cells.owner]
+    )
     normal_distance = dot(d, geometry.face.normal)
     viscous = gamma_face * geometry.face.area / normal_distance
     visc_int = np.asarray(jax.lax.stop_gradient(viscous))[interior_faces]

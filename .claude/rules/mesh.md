@@ -70,7 +70,11 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
   `structured_grid_2d` (quads) / `structured_grid_3d` (hexes), assembled with numpy (no per-face
   Python loop) via the shared `_FaceFamilyBuilder` and handed to `Mesh.from_csr`. These are clean
   **orthogonal** generators (a rectangular tank/channel without a mesh file) — the *user-facing*
-  surface. **Grid skewing is deliberately not here.** The `perturb`/`seed` interior-node
+  surface. `structured_grid_2d(..., periodic=("x",))` makes the x-axis **streamwise-periodic**: its
+  left/right planes fuse into one interior seam face per row (`nx` x-faces, not `nx+1`; only
+  `bottom`/`top` named) carrying the `neighbour_offset` above — the connectivity a fully-developed
+  channel driven by `MomentumContinuity.body_force` needs (requires `nx >= 2`). **Grid skewing is
+  deliberately not here.** The `perturb`/`seed` interior-node
   displacement that breaks a smooth grid's error cancellation for order-of-accuracy studies is a
   *verification* concern, so it lives in the test suite (`tests/support/meshes.py`:
   `perturbed_grid_2d`/`_3d`, thin wrappers that displace the clean grid's interior `node_coords`
@@ -112,6 +116,12 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
     the mesh geometry (`cell.py`, `quality.py`), the discretization scatter
     (`ResidualAssembler._scatter` delegates here; flux operators gather owner/neighbour by direct
     indexing on `owner`/`safe_neighbour`), the gradient schemes, and the coupled flow all compose it.
+    **Streamwise-periodic** meshes carry a per-face `neighbour_offset` (`None` on an ordinary mesh):
+    a displacement-forming operator gathers the neighbour centroid through `fc.neighbour_centroid(cc)`
+    (= `cc[safe_neighbour] + neighbour_offset`) rather than indexing directly, so a periodic seam —
+    one interior face wrapping the last cell to the first with `+L` offset — has the same owner→
+    neighbour delta as an ordinary interior face. *Values* (φ, u, p, gradients) are periodic and
+    gather unchanged; only *positions* take the offset. Existing meshes (offset `None`) are unchanged.
   - `FaceNodeConnectivity` (obtained as **`mesh.face_nodes`**) — the ragged face→node relation:
     `gather_node_coords`, `perimeter_next`, `reduce_to_faces`, `vertex_mean`; the face-geometry
     schemes (`face.py`) traverse a polygon through these instead of open-coding CSR arithmetic.

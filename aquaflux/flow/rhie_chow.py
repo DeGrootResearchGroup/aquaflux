@@ -171,7 +171,7 @@ def interior_mass_flux(
     # vector d, per normal distance — a consistent directional derivative that vanishes on a linear
     # pressure field and suppresses checkerboarding.
     cell_centroid = geometry.cell.centroid
-    d = cell_centroid[face_cells.safe_neighbour] - cell_centroid[face_cells.owner]
+    d = face_cells.neighbour_centroid(cell_centroid) - cell_centroid[face_cells.owner]  # seam image
     dp = pressure[face_cells.safe_neighbour] - pressure[face_cells.owner]
     damping = (dp - dot(grad_face, d)) / normal_distance
     return (mom_normal - rho_face * d_hat * damping) * face_geometry.area

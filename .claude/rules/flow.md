@@ -89,6 +89,12 @@ Engineering Principles.
   limited), which makes the residual **nonlinear** (mass flux and advected velocity both depend
   on velocity). `a_P`'s convective part uses a lagged velocity-flux estimate (breaks the
   `a_P`↔`mdot` circularity). Closed domains pin the pressure at one cell (`pressure_pin=`).
+- **Body force — BUILT.** `body_force=(β,…)` adds a uniform per-volume source to the momentum
+  residual (subtracted per component: `R = flux − β·V`). Sign: with `p = p̃ + G·x`, `β>0` drives
+  `+x` and the mean gradient is `G = −β`. It is a differentiable leaf (a mass-flow controller swaps
+  it via `eqx.tree_at`), and drives a **streamwise-periodic** channel (`structured_grid_2d(periodic=
+  ("x",))` + `pressure_pin`): verified against exact fully-developed Poiseuille in
+  `test_periodic_channel.py`. A uniform force needs no Rhie–Chow term and does not enter continuity.
 - **Validated:**
   - Poiseuille (`test_poiseuille.py`) — parabolic `u`, `v≈0`, linear `p`; **2nd-order**; Stokes
     is linear so **one Newton step**; differentiable.

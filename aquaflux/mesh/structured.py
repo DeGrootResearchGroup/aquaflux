@@ -72,6 +72,7 @@ class _FaceFamilyBuilder:
         self._nodes: list[np.ndarray] = []  # (n_family_faces, k) node-index arrays; k constant
         self._owner: list[np.ndarray] = []
         self._neighbour: list[np.ndarray] = []
+        self._offset: list[np.ndarray | None] = []  # per-family (n_family_faces, dim) or None
         self.sides: dict[str, np.ndarray] = {}
         self._n = 0  # faces accumulated so far (for global side-face indices)
 
@@ -82,8 +83,9 @@ class _FaceFamilyBuilder:
         hi_cell: np.ndarray,
         lo_valid: np.ndarray,
         hi_valid: np.ndarray,
-        lo_name: str,
-        hi_name: str,
+        lo_name: str | None,
+        hi_name: str | None,
+        neighbour_offset: np.ndarray | None = None,
     ) -> None:
         """Append one face family (a constant-index plane/line of faces) and record its boundaries.
 
@@ -98,16 +100,26 @@ class _FaceFamilyBuilder:
             Whether the low / high cell exists (``False`` on the corresponding domain boundary).
             The owner is whichever side exists (both, for an interior face); the neighbour is the
             other, or ``-1`` on a boundary face. The ``clip`` on a masked-off cell index is safe:
-            the clipped value is never used (it is overwritten by ``np.where``).
-        lo_name, hi_name : str
-            Patch names for the low / high boundary planes of this family.
+            the clipped value is never used (it is overwritten by ``np.where``). For a **periodic**
+            family every face is interior (both sides valid) and ``lo_cell``/``hi_cell`` already carry
+            the wrapped owner/neighbour.
+        lo_name, hi_name : str or None
+            Patch names for the low / high boundary planes of this family; ``None`` skips recording
+            that side (a periodic family has no boundary plane to name).
+        neighbour_offset : np.ndarray, optional
+            Per-face periodic-image translation of the neighbour centroid, shape
+            ``(n_family_faces, dim)`` — the wrap faces of a periodic family carry ``+L`` along the
+            periodic axis, every other face zero. Omit for an ordinary (non-periodic) family.
         """
         self._owner.append(np.where(lo_valid, lo_cell, hi_cell))
         self._neighbour.append(np.where(lo_valid & hi_valid, hi_cell, -1))
         self._nodes.append(np.stack(face_nodes, axis=1))
+        self._offset.append(neighbour_offset)
         gidx = self._n + np.arange(lo_valid.size)
-        self.sides[lo_name] = gidx[~lo_valid]  # low-side boundary faces
-        self.sides[hi_name] = gidx[~hi_valid]  # high-side boundary faces
+        if lo_name is not None:
+            self.sides[lo_name] = gidx[~lo_valid]  # low-side boundary faces
+        if hi_name is not None:
+            self.sides[hi_name] = gidx[~hi_valid]  # high-side boundary faces
         self._n += lo_valid.size
 
     def build(self, coords: np.ndarray, n_cells: int, named_boundaries: bool) -> Mesh:
@@ -115,6 +127,17 @@ class _FaceFamilyBuilder:
         all_nodes = np.concatenate(self._nodes, axis=0)  # (n_faces, k)
         n_faces, k = all_nodes.shape
         offsets = np.arange(n_faces + 1) * k  # every structured face has the same node count k
+        dim = coords.shape[1]
+        # A single per-mesh neighbour offset, assembled only when some family is periodic; zeros for
+        # the ordinary families, so a non-periodic mesh passes ``None`` and is unchanged.
+        neighbour_offset = None
+        if any(o is not None for o in self._offset):
+            neighbour_offset = np.concatenate(
+                [
+                    o if o is not None else np.zeros((f.shape[0], dim))
+                    for o, f in zip(self._offset, self._owner, strict=True)
+                ]
+            )
         return Mesh.from_csr(
             coords,
             offsets,
@@ -123,6 +146,7 @@ class _FaceFamilyBuilder:
             np.concatenate(self._neighbour),
             n_cells=n_cells,
             face_patches=self.sides if named_boundaries else None,
+            neighbour_offset=neighbour_offset,
         )
 
 
@@ -135,6 +159,7 @@ def structured_grid_2d(
     *,
     x_nodes: np.ndarray | None = None,
     y_nodes: np.ndarray | None = None,
+    periodic: tuple[str, ...] = (),
 ) -> Mesh:
     """A structured quad grid on ``[0, lx] x [0, ly]`` with ``nx * ny`` cells.
 
@@ -149,21 +174,33 @@ def structured_grid_2d(
     lx, ly : float
         Domain size. Ignored on an axis whose node coordinates are given explicitly.
     named_boundaries : bool
-        When ``True``, tag the four boundary sides as named face patches ``"left"``
+        When ``True``, tag the boundary sides as named face patches ``"left"``
         (x = 0), ``"right"`` (x = lx), ``"bottom"`` (y = 0), ``"top"`` (y = ly), so a
         different boundary condition can be attached to each. The sides are known exactly
         during construction (no geometric detection). Default ``False`` leaves the plain
-        ``"interior"`` / ``"boundary"`` split.
+        ``"interior"`` / ``"boundary"`` split. A **periodic** axis has no boundary planes, so its
+        two side names are absent (a periodic-x mesh names only ``"bottom"`` / ``"top"``).
     x_nodes, y_nodes : np.ndarray, optional
         Explicit, monotonically increasing node coordinates along each axis, shape ``(nx + 1,)`` /
         ``(ny + 1,)``. Only the coordinates change — the connectivity is identical — so this is how
         a **graded** mesh is built (e.g. :func:`graded_nodes` for a wall-resolved boundary layer).
         Default (``None``) is uniform spacing ``lx / nx`` / ``ly / ny``.
+    periodic : tuple of str
+        Axes made streamwise-periodic (currently ``("x",)``; the ``"y"`` analogue is symmetric but
+        unused here). A periodic axis fuses its two boundary planes into one interior **seam** face
+        per row, coupling the last cell back to the first with a periodic-image
+        :attr:`~aquaflux.mesh.connectivity.FaceCellConnectivity.neighbour_offset` of ``+lx`` — the
+        connectivity a fully-developed channel driven by a body force needs. Requires ``nx >= 2`` on
+        the periodic axis (a single cell would couple itself). Default ``()`` is non-periodic.
 
     Returns
     -------
     Mesh
     """
+    unknown = set(periodic) - {"x"}
+    if unknown:
+        raise ValueError(f"periodic axes must be a subset of {{'x'}}; got {sorted(unknown)}")
+    periodic_x = "x" in periodic
 
     def _axis(nodes: np.ndarray | None, n: int, length: float) -> np.ndarray:
         if nodes is None:
@@ -190,17 +227,43 @@ def structured_grid_2d(
 
     builder = _FaceFamilyBuilder()
 
-    # X-normal faces (vertical edges): index i in [0, nx], cells (i-1, j) | (i, j).
-    fi, fj = (a.ravel() for a in np.meshgrid(np.arange(nx + 1), np.arange(ny), indexing="ij"))
-    builder.add_family(
-        [nid(fi, fj), nid(fi, fj + 1)],
-        cid(np.clip(fi - 1, 0, nx - 1), fj),
-        cid(np.clip(fi, 0, nx - 1), fj),
-        fi > 0,
-        fi < nx,
-        "left",
-        "right",
-    )
+    if periodic_x:
+        if nx < 2:
+            raise ValueError(
+                f"a periodic x-axis needs nx >= 2 (a single cell couples itself); got {nx}"
+            )
+        # X-normal faces, one per cell column: index i in [1, nx] sits at x[i] between cells
+        # (i-1, j) | (i mod nx, j). The i == nx face is the seam at x = lx, wrapping the last cell
+        # back to the first (neighbour cell 0) with a periodic-image offset of +period along x; the
+        # x = 0 face is not emitted (it is that seam face's periodic image). All faces are interior.
+        fi, fj = (
+            a.ravel() for a in np.meshgrid(np.arange(1, nx + 1), np.arange(ny), indexing="ij")
+        )
+        period_x = float(x[-1] - x[0])
+        offset = np.zeros((fi.size, 2))
+        offset[fi == nx, 0] = period_x
+        builder.add_family(
+            [nid(fi, fj), nid(fi, fj + 1)],
+            cid(fi - 1, fj),
+            cid(fi % nx, fj),
+            np.ones(fi.size, dtype=bool),
+            np.ones(fi.size, dtype=bool),
+            None,
+            None,
+            neighbour_offset=offset,
+        )
+    else:
+        # X-normal faces (vertical edges): index i in [0, nx], cells (i-1, j) | (i, j).
+        fi, fj = (a.ravel() for a in np.meshgrid(np.arange(nx + 1), np.arange(ny), indexing="ij"))
+        builder.add_family(
+            [nid(fi, fj), nid(fi, fj + 1)],
+            cid(np.clip(fi - 1, 0, nx - 1), fj),
+            cid(np.clip(fi, 0, nx - 1), fj),
+            fi > 0,
+            fi < nx,
+            "left",
+            "right",
+        )
 
     # Y-normal faces (horizontal edges): index j in [0, ny], cells (i, j-1) | (i, j).
     fi, fj = (a.ravel() for a in np.meshgrid(np.arange(nx), np.arange(ny + 1), indexing="ij"))
