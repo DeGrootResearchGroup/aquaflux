@@ -478,6 +478,58 @@ def _spectral_radius(matrix: sp.spmatrix, iterations: int = 20) -> float:
     return lam
 
 
+def _build_aggregation_hierarchy(
+    a: sp.csr_matrix,
+    *,
+    aggregation_operator: Callable[[sp.csr_matrix], sp.csr_matrix],
+    omega_smooth: float,
+    max_coarse: int,
+    max_levels: int,
+) -> SmoothedHierarchy:
+    """Coarsen ``a`` into a frozen smoothed-aggregation hierarchy — the loop shared by the symmetric
+    and convection-diffusion builders.
+
+    ``aggregation_operator`` maps each level's true operator to the operator that drives aggregation
+    and prolongation smoothing: identity for a symmetric graph Laplacian, and the symmetric part
+    ``(A + Aᵀ)/2`` for a nonsymmetric convection-diffusion operator (whose advected error modes need a
+    well-shaped, stable coarse space). The Galerkin coarse operator ``Pᵀ A P`` always carries the true
+    ``a`` up the levels, so a nonsymmetric operator stays convection-aware.
+
+    Two spectral estimates play different roles. ``lam_smooth`` — the largest eigenvalue magnitude of
+    the aggregation operator's ``D⁻¹ A_agg`` — sets the constant-preserving prolongation smoothing.
+    ``lam_store`` — of the **true** ``D⁻¹ A`` — is frozen into each level for the runtime smoother: the
+    Galerkin coarse operators of a convection-diffusion problem pick up large complex eigenvalues the
+    symmetric part misses, so a coarse-level smoother damped by ``lam_smooth`` alone would diverge. When
+    the aggregation operator *is* the true operator (the symmetric path) the two coincide and the
+    estimate is computed once.
+    """
+    levels: list[_SparseLevel] = []
+    while True:
+        a_agg = aggregation_operator(a)
+        d_inv = sp.diags(1.0 / a.diagonal())
+        lam_smooth = _spectral_radius(d_inv @ a_agg)  # prolongation-smoothing damping
+        lam_store = (
+            lam_smooth if a_agg is a else _spectral_radius(d_inv @ a)
+        )  # runtime smoother scale
+        if a.shape[0] <= max_coarse or len(levels) + 1 >= max_levels:
+            # Coarsest level: a direct (dense pseudo-inverse) solve — an inexact coarse solve is the
+            # dominant cause of mesh-dependent V-cycle degradation, so it must be an actual solve; pinv
+            # also handles a nonsymmetric coarse operator.
+            levels.append(_sparse_level(a, lam_store, np.linalg.pinv(a.toarray()), None, 0))
+            break
+        upper = sp.triu(a_agg, k=1).tocoo()  # aggregate on the aggregation operator's graph
+        aggregate, n_coarse = _aggregate(upper.row, upper.col, a.shape[0])
+        tentative = sp.csr_matrix(
+            (np.ones(a.shape[0]), (np.arange(a.shape[0]), aggregate)), shape=(a.shape[0], n_coarse)
+        )
+        prolongation = (
+            tentative - (omega_smooth * 2.0 / lam_smooth) * (d_inv @ (a_agg @ tentative))
+        ).tocsr()
+        levels.append(_sparse_level(a, lam_store, None, prolongation.tocoo(), n_coarse))
+        a = (prolongation.T @ a @ prolongation).tocsr()  # Galerkin coarse operator from the true A
+    return SmoothedHierarchy(tuple(levels))
+
+
 def build_smoothed_hierarchy(
     owner: np.ndarray,
     nb: np.ndarray,
@@ -531,26 +583,15 @@ def build_smoothed_hierarchy(
         a[:, pin] = 0
         a[pin, pin] = 1.0
         a = a.tocsr()
-    levels: list[_SparseLevel] = []
-    while True:
-        d_inv = sp.diags(1.0 / a.diagonal())
-        lam_max = _spectral_radius(d_inv @ a)  # for the Chebyshev smoother and prolongation damping
-        if a.shape[0] <= max_coarse or len(levels) + 1 >= max_levels:
-            # Coarsest level: a direct (dense pseudo-inverse) solve — an inexact coarse solve is the
-            # dominant cause of mesh-dependent V-cycle degradation, so it must be an actual solve.
-            levels.append(_sparse_level(a, lam_max, np.linalg.pinv(a.toarray()), None, 0))
-            break
-        upper = sp.triu(a, k=1).tocoo()  # aggregate on this level's graph
-        aggregate, n_coarse = _aggregate(upper.row, upper.col, a.shape[0])
-        tentative = sp.csr_matrix(
-            (np.ones(a.shape[0]), (np.arange(a.shape[0]), aggregate)), shape=(a.shape[0], n_coarse)
-        )
-        prolongation = (
-            tentative - (omega_smooth * 2.0 / lam_max) * (d_inv @ (a @ tentative))
-        ).tocsr()
-        levels.append(_sparse_level(a, lam_max, None, prolongation.tocoo(), n_coarse))
-        a = (prolongation.T @ a @ prolongation).tocsr()  # Galerkin coarse operator
-    return SmoothedHierarchy(tuple(levels))
+    # Symmetric operator: aggregate on ``A`` itself (the prolongation smoother's ``lam_max`` also feeds
+    # the runtime Chebyshev smoother).
+    return _build_aggregation_hierarchy(
+        a,
+        aggregation_operator=lambda m: m,
+        omega_smooth=omega_smooth,
+        max_coarse=max_coarse,
+        max_levels=max_levels,
+    )
 
 
 def _sparse_apply(level: _SparseLevel, x: jnp.ndarray) -> jnp.ndarray:
@@ -757,32 +798,15 @@ def build_convection_hierarchy(
         Frozen finest-to-coarsest general-sparse levels for :func:`convection_multigrid_solve`.
     """
     a = _convection_diffusion_csr(owner, nb, visc, mdot, n, boundary_diagonal)
-    levels: list[_SparseLevel] = []
-    while True:
-        a_sym = (0.5 * (a + a.T)).tocsr()  # aggregation + prolongation use the symmetric part
-        d_inv = sp.diags(1.0 / a.diagonal())
-        # Two spectral estimates with different roles: the symmetric part's real ``lambda_max`` sets the
-        # constant-preserving prolongation smoothing; the **true** (nonsymmetric) operator's spectral
-        # radius sets the damped-Jacobi relaxation. The Galerkin coarse operators pick up large complex
-        # eigenvalues the symmetric part misses, so damping by the symmetric estimate alone makes the
-        # coarse-level smoother diverge — the smoother must see the true spectral radius.
-        lam_sym = _spectral_radius(d_inv @ a_sym)
-        lam_true = _spectral_radius(d_inv @ a)
-        if a.shape[0] <= max_coarse or len(levels) + 1 >= max_levels:
-            # Coarsest: a direct (dense pseudo-inverse) solve — pinv handles the nonsymmetric operator.
-            levels.append(_sparse_level(a, lam_true, np.linalg.pinv(a.toarray()), None, 0))
-            break
-        upper = sp.triu(a_sym, k=1).tocoo()  # aggregate on the symmetric graph
-        aggregate, n_coarse = _aggregate(upper.row, upper.col, a.shape[0])
-        tentative = sp.csr_matrix(
-            (np.ones(a.shape[0]), (np.arange(a.shape[0]), aggregate)), shape=(a.shape[0], n_coarse)
-        )
-        prolongation = (
-            tentative - (omega_smooth * 2.0 / lam_sym) * (d_inv @ (a_sym @ tentative))
-        ).tocsr()
-        levels.append(_sparse_level(a, lam_true, None, prolongation.tocoo(), n_coarse))
-        a = (prolongation.T @ a @ prolongation).tocsr()  # Galerkin coarse operator from the true A
-    return SmoothedHierarchy(tuple(levels))
+    # Nonsymmetric operator: aggregate and smooth the prolongation on the symmetric part ``(A + Aᵀ)/2``,
+    # while each level stores the true operator's spectral radius for the damped-Jacobi smoother.
+    return _build_aggregation_hierarchy(
+        a,
+        aggregation_operator=lambda m: (0.5 * (m + m.T)).tocsr(),
+        omega_smooth=omega_smooth,
+        max_coarse=max_coarse,
+        max_levels=max_levels,
+    )
 
 
 def _jacobi_smooth(
