@@ -1,0 +1,4 @@
+# Regenerable run artifacts; the figures/ and report.md deliverables ARE tracked.
+runs/
+__pycache__/
+*.npz

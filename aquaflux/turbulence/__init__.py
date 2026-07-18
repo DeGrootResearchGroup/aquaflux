@@ -14,7 +14,7 @@ the segregated outer loop coupling the flow and turbulence solves in
 from __future__ import annotations
 
 from .boundary import inlet_k, inlet_omega, omega_wall_value
-from .driver import solve_segregated
+from .driver import bulk_velocity, solve_segregated
 from .sources import (
     KDestruction,
     KProduction,
@@ -35,6 +35,7 @@ __all__ = [
     "SSTClosureFields",
     "SSTModel",
     "SSTTurbulence",
+    "bulk_velocity",
     "inlet_k",
     "inlet_omega",
     "omega_wall_value",
