@@ -61,13 +61,22 @@ if TYPE_CHECKING:
 _ResidualFn = Callable[[jnp.ndarray], jnp.ndarray]
 _Stepper = Callable[[_ResidualFn, jnp.ndarray, jnp.ndarray, lx.AbstractLinearSolver], jnp.ndarray]
 
+# Inexact-Newton forward solver for the pseudo-transient march: a loose *relative* tolerance (each
+# shifted step need only make Newton progress; the next step corrects the leftover) but a *tight*
+# absolute floor and a generous restart/stagnation budget. The march drives the residual far below
+# the ``1e-3`` absolute floor the plain inexact solver uses, and once ``‖R‖`` nears that floor the
+# linear solve would stop taking a step and the outer march would stall short of the nonlinear
+# tolerance — so the absolute term must not cap the terminal convergence. The looser stagnation
+# budget also rides out the stiffer shifted operators a graded, high-Reynolds mesh produces.
+_INEXACT_CONTINUATION_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-10, restart=40, stagnation_iters=40)
+
 
 class PseudoTransientContinuation(eqx.Module):
     """Implicit under-relaxation continuation for the coupled flow solve (see the module docstring).
 
-    Plugs into :class:`~aquaflux.solve.ImplicitNewtonSolver` as its ``continuation`` strategy: when
-    set, the forward Newton loop replaces the line-searched step with the diagonally shifted step
-    this object supplies, while the (converged, well-conditioned) adjoint solve keeps using the bare
+    Plugs into :class:`~aquaflux.solve.ImplicitNewtonSolver` as its ``forward_step`` strategy: the
+    forward Newton loop uses the diagonally shifted step this object supplies (in place of the
+    default line search), while the (converged, well-conditioned) adjoint solve keeps using the bare
     block preconditioner. Build it from a flow assembler with :meth:`build`.
 
     Attributes
@@ -151,6 +160,15 @@ class PseudoTransientContinuation(eqx.Module):
         block preconditioner is the consistent choice.
         """
         return self.preconditioner.factory()
+
+    def default_solver(self) -> lx.AbstractLinearSolver:
+        """The forward-loop solver for the pseudo-transient march when the caller supplies none.
+
+        A loose relative tolerance with a tight absolute floor and a generous restart/stagnation
+        budget, so the march is not capped short of the nonlinear tolerance and rides out the
+        stiffer shifted operators a graded, high-Reynolds mesh produces.
+        """
+        return _INEXACT_CONTINUATION_SOLVER
 
     def stepper(self) -> _Stepper:
         """Return the accepted shifted-Newton step ``(residual_fn, φ, ‖R₀‖, solver) -> φ_next``.
@@ -289,7 +307,7 @@ def reused_flow_solve(
         implicit-function-theorem adjoint is unchanged; the ``jit`` wrapper is transparent to it).
     """
     continuation = PseudoTransientContinuation.build(reference, **build_kwargs)
-    solver = ImplicitNewtonSolver(max_steps=max_steps, continuation=continuation)
+    solver = ImplicitNewtonSolver(max_steps=max_steps, forward_step=continuation)
 
     @eqx.filter_jit
     def solve_flow(momentum: MomentumContinuity, state: jnp.ndarray) -> jnp.ndarray:

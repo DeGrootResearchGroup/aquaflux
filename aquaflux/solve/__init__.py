@@ -8,7 +8,7 @@ functions are injected, so the driver is testable on a trivial analytic residual
 
 from __future__ import annotations
 
-from .implicit import ImplicitNewtonSolver
+from .implicit import DampedNewtonStep, ForwardStep, ImplicitNewtonSolver
 from .linear import default_linear_solver, solve_linear
 from .multigrid import (
     MultigridHierarchy,
@@ -23,6 +23,8 @@ from .multigrid import (
 from .newton import NewtonSolver, newton_step
 
 __all__ = [
+    "DampedNewtonStep",
+    "ForwardStep",
     "ImplicitNewtonSolver",
     "MultigridHierarchy",
     "NewtonSolver",

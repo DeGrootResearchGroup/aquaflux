@@ -25,7 +25,7 @@ from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, N
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import ImplicitNewtonSolver, newton_step
+from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver, newton_step
 
 RE, U_LID, RHO = 100.0, 1.0, 1.0
 MU = RHO * U_LID / RE
@@ -77,7 +77,9 @@ def test_cavity_solve_is_differentiable() -> None:
     wrong value here; only an FD comparison catches it."""
     n = 20
     precond = BlockPreconditioner.build(_cavity(n)).factory()  # stop_gradient-ed; reuse across mu
-    solver = ImplicitNewtonSolver(max_steps=30, preconditioner=precond)
+    solver = ImplicitNewtonSolver(
+        max_steps=30, forward_step=DampedNewtonStep(preconditioner=precond)
+    )
 
     def mean_speed(mu):
         assembler = _cavity(n, mu=mu)

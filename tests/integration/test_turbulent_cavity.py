@@ -18,7 +18,7 @@ from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, N
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import ImplicitNewtonSolver, NewtonSolver
+from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver, NewtonSolver
 from aquaflux.turbulence import SSTModel, SSTTurbulence, solve_segregated
 
 RHO, NU, U_LID = 1.0, 1e-2, 1.0
@@ -28,7 +28,9 @@ WALLS = ("top", "bottom", "left", "right")
 def _solve_flow(momentum, state):
     """The validated preconditioned Newton solve of the coupled cavity flow."""
     preconditioner = BlockPreconditioner.build(momentum).factory()
-    solver = ImplicitNewtonSolver(max_steps=30, preconditioner=preconditioner)
+    solver = ImplicitNewtonSolver(
+        max_steps=30, forward_step=DampedNewtonStep(preconditioner=preconditioner)
+    )
     return solver.solve(lambda s, m: m.residual(s), state, momentum)
 
 
