@@ -87,6 +87,11 @@ class MomentumContinuity(eqx.Module):
         The named per-patch flow closures, resolved to their boundary-face indices.
     interp_factor, normal_distance : jnp.ndarray
         Face interpolation factor ``g`` and normal distance ``d . n`` (precomputed geometry).
+    body_force : jnp.ndarray
+        Uniform body force per unit volume ``(dim,)``, added to the momentum equation. Drives a
+        streamwise-periodic channel: with the pressure split ``p = p̃ + G·x`` into a periodic ``p̃``
+        and a mean gradient ``G``, the linear part is a constant force ``f = −G``, so a positive
+        ``body_force[0]`` drives the flow in ``+x`` (mean gradient ``G = −body_force``). Default zero.
     """
 
     mesh: Mesh
@@ -97,6 +102,7 @@ class MomentumContinuity(eqx.Module):
     boundary: BoundaryConditions
     interp_factor: jnp.ndarray
     normal_distance: jnp.ndarray
+    body_force: jnp.ndarray
     pressure_pin: int | None = eqx.field(static=True)
     pressure_pin_value: float
 
@@ -112,6 +118,7 @@ class MomentumContinuity(eqx.Module):
         advection_scheme: AdvectionScheme | None = None,
         pressure_pin: int | None = None,
         pressure_pin_value: float = 0.0,
+        body_force=None,
     ) -> MomentumContinuity:
         """Build the coupled assembler, precomputing face interpolation geometry.
 
@@ -119,18 +126,23 @@ class MomentumContinuity(eqx.Module):
         flow closures (``BoundaryConditions({name: FlowBoundary})``), bound to ``mesh.face_patches``
         internally. ``properties`` must supply ``"viscosity"`` and ``"density"``. ``pressure_pin``
         fixes the pressure at one cell (its continuity equation is replaced by
-        ``p = pressure_pin_value``) — required for a closed domain (all-wall, no pressure outlet),
-        where pressure is otherwise defined only up to a constant.
+        ``p = pressure_pin_value``) — required for a closed domain (all-wall, no pressure outlet, e.g.
+        a streamwise-periodic channel), where pressure is otherwise defined only up to a constant.
+        ``body_force`` is a uniform force per unit volume ``(dim,)`` added to the momentum equation
+        (see :attr:`body_force`); default (``None``) is no force. It drives a periodic channel and is
+        the leaf a mass-flow controller updates via ``eqx.tree_at``.
         """
         properties.require("viscosity", "density")
+        force = jnp.zeros(mesh.dim) if body_force is None else jnp.asarray(body_force)
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells
         owner = face_cells.owner
-        nb = face_cells.safe_neighbour
         interior = face_cells.interior
         x_p = cell_geometry.centroid[owner]
         x_ip = face_geometry.centroid
-        d = cell_geometry.centroid[nb] - x_p
+        d = (
+            face_cells.neighbour_centroid(cell_geometry.centroid) - x_p
+        )  # periodic-image across seam
         interp_factor = interpolation_factor(face_cells, geometry)
         normal_distance = jnp.where(
             interior,
@@ -146,6 +158,7 @@ class MomentumContinuity(eqx.Module):
             boundary=boundary.resolve(mesh.face_patches),
             interp_factor=interp_factor,
             normal_distance=normal_distance,
+            body_force=force,
             pressure_pin=pressure_pin,
             pressure_pin_value=pressure_pin_value,
         )
@@ -359,6 +372,7 @@ class MomentumContinuity(eqx.Module):
         """
         viscosity = self.viscosity  # per-cell mu, the momentum diffusion coefficient
         normal, area = self.geometry.face.normal, self.geometry.face.area
+        volume = self.geometry.cell.volume
         diffusion = DiffusionFlux(coefficient="viscosity")
         advection = (
             AdvectionFlux(mass_flux=mdot, scheme=self.advection_scheme)
@@ -380,7 +394,8 @@ class MomentumContinuity(eqx.Module):
             )
             if advection is not None:
                 face_flux = face_flux + advection.face_flux(component, context)
-            columns.append(self._scatter(face_flux))
+            # R = sum(owner-outward flux) - source; the body force is a uniform volume source.
+            columns.append(self._scatter(face_flux) - self.body_force[i] * volume)
         return jnp.stack(columns, axis=1)
 
     def _continuity_residual(self, mdot: jnp.ndarray, pressure: jnp.ndarray) -> jnp.ndarray:

@@ -306,7 +306,9 @@ class CorrectedGreenGauss(GradientScheme):
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells
         x_p = cell_geometry.centroid[face_cells.owner]
-        d = cell_geometry.centroid[face_cells.safe_neighbour] - x_p
+        d = (
+            face_cells.neighbour_centroid(cell_geometry.centroid) - x_p
+        )  # periodic-image across seam
         g = interpolation_factor(face_cells, geometry)
         skew = face_geometry.centroid - (x_p + scale(d, g))  # D_g,ip: offset from P–N line to face
         area_vector = scale(face_geometry.normal, face_geometry.area)  # owner-outward S_f
@@ -416,13 +418,14 @@ class HessianCorrectedGradient(GradientScheme):
 
         x_own = cell_geometry.centroid[owner]
         x_ip = face_geometry.centroid
-        s = cell_geometry.centroid[nb] - x_own
+        x_nb = face_cells.neighbour_centroid(cell_geometry.centroid)  # periodic-image across a seam
+        s = x_nb - x_own
         f = interpolation_factor(face_cells, geometry)
         skew = x_ip - (x_own + scale(s, f))  # D_f,ip
         nhat = face_geometry.normal  # owner-outward unit normal
         area_vector = scale(nhat, face_geometry.area)  # S_f
         d_own = x_ip - x_own  # owner centroid → face centroid
-        d_nb = x_ip - cell_geometry.centroid[nb]  # neighbour centroid → face centroid
+        d_nb = x_ip - x_nb  # neighbour centroid → face centroid
         vol = cell_geometry.volume
 
         def _hessian_moment(h, d):

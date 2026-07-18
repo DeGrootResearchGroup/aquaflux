@@ -67,3 +67,41 @@ def test_velocity_gradient_shape_and_differentiable() -> None:
     assert not bool(jnp.any(jnp.isnan(grad)))
     g = jax.grad(lambda s: jnp.sum(asm.velocity_gradient(s) ** 2))(state)
     assert not bool(jnp.any(jnp.isnan(g)))
+
+
+def test_body_force_is_a_uniform_volume_source() -> None:
+    """A uniform body force enters the momentum residual as ``-beta * volume`` per component and
+    only there: at the zero state the streamwise block is exactly ``-beta * V`` and the rest is
+    zero, and the force is a differentiable leaf (a mass-flow controller updates it)."""
+    beta = 3.0
+    mesh = structured_grid_2d(6, 4, periodic=("x",), named_boundaries=True)
+    geom = mesh.geometry()
+    asm = MomentumContinuity.build(
+        mesh,
+        geom,
+        PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
+        CorrectedGreenGauss(),
+        BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+        pressure_pin=0,
+        body_force=(beta, 0.0),
+    )
+    velocity_residual, _ = asm.unpack(asm.residual(asm.initial_state()))
+    volume = jnp.asarray(geom.cell.volume)
+    assert jnp.allclose(velocity_residual[:, 0], -beta * volume)
+    assert jnp.allclose(velocity_residual[:, 1], 0.0)
+
+    # The force is a differentiable leaf: sensitivity of the summed streamwise residual to beta is -V.
+    def summed_streamwise_residual(b):
+        assembler = MomentumContinuity.build(
+            mesh,
+            geom,
+            PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
+            CorrectedGreenGauss(),
+            BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+            pressure_pin=0,
+            body_force=jnp.array([b, 0.0]),
+        )
+        return jnp.sum(assembler.residual(asm.initial_state())[: mesh.n_cells])
+
+    grad = jax.grad(summed_streamwise_residual)(beta)
+    assert jnp.isclose(grad, -jnp.sum(volume))

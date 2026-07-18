@@ -77,7 +77,7 @@ class DiffusionFlux(FaceFluxOperator):
         gamma_owner, gamma_neighbour = gamma[owner], gamma[neighbour]
 
         d_p = x_ip - x_cell[owner]
-        d_n = x_ip - x_cell[neighbour]
+        d_n = x_ip - fc.neighbour_centroid(x_cell)  # periodic-image neighbour across a seam
         dpn = dot(d_p, n)  # D_P . n  (> 0)
         dnn = dot(d_n, n)  # D_N . n  (< 0 on interior faces)
 

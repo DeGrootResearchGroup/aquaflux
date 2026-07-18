@@ -80,6 +80,7 @@ class Mesh(eqx.Module):
         *,
         cell_zones: dict[str, object] | None = None,
         face_patches: dict[str, object] | None = None,
+        neighbour_offset=None,
     ) -> Mesh:
         """Build a mesh from a ragged list of per-face node-index lists.
 
@@ -123,6 +124,7 @@ class Mesh(eqx.Module):
             n_cells,
             cell_zones=cell_zones,
             face_patches=face_patches,
+            neighbour_offset=neighbour_offset,
         )
 
     @classmethod
@@ -137,6 +139,7 @@ class Mesh(eqx.Module):
         *,
         cell_zones: dict[str, object] | None = None,
         face_patches: dict[str, object] | None = None,
+        neighbour_offset=None,
     ) -> Mesh:
         """Build a mesh from already-assembled CSR face connectivity.
 
@@ -162,6 +165,11 @@ class Mesh(eqx.Module):
             Number of cells (every cell must be referenced by at least one face).
         cell_zones, face_patches : dict of {str: indices}, optional
             As in :meth:`from_faces`.
+        neighbour_offset : array-like, optional
+            Per-face periodic-image translation of the neighbour centroid, shape ``(n_faces, dim)``
+            (see :attr:`~aquaflux.mesh.connectivity.FaceCellConnectivity.neighbour_offset`). Omit for
+            a non-periodic mesh; a streamwise-periodic mesh passes ``+L`` along the periodic axis on
+            its seam wrap faces and zero elsewhere.
         """
         neighbour = jnp.asarray(neighbour)
         zones = (
@@ -170,9 +178,10 @@ class Mesh(eqx.Module):
             else groups.CellZones.default(n_cells)
         )
         patches = groups.FacePatches.from_dict(neighbour, face_patches or {})
+        offset = None if neighbour_offset is None else jnp.asarray(neighbour_offset)
         mesh = cls(
             node_coords=jnp.asarray(node_coords),
-            face_cells=FaceCellConnectivity(jnp.asarray(owner), neighbour, n_cells),
+            face_cells=FaceCellConnectivity(jnp.asarray(owner), neighbour, n_cells, offset),
             face_nodes=FaceNodeConnectivity.from_csr(face_node_offsets, face_node_indices),
             cell_zones=zones,
             face_patches=patches,
@@ -254,7 +263,20 @@ class Mesh(eqx.Module):
             raise ValueError(f"neighbour index out of range [-1, {n_cells}) (only -1 = boundary)")
         interior = interior_mask(nb)
         if np.any(own[interior] == nb[interior]):
-            raise ValueError("an interior face has the same cell as both owner and neighbour")
+            raise ValueError(
+                "an interior face has the same cell as both owner and neighbour "
+                "(a periodic seam needs at least two cells across the periodic axis)"
+            )
+
+        offset = self.face_cells.neighbour_offset
+        if offset is not None:
+            off = np.asarray(offset)
+            if off.shape != (n_faces, dim):
+                raise ValueError(
+                    f"neighbour_offset must have shape ({n_faces}, {dim}); got {off.shape}"
+                )
+            if np.any(off[~interior] != 0.0):
+                raise ValueError("neighbour_offset must be zero on boundary faces")
 
         # Every cell must be touched by at least one face; an unreferenced cell gets zero faces,
         # so its volume/centroid would be 0/0 = NaN. (Indices are in range by the checks above.)
