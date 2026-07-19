@@ -19,7 +19,7 @@ the adjoint of the **unfrozen coupled residual**. Governed by the root `CLAUDE.m
 Principles; the flow block it feeds is `.claude/rules/flow.md`, and the Newton / linear-solve
 adjoint machinery it must reuse is `.claude/rules/solve.md`.
 
-## Status — BUILT (segregated forward solve; coupled adjoint NOT yet closed)
+## Status — BUILT (segregated forward solve **and** monolithic coupled solve + coupled adjoint)
 - **`sst.py` — `SSTModel`.** Menter's SST constants and the quantities derived directly from
   them (the F₁/F₂ blend, the eddy-viscosity limiter).
 - **`strain.py`** — the strain-rate magnitude `S = sqrt(2 S_ij S_ij)` the production terms read.
@@ -39,27 +39,46 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   `rtol`), with `max_sweeps` only a backstop; the outer under-relaxation is the **SER ramp**
   `_sweep_relaxation` (opens from the `relaxation` floor toward `relaxation_max` as that increment
   falls, constant when `relaxation_max is None`). Hitting `max_sweeps` without converging warns.
+- **`coupled.py` — `CoupledRANS`, `solve_coupled` (Option 2, the target engine).** The monolithic
+  residual `R(u, p, k, ω)` over the flat `[flow…, k, ω]` state (`CoupledRANSLayout`, whose `unpack`
+  yields the momentum block's own `[u,p]` sub-vector so `MomentumContinuity` runs on it unchanged),
+  with **nothing frozen**: μ_t, the strain `S(u)`, the Rhie–Chow flux, and the closure are live, so
+  one Newton solve sees the exact cross-block Jacobian. Globalized by `coupled_continuation`
+  (a block `CoupledShiftPolicy` = velocity `a_P` shift ⊕ the k/ω transport-diagonal shifts, and a
+  block-diagonal preconditioner gluing `BlockPreconditioner` to the two scalar CD-AMGs; the AMG
+  hierarchies + numpy-built scalar shift diagonals **frozen at a reference state** off-jit à la
+  `reused_flow_solve`, the velocity `a_P` live). Handed to `ImplicitNewtonSolver`, it gives the
+  **exact coupled adjoint** (§5) — a single transpose solve on the unfrozen `R_coupled`. The ω wall
+  rows are `FixedValueCells`. `CoupledRANS.build` pre-resolves the k/ω boundaries so the per-eval
+  assembler rebuild's `resolve` is an idempotent no-op (else a dynamic-shape `nonzero` on traced mesh
+  labels breaks the jit). **Direct k/ω variables** (log-variables held in reserve, below); positivity
+  under a full Newton step is carried by the pseudo-transient shift + divergence guard, no in-residual
+  floor. FD-verified: coupled ‖R‖→machine-zero, agrees with the segregated fixed point, adjoint
+  matches finite differences.
 
-**Known gap (tracked in issue #69 — do not re-derive or "quietly fix" without reading it):** the
-outer loop still has **no coupled-residual adjoint** — so differentiating it unrolls the Picard
-sweeps onto the tape, which §5 below forbids; it is forward-only. The convergence-based stop and
-adaptive outer relaxation (Option 1 hardening) shipped; the monolithic coupled residual + its IFT
-adjoint (Option 2, the target state) is the remaining #69 work. Treat the items below as the
-standard that decision must meet.
+**Issue #69 — CLOSED path (do not re-derive without reading it):** all three planned steps shipped —
+scalar continuation (#73), Option 1 hardening (convergence stop + adaptive relaxation), and Option 2
+(the monolithic coupled residual + its IFT adjoint, the target engine). The segregated loop is
+**retained as a forward pre-smoother / fallback**, not the sensitivity model; for gradients use the
+coupled `solve_coupled` (its adjoint is exact) — never differentiate `solve_segregated` (forward-only,
+unrolls the Picard sweeps, which §5 forbids). The remaining held-in-reserve item is the **log-variable
+fallback** (below), promoted only if a stiff high-Re case shows the direct coupled form non-robust.
 
 ## Binding decisions
 
-- **Segregated forward, coupled adjoint (design note §5 — binding).** Segregation is a
-  **forward-solve strategy only**. For exact sensitivities the adjoint is the
+- **Segregated forward, coupled adjoint (design note §5 — binding) — BUILT via `solve_coupled`.**
+  Segregation is a **forward-solve strategy only**. For exact sensitivities the adjoint is the
   implicit-function-theorem solve on the full **unfrozen** coupled residual
   `R_coupled(k, ω, U, p; params) = 0` at the converged state — the `solve/` two-level
-  implicit-diff machinery — **not** a differentiation of the Picard iteration. At the fixed
+  implicit-diff machinery — **not** a differentiation of the Picard iteration. This is now realized:
+  `coupled.py`'s `CoupledRANS.residual` **is** that unfrozen `R_coupled`, and `solve_coupled` hands it
+  to `ImplicitNewtonSolver`, whose adjoint is a single transpose solve (FD-verified). At the fixed
   point the frozen fields equal the live values, so the coupled residual is satisfied and its
-  adjoint is exact; the outer loop is a forward convergence device that is **absent from the
-  sensitivity model**. Verify the adjoint is a single transpose solve at the converged coupled
-  state, not an unrolled iteration (the same correctness claim as `solve.md`). **This precondition
-  must be stated explicitly in the driver's docstring**, so nobody later "adjoints through" the
-  segregated loop and reintroduces the freezing approximation into the gradient.
+  adjoint is exact; the segregated outer loop is a forward convergence device that is **absent from
+  the sensitivity model**. Differentiate **`solve_coupled`, never `solve_segregated`** (the latter is
+  forward-only and its docstring says so). When building the coupled continuation for a differentiated
+  solve, construct it **outside `jax.grad`** (concrete preconditioner params) and pass it in — see the
+  flow preconditioner's same constraint.
 
 - **Never unroll the outer loop onto the differentiation path.** A fixed-count `for` over sweeps
   that is differentiated directly is exactly the failure `solve.md` names ("no loops on the

@@ -84,8 +84,13 @@ class BoundaryConditions(eqx.Module):
         Returns
         -------
         BoundaryConditions
-            A bound copy carrying the same closures plus their per-patch face indices.
+            A bound copy carrying the same closures plus their per-patch face indices. Idempotent:
+            an already-resolved collection is returned unchanged, so re-binding (e.g. a coupled
+            residual that reuses a pre-resolved boundary inside its jit) does not re-run the
+            dynamic-shape ``nonzero`` lookup on traced mesh labels.
         """
+        if self.faces is not None:
+            return self
         faces = {name: jnp.asarray(face_patches.indices(name)) for name in self.conditions}
         return BoundaryConditions(self.conditions, _faces=faces)
 

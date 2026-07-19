@@ -8,13 +8,21 @@ strain-rate magnitude they consume in
 boundary values (near-wall omega, inlet k and omega) in :mod:`~aquaflux.turbulence.boundary`; and
 the assembly of the k and omega transport equations in :mod:`~aquaflux.turbulence.transport`; and
 the segregated outer loop coupling the flow and turbulence solves in
-:func:`~aquaflux.turbulence.driver.solve_segregated`.
+:func:`~aquaflux.turbulence.driver.solve_segregated`; and the monolithic coupled residual
+``R(u, p, k, omega)`` and its single Newton solve in :mod:`~aquaflux.turbulence.coupled`.
 """
 
 from __future__ import annotations
 
 from .boundary import inlet_k, inlet_omega, omega_wall_value
 from .continuation import ScalarShiftPolicy, scalar_pseudo_transient_solve
+from .coupled import (
+    CoupledRANS,
+    CoupledRANSLayout,
+    CoupledShiftPolicy,
+    coupled_continuation,
+    solve_coupled,
+)
 from .driver import bulk_velocity, solve_segregated
 from .sources import (
     KDestruction,
@@ -28,6 +36,9 @@ from .strain import strain_rate_magnitude
 from .transport import SSTClosureFields, SSTTurbulence
 
 __all__ = [
+    "CoupledRANS",
+    "CoupledRANSLayout",
+    "CoupledShiftPolicy",
     "KDestruction",
     "KProduction",
     "OmegaCrossDiffusion",
@@ -38,10 +49,12 @@ __all__ = [
     "SSTTurbulence",
     "ScalarShiftPolicy",
     "bulk_velocity",
+    "coupled_continuation",
     "inlet_k",
     "inlet_omega",
     "omega_wall_value",
     "scalar_pseudo_transient_solve",
+    "solve_coupled",
     "solve_segregated",
     "strain_rate_magnitude",
 ]
