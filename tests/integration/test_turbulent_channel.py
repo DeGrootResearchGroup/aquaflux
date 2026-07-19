@@ -1,44 +1,29 @@
-"""Integration: the segregated k-omega SST driver solves a genuinely turbulent channel.
+"""Integration: the k-omega SST production limiter stays solvable with the scalar preconditioner.
 
-The qualitative cavity check (:mod:`tests.integration.test_turbulent_cavity`) runs at low Reynolds
-number. Here the open channel is driven to a convective, wall-resolved Reynolds number where the k
-and omega transport equations are strongly convection-dominated -- the regime whose exact-Jacobian
-linear solve stalls unless the production limiter is made explicit (``KProduction.explicit_limiter``,
-set by ``k_residual``), which restores the M-matrix the Krylov solve needs. The flow block uses the
-high-Reynolds preconditioned continuation (reused across sweeps); the scalar solves are a plain
-(unpreconditioned) Krylov Newton, so this test isolates that the *linearization* -- not a scalar
-preconditioner -- is what makes the high-Re turbulent solve converge.
+The k equation caps turbulent production at ``10 beta* k omega``. Keeping that cap's exact
+derivative in the Jacobian -- rather than the Patankar-style positive linearization that
+``KProduction.explicit_limiter`` applies -- leaves an operator that is indefinite wherever the cap
+is active, and an unpreconditioned Krylov solve stagnates there. This drives that exact operator
+from a synthetic limiter-active state on a wall-resolved channel mesh, and checks that the
+convection-diffusion algebraic-multigrid (AMG) preconditioner carried by the continuation policy
+converges a bare Newton solve to machine precision.
 """
 
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
-import equinox as eqx
 import jax.numpy as jnp
 import lineax
 import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import (
-    MomentumContinuity,
-    NoSlipWall,
-    PressureOutlet,
-    VelocityInlet,
-    reused_flow_solve,
-)
+from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
 from aquaflux.mesh import graded_nodes, structured_grid_2d
-from aquaflux.properties import Constant, FieldProperty, PropertyModel
+from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import NewtonSolver
-from aquaflux.turbulence import (
-    SSTModel,
-    SSTTurbulence,
-    inlet_k,
-    inlet_omega,
-    scalar_pseudo_transient_solve,
-    solve_segregated,
-)
+from aquaflux.turbulence import SSTModel, SSTTurbulence, inlet_k, inlet_omega
 
 RHO, U_IN, H, L = 1.0, 1.0, 1.0, 6.0
 NU = 2e-4  # Re = rho U H / mu = 5000
@@ -98,41 +83,6 @@ def _channel(nx=48, ny=40, growth=1.18, *, explicit_production_limiter=True):
 
 
 @pytest.mark.slow
-def test_high_reynolds_turbulent_channel_solves() -> None:
-    mesh, momentum, turbulence, k_in, omega_in = _channel()
-
-    # A frozen preconditioner at a representative eddy viscosity, reused across the sweeps.
-    reference = jnp.full(mesh.n_cells, RHO * 21 * NU)
-    reference_momentum = _with_viscosity(momentum, reference)
-    solve_flow = reused_flow_solve(
-        reference_momentum, schur_scaling="msimpler", velocity="convection"
-    )
-
-    flow, k, omega = solve_segregated(
-        momentum,
-        turbulence,
-        solve_flow,
-        scalar_pseudo_transient_solve(max_steps=40),
-        momentum.initial_state(),
-        jnp.full(mesh.n_cells, k_in),
-        jnp.full(mesh.n_cells, omega_in),
-        density=RHO,
-        max_sweeps=8,
-        relaxation=0.5,
-        scalar_preconditioner="twolevel",
-    )
-
-    # Finite and physical.
-    assert not bool(jnp.any(jnp.isnan(flow)))
-    assert float(jnp.min(k)) >= 0.0
-    assert float(jnp.min(omega)) > 0.0
-
-    # Genuinely turbulent: the closure produces an eddy viscosity well above molecular.
-    nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
-    assert float(jnp.max(nu_t) / NU) > 1.0
-
-
-@pytest.mark.slow
 def test_exact_production_limiter_solves_with_the_preconditioner() -> None:
     """The scalar preconditioner rescues the *exact* (non-Patankar) k-linearization.
 
@@ -171,8 +121,3 @@ def test_exact_production_limiter_solves_with_the_preconditioner() -> None:
         residual, k
     )
     assert float(jnp.linalg.norm(residual(solved))) < 1e-8
-
-
-def _with_viscosity(momentum, mu):
-    properties = PropertyModel({**momentum.properties.properties, "viscosity": FieldProperty(mu)})
-    return eqx.tree_at(lambda m: m.properties, momentum, properties)

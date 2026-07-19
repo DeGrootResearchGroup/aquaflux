@@ -1,9 +1,9 @@
 """Validation: a fully-developed periodic channel reproduces the law of the wall.
 
 The streamwise-periodic channel driven to a target bulk velocity by the mass-flow controller is the
-canonical fully-developed case (unlike the spatially-developing open channel of
-:mod:`tests.integration.test_turbulent_channel`, whose boundary layers never merge). At a
-wall-resolved, converged, turbulent state this asserts the three law-of-the-wall facts:
+canonical fully-developed case (unlike a spatially-developing inlet-to-outlet channel, whose
+boundary layers never merge). At a wall-resolved, converged, turbulent state this asserts the three
+law-of-the-wall facts:
 
 1. the controller reaches the target bulk velocity (the body force self-adjusts);
 2. the **viscous sublayer collapses onto** ``u+ = y+``;
