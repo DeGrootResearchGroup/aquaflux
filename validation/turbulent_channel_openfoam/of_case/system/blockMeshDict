@@ -1,0 +1,69 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| 2D fully-developed channel: streamwise-periodic (cyclic x), no-slip walls    |
+| (y), 2D (empty z). Two y-blocks graded toward each wall so the first cell is  |
+| wall-resolved (y+ < 1). Half-height h = 1, full height H = 2.                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+convertToMeters 1;
+
+Lx  4;    // streamwise length (periodic; the flow is x-homogeneous)
+Lz  0.1;  // spanwise thickness (single empty cell -> 2D)
+nx  4;
+ny  40;
+nz  1;
+grade     60;
+gradeInv  0.0166667;
+
+vertices
+(
+    (0   0   0)   (4   0   0)   (0   1   0)   (4   1   0)   (0   2   0)   (4   2   0)
+    (0   0   0.1) (4   0   0.1) (0   1   0.1) (4   1   0.1) (0   2   0.1) (4   2   0.1)
+);
+
+blocks
+(
+    hex (0 1 3 2 6 7 9 8)   ($nx $ny $nz) simpleGrading (1 $grade 1)
+    hex (2 3 5 4 8 9 11 10) ($nx $ny $nz) simpleGrading (1 $gradeInv 1)
+);
+
+edges ();
+
+boundary
+(
+    bottomWall
+    {
+        type wall;
+        faces ((0 1 7 6));
+    }
+    topWall
+    {
+        type wall;
+        faces ((4 10 11 5));
+    }
+    inlet
+    {
+        type cyclic;
+        neighbourPatch outlet;
+        faces ((0 2 8 6) (2 4 10 8));
+    }
+    outlet
+    {
+        type cyclic;
+        neighbourPatch inlet;
+        faces ((1 7 9 3) (3 9 11 5));
+    }
+    frontAndBack
+    {
+        type empty;
+        faces ((0 1 3 2) (2 3 5 4) (6 7 9 8) (8 9 11 10));
+    }
+);
+
+// ************************************************************************* //

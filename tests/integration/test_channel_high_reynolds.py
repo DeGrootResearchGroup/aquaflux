@@ -1,16 +1,21 @@
 """High-Reynolds open channel: the pseudo-transient continuation that lifts the Re ~ 100 floor.
 
 The basic open channel (:mod:`tests.integration.test_channel`) solves at Re ~ 100 with a
-line-searched Newton step, but stagnates as the Reynolds number rises: once convection dominates,
-the block-SIMPLE preconditioner (built on the viscous operator) no longer approximates the Jacobian
-and the inner GMRES stalls a fixed fraction of the way down, which the line search cannot recover.
+line-searched Newton step, but fails once the flow becomes convection-dominated (a few hundred
+Reynolds): the undamped Newton step from the uniform cold start overshoots (the full step *increases*
+the residual, more steeply with Reynolds number), so the basin shrinks and the backtracking line
+search is too weak a globalization to march the convective path. The dominant missing ingredient is
+*outer* Newton globalization, not a better linear solve — the block-SIMPLE preconditioner stays an
+effective Jacobian approximation and the preconditioned inner GMRES converges cleanly at the cold start
+at every tested Reynolds number (pinned by ``test_inner_gmres_does_not_stall_at_high_reynolds``); a
+stronger preconditioner extends the line search's reach only modestly.
 
 :func:`~aquaflux.flow.momentum_continuation` fixes this by damping each Newton step with an
-``a_P``-proportional diagonal shift that ramps to zero on the residual — restoring the
-preconditioner's diagonal dominance while the shift is present, and recovering the exact steady
-Newton step (and its converged state) as it vanishes. These tests drive the same channel setup to
-genuinely convective Reynolds numbers, on both uniform and wall-graded meshes, and confirm the
-converged solve stays differentiable.
+``a_P``-proportional diagonal shift that ramps to zero on the residual — keeping each iterate inside
+the basin the undamped step overshoots, and recovering the exact steady Newton step (and its converged
+state) as the shift vanishes. These tests drive the same channel setup to genuinely convective
+Reynolds numbers, on both uniform and wall-graded meshes, and confirm the converged solve stays
+differentiable.
 """
 
 from __future__ import annotations
@@ -18,11 +23,13 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
+import lineax as lx
 import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import (
+    BlockPreconditioner,
     MomentumContinuity,
     NoSlipWall,
     PressureOutlet,
@@ -33,7 +40,7 @@ from aquaflux.flow import (
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver
+from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver, solve_linear
 
 H, L, U_IN, RHO = 1.0, 4.0, 1.0, 1.0
 
@@ -88,15 +95,14 @@ def test_continuation_converges_at_high_reynolds(nx, ny, mu) -> None:
 
 
 def test_continuation_is_necessary_beyond_the_laminar_floor() -> None:
-    """At Re = 200 the line-searched Newton solve stagnates; the continuation recovers convergence.
+    """At Re = 200 the line-searched Newton solve fails; the continuation recovers convergence.
 
     This is the higher-Reynolds analogue of ``test_line_search_is_necessary``: there the line search
-    was the missing globalization at Re ~ 100, here it is no longer enough and the pseudo-transient
-    continuation is what makes the solve converge.
+    was the missing globalization at Re ~ 100, here it is no longer enough — the undamped step
+    overshoots the shrinking basin — and the pseudo-transient continuation is what makes the solve
+    converge.
     """
     assembler = _channel(24, 16, 5e-3)  # Re = 200
-
-    from aquaflux.flow import BlockPreconditioner
 
     line_searched = ImplicitNewtonSolver(
         max_steps=40,
@@ -111,7 +117,71 @@ def test_continuation_is_necessary_beyond_the_laminar_floor() -> None:
         residual = float(jnp.linalg.norm(assembler.residual(undamped)))
         line_search_failed = (not np.isfinite(residual)) or residual > 1e-6
     except Exception:
-        line_search_failed = True  # the inner GMRES stagnated on the convective operator
+        line_search_failed = (
+            True  # the overshooting cold-start march drove the solve non-convergent
+        )
+    assert line_search_failed
+
+
+def test_inner_gmres_does_not_stall_at_high_reynolds() -> None:
+    """The preconditioned inner GMRES converges at the cold start even at Re = 1000.
+
+    The pseudo-transient continuation is an *outer* globalization: the block preconditioner stays an
+    effective Jacobian approximation, so the inner linear solve is healthy at the uniform cold start
+    (where the undamped outer step would overshoot). The line-search ceiling is set by that outer
+    overshoot, not by an inner stall — this pins the premise, so the motivation cannot silently drift
+    back to "the inner GMRES stalls."
+    """
+    assembler = _channel(32, 24, 1e-3)  # Re = 1000
+    state = assembler.initial_state()
+    residual = assembler.residual(state)
+    apply_m = BlockPreconditioner.build(
+        assembler, schur_scaling="msimpler", velocity="convection"
+    ).factory()(state)
+
+    def preconditioned_jacobian(v):  # M ∘ J at the cold start
+        jvp = jax.jvp(lambda s: assembler.residual(s), (state,), (v,))[1]
+        return apply_m(jvp)
+
+    rhs = apply_m(-residual)  # M (−R)
+    solution = solve_linear(
+        preconditioned_jacobian,
+        rhs,
+        solver=lx.GMRES(rtol=1e-8, atol=1e-8, restart=60, stagnation_iters=60),
+        throw=False,
+    )
+    achieved = jnp.linalg.norm(preconditioned_jacobian(solution) - rhs) / jnp.linalg.norm(rhs)
+    assert (
+        float(achieved) < 1e-6
+    )  # the inner solve reduces the linear residual ~12 orders, no stall
+
+
+def test_line_search_fails_in_the_convective_regime_even_with_best_preconditioner() -> None:
+    """The current best preconditioner does not make line-search-only a high-Reynolds globalization.
+
+    A stronger preconditioner (MSIMPLER Schur + convection-velocity AMG) extends the line-search reach
+    only modestly — it converges the Re ~ 200 coarse channel the default SIMPLE preconditioner does not,
+    but line-search-only still fails once the flow is convection-dominated (here Re = 500), because the
+    outer step overshoots the shrinking basin, which the preconditioner does not address. The
+    continuation is what carries the convective regime (``test_continuation_converges_at_high_reynolds``).
+    """
+    assembler = _channel(24, 16, 2e-3)  # Re = 500
+    best = BlockPreconditioner.build(
+        assembler, schur_scaling="msimpler", velocity="convection"
+    ).factory()
+    line_searched = ImplicitNewtonSolver(
+        max_steps=60, forward_step=DampedNewtonStep(preconditioner=best)
+    )
+    try:
+        undamped = line_searched.solve(
+            lambda s, a: a.residual(s), assembler.initial_state(), assembler
+        )
+        residual = float(jnp.linalg.norm(assembler.residual(undamped)))
+        line_search_failed = (not np.isfinite(residual)) or residual > 1e-6
+    except Exception:
+        line_search_failed = (
+            True  # the overshooting cold-start march drove the solve non-convergent
+        )
     assert line_search_failed
 
     converged = _solve(assembler)  # continuation on
