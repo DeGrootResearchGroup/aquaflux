@@ -1081,13 +1081,23 @@ def _rs_split(strength: sp.csr_matrix) -> np.ndarray:
     return split
 
 
+def _coarse_index(split: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The coarse-point ids and the inverse map (global index -> coarse index, ``-1`` for F-points).
+
+    The ``-1`` sentinel marks the F-points; an off-by-one in this map silently corrupts the
+    interpolation / restriction sparsity, so it lives in exactly one place.
+    """
+    coarse = np.where(split == 1)[0]
+    index = -np.ones(len(split), dtype=np.int64)
+    index[coarse] = np.arange(len(coarse))
+    return coarse, index
+
+
 def _one_point_interpolation(a: sp.csr_matrix, split: np.ndarray) -> sp.csr_matrix:
     """One-point interpolation ``P``: each F-point takes its strongest C-neighbour; C-points injected."""
     a = a.tocsr()
     n = a.shape[0]
-    coarse = np.where(split == 1)[0]
-    coarse_index = -np.ones(n, dtype=np.int64)
-    coarse_index[coarse] = np.arange(len(coarse))
+    coarse, coarse_index = _coarse_index(split)
     abs_a = a.copy()
     abs_a.data = np.abs(abs_a.data)
     rows: list[int] = []
@@ -1119,9 +1129,7 @@ def _lair_restriction(a: sp.csr_matrix, split: np.ndarray, degree: int) -> sp.cs
     """
     a = a.tocsr()
     n = a.shape[0]
-    coarse = np.where(split == 1)[0]
-    coarse_index = -np.ones(n, dtype=np.int64)
-    coarse_index[coarse] = np.arange(len(coarse))
+    coarse, coarse_index = _coarse_index(split)
     fine = split == 0
     indptr, indices = a.indptr, a.indices
     rows: list[int] = []
@@ -1145,15 +1153,15 @@ def _lair_restriction(a: sp.csr_matrix, split: np.ndarray, degree: int) -> sp.cs
             frontier = nxt
         if not neighbourhood:
             continue
-        nb = np.array(sorted(neighbourhood))
-        a_ff = a[np.ix_(nb, nb)].toarray()
-        rhs = np.asarray(a[g, nb].todense()).ravel()
+        f_nbrs = np.array(sorted(neighbourhood))
+        a_ff = a[np.ix_(f_nbrs, f_nbrs)].toarray()
+        rhs = np.asarray(a[g, f_nbrs].todense()).ravel()
         try:
             z = np.linalg.solve(a_ff.T, -rhs)
         except np.linalg.LinAlgError:
             z = np.linalg.lstsq(a_ff.T, -rhs, rcond=None)[0]
-        rows.extend([ci] * len(nb))
-        cols.extend(nb.tolist())
+        rows.extend([ci] * len(f_nbrs))
+        cols.extend(f_nbrs.tolist())
         vals.extend(z.tolist())
     return sp.csr_matrix((vals, (rows, cols)), shape=(len(coarse), n))
 

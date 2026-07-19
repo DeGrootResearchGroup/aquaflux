@@ -47,7 +47,7 @@ class BlockStateLayout(eqx.Module):
             Velocity ``(n_cells, dim)`` and pressure ``(n_cells,)``.
         """
         n = self.n_cells
-        velocity = jnp.stack([state[i * n : (i + 1) * n] for i in range(self.dim)], axis=1)
+        velocity = state[: self.dim * n].reshape(self.dim, n).T
         return velocity, state[self.dim * n :]
 
     def pack(self, velocity: jnp.ndarray, pressure: jnp.ndarray) -> jnp.ndarray:
@@ -65,7 +65,9 @@ class BlockStateLayout(eqx.Module):
         jnp.ndarray
             Flat state vector, shape ``((dim + 1) * n_cells,)``.
         """
-        return jnp.concatenate([velocity[:, i] for i in range(self.dim)] + [pressure])
+        # Component-first layout [vel_0, ..., vel_{dim-1}, pressure], each block (n_cells,): the
+        # transpose makes the reshape lay the components out contiguously.
+        return jnp.concatenate([velocity.T.reshape(-1), pressure])
 
     def zeros(self) -> jnp.ndarray:
         """A zero flat state vector, shape ``((dim + 1) * n_cells,)``."""
