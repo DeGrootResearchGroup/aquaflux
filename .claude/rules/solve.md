@@ -52,6 +52,16 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   nonlinear residual (the flux limiter). `newton_step` is shared with `NewtonSolver`. Verified
   (`test_implicit_solve.py`): converges a nonlinear root, gradient matches the closed form to
   1e-10, and is iteration-count-independent. Used by the limited-advection solve.
+  - **Convergence guard (binding — the IFT adjoint is only valid at a root).** `_forward` carries the
+    terminal residual norm out of the `while_loop` and wraps the returned field in `eqx.error_if`: if
+    the residual is non-finite or above `atol + rtol·‖R₀‖` (exhausted `max_steps`, or a `NaN`/`Inf`
+    that used to make `residual_norm > tol` short-circuit to `False` and exit with a poisoned field),
+    it **raises `eqx.EquinoxRuntimeError`** instead of returning. The guard sits in `_forward`, so it
+    fires for both the forward value and the `jax.grad` path (the fwd pass saves the guarded field),
+    closing the silent-wrong-gradient hole where the transpose solve at a non-root stays well-posed
+    and raises no `NaN`. The stopping test is one helper, `_within_tolerance`, shared by the loop
+    `cond` and the guard. A `NaN` mid-iteration is often caught first by `lineax`'s own non-finite
+    guard at the next linear solve — both are hard errors, neither is silent.
 - **Forward globalization is ONE injected strategy — `forward_step: ForwardStep`.** The forward
   Newton loop has a single point of variation: `ImplicitNewtonSolver` takes one `forward_step`
   implementing the `ForwardStep` protocol (`stepper()` → the per-step
@@ -121,6 +131,32 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   escape-hatch on NVIDIA hardware, **not** the coupled solver or an architectural commitment. Do not
   adopt it on the README's word. **`LSC` original / `PCD` carry equal-order/FEM traps** (use stabilized
   LSC for Rhie–Chow; PCD needs FEM-BC re-derivation).
+  - **Degenerate-mesh guard (binding — the frozen build validates its own inputs).** Because the
+    hierarchies are built once off-jit and then frozen, a degenerate mesh must fail *there*, not as a
+    silently stalling runtime V-cycle. The `build_*` entry points (`multigrid.py`) call
+    `_require_valid_graph` (`n ≥ 1`, matched `owner`/`nb`, in-range endpoints); the two build loops
+    (`_build_aggregation_hierarchy` for smoothed/convection, `build_air_hierarchy` for lAIR) call
+    `_require_positive_diagonal` on **every** level's operator diagonal before inverting/freezing it,
+    so a zero diagonal (disconnected component, isolated/zero-volume cell, degenerate `R A P` row)
+    raises `ValueError` at setup instead of baking `inf` into the frozen operator. The diagonal is
+    checked *after* boundary stiffness is folded into the operator, so a boundary-only cell is
+    correctly allowed. This one build-time guard is why the runtime smoothers (`_chebyshev_smooth`,
+    `_jacobi_smooth`, `_fc_jacobi`) and the block-preconditioner rescales, which invert the frozen
+    diagonal / the positive momentum `a_P`, need no per-apply floor.
+  - **The damped-Jacobi convection hierarchy is TWO-LEVEL by design (binding — do not add a depth
+    knob).** `build_convection_hierarchy` builds exactly a smoothed fine level + a single **direct**
+    (dense pseudo-inverse) coarse solve; it has no `max_levels` parameter. On the fine level the
+    upwind operator is a diagonally dominant M-matrix, so one damping factor `ω/λ_max` contracts
+    (`_jacobi_smooth`, ρ ≈ 0.7 at high cell Peclet). A *deeper* Galerkin recursion is deliberately not
+    built: a coarse-of-coarse operator of a strongly convection-dominated problem acquires
+    near-imaginary-axis eigenvalues that **no single-factor damped-Jacobi smoother can damp** — the
+    smoother becomes non-contractive (measured ρ(S) ≈ 1.0–1.36 on such levels), so the coarse level
+    must be an exact solve. Deep, mesh-independent convection coarsening is the job of the
+    reduction-based lAIR hierarchy (`build_convection_air_hierarchy` + `_fc_jacobi`) instead. Both
+    production callers (the flow `SmoothedAmgConvectionVelocity` two-level path and the turbulence
+    preconditioner) already used two levels, so this is behaviour-neutral; the deep damped-Jacobi
+    build it removed was dominated on both ends (worse than two-level shallow, worse than lAIR deep)
+    and was the sole source of the non-contractive-smoother defect.
 - **Where preconditioning must attach — measured, do not repeat the wrong lever.** For the
   skewed lid-driven cavity (`CorrectedGreenGauss`, `FirstOrderUpwind`) the per-Newton-step cost
   splits cleanly: the **outer coupled saddle-point GMRES takes 67 steps at 432 dof, 127 at 768

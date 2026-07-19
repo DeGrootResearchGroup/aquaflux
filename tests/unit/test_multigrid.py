@@ -12,10 +12,12 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.solve.multigrid import (
     _chebyshev_smooth,
     _convection_diffusion_csr,
+    _jacobi_smooth,
     _SparseLevel,
     air_multigrid_solve,
     build_convection_air_hierarchy,
@@ -391,6 +393,30 @@ def test_convection_multigrid_is_linear_in_rhs() -> None:
     assert jnp.allclose(solve(1.5 * r1 - 0.5 * r2), 1.5 * solve(r1) - 0.5 * solve(r2), atol=1e-10)
 
 
+def test_convection_hierarchy_is_two_level_with_a_contractive_fine_smoother() -> None:
+    """The convection hierarchy is two-level (a smoothed fine level + a single direct-solve coarse
+    level), and the fine-level damped-Jacobi smoother genuinely contracts at high cell Peclet.
+
+    A *deeper* Galerkin recursion would produce a coarse operator whose near-imaginary-axis
+    eigenvalues no single-factor damped-Jacobi smoother can damp — a non-contractive (amplifying)
+    coarse smoother. Keeping the hierarchy two-level removes that failure by construction: the only
+    smoothed level is the diagonally dominant M-matrix fine level, and the coarse level is solved
+    directly. (Deep, mesh-independent convection coarsening is the reduction-based lAIR hierarchy.)
+    """
+    owner, nb, visc, mdot, n, bd = _convective_grid(24, mu=1e-3, speed=1.0)  # cell Peclet ~40
+    hierarchy = build_convection_hierarchy(owner, nb, visc, mdot, n, boundary_diagonal=bd)
+    assert (
+        len(hierarchy.levels) == 2
+    )  # fine + one direct-solve coarse level; no smoothed coarse level
+
+    # b = 0 has exact solution 0, so smoothing a random error must shrink it: a contraction, not the
+    # amplification a deep Galerkin coarse smoother would apply at this cell Peclet.
+    fine = hierarchy.levels[0]
+    error = jnp.asarray(np.random.default_rng(0).standard_normal(n))
+    smoothed = _jacobi_smooth(fine, jnp.zeros(n), error, sweeps=5, omega=0.8)
+    assert float(jnp.linalg.norm(smoothed)) < float(jnp.linalg.norm(error))
+
+
 # --- local approximate ideal restriction (lAIR) -----------------------------------------
 
 
@@ -439,3 +465,53 @@ def test_air_multigrid_is_linear_and_transposable() -> None:
     transpose = jax.linear_transpose(solve, r1)
     u = jnp.asarray(rng.standard_normal(n))
     assert jnp.allclose(jnp.dot(u, solve(r1)), jnp.dot(transpose(u)[0], r1), rtol=1e-9)
+
+
+# --- degenerate-mesh guards (fail loudly at build, not a silent inf in the frozen preconditioner) ---
+
+
+def _triangle_with_isolated_cell():
+    """Four cells, edges forming a triangle on cells 0-1-2; cell 3 has no incident edge.
+
+    Cell 3's graph-Laplacian diagonal is therefore zero — the isolated-cell / disconnected-component
+    degeneracy that would invert to ``inf`` in the frozen preconditioner.
+    """
+    owner = np.array([0, 1, 2])
+    nb = np.array([1, 2, 0])
+    return owner, nb, 4
+
+
+def test_build_hierarchy_rejects_empty_mesh() -> None:
+    with pytest.raises(ValueError, match="at least one cell"):
+        build_hierarchy(np.array([], dtype=int), np.array([], dtype=int), 0)
+
+
+def test_build_hierarchy_rejects_out_of_range_edge() -> None:
+    with pytest.raises(ValueError, match="out of range"):
+        build_hierarchy(np.array([0, 5]), np.array([1, 1]), 4)  # endpoint 5 >= n = 4
+
+
+def test_isolated_cell_zero_diagonal_is_rejected_at_build() -> None:
+    """A zero-diagonal (isolated) cell makes the smoothed-aggregation build fail loudly rather than
+    bake ``1/0 = inf`` into the frozen operator and silently stall the runtime V-cycle."""
+    owner, nb, n = _triangle_with_isolated_cell()
+    with pytest.raises(ValueError, match="strictly positive"):
+        build_smoothed_hierarchy(owner, nb, np.ones(len(owner)), n, pin=None)
+
+
+def test_air_build_rejects_isolated_cell() -> None:
+    """The reduction (lAIR) build guards its coarse operators' diagonals on the same footing."""
+    owner, nb, n = _triangle_with_isolated_cell()
+    with pytest.raises(ValueError, match="strictly positive"):
+        build_convection_air_hierarchy(owner, nb, np.ones(len(owner)), np.zeros(len(owner)), n)
+
+
+def test_boundary_stiffened_cell_is_allowed() -> None:
+    """The diagonal is checked *after* boundary stiffness is folded in, so a cell that is closed off
+    from the interior but carries a boundary coefficient is a valid operator — not a false positive."""
+    owner, nb, n = _triangle_with_isolated_cell()
+    boundary_diagonal = np.array([0.0, 0.0, 0.0, 1.0])  # cell 3 gets a boundary stiffness
+    hierarchy = build_smoothed_hierarchy(
+        owner, nb, np.ones(len(owner)), n, boundary_diagonal=boundary_diagonal
+    )
+    assert len(hierarchy.levels) >= 1  # builds without raising

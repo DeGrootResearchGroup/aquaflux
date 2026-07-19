@@ -244,21 +244,30 @@ def test_escalation_recovers_an_underdamped_step() -> None:
     """The step-acceptance escalation makes ``β₀`` robust rather than a per-case knob.
 
     An intentionally under-damped ``β₀`` produces a shifted step that diverges (the divergence guard
-    rejects it), so without escalation the march makes no progress and stalls. Escalating the damping
-    until the step descends is what recovers convergence — so ``β₀`` only sets the starting damping,
-    and being too small is self-corrected rather than fatal.
+    rejects it), so without escalation the march makes no progress and stalls — the solve fails to
+    reach tolerance within ``max_steps`` and the convergence guard rejects the stalled field rather
+    than returning it. Escalating the damping until the step descends is what recovers convergence —
+    so ``β₀`` only sets the starting damping, and being too small is self-corrected rather than fatal.
     """
     assembler = _channel(40, 32, 1e-3, wall_growth=1.2)  # Re = 1000, wall-graded
 
-    def residual_after_solve(max_escalations):
+    def solve_with(max_escalations):
         continuation = momentum_continuation(
             assembler, schur_scaling="msimpler", beta0=0.2, max_escalations=max_escalations
         )
-        state = _solve(assembler, continuation=continuation, max_steps=150)
-        return float(jnp.linalg.norm(assembler.residual(state)))
+        return _solve(assembler, continuation=continuation, max_steps=150)
 
-    assert residual_after_solve(0) > 1e-6  # under-damped, no escalation: stalls
-    assert residual_after_solve(6) < 1e-8  # escalation recovers convergence
+    try:
+        stalled = solve_with(0)  # under-damped, no escalation
+        no_escalation_failed = float(jnp.linalg.norm(assembler.residual(stalled))) > 1e-6
+    except Exception:
+        no_escalation_failed = (
+            True  # the stalled march never reaches tolerance; the guard rejects it
+        )
+    assert no_escalation_failed
+
+    converged = solve_with(6)  # escalation recovers convergence
+    assert float(jnp.linalg.norm(assembler.residual(converged))) < 1e-8
 
 
 @pytest.mark.slow

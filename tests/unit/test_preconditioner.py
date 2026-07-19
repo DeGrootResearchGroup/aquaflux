@@ -4,12 +4,15 @@ damped-Jacobi inner solve. Both are tested in isolation from the Newton driver."
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import (
+    BlockPreconditioner,
     MomentumContinuity,
     MovingWall,
     NoSlipWall,
@@ -18,7 +21,11 @@ from aquaflux.flow import (
     damped_jacobi_solve,
     pressure_schur_laplacian,
 )
-from aquaflux.flow.block_preconditioner import _characteristic_reference_state
+from aquaflux.flow.block_preconditioner import (
+    SmoothedAmgVelocity,
+    _characteristic_reference_state,
+    _VelocityGeometry,
+)
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -42,13 +49,13 @@ def _geometry(n, perturb=0.0):
     )
 
 
-def _channel(u_in):
-    """A small open channel driven by a uniform velocity inlet at speed ``u_in``."""
+def _channel(u_in, rho=1.0):
+    """A small open channel driven by a uniform velocity inlet at speed ``u_in`` and density ``rho``."""
     mesh = structured_grid_2d(10, NY, lx=4.0, ly=H, named_boundaries=True)
     return MomentumContinuity.build(
         mesh,
         mesh.geometry(),
-        PropertyModel({"viscosity": Constant(1e-2), "density": Constant(1.0)}),
+        PropertyModel({"viscosity": Constant(1e-2), "density": Constant(rho)}),
         CompactGreenGauss(),
         BoundaryConditions(
             {
@@ -60,6 +67,91 @@ def _channel(u_in):
         ),
         advection_scheme=FirstOrderUpwind(),
     )
+
+
+def _msimpler_at(asm, u_in):
+    """The MSIMPLER preconditioner for ``asm`` and a uniform inlet-speed flow, and that state."""
+    preconditioner = BlockPreconditioner.build(asm, schur_scaling="msimpler")
+    velocity = jnp.zeros((asm.mesh.n_cells, asm.mesh.dim)).at[:, 0].set(u_in)
+    state = asm.pack(velocity, jnp.zeros(asm.mesh.n_cells))
+    return preconditioner, state
+
+
+def test_msimpler_schur_scale_carries_density_like_simple() -> None:
+    """MSIMPLER's Schur coefficient keeps its density factor for rho != 1, matching SIMPLE (issue #40).
+
+    ``schur_face_coefficient`` applies ``rho_face`` itself, so the frozen MSIMPLER diagonal
+    ``schur_a_P = Q_hat / k = rho V / k`` must be calibrated in ``rho V`` units (``k = mean(rho V /
+    a_P)``); otherwise the density cancels and the coefficient comes out ``rho`` times too small. At
+    water density (rho = 1000) the per-cell effective Schur coefficient ``rho V / schur_a_P`` must
+    match SIMPLE's ``rho V / a_P`` in mean magnitude -- before the fix it was 1000x smaller.
+    """
+    rho = 1000.0
+    asm = _channel(u_in=3.0, rho=rho)
+    preconditioner, state = _msimpler_at(asm, u_in=3.0)
+
+    a_p = preconditioner.frozen_momentum_diagonal(state)  # the real a_P (SIMPLE's schur diagonal)
+    schur_a_p = preconditioner.schur_mass_diagonal / preconditioner._msimpler_scale(
+        state
+    )  # rho V / k
+
+    rho_v = asm.density * asm.geometry.cell.volume
+    eff_simple = float(jnp.mean(rho_v / a_p))  # mean(rho V / a_P) = k
+    eff_msimpler = float(
+        jnp.mean(rho_v / schur_a_p)
+    )  # mean(rho V / (rho V / k)) = k iff k carries rho
+    assert eff_msimpler == pytest.approx(eff_simple, rel=1e-6)
+
+
+def test_msimpler_scale_does_not_leak_a_geometry_gradient() -> None:
+    """The MSIMPLER scale is frozen: no live cell-volume gradient reaches the Schur diagonal (issue #40).
+
+    ``k`` feeds ``schur_a_P`` (the Schur operator), so a live cell-volume dependence would leak a
+    mesh-geometry gradient into the adjoint. The scale must be ``stop_gradient``-ed, like the momentum
+    diagonal it is built from -- scaling the cell volumes must not move it.
+    """
+    asm = _channel(u_in=3.0, rho=1.2)
+    preconditioner, state = _msimpler_at(asm, u_in=3.0)
+
+    def scale_with_scaled_volumes(s):
+        scaled = eqx.tree_at(lambda a: a.geometry.cell.volume, asm, asm.geometry.cell.volume * s)
+        moved = eqx.tree_at(lambda p: p.assembler, preconditioner, scaled)
+        return moved._msimpler_scale(state)
+
+    assert float(jax.grad(scale_with_scaled_volumes)(1.0)) == 0.0
+
+
+def test_boundary_a_p_drops_wall_convection() -> None:
+    """A wall passes no fluid, so its a_P owner contribution ignores the convective estimate (issue #41).
+
+    On a closed cavity (all no-slip walls) the boundary momentum diagonal must be the Dirichlet viscous
+    term alone: feeding a huge convective mass flux must not change it, because the wall carries none.
+    """
+    asm = _geometry(6)  # closed cavity: every patch is a NoSlipWall
+    n_faces = asm.mesh.n_faces
+    viscous_only = asm.boundary_momentum_diagonal(asm.viscosity, None)
+    with_huge_mdot = asm.boundary_momentum_diagonal(asm.viscosity, jnp.full(n_faces, 1e6))
+    assert jnp.allclose(viscous_only, with_huge_mdot)  # convective dropped at every wall face
+    assert float(jnp.sum(viscous_only)) > 0.0  # the Dirichlet viscous stiffness is still there
+
+
+def test_boundary_a_p_drops_outlet_viscosity() -> None:
+    """A zero-gradient outlet imposes no velocity, so it adds no viscous a_P (issue #41).
+
+    At zero mass flux only the Dirichlet-velocity faces (walls, inlet) contribute their viscous term;
+    the outlet contributes nothing, so the total is strictly less than the naive all-boundary-faces
+    viscous sum (which the pre-fix code produced).
+    """
+    asm = _channel(u_in=1.0)  # velocity inlet + pressure outlet + no-slip walls
+    fc = asm.mesh.face_cells
+    boundary_a_p = asm.boundary_momentum_diagonal(asm.viscosity, jnp.zeros(asm.mesh.n_faces))
+    all_faces_viscous = jnp.where(
+        fc.interior, 0.0, asm.viscosity[fc.owner] * asm.geometry.face.area / asm.normal_distance
+    )
+    assert float(jnp.sum(boundary_a_p)) < float(
+        jnp.sum(all_faces_viscous)
+    )  # outlet viscous excluded
+    assert float(jnp.sum(boundary_a_p)) > 0.0  # walls + inlet still contribute
 
 
 @pytest.mark.parametrize("u_in", [0.01, 1.0, 100.0])
@@ -251,3 +343,33 @@ def test_damped_jacobi_converges_toward_solution() -> None:
         return float(jnp.linalg.norm(matvec(x) - rhs))
 
     assert residual_norm(40) < 0.3 * residual_norm(5)  # clearly decreasing with sweeps
+
+
+def test_velocity_block_builds_from_a_narrow_geometry_seam() -> None:
+    """A velocity-block strategy builds from a ``_VelocityGeometry`` bundle alone — mesh geometry only,
+    no boundary conditions / property model / schemes — so it is unit-testable in isolation without a
+    full flow assembler. This is the encapsulation the seam exists for: the strategy takes the narrow
+    geometry it needs, not the whole ``MomentumContinuity``.
+    """
+    mesh = structured_grid_2d(4, 3)
+    face_cells = mesh.face_cells
+    n_cells, n_faces = mesh.n_cells, mesh.n_faces
+    # SmoothedAmgVelocity reads only the mesh geometry (face area, normal distance, owner, dim); the
+    # interp_factor / viscosity fields belong to the convection-aware sibling, so they are unit here.
+    geometry = _VelocityGeometry(
+        face_cells=face_cells,
+        mesh_geometry=mesh.geometry(),
+        interp_factor=jnp.ones(n_faces),
+        normal_distance=jnp.ones(n_faces),
+        viscosity=jnp.ones(n_cells),
+        dim=mesh.dim,
+    )
+    owner_e, nb_e, _ = face_cells.interior_edges()
+    interior = np.asarray(face_cells.interior)
+    block = SmoothedAmgVelocity.build(geometry, owner_e, nb_e, interior, n_cells, v_cycles=1)
+
+    solve = block.apply(jnp.full(n_cells, 2.0))  # the per-iterate velocity solve at a_P = 2
+    ru = jnp.asarray(np.random.default_rng(0).standard_normal((n_cells, mesh.dim)))
+    du = solve(ru)
+    assert du.shape == (n_cells, mesh.dim)
+    assert bool(jnp.all(jnp.isfinite(du)))

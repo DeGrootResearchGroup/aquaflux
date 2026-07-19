@@ -118,6 +118,36 @@ class _SchurGeometry(eqx.Module):
         return jax.lax.stop_gradient(segment_sum(per_face, self.face_cells.owner, n_cells))
 
 
+class _VelocityGeometry(eqx.Module):
+    """The frozen geometry the velocity-block AMG strategies need — bundled so they build from a
+    narrow, testable seam instead of reaching into the full flow assembler (the momentum-block
+    counterpart of :class:`_SchurGeometry`).
+
+    Unlike :class:`_SchurGeometry`, this is a **build-time-only** input: the velocity strategies freeze
+    their AMG hierarchy at build and do not store the geometry, so this bundle is consumed by
+    ``build`` and discarded (it never enters the strategy pytree or the differentiated apply).
+    """
+
+    face_cells: FaceCellConnectivity
+    mesh_geometry: MeshGeometry
+    interp_factor: jnp.ndarray
+    normal_distance: jnp.ndarray
+    viscosity: jnp.ndarray
+    dim: int = eqx.field(static=True)
+
+    @classmethod
+    def of(cls, assembler: MomentumContinuity) -> _VelocityGeometry:
+        """Extract the velocity-block geometry from a flow assembler."""
+        return cls(
+            assembler.mesh.face_cells,
+            assembler.geometry,
+            assembler.interp_factor,
+            assembler.normal_distance,
+            assembler.viscosity,
+            assembler.mesh.dim,
+        )
+
+
 # --- pressure-Schur inner solvers (strategy family) ------------------------------------
 
 
@@ -227,7 +257,6 @@ class SmoothedAmgSchur(InnerSchurSolver):
     def build(
         cls,
         geometry: _SchurGeometry,
-        assembler: MomentumContinuity,
         owner_e: np.ndarray,
         nb_e: np.ndarray,
         interior: np.ndarray,
@@ -328,22 +357,22 @@ class SmoothedAmgVelocity(VelocityBlockSolver):
     @classmethod
     def build(
         cls,
-        assembler: MomentumContinuity,
+        geometry: _VelocityGeometry,
         owner_e: np.ndarray,
         nb_e: np.ndarray,
         interior: np.ndarray,
         n_cells: int,
         v_cycles: int,
     ) -> SmoothedAmgVelocity:
-        area = np.asarray(assembler.geometry.face.area)
-        over_distance = area / np.asarray(assembler.normal_distance)
-        boundary_owner = np.asarray(assembler.mesh.face_cells.owner)[~interior]
+        area = np.asarray(geometry.mesh_geometry.face.area)
+        over_distance = area / np.asarray(geometry.normal_distance)
+        boundary_owner = np.asarray(geometry.face_cells.owner)[~interior]
         boundary_diagonal = np.zeros(n_cells)
         np.add.at(boundary_diagonal, boundary_owner, over_distance[~interior])
         hierarchy = build_smoothed_hierarchy(
             owner_e, nb_e, over_distance[interior], n_cells, boundary_diagonal=boundary_diagonal
         )
-        return cls(hierarchy, assembler.mesh.dim, v_cycles)
+        return cls(hierarchy, geometry.dim, v_cycles)
 
     def apply(self, a_p: jnp.ndarray) -> _VelocitySolve:
         inv_scale = jnp.sqrt(self.hierarchy.levels[0].diagonal / a_p)
@@ -393,34 +422,36 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
     @classmethod
     def build(
         cls,
-        assembler: MomentumContinuity,
+        geometry: _VelocityGeometry,
         owner_e: np.ndarray,
         nb_e: np.ndarray,
         interior: np.ndarray,
         n_cells: int,
         v_cycles: int,
-        reference_state: jnp.ndarray,
+        reference_mdot: jnp.ndarray,
         *,
         method: str = "twolevel",
         sweeps: int = 2,
         omega: float = 0.8,
     ) -> SmoothedAmgConvectionVelocity:
-        face_cells = assembler.mesh.face_cells
-        mu = jax.lax.stop_gradient(assembler.viscosity)
-        mu_face = interpolate_owner_neighbour(mu, assembler.interp_factor, face_cells)
-        viscous = mu_face * assembler.geometry.face.area / assembler.normal_distance  # (n_faces,)
-        # Frozen reference convective linearization: the Rhie--Chow mass flux of a representative
-        # operating state (the same flux the momentum diagonal's convective part is built from below,
-        # so the operator diagonal matches ``a_P`` exactly and the per-iterate rescaling is exact).
-        reference_mdot = jax.lax.stop_gradient(assembler.mass_flux(reference_state))  # (n_faces,)
+        # ``reference_mdot`` is the (frozen) Rhie--Chow mass flux of a representative operating state
+        # -- the convective linearization the hierarchy is frozen at, so the operator diagonal matches
+        # the momentum diagonal ``a_P`` at the reference and the per-iterate rescaling is exact. It is
+        # supplied by the caller because it is assembler behaviour (the flux operator), not geometry.
+        face_cells = geometry.face_cells
+        mu = jax.lax.stop_gradient(geometry.viscosity)
+        mu_face = interpolate_owner_neighbour(mu, geometry.interp_factor, face_cells)
+        viscous = (
+            mu_face * geometry.mesh_geometry.face.area / geometry.normal_distance
+        )  # (n_faces,)
         reference_a_p = jax.lax.stop_gradient(
             jnp.mean(
                 momentum_diagonal(
                     face_cells,
-                    assembler.geometry,
+                    geometry.mesh_geometry,
                     mu,
-                    assembler.normal_distance,
-                    assembler.interp_factor,
+                    geometry.normal_distance,
+                    geometry.interp_factor,
                     mdot_lagged=reference_mdot,
                 ),
                 axis=1,
@@ -443,13 +474,12 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
             hierarchy = build_convection_air_hierarchy(*args, boundary_diagonal=boundary_diagonal)
         elif method == "twolevel":
             # A single aggregation with a direct coarse solve: the aggregation coarse space stays a
-            # stable correction at high cell Peclet, where a deeper Galerkin recursion does not.
-            hierarchy = build_convection_hierarchy(
-                *args, boundary_diagonal=boundary_diagonal, max_levels=2
-            )
+            # stable correction at high cell Peclet, where a deeper Galerkin recursion does not (the
+            # builder is two-level for exactly this reason).
+            hierarchy = build_convection_hierarchy(*args, boundary_diagonal=boundary_diagonal)
         else:
             raise ValueError(f"unknown convection method {method!r}; use 'twolevel' or 'air'")
-        return cls(hierarchy, method, assembler.mesh.dim, v_cycles, sweeps, omega)
+        return cls(hierarchy, method, geometry.dim, v_cycles, sweeps, omega)
 
     def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
         """One momentum-component inner solve: the reduction-based (lAIR) or two-level V-cycle."""
@@ -615,7 +645,8 @@ class BlockPreconditioner(eqx.Module):
         # built at the **mass matrix ``ρ V`` (k = 1)** — the constant-coefficient pressure Poisson
         # ``A/(d·n)``; the operating scale ``k`` is applied per iterate in :meth:`apply_at` (the
         # symmetric rescaling absorbs a scalar exactly). ``k`` is auto-calibrated there to
-        # ``mean(V / a_P)`` from the **real** momentum diagonal, so it tracks the true velocity /
+        # ``mean(ρV / a_P)`` from the **real** momentum diagonal (in the same ``ρV`` units as ``Q̂``, so
+        # the density is not divided back out of the Schur coefficient), so it tracks the true velocity /
         # density / viscosity scale with no unit-speed assumption; ``msimpler_scale`` overrides it.
         schur_mass_diagonal = None
         if schur_scaling == "msimpler":
@@ -626,7 +657,6 @@ class BlockPreconditioner(eqx.Module):
         if inner == "smoothed":
             schur: InnerSchurSolver = SmoothedAmgSchur.build(
                 geometry,
-                assembler,
                 owner_e,
                 nb_e,
                 interior,
@@ -635,23 +665,27 @@ class BlockPreconditioner(eqx.Module):
                 v_cycles,
                 reference_diagonal=schur_mass_diagonal,
             )
+            velocity_geometry = _VelocityGeometry.of(assembler)
             velocity_block: VelocityBlockSolver
             if velocity in ("convection", "convection-air"):
                 if reference_state is None:
                     reference_state = _characteristic_reference_state(assembler)
+                # The reference mass flux is assembler behaviour (the Rhie--Chow flux operator), so it
+                # is computed here and handed to the strategy, keeping the velocity build assembler-free.
+                reference_mdot = jax.lax.stop_gradient(assembler.mass_flux(reference_state))
                 velocity_block = SmoothedAmgConvectionVelocity.build(
-                    assembler,
+                    velocity_geometry,
                     owner_e,
                     nb_e,
                     interior,
                     n_cells,
                     v_cycles,
-                    reference_state,
+                    reference_mdot,
                     method="air" if velocity == "convection-air" else "twolevel",
                 )
             else:
                 velocity_block = SmoothedAmgVelocity.build(
-                    assembler, owner_e, nb_e, interior, n_cells, v_cycles
+                    velocity_geometry, owner_e, nb_e, interior, n_cells, v_cycles
                 )
             return cls(
                 assembler,
@@ -703,26 +737,38 @@ class BlockPreconditioner(eqx.Module):
         form its diagonal shift from the *same* ``a_P`` the preconditioner inverts.
         """
         velocity, _ = self.assembler.unpack(jax.lax.stop_gradient(state))
+        # The plain all-faces ``a_P`` (``boundary_corrected=False``): this frozen diagonal is a
+        # forward-path stabilization scale (the shift and the block it inverts), not the residual's
+        # operator-consistent coefficient, so it keeps the extra boundary damping that carries the
+        # high-Reynolds march. It never enters the converged residual or the adjoint.
         return jnp.mean(
-            jax.lax.stop_gradient(self.assembler.momentum_matrix_diagonal(velocity)), axis=1
+            jax.lax.stop_gradient(
+                self.assembler.momentum_matrix_diagonal(velocity, boundary_corrected=False)
+            ),
+            axis=1,
         )
 
     def _msimpler_scale(self, state: jnp.ndarray) -> jnp.ndarray:
-        """The MSIMPLER scale ``k`` at ``state`` — ``mean(V / a_P)`` from the real momentum diagonal.
+        """The MSIMPLER scale ``k`` at ``state`` — ``mean(ρV / a_P)`` from the real momentum diagonal.
 
-        ``k`` sets the frozen Schur diagonal ``Q̂ = ρ V / k`` (Schur coefficient ``k · A/(d·n)``). It is
-        calibrated from the **actual** momentum diagonal ``a_P`` at the current flow — which encodes
-        the true velocity / density / viscosity scale — so the MSIMPLER Schur magnitude matches the
-        SIMPLE Schur at the operating convection with **no unit-speed assumption** (an air/water or
-        otherwise non-unit-speed problem calibrates itself). The **un-shifted** diagonal is used (via
-        :meth:`frozen_momentum_diagonal`, not the continuation's shifted ``a_P``): an early large
-        pseudo-transient shift would give a spuriously large ``a_P``, hence a spuriously weak Schur.
-        ``msimpler_scale`` overrides the calibration with a fixed value.
+        ``k`` sets the frozen, velocity-independent Schur diagonal ``schur_a_P = Q̂ / k = ρV / k``, an
+        ``a_P``-magnitude stand-in for the real momentum diagonal, so the Schur coefficient
+        ``ρ_f (V/schur_a_P)_f A/(d·n)`` matches the SIMPLE coefficient ``ρ_f (V/a_P)_f A/(d·n)`` at the
+        operating convection. ``k`` is calibrated in the **same ``ρV`` units as ``Q̂``** (reusing the
+        frozen :attr:`schur_mass_diagonal`), so the density ``Q̂`` carries is not divided back out — the
+        assembled coefficient keeps its ``ρ`` factor for ρ≠1 (air, water), not only at ρ=1. Taken from
+        the **actual** momentum diagonal ``a_P`` at the current flow, which encodes the true velocity /
+        density / viscosity scale, so a non-unit-speed problem calibrates itself with **no unit-speed
+        assumption**. The **un-shifted** diagonal is used (via :meth:`frozen_momentum_diagonal`, not the
+        continuation's shifted ``a_P``): an early large pseudo-transient shift would give a spuriously
+        large ``a_P``, hence a spuriously weak Schur. ``msimpler_scale`` overrides the calibration with a
+        fixed value. Frozen (``stop_gradient``) like :meth:`frozen_momentum_diagonal`, so the scale never
+        leaks a live cell-volume or density gradient into the adjoint.
         """
         if self.msimpler_scale is not None:
             return jnp.asarray(float(self.msimpler_scale))
         a_p = self.frozen_momentum_diagonal(state)
-        return jnp.mean(self.assembler.geometry.cell.volume / a_p)
+        return jax.lax.stop_gradient(jnp.mean(self.schur_mass_diagonal / a_p))
 
     def apply_at(
         self, state: jnp.ndarray, a_p: jnp.ndarray

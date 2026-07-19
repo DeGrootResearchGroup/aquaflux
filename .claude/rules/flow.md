@@ -54,10 +54,25 @@ Engineering Principles.
   force** (`momentum.py::_face_pressure`) is likewise reconstructed to the integration point; the
   lagged-`a_P` momentum estimate uses `interpolate_to_face` too when `grad_velocity` is available
   (the preconditioner keeps the cheap leading-order blend, exact at convergence since `a_P` is lagged).
+  **Boundary faces respect the BC type** (`boundary_owner_coeff`, from each patch's
+  `momentum_diagonal_coefficient`): a zero-gradient outlet adds **no** viscous diagonal (its viscous
+  flux `μ(u_owner−u_owner)/(d·n)` is zero), and a no-through-flow wall adds **no** convective diagonal
+  (its mass flux is exactly zero) — assembling over *all* faces uniformly over-counted both. Applied to
+  the **residual** `a_P` only (`momentum_matrix_diagonal`, default `boundary_corrected=True`). The
+  **frozen** preconditioner / continuation-shift diagonal (`frozen_momentum_diagonal`) keeps the plain
+  all-faces form (`boundary_corrected=False`): it is a forward-path *stabilization* scale, not the
+  operator coefficient, and the extra boundary damping is what carries the high-Reynolds pseudo-transient
+  march — correcting it there regressed `test_channel_high_reynolds` and never affects the converged
+  residual or its adjoint (the shift vanishes at the fixed point). Wiring the velocity-block AMG to the
+  same shared decomposition (robustly) is deferred to #45; the broader assembler unification is #58.
 - **`boundary.py` — `FlowBoundary` → `NoSlipWall`, `MovingWall`, `VelocityInlet`,
   `PressureOutlet`.** Each closes velocity (viscous BC + gradient), pressure, and boundary
   `mdot`. `VelocityInlet`/`MovingWall` take a constant or a profile callable; `MovingWall` passes
-  no fluid (`mdot=0`, for a driven lid).
+  no fluid (`mdot=0`, for a driven lid). Beyond those three closures a patch also exposes the two
+  **preconditioner/diagonal contributions** it alone knows: `pressure_schur_coefficient`
+  (`d(mdot)/d(p_owner)`, non-zero only at a `PressureOutlet`) and `momentum_diagonal_coefficient`
+  (the owner-velocity linearization of its velocity flux — viscous for a Dirichlet-velocity patch,
+  convective for a through-flow patch; see the `rhie_chow.py` `a_P` note).
   - **Compose, do NOT inherit (decided; composition now realized).** A `FlowBoundary` is a *bundle*
     {velocity closure, pressure closure, mass-flux closure}, not a subtype of
     `boundary.BoundaryCondition`: it returns three coupled quantities, and `mdot` (Rhie–Chow) has no
@@ -124,6 +139,20 @@ Engineering Principles.
   `MomentumContinuity.lagged_momentum_diagonal`. When adding an inner solver, add an `InnerSchurSolver`
   subclass — do **not** grow an `if inner == …` branch (that god-method was the thing the refactor
   removed; see root `CLAUDE.md` Principle 3).
+- **Every strategy builds from a narrow geometry bundle, not the assembler (binding — Principle 3).**
+  Both strategy families take a frozen geometry seam rather than reaching into the full
+  `MomentumContinuity`: the Schur family holds a `_SchurGeometry` (`face_cells`, `mesh_geometry`,
+  `boundary`, `interp_factor`, `normal_distance`, `rho`, `pressure_pin`; it also *owns* the Schur-coeff
+  computation `coefficient(a_P)` / `boundary_diagonal(a_P)`, so it is a **stored, runtime** object), and
+  the velocity family builds from a sibling `_VelocityGeometry` (`face_cells`, `mesh_geometry`,
+  `interp_factor`, `normal_distance`, `viscosity`, `dim`) that is **build-time-only** — the velocity
+  strategies freeze their AMG hierarchy at build and never store it. Keep these **siblings, not one union
+  bundle** (the runtime-vs-build-time split and the disjoint Schur-only / velocity-only fields are why).
+  Anything that is assembler *behaviour* rather than geometry — the Rhie–Chow `mass_flux(reference_state)`
+  the convection velocity block freezes at — is computed by the builder (which has the assembler) and
+  handed in as a frozen array (`reference_mdot`), so the strategy `build` stays assembler-free and
+  unit-testable from mesh primitives alone. When adding a strategy, extend/consume the matching bundle;
+  do **not** thread the assembler into a strategy.
 - **Outer block preconditioner — BUILT (Stage 1: SIMPLE block-diagonal).** The `DampedJacobiSchur` +
   `DiagonalVelocity` composition is a frozen left preconditioner
   `M = blkdiag(diag(a_P)⁻¹, Ŝ⁻¹)`: the velocity block is the momentum-diagonal solve (reusing the

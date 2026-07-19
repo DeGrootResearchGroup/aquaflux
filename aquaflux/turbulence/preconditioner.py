@@ -223,7 +223,7 @@ def scalar_transport_preconditioner(
             return air_multigrid_solve(hierarchy, r, cycles=v_cycles)
     else:
         hierarchy = build_convection_hierarchy(
-            owner_e, nb_e, visc_int, mdot_int, n, boundary_diagonal=boundary_diagonal, max_levels=2
+            owner_e, nb_e, visc_int, mdot_int, n, boundary_diagonal=boundary_diagonal
         )
 
         def solve(r: jnp.ndarray) -> jnp.ndarray:

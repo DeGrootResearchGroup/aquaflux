@@ -164,20 +164,34 @@ class DampedNewtonStep(eqx.Module):
         return self.preconditioner
 
 
+def _within_tolerance(residual_norm, residual_norm_0, rtol, atol):
+    """The Newton stopping test: the residual norm has dropped to the absolute/relative floor."""
+    return residual_norm <= atol + rtol * residual_norm_0
+
+
 def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn):
-    """Newton iterate to convergence (``lax.while_loop``); returns the converged field.
+    """Newton iterate to convergence (``lax.while_loop``); return the converged field or error.
 
     Each iteration applies the injected ``forward_step_fn`` — the globalized Newton step the
     :class:`ForwardStep` strategy supplies (a backtracking line search by default, a pseudo-transient
     continuation for a high-Reynolds convective flow). Every strategy's shift vanishes at the fixed
     point, so the converged field solves the same unshifted ``R(phi, theta) = 0`` and the stopping
     test is unchanged.
+
+    The loop can exit without converging in two ways: it exhausts ``max_steps`` short of tolerance,
+    or the residual norm becomes non-finite (``NaN``/``Inf``), which makes the ``residual_norm > tol``
+    test ``False`` and exits at once. Both leave a field that does *not* solve ``R = 0``. The
+    implicit-function-theorem adjoint linearizes the residual at whatever field this returns, so a
+    non-converged field would yield a **silently wrong gradient** — the transpose solve is still
+    well-posed and raises no ``NaN``. Guard against that here: if the terminal residual is non-finite
+    or above tolerance, raise instead of returning a poisoned field, so neither the forward value nor
+    the gradient built on it can be used unknowingly.
     """
     residual_norm_0 = jnp.linalg.norm(residual_fn(phi0, theta))
 
     def cond(carry):
         _, step, residual_norm = carry
-        return (step < max_steps) & (residual_norm > atol + rtol * residual_norm_0)
+        return (step < max_steps) & ~_within_tolerance(residual_norm, residual_norm_0, rtol, atol)
 
     def body(carry):
         phi, step, _ = carry
@@ -188,8 +202,19 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
         phi = forward_step_fn(residual_theta, phi, residual_norm_0, solver)
         return phi, step + 1, jnp.linalg.norm(residual_fn(phi, theta))
 
-    phi, _, _ = jax.lax.while_loop(cond, body, (phi0, 0, residual_norm_0))
-    return phi
+    phi, _, residual_norm = jax.lax.while_loop(cond, body, (phi0, 0, residual_norm_0))
+    converged = jnp.isfinite(residual_norm) & _within_tolerance(
+        residual_norm, residual_norm_0, rtol, atol
+    )
+    return eqx.error_if(
+        phi,
+        ~converged,
+        "ImplicitNewtonSolver did not converge: the Newton residual norm did not reach "
+        "atol + rtol*||R0|| within max_steps, or became non-finite. The implicit-function-theorem "
+        "adjoint is only valid at a converged root, so the returned field and any gradient built on "
+        "it would be silently wrong. Raise max_steps, loosen the tolerances, or use a stronger "
+        "globalization (e.g. pseudo-transient continuation for a high-Reynolds flow).",
+    )
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(0, 3, 4, 5, 6, 7, 8, 9))
@@ -334,6 +359,15 @@ class ImplicitNewtonSolver(eqx.Module):
         -------
         jnp.ndarray
             The converged field, shape ``(n_cells,)``.
+
+        Raises
+        ------
+        equinox.EquinoxRuntimeError
+            If the Newton iteration does not converge — it exhausts ``max_steps`` short of
+            ``atol + rtol*||R0||`` or the residual norm becomes non-finite. The
+            implicit-function-theorem adjoint is valid only at a converged root, so a
+            non-converged field is rejected rather than returned (its gradient would be silently
+            wrong). Raised at solve time, and equally on the ``jax.grad`` path.
         """
         forward = self.forward_step
         solver = self.solver if self.solver is not None else forward.default_solver()
