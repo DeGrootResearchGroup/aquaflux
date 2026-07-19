@@ -57,10 +57,14 @@ Engineering Principles.
   **Boundary faces respect the BC type** (`boundary_owner_coeff`, from each patch's
   `momentum_diagonal_coefficient`): a zero-gradient outlet adds **no** viscous diagonal (its viscous
   flux `μ(u_owner−u_owner)/(d·n)` is zero), and a no-through-flow wall adds **no** convective diagonal
-  (its mass flux is exactly zero) — assembling over *all* faces uniformly over-counted both. Threaded
-  through every `momentum_diagonal`-derived `a_P` (residual, frozen preconditioner, Schur/velocity-AMG
-  references) so they stay mutually consistent; when omitted, boundary faces get the full interior-style
-  term (unit tests only). The single-momentum-assembly-source unification is tracked in #58.
+  (its mass flux is exactly zero) — assembling over *all* faces uniformly over-counted both. Applied to
+  the **residual** `a_P` only (`momentum_matrix_diagonal`, default `boundary_corrected=True`). The
+  **frozen** preconditioner / continuation-shift diagonal (`frozen_momentum_diagonal`) keeps the plain
+  all-faces form (`boundary_corrected=False`): it is a forward-path *stabilization* scale, not the
+  operator coefficient, and the extra boundary damping is what carries the high-Reynolds pseudo-transient
+  march — correcting it there regressed `test_channel_high_reynolds` and never affects the converged
+  residual or its adjoint (the shift vanishes at the fixed point). Wiring the velocity-block AMG to the
+  same shared decomposition (robustly) is deferred to #45; the broader assembler unification is #58.
 - **`boundary.py` — `FlowBoundary` → `NoSlipWall`, `MovingWall`, `VelocityInlet`,
   `PressureOutlet`.** Each closes velocity (viscous BC + gradient), pressure, and boundary
   `mdot`. `VelocityInlet`/`MovingWall` take a constant or a profile callable; `MovingWall` passes

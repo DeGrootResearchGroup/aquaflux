@@ -252,9 +252,6 @@ class SmoothedAmgSchur(InnerSchurSolver):
                     jnp.ones(n_cells),
                     geometry.normal_distance,
                     geometry.interp_factor,
-                    boundary_owner_coeff=assembler.boundary_momentum_diagonal(
-                        jnp.ones(n_cells), None
-                    ),
                 ),
                 axis=1,
             )
@@ -340,13 +337,9 @@ class SmoothedAmgVelocity(VelocityBlockSolver):
     ) -> SmoothedAmgVelocity:
         area = np.asarray(assembler.geometry.face.area)
         over_distance = area / np.asarray(assembler.normal_distance)
-        # Dirichlet no-slip / inlet faces add A/(d.n) stiffness to their owner (this is what makes the
-        # block nonsingular); a zero-gradient outlet imposes no velocity, so it adds none. Take each
-        # patch's contribution (unit viscosity, no convection) rather than summing every boundary face.
-        boundary_face = assembler.boundary_momentum_diagonal(jnp.ones(n_cells), None)
-        boundary_diagonal = np.asarray(
-            assembler.mesh.face_cells.scatter(boundary_face, jnp.zeros_like(boundary_face))
-        )
+        boundary_owner = np.asarray(assembler.mesh.face_cells.owner)[~interior]
+        boundary_diagonal = np.zeros(n_cells)
+        np.add.at(boundary_diagonal, boundary_owner, over_distance[~interior])
         hierarchy = build_smoothed_hierarchy(
             owner_e, nb_e, over_distance[interior], n_cells, boundary_diagonal=boundary_diagonal
         )
@@ -429,7 +422,6 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
                     assembler.normal_distance,
                     assembler.interp_factor,
                     mdot_lagged=reference_mdot,
-                    boundary_owner_coeff=assembler.boundary_momentum_diagonal(mu, reference_mdot),
                 ),
                 axis=1,
             )
@@ -712,8 +704,15 @@ class BlockPreconditioner(eqx.Module):
         form its diagonal shift from the *same* ``a_P`` the preconditioner inverts.
         """
         velocity, _ = self.assembler.unpack(jax.lax.stop_gradient(state))
+        # The plain all-faces ``a_P`` (``boundary_corrected=False``): this frozen diagonal is a
+        # forward-path stabilization scale (the shift and the block it inverts), not the residual's
+        # operator-consistent coefficient, so it keeps the extra boundary damping that carries the
+        # high-Reynolds march. It never enters the converged residual or the adjoint.
         return jnp.mean(
-            jax.lax.stop_gradient(self.assembler.momentum_matrix_diagonal(velocity)), axis=1
+            jax.lax.stop_gradient(
+                self.assembler.momentum_matrix_diagonal(velocity, boundary_corrected=False)
+            ),
+            axis=1,
         )
 
     def _msimpler_scale(self, state: jnp.ndarray) -> jnp.ndarray:

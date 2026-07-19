@@ -343,7 +343,11 @@ class MomentumContinuity(eqx.Module):
         return self.boundary.apply(self.mesh.face_cells, jnp.zeros(self.mesh.n_faces), coefficient)
 
     def momentum_matrix_diagonal(
-        self, velocity: jnp.ndarray, grad_velocity: jnp.ndarray | None = None
+        self,
+        velocity: jnp.ndarray,
+        grad_velocity: jnp.ndarray | None = None,
+        *,
+        boundary_corrected: bool = True,
     ) -> jnp.ndarray:
         """Momentum-matrix diagonal ``a_P`` as a differentiable function of the velocity state.
 
@@ -359,8 +363,15 @@ class MomentumContinuity(eqx.Module):
         integration point (consistent with the mass flux); omit it for the cheap leading-order
         estimate.
 
-        The block preconditioner needs ``a_P`` as a *frozen* coefficient; it ``stop_gradient``-s the
-        result itself (and evaluates it at a ``stop_gradient``-ed state).
+        ``boundary_corrected`` makes each boundary face contribute only the diagonal its BC actually
+        imposes (:meth:`boundary_momentum_diagonal`: a zero-gradient outlet no viscous term, a wall no
+        convective term). This is the operator-consistent form the **residual** uses. The frozen
+        preconditioner / continuation-shift diagonal passes ``boundary_corrected=False`` (the plain
+        all-faces sum): it is a forward-path *stabilization* scale that never enters the converged
+        residual or its adjoint, and keeping the extra boundary damping there is what carries the
+        high-Reynolds pseudo-transient march (``test_channel_high_reynolds``). The block preconditioner
+        needs ``a_P`` as a *frozen* coefficient; it ``stop_gradient``-s the result itself (and evaluates
+        it at a ``stop_gradient``-ed state).
         """
         mdot_estimate = None
         if self.advection_scheme is not None:
@@ -378,6 +389,11 @@ class MomentumContinuity(eqx.Module):
                     momentum, grad_momentum, self.interp_factor, self.mesh.face_cells, self.geometry
                 )
             mdot_estimate = dot(momentum_face, self.geometry.face.normal) * self.geometry.face.area
+        boundary_owner_coeff = (
+            self.boundary_momentum_diagonal(self.viscosity, mdot_estimate)
+            if boundary_corrected
+            else None
+        )
         return momentum_diagonal(
             self.mesh.face_cells,
             self.geometry,
@@ -385,7 +401,7 @@ class MomentumContinuity(eqx.Module):
             self.normal_distance,
             self.interp_factor,
             mdot_lagged=mdot_estimate,
-            boundary_owner_coeff=self.boundary_momentum_diagonal(self.viscosity, mdot_estimate),
+            boundary_owner_coeff=boundary_owner_coeff,
         )
 
     def _momentum_residual(
