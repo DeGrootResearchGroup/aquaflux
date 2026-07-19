@@ -17,6 +17,7 @@ from aquaflux.mesh import structured_grid_2d
 from aquaflux.solve.multigrid import (
     _chebyshev_smooth,
     _convection_diffusion_csr,
+    _jacobi_smooth,
     _SparseLevel,
     air_multigrid_solve,
     build_convection_air_hierarchy,
@@ -390,6 +391,30 @@ def test_convection_multigrid_is_linear_in_rhs() -> None:
         return convection_multigrid_solve(hierarchy, r, cycles=2)
 
     assert jnp.allclose(solve(1.5 * r1 - 0.5 * r2), 1.5 * solve(r1) - 0.5 * solve(r2), atol=1e-10)
+
+
+def test_convection_hierarchy_is_two_level_with_a_contractive_fine_smoother() -> None:
+    """The convection hierarchy is two-level (a smoothed fine level + a single direct-solve coarse
+    level), and the fine-level damped-Jacobi smoother genuinely contracts at high cell Peclet.
+
+    A *deeper* Galerkin recursion would produce a coarse operator whose near-imaginary-axis
+    eigenvalues no single-factor damped-Jacobi smoother can damp — a non-contractive (amplifying)
+    coarse smoother. Keeping the hierarchy two-level removes that failure by construction: the only
+    smoothed level is the diagonally dominant M-matrix fine level, and the coarse level is solved
+    directly. (Deep, mesh-independent convection coarsening is the reduction-based lAIR hierarchy.)
+    """
+    owner, nb, visc, mdot, n, bd = _convective_grid(24, mu=1e-3, speed=1.0)  # cell Peclet ~40
+    hierarchy = build_convection_hierarchy(owner, nb, visc, mdot, n, boundary_diagonal=bd)
+    assert (
+        len(hierarchy.levels) == 2
+    )  # fine + one direct-solve coarse level; no smoothed coarse level
+
+    # b = 0 has exact solution 0, so smoothing a random error must shrink it: a contraction, not the
+    # amplification a deep Galerkin coarse smoother would apply at this cell Peclet.
+    fine = hierarchy.levels[0]
+    error = jnp.asarray(np.random.default_rng(0).standard_normal(n))
+    smoothed = _jacobi_smooth(fine, jnp.zeros(n), error, sweeps=5, omega=0.8)
+    assert float(jnp.linalg.norm(smoothed)) < float(jnp.linalg.norm(error))
 
 
 # --- local approximate ideal restriction (lAIR) -----------------------------------------

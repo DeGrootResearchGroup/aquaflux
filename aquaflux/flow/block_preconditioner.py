@@ -443,10 +443,9 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
             hierarchy = build_convection_air_hierarchy(*args, boundary_diagonal=boundary_diagonal)
         elif method == "twolevel":
             # A single aggregation with a direct coarse solve: the aggregation coarse space stays a
-            # stable correction at high cell Peclet, where a deeper Galerkin recursion does not.
-            hierarchy = build_convection_hierarchy(
-                *args, boundary_diagonal=boundary_diagonal, max_levels=2
-            )
+            # stable correction at high cell Peclet, where a deeper Galerkin recursion does not (the
+            # builder is two-level for exactly this reason).
+            hierarchy = build_convection_hierarchy(*args, boundary_diagonal=boundary_diagonal)
         else:
             raise ValueError(f"unknown convection method {method!r}; use 'twolevel' or 'air'")
         return cls(hierarchy, method, assembler.mesh.dim, v_cycles, sweeps, omega)

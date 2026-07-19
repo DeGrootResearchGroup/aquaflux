@@ -790,15 +790,18 @@ def smoothed_multigrid_solve(
 # sense — so a Laplacian-only AMG (even rescaled by the convective diagonal) is not Peclet-robust and
 # stalls once the cell Peclet number grows.
 #
-# The convection-aware hierarchy carries the true nonsymmetric operator ``A = viscous + upwind`` up the
-# coarse levels: aggregation and the smoothed prolongation use the **symmetric part** ``(A + Aᵀ)/2`` (so
-# the coarse space is well-shaped and the prolongation smoothing is stable), while the Galerkin coarse
-# operator ``A_c = Pᵀ A P`` is formed from the **true** ``A`` — the standard way to keep the coarse
-# operators convection-aware. The upwind convection-diffusion operator is a diagonally dominant M-matrix
-# (positive diagonal, non-positive off-diagonals), so a **damped-Jacobi** smoother — matrix-free, a
-# fixed linear operator, and safe on the operator's positive-real-part spectrum where a Chebyshev
-# interval smoother is not — is the robust choice. Built once off-jit at a frozen reference mass flux
-# and applied as a frozen matrix-free V-cycle, exactly like the symmetric path.
+# The convection-aware hierarchy is **two-level**: it aggregates the fine cells once and forms a single
+# Galerkin coarse operator ``A_c = Pᵀ A P`` from the **true** ``A`` (aggregation and the smoothed
+# prolongation use the **symmetric part** ``(A + Aᵀ)/2`` so the coarse space is well-shaped), then
+# solves that coarse operator *directly*. The upwind convection-diffusion operator is a diagonally
+# dominant M-matrix (positive diagonal, non-positive off-diagonals); on the **fine** level a single
+# damping factor makes a **damped-Jacobi** smoother — matrix-free, a fixed linear operator, and safe on
+# the operator's positive-real-part spectrum where a Chebyshev interval smoother is not — contract, so
+# the two-level cycle is robust at high cell Peclet. It stays two-level on purpose: a coarser-still
+# Galerkin operator acquires near-imaginary-axis eigenvalues that no single-factor damped-Jacobi
+# smoother can damp, so the coarse level is an exact solve, and deeper coarsening is the job of the
+# reduction-based lAIR hierarchy (:func:`build_convection_air_hierarchy`) instead. Built once off-jit at
+# a frozen reference mass flux and applied as a frozen matrix-free V-cycle, exactly like the symmetric path.
 
 
 def _convection_diffusion_csr(
@@ -834,6 +837,11 @@ def _convection_diffusion_csr(
     return a.tocsr()
 
 
+# The two levels this convection hierarchy builds: a single aggregation of the fine cells, then a
+# direct (dense pseudo-inverse) solve on that one coarse level.
+_CONVECTION_LEVELS = 2
+
+
 def build_convection_hierarchy(
     owner: np.ndarray,
     nb: np.ndarray,
@@ -844,13 +852,22 @@ def build_convection_hierarchy(
     *,
     omega_smooth: float = 2.0 / 3.0,
     max_coarse: int = 16,
-    max_levels: int = 20,
 ) -> SmoothedHierarchy:
-    """Build the nonsymmetric convection-diffusion aggregation hierarchy — call once, off the jit path.
+    """Build the two-level convection-diffusion hierarchy — call once, off the jit path.
 
     The frozen reference operator is ``A = viscous + first-order-upwind convection`` (see
-    :func:`_convection_diffusion_csr`); the symmetric part drives aggregation and prolongation smoothing
-    while the Galerkin coarse operators keep the true nonsymmetric ``A``.
+    :func:`_convection_diffusion_csr`); the symmetric part drives aggregation and prolongation
+    smoothing while the single Galerkin coarse operator keeps the true nonsymmetric ``A``.
+
+    This hierarchy is deliberately **two-level**: the fine cells are aggregated once and the resulting
+    coarse operator is solved *directly* (a dense pseudo-inverse), with the damped-Jacobi smoother
+    applied only on the fine level. On the fine level the operator is a diagonally dominant M-matrix,
+    where a single damping factor contracts, so the two-level cycle is robust at high cell Peclet. A
+    *deeper* Galerkin recursion is not built here: the coarse-of-coarse operators of a strongly
+    convection-dominated problem acquire near-imaginary-axis eigenvalues that no single-factor
+    damped-Jacobi smoother can damp (it becomes non-contractive), so the correct coarse level is an
+    exact solve. For a hierarchy that coarsens all the way down and stays Peclet-robust, use the
+    reduction-based :func:`build_convection_air_hierarchy` (local approximate ideal restriction).
 
     Parameters
     ----------
@@ -868,27 +885,26 @@ def build_convection_hierarchy(
         convection), making the operator diagonally dominant and nonsingular.
     omega_smooth : float
         Prolongation-smoothing damping factor; the applied damping is ``omega_smooth * 2 / lambda_max``
-        (``lambda_max`` of the symmetric part per level).
+        (``lambda_max`` of the symmetric part).
     max_coarse : int
-        Stop coarsening once a level has at most this many cells (solved directly there).
-    max_levels : int
-        Hard cap on the number of levels.
+        Skip the aggregation and solve the fine operator directly when it already has at most this many
+        cells (a one-level direct solve for a trivially small system).
 
     Returns
     -------
     SmoothedHierarchy
-        Frozen finest-to-coarsest general-sparse levels for :func:`convection_multigrid_solve`.
+        The frozen fine + direct-coarse levels for :func:`convection_multigrid_solve`.
     """
     _require_valid_graph(n, owner, nb, "build_convection_hierarchy")
     a = _convection_diffusion_csr(owner, nb, visc, mdot, n, boundary_diagonal)
     # Nonsymmetric operator: aggregate and smooth the prolongation on the symmetric part ``(A + Aᵀ)/2``,
-    # while each level stores the true operator's spectral radius for the damped-Jacobi smoother.
+    # while the level stores the true operator's spectral radius for the damped-Jacobi smoother.
     return _build_aggregation_hierarchy(
         a,
         aggregation_operator=lambda m: (0.5 * (m + m.T)).tocsr(),
         omega_smooth=omega_smooth,
         max_coarse=max_coarse,
-        max_levels=max_levels,
+        max_levels=_CONVECTION_LEVELS,
     )
 
 
