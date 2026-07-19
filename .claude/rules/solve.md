@@ -69,11 +69,17 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   continuation engine lives **here in `solve/`, not in `flow/`** — it is a `ForwardStep`
   (`stepper`/`default_solver`/`adjoint_preconditioner`) that owns the switched-evolution-relaxation
   schedule `β = β₀(‖R‖/‖R₀‖)^p`, the diagonally-shifted solve `(J + diag(βd))δ = −R`
-  (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop` (divergence guard
-  against `divergence_cap·‖R₀‖`). The **only** problem-specific choices — which DOFs shift, the base
-  shift magnitude `d(φ)`, and the shifted-operator preconditioner — come from an injected
-  **`ShiftPolicy`** (`shift_term(φ) -> ShiftTerm(diagonal, make_preconditioner)`; `ShiftTerm.diagonal`
-  is the full-state base shift, `make_preconditioner(β)` the frozen shifted `M`). So the engine is
+  (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop`. **Two injected
+  seams**, both `Protocol`s: the physics comes from a **`ShiftPolicy`**
+  (`shift_term(φ) -> ShiftTerm(diagonal, make_preconditioner)`; `ShiftTerm.diagonal` is the full-state
+  base shift, `make_preconditioner(β)` the frozen shifted `M`), and the per-attempt accept/reject
+  decision from a **`StepAcceptance`** (`accept(candidate_norm, residual_norm, residual_norm_0,
+  attempt) -> bool`). The escalation-loop *mechanics* (grow `β`, cap at `max_escalations`, carry the
+  best candidate) stay in the engine; only the decision is delegated. Default acceptance is
+  **`DivergenceGuard(divergence_cap=10.0)`** — accept unless the candidate is non-finite or exceeds
+  `divergence_cap·‖R₀‖` (a divergence guard, not a descent test, since the march is non-monotone); a
+  monotone / forcing rule is a drop-in `StepAcceptance` — do **not** hardwire an acceptance test into
+  the `while_loop`. So the engine is
   reusable for **any** nonlinear residual (reaction/energy/turbulence), not just the coupled flow —
   verified in `tests/unit/test_pseudo_transient.py`, which drives it on a scalar root with a trivial
   policy (no mesh, no flow). The flow application is `aquaflux/flow/continuation.py`'s

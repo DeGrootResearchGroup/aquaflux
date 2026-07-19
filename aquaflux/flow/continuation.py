@@ -40,7 +40,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from aquaflux.solve.continuation import PseudoTransientStep, ShiftTerm
+from aquaflux.solve.continuation import DivergenceGuard, PseudoTransientStep, ShiftTerm
 from aquaflux.solve.implicit import ImplicitNewtonSolver
 
 from .block_preconditioner import BlockPreconditioner
@@ -188,7 +188,7 @@ class PseudoTransientContinuation(eqx.Module):
             exponent=self.exponent,
             max_escalations=self.max_escalations,
             escalation_factor=self.escalation_factor,
-            divergence_cap=self.divergence_cap,
+            acceptance=DivergenceGuard(divergence_cap=self.divergence_cap),
             adjoint_preconditioner_factory=self.preconditioner.factory(),
         )
 
