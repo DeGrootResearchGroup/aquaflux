@@ -25,11 +25,16 @@ sparse operators; the one recursion (:func:`_frozen_v_cycle`) applies the shared
   for the strongly convection-dominated velocity block — Peclet-robust and mesh-independent to large
   meshes.
 
+Every builder takes an **assembled operator** ``a`` (a ``scipy.sparse`` matrix) and returns a frozen
+hierarchy: this module coarsens operators and knows nothing about meshes, fluxes, or which face value
+a scheme upwinds. Callers assemble with :func:`aquaflux.solve.frozen_operator.convection_diffusion_operator`
+(and regularize a closed-domain pressure system with
+:func:`aquaflux.solve.frozen_operator.decouple_dof` before building, so the AMG null space matches the
+pinned outer Jacobian; the pin only affects preconditioner quality, never the converged solution).
+
 The coefficients are frozen at a reference field at build time (the standard "AMG setup once, reuse
 across nonlinear iterates" practice), with the per-iterate operator scale restored by a symmetric
-diagonal rescaling in the apply. A closed-domain pressure system is regularized by a pin decoupled
-into the frozen operator, so the AMG null space matches the pinned outer Jacobian; the pin only
-affects preconditioner quality, never the converged solution.
+diagonal rescaling in the apply.
 """
 
 from __future__ import annotations
@@ -43,39 +48,6 @@ import numpy as np
 import scipy.sparse as sp
 from jax.ops import segment_sum
 from scipy.sparse.csgraph import reverse_cuthill_mckee
-
-
-def _require_valid_graph(n: int, owner: np.ndarray, nb: np.ndarray, where: str) -> None:
-    """Reject a malformed fine graph at build time, so a degenerate mesh fails loudly at setup.
-
-    The hierarchies are built once, off the jit path, and then frozen; a bad graph would otherwise
-    bake ``inf``/``NaN`` into the frozen operator (via a later zero-diagonal inversion) and only show
-    up as a silently stalling runtime V-cycle. Checks the invariants that must hold for *any* mesh:
-    at least one cell, matched edge arrays, and every edge index in range.
-
-    Parameters
-    ----------
-    n : int
-        Number of cells.
-    owner, nb : np.ndarray
-        Interior-face edge endpoints, shape ``(n_edges,)`` each.
-    where : str
-        Caller name, included in the error message.
-
-    Raises
-    ------
-    ValueError
-        If ``n < 1``, ``owner`` and ``nb`` differ in length, or any endpoint is outside ``[0, n)``.
-    """
-    if n < 1:
-        raise ValueError(f"{where}: need at least one cell, got n={n}.")
-    owner, nb = np.asarray(owner), np.asarray(nb)
-    if owner.shape != nb.shape:
-        raise ValueError(
-            f"{where}: owner and nb must have the same shape, got {owner.shape} and {nb.shape}."
-        )
-    if owner.size and (owner.min() < 0 or owner.max() >= n or nb.min() < 0 or nb.max() >= n):
-        raise ValueError(f"{where}: edge endpoints out of range for n={n} cells.")
 
 
 def _require_positive_diagonal(diagonal: np.ndarray, where: str) -> None:
@@ -215,15 +187,6 @@ class SmoothedHierarchy(NamedTuple):
     levels: tuple[_SparseLevel, ...]
 
 
-def _laplacian_csr(owner: np.ndarray, nb: np.ndarray, coeff: np.ndarray, n: int) -> sp.csr_matrix:
-    """Symmetric graph Laplacian ``(row, col)`` with edge coefficients, as a scipy compressed-sparse-row (CSR) matrix."""
-    o, m, c = np.asarray(owner), np.asarray(nb), np.asarray(coeff)
-    rows = np.concatenate([o, m, o, m])
-    cols = np.concatenate([m, o, o, m])
-    vals = np.concatenate([-c, -c, c, c])  # off-diagonal -c; diagonal accumulates +c
-    return sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
-
-
 def _sparse_level(
     a: sp.csr_matrix,
     lam_max: float,
@@ -324,36 +287,23 @@ def _build_aggregation_hierarchy(
 
 
 def build_smoothed_hierarchy(
-    owner: np.ndarray,
-    nb: np.ndarray,
-    coeff: np.ndarray,
-    n: int,
-    pin: int | None = None,
-    boundary_diagonal: np.ndarray | None = None,
+    a: sp.csr_matrix,
     *,
     omega_smooth: float = 2.0 / 3.0,
     max_coarse: int = 16,
     max_levels: int = 20,
 ) -> SmoothedHierarchy:
-    """Build the smoothed-aggregation hierarchy — call once, off the jit path (uses ``scipy.sparse``).
+    """Build the smoothed-aggregation hierarchy for operator ``a`` — off the jit path.
+
+    ``a`` is an assembled **symmetric** operator (a graph Laplacian of the edge coefficients, plus any
+    boundary stiffness, with a closed-domain pressure system's pinned degree of freedom already
+    decoupled). Aggregation and prolongation smoothing run on ``a`` itself, and its ``lambda_max`` also
+    feeds the runtime Chebyshev smoother.
 
     Parameters
     ----------
-    owner, nb : np.ndarray
-        Fine-level graph edges (interior faces), shape ``(n_edges,)`` each.
-    coeff : np.ndarray
-        Reference fine edge coefficients ``c_f``, shape ``(n_edges,)`` (e.g. from the viscous ``a_P``).
-    n : int
-        Number of fine cells.
-    pin : int, optional
-        Pinned cell index (closed-domain regularization). The pinned DOF is **decoupled** (its row and
-        column are zeroed, unit diagonal) so the operator is SPD-nonsingular and the pin becomes a
-        singleton aggregate — the null space matches the pinned outer Jacobian, and no post-hoc pin
-        handling is needed in the V-cycle.
-    boundary_diagonal : np.ndarray, optional
-        Extra diagonal ``(n_cells,)`` added to the fine operator (e.g. Dirichlet boundary-face viscous
-        coefficients for a velocity block), making an otherwise-singular Laplacian SPD-nonsingular. Not
-        combined with ``pin`` (a Dirichlet-boundary operator needs no pin).
+    a : scipy.sparse matrix
+        The frozen symmetric fine operator, shape ``(n_cells, n_cells)``.
     omega_smooth : float
         Prolongation-smoothing damping factor; the applied damping is ``omega_smooth * 2 / lambda_max``
         (i.e. ``4/(3 lambda_max)`` at the default ``2/3``), with ``lambda_max`` estimated per level.
@@ -367,20 +317,8 @@ def build_smoothed_hierarchy(
     SmoothedHierarchy
         Frozen finest-to-coarsest general-sparse levels for :func:`smoothed_multigrid_solve`.
     """
-    _require_valid_graph(n, owner, nb, "build_smoothed_hierarchy")
-    a = _laplacian_csr(owner, nb, coeff, n)
-    if boundary_diagonal is not None:  # Dirichlet boundary stiffness -> SPD-nonsingular (no pin)
-        a = a + sp.diags(np.asarray(boundary_diagonal))
-    if pin is not None:  # decouple the pinned DOF: zero its row/col, unit diagonal -> SPD singleton
-        a = a.tolil()
-        a[pin, :] = 0
-        a[:, pin] = 0
-        a[pin, pin] = 1.0
-        a = a.tocsr()
-    # Symmetric operator: aggregate on ``A`` itself (the prolongation smoother's ``lam_max`` also feeds
-    # the runtime Chebyshev smoother).
     return _build_aggregation_hierarchy(
-        a,
+        a.tocsr(),
         aggregation_operator=lambda m: m,
         omega_smooth=omega_smooth,
         max_coarse=max_coarse,
@@ -557,41 +495,9 @@ def smoothed_multigrid_solve(
 # the two-level cycle is robust at high cell Peclet. It stays two-level on purpose: a coarser-still
 # Galerkin operator acquires near-imaginary-axis eigenvalues that no single-factor damped-Jacobi
 # smoother can damp, so the coarse level is an exact solve, and deeper coarsening is the job of the
-# reduction-based lAIR hierarchy (:func:`build_convection_air_hierarchy`) instead. Built once off-jit at
-# a frozen reference mass flux and applied as a frozen matrix-free V-cycle, exactly like the symmetric path.
-
-
-def _convection_diffusion_csr(
-    owner: np.ndarray,
-    nb: np.ndarray,
-    visc: np.ndarray,
-    mdot: np.ndarray,
-    n: int,
-    boundary_diagonal: np.ndarray | None = None,
-) -> sp.csr_matrix:
-    """First-order-upwind convection-diffusion operator ``A`` as a scipy CSR matrix (nonsymmetric).
-
-    Each interior edge ``(owner P, neighbour N)`` carries a symmetric viscous coupling ``visc`` and a
-    first-order-upwind convective coupling from the owner-outward face mass flux ``mdot``: an outflow
-    (``mdot > 0``) advects the owner value, an inflow the neighbour value. The resulting entries are
-
-        A[P, N] = -(visc + max(-mdot, 0)),   A[N, P] = -(visc + max(mdot, 0)),
-
-    with the matching diagonal contributions ``visc + max(mdot, 0)`` at P and ``visc + max(-mdot, 0)``
-    at N — so ``A`` is a diagonally dominant M-matrix, nonsymmetric wherever ``mdot != 0``.
-    ``boundary_diagonal`` (per cell) adds the boundary-face stiffness to the diagonal.
-    """
-    o, m = np.asarray(owner), np.asarray(nb)
-    v, f = np.asarray(visc), np.asarray(mdot)
-    up_out = np.maximum(f, 0.0)  # outflow leaves the owner: owner value is upwind
-    up_in = np.maximum(-f, 0.0)  # inflow enters the owner: neighbour value is upwind
-    rows = np.concatenate([o, m, o, m])
-    cols = np.concatenate([m, o, o, m])
-    vals = np.concatenate([-(v + up_in), -(v + up_out), v + up_out, v + up_in])
-    a = sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
-    if boundary_diagonal is not None:
-        a = a + sp.diags(np.asarray(boundary_diagonal))
-    return a.tocsr()
+# reduction-based lAIR hierarchy (:func:`build_air_hierarchy`) instead. The caller assembles the frozen
+# operator (the upwind stencil is transport discretization, not coarsening); here it is coarsened and
+# applied as a frozen matrix-free V-cycle, exactly like the symmetric path.
 
 
 # The two levels this convection hierarchy builds: a single aggregation of the fine cells, then a
@@ -600,21 +506,16 @@ _CONVECTION_LEVELS = 2
 
 
 def build_convection_hierarchy(
-    owner: np.ndarray,
-    nb: np.ndarray,
-    visc: np.ndarray,
-    mdot: np.ndarray,
-    n: int,
-    boundary_diagonal: np.ndarray | None = None,
+    a: sp.csr_matrix,
     *,
     omega_smooth: float = 2.0 / 3.0,
     max_coarse: int = 16,
 ) -> SmoothedHierarchy:
-    """Build the two-level convection-diffusion hierarchy — call once, off the jit path.
+    """Build the two-level convection-diffusion hierarchy for operator ``a`` — off the jit path.
 
-    The frozen reference operator is ``A = viscous + first-order-upwind convection`` (see
-    :func:`_convection_diffusion_csr`); the symmetric part drives aggregation and prolongation
-    smoothing while the single Galerkin coarse operator keeps the true nonsymmetric ``A``.
+    ``a`` is an assembled first-order-upwind convection-diffusion operator (viscous coupling plus the
+    upwind convective off-diagonals); the symmetric part ``(A + Aᵀ)/2`` drives aggregation and
+    prolongation smoothing while the single Galerkin coarse operator keeps the true nonsymmetric ``A``.
 
     This hierarchy is deliberately **two-level**: the fine cells are aggregated once and the resulting
     coarse operator is solved *directly* (a dense pseudo-inverse), with the damped-Jacobi smoother
@@ -624,22 +525,12 @@ def build_convection_hierarchy(
     convection-dominated problem acquire near-imaginary-axis eigenvalues that no single-factor
     damped-Jacobi smoother can damp (it becomes non-contractive), so the correct coarse level is an
     exact solve. For a hierarchy that coarsens all the way down and stays Peclet-robust, use the
-    reduction-based :func:`build_convection_air_hierarchy` (local approximate ideal restriction).
+    reduction-based :func:`build_air_hierarchy` (local approximate ideal restriction).
 
     Parameters
     ----------
-    owner, nb : np.ndarray
-        Fine-level interior-face edges, shape ``(n_edges,)`` each.
-    visc : np.ndarray
-        Per-edge viscous coefficient ``mu_f A_f / (d.n)_f``, shape ``(n_edges,)``.
-    mdot : np.ndarray
-        Reference owner-outward face mass flux on the interior edges, shape ``(n_edges,)`` — the frozen
-        convective linearization the hierarchy is built at.
-    n : int
-        Number of fine cells.
-    boundary_diagonal : np.ndarray, optional
-        Extra diagonal ``(n_cells,)`` from boundary faces (Dirichlet velocity walls/inlet + outlet
-        convection), making the operator diagonally dominant and nonsingular.
+    a : scipy.sparse matrix
+        The frozen (nonsymmetric) convection-diffusion operator, shape ``(n_cells, n_cells)``.
     omega_smooth : float
         Prolongation-smoothing damping factor; the applied damping is ``omega_smooth * 2 / lambda_max``
         (``lambda_max`` of the symmetric part).
@@ -652,12 +543,10 @@ def build_convection_hierarchy(
     SmoothedHierarchy
         The frozen fine + direct-coarse levels for :func:`convection_multigrid_solve`.
     """
-    _require_valid_graph(n, owner, nb, "build_convection_hierarchy")
-    a = _convection_diffusion_csr(owner, nb, visc, mdot, n, boundary_diagonal)
     # Nonsymmetric operator: aggregate and smooth the prolongation on the symmetric part ``(A + Aᵀ)/2``,
     # while the level stores the true operator's spectral radius for the damped-Jacobi smoother.
     return _build_aggregation_hierarchy(
-        a,
+        a.tocsr(),
         aggregation_operator=lambda m: (0.5 * (m + m.T)).tocsr(),
         omega_smooth=omega_smooth,
         max_coarse=max_coarse,
@@ -995,33 +884,6 @@ def build_air_hierarchy(
         levels.append(_air_level(a, split, restriction, prolongation))
         a = (restriction @ a @ prolongation).tocsr()  # Galerkin coarse operator R A P
     return AirHierarchy(tuple(levels))
-
-
-def build_convection_air_hierarchy(
-    owner: np.ndarray,
-    nb: np.ndarray,
-    visc: np.ndarray,
-    mdot: np.ndarray,
-    n: int,
-    boundary_diagonal: np.ndarray | None = None,
-    *,
-    theta: float = 0.25,
-    degree: int = 2,
-    max_coarse: int = 20,
-    max_levels: int = 20,
-) -> AirHierarchy:
-    """Build the lAIR hierarchy for a first-order-upwind convection-diffusion operator — off-jit.
-
-    Assembles the frozen ``viscous + upwind`` momentum operator (:func:`_convection_diffusion_csr`, the
-    same one :func:`build_convection_hierarchy` uses) and coarsens it by reduction (:func:`build_air_hierarchy`).
-    The arguments match :func:`build_convection_hierarchy`; see :func:`build_air_hierarchy` for the lAIR
-    parameters.
-    """
-    _require_valid_graph(n, owner, nb, "build_convection_air_hierarchy")
-    a = _convection_diffusion_csr(owner, nb, visc, mdot, n, boundary_diagonal)
-    return build_air_hierarchy(
-        a, theta=theta, degree=degree, max_coarse=max_coarse, max_levels=max_levels
-    )
 
 
 def _fc_jacobi(

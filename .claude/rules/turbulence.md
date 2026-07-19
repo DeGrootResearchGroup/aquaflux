@@ -30,7 +30,11 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   transport residuals on the flow's Rhie–Chow mass flux, with μ_t a **frozen per-cell field**
   recomputed once per outer sweep.
 - **`preconditioner.py`** — the convection-diffusion AMG preconditioner for the stiff k/ω scalar
-  Krylov solves at high Reynolds number (the scalar analogue of the velocity-block work).
+  Krylov solves at high Reynolds number (the scalar analogue of the velocity-block work). It assembles
+  its frozen operator with the shared `aquaflux.solve.frozen_operator.convection_diffusion_operator` and
+  hands the **assembled matrix** to `build_convection_hierarchy` / `build_air_hierarchy` (the coarsening
+  library is operator-in, #45); its reaction+boundary diagonal still comes from its own `J·1`
+  derivation, which is a genuinely different source, not a copy of the interior stencil.
 - **`boundary.py`** — inlet/wall closures for k and ω over the generic scalar boundary machinery.
 - **`driver.py` — `solve_segregated`.** The outer Picard loop: μ_t → flow solve → k solve → ω
   solve, with under-relaxation and positivity floors as the stabilizers, and injected

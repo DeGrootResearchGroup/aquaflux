@@ -33,9 +33,10 @@ import numpy as np
 from aquaflux.mesh import Mesh
 from aquaflux.mesh.geometry import MeshGeometry
 from aquaflux.schemes.interpolation import interpolate_owner_neighbour, interpolation_factor
+from aquaflux.solve.frozen_operator import convection_diffusion_operator
 from aquaflux.solve.multigrid import (
     air_multigrid_solve,
-    build_convection_air_hierarchy,
+    build_air_hierarchy,
     build_convection_hierarchy,
     convection_multigrid_solve,
 )
@@ -214,17 +215,16 @@ def scalar_transport_preconditioner(
         boundary_diagonal = boundary_diagonal.copy()
         boundary_diagonal[fixed] = 1.0  # identity rows: residual is phi - target
 
+    a = convection_diffusion_operator(
+        owner_e, nb_e, visc_int, n, flux=mdot_int, boundary_diagonal=boundary_diagonal
+    )
     if method == "air":
-        hierarchy = build_convection_air_hierarchy(
-            owner_e, nb_e, visc_int, mdot_int, n, boundary_diagonal=boundary_diagonal
-        )
+        hierarchy = build_air_hierarchy(a)
 
         def solve(r: jnp.ndarray) -> jnp.ndarray:
             return air_multigrid_solve(hierarchy, r, cycles=v_cycles)
     else:
-        hierarchy = build_convection_hierarchy(
-            owner_e, nb_e, visc_int, mdot_int, n, boundary_diagonal=boundary_diagonal
-        )
+        hierarchy = build_convection_hierarchy(a)
 
         def solve(r: jnp.ndarray) -> jnp.ndarray:
             return convection_multigrid_solve(hierarchy, r, cycles=v_cycles)

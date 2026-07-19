@@ -31,13 +31,12 @@ import jax.numpy as jnp
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import AdvectionFlux, DiffusionFlux, FaceContext, FixedValueCells
 from aquaflux.schemes.interpolation import (
-    interpolate_owner_neighbour,
     interpolate_to_face,
     interpolation_factor,
 )
-from aquaflux.vectors import dot, scale
+from aquaflux.vectors import dot
 
-from .rhie_chow import interior_mass_flux, momentum_diagonal
+from .rhie_chow import advective_momentum_flux, interior_mass_flux, momentum_diagonal
 from .state import BlockStateLayout
 
 if TYPE_CHECKING:
@@ -375,20 +374,20 @@ class MomentumContinuity(eqx.Module):
         """
         mdot_estimate = None
         if self.advection_scheme is not None:
-            # lagged momentum flux estimate: reconstruct rho*u to the face (density rides with velocity)
-            momentum = scale(velocity, self.density)
-            if grad_velocity is None:
-                momentum_face = interpolate_owner_neighbour(
-                    momentum, self.interp_factor, self.mesh.face_cells
+            # Lagged momentum-flux estimate: the shared advective flux (reconstructed rho*u projected
+            # on the normal), times area — the same face flux the Rhie--Chow mass flux uses, so a_P's
+            # convective term stays consistent with the mdot it stands in for.
+            mdot_estimate = (
+                advective_momentum_flux(
+                    velocity,
+                    self.density,
+                    self.interp_factor,
+                    self.mesh.face_cells,
+                    self.geometry,
+                    grad_velocity,
                 )
-            else:
-                grad_momentum = (
-                    self.density[:, None, None] * grad_velocity
-                )  # grad(rho*u) = rho grad(u)
-                momentum_face = interpolate_to_face(
-                    momentum, grad_momentum, self.interp_factor, self.mesh.face_cells, self.geometry
-                )
-            mdot_estimate = dot(momentum_face, self.geometry.face.normal) * self.geometry.face.area
+                * self.geometry.face.area
+            )
         boundary_owner_coeff = (
             self.boundary_momentum_diagonal(self.viscosity, mdot_estimate)
             if boundary_corrected

@@ -36,6 +36,38 @@ if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, MeshGeometry
 
 
+def viscous_face_coefficient(
+    mu: jnp.ndarray,
+    normal_distance: jnp.ndarray,
+    interp_factor: jnp.ndarray,
+    face_cells: FaceCellConnectivity,
+    geometry: MeshGeometry,
+) -> jnp.ndarray:
+    """Central viscous face coefficient ``mu_f A / (d.n)`` per face, shape ``(n_faces,)``.
+
+    The face viscosity is the owner/neighbour interpolation ``mu_f`` (the same blend every other face
+    value uses), times the face area over the normal distance. The single definition of the viscous
+    coupling shared by the momentum diagonal (:func:`momentum_diagonal`) and the frozen
+    convection-diffusion operator the velocity-block preconditioner coarsens, so the two cannot drift.
+
+    Parameters
+    ----------
+    mu : jnp.ndarray
+        Per-cell dynamic viscosity, shape ``(n_cells,)``.
+    normal_distance : jnp.ndarray
+        Owner-to-neighbour (or owner-to-face on boundaries) normal distance ``d . n`` per face,
+        shape ``(n_faces,)``.
+    interp_factor : jnp.ndarray
+        Face interpolation factor ``g``, shape ``(n_faces,)``.
+    face_cells : FaceCellConnectivity
+        The face→cell incidence (``mesh.face_cells``).
+    geometry : MeshGeometry
+        The mesh metrics; reads face areas.
+    """
+    mu_face = interpolate_owner_neighbour(mu, interp_factor, face_cells)
+    return mu_face * geometry.face.area / normal_distance
+
+
 def momentum_diagonal(
     face_cells: FaceCellConnectivity,
     geometry: MeshGeometry,
@@ -85,8 +117,7 @@ def momentum_diagonal(
         normal as ``sum_i n_i^2 (V / a_P_i)``, which reduces to the scalar ``V / a_P`` for equal
         components.
     """
-    mu_face = interpolate_owner_neighbour(mu, interp_factor, face_cells)
-    viscous = mu_face * geometry.face.area / normal_distance  # central viscous coefficient
+    viscous = viscous_face_coefficient(mu, normal_distance, interp_factor, face_cells, geometry)
 
     # The scatter masks the neighbour coefficient to zero on boundary faces, so pass it unmasked.
     owner_coeff = viscous
@@ -106,6 +137,60 @@ def momentum_diagonal(
         a_p_isotropic = a_p_isotropic + geometry.cell.volume / dt
     dim = geometry.face.normal.shape[-1]
     return jnp.broadcast_to(a_p_isotropic[:, None], (*a_p_isotropic.shape, dim))
+
+
+def advective_momentum_flux(
+    velocity: jnp.ndarray,
+    rho: jnp.ndarray,
+    interp_factor: jnp.ndarray,
+    face_cells: FaceCellConnectivity,
+    geometry: MeshGeometry,
+    grad_velocity: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Owner-outward advective momentum flux ``(rho u)_f . n`` per face, shape ``(n_faces,)``.
+
+    Reconstructs the per-cell momentum ``rho u`` to each face and projects it on the owner-outward
+    normal — the single definition of the convective face flux shared by the Rhie--Chow mass flux
+    (:func:`interior_mass_flux`) and the momentum diagonal's convective estimate
+    (:meth:`~aquaflux.flow.MomentumContinuity.momentum_matrix_diagonal`). Keeping them one function is
+    what makes the estimate that breaks the ``a_P`` <-> ``mdot`` circularity consistent with the mass
+    flux it stands in for. Density rides **with** the velocity as the conserved momentum ``rho u`` (not
+    a separate face density times an interpolated velocity); the two agree exactly for uniform ``rho``.
+
+    Parameters
+    ----------
+    velocity : jnp.ndarray
+        Per-cell velocity, shape ``(n_cells, dim)``.
+    rho : jnp.ndarray
+        Per-cell density, shape ``(n_cells,)``.
+    interp_factor : jnp.ndarray
+        Face interpolation factor ``g``, shape ``(n_faces,)``.
+    face_cells : FaceCellConnectivity
+        The face→cell incidence (``mesh.face_cells``).
+    geometry : MeshGeometry
+        The mesh metrics; reads face normals (and centroids, for the reconstruction).
+    grad_velocity : jnp.ndarray, optional
+        Per-cell velocity gradient ``(n_cells, dim, dim)``. When given, the momentum is reconstructed
+        to the face integration point (2nd order, :func:`interpolate_to_face`); when omitted, the cheap
+        leading-order owner/neighbour blend (:func:`interpolate_owner_neighbour`).
+
+    Returns
+    -------
+    jnp.ndarray
+        The normal-projected face momentum flux **before** the area factor; multiply by
+        ``geometry.face.area`` for the mass flux ``mdot``.
+    """
+    momentum = scale(velocity, rho)
+    if grad_velocity is None:
+        momentum_face = interpolate_owner_neighbour(momentum, interp_factor, face_cells)
+    else:
+        grad_momentum = (
+            rho[:, None, None] * grad_velocity
+        )  # grad(rho u) = rho grad(u) for uniform rho
+        momentum_face = interpolate_to_face(
+            momentum, grad_momentum, interp_factor, face_cells, geometry
+        )
+    return dot(momentum_face, geometry.face.normal)
 
 
 def interior_mass_flux(
@@ -166,11 +251,11 @@ def interior_mass_flux(
     face_geometry = geometry.face
     normal = face_geometry.normal
 
-    # Advective mass flux: reconstruct the momentum rho*u to the face integration point (2nd order).
-    momentum = scale(velocity, rho)
-    grad_momentum = rho[:, None, None] * grad_velocity  # grad(rho*u) = rho grad(u) for uniform rho
-    momentum_ip = interpolate_to_face(momentum, grad_momentum, interp_factor, face_cells, geometry)
-    mom_normal = dot(momentum_ip, normal)
+    # Advective mass flux: the shared momentum reconstruction rho*u -> face integration point (2nd
+    # order), projected on the normal — the same estimate the momentum diagonal's convective term uses.
+    mom_normal = advective_momentum_flux(
+        velocity, rho, interp_factor, face_cells, geometry, grad_velocity
+    )
 
     rho_face = interpolate_owner_neighbour(rho, interp_factor, face_cells)
     grad_face = interpolate_owner_neighbour(grad_pressure, interp_factor, face_cells)

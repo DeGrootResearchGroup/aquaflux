@@ -63,8 +63,19 @@ Engineering Principles.
   all-faces form (`boundary_corrected=False`): it is a forward-path *stabilization* scale, not the
   operator coefficient, and the extra boundary damping is what carries the high-Reynolds pseudo-transient
   march — correcting it there regressed `test_channel_high_reynolds` and never affects the converged
-  residual or its adjoint (the shift vanishes at the fixed point). Wiring the velocity-block AMG to the
-  same shared decomposition (robustly) is deferred to #45; the broader assembler unification is #58.
+  residual or its adjoint (the shift vanishes at the fixed point). The broader assembler unification is #58.
+- **The velocity-block AMG derives its frozen operator from the shared diagonal definitions — no numpy
+  re-derivation (binding, #45).** The velocity strategies used to rebuild the interior upwind stencil in
+  numpy (`np.add.at`) purely to subtract it back out of `a_P` and recover a boundary diagonal — a
+  reconstruction that had to match the `jnp` formula bit-for-bit across two modules and two languages.
+  Now: the viscous coupling comes from `rhie_chow.viscous_face_coefficient` (the *same* helper
+  `momentum_diagonal` uses, so the two cannot drift), and the boundary diagonal is the boundary-face
+  owner coefficient scattered by `face_cells.scatter` — built from the same `viscous` / reference-flux
+  arrays as the off-diagonals, so the assembled operator's diagonal **is** the frozen `a_P` by
+  construction and the per-iterate rescaling is diagonal-exact without a bit-matching assumption
+  (verified equal to the old path to ~1e-16). It stays on the **uncorrected all-faces** form, matching
+  `frozen_momentum_diagonal` (`boundary_corrected=False`) — that is what the runtime rescaling divides
+  by, and what carries the high-Reynolds march; do not "correct" it to the residual's form.
 - **`boundary.py` — `FlowBoundary` → `NoSlipWall`, `MovingWall`, `VelocityInlet`,
   `PressureOutlet`.** Each closes velocity (viscous BC + gradient), pressure, and boundary
   `mdot`. `VelocityInlet`/`MovingWall` take a constant or a profile callable; `MovingWall` passes
@@ -142,6 +153,11 @@ Engineering Principles.
   The low-level coefficient/Laplacian kernels stay in `preconditioner.py`. `a_P` comes from
   `MomentumContinuity.lagged_momentum_diagonal`. `InnerSchurSolver` / `VelocityBlockSolver` stay abstract
   as the extension seam — when adding a strategy, add a subclass; do **not** grow an `if … == …` branch.
+- **Frozen operators are assembled by `aquaflux/solve/frozen_operator.py`, not here (#45).** All three preconditioner hierarchies (pressure Schur, viscous velocity block,
+  convection velocity block) build their scipy CSR operator with
+  `convection_diffusion_operator(owner, nb, coefficient, n, *, flux=None, boundary_diagonal=None)` and
+  regularize the closed-domain pin with `decouple_dof`, then hand the **assembled matrix** to the
+  coarsening builders. Do not re-assemble a stencil inside `block_preconditioner.py`.
 - **Every strategy builds from a narrow geometry bundle, not the assembler (binding — Principle 3).**
   Both strategy families take a frozen geometry seam rather than reaching into the full
   `MomentumContinuity`: the Schur family holds a `_SchurGeometry` (`face_cells`, `mesh_geometry`,
