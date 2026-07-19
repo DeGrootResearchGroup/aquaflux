@@ -38,6 +38,8 @@ from aquaflux.properties import FieldProperty, PropertyModel
 from aquaflux.solve import ImplicitNewtonSolver
 from aquaflux.solve.continuation import DivergenceGuard, PseudoTransientStep, ShiftTerm
 
+from .initialization import hybrid_initialize
+
 if TYPE_CHECKING:
     from aquaflux.flow import MomentumContinuity
 
@@ -375,9 +377,9 @@ def coupled_continuation(
 
 def solve_coupled(
     coupled: CoupledRANS,
-    flow: jnp.ndarray,
-    k: jnp.ndarray,
-    omega: jnp.ndarray,
+    flow: jnp.ndarray | None = None,
+    k: jnp.ndarray | None = None,
+    omega: jnp.ndarray | None = None,
     *,
     continuation: PseudoTransientStep | None = None,
     reference_state: jnp.ndarray | None = None,
@@ -399,10 +401,14 @@ def solve_coupled(
     ----------
     coupled : CoupledRANS
         The coupled residual assembler; **the differentiable parameter pytree** for the adjoint.
-    flow, k, omega : jnp.ndarray
-        The initial flow state ``((dim + 1) n_cells,)`` and turbulence fields ``(n_cells,)`` -- a
-        representative (e.g. segregated pre-smoothed) start, which the frozen preconditioner also uses
-        as its reference unless ``reference_state`` is given.
+    flow, k, omega : jnp.ndarray or None
+        The initial flow state ``((dim + 1) n_cells,)`` and turbulence fields ``(n_cells,)``. **Leave
+        any of them ``None`` to self-start from a hybrid initial condition**
+        (:func:`~aquaflux.turbulence.hybrid_initialize` -- potential-flow velocity + Laplace-smoothed
+        turbulence), so ``solve_coupled(coupled)`` converges from nothing; the monolithic Newton stalls
+        from a raw cold start otherwise. The initial state also seeds the frozen preconditioner unless
+        ``reference_state`` is given. (When differentiating, pass an explicit state built outside
+        ``jax.grad``.)
     continuation : PseudoTransientStep or None
         A pre-built continuation step. **Build it once outside ``jax.grad`` and pass it here when
         differentiating** (the block preconditioner must be constructed with concrete parameters, not
@@ -426,6 +432,8 @@ def solve_coupled(
     tuple of jnp.ndarray
         The converged ``(flow, k, omega)``.
     """
+    if flow is None or k is None or omega is None:
+        flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
     state = coupled.pack_state(flow, k, omega)
     if continuation is None:
         reference = state if reference_state is None else reference_state

@@ -95,6 +95,15 @@ Engineering Principles.
   it via `eqx.tree_at`), and drives a **streamwise-periodic** channel (`structured_grid_2d(periodic=
   ("x",))` + `pressure_pin`): verified against exact fully-developed Poiseuille in
   `test_periodic_channel.py`. A uniform force needs no Rhie–Chow term and does not enter continuity.
+- **Field initialization — BUILT (`flow/initialization.py`).** `laplace_field(mesh, geometry, boundary,
+  …)` solves a scalar Laplace `div(Γ∇φ)=0` (one exact linear step) — the harmonic interpolant of any
+  boundary data; general-purpose, not flow-specific. `potential_flow(momentum)` uses it to build a
+  Fluent-style irrotational velocity `u=∇φ`: a `Neumann` `∂φ/∂n = u_in·n` at each `VelocityInlet`, a
+  `Dirichlet` datum at the `PressureOutlet`, no-penetration (`ZeroGradient`) at walls; returns the flat
+  `[u, p=0]` state. Divergence-free, respects geometry (≈plug only in a straight duct), and — being a
+  real discrete gradient — carries the tiny asymmetry that avoids the coupled solve's perfectly-symmetric
+  degeneracy. Closed domains (no outlet) return the zero state (or pin `pressure_pin`). Usable to
+  warm-start **any** solve (flow-only, segregated, coupled), not only the coupled path.
 - **Validated:**
   - Poiseuille (`test_poiseuille.py`) — parabolic `u`, `v≈0`, linear `p`; **2nd-order**; Stokes
     is linear so **one Newton step**; differentiable.

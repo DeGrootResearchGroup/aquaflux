@@ -202,5 +202,23 @@ def test_coupled_adjoint_matches_finite_difference(warm_started) -> None:
     assert abs(analytic - finite_difference) / abs(finite_difference) < 1e-5
 
 
+@pytest.mark.slow
+def test_coupled_solve_self_starts_from_a_cold_hybrid_initial_condition() -> None:
+    # No warm start, no initial state: solve_coupled builds the hybrid IC itself (potential-flow
+    # velocity + Laplace-smoothed k/omega) and converges the monolithic Newton from nothing -- which a
+    # raw cold start (u=0, uniform k/omega) cannot do.
+    _, momentum, turbulence, _, _ = _channel()
+    coupled = CoupledRANS.build(momentum, turbulence, RHO)
+
+    flow, k, omega = solve_coupled(coupled, method="twolevel", max_steps=40, **PRECONDITIONER)
+
+    residual_norm = float(jnp.linalg.norm(coupled.residual(coupled.pack_state(flow, k, omega))))
+    assert residual_norm < 1e-8
+    assert float(jnp.min(k)) >= 0.0
+    assert float(jnp.min(omega)) > 0.0
+    nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
+    assert float(jnp.max(nu_t) / NU) > 1.0  # genuinely turbulent at the converged state
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
