@@ -29,7 +29,7 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
-from aquaflux.solve.continuation import PseudoTransientStep, ShiftTerm
+from aquaflux.solve.continuation import DivergenceGuard, PseudoTransientStep, ShiftTerm
 from aquaflux.solve.implicit import ImplicitNewtonSolver
 
 _Factory = Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]
@@ -139,7 +139,7 @@ def scalar_pseudo_transient_solve(
                 exponent=exponent,
                 max_escalations=max_escalations,
                 escalation_factor=escalation_factor,
-                divergence_cap=divergence_cap,
+                acceptance=DivergenceGuard(divergence_cap=divergence_cap),
             )
         else:
             forward = PseudoTransientStep(
@@ -148,7 +148,7 @@ def scalar_pseudo_transient_solve(
                 exponent=exponent,
                 max_escalations=max_escalations,
                 escalation_factor=escalation_factor,
-                divergence_cap=divergence_cap,
+                acceptance=DivergenceGuard(divergence_cap=divergence_cap),
                 adjoint_preconditioner_factory=policy.preconditioner,
             )
         newton = ImplicitNewtonSolver(
