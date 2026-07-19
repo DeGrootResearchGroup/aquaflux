@@ -211,6 +211,30 @@ class FlowBoundary(eqx.Module):
         """
         return jnp.zeros_like(area)
 
+    def momentum_diagonal_coefficient(
+        self, viscous_owner: jnp.ndarray, convective_owner: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Per-face owner momentum-diagonal contribution this patch adds, shape ``(n,)``.
+
+        The linearization of the patch's boundary *velocity* flux with respect to the owner velocity
+        — the momentum sibling of :meth:`pressure_schur_coefficient` (the same idea for the mass flux
+        and pressure). A Dirichlet-velocity patch fixes the face velocity independently of the owner,
+        so its viscous flux ``mu (u_b − u_owner)/(d·n) A`` contributes ``+mu A/(d·n)`` to the owner
+        diagonal (``viscous_owner``); a zero-gradient (outlet) patch sets ``u_b = u_owner``, so the
+        viscous flux vanishes and it contributes nothing there. A no-through-flow patch (a wall)
+        carries no convective flux, so the upwind convective diagonal ``max(mdot, 0)``
+        (``convective_owner``) is zero for it regardless of the owner-velocity estimate. The base is a
+        through-flow Dirichlet patch (a velocity inlet): both terms contribute.
+
+        Parameters
+        ----------
+        viscous_owner : jnp.ndarray
+            The Dirichlet viscous diagonal ``mu A/(d·n)`` per face, shape ``(n,)``.
+        convective_owner : jnp.ndarray
+            The upwind convective diagonal ``max(mdot, 0)`` per face, shape ``(n,)``.
+        """
+        return viscous_owner + convective_owner
+
     def reference_velocity(self, normal: jnp.ndarray, centroid: jnp.ndarray) -> jnp.ndarray:
         """The velocity this patch *prescribes* on the flow, shape ``(n, dim)``.
 
@@ -259,6 +283,11 @@ class NoSlipWall(FlowBoundary):
     ):
         return jnp.zeros(area.shape)
 
+    def momentum_diagonal_coefficient(self, viscous_owner, convective_owner):
+        # A wall passes no fluid, so it carries no convective diagonal; only the Dirichlet viscous
+        # term contributes.
+        return viscous_owner
+
 
 class MovingWall(FlowBoundary):
     """A wall translating in its own plane: prescribed (tangential) velocity, no through-flow.
@@ -297,6 +326,10 @@ class MovingWall(FlowBoundary):
         rho,
     ):
         return jnp.zeros(area.shape)
+
+    def momentum_diagonal_coefficient(self, viscous_owner, convective_owner):
+        # A moving wall still passes no fluid, so only the Dirichlet viscous term contributes.
+        return viscous_owner
 
     def reference_velocity(self, normal, centroid):
         return _prescribed_reference_velocity(self, normal, centroid)
@@ -384,3 +417,8 @@ class PressureOutlet(FlowBoundary):
         # contributes +rho d_hat A / (d.n) to the owner's continuity--pressure coupling. The Schur uses
         # an isotropic V/a_P, for which d_hat = V/a_P, matching the interior face coefficient.
         return rho_owner * d_coeff_owner * area / normal_distance
+
+    def momentum_diagonal_coefficient(self, viscous_owner, convective_owner):
+        # Zero-gradient velocity: the viscous flux mu(u_owner - u_owner)/(d.n) vanishes, so only the
+        # upwind outflow convective diagonal remains.
+        return convective_owner

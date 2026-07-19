@@ -117,6 +117,39 @@ def test_msimpler_scale_does_not_leak_a_geometry_gradient() -> None:
     assert float(jax.grad(scale_with_scaled_volumes)(1.0)) == 0.0
 
 
+def test_boundary_a_p_drops_wall_convection() -> None:
+    """A wall passes no fluid, so its a_P owner contribution ignores the convective estimate (issue #41).
+
+    On a closed cavity (all no-slip walls) the boundary momentum diagonal must be the Dirichlet viscous
+    term alone: feeding a huge convective mass flux must not change it, because the wall carries none.
+    """
+    asm = _geometry(6)  # closed cavity: every patch is a NoSlipWall
+    n_faces = asm.mesh.n_faces
+    viscous_only = asm.boundary_momentum_diagonal(asm.viscosity, None)
+    with_huge_mdot = asm.boundary_momentum_diagonal(asm.viscosity, jnp.full(n_faces, 1e6))
+    assert jnp.allclose(viscous_only, with_huge_mdot)  # convective dropped at every wall face
+    assert float(jnp.sum(viscous_only)) > 0.0  # the Dirichlet viscous stiffness is still there
+
+
+def test_boundary_a_p_drops_outlet_viscosity() -> None:
+    """A zero-gradient outlet imposes no velocity, so it adds no viscous a_P (issue #41).
+
+    At zero mass flux only the Dirichlet-velocity faces (walls, inlet) contribute their viscous term;
+    the outlet contributes nothing, so the total is strictly less than the naive all-boundary-faces
+    viscous sum (which the pre-fix code produced).
+    """
+    asm = _channel(u_in=1.0)  # velocity inlet + pressure outlet + no-slip walls
+    fc = asm.mesh.face_cells
+    boundary_a_p = asm.boundary_momentum_diagonal(asm.viscosity, jnp.zeros(asm.mesh.n_faces))
+    all_faces_viscous = jnp.where(
+        fc.interior, 0.0, asm.viscosity[fc.owner] * asm.geometry.face.area / asm.normal_distance
+    )
+    assert float(jnp.sum(boundary_a_p)) < float(
+        jnp.sum(all_faces_viscous)
+    )  # outlet viscous excluded
+    assert float(jnp.sum(boundary_a_p)) > 0.0  # walls + inlet still contribute
+
+
 @pytest.mark.parametrize("u_in", [0.01, 1.0, 100.0])
 def test_reference_state_tracks_the_boundary_driven_velocity_scale(u_in) -> None:
     """The derived reference is a uniform flow at the prescribed inlet velocity, whatever its scale.

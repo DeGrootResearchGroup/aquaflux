@@ -704,8 +704,15 @@ class BlockPreconditioner(eqx.Module):
         form its diagonal shift from the *same* ``a_P`` the preconditioner inverts.
         """
         velocity, _ = self.assembler.unpack(jax.lax.stop_gradient(state))
+        # The plain all-faces ``a_P`` (``boundary_corrected=False``): this frozen diagonal is a
+        # forward-path stabilization scale (the shift and the block it inverts), not the residual's
+        # operator-consistent coefficient, so it keeps the extra boundary damping that carries the
+        # high-Reynolds march. It never enters the converged residual or the adjoint.
         return jnp.mean(
-            jax.lax.stop_gradient(self.assembler.momentum_matrix_diagonal(velocity)), axis=1
+            jax.lax.stop_gradient(
+                self.assembler.momentum_matrix_diagonal(velocity, boundary_corrected=False)
+            ),
+            axis=1,
         )
 
     def _msimpler_scale(self, state: jnp.ndarray) -> jnp.ndarray:
