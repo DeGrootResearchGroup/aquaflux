@@ -44,6 +44,115 @@ from aquaflux.vectors import dot
 _Factory = Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]
 
 
+def _scalar_operator_pieces(
+    mesh: Mesh,
+    geometry: MeshGeometry,
+    diffusivity: jnp.ndarray,
+    volume_flux: jnp.ndarray,
+    residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
+    reference: jnp.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    """The frozen scalar convection-diffusion-reaction operator, as sparse pieces (no fixed cells).
+
+    Shared by the AMG preconditioner and the pseudo-time shift diagonal: both need the same interior
+    stencil (``viscous + first-order-upwind convection``) and the same reaction-plus-boundary diagonal.
+
+    Returns ``(owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n)`` -- the interior-face edge
+    endpoints, the per-edge viscous coefficient ``Gamma_face A / (d.n)`` and owner-outward volume flux
+    ``mdot``, the clamped reaction+boundary diagonal, and the cell count. Value fixations (e.g. the
+    omega near-wall cells) are *not* applied here -- each consumer imposes its own (the preconditioner
+    detaches them from the aggregation; the shift zeroes them).
+    """
+    face_cells = mesh.face_cells
+    owner_e, nb_e, interior_faces = face_cells.interior_edges()
+    n = mesh.n_cells
+
+    # Diffusion face coefficient Gamma_face * A / (d . n), interpolated to faces as the flux forms it.
+    gamma = jax.lax.stop_gradient(diffusivity)
+    gamma_face = interpolate_owner_neighbour(
+        gamma, interpolation_factor(face_cells, geometry), face_cells
+    )
+    d = (
+        face_cells.neighbour_centroid(geometry.cell.centroid)
+        - geometry.cell.centroid[face_cells.owner]
+    )
+    normal_distance = dot(d, geometry.face.normal)
+    viscous = gamma_face * geometry.face.area / normal_distance
+    visc_int = np.asarray(jax.lax.stop_gradient(viscous))[interior_faces]
+    mdot_int = np.asarray(jax.lax.stop_gradient(volume_flux))[interior_faces]
+
+    # Reaction + boundary diagonal. The interior stencil (the edges above) carries only the interior
+    # faces, so the true diagonal must be corrected by everything else on it: the local source
+    # linearization and the Dirichlet boundary-face stiffness. That is J . 1 minus the interior
+    # convective imbalance -- a conservative interior operator has zero row sums, but a
+    # boundary-adjacent cell's interior faces do not sum to zero (the boundary face carrying the rest
+    # is absent from the edge list), and J . 1 would otherwise fold that imbalance into the diagonal
+    # (double-counting the boundary flux). Subtracting the interior net outflow removes it exactly.
+    _, j_dot_one = jax.jvp(residual_fn, (reference,), (jnp.ones_like(reference),))
+    interior_outflow = np.zeros(n)
+    np.add.at(interior_outflow, owner_e, mdot_int)
+    np.add.at(interior_outflow, nb_e, -mdot_int)
+    boundary_diagonal = np.asarray(jax.lax.stop_gradient(j_dot_one)) - interior_outflow
+    # Clamp non-negative: any residual anti-diffusive source (e.g. an active production limiter not
+    # already made explicit) would make the operator indefinite and its V-cycle diverge; dropping it
+    # keeps an M-matrix and only softens the preconditioner (it approximates the Jacobian).
+    boundary_diagonal = np.maximum(boundary_diagonal, 0.0)
+    return owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n
+
+
+def scalar_transport_shift_diagonal(
+    mesh: Mesh,
+    geometry: MeshGeometry,
+    diffusivity: jnp.ndarray,
+    volume_flux: jnp.ndarray,
+    residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
+    reference: jnp.ndarray,
+    *,
+    fixed_cells: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """The pseudo-time shift diagonal for a scalar transport equation -- the ``a_P`` analogue.
+
+    Pseudo-transient continuation shifts the Jacobian diagonal by ``beta d(phi)``; ``d`` is the local
+    ``V / dt`` scale. As for the momentum block (where it is the momentum diagonal ``a_P``), the
+    scale-invariant choice on a graded, wall-resolved mesh is the equation's own operator diagonal:
+    the diffusion stiffness, the first-order-upwind convective outflow, and the clamped
+    reaction+boundary diagonal. Being proportional to the operator (not a global ``V / dt``) relaxes
+    the tiny near-wall cells and the coarse core uniformly in relative terms.
+
+    Built once off the jit path from the same frozen pieces as
+    :func:`scalar_transport_preconditioner`, and returned ``stop_gradient``-detached: like the
+    preconditioner it only reshapes the forward march and never enters the converged field or its
+    adjoint.
+
+    Parameters
+    ----------
+    mesh, geometry, diffusivity, volume_flux, residual_fn, reference
+        As :func:`scalar_transport_preconditioner`.
+    fixed_cells : jnp.ndarray, optional
+        Cells whose residual is a value fixation ``phi - target`` (e.g. the omega near-wall cells).
+        Their shift is zeroed: an exact algebraic constraint needs no pseudo-time damping (a full
+        Newton step converges it in one), and shifting an identity row only slows it.
+
+    Returns
+    -------
+    jnp.ndarray
+        The non-negative per-cell shift diagonal ``d``, shape ``(n_cells,)``.
+    """
+    owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, _n = _scalar_operator_pieces(
+        mesh, geometry, diffusivity, volume_flux, residual_fn, reference
+    )
+    diagonal = boundary_diagonal.copy()  # reaction + Dirichlet boundary stiffness (>= 0)
+    np.add.at(diagonal, owner_e, visc_int)  # diffusion stiffness on both incident cells
+    np.add.at(diagonal, nb_e, visc_int)
+    np.add.at(
+        diagonal, owner_e, np.maximum(mdot_int, 0.0)
+    )  # upwind outflow: owner loses when mdot>0
+    np.add.at(diagonal, nb_e, np.maximum(-mdot_int, 0.0))  # neighbour loses when mdot<0
+    if fixed_cells is not None:
+        diagonal[np.asarray(fixed_cells)] = 0.0
+    return jax.lax.stop_gradient(jnp.asarray(diagonal))
+
+
 def scalar_transport_preconditioner(
     mesh: Mesh,
     geometry: MeshGeometry,
@@ -91,40 +200,9 @@ def scalar_transport_preconditioner(
     """
     if method not in ("twolevel", "air"):
         raise ValueError(f"unknown method {method!r}; use 'twolevel' or 'air'")
-    face_cells = mesh.face_cells
-    owner_e, nb_e, interior_faces = face_cells.interior_edges()
-    n = mesh.n_cells
-
-    # Diffusion face coefficient Gamma_face * A / (d . n), interpolated to faces as the flux forms it.
-    gamma = jax.lax.stop_gradient(diffusivity)
-    gamma_face = interpolate_owner_neighbour(
-        gamma, interpolation_factor(face_cells, geometry), face_cells
+    owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n = _scalar_operator_pieces(
+        mesh, geometry, diffusivity, volume_flux, residual_fn, reference
     )
-    d = (
-        face_cells.neighbour_centroid(geometry.cell.centroid)
-        - geometry.cell.centroid[face_cells.owner]
-    )
-    normal_distance = dot(d, geometry.face.normal)
-    viscous = gamma_face * geometry.face.area / normal_distance
-    visc_int = np.asarray(jax.lax.stop_gradient(viscous))[interior_faces]
-    mdot_int = np.asarray(jax.lax.stop_gradient(volume_flux))[interior_faces]
-
-    # Reaction + boundary diagonal. The aggregation operator carries only the *interior* stencil
-    # (the edges above), so its diagonal must be corrected by everything else on the true diagonal:
-    # the local source linearization and the Dirichlet boundary-face stiffness. That is J . 1 minus
-    # the interior convective imbalance -- a conservative interior operator has zero row sums, but a
-    # boundary-adjacent cell's interior faces do not sum to zero (the boundary face carrying the rest
-    # is absent from the edge list), and J . 1 would otherwise fold that imbalance into the diagonal
-    # (double-counting the boundary flux). Subtracting the interior net outflow removes it exactly.
-    _, j_dot_one = jax.jvp(residual_fn, (reference,), (jnp.ones_like(reference),))
-    interior_outflow = np.zeros(n)
-    np.add.at(interior_outflow, owner_e, mdot_int)
-    np.add.at(interior_outflow, nb_e, -mdot_int)
-    boundary_diagonal = np.asarray(jax.lax.stop_gradient(j_dot_one)) - interior_outflow
-    # Clamp non-negative: any residual anti-diffusive source (e.g. an active production limiter not
-    # already made explicit) would make the operator indefinite and its V-cycle diverge; dropping it
-    # keeps an M-matrix and only softens the preconditioner (it approximates the Jacobian).
-    boundary_diagonal = np.maximum(boundary_diagonal, 0.0)
 
     if fixed_cells is not None:
         fixed = np.asarray(fixed_cells)

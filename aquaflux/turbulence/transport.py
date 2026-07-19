@@ -30,7 +30,8 @@ from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import FieldProperty, PropertyModel
 
 from .boundary import omega_wall_value
-from .preconditioner import scalar_transport_preconditioner
+from .continuation import ScalarShiftPolicy
+from .preconditioner import scalar_transport_preconditioner, scalar_transport_shift_diagonal
 from .sources import (
     KDestruction,
     KProduction,
@@ -383,3 +384,94 @@ class SSTTurbulence(eqx.Module):
             method=method,
             fixed_cells=self.wall_cells,
         )
+
+    def k_shift_policy(
+        self,
+        mdot: jnp.ndarray,
+        closure: SSTClosureFields,
+        reference: jnp.ndarray,
+        *,
+        method: str | None = None,
+    ) -> ScalarShiftPolicy:
+        """The pseudo-transient continuation policy for the k-equation solve.
+
+        Bundles the transport-operator shift diagonal (the ``a_P`` analogue that damps the reactive
+        k-solve from a cold start) and, when ``method`` is set, the convection-diffusion AMG that
+        preconditions the shifted operator -- the two problem-specific inputs
+        :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` supplies to the continuation
+        engine. Frozen for the sweep's ``closure`` and ``mdot`` (as :meth:`k_preconditioner`).
+
+        Parameters
+        ----------
+        mdot, closure, reference
+            As :meth:`k_preconditioner`.
+        method : {"twolevel", "air"} or None
+            The AMG method for the shifted-operator preconditioner, or ``None`` for a shift-only
+            (unpreconditioned) continuation solve.
+        """
+        diffusivity = self._diffusivity(
+            closure.nu_t, closure.f1, self.model.sigma_k1, self.model.sigma_k2
+        )
+        volume_flux = self._volume_flux(mdot)
+        residual = self.k_residual(mdot, closure)
+        shift_diagonal = scalar_transport_shift_diagonal(
+            self.mesh, self.geometry, diffusivity.values, volume_flux, residual, reference
+        )
+        preconditioner = (
+            None
+            if method is None
+            else scalar_transport_preconditioner(
+                self.mesh,
+                self.geometry,
+                diffusivity.values,
+                volume_flux,
+                residual,
+                reference,
+                method=method,
+            )
+        )
+        return ScalarShiftPolicy(shift_diagonal, preconditioner)
+
+    def omega_shift_policy(
+        self,
+        mdot: jnp.ndarray,
+        closure: SSTClosureFields,
+        reference: jnp.ndarray,
+        *,
+        method: str | None = None,
+    ) -> ScalarShiftPolicy:
+        """The pseudo-transient continuation policy for the omega-equation solve.
+
+        As :meth:`k_shift_policy`, with the omega diffusivity and the near-wall fixed cells: their
+        shift is zeroed (an exact value fixation needs no pseudo-time), and they are detached from the
+        AMG coarsening as in :meth:`omega_preconditioner`.
+        """
+        diffusivity = self._diffusivity(
+            closure.nu_t, closure.f1, self.model.sigma_omega1, self.model.sigma_omega2
+        )
+        volume_flux = self._volume_flux(mdot)
+        residual = self.omega_residual(mdot, closure)
+        shift_diagonal = scalar_transport_shift_diagonal(
+            self.mesh,
+            self.geometry,
+            diffusivity.values,
+            volume_flux,
+            residual,
+            reference,
+            fixed_cells=self.wall_cells,
+        )
+        preconditioner = (
+            None
+            if method is None
+            else scalar_transport_preconditioner(
+                self.mesh,
+                self.geometry,
+                diffusivity.values,
+                volume_flux,
+                residual,
+                reference,
+                method=method,
+                fixed_cells=self.wall_cells,
+            )
+        )
+        return ScalarShiftPolicy(shift_diagonal, preconditioner)
