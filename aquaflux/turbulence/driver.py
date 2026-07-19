@@ -14,6 +14,16 @@ The relaxation and the floor are the segregated iteration's stabilisers; the flo
 nonlinear-iteration safeguard that should be inactive once the fields have converged (a converged
 turbulent field is strictly positive). Constant density (see :mod:`~aquaflux.turbulence.transport`).
 
+The outer loop **stops on convergence**, not a fixed sweep count: each sweep's coupled Picard
+increment -- the largest per-field relative change ``max(||dflow||/||flow||, ||dk||/||k||,
+||domega||/||omega||)`` -- is the residual-agnostic fixed-point measure, and the loop exits once it
+drops below ``rtol`` (``max_sweeps`` only caps the work; a warning fires if it is hit without
+converging). The outer under-relaxation is **adaptive**: it opens from its floor toward
+``relaxation_max`` as that increment falls, a switched-evolution-relaxation ramp
+``w = clip(w0 (r0/r)^p, w0, w_max)`` -- conservative while the coupling is still moving, then close
+to a full step near the fixed point, so a safe floor need not throttle the whole march. With
+``relaxation_max`` left at the floor the relaxation is constant (the plain Picard loop).
+
 The flow and scalar solvers are **injected** rather than chosen here (the preconditioner, iteration
 counts, and adjoint are the caller's to set): ``solve_flow(momentum, state)`` solves the momentum
 residual for the (re-viscosified) assembler, and ``solve_scalar(residual, state, policy)`` solves a
@@ -24,6 +34,7 @@ caller wires :func:`~aquaflux.turbulence.scalar_pseudo_transient_solve`.
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING
 
 import equinox as eqx
@@ -54,6 +65,42 @@ def _relax(old: jnp.ndarray, new: jnp.ndarray, factor: float) -> jnp.ndarray:
     return old + factor * (new - old)
 
 
+def _relative_change(*field_pairs: tuple[jnp.ndarray, jnp.ndarray]) -> float:
+    """Largest per-field relative L2 change ``max_i ||new_i - old_i|| / ||new_i||``.
+
+    The scale-free Picard-increment measure that drives both the outer convergence test and the
+    relaxation ramp: taking the max over the fields (rather than one combined norm) keeps the three
+    disparate scales -- velocity O(1), ``k`` O(1e-3), ``omega`` O(1e2) -- comparable, so a stalled
+    ``omega`` cannot hide behind a converged velocity. The tiny floor guards the first-sweep divide
+    when a field starts at exactly zero.
+    """
+    worst = 0.0
+    for old, new in field_pairs:
+        change = float(jnp.linalg.norm(new - old) / jnp.maximum(jnp.linalg.norm(new), 1e-30))
+        worst = max(worst, change)
+    return worst
+
+
+def _sweep_relaxation(
+    increment: float | None,
+    increment_0: float | None,
+    relaxation: float,
+    relaxation_ceiling: float,
+    ser_exponent: float,
+) -> float:
+    """The adaptive outer under-relaxation for a sweep: the SER ramp opened by the increment drop.
+
+    ``clip(relaxation (increment_0 / increment)^ser_exponent, relaxation, relaxation_ceiling)`` -- the
+    floor ``relaxation`` on the first sweep (no increment yet) and whenever the coupling is not yet
+    contracting, ramping up toward ``relaxation_ceiling`` as the increment falls below its first value.
+    With ``relaxation_ceiling == relaxation`` this is a constant floor (the plain Picard loop).
+    """
+    if increment is None or increment_0 is None:
+        return relaxation
+    ramp = (increment_0 / max(increment, 1e-30)) ** ser_exponent
+    return float(jnp.clip(relaxation * ramp, relaxation, relaxation_ceiling))
+
+
 def bulk_velocity(
     momentum: MomentumContinuity, flow: jnp.ndarray, direction: int = 0
 ) -> jnp.ndarray:
@@ -77,8 +124,11 @@ def solve_segregated(
     omega: jnp.ndarray,
     *,
     density: float,
-    sweeps: int,
+    max_sweeps: int,
+    rtol: float = 1e-6,
     relaxation: float = 0.7,
+    relaxation_max: float | None = None,
+    ser_exponent: float = 1.0,
     k_floor: float = 1e-8,
     omega_floor: float = 1e-8,
     scalar_preconditioner: str | None = None,
@@ -110,10 +160,25 @@ def solve_segregated(
         The initial turbulence fields, shape ``(n_cells,)`` (e.g. the inlet values, uniform).
     density : float
         The (constant) fluid density, forming ``mu_eff = rho (nu + nu_t)``.
-    sweeps : int
-        Number of outer Picard sweeps.
+    max_sweeps : int
+        Upper bound on outer Picard sweeps. The loop normally stops earlier, when the coupled
+        increment drops below ``rtol``; hitting this cap without converging emits a warning.
+    rtol : float
+        Outer convergence tolerance on the coupled Picard increment (the largest per-field relative
+        change over a sweep). The loop exits the first sweep whose increment is below it.
     relaxation : float
-        Under-relaxation factor for ``k`` and ``omega`` in ``(0, 1]``.
+        Under-relaxation factor for ``k`` and ``omega`` in ``(0, 1]``. This is the **floor** of the
+        adaptive ramp -- the value used on the first sweep and never dropped below -- so set it to the
+        largest factor that is safe from a cold start.
+    relaxation_max : float or None
+        Ceiling the adaptive relaxation ramps up to as the coupled increment falls (the SER schedule
+        ``clip(relaxation (r0/r)^ser_exponent, relaxation, relaxation_max)``). ``None`` pins it to
+        ``relaxation`` -- a constant under-relaxation, the plain Picard loop. A value above
+        ``relaxation`` (up to ``1.0`` for a full step near convergence) accelerates the tail without
+        risking the early sweeps.
+    ser_exponent : float
+        Exponent ``p`` on the increment-drop ratio in the relaxation ramp; larger opens the
+        relaxation up faster as the coupling settles. Ignored when ``relaxation_max is None``.
     k_floor, omega_floor : float
         Positive floors applied to ``k`` and ``omega`` after each sweep.
     scalar_preconditioner : {"twolevel", "air"} or None
@@ -140,10 +205,22 @@ def solve_segregated(
     Returns
     -------
     tuple of jnp.ndarray
-        The converged ``(flow, k, omega)``.
+        The ``(flow, k, omega)`` at the sweep that met ``rtol`` -- or at ``max_sweeps`` if it was not
+        reached, in which case a warning is emitted and the fields may be under-converged.
     """
     molecular = turbulence.molecular_viscosity
-    for _ in range(sweeps):
+    relaxation_ceiling = relaxation if relaxation_max is None else relaxation_max
+    increment_0: float | None = None
+    increment: float | None = None
+    converged = False
+    for _ in range(max_sweeps):
+        # Adaptive under-relaxation: open from the floor toward the ceiling as the coupled increment
+        # falls (SER ramp). The first sweep, and a constant-relaxation run, use the floor unchanged.
+        sweep_relaxation = _sweep_relaxation(
+            increment, increment_0, relaxation, relaxation_ceiling, ser_exponent
+        )
+
+        flow_prev, k_prev, omega_prev = flow, k, omega
         nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
         momentum = _with_viscosity(momentum, density * (molecular + nu_t))
         flow = solve_flow(momentum, flow)
@@ -164,10 +241,27 @@ def solve_segregated(
         # bundles the transport shift diagonal with the (optional) AMG for the injected solve to use.
         k_policy = turbulence.k_shift_policy(mdot, closure, k, method=scalar_preconditioner)
         k_solved = solve_scalar(turbulence.k_residual(mdot, closure), k, k_policy)
-        k = jnp.maximum(_relax(k, k_solved, relaxation), k_floor)
+        k = jnp.maximum(_relax(k, k_solved, sweep_relaxation), k_floor)
         omega_policy = turbulence.omega_shift_policy(
             mdot, closure, omega, method=scalar_preconditioner
         )
         omega_solved = solve_scalar(turbulence.omega_residual(mdot, closure), omega, omega_policy)
-        omega = jnp.maximum(_relax(omega, omega_solved, relaxation), omega_floor)
+        omega = jnp.maximum(_relax(omega, omega_solved, sweep_relaxation), omega_floor)
+
+        # Coupled Picard increment: the residual-agnostic outer convergence signal, also the ramp's
+        # drop ratio. The first sweep sets the reference the ramp opens relative to.
+        increment = _relative_change((flow_prev, flow), (k_prev, k), (omega_prev, omega))
+        if increment_0 is None:
+            increment_0 = increment
+        if increment < rtol:
+            converged = True
+            break
+
+    if not converged:
+        last = "n/a" if increment is None else f"{increment:g}"
+        warnings.warn(
+            f"segregated coupling did not reach rtol={rtol:g} within max_sweeps={max_sweeps} "
+            f"(last increment {last}); the returned fields may be under-converged.",
+            stacklevel=2,
+        )
     return flow, k, omega
