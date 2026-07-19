@@ -131,6 +131,18 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   escape-hatch on NVIDIA hardware, **not** the coupled solver or an architectural commitment. Do not
   adopt it on the README's word. **`LSC` original / `PCD` carry equal-order/FEM traps** (use stabilized
   LSC for Rhie–Chow; PCD needs FEM-BC re-derivation).
+  - **Degenerate-mesh guard (binding — the frozen build validates its own inputs).** Because the
+    hierarchies are built once off-jit and then frozen, a degenerate mesh must fail *there*, not as a
+    silently stalling runtime V-cycle. The `build_*` entry points (`multigrid.py`) call
+    `_require_valid_graph` (`n ≥ 1`, matched `owner`/`nb`, in-range endpoints); the two build loops
+    (`_build_aggregation_hierarchy` for smoothed/convection, `build_air_hierarchy` for lAIR) call
+    `_require_positive_diagonal` on **every** level's operator diagonal before inverting/freezing it,
+    so a zero diagonal (disconnected component, isolated/zero-volume cell, degenerate `R A P` row)
+    raises `ValueError` at setup instead of baking `inf` into the frozen operator. The diagonal is
+    checked *after* boundary stiffness is folded into the operator, so a boundary-only cell is
+    correctly allowed. This one build-time guard is why the runtime smoothers (`_chebyshev_smooth`,
+    `_jacobi_smooth`, `_fc_jacobi`) and the block-preconditioner rescales, which invert the frozen
+    diagonal / the positive momentum `a_P`, need no per-apply floor.
 - **Where preconditioning must attach — measured, do not repeat the wrong lever.** For the
   skewed lid-driven cavity (`CorrectedGreenGauss`, `FirstOrderUpwind`) the per-Newton-step cost
   splits cleanly: the **outer coupled saddle-point GMRES takes 67 steps at 432 dof, 127 at 768
