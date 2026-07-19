@@ -55,6 +55,21 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   under a full Newton step is carried by the pseudo-transient shift + divergence guard, no in-residual
   floor. FD-verified: coupled ‖R‖→machine-zero, agrees with the segregated fixed point, adjoint
   matches finite differences.
+- **`initialization.py` — `hybrid_initialize` (cold-start, the reason `solve_coupled` self-starts).**
+  The monolithic Newton is a *local* method: from a raw cold start (`u=0`, uniform k/ω) it **stalls** —
+  the near-wall ω fixation alone injects a `~60ν/(β₁d²)` jump, and a uniform interior is far from a
+  consistent field the inner solve can precondition. `hybrid_initialize(momentum, turbulence)` builds a
+  cheap physical IC (a few linear Laplace solves): **potential-flow velocity** (`flow/initialization.py`
+  `potential_flow`), **Laplace-smoothed k** (harmonic interpolant of its BCs), and **ω** =
+  boundary-propagated interior with the near-wall cells set to the analytical wall value (a *Laplace*-ω
+  over-diffuses that large value and slows the solve — set only the wall cells). From this IC the coupled
+  Newton converges from nothing (~10–15 steps, FD-verified). `solve_coupled(coupled)` with no initial
+  state calls it automatically; the segregated pre-smooth is no longer required to reach the basin (still
+  available as a fallback). **Do not init with an exactly symmetric velocity** — a perfectly symmetric
+  `u` (e.g. exact plug, `u_y≡0`) hits a measure-zero degeneracy in the coupled inner solve that stalls;
+  the potential flow's discrete-gradient roundoff (`|u_y|~1e-10`) lifts it, and any perturbation ≥1e-10
+  converges. The IC is a forward device (the converged-state adjoint is IC-independent); when
+  differentiating, pass an explicit state built outside `jax.grad`.
 
 **Issue #69 — CLOSED path (do not re-derive without reading it):** all three planned steps shipped —
 scalar continuation (#73), Option 1 hardening (convergence stop + adaptive relaxation), and Option 2

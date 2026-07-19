@@ -24,6 +24,7 @@ from .coupled import (
     solve_coupled,
 )
 from .driver import bulk_velocity, solve_segregated
+from .initialization import hybrid_initialize
 from .sources import (
     KDestruction,
     KProduction,
@@ -50,6 +51,7 @@ __all__ = [
     "ScalarShiftPolicy",
     "bulk_velocity",
     "coupled_continuation",
+    "hybrid_initialize",
     "inlet_k",
     "inlet_omega",
     "omega_wall_value",
