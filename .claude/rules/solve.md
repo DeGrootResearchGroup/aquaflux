@@ -58,9 +58,10 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   `(residual_fn, phi, ‖R₀‖, solver) -> phi_next`; `default_solver()` → the inexact-Newton forward
   GMRES for that march; `adjoint_preconditioner()` → the converged-state transpose preconditioner).
   Two concrete strategies: **`DampedNewtonStep`** (default — the backtracking line search, holding
-  the forward/adjoint preconditioner and the line-search count) and **`PseudoTransientContinuation`**
-  (`aquaflux/flow/`, the high-Reynolds diagonally-shifted march). `_forward` calls the injected step
-  unconditionally — there is **no `if continuation is None` branch**, and **no separate
+  the forward/adjoint preconditioner and the line-search count) and **`PseudoTransientStep`**
+  (`aquaflux/solve/`, the residual-agnostic diagonally-shifted march; the flow configures it via
+  `aquaflux/flow/`'s `momentum_continuation` factory — no wrapper class). `_forward` calls the
+  injected step unconditionally — there is **no `if continuation is None` branch**, and **no separate
   `line_search`/`preconditioner`/`continuation` constructor args** (they were unified here; do not
   reintroduce them). Each strategy's shift vanishes at the fixed point, so the converged state and
   the IFT adjoint are strategy-independent. When adding a globalization (e.g. a monotone/forcing
@@ -69,18 +70,25 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   continuation engine lives **here in `solve/`, not in `flow/`** — it is a `ForwardStep`
   (`stepper`/`default_solver`/`adjoint_preconditioner`) that owns the switched-evolution-relaxation
   schedule `β = β₀(‖R‖/‖R₀‖)^p`, the diagonally-shifted solve `(J + diag(βd))δ = −R`
-  (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop` (divergence guard
-  against `divergence_cap·‖R₀‖`). The **only** problem-specific choices — which DOFs shift, the base
-  shift magnitude `d(φ)`, and the shifted-operator preconditioner — come from an injected
-  **`ShiftPolicy`** (`shift_term(φ) -> ShiftTerm(diagonal, make_preconditioner)`; `ShiftTerm.diagonal`
-  is the full-state base shift, `make_preconditioner(β)` the frozen shifted `M`). So the engine is
+  (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop`. **Two injected
+  seams**, both `Protocol`s: the physics comes from a **`ShiftPolicy`**
+  (`shift_term(φ) -> ShiftTerm(diagonal, make_preconditioner)`; `ShiftTerm.diagonal` is the full-state
+  base shift, `make_preconditioner(β)` the frozen shifted `M`), and the per-attempt accept/reject
+  decision from a **`StepAcceptance`** (`accept(candidate_norm, residual_norm, residual_norm_0,
+  attempt) -> bool`). The escalation-loop *mechanics* (grow `β`, cap at `max_escalations`, carry the
+  best candidate) stay in the engine; only the decision is delegated. Default acceptance is
+  **`DivergenceGuard(divergence_cap=10.0)`** — accept unless the candidate is non-finite or exceeds
+  `divergence_cap·‖R₀‖` (a divergence guard, not a descent test, since the march is non-monotone); a
+  monotone / forcing rule is a drop-in `StepAcceptance` — do **not** hardwire an acceptance test into
+  the `while_loop`. So the engine is
   reusable for **any** nonlinear residual (reaction/energy/turbulence), not just the coupled flow —
   verified in `tests/unit/test_pseudo_transient.py`, which drives it on a scalar root with a trivial
   policy (no mesh, no flow). The flow application is `aquaflux/flow/continuation.py`'s
-  `MomentumShiftPolicy` (velocity-block `a_P` shift + shifted SIMPLE preconditioner), wired in by the
-  thin `PseudoTransientContinuation` adapter (unchanged `build(assembler, …)` and pytree). When a new
-  nonlinear residual needs pseudo-time globalization, write a `ShiftPolicy` — do **not** re-implement
-  the march.
+  `MomentumShiftPolicy` (velocity-block `a_P` shift + shifted SIMPLE preconditioner), configured into a
+  `PseudoTransientStep` by the `momentum_continuation(assembler, …)` **factory** (which builds the
+  block preconditioner and injects the `DivergenceGuard` + adjoint factory) — **no wrapper/adapter
+  class**, since `PseudoTransientStep` is itself the `ForwardStep`. When a new nonlinear residual needs
+  pseudo-time globalization, write a `ShiftPolicy` — do **not** re-implement the march.
 - **Gate C — PASSED (`tests/integration/test_skewed_diffusion.py`).** With
   `CorrectedGreenGauss` injected into the residual on a 25%-skewed mesh, one Newton step
   drives `‖R‖` ~24 → ~1e-12 and reproduces a harmonic linear field to ~5e-13 (linear-exact

@@ -83,6 +83,71 @@ class ShiftPolicy(Protocol):
         """The base shift diagonal and the ``β -> M`` preconditioner factory at iterate ``phi``."""
 
 
+class StepAcceptance(Protocol):
+    """The accept/reject decision for one shifted-step attempt (structural interface only).
+
+    The engine's escalation-loop mechanics — grow ``β`` on rejection, cap at ``max_escalations``,
+    carry the best candidate — are fixed; a policy supplies only *whether* a given candidate is
+    accepted. It sees pure scalars (residual norms and the attempt index), so it is unit-testable
+    with no solve. The default :class:`DivergenceGuard` is a divergence guard, not a descent test,
+    because the pseudo-transient march is legitimately non-monotone; a monotone / sufficient-decrease
+    or forcing rule is a drop-in alternative.
+    """
+
+    def accept(
+        self,
+        candidate_norm: jnp.ndarray,
+        residual_norm: jnp.ndarray,
+        residual_norm_0: jnp.ndarray,
+        attempt: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Whether to accept a candidate (a boolean array).
+
+        Parameters
+        ----------
+        candidate_norm : jnp.ndarray
+            ``‖R(candidate)‖`` of the shifted-step candidate under test.
+        residual_norm : jnp.ndarray
+            ``‖R(φ)‖`` at the current iterate (before the step) — for a descent / monotone test.
+        residual_norm_0 : jnp.ndarray
+            ``‖R(φ₀)‖`` at the initial iterate — the scale a divergence guard measures against.
+        attempt : jnp.ndarray
+            The 0-based attempt index within this step's escalation loop.
+        """
+
+
+class DivergenceGuard(eqx.Module):
+    """Accept unless the candidate diverges — the default acceptance policy.
+
+    Rejects only a non-finite candidate or one that has blown up past ``divergence_cap × ‖R₀‖``, and
+    accepts everything else. Measured against the *initial* residual because the pseudo-transient
+    march is non-monotone (it oscillates around and below ``‖R₀‖``), so this catches a genuine blow-up
+    without rejecting a healthy transient — it is a divergence guard, not a descent test.
+
+    Attributes
+    ----------
+    divergence_cap : float
+        The divergence threshold (static): an attempt is rejected if its residual is non-finite or
+        exceeds ``divergence_cap × ‖R₀‖``. Lenient by default; lower it to intervene on divergence
+        sooner.
+    """
+
+    divergence_cap: float = eqx.field(static=True, default=10.0)
+
+    def accept(
+        self,
+        candidate_norm: jnp.ndarray,
+        residual_norm: jnp.ndarray,
+        residual_norm_0: jnp.ndarray,
+        attempt: jnp.ndarray,
+    ) -> jnp.ndarray:
+        # A pure divergence guard needs neither the previous-iterate norm nor the attempt index.
+        del residual_norm, attempt
+        return jnp.isfinite(candidate_norm) & (
+            candidate_norm < self.divergence_cap * residual_norm_0
+        )
+
+
 class PseudoTransientStep(eqx.Module):
     """Pseudo-transient continuation as a :class:`~aquaflux.solve.ForwardStep` (see the module docstring).
 
@@ -111,11 +176,11 @@ class PseudoTransientStep(eqx.Module):
         accepted on the first attempt (no extra cost). ``0`` disables escalation.
     escalation_factor : float
         Factor ``> 1`` by which ``β`` grows on each rejected attempt (static).
-    divergence_cap : float
-        The divergence threshold (static): an attempt is rejected (and the damping escalated) if its
-        residual is non-finite or exceeds ``divergence_cap × ‖R₀‖``. Measured against the *initial*
-        residual because the pseudo-transient march is non-monotone — it oscillates around and below
-        ``‖R₀‖`` — so the guard catches a genuine blow-up without rejecting a healthy transient.
+    acceptance : StepAcceptance
+        The accept/reject policy for each shifted-step attempt. Defaults to a
+        :class:`DivergenceGuard` (accept unless the candidate is non-finite or exceeds
+        ``divergence_cap × ‖R₀‖``) — the divergence guard the non-monotone march needs. Swap in a
+        monotone / sufficient-decrease or forcing rule without touching the escalation loop.
     adjoint_preconditioner_factory : callable or None
         The ``state -> M`` preconditioner factory for the converged transpose (adjoint) solve, or
         ``None`` for an unpreconditioned adjoint (static). At ``φ*`` the operator is the
@@ -128,7 +193,7 @@ class PseudoTransientStep(eqx.Module):
     exponent: float = eqx.field(static=True, default=1.0)
     max_escalations: int = eqx.field(static=True, default=6)
     escalation_factor: float = eqx.field(static=True, default=2.0)
-    divergence_cap: float = eqx.field(static=True, default=10.0)
+    acceptance: StepAcceptance = eqx.field(default_factory=DivergenceGuard)
     adjoint_preconditioner_factory: (
         Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
     ) = eqx.field(static=True, default=None)
@@ -152,18 +217,19 @@ class PseudoTransientStep(eqx.Module):
         """Return the accepted shifted-Newton step ``(residual_fn, φ, ‖R₀‖, solver) -> φ_next``.
 
         Each step forms the shifted-Newton correction at ``β = β₀ (‖R‖/‖R₀‖)^p`` and **accepts it
-        only if it does not diverge**; otherwise it escalates the damping (``β *= escalation_factor``)
-        and retries, up to :attr:`max_escalations`. A cold-start step whose shifted system is
-        ill-conditioned (or whose full step overshoots) is re-damped until it descends, so the march
-        cannot diverge to a non-finite iterate — while a well-behaved step is accepted on the first
-        attempt at no extra solve. The retry uses a non-throwing linear solve so a non-convergent
-        attempt is *rejected and re-damped* rather than raising. ``β`` still vanishes at the fixed
-        point, so the converged state and the IFT adjoint are unchanged.
+        only if the injected :attr:`acceptance` policy admits it** (by default, unless it diverges);
+        otherwise it escalates the damping (``β *= escalation_factor``) and retries, up to
+        :attr:`max_escalations`. A cold-start step whose shifted system is ill-conditioned (or whose
+        full step overshoots) is re-damped until it is accepted, so the march cannot diverge to a
+        non-finite iterate — while a well-behaved step is accepted on the first attempt at no extra
+        solve. The retry uses a non-throwing linear solve so a non-convergent attempt is *rejected
+        and re-damped* rather than raising. ``β`` still vanishes at the fixed point, so the converged
+        state and the IFT adjoint are unchanged.
         """
         policy = self.shift_policy
         beta0, exponent = self.beta0, self.exponent
         max_escalations, escalation_factor = self.max_escalations, self.escalation_factor
-        divergence_cap = self.divergence_cap
+        acceptance = self.acceptance
 
         def step(
             residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
@@ -202,16 +268,13 @@ class PseudoTransientStep(eqx.Module):
                 candidate = phi + delta
                 return candidate, jnp.linalg.norm(residual_fn(candidate))
 
-            # Accept the first attempt that does not *diverge*, escalating the damping on rejection.
-            # Pseudo-transient steps are legitimately non-monotone, so the test is a divergence guard,
-            # not a descent test: reject only a non-finite candidate or one that has blown up past
-            # ``divergence_cap × ‖R₀‖`` — measured against the *initial* residual, since the healthy
-            # march oscillates around and below ‖R₀‖ while a diverging one explodes above it. More
-            # shift (a smaller pseudo-timestep) is what a rejected step needs. The loop exits as soon
-            # as an attempt is accepted, so a healthy first attempt costs a single solve; only a
-            # diverging step pays for extra, more-damped attempts.
-            divergence_norm = divergence_cap * residual_norm_0
-
+            # Escalate the damping on a rejected attempt, taking the first the acceptance policy
+            # admits. The loop *mechanics* — grow β, cap at max_escalations, carry the best candidate
+            # — are fixed here; only the accept/reject decision is the injected policy's, so a
+            # divergence guard (the default) or a monotone/forcing rule slots in without touching this
+            # loop. More shift (a smaller pseudo-timestep) is what a rejected step needs. The loop
+            # exits as soon as an attempt is accepted, so a healthy first attempt costs a single solve;
+            # only a rejected step pays for extra, more-damped attempts.
             def cond(state: tuple) -> jnp.ndarray:
                 _, _, attempts, accepted = state
                 return (~accepted) & (attempts <= max_escalations)
@@ -219,7 +282,7 @@ class PseudoTransientStep(eqx.Module):
             def body(state: tuple) -> tuple:
                 relaxation, best, attempts, _ = state
                 candidate, candidate_norm = attempt(relaxation)
-                accept = jnp.isfinite(candidate_norm) & (candidate_norm < divergence_norm)
+                accept = acceptance.accept(candidate_norm, residual_norm, residual_norm_0, attempts)
                 best = jnp.where(accept, candidate, best)
                 return relaxation * escalation_factor, best, attempts + 1, accept
 

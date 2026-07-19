@@ -188,6 +188,27 @@ found and fixed**; treat them as binding, not aspirational.
   existing class, or write a one-line formula that already exists — stop and reach for the
   object/helper instead.*
 
+### 4. No compatibility shims before release (pre-release policy — remove this principle at 1.0)
+
+The project is **pre-release: there are no external API consumers, so breaking API changes are free.**
+When a refactor changes a public surface, **change the surface and update every call site — do not
+preserve the old one.**
+
+- **No thin adapters kept only to preserve an API.** A wrapper class or forwarding function that exists
+  solely to re-expose a refactored abstraction under its former shape is dead weight: delete it and
+  point callers at the real object. (E.g. a `PseudoTransientStep` *is* the `ForwardStep`, so a
+  `PseudoTransientContinuation` class that only delegated `stepper`/`default_solver`/… was removed in
+  favour of a `momentum_continuation` factory returning the engine directly.)
+- **No deprecation shims, aliases, or back-compat branches.** No `old_name = new_name` re-exports, no
+  `if legacy_arg is not None` compatibility paths, no keeping a parameter alive "so nothing breaks."
+  Rename/retype/delete in one change and fix the callers and tests in the same change.
+- A **builder function or factory is not a shim** — it constructs and returns the real object (like
+  `momentum_continuation` or `reused_flow_solve`). What this bans is the *delegating wrapper* that adds
+  a layer over an object already fit to use directly.
+
+**This principle is a pre-release convenience and must be deleted at the first stable release**, when
+backward compatibility becomes a real constraint and the calculus reverses.
+
 ---
 
 ## Design Goals

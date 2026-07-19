@@ -10,7 +10,7 @@ effective Jacobian approximation and the preconditioned inner GMRES converges cl
 at every tested Reynolds number (pinned by ``test_inner_gmres_does_not_stall_at_high_reynolds``); a
 stronger preconditioner extends the line search's reach only modestly.
 
-:class:`~aquaflux.flow.PseudoTransientContinuation` fixes this by damping each Newton step with an
+:func:`~aquaflux.flow.momentum_continuation` fixes this by damping each Newton step with an
 ``a_P``-proportional diagonal shift that ramps to zero on the residual — keeping each iterate inside
 the basin the undamped step overshoots, and recovering the exact steady Newton step (and its converged
 state) as the shift vanishes. These tests drive the same channel setup to genuinely convective
@@ -33,8 +33,8 @@ from aquaflux.flow import (
     MomentumContinuity,
     NoSlipWall,
     PressureOutlet,
-    PseudoTransientContinuation,
     VelocityInlet,
+    momentum_continuation,
     reused_flow_solve,
 )
 from aquaflux.mesh import graded_nodes, structured_grid_2d
@@ -78,7 +78,7 @@ def _reynolds(mu):
 
 def _solve(assembler, *, continuation=None, max_steps=120, **kwargs):
     if continuation is None:
-        continuation = PseudoTransientContinuation.build(assembler)
+        continuation = momentum_continuation(assembler)
     solver = ImplicitNewtonSolver(max_steps=max_steps, forward_step=continuation, **kwargs)
     return solver.solve(lambda s, a: a.residual(s), assembler.initial_state(), assembler)
 
@@ -222,7 +222,7 @@ def test_continuation_solve_is_differentiable() -> None:
     parameters and reused across ``mu``; its diagonal shift vanishes at convergence, so the IFT
     adjoint linearizes the same steady residual it would without it.
     """
-    continuation = PseudoTransientContinuation.build(_channel(24, 16, 5e-3))
+    continuation = momentum_continuation(_channel(24, 16, 5e-3))
 
     def mean_speed(mu):
         assembler = _channel(24, 16, mu)
@@ -251,7 +251,7 @@ def test_escalation_recovers_an_underdamped_step() -> None:
     assembler = _channel(40, 32, 1e-3, wall_growth=1.2)  # Re = 1000, wall-graded
 
     def residual_after_solve(max_escalations):
-        continuation = PseudoTransientContinuation.build(
+        continuation = momentum_continuation(
             assembler, schur_scaling="msimpler", beta0=0.2, max_escalations=max_escalations
         )
         state = _solve(assembler, continuation=continuation, max_steps=150)
@@ -278,7 +278,7 @@ def test_msimpler_schur_reaches_beyond_the_simple_schur() -> None:
     number.
     """
     assembler = _channel(64, 48, 5e-4, wall_growth=1.15)  # Re = 2000, wall-graded
-    msimpler = PseudoTransientContinuation.build(assembler, schur_scaling="msimpler")
+    msimpler = momentum_continuation(assembler, schur_scaling="msimpler")
     converged = _solve(assembler, continuation=msimpler, max_steps=150)
     assert float(jnp.linalg.norm(assembler.residual(converged))) < 1e-8
 
@@ -288,9 +288,7 @@ def test_msimpler_schur_matches_simple_at_moderate_reynolds() -> None:
     """MSIMPLER is a drop-in for SIMPLE where SIMPLE already works: both converge, and the MSIMPLER
     solve stays reverse-differentiable (its Schur scaling is a frozen, ``stop_gradient``-ed operator,
     so the implicit-function-theorem adjoint is untouched)."""
-    continuation = PseudoTransientContinuation.build(
-        _channel(32, 24, 2e-3), schur_scaling="msimpler"
-    )
+    continuation = momentum_continuation(_channel(32, 24, 2e-3), schur_scaling="msimpler")
 
     def mean_speed(mu):
         assembler = _channel(32, 24, mu)
@@ -339,7 +337,7 @@ def test_msimpler_auto_scale_converges_at_non_unit_speed() -> None:
     """
     u_in = 100.0
     assembler = _channel(32, 24, RHO * u_in * H / 500.0, wall_growth=1.15, u_in=u_in)  # Re 500
-    continuation = PseudoTransientContinuation.build(assembler, schur_scaling="msimpler")
+    continuation = momentum_continuation(assembler, schur_scaling="msimpler")
     state = _solve(assembler, continuation=continuation, max_steps=200)
     assert float(jnp.linalg.norm(assembler.residual(state))) < 1e-8
 
@@ -357,7 +355,7 @@ def test_convection_velocity_block_converges_at_high_reynolds() -> None:
     Newton.
     """
     assembler = _channel(64, 48, 5e-4, wall_growth=1.15)  # Re = 2000, wall-graded
-    continuation = PseudoTransientContinuation.build(
+    continuation = momentum_continuation(
         assembler,
         schur_scaling="msimpler",
         velocity="convection",
@@ -372,7 +370,7 @@ def test_convection_velocity_block_is_differentiable() -> None:
     ``stop_gradient``-ed (only accelerates the Krylov iteration), so the implicit-function-theorem
     adjoint is untouched. Built once outside ``jax.grad`` from concrete parameters and reused.
     """
-    continuation = PseudoTransientContinuation.build(
+    continuation = momentum_continuation(
         _channel(32, 24, 2e-3, wall_growth=1.15),  # Re = 500, wall-graded
         schur_scaling="msimpler",
         velocity="convection",
@@ -405,7 +403,7 @@ def test_air_velocity_block_converges_and_is_differentiable() -> None:
     differ (``R != Pᵀ``) but the frozen apply still transposes cleanly, so the implicit-function-theorem
     adjoint is untouched and the gradient matches finite differences.
     """
-    continuation = PseudoTransientContinuation.build(
+    continuation = momentum_continuation(
         _channel(32, 24, 2e-3, wall_growth=1.15),  # Re = 500, wall-graded
         schur_scaling="msimpler",
         velocity="convection-air",

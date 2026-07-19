@@ -51,7 +51,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from aquaflux.solve.continuation import PseudoTransientStep, ShiftTerm
+from aquaflux.solve.continuation import DivergenceGuard, PseudoTransientStep, ShiftTerm
 from aquaflux.solve.implicit import ImplicitNewtonSolver
 
 from .block_preconditioner import BlockPreconditioner
@@ -115,112 +115,68 @@ class MomentumShiftPolicy(eqx.Module):
         return ShiftTerm(diagonal, make_preconditioner)
 
 
-class PseudoTransientContinuation(eqx.Module):
-    """Implicit under-relaxation continuation for the coupled flow solve (see the module docstring).
+def momentum_continuation(
+    assembler: MomentumContinuity,
+    *,
+    beta0: float = 2.0,
+    exponent: float = 1.0,
+    max_escalations: int = 6,
+    escalation_factor: float = 2.0,
+    divergence_cap: float = 10.0,
+    **preconditioner_kwargs: object,
+) -> PseudoTransientStep:
+    """The pseudo-transient continuation ``ForwardStep`` for the coupled flow solve.
 
-    Plugs into :class:`~aquaflux.solve.ImplicitNewtonSolver` as its ``forward_step`` strategy: the
-    forward Newton loop uses the diagonally shifted step this supplies (in place of the default line
-    search), while the (converged, well-conditioned) adjoint solve uses the bare block
-    preconditioner. It wires a :class:`MomentumShiftPolicy` into the residual-agnostic
+    Builds the block-SIMPLE preconditioner for ``assembler`` and wires a :class:`MomentumShiftPolicy`
+    (the velocity ``a_P`` shift + the matching shifted preconditioner) into the residual-agnostic
     :class:`~aquaflux.solve.PseudoTransientStep` engine, which owns the schedule, the shifted solve,
-    and the accept/escalate loop. Build it from a flow assembler with :meth:`build`.
+    and the accept/escalate loop. The result plugs straight into
+    :class:`~aquaflux.solve.ImplicitNewtonSolver` as its ``forward_step`` (the forward Newton loop
+    uses the diagonally shifted step in place of the default line search; the converged,
+    well-conditioned adjoint solve uses the bare block preconditioner, since at ``φ*`` the shift has
+    vanished). ``PseudoTransientStep`` is itself the ``ForwardStep``, so no wrapper is needed.
 
-    Attributes
+    Parameters
     ----------
-    preconditioner : BlockPreconditioner
-        The block-SIMPLE preconditioner, applied at the shifted diagonal ``a_P (1 + β)`` each step
-        and (unshifted) as the adjoint preconditioner.
+    assembler : MomentumContinuity
+        The coupled flow residual assembler.
     beta0 : float
-        *Initial* under-relaxation strength ``β₀`` (static) — the damping the first attempt of each
-        step tries, ``β = β₀ (‖R‖/‖R₀‖)^p``. With the step-acceptance escalation, ``β₀`` is a starting
-        guess rather than a per-case knob: too small is recovered by escalation, too large only costs
-        a slower march. The effective SIMPLE velocity relaxation is ``1/(1+β)``.
+        *Initial* under-relaxation strength ``β₀`` — the damping the first attempt of each step tries,
+        ``β = β₀ (‖R‖/‖R₀‖)^p``. With the step-acceptance escalation it is a starting guess rather than
+        a per-case knob: too small is recovered by escalation, too large only costs a slower march. The
+        effective SIMPLE velocity relaxation is ``1/(1+β)``.
     exponent : float
-        Switched-evolution-relaxation exponent ``p`` in ``β = β₀ (‖R‖/‖R₀‖)^p`` (static). ``1`` ramps
-        the shift linearly with the residual norm.
+        Switched-evolution-relaxation exponent ``p`` in ``β = β₀ (‖R‖/‖R₀‖)^p``. ``1`` ramps the shift
+        linearly with the residual norm.
     max_escalations : int
-        Maximum damping escalations per step (static). A step's shifted solve that fails to descend is
-        re-damped (``β *= escalation_factor``) and retried, up to this many times; a well-behaved step
-        is accepted on the first attempt. ``0`` disables escalation.
+        Maximum per-step damping escalations. A step whose shifted solve fails to descend is re-damped
+        (``β *= escalation_factor``) and retried, up to this many times; a well-behaved step is
+        accepted on the first attempt. ``0`` disables escalation. The default makes the solve robust to
+        ``β₀`` across Reynolds numbers.
     escalation_factor : float
-        Factor ``> 1`` by which ``β`` grows on each rejected attempt (static).
+        Factor ``> 1`` by which ``β`` grows on each rejected attempt.
     divergence_cap : float
-        The divergence threshold (static): an attempt is rejected (and the damping escalated) if its
-        residual is non-finite or exceeds ``divergence_cap × ‖R₀‖`` — measured against the *initial*
-        residual, since the non-monotone march oscillates around and below ``‖R₀‖``.
+        The :class:`~aquaflux.solve.DivergenceGuard` threshold: an attempt is rejected (and the damping
+        escalated) if its residual is non-finite or exceeds ``divergence_cap × ‖R₀‖`` — measured
+        against the *initial* residual, since the non-monotone march oscillates around and below it.
+    **preconditioner_kwargs
+        Forwarded to :meth:`BlockPreconditioner.build` (e.g. ``schur_scaling``, ``velocity``).
+
+    Returns
+    -------
+    PseudoTransientStep
+        The configured continuation, ready to pass as ``ImplicitNewtonSolver(forward_step=...)``.
     """
-
-    preconditioner: BlockPreconditioner
-    beta0: float = eqx.field(static=True)
-    exponent: float = eqx.field(static=True)
-    max_escalations: int = eqx.field(static=True)
-    escalation_factor: float = eqx.field(static=True)
-    divergence_cap: float = eqx.field(static=True)
-
-    @classmethod
-    def build(
-        cls,
-        assembler: MomentumContinuity,
-        *,
-        beta0: float = 2.0,
-        exponent: float = 1.0,
-        max_escalations: int = 6,
-        escalation_factor: float = 2.0,
-        divergence_cap: float = 10.0,
-        **preconditioner_kwargs: object,
-    ) -> PseudoTransientContinuation:
-        """Build the continuation (and its block preconditioner) for ``assembler``.
-
-        Parameters
-        ----------
-        assembler : MomentumContinuity
-            The coupled flow residual assembler.
-        beta0, exponent : float
-            The initial under-relaxation strength and the switched-evolution-relaxation exponent
-            (see the class attributes).
-        max_escalations : int
-            Maximum per-step damping escalations for the step-acceptance test (see the class
-            attribute). The default makes the solve robust to ``β₀`` across Reynolds numbers.
-        escalation_factor : float
-            The per-rejection growth factor for ``β`` (see the class attribute).
-        **preconditioner_kwargs
-            Forwarded to :meth:`BlockPreconditioner.build` (e.g. ``inner``, ``v_cycles``).
-        """
-        preconditioner = BlockPreconditioner.build(assembler, **preconditioner_kwargs)
-        return cls(
-            preconditioner, beta0, exponent, max_escalations, escalation_factor, divergence_cap
-        )
-
-    def _engine(self) -> PseudoTransientStep:
-        """The residual-agnostic engine, configured with the flow shift policy and adjoint."""
-        return PseudoTransientStep(
-            MomentumShiftPolicy(self.preconditioner),
-            beta0=self.beta0,
-            exponent=self.exponent,
-            max_escalations=self.max_escalations,
-            escalation_factor=self.escalation_factor,
-            divergence_cap=self.divergence_cap,
-            adjoint_preconditioner_factory=self.preconditioner.factory(),
-        )
-
-    def stepper(self) -> Callable:
-        """The shifted-Newton forward step ``(residual_fn, φ, ‖R₀‖, solver) -> φ_next``."""
-        return self._engine().stepper()
-
-    def default_solver(self):
-        """The forward-loop solver for the pseudo-transient march when the caller supplies none."""
-        return self._engine().default_solver()
-
-    def adjoint_preconditioner(
-        self,
-    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
-        """The bare (unshifted) ``state -> M`` factory for the adjoint solve at the converged state.
-
-        The adjoint is taken once at ``φ*``, where ``β → 0`` and the operator is already the
-        well-conditioned steady Jacobian, so it needs no pseudo-transient shift — the ordinary block
-        preconditioner is the consistent choice.
-        """
-        return self.preconditioner.factory()
+    preconditioner = BlockPreconditioner.build(assembler, **preconditioner_kwargs)
+    return PseudoTransientStep(
+        MomentumShiftPolicy(preconditioner),
+        beta0=beta0,
+        exponent=exponent,
+        max_escalations=max_escalations,
+        escalation_factor=escalation_factor,
+        acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        adjoint_preconditioner_factory=preconditioner.factory(),
+    )
 
 
 def reused_flow_solve(
@@ -256,7 +212,7 @@ def reused_flow_solve(
     max_steps : int
         Maximum Newton/continuation iterations per solve.
     **build_kwargs
-        Forwarded to :meth:`PseudoTransientContinuation.build` (e.g. ``schur_scaling="msimpler"``,
+        Forwarded to :func:`momentum_continuation` (e.g. ``schur_scaling="msimpler"``,
         ``velocity="convection"``, ``beta0``).
 
     Returns
@@ -266,7 +222,7 @@ def reused_flow_solve(
         frozen preconditioned continuation. Reverse-differentiable in ``momentum`` (the underlying
         implicit-function-theorem adjoint is unchanged; the ``jit`` wrapper is transparent to it).
     """
-    continuation = PseudoTransientContinuation.build(reference, **build_kwargs)
+    continuation = momentum_continuation(reference, **build_kwargs)
     solver = ImplicitNewtonSolver(max_steps=max_steps, forward_step=continuation)
 
     @eqx.filter_jit
