@@ -14,7 +14,9 @@ import jax.numpy as jnp
 import numpy as np
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.solve.multigrid import (
+    _chebyshev_smooth,
     _convection_diffusion_csr,
+    _SparseLevel,
     air_multigrid_solve,
     build_convection_air_hierarchy,
     build_convection_hierarchy,
@@ -239,6 +241,61 @@ def test_smoothed_multigrid_is_linear_in_rhs() -> None:
         return smoothed_multigrid_solve(hierarchy, r, cycles=2)
 
     assert jnp.allclose(solve(1.5 * r1 - 0.5 * r2), 1.5 * solve(r1) - 0.5 * solve(r2), atol=1e-10)
+
+
+def _chebyshev_propagation_polynomial(eigenvalues, lam_max, degree, lo_frac):
+    """Sample the smoother's error-propagation polynomial ``P(mu)`` at the given eigenvalues.
+
+    Builds a diagonal level whose preconditioned operator is ``D^-1 A = diag(eigenvalues)`` (unit
+    diagonal, ``A`` diagonal), then smooths ``x0 = 1`` against ``b = 0`` (so the exact solution is
+    ``0`` and ``x`` after smoothing equals ``P(mu)`` mode by mode). Returns ``P`` at each eigenvalue.
+    """
+    n = len(eigenvalues)
+    index = jnp.arange(n)
+    level = _SparseLevel(
+        n=n,
+        row=index,
+        col=index,
+        val=jnp.asarray(eigenvalues),
+        diagonal=jnp.ones(n),
+        lam_max=float(lam_max),
+        coarse_inv=None,
+        p_frow=None,
+        p_ccol=None,
+        p_val=None,
+        n_coarse=0,
+    )
+    x0 = jnp.ones(n)
+    return np.asarray(_chebyshev_smooth(level, jnp.zeros_like(x0), x0, degree, lo_frac))
+
+
+def _scaled_chebyshev(eigenvalues, lo, hi, degree):
+    """Analytic scaled Chebyshev polynomial ``T_k((theta - z)/delta) / T_k(theta/delta)`` on ``[lo, hi]``."""
+    theta, delta = 0.5 * (hi + lo), 0.5 * (hi - lo)
+    coeffs = [0] * degree + [1]
+    argument = (theta - np.asarray(eigenvalues)) / delta
+    return np.polynomial.chebyshev.chebval(argument, coeffs) / np.polynomial.chebyshev.chebval(
+        theta / delta, coeffs
+    )
+
+
+def test_chebyshev_smoother_matches_the_scaled_chebyshev_polynomial() -> None:
+    """The smoother realizes the min-max scaled Chebyshev polynomial, and damps the whole band.
+
+    Regression for the first-step coefficient: an earlier ``2/theta`` first step (twice the correct
+    scaled-Richardson ``1/theta``) made ``|P| > 1`` at low degree — the smoother *amplified* the
+    highest-frequency modes instead of damping them. The correct three-term recurrence keeps
+    ``max|P| < 1`` across ``[lo, hi]`` and matches the analytic min-max value at every degree.
+    """
+    lam_max, lo_frac = 1.0, 0.25
+    lo, hi = lo_frac * lam_max, 1.05 * lam_max
+    band = np.linspace(lo, hi, 400)
+    for degree in (1, 2, 3, 4):
+        realized = _chebyshev_propagation_polynomial(band, lam_max, degree, lo_frac)
+        analytic = _scaled_chebyshev(band, lo, hi, degree)
+        max_abs = float(np.max(np.abs(realized)))
+        assert max_abs < 1.0  # every mode in the band is damped, not amplified
+        assert np.allclose(realized, analytic, atol=1e-10)  # exactly the min-max polynomial
 
 
 # --- convection-diffusion (nonsymmetric) aggregation ------------------------------------

@@ -607,23 +607,33 @@ def _chebyshev_smooth(
     Matrix-free (only ``A``-matvecs and the diagonal), a fixed *linear* operator, and a far stronger
     smoother than the same number of damped-Jacobi sweeps — the fix for the weak-smoother half of the
     V-cycle degradation. Reuses the per-level ``lambda_max`` estimated at build time.
+
+    The error-propagation polynomial is the scaled Chebyshev polynomial
+    ``P_k(z) = T_k((theta - z) / delta) / T_k(theta / delta)`` on the interval ``[lo, hi]`` with
+    centre ``theta = (lo + hi) / 2`` and half-width ``delta = (hi - lo) / 2``. Since ``theta / delta
+    > 1``, ``|P_k| <= 1 / T_k(theta / delta) < 1`` across ``[lo, hi]`` — every mode in the band is
+    damped, and the damping is optimal (min-max) over the band. Realized by the standard three-term
+    recurrence (Saad, *Iterative Methods for Sparse Linear Systems*, Alg. 12.1): the first step is
+    the scaled-Richardson ``(1 / theta) D^-1 r``, and each subsequent increment mixes the previous
+    increment with the current preconditioned residual through the ``rho`` recurrence.
     """
     lo, hi = level.lam_max * lo_frac, level.lam_max * 1.05
     centre, half_width = 0.5 * (hi + lo), 0.5 * (hi - lo)
+    sigma = centre / half_width  # theta / delta > 1
     inv_diagonal = 1.0 / level.diagonal
+
     residual = b - _sparse_apply(level, x)
-    direction = jnp.zeros_like(x)
-    alpha = 0.0
-    for i in range(degree):
-        preconditioned = inv_diagonal * residual
-        if i == 0:
-            direction, alpha = preconditioned, 2.0 / centre
-        else:
-            beta = (half_width * alpha / 2.0) ** 2
-            alpha = 1.0 / (centre - beta / alpha)
-            direction = preconditioned + beta * direction
-        x = x + alpha * direction
+    increment = (inv_diagonal * residual) / centre  # first step: (1 / theta) D^-1 r
+    x = x + increment
+    rho = 1.0 / sigma
+    for _ in range(1, degree):
         residual = b - _sparse_apply(level, x)
+        rho_next = 1.0 / (2.0 * sigma - rho)
+        increment = rho_next * rho * increment + (2.0 * rho_next / half_width) * (
+            inv_diagonal * residual
+        )
+        x = x + increment
+        rho = rho_next
     return x
 
 
