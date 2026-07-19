@@ -1,0 +1,7 @@
+FoamFile { format ascii; class dictionary; location "system"; object fvConstraints; }
+momentumForce
+{
+    type        meanVelocityForce;
+    cellZone    all;
+    Ubar        (0.1335 0 0);
+}
