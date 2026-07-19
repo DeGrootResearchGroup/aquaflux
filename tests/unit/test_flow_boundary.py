@@ -16,11 +16,43 @@ DCOEFF = jnp.array([[0.4, 0.4]])  # per-component V/a_P (isotropic)
 P = jnp.array([1.5])
 
 
+VISCOUS = jnp.array([7.0])  # a Dirichlet viscous diagonal mu*A/(d.n)
+CONVECTIVE = jnp.array([5.0])  # an upwind convective diagonal max(mdot, 0)
+
+
 def test_no_slip_wall() -> None:
     bc = NoSlipWall()
     assert jnp.allclose(bc.velocity_face(VEL, NORMAL, CENTROID), 0.0)
     assert jnp.allclose(bc.pressure_face(P), P)  # zero-gradient
     assert float(bc.mass_flux(VEL, P, GRADP, DCOEFF, NORMAL, AREA, DN, CENTROID, 1.0)[0]) == 0.0
+
+
+def test_momentum_diagonal_coefficient_per_patch() -> None:
+    """Each patch's a_P owner contribution matches the operator it imposes (issue #41).
+
+    A wall passes no fluid, so it contributes only the Dirichlet viscous diagonal, never the
+    convective one (4b); a zero-gradient pressure outlet imposes no velocity, so its viscous flux
+    vanishes and it contributes only the outflow convective diagonal (4a); a velocity inlet is a
+    through-flow Dirichlet patch and contributes both.
+    """
+    # Walls: viscous only -- the spurious wall convective term is dropped.
+    assert float(NoSlipWall().momentum_diagonal_coefficient(VISCOUS, CONVECTIVE)[0]) == 7.0
+    assert (
+        float(MovingWall(velocity=(1.0, 0.0)).momentum_diagonal_coefficient(VISCOUS, CONVECTIVE)[0])
+        == 7.0
+    )
+    # Pressure outlet: convective only -- the spurious outlet viscous term is dropped.
+    assert (
+        float(PressureOutlet(pressure=0.0).momentum_diagonal_coefficient(VISCOUS, CONVECTIVE)[0])
+        == 5.0
+    )
+    # Velocity inlet: both (the base through-flow Dirichlet behaviour).
+    assert (
+        float(
+            VelocityInlet(velocity=(1.0, 0.0)).momentum_diagonal_coefficient(VISCOUS, CONVECTIVE)[0]
+        )
+        == 12.0
+    )
 
 
 def test_moving_wall() -> None:

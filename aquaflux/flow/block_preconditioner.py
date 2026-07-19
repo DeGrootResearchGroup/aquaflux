@@ -252,6 +252,9 @@ class SmoothedAmgSchur(InnerSchurSolver):
                     jnp.ones(n_cells),
                     geometry.normal_distance,
                     geometry.interp_factor,
+                    boundary_owner_coeff=assembler.boundary_momentum_diagonal(
+                        jnp.ones(n_cells), None
+                    ),
                 ),
                 axis=1,
             )
@@ -337,9 +340,13 @@ class SmoothedAmgVelocity(VelocityBlockSolver):
     ) -> SmoothedAmgVelocity:
         area = np.asarray(assembler.geometry.face.area)
         over_distance = area / np.asarray(assembler.normal_distance)
-        boundary_owner = np.asarray(assembler.mesh.face_cells.owner)[~interior]
-        boundary_diagonal = np.zeros(n_cells)
-        np.add.at(boundary_diagonal, boundary_owner, over_distance[~interior])
+        # Dirichlet no-slip / inlet faces add A/(d.n) stiffness to their owner (this is what makes the
+        # block nonsingular); a zero-gradient outlet imposes no velocity, so it adds none. Take each
+        # patch's contribution (unit viscosity, no convection) rather than summing every boundary face.
+        boundary_face = assembler.boundary_momentum_diagonal(jnp.ones(n_cells), None)
+        boundary_diagonal = np.asarray(
+            assembler.mesh.face_cells.scatter(boundary_face, jnp.zeros_like(boundary_face))
+        )
         hierarchy = build_smoothed_hierarchy(
             owner_e, nb_e, over_distance[interior], n_cells, boundary_diagonal=boundary_diagonal
         )
@@ -422,6 +429,7 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
                     assembler.normal_distance,
                     assembler.interp_factor,
                     mdot_lagged=reference_mdot,
+                    boundary_owner_coeff=assembler.boundary_momentum_diagonal(mu, reference_mdot),
                 ),
                 axis=1,
             )

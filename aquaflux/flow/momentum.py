@@ -310,6 +310,38 @@ class MomentumContinuity(eqx.Module):
         mdot = face_cells.combine_face_values(interior_flux, 0.0)
         return self._boundary_mass_flux(velocity, pressure, grad_pressure, d_coeff, mdot)
 
+    def boundary_momentum_diagonal(
+        self, viscosity: jnp.ndarray, mdot: jnp.ndarray | None
+    ) -> jnp.ndarray:
+        """Per-face boundary owner contribution to ``a_P``, zero on interior faces, shape ``(n_faces,)``.
+
+        Each patch's :meth:`~aquaflux.flow.boundary.FlowBoundary.momentum_diagonal_coefficient` selects
+        which of the Dirichlet viscous term ``mu A/(d·n)`` and the upwind convective term
+        ``max(mdot, 0)`` its faces contribute — a Dirichlet-velocity wall or inlet the viscous, a
+        through-flow outlet the convective — so the diagonal matches the operator each patch actually
+        imposes (no viscous stiffness where the velocity is zero-gradient, no convective flux through a
+        wall). Passed to :func:`~aquaflux.flow.rhie_chow.momentum_diagonal` as ``boundary_owner_coeff``,
+        and shared by the block preconditioner so its frozen ``a_P`` references match the operator's.
+
+        Parameters
+        ----------
+        viscosity : jnp.ndarray
+            Per-cell viscosity used for the viscous term, shape ``(n_cells,)`` (a unit field where the
+            preconditioner wants the geometry-only ``A/(d·n)``).
+        mdot : jnp.ndarray or None
+            Per-face mass flux for the convective term, shape ``(n_faces,)``; ``None`` for Stokes.
+        """
+        fg = self.geometry.face
+
+        def coefficient(bc, faces, owner):
+            viscous_owner = viscosity[owner] * fg.area[faces] / self.normal_distance[faces]
+            convective_owner = (
+                jnp.maximum(mdot[faces], 0.0) if mdot is not None else jnp.zeros(faces.shape)
+            )
+            return bc.momentum_diagonal_coefficient(viscous_owner, convective_owner)
+
+        return self.boundary.apply(self.mesh.face_cells, jnp.zeros(self.mesh.n_faces), coefficient)
+
     def momentum_matrix_diagonal(
         self, velocity: jnp.ndarray, grad_velocity: jnp.ndarray | None = None
     ) -> jnp.ndarray:
@@ -353,6 +385,7 @@ class MomentumContinuity(eqx.Module):
             self.normal_distance,
             self.interp_factor,
             mdot_lagged=mdot_estimate,
+            boundary_owner_coeff=self.boundary_momentum_diagonal(self.viscosity, mdot_estimate),
         )
 
     def _momentum_residual(

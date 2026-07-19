@@ -44,6 +44,7 @@ def momentum_diagonal(
     interp_factor: jnp.ndarray,
     mdot_lagged: jnp.ndarray | None = None,
     dt: float | None = None,
+    boundary_owner_coeff: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Per-cell momentum-matrix diagonal ``a_P`` (viscous + convective + transient central coeff).
 
@@ -66,6 +67,12 @@ def momentum_diagonal(
         Stokes flow (no convection).
     dt : float, optional
         Timestep for the transient contribution ``V / dt``; omit for steady flow.
+    boundary_owner_coeff : jnp.ndarray, optional
+        Per-face owner diagonal contribution on boundary faces (zero on interior faces), shape
+        ``(n_faces,)`` — each patch's :meth:`~aquaflux.flow.boundary.FlowBoundary.momentum_diagonal_coefficient`,
+        so a zero-gradient outlet drops the viscous term and a wall drops the convective one. When
+        omitted, every boundary face contributes the full interior-style ``viscous + max(mdot, 0)``
+        (the leading-order form; only the pure geometry/unit tests rely on this default).
 
     Returns
     -------
@@ -87,6 +94,12 @@ def momentum_diagonal(
     if mdot_lagged is not None:  # convective upwind: outflow leaves the owner, inflow the neighbour
         owner_coeff = owner_coeff + jnp.maximum(mdot_lagged, 0.0)
         neighbour_coeff = neighbour_coeff + jnp.maximum(-mdot_lagged, 0.0)
+
+    # On boundary faces the owner contribution is the patch's own diagonal coefficient (a wall drops
+    # the convective term, a zero-gradient outlet the viscous one), not the interior-style sum above;
+    # the scatter already zeros the neighbour coefficient on boundary faces.
+    if boundary_owner_coeff is not None:
+        owner_coeff = jnp.where(face_cells.interior, owner_coeff, boundary_owner_coeff)
 
     a_p_isotropic = face_cells.scatter(owner_coeff, neighbour_coeff)
     if dt is not None:
