@@ -33,11 +33,11 @@ import numpy as np
 from aquaflux.mesh import Mesh
 from aquaflux.mesh.geometry import MeshGeometry
 from aquaflux.schemes.interpolation import interpolate_owner_neighbour, interpolation_factor
-from aquaflux.solve.frozen_operator import convection_diffusion_operator
-from aquaflux.solve.multigrid import (
+from aquaflux.solve import (
     air_multigrid_solve,
     build_air_hierarchy,
     build_convection_hierarchy,
+    convection_diffusion_operator,
     convection_multigrid_solve,
 )
 from aquaflux.vectors import dot

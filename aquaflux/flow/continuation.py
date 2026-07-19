@@ -51,8 +51,12 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from aquaflux.solve.continuation import DivergenceGuard, PseudoTransientStep, ShiftTerm
-from aquaflux.solve.implicit import ImplicitNewtonSolver
+from aquaflux.solve import (
+    DivergenceGuard,
+    ImplicitNewtonSolver,
+    PseudoTransientStep,
+    ShiftTerm,
+)
 
 from .block_preconditioner import BlockPreconditioner
 

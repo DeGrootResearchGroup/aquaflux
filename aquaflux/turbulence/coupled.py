@@ -35,8 +35,12 @@ import jax.numpy as jnp
 
 from aquaflux.flow import BlockPreconditioner
 from aquaflux.properties import FieldProperty, PropertyModel
-from aquaflux.solve import ImplicitNewtonSolver
-from aquaflux.solve.continuation import DivergenceGuard, PseudoTransientStep, ShiftTerm
+from aquaflux.solve import (
+    DivergenceGuard,
+    ImplicitNewtonSolver,
+    PseudoTransientStep,
+    ShiftTerm,
+)
 
 from .initialization import hybrid_initialize
 
