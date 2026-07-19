@@ -88,7 +88,7 @@ def test_segregated_cavity_is_stable_and_active() -> None:
         jnp.full(mesh.n_cells, 1e-4),  # seed k > 0 so the shear production can start
         jnp.full(mesh.n_cells, 1.0),
         density=RHO,
-        sweeps=10,
+        max_sweeps=10,
         scalar_preconditioner="twolevel",
     )
     assert not bool(jnp.any(jnp.isnan(flow)))

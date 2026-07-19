@@ -162,7 +162,7 @@ def solve_aquaflux(nu_of, ny, growth):
         jnp.full(mesh.n_cells, k_in),
         jnp.full(mesh.n_cells, omega_in),
         density=1.0,
-        sweeps=sweeps,
+        max_sweeps=sweeps,
         relaxation=0.5,
         bulk_velocity_target=1.0,
         flow_direction=0,

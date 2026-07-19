@@ -117,7 +117,7 @@ def test_high_reynolds_turbulent_channel_solves() -> None:
         jnp.full(mesh.n_cells, k_in),
         jnp.full(mesh.n_cells, omega_in),
         density=RHO,
-        sweeps=8,
+        max_sweeps=8,
         relaxation=0.5,
         scalar_preconditioner="twolevel",
     )
