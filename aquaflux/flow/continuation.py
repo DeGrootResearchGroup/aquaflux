@@ -1,11 +1,20 @@
 """Pseudo-transient continuation for the coupled flow Newton solve at high Reynolds number.
 
-The block-SIMPLE preconditioner (:mod:`aquaflux.flow.block_preconditioner`) inverts a velocity block
-built on the **viscous** momentum operator and a SIMPLE pressure Schur built on ``V / a_P``. Both are
-good approximations while diffusion dominates, but once convection strengthens (Reynolds number past
-~100) the true Jacobian is far from that diffusion operator: the inner GMRES stalls a fixed fraction
-of the way down and the backtracking line search alone can no longer recover a step, so the solve
-stagnates (:mod:`tests.integration.test_channel` documents the Re ~ 100 floor this lifts).
+A line-searched Newton step converges the channel at Re ~ 100 but fails once the flow becomes
+convection-dominated (a few hundred Reynolds). As convection strengthens, the undamped Newton step
+from the uniform cold start **overshoots** — the full step *increases* the residual, more steeply as
+the Reynolds number rises — so the basin the step must land in shrinks and the backtracking line
+search must retreat to ever-smaller steps, until it can no longer march the convective path
+(:mod:`tests.integration.test_channel` documents the Re ~ 100 floor this lifts).
+
+The dominant missing ingredient is *outer* Newton globalization, not a better linear solve. The
+block-SIMPLE preconditioner (:mod:`aquaflux.flow.block_preconditioner`) — a velocity block on the
+**viscous** momentum operator and a SIMPLE pressure Schur on ``V / a_P`` — stays an effective
+approximation of the Jacobian: the preconditioned inner GMRES converges cleanly at the cold start at
+every tested Reynolds number (to Re ~ 2000), so the inner solve is not the bottleneck. A stronger
+preconditioner extends the line search's reach only modestly (it does not damp the overshoot); what
+carries the convective regime is a globalization that keeps each iterate inside the basin the undamped
+step overshoots.
 
 The cure is **pseudo-transient continuation**: each outer step solves a *diagonally shifted* Newton
 system
@@ -18,8 +27,10 @@ so it is the coupled-Newton form of SIMPLE velocity under-relaxation (effective 
 ``V / Δt`` with a cell-local ``Δt ∝ V / (β a_P)``. Being proportional to ``a_P`` rather than a global
 ``V / Δt`` makes the damping **scale-invariant**: a graded, wall-resolved mesh (tiny near-wall cells,
 coarse core) is relaxed uniformly in relative terms, which a single global ``Δt`` cannot do. The
-preconditioner inverts the *same* shifted diagonal ``a_P (1 + β)``, which restores its diagonal
-dominance and makes the inner GMRES converge again.
+shift's essential job is this outer globalization — it keeps each iterate inside the basin the
+undamped step would overshoot, so the (already-effective) preconditioner keeps working along the whole
+march; the preconditioner inverts the *same* shifted diagonal ``a_P (1 + β)`` the step is damped by, so
+it stays consistent with the shifted operator (whose added diagonal only improves its conditioning).
 
 Everything that is *not* flow-specific — the switched-evolution-relaxation schedule
 ``β = β₀ (‖R‖/‖R₀‖)^p`` (strong damping from a cold start, ``β → 0`` recovering the undamped Newton
