@@ -143,6 +143,20 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     correctly allowed. This one build-time guard is why the runtime smoothers (`_chebyshev_smooth`,
     `_jacobi_smooth`, `_fc_jacobi`) and the block-preconditioner rescales, which invert the frozen
     diagonal / the positive momentum `a_P`, need no per-apply floor.
+  - **The damped-Jacobi convection hierarchy is TWO-LEVEL by design (binding — do not add a depth
+    knob).** `build_convection_hierarchy` builds exactly a smoothed fine level + a single **direct**
+    (dense pseudo-inverse) coarse solve; it has no `max_levels` parameter. On the fine level the
+    upwind operator is a diagonally dominant M-matrix, so one damping factor `ω/λ_max` contracts
+    (`_jacobi_smooth`, ρ ≈ 0.7 at high cell Peclet). A *deeper* Galerkin recursion is deliberately not
+    built: a coarse-of-coarse operator of a strongly convection-dominated problem acquires
+    near-imaginary-axis eigenvalues that **no single-factor damped-Jacobi smoother can damp** — the
+    smoother becomes non-contractive (measured ρ(S) ≈ 1.0–1.36 on such levels), so the coarse level
+    must be an exact solve. Deep, mesh-independent convection coarsening is the job of the
+    reduction-based lAIR hierarchy (`build_convection_air_hierarchy` + `_fc_jacobi`) instead. Both
+    production callers (the flow `SmoothedAmgConvectionVelocity` two-level path and the turbulence
+    preconditioner) already used two levels, so this is behaviour-neutral; the deep damped-Jacobi
+    build it removed was dominated on both ends (worse than two-level shallow, worse than lAIR deep)
+    and was the sole source of the non-contractive-smoother defect.
 - **Where preconditioning must attach — measured, do not repeat the wrong lever.** For the
   skewed lid-driven cavity (`CorrectedGreenGauss`, `FirstOrderUpwind`) the per-Newton-step cost
   splits cleanly: the **outer coupled saddle-point GMRES takes 67 steps at 432 dof, 127 at 768
