@@ -8,6 +8,7 @@ functions are injected, so the driver is testable on a trivial analytic residual
 
 from __future__ import annotations
 
+from .continuation import PseudoTransientStep, ShiftPolicy, ShiftTerm
 from .implicit import DampedNewtonStep, ForwardStep, ImplicitNewtonSolver
 from .linear import default_linear_solver, solve_linear
 from .multigrid import (
@@ -28,6 +29,9 @@ __all__ = [
     "ImplicitNewtonSolver",
     "MultigridHierarchy",
     "NewtonSolver",
+    "PseudoTransientStep",
+    "ShiftPolicy",
+    "ShiftTerm",
     "SmoothedHierarchy",
     "build_hierarchy",
     "build_smoothed_hierarchy",
