@@ -52,7 +52,8 @@ class ForwardStep(Protocol):
 
     Structural interface only (a ``Protocol``), so the generic solver stays free of any flow
     specifics. The concrete strategies are :class:`DampedNewtonStep` (the default backtracking line
-    search) and :class:`aquaflux.flow.PseudoTransientContinuation` (the high-Reynolds march).
+    search) and :class:`PseudoTransientStep` (the residual-agnostic pseudo-transient march;
+    :func:`aquaflux.flow.momentum_continuation` configures it for the high-Reynolds flow).
     """
 
     def stepper(self) -> _ForwardStep:
@@ -295,8 +296,8 @@ class ImplicitNewtonSolver(eqx.Module):
         gradient accuracy directly and should not be loosened along with the forward steps.
     forward_step : ForwardStep
         The globalized forward-step strategy that supplies each Newton iteration (static): a
-        :class:`DampedNewtonStep` backtracking line search by default, or an
-        :class:`aquaflux.flow.PseudoTransientContinuation` for a high-Reynolds convective flow. The
+        :class:`DampedNewtonStep` backtracking line search by default, or a :class:`PseudoTransientStep`
+        (e.g. from :func:`aquaflux.flow.momentum_continuation`) for a high-Reynolds convective flow. The
         strategy also owns the forward preconditioner and, transposed, the adjoint preconditioner
         (via :meth:`ForwardStep.adjoint_preconditioner`), so gradients are mesh-independent too.
         Every strategy's shift vanishes at the fixed point, so the converged state and the IFT

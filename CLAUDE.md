@@ -36,6 +36,7 @@ Checklist still governs).
 | `.claude/rules/properties.md` | `aquaflux/properties/**` | physical property model (density/viscosity/conductivity): `Property` (constant / per-zone / calculated) collected in a `PropertyModel`, decoupled from the numerics |
 | `.claude/rules/solve.md` | `aquaflux/solve/**` | Newton on the residual, linear solve with implicit differentiation / `custom_vjp`, the preconditioner risk |
 | `.claude/rules/flow.md` | `aquaflux/flow/**` | coupled p–U block: momentum (reusing advection/diffusion) + Rhie–Chow continuity, lagged `a_P`, monolithic AD-Jacobian solve |
+| `.claude/rules/turbulence.md` | `aquaflux/turbulence/**` | k–ω SST closure + the segregated flow–turbulence loop: segregated forward / coupled adjoint, outer-loop globalization, positivity-floor adjoint honesty |
 | `.claude/rules/io.md` | `aquaflux/io/**` | mesh import: the `MeshReader` strategy + the OpenFOAM polyMesh reader (ASCII); parse→assemble→collapse seams, empty-patch 2D collapse (a `mesh/` transform), reserved-name guard |
 
 ---
@@ -187,6 +188,27 @@ found and fixed**; treat them as binding, not aspirational.
   existing class, or write a one-line formula that already exists — stop and reach for the
   object/helper instead.*
 
+### 4. No compatibility shims before release (pre-release policy — remove this principle at 1.0)
+
+The project is **pre-release: there are no external API consumers, so breaking API changes are free.**
+When a refactor changes a public surface, **change the surface and update every call site — do not
+preserve the old one.**
+
+- **No thin adapters kept only to preserve an API.** A wrapper class or forwarding function that exists
+  solely to re-expose a refactored abstraction under its former shape is dead weight: delete it and
+  point callers at the real object. (E.g. a `PseudoTransientStep` *is* the `ForwardStep`, so a
+  `PseudoTransientContinuation` class that only delegated `stepper`/`default_solver`/… was removed in
+  favour of a `momentum_continuation` factory returning the engine directly.)
+- **No deprecation shims, aliases, or back-compat branches.** No `old_name = new_name` re-exports, no
+  `if legacy_arg is not None` compatibility paths, no keeping a parameter alive "so nothing breaks."
+  Rename/retype/delete in one change and fix the callers and tests in the same change.
+- A **builder function or factory is not a shim** — it constructs and returns the real object (like
+  `momentum_continuation` or `reused_flow_solve`). What this bans is the *delegating wrapper* that adds
+  a layer over an object already fit to use directly.
+
+**This principle is a pre-release convenience and must be deleted at the first stable release**, when
+backward compatibility becomes a real constraint and the calculus reverses.
+
 ---
 
 ## Design Goals
@@ -310,6 +332,13 @@ pytest                                     # everything
   NaNs.
 - **AD-exact-linearization (skewed mesh):** on a non-orthogonal mesh, the linear problem
   converges in one Newton step (Gate C) — the concrete improvement over the reference.
+- **Coupled-solve adjoint (iteration-count-independent):** for any iterative / coupled / fixed-point
+  solver (the segregated flow–turbulence loop, and any future coupled system), `jax.grad` through the
+  converged solve must match a reference gradient (finite difference or the closed form) **and be
+  independent of the forward iteration count** — the coupling analogue of Gate C. This is what proves
+  the adjoint is the implicit-function-theorem solve on the converged coupled residual, not the outer
+  loop unrolled onto the tape. An existence/stability smoke test ("stays stable, fields positive")
+  does **not** establish this — it must be its own explicit test.
 - **x64:** `assert jax.config.x64_enabled`.
 
 ---
@@ -548,6 +577,16 @@ After **every code change**, before considering the task complete, review and ac
      has a home, or grow a `# step N` god-method? Fix the seam *now* — reach for the object/helper.
    - **Maintainability (Principle 0):** if you took a quick-to-ship shortcut as an
      intermediate step, refactor it before marking the task done.
+   - **Solver adjoint & globalization (for any new iterative / coupled / fixed-point solver).**
+     Before calling such a solver done, confirm all three: (a) **the adjoint is an
+     implicit-function-theorem solve on the converged residual, not the iteration unrolled onto
+     the tape** — verify it is a single transpose solve, not a taped loop (`.claude/rules/solve.md`);
+     (b) **the forward solve stops on a convergence test**, not a hard-coded iteration count (a fixed
+     count is allowed *only* as an explicitly-labelled intermediate); (c) **it is globalized** to the
+     standard of its neighbours (continuation / line search), with constant under-relaxation + floors
+     treated as a stabilizer, not the globalization. If you ship an intermediate that does not yet
+     meet (a)–(c), **file the deferred work as a tracked issue in the same change** — an unlabelled,
+     untracked prototype delivered as done is the exact Principle-0 failure this gate guards against.
 
 2. **Lint, format & comment hygiene** — from the repo root:
    - `ruff check aquaflux tests` — must report no errors.
