@@ -41,6 +41,73 @@ from jax.ops import segment_sum
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 
 
+def _require_valid_graph(n: int, owner: np.ndarray, nb: np.ndarray, where: str) -> None:
+    """Reject a malformed fine graph at build time, so a degenerate mesh fails loudly at setup.
+
+    The hierarchies are built once, off the jit path, and then frozen; a bad graph would otherwise
+    bake ``inf``/``NaN`` into the frozen operator (via a later zero-diagonal inversion) and only show
+    up as a silently stalling runtime V-cycle. Checks the invariants that must hold for *any* mesh:
+    at least one cell, matched edge arrays, and every edge index in range.
+
+    Parameters
+    ----------
+    n : int
+        Number of cells.
+    owner, nb : np.ndarray
+        Interior-face edge endpoints, shape ``(n_edges,)`` each.
+    where : str
+        Caller name, included in the error message.
+
+    Raises
+    ------
+    ValueError
+        If ``n < 1``, ``owner`` and ``nb`` differ in length, or any endpoint is outside ``[0, n)``.
+    """
+    if n < 1:
+        raise ValueError(f"{where}: need at least one cell, got n={n}.")
+    owner, nb = np.asarray(owner), np.asarray(nb)
+    if owner.shape != nb.shape:
+        raise ValueError(
+            f"{where}: owner and nb must have the same shape, got {owner.shape} and {nb.shape}."
+        )
+    if owner.size and (owner.min() < 0 or owner.max() >= n or nb.min() < 0 or nb.max() >= n):
+        raise ValueError(f"{where}: edge endpoints out of range for n={n} cells.")
+
+
+def _require_positive_diagonal(diagonal: np.ndarray, where: str) -> None:
+    """Reject a non-positive or non-finite operator diagonal before it is inverted or frozen.
+
+    A frozen level's diagonal is inverted by the smoother (``D^-1``) and, at build time, by the
+    prolongation-smoothing damping. A zero entry — from a disconnected component, an isolated or
+    zero-volume cell, or a degenerate nonsymmetric Galerkin (``R A P``) row — makes ``1/0 = inf`` and
+    poisons the frozen preconditioner. A symmetric graph Laplacian with positive coefficients (and a
+    diagonally dominant convection-diffusion operator) has a strictly positive diagonal, so a
+    violation means the operator is degenerate; fail here rather than silently stall the V-cycle. The
+    diagonal is checked *after* any boundary stiffness has been folded in, so a cell that is closed
+    off from the interior but carries a boundary coefficient is correctly allowed.
+
+    Parameters
+    ----------
+    diagonal : np.ndarray
+        The operator diagonal at one level, shape ``(n_cells,)``.
+    where : str
+        Caller name (with level index), included in the error message.
+
+    Raises
+    ------
+    ValueError
+        If any entry is non-finite or ``<= 0``.
+    """
+    diagonal = np.asarray(diagonal)
+    if not np.all(np.isfinite(diagonal)) or np.any(diagonal <= 0.0):
+        raise ValueError(
+            f"{where}: operator diagonal must be finite and strictly positive, but its minimum is "
+            f"{np.nanmin(diagonal):.3e}. A zero/negative diagonal indicates a degenerate operator "
+            "(disconnected component, isolated or zero-volume cell, or a degenerate coarse-grid row) "
+            "that would bake inf/NaN into the frozen preconditioner."
+        )
+
+
 class _Level(NamedTuple):
     """One multigrid level's static (integer, mesh-fixed) structure."""
 
@@ -173,6 +240,7 @@ def build_hierarchy(
     MultigridHierarchy
         The finest-to-coarsest level structure, with JAX integer arrays ready for the jit-ed apply.
     """
+    _require_valid_graph(n, owner, nb, "build_hierarchy")
     owner = np.asarray(owner, dtype=np.int64)
     nb = np.asarray(nb, dtype=np.int64)
     levels: list[_Level] = []
@@ -506,6 +574,9 @@ def _build_aggregation_hierarchy(
     levels: list[_SparseLevel] = []
     while True:
         a_agg = aggregation_operator(a)
+        _require_positive_diagonal(
+            a.diagonal(), f"_build_aggregation_hierarchy (level {len(levels)})"
+        )
         d_inv = sp.diags(1.0 / a.diagonal())
         lam_smooth = _spectral_radius(d_inv @ a_agg)  # prolongation-smoothing damping
         lam_store = (
@@ -574,6 +645,7 @@ def build_smoothed_hierarchy(
     SmoothedHierarchy
         Frozen finest-to-coarsest general-sparse levels for :func:`smoothed_multigrid_solve`.
     """
+    _require_valid_graph(n, owner, nb, "build_smoothed_hierarchy")
     a = _laplacian_csr(owner, nb, coeff, n)
     if boundary_diagonal is not None:  # Dirichlet boundary stiffness -> SPD-nonsingular (no pin)
         a = a + sp.diags(np.asarray(boundary_diagonal))
@@ -807,6 +879,7 @@ def build_convection_hierarchy(
     SmoothedHierarchy
         Frozen finest-to-coarsest general-sparse levels for :func:`convection_multigrid_solve`.
     """
+    _require_valid_graph(n, owner, nb, "build_convection_hierarchy")
     a = _convection_diffusion_csr(owner, nb, visc, mdot, n, boundary_diagonal)
     # Nonsymmetric operator: aggregate and smooth the prolongation on the symmetric part ``(A + Aᵀ)/2``,
     # while each level stores the true operator's spectral radius for the damped-Jacobi smoother.
@@ -1126,6 +1199,7 @@ def build_air_hierarchy(
     levels: list[_AirLevel] = []
     while True:
         n = a.shape[0]
+        _require_positive_diagonal(a.diagonal(), f"build_air_hierarchy (level {len(levels)})")
         if n <= max_coarse or len(levels) + 1 >= max_levels:
             levels.append(_air_level(a, np.ones(n, dtype=np.int64), None, None))
             break
@@ -1161,6 +1235,7 @@ def build_convection_air_hierarchy(
     The arguments match :func:`build_convection_hierarchy`; see :func:`build_air_hierarchy` for the lAIR
     parameters.
     """
+    _require_valid_graph(n, owner, nb, "build_convection_air_hierarchy")
     a = _convection_diffusion_csr(owner, nb, visc, mdot, n, boundary_diagonal)
     return build_air_hierarchy(
         a, theta=theta, degree=degree, max_coarse=max_coarse, max_levels=max_levels
