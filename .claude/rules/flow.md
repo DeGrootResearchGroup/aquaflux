@@ -54,10 +54,21 @@ Engineering Principles.
   force** (`momentum.py::_face_pressure`) is likewise reconstructed to the integration point; the
   lagged-`a_P` momentum estimate uses `interpolate_to_face` too when `grad_velocity` is available
   (the preconditioner keeps the cheap leading-order blend, exact at convergence since `a_P` is lagged).
+  **Boundary faces respect the BC type** (`boundary_owner_coeff`, from each patch's
+  `momentum_diagonal_coefficient`): a zero-gradient outlet adds **no** viscous diagonal (its viscous
+  flux `μ(u_owner−u_owner)/(d·n)` is zero), and a no-through-flow wall adds **no** convective diagonal
+  (its mass flux is exactly zero) — assembling over *all* faces uniformly over-counted both. Threaded
+  through every `momentum_diagonal`-derived `a_P` (residual, frozen preconditioner, Schur/velocity-AMG
+  references) so they stay mutually consistent; when omitted, boundary faces get the full interior-style
+  term (unit tests only). The single-momentum-assembly-source unification is tracked in #58.
 - **`boundary.py` — `FlowBoundary` → `NoSlipWall`, `MovingWall`, `VelocityInlet`,
   `PressureOutlet`.** Each closes velocity (viscous BC + gradient), pressure, and boundary
   `mdot`. `VelocityInlet`/`MovingWall` take a constant or a profile callable; `MovingWall` passes
-  no fluid (`mdot=0`, for a driven lid).
+  no fluid (`mdot=0`, for a driven lid). Beyond those three closures a patch also exposes the two
+  **preconditioner/diagonal contributions** it alone knows: `pressure_schur_coefficient`
+  (`d(mdot)/d(p_owner)`, non-zero only at a `PressureOutlet`) and `momentum_diagonal_coefficient`
+  (the owner-velocity linearization of its velocity flux — viscous for a Dirichlet-velocity patch,
+  convective for a through-flow patch; see the `rhie_chow.py` `a_P` note).
   - **Compose, do NOT inherit (decided; composition now realized).** A `FlowBoundary` is a *bundle*
     {velocity closure, pressure closure, mass-flux closure}, not a subtype of
     `boundary.BoundaryCondition`: it returns three coupled quantities, and `mdot` (Rhie–Chow) has no
