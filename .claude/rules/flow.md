@@ -130,6 +130,20 @@ Engineering Principles.
   `MomentumContinuity.lagged_momentum_diagonal`. When adding an inner solver, add an `InnerSchurSolver`
   subclass — do **not** grow an `if inner == …` branch (that god-method was the thing the refactor
   removed; see root `CLAUDE.md` Principle 3).
+- **Every strategy builds from a narrow geometry bundle, not the assembler (binding — Principle 3).**
+  Both strategy families take a frozen geometry seam rather than reaching into the full
+  `MomentumContinuity`: the Schur family holds a `_SchurGeometry` (`face_cells`, `mesh_geometry`,
+  `boundary`, `interp_factor`, `normal_distance`, `rho`, `pressure_pin`; it also *owns* the Schur-coeff
+  computation `coefficient(a_P)` / `boundary_diagonal(a_P)`, so it is a **stored, runtime** object), and
+  the velocity family builds from a sibling `_VelocityGeometry` (`face_cells`, `mesh_geometry`,
+  `interp_factor`, `normal_distance`, `viscosity`, `dim`) that is **build-time-only** — the velocity
+  strategies freeze their AMG hierarchy at build and never store it. Keep these **siblings, not one union
+  bundle** (the runtime-vs-build-time split and the disjoint Schur-only / velocity-only fields are why).
+  Anything that is assembler *behaviour* rather than geometry — the Rhie–Chow `mass_flux(reference_state)`
+  the convection velocity block freezes at — is computed by the builder (which has the assembler) and
+  handed in as a frozen array (`reference_mdot`), so the strategy `build` stays assembler-free and
+  unit-testable from mesh primitives alone. When adding a strategy, extend/consume the matching bundle;
+  do **not** thread the assembler into a strategy.
 - **Outer block preconditioner — BUILT (Stage 1: SIMPLE block-diagonal).** The `DampedJacobiSchur` +
   `DiagonalVelocity` composition is a frozen left preconditioner
   `M = blkdiag(diag(a_P)⁻¹, Ŝ⁻¹)`: the velocity block is the momentum-diagonal solve (reusing the

@@ -21,7 +21,11 @@ from aquaflux.flow import (
     damped_jacobi_solve,
     pressure_schur_laplacian,
 )
-from aquaflux.flow.block_preconditioner import _characteristic_reference_state
+from aquaflux.flow.block_preconditioner import (
+    SmoothedAmgVelocity,
+    _characteristic_reference_state,
+    _VelocityGeometry,
+)
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -339,3 +343,33 @@ def test_damped_jacobi_converges_toward_solution() -> None:
         return float(jnp.linalg.norm(matvec(x) - rhs))
 
     assert residual_norm(40) < 0.3 * residual_norm(5)  # clearly decreasing with sweeps
+
+
+def test_velocity_block_builds_from_a_narrow_geometry_seam() -> None:
+    """A velocity-block strategy builds from a ``_VelocityGeometry`` bundle alone — mesh geometry only,
+    no boundary conditions / property model / schemes — so it is unit-testable in isolation without a
+    full flow assembler. This is the encapsulation the seam exists for: the strategy takes the narrow
+    geometry it needs, not the whole ``MomentumContinuity``.
+    """
+    mesh = structured_grid_2d(4, 3)
+    face_cells = mesh.face_cells
+    n_cells, n_faces = mesh.n_cells, mesh.n_faces
+    # SmoothedAmgVelocity reads only the mesh geometry (face area, normal distance, owner, dim); the
+    # interp_factor / viscosity fields belong to the convection-aware sibling, so they are unit here.
+    geometry = _VelocityGeometry(
+        face_cells=face_cells,
+        mesh_geometry=mesh.geometry(),
+        interp_factor=jnp.ones(n_faces),
+        normal_distance=jnp.ones(n_faces),
+        viscosity=jnp.ones(n_cells),
+        dim=mesh.dim,
+    )
+    owner_e, nb_e, _ = face_cells.interior_edges()
+    interior = np.asarray(face_cells.interior)
+    block = SmoothedAmgVelocity.build(geometry, owner_e, nb_e, interior, n_cells, v_cycles=1)
+
+    solve = block.apply(jnp.full(n_cells, 2.0))  # the per-iterate velocity solve at a_P = 2
+    ru = jnp.asarray(np.random.default_rng(0).standard_normal((n_cells, mesh.dim)))
+    du = solve(ru)
+    assert du.shape == (n_cells, mesh.dim)
+    assert bool(jnp.all(jnp.isfinite(du)))
