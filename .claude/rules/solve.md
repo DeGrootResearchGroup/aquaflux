@@ -52,6 +52,16 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   nonlinear residual (the flux limiter). `newton_step` is shared with `NewtonSolver`. Verified
   (`test_implicit_solve.py`): converges a nonlinear root, gradient matches the closed form to
   1e-10, and is iteration-count-independent. Used by the limited-advection solve.
+  - **Convergence guard (binding — the IFT adjoint is only valid at a root).** `_forward` carries the
+    terminal residual norm out of the `while_loop` and wraps the returned field in `eqx.error_if`: if
+    the residual is non-finite or above `atol + rtol·‖R₀‖` (exhausted `max_steps`, or a `NaN`/`Inf`
+    that used to make `residual_norm > tol` short-circuit to `False` and exit with a poisoned field),
+    it **raises `eqx.EquinoxRuntimeError`** instead of returning. The guard sits in `_forward`, so it
+    fires for both the forward value and the `jax.grad` path (the fwd pass saves the guarded field),
+    closing the silent-wrong-gradient hole where the transpose solve at a non-root stays well-posed
+    and raises no `NaN`. The stopping test is one helper, `_within_tolerance`, shared by the loop
+    `cond` and the guard. A `NaN` mid-iteration is often caught first by `lineax`'s own non-finite
+    guard at the next linear solve — both are hard errors, neither is silent.
 - **Forward globalization is ONE injected strategy — `forward_step: ForwardStep`.** The forward
   Newton loop has a single point of variation: `ImplicitNewtonSolver` takes one `forward_step`
   implementing the `ForwardStep` protocol (`stepper()` → the per-step
