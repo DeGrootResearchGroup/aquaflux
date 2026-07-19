@@ -53,6 +53,19 @@ def _relax(old: jnp.ndarray, new: jnp.ndarray, factor: float) -> jnp.ndarray:
     return old + factor * (new - old)
 
 
+def bulk_velocity(
+    momentum: MomentumContinuity, flow: jnp.ndarray, direction: int = 0
+) -> jnp.ndarray:
+    """Volume-averaged velocity component ``Sigma(u_dir V) / Sigma(V)`` for a flow state.
+
+    The mean (bulk) velocity a mass-flow-controlled periodic channel targets. Reads the cell
+    volumes from the assembler's geometry, so it is the same average the controller drives.
+    """
+    velocity, _ = momentum.unpack(flow)
+    volume = momentum.geometry.cell.volume
+    return jnp.sum(velocity[:, direction] * volume) / jnp.sum(volume)
+
+
 def solve_segregated(
     momentum: MomentumContinuity,
     turbulence: SSTTurbulence,
@@ -68,6 +81,9 @@ def solve_segregated(
     k_floor: float = 1e-8,
     omega_floor: float = 1e-8,
     scalar_preconditioner: str | None = None,
+    bulk_velocity_target: float | None = None,
+    flow_direction: int = 0,
+    bulk_velocity_gain: float = 1.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system by the segregated Picard loop.
 
@@ -101,6 +117,21 @@ def solve_segregated(
         When set, build a convection-diffusion AMG preconditioner for each k/omega solve (the given
         multigrid method) and pass it to ``solve_scalar`` -- the mesh-independent scalar solve a
         high-Reynolds case needs. ``None`` passes ``None`` (an unpreconditioned scalar solve).
+    bulk_velocity_target : float or None
+        When set, drive a streamwise-periodic channel to this **bulk velocity** by a mass-flow
+        controller: after each sweep's flow solve the body force is rescaled toward the
+        linear-response estimate that would hit the target,
+        ``beta <- beta + gain (beta U_target / U_bulk - beta)`` (the mass-flow feedback the reference
+        code applies to its periodic pressure drop, ``main.F90``, cast for the body-force
+        formulation, where it is scale-free -- no gain tuning per Reynolds number). Requires
+        ``momentum`` to carry a nonzero initial ``body_force`` along ``flow_direction`` and a
+        ``pressure_pin``. ``None`` leaves the body force fixed.
+    flow_direction : int
+        The streamwise axis the bulk velocity is measured and the body force is applied along.
+    bulk_velocity_gain : float
+        Relaxation on the controller update in ``(0, 1]``: ``1.0`` takes the full linear-response
+        step (exact in one sweep for Stokes flow), lower it if the bulk velocity oscillates under the
+        nonlinear closure.
 
     Returns
     -------
@@ -112,6 +143,16 @@ def solve_segregated(
         nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
         momentum = _with_viscosity(momentum, density * (molecular + nu_t))
         flow = solve_flow(momentum, flow)
+
+        if bulk_velocity_target is not None:
+            u_bulk = bulk_velocity(momentum, flow, flow_direction)
+            beta = momentum.body_force[flow_direction]
+            # Linear-response estimate of the force that hits the target, relaxed for the closure's
+            # nonlinearity; scale-free, so no per-Reynolds gain tuning (unlike a raw additive step).
+            beta_target = beta * bulk_velocity_target / jnp.maximum(u_bulk, 1e-12)
+            new_beta = beta + bulk_velocity_gain * (beta_target - beta)
+            new_force = momentum.body_force.at[flow_direction].set(new_beta)
+            momentum = eqx.tree_at(lambda m: m.body_force, momentum, new_force)
 
         closure = turbulence.closure_fields(momentum.velocity_gradient(flow), k, omega)
         mdot = momentum.mass_flux(flow)
