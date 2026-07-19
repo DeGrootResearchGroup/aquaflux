@@ -295,6 +295,18 @@ readable — reach for these helpers instead of open-coding `jnp.sum(a * b, axis
 helper states the intent, and gives one home to change (Principle 2). Rank-3 tensor algebra
 (Hessian outer products, `einsum`) stays explicit — the helpers target rank-2 vector fields.
 
+**Frozen preconditioner operators are assembled in one place, `aquaflux/solve/frozen_operator.py`.**
+The AMG preconditioners coarsen a *frozen* linearization of a transport equation — a symmetric
+diffusive edge coupling, optionally plus first-order-upwind convection at a reference flux —
+assembled once, off the jit path, as a `scipy.sparse` matrix. `convection_diffusion_operator(...)`
+(with `decouple_dof` for the closed-domain pressure pin) is the single assembler for all four
+consumers: the pressure Schur, both velocity blocks, and the k/ω scalar transport. It sits **beside**
+`solve/multigrid.py`, not inside it: every multigrid builder takes an assembled operator `a` and
+knows nothing about meshes or fluxes. The first-order-upwind stencil is the **preconditioner's**
+choice, not the model's — whatever scheme the residual uses for advection, the frozen operator always
+upwinds first-order, because that is what makes it an M-matrix an aggregation hierarchy can coarsen —
+which is why it is a solver concern and holds no mesh, field, or `jax` import.
+
 ```
 Mesh (SoA topology) + FaceGeometry/CellGeometry            (classes)
    → operator strategies (DiffusionFlux, ...) consuming injected scheme strategies

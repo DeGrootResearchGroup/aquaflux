@@ -14,13 +14,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.mesh import structured_grid_2d
+from aquaflux.solve.frozen_operator import convection_diffusion_operator, decouple_dof
 from aquaflux.solve.multigrid import (
     _chebyshev_smooth,
-    _convection_diffusion_csr,
     _jacobi_smooth,
     _SparseLevel,
     air_multigrid_solve,
-    build_convection_air_hierarchy,
+    build_air_hierarchy,
     build_convection_hierarchy,
     build_smoothed_hierarchy,
     convection_multigrid_solve,
@@ -53,13 +53,15 @@ def _dense_laplacian(owner, nb, n, coeff=None):
 def _pinned_v_cycle_factor(owner, nb, ncell, pin, *, seed=0):
     """Geometric-mean contraction of the fixed smoothed V-cycle on a pin-decoupled Poisson.
 
-    The pin row/column is zeroed out of both the hierarchy (via ``build_smoothed_hierarchy``'s
-    ``pin=``) and the dense operator, so the two share a null space and the V-cycle is a valid
-    inner solve. Returns the cube-root of the residual-norm ratio over the last three cycles —
+    The pin row/column is zeroed out of both the assembled operator (via ``decouple_dof``) and the
+    dense operator, so the two share a null space and the V-cycle is a valid inner solve. Returns the cube-root of the residual-norm ratio over the last three cycles —
     the asymptotic per-cycle contraction factor. Shared by the mesh-independence and
     ordering-invariance checks.
     """
-    hierarchy = build_smoothed_hierarchy(owner, nb, np.ones(len(owner)), ncell, pin=pin)
+    a_pinned = decouple_dof(
+        convection_diffusion_operator(owner, nb, np.ones(len(owner)), ncell), pin
+    )
+    hierarchy = build_smoothed_hierarchy(a_pinned)
     a = _dense_laplacian(owner, nb, ncell)
     a[pin, :] = 0.0
     a[:, pin] = 0.0
@@ -80,7 +82,9 @@ def _pinned_v_cycle_factor(owner, nb, ncell, pin, *, seed=0):
 def _smoothed_residual_factor(n):
     """Geometric-mean V-cycle residual factor of the smoothed hierarchy on a singular Poisson."""
     owner, nb, ncell = _poisson(n)
-    hierarchy = build_smoothed_hierarchy(owner, nb, np.ones(owner.shape[0]), ncell, pin=None)
+    hierarchy = build_smoothed_hierarchy(
+        convection_diffusion_operator(owner, nb, np.ones(owner.shape[0]), ncell)
+    )
     o, m = jnp.asarray(owner), jnp.asarray(nb)
 
     def matvec(p):
@@ -136,7 +140,9 @@ def test_aggregation_coarse_space_is_ordering_robust() -> None:
 def test_smoothed_multigrid_is_linear_in_rhs() -> None:
     """A fixed cycle count makes the smoothed V-cycle a constant linear operator."""
     owner, nb, ncell = _poisson(8)
-    hierarchy = build_smoothed_hierarchy(owner, nb, np.ones(owner.shape[0]), ncell, pin=0)
+    hierarchy = build_smoothed_hierarchy(
+        decouple_dof(convection_diffusion_operator(owner, nb, np.ones(owner.shape[0]), ncell), 0)
+    )
     rng = np.random.default_rng(1)
     r1 = jnp.asarray(rng.standard_normal(ncell))
     r2 = jnp.asarray(rng.standard_normal(ncell))
@@ -235,10 +241,13 @@ def _convective_grid(n, mu, speed):
     return o, m, viscous, mdot, ncell, bd
 
 
+def _operator(owner, nb, visc, mdot, n, bd):
+    """The assembled frozen convection-diffusion operator (flow-side builder), as a scipy CSR matrix."""
+    return convection_diffusion_operator(owner, nb, visc, n, flux=mdot, boundary_diagonal=bd)
+
+
 def _dense(owner, nb, visc, mdot, n, bd):
-    a = np.asarray(_convection_diffusion_csr(owner, nb, visc, mdot, n).toarray())
-    a[np.diag_indices(n)] += bd
-    return jnp.asarray(a)
+    return jnp.asarray(np.asarray(_operator(owner, nb, visc, mdot, n, bd).toarray()))
 
 
 def test_convection_operator_is_a_nonsymmetric_m_matrix() -> None:
@@ -260,7 +269,7 @@ def test_convection_v_cycle_preconditions_gmres_at_high_peclet() -> None:
     reaches a residual orders of magnitude below the unpreconditioned one, at a cell Peclet number
     where the operator is convection-dominated."""
     owner, nb, visc, mdot, n, bd = _convective_grid(24, mu=1e-3, speed=1.0)  # cell Peclet ~40
-    hierarchy = build_convection_hierarchy(owner, nb, visc, mdot, n, boundary_diagonal=bd)
+    hierarchy = build_convection_hierarchy(_operator(owner, nb, visc, mdot, n, bd))
     a = _dense(owner, nb, visc, mdot, n, bd)
     b = jnp.asarray(np.random.default_rng(0).standard_normal(n))
 
@@ -284,7 +293,7 @@ def test_convection_multigrid_is_linear_in_rhs() -> None:
     """A fixed cycle/sweep count makes the convection V-cycle a constant linear operator (so it is a
     valid frozen left preconditioner that transposes cleanly for the adjoint)."""
     owner, nb, visc, mdot, n, bd = _convective_grid(8, mu=1e-2, speed=1.0)
-    hierarchy = build_convection_hierarchy(owner, nb, visc, mdot, n, boundary_diagonal=bd)
+    hierarchy = build_convection_hierarchy(_operator(owner, nb, visc, mdot, n, bd))
     rng = np.random.default_rng(1)
     r1 = jnp.asarray(rng.standard_normal(n))
     r2 = jnp.asarray(rng.standard_normal(n))
@@ -306,7 +315,7 @@ def test_convection_hierarchy_is_two_level_with_a_contractive_fine_smoother() ->
     directly. (Deep, mesh-independent convection coarsening is the reduction-based lAIR hierarchy.)
     """
     owner, nb, visc, mdot, n, bd = _convective_grid(24, mu=1e-3, speed=1.0)  # cell Peclet ~40
-    hierarchy = build_convection_hierarchy(owner, nb, visc, mdot, n, boundary_diagonal=bd)
+    hierarchy = build_convection_hierarchy(_operator(owner, nb, visc, mdot, n, bd))
     assert (
         len(hierarchy.levels) == 2
     )  # fine + one direct-solve coarse level; no smoothed coarse level
@@ -331,9 +340,7 @@ def test_air_v_cycle_is_mesh_independent_at_high_peclet() -> None:
     contractions = []
     for n in (24, 48):  # cell Peclet ~40; a 4x change in cell count
         owner, nb, visc, mdot, ncell, bd = _convective_grid(n, mu=1e-3, speed=1.0)
-        hierarchy = build_convection_air_hierarchy(
-            owner, nb, visc, mdot, ncell, boundary_diagonal=bd
-        )
+        hierarchy = build_air_hierarchy(_operator(owner, nb, visc, mdot, ncell, bd))
         a = _dense(owner, nb, visc, mdot, ncell, bd)
         b = jnp.asarray(np.random.default_rng(0).standard_normal(ncell))
         x = jnp.zeros(ncell)
@@ -353,7 +360,7 @@ def test_air_multigrid_is_linear_and_transposable() -> None:
     cleanly (``R != Pᵀ``), so it is a valid frozen left preconditioner for the forward solve and its
     ``M^T`` adjoint."""
     owner, nb, visc, mdot, n, bd = _convective_grid(12, mu=1e-2, speed=1.0)
-    hierarchy = build_convection_air_hierarchy(owner, nb, visc, mdot, n, boundary_diagonal=bd)
+    hierarchy = build_air_hierarchy(_operator(owner, nb, visc, mdot, n, bd))
     rng = np.random.default_rng(1)
     r1 = jnp.asarray(rng.standard_normal(n))
     r2 = jnp.asarray(rng.standard_normal(n))
@@ -383,15 +390,23 @@ def _triangle_with_isolated_cell():
     return owner, nb, 4
 
 
-def test_build_rejects_empty_mesh() -> None:
+def test_assembly_rejects_empty_mesh() -> None:
+    """The graph is validated where it is consumed — at assembly, before any coarsening."""
     with pytest.raises(ValueError, match="at least one cell"):
-        build_smoothed_hierarchy(np.array([], dtype=int), np.array([], dtype=int), np.array([]), 0)
+        convection_diffusion_operator(
+            np.array([], dtype=int), np.array([], dtype=int), np.array([]), 0
+        )
 
 
-def test_build_rejects_out_of_range_edge() -> None:
+def test_assembly_rejects_out_of_range_edge() -> None:
     with pytest.raises(ValueError, match="out of range"):
         # endpoint 5 >= n = 4
-        build_smoothed_hierarchy(np.array([0, 5]), np.array([1, 1]), np.ones(2), 4)
+        convection_diffusion_operator(np.array([0, 5]), np.array([1, 1]), np.ones(2), 4)
+
+
+def test_assembly_rejects_mismatched_edge_arrays() -> None:
+    with pytest.raises(ValueError, match="same shape"):
+        convection_diffusion_operator(np.array([0, 1]), np.array([1]), np.ones(2), 4)
 
 
 def test_isolated_cell_zero_diagonal_is_rejected_at_build() -> None:
@@ -399,14 +414,16 @@ def test_isolated_cell_zero_diagonal_is_rejected_at_build() -> None:
     bake ``1/0 = inf`` into the frozen operator and silently stall the runtime V-cycle."""
     owner, nb, n = _triangle_with_isolated_cell()
     with pytest.raises(ValueError, match="strictly positive"):
-        build_smoothed_hierarchy(owner, nb, np.ones(len(owner)), n, pin=None)
+        build_smoothed_hierarchy(convection_diffusion_operator(owner, nb, np.ones(len(owner)), n))
 
 
 def test_air_build_rejects_isolated_cell() -> None:
     """The reduction (lAIR) build guards its coarse operators' diagonals on the same footing."""
     owner, nb, n = _triangle_with_isolated_cell()
     with pytest.raises(ValueError, match="strictly positive"):
-        build_convection_air_hierarchy(owner, nb, np.ones(len(owner)), np.zeros(len(owner)), n)
+        build_air_hierarchy(
+            _operator(owner, nb, np.ones(len(owner)), np.zeros(len(owner)), n, np.zeros(n))
+        )
 
 
 def test_boundary_stiffened_cell_is_allowed() -> None:
@@ -415,6 +432,8 @@ def test_boundary_stiffened_cell_is_allowed() -> None:
     owner, nb, n = _triangle_with_isolated_cell()
     boundary_diagonal = np.array([0.0, 0.0, 0.0, 1.0])  # cell 3 gets a boundary stiffness
     hierarchy = build_smoothed_hierarchy(
-        owner, nb, np.ones(len(owner)), n, boundary_diagonal=boundary_diagonal
+        convection_diffusion_operator(
+            owner, nb, np.ones(len(owner)), n, boundary_diagonal=boundary_diagonal
+        )
     )
     assert len(hierarchy.levels) >= 1  # builds without raising

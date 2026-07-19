@@ -22,10 +22,12 @@ from aquaflux.flow import (
     pressure_schur_laplacian,
 )
 from aquaflux.flow.block_preconditioner import (
+    SmoothedAmgConvectionVelocity,
     SmoothedAmgVelocity,
     _characteristic_reference_state,
     _VelocityGeometry,
 )
+from aquaflux.flow.rhie_chow import momentum_diagonal
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -209,6 +211,46 @@ def test_reference_state_is_driven_by_a_moving_wall_too() -> None:
     closed = _cavity(walls)
     velocity, _ = closed.unpack(_characteristic_reference_state(closed))
     assert jnp.allclose(velocity, 0.0)
+
+
+def test_convection_velocity_operator_diagonal_is_the_momentum_diagonal() -> None:
+    """The convection velocity block's frozen operator carries the momentum diagonal ``a_P`` exactly.
+
+    The per-iterate rescaling ``sqrt(diag_ref / a_P)`` is only diagonal-exact if the assembled
+    reference operator's diagonal *is* ``a_P`` at that reference. It is built to be: the interior
+    upwind stencil supplies the interior part, the boundary-face owner coefficient supplies the rest,
+    and both come from the same shared viscous coefficient and reference flux the momentum diagonal
+    itself uses — so the two cannot drift, and nothing has to match a separately reconstructed
+    diagonal. The plain all-faces form is the one checked, since that is what the frozen diagonal
+    (``boundary_corrected=False``) the rescaling divides by uses.
+    """
+    asm = _channel(1.0)
+    n_cells = asm.mesh.n_cells
+    owner_e, nb_e, _ = asm.mesh.face_cells.interior_edges()
+    interior = np.asarray(asm.mesh.face_cells.interior)
+    reference_mdot = jax.lax.stop_gradient(asm.mass_flux(_characteristic_reference_state(asm)))
+    block = SmoothedAmgConvectionVelocity.build(
+        _VelocityGeometry.of(asm),
+        owner_e,
+        nb_e,
+        interior,
+        n_cells,
+        1,
+        reference_mdot,
+        method="twolevel",
+    )
+    reference_a_p = jnp.mean(
+        momentum_diagonal(
+            asm.mesh.face_cells,
+            asm.geometry,
+            asm.viscosity,
+            asm.normal_distance,
+            asm.interp_factor,
+            mdot_lagged=reference_mdot,
+        ),
+        axis=1,
+    )
+    assert jnp.allclose(block.hierarchy.levels[0].diagonal, reference_a_p, rtol=1e-12, atol=0.0)
 
 
 def test_schur_laplacian_is_conservative_and_spd() -> None:

@@ -28,10 +28,10 @@ import jax.numpy as jnp
 import numpy as np
 from jax.ops import segment_sum
 
-from aquaflux.schemes.interpolation import interpolate_owner_neighbour
+from aquaflux.solve.frozen_operator import convection_diffusion_operator, decouple_dof
 from aquaflux.solve.multigrid import (
     air_multigrid_solve,
-    build_convection_air_hierarchy,
+    build_air_hierarchy,
     build_convection_hierarchy,
     build_smoothed_hierarchy,
     convection_multigrid_solve,
@@ -39,7 +39,7 @@ from aquaflux.solve.multigrid import (
 )
 
 from .preconditioner import schur_face_coefficient
-from .rhie_chow import momentum_diagonal
+from .rhie_chow import momentum_diagonal, viscous_face_coefficient
 
 if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, MeshGeometry
@@ -209,14 +209,12 @@ class SmoothedAmgSchur(InnerSchurSolver):
         # A pressure-fixing outlet adds a boundary diagonal that de-singularises the Schur; freeze it
         # at the reference diagonal (all-zero for a closed all-wall domain, which the pin handles).
         reference_boundary = np.asarray(geometry.boundary_diagonal(reference_diagonal))
-        hierarchy = build_smoothed_hierarchy(
-            owner_e,
-            nb_e,
-            reference_coeff,
-            n_cells,
-            pin=geometry.pressure_pin,
-            boundary_diagonal=reference_boundary,
+        a = convection_diffusion_operator(
+            owner_e, nb_e, reference_coeff, n_cells, boundary_diagonal=reference_boundary
         )
+        if geometry.pressure_pin is not None:  # closed domain: regularize by decoupling the pin
+            a = decouple_dof(a, geometry.pressure_pin)
+        hierarchy = build_smoothed_hierarchy(a)
         return cls(
             geometry,
             hierarchy,
@@ -277,14 +275,29 @@ class SmoothedAmgVelocity(VelocityBlockSolver):
         n_cells: int,
         v_cycles: int,
     ) -> SmoothedAmgVelocity:
-        area = np.asarray(geometry.mesh_geometry.face.area)
-        over_distance = area / np.asarray(geometry.normal_distance)
-        boundary_owner = np.asarray(geometry.face_cells.owner)[~interior]
-        boundary_diagonal = np.zeros(n_cells)
-        np.add.at(boundary_diagonal, boundary_owner, over_distance[~interior])
-        hierarchy = build_smoothed_hierarchy(
-            owner_e, nb_e, over_distance[interior], n_cells, boundary_diagonal=boundary_diagonal
+        face_cells = geometry.face_cells
+        # Unit-viscosity viscous coefficient A/(d·n) — the geometry-only part of the momentum
+        # diagonal, rescaled to the current a_P in :meth:`apply`. From the shared coefficient with a
+        # unit viscosity, so the reference operator matches the momentum diagonal's viscous term.
+        over_distance = viscous_face_coefficient(
+            jnp.ones(n_cells),
+            geometry.normal_distance,
+            geometry.interp_factor,
+            face_cells,
+            geometry.mesh_geometry,
         )
+        # Boundary-face owner stiffness (the boundary part of the momentum diagonal), scattered to
+        # cells via the connectivity's own scatter rather than a hand-rolled index add.
+        boundary_owner = jnp.where(face_cells.interior, 0.0, over_distance)
+        boundary_diagonal = face_cells.scatter(boundary_owner, jnp.zeros_like(over_distance))
+        a = convection_diffusion_operator(
+            owner_e,
+            nb_e,
+            np.asarray(over_distance)[interior],
+            n_cells,
+            boundary_diagonal=np.asarray(boundary_diagonal),
+        )
+        hierarchy = build_smoothed_hierarchy(a)
         return cls(hierarchy, geometry.dim, v_cycles)
 
     def apply(self, a_p: jnp.ndarray) -> _VelocitySolve:
@@ -353,43 +366,38 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
         # supplied by the caller because it is assembler behaviour (the flux operator), not geometry.
         face_cells = geometry.face_cells
         mu = jax.lax.stop_gradient(geometry.viscosity)
-        mu_face = interpolate_owner_neighbour(mu, geometry.interp_factor, face_cells)
-        viscous = (
-            mu_face * geometry.mesh_geometry.face.area / geometry.normal_distance
-        )  # (n_faces,)
-        reference_a_p = jax.lax.stop_gradient(
-            jnp.mean(
-                momentum_diagonal(
-                    face_cells,
-                    geometry.mesh_geometry,
-                    mu,
-                    geometry.normal_distance,
-                    geometry.interp_factor,
-                    mdot_lagged=reference_mdot,
-                ),
-                axis=1,
-            )
+        # Central viscous coefficient, from the shared definition so the frozen operator's viscous term
+        # cannot drift from the momentum diagonal's.
+        viscous = viscous_face_coefficient(
+            mu, geometry.normal_distance, geometry.interp_factor, face_cells, geometry.mesh_geometry
         )
-        viscous_int = np.asarray(viscous)[interior]
-        mdot_int = np.asarray(reference_mdot)[interior]
-        # Boundary diagonal: the momentum diagonal minus the interior stiffness the off-diagonals
-        # imply, isolating the boundary-face contributions (Dirichlet walls/inlet + outlet convection)
-        # that make the operator nonsingular. The interior diagonal mirrors the upwind split above.
-        interior_diagonal = np.zeros(n_cells)
-        np.add.at(interior_diagonal, owner_e, viscous_int + np.maximum(mdot_int, 0.0))
-        np.add.at(interior_diagonal, nb_e, viscous_int + np.maximum(-mdot_int, 0.0))
-        boundary_diagonal = np.asarray(reference_a_p) - interior_diagonal
-        args = (owner_e, nb_e, viscous_int, mdot_int, n_cells)
+        # Boundary-face owner contribution to the momentum diagonal ``a_P`` (the plain all-faces form
+        # the frozen diagonal keeps: ``viscous + max(mdot, 0)`` on each boundary face), scattered to
+        # cells by the connectivity's own scatter. Built from the same ``viscous`` and reference flux as
+        # the interior off-diagonals, so the assembled operator's diagonal is exactly the frozen ``a_P``
+        # — no separate reconstruction of the interior upwind stencil.
+        boundary_owner = jnp.where(
+            face_cells.interior, 0.0, viscous + jnp.maximum(reference_mdot, 0.0)
+        )
+        boundary_diagonal = face_cells.scatter(boundary_owner, jnp.zeros_like(boundary_owner))
+        a = convection_diffusion_operator(
+            owner_e,
+            nb_e,
+            np.asarray(viscous)[interior],
+            n_cells,
+            flux=np.asarray(reference_mdot)[interior],
+            boundary_diagonal=np.asarray(boundary_diagonal),
+        )
         hierarchy: SmoothedHierarchy | AirHierarchy
         if method == "air":
             # Reduction-based (lAIR) coarsening: coarsens fully and stays Peclet-robust /
             # mesh-independent, so it scales where the two-level direct coarse solve cannot.
-            hierarchy = build_convection_air_hierarchy(*args, boundary_diagonal=boundary_diagonal)
+            hierarchy = build_air_hierarchy(a)
         elif method == "twolevel":
             # A single aggregation with a direct coarse solve: the aggregation coarse space stays a
             # stable correction at high cell Peclet, where a deeper Galerkin recursion does not (the
             # builder is two-level for exactly this reason).
-            hierarchy = build_convection_hierarchy(*args, boundary_diagonal=boundary_diagonal)
+            hierarchy = build_convection_hierarchy(a)
         else:
             raise ValueError(f"unknown convection method {method!r}; use 'twolevel' or 'air'")
         return cls(hierarchy, method, geometry.dim, v_cycles, sweeps, omega)

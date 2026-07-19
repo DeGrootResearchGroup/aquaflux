@@ -36,6 +36,38 @@ if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, MeshGeometry
 
 
+def viscous_face_coefficient(
+    mu: jnp.ndarray,
+    normal_distance: jnp.ndarray,
+    interp_factor: jnp.ndarray,
+    face_cells: FaceCellConnectivity,
+    geometry: MeshGeometry,
+) -> jnp.ndarray:
+    """Central viscous face coefficient ``mu_f A / (d.n)`` per face, shape ``(n_faces,)``.
+
+    The face viscosity is the owner/neighbour interpolation ``mu_f`` (the same blend every other face
+    value uses), times the face area over the normal distance. The single definition of the viscous
+    coupling shared by the momentum diagonal (:func:`momentum_diagonal`) and the frozen
+    convection-diffusion operator the velocity-block preconditioner coarsens, so the two cannot drift.
+
+    Parameters
+    ----------
+    mu : jnp.ndarray
+        Per-cell dynamic viscosity, shape ``(n_cells,)``.
+    normal_distance : jnp.ndarray
+        Owner-to-neighbour (or owner-to-face on boundaries) normal distance ``d . n`` per face,
+        shape ``(n_faces,)``.
+    interp_factor : jnp.ndarray
+        Face interpolation factor ``g``, shape ``(n_faces,)``.
+    face_cells : FaceCellConnectivity
+        The face→cell incidence (``mesh.face_cells``).
+    geometry : MeshGeometry
+        The mesh metrics; reads face areas.
+    """
+    mu_face = interpolate_owner_neighbour(mu, interp_factor, face_cells)
+    return mu_face * geometry.face.area / normal_distance
+
+
 def momentum_diagonal(
     face_cells: FaceCellConnectivity,
     geometry: MeshGeometry,
@@ -85,8 +117,7 @@ def momentum_diagonal(
         normal as ``sum_i n_i^2 (V / a_P_i)``, which reduces to the scalar ``V / a_P`` for equal
         components.
     """
-    mu_face = interpolate_owner_neighbour(mu, interp_factor, face_cells)
-    viscous = mu_face * geometry.face.area / normal_distance  # central viscous coefficient
+    viscous = viscous_face_coefficient(mu, normal_distance, interp_factor, face_cells, geometry)
 
     # The scatter masks the neighbour coefficient to zero on boundary faces, so pass it unmasked.
     owner_coeff = viscous
