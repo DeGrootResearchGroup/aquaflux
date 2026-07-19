@@ -330,61 +330,6 @@ class SSTTurbulence(eqx.Module):
 
         return residual
 
-    def k_preconditioner(
-        self,
-        mdot: jnp.ndarray,
-        closure: SSTClosureFields,
-        reference: jnp.ndarray,
-        *,
-        method: str = "twolevel",
-    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
-        """A convection-diffusion AMG preconditioner for the k-equation linear solve.
-
-        Frozen for the sweep's ``closure`` and ``mdot`` (the same fields ``k_residual`` uses), it
-        makes the k-solve's Krylov iteration mesh-independent at the high cell Peclet where an
-        unpreconditioned solve would otherwise cost ``O(N)`` iterations (or stall). See
-        :func:`~aquaflux.turbulence.preconditioner.scalar_transport_preconditioner`.
-        """
-        diffusivity = self._diffusivity(
-            closure.nu_t, closure.f1, self.model.sigma_k1, self.model.sigma_k2
-        )
-        return scalar_transport_preconditioner(
-            self.mesh,
-            self.geometry,
-            diffusivity.values,
-            self._volume_flux(mdot),
-            self.k_residual(mdot, closure),
-            reference,
-            method=method,
-        )
-
-    def omega_preconditioner(
-        self,
-        mdot: jnp.ndarray,
-        closure: SSTClosureFields,
-        reference: jnp.ndarray,
-        *,
-        method: str = "twolevel",
-    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
-        """A convection-diffusion AMG preconditioner for the omega-equation linear solve.
-
-        As :meth:`k_preconditioner`, with the omega diffusivity and the near-wall fixed cells detached
-        from the coarsening (their rows are the value fixation, not a transport balance).
-        """
-        diffusivity = self._diffusivity(
-            closure.nu_t, closure.f1, self.model.sigma_omega1, self.model.sigma_omega2
-        )
-        return scalar_transport_preconditioner(
-            self.mesh,
-            self.geometry,
-            diffusivity.values,
-            self._volume_flux(mdot),
-            self.omega_residual(mdot, closure),
-            reference,
-            method=method,
-            fixed_cells=self.wall_cells,
-        )
-
     def k_shift_policy(
         self,
         mdot: jnp.ndarray,
@@ -399,12 +344,16 @@ class SSTTurbulence(eqx.Module):
         k-solve from a cold start) and, when ``method`` is set, the convection-diffusion AMG that
         preconditions the shifted operator -- the two problem-specific inputs
         :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` supplies to the continuation
-        engine. Frozen for the sweep's ``closure`` and ``mdot`` (as :meth:`k_preconditioner`).
+        engine. Frozen for the sweep's ``closure`` and ``mdot`` (the same fields ``k_residual`` uses).
 
         Parameters
         ----------
-        mdot, closure, reference
-            As :meth:`k_preconditioner`.
+        mdot : jnp.ndarray
+            The flow's Rhie--Chow mass flux, shape ``(n_faces,)``.
+        closure : SSTClosureFields
+            The frozen closure fields of the current sweep.
+        reference : jnp.ndarray
+            The field the frozen operator linearizes at (the current ``k``), shape ``(n_cells,)``.
         method : {"twolevel", "air"} or None
             The AMG method for the shifted-operator preconditioner, or ``None`` for a shift-only
             (unpreconditioned) continuation solve.
@@ -444,7 +393,7 @@ class SSTTurbulence(eqx.Module):
 
         As :meth:`k_shift_policy`, with the omega diffusivity and the near-wall fixed cells: their
         shift is zeroed (an exact value fixation needs no pseudo-time), and they are detached from the
-        AMG coarsening as in :meth:`omega_preconditioner`.
+        AMG coarsening (their rows are the value fixation, not a transport balance).
         """
         diffusivity = self._diffusivity(
             closure.nu_t, closure.f1, self.model.sigma_omega1, self.model.sigma_omega2

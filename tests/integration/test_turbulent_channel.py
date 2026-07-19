@@ -15,7 +15,7 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax.numpy as jnp
-import lineax as lx
+import lineax
 import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
@@ -36,6 +36,7 @@ from aquaflux.turbulence import (
     SSTTurbulence,
     inlet_k,
     inlet_omega,
+    scalar_pseudo_transient_solve,
     solve_segregated,
 )
 
@@ -106,24 +107,19 @@ def test_high_reynolds_turbulent_channel_solves() -> None:
     solve_flow = reused_flow_solve(
         reference_momentum, schur_scaling="msimpler", velocity="convection"
     )
-    gmres = lx.GMRES(rtol=1e-8, atol=1e-8, restart=32, stagnation_iters=32)
-
-    def solve_scalar(residual, state, preconditioner):
-        return NewtonSolver(iterations=6, solver=gmres, preconditioner=preconditioner).solve(
-            residual, state
-        )
 
     flow, k, omega = solve_segregated(
         momentum,
         turbulence,
         solve_flow,
-        solve_scalar,
+        scalar_pseudo_transient_solve(max_steps=40),
         momentum.initial_state(),
         jnp.full(mesh.n_cells, k_in),
         jnp.full(mesh.n_cells, omega_in),
         density=RHO,
         sweeps=8,
         relaxation=0.5,
+        scalar_preconditioner="twolevel",
     )
 
     # Finite and physical.
@@ -142,10 +138,14 @@ def test_exact_production_limiter_solves_with_the_preconditioner() -> None:
 
     With ``explicit_production_limiter=False`` the k-Jacobian keeps the production limiter's exact
     derivative, which is indefinite where the cap is active -- an unpreconditioned solve stagnates
-    there. The convection-diffusion preconditioner reconstructs the operator well enough to rescue it,
-    so the exact-Newton k-solve converges (to machine precision -- exact Newton is quadratic). This
-    documents that the earlier exact-linearization failure was the preconditioner's diagonal bug, not
-    an unsolvable operator, and that the exact linearization is a usable option.
+    there. The convection-diffusion AMG the continuation policy carries (its ``preconditioner``)
+    reconstructs the operator well enough to rescue it, so a preconditioned exact-Newton k-solve
+    converges to machine precision (quadratic). This isolates the **preconditioner** on the exact
+    operator -- a bare Newton solve, no pseudo-time shift -- to document that the earlier
+    exact-linearization failure was the preconditioner's diagonal bug, not an unsolvable operator.
+    (The pseudo-transient shift the segregated driver adds is a *positive* diagonal that stabilizes the
+    indefinite operator from a cold start but does not converge it as deeply; that robustness, not this
+    deep exact-Newton convergence, is what the coupled solve relies on.)
     """
     mesh, momentum, turbulence, k_in, omega_in = _channel(32, 24, explicit_production_limiter=False)
     geometry = momentum.geometry
@@ -164,8 +164,9 @@ def test_exact_production_limiter_solves_with_the_preconditioner() -> None:
     assert int(np.sum(production > cap)) > n // 4  # the cap is genuinely active over the field
 
     residual = turbulence.k_residual(mdot, closure)
-    preconditioner = turbulence.k_preconditioner(mdot, closure, k)
-    gmres = lx.GMRES(rtol=1e-8, atol=1e-8, restart=32, stagnation_iters=32)
+    # The AMG the continuation policy carries, applied to a bare Newton solve to isolate it.
+    preconditioner = turbulence.k_shift_policy(mdot, closure, k, method="twolevel").preconditioner
+    gmres = lineax.GMRES(rtol=1e-8, atol=1e-8, restart=32, stagnation_iters=32)
     solved = NewtonSolver(iterations=6, solver=gmres, preconditioner=preconditioner).solve(
         residual, k
     )

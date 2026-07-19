@@ -34,6 +34,7 @@ from aquaflux.turbulence import (
     bulk_velocity,
     inlet_k,
     inlet_omega,
+    scalar_pseudo_transient_solve,
     solve_segregated,
 )
 
@@ -77,19 +78,13 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=75):
     def solve_flow(mom, state):
         return NewtonSolver(iterations=15, solver=direct).solve(mom.residual, state)
 
-    def solve_scalar(residual, state, precond):
-        gmres = lx.GMRES(rtol=1e-8, atol=1e-8, restart=32, stagnation_iters=32)
-        return NewtonSolver(iterations=6, solver=gmres, preconditioner=precond).solve(
-            residual, state
-        )
-
     warm = jnp.zeros((mesh.n_cells, 2)).at[:, 0].set(U_B)
     flow0 = momentum.pack(warm, jnp.zeros(mesh.n_cells))
     flow, k, omega = solve_segregated(
         momentum,
         turbulence,
         solve_flow,
-        solve_scalar,
+        scalar_pseudo_transient_solve(max_steps=40),
         flow0,
         jnp.full(mesh.n_cells, k_in),
         jnp.full(mesh.n_cells, omega_in),
