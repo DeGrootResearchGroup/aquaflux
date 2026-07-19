@@ -18,8 +18,13 @@ from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, N
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver, NewtonSolver
-from aquaflux.turbulence import SSTModel, SSTTurbulence, solve_segregated
+from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver
+from aquaflux.turbulence import (
+    SSTModel,
+    SSTTurbulence,
+    scalar_pseudo_transient_solve,
+    solve_segregated,
+)
 
 RHO, NU, U_LID = 1.0, 1e-2, 1.0
 WALLS = ("top", "bottom", "left", "right")
@@ -32,10 +37,6 @@ def _solve_flow(momentum, state):
         max_steps=30, forward_step=DampedNewtonStep(preconditioner=preconditioner)
     )
     return solver.solve(lambda s, m: m.residual(s), state, momentum)
-
-
-def _solve_scalar(residual, state, preconditioner=None):
-    return NewtonSolver(iterations=5, preconditioner=preconditioner).solve(residual, state)
 
 
 def _cavity():
@@ -74,28 +75,28 @@ def _cavity():
 
 @pytest.mark.slow
 def test_segregated_cavity_is_stable_and_active() -> None:
+    """The segregated driver solves the coupled cavity end to end, the stiff k/omega solves globalized
+    by pseudo-transient continuation -- stable, positive/finite fields, active eddy viscosity, developed
+    flow."""
     mesh, momentum, turbulence = _cavity()
     flow, k, omega = solve_segregated(
         momentum,
         turbulence,
         _solve_flow,
-        _solve_scalar,
+        scalar_pseudo_transient_solve(max_steps=40),
         momentum.initial_state(),
         jnp.full(mesh.n_cells, 1e-4),  # seed k > 0 so the shear production can start
         jnp.full(mesh.n_cells, 1.0),
         density=RHO,
         sweeps=10,
+        scalar_preconditioner="twolevel",
     )
-    # Stable and finite.
     assert not bool(jnp.any(jnp.isnan(flow)))
     assert not bool(jnp.any(jnp.isnan(k)))
     assert not bool(jnp.any(jnp.isnan(omega)))
-    # The turbulence fields stayed positive (floored).
     assert float(jnp.min(k)) >= 0.0
     assert float(jnp.min(omega)) > 0.0
-    # Turbulence is active: the eddy viscosity is non-trivial somewhere.
     nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
     assert float(jnp.max(nu_t)) > 0.0
-    # The lid drives the flow.
     velocity, _ = momentum.unpack(flow)
     assert float(jnp.max(jnp.abs(velocity[:, 0]))) > 0.3 * U_LID

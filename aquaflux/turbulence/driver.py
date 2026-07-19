@@ -14,11 +14,12 @@ The relaxation and the floor are the segregated iteration's stabilisers; the flo
 nonlinear-iteration safeguard that should be inactive once the fields have converged (a converged
 turbulent field is strictly positive). Constant density (see :mod:`~aquaflux.turbulence.transport`).
 
-The flow and scalar solvers are **injected** rather than chosen here: the coupled p--U flow needs a
-preconditioned Newton solve while a single k/omega equation is better conditioned, and the choice
-(preconditioner, iteration counts, adjoint) is the caller's to make. ``solve_flow(momentum, state)``
-solves the momentum residual for the (re-viscosified) assembler, and ``solve_scalar(residual,
-state)`` solves a scalar residual.
+The flow and scalar solvers are **injected** rather than chosen here (the preconditioner, iteration
+counts, and adjoint are the caller's to set): ``solve_flow(momentum, state)`` solves the momentum
+residual for the (re-viscosified) assembler, and ``solve_scalar(residual, state, policy)`` solves a
+scalar residual. Both stiff reactive scalars are globalized by pseudo-transient continuation -- the
+driver builds the per-sweep :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` and the
+caller wires :func:`~aquaflux.turbulence.scalar_pseudo_transient_solve`.
 """
 
 from __future__ import annotations
@@ -98,9 +99,11 @@ def solve_segregated(
         ``solve_flow(momentum, state) -> state`` solves the momentum residual of the (re-viscosified)
         assembler from ``state`` (e.g. a preconditioned Newton solve).
     solve_scalar : callable
-        ``solve_scalar(residual, state, preconditioner) -> state`` solves a scalar residual function
-        from ``state``. ``preconditioner`` is a ``phi -> M`` factory (or ``None``) the solve may use to
-        precondition its linear steps.
+        ``solve_scalar(residual, state, policy) -> state`` solves a scalar residual function from
+        ``state``, globalizing it by pseudo-transient continuation. ``policy`` is the per-sweep
+        :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` (the transport shift diagonal plus
+        the optional AMG) the driver builds; wire it with
+        :func:`~aquaflux.turbulence.scalar_pseudo_transient_solve`.
     flow : jnp.ndarray
         The initial flat flow state ``[vel..., pressure]``, shape ``((dim + 1) n_cells,)``.
     k, omega : jnp.ndarray
@@ -114,9 +117,10 @@ def solve_segregated(
     k_floor, omega_floor : float
         Positive floors applied to ``k`` and ``omega`` after each sweep.
     scalar_preconditioner : {"twolevel", "air"} or None
-        When set, build a convection-diffusion AMG preconditioner for each k/omega solve (the given
-        multigrid method) and pass it to ``solve_scalar`` -- the mesh-independent scalar solve a
-        high-Reynolds case needs. ``None`` passes ``None`` (an unpreconditioned scalar solve).
+        When set, the per-sweep :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` carries a
+        convection-diffusion AMG (the given multigrid method) for its shifted-operator solve -- the
+        mesh-independent scalar solve a high-Reynolds case needs. ``None`` is a shift-only
+        (unpreconditioned) continuation solve.
     bulk_velocity_target : float or None
         When set, drive a streamwise-periodic channel to this **bulk velocity** by a mass-flow
         controller: after each sweep's flow solve the body force is rescaled toward the
@@ -156,18 +160,14 @@ def solve_segregated(
 
         closure = turbulence.closure_fields(momentum.velocity_gradient(flow), k, omega)
         mdot = momentum.mass_flux(flow)
-        k_precond = (
-            None
-            if scalar_preconditioner is None
-            else turbulence.k_preconditioner(mdot, closure, k, method=scalar_preconditioner)
-        )
-        k_solved = solve_scalar(turbulence.k_residual(mdot, closure), k, k_precond)
+        # Each stiff reactive scalar is globalized by pseudo-transient continuation: the shift policy
+        # bundles the transport shift diagonal with the (optional) AMG for the injected solve to use.
+        k_policy = turbulence.k_shift_policy(mdot, closure, k, method=scalar_preconditioner)
+        k_solved = solve_scalar(turbulence.k_residual(mdot, closure), k, k_policy)
         k = jnp.maximum(_relax(k, k_solved, relaxation), k_floor)
-        omega_precond = (
-            None
-            if scalar_preconditioner is None
-            else turbulence.omega_preconditioner(mdot, closure, omega, method=scalar_preconditioner)
+        omega_policy = turbulence.omega_shift_policy(
+            mdot, closure, omega, method=scalar_preconditioner
         )
-        omega_solved = solve_scalar(turbulence.omega_residual(mdot, closure), omega, omega_precond)
+        omega_solved = solve_scalar(turbulence.omega_residual(mdot, closure), omega, omega_policy)
         omega = jnp.maximum(_relax(omega, omega_solved, relaxation), omega_floor)
     return flow, k, omega
