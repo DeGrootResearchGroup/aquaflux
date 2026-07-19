@@ -34,14 +34,18 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
 - **`boundary.py`** — inlet/wall closures for k and ω over the generic scalar boundary machinery.
 - **`driver.py` — `solve_segregated`.** The outer Picard loop: μ_t → flow solve → k solve → ω
   solve, with under-relaxation and positivity floors as the stabilizers, and injected
-  `solve_flow` / `solve_scalar` so the driver is pure orchestration.
+  `solve_flow` / `solve_scalar` so the driver is pure orchestration. The loop **stops on the coupled
+  Picard increment** (`_relative_change` — the largest per-field relative L2 change over a sweep <
+  `rtol`), with `max_sweeps` only a backstop; the outer under-relaxation is the **SER ramp**
+  `_sweep_relaxation` (opens from the `relaxation` floor toward `relaxation_max` as that increment
+  falls, constant when `relaxation_max is None`). Hitting `max_sweeps` without converging warns.
 
 **Known gap (tracked in issue #69 — do not re-derive or "quietly fix" without reading it):** the
-outer loop currently ships as a fixed-count Python `for _ in range(sweeps)` with **no
-convergence test** and **no coupled-residual adjoint** — so differentiating it unrolls the Picard
-sweeps onto the tape, which §5 below forbids. This is a *deliberately-staged intermediate*, not
-the target state. The globalization/adjoint decision (robust segregated loop vs. monolithic
-coupled residual) is issue #69; treat the items below as the standard that decision must meet.
+outer loop still has **no coupled-residual adjoint** — so differentiating it unrolls the Picard
+sweeps onto the tape, which §5 below forbids; it is forward-only. The convergence-based stop and
+adaptive outer relaxation (Option 1 hardening) shipped; the monolithic coupled residual + its IFT
+adjoint (Option 2, the target state) is the remaining #69 work. Treat the items below as the
+standard that decision must meet.
 
 ## Binding decisions
 
@@ -63,16 +67,18 @@ coupled residual) is issue #69; treat the items below as the standard that decis
   adjoint, it is **not done** — it is an intermediate step (Principle 0), and the deferred adjoint
   must be filed as a tracked issue at merge time, not left implicit.
 
-- **Convergence-based outer stop, not a fixed sweep count.** The robust form of the loop tests the
-  coupled residual and stops on it (with a sweep cap as a backstop), rather than running a hard-coded
-  `sweeps`. A fixed count is acceptable only as an explicitly-labelled intermediate.
+- **Convergence-based outer stop, not a fixed sweep count — BUILT.** The loop tests the coupled
+  Picard increment and stops on it (`rtol`), with `max_sweeps` only a backstop and a warning when the
+  cap is hit unconverged. Do **not** reintroduce a hard-coded `sweeps` count. The increment measure
+  is the residual-agnostic per-field relative change, not a raw combined norm (the field scales
+  differ by orders of magnitude).
 
 - **Globalize the outer loop and the scalar sub-solves like everything else.** The flow block is
   globalized by pseudo-transient continuation; the k/ω transport sub-solves and the outer coupling
   must reach the same standard (a scalar `ShiftPolicy` continuation on the transport diagonal for the
-  sub-solves; adaptive under-relaxation / Aitken–Anderson, or a monolithic coupled residual, for the
-  loop). Constant under-relaxation plus positivity floors is the *stabilizer of last resort*, not the
-  globalization.
+  sub-solves; adaptive under-relaxation — **the SER ramp is built** — with Aitken/Anderson or a
+  monolithic coupled residual as the further steps, for the loop). Constant under-relaxation plus
+  positivity floors is the *stabilizer of last resort*, not the globalization.
 
 - **Positivity floors must be inactive at convergence (adjoint honesty, design note §3.3 —
   binding).** `k ← max(k, k_floor)`, `ω ← max(ω, ω_floor)` and the `CD_kω` / F-blend floors have zero

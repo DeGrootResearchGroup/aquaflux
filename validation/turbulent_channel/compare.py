@@ -125,7 +125,7 @@ def solve_case(Re_b, ny, growth, beta0, sweeps):
         jnp.full(mesh.n_cells, k_in),
         jnp.full(mesh.n_cells, omega_in),
         density=RHO,
-        sweeps=sweeps,
+        max_sweeps=sweeps,
         relaxation=0.5,
         bulk_velocity_target=U_B,  # the mass-flow controller drives the body force to hit U_b
         flow_direction=0,

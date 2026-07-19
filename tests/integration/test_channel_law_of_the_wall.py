@@ -89,7 +89,7 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=75):
         jnp.full(mesh.n_cells, k_in),
         jnp.full(mesh.n_cells, omega_in),
         density=RHO,
-        sweeps=sweeps,
+        max_sweeps=sweeps,
         relaxation=0.5,
         bulk_velocity_target=U_B,
         flow_direction=0,
