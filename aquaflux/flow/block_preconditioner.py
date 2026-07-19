@@ -615,7 +615,8 @@ class BlockPreconditioner(eqx.Module):
         # built at the **mass matrix ``ρ V`` (k = 1)** — the constant-coefficient pressure Poisson
         # ``A/(d·n)``; the operating scale ``k`` is applied per iterate in :meth:`apply_at` (the
         # symmetric rescaling absorbs a scalar exactly). ``k`` is auto-calibrated there to
-        # ``mean(V / a_P)`` from the **real** momentum diagonal, so it tracks the true velocity /
+        # ``mean(ρV / a_P)`` from the **real** momentum diagonal (in the same ``ρV`` units as ``Q̂``, so
+        # the density is not divided back out of the Schur coefficient), so it tracks the true velocity /
         # density / viscosity scale with no unit-speed assumption; ``msimpler_scale`` overrides it.
         schur_mass_diagonal = None
         if schur_scaling == "msimpler":
@@ -708,21 +709,26 @@ class BlockPreconditioner(eqx.Module):
         )
 
     def _msimpler_scale(self, state: jnp.ndarray) -> jnp.ndarray:
-        """The MSIMPLER scale ``k`` at ``state`` — ``mean(V / a_P)`` from the real momentum diagonal.
+        """The MSIMPLER scale ``k`` at ``state`` — ``mean(ρV / a_P)`` from the real momentum diagonal.
 
-        ``k`` sets the frozen Schur diagonal ``Q̂ = ρ V / k`` (Schur coefficient ``k · A/(d·n)``). It is
-        calibrated from the **actual** momentum diagonal ``a_P`` at the current flow — which encodes
-        the true velocity / density / viscosity scale — so the MSIMPLER Schur magnitude matches the
-        SIMPLE Schur at the operating convection with **no unit-speed assumption** (an air/water or
-        otherwise non-unit-speed problem calibrates itself). The **un-shifted** diagonal is used (via
-        :meth:`frozen_momentum_diagonal`, not the continuation's shifted ``a_P``): an early large
-        pseudo-transient shift would give a spuriously large ``a_P``, hence a spuriously weak Schur.
-        ``msimpler_scale`` overrides the calibration with a fixed value.
+        ``k`` sets the frozen, velocity-independent Schur diagonal ``schur_a_P = Q̂ / k = ρV / k``, an
+        ``a_P``-magnitude stand-in for the real momentum diagonal, so the Schur coefficient
+        ``ρ_f (V/schur_a_P)_f A/(d·n)`` matches the SIMPLE coefficient ``ρ_f (V/a_P)_f A/(d·n)`` at the
+        operating convection. ``k`` is calibrated in the **same ``ρV`` units as ``Q̂``** (reusing the
+        frozen :attr:`schur_mass_diagonal`), so the density ``Q̂`` carries is not divided back out — the
+        assembled coefficient keeps its ``ρ`` factor for ρ≠1 (air, water), not only at ρ=1. Taken from
+        the **actual** momentum diagonal ``a_P`` at the current flow, which encodes the true velocity /
+        density / viscosity scale, so a non-unit-speed problem calibrates itself with **no unit-speed
+        assumption**. The **un-shifted** diagonal is used (via :meth:`frozen_momentum_diagonal`, not the
+        continuation's shifted ``a_P``): an early large pseudo-transient shift would give a spuriously
+        large ``a_P``, hence a spuriously weak Schur. ``msimpler_scale`` overrides the calibration with a
+        fixed value. Frozen (``stop_gradient``) like :meth:`frozen_momentum_diagonal`, so the scale never
+        leaks a live cell-volume or density gradient into the adjoint.
         """
         if self.msimpler_scale is not None:
             return jnp.asarray(float(self.msimpler_scale))
         a_p = self.frozen_momentum_diagonal(state)
-        return jnp.mean(self.assembler.geometry.cell.volume / a_p)
+        return jax.lax.stop_gradient(jnp.mean(self.schur_mass_diagonal / a_p))
 
     def apply_at(
         self, state: jnp.ndarray, a_p: jnp.ndarray

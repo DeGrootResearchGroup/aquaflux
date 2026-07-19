@@ -4,12 +4,15 @@ damped-Jacobi inner solve. Both are tested in isolation from the Newton driver."
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import (
+    BlockPreconditioner,
     MomentumContinuity,
     MovingWall,
     NoSlipWall,
@@ -42,13 +45,13 @@ def _geometry(n, perturb=0.0):
     )
 
 
-def _channel(u_in):
-    """A small open channel driven by a uniform velocity inlet at speed ``u_in``."""
+def _channel(u_in, rho=1.0):
+    """A small open channel driven by a uniform velocity inlet at speed ``u_in`` and density ``rho``."""
     mesh = structured_grid_2d(10, NY, lx=4.0, ly=H, named_boundaries=True)
     return MomentumContinuity.build(
         mesh,
         mesh.geometry(),
-        PropertyModel({"viscosity": Constant(1e-2), "density": Constant(1.0)}),
+        PropertyModel({"viscosity": Constant(1e-2), "density": Constant(rho)}),
         CompactGreenGauss(),
         BoundaryConditions(
             {
@@ -60,6 +63,58 @@ def _channel(u_in):
         ),
         advection_scheme=FirstOrderUpwind(),
     )
+
+
+def _msimpler_at(asm, u_in):
+    """The MSIMPLER preconditioner for ``asm`` and a uniform inlet-speed flow, and that state."""
+    preconditioner = BlockPreconditioner.build(asm, schur_scaling="msimpler")
+    velocity = jnp.zeros((asm.mesh.n_cells, asm.mesh.dim)).at[:, 0].set(u_in)
+    state = asm.pack(velocity, jnp.zeros(asm.mesh.n_cells))
+    return preconditioner, state
+
+
+def test_msimpler_schur_scale_carries_density_like_simple() -> None:
+    """MSIMPLER's Schur coefficient keeps its density factor for rho != 1, matching SIMPLE (issue #40).
+
+    ``schur_face_coefficient`` applies ``rho_face`` itself, so the frozen MSIMPLER diagonal
+    ``schur_a_P = Q_hat / k = rho V / k`` must be calibrated in ``rho V`` units (``k = mean(rho V /
+    a_P)``); otherwise the density cancels and the coefficient comes out ``rho`` times too small. At
+    water density (rho = 1000) the per-cell effective Schur coefficient ``rho V / schur_a_P`` must
+    match SIMPLE's ``rho V / a_P`` in mean magnitude -- before the fix it was 1000x smaller.
+    """
+    rho = 1000.0
+    asm = _channel(u_in=3.0, rho=rho)
+    preconditioner, state = _msimpler_at(asm, u_in=3.0)
+
+    a_p = preconditioner.frozen_momentum_diagonal(state)  # the real a_P (SIMPLE's schur diagonal)
+    schur_a_p = preconditioner.schur_mass_diagonal / preconditioner._msimpler_scale(
+        state
+    )  # rho V / k
+
+    rho_v = asm.density * asm.geometry.cell.volume
+    eff_simple = float(jnp.mean(rho_v / a_p))  # mean(rho V / a_P) = k
+    eff_msimpler = float(
+        jnp.mean(rho_v / schur_a_p)
+    )  # mean(rho V / (rho V / k)) = k iff k carries rho
+    assert eff_msimpler == pytest.approx(eff_simple, rel=1e-6)
+
+
+def test_msimpler_scale_does_not_leak_a_geometry_gradient() -> None:
+    """The MSIMPLER scale is frozen: no live cell-volume gradient reaches the Schur diagonal (issue #40).
+
+    ``k`` feeds ``schur_a_P`` (the Schur operator), so a live cell-volume dependence would leak a
+    mesh-geometry gradient into the adjoint. The scale must be ``stop_gradient``-ed, like the momentum
+    diagonal it is built from -- scaling the cell volumes must not move it.
+    """
+    asm = _channel(u_in=3.0, rho=1.2)
+    preconditioner, state = _msimpler_at(asm, u_in=3.0)
+
+    def scale_with_scaled_volumes(s):
+        scaled = eqx.tree_at(lambda a: a.geometry.cell.volume, asm, asm.geometry.cell.volume * s)
+        moved = eqx.tree_at(lambda p: p.assembler, preconditioner, scaled)
+        return moved._msimpler_scale(state)
+
+    assert float(jax.grad(scale_with_scaled_volumes)(1.0)) == 0.0
 
 
 @pytest.mark.parametrize("u_in", [0.01, 1.0, 100.0])
