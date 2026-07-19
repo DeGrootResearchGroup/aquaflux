@@ -29,8 +29,12 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
-from aquaflux.solve.continuation import DivergenceGuard, PseudoTransientStep, ShiftTerm
-from aquaflux.solve.implicit import ImplicitNewtonSolver
+from aquaflux.solve import (
+    DivergenceGuard,
+    ImplicitNewtonSolver,
+    PseudoTransientStep,
+    ShiftTerm,
+)
 
 _Factory = Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]
 _ScalarResidual = Callable[[jnp.ndarray], jnp.ndarray]

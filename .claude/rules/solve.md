@@ -18,6 +18,16 @@ Governed by the root `CLAUDE.md` Engineering Principles.
 - A Newton driver on `R(state, params) = 0` using the AD Jacobian (JVP/VJP), and a
   linear solve wrapped so its gradient comes from **implicit differentiation**, not by
   unrolling Krylov iterations onto the tape.
+
+> **`solve/__init__.py` is the API boundary (binding, #48).** Everything consumable from this
+> package is re-exported there, and **library code imports `from aquaflux.solve import …`, never
+> `from aquaflux.solve.<submodule> import …`**. A name absent from `__all__` is internal (reach for it
+> only from that submodule's own unit tests, which are exempt). When you add a public entry point,
+> export it in the *same* change — a partial surface is what pushes consumers into deep imports and
+> makes `__init__` stop describing the package (the block preconditioner once pulled nine names
+> straight out of `solve.multigrid` while `__all__` advertised only the smoothed-aggregation third of
+> the AMG toolkit). `tests/unit/test_solve_api.py` pins both halves and fails with the offending
+> file named, so this cannot erode silently.
 - Milestone 0: a single scalar diffusion system; the plumbing must generalize to the
   coupled p–U block later without redesign.
 
@@ -152,7 +162,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   - **Degenerate-mesh guard (binding — validated where the graph is consumed).** Because the
     hierarchies are built once off-jit and then frozen, a degenerate mesh must fail *there*, not as a
     silently stalling runtime V-cycle. Now that the builders are operator-in, the **graph** check lives
-    with the assembler: `solve.frozen_operator.require_valid_graph` (`n ≥ 1`, matched `owner`/`nb`, in-range
+    with the assembler: `frozen_operator._require_valid_graph` (`n ≥ 1`, matched `owner`/`nb`, in-range
     endpoints) runs inside `convection_diffusion_operator`; the two build loops
     (`_build_aggregation_hierarchy` for smoothed/convection, `build_air_hierarchy` for lAIR) call
     `_require_positive_diagonal` on **every** level's operator diagonal before inverting/freezing it,

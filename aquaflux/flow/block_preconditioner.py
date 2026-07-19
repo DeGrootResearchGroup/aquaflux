@@ -28,13 +28,14 @@ import jax.numpy as jnp
 import numpy as np
 from jax.ops import segment_sum
 
-from aquaflux.solve.frozen_operator import convection_diffusion_operator, decouple_dof
-from aquaflux.solve.multigrid import (
+from aquaflux.solve import (
     air_multigrid_solve,
     build_air_hierarchy,
     build_convection_hierarchy,
     build_smoothed_hierarchy,
+    convection_diffusion_operator,
     convection_multigrid_solve,
+    decouple_dof,
     smoothed_multigrid_solve,
 )
 
@@ -43,7 +44,7 @@ from .rhie_chow import momentum_diagonal, viscous_face_coefficient
 
 if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, MeshGeometry
-    from aquaflux.solve.multigrid import AirHierarchy, SmoothedHierarchy
+    from aquaflux.solve import AirHierarchy, SmoothedHierarchy
 
     from .momentum import MomentumContinuity
 

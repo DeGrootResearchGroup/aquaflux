@@ -24,7 +24,7 @@ import numpy as np
 import scipy.sparse as sp
 
 
-def require_valid_graph(n: int, owner: np.ndarray, nb: np.ndarray, where: str) -> None:
+def _require_valid_graph(n: int, owner: np.ndarray, nb: np.ndarray, where: str) -> None:
     """Reject a malformed interior-face graph before it is assembled into an operator.
 
     The frozen operators are assembled and coarsened once, off the jit path, and then held fixed; a
@@ -102,7 +102,7 @@ def convection_diffusion_operator(
     scipy.sparse.csr_matrix
         The assembled operator, shape ``(n, n)``.
     """
-    require_valid_graph(n, owner, nb, "convection_diffusion_operator")
+    _require_valid_graph(n, owner, nb, "convection_diffusion_operator")
     o, m = np.asarray(owner), np.asarray(nb)
     c = np.asarray(coefficient)
     zero = np.zeros_like(c)
