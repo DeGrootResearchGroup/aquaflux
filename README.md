@@ -1,5 +1,7 @@
 # aquaflux
 
+[![CI](https://github.com/DeGrootResearchGroup/aquaflux/actions/workflows/ci.yml/badge.svg)](https://github.com/DeGrootResearchGroup/aquaflux/actions/workflows/ci.yml)
+
 **A differentiable, unstructured, cell-centred finite-volume (FVM) flow solver written in [JAX](https://docs.jax.dev/).**
 
 Because the entire solver is written in JAX, the gradient of any output — a drag,
