@@ -1,0 +1,15 @@
+FoamFile { format ascii; class dictionary; location "system"; object controlDict; }
+solver          incompressibleFluid;
+startFrom       startTime;
+startTime       0;
+stopAt          endTime;
+endTime         3000;
+deltaT          1;
+writeControl    timeStep;
+writeInterval   3000;
+purgeWrite      1;
+writeFormat     ascii;
+writePrecision  8;
+writeCompression off;
+timeFormat      general;
+runTimeModifiable true;

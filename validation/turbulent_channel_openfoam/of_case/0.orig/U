@@ -1,0 +1,11 @@
+FoamFile { format ascii; class volVectorField; location "0"; object U; }
+dimensions [0 1 -1 0 0 0 0];
+internalField uniform (0.1335 0 0);
+boundaryField
+{
+    bottomWall { type noSlip; }
+    topWall    { type noSlip; }
+    inlet      { type cyclic; }
+    outlet     { type cyclic; }
+    frontAndBack { type empty; }
+}

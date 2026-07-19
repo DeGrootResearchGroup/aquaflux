@@ -1,0 +1,11 @@
+FoamFile { format ascii; class volScalarField; location "0"; object k; }
+dimensions [0 2 -2 0 0 0 0];
+internalField uniform 1e-3;
+boundaryField
+{
+    bottomWall { type kLowReWallFunction; value uniform 1e-11; }
+    topWall    { type kLowReWallFunction; value uniform 1e-11; }
+    inlet      { type cyclic; }
+    outlet     { type cyclic; }
+    frontAndBack { type empty; }
+}
