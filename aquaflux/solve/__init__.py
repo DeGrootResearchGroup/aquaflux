@@ -18,14 +18,9 @@ from .continuation import (
 from .implicit import DampedNewtonStep, ForwardStep, ImplicitNewtonSolver
 from .linear import default_linear_solver, solve_linear
 from .multigrid import (
-    MultigridHierarchy,
     SmoothedHierarchy,
-    build_hierarchy,
     build_smoothed_hierarchy,
-    level_coefficients,
-    multigrid_solve,
     smoothed_multigrid_solve,
-    v_cycle,
 )
 from .newton import NewtonSolver, newton_step
 
@@ -34,20 +29,15 @@ __all__ = [
     "DivergenceGuard",
     "ForwardStep",
     "ImplicitNewtonSolver",
-    "MultigridHierarchy",
     "NewtonSolver",
     "PseudoTransientStep",
     "ShiftPolicy",
     "ShiftTerm",
     "SmoothedHierarchy",
     "StepAcceptance",
-    "build_hierarchy",
     "build_smoothed_hierarchy",
     "default_linear_solver",
-    "level_coefficients",
-    "multigrid_solve",
     "newton_step",
     "smoothed_multigrid_solve",
     "solve_linear",
-    "v_cycle",
 ]

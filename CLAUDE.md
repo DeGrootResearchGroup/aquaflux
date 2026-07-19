@@ -65,6 +65,19 @@ Concretely:
 - A correct-but-ugly prototype is acceptable *only* as an explicitly-labelled
   intermediate step that you then refactor before the task is considered done —
   never as the delivered result.
+- **Delete dominated methods while the code is pre-release.** When a method,
+  strategy, or code path is *dominated* — another one does its job better across
+  the regime this project actually targets, and nothing selects it in production
+  or integration tests — prefer **deleting** it over keeping it "just in case."
+  Unused alternatives are not free: they carry maintenance cost, bloat the API,
+  and force awkward abstractions (a unifying refactor must accommodate the dead
+  path too). Before adding or keeping a second method for the same job, ask *is
+  the first one dominated, and would we actually miss it?* A method with a
+  genuine, exercised niche stays; a dominated one goes. The code is pre-release
+  and everything lives in git history, so a method deleted now is cheap to
+  restore if a real need for it ever appears — far cheaper than carrying it
+  unused indefinitely. (When in doubt about whether a niche is real, surface the
+  trade-off rather than silently keeping the cruft.)
 
 ### 1. A fully object-oriented, testable design (do NOT write quick-to-ship code)
 

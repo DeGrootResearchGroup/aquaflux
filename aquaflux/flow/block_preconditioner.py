@@ -8,13 +8,12 @@ assembler's frozen geometry and applied per Newton iterate at the current moment
 Every coefficient is ``stop_gradient``-ed, so ``M`` only accelerates the Krylov iteration — it never
 perturbs the converged solution or its adjoint.
 
-The three inner Schur strategies trade cost for mesh-independence:
-
-* :class:`SmoothedAmgSchur` — smoothed-aggregation multigrid, mesh-independent (V-cycle contraction
-  ~0.25); paired with a velocity-block AMG (:class:`SmoothedAmgVelocity`) and the block-triangular
-  ``D·δu`` coupling for the strongest preconditioner.
-* :class:`AggregationSchur` — unsmoothed aggregation; better than Jacobi but not mesh-independent.
-* :class:`DampedJacobiSchur` — a fixed damped-Jacobi sweep on the assembled pressure Laplacian.
+The inner pressure Schur is a **smoothed-aggregation multigrid** (:class:`SmoothedAmgSchur`,
+mesh-independent V-cycle contraction ~0.25), paired with a velocity-block AMG
+(:class:`SmoothedAmgVelocity` on the viscous operator, or :class:`SmoothedAmgConvectionVelocity` on
+the convection-diffusion operator) and the block-triangular ``D·δu`` coupling. Both strategy families
+are abstract interfaces (:class:`InnerSchurSolver` / :class:`VelocityBlockSolver`), the seam a new
+inner solver or velocity block plugs into.
 """
 
 from __future__ import annotations
@@ -34,21 +33,17 @@ from aquaflux.solve.multigrid import (
     air_multigrid_solve,
     build_convection_air_hierarchy,
     build_convection_hierarchy,
-    build_hierarchy,
     build_smoothed_hierarchy,
     convection_multigrid_solve,
-    level_coefficients,
-    multigrid_solve,
     smoothed_multigrid_solve,
 )
-from aquaflux.vectors import scale
 
-from .preconditioner import damped_jacobi_solve, pressure_schur_laplacian, schur_face_coefficient
+from .preconditioner import schur_face_coefficient
 from .rhie_chow import momentum_diagonal
 
 if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, MeshGeometry
-    from aquaflux.solve.multigrid import AirHierarchy, MultigridHierarchy, SmoothedHierarchy
+    from aquaflux.solve.multigrid import AirHierarchy, SmoothedHierarchy
 
     from .momentum import MomentumContinuity
 
@@ -163,80 +158,6 @@ class InnerSchurSolver(eqx.Module):
         """Return the pressure solve ``rp -> Ŝ⁻¹ rp`` at momentum diagonal ``a_P``."""
 
 
-class DampedJacobiSchur(InnerSchurSolver):
-    """Fixed damped-Jacobi sweeps on the assembled pressure Laplacian (simplest; not h-independent)."""
-
-    geometry: _SchurGeometry
-    sweeps: int = eqx.field(static=True)
-    omega: float = eqx.field(static=True)
-
-    def apply(self, a_p: jnp.ndarray) -> _PressureSolve:
-        g = self.geometry
-        matvec, diagonal = pressure_schur_laplacian(
-            g.face_cells,
-            g.mesh_geometry,
-            g.interp_factor,
-            g.normal_distance,
-            a_p,
-            g.rho,
-            g.pressure_pin,
-            boundary_diagonal=g.boundary_diagonal(a_p),
-        )
-        return lambda rp: damped_jacobi_solve(
-            matvec, diagonal, rp, self.sweeps, self.omega, g.pressure_pin
-        )
-
-
-class AggregationSchur(InnerSchurSolver):
-    """Unsmoothed-aggregation multigrid V-cycle; coefficients track the iterate, coarse space is weak."""
-
-    geometry: _SchurGeometry
-    hierarchy: MultigridHierarchy
-    interior_faces: jnp.ndarray
-    v_cycles: int = eqx.field(static=True)
-    omega: float = eqx.field(static=True)
-
-    @classmethod
-    def build(
-        cls,
-        geometry: _SchurGeometry,
-        owner_e: np.ndarray,
-        nb_e: np.ndarray,
-        interior_faces: jnp.ndarray,
-        n_cells: int,
-        v_cycles: int,
-        omega: float,
-    ) -> AggregationSchur:
-        hierarchy = build_hierarchy(owner_e, nb_e, n_cells, pin=geometry.pressure_pin)
-        return cls(geometry, hierarchy, interior_faces, v_cycles, omega)
-
-    def apply(self, a_p: jnp.ndarray) -> _PressureSolve:
-        coeff = self.geometry.coefficient(a_p)[self.interior_faces]
-        coeffs, diagonals = level_coefficients(self.hierarchy, coeff)
-        # Propagate the boundary (outlet) diagonal up the aggregation — piecewise-constant Galerkin
-        # makes a coarse cell's stiffness the sum over its fine members — and fold it into each
-        # level's operator, so A = Laplacian + diag(boundary) is non-singular at every level. All-zero
-        # (and a no-op) for a closed all-wall domain, which the pin regularizes instead.
-        levels = self.hierarchy.levels
-        extra = self.geometry.boundary_diagonal(a_p)
-        extras = []
-        for index, level in enumerate(levels):
-            extras.append(extra)
-            if level.agg is not None:
-                extra = segment_sum(extra, level.agg, levels[index + 1].n)
-        diagonals = tuple(d + e for d, e in zip(diagonals, extras, strict=True))
-        diag_extras = tuple(extras)
-        return lambda rp: multigrid_solve(
-            self.hierarchy,
-            coeffs,
-            diagonals,
-            rp,
-            cycles=self.v_cycles,
-            omega=self.omega,
-            diag_extras=diag_extras,
-        )
-
-
 class SmoothedAmgSchur(InnerSchurSolver):
     """Smoothed-aggregation multigrid, mesh-independent (V-cycle contraction ~0.25).
 
@@ -332,14 +253,6 @@ class VelocityBlockSolver(eqx.Module):
     @abc.abstractmethod
     def apply(self, a_p: jnp.ndarray) -> _VelocitySolve:
         """Return the velocity solve ``ru -> δu`` at momentum diagonal ``a_P``."""
-
-
-class DiagonalVelocity(VelocityBlockSolver):
-    """SIMPLE's momentum-diagonal solve ``δu = diag(a_P)⁻¹ ru`` (Jacobi-quality for the viscous block)."""
-
-    def apply(self, a_p: jnp.ndarray) -> _VelocitySolve:
-        inv_a_p = 1.0 / a_p
-        return lambda ru: scale(ru, inv_a_p)
 
 
 class SmoothedAmgVelocity(VelocityBlockSolver):
@@ -540,10 +453,10 @@ class BlockPreconditioner(eqx.Module):
     """A block SIMPLE preconditioner composing a velocity solve and a pressure-Schur inner solve.
 
     Built from a flow assembler by :meth:`build`; :meth:`factory` returns the ``state -> M`` callable
-    :func:`~aquaflux.solve.newton.newton_step` expects. With ``block_triangular`` set, the pressure
-    block additionally sees the divergence of the velocity predictor (``δp = Ŝ⁻¹(r_p − D·δu)``), giving
-    the Murphy--Golub--Wathen 2-eigenvalue structure; ``D·δu`` is a ``jvp`` through the frozen residual,
-    so ``D`` is a constant operator (adjoint-transparent).
+    :func:`~aquaflux.solve.newton.newton_step` expects. It is **block-triangular**: the pressure block
+    additionally sees the divergence of the velocity predictor (``δp = Ŝ⁻¹(r_p − D·δu)``), giving the
+    Murphy--Golub--Wathen 2-eigenvalue structure; ``D·δu`` is a ``jvp`` through the frozen residual, so
+    ``D`` is a constant operator (adjoint-transparent).
 
     The pressure Schur is scaled either by the momentum diagonal ``a_P`` (SIMPLE, ``Ŝ ~ B diag(V/a_P)
     B^T``) or, when ``schur_mass_diagonal`` is set, by a frozen velocity-independent diagonal
@@ -561,7 +474,6 @@ class BlockPreconditioner(eqx.Module):
     assembler: MomentumContinuity
     schur: InnerSchurSolver
     velocity: VelocityBlockSolver
-    block_triangular: bool = eqx.field(static=True)
     schur_mass_diagonal: jnp.ndarray | None = None
     msimpler_scale: float | None = eqx.field(static=True, default=None)
 
@@ -570,33 +482,28 @@ class BlockPreconditioner(eqx.Module):
         cls,
         assembler: MomentumContinuity,
         *,
-        inner: str = "smoothed",
         velocity: str = "smoothed",
         reference_state: jnp.ndarray | None = None,
         schur_scaling: str = "simple",
         msimpler_scale: float | None = None,
         v_cycles: int = 1,
-        jacobi_sweeps: int = 30,
-        omega: float = 0.7,
     ) -> BlockPreconditioner:
-        """Build the preconditioner for ``assembler`` with the selected inner Schur solver.
+        """Build the block-triangular preconditioner for ``assembler``.
 
         Parameters
         ----------
         assembler : MomentumContinuity
             The coupled flow residual assembler.
-        inner : {"smoothed", "multigrid", "jacobi"}
-            The inner pressure-Schur solver strategy.
         velocity : {"smoothed", "convection", "convection-air"}
-            The velocity-block strategy (only for ``inner="smoothed"``). ``"smoothed"`` builds an AMG
-            on the viscous (symmetric) momentum operator — mesh-independent but Peclet-blind, so it
-            bounds the reachable Reynolds number. ``"convection"`` and ``"convection-air"`` build a
-            convection-aware hierarchy on the frozen ``viscous + first-order-upwind`` operator (see
-            :class:`SmoothedAmgConvectionVelocity`), which stays a good momentum-block approximation as
-            convection strengthens: ``"convection"`` is the stable two-level method,
-            ``"convection-air"`` the reduction-based (lAIR) hierarchy that is Peclet-robust *and*
-            mesh-independent (scales to large meshes). Both freeze their convective linearization at
-            ``reference_state``, taken from the boundary conditions unless given.
+            The velocity-block strategy. ``"smoothed"`` builds an AMG on the viscous (symmetric)
+            momentum operator — mesh-independent but Peclet-blind, so it bounds the reachable Reynolds
+            number. ``"convection"`` and ``"convection-air"`` build a convection-aware hierarchy on the
+            frozen ``viscous + first-order-upwind`` operator (see :class:`SmoothedAmgConvectionVelocity`),
+            which stays a good momentum-block approximation as convection strengthens: ``"convection"``
+            is the stable two-level method, ``"convection-air"`` the reduction-based (lAIR) hierarchy
+            that is Peclet-robust *and* mesh-independent (scales to large meshes). Both freeze their
+            convective linearization at ``reference_state``, taken from the boundary conditions unless
+            given.
         reference_state : jnp.ndarray, optional
             A representative operating flow state whose Rhie--Chow mass flux freezes the convective
             linearization of the convection-aware velocity blocks. ``None`` (default) derives one from
@@ -618,16 +525,8 @@ class BlockPreconditioner(eqx.Module):
             / density / viscosity scale, so it matches the SIMPLE Schur magnitude with no assumption
             on the characteristic speed. Pass an explicit value only to pin ``k`` (e.g. for a study).
         v_cycles : int
-            Multigrid V-cycles per apply (``"smoothed"`` / ``"multigrid"``).
-        jacobi_sweeps : int
-            Damped-Jacobi sweeps (``"jacobi"``).
-        omega : float
-            Jacobi damping factor in ``(0, 1]`` (``"jacobi"`` / ``"multigrid"``).
+            Multigrid V-cycles per apply.
         """
-        if inner not in ("smoothed", "multigrid", "jacobi"):
-            raise ValueError(
-                f"unknown inner solver {inner!r}; use 'smoothed', 'multigrid' or 'jacobi'"
-            )
         if velocity not in ("smoothed", "convection", "convection-air"):
             raise ValueError(
                 f"unknown velocity block {velocity!r}; use 'smoothed', 'convection' or 'convection-air'"
@@ -654,58 +553,42 @@ class BlockPreconditioner(eqx.Module):
                 assembler.density * assembler.geometry.cell.volume
             )
 
-        if inner == "smoothed":
-            schur: InnerSchurSolver = SmoothedAmgSchur.build(
-                geometry,
+        schur = SmoothedAmgSchur.build(
+            geometry,
+            owner_e,
+            nb_e,
+            interior,
+            interior_faces,
+            n_cells,
+            v_cycles,
+            reference_diagonal=schur_mass_diagonal,
+        )
+        velocity_geometry = _VelocityGeometry.of(assembler)
+        velocity_block: VelocityBlockSolver
+        if velocity in ("convection", "convection-air"):
+            if reference_state is None:
+                reference_state = _characteristic_reference_state(assembler)
+            # The reference mass flux is assembler behaviour (the Rhie--Chow flux operator), so it is
+            # computed here and handed to the strategy, keeping the velocity build assembler-free.
+            reference_mdot = jax.lax.stop_gradient(assembler.mass_flux(reference_state))
+            velocity_block = SmoothedAmgConvectionVelocity.build(
+                velocity_geometry,
                 owner_e,
                 nb_e,
                 interior,
-                interior_faces,
                 n_cells,
                 v_cycles,
-                reference_diagonal=schur_mass_diagonal,
-            )
-            velocity_geometry = _VelocityGeometry.of(assembler)
-            velocity_block: VelocityBlockSolver
-            if velocity in ("convection", "convection-air"):
-                if reference_state is None:
-                    reference_state = _characteristic_reference_state(assembler)
-                # The reference mass flux is assembler behaviour (the Rhie--Chow flux operator), so it
-                # is computed here and handed to the strategy, keeping the velocity build assembler-free.
-                reference_mdot = jax.lax.stop_gradient(assembler.mass_flux(reference_state))
-                velocity_block = SmoothedAmgConvectionVelocity.build(
-                    velocity_geometry,
-                    owner_e,
-                    nb_e,
-                    interior,
-                    n_cells,
-                    v_cycles,
-                    reference_mdot,
-                    method="air" if velocity == "convection-air" else "twolevel",
-                )
-            else:
-                velocity_block = SmoothedAmgVelocity.build(
-                    velocity_geometry, owner_e, nb_e, interior, n_cells, v_cycles
-                )
-            return cls(
-                assembler,
-                schur,
-                velocity_block,
-                block_triangular=True,
-                schur_mass_diagonal=schur_mass_diagonal,
-                msimpler_scale=msimpler_scale,
-            )
-        if inner == "multigrid":
-            schur = AggregationSchur.build(
-                geometry, owner_e, nb_e, interior_faces, n_cells, v_cycles, omega
+                reference_mdot,
+                method="air" if velocity == "convection-air" else "twolevel",
             )
         else:
-            schur = DampedJacobiSchur(geometry, jacobi_sweeps, omega)
+            velocity_block = SmoothedAmgVelocity.build(
+                velocity_geometry, owner_e, nb_e, interior, n_cells, v_cycles
+            )
         return cls(
             assembler,
             schur,
-            DiagonalVelocity(),
-            block_triangular=False,
+            velocity_block,
             schur_mass_diagonal=schur_mass_diagonal,
             msimpler_scale=msimpler_scale,
         )
@@ -791,13 +674,13 @@ class BlockPreconditioner(eqx.Module):
             schur_a_p = self.schur_mass_diagonal / self._msimpler_scale(state)
         schur_solve = self.schur.apply(schur_a_p)
         velocity_solve = self.velocity.apply(a_p)
-        divergence = self._divergence(state) if self.block_triangular else None
+        divergence = self._divergence(state)
 
         def apply(v: jnp.ndarray) -> jnp.ndarray:
             velocity_residual, pressure_residual = self.assembler.unpack(v)
             velocity_correction = velocity_solve(velocity_residual)
-            if divergence is not None:  # block-triangular: correct the pressure RHS by D·δu
-                pressure_residual = pressure_residual - divergence(velocity_correction)
+            # Block-triangular: the pressure block sees the velocity predictor's divergence D·δu.
+            pressure_residual = pressure_residual - divergence(velocity_correction)
             return self.assembler.pack(velocity_correction, schur_solve(pressure_residual))
 
         return apply

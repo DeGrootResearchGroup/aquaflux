@@ -1,9 +1,9 @@
-"""Unit tests for the aggregation-multigrid building blocks (structure, Galerkin, V-cycle).
+"""Unit tests for the algebraic-multigrid building blocks (smoothed aggregation, convection, lAIR).
 
-These cover the properties that hold regardless of the interpolation order: a healthy aggregation,
-an exact piecewise-constant Galerkin coarse operator, a convergent and linear V-cycle. (The current
-unsmoothed prolongation is a correct-but-weak coarse space; smoothed aggregation is the accuracy
-upgrade.)
+These cover the frozen-operator V-cycle families: a mesh-independent smoothed-aggregation V-cycle for
+the symmetric pressure Schur, its convection-diffusion variant, and the reduction-based (lAIR) cycle
+for a strongly convection-dominated operator — each a fixed linear operator (a valid frozen left
+preconditioner), plus the degenerate-mesh build guards.
 """
 
 from __future__ import annotations
@@ -22,11 +22,8 @@ from aquaflux.solve.multigrid import (
     air_multigrid_solve,
     build_convection_air_hierarchy,
     build_convection_hierarchy,
-    build_hierarchy,
     build_smoothed_hierarchy,
     convection_multigrid_solve,
-    level_coefficients,
-    multigrid_solve,
     smoothed_multigrid_solve,
 )
 
@@ -77,77 +74,6 @@ def _pinned_v_cycle_factor(owner, nb, ncell, pin, *, seed=0):
     return (norms[-1] / norms[-4]) ** (1.0 / 3.0)
 
 
-def test_aggregation_is_healthy() -> None:
-    """The two-pass aggregation covers every cell, has no singleton-dominated coarsening."""
-    owner, nb, ncell = _poisson(16)
-    hierarchy = build_hierarchy(owner, nb, ncell)
-    agg = np.asarray(hierarchy.levels[0].agg)
-    assert (agg >= 0).all()  # every cell aggregated
-    assert ncell / hierarchy.levels[1].n > 3.0  # healthy coarsening ratio (~4-5x)
-
-
-def test_galerkin_coarse_operator_is_correct() -> None:
-    """The coarse operator built by ``level_coefficients`` equals the exact ``P^T A P``."""
-    owner, nb, ncell = _poisson(8)
-    hierarchy = build_hierarchy(owner, nb, ncell, max_levels=2)
-    coeffs, _ = level_coefficients(hierarchy, jnp.ones(owner.shape[0]))
-    a = _dense_laplacian(owner, nb, ncell)
-    agg = np.asarray(hierarchy.levels[0].agg)
-    n1 = hierarchy.levels[1].n
-    p = np.zeros((ncell, n1))
-    p[np.arange(ncell), agg] = 1.0
-    a_coarse = _dense_laplacian(
-        np.asarray(hierarchy.levels[1].owner), np.asarray(hierarchy.levels[1].nb), n1, coeffs[1]
-    )
-    assert np.max(np.abs(a_coarse - p.T @ a @ p)) < 1e-10
-
-
-def test_coarse_coefficients_conserve_the_crossing_sum() -> None:
-    """Each coarse edge coefficient is the sum of the fine coefficients crossing the aggregates."""
-    owner, nb, ncell = _poisson(8)
-    hierarchy = build_hierarchy(owner, nb, ncell, max_levels=2)
-    fine = jnp.asarray(np.random.default_rng(0).uniform(0.5, 2.0, owner.shape[0]))
-    coeffs, _ = level_coefficients(hierarchy, fine)
-    agg = np.asarray(hierarchy.levels[0].agg)
-    crossing = agg[owner] != agg[nb]
-    assert abs(float(jnp.sum(coeffs[1])) - float(jnp.sum(fine[crossing]))) < 1e-9
-
-
-def test_v_cycle_reduces_residual() -> None:
-    """Fixed V-cycles drive the residual of a pinned model Poisson down (a valid inner solve)."""
-    owner, nb, ncell = _poisson(16)
-    hierarchy = build_hierarchy(owner, nb, ncell, pin=0)
-    coeffs, diagonals = level_coefficients(hierarchy, jnp.ones(owner.shape[0]))
-    o, m = hierarchy.levels[0].owner, hierarchy.levels[0].nb
-
-    def matvec(p):
-        flux = p[o] - p[m]
-        return (
-            (jax.ops.segment_sum(flux, o, ncell) - jax.ops.segment_sum(flux, m, ncell))
-            .at[0]
-            .set(p[0])
-        )
-
-    b = jnp.asarray(np.random.default_rng(0).standard_normal(ncell)).at[0].set(0.0)
-    x = multigrid_solve(hierarchy, coeffs, diagonals, b, cycles=12)
-    assert float(jnp.linalg.norm(matvec(x) - b)) < 0.3 * float(jnp.linalg.norm(b))
-
-
-def test_multigrid_solve_is_linear_in_rhs() -> None:
-    """A fixed cycle count makes rhs -> x linear (needed for a plain-GMRES left preconditioner)."""
-    owner, nb, ncell = _poisson(8)
-    hierarchy = build_hierarchy(owner, nb, ncell, pin=0)
-    coeffs, diagonals = level_coefficients(hierarchy, jnp.ones(owner.shape[0]))
-    rng = np.random.default_rng(1)
-    r1 = jnp.asarray(rng.standard_normal(ncell))
-    r2 = jnp.asarray(rng.standard_normal(ncell))
-
-    def solve(r):
-        return multigrid_solve(hierarchy, coeffs, diagonals, r, cycles=2)
-
-    assert jnp.allclose(solve(2.0 * r1 - 3.0 * r2), 2.0 * solve(r1) - 3.0 * solve(r2), atol=1e-10)
-
-
 # --- smoothed aggregation --------------------------------------------------------------
 
 
@@ -171,30 +97,6 @@ def _smoothed_residual_factor(n):
         x = proj(x + proj(smoothed_multigrid_solve(hierarchy, b - matvec(x), cycles=1)))
         norms.append(float(jnp.linalg.norm(matvec(x) - b)))
     return (norms[-1] / norms[-4]) ** (1 / 3)
-
-
-def test_smoothed_aggregation_beats_unsmoothed() -> None:
-    """The smoothed coarse space contracts the V-cycle far faster than piecewise-constant."""
-    owner, nb, ncell = _poisson(24)
-    smoothed = build_smoothed_hierarchy(owner, nb, np.ones(owner.shape[0]), ncell, pin=0)
-    unsmoothed = build_hierarchy(owner, nb, ncell, pin=0)
-    coeffs, diagonals = level_coefficients(unsmoothed, jnp.ones(owner.shape[0]))
-    o, m = jnp.asarray(owner), jnp.asarray(nb)
-
-    def matvec(p):
-        flux = p[o] - p[m]
-        return (
-            (jax.ops.segment_sum(flux, o, ncell) - jax.ops.segment_sum(flux, m, ncell))
-            .at[0]
-            .set(p[0])
-        )
-
-    b = jnp.asarray(np.random.default_rng(0).standard_normal(ncell)).at[0].set(0.0)
-    r_smoothed = float(jnp.linalg.norm(matvec(smoothed_multigrid_solve(smoothed, b, cycles=3)) - b))
-    r_unsmoothed = float(
-        jnp.linalg.norm(matvec(multigrid_solve(unsmoothed, coeffs, diagonals, b, cycles=3)) - b)
-    )
-    assert r_smoothed < r_unsmoothed  # smoothed converges faster at equal cycles
 
 
 def test_smoothed_aggregation_v_cycle_is_mesh_independent() -> None:
@@ -481,14 +383,15 @@ def _triangle_with_isolated_cell():
     return owner, nb, 4
 
 
-def test_build_hierarchy_rejects_empty_mesh() -> None:
+def test_build_rejects_empty_mesh() -> None:
     with pytest.raises(ValueError, match="at least one cell"):
-        build_hierarchy(np.array([], dtype=int), np.array([], dtype=int), 0)
+        build_smoothed_hierarchy(np.array([], dtype=int), np.array([], dtype=int), np.array([]), 0)
 
 
-def test_build_hierarchy_rejects_out_of_range_edge() -> None:
+def test_build_rejects_out_of_range_edge() -> None:
     with pytest.raises(ValueError, match="out of range"):
-        build_hierarchy(np.array([0, 5]), np.array([1, 1]), 4)  # endpoint 5 >= n = 4
+        # endpoint 5 >= n = 4
+        build_smoothed_hierarchy(np.array([0, 5]), np.array([1, 1]), np.ones(2), 4)
 
 
 def test_isolated_cell_zero_diagonal_is_rejected_at_build() -> None:

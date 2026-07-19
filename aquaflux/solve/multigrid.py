@@ -1,31 +1,35 @@
-"""Matrix-free aggregation multigrid for a symmetric graph-Laplacian operator.
+"""Matrix-free algebraic multigrid for the preconditioner's inner solves.
 
-A pressure-Poisson-like operator ``A`` on an unstructured mesh is a **graph Laplacian**: it is
-defined by a set of edges ``(owner, nb)`` each carrying a coefficient ``c_e`` (here ``A p`` is
-``sum_e c_e (p_owner - p_nb)`` scattered to cells, diagonal ``sum_e c_e``). Unpreconditioned
-Krylov on it needs ``O(h^-2)`` iterations; a multigrid V-cycle makes the iteration count
-**mesh-independent**, which is what a scalable inner solve for the SIMPLE pressure Schur needs at
-large mesh sizes.
+A pressure-Poisson-like operator ``A`` on an unstructured mesh needs ``O(h^-2)`` unpreconditioned
+Krylov iterations; a multigrid V-cycle makes the iteration count **mesh-independent**, which is what
+a scalable inner solve for the SIMPLE pressure Schur (and the convection-dominated velocity block)
+needs at large mesh sizes.
 
-Design for a differentiable JAX/GPU pipeline:
+Design for a differentiable JAX/GPU pipeline — every hierarchy is **built once, off the jit path,
+and frozen**, then applied under jit as a fixed matrix-free V-cycle (a constant linear operator in
+``b``, so plain left-preconditioned GMRES suffices and the adjoint transposes cleanly). Each level
+carries its operator as a general sparse ``(row, col, val)`` triple and its intergrid transfers as
+sparse operators; the one recursion (:func:`_frozen_v_cycle`) applies the shared operator matvec
+(:func:`_operator_matvec`) and direct coarse solve, and is specialized per family by the injected
+:class:`_VCycleOps` (restriction, prolongation, smoother):
 
-* **The aggregation *structure* is integer graph work — built once, off the jit path, per fixed
-  mesh** (:func:`build_hierarchy`). Greedy aggregation coarsens the graph; piecewise-constant
-  (unsmoothed) prolongation keeps every coarse level a graph Laplacian, so the Galerkin coarse
-  operator is again ``(owner, nb, coeff)`` with the coarse coefficient the sum of the fine
-  coefficients crossing between aggregates.
-* **The coefficients flow through per call, under jit** (:func:`level_coefficients`): the fine
-  coefficients change every Newton iterate (they depend on the lagged ``a_P``), but propagating
-  them up the fixed hierarchy is just ``segment_sum`` — matvec-only, and ``stop_gradient``-ed by
-  the caller, so the whole V-cycle is a frozen linear operator (adjoint-transparent).
-* **The V-cycle** (:func:`v_cycle`) is a fixed number of damped-Jacobi pre/post smooths + a coarse
-  correction, recursion unrolled at trace time (the number of levels is static). A *fixed* cycle is
-  a constant linear operator, so plain left-preconditioned GMRES suffices.
+* **Smoothed aggregation** (:func:`build_smoothed_hierarchy`, :func:`smoothed_multigrid_solve`): the
+  symmetric pressure Schur. The tentative piecewise-constant prolongation is smoothed
+  ``P = (I - omega D^-1 A) P_tent``, restriction is ``Pᵀ``, the smoother is a Chebyshev polynomial,
+  and the coarse level is a direct (dense pseudo-inverse) solve — ~0.25 mesh-independent contraction.
+  Its two-level convection variant (:func:`build_convection_hierarchy`,
+  :func:`convection_multigrid_solve`) uses a damped-Jacobi smoother for the nonsymmetric momentum
+  operator.
+* **Reduction — local approximate ideal restriction, lAIR** (:func:`build_air_hierarchy`,
+  :func:`air_multigrid_solve`): an **independent** restriction ``R != Pᵀ`` and an FC-Jacobi smoother
+  for the strongly convection-dominated velocity block — Peclet-robust and mesh-independent to large
+  meshes.
 
-This is unsmoothed aggregation (a first, robust cut); smoothed aggregation is the accuracy upgrade,
-at the cost of denser coarse operators. A closed-domain pressure system is regularized by a pin (one
-cell per level held to the right-hand side); the pin only affects preconditioner quality, never the
-converged solution (the outer solve terminates on the true residual).
+The coefficients are frozen at a reference field at build time (the standard "AMG setup once, reuse
+across nonlinear iterates" practice), with the per-iterate operator scale restored by a symmetric
+diagonal rescaling in the apply. A closed-domain pressure system is regularized by a pin decoupled
+into the frozen operator, so the AMG null space matches the pinned outer Jacobian; the pin only
+affects preconditioner quality, never the converged solution.
 """
 
 from __future__ import annotations
@@ -108,26 +112,6 @@ def _require_positive_diagonal(diagonal: np.ndarray, where: str) -> None:
         )
 
 
-class _Level(NamedTuple):
-    """One multigrid level's static (integer, mesh-fixed) structure."""
-
-    n: int  # cells at this level (static)
-    owner: jnp.ndarray  # (n_edges,) edge owner index
-    nb: jnp.ndarray  # (n_edges,) edge neighbour index
-    pin: int  # pinned cell index at this level, or -1 (static)
-    agg: jnp.ndarray | None  # (n,) map cell -> next-coarser cell; None on the coarsest level
-    edge_map: (
-        jnp.ndarray | None
-    )  # (n_edges,) map edge -> next-coarser edge (n_coarse_edges = collapsed)
-    n_coarse_edges: int  # number of edges on the next-coarser level (static; 0 on coarsest)
-
-
-class MultigridHierarchy(NamedTuple):
-    """A built aggregation hierarchy: a tuple of :class:`_Level` from finest to coarsest."""
-
-    levels: tuple[_Level, ...]
-
-
 def _rcm_order(owner: np.ndarray, nb: np.ndarray, n: int) -> np.ndarray:
     """A locality-preserving cell visit order (reverse Cuthill--McKee) for the greedy aggregation.
 
@@ -189,272 +173,10 @@ def _aggregate(owner: np.ndarray, nb: np.ndarray, n: int) -> tuple[np.ndarray, i
     return aggregate, count
 
 
-def _coarsen_edges(
-    owner: np.ndarray, nb: np.ndarray, aggregate: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
-    """Coarse graph from the aggregation: unique inter-aggregate edges and the fine->coarse edge map.
-
-    Returns ``(coarse_owner, coarse_nb, edge_map, n_coarse_edges)`` where ``edge_map[e]`` is the
-    coarse-edge index of fine edge ``e`` (or ``n_coarse_edges`` for intra-aggregate edges, which
-    collapse and contribute nothing to the coarse operator).
-    """
-    coarse_o = aggregate[owner]
-    coarse_n = aggregate[nb]
-    inter = coarse_o != coarse_n
-    lo = np.minimum(coarse_o, coarse_n)  # canonical (undirected) pair
-    hi = np.maximum(coarse_o, coarse_n)
-    pairs = np.stack([lo[inter], hi[inter]], axis=1)
-    unique_pairs, inverse = np.unique(pairs, axis=0, return_inverse=True)
-    n_coarse_edges = len(unique_pairs)
-    edge_map = np.full(len(owner), n_coarse_edges, dtype=np.int64)  # intra edges -> collapse index
-    edge_map[inter] = inverse.astype(np.int64)
-    return unique_pairs[:, 0], unique_pairs[:, 1], edge_map, n_coarse_edges
-
-
-def build_hierarchy(
-    owner: np.ndarray,
-    nb: np.ndarray,
-    n: int,
-    pin: int | None = None,
-    *,
-    max_coarse: int = 16,
-    max_levels: int = 20,
-) -> MultigridHierarchy:
-    """Build the aggregation hierarchy structure (integer, mesh-fixed) — call once, off the jit path.
-
-    Parameters
-    ----------
-    owner, nb : np.ndarray
-        Fine-level graph edges (interior faces), shape ``(n_edges,)`` each.
-    n : int
-        Number of fine cells.
-    pin : int, optional
-        Pinned cell index (closed-domain regularization); propagated to each coarse level.
-    max_coarse : int
-        Stop coarsening once a level has at most this many cells.
-    max_levels : int
-        Hard cap on the number of levels.
-
-    Returns
-    -------
-    MultigridHierarchy
-        The finest-to-coarsest level structure, with JAX integer arrays ready for the jit-ed apply.
-    """
-    _require_valid_graph(n, owner, nb, "build_hierarchy")
-    owner = np.asarray(owner, dtype=np.int64)
-    nb = np.asarray(nb, dtype=np.int64)
-    levels: list[_Level] = []
-    current_n, current_pin = n, (-1 if pin is None else int(pin))
-    while True:
-        coarsest = current_n <= max_coarse or len(levels) + 1 >= max_levels or len(owner) == 0
-        if coarsest:
-            levels.append(
-                _Level(current_n, jnp.asarray(owner), jnp.asarray(nb), current_pin, None, None, 0)
-            )
-            break
-        aggregate, n_coarse = _aggregate(owner, nb, current_n)
-        c_owner, c_nb, edge_map, n_coarse_edges = _coarsen_edges(owner, nb, aggregate)
-        levels.append(
-            _Level(
-                current_n,
-                jnp.asarray(owner),
-                jnp.asarray(nb),
-                current_pin,
-                jnp.asarray(aggregate),
-                jnp.asarray(edge_map),
-                n_coarse_edges,
-            )
-        )
-        owner, nb = c_owner, c_nb
-        current_pin = -1 if current_pin < 0 else int(aggregate[current_pin])
-        current_n = n_coarse
-    return MultigridHierarchy(tuple(levels))
-
-
-def _laplacian_diagonal(level: _Level, coeff: jnp.ndarray) -> jnp.ndarray:
-    """Diagonal of the level's graph Laplacian (``sum_e c_e`` per cell); pinned row set to 1."""
-    diagonal = segment_sum(coeff, level.owner, level.n) + segment_sum(coeff, level.nb, level.n)
-    if level.pin >= 0:
-        diagonal = diagonal.at[level.pin].set(1.0)
-    return diagonal
-
-
-def level_coefficients(
-    hierarchy: MultigridHierarchy, fine_coeff: jnp.ndarray
-) -> tuple[tuple[jnp.ndarray, ...], tuple[jnp.ndarray, ...]]:
-    """Propagate the fine edge coefficients up every level (Galerkin) and form each diagonal.
-
-    Pure ``segment_sum`` — jit/GPU-friendly and differentiable — so the (frozen) fine coefficients
-    of the current Newton iterate produce the whole hierarchy's coefficients on the fly.
-
-    Returns ``(coeffs, diagonals)`` aligned with ``hierarchy.levels``.
-    """
-    coeffs: list[jnp.ndarray] = []
-    diagonals: list[jnp.ndarray] = []
-    coeff = fine_coeff
-    for level in hierarchy.levels:
-        coeffs.append(coeff)
-        diagonals.append(_laplacian_diagonal(level, coeff))
-        if (
-            level.edge_map is not None
-        ):  # Galerkin coarsen: sum fine coeffs crossing each coarse edge
-            coeff = segment_sum(coeff, level.edge_map, level.n_coarse_edges + 1)[
-                : level.n_coarse_edges
-            ]
-    return tuple(coeffs), tuple(diagonals)
-
-
-def _matvec(
-    level: _Level, coeff: jnp.ndarray, p: jnp.ndarray, diag_extra: jnp.ndarray | None = None
-) -> jnp.ndarray:
-    """Graph-Laplacian matvec ``A p`` at a level; pinned row returns ``p[pin]`` (identity).
-
-    ``diag_extra`` is an optional per-cell diagonal added to the operator (a Dirichlet boundary
-    stiffness, e.g. a pressure outlet), making ``A = Laplacian + diag(diag_extra)``.
-    """
-    flux = coeff * (p[level.owner] - p[level.nb])
-    result = segment_sum(flux, level.owner, level.n) - segment_sum(flux, level.nb, level.n)
-    if diag_extra is not None:
-        result = result + diag_extra * p
-    if level.pin >= 0:
-        result = result.at[level.pin].set(p[level.pin])
-    return result
-
-
-def _smooth(
-    level: _Level,
-    coeff: jnp.ndarray,
-    diagonal: jnp.ndarray,
-    b: jnp.ndarray,
-    x: jnp.ndarray,
-    sweeps: int,
-    omega: float,
-    diag_extra: jnp.ndarray | None = None,
-) -> jnp.ndarray:
-    """A few damped-Jacobi sweeps ``x <- x + omega D^-1 (b - A x)``, holding the pinned cell."""
-    inv_diagonal = 1.0 / diagonal
-    for _ in range(sweeps):
-        x = x + omega * inv_diagonal * (b - _matvec(level, coeff, x, diag_extra))
-        if level.pin >= 0:
-            x = x.at[level.pin].set(b[level.pin])
-    return x
-
-
-def v_cycle(
-    hierarchy: MultigridHierarchy,
-    coeffs: tuple[jnp.ndarray, ...],
-    diagonals: tuple[jnp.ndarray, ...],
-    b: jnp.ndarray,
-    *,
-    pre_sweeps: int = 2,
-    post_sweeps: int = 2,
-    coarse_sweeps: int = 30,
-    omega: float = 0.7,
-    level_index: int = 0,
-    diag_extras: tuple[jnp.ndarray, ...] | None = None,
-) -> jnp.ndarray:
-    """One multigrid V-cycle for ``A x = b`` at ``level_index`` (recursion unrolled at trace time).
-
-    A single fixed V-cycle is a constant linear operator in ``b`` (the smoother sweeps and the coarse
-    recursion are all fixed-length), so it is a valid frozen left preconditioner. ``diag_extras``, when
-    given, is the per-level Dirichlet boundary diagonal added to each level's operator.
-    """
-    level = hierarchy.levels[level_index]
-    coeff, diagonal = coeffs[level_index], diagonals[level_index]
-    extra = None if diag_extras is None else diag_extras[level_index]
-    if level.agg is None:  # coarsest level: smooth to (near-)solve the small system
-        return _smooth(level, coeff, diagonal, b, jnp.zeros_like(b), coarse_sweeps, omega, extra)
-
-    next_level = hierarchy.levels[level_index + 1]
-    x = _smooth(level, coeff, diagonal, b, jnp.zeros_like(b), pre_sweeps, omega, extra)
-    residual = b - _matvec(level, coeff, x, extra)
-    coarse_residual = segment_sum(residual, level.agg, next_level.n)
-    if next_level.pin >= 0:  # the pinned row is an identity Dirichlet condition: zero error there
-        coarse_residual = coarse_residual.at[next_level.pin].set(0.0)
-    coarse_error = v_cycle(
-        hierarchy,
-        coeffs,
-        diagonals,
-        coarse_residual,
-        pre_sweeps=pre_sweeps,
-        post_sweeps=post_sweeps,
-        coarse_sweeps=coarse_sweeps,
-        omega=omega,
-        level_index=level_index + 1,
-        diag_extras=diag_extras,
-    )
-    x = x + coarse_error[level.agg]  # prolong (piecewise-constant) and correct
-    if level.pin >= 0:
-        x = x.at[level.pin].set(b[level.pin])
-    return _smooth(level, coeff, diagonal, b, x, post_sweeps, omega, extra)
-
-
-def multigrid_solve(
-    hierarchy: MultigridHierarchy,
-    coeffs: tuple[jnp.ndarray, ...],
-    diagonals: tuple[jnp.ndarray, ...],
-    b: jnp.ndarray,
-    *,
-    cycles: int = 1,
-    pre_sweeps: int = 2,
-    post_sweeps: int = 2,
-    coarse_sweeps: int = 30,
-    omega: float = 0.7,
-    diag_extras: tuple[jnp.ndarray, ...] | None = None,
-) -> jnp.ndarray:
-    """A **fixed** number of V-cycles for ``A x = b`` — the mesh-independent, constant-linear inner
-    solve for the SIMPLE pressure Schur.
-
-    A fixed cycle count makes ``b -> x`` a constant linear operator, so it is a valid frozen left
-    preconditioner under plain GMRES. One cycle (the default) is the usual preconditioner choice.
-
-    Parameters
-    ----------
-    hierarchy : MultigridHierarchy
-        The aggregation structure from :func:`build_hierarchy`.
-    coeffs, diagonals : tuple of jnp.ndarray
-        Per-level coefficients/diagonals from :func:`level_coefficients` (current iterate).
-    b : jnp.ndarray
-        Right-hand side, shape ``(n_cells,)``.
-    cycles : int
-        Number of V-cycles (static).
-    pre_sweeps, post_sweeps, coarse_sweeps : int
-        Damped-Jacobi sweep counts (static).
-    omega : float
-        Jacobi damping factor.
-    diag_extras : tuple of jnp.ndarray, optional
-        Per-level Dirichlet boundary diagonal added to each level's operator (e.g. a pressure-outlet
-        stiffness that de-singularises an otherwise pure-Neumann Schur). The ``diagonals`` passed in
-        must already include it, so the Jacobi smoother scales by the true diagonal.
-
-    Returns
-    -------
-    jnp.ndarray
-        The approximate solution ``x``, shape ``(n_cells,)``.
-    """
-    fine = hierarchy.levels[0]
-    fine_extra = None if diag_extras is None else diag_extras[0]
-    x = jnp.zeros_like(b)
-    for _ in range(cycles):
-        residual = b - _matvec(fine, coeffs[0], x, fine_extra)
-        x = x + v_cycle(
-            hierarchy,
-            coeffs,
-            diagonals,
-            residual,
-            pre_sweeps=pre_sweeps,
-            post_sweeps=post_sweeps,
-            coarse_sweeps=coarse_sweeps,
-            omega=omega,
-            diag_extras=diag_extras,
-        )
-    return x
-
-
 # --- smoothed aggregation ---------------------------------------------------------------
 #
-# Unsmoothed (piecewise-constant) aggregation above is correct but weak (V-cycle contraction ~0.97):
-# the coarse space cannot represent smooth error. Smoothed aggregation fixes this by smoothing the
+# Piecewise-constant (unsmoothed) aggregation is correct but weak (V-cycle contraction ~0.97): the
+# coarse space cannot represent smooth error. Smoothed aggregation fixes this by smoothing the
 # tentative prolongation, ``P = (I - omega D^-1 A) P_tent`` -- which makes the coarse operator denser
 # (no longer a graph Laplacian), so each level is a **general sparse operator** ``(row, col, val)`` and
 # the Galerkin coarse operator ``A_c = P^T A P`` is a genuine sparse triple product. That product is
@@ -666,9 +388,18 @@ def build_smoothed_hierarchy(
     )
 
 
-def _sparse_apply(level: _SparseLevel, x: jnp.ndarray) -> jnp.ndarray:
-    """General sparse matvec ``A x`` (``segment_sum`` over the frozen COO operator)."""
-    return segment_sum(level.val * x[level.col], level.row, level.n)
+def _coo_apply(row, col, val, x: jnp.ndarray, n_out: int) -> jnp.ndarray:
+    """General sparse matvec ``M x`` for a COO operator: ``segment_sum(val * x[col], row, n_out)``.
+
+    The one sparse-matvec kernel, shared by every frozen operator, prolongation, and restriction.
+    """
+    return segment_sum(val * x[col], row, n_out)
+
+
+def _operator_matvec(level: _SparseLevel | _AirLevel, x: jnp.ndarray) -> jnp.ndarray:
+    """Apply a frozen level's operator ``A x``. Works for any COO level type — ``_SparseLevel`` and
+    ``_AirLevel`` both carry the operator as ``row`` / ``col`` / ``val`` over ``n`` rows."""
+    return _coo_apply(level.row, level.col, level.val, x, level.n)
 
 
 def _chebyshev_smooth(
@@ -694,12 +425,12 @@ def _chebyshev_smooth(
     sigma = centre / half_width  # theta / delta > 1
     inv_diagonal = 1.0 / level.diagonal
 
-    residual = b - _sparse_apply(level, x)
+    residual = b - _operator_matvec(level, x)
     increment = (inv_diagonal * residual) / centre  # first step: (1 / theta) D^-1 r
     x = x + increment
     rho = 1.0 / sigma
     for _ in range(1, degree):
-        residual = b - _sparse_apply(level, x)
+        residual = b - _operator_matvec(level, x)
         rho_next = 1.0 / (2.0 * sigma - rho)
         increment = rho_next * rho * increment + (2.0 * rho_next / half_width) * (
             inv_diagonal * residual
@@ -709,31 +440,56 @@ def _chebyshev_smooth(
     return x
 
 
-_Smoother = Callable[["_SparseLevel", jnp.ndarray, jnp.ndarray], jnp.ndarray]
+_Smoother = Callable[[object, jnp.ndarray, jnp.ndarray], jnp.ndarray]
 
 
-def _smoothed_v_cycle(
-    hierarchy: SmoothedHierarchy, b: jnp.ndarray, level_index: int, smoother: _Smoother
-) -> jnp.ndarray:
-    """One V-cycle on a frozen sparse-operator hierarchy (recursion unrolled at trace time).
+class _VCycleOps(NamedTuple):
+    """The three level-local operations that specialize the shared frozen V-cycle recursion.
 
-    The pre/post ``smoother`` is injected — a symmetric-part-agnostic seam so the symmetric
-    (Chebyshev) and nonsymmetric convection-diffusion (damped-Jacobi) paths share this one recursion,
-    the prolongation/restriction, and the direct coarse solve. ``smoother(level, b, x) -> x`` applies a
-    fixed, matrix-free relaxation for ``A x = b`` starting from ``x`` on that level.
+    ``restrict(level, r) -> coarse_r`` moves a fine residual to the next-coarser level; ``prolong(level,
+    coarse_e) -> fine_e`` moves a coarse error back; ``smooth(level, b, x) -> x`` applies a fixed,
+    matrix-free relaxation for ``A x = b``. The frozen-operator matvec and the direct coarse solve are
+    identical across every frozen path, so only these three vary: smoothed aggregation restricts with
+    ``Pᵀ`` (the ``R = Pᵀ`` special case, :func:`_smoothed_ops`) and lAIR with an independent restriction
+    ``R`` (:func:`_air_ops`); the smoother is Chebyshev / damped-Jacobi (symmetric / convection
+    two-level) or FC-Jacobi (reduction).
     """
-    level = hierarchy.levels[level_index]
-    if level.coarse_inv is not None:  # coarsest: an actual (dense pseudo-inverse) solve
+
+    restrict: Callable[[object, jnp.ndarray], jnp.ndarray]
+    prolong: Callable[[object, jnp.ndarray], jnp.ndarray]
+    smooth: _Smoother
+
+
+def _frozen_v_cycle(
+    levels: tuple, b: jnp.ndarray, level_index: int, ops: _VCycleOps
+) -> jnp.ndarray:
+    """One V-cycle on a frozen COO-operator hierarchy (recursion unrolled at trace time).
+
+    Shared by every frozen path — smoothed aggregation, its convection two-level variant, and lAIR:
+    the operator matvec (:func:`_operator_matvec`) and the direct coarse solve are common, and the
+    restriction, prolongation, and pre/post smoother come from the injected ``ops`` (:class:`_VCycleOps`).
+    """
+    level = levels[level_index]
+    if level.coarse_inv is not None:  # coarsest: a direct (dense pseudo-inverse) solve
         return level.coarse_inv @ b
 
-    x = smoother(level, b, jnp.zeros_like(b))  # pre-smooth
-    residual = b - _sparse_apply(level, x)
-    coarse_residual = segment_sum(
-        level.p_val * residual[level.p_frow], level.p_ccol, hierarchy.levels[level_index + 1].n
+    x = ops.smooth(level, b, jnp.zeros_like(b))  # pre-smooth
+    residual = b - _operator_matvec(level, x)
+    coarse_residual = ops.restrict(level, residual)
+    coarse_error = _frozen_v_cycle(levels, coarse_residual, level_index + 1, ops)
+    x = x + ops.prolong(level, coarse_error)  # prolong and correct
+    return ops.smooth(level, b, x)  # post-smooth
+
+
+def _smoothed_ops(smoother: _Smoother) -> _VCycleOps:
+    """V-cycle ops for a smoothed-aggregation level: restrict by ``Pᵀ``, prolong by ``P`` (``R = Pᵀ``)."""
+    return _VCycleOps(
+        restrict=lambda level, r: _coo_apply(
+            level.p_ccol, level.p_frow, level.p_val, r, level.n_coarse
+        ),
+        prolong=lambda level, e: _coo_apply(level.p_frow, level.p_ccol, level.p_val, e, level.n),
+        smooth=smoother,
     )
-    coarse_error = _smoothed_v_cycle(hierarchy, coarse_residual, level_index + 1, smoother)
-    x = x + segment_sum(level.p_val * coarse_error[level.p_ccol], level.p_frow, level.n)  # prolong
-    return smoother(level, b, x)  # post-smooth
 
 
 def smoothed_multigrid_solve(
@@ -774,10 +530,11 @@ def smoothed_multigrid_solve(
     def smoother(level: _SparseLevel, rhs: jnp.ndarray, guess: jnp.ndarray) -> jnp.ndarray:
         return _chebyshev_smooth(level, rhs, guess, degree, lo_frac)
 
+    ops = _smoothed_ops(smoother)
     x = jnp.zeros_like(b)
     for _ in range(cycles):
-        residual = b - _sparse_apply(hierarchy.levels[0], x)
-        x = x + _smoothed_v_cycle(hierarchy, residual, 0, smoother)
+        residual = b - _operator_matvec(hierarchy.levels[0], x)
+        x = x + _frozen_v_cycle(hierarchy.levels, residual, 0, ops)
     return x
 
 
@@ -921,7 +678,7 @@ def _jacobi_smooth(
     alpha = omega / level.lam_max
     inv_diagonal = 1.0 / level.diagonal
     for _ in range(sweeps):
-        x = x + alpha * inv_diagonal * (b - _sparse_apply(level, x))
+        x = x + alpha * inv_diagonal * (b - _operator_matvec(level, x))
     return x
 
 
@@ -962,10 +719,11 @@ def convection_multigrid_solve(
     def smoother(level: _SparseLevel, rhs: jnp.ndarray, guess: jnp.ndarray) -> jnp.ndarray:
         return _jacobi_smooth(level, rhs, guess, sweeps, omega)
 
+    ops = _smoothed_ops(smoother)
     x = jnp.zeros_like(b)
     for _ in range(cycles):
-        residual = b - _sparse_apply(hierarchy.levels[0], x)
-        x = x + _smoothed_v_cycle(hierarchy, residual, 0, smoother)
+        residual = b - _operator_matvec(hierarchy.levels[0], x)
+        x = x + _frozen_v_cycle(hierarchy.levels, residual, 0, ops)
     return x
 
 
@@ -1258,11 +1016,6 @@ def build_convection_air_hierarchy(
     )
 
 
-def _coo_apply(row, col, val, x: jnp.ndarray, n_out: int) -> jnp.ndarray:
-    """General sparse matvec ``M x`` for a COO operator with ``n_out`` output rows."""
-    return segment_sum(val * x[col], row, n_out)
-
-
 def _fc_jacobi(
     level: _AirLevel, b: jnp.ndarray, x: jnp.ndarray, f_iters: int, c_iters: int, omega: float
 ) -> jnp.ndarray:
@@ -1274,33 +1027,22 @@ def _fc_jacobi(
     """
     inv_diagonal = 1.0 / level.diagonal
     for _ in range(f_iters):
-        x = x + omega * level.f_mask * inv_diagonal * (b - _sparse_apply(level, x))
+        x = x + omega * level.f_mask * inv_diagonal * (b - _operator_matvec(level, x))
     for _ in range(c_iters):
-        x = x + omega * level.c_mask * inv_diagonal * (b - _sparse_apply(level, x))
+        x = x + omega * level.c_mask * inv_diagonal * (b - _operator_matvec(level, x))
     return x
 
 
-def _air_v_cycle(
-    hierarchy: AirHierarchy,
-    b: jnp.ndarray,
-    level_index: int,
-    f_iters: int,
-    c_iters: int,
-    omega: float,
-) -> jnp.ndarray:
-    """One reduction-based V-cycle (recursion unrolled at trace time), pre/post FC-Jacobi smoothed."""
-    level = hierarchy.levels[level_index]
-    if level.coarse_inv is not None:  # coarsest: a direct (dense pseudo-inverse) solve
-        return level.coarse_inv @ b
-
-    x = _fc_jacobi(level, b, jnp.zeros_like(b), f_iters, c_iters, omega)  # pre-smooth
-    residual = b - _sparse_apply(level, x)
-    coarse_residual = _coo_apply(level.r_row, level.r_col, level.r_val, residual, level.n_coarse)
-    coarse_error = _air_v_cycle(
-        hierarchy, coarse_residual, level_index + 1, f_iters, c_iters, omega
+def _air_ops(f_iters: int, c_iters: int, omega: float) -> _VCycleOps:
+    """V-cycle ops for a reduction (lAIR) level: an independent restriction ``R != Pᵀ`` and an
+    FC-Jacobi smoother (the reduction analogue of :func:`_smoothed_ops`)."""
+    return _VCycleOps(
+        restrict=lambda level, r: _coo_apply(
+            level.r_row, level.r_col, level.r_val, r, level.n_coarse
+        ),
+        prolong=lambda level, e: _coo_apply(level.p_row, level.p_col, level.p_val, e, level.n),
+        smooth=lambda level, b, x: _fc_jacobi(level, b, x, f_iters, c_iters, omega),
     )
-    x = x + _coo_apply(level.p_row, level.p_col, level.p_val, coarse_error, level.n)  # prolong
-    return _fc_jacobi(level, b, x, f_iters, c_iters, omega)  # post-smooth
 
 
 def air_multigrid_solve(
@@ -1337,8 +1079,9 @@ def air_multigrid_solve(
     jnp.ndarray
         The approximate solution ``x``, shape ``(n_cells,)``.
     """
+    ops = _air_ops(f_iters, c_iters, omega)
     x = jnp.zeros_like(b)
     for _ in range(cycles):
-        residual = b - _sparse_apply(hierarchy.levels[0], x)
-        x = x + _air_v_cycle(hierarchy, residual, 0, f_iters, c_iters, omega)
+        residual = b - _operator_matvec(hierarchy.levels[0], x)
+        x = x + _frozen_v_cycle(hierarchy.levels, residual, 0, ops)
     return x
