@@ -78,9 +78,13 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   verified in `tests/unit/test_pseudo_transient.py`, which drives it on a scalar root with a trivial
   policy (no mesh, no flow). The flow application is `aquaflux/flow/continuation.py`'s
   `MomentumShiftPolicy` (velocity-block `a_P` shift + shifted SIMPLE preconditioner), wired in by the
-  thin `PseudoTransientContinuation` adapter (unchanged `build(assembler, …)` and pytree). When a new
-  nonlinear residual needs pseudo-time globalization, write a `ShiftPolicy` — do **not** re-implement
-  the march.
+  thin `PseudoTransientContinuation` adapter (unchanged `build(assembler, …)` and pytree). The scalar
+  application is `aquaflux/turbulence/continuation.py`'s `ScalarShiftPolicy` (the transport operator
+  diagonal — the scalar `a_P` analogue from `scalar_transport_shift_diagonal` — as the base shift, with
+  the frozen scalar-transport AMG reused **unshifted** as `M`, since the shift only adds positive
+  diagonal), globalizing the stiff k/omega solves via `scalar_pseudo_transient_solve` under the SST
+  driver's `scalar_globalization="continuation"`. When a new nonlinear residual needs pseudo-time
+  globalization, write a `ShiftPolicy` — do **not** re-implement the march.
 - **Gate C — PASSED (`tests/integration/test_skewed_diffusion.py`).** With
   `CorrectedGreenGauss` injected into the residual on a 25%-skewed mesh, one Newton step
   drives `‖R‖` ~24 → ~1e-12 and reproduces a harmonic linear field to ~5e-13 (linear-exact
