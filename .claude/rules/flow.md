@@ -119,17 +119,20 @@ Engineering Principles.
     **differentiable through the nonlinear solve via the IFT adjoint**.
 - **Structure (post-encapsulation-refactor):** the preconditioner is `block_preconditioner.py`'s
   `BlockPreconditioner` — a builder composing two **injected strategy families**: an `InnerSchurSolver`
-  (`SmoothedAmgSchur` / `AggregationSchur` / `DampedJacobiSchur`) for the pressure block and a
-  `VelocityBlockSolver` (`DiagonalVelocity` / `SmoothedAmgVelocity`), with the block-triangular `D·δu`
-  coupling. Build it with `BlockPreconditioner.build(assembler, inner=…).factory()` (the factory is
-  the `preconditioner` argument `newton_step` expects). **The dependency is one-way** `block_preconditioner
-  → momentum` — the assembler does **not** know about the preconditioner (the old
-  `MomentumContinuity.simple_preconditioner` convenience wrapper was removed precisely because it made
-  `momentum.py` import `block_preconditioner`, a cycle; do not reintroduce it). The low-level
-  coefficient/Laplacian/Jacobi kernels stay in `preconditioner.py`. `a_P` comes from
-  `MomentumContinuity.lagged_momentum_diagonal`. When adding an inner solver, add an `InnerSchurSolver`
-  subclass — do **not** grow an `if inner == …` branch (that god-method was the thing the refactor
-  removed; see root `CLAUDE.md` Principle 3).
+  (`SmoothedAmgSchur`, the mesh-independent smoothed-aggregation multigrid) for the pressure block and a
+  `VelocityBlockSolver` (`SmoothedAmgVelocity` on the viscous operator / `SmoothedAmgConvectionVelocity`
+  on the convection-diffusion operator) for the momentum block, **always** block-triangular (the `D·δu`
+  coupling). Build it with `BlockPreconditioner.build(assembler, velocity=…).factory()` (the factory is
+  the `preconditioner` argument `newton_step` expects). The dominated Stage-1 fallbacks
+  (`AggregationSchur`/`inner="multigrid"`, `DampedJacobiSchur`/`inner="jacobi"`, `DiagonalVelocity`) and
+  the geometric coefficient-flow multigrid they used were **deleted** as superseded (see root `CLAUDE.md`
+  Principle 0); there is no `inner=` selector — the smoothed AMG is the one pressure Schur. **The
+  dependency is one-way** `block_preconditioner → momentum` — the assembler does **not** know about the
+  preconditioner (the old `MomentumContinuity.simple_preconditioner` convenience wrapper was removed
+  precisely because it made `momentum.py` import `block_preconditioner`, a cycle; do not reintroduce it).
+  The low-level coefficient/Laplacian kernels stay in `preconditioner.py`. `a_P` comes from
+  `MomentumContinuity.lagged_momentum_diagonal`. `InnerSchurSolver` / `VelocityBlockSolver` stay abstract
+  as the extension seam — when adding a strategy, add a subclass; do **not** grow an `if … == …` branch.
 - **Every strategy builds from a narrow geometry bundle, not the assembler (binding — Principle 3).**
   Both strategy families take a frozen geometry seam rather than reaching into the full
   `MomentumContinuity`: the Schur family holds a `_SchurGeometry` (`face_cells`, `mesh_geometry`,
@@ -144,17 +147,16 @@ Engineering Principles.
   handed in as a frozen array (`reference_mdot`), so the strategy `build` stays assembler-free and
   unit-testable from mesh primitives alone. When adding a strategy, extend/consume the matching bundle;
   do **not** thread the assembler into a strategy.
-- **Outer block preconditioner — BUILT (Stage 1: SIMPLE block-diagonal).** The `DampedJacobiSchur` +
-  `DiagonalVelocity` composition is a frozen left preconditioner
-  `M = blkdiag(diag(a_P)⁻¹, Ŝ⁻¹)`: the velocity block is the momentum-diagonal solve (reusing the
-  lagged `a_P`), and `Ŝ` is the compact Rhie–Chow **pressure Laplacian** (`pressure_schur_laplacian`,
-  coefficient `c_f = ρ(V/a_P)_f A_f/(d·n)_f` — same `d = V/a_P` as the mass flux, one source of truth)
-  solved by a **fixed** damped-Jacobi sweep (`damped_jacobi_solve` — constant operator, so plain
-  left-preconditioned GMRES suffices, no FGMRES). **Measured (skewed cavity):** outer GMRES per Newton
-  step 92→11 (432 dof), 191→19 (768), 309→25 (1200) — **~8–12× fewer iterations**, an exact drop-in
-  (update diff ~1e-7) and adjoint-transparent (`tests/{unit/test_preconditioner,integration/test_flow_preconditioner}.py`).
-  The count still *grows* with mesh because the Jacobi inner is not h-independent — **Stage 2 (a
-  fixed-cycle multigrid inner, built once off-jit and frozen) is what flattens it at >1M cells.**
+- **Outer block preconditioner — Stage 1 (SIMPLE block-diagonal) was BUILT then REMOVED as superseded.**
+  The original composition was a `DampedJacobiSchur` (a fixed damped-Jacobi sweep on the compact
+  Rhie–Chow **pressure Laplacian** `pressure_schur_laplacian`, coefficient `c_f = ρ(V/a_P)_f A_f/(d·n)_f`)
+  + `DiagonalVelocity` (`diag(a_P)⁻¹`) block-diagonal preconditioner. It gave ~8–12× fewer outer GMRES
+  iterations (skewed cavity: 92→11 at 432 dof, 309→25 at 1200) — but the count still *grew* with mesh
+  because the Jacobi inner is not h-independent. Stage 2 (the mesh-independent smoothed-AMG inner) made
+  it obsolete, so `DampedJacobiSchur` / `DiagonalVelocity` (and the `inner="jacobi"` selector) were
+  deleted as dominated (root `CLAUDE.md` Principle 0). The underlying kernels `pressure_schur_laplacian`
+  / `damped_jacobi_solve` remain in `preconditioner.py` (still directly unit-tested); the composed Stage-1
+  strategy is gone.
 
 ## Binding decisions
 - **`a_P` (momentum diagonal) is a LAGGED stabilization coefficient, not the AD Jacobian.**
@@ -185,9 +187,9 @@ Engineering Principles.
   full for SIMPLE's `diag(F)⁻¹`). `momentum_diagonal` already carries an unused `dt` seam. Then **energy
   coupling** (the scalar transport already exists — couple the temperature field to the flow).
 - **Outer block preconditioner — Stage 2: MESH-INDEPENDENT AMG inner is done; the residual is the Schur
-  approximation.** Default inner Schur solve is a **smoothed-aggregation multigrid** V-cycle
-  (`aquaflux/solve/multigrid.py`, `BlockPreconditioner.build(asm, inner="smoothed")`; `"multigrid"` =
-  unsmoothed fallback, `"jacobi"` = Stage-1 fallback). Built once off-jit with `scipy.sparse` (no PyAMG needed),
+  approximation.** The inner Schur solve is a **smoothed-aggregation multigrid** V-cycle
+  (`aquaflux/solve/multigrid.py`, `SmoothedAmgSchur`, the one inner — `BlockPreconditioner.build(asm)`).
+  Built once off-jit with `scipy.sparse` (no PyAMG needed),
   applied as a frozen matrix-free V-cycle; **~0.25 flat contraction** via three fixes — **direct coarse
   solve** (dense pinv), **Chebyshev smoother**, and **pin decoupling** (pin zeroed out of the operator →
   SPD singleton, null-space-matched to the pinned Jacobian; this fixed the earlier stagnation/wrong-solution
