@@ -78,14 +78,17 @@ jobs:
         run: codespell aquaflux tests
 
   # ---- Fast unit tests (always-on) --------------------------------------------
-  # The 337 unit tests are cheap and homogeneous (peak ~5 GB in one process), so
-  # they run unsharded across xdist workers (`-n auto`). Two interpreters, since a
-  # unit-level regression can be version-specific.
+  # Most unit tests are cheap and homogeneous (peak ~5 GB in one process), so they
+  # run unsharded across xdist workers (`-n auto`). The wall-clock driver, though, is
+  # the handful of distributed (`shard_map`) tests, each of which spawns a fresh
+  # interpreter to set the simulated device count before JAX starts and then compiles
+  # a sharded program -- that fixed cost, not the cheap tests, sets the budget below.
+  # Two interpreters, since a unit-level regression can be version-specific.
   unit:
     name: unit tests (py${{ matrix.python-version }})
     if: github.event.action != 'labeled'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
