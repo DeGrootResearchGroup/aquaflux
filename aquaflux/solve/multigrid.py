@@ -11,7 +11,9 @@ and frozen**, then applied under jit as a fixed matrix-free V-cycle (a constant 
 carries its operator as a general sparse ``(row, col, val)`` triple and its intergrid transfers as
 sparse operators; the one recursion (:func:`_frozen_v_cycle`) applies the shared operator matvec
 (:func:`_operator_matvec`) and direct coarse solve, and is specialized per family by the injected
-:class:`_VCycleOps` (restriction, prolongation, smoother):
+:class:`_VCycleOps` (restriction, prolongation, smoother). The outer fixed-cycle driver every
+``*_multigrid_solve`` entry point runs is likewise one function (:func:`_fixed_cycle_solve`), so a
+family contributes only its ops:
 
 * **Smoothed aggregation** (:func:`build_smoothed_hierarchy`, :func:`smoothed_multigrid_solve`): the
   symmetric pressure Schur. The tentative piecewise-constant prolongation is smoothed
@@ -419,6 +421,21 @@ def _frozen_v_cycle(
     return ops.smooth(level, b, x)  # post-smooth
 
 
+def _fixed_cycle_solve(levels: tuple, b: jnp.ndarray, cycles: int, ops: _VCycleOps) -> jnp.ndarray:
+    """The outer driver shared by every frozen path: ``cycles`` V-cycles from a zero initial guess.
+
+    Each pass corrects the current iterate by a V-cycle on the current residual, so with a frozen
+    hierarchy and a fixed ``cycles`` the map ``b -> x`` is a constant linear operator — what makes it
+    a valid frozen left preconditioner under plain GMRES, and what lets the adjoint transpose it.
+    Only the level-local ``ops`` differ between the families.
+    """
+    x = jnp.zeros_like(b)
+    for _ in range(cycles):
+        residual = b - _operator_matvec(levels[0], x)
+        x = x + _frozen_v_cycle(levels, residual, 0, ops)
+    return x
+
+
 def _smoothed_ops(smoother: _Smoother) -> _VCycleOps:
     """V-cycle ops for a smoothed-aggregation level: restrict by ``Pᵀ``, prolong by ``P`` (``R = Pᵀ``)."""
     return _VCycleOps(
@@ -468,12 +485,7 @@ def smoothed_multigrid_solve(
     def smoother(level: _SparseLevel, rhs: jnp.ndarray, guess: jnp.ndarray) -> jnp.ndarray:
         return _chebyshev_smooth(level, rhs, guess, degree, lo_frac)
 
-    ops = _smoothed_ops(smoother)
-    x = jnp.zeros_like(b)
-    for _ in range(cycles):
-        residual = b - _operator_matvec(hierarchy.levels[0], x)
-        x = x + _frozen_v_cycle(hierarchy.levels, residual, 0, ops)
-    return x
+    return _fixed_cycle_solve(hierarchy.levels, b, cycles, _smoothed_ops(smoother))
 
 
 # --- nonsymmetric (convection-diffusion) smoothed aggregation ---------------------------
@@ -608,12 +620,7 @@ def convection_multigrid_solve(
     def smoother(level: _SparseLevel, rhs: jnp.ndarray, guess: jnp.ndarray) -> jnp.ndarray:
         return _jacobi_smooth(level, rhs, guess, sweeps, omega)
 
-    ops = _smoothed_ops(smoother)
-    x = jnp.zeros_like(b)
-    for _ in range(cycles):
-        residual = b - _operator_matvec(hierarchy.levels[0], x)
-        x = x + _frozen_v_cycle(hierarchy.levels, residual, 0, ops)
-    return x
+    return _fixed_cycle_solve(hierarchy.levels, b, cycles, _smoothed_ops(smoother))
 
 
 # --- local approximate ideal restriction (lAIR) -----------------------------------------
@@ -949,9 +956,4 @@ def air_multigrid_solve(
     jnp.ndarray
         The approximate solution ``x``, shape ``(n_cells,)``.
     """
-    ops = _air_ops(f_iters, c_iters, omega)
-    x = jnp.zeros_like(b)
-    for _ in range(cycles):
-        residual = b - _operator_matvec(hierarchy.levels[0], x)
-        x = x + _frozen_v_cycle(hierarchy.levels, residual, 0, ops)
-    return x
+    return _fixed_cycle_solve(hierarchy.levels, b, cycles, _air_ops(f_iters, c_iters, omega))
