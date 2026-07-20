@@ -12,21 +12,27 @@ settles whether aquaflux's realized `kappa ~ 0.34-0.39` (below the nominal 0.41;
 
 | Re_tau | code | u_tau/U_bulk | nu_t/nu peak | realized kappa (indicator plateau) |
 |---|---|---|---|---|
-| 368 | aquaflux | 0.0551 | 48.5 | 0.333 |
+| 380 | aquaflux | 0.0569 | 50.4 | 0.340 |
 | 379 | OpenFOAM | 0.0567 | 50.3 | 0.343 |
-| 3569 | aquaflux | 0.0420 | 519.7 | 0.388 |
-| 3630 | OpenFOAM | 0.0427 | 529.0 | 0.389 |
 
 See `figures/comparison.png`.
 
+## Points not compared
+
+- **high** (OpenFOAM Re_tau ~ 3630): the aquaflux segregated solve did not converge (`EquinoxRuntimeError`), so this point is absent from the table and the figure.
+
 ## Conclusion
 
-The two independent SST implementations **agree** on every metric to a few percent at both
-Reynolds numbers -- the mean profile, the wall stress `u_tau/U_bulk`, the eddy-viscosity ratio,
-and the **realized `kappa`**, which both codes carry a few percent below the nominal 0.41 and
-which both increase with `Re_tau` (kappa ~ 0.34 at Re_tau ~ 380, ~ 0.39 at Re_tau ~ 3600). So
-aquaflux's below-nominal realized `kappa` is **standard k-omega SST behaviour**, reproduced by
-the reference implementation -- not an aquaflux discretization or model error.
+At every Reynolds number that converged, the two independent SST implementations **agree** on
+each metric to a few percent -- the mean profile, the wall stress `u_tau/U_bulk`, the
+eddy-viscosity ratio, and the **realized `kappa`**, which both codes carry a few percent below
+the nominal 0.41. So aquaflux's below-nominal realized `kappa` is **standard k-omega SST
+behaviour**, reproduced by an independent implementation -- not an aquaflux discretization or
+model error.
+
+The discretization is matched term by term (momentum `linearUpwind`, k/omega `upwind`,
+uncorrected Green-Gauss gradients), so what the comparison isolates is the model, not the
+schemes.
 
 ## Reproduce
 

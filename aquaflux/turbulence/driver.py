@@ -190,9 +190,9 @@ def solve_segregated(
         When set, drive a streamwise-periodic channel to this **bulk velocity** by a mass-flow
         controller: after each sweep's flow solve the body force is rescaled toward the
         linear-response estimate that would hit the target,
-        ``beta <- beta + gain (beta U_target / U_bulk - beta)`` (the mass-flow feedback the reference
-        code applies to its periodic pressure drop, ``main.F90``, cast for the body-force
-        formulation, where it is scale-free -- no gain tuning per Reynolds number). Requires
+        ``beta <- beta + gain (beta U_target / U_bulk - beta)`` (the standard mass-flow feedback for a
+        periodic pressure drop, cast for the body-force formulation, where it is scale-free -- no gain
+        tuning per Reynolds number). Requires
         ``momentum`` to carry a nonzero initial ``body_force`` along ``flow_direction`` and a
         ``pressure_pin``. ``None`` leaves the body force fixed.
     flow_direction : int

@@ -36,6 +36,15 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   library is operator-in, #45); its reaction+boundary diagonal still comes from its own `J·1`
   derivation, which is a genuinely different source, not a copy of the interior stencil.
 - **`boundary.py`** — inlet/wall closures for k and ω over the generic scalar boundary machinery.
+  - **The wall ω is `6ν/(β₁d²)`, NOT `60ν/(β₁d²)` (binding — the constant depends on where it is
+    imposed).** `omega_wall_value` is fixed at the wall-adjacent **cell centroid** (`FixedValueCells`
+    at `wall_distance[wall_cells]`), so it must be the analytical sublayer solution *at that distance*:
+    `ν d²ω/dy² = β₁ω²` with `ω = A/y²` gives `A = 6ν/β₁`. The `60` form is a wall-**face** value — 10×
+    the asymptote, standing in for the singularity at `y = 0` (Menter, 1994) — and was being imposed at
+    the cell centroid, putting near-wall ω 10× high (suppressed near-wall `ν_t`, stiffer ω equation, and
+    a realized κ below the reference). Do **not** "restore" the 60 without also moving the imposition to
+    the wall face. The unit test pins the **ODE residual**, not the coefficient, so the two forms cannot
+    be swapped silently again.
 - **`driver.py` — `solve_segregated`.** The outer Picard loop: μ_t → flow solve → k solve → ω
   solve, with under-relaxation and positivity floors as the stabilizers, and injected
   `solve_flow` / `solve_scalar` so the driver is pure orchestration. The loop **stops on the coupled
@@ -61,7 +70,7 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   matches finite differences.
 - **`initialization.py` — `hybrid_initialize` (cold-start, the reason `solve_coupled` self-starts).**
   The monolithic Newton is a *local* method: from a raw cold start (`u=0`, uniform k/ω) it **stalls** —
-  the near-wall ω fixation alone injects a `~60ν/(β₁d²)` jump, and a uniform interior is far from a
+  the near-wall ω fixation alone injects a `~6ν/(β₁d²)` jump, and a uniform interior is far from a
   consistent field the inner solve can precondition. `hybrid_initialize(momentum, turbulence)` builds a
   cheap physical IC (a few linear Laplace solves): **potential-flow velocity** (`flow/initialization.py`
   `potential_flow`), **Laplace-smoothed k** (harmonic interpolant of its BCs), and **ω** =

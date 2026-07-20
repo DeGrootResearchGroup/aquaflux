@@ -48,10 +48,34 @@ python3 validation/turbulent_channel_openfoam/compare.py
 
 ## Headline
 
-The two independent SST implementations agree on the mean profile, `u_τ/U_bulk`, `ν_t/ν`, and the
-**realized `κ`** to a few percent at both Reynolds numbers — and both carry `κ` a few percent below
-the nominal 0.41, rising with Re_τ. aquaflux's below-nominal `κ` is **standard k-ω SST behaviour**,
-not an aquaflux gap.
+At Re_τ ≈ 380 the two independent SST implementations agree on the mean profile, `u_τ/U_bulk`
+(0.0569 vs 0.0567), `ν_t/ν` (50.4 vs 50.3), and the **realized `κ`** (0.340 vs 0.343) — and both
+carry `κ` a few percent below the nominal 0.41. aquaflux's below-nominal `κ` is **standard k-ω SST
+behaviour**, not an aquaflux gap.
+
+The Re_τ ≈ 3600 point is currently **not compared**: the aquaflux segregated solve does not converge
+there (its scalar k/ω sub-solve exhausts its step budget). `compare.py` records the point as
+unconverged and reports the rest rather than aborting.
+
+## Matched discretization
+
+The comparison isolates the *model*, so the schemes are matched term by term:
+
+| term | OpenFOAM (`fvSchemes`) | aquaflux |
+|---|---|---|
+| momentum advection | `Gauss linearUpwind grad(U)` | `LimitedUpwind()` (unlimited) |
+| k / ω advection | `Gauss upwind` | `FirstOrderUpwind()` |
+| gradient | `Gauss linear` (uncorrected) | `CompactGreenGauss()` |
+| laplacian / surface-normal gradient | `corrected` | `DiffusionFlux` non-orthogonal correction |
+
+Two notes on why these pairings are the accurate ones here, not just the matching ones:
+
+- The wall-normal grading keeps the cells rectangular, so the skewness offset `x_ip − x_g` vanishes
+  and a skewness-corrected gradient reproduces the compact one to ~1e-13 relative.
+- A fully-developed channel carries **no mean momentum advection** (the converged wall-normal
+  velocity is ~1e-15 and the flow is streamwise-homogeneous), so the momentum advection scheme has
+  nothing to act on — first-order and second-order upwind give identical results to four significant
+  figures. The scheme is matched for correctness of the claim, not because it moves this case.
 
 ## Follow-up
 
