@@ -21,9 +21,11 @@ Key correctness facts for a cell-centred FVM decomposition:
   local owner, so the gathered owner-outward normals stay consistent — no re-orientation.
 
 This module produces a correct decomposition and nothing more; extending each partition to the
-uniform shapes ``shard_map`` needs is a separate concern, in
-:mod:`~aquaflux.parallel.padding`. The current builder keeps the full global node array on every
-partition (correct, simple); remapping to a partition-local node set is a scaling follow-on.
+uniform shapes ``shard_map`` needs is a separate concern, in :mod:`~aquaflux.parallel.padding`.
+Each local mesh carries its **own** node set — the nodes its faces touch, with the face-node
+connectivity remapped to local node ids — so a partition is a genuinely standalone ``Mesh`` rather
+than one holding a copy of the whole global node array (which would be replicated onto every device
+once the partitions are stacked).
 """
 
 from __future__ import annotations
@@ -212,9 +214,9 @@ def partition_mesh(mesh: Mesh, labels) -> PartitionedMesh:
 
     Notes
     -----
-    Pure build-time topology work in numpy (not part of the differentiable solve). The local mesh
-    keeps the full global node array; node remapping is a scaling follow-on. Padding to the
-    uniform shapes ``shard_map`` needs is applied separately, by
+    Pure build-time topology work in numpy (not part of the differentiable solve). Each local mesh
+    carries only its own nodes (the face-node connectivity is remapped to local node ids). Padding
+    to the uniform shapes ``shard_map`` needs is applied separately, by
     :func:`~aquaflux.parallel.padding.pad_partition`.
     """
     labels = np.asarray(labels)
@@ -223,7 +225,8 @@ def partition_mesh(mesh: Mesh, labels) -> PartitionedMesh:
     n_global = mesh.n_cells
     n_partitions = int(labels.max()) + 1
 
-    node_coords = mesh.node_coords
+    node_coords = np.asarray(mesh.node_coords)
+    n_global_nodes = node_coords.shape[0]
     offsets = np.asarray(mesh.face_nodes.offsets)
     indices = np.asarray(mesh.face_nodes.face_node_indices)
     face_patch_label = np.asarray(mesh.face_patches.label)
@@ -277,9 +280,18 @@ def partition_mesh(mesh: Mesh, labels) -> PartitionedMesh:
         local_offsets = np.concatenate(
             [[0], np.cumsum([len(x) for x in local_face_nodes], dtype=np.int64)]
         )
-        local_indices = (
+        global_node_indices = (
             np.concatenate(local_face_nodes) if local_face_nodes else np.zeros(0, dtype=np.int64)
         )
+
+        # Remap to a partition-local node set: keep only the nodes this partition's faces touch, so
+        # the local mesh carries its own nodes rather than a copy of the whole global node array
+        # (which would otherwise be replicated onto every device once the partitions are stacked).
+        local_nodes = np.unique(global_node_indices)  # global ids of this partition's nodes
+        global_to_local_node = np.full(n_global_nodes, -1, dtype=np.int64)
+        global_to_local_node[local_nodes] = np.arange(len(local_nodes))
+        local_indices = global_to_local_node[global_node_indices]
+        local_node_coords = node_coords[local_nodes]
 
         local_patches = FacePatches(
             label=jnp.asarray(face_patch_label[local_faces]), names=mesh.face_patches.names
@@ -288,7 +300,7 @@ def partition_mesh(mesh: Mesh, labels) -> PartitionedMesh:
             label=jnp.asarray(cell_zone_label[local_global]), names=mesh.cell_zones.names
         )
         local_mesh = Mesh(
-            node_coords=node_coords,
+            node_coords=jnp.asarray(local_node_coords),
             face_cells=FaceCellConnectivity(
                 jnp.asarray(lf_owner), jnp.asarray(lf_nb), n_owned + n_ghost
             ),

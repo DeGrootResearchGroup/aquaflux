@@ -75,6 +75,10 @@ class PaddedLayout(eqx.Module):
     n_incidences_max : int
         Padded length of the face-node index array (static) — the largest face-node incidence
         count over the partitions.
+    n_nodes : tuple of int
+        Real per-partition node counts (static); the valid prefix of each padded node array.
+    n_nodes_max : int
+        Padded node count (static) — the largest per-partition node count.
     n_global_cells : int
         Global cell count (static).
     owned_global : jnp.ndarray
@@ -92,6 +96,8 @@ class PaddedLayout(eqx.Module):
     n_ghost_max: int = eqx.field(static=True)
     n_faces_max: int = eqx.field(static=True)
     n_incidences_max: int = eqx.field(static=True)
+    n_nodes: tuple[int, ...] = eqx.field(static=True)
+    n_nodes_max: int = eqx.field(static=True)
     n_global_cells: int = eqx.field(static=True)
     owned_global: jnp.ndarray
     ghost_src_partition: jnp.ndarray
@@ -197,6 +203,7 @@ class PaddedLayout(eqx.Module):
         n_owned = tuple(p.n_owned for p in parts)
         n_ghost = tuple(p.n_ghost for p in parts)
         n_faces = tuple(int(p.mesh.n_faces) for p in parts)
+        n_nodes = tuple(int(p.mesh.n_nodes) for p in parts)
         no_max, ng_max = max(n_owned), max(n_ghost)
 
         owned_global = np.zeros((len(parts), no_max), dtype=np.int64)
@@ -215,6 +222,8 @@ class PaddedLayout(eqx.Module):
             n_ghost_max=ng_max,
             n_faces_max=max(n_faces),
             n_incidences_max=max(int(p.mesh.face_nodes.face_node_indices.shape[0]) for p in parts),
+            n_nodes=n_nodes,
+            n_nodes_max=max(n_nodes),
             n_global_cells=pmesh.n_global_cells,
             owned_global=jnp.asarray(owned_global),
             ghost_src_partition=jnp.asarray(gsp),
@@ -310,6 +319,14 @@ def pad_partition(
     zone_label = np.full(n_local, zone_label_real[0], dtype=np.int64)
     zone_label[padded_cells] = zone_label_real
 
+    # --- nodes --------------------------------------------------------------------------
+    # Node counts are ragged across partitions (each carries only its own nodes), so the node
+    # coordinates are padded to a common count with copies of node 0 — a real, finite point. The
+    # padding nodes are referenced by nothing (padded faces list no nodes), so their value is inert.
+    node_coords_real = np.asarray(local_mesh.node_coords)
+    node_coords = np.tile(node_coords_real[0], (layout.n_nodes_max, 1))
+    node_coords[: node_coords_real.shape[0]] = node_coords_real
+
     # --- face nodes ---------------------------------------------------------------------
     # The face-node array is ragged across partitions, so it is padded to a common length too.
     # Row pointers must still end at that length, so the first padding face absorbs the whole
@@ -325,7 +342,7 @@ def pad_partition(
     offsets[: nf + 1] = offsets_real
 
     padded_mesh = Mesh(
-        node_coords=local_mesh.node_coords,
+        node_coords=jnp.asarray(node_coords),
         face_cells=FaceCellConnectivity(jnp.asarray(owner), jnp.asarray(neighbour), n_local),
         face_nodes=FaceNodeConnectivity.from_csr(offsets, indices),
         cell_zones=CellZones(label=jnp.asarray(zone_label), names=local_mesh.cell_zones.names),
