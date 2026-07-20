@@ -32,16 +32,19 @@ from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
     bulk_velocity,
-    inlet_k,
-    inlet_omega,
+    hybrid_initialize,
     scalar_pseudo_transient_solve,
     solve_segregated,
 )
 
+# The scalar march's cap is a backstop, not a cost: the solver exits on tolerance, so a generous
+# value only bounds the worst case (measured identical physics and wall time at 200 vs 500).
+SCALAR_MAX_STEPS = 200
+
 RHO, U_B, H = 1.0, 1.0, 2.0  # half-height h = 1
 
 
-def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=75):
+def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
     nu = U_B * H / Re_b
     y = graded_nodes(ny, H, growth)
     mesh = structured_grid_2d(
@@ -49,8 +52,6 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=75):
     )
     geom = mesh.geometry()
     model = SSTModel()
-    k_in = float(inlet_k(jnp.array(U_B), 0.05))
-    omega_in = float(inlet_omega(jnp.array(k_in), 0.1, model))
     momentum = MomentumContinuity.build(
         mesh,
         geom,
@@ -78,19 +79,21 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=75):
     def solve_flow(mom, state):
         return NewtonSolver(iterations=15, solver=direct).solve(mom.residual, state)
 
-    warm = jnp.zeros((mesh.n_cells, 2)).at[:, 0].set(U_B)
-    flow0 = momentum.pack(warm, jnp.zeros(mesh.n_cells))
+    # A uniform k leaves the first sweep's residual essentially unchanged for ~30 pseudo-transient
+    # steps, so the SER schedule's beta never relaxes and the march exhausts its budget before the
+    # residual moves. The hybrid IC descends from the first step (>200 steps -> 37 here).
+    flow0, k0, omega0 = hybrid_initialize(momentum, turbulence)
     flow, k, omega = solve_segregated(
         momentum,
         turbulence,
         solve_flow,
-        scalar_pseudo_transient_solve(max_steps=40),
+        scalar_pseudo_transient_solve(max_steps=SCALAR_MAX_STEPS),
         flow0,
-        jnp.full(mesh.n_cells, k_in),
-        jnp.full(mesh.n_cells, omega_in),
+        k0,
+        omega0,
         density=RHO,
         max_sweeps=sweeps,
-        relaxation=0.5,
+        relaxation=0.9,
         bulk_velocity_target=U_B,
         flow_direction=0,
         bulk_velocity_gain=0.5,
