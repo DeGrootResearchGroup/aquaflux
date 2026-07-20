@@ -14,13 +14,14 @@ from .continuation import MomentumShiftPolicy, momentum_continuation, reused_flo
 from .initialization import laplace_field, potential_flow
 from .mean_velocity import bulk_velocity_flow_solve
 from .scales import body_force_velocity, characteristic_velocity
-from .momentum import MomentumContinuity
+from .momentum import FlowFields, MomentumContinuity
 from .preconditioner import damped_jacobi_solve, pressure_schur_laplacian
 from .rhie_chow import interior_mass_flux, momentum_diagonal
 
 __all__ = [
     "BlockPreconditioner",
     "FlowBoundary",
+    "FlowFields",
     "MomentumContinuity",
     "MomentumShiftPolicy",
     "MovingWall",

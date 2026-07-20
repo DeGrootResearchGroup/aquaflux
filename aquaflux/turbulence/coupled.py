@@ -34,7 +34,6 @@ import jax
 import jax.numpy as jnp
 
 from aquaflux.flow import BlockPreconditioner
-from aquaflux.properties import FieldProperty, PropertyModel
 from aquaflux.solve import (
     DivergenceGuard,
     ImplicitNewtonSolver,
@@ -43,14 +42,12 @@ from aquaflux.solve import (
 )
 
 from .initialization import hybrid_initialize
+from .preconditioner import ScalarTransportPreconditioner
 
 if TYPE_CHECKING:
     from aquaflux.flow import MomentumContinuity
 
     from .transport import SSTTurbulence
-
-# A frozen ``phi -> M`` preconditioner factory (the scalar convection-diffusion AMG carriers).
-_ScalarFactory = Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]
 
 
 class CoupledRANSLayout(eqx.Module):
@@ -115,25 +112,10 @@ class CoupledRANSLayout(eqx.Module):
         return jnp.concatenate([flow, k, omega])
 
 
-def _with_viscosity(
-    momentum: MomentumContinuity, effective_viscosity: jnp.ndarray
-) -> MomentumContinuity:
-    """Return ``momentum`` with its ``viscosity`` property replaced by a per-cell field.
-
-    The seam the eddy viscosity enters the momentum block through: ``mu_eff = rho (nu + nu_t)``. The
-    same functional swap the segregated driver applies each sweep, here evaluated live inside the
-    coupled residual so ``dR_momentum / d(k, omega)`` flows through ``nu_t`` under AD.
-    """
-    properties = PropertyModel(
-        {**momentum.properties.properties, "viscosity": FieldProperty(effective_viscosity)}
-    )
-    return eqx.tree_at(lambda m: m.properties, momentum, properties)
-
-
 class CoupledRANS(eqx.Module):
     """The monolithic ``R(u, p, k, omega)`` assembler.
 
-    Holds the flow and turbulence assemblers and the (constant) density, and composes their residuals
+    Holds the flow and turbulence assemblers and composes their residuals
     with **live** coupling: each :meth:`residual` evaluation recomputes ``nu_t`` and the closure from
     the current ``(k, omega, grad u)``, re-viscosifies the momentum block, and advects ``k`` / ``omega``
     on the current Rhie--Chow flux. The whole module is the differentiable parameter pytree ``theta``
@@ -146,18 +128,13 @@ class CoupledRANS(eqx.Module):
         evaluation (the molecular viscosity comes from ``turbulence``).
     turbulence : SSTTurbulence
         The k-omega SST closure and equation assembler.
-    density : float
-        The constant fluid density forming ``mu_eff = rho (nu + nu_t)``.
     """
 
     momentum: MomentumContinuity
     turbulence: SSTTurbulence
-    density: float
 
     @classmethod
-    def build(
-        cls, momentum: MomentumContinuity, turbulence: SSTTurbulence, density: float
-    ) -> CoupledRANS:
+    def build(cls, momentum: MomentumContinuity, turbulence: SSTTurbulence) -> CoupledRANS:
         """Assemble the coupled system, pre-resolving the turbulence boundaries off the jit path.
 
         The turbulence residual rebuilds its scalar :class:`~aquaflux.discretization.ResidualAssembler`
@@ -167,16 +144,7 @@ class CoupledRANS(eqx.Module):
         :meth:`~aquaflux.flow.MomentumContinuity.build`) makes the per-evaluation rebuild's ``resolve``
         an idempotent no-op, so the whole coupled residual is jit- and adjoint-safe.
         """
-        face_patches = momentum.mesh.face_patches
-        turbulence = eqx.tree_at(
-            lambda t: (t.k_boundary, t.omega_boundary),
-            turbulence,
-            (
-                turbulence.k_boundary.resolve(face_patches),
-                turbulence.omega_boundary.resolve(face_patches),
-            ),
-        )
-        return cls(momentum, turbulence, density)
+        return cls(momentum, turbulence.resolve_boundaries())
 
     @property
     def layout(self) -> CoupledRANSLayout:
@@ -197,18 +165,18 @@ class CoupledRANS(eqx.Module):
         """
         flow, k, omega = self.layout.unpack(state)
 
+        # The closure carries nu_t and the mean strain, so build it first and take nu_t from it --
+        # eddy_viscosity would otherwise recompute the same strain and nu_t the closure already forms.
         grad_velocity = self.momentum.velocity_gradient(flow)
-        nu_t = self.turbulence.eddy_viscosity(grad_velocity, k, omega)
-        momentum = _with_viscosity(
-            self.momentum, self.density * (self.turbulence.molecular_viscosity + nu_t)
-        )
-
-        flow_residual = momentum.residual(flow)
-
-        mdot = momentum.mass_flux(flow)
         closure = self.turbulence.closure_fields(grad_velocity, k, omega)
-        k_residual = self.turbulence.k_residual(mdot, closure)(k)
-        omega_residual = self.turbulence.omega_residual(mdot, closure)(omega)
+        momentum = self.momentum.with_eddy_viscosity(closure.nu_t)
+
+        # One Rhie--Chow assembly at the re-viscosified state feeds both the flow residual and the
+        # mass flux the scalars advect on.
+        fields = momentum.flow_fields(flow)
+        flow_residual = momentum.residual_from_fields(fields)
+        k_residual = self.turbulence.k_residual(fields.mdot, closure)(k)
+        omega_residual = self.turbulence.omega_residual(fields.mdot, closure)(omega)
 
         return self.layout.pack(flow_residual, k_residual, omega_residual)
 
@@ -250,8 +218,8 @@ class CoupledShiftPolicy(eqx.Module):
     flow_preconditioner: BlockPreconditioner
     k_shift_diagonal: jnp.ndarray
     omega_shift_diagonal: jnp.ndarray
-    k_preconditioner: _ScalarFactory | None = None
-    omega_preconditioner: _ScalarFactory | None = None
+    k_preconditioner: ScalarTransportPreconditioner | None = None
+    omega_preconditioner: ScalarTransportPreconditioner | None = None
 
     def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
         """The block-diagonal full-state shift and the ``beta -> M`` composed preconditioner at ``phi``.
@@ -349,24 +317,23 @@ def coupled_continuation(
     """
     flow_ref, k_ref, omega_ref = coupled.layout.unpack(reference_state)
     grad_velocity = coupled.momentum.velocity_gradient(flow_ref)
-    nu_t = coupled.turbulence.eddy_viscosity(grad_velocity, k_ref, omega_ref)
-    momentum = _with_viscosity(
-        coupled.momentum, coupled.density * (coupled.turbulence.molecular_viscosity + nu_t)
-    )
+    closure = coupled.turbulence.closure_fields(grad_velocity, k_ref, omega_ref)
+    momentum = coupled.momentum.with_eddy_viscosity(closure.nu_t)
     block = BlockPreconditioner.build(momentum, **preconditioner_kwargs)
 
     mdot = momentum.mass_flux(flow_ref)
-    closure = coupled.turbulence.closure_fields(grad_velocity, k_ref, omega_ref)
-    k_policy = coupled.turbulence.k_shift_policy(mdot, closure, k_ref, method=method)
-    omega_policy = coupled.turbulence.omega_shift_policy(mdot, closure, omega_ref, method=method)
+    k_amg = omega_amg = None
+    if method is not None:
+        k_amg = coupled.turbulence.k_preconditioner(mdot, closure, k_ref, method=method)
+        omega_amg = coupled.turbulence.omega_preconditioner(mdot, closure, omega_ref, method=method)
 
     policy = CoupledShiftPolicy(
         coupled.layout,
         block,
-        k_policy.shift_diagonal,
-        omega_policy.shift_diagonal,
-        k_policy.preconditioner,
-        omega_policy.preconditioner,
+        coupled.turbulence.k_shift_policy(mdot, closure, k_ref).shift_diagonal,
+        coupled.turbulence.omega_shift_policy(mdot, closure, omega_ref).shift_diagonal,
+        k_amg,
+        omega_amg,
     )
     return PseudoTransientStep(
         policy,

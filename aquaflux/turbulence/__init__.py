@@ -25,6 +25,13 @@ from .coupled import (
 )
 from .driver import bulk_velocity, solve_segregated
 from .initialization import hybrid_initialize
+from .preconditioner import (
+    AirAmgPreconditioner,
+    ConvectionAmgPreconditioner,
+    ScalarTransportPreconditioner,
+    scalar_transport_preconditioner,
+    scalar_transport_shift_diagonal,
+)
 from .sources import (
     KDestruction,
     KProduction,
@@ -34,9 +41,11 @@ from .sources import (
 )
 from .sst import SSTModel
 from .strain import strain_rate_magnitude
-from .transport import SSTClosureFields, SSTTurbulence
+from .transport import SSTClosureFields, SSTTurbulence, WallFixedResidual
 
 __all__ = [
+    "AirAmgPreconditioner",
+    "ConvectionAmgPreconditioner",
     "CoupledRANS",
     "CoupledRANSLayout",
     "CoupledShiftPolicy",
@@ -49,6 +58,8 @@ __all__ = [
     "SSTModel",
     "SSTTurbulence",
     "ScalarShiftPolicy",
+    "ScalarTransportPreconditioner",
+    "WallFixedResidual",
     "bulk_velocity",
     "coupled_continuation",
     "equilibrium_k",
@@ -57,6 +68,8 @@ __all__ = [
     "inlet_omega",
     "omega_wall_value",
     "scalar_pseudo_transient_solve",
+    "scalar_transport_preconditioner",
+    "scalar_transport_shift_diagonal",
     "solve_coupled",
     "solve_segregated",
     "strain_rate_magnitude",

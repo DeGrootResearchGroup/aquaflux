@@ -73,7 +73,7 @@ def _cavity(n=6):
         k_boundary=BoundaryConditions({w: Dirichlet(0.0) for w in WALLS}),
         omega_boundary=BoundaryConditions({w: ZeroGradient() for w in WALLS}),
     )
-    return mesh, CoupledRANS.build(momentum, turbulence, RHO)
+    return mesh, CoupledRANS.build(momentum, turbulence)
 
 
 def _healthy_state(mesh, coupled, seed=0):
@@ -112,6 +112,61 @@ def test_residual_jacobian_matches_finite_difference() -> None:
     )
     rel = float(jnp.linalg.norm(fd - jvp) / jnp.linalg.norm(jvp))
     assert rel < 1e-6
+
+
+def _count_rhie_chow_assemblies(monkeypatch):
+    """A mutable ``[count]`` incremented on each lagged-``a_P`` Rhie--Chow assembly (see the seam)."""
+    calls = [0]
+    original = MomentumContinuity.momentum_matrix_diagonal
+
+    def counted(self, *args, **kwargs):
+        calls[0] += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(MomentumContinuity, "momentum_matrix_diagonal", counted)
+    return calls
+
+
+def test_residual_assembles_the_flow_fields_once(monkeypatch) -> None:
+    """The coupled residual re-derives the Rhie--Chow flow fields a single time per evaluation.
+
+    The residual, the mass flux the scalars advect on, and the velocity gradient the closure reads all
+    come from one :meth:`~aquaflux.flow.MomentumContinuity.flow_fields` assembly (the gradient is the
+    lightweight one that does no ``a_P`` work), so the expensive lagged-``a_P`` Rhie--Chow assembly runs
+    exactly once -- not once each for the residual, the mass flux, and the gradient.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    calls = _count_rhie_chow_assemblies(monkeypatch)
+    calls[0] = 0
+    coupled.residual(state)
+    assert calls[0] == 1
+
+
+def test_segregated_prologues_match_the_eager_assembly() -> None:
+    """The jitted sweep prologues equal the eager accessor expressions they replace.
+
+    ``_sweep_eddy_viscosity`` is the pre-solve ``nu_t`` from the velocity gradient; ``_sweep_closure``
+    is the post-solve ``(mdot, closure)`` from a single flow-field assembly. Jitting and fusing them
+    must not change the numbers (the driver's per-sweep assembly savings come for free). That the
+    fused path assembles the Rhie--Chow flow fields only once is pinned by the eager
+    ``test_residual_assembles_the_flow_fields_once`` and the momentum seam tests.
+    """
+    from aquaflux.turbulence.driver import _sweep_closure, _sweep_eddy_viscosity
+
+    mesh, coupled = _cavity()
+    momentum, turbulence = coupled.momentum, coupled.turbulence
+    flow, k, omega = coupled.layout.unpack(_healthy_state(mesh, coupled))
+
+    nu_t = _sweep_eddy_viscosity(momentum, turbulence, flow, k, omega)
+    expected_nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
+    assert jnp.allclose(nu_t, expected_nu_t)
+
+    mdot, closure = _sweep_closure(momentum, turbulence, flow, k, omega)
+    assert jnp.allclose(mdot, momentum.mass_flux(flow))
+    expected_closure = turbulence.closure_fields(momentum.velocity_gradient(flow), k, omega)
+    assert jnp.allclose(closure.nu_t, expected_closure.nu_t)
+    assert jnp.allclose(closure.strain_rate, expected_closure.strain_rate)
 
 
 def test_layout_matches_the_assembler_dimensions() -> None:

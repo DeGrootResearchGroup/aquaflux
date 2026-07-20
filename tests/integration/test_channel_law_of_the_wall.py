@@ -39,6 +39,7 @@ from aquaflux.turbulence import (
 # The scalar march's cap is a backstop, not a cost: the solver exits on tolerance, so a generous
 # value only bounds the worst case (measured identical physics and wall time at 200 vs 500).
 SCALAR_MAX_STEPS = 200
+FLOW_MAX_STEPS = 60
 
 RHO, U_B, H = 1.0, 1.0, 2.0  # half-height h = 1
 
@@ -73,11 +74,17 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
         k_boundary=BoundaryConditions({"bottom": Dirichlet(0.0), "top": Dirichlet(0.0)}),
         omega_boundary=BoundaryConditions({"bottom": ZeroGradient(), "top": ZeroGradient()}),
     )
-    direct = lx.AutoLinearSolver(well_posed=True)
-
-    # The body force is a solve unknown enforcing <U_x> = U_b (a bordered Newton with beta as a scalar
-    # Lagrange multiplier), so the bulk velocity is held exactly each sweep -- no feedback controller.
-    solve_flow = bulk_velocity_flow_solve(target=U_B, flow_direction=0, solver=direct)
+    # The body force is a solve unknown enforcing <U_x> = U_b (beta a scalar Lagrange multiplier in the
+    # augmented flow residual), so the bulk velocity is held exactly each sweep -- no feedback
+    # controller that could overshoot while the eddy viscosity is still developing. The momentum block
+    # is nonlinear (upwind convection), so the augmented solve stops on a convergence test; the mesh is
+    # small, so a direct linear solve is the cheap, robust choice.
+    solve_flow = bulk_velocity_flow_solve(
+        target=U_B,
+        flow_direction=0,
+        max_steps=FLOW_MAX_STEPS,
+        solver=lx.AutoLinearSolver(well_posed=True),
+    )
 
     # A uniform k leaves the first sweep's residual essentially unchanged for ~30 pseudo-transient
     # steps, so the SER schedule's beta never relaxes and the march exhausts its budget before the
@@ -91,7 +98,6 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
         flow0,
         k0,
         omega0,
-        density=RHO,
         max_sweeps=sweeps,
         relaxation=0.9,
     )

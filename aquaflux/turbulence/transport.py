@@ -31,7 +31,11 @@ from aquaflux.properties import FieldProperty, PropertyModel
 
 from .boundary import omega_wall_value
 from .continuation import ScalarShiftPolicy
-from .preconditioner import scalar_transport_preconditioner, scalar_transport_shift_diagonal
+from .preconditioner import (
+    ScalarTransportPreconditioner,
+    scalar_transport_preconditioner,
+    scalar_transport_shift_diagonal,
+)
 from .sources import (
     KDestruction,
     KProduction,
@@ -79,6 +83,35 @@ class SSTClosureFields(NamedTuple):
     grad_k: jnp.ndarray
     grad_omega: jnp.ndarray
     omega: jnp.ndarray
+
+
+class WallFixedResidual(eqx.Module):
+    """A transport residual with a set of cells' rows replaced by a value fixation.
+
+    The omega equation's near-wall cells carry the analytical sublayer value rather than a transport
+    balance, so its residual is the assembled balance composed with a
+    :class:`~aquaflux.discretization.FixedValueCells` overwrite.
+
+    This is an ``equinox.Module`` rather than a closure so that it can be passed *into* a jitted solve
+    without forcing a re-trace. ``equinox.filter_jit`` partitions a plain function onto the static
+    side, where it is hashed by object identity — a freshly built closure each outer sweep therefore
+    misses the compilation cache and re-compiles the whole solve. As a Module its arrays ride on the
+    traced side, so a sweep changes only their *values* and the compiled solve is reused.
+
+    Attributes
+    ----------
+    assembler : ResidualAssembler
+        Assembles the transport balance ``phi -> R(phi)``.
+    wall_fix : FixedValueCells
+        The rows to replace, and the values to fix them to.
+    """
+
+    assembler: ResidualAssembler
+    wall_fix: FixedValueCells
+
+    def __call__(self, phi: jnp.ndarray) -> jnp.ndarray:
+        """The residual at ``phi``, shape ``(n_cells,)``."""
+        return self.wall_fix.apply(self.assembler.residual(phi), phi)
 
 
 class SSTTurbulence(eqx.Module):
@@ -177,6 +210,23 @@ class SSTTurbulence(eqx.Module):
             k_boundary=k_boundary,
             omega_boundary=omega_boundary,
             explicit_production_limiter=explicit_production_limiter,
+        )
+
+    def resolve_boundaries(self) -> SSTTurbulence:
+        """Return a copy whose k and omega boundaries are bound to the mesh's face patches.
+
+        The k/omega scalar residuals and the closure-gradient reconstruction rebuild a
+        :class:`~aquaflux.discretization.ResidualAssembler` each call, and that build resolves the
+        boundary patch names to face indices -- a data-dependent ``nonzero`` lookup that cannot run
+        under ``jit``. Binding the boundaries **once**, ahead of any jitted use (the coupled residual,
+        the jitted segregated sweep prologue), makes each rebuild's ``resolve`` an idempotent no-op.
+        Idempotent itself: an already-bound assembler is returned with its boundaries unchanged.
+        """
+        face_patches = self.mesh.face_patches
+        return eqx.tree_at(
+            lambda t: (t.k_boundary, t.omega_boundary),
+            self,
+            (self.k_boundary.resolve(face_patches), self.omega_boundary.resolve(face_patches)),
         )
 
     def _volume_flux(self, mdot: jnp.ndarray) -> jnp.ndarray:
@@ -324,11 +374,52 @@ class SSTTurbulence(eqx.Module):
                 self.model,
             ),
         )
+        return WallFixedResidual(assembler, wall_fix)
 
-        def residual(omega: jnp.ndarray) -> jnp.ndarray:
-            return wall_fix.apply(assembler.residual(omega), omega)
+    def k_preconditioner(
+        self,
+        mdot: jnp.ndarray,
+        closure: SSTClosureFields,
+        reference: jnp.ndarray,
+        *,
+        method: str = "twolevel",
+    ) -> ScalarTransportPreconditioner:
+        """The convection-diffusion AMG preconditioning the k-equation's shifted solve.
 
-        return residual
+        Split from :meth:`k_shift_policy` because the two have different lifetimes: building the
+        hierarchy is scipy graph work whose cost grows with mesh size, and it only accelerates the
+        Krylov iteration (it never enters the converged field or its adjoint), so a segregated loop
+        builds it **once** and reuses it across sweeps while rebuilding the shift diagonal each sweep.
+        Freezing stays effective as the sweeps proceed because a larger eddy viscosity makes the
+        transport operator *more* diffusion-dominated — the regime a frozen aggregation hierarchy
+        handles best.
+
+        Parameters
+        ----------
+        mdot : jnp.ndarray
+            The flow's Rhie--Chow mass flux, shape ``(n_faces,)``.
+        closure : SSTClosureFields
+            The closure fields the frozen operator is built from. Use a representative sweep (the
+            first is a reasonable choice, and is conservative: its lower eddy viscosity makes the
+            frozen operator the *harder* of the two).
+        reference : jnp.ndarray
+            The field the frozen operator linearizes at, shape ``(n_cells,)``.
+        method : {"twolevel", "air"}
+            The convection hierarchy: stable two-level aggregation, or the reduction-based (lAIR)
+            hierarchy that coarsens fully and stays mesh-independent at large sizes.
+        """
+        diffusivity = self._diffusivity(
+            closure.nu_t, closure.f1, self.model.sigma_k1, self.model.sigma_k2
+        )
+        return scalar_transport_preconditioner(
+            self.mesh,
+            self.geometry,
+            diffusivity.values,
+            self._volume_flux(mdot),
+            self.k_residual(mdot, closure),
+            reference,
+            method=method,
+        )
 
     def k_shift_policy(
         self,
@@ -336,15 +427,17 @@ class SSTTurbulence(eqx.Module):
         closure: SSTClosureFields,
         reference: jnp.ndarray,
         *,
-        method: str | None = None,
+        preconditioner: ScalarTransportPreconditioner | None = None,
     ) -> ScalarShiftPolicy:
         """The pseudo-transient continuation policy for the k-equation solve.
 
         Bundles the transport-operator shift diagonal (the ``a_P`` analogue that damps the reactive
-        k-solve from a cold start) and, when ``method`` is set, the convection-diffusion AMG that
-        preconditions the shifted operator -- the two problem-specific inputs
+        k-solve from a cold start) with the preconditioner for the shifted operator -- the two
+        problem-specific inputs
         :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` supplies to the continuation
-        engine. Frozen for the sweep's ``closure`` and ``mdot`` (the same fields ``k_residual`` uses).
+        engine. The shift diagonal is built for the sweep's ``closure`` and ``mdot`` (the same fields
+        ``k_residual`` uses), so it tracks the current operator; the preconditioner is passed in
+        because it is built once and reused (see :meth:`k_preconditioner`).
 
         Parameters
         ----------
@@ -353,33 +446,50 @@ class SSTTurbulence(eqx.Module):
         closure : SSTClosureFields
             The frozen closure fields of the current sweep.
         reference : jnp.ndarray
-            The field the frozen operator linearizes at (the current ``k``), shape ``(n_cells,)``.
-        method : {"twolevel", "air"} or None
-            The AMG method for the shifted-operator preconditioner, or ``None`` for a shift-only
-            (unpreconditioned) continuation solve.
+            The field the shift diagonal linearizes at (the current ``k``), shape ``(n_cells,)``.
+        preconditioner : ScalarTransportPreconditioner, optional
+            The preconditioner for the shifted solve (from :meth:`k_preconditioner`), or ``None`` for
+            a shift-only (unpreconditioned) continuation solve.
         """
         diffusivity = self._diffusivity(
             closure.nu_t, closure.f1, self.model.sigma_k1, self.model.sigma_k2
         )
-        volume_flux = self._volume_flux(mdot)
-        residual = self.k_residual(mdot, closure)
         shift_diagonal = scalar_transport_shift_diagonal(
-            self.mesh, self.geometry, diffusivity.values, volume_flux, residual, reference
-        )
-        preconditioner = (
-            None
-            if method is None
-            else scalar_transport_preconditioner(
-                self.mesh,
-                self.geometry,
-                diffusivity.values,
-                volume_flux,
-                residual,
-                reference,
-                method=method,
-            )
+            self.mesh,
+            self.geometry,
+            diffusivity.values,
+            self._volume_flux(mdot),
+            self.k_residual(mdot, closure),
+            reference,
         )
         return ScalarShiftPolicy(shift_diagonal, preconditioner)
+
+    def omega_preconditioner(
+        self,
+        mdot: jnp.ndarray,
+        closure: SSTClosureFields,
+        reference: jnp.ndarray,
+        *,
+        method: str = "twolevel",
+    ) -> ScalarTransportPreconditioner:
+        """The convection-diffusion AMG preconditioning the omega-equation's shifted solve.
+
+        As :meth:`k_preconditioner`, with the omega diffusivity and the near-wall fixed cells
+        detached from the coarsening (their rows are the value fixation, not a transport balance).
+        """
+        diffusivity = self._diffusivity(
+            closure.nu_t, closure.f1, self.model.sigma_omega1, self.model.sigma_omega2
+        )
+        return scalar_transport_preconditioner(
+            self.mesh,
+            self.geometry,
+            diffusivity.values,
+            self._volume_flux(mdot),
+            self.omega_residual(mdot, closure),
+            reference,
+            method=method,
+            fixed_cells=self.wall_cells,
+        )
 
     def omega_shift_policy(
         self,
@@ -387,40 +497,24 @@ class SSTTurbulence(eqx.Module):
         closure: SSTClosureFields,
         reference: jnp.ndarray,
         *,
-        method: str | None = None,
+        preconditioner: ScalarTransportPreconditioner | None = None,
     ) -> ScalarShiftPolicy:
         """The pseudo-transient continuation policy for the omega-equation solve.
 
         As :meth:`k_shift_policy`, with the omega diffusivity and the near-wall fixed cells: their
-        shift is zeroed (an exact value fixation needs no pseudo-time), and they are detached from the
-        AMG coarsening (their rows are the value fixation, not a transport balance).
+        shift is zeroed, since an exact value fixation needs no pseudo-time damping (a full Newton
+        step converges it in one) and shifting an identity row only slows it.
         """
         diffusivity = self._diffusivity(
             closure.nu_t, closure.f1, self.model.sigma_omega1, self.model.sigma_omega2
         )
-        volume_flux = self._volume_flux(mdot)
-        residual = self.omega_residual(mdot, closure)
         shift_diagonal = scalar_transport_shift_diagonal(
             self.mesh,
             self.geometry,
             diffusivity.values,
-            volume_flux,
-            residual,
+            self._volume_flux(mdot),
+            self.omega_residual(mdot, closure),
             reference,
             fixed_cells=self.wall_cells,
-        )
-        preconditioner = (
-            None
-            if method is None
-            else scalar_transport_preconditioner(
-                self.mesh,
-                self.geometry,
-                diffusivity.values,
-                volume_flux,
-                residual,
-                reference,
-                method=method,
-                fixed_cells=self.wall_cells,
-            )
         )
         return ScalarShiftPolicy(shift_diagonal, preconditioner)

@@ -38,6 +38,7 @@ Checklist still governs).
 | `.claude/rules/flow.md` | `aquaflux/flow/**` | coupled p–U block: momentum (reusing advection/diffusion) + Rhie–Chow continuity, lagged `a_P`, monolithic AD-Jacobian solve |
 | `.claude/rules/turbulence.md` | `aquaflux/turbulence/**` | k–ω SST closure + the segregated flow–turbulence loop: segregated forward / coupled adjoint, outer-loop globalization, positivity-floor adjoint honesty |
 | `.claude/rules/io.md` | `aquaflux/io/**` | mesh import: the `MeshReader` strategy + the OpenFOAM polyMesh reader (ASCII); parse→assemble→collapse seams, empty-patch 2D collapse (a `mesh/` transform), reserved-name guard |
+| `.claude/rules/parallel.md` | `aquaflux/parallel/**` | distributed memory: graph partitioners, the `PartitionedMesh` owned+halo decomposition, uniform-shape padding, and the `shard_map` residual that runs an *injected* assembler per device (never a re-implementation) |
 
 ---
 
@@ -500,6 +501,30 @@ So: `LabelledGroups`, `cell-centred`, `neighbour` (already used throughout).
 > The workflow mirrors aquakin: branch → PR → green lint gate → merge; never commit on
 > `main`; commit/push only when the user asks.
 
+### Start from an up-to-date main (do this FIRST — binding)
+
+**Before creating a feature branch, putting any change on it, or running the test suite,
+refresh `main` from the remote so you are not working against a stale base.** Branching from
+a stale `main` is the observed failure mode this rule guards against: the branch diverges from
+what has already merged, tests pass or fail against outdated code, and the eventual PR carries
+avoidable conflicts and re-litigates work that is already in.
+
+Concretely, at the **start** of every task — before the first branch or the first test run:
+
+1. `git fetch origin` (or the configured remote) to pull the latest refs.
+2. Compare your base against the remote: `git log --oneline HEAD..origin/main` (or
+   `git rev-list --count HEAD..origin/main`). If it is non-empty, your base is stale.
+3. Bring your working base up to date before branching — update local `main` to
+   `origin/main` and branch from it, or rebase an existing feature branch onto the freshened
+   `origin/main`. In a worktree, sync the branch you are on against `origin/main` the same way.
+4. **Only then** create/switch to the feature branch, make changes, and run tests — so the
+   suite runs against current code, not a stale snapshot.
+
+If the base was stale and you have already started, stop and rebase onto the freshened
+`origin/main` before continuing. When a sync would pull in changes that could reasonably
+affect the task (a touched subsystem moved under you), surface that to the user rather than
+silently rebasing over it.
+
 CI runs a ruff gate on every pull request (and on pushes to `main`) via GitHub Actions
 (`.github/workflows/ci.yml`): `ruff check` + `ruff format --check` on `aquaflux` and `tests`,
 with ruff pinned by the `lint` extra so the gate cannot move under a new release. The same
@@ -641,6 +666,19 @@ After **every code change**, before considering the task complete, review and ac
    - New public API → integration test against an analytical solution.
    - New analytical/published benchmark → validation test.
    - Bug fix → regression test.
+
+   **Run the tier your change can reach — the fast gate is not the whole suite.** The `slow` and
+   `validation` tiers run on **merge to main**, and on a PR only when it carries the `full-ci`
+   label; the always-on required check is just the fast gate (`-m "not slow and not validation"`).
+   So a change whose *only* coverage lives in those tiers can pass every required check and still
+   break on merge. Before calling a change done, ask **whether it could affect a `slow` or
+   `validation` test** — you are touching a shared solver / operator / scheme / helper those tests
+   call, deleting or renaming a symbol, or changing convergence/behaviour — and if it could, **run
+   those tiers locally** (`pytest -m validation`, `pytest -m slow`) or apply `full-ci` to the PR.
+   The trap is a migration reached only through a validation-marked test (e.g. a case whose sole
+   test is `@pytest.mark.validation`): the fast gate exercises the *mechanism* elsewhere but never
+   that call path, so grep for the changed symbol across `-m slow`/`-m validation` tests and run the
+   ones that hit it. Don't assume "unit + fast integration green" means safe to merge.
 
 4. **Documentation sync (binding — this is how the docs stop drifting).** A code change is
    **not complete** until every file that *describes* the changed code is updated in the **same

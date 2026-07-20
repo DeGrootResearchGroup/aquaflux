@@ -11,6 +11,7 @@ asserted (sweeps taken, non-convergence warning) in a fraction of a second.
 from __future__ import annotations
 
 import warnings
+from typing import NamedTuple
 
 import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
@@ -19,6 +20,14 @@ import jax.numpy as jnp
 import pytest
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.turbulence.driver import _relative_change, _sweep_relaxation, solve_segregated
+
+
+class _StubFlowFields(NamedTuple):
+    """The two fields the driver's post-solve prologue reads off ``momentum.flow_fields``."""
+
+    grad_velocity: jax.Array
+    mdot: jax.Array
+
 
 # --- the coupled increment measure -------------------------------------------------------------
 
@@ -76,16 +85,24 @@ def test_sweep_relaxation_exponent_sharpens_the_ramp() -> None:
 
 
 class _StubMomentum(eqx.Module):
-    """Just enough of a flow assembler for the driver: a swappable ``properties`` leaf and the two
-    field queries the loop makes (their return values are ignored by the stub turbulence)."""
+    """Just enough of a flow assembler for the driver: the material properties, the eddy-viscosity
+    leaf the loop sets each sweep, and the two field queries it makes (their return values are
+    ignored by the stub turbulence)."""
 
     properties: PropertyModel
+    eddy_viscosity: jax.Array | None = None
+
+    def with_eddy_viscosity(self, eddy_viscosity: jax.Array) -> _StubMomentum:
+        return _StubMomentum(self.properties, eddy_viscosity)
 
     def velocity_gradient(self, flow: jax.Array) -> jax.Array:
         return flow
 
     def mass_flux(self, flow: jax.Array) -> jax.Array:
         return flow
+
+    def flow_fields(self, flow: jax.Array) -> _StubFlowFields:
+        return _StubFlowFields(grad_velocity=flow, mdot=flow)
 
 
 class _StubTurbulence(eqx.Module):
@@ -94,16 +111,25 @@ class _StubTurbulence(eqx.Module):
 
     molecular_viscosity: jax.Array
 
+    def resolve_boundaries(self):
+        return self
+
     def eddy_viscosity(self, velocity_gradient, k, omega):
         return jnp.zeros_like(k)
 
     def closure_fields(self, velocity_gradient, k, omega):
         return None
 
-    def k_shift_policy(self, mdot, closure, k, method=None):
+    def k_preconditioner(self, mdot, closure, k, method="twolevel"):
         return None
 
-    def omega_shift_policy(self, mdot, closure, omega, method=None):
+    def omega_preconditioner(self, mdot, closure, omega, method="twolevel"):
+        return None
+
+    def k_shift_policy(self, mdot, closure, k, preconditioner=None):
+        return None
+
+    def omega_shift_policy(self, mdot, closure, omega, preconditioner=None):
         return None
 
     def k_residual(self, mdot, closure):
@@ -138,7 +164,6 @@ def _drive(*, max_sweeps, rtol, contraction, relaxation=1.0, relaxation_max=None
         jnp.zeros(n),
         jnp.full(n, 0.1),
         jnp.full(n, 0.1),
-        density=1.0,
         max_sweeps=max_sweeps,
         rtol=rtol,
         relaxation=relaxation,

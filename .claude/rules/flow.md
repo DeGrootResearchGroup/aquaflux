@@ -24,7 +24,21 @@ Engineering Principles.
   a `FaceContext` (properties `{"viscosity": μ}` via `DiffusionFlux(coefficient="viscosity")`, the
   component gradient, the boundary velocity) and calls the shared operators' `face_flux(component,
   context)`; only the pressure term is new. Continuity is `Σ mdot_f = 0`. The whole Jacobian comes
-  from AD; solved by the existing `NewtonSolver` / `ImplicitNewtonSolver`. **Fluid properties come
+  from AD; solved by the existing `NewtonSolver` / `ImplicitNewtonSolver`.
+  - **One shared assembly per state — `flow_fields` / `residual_from_fields` (binding, #106).** The
+    boundary fields, both gradients, the lagged `a_P`, and the Rhie–Chow flux are assembled once by
+    the public `flow_fields(state) -> FlowFields`; `residual` = `residual_from_fields(flow_fields(state))`
+    and `mass_flux(state)` = `flow_fields(state).mdot`. A coupling caller that needs several of these at
+    one state (a coupled RANS residual wanting the residual **and** `mdot`, a segregated sweep wanting
+    the gradient **and** `mdot`) must call `flow_fields` **once** and read the fields — not call the
+    accessors separately, which re-assembles the whole Rhie–Chow flux per accessor (was 3× per coupled
+    residual eval; the pre-optimization HLO / AD-tape size scaled with that). **`velocity_gradient` is
+    deliberately the lightweight path** (boundary velocity + the shared `_velocity_gradient` only, **no**
+    `a_P`/`mdot`): the eddy viscosity a segregated sweep needs comes before the mass flux is even
+    defined, so dragging the Rhie–Chow assembly through it would defeat the point. Same formula as the
+    bundle (both compose `_boundary_fields` + `_velocity_gradient`), so no duplication. Pinned by
+    `test_flow_fields_accessors_agree_with_the_bundle` / `test_velocity_gradient_skips_the_rhie_chow_assembly`.
+  - **Fluid properties come
   from a `PropertyModel`** (`build(mesh, geom, properties, gradient_scheme, boundary, …)`, must supply
   `"viscosity"`+`"density"`; `.viscosity`/`.density` evaluate them per-cell) — see
   `.claude/rules/properties.md`. **`boundary` is a `BoundaryConditions({name: FlowBoundary})`**
@@ -111,6 +125,29 @@ Engineering Principles.
     the BC closures) and must land for both paths together, with an analytical skewed-flow test — not
     as a local edit. Both paths are currently leading-order at non-Dirichlet skewed boundaries;
     documented as deliberate, not drift.
+- **The turbulence closure enters through `eddy_viscosity`, and `μ_eff = μ + ρν_t` is formed ONCE, in
+  `MomentumContinuity.viscosity` (binding).** `ν_t` (**kinematic**, the closure's own quantity) rides
+  on its own differentiable leaf, set by `with_eddy_viscosity(nu_t)`; `viscosity` adds it to the
+  molecular `μ` from `properties`. Callers pass only `ν_t` and never restate the closure relation.
+  - **Do not put `ν_t` into the `PropertyModel`.** It is not a material property — water has no eddy
+    viscosity, a turbulent flow of water does. The previous design overwrote the `"viscosity"` entry
+    with a pre-summed `ρ(ν+ν_t)` field, which **destroyed the molecular value**, forced a second home
+    for it (`turbulence.molecular_viscosity` — `solve_segregated`'s docstring openly said the
+    assembler's own molecular viscosity "is ignored"), made the swap non-idempotent, duplicated the
+    `ρ(ν+ν_t)` formula across three call sites, and changed the property's type `Constant`→
+    `FieldProperty` on the first sweep. Keeping the material properties intact fixed all five.
+  - The redundant `density=` parameter of `solve_segregated` and the `density` field of `CoupledRANS`
+    were **removed** with it: both existed only to form `μ_eff`, which the assembler now does from its
+    own `ρ`. (`SSTTurbulence` keeps its `density` and `molecular_viscosity` — the k/ω equations use
+    them for their own `ν + σν_t` diffusion, a genuinely different coefficient.)
+  - `with_eddy_viscosity` is part of the contract the segregated driver requires of any injected
+    momentum stand-in. Pinned in `tests/unit/test_momentum_coupling.py` on a `ρ≠1` fluid, so a dropped
+    density factor cannot pass.
+  - **The same call means different things in the two paths**, and nothing at the call site says
+    which: `driver.py` applies it *outside* the residual, so `ν_t` is frozen for the sweep and the
+    coupling is invisible to AD; `coupled.py` applies it *inside*, so `dR_momentum/d(k,ω)` flows
+    through it and the monolithic Jacobian gets its cross-block terms. That is why gradients go
+    through `solve_coupled` and never `solve_segregated`.
 - **Convection — BUILT.** `advection_scheme=` turns on momentum convection (`mdot·u`, upwind or
   limited), which makes the residual **nonlinear** (mass flux and advected velocity both depend
   on velocity). `a_P`'s convective part uses a lagged velocity-flux estimate (breaks the

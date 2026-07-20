@@ -155,7 +155,6 @@ def test_limiter_reduces_overshoot_on_advected_step() -> None:
 
     def advect_tophat(limiter, nx=80, n_steps=40):
         from aquaflux.discretization import TransientTerm
-        from aquaflux.solve import NewtonSolver
 
         mesh = structured_grid_2d(nx, 1, lx=1.0, ly=1.0 / nx, named_boundaries=True)
         geom = mesh.geometry()
@@ -182,18 +181,23 @@ def test_limiter_reduces_overshoot_on_advected_step() -> None:
             transient=TransientTerm(),
         )
         dt = 0.4 / n_steps
-        solver = NewtonSolver(iterations=6)
+        # The limiter makes each step nonlinear, so the sub-solve converges on a tolerance rather
+        # than a fixed count -- a count cannot tell convergence from exhaustion.
+        solver = ImplicitNewtonSolver(max_steps=30)
         phi1 = solver.solve(
-            lambda p: assembler.residual(p, phi_old=phi0, dt=dt, first_step=True), phi0
+            lambda p, _theta: assembler.residual(p, phi_old=phi0, dt=dt, first_step=True),
+            phi0,
+            None,
         )
 
         def step(carry, _):
             old, older = carry
             new = solver.solve(
-                lambda p: assembler.residual(
+                lambda p, _theta: assembler.residual(
                     p, phi_old=old, phi_older=older, dt=dt, first_step=False
                 ),
                 old,
+                None,
             )
             return (new, old), None
 

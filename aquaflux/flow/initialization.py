@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -28,10 +29,10 @@ from aquaflux.discretization import DiffusionFlux, FixedValueCells, ResidualAsse
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import (
-    NewtonSolver,
     build_smoothed_hierarchy,
     convection_diffusion_operator,
     decouple_dof,
+    newton_step,
     smoothed_multigrid_solve,
 )
 from aquaflux.vectors import dot
@@ -153,8 +154,11 @@ def laplace_field(
             return fixation.apply(assembler.residual(phi), phi)
 
     preconditioner = _laplace_preconditioner(mesh, geometry, residual, diffusivity, fixed_cells)
-    field = NewtonSolver(iterations=1, preconditioner=preconditioner).solve(
-        residual, jnp.zeros(mesh.n_cells)
+    # Pure diffusion is linear, so one Newton correction is the exact solve. Compiled here because
+    # newton_step leaves the jit boundary to its caller; un-jitted, the preconditioned linear solve
+    # would dispatch operation by operation.
+    field = eqx.filter_jit(newton_step)(
+        residual, jnp.zeros(mesh.n_cells), preconditioner=preconditioner
     )
     return field, assembler
 

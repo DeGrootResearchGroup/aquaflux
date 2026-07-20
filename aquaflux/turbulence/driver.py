@@ -5,7 +5,8 @@ outer sweep freezes the eddy viscosity for the flow solve, then freezes the flow
 solve. A sweep is
 
 1. eddy viscosity ``nu_t`` from the current velocity gradient and ``(k, omega)``;
-2. the momentum viscosity set to the effective ``mu_eff = rho (nu + nu_t)`` and the flow solved;
+2. the momentum block given that ``nu_t`` (it forms the effective ``mu_eff = mu + rho nu_t`` from
+   its own material properties) and the flow solved;
 3. the closure fields recomputed from the new flow, and the k then omega equations solved on the
    flow's Rhie--Chow mass flux;
 4. ``k`` and ``omega`` under-relaxed towards the new values and floored to keep them positive.
@@ -13,6 +14,13 @@ solve. A sweep is
 The relaxation and the floor are the segregated iteration's stabilisers; the floor is a
 nonlinear-iteration safeguard that should be inactive once the fields have converged (a converged
 turbulent field is strictly positive). Constant density (see :mod:`~aquaflux.turbulence.transport`).
+
+The parts of a sweep between the two injected solves -- the pre-solve eddy viscosity and the
+post-solve mass flux and closure -- run in two ``jit``-compiled prologues (``_sweep_eddy_viscosity``,
+``_sweep_closure``) rather than op-by-op eagerly, and the post-solve prologue assembles the flow
+fields **once** (:meth:`~aquaflux.flow.MomentumContinuity.flow_fields`) for both the velocity gradient
+the closure reads and the mass flux the scalars advect on. The k/omega boundaries are bound to the
+mesh once before the loop so those compiled prologues never re-run the dynamic-shape patch resolve.
 
 The outer loop **stops on convergence**, not a fixed sweep count: each sweep's coupled Picard
 increment -- the largest per-field relative change ``max(||dflow||/||flow||, ||dk||/||k||,
@@ -34,6 +42,17 @@ controller -- threads that forward. Both stiff reactive scalars are globalized b
 continuation -- the driver builds the per-sweep
 :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` and the caller wires
 :func:`~aquaflux.turbulence.scalar_pseudo_transient_solve`.
+
+The two halves of that policy have deliberately different lifetimes. The **shift diagonal** is rebuilt
+every sweep, so the pseudo-time damping keeps tracking the operator as the eddy viscosity grows. The
+**AMG preconditioner** is built from the first sweep's operator and then carried: building the
+hierarchy is scipy graph work whose cost grows with mesh size, and it only accelerates the Krylov
+iteration -- it never enters the converged field or its adjoint -- so freezing it costs at most a few
+extra iterations. Freezing stays effective as the sweeps proceed because a larger eddy viscosity makes
+the transport operator *more* diffusion-dominated, the regime a frozen aggregation hierarchy handles
+best. Carrying one instance is also what lets the jitted scalar solve be compiled **once**: it is a
+frozen, off-jit constant, so it sits on the static side of the solve's ``jit`` and is hashed by object
+identity -- a rebuilt one each sweep would re-compile the whole solve.
 """
 
 from __future__ import annotations
@@ -44,24 +63,53 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax.numpy as jnp
 
-from aquaflux.properties import FieldProperty, PropertyModel
-
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from aquaflux.flow import MomentumContinuity
 
-    from .transport import SSTTurbulence
+    from .preconditioner import ScalarTransportPreconditioner
+    from .transport import SSTClosureFields, SSTTurbulence
 
 
-def _with_viscosity(
-    momentum: MomentumContinuity, effective_viscosity: jnp.ndarray
-) -> MomentumContinuity:
-    """Return ``momentum`` with its ``viscosity`` property replaced by a per-cell field."""
-    properties = PropertyModel(
-        {**momentum.properties.properties, "viscosity": FieldProperty(effective_viscosity)}
-    )
-    return eqx.tree_at(lambda m: m.properties, momentum, properties)
+@eqx.filter_jit
+def _sweep_eddy_viscosity(
+    momentum: MomentumContinuity,
+    turbulence: SSTTurbulence,
+    flow: jnp.ndarray,
+    k: jnp.ndarray,
+    omega: jnp.ndarray,
+) -> jnp.ndarray:
+    """The pre-flow-solve eddy viscosity ``nu_t`` from the current flow, shape ``(n_cells,)``.
+
+    Jitted so the velocity-gradient reconstruction, the strain magnitude, and the eddy-viscosity model
+    fuse into one compiled call rather than dispatching op-by-op eagerly. The gradient is the
+    lightweight :meth:`~aquaflux.flow.MomentumContinuity.velocity_gradient` (no Rhie--Chow assembly),
+    which is all ``nu_t`` needs -- the mass flux is not yet defined before the flow solve.
+    """
+    grad_velocity = momentum.velocity_gradient(flow)
+    return turbulence.eddy_viscosity(grad_velocity, k, omega)
+
+
+@eqx.filter_jit
+def _sweep_closure(
+    momentum: MomentumContinuity,
+    turbulence: SSTTurbulence,
+    flow: jnp.ndarray,
+    k: jnp.ndarray,
+    omega: jnp.ndarray,
+) -> tuple[jnp.ndarray, SSTClosureFields]:
+    """The post-flow-solve scalar-transport inputs ``(mdot, closure)`` for the solved flow.
+
+    One :meth:`~aquaflux.flow.MomentumContinuity.flow_fields` assembly yields both the velocity
+    gradient the SST closure reads and the Rhie--Chow mass flux the k/omega equations advect on, so
+    the whole assembly (boundary fields, gradients, lagged ``a_P``, Rhie--Chow flux) runs a single
+    time per sweep instead of once for the gradient and again for the mass flux. Jitted so none of it
+    runs op-by-op eagerly.
+    """
+    fields = momentum.flow_fields(flow)
+    closure = turbulence.closure_fields(fields.grad_velocity, k, omega)
+    return fields.mdot, closure
 
 
 def _relax(old: jnp.ndarray, new: jnp.ndarray, factor: float) -> jnp.ndarray:
@@ -127,7 +175,6 @@ def solve_segregated(
     k: jnp.ndarray,
     omega: jnp.ndarray,
     *,
-    density: float,
     max_sweeps: int,
     rtol: float = 1e-6,
     relaxation: float = 0.7,
@@ -142,8 +189,9 @@ def solve_segregated(
     Parameters
     ----------
     momentum : MomentumContinuity
-        The flow assembler; its viscosity property is replaced with the effective viscosity each
-        sweep (its molecular value is ignored -- the molecular viscosity comes from ``turbulence``).
+        The flow assembler, carrying the fluid's own molecular viscosity and density. Each sweep it
+        is handed the current eddy viscosity and forms the effective viscosity itself, so the
+        molecular value it was built with is the one that is used.
     turbulence : SSTTurbulence
         The k-omega SST closure and equation assembler.
     solve_flow : callable
@@ -156,15 +204,14 @@ def solve_segregated(
     solve_scalar : callable
         ``solve_scalar(residual, state, policy) -> state`` solves a scalar residual function from
         ``state``, globalizing it by pseudo-transient continuation. ``policy`` is the per-sweep
-        :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` (the transport shift diagonal plus
-        the optional AMG) the driver builds; wire it with
-        :func:`~aquaflux.turbulence.scalar_pseudo_transient_solve`.
+        :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` the driver builds -- a shift
+        diagonal rebuilt each sweep, carrying the optional AMG built once on the first sweep; wire it
+        with :func:`~aquaflux.turbulence.scalar_pseudo_transient_solve`. Jit it, so the compiled solve
+        is reused across sweeps.
     flow : jnp.ndarray
         The initial flat flow state ``[vel..., pressure]``, shape ``((dim + 1) n_cells,)``.
     k, omega : jnp.ndarray
         The initial turbulence fields, shape ``(n_cells,)`` (e.g. the inlet values, uniform).
-    density : float
-        The (constant) fluid density, forming ``mu_eff = rho (nu + nu_t)``.
     max_sweeps : int
         Upper bound on outer Picard sweeps. The loop normally stops earlier, when the coupled
         increment drops below ``rtol``; hitting this cap without converging emits a warning.
@@ -198,11 +245,16 @@ def solve_segregated(
         The ``(flow, k, omega)`` at the sweep that met ``rtol`` -- or at ``max_sweeps`` if it was not
         reached, in which case a warning is emitted and the fields may be under-converged.
     """
-    molecular = turbulence.molecular_viscosity
+    # Bind the k/omega boundaries to the mesh once, off the jit path, so the jitted sweep prologue's
+    # closure-gradient assembler rebuilds do not re-run the dynamic-shape patch resolve under trace.
+    turbulence = turbulence.resolve_boundaries()
     relaxation_ceiling = relaxation if relaxation_max is None else relaxation_max
     increment_0: float | None = None
     increment: float | None = None
     converged = False
+    # Built from the first sweep's operator and then reused (see the sweep body).
+    k_amg: ScalarTransportPreconditioner | None = None
+    omega_amg: ScalarTransportPreconditioner | None = None
     for _ in range(max_sweeps):
         # Adaptive under-relaxation: open from the floor toward the ceiling as the coupled increment
         # falls (SER ramp). The first sweep, and a constant-relaxation run, use the floor unchanged.
@@ -211,27 +263,32 @@ def solve_segregated(
         )
 
         flow_prev, k_prev, omega_prev = flow, k, omega
-        nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
-        momentum = _with_viscosity(momentum, density * (molecular + nu_t))
+        nu_t = _sweep_eddy_viscosity(momentum, turbulence, flow, k, omega)
+        momentum = momentum.with_eddy_viscosity(nu_t)
         # The flow solve may adjust the assembler (e.g. a bulk-velocity-constrained solve carries the
         # body force out as a converged multiplier), so it returns the assembler alongside the state.
         momentum, flow = solve_flow(momentum, flow)
 
-        closure = turbulence.closure_fields(momentum.velocity_gradient(flow), k, omega)
-        mdot = momentum.mass_flux(flow)
+        mdot, closure = _sweep_closure(momentum, turbulence, flow, k, omega)
         # Each stiff reactive scalar is globalized by pseudo-transient continuation: the shift policy
         # bundles the transport shift diagonal with the (optional) AMG for the injected solve to use.
-        k_policy = turbulence.k_shift_policy(mdot, closure, k, method=scalar_preconditioner)
+        # The AMG is built once here and carried; the shift diagonal is rebuilt every sweep (the
+        # module docstring has the why for each).
+        if scalar_preconditioner is not None and k_amg is None:
+            k_amg = turbulence.k_preconditioner(mdot, closure, k, method=scalar_preconditioner)
+            omega_amg = turbulence.omega_preconditioner(
+                mdot, closure, omega, method=scalar_preconditioner
+            )
+
+        k_policy = turbulence.k_shift_policy(mdot, closure, k, preconditioner=k_amg)
         k_solved = solve_scalar(turbulence.k_residual(mdot, closure), k, k_policy)
         k = jnp.maximum(_relax(k, k_solved, sweep_relaxation), k_floor)
-        omega_policy = turbulence.omega_shift_policy(
-            mdot, closure, omega, method=scalar_preconditioner
-        )
+        omega_policy = turbulence.omega_shift_policy(mdot, closure, omega, preconditioner=omega_amg)
         omega_solved = solve_scalar(turbulence.omega_residual(mdot, closure), omega, omega_policy)
         omega = jnp.maximum(_relax(omega, omega_solved, sweep_relaxation), omega_floor)
 
         # Coupled Picard increment: the residual-agnostic outer convergence signal, also the ramp's
-        # drop ratio. The first sweep sets the baseline the ramp opens relative to.
+        # drop ratio. The first sweep sets the reference the ramp opens relative to.
         increment = _relative_change((flow_prev, flow), (k_prev, k), (omega_prev, omega))
         if increment_0 is None:
             increment_0 = increment
