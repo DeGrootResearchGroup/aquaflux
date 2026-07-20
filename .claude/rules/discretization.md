@@ -76,6 +76,14 @@ Principles.
   gathers owner/neighbour state, sums the injected `FaceFluxOperator`s, `segment_sum`-scatters
   (owner `+`, interior neighbour `−`), and adds the transient term. `R = accumulation −
   transport`. Verified: stub-operator scatter is conservative and correctly signed.
+  - **`residual(phi, *, gradient_hook=None)` seam.** `gradient_hook` is an optional transform
+    `gradient -> gradient` applied to the reconstructed cell gradient before the flux consumes it
+    (identity when omitted). It exists so the **distributed** residual can overwrite ghost-cell
+    gradients with the value their owning partition computed (a ghost's local stencil is incomplete,
+    so its reconstructed gradient is wrong). Correct to hook *after* reconstruction and *not* touch
+    the boundary values, because every boundary face is owned by an interior cell of its own
+    partition — boundary closures read only owner-cell gradients, which the ghost exchange leaves
+    untouched.
 - **`transient.py` — BUILT.** `TransientTerm`: BDF1 at step 1 (static `first_step`), BDF2
   after; carries no physical coefficient. Verified against the closed BDF formulae.
 - **`source.py` — BUILT.** `VolumeSource` (ABC, `source(field, context) -> (n_cells,)`): a

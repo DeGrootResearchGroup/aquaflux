@@ -137,7 +137,7 @@ Specific traps that are now closed, and must stay closed:
 - **The face-node array is ragged across partitions**, so it is padded too: the first padding face
   absorbs the whole padded tail (keeping the row pointers well-formed) and the rest list no nodes.
 
-## Halo depth — one layer, exchanging derived fields (decided)
+## Halo depth — one layer, exchanging derived fields (built for the gradient)
 
 **One ghost layer suffices — provided the gradient and limiter are *exchanged*, not recomputed.**
 The residual at an owned cell reads, at each face, only quantities at that cell and its immediate
@@ -152,6 +152,25 @@ owned cell's stencil is within owned + the one-layer `phi` halo) → exchange `g
 The ghost values are then bit-for-bit what they would be serially, so the distributed Jacobian
 equals the serial Jacobian. Every exchange is a differentiable collective *inside* `R(phi)`, so the
 AD-linearized limiter and the exact adjoint are preserved automatically.
+
+**The gradient exchange is built.** `ResidualAssembler.residual` takes an optional `gradient_hook`,
+a transform applied to the reconstructed cell gradient before the flux consumes it (identity when
+omitted — the serial path). `DistributedResidual` passes a hook that overwrites each ghost row with
+the value the ghost's owning partition computed, reusing the *same* `HaloExchange` and plan as the
+`phi` fill (`fill` is trailing-axis-generic, so the `(n_cells, dim)` gradient rides through
+unchanged). The exchange runs only when a gradient scheme is actually injected
+(`DistributedResidual.exchange_gradient`, a static flag): on an orthogonal grid the gradient is
+identically zero, so the exchange is skipped rather than moving zeros. Boundary values need **no**
+correction — every boundary face is owned by an interior cell of its own partition, so they read only
+owner-cell gradients, which the ghost exchange never touches.
+
+Only a **single-pass** gradient scheme (`CompactGreenGauss`) is correct under this one-exchange
+scheme: an owned cell's one-shot Green–Gauss gradient is exact once its `phi` halo is filled. A
+gradient scheme that solves a *global* system (`CorrectedGreenGauss` / `HessianCorrectedGradient` via
+`GmresGradientSolve` or `SweptGradientSolve`) couples across partitions **inside** its own solve, so
+it would need an exchange per sweep / per Krylov step — not yet built. The limiter `psi` exchange is
+likewise deferred until advection-with-limiter runs distributed (no distributed-advection path yet);
+it reuses the identical hook mechanism.
 
 ## Testing
 
@@ -171,23 +190,26 @@ AD-linearized limiter and the exact adjoint are preserved automatically.
   row to **bit-for-bit the all-gather values** (scalar and vector), and a full distributed residual
   on it matches serial in value and gradient. The all-gather exchange is the reference the scaling
   path is validated against.
+- `tests/unit/test_distributed_gradient.py` — the derived-field halo on a **non-orthogonal** mesh
+  (`columnwise_perturbed_grid_3d` + `CompactGreenGauss`): the sharded residual and its gradient match
+  serial, and a **control** with the gradient exchange forced off does *not* match — proving the
+  ghost-gradient exchange is load-bearing, not incidentally passing.
 
 The device tests simulate 4 CPU devices via `--xla_force_host_platform_device_count=4`, which must
 be set **before JAX initializes** — hence the subprocess.
 
 ## Not yet built (in priority order)
 
-1. **The derived-field halo** (`grad`, limiter) per the one-layer scheme above — an exchange hook
-   between gradient reconstruction and the flux loop. Needed the moment a non-orthogonal correction
-   or a limiter runs distributed; the current gate is orthogonal-grid, where the correction vanishes.
-   `fill` is already generic in the trailing axes (a per-cell vector field carries unchanged, pinned
-   by `test_halo_exchange_carries_a_vector_field`), so exchanging a reconstructed gradient reuses the
-   existing exchange — the work is the hook placement, not a new collective.
-2. **Node remapping.** Each local mesh keeps the **full global** `node_coords`, so the stacked
+1. **The per-sweep gradient exchange** for a global-solve gradient scheme (`CorrectedGreenGauss` /
+   `HessianCorrectedGradient`) — see the halo-depth section. The single-pass `CompactGreenGauss`
+   gradient is built; the iterative schemes need an exchange inside their own solve.
+2. **The limiter (`psi`) exchange** for distributed limited advection — reuses the `gradient_hook`
+   mechanism; deferred until there is a distributed-advection path to exercise it.
+3. **Node remapping.** Each local mesh keeps the **full global** `node_coords`, so the stacked
    sharded arrays replicate it P times. Correct but wasteful; remap to a partition-local node set.
-3. **Per-partition reverse Cuthill–McKee**, applied as a transform over a built `PartitionedMesh`
+4. **Per-partition reverse Cuthill–McKee**, applied as a transform over a built `PartitionedMesh`
    (not woven into the build loop) so it stays contained.
-4. **Multi-node** via `jax.distributed.initialize()`. Note the honest gap: multi-host is
+5. **Multi-node** via `jax.distributed.initialize()`. Note the honest gap: multi-host is
    production-grade on GPU/TPU, but multi-node **CPU** leans on Gloo and is materially slower than
    MPI — re-verify before committing to a CPU cluster.
 

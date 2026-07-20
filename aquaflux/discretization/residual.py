@@ -35,6 +35,7 @@ to the differentiable residual.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import equinox as eqx
@@ -264,6 +265,8 @@ class ResidualAssembler(eqx.Module):
         phi_older: jnp.ndarray | None = None,
         dt: float | None = None,
         first_step: bool = False,
+        *,
+        gradient_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         """Cell residual ``R(phi)``, shape ``(n_cells,)``.
 
@@ -278,6 +281,14 @@ class ResidualAssembler(eqx.Module):
             Timestep (required with a transient term).
         first_step : bool
             ``True`` on the first timestep (BDF1); static.
+        gradient_hook : callable, optional
+            A transform ``gradient -> gradient`` applied to the reconstructed cell gradient,
+            shape ``(n_cells, dim)``, before the flux operators consume it. The identity when
+            omitted. This is the seam a distributed residual uses to overwrite ghost-cell gradients
+            with the values their owning partition computed (a ghost's own stencil is incomplete
+            locally, so its reconstructed gradient would be wrong): the exchange corrects only ghost
+            rows, and the boundary values are unaffected because they read only owner-cell gradients
+            (every boundary face is owned by an interior cell of its own partition).
 
         Returns
         -------
@@ -287,6 +298,8 @@ class ResidualAssembler(eqx.Module):
         """
         properties = self.properties.evaluate(self.mesh.cell_zones)
         gradient, boundary_values = self._gradient(phi, properties)
+        if gradient_hook is not None:
+            gradient = gradient_hook(gradient)
         context = self._context(gradient, boundary_values, properties)
 
         face_flux = jnp.zeros(self.mesh.n_faces, dtype=phi.dtype)
