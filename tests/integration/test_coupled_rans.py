@@ -1,8 +1,9 @@
 """Integration: the monolithic coupled RANS Newton solve on a turbulent channel.
 
 The unfrozen residual ``R(u, p, k, omega)`` is solved as **one** Newton system (globalized by the
-coupled pseudo-transient continuation), from a short segregated warm start. These check the three
-properties that make it the design note's target engine (S5): it converges the coupled system to
+coupled pseudo-transient continuation), self-started from the hybrid initial condition -- no
+segregated pre-smooth. These check the three properties that make it the design note's target
+engine (S5): it converges the coupled system to
 machine precision with the turbulence field positive and healthy; the coupled fixed point is the
 *same* state the segregated Picard loop converges to; and -- handed to the implicit solver -- it
 yields the exact coupled adjoint (a single transpose solve on the unfrozen residual), matching finite
@@ -110,8 +111,21 @@ def _channel(nx=28, ny=20, growth=1.2):
 
 
 @pytest.fixture(scope="module")
-def warm_started():
-    """A short segregated pre-smooth, shared by the coupled tests as their warm start / reference."""
+def case():
+    """The channel and the segregated reference's starting state, shared by the coupled tests.
+
+    The coupled solve needs **no** segregated pre-smooth: `solve_coupled` self-starts from its own
+    hybrid initial condition and converges in a third the wall clock the pre-smoothed path took.
+
+    The segregated reference keeps its flow at **rest** on purpose -- the two engines want opposite
+    velocity starts. The Picard flow block converges in 20 steps from rest against 70 from the
+    potential field (a smaller ||R0|| tightens the relative stopping target faster than it shortens
+    the march), while the coupled Newton *stalls* on a state at rest: `u_y == 0` exactly is the
+    measure-zero symmetric degeneracy, which the potential field's discrete-gradient roundoff
+    (|u_y| ~ 1e-10) lifts. Its scalars still come from the hybrid IC, without which a uniform k
+    leaves the first sweep's residual unchanged for ~30 pseudo-transient steps -- it briefly
+    *rises* -- so the SER schedule's beta never relaxes and the march burns its budget.
+    """
     mesh, momentum, turbulence, _, _ = _channel()
     n = mesh.n_cells
     coupled = CoupledRANS.build(momentum, turbulence, RHO)
@@ -119,44 +133,27 @@ def warm_started():
     solve_flow = reused_flow_solve(
         _with_viscosity(momentum, reference), max_steps=FLOW_MAX_STEPS, **PRECONDITIONER
     )
-    # Take the hybrid initial condition's *scalars* but keep the flow at rest. A uniform k leaves
-    # the first sweep's k residual essentially unchanged for ~30 pseudo-transient steps (measured
-    # rel 0.997, 1.007, 1.016, ... -- it briefly *rises*), so the SER schedule's beta never relaxes
-    # and the march burns its budget; the smoothed k descends from the first step (51 -> 29 steps).
-    # The flow block wants the opposite: from rest it converges in 20 steps, but from the potential
-    # field in 70 -- a smaller ||R0|| tightens the relative stopping target faster than it shortens
-    # the march, and the potential start decays slowly (~0.977/step) rather than dropping.
-    _, k0, omega0 = hybrid_initialize(momentum, turbulence)
-    flow0 = momentum.initial_state()
-    flow_ws, k_ws, omega_ws = solve_segregated(
-        momentum,
-        turbulence,
-        solve_flow,
-        scalar_pseudo_transient_solve(max_steps=SCALAR_MAX_STEPS),
-        flow0,
-        k0,
-        omega0,
-        density=RHO,
-        max_sweeps=8,
-        rtol=1e-10,
-        relaxation=0.5,
-        scalar_preconditioner="twolevel",
-    )
+    hybrid = hybrid_initialize(momentum, turbulence)
+    _, k0, omega0 = hybrid
     return {
         "mesh": mesh,
         "momentum": momentum,
         "turbulence": turbulence,
         "coupled": coupled,
         "solve_flow": solve_flow,
-        "warm": (flow_ws, k_ws, omega_ws),
-        "initial": (flow0, k0, omega0),
+        # The coupled Newton's start: the full hybrid IC, potential-flow velocity included. Built
+        # once here so the adjoint test can hand the solve a *concrete* state -- an IC constructed
+        # inside jax.grad would trace the preconditioner it seeds.
+        "coupled_start": hybrid,
+        # The segregated reference's start: the same scalars, but the flow at rest.
+        "initial": (momentum.initial_state(), k0, omega0),
     }
 
 
 @pytest.mark.slow
-def test_coupled_newton_converges_and_matches_the_segregated_solution(warm_started) -> None:
-    coupled = warm_started["coupled"]
-    flow_ws, k_ws, omega_ws = warm_started["warm"]
+def test_coupled_newton_converges_and_matches_the_segregated_solution(case) -> None:
+    coupled = case["coupled"]
+    flow_ws, k_ws, omega_ws = case["coupled_start"]
 
     flow, k, omega = solve_coupled(
         coupled, flow_ws, k_ws, omega_ws, method="twolevel", max_steps=40, **PRECONDITIONER
@@ -170,12 +167,12 @@ def test_coupled_newton_converges_and_matches_the_segregated_solution(warm_start
     assert float(jnp.max(k)) > 10.0 * float(jnp.min(jnp.abs(k)) + 1e-30)  # genuinely turbulent
 
     # Same fixed point as a fully-converged segregated solve.
-    momentum, turbulence = warm_started["momentum"], warm_started["turbulence"]
-    flow0, k0, omega0 = warm_started["initial"]
+    momentum, turbulence = case["momentum"], case["turbulence"]
+    flow0, k0, omega0 = case["initial"]
     flow_s, k_s, omega_s = solve_segregated(
         momentum,
         turbulence,
-        warm_started["solve_flow"],
+        case["solve_flow"],
         scalar_pseudo_transient_solve(max_steps=SCALAR_MAX_STEPS),
         flow0,
         k0,
@@ -183,7 +180,7 @@ def test_coupled_newton_converges_and_matches_the_segregated_solution(warm_start
         density=RHO,
         max_sweeps=60,
         rtol=1e-9,
-        relaxation=0.5,
+        relaxation=0.9,
         scalar_preconditioner="twolevel",
     )
     assert float(jnp.linalg.norm(flow - flow_s) / jnp.linalg.norm(flow_s)) < 1e-4
@@ -192,9 +189,9 @@ def test_coupled_newton_converges_and_matches_the_segregated_solution(warm_start
 
 
 @pytest.mark.slow
-def test_coupled_adjoint_matches_finite_difference(warm_started) -> None:
-    coupled = warm_started["coupled"]
-    flow_ws, k_ws, omega_ws = warm_started["warm"]
+def test_coupled_adjoint_matches_finite_difference(case) -> None:
+    coupled = case["coupled"]
+    flow_ws, k_ws, omega_ws = case["coupled_start"]
 
     # Build the continuation once, outside jax.grad, on concrete parameters (the block preconditioner
     # must not be traced); differentiate only the converged solve through the coupled IFT adjoint.
