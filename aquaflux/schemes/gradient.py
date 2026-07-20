@@ -87,6 +87,8 @@ class GradientScheme(eqx.Module):
         mesh: Mesh,
         geometry: MeshGeometry,
         boundary_values: jnp.ndarray,
+        *,
+        operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         """Cell gradients of ``field``, shape ``(n_cells, dim)``.
 
@@ -100,6 +102,13 @@ class GradientScheme(eqx.Module):
             Face and cell metrics (areas, owner-outward normals, centroids, volumes).
         boundary_values : jnp.ndarray
             Face values on boundary faces, shape ``(n_faces,)`` (interior entries ignored).
+        operator_hook : callable, optional
+            A ghost-cell exchange threaded into an iterative reconstruction's linear solve, applied
+            to the unknown before each operator apply (see :meth:`GradientSolve.solve`). The identity
+            when omitted (the serial path). A single-pass scheme reconstructs owned rows exactly from
+            the already-exchanged ``field`` and so ignores it; a scheme whose reconstruction couples
+            across partitions in a way this per-apply exchange cannot make serial-exact must raise
+            when it is not ``None``, never silently return a wrong owned gradient.
         """
 
 
@@ -112,7 +121,13 @@ class CompactGreenGauss(GradientScheme):
         mesh: Mesh,
         geometry: MeshGeometry,
         boundary_values: jnp.ndarray,
+        *,
+        operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
+        # No iterative solve: an owned cell's one-shot gradient is exact once its `field` halo is
+        # filled, so the per-apply ghost exchange (`operator_hook`) has nothing to correct here. The
+        # distributed residual still exchanges the *final* gradient for the flux (its `gradient_hook`).
+        del operator_hook
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells
         g = interpolation_factor(face_cells, geometry)
@@ -143,6 +158,8 @@ class GradientSolve(eqx.Module):
         volume: jnp.ndarray,
         operator: Callable[[jnp.ndarray], jnp.ndarray],
         rhs: jnp.ndarray,
+        *,
+        operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         """Solve ``A·x = rhs`` for ``x`` (the shape of ``rhs``).
 
@@ -157,6 +174,14 @@ class GradientSolve(eqx.Module):
             ``(n_cells, dim + dim²)`` — so ``volume`` preconditions by broadcasting over it.
         rhs : jnp.ndarray
             The right-hand side, matching the shape of the unknown ``x``.
+        operator_hook : callable, optional
+            A transform ``x -> x`` applied to the unknown **before every operator apply**. The
+            identity when omitted (the serial path). A domain-decomposed solve passes the ghost-cell
+            exchange here: each partition holds owned + ghost rows of ``x``, and the operator's owned
+            output rows are only correct once the ghost rows carry their owning partition's current
+            values, so the exchange must run once per iteration. A strategy that cannot honour this
+            correctly (one whose iteration forms cross-cell reductions over the whole local vector)
+            must **raise** when it is not ``None`` rather than silently return a wrong owned solution.
         """
 
 
@@ -181,7 +206,18 @@ class GmresGradientSolve(GradientSolve):
         volume: jnp.ndarray,
         operator: Callable[[jnp.ndarray], jnp.ndarray],
         rhs: jnp.ndarray,
+        *,
+        operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
+        if operator_hook is not None:
+            raise NotImplementedError(
+                "GmresGradientSolve cannot run domain-decomposed: GMRES forms inner products over "
+                "the whole local vector, which double-counts a partition's ghost rows and is not "
+                "reduced across partitions, so refreshing the ghost rows before each apply is not "
+                "enough to make it converge to the serial solution. Use SweptGradientSolve for a "
+                "distributed gradient solve (its preconditioned-Richardson sweeps form no global "
+                "inner product, so a per-sweep ghost exchange is exact)."
+            )
         op = lx.FunctionLinearOperator(operator, jax.ShapeDtypeStruct(rhs.shape, rhs.dtype))
         return lx.linear_solve(op, rhs, solver=lx.GMRES(rtol=self.rtol, atol=self.atol)).value
 
@@ -228,14 +264,26 @@ class SweptGradientSolve(GradientSolve):
         volume: jnp.ndarray,
         operator: Callable[[jnp.ndarray], jnp.ndarray],
         rhs: jnp.ndarray,
+        *,
+        operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
+        # Domain-decomposed: refresh the ghost rows of the current iterate before every operator
+        # apply, so each partition's owned output rows equal the serial matvec restricted to owned
+        # cells. The Richardson update writes garbage into the ghost/null rows, but the next apply's
+        # hook overwrites them, so the owned rows converge exactly to the serial solution.
+        op = operator if operator_hook is None else lambda v: operator(operator_hook(v))
         inv_volume = 1.0 / volume
         x = jnp.zeros_like(rhs)
         residual = rhs  # rhs - A·0; overwritten each sweep with the current residual
         for _ in range(self.sweeps):
-            residual = rhs - operator(x)
+            residual = rhs - op(x)
             x = x + scale(residual, inv_volume)
-        if self.warn_tol is not None:
+        # The convergence diagnostic norms the residual over the whole local vector. Under domain
+        # decomposition that vector holds each partition's ghost/null rows too, so a faithful global
+        # norm would need an owned-only cross-partition reduction the operator-wrapping seam does not
+        # carry; the sweep count is a static, mesh-property-driven choice, so the distributed path
+        # drops the (unreliable) diagnostic rather than report a per-partition norm.
+        if operator_hook is None and self.warn_tol is not None:
             # `residual` is rhs - A·x from the last sweep (one apply already spent) — a free,
             # slightly conservative convergence indicator. The host-side warning is gated behind a
             # `lax.cond` on the tolerance so the (host-synchronizing) callback fires *only* when the
@@ -352,9 +400,16 @@ class CorrectedGreenGauss(GradientScheme):
         mesh: Mesh,
         geometry: MeshGeometry,
         boundary_values: jnp.ndarray,
+        *,
+        operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         t = self.terms(mesh, geometry)
-        return self.solver.solve(t.volume, self.operator(t), self.rhs(t, field, boundary_values))
+        return self.solver.solve(
+            t.volume,
+            self.operator(t),
+            self.rhs(t, field, boundary_values),
+            operator_hook=operator_hook,
+        )
 
 
 class HessianCorrectedGradient(GradientScheme):
@@ -407,7 +462,18 @@ class HessianCorrectedGradient(GradientScheme):
         mesh: Mesh,
         geometry: MeshGeometry,
         boundary_values: jnp.ndarray,
+        *,
+        operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
+        if operator_hook is not None:
+            raise NotImplementedError(
+                "HessianCorrectedGradient cannot run domain-decomposed: the gradient couples to the "
+                "Hessian through the nested Schur and inner A_HH solves, whose operators read ghost "
+                "gradients and ghost Hessians that a single per-apply exchange of the outer gradient "
+                "does not refresh. A correct distributed build would exchange inside each nested "
+                "solve — not yet built. Use CorrectedGreenGauss with SweptGradientSolve for a "
+                "distributed non-orthogonal gradient."
+            )
         dim = mesh.dim
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells

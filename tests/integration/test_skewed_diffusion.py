@@ -49,8 +49,12 @@ class _LaggedGradient(GradientScheme):
 
     inner: GradientScheme
 
-    def gradients(self, field, mesh, geometry, boundary_values):
-        return jax.lax.stop_gradient(self.inner.gradients(field, mesh, geometry, boundary_values))
+    def gradients(self, field, mesh, geometry, boundary_values, *, operator_hook=None):
+        return jax.lax.stop_gradient(
+            self.inner.gradients(
+                field, mesh, geometry, boundary_values, operator_hook=operator_hook
+            )
+        )
 
 
 def _skewed_laplace(gradient_scheme, n=12, perturb=0.25, seed=1):
