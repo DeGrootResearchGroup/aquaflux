@@ -91,6 +91,16 @@ root `CLAUDE.md` Engineering Principles.
   matches the GMRES solution, differentiable through the nonlinear solve. The Schur complement
   `∂R/∂x + (∂R/∂g)A_g⁻¹B` is still formed by AD; only `A_g⁻¹` changes from a nested solve to a cheap
   unrolled sparse apply. **The default solve strategy for skewed flow meshes.**
+  - **The `GradientSolve.solve(..., operator_hook=None)` distributed seam.** `operator_hook` is an
+    optional transform applied to the unknown before **every operator apply**. `SweptGradientSolve`
+    honours it — the Richardson sweeps form no global inner product, so a domain-decomposed residual
+    can pass its ghost-cell exchange here to refresh the iterate's ghost rows each sweep, making the
+    owned gradients serial-exact. `GmresGradientSolve` **raises** on a non-`None` `operator_hook` (its
+    inner products span the whole local vector, double-counting ghost rows and unreduced across
+    partitions), as does `HessianCorrectedGradient` (its nested Schur/`A_HH` solves read ghost
+    gradients *and* Hessians the outer exchange does not refresh). This makes `SweptGradientSolve` the
+    one gradient solve that runs under domain decomposition (the distributed non-orthogonal path; see
+    `.claude/rules/parallel.md`).
 - **Rejected alternative — dense LU of `A_g` (built, measured, removed; do not rebuild).** Factorizing
   the constant `A_g` once (dense, via `jit`-ed `jacfwd` + `lu_factor`) and applying `A_g⁻¹` by
   back-substitution is also exact, but dense ⇒ `O((n·dim)²)` per apply, so it is **strictly dominated by

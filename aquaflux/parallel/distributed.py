@@ -37,6 +37,16 @@ the gradient (correct on owned cells, whose stencil is within owned + the ``phi`
 exchange the gradient so each ghost carries the value its owning partition computed — the assembler's
 ``gradient_hook`` seam. Both exchanges reuse the same :class:`~aquaflux.parallel.halo.HaloExchange`,
 which is generic in the trailing axes, so a per-cell vector gradient rides the identical plan.
+
+A single-pass gradient scheme (:class:`~aquaflux.schemes.CompactGreenGauss`) reconstructs each owned
+cell's gradient exactly from the ``phi`` halo, so those two exchanges suffice. An *iterative*
+non-orthogonal scheme (:class:`~aquaflux.schemes.CorrectedGreenGauss`) instead solves a
+partition-coupled linear system for the gradient, whose operator reads ghost gradients on every
+apply; the assembler threads this same ``gradient_hook`` into that solve so it refreshes the ghost
+rows each sweep, and the owned gradients then converge to the serial ones. This needs a solve with no
+global inner product — :class:`~aquaflux.schemes.SweptGradientSolve`; the GMRES gradient solve and
+:class:`~aquaflux.schemes.HessianCorrectedGradient` raise if asked to run distributed (their
+reductions / nested solves would need cross-partition machinery that is not built).
 """
 
 from __future__ import annotations

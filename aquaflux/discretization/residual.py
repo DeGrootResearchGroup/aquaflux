@@ -220,7 +220,11 @@ class ResidualAssembler(eqx.Module):
         return self.mesh.face_cells.scatter_conservative(face_flux)
 
     def _gradient(
-        self, phi: jnp.ndarray, properties: dict[str, jnp.ndarray]
+        self,
+        phi: jnp.ndarray,
+        properties: dict[str, jnp.ndarray],
+        *,
+        gradient_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Cell gradients and the boundary values consistent with them.
 
@@ -230,6 +234,11 @@ class ResidualAssembler(eqx.Module):
         at zero gradient) to keep ``R`` a single-pass function of ``phi``; the flux then uses
         the full boundary value evaluated at the reconstructed gradient. The two agree
         exactly on orthogonal grids.
+
+        ``gradient_hook`` is the distributed ghost-cell exchange (see :meth:`residual`); it is
+        threaded into an iterative reconstruction's own linear solve so a partition-coupled gradient
+        scheme refreshes its ghost rows each sweep, and is applied again to the returned gradient in
+        :meth:`residual` so the flux reads exchanged ghost gradients.
         """
         dim = self.mesh.dim
         n_cells = self.mesh.n_cells
@@ -238,7 +247,9 @@ class ResidualAssembler(eqx.Module):
             return gradient, self.boundary_values(phi, gradient, properties)
         zero_grad = jnp.zeros((n_cells, dim), dtype=phi.dtype)
         leading_bvals = self.boundary_values(phi, zero_grad, properties)
-        gradient = self.gradient_scheme.gradients(phi, self.mesh, self.geometry, leading_bvals)
+        gradient = self.gradient_scheme.gradients(
+            phi, self.mesh, self.geometry, leading_bvals, operator_hook=gradient_hook
+        )
         return gradient, self.boundary_values(phi, gradient, properties)
 
     def gradient(self, phi: jnp.ndarray) -> jnp.ndarray:
@@ -282,13 +293,16 @@ class ResidualAssembler(eqx.Module):
         first_step : bool
             ``True`` on the first timestep (BDF1); static.
         gradient_hook : callable, optional
-            A transform ``gradient -> gradient`` applied to the reconstructed cell gradient,
-            shape ``(n_cells, dim)``, before the flux operators consume it. The identity when
-            omitted. This is the seam a distributed residual uses to overwrite ghost-cell gradients
-            with the values their owning partition computed (a ghost's own stencil is incomplete
-            locally, so its reconstructed gradient would be wrong): the exchange corrects only ghost
-            rows, and the boundary values are unaffected because they read only owner-cell gradients
-            (every boundary face is owned by an interior cell of its own partition).
+            A transform ``gradient -> gradient`` (shape ``(n_cells, dim)``) that overwrites ghost
+            rows with the values their owning partition computed; the identity when omitted. This is
+            the seam a distributed residual uses to correct ghost-cell gradients (a ghost's own
+            stencil is incomplete locally, so its reconstructed gradient would be wrong). It is used
+            at two depths: threaded into an iterative gradient scheme's own linear solve so it
+            refreshes ghost rows each sweep (a partition-coupled reconstruction then converges to the
+            serial gradient on owned cells), and applied again to the returned gradient before the
+            flux consumes it. Boundary values are unaffected either way, because they read only
+            owner-cell gradients (every boundary face is owned by an interior cell of its own
+            partition).
 
         Returns
         -------
@@ -297,7 +311,12 @@ class ResidualAssembler(eqx.Module):
             ``(n_cells,)``.
         """
         properties = self.properties.evaluate(self.mesh.cell_zones)
-        gradient, boundary_values = self._gradient(phi, properties)
+        # The hook is used at two depths of the same reconstruction: threaded *into* an iterative
+        # gradient scheme's solve so it refreshes ghost rows each sweep (owned rows then converge to
+        # the serial gradient), and applied *again* to the returned gradient below so the flux reads
+        # exchanged ghost gradients. A single-pass scheme ignores the first use; both are the identity
+        # when the hook is omitted (the serial path).
+        gradient, boundary_values = self._gradient(phi, properties, gradient_hook=gradient_hook)
         if gradient_hook is not None:
             gradient = gradient_hook(gradient)
         context = self._context(gradient, boundary_values, properties)

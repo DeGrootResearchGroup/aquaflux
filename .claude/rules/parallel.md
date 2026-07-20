@@ -175,13 +175,36 @@ identically zero, so the exchange is skipped rather than moving zeros. Boundary 
 correction — every boundary face is owned by an interior cell of its own partition, so they read only
 owner-cell gradients, which the ghost exchange never touches.
 
-Only a **single-pass** gradient scheme (`CompactGreenGauss`) is correct under this one-exchange
-scheme: an owned cell's one-shot Green–Gauss gradient is exact once its `phi` halo is filled. A
-gradient scheme that solves a *global* system (`CorrectedGreenGauss` / `HessianCorrectedGradient` via
-`GmresGradientSolve` or `SweptGradientSolve`) couples across partitions **inside** its own solve, so
-it would need an exchange per sweep / per Krylov step — not yet built. The limiter `psi` exchange is
-likewise deferred until advection-with-limiter runs distributed (no distributed-advection path yet);
-it reuses the identical hook mechanism.
+A **single-pass** gradient scheme (`CompactGreenGauss`) is correct under this one-exchange scheme
+with no extra work: an owned cell's one-shot Green–Gauss gradient is exact once its `phi` halo is
+filled. An **iterative** scheme (`CorrectedGreenGauss`) instead solves a partition-coupled linear
+system `A_g·G = B·φ` for the gradient, whose operator reads ghost gradients on *every* apply, so one
+exchange is not enough — the ghost rows of the iterate must be refreshed before each apply.
+
+**The per-sweep gradient exchange is built** — as the *same* `gradient_hook`, threaded one level
+deeper. `residual` passes its `gradient_hook` into `_gradient` → `GradientScheme.gradients(...,
+operator_hook=…)` → `GradientSolve.solve(..., operator_hook=…)`; the solve wraps its operator so each
+apply first refreshes the iterate's ghost rows (`operator(operator_hook(x))`). Because the hook is
+literally `grad → fill_local(grad[:n_owned_max])`, the identical closure serves all three uses: the
+one-shot final-gradient exchange, and now the per-sweep exchange of the solve unknown. By induction
+the distributed iterate's owned rows equal the serial iterate's at every sweep (same sweep count), so
+the owned gradients are serial-exact. The single-pass scheme ignores `operator_hook`; both are the
+identity serially.
+
+**This requires a reduction-free iterative solve — `SweptGradientSolve`.** Its preconditioned-Richardson
+sweeps `g ← g + V⁻¹(B·φ − A_g·g)` form no global inner product, so a per-apply ghost exchange makes the
+owned rows exact. `GmresGradientSolve` forms inner products over the whole local vector (which would
+double-count ghost rows and are not `psum`-reduced across partitions), so it **raises** if handed an
+`operator_hook`; a correct distributed GMRES needs owned-only cross-partition inner products (a
+distributed Krylov solver), not built. `HessianCorrectedGradient` also **raises**: its gradient couples
+to the Hessian through nested Schur / inner-`A_HH` solves whose operators read ghost gradients *and*
+ghost Hessians that the outer exchange does not refresh — a correct build would exchange inside each
+nested solve. The distributed swept solve also drops the sweep's host-side under-resolution diagnostic
+(a faithful global residual norm would need the owned-only reduction the operator-wrapping seam does not
+carry; the sweep count is a static, mesh-property-driven choice regardless).
+
+The limiter `psi` exchange is likewise deferred until advection-with-limiter runs distributed (no
+distributed-advection path yet); it reuses the identical hook mechanism.
 
 ## Testing
 
@@ -207,18 +230,20 @@ it reuses the identical hook mechanism.
   (`columnwise_perturbed_grid_3d` + `CompactGreenGauss`): the sharded residual and its gradient match
   serial, and a **control** with the gradient exchange forced off does *not* match — proving the
   ghost-gradient exchange is load-bearing, not incidentally passing.
+- `tests/unit/test_distributed_swept_gradient.py` — the **iterative** gradient scheme on the same
+  skewed mesh (`CorrectedGreenGauss` + `SweptGradientSolve`): the sharded residual and gradient match
+  serial; a **control** that drops only the *per-sweep* exchange (keeping the final gradient exchange)
+  diverges — isolating the per-sweep exchange as load-bearing; and the GMRES gradient solve and
+  `HessianCorrectedGradient` **raise** when asked to run distributed rather than misconverge.
 
 The device tests simulate 4 CPU devices via `--xla_force_host_platform_device_count=4`, which must
 be set **before JAX initializes** — hence the subprocess.
 
 ## Not yet built (in priority order)
 
-1. **The per-sweep gradient exchange** for a global-solve gradient scheme (`CorrectedGreenGauss` /
-   `HessianCorrectedGradient`) — see the halo-depth section. The single-pass `CompactGreenGauss`
-   gradient is built; the iterative schemes need an exchange inside their own solve.
-2. **The limiter (`psi`) exchange** for distributed limited advection — reuses the `gradient_hook`
+1. **The limiter (`psi`) exchange** for distributed limited advection — reuses the `gradient_hook`
    mechanism; deferred until there is a distributed-advection path to exercise it.
-3. **Per-partition reverse Cuthill–McKee**, applied as a transform over a built `PartitionedMesh`
+2. **Per-partition reverse Cuthill–McKee**, applied as a transform over a built `PartitionedMesh`
    (not woven into the build loop) so it stays contained.
 4. **Multi-node** via `jax.distributed.initialize()`. Note the honest gap: multi-host is
    production-grade on GPU/TPU, but multi-node **CPU** leans on Gloo and is materially slower than

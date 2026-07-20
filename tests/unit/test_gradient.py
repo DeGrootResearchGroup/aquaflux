@@ -268,6 +268,47 @@ def test_swept_warns_once_when_underresolved() -> None:
     assert warnings_emitted(None) == 0  # check disabled -> silent
 
 
+def test_swept_operator_hook_is_applied_before_each_apply() -> None:
+    """``operator_hook`` transforms the iterate before every operator apply — the seam a
+    domain-decomposed solve uses to refresh ghost rows each sweep. Identity is a no-op; a zeroing
+    hook makes the operator see 0 on every sweep, so the unit-volume Richardson update accumulates
+    the right-hand side once per sweep."""
+    solver = SweptGradientSolve(sweeps=3, warn_tol=None)
+    volume = jnp.ones(4)
+    rhs = jnp.arange(1.0, 5.0)
+
+    def operator(v):
+        return 3.0 * v  # a diagonal the bare (un-hooked) iteration would diverge on
+
+    plain = solver.solve(volume, operator, rhs)
+    identity = solver.solve(volume, operator, rhs, operator_hook=lambda x: x)
+    assert jnp.allclose(plain, identity)  # an identity hook changes nothing
+
+    zeroed = solver.solve(volume, operator, rhs, operator_hook=lambda x: jnp.zeros_like(x))
+    assert jnp.allclose(
+        zeroed, solver.sweeps * rhs
+    )  # operator sees 0 -> x += V^{-1} rhs each sweep
+
+
+def test_gmres_gradient_solve_refuses_distributed_operator_hook() -> None:
+    """GMRES forms whole-vector inner products, so it cannot honour a per-apply ghost exchange and
+    must raise rather than silently return a wrong owned gradient."""
+    solver = GmresGradientSolve()
+    with pytest.raises(NotImplementedError, match="SweptGradientSolve"):
+        solver.solve(jnp.ones(3), lambda v: v, jnp.arange(3.0), operator_hook=lambda x: x)
+
+
+def test_hessian_gradient_refuses_distributed_operator_hook() -> None:
+    """The Hessian-corrected gradient's nested Schur/A_HH solves read ghost data the outer exchange
+    does not refresh, so it refuses a distributed ``operator_hook``."""
+    mesh = perturbed_grid_2d(4, 4, perturb=0.1)
+    geom = mesh.geometry()
+    phi = _trig(geom.cell.centroid)
+    bvals = _trig(geom.face.centroid)
+    with pytest.raises(NotImplementedError, match="domain-decomposed"):
+        HessianCorrectedGradient().gradients(phi, mesh, geom, bvals, operator_hook=lambda x: x)
+
+
 # --- Hessian-corrected gradient (Hessian Schur-eliminated) -----------------------------
 
 
