@@ -157,7 +157,7 @@ def test_preconditioned_iterative_solve_matches_the_direct_solve() -> None:
     preconditioner = BlockPreconditioner.build(momentum).factory()
     gmres = lx.GMRES(rtol=1e-8, atol=1e-10)
     solve_iterative = bulk_velocity_flow_solve(
-        target=U_TARGET, solver=gmres, preconditioner=preconditioner
+        target=U_TARGET, solver=gmres, preconditioner=preconditioner, reference=momentum
     )
     solve_direct = bulk_velocity_flow_solve(target=U_TARGET, solver=_DIRECT)
 
@@ -169,3 +169,75 @@ def test_preconditioned_iterative_solve_matches_the_direct_solve() -> None:
         float(momentum_di.body_force[0]), rel=1e-6
     )
     assert jnp.allclose(flow_it, flow_di, atol=1e-6)
+
+
+def test_preconditioner_requires_a_reference() -> None:
+    """A preconditioner needs a concrete reference for the border geometry (else it would carry a
+    tracer through the jitted solve and break differentiation)."""
+    with pytest.raises(ValueError, match="reference"):
+        bulk_velocity_flow_solve(
+            target=U_TARGET, solver=lx.GMRES(rtol=1e-8, atol=1e-10), preconditioner=lambda w: w
+        )
+
+
+def _laminar_body_force(mu: float, solve) -> float:
+    """The converged body force (the multiplier) of the laminar channel at viscosity ``mu``."""
+    mesh = structured_grid_2d(16, 24, lx=1.0, ly=H, periodic=("x",), named_boundaries=True)
+    momentum = MomentumContinuity.build(
+        mesh,
+        mesh.geometry(),
+        PropertyModel({"viscosity": Constant(RHO * mu), "density": Constant(RHO)}),
+        CompactGreenGauss(),
+        BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+        pressure_pin=0,
+        body_force=(0.05, 0.0),
+    )
+    solved_momentum, _ = solve(momentum, momentum.initial_state())
+    return solved_momentum.body_force[0]
+
+
+def test_constrained_solve_is_reverse_differentiable() -> None:
+    """``jax.grad`` through the constrained solve matches finite differences.
+
+    Differentiate the converged body force ``beta`` (the multiplier) w.r.t. viscosity: for the laminar
+    channel ``<U> = beta H^2 / (12 mu) = U_b`` gives ``beta = 12 mu U_b / H^2``, so ``d beta / d mu =
+    12 U_b / H^2 = 3``. This exercises the implicit-function-theorem adjoint (the assembler threaded as
+    the Newton parameter) -- without it the solve raises rather than returning a gradient.
+    """
+    solve = bulk_velocity_flow_solve(target=U_TARGET, solver=_DIRECT)
+    ad = float(jax.grad(lambda mu: _laminar_body_force(mu, solve))(MU))
+    eps = 1e-6
+    fd = (_laminar_body_force(MU + eps, solve) - _laminar_body_force(MU - eps, solve)) / (2 * eps)
+    assert ad == pytest.approx(float(fd), rel=1e-5)
+    assert ad == pytest.approx(12.0 * U_TARGET / H**2, rel=2e-2)  # analytic 3.0 to discretization
+
+
+def test_preconditioned_adjoint_matches_the_unpreconditioned_adjoint() -> None:
+    """The reverse-mode gradient is identical with and without the constraint preconditioner.
+
+    The block-preconditioned iterative solve reuses the bordered preconditioner **transposed** (formed
+    by :func:`jax.linear_transpose`) for the adjoint transpose solve; the preconditioner only
+    accelerates the adjoint Krylov iteration, so the gradient must equal the direct (unpreconditioned)
+    adjoint's -- the guard rail that the adjoint preconditioner is correct, not just fast.
+    """
+    mesh = structured_grid_2d(16, 24, lx=1.0, ly=H, periodic=("x",), named_boundaries=True)
+    reference = MomentumContinuity.build(
+        mesh,
+        mesh.geometry(),
+        PropertyModel({"viscosity": Constant(RHO * MU), "density": Constant(RHO)}),
+        CompactGreenGauss(),
+        BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+        pressure_pin=0,
+        body_force=(0.05, 0.0),
+    )
+    preconditioner = BlockPreconditioner.build(reference).factory()  # built off-grad, concrete
+    solve_direct = bulk_velocity_flow_solve(target=U_TARGET, solver=_DIRECT)
+    solve_pre = bulk_velocity_flow_solve(
+        target=U_TARGET,
+        solver=lx.GMRES(rtol=1e-9, atol=1e-11),
+        preconditioner=preconditioner,
+        reference=reference,
+    )
+    grad_direct = float(jax.grad(lambda mu: _laminar_body_force(mu, solve_direct))(MU))
+    grad_pre = float(jax.grad(lambda mu: _laminar_body_force(mu, solve_pre))(MU))
+    assert grad_pre == pytest.approx(grad_direct, abs=1e-9)
