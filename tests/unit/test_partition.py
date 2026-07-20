@@ -21,7 +21,7 @@ import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler
 from aquaflux.mesh import structured_grid_3d
-from aquaflux.parallel import AllGatherHaloExchange, partition_mesh
+from aquaflux.parallel import AllGatherHaloExchange, PaddedLayout, partition_mesh
 from aquaflux.properties import Constant, PropertyModel
 
 SIDES = ("left", "right", "bottom", "top", "back", "front")
@@ -71,32 +71,9 @@ def _slab_labels(n_cells, n_partitions):
     return (np.arange(n_cells) * n_partitions // n_cells).astype(np.int64)
 
 
-def _all_owned_stack(pmesh, global_field):
-    """Emulate the `shard_map` all-gather: stack every partition's owned values, padded uniform."""
-    n_owned_max = max(p.n_owned for p in pmesh.partitions)
-    rows = []
-    for part in pmesh.partitions:
-        owned = global_field[part.owned_global]
-        pad = jnp.zeros(n_owned_max - part.n_owned, dtype=global_field.dtype)
-        rows.append(jnp.concatenate([owned, pad]))
-    return jnp.stack(rows)  # (n_partitions, n_owned_max)
-
-
-def _distributed_residual_via_halo(pmesh, global_geom, gamma_val, global_phi):
-    """Distributed residual with ghosts filled by the halo plan (not a direct global gather)."""
-    all_owned = _all_owned_stack(pmesh, global_phi)
-    halo = AllGatherHaloExchange()
-    owned = []
-    for part in pmesh.partitions:
-        local_full = halo.fill(
-            global_phi[part.owned_global],
-            all_owned,
-            part.ghost_src_partition,
-            part.ghost_src_owned_index,
-        )
-        asm = _local_assembler(part, global_geom, gamma_val)
-        owned.append(asm.residual(local_full)[: part.n_owned])
-    return pmesh.scatter_owned(owned)
+def _padded_owned_stack(layout, global_field):
+    """Every partition's owned values in the padded layout — what an all-gather makes available."""
+    return layout.owned_states_from_global(global_field)
 
 
 def test_partition_covers_every_cell_once() -> None:
@@ -122,33 +99,25 @@ def test_distributed_residual_matches_serial(n_partitions) -> None:
     assert jnp.allclose(serial, distributed, atol=1e-12)
 
 
-def test_halo_plan_reproduces_the_global_gather() -> None:
-    """The halo plan (ghost -> src partition + owned index) fills ghosts to exactly the values a
-    direct global gather would — validating the metadata the `shard_map` all-gather will consume."""
+def test_halo_plan_resolves_ghosts_to_the_global_gather() -> None:
+    """Each ghost's (owning partition, owned index) pair addresses exactly the value a direct
+    global gather would give it.
+
+    This checks the plan's *indices* — the bookkeeping the exchange's collective consumes — without
+    running a collective. Driving the exchange itself needs a device axis, so that is covered under
+    `shard_map` in `test_distributed.py`.
+    """
     mesh = structured_grid_3d(5, 5, 5, named_boundaries=True)
     pmesh = partition_mesh(mesh, _slab_labels(mesh.n_cells, 3))
+    layout = PaddedLayout.from_partitioned(pmesh)
+    plan = AllGatherHaloExchange().plan(layout)
     phi = jnp.asarray(np.random.default_rng(2).standard_normal(mesh.n_cells))
-    all_owned = _all_owned_stack(pmesh, phi)
-    halo = AllGatherHaloExchange()
+    all_owned = _padded_owned_stack(layout, phi)
 
-    for part in pmesh.partitions:
-        local_full = halo.fill(
-            phi[part.owned_global], all_owned, part.ghost_src_partition, part.ghost_src_owned_index
-        )
-        assert jnp.allclose(local_full, part.gather_cells(phi), atol=1e-14)
-
-
-def test_distributed_residual_via_halo_matches_serial() -> None:
-    """The full distributed residual with ghosts filled by the halo exchange equals serial — the
-    same per-partition function is what the sharded residual runs, once padded to uniform shapes."""
-    mesh = structured_grid_3d(6, 6, 6, named_boundaries=True)
-    geom = mesh.geometry()
-    pmesh = partition_mesh(mesh, _slab_labels(mesh.n_cells, 3))
-    phi = jnp.asarray(np.random.default_rng(3).standard_normal(mesh.n_cells))
-
-    serial = _serial_assembler(mesh, 1.3).residual(phi)
-    distributed = _distributed_residual_via_halo(pmesh, geom, 1.3, phi)
-    assert jnp.allclose(serial, distributed, atol=1e-12)
+    for p, part in enumerate(pmesh.partitions):
+        ghosts = all_owned[plan.src_partition[p], plan.src_owned_index[p]][: part.n_ghost]
+        expected = part.gather_cells(phi)[part.n_owned :]
+        assert jnp.allclose(ghosts, expected, atol=1e-14)
 
 
 def test_distributed_parameter_gradient_matches_serial() -> None:

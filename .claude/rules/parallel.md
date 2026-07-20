@@ -46,7 +46,9 @@ communication** — the step that is a notorious, error-prone hand-derivation in
   ordinary `Mesh` so every operator/scheme/BC runs on it verbatim.
 - `padding.py` — **`PaddedLayout`** and **`pad_partition`**: uniform per-shard shapes. Deliberately
   **operator-independent**.
-- `halo.py` — **`HaloExchange`** strategy; `AllGatherHaloExchange` is the current implementation.
+- `halo.py` — **`HaloExchange`** strategy: `plan(layout) -> HaloPlan` at setup, `fill(owned_local,
+  plan, axis_name)` inside the sharded body with the collective *inside* `fill`. `AllGatherHaloExchange`
+  / `AllGatherPlan` is the current implementation.
 - `distributed.py` — **`build_distributed_residual`** / **`DistributedResidual`**: the `shard_map`
   driver. Also operator-independent.
 
@@ -166,12 +168,11 @@ be set **before JAX initializes** — hence the subprocess.
 
 ## Not yet built (in priority order)
 
-1. **`HaloExchange` should own its plan and its collective.** Current `fill(owned_local, all_owned,
-   ghost_src_partition, ghost_src_owned_index)` takes the all-gather *result*, and the
-   `all_gather` is issued in the `shard_map` body outside the strategy. A neighbour-only `ppermute`
-   never receives an `(n_partitions, n_owned_max)` array and **cannot implement this signature**.
-   Reshape to `plan(pmesh)` at setup plus `fill(owned_local, plan)` with the collective *inside*,
-   **before** writing `ppermute` — not during.
+1. **A neighbour-only `ppermute` `HaloExchange`.** The interface is now shaped for it: `plan` owns
+   the setup bookkeeping and `fill` issues its own collective, so `AllGatherHaloExchange` swaps for a
+   permutation variant with no change to the sharded body. `fill` is already generic in the trailing
+   axes (a per-cell vector field carries unchanged — pinned by
+   `test_halo_exchange_carries_a_vector_field`), which is what the derived-field halo below needs.
 2. **The derived-field halo** (`grad`, limiter) per the one-layer scheme above — an exchange hook
    between gradient reconstruction and the flux loop. Needed the moment a non-orthogonal correction
    or a limiter runs distributed; the current gate is orthogonal-grid, where the correction vanishes.

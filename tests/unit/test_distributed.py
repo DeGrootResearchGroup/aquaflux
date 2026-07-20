@@ -76,8 +76,67 @@ print("ok")
 """
 
 
-def test_distributed_residual_matches_serial_value_and_gradient() -> None:
-    """The `shard_map` residual and its gradient match serial on 4 simulated devices."""
-    result = subprocess.run([sys.executable, "-c", _SUBPROCESS], capture_output=True, text=True)
+_HALO_VECTOR_SUBPROCESS = r"""
+import os
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
+import numpy as np
+import jax, jax.numpy as jnp
+from jax.sharding import Mesh as DeviceMesh, PartitionSpec as Pspec
+import aquaflux  # x64
+from aquaflux.mesh import structured_grid_3d
+from aquaflux.parallel import (
+    AllGatherHaloExchange, BlockPartitioner, PaddedLayout, partition_mesh,
+)
+
+DIM = 3
+mesh = structured_grid_3d(5, 5, 5, named_boundaries=True)
+pmesh = partition_mesh(mesh, BlockPartitioner().partition(mesh, 4))
+layout = PaddedLayout.from_partitioned(pmesh)
+halo = AllGatherHaloExchange()
+plan = halo.plan(layout)
+
+# A per-cell *vector* field -- the shape a reconstructed gradient has.
+field = jnp.asarray(np.random.default_rng(0).standard_normal((mesh.n_cells, DIM)))
+owned_states = layout.owned_states_from_global(field)  # (n_part, n_owned_max, DIM)
+
+def per_device(owned_shard, plan_shard):
+    owned = owned_shard[0]
+    shard_plan = jax.tree.map(lambda a: a[0], plan_shard)
+    filled = halo.fill(owned, shard_plan, "p")
+    return filled.reshape(1, *filled.shape)
+
+device_mesh = DeviceMesh(np.array(jax.devices()[:4]), axis_names=("p",))
+filled = jax.shard_map(
+    per_device, mesh=device_mesh, in_specs=(Pspec("p"), Pspec("p")), out_specs=Pspec("p"),
+)(owned_states, plan)
+
+assert filled.shape == (4, layout.n_owned_max + layout.n_ghost_max, DIM), filled.shape
+# Every real owned and ghost row must equal what a direct global gather gives.
+for p, part in enumerate(pmesh.partitions):
+    expected = part.gather_cells(field)
+    got_owned = filled[p, : part.n_owned]
+    got_ghost = filled[p, layout.n_owned_max : layout.n_owned_max + part.n_ghost]
+    assert jnp.allclose(got_owned, expected[: part.n_owned], atol=1e-14)
+    assert jnp.allclose(got_ghost, expected[part.n_owned :], atol=1e-14)
+print("ok")
+"""
+
+
+def _run(source: str) -> None:
+    result = subprocess.run([sys.executable, "-c", source], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().splitlines()[-1] == "ok"
+
+
+def test_distributed_residual_matches_serial_value_and_gradient() -> None:
+    """The `shard_map` residual and its gradient match serial on 4 simulated devices."""
+    _run(_SUBPROCESS)
+
+
+def test_halo_exchange_carries_a_vector_field() -> None:
+    """The exchange is generic in the trailing axes, so it carries a per-cell vector field.
+
+    Pins the property the derived-field halo depends on: exchanging a reconstructed gradient
+    (shape ``(n_cells, dim)``) rather than only a scalar needs no new code path.
+    """
+    _run(_HALO_VECTOR_SUBPROCESS)

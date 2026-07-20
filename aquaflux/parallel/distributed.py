@@ -44,9 +44,12 @@ from jax.sharding import PartitionSpec as Pspec
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.mesh import Mesh, MeshGeometry
 
-from .halo import AllGatherHaloExchange, HaloExchange
+from .halo import AllGatherHaloExchange, HaloExchange, HaloPlan
 from .padding import PaddedLayout, pad_partition
 from .partition import PartitionedMesh
+
+# Name of the device axis the partitions are mapped over.
+_DEVICE_AXIS = "p"
 
 
 def _uniform_boundary_faces(assemblers: list, fill_face: int) -> list:
@@ -109,11 +112,15 @@ class DistributedResidual(eqx.Module):
         The per-partition assemblers stacked into one pytree with a leading partition axis.
     halo : HaloExchange
         The ghost-cell refresh strategy.
+    halo_plan : HaloPlan
+        That strategy's index bookkeeping, stacked over the partition axis and sharded alongside
+        the assemblers.
     """
 
     layout: PaddedLayout
     assemblers: object
     halo: HaloExchange
+    halo_plan: HaloPlan
 
     def residual(self, global_field: jnp.ndarray) -> jnp.ndarray:
         """Evaluate the residual across devices and reassemble it into a global vector.
@@ -132,16 +139,18 @@ class DistributedResidual(eqx.Module):
         """
         layout = self.layout
         n_owned_max = layout.n_owned_max
-        device_mesh = DeviceMesh(np.array(jax.devices()[: layout.n_partitions]), axis_names=("p",))
+        device_mesh = DeviceMesh(
+            np.array(jax.devices()[: layout.n_partitions]), axis_names=(_DEVICE_AXIS,)
+        )
         owned_states = layout.owned_states_from_global(global_field)
 
         def per_device(owned_shard, plan_shard, assembler_shard):
-            # Every partition's owned values; JAX derives the collective's adjoint.
-            all_owned = jax.lax.all_gather(owned_shard, "p", axis=0, tiled=True)
+            # Drop the size-1 partition axis each shard carries, recovering this device's own data.
             owned = owned_shard[0]
-            src_partition, src_index = (a[0] for a in plan_shard)
+            plan = jax.tree.map(lambda a: a[0], plan_shard)
             assembler = jax.tree.map(lambda a: a[0], assembler_shard)
-            local_field = self.halo.fill(owned, all_owned, src_partition, src_index)
+            # The exchange issues its own collectives; JAX derives their adjoint.
+            local_field = self.halo.fill(owned, plan, _DEVICE_AXIS)
             # The halo fills owned + ghost cells; the null cell mirrors no remote cell, so its row
             # is appended here. Nothing reads it — every padding face scatters into it.
             null_row = jnp.zeros((1, *local_field.shape[1:]), local_field.dtype)
@@ -151,11 +160,10 @@ class DistributedResidual(eqx.Module):
         sharded = jax.shard_map(
             per_device,
             mesh=device_mesh,
-            in_specs=(Pspec("p"), Pspec("p"), Pspec("p")),
-            out_specs=Pspec("p"),
+            in_specs=(Pspec(_DEVICE_AXIS),) * 3,
+            out_specs=Pspec(_DEVICE_AXIS),
         )
-        plan = (layout.ghost_src_partition, layout.ghost_src_owned_index)
-        owned_out = sharded(owned_states, plan, self.assemblers)
+        owned_out = sharded(owned_states, self.halo_plan, self.assemblers)
         return layout.scatter_owned_to_global(owned_out)
 
 
@@ -211,6 +219,7 @@ def build_distributed_residual(
             "stacked for shard_map; something varies per partition beyond the padded sizes"
         )
     stacked = jax.tree.map(lambda *xs: jnp.stack(xs), *assemblers)
+    halo = halo or AllGatherHaloExchange()
     return DistributedResidual(
-        layout=layout, assemblers=stacked, halo=halo or AllGatherHaloExchange()
+        layout=layout, assemblers=stacked, halo=halo, halo_plan=halo.plan(layout)
     )
