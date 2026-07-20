@@ -4,8 +4,8 @@ The k and omega equations are stiff convection-diffusion-**reaction** scalars: t
 and the near-wall omega source make a full Newton step overshoot (and drive k or omega negative) from
 a cold start, exactly the fragility the coupled flow block solves with pseudo-transient continuation.
 This module gives the scalar solves the *same* globalization by supplying a :class:`ScalarShiftPolicy`
-to the residual-agnostic :class:`aquaflux.solve.PseudoTransientStep` engine, in place of the fixed-count
-``NewtonSolver`` (no line search, no continuation) the scalar sub-solves used before.
+to the residual-agnostic :class:`aquaflux.solve.PseudoTransientStep` engine, in place of the
+fixed-count Newton loop (no line search, no continuation) the scalar sub-solves used before.
 
 The shift is proportional to the scalar transport operator's own diagonal (the ``a_P`` analogue; see
 :func:`~aquaflux.turbulence.preconditioner.scalar_transport_shift_diagonal`), so it is the scalar
@@ -16,7 +16,7 @@ positive diagonal (more diagonal dominance), so the AMG built for the unshifted 
 effective preconditioner for the shifted one — no per-step rebuild of the off-jit hierarchy is needed.
 
 Because the shift vanishes at the fixed point (``R(phi*) = 0`` exactly), swapping the fixed-count Newton
-sub-solve for this **converges the same field** and, unlike the unrolled ``NewtonSolver``, gives it a
+sub-solve for this **converges the same field** and, unlike an unrolled fixed-count loop, gives it a
 clean implicit-function-theorem adjoint — a step toward the fully-coupled ``R(u, p, k, omega)`` adjoint.
 """
 

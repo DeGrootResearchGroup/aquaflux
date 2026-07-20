@@ -24,6 +24,7 @@ Analytical series (Fourier number ``Fo``):
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -32,7 +33,7 @@ from aquaflux.boundary import BoundaryConditions, Convective, ZeroGradient
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler, TransientTerm
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.solve import NewtonSolver
+from aquaflux.solve import newton_step
 
 # --- analytical oracle -----------------------------------------------------------------
 
@@ -87,13 +88,16 @@ def solve_wall(bi, mesh, geometry, fo_final=1.0, n_steps=400):
         transient=TransientTerm(),
     )
     dt = fo_final / n_steps
-    solver = NewtonSolver(iterations=1)  # linear problem: one Newton step is exact
+    # The per-step problem is linear, so one Newton correction is exact. newton_step is plain
+    # traced operations, which is what lets the whole march be differentiated in forward mode
+    # (jacfwd below) as well as reverse.
+    solve = eqx.filter_jit(newton_step)
     phi0 = jnp.ones(mesh.n_cells)
-    phi1 = solver.solve(lambda p: assembler.residual(p, phi_old=phi0, dt=dt, first_step=True), phi0)
+    phi1 = solve(lambda p: assembler.residual(p, phi_old=phi0, dt=dt, first_step=True), phi0)
 
     def step(carry, _):
         old, older = carry
-        new = solver.solve(
+        new = solve(
             lambda p: assembler.residual(p, phi_old=old, phi_older=older, dt=dt, first_step=False),
             old,
         )
@@ -144,7 +148,7 @@ def test_gate_a_one_newton_step_converges() -> None:
     def residual_fn(p):
         return assembler.residual(p, phi_old=phi0, dt=0.01, first_step=True)
 
-    phi = NewtonSolver(iterations=1).solve(residual_fn, phi0)
+    phi = eqx.filter_jit(newton_step)(residual_fn, phi0)
     assert float(jnp.linalg.norm(residual_fn(phi))) < 1e-10
 
 

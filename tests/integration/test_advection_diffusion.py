@@ -13,6 +13,7 @@ no over/undershoot), at the cost of first-order accuracy from its numerical diff
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -26,7 +27,7 @@ from aquaflux.discretization import (
 )
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.solve import NewtonSolver
+from aquaflux.solve import newton_step
 
 from tests.support.fields import face_mass_flux
 
@@ -57,7 +58,7 @@ def _solve(nx):
             }
         ),
     )
-    phi = NewtonSolver(iterations=1).solve(assembler.residual, jnp.zeros(mesh.n_cells))
+    phi = eqx.filter_jit(newton_step)(assembler.residual, jnp.zeros(mesh.n_cells))
     return mesh, geom.cell, assembler, phi
 
 
@@ -98,9 +99,7 @@ def test_upwind_solve_is_differentiable() -> None:
                 }
             ),
         )
-        return jnp.mean(
-            NewtonSolver(iterations=1).solve(assembler.residual, jnp.zeros(mesh.n_cells))
-        )
+        return jnp.mean(eqx.filter_jit(newton_step)(assembler.residual, jnp.zeros(mesh.n_cells)))
 
     grad = jax.grad(mean_phi)(GAMMA)
     assert np.isfinite(float(grad))

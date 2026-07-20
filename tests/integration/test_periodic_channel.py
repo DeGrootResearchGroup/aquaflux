@@ -16,6 +16,7 @@ path -- the seam face's cell geometry, diffusion, Rhie--Chow continuity, and the
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -25,7 +26,7 @@ from aquaflux.flow.initialization import potential_flow
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss
-from aquaflux.solve import NewtonSolver
+from aquaflux.solve import newton_step
 
 H, LX, MU, RHO, BETA = 1.0, 2.0, 0.1, 1.0, 0.1
 U_MAX = BETA * H**2 / (8.0 * MU)
@@ -43,7 +44,7 @@ def _solve(nx, ny):
         pressure_pin=0,  # periodic + walls is a closed domain: fix the pressure datum
         body_force=(BETA, 0.0),
     )
-    state = NewtonSolver(iterations=3).solve(assembler.residual, assembler.initial_state())
+    state = eqx.filter_jit(newton_step)(assembler.residual, assembler.initial_state())
     return mesh, geometry, assembler, state
 
 

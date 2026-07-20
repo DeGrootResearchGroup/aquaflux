@@ -21,6 +21,7 @@ value imposed on all boundaries (a :class:`DirichletField`), on a skewed grid.
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -29,7 +30,7 @@ from aquaflux.boundary import BoundaryConditions, DirichletField
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, HessianCorrectedGradient
-from aquaflux.solve import NewtonSolver
+from aquaflux.solve import newton_step
 
 from tests.support.meshes import perturbed_grid_2d
 
@@ -72,7 +73,7 @@ def test_betchen_one_newton_step_on_skewed_mesh() -> None:
     mesh, _, assembler = _laplace(12, HessianCorrectedGradient())
     phi0 = jnp.zeros(mesh.n_cells)
     before = float(jnp.linalg.norm(assembler.residual(phi0)))
-    phi = NewtonSolver(iterations=1).solve(assembler.residual, phi0)
+    phi = eqx.filter_jit(newton_step)(assembler.residual, phi0)
     after = float(jnp.linalg.norm(assembler.residual(phi)))
     assert before > 1.0
     assert after < 1e-8
@@ -94,7 +95,7 @@ def test_betchen_solve_is_differentiable() -> None:
             gradient_scheme=HessianCorrectedGradient(),
         )
         return jnp.sum(
-            NewtonSolver(iterations=1).solve(assembler.residual, jnp.zeros(mesh.n_cells)) ** 2
+            eqx.filter_jit(newton_step)(assembler.residual, jnp.zeros(mesh.n_cells)) ** 2
         )
 
     grad = jax.grad(objective)(1.0)
@@ -108,7 +109,7 @@ def test_betchen_field_converges_second_order_on_skewed() -> None:
     errors = []
     for n in (8, 16, 32):
         mesh, cell_geometry, assembler = _laplace(n, HessianCorrectedGradient())
-        phi = NewtonSolver(iterations=1).solve(assembler.residual, jnp.zeros(mesh.n_cells))
+        phi = eqx.filter_jit(newton_step)(assembler.residual, jnp.zeros(mesh.n_cells))
         err = phi - _phi_exact(cell_geometry.centroid)
         errors.append(float(jnp.sqrt(jnp.mean(err[_interior_mask(mesh)] ** 2))))
     order = np.log2(errors[0] / errors[-1]) / np.log2(32 / 8)
@@ -125,7 +126,7 @@ def test_betchen_flux_beats_green_gauss_on_skewed() -> None:
         errs = []
         for n in (8, 16, 32):
             mesh, cell_geometry, assembler = _laplace(n, scheme)
-            phi = NewtonSolver(iterations=1).solve(assembler.residual, jnp.zeros(mesh.n_cells))
+            phi = eqx.filter_jit(newton_step)(assembler.residual, jnp.zeros(mesh.n_cells))
             g_err = assembler.gradient(phi) - _grad_exact(cell_geometry.centroid)
             per_cell = jnp.sqrt(jnp.sum(g_err**2, axis=1))
             errs.append(float(jnp.sqrt(jnp.mean(per_cell[_interior_mask(mesh)] ** 2))))

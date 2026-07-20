@@ -22,6 +22,7 @@ correction's dependence on the field — exactly the unlinearized deferred corre
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -29,7 +30,7 @@ from aquaflux.boundary import BoundaryConditions, DirichletField
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, GradientScheme
-from aquaflux.solve import NewtonSolver
+from aquaflux.solve import newton_step
 
 from tests.support.meshes import perturbed_grid_2d
 
@@ -73,7 +74,7 @@ def test_gate_c_one_newton_step_on_skewed_mesh() -> None:
     mesh, _, assembler = _skewed_laplace(CorrectedGreenGauss())
     phi0 = jnp.zeros(mesh.n_cells)
     before = float(jnp.linalg.norm(assembler.residual(phi0)))
-    phi = NewtonSolver(iterations=1).solve(assembler.residual, phi0)
+    phi = eqx.filter_jit(newton_step)(assembler.residual, phi0)
     after = float(jnp.linalg.norm(assembler.residual(phi)))
     assert before > 1.0  # a genuinely non-trivial residual to begin with
     assert after < 1e-8  # driven to ~zero in a single step
@@ -82,7 +83,7 @@ def test_gate_c_one_newton_step_on_skewed_mesh() -> None:
 def test_gate_c_linear_exact_on_skewed_mesh() -> None:
     """The consistently-linearized operator reproduces a linear field exactly on a skewed grid."""
     mesh, cell_geometry, assembler = _skewed_laplace(CorrectedGreenGauss())
-    phi = NewtonSolver(iterations=1).solve(assembler.residual, jnp.zeros(mesh.n_cells))
+    phi = eqx.filter_jit(newton_step)(assembler.residual, jnp.zeros(mesh.n_cells))
     exact = _linear_field(cell_geometry.centroid)
     assert float(jnp.max(jnp.abs(phi - exact))) < 1e-9
 
@@ -98,12 +99,10 @@ def test_gate_c_lagged_correction_needs_several_iterations() -> None:
     phi0 = jnp.zeros(mesh.n_cells)
 
     implicit_after_one = float(
-        jnp.linalg.norm(
-            implicit.residual(NewtonSolver(iterations=1).solve(implicit.residual, phi0))
-        )
+        jnp.linalg.norm(implicit.residual(eqx.filter_jit(newton_step)(implicit.residual, phi0)))
     )
     lagged_after_one = float(
-        jnp.linalg.norm(lagged.residual(NewtonSolver(iterations=1).solve(lagged.residual, phi0)))
+        jnp.linalg.norm(lagged.residual(eqx.filter_jit(newton_step)(lagged.residual, phi0)))
     )
     assert implicit_after_one < 1e-8
     assert lagged_after_one > 1e-2  # far from converged after a single step
@@ -112,7 +111,7 @@ def test_gate_c_lagged_correction_needs_several_iterations() -> None:
     phi = phi0
     steps = 0
     for _ in range(20):
-        phi = NewtonSolver(iterations=1).solve(lagged.residual, phi)
+        phi = eqx.filter_jit(newton_step)(lagged.residual, phi)
         steps += 1
         if float(jnp.linalg.norm(lagged.residual(phi))) < 1e-8:
             break
@@ -133,7 +132,7 @@ def test_gate_c_residual_is_differentiable_on_skewed_mesh() -> None:
             BoundaryConditions({"left": bc, "right": bc, "bottom": bc, "top": bc}),
             gradient_scheme=CorrectedGreenGauss(),
         )
-        phi = NewtonSolver(iterations=1).solve(scaled.residual, jnp.zeros(mesh.n_cells))
+        phi = eqx.filter_jit(newton_step)(scaled.residual, jnp.zeros(mesh.n_cells))
         return jnp.sum(phi**2)
 
     grad = jax.grad(objective)(1.0)

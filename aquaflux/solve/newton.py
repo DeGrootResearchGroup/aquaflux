@@ -1,24 +1,33 @@
-"""Newton driver on the cell residual.
+"""The Newton correction on the cell residual.
 
-Solves ``R(phi) = 0`` by Newton's method: at each iterate the correction ``delta`` solves the
-linearized system ``J delta = -R(phi)``, where ``J = dR/dphi`` is applied **matrix-free** via
-a forward-mode directional derivative (``jax.jvp``) — the Jacobian is never assembled, and no
-hand-derived linearization coefficients exist. The linear solve is the differentiable
+One Newton step takes ``phi`` to ``phi + delta``, where the correction solves the linearized system
+``J delta = -R(phi)`` and ``J = dR/dphi`` is applied **matrix-free** via a forward-mode directional
+derivative (``jax.jvp``) — the Jacobian is never assembled, and no hand-derived linearization
+coefficients exist. The linear solve is the differentiable
 :func:`~aquaflux.solve.linear.solve_linear`.
 
-The residual is supplied as a closure ``residual_fn(phi)``, so the driver is testable on any
-analytic residual and never imports a specific operator. For a linear residual (e.g. transient
-diffusion) a single iteration is exact; ``iterations`` is fixed and small, and the driver is
-differentiated directly through those unrolled steps. (A convergence-based stop with an
-implicit-function-theorem adjoint is the upgrade for genuinely nonlinear residuals, where many
-iterations would otherwise be taped; it is not needed while the physics is linear.)
+The residual is supplied as a closure ``residual_fn(phi)``, so these functions are testable on any
+analytic residual and never import a specific operator.
+
+**This module is one step, not a driver.** For a *linear* residual — transient diffusion, Stokes
+flow, a Laplace initializer — a single :func:`newton_step` is exact, and being plain traced
+operations it differentiates in **both** modes: the forward-mode ``jacfwd`` that a scalar-parameter
+sensitivity over a whole field wants, as well as reverse-mode. For a *nonlinear* residual, iterate
+with :class:`~aquaflux.solve.ImplicitNewtonSolver`, which stops on a convergence test, globalizes
+the march, and carries the implicit-function-theorem adjoint. Do **not** write a fixed-count loop
+over :func:`newton_step` for a nonlinear residual: it cannot tell convergence from exhaustion, and
+taping the unrolled steps is exactly the gradient path the two-level implicit differentiation exists
+to avoid.
+
+Neither function jits internally — the caller owns the jit boundary, so a step composes into
+whatever the caller compiles. Wrap the call in ``equinox.filter_jit``; un-jitted, every operation
+dispatches eagerly.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 import lineax as lx
@@ -36,9 +45,13 @@ def newton_step(
 
     The Jacobian ``J = dR/dphi`` is applied matrix-free via a forward-mode directional
     derivative (``jax.jvp``); the linear solve is the differentiable
-    :func:`~aquaflux.solve.linear.solve_linear`. Shared by :class:`NewtonSolver` and the
-    implicit-function-theorem solver. A globalized driver instead takes the raw correction from
-    :func:`newton_correction` and damps it with a line search.
+    :func:`~aquaflux.solve.linear.solve_linear`. Shared with the implicit-function-theorem solver.
+    A globalized driver instead takes the raw correction from :func:`newton_correction` and damps it
+    with a line search.
+
+    Exact in one call for a linear residual. For a nonlinear one, iterate with
+    :class:`~aquaflux.solve.ImplicitNewtonSolver` rather than calling this a fixed number of times
+    (see the module docstring).
 
     Parameters
     ----------
@@ -79,63 +92,3 @@ def newton_correction(
         jacobian_vector_product, -r, solver=solver, preconditioner=preconditioner_matvec
     )
     return delta, r
-
-
-class NewtonSolver(eqx.Module):
-    """Fixed-iteration Newton solver with a matrix-free, differentiable linear step.
-
-    The Newton step is compiled **once** (with the iterate as the only traced argument) and the
-    compiled graph is reused across iterations. Iterating an un-jitted :func:`newton_step` rebuilds
-    the Jacobian-vector-product operator and the preconditioner as fresh closures every step, which
-    forces XLA to recompile the whole preconditioned linear solve each iteration — the dominant cost
-    of the naive loop.
-
-    Attributes
-    ----------
-    iterations : int
-        Number of Newton iterations (static). One is exact for a linear residual.
-    solver : lineax.AbstractLinearSolver or None
-        The linear solver for each Newton step; ``None`` uses the package default.
-    preconditioner : callable or None
-        A factory ``phi -> M`` giving the left preconditioner ``M`` (a matvec approximating
-        ``J^{-1}``) for each step's linear solve, built at the current iterate (e.g.
-        :meth:`aquaflux.flow.BlockPreconditioner.factory`). ``None`` solves unpreconditioned. Static
-        (its coefficients are ``stop_gradient``-ed by the factory, so it stays gradient-transparent).
-    """
-
-    iterations: int = eqx.field(static=True, default=1)
-    solver: lx.AbstractLinearSolver | None = None
-    preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None = (
-        eqx.field(static=True, default=None)
-    )
-
-    def solve(
-        self,
-        residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
-        phi0: jnp.ndarray,
-    ) -> jnp.ndarray:
-        """Solve ``residual_fn(phi) = 0`` starting from ``phi0``.
-
-        Parameters
-        ----------
-        residual_fn : callable
-            Maps a cell field ``phi`` of shape ``(n_cells,)`` to the residual, same shape.
-        phi0 : jnp.ndarray
-            Initial guess, shape ``(n_cells,)``.
-
-        Returns
-        -------
-        jnp.ndarray
-            The converged field, shape ``(n_cells,)``.
-        """
-
-        @eqx.filter_jit
-        def step(phi: jnp.ndarray) -> jnp.ndarray:
-            return newton_step(
-                residual_fn, phi, solver=self.solver, preconditioner=self.preconditioner
-            )
-
-        phi = phi0
-        for _ in range(self.iterations):
-            phi = step(phi)
-        return phi

@@ -40,18 +40,35 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   convergence, not the solution or its gradient — **verified transparent** in
   `test_preconditioning.py` (solution and gradient identical with/without `M`). This is the seam
   the **outer block preconditioner** (below) attaches to.
-- **`newton.py` — BUILT.** `NewtonSolver(iterations, solver)` is an `equinox.Module` taking
-  an **injected residual closure** and linear solver. Each step forms `J` matrix-free via
-  `jax.jvp` and calls `solve_linear`; no hand-derived Jacobian. Verified (`test_newton.py`):
-  one step is exact on a linear residual, a nonlinear residual converges, and `jax.grad`
-  through the converged solve matches finite difference.
-- **Deliberate Stage-A staging (not a shortcut):** for the *linear* transient-diffusion
-  residual, one Newton step is exact, so the driver differentiates directly through that
-  single step while `lineax` implicit-diffs the linear solve — the "no unrolled Krylov"
-  half of the two-level scheme is already in place. The **IFT-over-Newton** half (a
-  `custom_vjp` skipping *many* Newton iterations) is only needed once the residual is
-  genuinely nonlinear (convection / coupled p–U); it is the documented next increment, and
-  the injected-closure interface is unchanged when it lands.
+- **`newton.py` — BUILT: `newton_step` / `newton_correction`, one correction each. There is NO
+  `NewtonSolver` class — it was deleted (binding, #102).** Each forms `J` matrix-free via `jax.jvp`
+  and calls `solve_linear`; no hand-derived Jacobian.
+  - **Why it went.** The class was `newton_step` plus a **fixed-count, unchecked loop**, which is
+    redundant at `iterations=1` (19 of its 28 call sites — a *linear* residual, where one correction
+    is exact) and **forbidden** above it (a fixed count cannot tell convergence from exhaustion, and
+    taping the unrolled steps is the gradient path the two-level implicit differentiation exists to
+    avoid). Its one production use, `laplace_field`, was `iterations=1` — not Newton at all, just an
+    exact linear solve. The turbulence scalars had already migrated off it for exactly these reasons
+    (see `turbulence/continuation.py`).
+  - **The split to hold to.** *Linear* residual → `newton_step`, exact in one call. *Nonlinear*
+    residual → `ImplicitNewtonSolver` (converges, globalizes, IFT adjoint). Do **not** reintroduce a
+    fixed-count loop over `newton_step` in library code. A *test* may write one inline when the point
+    is to show unglobalized Newton is insufficient (`test_scalar_continuation.py`) or to isolate a
+    preconditioner (`test_turbulent_channel.py`) — that is 2 lines and self-documenting, not a class.
+  - **`newton_step` is the only path that differentiates in FORWARD mode.** `ImplicitNewtonSolver` is
+    a `jax.custom_vjp`, which registers only the reverse rule, so `jacfwd`/`jvp` through it raises
+    `TypeError` — a JAX API consequence, not a mathematical one (the IFT gives the tangent just as
+    readily; a `custom_jvp` would serve both, at the cost of the separate tight `adjoint_solver` the
+    current design deliberately controls). `newton_step` is plain traced operations, so both modes
+    work. This matters: the plane-wall sensitivity gate takes `jacfwd` through the whole transient
+    march — one linear solve per input, the efficient direction for a scalar parameter against a
+    whole field. Pinned in `tests/unit/test_newton.py`.
+- **Neither function jits internally — the caller owns the jit boundary**, matching
+  `ImplicitNewtonSolver`. Wrap calls in `eqx.filter_jit`; un-jitted, every operation dispatches
+  eagerly. For a caller that re-solves in a loop, pass the assembler as an `equinox.Module`
+  **argument** to the jitted function (`reused_flow_solve`'s pattern) so its arrays are dynamic
+  leaves and the compiled solve is a cache hit; a bare captured closure is hashed by identity and
+  misses every time.
 - **`implicit.py` — BUILT (`ImplicitNewtonSolver`).** The nonlinear counterpart: Newton to
   convergence (`lax.while_loop`, data-dependent stop) with a reverse-mode **IFT adjoint** via
   `custom_vjp` — one transpose linear solve at the converged state, `dphi*/dtheta =
