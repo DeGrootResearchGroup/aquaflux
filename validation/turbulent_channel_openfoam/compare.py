@@ -53,8 +53,7 @@ from aquaflux.solve import NewtonSolver
 from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
-    inlet_k,
-    inlet_omega,
+    hybrid_initialize,
     scalar_pseudo_transient_solve,
     solve_segregated,
 )
@@ -132,8 +131,6 @@ def solve_aquaflux(nu_of, ny, growth):
     )
     geom = mesh.geometry()
     model = SSTModel()
-    k_in = float(inlet_k(jnp.array(1.0), 0.05))
-    omega_in = float(inlet_omega(jnp.array(k_in), 0.1, model))
     momentum = MomentumContinuity.build(
         mesh,
         geom,
@@ -167,9 +164,11 @@ def solve_aquaflux(nu_of, ny, growth):
     def solve_flow(mom, state):
         return NewtonSolver(iterations=15, solver=direct).solve(mom.residual, state)
 
-    warm = jnp.zeros((mesh.n_cells, 2)).at[:, 0].set(1.0)
-    flow0 = momentum.pack(warm, jnp.zeros(mesh.n_cells))
-    sweeps = 70 if ny < 150 else 110
+    # Seed from the hybrid IC. A uniform k leaves the first sweep's residual essentially unchanged
+    # for ~30 pseudo-transient steps, so the SER schedule's beta never relaxes and the scalar march
+    # burns its budget before the residual moves; the hybrid start descends from the first step.
+    flow0, k0, omega0 = hybrid_initialize(momentum, turbulence)
+    sweeps = 90 if ny < 150 else 140
     flow, k, omega = solve_segregated(
         momentum,
         turbulence,
@@ -179,11 +178,11 @@ def solve_aquaflux(nu_of, ny, growth):
         # tolerance carry both Reynolds numbers.
         scalar_pseudo_transient_solve(max_steps=200, rtol=1e-8, atol=1e-10),
         flow0,
-        jnp.full(mesh.n_cells, k_in),
-        jnp.full(mesh.n_cells, omega_in),
+        k0,
+        omega0,
         density=1.0,
         max_sweeps=sweeps,
-        relaxation=0.5,
+        relaxation=0.9,
         bulk_velocity_target=1.0,
         flow_direction=0,
         bulk_velocity_gain=0.5,
