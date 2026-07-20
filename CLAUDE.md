@@ -667,6 +667,19 @@ After **every code change**, before considering the task complete, review and ac
    - New analytical/published benchmark → validation test.
    - Bug fix → regression test.
 
+   **Run the tier your change can reach — the fast gate is not the whole suite.** The `slow` and
+   `validation` tiers run on **merge to main**, and on a PR only when it carries the `full-ci`
+   label; the always-on required check is just the fast gate (`-m "not slow and not validation"`).
+   So a change whose *only* coverage lives in those tiers can pass every required check and still
+   break on merge. Before calling a change done, ask **whether it could affect a `slow` or
+   `validation` test** — you are touching a shared solver / operator / scheme / helper those tests
+   call, deleting or renaming a symbol, or changing convergence/behaviour — and if it could, **run
+   those tiers locally** (`pytest -m validation`, `pytest -m slow`) or apply `full-ci` to the PR.
+   The trap is a migration reached only through a validation-marked test (e.g. a case whose sole
+   test is `@pytest.mark.validation`): the fast gate exercises the *mechanism* elsewhere but never
+   that call path, so grep for the changed symbol across `-m slow`/`-m validation` tests and run the
+   ones that hit it. Don't assume "unit + fast integration green" means safe to merge.
+
 4. **Documentation sync (binding — this is how the docs stop drifting).** A code change is
    **not complete** until every file that *describes* the changed code is updated in the **same
    change** — docs move with code, never "fix it later." When you rename a symbol, change a
