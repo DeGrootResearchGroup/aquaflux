@@ -10,8 +10,7 @@ wall-resolved mesh, so they cost a fraction of one nonlinear iteration:
 - :func:`potential_flow` uses it to build an irrotational velocity ``u = grad phi`` whose normal
   component matches the flow boundary conditions (inflow at inlets, no penetration at walls), i.e. the
   classic Fluent-style "hybrid" velocity initializer. It is divergence-free and respects the geometry,
-  unlike a uniform plug guess -- and, being a real discrete gradient field, it carries the tiny
-  asymmetry that lifts the coupled solve's degeneracy on a perfectly symmetric velocity.
+  unlike a uniform plug guess, so it lands a globalized solve far closer to the developed flow.
 """
 
 from __future__ import annotations
