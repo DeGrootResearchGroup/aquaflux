@@ -15,6 +15,13 @@ The relaxation and the floor are the segregated iteration's stabilisers; the flo
 nonlinear-iteration safeguard that should be inactive once the fields have converged (a converged
 turbulent field is strictly positive). Constant density (see :mod:`~aquaflux.turbulence.transport`).
 
+The parts of a sweep between the two injected solves -- the pre-solve eddy viscosity and the
+post-solve mass flux and closure -- run in two ``jit``-compiled prologues (``_sweep_eddy_viscosity``,
+``_sweep_closure``) rather than op-by-op eagerly, and the post-solve prologue assembles the flow
+fields **once** (:meth:`~aquaflux.flow.MomentumContinuity.flow_fields`) for both the velocity gradient
+the closure reads and the mass flux the scalars advect on. The k/omega boundaries are bound to the
+mesh once before the loop so those compiled prologues never re-run the dynamic-shape patch resolve.
+
 The outer loop **stops on convergence**, not a fixed sweep count: each sweep's coupled Picard
 increment -- the largest per-field relative change ``max(||dflow||/||flow||, ||dk||/||k||,
 ||domega||/||omega||)`` -- is the residual-agnostic fixed-point measure, and the loop exits once it
@@ -58,7 +65,47 @@ if TYPE_CHECKING:
     from aquaflux.flow import MomentumContinuity
 
     from .preconditioner import ScalarTransportPreconditioner
-    from .transport import SSTTurbulence
+    from .transport import SSTClosureFields, SSTTurbulence
+
+
+@eqx.filter_jit
+def _sweep_eddy_viscosity(
+    momentum: MomentumContinuity,
+    turbulence: SSTTurbulence,
+    flow: jnp.ndarray,
+    k: jnp.ndarray,
+    omega: jnp.ndarray,
+) -> jnp.ndarray:
+    """The pre-flow-solve eddy viscosity ``nu_t`` from the current flow, shape ``(n_cells,)``.
+
+    Jitted so the velocity-gradient reconstruction, the strain magnitude, and the eddy-viscosity model
+    fuse into one compiled call rather than dispatching op-by-op eagerly. The gradient is the
+    lightweight :meth:`~aquaflux.flow.MomentumContinuity.velocity_gradient` (no Rhie--Chow assembly),
+    which is all ``nu_t`` needs -- the mass flux is not yet defined before the flow solve.
+    """
+    grad_velocity = momentum.velocity_gradient(flow)
+    return turbulence.eddy_viscosity(grad_velocity, k, omega)
+
+
+@eqx.filter_jit
+def _sweep_closure(
+    momentum: MomentumContinuity,
+    turbulence: SSTTurbulence,
+    flow: jnp.ndarray,
+    k: jnp.ndarray,
+    omega: jnp.ndarray,
+) -> tuple[jnp.ndarray, SSTClosureFields]:
+    """The post-flow-solve scalar-transport inputs ``(mdot, closure)`` for the solved flow.
+
+    One :meth:`~aquaflux.flow.MomentumContinuity.flow_fields` assembly yields both the velocity
+    gradient the SST closure reads and the Rhie--Chow mass flux the k/omega equations advect on, so
+    the whole assembly (boundary fields, gradients, lagged ``a_P``, Rhie--Chow flux) runs a single
+    time per sweep instead of once for the gradient and again for the mass flux. Jitted so none of it
+    runs op-by-op eagerly.
+    """
+    fields = momentum.flow_fields(flow)
+    closure = turbulence.closure_fields(fields.grad_velocity, k, omega)
+    return fields.mdot, closure
 
 
 def _relax(old: jnp.ndarray, new: jnp.ndarray, factor: float) -> jnp.ndarray:
@@ -208,6 +255,9 @@ def solve_segregated(
         The ``(flow, k, omega)`` at the sweep that met ``rtol`` -- or at ``max_sweeps`` if it was not
         reached, in which case a warning is emitted and the fields may be under-converged.
     """
+    # Bind the k/omega boundaries to the mesh once, off the jit path, so the jitted sweep prologue's
+    # closure-gradient assembler rebuilds do not re-run the dynamic-shape patch resolve under trace.
+    turbulence = turbulence.resolve_boundaries()
     relaxation_ceiling = relaxation if relaxation_max is None else relaxation_max
     increment_0: float | None = None
     increment: float | None = None
@@ -223,7 +273,7 @@ def solve_segregated(
         )
 
         flow_prev, k_prev, omega_prev = flow, k, omega
-        nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
+        nu_t = _sweep_eddy_viscosity(momentum, turbulence, flow, k, omega)
         momentum = momentum.with_eddy_viscosity(nu_t)
         flow = solve_flow(momentum, flow)
 
@@ -237,8 +287,7 @@ def solve_segregated(
             new_force = momentum.body_force.at[flow_direction].set(new_beta)
             momentum = eqx.tree_at(lambda m: m.body_force, momentum, new_force)
 
-        closure = turbulence.closure_fields(momentum.velocity_gradient(flow), k, omega)
-        mdot = momentum.mass_flux(flow)
+        mdot, closure = _sweep_closure(momentum, turbulence, flow, k, omega)
         # Each stiff reactive scalar is globalized by pseudo-transient continuation: the shift policy
         # bundles the transport shift diagonal with the (optional) AMG for the injected solve to use.
         # The AMG is built once here and carried; the shift diagonal is rebuilt every sweep (the

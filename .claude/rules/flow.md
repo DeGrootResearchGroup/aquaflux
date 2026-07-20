@@ -24,7 +24,21 @@ Engineering Principles.
   a `FaceContext` (properties `{"viscosity": μ}` via `DiffusionFlux(coefficient="viscosity")`, the
   component gradient, the boundary velocity) and calls the shared operators' `face_flux(component,
   context)`; only the pressure term is new. Continuity is `Σ mdot_f = 0`. The whole Jacobian comes
-  from AD; solved by the existing `NewtonSolver` / `ImplicitNewtonSolver`. **Fluid properties come
+  from AD; solved by the existing `NewtonSolver` / `ImplicitNewtonSolver`.
+  - **One shared assembly per state — `flow_fields` / `residual_from_fields` (binding, #106).** The
+    boundary fields, both gradients, the lagged `a_P`, and the Rhie–Chow flux are assembled once by
+    the public `flow_fields(state) -> FlowFields`; `residual` = `residual_from_fields(flow_fields(state))`
+    and `mass_flux(state)` = `flow_fields(state).mdot`. A coupling caller that needs several of these at
+    one state (a coupled RANS residual wanting the residual **and** `mdot`, a segregated sweep wanting
+    the gradient **and** `mdot`) must call `flow_fields` **once** and read the fields — not call the
+    accessors separately, which re-assembles the whole Rhie–Chow flux per accessor (was 3× per coupled
+    residual eval; the pre-optimization HLO / AD-tape size scaled with that). **`velocity_gradient` is
+    deliberately the lightweight path** (boundary velocity + the shared `_velocity_gradient` only, **no**
+    `a_P`/`mdot`): the eddy viscosity a segregated sweep needs comes before the mass flux is even
+    defined, so dragging the Rhie–Chow assembly through it would defeat the point. Same formula as the
+    bundle (both compose `_boundary_fields` + `_velocity_gradient`), so no duplication. Pinned by
+    `test_flow_fields_accessors_agree_with_the_bundle` / `test_velocity_gradient_skips_the_rhie_chow_assembly`.
+  - **Fluid properties come
   from a `PropertyModel`** (`build(mesh, geom, properties, gradient_scheme, boundary, …)`, must supply
   `"viscosity"`+`"density"`; `.viscosity`/`.density` evaluate them per-cell) — see
   `.claude/rules/properties.md`. **`boundary` is a `BoundaryConditions({name: FlowBoundary})`**

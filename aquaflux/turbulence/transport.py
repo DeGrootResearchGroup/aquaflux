@@ -212,6 +212,23 @@ class SSTTurbulence(eqx.Module):
             explicit_production_limiter=explicit_production_limiter,
         )
 
+    def resolve_boundaries(self) -> SSTTurbulence:
+        """Return a copy whose k and omega boundaries are bound to the mesh's face patches.
+
+        The k/omega scalar residuals and the closure-gradient reconstruction rebuild a
+        :class:`~aquaflux.discretization.ResidualAssembler` each call, and that build resolves the
+        boundary patch names to face indices -- a data-dependent ``nonzero`` lookup that cannot run
+        under ``jit``. Binding the boundaries **once**, ahead of any jitted use (the coupled residual,
+        the jitted segregated sweep prologue), makes each rebuild's ``resolve`` an idempotent no-op.
+        Idempotent itself: an already-bound assembler is returned with its boundaries unchanged.
+        """
+        face_patches = self.mesh.face_patches
+        return eqx.tree_at(
+            lambda t: (t.k_boundary, t.omega_boundary),
+            self,
+            (self.k_boundary.resolve(face_patches), self.omega_boundary.resolve(face_patches)),
+        )
+
     def _volume_flux(self, mdot: jnp.ndarray) -> jnp.ndarray:
         """The volume face flux ``mdot / rho`` the kinematic transport advects on."""
         return mdot / self.density

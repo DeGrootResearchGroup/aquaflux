@@ -11,6 +11,7 @@ asserted (sweeps taken, non-convergence warning) in a fraction of a second.
 from __future__ import annotations
 
 import warnings
+from typing import NamedTuple
 
 import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
@@ -19,6 +20,14 @@ import jax.numpy as jnp
 import pytest
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.turbulence.driver import _relative_change, _sweep_relaxation, solve_segregated
+
+
+class _StubFlowFields(NamedTuple):
+    """The two fields the driver's post-solve prologue reads off ``momentum.flow_fields``."""
+
+    grad_velocity: jax.Array
+    mdot: jax.Array
+
 
 # --- the coupled increment measure -------------------------------------------------------------
 
@@ -92,12 +101,18 @@ class _StubMomentum(eqx.Module):
     def mass_flux(self, flow: jax.Array) -> jax.Array:
         return flow
 
+    def flow_fields(self, flow: jax.Array) -> _StubFlowFields:
+        return _StubFlowFields(grad_velocity=flow, mdot=flow)
+
 
 class _StubTurbulence(eqx.Module):
     """A closure that contributes no eddy viscosity and whose per-scalar hooks are inert -- the
     stand-in scalar solve supplies the field update the increment is measured from."""
 
     molecular_viscosity: jax.Array
+
+    def resolve_boundaries(self):
+        return self
 
     def eddy_viscosity(self, velocity_gradient, k, omega):
         return jnp.zeros_like(k)

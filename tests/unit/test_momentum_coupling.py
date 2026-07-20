@@ -3,7 +3,9 @@
 ``MomentumContinuity.mass_flux`` must return exactly the Rhie--Chow mass flux the continuity
 residual is built from (so a transported scalar advects on the same conservative flux), and
 ``velocity_gradient`` must return the tensor a turbulence model reads. Both are checked without a
-solve -- they are functions of the state.
+solve -- they are functions of the state. Also the shared :meth:`MomentumContinuity.flow_fields`
+seam: the accessors and the residual read off one assembly so a coupling caller re-derives the
+boundary fields, gradients, and Rhie--Chow flux once rather than per accessor.
 
 The reverse direction -- how a RANS closure's eddy viscosity enters the momentum block -- is
 ``with_eddy_viscosity`` / ``viscosity``, checked here on a fluid with ``rho != 1`` so a missing
@@ -20,6 +22,24 @@ from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, Veloci
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss
+
+
+def _count_rhie_chow_assemblies(monkeypatch):
+    """Return a mutable ``[count]`` incremented on every lagged-``a_P`` Rhie--Chow assembly.
+
+    ``momentum_matrix_diagonal`` is the expensive nonlinear diagonal only the full
+    :meth:`~aquaflux.flow.MomentumContinuity.flow_fields` assembly forms, so its call count is a
+    proxy for how many times the Rhie--Chow flux is assembled in an evaluation.
+    """
+    calls = [0]
+    original = MomentumContinuity.momentum_matrix_diagonal
+
+    def counted(self, *args, **kwargs):
+        calls[0] += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(MomentumContinuity, "momentum_matrix_diagonal", counted)
+    return calls
 
 
 def _uniform_inlet(centroid):
@@ -71,6 +91,40 @@ def test_velocity_gradient_shape_and_differentiable() -> None:
     assert not bool(jnp.any(jnp.isnan(grad)))
     g = jax.grad(lambda s: jnp.sum(asm.velocity_gradient(s) ** 2))(state)
     assert not bool(jnp.any(jnp.isnan(g)))
+
+
+def test_flow_fields_accessors_agree_with_the_bundle() -> None:
+    """mass_flux / velocity_gradient / residual read the same values a single flow_fields yields."""
+    mesh, asm = _assembler()
+    state = _arbitrary_state(mesh)
+    fields = asm.flow_fields(state)
+    assert jnp.array_equal(asm.mass_flux(state), fields.mdot)
+    assert jnp.array_equal(asm.velocity_gradient(state), fields.grad_velocity)
+    assert jnp.array_equal(asm.residual(state), asm.residual_from_fields(fields))
+
+
+def test_velocity_gradient_skips_the_rhie_chow_assembly(monkeypatch) -> None:
+    """velocity_gradient is the lightweight reconstruction: it does not build the lagged a_P / mdot.
+
+    A segregated sweep needs the eddy viscosity (from the gradient) before the mass flux is even
+    defined, so ``velocity_gradient`` must not drag the whole Rhie--Chow assembly along; ``flow_fields``
+    and ``mass_flux`` do exactly one such assembly.
+    """
+    mesh, asm = _assembler()
+    state = _arbitrary_state(mesh)
+    calls = _count_rhie_chow_assemblies(monkeypatch)
+
+    calls[0] = 0
+    asm.velocity_gradient(state)
+    assert calls[0] == 0  # gradient only -- no a_P / Rhie--Chow work
+
+    calls[0] = 0
+    asm.flow_fields(state)
+    assert calls[0] == 1
+
+    calls[0] = 0
+    asm.mass_flux(state)
+    assert calls[0] == 1
 
 
 def test_body_force_is_a_uniform_volume_source() -> None:
