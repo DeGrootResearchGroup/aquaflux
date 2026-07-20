@@ -114,8 +114,11 @@ def test_adjoint_preconditioner_is_a_drop_in() -> None:
     n = 8
 
     def viscosity_grad(preconditioner):
+        # A backstop, not a cost: the solver's while_loop exits on tolerance, so a generous cap only
+        # bounds the worst case. The gradients being compared are only meaningful at a converged
+        # root, so this solve has to reach one rather than be truncated.
         solver = ImplicitNewtonSolver(
-            max_steps=20, forward_step=DampedNewtonStep(preconditioner=preconditioner)
+            max_steps=200, forward_step=DampedNewtonStep(preconditioner=preconditioner)
         )
 
         def f(mu):
@@ -144,7 +147,7 @@ def test_inexact_newton_matches_tight_solve_with_fewer_matvecs() -> None:
 
     def converged_and_grad(forward_solver):
         solver = ImplicitNewtonSolver(
-            max_steps=30,
+            max_steps=200,
             forward_step=DampedNewtonStep(preconditioner=precond),
             solver=forward_solver,
         )
@@ -168,9 +171,16 @@ def test_inexact_newton_matches_tight_solve_with_fewer_matvecs() -> None:
     # Strictly fewer matvecs: on the Jacobian at a representative mid-solve iterate, the default
     # inexact forward GMRES converges in fewer steps (hence matvecs) than the tight one.
     assembler = _cavity(mu0, n, FirstOrderUpwind())
-    phi = ImplicitNewtonSolver(
-        max_steps=2, forward_step=DampedNewtonStep(preconditioner=precond), solver=tight
-    ).solve(_residual, assembler.initial_state(), assembler)
+    # A deliberately *partial* iterate to linearize about, not a converged root, so it drives the
+    # forward step directly rather than through a solver. ImplicitNewtonSolver cannot serve here:
+    # its implicit-function-theorem adjoint is only valid at a root, so it converges or raises and
+    # has no half-finished state to hand back. The ForwardStep is the piece underneath it, and makes
+    # no such promise.
+    step = DampedNewtonStep(preconditioner=precond).stepper()
+    phi = assembler.initial_state()
+    residual_norm_0 = jnp.linalg.norm(assembler.residual(phi))
+    for _ in range(2):
+        phi = step(assembler.residual, phi, residual_norm_0, tight)
     apply_m = precond(phi)
     residual = assembler.residual(phi)
     operator = lx.FunctionLinearOperator(
