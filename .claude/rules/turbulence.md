@@ -35,6 +35,26 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   hands the **assembled matrix** to `build_convection_hierarchy` / `build_air_hierarchy` (the coarsening
   library is operator-in, #45); its reaction+boundary diagonal still comes from its own `J·1`
   derivation, which is a genuinely different source, not a copy of the interior stencil.
+  `scalar_transport_preconditioner` returns a **`ScalarTransportPreconditioner`** strategy
+  (`ConvectionAmgPreconditioner` / `AirAmgPreconditioner`) rather than the old opaque `lambda phi: solve`.
+  These are plain frozen dataclasses, **not `equinox.Module`s** — see the binding note in
+  `.claude/rules/solve.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
+- **The scalar policy's two halves have different lifetimes (binding, #105).** `ScalarShiftPolicy` carries
+  a **shift diagonal rebuilt every sweep** (so the pseudo-time damping keeps tracking the operator as
+  ν_t grows — freezing it would under-damp the march and lean on `DivergenceGuard` escalation) and an
+  **AMG preconditioner built once and carried** (it only accelerates the Krylov iteration, and rebuilding
+  it per sweep cost ~0.9 s (k) + ~1.0 s (ω) at 4k cells *and* re-compiled the whole solve every sweep).
+  `SSTTurbulence` therefore splits `k_preconditioner`/`omega_preconditioner` (frozen, `method=`) from
+  `k_shift_policy`/`omega_shift_policy` (per sweep, `preconditioner=`); `solve_segregated` builds the
+  former on the first sweep and the latter every sweep. Measured: traces per sweep went `[5,5,5,5,5]` →
+  `[5,5,0,0,0]` with the converged field bit-identical. Pinned by
+  `test_a_carried_preconditioner_compiles_the_scalar_solve_once`.
+- **`transport.py`'s `omega_residual` returns a `WallFixedResidual`, not a closure (binding, #105).** It is
+  rebuilt every sweep and passed into the jitted scalar solve, so as a bare closure it landed on
+  `filter_jit`'s static side and identity-missed the cache every sweep. As an `equinox.Module` its arrays
+  ride on the traced side and only their *values* change. (`k_residual` already returned a bound
+  `ResidualAssembler.residual`, which equinox treats as a pytree — that one was always fine.) Note the
+  contrast with the preconditioner above: a *per-sweep* callable must be a pytree, a *frozen* one must not.
 - **`boundary.py`** — inlet/wall closures for k and ω over the generic scalar boundary machinery.
   - **The wall ω is `6ν/(β₁d²)`, NOT `60ν/(β₁d²)` (binding — the constant depends on where it is
     imposed).** `omega_wall_value` is fixed at the wall-adjacent **cell centroid** (`FixedValueCells`

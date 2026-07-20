@@ -100,10 +100,16 @@ class _StubTurbulence(eqx.Module):
     def closure_fields(self, velocity_gradient, k, omega):
         return None
 
-    def k_shift_policy(self, mdot, closure, k, method=None):
+    def k_preconditioner(self, mdot, closure, k, method="twolevel"):
         return None
 
-    def omega_shift_policy(self, mdot, closure, omega, method=None):
+    def omega_preconditioner(self, mdot, closure, omega, method="twolevel"):
+        return None
+
+    def k_shift_policy(self, mdot, closure, k, preconditioner=None):
+        return None
+
+    def omega_shift_policy(self, mdot, closure, omega, preconditioner=None):
         return None
 
     def k_residual(self, mdot, closure):
