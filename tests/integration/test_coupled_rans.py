@@ -139,7 +139,7 @@ def warm_started():
         density=RHO,
         max_sweeps=8,
         rtol=1e-10,
-        relaxation=0.5,
+        relaxation=0.9,
         scalar_preconditioner="twolevel",
     )
     return {
@@ -183,7 +183,7 @@ def test_coupled_newton_converges_and_matches_the_segregated_solution(warm_start
         density=RHO,
         max_sweeps=60,
         rtol=1e-9,
-        relaxation=0.5,
+        relaxation=0.9,
         scalar_preconditioner="twolevel",
     )
     assert float(jnp.linalg.norm(flow - flow_s) / jnp.linalg.norm(flow_s)) < 1e-4
