@@ -8,11 +8,11 @@ before each sweep. The assembler threads the same ``gradient_hook`` into the gra
 solve to do exactly that, and the owned gradients then converge to the serial ones.
 
 The solve must form no global inner product for a per-apply exchange to be exact, so this needs
-``SweptGradientSolve`` (preconditioned-Richardson sweeps); the checks here therefore use it. Three
-subprocess checks on a columnwise-skewed 3D grid:
+``SweptGradientSolve`` (preconditioned-Richardson sweeps); the checks here therefore use it, on a
+columnwise-skewed 3D grid:
 
-- **matches:** the sharded ``CorrectedGreenGauss`` + ``SweptGradientSolve`` residual and its gradient
-  match serial;
+- **matches (value, then gradient):** the sharded ``CorrectedGreenGauss`` + ``SweptGradientSolve``
+  residual matches serial, and so does its parameter gradient;
 - **control:** with the *per-sweep* exchange dropped (but the final gradient exchange kept), the
   residual diverges from serial — proving the per-sweep exchange, not just the final one, is
   load-bearing for an iterative scheme;
@@ -21,8 +21,11 @@ subprocess checks on a columnwise-skewed 3D grid:
   gradient.
 
 Each check runs in its **own** subprocess: the device count must be set before JAX starts, and a
-separate process keeps each check to a single sharded-program compilation, so peak memory stays low
-when the unit tier runs many workers in parallel.
+separate process keeps each check to a **single** sharded-program compilation — the value and gradient
+checks are split for this reason, since a swept solve unrolls its sweeps (each with a collective) and
+reverse-mode through them is the memory driver — so peak memory stays low when the unit tier runs many
+workers in parallel. The swept/serial match is bit-for-bit for any sweep count (both run the same
+count), so a small ``SWEEPS`` keeps the unrolled program and its tape small without weakening the test.
 """
 
 from __future__ import annotations
@@ -56,17 +59,15 @@ mesh = columnwise_perturbed_grid_3d(6, 6, 6, perturb=0.25, named_boundaries=True
 geom = mesh.geometry()
 properties = PropertyModel({"diffusivity": Constant(1.3)})
 boundary = BoundaryConditions(BOUNDARY)
-SWEEPS = 20  # plenty at 0.25 skew; the swept/serial comparison is exact for any count anyway
-
-
-def _swept_scheme():
-    # warn_tol off so the serial reference emits no host-side under-resolution callback.
-    return CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=SWEEPS, warn_tol=None))
+# Small: the distributed/serial comparison is exact for any count, so few sweeps keep the unrolled
+# program (and its reverse-mode tape) small. warn_tol off so the serial reference stays silent.
+SWEEPS = 6
 
 
 def assemble(m, g):
+    scheme = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=SWEEPS, warn_tol=None))
     return ResidualAssembler.build(
-        m, g, properties, (DiffusionFlux(),), boundary, gradient_scheme=_swept_scheme()
+        m, g, properties, (DiffusionFlux(),), boundary, gradient_scheme=scheme
     )
 
 
@@ -79,16 +80,22 @@ phi = jnp.asarray(np.random.default_rng(0).standard_normal(mesh.n_cells))
 weight = jnp.asarray(np.random.default_rng(1).standard_normal(mesh.n_cells))
 """
 
-_MATCHES = (
-    _SETUP
-    + r"""
 # The distributed swept solve refreshes ghost rows each sweep, so at every sweep its owned rows equal
 # the serial iterate's — bit-for-bit up to scatter/collective reordering, for the same sweep count.
+_MATCHES_VALUE = (
+    _SETUP
+    + r"""
 r_s = serial.residual(phi)
 r_d = distributed.residual(phi)
 assert jnp.all(jnp.isfinite(r_d))
 assert jnp.allclose(r_s, r_d, atol=1e-9), ("value", float(jnp.max(jnp.abs(r_s - r_d))))
+print("ok")
+"""
+)
 
+_MATCHES_GRAD = (
+    _SETUP
+    + r"""
 g_s = jax.grad(lambda p: jnp.sum(weight * serial.residual(p)))(phi)
 g_d = jax.grad(lambda p: jnp.sum(weight * distributed.residual(p)))(phi)
 assert jnp.all(jnp.isfinite(g_d))
@@ -167,9 +174,14 @@ def _run(source: str) -> None:
     assert result.stdout.strip().splitlines()[-1] == "ok"
 
 
-def test_distributed_swept_gradient_matches_serial_on_skewed_mesh() -> None:
+def test_distributed_swept_gradient_residual_matches_serial_on_skewed_mesh() -> None:
     """The per-sweep ghost exchange makes the sharded corrected-gradient residual serial-exact."""
-    _run(_MATCHES)
+    _run(_MATCHES_VALUE)
+
+
+def test_distributed_swept_gradient_of_the_residual_matches_serial() -> None:
+    """The adjoint through the per-sweep exchange matches the serial parameter gradient."""
+    _run(_MATCHES_GRAD)
 
 
 def test_per_sweep_gradient_exchange_is_load_bearing() -> None:
