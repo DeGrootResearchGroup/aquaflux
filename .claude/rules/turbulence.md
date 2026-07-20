@@ -139,6 +139,18 @@ fallback** (below), promoted only if a stiff high-Re case shows the direct coupl
   `jax.grad` through the converged coupled turbulent solve is **iteration-count-independent** (the
   coupling analogue of Gate C; see the root `CLAUDE.md` Testing Architecture). An existence check
   ("stays stable, fields positive, μ_t active") does not establish the adjoint.
+- **Never assert the positivity floors back (binding — they are tautologies).** `solve_segregated`
+  clamps every sweep with `jnp.maximum(k, k_floor)` / `jnp.maximum(ω, ω_floor)`, so `min(k) >= 0`
+  and `min(ω) > 0` hold for a *diverged* field exactly as well as a converged one. Likewise
+  `max(μ_t)/ν > 1` is reached within a single sweep. A test built from these asserts only that the
+  process did not crash. `test_high_reynolds_turbulent_channel_solves` was exactly this shape and
+  was deleted rather than tuned: it cost ~45 minutes and its four assertions were all near-free,
+  while its docstring claimed an isolation (unpreconditioned scalar solves) that the code
+  contradicted. **A segregated-loop test must assert convergence** — that the Picard increment
+  actually reached `rtol` (the driver only `warnings.warn`s otherwise, and returns the
+  under-converged fields), or that the result matches an independently converged reference. The
+  model is `test_coupled_rans.py`, which drives the loop to `rtol=1e-9` and asserts it reaches the
+  coupled solve's fixed point to 1e-4.
 
 ## Post-change
 Keep this file's Status and Binding decisions true as the coupling globalization (issue #69) lands —
