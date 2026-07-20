@@ -30,6 +30,7 @@ import jax.numpy as jnp
 
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import AdvectionFlux, DiffusionFlux, FaceContext, FixedValueCells
+from aquaflux.properties import PropertyModel
 from aquaflux.schemes.interpolation import (
     interpolate_to_face,
     interpolation_factor,
@@ -42,7 +43,6 @@ from .state import BlockStateLayout
 if TYPE_CHECKING:
     from aquaflux.discretization import AdvectionScheme
     from aquaflux.mesh import Mesh, MeshGeometry
-    from aquaflux.properties import PropertyModel
     from aquaflux.schemes import GradientScheme
 
 
@@ -75,8 +75,14 @@ class MomentumContinuity(eqx.Module):
     geometry : MeshGeometry
         Face and cell metrics (areas, owner-outward normals, centroids, volumes).
     properties : PropertyModel
-        The fluid properties, supplying per-cell ``"viscosity"`` (the momentum diffusion
-        coefficient) and ``"density"`` (:attr:`viscosity` / :attr:`density` evaluate them).
+        The fluid's **material** properties, supplying its per-cell molecular ``"viscosity"`` and
+        ``"density"``. These describe the fluid alone and are never overwritten by a flow state; a
+        turbulence closure's contribution rides separately in :attr:`eddy_viscosity`, and
+        :attr:`viscosity` combines the two.
+    eddy_viscosity : jnp.ndarray or None
+        Per-cell **kinematic** eddy viscosity ``nu_t`` from a RANS closure, shape ``(n_cells,)``, or
+        ``None`` for laminar flow. Set with :meth:`with_eddy_viscosity`. A differentiable leaf, so a
+        coupled residual that computes ``nu_t`` from ``(k, omega)`` differentiates through it.
     gradient_scheme : GradientScheme
         Reconstruction for the velocity and pressure gradients.
     advection_scheme : AdvectionScheme or None
@@ -104,6 +110,7 @@ class MomentumContinuity(eqx.Module):
     body_force: jnp.ndarray
     pressure_pin: int | None = eqx.field(static=True)
     pressure_pin_value: float
+    eddy_viscosity: jnp.ndarray | None = None
 
     @classmethod
     def build(
@@ -181,12 +188,48 @@ class MomentumContinuity(eqx.Module):
         """A zero flat state vector, shape ``((dim + 1) n_cells,)``."""
         return self._layout.zeros()
 
+    def with_eddy_viscosity(self, eddy_viscosity: jnp.ndarray) -> MomentumContinuity:
+        """Return a copy carrying the turbulence closure's eddy viscosity ``nu_t``.
+
+        The one seam a RANS closure enters the momentum block through. The closure supplies only its
+        own quantity, the **kinematic** eddy viscosity; combining it with the fluid's molecular
+        viscosity into the momentum diffusion coefficient ``mu_eff = mu + rho nu_t`` is done once, by
+        :attr:`viscosity`, so no caller restates the closure relation.
+
+        ``nu_t`` replaces a dedicated leaf rather than overwriting the material properties, which
+        means the molecular viscosity in :attr:`properties` stays intact and authoritative (so this
+        is idempotent — applying it twice does not accumulate). A segregated outer loop applies it
+        once per sweep with the closure frozen; the coupled residual applies it live, so
+        ``dR_momentum / d(k, omega)`` flows through ``nu_t`` under AD.
+
+        Parameters
+        ----------
+        eddy_viscosity : jnp.ndarray
+            Per-cell **kinematic** eddy viscosity ``nu_t``, shape ``(n_cells,)``.
+
+        Returns
+        -------
+        MomentumContinuity
+            A new assembler carrying ``nu_t``; ``self`` is unchanged.
+        """
+        return eqx.tree_at(
+            lambda m: m.eddy_viscosity, self, eddy_viscosity, is_leaf=lambda x: x is None
+        )
+
     # --- properties -----------------------------------------------------------
 
     @property
     def viscosity(self) -> jnp.ndarray:
-        """Per-cell dynamic viscosity — the momentum diffusion coefficient, shape ``(n_cells,)``."""
-        return self.properties.evaluate(self.mesh.cell_zones)["viscosity"]
+        """Per-cell dynamic viscosity — the momentum diffusion coefficient, shape ``(n_cells,)``.
+
+        The molecular viscosity from :attr:`properties`, plus the turbulent contribution
+        ``rho nu_t`` when a closure has supplied one via :meth:`with_eddy_viscosity`. This is the
+        single place the effective viscosity ``mu_eff = mu + rho nu_t`` is formed.
+        """
+        molecular = self.properties.evaluate(self.mesh.cell_zones)["viscosity"]
+        if self.eddy_viscosity is None:
+            return molecular
+        return molecular + self.density * self.eddy_viscosity
 
     @property
     def density(self) -> jnp.ndarray:

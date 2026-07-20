@@ -91,7 +91,6 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
         flow0,
         k0,
         omega0,
-        density=RHO,
         max_sweeps=sweeps,
         relaxation=0.9,
         bulk_velocity_target=U_B,

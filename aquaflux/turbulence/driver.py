@@ -5,7 +5,8 @@ outer sweep freezes the eddy viscosity for the flow solve, then freezes the flow
 solve. A sweep is
 
 1. eddy viscosity ``nu_t`` from the current velocity gradient and ``(k, omega)``;
-2. the momentum viscosity set to the effective ``mu_eff = rho (nu + nu_t)`` and the flow solved;
+2. the momentum block given that ``nu_t`` (it forms the effective ``mu_eff = mu + rho nu_t`` from
+   its own material properties) and the flow solved;
 3. the closure fields recomputed from the new flow, and the k then omega equations solved on the
    flow's Rhie--Chow mass flux;
 4. ``k`` and ``omega`` under-relaxed towards the new values and floored to keep them positive.
@@ -40,24 +41,12 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax.numpy as jnp
 
-from aquaflux.properties import FieldProperty, PropertyModel
-
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from aquaflux.flow import MomentumContinuity
 
     from .transport import SSTTurbulence
-
-
-def _with_viscosity(
-    momentum: MomentumContinuity, effective_viscosity: jnp.ndarray
-) -> MomentumContinuity:
-    """Return ``momentum`` with its ``viscosity`` property replaced by a per-cell field."""
-    properties = PropertyModel(
-        {**momentum.properties.properties, "viscosity": FieldProperty(effective_viscosity)}
-    )
-    return eqx.tree_at(lambda m: m.properties, momentum, properties)
 
 
 def _relax(old: jnp.ndarray, new: jnp.ndarray, factor: float) -> jnp.ndarray:
@@ -123,7 +112,6 @@ def solve_segregated(
     k: jnp.ndarray,
     omega: jnp.ndarray,
     *,
-    density: float,
     max_sweeps: int,
     rtol: float = 1e-6,
     relaxation: float = 0.7,
@@ -141,8 +129,9 @@ def solve_segregated(
     Parameters
     ----------
     momentum : MomentumContinuity
-        The flow assembler; its viscosity property is replaced with the effective viscosity each
-        sweep (its molecular value is ignored -- the molecular viscosity comes from ``turbulence``).
+        The flow assembler, carrying the fluid's own molecular viscosity and density. Each sweep it
+        is handed the current eddy viscosity and forms the effective viscosity itself, so the
+        molecular value it was built with is the one that is used.
     turbulence : SSTTurbulence
         The k-omega SST closure and equation assembler.
     solve_flow : callable
@@ -158,8 +147,6 @@ def solve_segregated(
         The initial flat flow state ``[vel..., pressure]``, shape ``((dim + 1) n_cells,)``.
     k, omega : jnp.ndarray
         The initial turbulence fields, shape ``(n_cells,)`` (e.g. the inlet values, uniform).
-    density : float
-        The (constant) fluid density, forming ``mu_eff = rho (nu + nu_t)``.
     max_sweeps : int
         Upper bound on outer Picard sweeps. The loop normally stops earlier, when the coupled
         increment drops below ``rtol``; hitting this cap without converging emits a warning.
@@ -208,7 +195,6 @@ def solve_segregated(
         The ``(flow, k, omega)`` at the sweep that met ``rtol`` -- or at ``max_sweeps`` if it was not
         reached, in which case a warning is emitted and the fields may be under-converged.
     """
-    molecular = turbulence.molecular_viscosity
     relaxation_ceiling = relaxation if relaxation_max is None else relaxation_max
     increment_0: float | None = None
     increment: float | None = None
@@ -222,7 +208,7 @@ def solve_segregated(
 
         flow_prev, k_prev, omega_prev = flow, k, omega
         nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
-        momentum = _with_viscosity(momentum, density * (molecular + nu_t))
+        momentum = momentum.with_eddy_viscosity(nu_t)
         flow = solve_flow(momentum, flow)
 
         if bulk_velocity_target is not None:

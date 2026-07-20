@@ -125,7 +125,6 @@ def solve_case(Re_b, ny, growth, beta0, sweeps):
         flow0,
         k0,
         omega0,
-        density=RHO,
         max_sweeps=sweeps,
         relaxation=0.9,
         bulk_velocity_target=U_B,  # the mass-flow controller drives the body force to hit U_b

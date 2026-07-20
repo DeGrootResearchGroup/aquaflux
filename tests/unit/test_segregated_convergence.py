@@ -76,10 +76,15 @@ def test_sweep_relaxation_exponent_sharpens_the_ramp() -> None:
 
 
 class _StubMomentum(eqx.Module):
-    """Just enough of a flow assembler for the driver: a swappable ``properties`` leaf and the two
-    field queries the loop makes (their return values are ignored by the stub turbulence)."""
+    """Just enough of a flow assembler for the driver: the material properties, the eddy-viscosity
+    leaf the loop sets each sweep, and the two field queries it makes (their return values are
+    ignored by the stub turbulence)."""
 
     properties: PropertyModel
+    eddy_viscosity: jax.Array | None = None
+
+    def with_eddy_viscosity(self, eddy_viscosity: jax.Array) -> _StubMomentum:
+        return _StubMomentum(self.properties, eddy_viscosity)
 
     def velocity_gradient(self, flow: jax.Array) -> jax.Array:
         return flow
@@ -138,7 +143,6 @@ def _drive(*, max_sweeps, rtol, contraction, relaxation=1.0, relaxation_max=None
         jnp.zeros(n),
         jnp.full(n, 0.1),
         jnp.full(n, 0.1),
-        density=1.0,
         max_sweeps=max_sweeps,
         rtol=rtol,
         relaxation=relaxation,

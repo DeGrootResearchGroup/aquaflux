@@ -73,7 +73,7 @@ def _cavity(n=6):
         k_boundary=BoundaryConditions({w: Dirichlet(0.0) for w in WALLS}),
         omega_boundary=BoundaryConditions({w: ZeroGradient() for w in WALLS}),
     )
-    return mesh, CoupledRANS.build(momentum, turbulence, RHO)
+    return mesh, CoupledRANS.build(momentum, turbulence)
 
 
 def _healthy_state(mesh, coupled, seed=0):

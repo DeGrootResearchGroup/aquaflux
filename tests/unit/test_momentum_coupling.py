@@ -1,9 +1,13 @@
-"""Unit tests for the flow coupling accessors used by scalar transport.
+"""Unit tests for the flow coupling accessors used by scalar transport and turbulence.
 
 ``MomentumContinuity.mass_flux`` must return exactly the Rhie--Chow mass flux the continuity
 residual is built from (so a transported scalar advects on the same conservative flux), and
 ``velocity_gradient`` must return the tensor a turbulence model reads. Both are checked without a
 solve -- they are functions of the state.
+
+The reverse direction -- how a RANS closure's eddy viscosity enters the momentum block -- is
+``with_eddy_viscosity`` / ``viscosity``, checked here on a fluid with ``rho != 1`` so a missing
+density factor in ``mu_eff = mu + rho nu_t`` cannot pass.
 """
 
 from __future__ import annotations
@@ -105,3 +109,59 @@ def test_body_force_is_a_uniform_volume_source() -> None:
 
     grad = jax.grad(summed_streamwise_residual)(beta)
     assert jnp.isclose(grad, -jnp.sum(volume))
+
+
+# --- the turbulence coupling seam: nu_t -> the momentum diffusion coefficient -------------------
+
+RHO_T, MU_T = 2.0, 0.6  # rho != 1, so a dropped density factor cannot pass
+
+
+def _turbulent_assembler():
+    """A closed box with ``rho != 1`` and a known molecular ``mu``."""
+    mesh = structured_grid_2d(4, 3, lx=3.0, ly=1.0, named_boundaries=True)
+    asm = MomentumContinuity.build(
+        mesh,
+        mesh.geometry(),
+        PropertyModel({"viscosity": Constant(MU_T), "density": Constant(RHO_T)}),
+        CorrectedGreenGauss(),
+        BoundaryConditions({n: NoSlipWall() for n in ("left", "right", "bottom", "top")}),
+    )
+    return mesh, asm
+
+
+def test_without_a_closure_the_viscosity_is_the_molecular_value() -> None:
+    """No eddy viscosity supplied -- the flow is laminar and sees only the fluid's own ``mu``."""
+    _, asm = _turbulent_assembler()
+    assert asm.eddy_viscosity is None
+    assert jnp.allclose(asm.viscosity, MU_T)
+
+
+def test_eddy_viscosity_forms_the_effective_diffusion_coefficient() -> None:
+    """``viscosity`` is ``mu + rho nu_t`` -- the closure supplies kinematic ``nu_t``, not ``mu_t``."""
+    mesh, asm = _turbulent_assembler()
+    nu_t = jnp.linspace(0.0, 5.0, mesh.n_cells)
+    assert jnp.allclose(asm.with_eddy_viscosity(nu_t).viscosity, MU_T + RHO_T * nu_t)
+
+
+def test_eddy_viscosity_is_idempotent_and_keeps_the_molecular_value() -> None:
+    """Re-applying a closure must not accumulate: the molecular viscosity stays the material one.
+
+    The eddy contribution rides on its own leaf rather than overwriting the material properties, so
+    ``properties`` still describes the fluid after a swap and a second swap replaces rather than adds.
+    """
+    mesh, asm = _turbulent_assembler()
+    nu_t = jnp.full(mesh.n_cells, 4.0)
+    once = asm.with_eddy_viscosity(nu_t)
+    twice = once.with_eddy_viscosity(nu_t)
+    assert jnp.allclose(twice.viscosity, once.viscosity)
+    assert jnp.allclose(once.properties.evaluate(mesh.cell_zones)["viscosity"], MU_T)
+    assert jnp.allclose(asm.viscosity, MU_T)  # the original assembler is unchanged
+
+
+def test_eddy_viscosity_is_a_differentiable_leaf() -> None:
+    """A coupled residual computes ``nu_t`` from ``(k, omega)``, so gradients must flow through it."""
+    mesh, asm = _turbulent_assembler()
+    grad = jax.grad(lambda nu_t: jnp.sum(asm.with_eddy_viscosity(nu_t).viscosity))(
+        jnp.full(mesh.n_cells, 1.0)
+    )
+    assert jnp.allclose(grad, RHO_T)  # d(mu + rho nu_t)/d(nu_t) = rho

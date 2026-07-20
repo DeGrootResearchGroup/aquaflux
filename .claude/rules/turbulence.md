@@ -47,7 +47,11 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     be swapped silently again.
 - **`driver.py` — `solve_segregated`.** The outer Picard loop: μ_t → flow solve → k solve → ω
   solve, with under-relaxation and positivity floors as the stabilizers, and injected
-  `solve_flow` / `solve_scalar` so the driver is pure orchestration. The loop **stops on the coupled
+  `solve_flow` / `solve_scalar` so the driver is pure orchestration. The per-sweep coupling is
+  `momentum.with_eddy_viscosity(ν_t)` — the driver hands over the closure's **kinematic** `ν_t` and
+  the flow assembler forms `μ_eff = μ + ρν_t` from its own material properties, so the driver never
+  restates the closure relation and takes **no `density=` argument** (see `.claude/rules/flow.md`).
+  An injected momentum stand-in must therefore provide `with_eddy_viscosity`. The loop **stops on the coupled
   Picard increment** (`_relative_change` — the largest per-field relative L2 change over a sweep <
   `rtol`), with `max_sweeps` only a backstop; the outer under-relaxation is the **SER ramp**
   `_sweep_relaxation` (opens from the `relaxation` floor toward `relaxation_max` as that increment
