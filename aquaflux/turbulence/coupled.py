@@ -144,16 +144,7 @@ class CoupledRANS(eqx.Module):
         :meth:`~aquaflux.flow.MomentumContinuity.build`) makes the per-evaluation rebuild's ``resolve``
         an idempotent no-op, so the whole coupled residual is jit- and adjoint-safe.
         """
-        face_patches = momentum.mesh.face_patches
-        turbulence = eqx.tree_at(
-            lambda t: (t.k_boundary, t.omega_boundary),
-            turbulence,
-            (
-                turbulence.k_boundary.resolve(face_patches),
-                turbulence.omega_boundary.resolve(face_patches),
-            ),
-        )
-        return cls(momentum, turbulence)
+        return cls(momentum, turbulence.resolve_boundaries())
 
     @property
     def layout(self) -> CoupledRANSLayout:
@@ -174,16 +165,18 @@ class CoupledRANS(eqx.Module):
         """
         flow, k, omega = self.layout.unpack(state)
 
+        # The closure carries nu_t and the mean strain, so build it first and take nu_t from it --
+        # eddy_viscosity would otherwise recompute the same strain and nu_t the closure already forms.
         grad_velocity = self.momentum.velocity_gradient(flow)
-        nu_t = self.turbulence.eddy_viscosity(grad_velocity, k, omega)
-        momentum = self.momentum.with_eddy_viscosity(nu_t)
-
-        flow_residual = momentum.residual(flow)
-
-        mdot = momentum.mass_flux(flow)
         closure = self.turbulence.closure_fields(grad_velocity, k, omega)
-        k_residual = self.turbulence.k_residual(mdot, closure)(k)
-        omega_residual = self.turbulence.omega_residual(mdot, closure)(omega)
+        momentum = self.momentum.with_eddy_viscosity(closure.nu_t)
+
+        # One Rhie--Chow assembly at the re-viscosified state feeds both the flow residual and the
+        # mass flux the scalars advect on.
+        fields = momentum.flow_fields(flow)
+        flow_residual = momentum.residual_from_fields(fields)
+        k_residual = self.turbulence.k_residual(fields.mdot, closure)(k)
+        omega_residual = self.turbulence.omega_residual(fields.mdot, closure)(omega)
 
         return self.layout.pack(flow_residual, k_residual, omega_residual)
 
@@ -324,12 +317,11 @@ def coupled_continuation(
     """
     flow_ref, k_ref, omega_ref = coupled.layout.unpack(reference_state)
     grad_velocity = coupled.momentum.velocity_gradient(flow_ref)
-    nu_t = coupled.turbulence.eddy_viscosity(grad_velocity, k_ref, omega_ref)
-    momentum = coupled.momentum.with_eddy_viscosity(nu_t)
+    closure = coupled.turbulence.closure_fields(grad_velocity, k_ref, omega_ref)
+    momentum = coupled.momentum.with_eddy_viscosity(closure.nu_t)
     block = BlockPreconditioner.build(momentum, **preconditioner_kwargs)
 
     mdot = momentum.mass_flux(flow_ref)
-    closure = coupled.turbulence.closure_fields(grad_velocity, k_ref, omega_ref)
     k_amg = omega_amg = None
     if method is not None:
         k_amg = coupled.turbulence.k_preconditioner(mdot, closure, k_ref, method=method)

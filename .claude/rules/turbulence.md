@@ -76,6 +76,17 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   `rtol`), with `max_sweeps` only a backstop; the outer under-relaxation is the **SER ramp**
   `_sweep_relaxation` (opens from the `relaxation` floor toward `relaxation_max` as that increment
   falls, constant when `relaxation_max is None`). Hitting `max_sweeps` without converging warns.
+  - **The sweep body between the injected solves is jitted and assembles the flow fields once
+    (binding, #106).** The pre-solve μ_t and the post-solve `(mdot, closure)` run in two module-level
+    `eqx.filter_jit` prologues (`_sweep_eddy_viscosity`, `_sweep_closure`) instead of op-by-op eagerly
+    (the eager path dispatched `velocity_gradient` / `mass_flux` / `closure_fields` one op at a time —
+    ~130 ms/sweep of avoidable overhead at 1600 cells). `_sweep_closure` calls
+    `momentum.flow_fields(flow)` **once** for both the velocity gradient the closure reads and the
+    Rhie–Chow `mdot` the scalars advect on (the pre-solve μ_t uses the lightweight `velocity_gradient`,
+    which is all it needs before `mdot` exists). `solve_segregated` binds the k/ω boundaries once via
+    `turbulence.resolve_boundaries()` before the loop, so those compiled prologues never re-run the
+    dynamic-shape patch resolve inside `closure_fields`'s gradient assembler. Bit-identical to the old
+    eager path; pinned by `test_segregated_prologues_match_the_eager_assembly`.
 - **`coupled.py` — `CoupledRANS`, `solve_coupled` (Option 2, the target engine).** The monolithic
   residual `R(u, p, k, ω)` over the flat `[flow…, k, ω]` state (`CoupledRANSLayout`, whose `unpack`
   yields the momentum block's own `[u,p]` sub-vector so `MomentumContinuity` runs on it unchanged),
@@ -86,9 +97,14 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   hierarchies + numpy-built scalar shift diagonals **frozen at a reference state** off-jit à la
   `reused_flow_solve`, the velocity `a_P` live). Handed to `ImplicitNewtonSolver`, it gives the
   **exact coupled adjoint** (§5) — a single transpose solve on the unfrozen `R_coupled`. The ω wall
-  rows are `FixedValueCells`. `CoupledRANS.build` pre-resolves the k/ω boundaries so the per-eval
-  assembler rebuild's `resolve` is an idempotent no-op (else a dynamic-shape `nonzero` on traced mesh
-  labels breaks the jit). **Direct k/ω variables** (log-variables held in reserve, below); positivity
+  rows are `FixedValueCells`. `CoupledRANS.build` pre-resolves the k/ω boundaries (via
+  `turbulence.resolve_boundaries()`, the shared idempotent bind the segregated driver also uses) so the
+  per-eval assembler rebuild's `resolve` is an idempotent no-op (else a dynamic-shape `nonzero` on
+  traced mesh labels breaks the jit). **`CoupledRANS.residual` assembles the Rhie–Chow flow fields once
+  (#106):** it builds the `closure` first and takes `nu_t` from it (rather than a separate
+  `eddy_viscosity` recomputing the same strain), then one `momentum.flow_fields(flow)` feeds both
+  `residual_from_fields` and the `mdot` the scalars advect on — was 3× `_flow_fields` per eval, ~1.85×
+  the trace/compile and AD-tape size. **Direct k/ω variables** (log-variables held in reserve, below); positivity
   under a full Newton step is carried by the pseudo-transient shift + divergence guard, no in-residual
   floor. FD-verified: coupled ‖R‖→machine-zero, agrees with the segregated fixed point, adjoint
   matches finite differences.
