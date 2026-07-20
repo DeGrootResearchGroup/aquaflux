@@ -13,12 +13,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import scipy.sparse as sp
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.solve.frozen_operator import convection_diffusion_operator, decouple_dof
 from aquaflux.solve.multigrid import (
     _chebyshev_smooth,
     _jacobi_smooth,
+    _lair_restriction,
+    _one_point_interpolation,
+    _rs_split,
     _SparseLevel,
+    _strength_classical,
     air_multigrid_solve,
     build_air_hierarchy,
     build_convection_hierarchy,
@@ -374,6 +379,149 @@ def test_air_multigrid_is_linear_and_transposable() -> None:
     transpose = jax.linear_transpose(solve, r1)
     u = jnp.asarray(rng.standard_normal(n))
     assert jnp.allclose(jnp.dot(u, solve(r1)), jnp.dot(transpose(u)[0], r1), rtol=1e-9)
+
+
+# --- lAIR setup internals (strength graph, C/F split, interpolation, restriction) --------
+#
+# The setup runs once off the jit path in scipy/numpy, so it is exercised here directly on small
+# explicit matrices — including the degenerate shapes a real hierarchy only hits occasionally (a row
+# with nothing strong to depend on, a split that cannot coarsen, an F-point with no C-neighbour, an
+# empty or singular local solve), which a mesh-driven end-to-end test cannot reach on demand.
+
+
+def _upwind_chain(n, *, diffusion=1.0, flux=4.0):
+    """A nonsymmetric first-order-upwind convection-diffusion chain on ``n`` cells, as a CSR matrix.
+
+    Row ``i`` couples strongly to its upwind neighbour ``i-1`` (weight ``diffusion + flux``) and
+    weakly to the downwind ``i+1`` (weight ``diffusion``), over a diagonally dominant positive
+    diagonal — the flow-aligned M-matrix shape the reduction setup targets, small enough to compare
+    against dense linear algebra.
+    """
+    a = np.zeros((n, n))
+    for i in range(n):
+        a[i, i] = 2.0 * diffusion + flux
+        if i > 0:
+            a[i, i - 1] = -(diffusion + flux)
+        if i < n - 1:
+            a[i, i + 1] = -diffusion
+    return sp.csr_matrix(a)
+
+
+def test_strength_graph_marks_the_flow_aligned_couplings() -> None:
+    """The classical strength graph keeps a row's couplings within ``theta`` of its largest one — for
+    an upwind operator, the upwind (flow-aligned) neighbour, not the much weaker downwind one."""
+    n = 5
+    strength = np.asarray(_strength_classical(_upwind_chain(n), 0.25).toarray())
+    assert np.all(np.diag(strength) == 0.0)  # a point never depends on itself
+    for i in range(1, n):
+        assert strength[i, i - 1] == 1.0  # upwind coupling (weight 5) is the row maximum
+    for i in range(1, n - 1):
+        assert strength[i, i + 1] == 0.0  # downwind (weight 1) is below 0.25 * 5
+    # Row 0 has no upwind neighbour, so its lone downwind coupling *is* its maximum and is strong.
+    assert strength[0, 1] == 1.0
+
+
+def test_strength_graph_skips_rows_with_no_usable_off_diagonal() -> None:
+    """Two rows carry no strength at all: one with no off-diagonal entry, and one whose stored
+    off-diagonals are exactly zero. Explicit stored zeros are not hypothetical — the Galerkin ``R A P``
+    product that builds each coarser level can produce them."""
+    a = sp.csr_matrix(
+        ([1.0, 1.0, 0.0, 1.0], ([0, 1, 1, 2], [0, 1, 2, 2])), shape=(3, 3)
+    )  # row 0: diagonal only; row 1: a stored *zero* off-diagonal
+    assert a.nnz == 4  # the explicit zero survived assembly
+    assert _strength_classical(a, 0.25).nnz == 0
+
+
+def test_rs_split_leaves_every_fine_point_strongly_dependent_on_a_coarse_point() -> None:
+    """The splitting decides every point and produces a real coarsening whose C-points cover the
+    strong connections: each F-point depends strongly on at least one C-point, which is what the
+    one-point interpolation and the local restriction solves both rely on."""
+    n = 12
+    strength = _strength_classical(_upwind_chain(n), 0.25)
+    split = _rs_split(strength)
+    assert set(np.unique(split)) <= {0, 1}  # nothing left undecided
+    assert 0 in split and 1 in split  # a real coarsening, neither all-C nor all-F
+    s = np.asarray(strength.toarray())
+    for i in np.where(split == 0)[0]:
+        assert np.any(s[i] * (split == 1))
+
+
+def test_air_build_stops_when_the_split_cannot_coarsen() -> None:
+    """An operator with no off-diagonal couplings has an empty strength graph, so the splitting makes
+    every point coarse. Rather than recurse on a hierarchy that would never shrink, the build stops
+    and solves that level directly."""
+    n = 30  # above max_coarse, so the build would otherwise try to coarsen
+    diagonal = np.linspace(1.0, 2.0, n)
+    hierarchy = build_air_hierarchy(sp.csr_matrix(np.diag(diagonal)))
+    assert len(hierarchy.levels) == 1
+    level = hierarchy.levels[0]
+    assert level.r_row is None and level.p_row is None  # coarsest: a direct solve, no transfers
+    b = np.random.default_rng(0).standard_normal(n)
+    x = air_multigrid_solve(hierarchy, jnp.asarray(b), cycles=1)
+    assert np.allclose(np.asarray(x), b / diagonal)
+
+
+def test_one_point_interpolation_leaves_a_fine_point_without_a_coarse_neighbour_empty() -> None:
+    """Each F-point takes its strongest C-neighbour and each C-point is injected; an F-point with no
+    C-neighbour at all interpolates nothing, giving a zero row rather than an invalid entry."""
+    n = 5
+    split = np.array([1, 0, 0, 0, 1])  # cell 2 sits between two F-points -> no C-neighbour
+    p = np.asarray(_one_point_interpolation(_upwind_chain(n), split).toarray())
+    assert p.shape == (n, 2)
+    assert np.array_equal(p[0], [1.0, 0.0])  # C-point injection
+    assert np.array_equal(p[4], [0.0, 1.0])
+    assert np.array_equal(p[1], [1.0, 0.0])  # F-point 1 -> its only C-neighbour, cell 0
+    assert np.array_equal(p[3], [0.0, 1.0])  # F-point 3 -> cell 4
+    assert np.array_equal(p[2], [0.0, 0.0])  # no C-neighbour -> zero row
+
+
+def test_lair_restriction_handles_an_empty_and_a_singular_local_solve() -> None:
+    """Two degenerate local solves, on a matrix built to force both.
+
+    Coarse point 0's F-neighbourhood ``{1, 2}`` gives an exactly singular ``A_ff``, so the local solve
+    falls back to the minimum-norm least-squares solution instead of failing; coarse point 3 has no
+    F-neighbour at all, so its restriction row is the identity entry alone.
+    """
+    a = sp.csr_matrix(
+        np.array(
+            [
+                [4.0, 1.0, 1.0, 0.0],
+                [1.0, 1.0, 1.0, 0.0],  # rows 1 and 2 agree over columns {1, 2}:
+                [1.0, 1.0, 1.0, 0.0],  # A_ff = [[1, 1], [1, 1]] is exactly singular
+                [-1.0, 0.0, 0.0, 4.0],  # cell 3's only off-diagonal reaches a C-point
+            ]
+        )
+    )
+    split = np.array([1, 0, 0, 1])
+    r = np.asarray(_lair_restriction(a, split, degree=1).toarray())
+    assert r.shape == (2, 4)
+    assert np.all(np.isfinite(r))
+    # Minimum-norm least-squares solution of [[1, 1], [1, 1]] z = [-1, -1].
+    assert np.allclose(r[0], [1.0, -0.5, -0.5, 0.0])
+    assert np.allclose(r[1], [0.0, 0.0, 0.0, 1.0])  # empty F-neighbourhood -> identity entry only
+
+
+def test_lair_restriction_reproduces_the_exact_schur_complement() -> None:
+    """With an F-neighbourhood wide enough to reach every F-point it couples to, the local
+    approximate-ideal solve *is* the ideal restriction ``R = [-A_cf A_ff⁻¹, I]``: it annihilates the
+    F-columns of ``R A``, so the Galerkin coarse operator ``R A P`` is exactly the Schur complement
+    ``A_cc - A_cf A_ff⁻¹ A_fc`` — the coarse action of the fine operator, reproduced exactly."""
+    n = 9
+    a = _upwind_chain(n)
+    split = _rs_split(_strength_classical(a, 0.25))
+    coarse, fine = np.where(split == 1)[0], np.where(split == 0)[0]
+    assert len(fine) > 0 and len(coarse) > 0
+    p = _one_point_interpolation(a, split)
+    r = _lair_restriction(a, split, degree=n)
+    assert p.shape == (n, len(coarse))
+    assert r.shape == (len(coarse), n)
+
+    dense = a.toarray()
+    assert np.allclose(np.asarray((r @ a).toarray())[:, fine], 0.0, atol=1e-12)
+    schur = dense[np.ix_(coarse, coarse)] - dense[np.ix_(coarse, fine)] @ np.linalg.solve(
+        dense[np.ix_(fine, fine)], dense[np.ix_(fine, coarse)]
+    )
+    assert np.allclose(np.asarray((r @ a @ p).toarray()), schur, atol=1e-10)
 
 
 # --- degenerate-mesh guards (fail loudly at build, not a silent inf in the frozen preconditioner) ---
