@@ -28,7 +28,7 @@ from aquaflux.flow import (
     reused_flow_solve,
 )
 from aquaflux.mesh import graded_nodes, structured_grid_2d
-from aquaflux.properties import Constant, FieldProperty, PropertyModel
+from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.turbulence import (
     SSTModel,
@@ -52,11 +52,6 @@ RHO, U_IN, H, L = 1.0, 1.0, 1.0, 4.0
 NU = 4e-4  # Re = U H / nu = 2500
 INTENSITY, LENGTH_SCALE = 0.05, 0.07 * H
 PRECONDITIONER = {"schur_scaling": "msimpler", "velocity": "convection"}
-
-
-def _with_viscosity(momentum, mu):
-    props = PropertyModel({**momentum.properties.properties, "viscosity": FieldProperty(mu)})
-    return eqx.tree_at(lambda m: m.properties, momentum, props)
 
 
 def _channel(nx=28, ny=20, growth=1.2):
@@ -128,10 +123,12 @@ def case():
     """
     mesh, momentum, turbulence, _, _ = _channel()
     n = mesh.n_cells
-    coupled = CoupledRANS.build(momentum, turbulence, RHO)
-    reference = jnp.full(n, RHO * 21 * NU)
+    coupled = CoupledRANS.build(momentum, turbulence)
+    # Freeze the preconditioner at a representative turbulent viscosity: nu_t = 20 nu, so the
+    # effective mu the frozen a_P sees is 21x molecular.
+    reference_nu_t = jnp.full(n, 20.0 * NU)
     solve_flow = reused_flow_solve(
-        _with_viscosity(momentum, reference), max_steps=FLOW_MAX_STEPS, **PRECONDITIONER
+        momentum.with_eddy_viscosity(reference_nu_t), max_steps=FLOW_MAX_STEPS, **PRECONDITIONER
     )
     hybrid = hybrid_initialize(momentum, turbulence)
     _, k0, omega0 = hybrid
@@ -177,7 +174,6 @@ def test_coupled_newton_converges_and_matches_the_segregated_solution(case) -> N
         flow0,
         k0,
         omega0,
-        density=RHO,
         max_sweeps=60,
         rtol=1e-9,
         relaxation=0.9,
@@ -223,7 +219,7 @@ def test_coupled_solve_self_starts_from_a_cold_hybrid_initial_condition() -> Non
     # velocity + Laplace-smoothed k/omega) and converges the monolithic Newton from nothing -- which a
     # raw cold start (u=0, uniform k/omega) cannot do.
     _, momentum, turbulence, _, _ = _channel()
-    coupled = CoupledRANS.build(momentum, turbulence, RHO)
+    coupled = CoupledRANS.build(momentum, turbulence)
 
     flow, k, omega = solve_coupled(coupled, method="twolevel", max_steps=40, **PRECONDITIONER)
 

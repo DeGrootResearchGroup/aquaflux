@@ -111,6 +111,29 @@ Engineering Principles.
     the BC closures) and must land for both paths together, with an analytical skewed-flow test — not
     as a local edit. Both paths are currently leading-order at non-Dirichlet skewed boundaries;
     documented as deliberate, not drift.
+- **The turbulence closure enters through `eddy_viscosity`, and `μ_eff = μ + ρν_t` is formed ONCE, in
+  `MomentumContinuity.viscosity` (binding).** `ν_t` (**kinematic**, the closure's own quantity) rides
+  on its own differentiable leaf, set by `with_eddy_viscosity(nu_t)`; `viscosity` adds it to the
+  molecular `μ` from `properties`. Callers pass only `ν_t` and never restate the closure relation.
+  - **Do not put `ν_t` into the `PropertyModel`.** It is not a material property — water has no eddy
+    viscosity, a turbulent flow of water does. The previous design overwrote the `"viscosity"` entry
+    with a pre-summed `ρ(ν+ν_t)` field, which **destroyed the molecular value**, forced a second home
+    for it (`turbulence.molecular_viscosity` — `solve_segregated`'s docstring openly said the
+    assembler's own molecular viscosity "is ignored"), made the swap non-idempotent, duplicated the
+    `ρ(ν+ν_t)` formula across three call sites, and changed the property's type `Constant`→
+    `FieldProperty` on the first sweep. Keeping the material properties intact fixed all five.
+  - The redundant `density=` parameter of `solve_segregated` and the `density` field of `CoupledRANS`
+    were **removed** with it: both existed only to form `μ_eff`, which the assembler now does from its
+    own `ρ`. (`SSTTurbulence` keeps its `density` and `molecular_viscosity` — the k/ω equations use
+    them for their own `ν + σν_t` diffusion, a genuinely different coefficient.)
+  - `with_eddy_viscosity` is part of the contract the segregated driver requires of any injected
+    momentum stand-in. Pinned in `tests/unit/test_momentum_coupling.py` on a `ρ≠1` fluid, so a dropped
+    density factor cannot pass.
+  - **The same call means different things in the two paths**, and nothing at the call site says
+    which: `driver.py` applies it *outside* the residual, so `ν_t` is frozen for the sweep and the
+    coupling is invisible to AD; `coupled.py` applies it *inside*, so `dR_momentum/d(k,ω)` flows
+    through it and the monolithic Jacobian gets its cross-block terms. That is why gradients go
+    through `solve_coupled` and never `solve_segregated`.
 - **Convection — BUILT.** `advection_scheme=` turns on momentum convection (`mdot·u`, upwind or
   limited), which makes the residual **nonlinear** (mass flux and advected velocity both depend
   on velocity). `a_P`'s convective part uses a lagged velocity-flux estimate (breaks the

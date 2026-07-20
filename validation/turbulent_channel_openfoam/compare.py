@@ -180,7 +180,6 @@ def solve_aquaflux(nu_of, ny, growth):
         flow0,
         k0,
         omega0,
-        density=1.0,
         max_sweeps=sweeps,
         relaxation=0.9,
         bulk_velocity_target=1.0,
