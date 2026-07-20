@@ -27,7 +27,7 @@ from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.solve.continuation import PseudoTransientStep
 from aquaflux.solve.implicit import ImplicitNewtonSolver
-from aquaflux.solve.newton import NewtonSolver
+from aquaflux.solve.newton import newton_step
 from aquaflux.turbulence import ScalarShiftPolicy, scalar_pseudo_transient_solve
 from aquaflux.turbulence.preconditioner import (
     scalar_transport_preconditioner,
@@ -125,7 +125,7 @@ def test_shift_policy_carries_a_frozen_term() -> None:
 
 def test_continuation_globalizes_where_fixed_count_newton_stalls() -> None:
     """From a large cold start the continuation solve converges the stiff reactive scalar (staying
-    positive), where the fixed-count ``NewtonSolver`` the scalar sub-solve used before does not."""
+    positive), where the fixed-count Newton loop the scalar sub-solve used before does not."""
     mesh, geometry, volume_flux, residual = _reactive_transport(24, 12)
     reference = jnp.full(mesh.n_cells, 0.5)
     n = mesh.n_cells
@@ -143,7 +143,11 @@ def test_continuation_globalizes_where_fixed_count_newton_stalls() -> None:
     assert float(jnp.linalg.norm(residual(solved))) < 1e-8
     assert bool(jnp.all(solved > 0.0))
 
-    newton = NewtonSolver(iterations=6, preconditioner=precond).solve(residual, cold)
+    # The baseline this is measured against: six *unglobalized* Newton steps, written out here
+    # because a fixed count with no convergence test is the thing being shown to be insufficient.
+    newton = cold
+    for _ in range(6):
+        newton = newton_step(residual, newton, preconditioner=precond)
     # The globalized solve is at least three orders of magnitude tighter than fixed-count Newton.
     assert float(jnp.linalg.norm(residual(solved))) < 1e-3 * float(
         jnp.linalg.norm(residual(newton))

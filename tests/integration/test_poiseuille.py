@@ -15,6 +15,7 @@ gradient flows through the coupled solve.
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -24,7 +25,7 @@ from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, Veloci
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss
-from aquaflux.solve import NewtonSolver
+from aquaflux.solve import newton_step
 
 H, L, MU, RHO, UMAX = 1.0, 3.0, 0.1, 1.0, 1.0
 DPDX = -8.0 * MU * UMAX / H**2
@@ -54,7 +55,7 @@ def _solve(nx, ny, mu=MU):
             }
         ),
     )
-    state = NewtonSolver(iterations=3).solve(assembler.residual, assembler.initial_state())
+    state = eqx.filter_jit(newton_step)(assembler.residual, assembler.initial_state())
     return mesh, cell_geometry, assembler, state
 
 
@@ -74,7 +75,7 @@ def test_poiseuille_reproduces_analytical_profile() -> None:
 def test_poiseuille_stokes_converges_in_one_newton_step() -> None:
     """Fully-developed flow has no convection, so the coupled system is linear (one step)."""
     _, _, assembler, _ = _solve(24, 16)
-    one_step = NewtonSolver(iterations=1).solve(assembler.residual, assembler.initial_state())
+    one_step = eqx.filter_jit(newton_step)(assembler.residual, assembler.initial_state())
     assert float(jnp.linalg.norm(assembler.residual(one_step))) < 1e-9
 
 

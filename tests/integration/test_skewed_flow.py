@@ -15,13 +15,14 @@ boundaries are Dirichlet velocity, so the deferred boundary tangential correctio
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall, VelocityInlet
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss
-from aquaflux.solve import NewtonSolver
+from aquaflux.solve import newton_step
 
 from tests.support.meshes import perturbed_grid_2d
 
@@ -51,7 +52,7 @@ def _solve_couette(n: int = 8, perturb: float = 0.2, seed: int = 2):
         pressure_pin=0,  # closed domain (all velocity Dirichlet): fix the pressure level
     )
     # Stokes (no advection) so the residual is affine: one Newton step is exact.
-    state = NewtonSolver(iterations=1).solve(assembler.residual, assembler.initial_state())
+    state = eqx.filter_jit(newton_step)(assembler.residual, assembler.initial_state())
     return geom, assembler, state
 
 

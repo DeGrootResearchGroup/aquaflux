@@ -14,7 +14,7 @@ from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.schemes import CorrectedGreenGauss
-from aquaflux.solve import NewtonSolver
+from aquaflux.solve import ImplicitNewtonSolver
 from aquaflux.turbulence import SSTClosureFields, SSTModel, SSTTurbulence, omega_wall_value
 
 NU = 1e-3
@@ -79,7 +79,9 @@ def test_k_equation_solves_to_a_finite_bounded_field() -> None:
     """
     mesh, turb = _turbulence()
     residual = turb.k_residual(jnp.zeros(mesh.n_faces), _closure(mesh.n_cells))
-    k = NewtonSolver(iterations=5).solve(residual, jnp.full(mesh.n_cells, 0.01))
+    k = ImplicitNewtonSolver(max_steps=30).solve(
+        lambda phi, _: residual(phi), jnp.full(mesh.n_cells, 0.01), None
+    )
     assert float(jnp.linalg.norm(residual(k))) < 1e-8  # the equation is solvable
     assert not bool(jnp.any(jnp.isnan(k)))
     assert float(jnp.max(jnp.abs(k))) < 0.1  # bounded near the inlet magnitude, no blow-up
@@ -88,7 +90,9 @@ def test_k_equation_solves_to_a_finite_bounded_field() -> None:
 def test_omega_equation_fixes_the_wall_cells_to_the_analytical_value() -> None:
     mesh, turb = _turbulence()
     residual = turb.omega_residual(jnp.zeros(mesh.n_faces), _closure(mesh.n_cells))
-    omega = NewtonSolver(iterations=12).solve(residual, jnp.full(mesh.n_cells, 10.0))
+    omega = ImplicitNewtonSolver(max_steps=40).solve(
+        lambda phi, _: residual(phi), jnp.full(mesh.n_cells, 10.0), None
+    )
     assert float(jnp.linalg.norm(residual(omega))) < 1e-6
     expected = omega_wall_value(
         jnp.full(turb.wall_cells.shape[0], NU), turb.wall_distance[turb.wall_cells], SSTModel()

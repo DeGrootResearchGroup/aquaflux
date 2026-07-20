@@ -10,8 +10,10 @@ consume from `solve` is re-exported here, and consumers import from `aquaflux.so
 submodules.** A name absent from `__all__` is internal — reach for it only from that submodule's own
 unit tests. The surface is three groups:
 
-* **Newton drivers and the linear solve** — `NewtonSolver`, `ImplicitNewtonSolver`, `newton_step`,
-  `solve_linear`, `default_linear_solver`.
+* **The Newton driver, the single step, and the linear solve** — `ImplicitNewtonSolver` (the
+  driver: converges, globalizes, and carries the implicit-function-theorem adjoint), `newton_step`
+  (one matrix-free correction — exact in one call for a linear residual, and differentiable in both
+  modes), `solve_linear`, `default_linear_solver`.
 * **Forward globalization** — the `ForwardStep` strategies `DampedNewtonStep` and
   `PseudoTransientStep`, with the `ShiftPolicy` / `ShiftTerm` / `StepAcceptance` seams a caller
   implements and the default `DivergenceGuard`.
@@ -44,7 +46,7 @@ from .multigrid import (
     convection_multigrid_solve,
     smoothed_multigrid_solve,
 )
-from .newton import NewtonSolver, newton_step
+from .newton import newton_step
 
 __all__ = [
     "AirHierarchy",
@@ -52,7 +54,6 @@ __all__ = [
     "DivergenceGuard",
     "ForwardStep",
     "ImplicitNewtonSolver",
-    "NewtonSolver",
     "PseudoTransientStep",
     "ShiftPolicy",
     "ShiftTerm",
