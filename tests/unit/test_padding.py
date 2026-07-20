@@ -84,7 +84,7 @@ def test_owned_scatter_gather_round_trips(decomposition, layout):
 
 
 def test_padded_shapes_are_uniform_across_partitions(decomposition, layout):
-    """Every partition pads to identical cell, face and face-node array shapes."""
+    """Every partition pads to identical cell, face, face-node and node array shapes."""
     shapes = set()
     for p in range(N_PARTS):
         padded_mesh, padded_geometry = _padded(decomposition, layout, p)
@@ -92,12 +92,31 @@ def test_padded_shapes_are_uniform_across_partitions(decomposition, layout):
             (
                 padded_mesh.n_cells,
                 padded_mesh.n_faces,
+                padded_mesh.n_nodes,
                 int(padded_mesh.face_nodes.face_node_indices.shape[0]),
                 int(padded_geometry.cell.volume.shape[0]),
                 int(padded_geometry.face.area.shape[0]),
             )
         )
     assert len(shapes) == 1
+
+
+def test_padded_nodes_preserve_real_coordinates(decomposition, layout):
+    """Padding the node array appends only copies of node 0, leaving the real nodes untouched.
+
+    The padded node count is the per-partition maximum, far below the global node count — the whole
+    point of the partition-local node set, so the stacked sharded arrays do not replicate the global
+    nodes on every device.
+    """
+    mesh, _, pmesh = decomposition
+    assert layout.n_nodes_max < mesh.n_nodes  # far below full replication of the global node set
+    for p, part in enumerate(pmesh.partitions):
+        padded_mesh, _ = _padded(decomposition, layout, p)
+        real = np.asarray(part.mesh.node_coords)
+        padded = np.asarray(padded_mesh.node_coords)
+        assert padded.shape == (layout.n_nodes_max, real.shape[1])
+        np.testing.assert_array_equal(padded[: real.shape[0]], real)
+        assert np.all(padded[real.shape[0] :] == real[0])  # padding rows are copies of node 0
 
 
 def test_real_geometry_survives_padding_unchanged(decomposition, layout):

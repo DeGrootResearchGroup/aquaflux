@@ -74,6 +74,14 @@ Three correctness facts the builder depends on:
   gather from the global geometry, which is what buys bit-for-bit agreement with serial.
 - **Global owner/neighbour roles are preserved** by the remap, so owner-outward normals stay
   consistent — no re-orientation.
+- **Each local mesh carries its own node set.** `partition_mesh` keeps only the nodes the
+  partition's faces touch and remaps the face-node connectivity to local node ids, so a local mesh is
+  a genuinely standalone `Mesh` rather than one holding a copy of the whole global node array. This
+  matters because `node_coords` is a differentiable leaf of the assembler pytree, so it is stacked
+  and shipped to every device; without the remap the global node array would be replicated P times
+  for data the sharded residual never reads (geometry is gathered, not recomputed from nodes). The
+  padded node array is therefore ragged and `pad_partition` pads it to `n_nodes_max` with copies of
+  node 0 (referenced by nothing — padded faces list no nodes).
 
 ## Decided: the per-device body runs a real assembler — never a re-implementation
 
@@ -136,6 +144,9 @@ Specific traps that are now closed, and must stay closed:
   node-level invariants do not apply. Do not "fix" this by calling `validate()`.
 - **The face-node array is ragged across partitions**, so it is padded too: the first padding face
   absorbs the whole padded tail (keeping the row pointers well-formed) and the rest list no nodes.
+- **The node array is ragged across partitions** (each local mesh carries only its own nodes, see the
+  decomposition section), so it is padded to `n_nodes_max` with copies of node 0 — a real, finite
+  point referenced by no padded face.
 
 ## Halo depth — one layer, exchanging derived fields (built for the gradient)
 
@@ -176,10 +187,12 @@ it reuses the identical hook mechanism.
 
 - `tests/unit/test_partition.py` — the loop-emulated distributed residual matches serial for
   2/3/4 partitions; the halo plan reproduces a direct global gather; a parameter gradient through
-  the decomposition matches serial.
+  the decomposition matches serial; and each local mesh carries only its own nodes, with the remap
+  proved consistent (a local face's nodes dereference to the same coordinates as the global face's).
 - `tests/unit/test_padding.py` — padding in isolation: **no devices, no `shard_map`**. Uniform
-  shapes, real geometry preserved (volumes explicitly), padding inert and finite, and the load-
-  bearing one: a residual on a padded local mesh matches the unpadded one row for row.
+  shapes (cells, faces, face-nodes and nodes), real geometry and nodes preserved (volumes
+  explicitly), padding inert and finite, and the load-bearing one: a residual on a padded local mesh
+  matches the unpadded one row for row.
 - `tests/unit/test_shard_map_smoke.py` — the `shard_map` + `all_gather` mechanism matches a serial
   reference in **value and gradient** (adjoint exact to 0).
 - `tests/unit/test_distributed.py` — the full sharded residual and its gradient match serial (on the
@@ -205,11 +218,9 @@ be set **before JAX initializes** — hence the subprocess.
    gradient is built; the iterative schemes need an exchange inside their own solve.
 2. **The limiter (`psi`) exchange** for distributed limited advection — reuses the `gradient_hook`
    mechanism; deferred until there is a distributed-advection path to exercise it.
-3. **Node remapping.** Each local mesh keeps the **full global** `node_coords`, so the stacked
-   sharded arrays replicate it P times. Correct but wasteful; remap to a partition-local node set.
-4. **Per-partition reverse Cuthill–McKee**, applied as a transform over a built `PartitionedMesh`
+3. **Per-partition reverse Cuthill–McKee**, applied as a transform over a built `PartitionedMesh`
    (not woven into the build loop) so it stays contained.
-5. **Multi-node** via `jax.distributed.initialize()`. Note the honest gap: multi-host is
+4. **Multi-node** via `jax.distributed.initialize()`. Note the honest gap: multi-host is
    production-grade on GPU/TPU, but multi-node **CPU** leans on Gloo and is materially slower than
    MPI — re-verify before committing to a CPU cluster.
 

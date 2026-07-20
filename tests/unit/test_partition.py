@@ -85,6 +85,34 @@ def test_partition_covers_every_cell_once() -> None:
     assert all(p.n_ghost > 0 for p in pmesh.partitions)  # interfaces produce halos
 
 
+def test_local_meshes_carry_only_their_own_nodes() -> None:
+    """Each partition's local mesh holds its own node subset, not a copy of the global array.
+
+    The remap must also be *consistent*: dereferencing a local face's node ids through the local
+    node coordinates reproduces exactly the global face's node coordinates.
+    """
+    mesh = structured_grid_3d(5, 5, 5, named_boundaries=True)
+    pmesh = partition_mesh(mesh, _slab_labels(mesh.n_cells, 4))
+    g_off = np.asarray(mesh.face_nodes.offsets)
+    g_idx = np.asarray(mesh.face_nodes.face_node_indices)
+    g_coords = np.asarray(mesh.node_coords)
+
+    for part in pmesh.partitions:
+        local = part.mesh
+        # A genuine subset: fewer nodes than the global mesh, and no orphan nodes (every local node
+        # is referenced by a local face, since the set is built from exactly those faces).
+        assert local.n_nodes < mesh.n_nodes
+        l_off = np.asarray(local.face_nodes.offsets)
+        l_idx = np.asarray(local.face_nodes.face_node_indices)
+        l_coords = np.asarray(local.node_coords)
+        assert set(l_idx.tolist()) == set(range(local.n_nodes))
+
+        for lf, gf in enumerate(np.asarray(part.faces_global)):
+            local_face_coords = l_coords[l_idx[l_off[lf] : l_off[lf + 1]]]
+            global_face_coords = g_coords[g_idx[g_off[gf] : g_off[gf + 1]]]
+            np.testing.assert_array_equal(local_face_coords, global_face_coords)
+
+
 @pytest.mark.parametrize("n_partitions", [2, 3, 4])
 def test_distributed_residual_matches_serial(n_partitions) -> None:
     mesh = structured_grid_3d(6, 6, 6, named_boundaries=True)
