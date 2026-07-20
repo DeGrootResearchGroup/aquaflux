@@ -25,9 +25,10 @@ the *same* on every partition — the operators, the property model, the boundar
 — is carried along in that stack; the only genuinely per-partition data is the mesh, the geometry,
 and the patch bindings.
 
-The halo is currently an ``all_gather`` over the device axis, whose adjoint JAX derives
-automatically. A neighbour-only ``ppermute`` is the scaling upgrade, behind the same
-:class:`~aquaflux.parallel.halo.HaloExchange` interface.
+The halo exchange is an injected :class:`~aquaflux.parallel.halo.HaloExchange` collective, whose
+adjoint JAX derives automatically; it defaults to the neighbour-only
+:class:`~aquaflux.parallel.halo.AllToAllHaloExchange` (exchanging only boundary cells), with the
+all-gather variant available as a simple reference.
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ from jax.sharding import PartitionSpec as Pspec
 from aquaflux.boundary import BoundaryConditions
 from aquaflux.mesh import Mesh, MeshGeometry
 
-from .halo import AllGatherHaloExchange, HaloExchange, HaloPlan
+from .halo import AllToAllHaloExchange, HaloExchange, HaloPlan
 from .padding import PaddedLayout, pad_partition
 from .partition import PartitionedMesh
 
@@ -194,7 +195,7 @@ def build_distributed_residual(
         ``lambda m, g: ResidualAssembler.build(m, g, properties, operators, boundary)``.
     halo : HaloExchange, optional
         Ghost-cell refresh strategy (default
-        :class:`~aquaflux.parallel.halo.AllGatherHaloExchange`).
+        :class:`~aquaflux.parallel.halo.AllToAllHaloExchange`, which exchanges only boundary cells).
 
     Returns
     -------
@@ -219,7 +220,7 @@ def build_distributed_residual(
             "stacked for shard_map; something varies per partition beyond the padded sizes"
         )
     stacked = jax.tree.map(lambda *xs: jnp.stack(xs), *assemblers)
-    halo = halo or AllGatherHaloExchange()
+    halo = halo or AllToAllHaloExchange()
     return DistributedResidual(
         layout=layout, assemblers=stacked, halo=halo, halo_plan=halo.plan(layout)
     )

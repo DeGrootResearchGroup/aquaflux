@@ -10,7 +10,14 @@ exchange is the only new operator inside the differentiable, sharded residual.
 from __future__ import annotations
 
 from .distributed import DistributedResidual, build_distributed_residual
-from .halo import AllGatherHaloExchange, AllGatherPlan, HaloExchange, HaloPlan
+from .halo import (
+    AllGatherHaloExchange,
+    AllGatherPlan,
+    AllToAllHaloExchange,
+    AllToAllPlan,
+    HaloExchange,
+    HaloPlan,
+)
 from .padding import PaddedLayout, pad_partition
 from .partition import LocalPartition, PartitionedMesh, partition_mesh
 from .partitioner import (
@@ -23,6 +30,8 @@ from .partitioner import (
 __all__ = [
     "AllGatherHaloExchange",
     "AllGatherPlan",
+    "AllToAllHaloExchange",
+    "AllToAllPlan",
     "BlockPartitioner",
     "DistributedResidual",
     "HaloExchange",
