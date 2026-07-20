@@ -139,3 +139,8 @@ def test_periodic_channel_reproduces_the_law_of_the_wall() -> None:
     # Genuinely turbulent closure.
     nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
     assert float(jnp.max(nu_t) / nu) > 10.0
+
+    # The k-tied realizability omega floor (omega >= k / (nut_max_coeff nu), nut_max_coeff = 1e5) is
+    # inactive at the converged state -- omega sits above it everywhere with margin, so it never pins a
+    # converged cell (the Principle-3 adjoint-honesty precondition a fixed floor would not meet).
+    assert bool(jnp.all(omega > k / (1e5 * nu)))

@@ -60,6 +60,7 @@ def _closure(n):
         grad_k=jnp.zeros((n, 2)),
         grad_omega=jnp.zeros((n, 2)),
         omega=jnp.full(n, 1.0),
+        k=jnp.full(n, 1.0),
     )
 
 

@@ -26,6 +26,16 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
 - **`sources.py`** — the k and ω production / destruction / cross-diffusion terms as
   `VolumeSourceFn` volume-source operators (the transport equations reuse the shared advection
   and diffusion flux operators; only the sources are turbulence-specific).
+  - **Both productions are limited at the destruction scale (binding).** `KProduction` caps
+    `P_k = min(ν_t S², 10 β* k ω)`; `OmegaProduction` caps the *same way* — `α min(S², 10 β* k ω/ν_t)`,
+    i.e. `α/ν_t` times the limited k-production (equivalently OpenFOAM's `(c1/a1)β*ω·max(a1ω, F2 S)`,
+    c1=10). It reads the frozen closure (`nu_t`, `k`, `omega`, `strain_rate`), so it has **no derivative
+    in the solved ω** (adds no ω-Jacobian diagonal) and differentiates exactly through the *live*
+    closure in the coupled residual. A tiny `_EDDY_VISCOSITY_FLOOR` guards the `1/ν_t` at the `k→0`
+    edge only (k/ν_t is finite where the cap bites). The unlimited `α S²` over-stiffened the ω equation
+    in high-strain / transient regions — one of the robustness gaps behind the near-wall `k` collapse
+    (#126). `KProduction.explicit_limiter` still freezes *its* cap's solved `k` for the M-matrix
+    forward path; ω needs no such flag (its cap is already field-independent).
 - **`transport.py` — `SSTTurbulence`, `SSTClosureFields`.** Assembles the k and ω scalar
   transport residuals on the flow's Rhie–Chow mass flux, with μ_t a **frozen per-cell field**
   recomputed once per outer sweep.
@@ -197,6 +207,12 @@ fallback** (below), promoted only if a stiff high-Re case shows the direct coupl
   (`k, ω > floor` everywhere, which holds for any properly resolved RANS field). State this precondition
   in code and **check it**: if a case converges with a floor active, the sensitivity through that cell is
   wrong — surface it, do not ship it. (Log-variable `k = e^{k̃}` is the held-in-reserve structural fix.)
+  - **The ω floor is the k-tied realizability floor `ω ≥ k/(nut_max_coeff·ν)` (default `nut_max_coeff
+    = 1e5`), NOT a fixed value (#126).** It caps `ν_t = k/ω` at `nut_max_coeff·ν`; being tied to the
+    current `k` it is **inactive at convergence** for a physical field (`ν_t/ν` is O(10²) ≪ 1e5), so it
+    honours the precondition above rather than pinning near-wall cells the way the old fixed `1e-8` ω
+    floor could. `omega_floor` remains only as a tiny absolute backstop (`max(realizability, ω_floor)`).
+    Pinned by the law-of-the-wall test asserting `ω > k/(1e5 ν)` everywhere at the converged state.
 
 - **Frozen coupling data rides as injected pytree leaves** (μ_t, the frozen ∇u, mdot), the same
   blessed mechanism the coupled solver already uses to inject `mdot` — no new freezing mechanism, and

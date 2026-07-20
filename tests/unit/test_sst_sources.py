@@ -89,13 +89,45 @@ def test_k_destruction_is_a_negative_sink() -> None:
     assert jnp.allclose(op.source(_cell(2.0, 2.0), context), -MODEL.beta_star * 2.0 * 3.0 * volume)
 
 
-def test_omega_production_blends_alpha() -> None:
+def _omega_production(s, f1, nu_t=None, k=None, omega=None):
+    unit = _cell(1.0, 1.0)
+    return OmegaProduction(
+        strain_rate=s,
+        nu_t=_cell(0.01, 0.01) if nu_t is None else nu_t,
+        k=unit if k is None else k,
+        omega=unit if omega is None else omega,
+        f1=f1,
+        model=MODEL,
+    )
+
+
+def test_omega_production_unlimited_blends_alpha() -> None:
+    """Below the cap the production is the blended ``α S²`` (α by F1); here 10 β* k ω / ν_t = 90 > 4."""
     context, volume = _context_and_volume()
-    s = _cell(2.0, 2.0)
-    inner = OmegaProduction(strain_rate=s, f1=_cell(1.0, 1.0), model=MODEL)
-    outer = OmegaProduction(strain_rate=s, f1=_cell(0.0, 0.0), model=MODEL)
+    s = _cell(2.0, 2.0)  # S² = 4, cap = 10 * 0.09 * 1 * 1 / 0.01 = 90 -> inactive
+    inner = _omega_production(s, _cell(1.0, 1.0))
+    outer = _omega_production(s, _cell(0.0, 0.0))
     assert jnp.allclose(inner.source(_cell(1.0, 1.0), context), MODEL.alpha_1 * 4.0 * volume)
     assert jnp.allclose(outer.source(_cell(1.0, 1.0), context), MODEL.alpha_2 * 4.0 * volume)
+
+
+def test_omega_production_limited_at_the_destruction_scale() -> None:
+    """When ``S²`` exceeds ``10 β* k ω / ν_t`` the production is capped there (times α)."""
+    context, volume = _context_and_volume()
+    s = _cell(3.0, 3.0)  # S² = 9
+    nu_t, k, omega = _cell(1.0, 1.0), _cell(1.0, 1.0), _cell(1.0, 1.0)
+    cap = 10.0 * MODEL.beta_star * 1.0 * 1.0 / 1.0  # 10 β* k ω / ν_t = 0.9 < 9 -> active
+    op = _omega_production(s, _cell(1.0, 1.0), nu_t=nu_t, k=k, omega=omega)
+    assert jnp.allclose(op.source(_cell(1.0, 1.0), context), MODEL.alpha_1 * cap * volume)
+
+
+def test_omega_production_is_independent_of_the_solved_field() -> None:
+    """The source reads only the frozen closure, so it has no derivative in the solved ``ω`` field
+    (it adds no diagonal term to the ω-equation Jacobian)."""
+    context, _ = _context_and_volume()
+    op = _omega_production(_cell(3.0, 3.0), _cell(1.0, 1.0), nu_t=_cell(1.0, 1.0))
+    d = jax.jacobian(lambda f: op.source(f, context))(_cell(1.0, 1.0))
+    assert float(jnp.max(jnp.abs(d))) == 0.0
 
 
 def test_omega_destruction_blends_beta_and_is_negative() -> None:

@@ -40,7 +40,13 @@ if TYPE_CHECKING:
 
 # The ratio capping production against destruction in the k-production limiter,
 # P̃_k = min(P_k, ratio * β* k ω) — a standard SST safeguard against build-up in stagnation regions.
+# The same ratio caps the ω production (see :class:`OmegaProduction`).
 _PRODUCTION_LIMIT_RATIO = 10.0
+
+# A tiny positive floor guarding the ``1 / ν_t`` in the ω-production cap where ν_t → 0 (k → 0). It never
+# affects a physical field: ν_t is orders above it wherever the cap is active (k / ν_t stays finite as
+# both vanish), so it only prevents a 0/0 at an all-zero cold-start cell.
+_EDDY_VISCOSITY_FLOOR = 1e-30
 
 
 class KProduction(VolumeSource):
@@ -108,28 +114,54 @@ class KDestruction(VolumeSource):
 
 
 class OmegaProduction(VolumeSource):
-    """Production of the specific dissipation rate, ``α S²`` with ``α`` blended by ``F₁``.
+    """Limited production of the specific dissipation rate, ``α P̃_k / ν_t`` with ``α`` blended by ``F₁``.
 
-    Independent of the solved ``ω`` (a per-cell source computed from the frozen strain rate and
-    blending function).
+    The ω production is the k production scaled by ``α / ν_t``; writing it that way and reusing the
+    **limited** k production ``P̃_k = min(ν_t S², 10 β* k ω)`` (the same destruction-scale cap
+    :class:`KProduction` applies) gives ``α min(S², 10 β* k ω / ν_t)`` — the standard SST ω-production
+    limiter. Without it the ω source is the unlimited ``α S²``, which over-stiffens the ω equation
+    where the strain is large (stagnation regions, and the transient over-shoots a segregated march can
+    pass through).
+
+    Independent of the *solved* ``ω`` (a per-cell source from the frozen closure fields), so it adds no
+    diagonal term to the ω-equation Jacobian; in the coupled residual it differentiates exactly through
+    the live closure.
 
     Attributes
     ----------
     strain_rate : jnp.ndarray
         Strain-rate magnitude ``S`` per cell, shape ``(n_cells,)`` (frozen).
+    nu_t : jnp.ndarray
+        Eddy viscosity per cell, shape ``(n_cells,)`` (frozen) — sets the ``α / ν_t`` scaling and the cap.
+    k, omega : jnp.ndarray
+        Turbulent kinetic energy and specific dissipation rate per cell, shape ``(n_cells,)`` (frozen)
+        — the destruction-scale cap ``10 β* k ω``.
     f1 : jnp.ndarray
         The ``F₁`` blending function per cell, shape ``(n_cells,)`` (frozen).
     model : SSTModel
-        The model constants (blends ``alpha_1`` / ``alpha_2``).
+        The model constants (blends ``alpha_1`` / ``alpha_2``, reads ``beta_star``).
     """
 
     strain_rate: jnp.ndarray
+    nu_t: jnp.ndarray
+    k: jnp.ndarray
+    omega: jnp.ndarray
     f1: jnp.ndarray
     model: SSTModel
 
     def source(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
         alpha = self.model.blend(self.f1, self.model.alpha_1, self.model.alpha_2)
-        return alpha * self.strain_rate**2 * context.geometry.cell.volume
+        # α min(S², 10 β* k ω / ν_t): the cap is α/ν_t times the destruction-scale k-production cap.
+        # The ν_t floor only guards the k → 0 (ν_t → 0) edge; k/ν_t stays finite there (both vanish),
+        # so where the cap actually bites it is unaffected.
+        cap = (
+            _PRODUCTION_LIMIT_RATIO
+            * self.model.beta_star
+            * self.k
+            * self.omega
+            / jnp.maximum(self.nu_t, _EDDY_VISCOSITY_FLOOR)
+        )
+        return alpha * jnp.minimum(self.strain_rate**2, cap) * context.geometry.cell.volume
 
 
 class OmegaDestruction(VolumeSource):
