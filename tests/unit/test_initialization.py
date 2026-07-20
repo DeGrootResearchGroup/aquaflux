@@ -168,3 +168,63 @@ def test_hybrid_initialize_is_positive_with_analytical_wall_omega() -> None:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def _periodic_channel(beta=0.0035, mu_factor=1.0):
+    """A streamwise-periodic channel driven by a body force: no inlet, every patch a wall."""
+    mesh = structured_grid_2d(4, 24, lx=1.0, ly=2.0, periodic=("x",), named_boundaries=True)
+    geometry = mesh.geometry()
+    momentum = MomentumContinuity.build(
+        mesh,
+        geometry,
+        PropertyModel({"viscosity": Constant(RHO * NU * mu_factor), "density": Constant(RHO)}),
+        CompactGreenGauss(),
+        BoundaryConditions({"bottom": NoSlipWall(), "top": NoSlipWall()}),
+        advection_scheme=FirstOrderUpwind(),
+        pressure_pin=0,
+        body_force=(beta, 0.0),
+    )
+    turbulence = SSTTurbulence.build(
+        SSTModel(),
+        mesh,
+        geometry,
+        CompactGreenGauss(),
+        FirstOrderUpwind(),
+        density=RHO,
+        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        wall_patches=["bottom", "top"],
+        k_boundary=BoundaryConditions({"bottom": Dirichlet(0.0), "top": Dirichlet(0.0)}),
+        omega_boundary=BoundaryConditions({"bottom": ZeroGradient(), "top": ZeroGradient()}),
+    )
+    return mesh, momentum, turbulence
+
+
+def test_hybrid_initialize_starts_a_body_force_channel_in_the_turbulent_regime() -> None:
+    """With no inlet, the k interpolant is harmonic between zero wall values -- identically zero.
+
+    Started there the closure has no turbulence at all (``nu_t = 0``), which is not merely a poor
+    guess but the *laminar* problem. The equilibrium level from the friction velocity replaces it.
+    """
+    _, momentum, turbulence = _periodic_channel(beta=0.0035)
+    _, k, omega = hybrid_initialize(momentum, turbulence)
+
+    u_tau = (0.0035 * 1.0 / RHO) ** 0.5  # h = V/A_wall = 1 for this ly = 2 channel
+    assert float(jnp.min(k)) == pytest.approx(u_tau**2 / SSTModel().beta_star ** 0.5)
+    assert float(jnp.min(omega)) > 0.0  # a pure-Neumann omega solve would leave the interior empty
+
+
+def test_hybrid_initialize_gives_a_developed_channel_eddy_viscosity() -> None:
+    """The equilibrium levels must land at the ``~0.09 u_tau h`` eddy viscosity a channel carries.
+
+    Getting k right but omega wrong would be worse than either: ``nu_t = k / omega`` with omega at
+    its floor is enormous, so both come from the same friction velocity.
+    """
+    _, momentum, turbulence = _periodic_channel(beta=0.0035)
+    flow, k, omega = hybrid_initialize(momentum, turbulence)
+    nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
+
+    u_tau = (0.0035 * 1.0 / RHO) ** 0.5
+    assert float(jnp.max(nu_t)) == pytest.approx(0.09 * u_tau * 1.0, rel=0.05)
+    # The degenerate interpolant would leave k at its 1e-8 floor, i.e. nu_t ~ 1e-9 -- no
+    # turbulence at all. Pin the gap so a regression to that start cannot pass.
+    assert float(jnp.max(nu_t)) > 1e-4

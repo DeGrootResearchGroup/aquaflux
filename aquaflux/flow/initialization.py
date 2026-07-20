@@ -26,6 +26,7 @@ from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import NewtonSolver
 
 from .boundary import PressureOutlet, VelocityInlet
+from .scales import body_force_velocity
 
 if TYPE_CHECKING:
     from aquaflux.mesh import Mesh, MeshGeometry
@@ -101,9 +102,14 @@ def potential_flow(
     is irrotational, divergence-free, and matches the through-flow, so it is a far better start than a
     uniform plug for anything but a straight duct, at the cost of one linear solve.
 
-    A closed domain (no outlet, no pressure datum) has no potential through-flow; this returns the zero
-    state there. When there is no outlet but the momentum carries a ``pressure_pin``, that cell pins the
-    otherwise-singular Laplacian.
+    A domain with no through-flow boundary at all has no potential to solve for, but may still be
+    driven: a streamwise-periodic channel is pushed by a uniform ``body_force``, whose potential is
+    uniform. That case returns a plug at the characteristic speed the force sustains against the wall
+    drag (:func:`~aquaflux.flow.scales.body_force_velocity`) — far closer to the developed flow than
+    rest, which leaves a globalized solve to march the entire viscous spin-up. A domain driven only by
+    a moving wall is not this case (it has no net through-flow, so its potential really is zero), and
+    a domain driven by nothing returns the zero state. When there is no outlet but the
+    momentum carries a ``pressure_pin``, that cell pins the otherwise-singular Laplacian.
 
     Parameters
     ----------
@@ -139,6 +145,16 @@ def potential_flow(
 
     fixed_cells = fixed_values = None
     if not has_reference:
+        # No inflow/outflow to build a potential from. A body force still drives the domain, though
+        # (a streamwise-periodic channel is exactly this: no through-flow boundary at all), and its
+        # potential is uniform, so the harmonic solve has nothing to add — start from the plug the
+        # force sustains instead of from rest. A domain driven only by a moving wall is *not* this
+        # case: it has no net through-flow, so its potential really is zero and a plug would violate
+        # the stationary walls.
+        plug = body_force_velocity(momentum)
+        if float(jnp.linalg.norm(plug)) > 0.0:
+            velocity = jnp.broadcast_to(plug, (mesh.n_cells, mesh.dim))
+            return momentum.pack(velocity, jnp.zeros(mesh.n_cells))
         if momentum.pressure_pin is None:
             return momentum.initial_state()  # closed domain: no potential through-flow
         fixed_cells = jnp.array([momentum.pressure_pin])

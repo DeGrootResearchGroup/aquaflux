@@ -62,6 +62,35 @@ def inlet_k(velocity_magnitude: jnp.ndarray, intensity: float) -> jnp.ndarray:
     return 1.5 * (velocity_magnitude * intensity) ** 2
 
 
+def equilibrium_k(friction_velocity: jnp.ndarray, model: SSTModel) -> jnp.ndarray:
+    """Turbulent kinetic energy of equilibrium wall turbulence: ``k = u_tau**2 / sqrt(beta_star)``.
+
+    In the log layer production balances dissipation, the shear stress is the wall value
+    ``-u'v' = u_tau**2``, and the eddy-viscosity closure ties that to ``k`` through
+    ``-u'v' = sqrt(beta_star) k``. Rearranged, ``k = u_tau**2 / sqrt(beta_star)`` (~``3.3 u_tau**2``
+    for the standard ``beta_star = 0.09``).
+
+    This is the counterpart to :func:`inlet_k` for a flow with **no inlet to read a level from** — a
+    streamwise-periodic channel driven by a body force, where the friction velocity instead follows
+    from the global force balance (:func:`~aquaflux.flow.scales.friction_velocity`). Being an
+    equilibrium relation it is a level for the core flow, not a wall value; ``k`` still goes to zero at
+    the wall through its boundary condition.
+
+    Parameters
+    ----------
+    friction_velocity : jnp.ndarray
+        The wall friction velocity ``u_tau``, any shape (or a scalar).
+    model : SSTModel
+        The model constants (reads ``beta_star``).
+
+    Returns
+    -------
+    jnp.ndarray
+        The equilibrium ``k``, matching the shape of ``friction_velocity``.
+    """
+    return friction_velocity**2 / jnp.sqrt(model.beta_star)
+
+
 def inlet_omega(k: jnp.ndarray, length_scale: float, model: SSTModel) -> jnp.ndarray:
     """Inlet omega from a turbulent length scale: ``omega = sqrt(k) / (beta_star**0.25 L)``.
 

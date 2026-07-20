@@ -14,7 +14,7 @@ the segregated outer loop coupling the flow and turbulence solves in
 
 from __future__ import annotations
 
-from .boundary import inlet_k, inlet_omega, omega_wall_value
+from .boundary import equilibrium_k, inlet_k, inlet_omega, omega_wall_value
 from .continuation import ScalarShiftPolicy, scalar_pseudo_transient_solve
 from .coupled import (
     CoupledRANS,
@@ -51,6 +51,7 @@ __all__ = [
     "ScalarShiftPolicy",
     "bulk_velocity",
     "coupled_continuation",
+    "equilibrium_k",
     "hybrid_initialize",
     "inlet_k",
     "inlet_omega",

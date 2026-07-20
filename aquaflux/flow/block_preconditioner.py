@@ -19,6 +19,7 @@ inner solver or velocity block plugs into.
 from __future__ import annotations
 
 import abc
+import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -41,6 +42,7 @@ from aquaflux.solve import (
 
 from .preconditioner import schur_face_coefficient
 from .rhie_chow import momentum_diagonal, viscous_face_coefficient
+from .scales import characteristic_velocity
 
 if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, MeshGeometry
@@ -485,33 +487,19 @@ class SmoothedAmgConvectionVelocity(_RescaledAmgVelocity):
 
 
 def _characteristic_reference_state(assembler: MomentumContinuity) -> jnp.ndarray:
-    """A uniform flow at the characteristic velocity the boundaries drive, shape ``((dim+1) n,)``.
+    """A uniform flow at the characteristic velocity driving the domain, shape ``((dim+1) n,)``.
 
     The convection-aware velocity block freezes its convective linearization at the mass flux of a
     representative operating state, so that state has to carry the operating convective scale (cell
     Peclet ``rho U dx / mu``) — a cold zero state carries none, and would silently reduce the block to
-    the viscous one it exists to replace.
-
-    The scale is taken from the boundaries, which already state it: each patch declares the velocity
-    it prescribes (see :meth:`~aquaflux.flow.boundary.FlowBoundary.reference_velocity`), and the
-    fastest of them is the characteristic speed a Reynolds number is formed from — the inlet speed of
-    a channel, the lid speed of a driven cavity. A uniform field at that velocity is Peclet-
-    representative wherever the flow is driven, and assumes nothing about the speed's magnitude,
-    direction, or units. Taking the fastest rather than an average is the safe side of the estimate:
-    these hierarchies stay stable as the cell Peclet rises, whereas under-estimating the convection
-    drifts the block back toward the Peclet-blind viscous one.
-
-    A domain that prescribes no velocity anywhere (every patch a stationary wall) drives no flow, and
-    yields a zero state — correctly, since there is no convection for the block to be aware of.
+    the viscous one it exists to replace. The speed itself comes from
+    :func:`~aquaflux.flow.scales.characteristic_velocity` (a prescribed boundary velocity, or the
+    body-force balance when the domain prescribes none); this only spreads it over the cells as the
+    packed flow state.
     """
-    face = assembler.geometry.face
-    prescribed = assembler.boundary.apply(
-        assembler.mesh.face_cells,
-        jnp.zeros((assembler.mesh.n_faces, assembler.mesh.dim)),
-        lambda bc, faces, owner: bc.reference_velocity(face.normal[faces], face.centroid[faces]),
+    velocity = jnp.broadcast_to(
+        characteristic_velocity(assembler), (assembler.mesh.n_cells, assembler.mesh.dim)
     )
-    fastest = prescribed[jnp.argmax(jnp.sum(prescribed**2, axis=1))]
-    velocity = jnp.broadcast_to(fastest, (assembler.mesh.n_cells, assembler.mesh.dim))
     return jax.lax.stop_gradient(assembler.pack(velocity, jnp.zeros(assembler.mesh.n_cells)))
 
 
@@ -640,6 +628,22 @@ class BlockPreconditioner(eqx.Module):
             # The reference mass flux is assembler behaviour (the Rhie--Chow flux operator), so it is
             # computed here and handed to the strategy, keeping the velocity build assembler-free.
             reference_mdot = jax.lax.stop_gradient(assembler.mass_flux(reference_state))
+            if float(jnp.max(jnp.abs(reference_mdot))) == 0.0:
+                # No convective scale to freeze the hierarchy at: the convection-diffusion operator
+                # collapses to the viscous one, so this block silently becomes the cheaper `velocity=
+                # "smoothed"` it was chosen over. Warn rather than fail — the build is still valid,
+                # just not the Peclet-aware accelerator that was asked for.
+                warnings.warn(
+                    "velocity block "
+                    f"{velocity!r} was requested but the reference state carries no mass flux, so "
+                    "its convective linearization is zero and the block reduces to the viscous "
+                    "'smoothed' one. The domain neither prescribes a velocity at any patch nor "
+                    "carries a body force to size one from. Pass an explicit reference_state (e.g. a "
+                    "uniform flow at the bulk velocity a mass-flow controller targets) to restore the "
+                    "convection-aware block.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             velocity_block = SmoothedAmgConvectionVelocity.build(
                 velocity_geometry,
                 owner_e,
