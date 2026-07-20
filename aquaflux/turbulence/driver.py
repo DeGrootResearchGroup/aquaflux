@@ -178,6 +178,7 @@ def solve_segregated(
     ser_exponent: float = 1.0,
     k_floor: float = 1e-8,
     omega_floor: float = 1e-8,
+    nut_max_coeff: float = 1e5,
     scalar_preconditioner: str | None = None,
     bulk_velocity_target: float | None = None,
     flow_direction: int = 0,
@@ -227,7 +228,14 @@ def solve_segregated(
         Exponent ``p`` on the increment-drop ratio in the relaxation ramp; larger opens the
         relaxation up faster as the coupling settles. Ignored when ``relaxation_max is None``.
     k_floor, omega_floor : float
-        Positive floors applied to ``k`` and ``omega`` after each sweep.
+        Positive absolute floors applied to ``k`` and ``omega`` after each sweep (the last-resort
+        positivity guards). ``omega`` also carries the k-tied realizability floor below.
+    nut_max_coeff : float
+        The realizability floor on ``omega`` is ``omega >= k / (nut_max_coeff * nu)``, which caps
+        ``nu_t = k / omega`` at ``nut_max_coeff * nu``. Tied to the current ``k`` rather than a fixed
+        value, it is inactive at convergence for a physical field (where ``nu_t / nu`` is orders below
+        ``nut_max_coeff``), so it never pins a converged cell -- unlike a fixed ``omega`` floor, whose
+        activity at the fixed point would pollute the sensitivity through that cell.
     scalar_preconditioner : {"twolevel", "air"} or None
         When set, the per-sweep :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` carries a
         convection-diffusion AMG (the given multigrid method) for its shifted-operator solve -- the
@@ -301,12 +309,19 @@ def solve_segregated(
         k_policy = turbulence.k_shift_policy(mdot, closure, k, preconditioner=k_amg)
         k_solved = solve_scalar(turbulence.k_residual(mdot, closure), k, k_policy)
         k = jnp.maximum(_relax(k, k_solved, sweep_relaxation), k_floor)
+        # Realizability floor on omega: omega >= k / (nut_max_coeff * nu) caps nu_t = k/omega at
+        # nut_max_coeff * nu. Tied to the current k (not a fixed value), it is inactive at convergence
+        # for a physical field (nu_t/nu is O(10^2), far below nut_max_coeff) rather than pinning cells.
+        omega_realizability = k / (nut_max_coeff * turbulence.molecular_viscosity)
         omega_policy = turbulence.omega_shift_policy(mdot, closure, omega, preconditioner=omega_amg)
         omega_solved = solve_scalar(turbulence.omega_residual(mdot, closure), omega, omega_policy)
-        omega = jnp.maximum(_relax(omega, omega_solved, sweep_relaxation), omega_floor)
+        omega = jnp.maximum(
+            _relax(omega, omega_solved, sweep_relaxation),
+            jnp.maximum(omega_realizability, omega_floor),
+        )
 
         # Coupled Picard increment: the residual-agnostic outer convergence signal, also the ramp's
-        # drop ratio. The first sweep sets the reference the ramp opens relative to.
+        # drop ratio. The first sweep sets the baseline the ramp opens relative to.
         increment = _relative_change((flow_prev, flow), (k_prev, k), (omega_prev, omega))
         if increment_0 is None:
             increment_0 = increment

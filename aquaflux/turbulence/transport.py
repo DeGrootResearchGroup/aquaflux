@@ -75,6 +75,9 @@ class SSTClosureFields(NamedTuple):
     omega : jnp.ndarray
         The frozen ``omega`` field, shape ``(n_cells,)`` (the k destruction/production read it, and
         the omega cross-diffusion lags it).
+    k : jnp.ndarray
+        The frozen ``k`` field, shape ``(n_cells,)`` (the ω-production limiter's ``10 β* k ω`` cap
+        reads it).
     """
 
     nu_t: jnp.ndarray
@@ -83,6 +86,7 @@ class SSTClosureFields(NamedTuple):
     grad_k: jnp.ndarray
     grad_omega: jnp.ndarray
     omega: jnp.ndarray
+    k: jnp.ndarray
 
 
 class WallFixedResidual(eqx.Module):
@@ -301,7 +305,7 @@ class SSTTurbulence(eqx.Module):
         nu_t = self.model.eddy_viscosity(
             k, omega, strain, self.molecular_viscosity, self.wall_distance
         )
-        return SSTClosureFields(nu_t, strain, f1, grad_k, grad_omega, omega)
+        return SSTClosureFields(nu_t, strain, f1, grad_k, grad_omega, omega, k)
 
     def k_residual(
         self, mdot: jnp.ndarray, closure: SSTClosureFields
@@ -358,7 +362,14 @@ class SSTTurbulence(eqx.Module):
             ),
             self.omega_boundary,
             source_operators=(
-                OmegaProduction(closure.strain_rate, closure.f1, self.model),
+                OmegaProduction(
+                    closure.strain_rate,
+                    closure.nu_t,
+                    closure.k,
+                    closure.omega,
+                    closure.f1,
+                    self.model,
+                ),
                 OmegaDestruction(closure.f1, self.model),
                 OmegaCrossDiffusion(
                     closure.omega, closure.grad_k, closure.grad_omega, closure.f1, self.model
