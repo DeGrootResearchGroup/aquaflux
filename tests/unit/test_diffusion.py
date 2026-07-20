@@ -171,3 +171,45 @@ def test_operator_recovers_laplacian_second_order() -> None:
     e_fine = interior_laplacian_error(32)
     order = np.log2(e_coarse / e_fine)
     assert order > 1.8
+
+
+def _skewed_diffusion_assembler():
+    """A skewed-grid diffusion assembler with a gradient scheme (so the correction is nonzero)."""
+    from aquaflux.schemes import CompactGreenGauss
+
+    from tests.support.meshes import perturbed_grid_2d
+
+    mesh = perturbed_grid_2d(8, 8, perturb=0.2, named_boundaries=True)
+    geom = mesh.geometry()
+    sides = ("left", "right", "bottom", "top")
+    asm = ResidualAssembler.build(
+        mesh,
+        geom,
+        PropertyModel({"diffusivity": Constant(1.0)}),
+        (DiffusionFlux(),),
+        BoundaryConditions({s: ZeroGradient() for s in sides}),
+        gradient_scheme=CompactGreenGauss(),
+    )
+    xc, yc = geom.cell.centroid[:, 0], geom.cell.centroid[:, 1]
+    phi = jnp.sin(1.7 * xc) * jnp.cos(
+        1.3 * yc
+    )  # non-constant, so the reconstructed gradient is nonzero
+    return asm, phi
+
+
+def test_gradient_hook_is_identity_when_omitted() -> None:
+    """Passing the identity as the gradient hook reproduces the default residual exactly."""
+    asm, phi = _skewed_diffusion_assembler()
+    assert jnp.allclose(asm.residual(phi), asm.residual(phi, gradient_hook=lambda g: g), atol=1e-14)
+
+
+def test_gradient_hook_transforms_the_reconstructed_gradient() -> None:
+    """The hook feeds the flux a modified gradient — scaling it changes the residual.
+
+    The diffusion flux's non-orthogonal correction is what reads the cell gradient, so a hook that
+    scales the gradient must change the residual on a skewed grid (where the correction is nonzero).
+    """
+    asm, phi = _skewed_diffusion_assembler()
+    default = asm.residual(phi)
+    scaled = asm.residual(phi, gradient_hook=lambda g: 2.0 * g)
+    assert not jnp.allclose(default, scaled, atol=1e-10)

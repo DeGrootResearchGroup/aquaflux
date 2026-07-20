@@ -29,6 +29,14 @@ The halo exchange is an injected :class:`~aquaflux.parallel.halo.HaloExchange` c
 adjoint JAX derives automatically; it defaults to the neighbour-only
 :class:`~aquaflux.parallel.halo.AllToAllHaloExchange` (exchanging only boundary cells), with the
 all-gather variant available as a simple reference.
+
+On a non-orthogonal mesh the residual reads a reconstructed cell gradient at each face, and a
+ghost cell's gradient cannot be reconstructed locally (its stencil reaches past the one-cell halo).
+So the field is exchanged in **one layer, twice**: exchange ``phi``, let the assembler reconstruct
+the gradient (correct on owned cells, whose stencil is within owned + the ``phi`` halo), then
+exchange the gradient so each ghost carries the value its owning partition computed — the assembler's
+``gradient_hook`` seam. Both exchanges reuse the same :class:`~aquaflux.parallel.halo.HaloExchange`,
+which is generic in the trailing axes, so a per-cell vector gradient rides the identical plan.
 """
 
 from __future__ import annotations
@@ -116,12 +124,18 @@ class DistributedResidual(eqx.Module):
     halo_plan : HaloPlan
         That strategy's index bookkeeping, stacked over the partition axis and sharded alongside
         the assemblers.
+    exchange_gradient : bool
+        Whether to exchange ghost-cell gradients (static). ``True`` when the assembler reconstructs
+        a gradient (a non-orthogonal correction reads it across partition boundaries); ``False`` for
+        an orthogonal grid with no gradient scheme, where the gradient is identically zero and the
+        exchange would move only zeros.
     """
 
     layout: PaddedLayout
     assemblers: object
     halo: HaloExchange
     halo_plan: HaloPlan
+    exchange_gradient: bool = eqx.field(static=True)
 
     def residual(self, global_field: jnp.ndarray) -> jnp.ndarray:
         """Evaluate the residual across devices and reassemble it into a global vector.
@@ -140,6 +154,7 @@ class DistributedResidual(eqx.Module):
         """
         layout = self.layout
         n_owned_max = layout.n_owned_max
+        exchange_gradient = self.exchange_gradient
         device_mesh = DeviceMesh(
             np.array(jax.devices()[: layout.n_partitions]), axis_names=(_DEVICE_AXIS,)
         )
@@ -150,13 +165,26 @@ class DistributedResidual(eqx.Module):
             owned = owned_shard[0]
             plan = jax.tree.map(lambda a: a[0], plan_shard)
             assembler = jax.tree.map(lambda a: a[0], assembler_shard)
-            # The exchange issues its own collectives; JAX derives their adjoint.
-            local_field = self.halo.fill(owned, plan, _DEVICE_AXIS)
-            # The halo fills owned + ghost cells; the null cell mirrors no remote cell, so its row
-            # is appended here. Nothing reads it — every padding face scatters into it.
-            null_row = jnp.zeros((1, *local_field.shape[1:]), local_field.dtype)
-            local_field = jnp.concatenate([local_field, null_row])
-            return assembler.residual(local_field)[:n_owned_max].reshape(1, n_owned_max)
+
+            def fill_local(owned_rows):
+                # Exchange owned rows into owned + ghost (the exchange issues its own collectives,
+                # whose adjoint JAX derives), then append the null cell: it mirrors no remote cell,
+                # nothing reads it, and every padding face scatters into it.
+                filled = self.halo.fill(owned_rows, plan, _DEVICE_AXIS)
+                null_row = jnp.zeros((1, *filled.shape[1:]), filled.dtype)
+                return jnp.concatenate([filled, null_row])
+
+            local_field = fill_local(owned)
+            # A ghost cell's reconstructed gradient is wrong (its stencil is incomplete locally), so
+            # overwrite the ghost rows with the value each ghost's owning partition computed — the
+            # same one-layer exchange, now carrying a per-cell vector. Owner-cell gradients (all a
+            # ghost gradient could corrupt is a partition-boundary face's non-orthogonal correction)
+            # are untouched, so the reconstruction and boundary values stay serial-exact.
+            hook = (
+                (lambda gradient: fill_local(gradient[:n_owned_max])) if exchange_gradient else None
+            )
+            residual = assembler.residual(local_field, gradient_hook=hook)
+            return residual[:n_owned_max].reshape(1, n_owned_max)
 
         sharded = jax.shard_map(
             per_device,
@@ -221,6 +249,13 @@ def build_distributed_residual(
         )
     stacked = jax.tree.map(lambda *xs: jnp.stack(xs), *assemblers)
     halo = halo or AllToAllHaloExchange()
+    # Exchange ghost gradients only when a gradient is actually reconstructed; the schemes are the
+    # same on every partition, so one assembler settles it.
+    exchange_gradient = assemblers[0].gradient_scheme is not None
     return DistributedResidual(
-        layout=layout, assemblers=stacked, halo=halo, halo_plan=halo.plan(layout)
+        layout=layout,
+        assemblers=stacked,
+        halo=halo,
+        halo_plan=halo.plan(layout),
+        exchange_gradient=exchange_gradient,
     )
