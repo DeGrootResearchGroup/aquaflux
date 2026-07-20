@@ -192,11 +192,24 @@ Engineering Principles.
     preconditioner is an approximate, `stop_gradient`-ed inverse that changes only Krylov convergence,
     never the solution or adjoint (contrast the *residual*, whose Jacobian is AD-assembled). This is the
     robust production path (large iterative solve); `preconditioner=None` (a direct or small solve) needs
-    none of it. Pinned by `test_mean_velocity.py`: with an exact `M` the bordered preconditioner is
-    exactly `J_aug⁻¹` (and AD's border matches the hand-built `a`/`c`), and the block-preconditioned
-    GMRES augmented solve lands on the direct solve's answer.
+    none of it. **The bordered preconditioner is built once in the builder from a concrete `reference`**
+    (required whenever `preconditioner` is given), **not** inside the jitted solve from its traced
+    `momentum` argument — a tracer captured into the (non-differentiated) preconditioner breaks `jax.grad`
+    ("no constant handler" / closed-over-value). Pinned by `test_mean_velocity.py`: with an exact `M` the
+    bordered preconditioner is exactly `J_aug⁻¹` (and AD's border matches the hand-built `a`/`c`), and the
+    block-preconditioned GMRES augmented solve lands on the direct solve's answer.
+  - **The solve is reverse-differentiable in `momentum` (#127).** The assembler is threaded as the Newton
+    **`theta`** (not captured in the residual closure), so the IFT adjoint returns its cotangent —
+    `jax.grad` of an objective through the solve gives e.g. `d/dμ` (verified vs finite differences and the
+    analytic `dβ/dμ = 12U_b/H²` on the laminar channel). A captured assembler instead raises a `custom_vjp`
+    closed-over-value error — the reason `theta` threading is load-bearing, not cosmetic. The **adjoint**
+    transpose solve is preconditioned by the *same* bordered preconditioner **transposed**, which the
+    generic adjoint machinery (`solve/implicit.py::_adjoint_preconditioner`) forms with `jax.linear_transpose`
+    (`M_aug` is linear ⇒ `M_augᵀ ≈ J_augᵀ⁻¹` exactly) — no hand-written transpose needed. Pinned: the
+    preconditioned gradient equals the unpreconditioned (direct) one to ~1e-9 (a preconditioner never
+    changes the sensitivity, only the adjoint Krylov iteration count).
   Pinned by `tests/unit/test_mean_velocity.py` (constraint met to machine precision; analytic β
-  recovered; initial-force-independent; the preconditioner tests above).
+  recovered; initial-force-independent; the preconditioner and gradient tests above).
   - **The periodic seam is NOT a preconditioner problem — do not go looking there again.** A
     `reused_flow_solve` on a periodic mesh was suspected of a block-SIMPLE defect "across the seam";
     it was measured and the seam is clean. The offset is absorbed one layer down (`interpolation_factor`

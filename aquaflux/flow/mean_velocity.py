@@ -24,7 +24,11 @@ aspect ratio: it measured ``U_bulk`` at a fixed ``beta``, which spiked before th
 collapsing the near-wall ``k`` onto its floor).
 
 Being the production Newton solve, it is **convergence-gated** (stops on the residual tolerance) and
-**reverse-differentiable** through the implicit-function-theorem adjoint at the converged root.
+**reverse-differentiable** through the implicit-function-theorem adjoint at the converged root. The
+assembler is threaded as the Newton solve's differentiable parameter (not captured in the residual
+closure), so ``jax.grad`` of an objective through the solve returns its cotangent -- e.g. the
+sensitivity to viscosity; a captured assembler would instead raise a ``custom_vjp`` closed-over-value
+error.
 
 **Preconditioning the augmented system (constraint preconditioning).** ``beta`` is a Lagrange
 multiplier, not a function of ``w``, so -- unlike a nested gradient sub-solve -- it cannot be absorbed
@@ -43,7 +47,14 @@ augmented solve converges in one step); with the frozen block AMG the augmented 
 flow block's mesh-independence. Hand-building ``a`` and ``c`` here is legitimate: a preconditioner is an
 approximate inverse, ``stop_gradient``-ed, that changes only Krylov convergence, never the solution or
 its adjoint. A direct or unpreconditioned solve (the small nx=4 channels) passes ``preconditioner=None``
-and needs none of this.
+and needs none of this. The **adjoint** transpose solve at the converged root is preconditioned by the
+*same* bordered preconditioner **transposed** -- the generic adjoint machinery forms it with
+:func:`jax.linear_transpose` (``M_aug`` is linear, so ``M_aug^T ~ J_aug^{-T}`` exactly), so the reverse
+pass is mesh-independent too with no extra code; the gradient is identical to the unpreconditioned
+adjoint's (a preconditioner never changes the sensitivity). The bordered preconditioner is built once,
+in the builder, from a concrete ``reference`` -- **not** inside the jitted solve from its traced
+``momentum`` argument, which would leave a tracer in the (non-differentiated) preconditioner and break
+``jax.grad``.
 """
 
 from __future__ import annotations
@@ -138,6 +149,7 @@ def bulk_velocity_flow_solve(
     max_steps: int = 20,
     solver: lx.AbstractLinearSolver | None = None,
     preconditioner: _Preconditioner | None = None,
+    reference: MomentumContinuity | None = None,
 ) -> _ConstrainedSolve:
     """Build a ``solve(momentum, state) -> (momentum, state)`` that holds the bulk velocity at ``target``.
 
@@ -147,6 +159,13 @@ def bulk_velocity_flow_solve(
     :class:`~aquaflux.solve.ImplicitNewtonSolver` (see the module docstring). The initial ``beta`` is
     read from ``momentum.body_force[flow_direction]``, and the returned ``momentum`` carries the
     converged ``beta`` (via :func:`equinox.tree_at`), so a segregated outer loop can thread it forward.
+
+    The assembler is threaded as the Newton solve's differentiable parameter, so the solve is
+    **reverse-differentiable in** ``momentum`` (e.g. its viscosity) through the implicit-function-theorem
+    adjoint -- one transpose solve at the converged root, preconditioned (when ``preconditioner`` is
+    given) by the transpose of the bordered preconditioner, which the adjoint machinery forms
+    automatically with :func:`jax.linear_transpose`. Build the solve **outside** ``jax.grad`` (the
+    preconditioner and its reference must be concrete) and differentiate a call to it.
 
     Parameters
     ----------
@@ -167,6 +186,11 @@ def bulk_velocity_flow_solve(
         it is wrapped by :func:`_bordered_preconditioner` into a constraint preconditioner for the
         augmented Krylov solve -- the mesh-independent path for a large iterative solve. ``None`` solves
         unpreconditioned (a direct or small solve needs nothing).
+    reference : MomentumContinuity or None
+        Required when ``preconditioner`` is given: the concrete assembler whose geometry sets the
+        border row/column of the constraint preconditioner. It is built **once here** (not inside the
+        jitted, potentially traced solve), so the frozen preconditioner carries no tracer and the
+        differentiated solve stays clean.
 
     Returns
     -------
@@ -174,24 +198,33 @@ def bulk_velocity_flow_solve(
         ``solve(momentum, state) -> (momentum, state)``: the flow state meeting the constraint and the
         ``momentum`` carrying the converged body force.
     """
+    augmented_preconditioner = None
+    if preconditioner is not None:
+        if reference is None:
+            raise ValueError(
+                "bulk_velocity_flow_solve: a preconditioner requires a concrete `reference` assembler "
+                "for the constraint preconditioner's border geometry."
+            )
+        force, average = _constraint_vectors(reference, flow_direction)
+        augmented_preconditioner = _bordered_preconditioner(preconditioner, force, average)
 
     @eqx.filter_jit
     def solve(
         momentum: MomentumContinuity, state: jnp.ndarray
     ) -> tuple[MomentumContinuity, jnp.ndarray]:
-        volume = momentum.geometry.cell.volume
-
-        def augmented_residual(augmented: jnp.ndarray, _theta: object) -> jnp.ndarray:
+        # The assembler is threaded as the Newton solve's differentiable parameter ``theta`` (not
+        # captured), so the implicit-function-theorem adjoint returns its cotangent -- the constrained
+        # solve is reverse-differentiable in ``momentum`` (e.g. its viscosity). Everything the residual
+        # reads from the assembler therefore comes from ``theta``, including the cell volumes; a value
+        # captured from the outer ``momentum`` here would be a closed-over ``custom_vjp`` input and
+        # differentiating it raises.
+        def augmented_residual(augmented: jnp.ndarray, theta: MomentumContinuity) -> jnp.ndarray:
             flow, beta = augmented[:-1], augmented[-1]
-            forced = _with_body_force(momentum, flow_direction, beta)
+            forced = _with_body_force(theta, flow_direction, beta)
             velocity, _ = forced.unpack(flow)
+            volume = theta.geometry.cell.volume
             bulk = jnp.sum(velocity[:, flow_direction] * volume) / jnp.sum(volume)
             return jnp.append(forced.residual(flow), bulk - target)
-
-        augmented_preconditioner = None
-        if preconditioner is not None:
-            force, average = _constraint_vectors(momentum, flow_direction)
-            augmented_preconditioner = _bordered_preconditioner(preconditioner, force, average)
 
         augmented0 = jnp.append(state, momentum.body_force[flow_direction])
         newton = ImplicitNewtonSolver(
@@ -199,7 +232,7 @@ def bulk_velocity_flow_solve(
             solver=solver,
             forward_step=DampedNewtonStep(preconditioner=augmented_preconditioner),
         )
-        augmented = newton.solve(augmented_residual, augmented0, None)
+        augmented = newton.solve(augmented_residual, augmented0, momentum)
         flow, beta = augmented[:-1], augmented[-1]
         return _with_body_force(momentum, flow_direction, beta), flow
 
