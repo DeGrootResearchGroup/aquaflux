@@ -20,9 +20,8 @@ is `u_tau h / nu`. Molecular wall stress `tau_w = nu (du/dy)|_wall` from the nea
 
 | Re_tau | u_tau | u_tau (Dean) | first y+ | realized kappa (plateau) |
 |---|---|---|---|---|
-| 518 | 0.0518 | 0.0554 | 0.38 | 0.333 |
-| 1053 | 0.0468 | 0.0501 | 0.52 | 0.358 |
-| 4822 | 0.0402 | 0.0406 | 0.43 | 0.381 |
+| 538 | 0.0538 | 0.0554 | 0.39 | 0.340 |
+| 1093 | 0.0486 | 0.0501 | 0.54 | 0.361 |
 
 See `figures/law_of_the_wall.png`.
 
@@ -55,3 +54,5 @@ gap -- is best settled by a **direct same-model, same-mesh comparison against Op
 (the pattern used in `validation/skewed_cavity`: solve an OpenFOAM channel tutorial, read its
 mesh into aquaflux via `read_openfoam`, and compare the profiles cell-for-cell). That
 comparison is the next step.
+
+- **Re_b = 240000 (ny = 224)**: the segregated solve did not converge (`EquinoxRuntimeError`) and is omitted above. Tracked in issue #99.
