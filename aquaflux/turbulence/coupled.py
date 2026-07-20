@@ -34,6 +34,16 @@ import jax
 import jax.numpy as jnp
 
 from aquaflux.flow import BlockPreconditioner
+
+# The mass-flow-constraint primitives (a body force that is a solve unknown enforcing a bulk velocity)
+# are shared with the flow-block solve `aquaflux.flow.bulk_velocity_flow_solve`: the border column/row,
+# the Schur (constraint) preconditioner, and the body-force setter. Reused here rather than re-deriving
+# the Schur elimination, which one careful place keeps consistent.
+from aquaflux.flow.mean_velocity import (
+    _bordered_preconditioner,
+    _constraint_vectors,
+    _with_body_force,
+)
 from aquaflux.solve import (
     DivergenceGuard,
     ImplicitNewtonSolver,
@@ -315,6 +325,30 @@ def coupled_continuation(
     PseudoTransientStep
         The forward step to hand :class:`~aquaflux.solve.ImplicitNewtonSolver` as ``forward_step``.
     """
+    policy = _coupled_shift_policy(coupled, reference_state, method, **preconditioner_kwargs)
+    return PseudoTransientStep(
+        policy,
+        beta0=beta0,
+        exponent=exponent,
+        max_escalations=max_escalations,
+        escalation_factor=escalation_factor,
+        acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        adjoint_preconditioner_factory=policy.adjoint_factory(),
+    )
+
+
+def _coupled_shift_policy(
+    coupled: CoupledRANS,
+    reference_state: jnp.ndarray,
+    method: str | None,
+    **preconditioner_kwargs: object,
+) -> CoupledShiftPolicy:
+    """Build the block-diagonal :class:`CoupledShiftPolicy` frozen at ``reference_state``.
+
+    The preconditioner-freezing half of :func:`coupled_continuation`, split out so the mass-flow
+    constraint (:func:`mass_flow_coupled_continuation`) can border the *same* policy rather than
+    re-derive it.
+    """
     flow_ref, k_ref, omega_ref = coupled.layout.unpack(reference_state)
     grad_velocity = coupled.momentum.velocity_gradient(flow_ref)
     closure = coupled.turbulence.closure_fields(grad_velocity, k_ref, omega_ref)
@@ -327,22 +361,13 @@ def coupled_continuation(
         k_amg = coupled.turbulence.k_preconditioner(mdot, closure, k_ref, method=method)
         omega_amg = coupled.turbulence.omega_preconditioner(mdot, closure, omega_ref, method=method)
 
-    policy = CoupledShiftPolicy(
+    return CoupledShiftPolicy(
         coupled.layout,
         block,
         coupled.turbulence.k_shift_policy(mdot, closure, k_ref).shift_diagonal,
         coupled.turbulence.omega_shift_policy(mdot, closure, omega_ref).shift_diagonal,
         k_amg,
         omega_amg,
-    )
-    return PseudoTransientStep(
-        policy,
-        beta0=beta0,
-        exponent=exponent,
-        max_escalations=max_escalations,
-        escalation_factor=escalation_factor,
-        acceptance=DivergenceGuard(divergence_cap=divergence_cap),
-        adjoint_preconditioner_factory=policy.adjoint_factory(),
     )
 
 
@@ -416,3 +441,173 @@ def solve_coupled(
     )
     solved = solver.solve(lambda s, c: c.residual(s), state, coupled)
     return coupled.layout.unpack(solved)
+
+
+class _MassFlowBorderedPolicy(eqx.Module):
+    """A coupled shift policy bordered with the mass-flow constraint (``beta`` appended to the state).
+
+    Delegates to the inner :class:`CoupledShiftPolicy` on the coupled sub-state and borders both halves
+    of the pseudo-transient step for the augmented ``[flow..., k, omega, beta]`` system: the shift
+    diagonal gains a **zero** for ``beta`` (the linear constraint row needs no pseudo-time damping), and
+    the block-diagonal preconditioner is wrapped by the constraint (Schur) preconditioner
+    (:func:`~aquaflux.flow.mean_velocity._bordered_preconditioner`), which eliminates the scalar ``beta``
+    with the border column/row ``(a, c)``. The shift only adds positive diagonal to the coupled block, so
+    the border ``(a, c)`` -- the ``beta`` column and the ``<U>`` row, both shift-independent -- is reused
+    unchanged.
+
+    Attributes
+    ----------
+    inner : CoupledShiftPolicy
+        The block-diagonal coupled policy for the ``[flow..., k, omega]`` sub-state.
+    force, average : jnp.ndarray
+        The border column ``a = dR_coupled/dbeta`` and row ``c = d<U_dir>/dstate`` in the coupled
+        layout, shape ``((dim + 3) n_cells,)`` (:func:`_coupled_constraint_vectors`).
+    """
+
+    inner: CoupledShiftPolicy
+    force: jnp.ndarray
+    average: jnp.ndarray
+
+    def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
+        """The augmented block-diagonal shift and the bordered preconditioner at ``phi``."""
+        inner_term = self.inner.shift_term(phi[:-1])
+        diagonal = jnp.append(inner_term.diagonal, 0.0)
+
+        def make_preconditioner(relaxation: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
+            coupled_m = inner_term.make_preconditioner(relaxation)
+            return _bordered_preconditioner(lambda _w: coupled_m, self.force, self.average)(phi)
+
+        return ShiftTerm(diagonal, make_preconditioner)
+
+    def adjoint_factory(self) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
+        """The ``state -> M`` factory for the adjoint transpose solve (the composition at ``beta = 0``)."""
+        return lambda state: self.shift_term(state).make_preconditioner(jnp.asarray(0.0))
+
+
+def _coupled_constraint_vectors(
+    coupled: CoupledRANS, flow_direction: int
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """The mass-flow border column/row ``(a, c)`` in the coupled ``[flow..., k, omega]`` layout.
+
+    ``beta`` enters only the momentum block (as the body force), and ``<U>`` reads only the velocity, so
+    both vectors are the flow-block border (:func:`~aquaflux.flow.mean_velocity._constraint_vectors`)
+    packed with zero ``k`` / ``omega`` blocks.
+    """
+    force_flow, average_flow = _constraint_vectors(coupled.momentum, flow_direction)
+    zero = jnp.zeros(coupled.momentum.mesh.n_cells)
+    return (
+        coupled.layout.pack(force_flow, zero, zero),
+        coupled.layout.pack(average_flow, zero, zero),
+    )
+
+
+def mass_flow_coupled_continuation(
+    coupled: CoupledRANS,
+    reference_state: jnp.ndarray,
+    *,
+    flow_direction: int = 0,
+    method: str | None = "twolevel",
+    beta0: float = 2.0,
+    exponent: float = 1.0,
+    max_escalations: int = 6,
+    escalation_factor: float = 2.0,
+    divergence_cap: float = 10.0,
+    **preconditioner_kwargs: object,
+) -> PseudoTransientStep:
+    """The pseudo-transient continuation step for the **mass-flow-constrained** coupled Newton solve.
+
+    The globalization of :func:`coupled_continuation`, with its :class:`CoupledShiftPolicy` bordered by
+    the mass-flow constraint (:class:`_MassFlowBorderedPolicy`), so it drives the augmented
+    ``[flow..., k, omega, beta]`` system where ``beta`` is a Lagrange multiplier for ``<U_dir> =
+    target``. Parameters are :func:`coupled_continuation`'s; ``flow_direction`` selects the constrained
+    velocity component.
+    """
+    policy = _coupled_shift_policy(coupled, reference_state, method, **preconditioner_kwargs)
+    force, average = _coupled_constraint_vectors(coupled, flow_direction)
+    bordered = _MassFlowBorderedPolicy(policy, force, average)
+    return PseudoTransientStep(
+        bordered,
+        beta0=beta0,
+        exponent=exponent,
+        max_escalations=max_escalations,
+        escalation_factor=escalation_factor,
+        acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        adjoint_preconditioner_factory=bordered.adjoint_factory(),
+    )
+
+
+def solve_coupled_mass_flow(
+    coupled: CoupledRANS,
+    target: float,
+    *,
+    flow_direction: int = 0,
+    flow: jnp.ndarray | None = None,
+    k: jnp.ndarray | None = None,
+    omega: jnp.ndarray | None = None,
+    continuation: PseudoTransientStep | None = None,
+    reference_state: jnp.ndarray | None = None,
+    method: str | None = "twolevel",
+    max_steps: int = 60,
+    rtol: float = 1e-10,
+    atol: float = 1e-12,
+    **continuation_kwargs: object,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Solve the coupled RANS system holding the bulk velocity at ``target``, in one monolithic Newton.
+
+    The mass-flow analogue of :func:`solve_coupled`: the body force ``beta`` (along ``flow_direction``)
+    is a **coupled unknown** appended to the state, and the coupled residual is bordered with the
+    constraint row ``<U_dir> - target`` -- one honest augmented residual
+
+        R_aug([flow, k, omega, beta]) = [ R_coupled(flow, k, omega; beta) ; <U_dir>(flow) - target ],
+
+    driven by a single :class:`~aquaflux.solve.ImplicitNewtonSolver` globalized by
+    :func:`mass_flow_coupled_continuation`. ``<U> = target`` therefore holds at the converged root **by
+    construction**, and (the point of putting the constraint *in* the coupled residual) the coupled
+    implicit-function-theorem adjoint carries it: ``jax.grad`` through the converged constrained solve is
+    the exact sensitivity of the whole turbulent flow at fixed bulk velocity. The forward solve is
+    monolithic here, but the same bordered residual is what a *segregated* forward loop would need its
+    coupled adjoint to transpose (segregated forward, coupled adjoint).
+
+    Parameters mirror :func:`solve_coupled` (``coupled`` is the differentiable parameter pytree; leave
+    ``flow``/``k``/``omega`` ``None`` to self-start from the hybrid IC; build ``continuation`` outside
+    ``jax.grad`` when differentiating), plus:
+
+    target : float
+        The bulk (volume-averaged) velocity component to hold along ``flow_direction``.
+    flow_direction : int
+        The streamwise axis the bulk velocity is measured and the body force applied along.
+
+    Returns
+    -------
+    tuple of jnp.ndarray
+        The converged ``(flow, k, omega, beta)`` -- the fields and the multiplier that hits ``target``.
+    """
+    if flow is None or k is None or omega is None:
+        flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
+    state = coupled.pack_state(flow, k, omega)
+    augmented0 = jnp.append(state, coupled.momentum.body_force[flow_direction])
+
+    if continuation is None:
+        reference = state if reference_state is None else reference_state
+        continuation = mass_flow_coupled_continuation(
+            coupled, reference, flow_direction=flow_direction, method=method, **continuation_kwargs
+        )
+    solver = ImplicitNewtonSolver(
+        max_steps=max_steps, rtol=rtol, atol=atol, forward_step=continuation
+    )
+
+    def constrained_residual(augmented: jnp.ndarray, theta: CoupledRANS) -> jnp.ndarray:
+        # theta is the coupled assembler (the differentiable parameter); beta overrides its body force.
+        coupled_state, beta = augmented[:-1], augmented[-1]
+        forced_momentum = _with_body_force(theta.momentum, flow_direction, beta)
+        forced = eqx.tree_at(lambda c: c.momentum, theta, forced_momentum)
+        r_coupled = forced.residual(coupled_state)
+        flow_state, _, _ = theta.layout.unpack(coupled_state)
+        velocity, _ = theta.momentum.unpack(flow_state)
+        volume = theta.momentum.geometry.cell.volume
+        bulk = jnp.sum(velocity[:, flow_direction] * volume) / jnp.sum(volume)
+        return jnp.append(r_coupled, bulk - target)
+
+    solved = solver.solve(constrained_residual, augmented0, coupled)
+    flow_s, k_s, omega_s = coupled.layout.unpack(solved[:-1])
+    return flow_s, k_s, omega_s, solved[-1]

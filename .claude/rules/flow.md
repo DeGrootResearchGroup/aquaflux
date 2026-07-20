@@ -210,6 +210,12 @@ Engineering Principles.
     changes the sensitivity, only the adjoint Krylov iteration count).
   Pinned by `tests/unit/test_mean_velocity.py` (constraint met to machine precision; analytic β
   recovered; initial-force-independent; the preconditioner and gradient tests above).
+  - **The same primitives border the monolithic coupled RANS solve (#128).** `_constraint_vectors`,
+    `_bordered_preconditioner`, and `_with_body_force` are imported by
+    `turbulence/coupled.py::solve_coupled_mass_flow` to append `β` to the *coupled* `[flow…, k, ω]`
+    state and Schur-eliminate it in the coupled preconditioner — so the bulk-velocity constraint is
+    enforced by the same one place whether the forward solve is segregated (this flow-block solve) or
+    monolithic. Do not re-derive the border there.
   - **The periodic seam is NOT a preconditioner problem — do not go looking there again.** A
     `reused_flow_solve` on a periodic mesh was suspected of a block-SIMPLE defect "across the seam";
     it was measured and the seam is clean. The offset is absorbed one layer down (`interpolation_factor`
