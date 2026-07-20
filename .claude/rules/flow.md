@@ -158,6 +158,20 @@ Engineering Principles.
   `convection_diffusion_operator(owner, nb, coefficient, n, *, flux=None, boundary_diagonal=None)` and
   regularize the closed-domain pin with `decouple_dof`, then hand the **assembled matrix** to the
   coarsening builders. Do not re-assemble a stencil inside `block_preconditioner.py`.
+- **The symmetric rescaling and the per-component lift are single-homed (binding — Principle 2).** Every
+  block here freezes a multigrid hierarchy at a reference operator and tracks the current one by the
+  symmetric congruence `A_cur⁻¹ ≈ D⁻¹ A_ref⁻¹ D⁻¹`, `D = sqrt(diag_cur/diag_ref)` — the most subtle
+  numerical invariant in the file. It lives **once**, in `_symmetric_rescaled(inner_solve, diag_ref,
+  diag_cur)`; the momentum block's per-component lift lives once in `_per_component(scalar_solve, dim)`.
+  `SmoothedAmgSchur.apply` composes the first; both velocity blocks inherit a **single** `apply`
+  (`_per_component` ∘ `_symmetric_rescaled`) from the intermediate base `_RescaledAmgVelocity`, which
+  owns the shared `hierarchy` / `dim` / `v_cycles` fields and defers to an abstract `_inner_solve` — the
+  only thing the viscous and convection-aware blocks actually differ in (besides how they *build* the
+  hierarchy). A new AMG-based velocity block subclasses `_RescaledAmgVelocity` and supplies `build` +
+  `_inner_solve`; do **not** re-write the rescale sandwich or the component loop in a strategy's `apply`.
+  The invariant is pinned directly (rescaled dense solve == exact `A_cur⁻¹` for a diagonal congruence)
+  in `tests/unit/test_preconditioner.py`, independent of any multigrid. (Was issue #51: the sandwich was
+  hand-written in three `apply` methods and the component loop byte-identical in two.)
 - **Every strategy builds from a narrow geometry bundle, not the assembler (binding — Principle 3).**
   Both strategy families take a frozen geometry seam rather than reaching into the full
   `MomentumContinuity`: the Schur family holds a `_SchurGeometry` (`face_cells`, `mesh_geometry`,

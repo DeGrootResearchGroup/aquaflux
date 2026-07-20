@@ -25,6 +25,8 @@ from aquaflux.flow.block_preconditioner import (
     SmoothedAmgConvectionVelocity,
     SmoothedAmgVelocity,
     _characteristic_reference_state,
+    _per_component,
+    _symmetric_rescaled,
     _VelocityGeometry,
 )
 from aquaflux.flow.rhie_chow import momentum_diagonal
@@ -385,6 +387,50 @@ def test_damped_jacobi_converges_toward_solution() -> None:
         return float(jnp.linalg.norm(matvec(x) - rhs))
 
     assert residual_norm(40) < 0.3 * residual_norm(5)  # clearly decreasing with sweeps
+
+
+def test_symmetric_rescaling_is_exact_for_a_diagonal_congruence() -> None:
+    """The rescaling sandwich inverts ``A_cur`` exactly when ``A_cur = D A_ref D`` — the invariant it
+    is built on. Every multigrid block here freezes a hierarchy at ``A_ref`` and tracks the current
+    operator this way, so the property is pinned once against a dense operator whose exact inverse is
+    known, independent of any multigrid.
+    """
+    rng = np.random.default_rng(11)
+    n = 8
+    root = rng.standard_normal((n, n))
+    a_ref = jnp.asarray(root @ root.T + n * np.eye(n))  # SPD
+    scale = jnp.asarray(rng.uniform(0.2, 5.0, n))  # the per-cell drift D = diag(scale)
+    a_cur = scale[:, None] * a_ref * scale[None, :]
+
+    rescaled = _symmetric_rescaled(
+        lambda b: jnp.linalg.solve(a_ref, b), jnp.diag(a_ref), jnp.diag(a_cur)
+    )
+    b = jnp.asarray(rng.standard_normal(n))
+    assert np.allclose(rescaled(b), jnp.linalg.solve(a_cur, b))
+
+    # A zero drift (diag_cur == diag_ref) leaves the frozen solve untouched.
+    identity = _symmetric_rescaled(
+        lambda x: jnp.linalg.solve(a_ref, x), jnp.diag(a_ref), jnp.diag(a_ref)
+    )
+    assert np.allclose(identity(b), jnp.linalg.solve(a_ref, b))
+
+
+def test_per_component_applies_the_scalar_solve_to_each_column() -> None:
+    """The momentum block is block-diagonal across velocity components, so lifting a scalar solve to a
+    vector field is exactly the same solve per column — no cross-component mixing."""
+    rng = np.random.default_rng(12)
+    n, dim = 5, 3
+    weights = jnp.asarray(rng.uniform(1.0, 3.0, n))
+
+    def scalar_solve(b):
+        return weights * b
+
+    ru = jnp.asarray(rng.standard_normal((n, dim)))
+    du = _per_component(scalar_solve, dim)(ru)
+
+    assert du.shape == (n, dim)
+    for i in range(dim):
+        assert np.allclose(du[:, i], scalar_solve(ru[:, i]))
 
 
 def test_velocity_block_builds_from_a_narrow_geometry_seam() -> None:

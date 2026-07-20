@@ -50,6 +50,68 @@ if TYPE_CHECKING:
 
 _PressureSolve = Callable[[jnp.ndarray], jnp.ndarray]
 _VelocitySolve = Callable[[jnp.ndarray], jnp.ndarray]
+# A solve of one scalar field, shape ``(n_cells,) -> (n_cells,)`` — the shape the composition
+# helpers below are generic over (the two aliases above name the *role* the solve plays).
+_ScalarSolve = Callable[[jnp.ndarray], jnp.ndarray]
+
+
+def _symmetric_rescaled(
+    inner_solve: _ScalarSolve, diag_ref: jnp.ndarray, diag_cur: jnp.ndarray
+) -> _ScalarSolve:
+    """Track an operator's current diagonal with a solve frozen at a reference diagonal.
+
+    Every multigrid block here freezes its hierarchy at a reference operator ``A_ref`` and reuses it
+    across iterates, where the true operator ``A_cur`` has drifted in scale. Writing that drift as a
+    symmetric diagonal congruence ``A_cur ≈ D A_ref D`` with ``D = sqrt(diag_cur/diag_ref)`` gives
+    ``A_cur⁻¹ ≈ D⁻¹ A_ref⁻¹ D⁻¹`` — the "sandwich" this returns. It is **exact** for a uniform
+    rescale and diagonal-exact whenever ``diag_ref`` is the reference operator's own diagonal;
+    otherwise it captures the per-cell scale while leaving the frozen off-diagonal structure alone.
+
+    Symmetric (rather than a one-sided ``diag_cur/diag_ref``) so a symmetric-positive-definite block
+    stays symmetric-positive-definite, which the Krylov iteration the preconditioner feeds relies on.
+
+    Parameters
+    ----------
+    inner_solve : callable
+        The frozen solve ``b -> A_ref⁻¹ b``, shape ``(n_cells,) -> (n_cells,)``.
+    diag_ref : jnp.ndarray
+        Diagonal of the frozen reference operator, shape ``(n_cells,)``.
+    diag_cur : jnp.ndarray
+        Diagonal of the current operator, shape ``(n_cells,)``.
+
+    Returns
+    -------
+    callable
+        The rescaled solve ``b -> A_cur⁻¹ b``, shape ``(n_cells,) -> (n_cells,)``.
+    """
+    inv_scale = jnp.sqrt(diag_ref / diag_cur)
+    return lambda b: inv_scale * inner_solve(inv_scale * b)
+
+
+def _per_component(scalar_solve: _ScalarSolve, dim: int) -> _VelocitySolve:
+    """Lift a scalar-field solve to a vector field by applying it to each component.
+
+    The momentum block is block-diagonal across velocity components (the components couple only
+    through pressure, which the Schur block carries), so inverting it is the same scalar solve run
+    per component.
+
+    Parameters
+    ----------
+    scalar_solve : callable
+        The per-component solve, shape ``(n_cells,) -> (n_cells,)``.
+    dim : int
+        Number of spatial components.
+
+    Returns
+    -------
+    callable
+        The vector solve, shape ``(n_cells, dim) -> (n_cells, dim)``.
+    """
+
+    def solve(ru: jnp.ndarray) -> jnp.ndarray:
+        return jnp.stack([scalar_solve(ru[:, i]) for i in range(dim)], axis=1)
+
+    return solve
 
 
 class _SchurGeometry(eqx.Module):
@@ -236,10 +298,10 @@ class SmoothedAmgSchur(InnerSchurSolver):
         diag_cur = diag_cur + self.geometry.boundary_diagonal(a_p)
         if self.geometry.pressure_pin is not None:
             diag_cur = diag_cur.at[self.geometry.pressure_pin].set(1.0)
-        inv_scale = jnp.sqrt(self.hierarchy.levels[0].diagonal / diag_cur)
-        return lambda rp: (
-            inv_scale
-            * smoothed_multigrid_solve(self.hierarchy, inv_scale * rp, cycles=self.v_cycles)
+        return _symmetric_rescaled(
+            lambda rp: smoothed_multigrid_solve(self.hierarchy, rp, cycles=self.v_cycles),
+            self.hierarchy.levels[0].diagonal,
+            diag_cur,
         )
 
 
@@ -254,17 +316,41 @@ class VelocityBlockSolver(eqx.Module):
         """Return the velocity solve ``ru -> δu`` at momentum diagonal ``a_P``."""
 
 
-class SmoothedAmgVelocity(VelocityBlockSolver):
+class _RescaledAmgVelocity(VelocityBlockSolver):
+    """A velocity block that inverts a frozen AMG hierarchy, rescaled to the current ``a_P``.
+
+    Both concrete velocity blocks share the same per-iterate structure and differ only in the
+    operator their hierarchy is frozen at (viscous or convection-diffusion) and the V-cycle that
+    inverts it: hold the coarse-grid structure fixed, track the current momentum diagonal by the
+    symmetric rescaling :func:`_symmetric_rescaled`, and apply the result per velocity component
+    (:func:`_per_component`). That composition is :meth:`apply`, defined here once; a subclass
+    supplies its hierarchy and :meth:`_inner_solve`.
+    """
+
+    hierarchy: SmoothedHierarchy | AirHierarchy
+    dim: int = eqx.field(static=True)
+    v_cycles: int = eqx.field(static=True)
+
+    @abc.abstractmethod
+    def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
+        """One momentum-component solve against the frozen reference operator."""
+
+    def apply(self, a_p: jnp.ndarray) -> _VelocitySolve:
+        # Rescaling against the frozen hierarchy's own diagonal reproduces the current ``a_P`` on the
+        # diagonal exactly; the off-diagonal structure (the viscous stencil, or the frozen convection
+        # direction) stays as built at the reference.
+        return _per_component(
+            _symmetric_rescaled(self._inner_solve, self.hierarchy.levels[0].diagonal, a_p), self.dim
+        )
+
+
+class SmoothedAmgVelocity(_RescaledAmgVelocity):
     """Smoothed-aggregation AMG on the viscous momentum operator (mesh-independent), per component.
 
     The viscous momentum operator is a Dirichlet (no-slip) Laplacian — SPD-nonsingular (boundary faces
     add stiffness to the diagonal, no pin) — so a single AMG hierarchy on a unit-viscosity reference,
     rescaled to the current ``a_P``, replaces the Jacobi-quality diagonal solve.
     """
-
-    hierarchy: SmoothedHierarchy
-    dim: int = eqx.field(static=True)
-    v_cycles: int = eqx.field(static=True)
 
     @classmethod
     def build(
@@ -301,23 +387,12 @@ class SmoothedAmgVelocity(VelocityBlockSolver):
         hierarchy = build_smoothed_hierarchy(a)
         return cls(hierarchy, geometry.dim, v_cycles)
 
-    def apply(self, a_p: jnp.ndarray) -> _VelocitySolve:
-        inv_scale = jnp.sqrt(self.hierarchy.levels[0].diagonal / a_p)
-
-        def solve(ru: jnp.ndarray) -> jnp.ndarray:
-            columns = [
-                inv_scale
-                * smoothed_multigrid_solve(
-                    self.hierarchy, inv_scale * ru[:, i], cycles=self.v_cycles
-                )
-                for i in range(self.dim)
-            ]
-            return jnp.stack(columns, axis=1)
-
-        return solve
+    def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
+        """One momentum-component inner solve: the smoothed-aggregation V-cycle."""
+        return smoothed_multigrid_solve(self.hierarchy, b, cycles=self.v_cycles)
 
 
-class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
+class SmoothedAmgConvectionVelocity(_RescaledAmgVelocity):
     """Convection-aware AMG on the frozen convection-diffusion momentum operator, per component.
 
     :class:`SmoothedAmgVelocity` builds its hierarchy on the *viscous* (symmetric) momentum operator,
@@ -339,10 +414,7 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
       the way down and stays Peclet-robust and mesh-independent, inverted by an FC-Jacobi V-cycle.
     """
 
-    hierarchy: SmoothedHierarchy | AirHierarchy
     method: str = eqx.field(static=True)
-    dim: int = eqx.field(static=True)
-    v_cycles: int = eqx.field(static=True)
     sweeps: int = eqx.field(static=True)
     omega: float = eqx.field(static=True)
 
@@ -401,7 +473,7 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
             hierarchy = build_convection_hierarchy(a)
         else:
             raise ValueError(f"unknown convection method {method!r}; use 'twolevel' or 'air'")
-        return cls(hierarchy, method, geometry.dim, v_cycles, sweeps, omega)
+        return cls(hierarchy, geometry.dim, v_cycles, method, sweeps, omega)
 
     def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
         """One momentum-component inner solve: the reduction-based (lAIR) or two-level V-cycle."""
@@ -410,18 +482,6 @@ class SmoothedAmgConvectionVelocity(VelocityBlockSolver):
         return convection_multigrid_solve(
             self.hierarchy, b, cycles=self.v_cycles, sweeps=self.sweeps, omega=self.omega
         )
-
-    def apply(self, a_p: jnp.ndarray) -> _VelocitySolve:
-        # Rescale the frozen reference operator's solve to the current a_P: A_cur ≈ D A_ref D with
-        # D = sqrt(a_P / diag_ref), so A_cur⁻¹ ≈ D⁻¹ A_ref⁻¹ D⁻¹ (diagonal-exact, since diag_ref = a_P
-        # at the reference). The convection off-diagonal structure stays frozen at the reference.
-        inv_scale = jnp.sqrt(self.hierarchy.levels[0].diagonal / a_p)
-
-        def solve(ru: jnp.ndarray) -> jnp.ndarray:
-            columns = [inv_scale * self._inner_solve(inv_scale * ru[:, i]) for i in range(self.dim)]
-            return jnp.stack(columns, axis=1)
-
-        return solve
 
 
 def _characteristic_reference_state(assembler: MomentumContinuity) -> jnp.ndarray:
