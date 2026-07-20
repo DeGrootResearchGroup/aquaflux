@@ -2,7 +2,8 @@
 
 A good initial condition is what lets the monolithic coupled Newton solve (and, less critically, the
 segregated loop) start from nothing. The two building blocks here are both **single linear SPD
-solves**, so they cost a fraction of one nonlinear iteration:
+solves**, multigrid-preconditioned so they stay robust on the high-aspect-ratio cells of a
+wall-resolved mesh, so they cost a fraction of one nonlinear iteration:
 
 - :func:`laplace_field` solves ``div(Gamma grad phi) = 0`` for the boundary-value harmonic field --
   the smooth interpolant of a scalar's boundary data into the interior.
@@ -15,15 +16,25 @@ solves**, so they cost a fraction of one nonlinear iteration:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 from aquaflux.boundary import BoundaryConditions, Dirichlet, Neumann, ZeroGradient
 from aquaflux.discretization import DiffusionFlux, FixedValueCells, ResidualAssembler
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import NewtonSolver
+from aquaflux.solve import (
+    NewtonSolver,
+    build_smoothed_hierarchy,
+    convection_diffusion_operator,
+    decouple_dof,
+    smoothed_multigrid_solve,
+)
+from aquaflux.vectors import dot
 
 from .boundary import PressureOutlet, VelocityInlet
 from .scales import body_force_velocity
@@ -33,6 +44,58 @@ if TYPE_CHECKING:
     from aquaflux.schemes import GradientScheme
 
     from .momentum import MomentumContinuity
+
+
+def _laplace_preconditioner(
+    mesh: Mesh,
+    geometry: MeshGeometry,
+    residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
+    diffusivity: float,
+    fixed_cells: jnp.ndarray | None,
+) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
+    """A frozen smoothed-aggregation V-cycle preconditioner for the Laplace operator.
+
+    The Laplacian of a graded, wall-resolved mesh is severely ill-conditioned: its condition number
+    grows like the square of the near-wall cell aspect ratio, so an unpreconditioned Krylov solve
+    stagnates and returns a non-finite iterate once the aspect ratio reaches a few hundred -- exactly
+    the meshes a wall-resolved turbulent case needs. Diagonal scaling is not enough (it removes only
+    one factor of the aspect ratio); the smooth error modes need a coarse space.
+
+    The operator is the symmetric graph Laplacian of the diffusion face coefficients
+    ``Gamma_face A / (d . n)``, plus the per-cell boundary stiffness the interior faces do not carry.
+    That boundary diagonal comes from a single Jacobian-vector product ``J . 1``: a conservative
+    pure-diffusion interior stencil has zero row sums, so whatever ``J . 1`` leaves on a row is the
+    Dirichlet boundary-face stiffness (a ``ZeroGradient`` or ``Neumann`` patch contributes nothing,
+    which is what makes an all-Neumann Laplacian singular and why a datum is required).
+    """
+    face_cells = mesh.face_cells
+    owner_e, nb_e, interior_faces = face_cells.interior_edges()
+    n = mesh.n_cells
+
+    d = (
+        face_cells.neighbour_centroid(geometry.cell.centroid)
+        - geometry.cell.centroid[face_cells.owner]
+    )
+    coefficient = diffusivity * geometry.face.area / dot(d, geometry.face.normal)
+    coefficient_int = np.asarray(jax.lax.stop_gradient(coefficient))[interior_faces]
+
+    zero = jnp.zeros(n)
+    _, j_dot_one = jax.jvp(residual_fn, (zero,), (jnp.ones_like(zero),))
+    # Clamp non-negative to keep an M-matrix: a fixated row contributes its own unit diagonal (it is
+    # decoupled below), and any negative entry would make the V-cycle diverge.
+    boundary_diagonal = np.maximum(np.asarray(jax.lax.stop_gradient(j_dot_one)), 0.0)
+
+    a = convection_diffusion_operator(
+        owner_e, nb_e, coefficient_int, n, boundary_diagonal=boundary_diagonal
+    )
+    for cell in np.atleast_1d(np.asarray(fixed_cells)) if fixed_cells is not None else ():
+        a = decouple_dof(a, int(cell))
+    hierarchy = build_smoothed_hierarchy(a)
+
+    def factory(_: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
+        return lambda residual: smoothed_multigrid_solve(hierarchy, residual)
+
+    return factory
 
 
 def laplace_field(
@@ -47,8 +110,11 @@ def laplace_field(
 ) -> tuple[jnp.ndarray, ResidualAssembler]:
     """Solve the scalar Laplace equation ``div(Gamma grad phi) = 0`` for the given boundary data.
 
-    A pure-diffusion residual is linear, so a single Newton step is exact. Returns the solved field
-    **and** the assembler (so a caller can reconstruct ``grad phi`` with the same boundary closures).
+    A pure-diffusion residual is linear, so a single Newton step is exact. The step is preconditioned
+    by a smoothed-aggregation V-cycle (:func:`_laplace_preconditioner`), without which the solve
+    stagnates to a non-finite iterate on the high-aspect-ratio cells of a wall-resolved mesh. Returns
+    the solved field **and** the assembler (so a caller can reconstruct ``grad phi`` with the same
+    boundary closures).
 
     Parameters
     ----------
@@ -86,7 +152,10 @@ def laplace_field(
         def residual(phi: jnp.ndarray) -> jnp.ndarray:
             return fixation.apply(assembler.residual(phi), phi)
 
-    field = NewtonSolver(iterations=1).solve(residual, jnp.zeros(mesh.n_cells))
+    preconditioner = _laplace_preconditioner(mesh, geometry, residual, diffusivity, fixed_cells)
+    field = NewtonSolver(iterations=1, preconditioner=preconditioner).solve(
+        residual, jnp.zeros(mesh.n_cells)
+    )
     return field, assembler
 
 

@@ -23,7 +23,7 @@ from aquaflux.flow import (
     laplace_field,
     potential_flow,
 )
-from aquaflux.mesh import structured_grid_2d
+from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.turbulence import (
@@ -109,6 +109,44 @@ def test_potential_flow_is_zero_on_a_closed_domain() -> None:
     )
     velocity, _ = momentum.unpack(potential_flow(momentum))
     assert float(jnp.max(jnp.abs(velocity))) < 1e-8
+
+
+@pytest.mark.parametrize("growth", [1.8, 2.2])
+def test_potential_flow_survives_a_wall_resolved_aspect_ratio(growth: float) -> None:
+    # A wall-resolved mesh grades to a near-wall cell of aspect ratio 1e3-1e5, where the Laplacian's
+    # condition number (~aspect ratio squared) stagnates an unpreconditioned Krylov solve into a
+    # non-finite iterate. The multigrid preconditioner is what keeps the initializer usable there.
+    ny, lx, ly = 32, 6.0, 1.0
+    y_nodes = graded_nodes(ny, ly, growth)
+    mesh = structured_grid_2d(16, ny, lx=lx, ly=ly, named_boundaries=True, y_nodes=y_nodes)
+    geometry = mesh.geometry()
+    momentum = MomentumContinuity.build(
+        mesh,
+        geometry,
+        PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
+        CompactGreenGauss(),
+        BoundaryConditions(
+            {
+                "left": VelocityInlet(velocity=(U_IN, 0.0)),
+                "right": PressureOutlet(pressure=0.0),
+                "bottom": NoSlipWall(),
+                "top": NoSlipWall(),
+            }
+        ),
+        advection_scheme=FirstOrderUpwind(),
+    )
+    assert (lx / 16) / float(y_nodes[1]) > 1e3  # the regime that used to fail
+
+    velocity, _ = momentum.unpack(potential_flow(momentum))
+
+    assert bool(jnp.all(jnp.isfinite(velocity)))
+    # still the straight-channel potential solution, graded mesh notwithstanding
+    assert float(jnp.max(jnp.abs(velocity[:, 0] - U_IN))) < 1e-8
+    # The transverse component is not machine-zero here: the cell-gradient reconstruction's roundoff
+    # is amplified by the near-wall anisotropy (it grows with the aspect ratio, while the streamwise
+    # component stays exact). Small is all that is required -- and a non-zero transverse velocity is
+    # what lifts the coupled solve's exactly-symmetric degeneracy.
+    assert float(jnp.max(jnp.abs(velocity[:, 1]))) < 1e-3
 
 
 def _turbulence(mesh, geometry, k_in, omega_in):
