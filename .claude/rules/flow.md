@@ -121,6 +121,22 @@ Engineering Principles.
   it via `eqx.tree_at`), and drives a **streamwise-periodic** channel (`structured_grid_2d(periodic=
   ("x",))` + `pressure_pin`): verified against exact fully-developed Poiseuille in
   `test_periodic_channel.py`. A uniform force needs no Rhie–Chow term and does not enter continuity.
+  - **The periodic seam is NOT a preconditioner problem — do not go looking there again.** A
+    `reused_flow_solve` on a periodic mesh was suspected of a block-SIMPLE defect "across the seam";
+    it was measured and the seam is clean. The offset is absorbed one layer down (`interpolation_factor`
+    and `normal_distance` both route through `face_cells.neighbour_centroid`; the Schur matvec compares
+    *field* values, which are periodic and need no offset), so: preconditioned GMRES converges in 9–18
+    iterations on the periodic mesh and returns the same Newton update as unpreconditioned to `5e-8`;
+    the velocity-AMG `boundary_diagonal` has no negative entries (min `-4e-16`); every shifted-step
+    attempt is accepted with `|δ| ∝ 1/β`. **The real failure was the cold start**: from rest, a
+    body-force channel's residual barely moves during the viscous spin-up (measured ratio `0.984` per
+    step), so the feedforward SER schedule `β = β₀(‖R‖/‖R₀‖)^p` never relaxes, the pseudo-timestep stays
+    tiny, and the march exhausts `max_steps` at ~`0.28‖R₀‖` — a crawl, not a stall. Two independent
+    confirmations: `β₀ ≤ 0.1` converges to `1e-16` in 30 steps, and starting from `potential_flow`'s plug
+    reaches `7e-13`. **Fix shipped = the velocity scale + plug start** (`flow/scales.py`), not a change
+    to the schedule. A cold rest start on a body-force domain still crawls and is left to fail loudly
+    (`ImplicitNewtonSolver` raises); revisiting that means revisiting cross-step SER, which was measured
+    ~24% slower on the inlet channel and rejected.
 - **Field initialization — BUILT (`flow/initialization.py`).** `laplace_field(mesh, geometry, boundary,
   …)` solves a scalar Laplace `div(Γ∇φ)=0` (one exact linear step) — the harmonic interpolant of any
   boundary data; general-purpose, not flow-specific. `potential_flow(momentum)` uses it to build a
@@ -128,8 +144,31 @@ Engineering Principles.
   `Dirichlet` datum at the `PressureOutlet`, no-penetration (`ZeroGradient`) at walls; returns the flat
   `[u, p=0]` state. Divergence-free, respects geometry (≈plug only in a straight duct), and — being a
   real discrete gradient — carries the tiny asymmetry that avoids the coupled solve's perfectly-symmetric
-  degeneracy. Closed domains (no outlet) return the zero state (or pin `pressure_pin`). Usable to
-  warm-start **any** solve (flow-only, segregated, coupled), not only the coupled path.
+  degeneracy. A domain with **no through-flow boundary** has no potential to solve for, but may still be
+  driven: a body-force periodic channel returns the **plug** `scales.body_force_velocity(momentum)` (see
+  the velocity-scale bullet below). A moving-lid cavity is deliberately *not* that case (no net
+  through-flow → its potential really is zero; a plug would violate the stationary walls), so the test
+  `test_potential_flow_is_zero_on_a_closed_domain` is the guard — do not widen the fallback to
+  `characteristic_velocity`, which reports the *lid* speed. Otherwise closed domains return the zero
+  state (or pin `pressure_pin`). Usable to warm-start **any** solve (flow-only, segregated, coupled).
+- **Velocity scale — BUILT (`flow/scales.py`), the one home for "how fast is this flow".** Two consumers
+  need a representative speed before any flow exists — the convection velocity block's frozen
+  linearization and the initializer's plug — so it is derived once here rather than in either.
+  `characteristic_velocity(assembler)`: the **fastest** patch `reference_velocity` if any patch prescribes
+  one, else `body_force_velocity`. `body_force_speed` closes the global balance `β V_total = τ_w A_wall`
+  via the hydraulic length `h = V_total/A_wall` (`hydraulic_length`, wetted area from the new
+  `FlowBoundary.shears_flow()` predicate — True for `NoSlipWall`/`MovingWall`), taking **`min`** of the
+  laminar `β h²/(3μ)` (exact in that regime — unit-tested against the closed-form `βH²/12μ`) and the
+  turbulent `20·u_τ`. `friction_velocity(assembler)` = `√(βh/ρ)` is the shared primitive: it follows from
+  the force balance alone (no viscous or turbulence assumption), so it is the one velocity scale such a
+  domain always has — which is why `turbulence/initialization.py` also sizes its equilibrium `k`/`ω` from
+  it (see `.claude/rules/turbulence.md`). `min` not `max` here: the laminar branch is an extrapolation that
+  diverges as `μ→0`, unlike the prescribed-velocity rule where every candidate is genuinely imposed.
+  **Why it exists:** a streamwise-periodic channel prescribes velocity *nowhere*, so the old
+  boundary-only estimate returned exactly zero and silently degraded `velocity="convection"` to the
+  viscous block. `BlockPreconditioner.build` now warns (`RuntimeWarning`) when the convection block is
+  asked for but the reference mass flux is zero. A caller that *knows* the speed (the mass-flow
+  controller holds `bulk_velocity_target`) should pass `reference_state=` explicitly instead.
 - **Validated:**
   - Poiseuille (`test_poiseuille.py`) — parabolic `u`, `v≈0`, linear `p`; **2nd-order**; Stokes
     is linear so **one Newton step**; differentiable.

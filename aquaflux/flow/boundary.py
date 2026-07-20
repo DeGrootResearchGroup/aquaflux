@@ -258,6 +258,20 @@ class FlowBoundary(eqx.Module):
         """
         return jnp.zeros(centroid.shape)
 
+    def shears_flow(self) -> bool:
+        """Whether this patch is a solid surface the flow shears against (static).
+
+        True for a solid wall — a patch that passes no fluid and holds the tangential velocity at its
+        own — and False for a patch the flow passes through (an inlet, an outlet). The wetted area of
+        the patches that return True is the surface the streamwise drag acts on, so it sets the
+        domain's hydraulic length scale ``V / A_wall``: the half-height of a plane channel, the radius
+        of a pipe. A body-force-driven flow has no prescribed velocity to size a characteristic speed
+        from, and that length is what closes the force balance instead.
+
+        Consumed only by the frozen preconditioner's velocity scale; it never enters the residual.
+        """
+        return False
+
 
 class NoSlipWall(FlowBoundary):
     """A stationary solid wall: zero velocity, zero-gradient pressure, no through-flow."""
@@ -287,6 +301,9 @@ class NoSlipWall(FlowBoundary):
         # A wall passes no fluid, so it carries no convective diagonal; only the Dirichlet viscous
         # term contributes.
         return viscous_owner
+
+    def shears_flow(self):
+        return True
 
 
 class MovingWall(FlowBoundary):
@@ -333,6 +350,9 @@ class MovingWall(FlowBoundary):
 
     def reference_velocity(self, normal, centroid):
         return _prescribed_reference_velocity(self, normal, centroid)
+
+    def shears_flow(self):
+        return True
 
 
 class VelocityInlet(FlowBoundary):

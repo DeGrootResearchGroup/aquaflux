@@ -74,6 +74,20 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   the potential flow's discrete-gradient roundoff (`|u_y|~1e-10`) lifts it, and any perturbation ≥1e-10
   converges. The IC is a forward device (the converged-state adjoint is IC-independent); when
   differentiating, pass an explicit state built outside `jax.grad`.
+  - **Body-force-driven domains need equilibrium levels, not interpolants (binding).** A
+    streamwise-periodic channel has **no inlet**, so both smoothed fields are degenerate: `k` is the
+    harmonic interpolant between all-zero wall Dirichlets (**identically zero**), and `ω` is a
+    pure-Neumann solve whose interior carries nothing. Left alone that starts the solve at `k=0` →
+    `ν_t=0` — not a poor guess but the **laminar** problem, which for a turbulent case is the wrong
+    equations. Both levels therefore come from the **friction velocity the force balance fixes**,
+    `u_τ = √(βh/ρ)` (`flow/scales.py::friction_velocity`, `h = V/A_wall`): `k = u_τ²/√β*`
+    (`boundary.py::equilibrium_k`) and `ω = inlet_omega(k, 0.09h)`, applied with `jnp.maximum` so an
+    inlet-driven domain (whose `u_τ` is zero) is bit-unchanged. **Fix k and ω together or not at
+    all** — raising `k` while `ω` sits at its `1e-8` floor gives `ν_t = k/ω ~ 10⁶`, far worse than the
+    laminar start. The length scale is the **outer mixing length `0.09h`**, not the `0.07·D_h`
+    inlet-specification convention: the latter is for an inlet, and here overshot the developed-channel
+    `ν_t` by ~3.5× (measured `ν_t/ν` 373 vs the correct 120 = `0.09u_τh/ν`, which the shipped default
+    now hits exactly). Pinned by `test_hybrid_initialize_gives_a_developed_channel_eddy_viscosity`.
 
 **Issue #69 — CLOSED path (do not re-derive without reading it):** all three planned steps shipped —
 scalar continuation (#73), Option 1 hardening (convergence stop + adaptive relaxation), and Option 2
