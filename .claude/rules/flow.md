@@ -223,9 +223,8 @@ Engineering Principles.
   of AR, not two). `potential_flow(momentum)` uses it to build a
   Fluent-style irrotational velocity `u=∇φ`: a `Neumann` `∂φ/∂n = u_in·n` at each `VelocityInlet`, a
   `Dirichlet` datum at the `PressureOutlet`, no-penetration (`ZeroGradient`) at walls; returns the flat
-  `[u, p=0]` state. Divergence-free, respects geometry (≈plug only in a straight duct), and — being a
-  real discrete gradient — carries the tiny asymmetry that avoids the coupled solve's perfectly-symmetric
-  degeneracy. A domain with **no through-flow boundary** has no potential to solve for, but may still be
+  `[u, p=0]` state. Divergence-free, respects geometry (≈plug only in a straight duct). A domain with
+  **no through-flow boundary** has no potential to solve for, but may still be
   driven: a body-force periodic channel returns the **plug** `scales.body_force_velocity(momentum)` (see
   the velocity-scale bullet below). A moving-lid cavity is deliberately *not* that case (no net
   through-flow → its potential really is zero; a plug would violate the stationary walls), so the test

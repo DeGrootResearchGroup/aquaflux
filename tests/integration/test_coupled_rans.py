@@ -115,11 +115,12 @@ def case():
     The segregated reference keeps its flow at **rest** on purpose -- the two engines want opposite
     velocity starts. The Picard flow block converges in 20 steps from rest against 70 from the
     potential field (a smaller ||R0|| tightens the relative stopping target faster than it shortens
-    the march), while the coupled Newton *stalls* on a state at rest: `u_y == 0` exactly is the
-    measure-zero symmetric degeneracy, which the potential field's discrete-gradient roundoff
-    (|u_y| ~ 1e-10) lifts. Its scalars still come from the hybrid IC, without which a uniform k
-    leaves the first sweep's residual unchanged for ~30 pseudo-transient steps -- it briefly
-    *rises* -- so the SER schedule's beta never relaxes and the march burns its budget.
+    the march), while the coupled Newton wants the developed potential field: a state at rest is far
+    from the answer, and its scalars still come from the hybrid IC, without which a uniform k leaves
+    the first sweep's residual unchanged for ~30 pseudo-transient steps -- it briefly *rises* -- so
+    the SER schedule's beta never relaxes and the march burns its budget. (An exactly-uniform start
+    is itself fine for the coupled solve now that the strain magnitude's sqrt is guarded at S = 0;
+    see `test_coupled_periodic_channel`, which self-starts from the symmetric plug.)
     """
     mesh, momentum, turbulence, _, _ = _channel()
     n = mesh.n_cells

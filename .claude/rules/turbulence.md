@@ -23,6 +23,23 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
 - **`sst.py` — `SSTModel`.** Menter's SST constants and the quantities derived directly from
   them (the F₁/F₂ blend, the eddy-viscosity limiter).
 - **`strain.py`** — the strain-rate magnitude `S = sqrt(2 S_ij S_ij)` the production terms read.
+  - **The `sqrt` is guarded at `S = 0` (binding, `_safe_sqrt`).** `S` is a Euclidean norm, so it has a
+    cone point at zero (like `|x| = sqrt(x²)`): the value is continuous but the `sqrt` chain rule is
+    `dS = dq/(2S) = 0/0 = NaN` there. A **uniform** velocity region has `S = 0` *identically* (zero
+    gradient), and a body-force periodic channel's hybrid IC is the exactly-uniform plug
+    (`scales.body_force_velocity`, `u_y ≡ 0`), so **every interior cell** was `S = 0` and the coupled
+    Jacobian came back NaN in all of them — the monolithic Newton then stalled immediately (every step
+    NaN → `DivergenceGuard` rejects → escalates to the cap → `max_steps` → raises). The double-`where`
+    `_safe_sqrt` clamps the `sqrt` argument to 1 on the branch discarded at zero, so `dS = 0` (the
+    minimum-norm subgradient) at exactly `S = 0` while the value and derivative are **bit-identical to a
+    plain `sqrt` wherever `S > 0`** (verified: forward value, jvp, and jacrev all bit-equal). Returning
+    `0` is the *correct* local derivative, not just NaN-avoidance: every consumer of `S` is locally flat
+    in the flow there — production reads `S²` (`d/dt S² = 2S·dS → 0`) and the eddy-viscosity limiter's
+    `max(a1 ω, S F2)` picks the strain-independent `a1 ω` branch — and `S = 0` never occurs at a
+    converged (sheared) field, so the exact adjoint at the fixed point is untouched. This is what lets
+    the coupled solve self-start from the symmetric plug with **no symmetry-breaking perturbation** (see
+    the `initialization.py` note). Pinned by `test_strain.py` (finite/zero Jacobian at `S = 0`; FD-match
+    where `S > 0`).
 - **`sources.py`** — the k and ω production / destruction / cross-diffusion terms as
   `VolumeSourceFn` volume-source operators (the transport equations reuse the shared advection
   and diffusion flux operators; only the sources are turbulence-specific).
@@ -138,11 +155,13 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   over-diffuses that large value and slows the solve — set only the wall cells). From this IC the coupled
   Newton converges from nothing (~10–15 steps, FD-verified). `solve_coupled(coupled)` with no initial
   state calls it automatically; the segregated pre-smooth is no longer required to reach the basin (still
-  available as a fallback). **Do not init with an exactly symmetric velocity** — a perfectly symmetric
-  `u` (e.g. exact plug, `u_y≡0`) hits a measure-zero degeneracy in the coupled inner solve that stalls;
-  the potential flow's discrete-gradient roundoff (`|u_y|~1e-10`) lifts it, and any perturbation ≥1e-10
-  converges. The IC is a forward device (the converged-state adjoint is IC-independent); when
-  differentiating, pass an explicit state built outside `jax.grad`.
+  available as a fallback). **An exactly symmetric velocity is fine** — the coupled solve self-starts
+  from the exactly-uniform body-force plug (`u_y ≡ 0`) with no perturbation. (Earlier this stalled, and
+  was misread as a "measure-zero degeneracy in the inner solve"; it was actually the `sqrt`-at-zero NaN
+  in `strain_rate_magnitude` — a uniform plug has `S = 0` in every interior cell — now fixed at the
+  source by the guarded `sqrt`, see the `strain.py` note. Do **not** reintroduce an IC perturbation to
+  "lift" it: the degeneracy was never in the IC.) The IC is a forward device (the converged-state
+  adjoint is IC-independent); when differentiating, pass an explicit state built outside `jax.grad`.
   - **Body-force-driven domains need equilibrium levels, not interpolants (binding).** A
     streamwise-periodic channel has **no inlet**, so both smoothed fields are degenerate: `k` is the
     harmonic interpolant between all-zero wall Dirichlets (**identically zero**), and `ω` is a
