@@ -25,14 +25,26 @@ if TYPE_CHECKING:
 
 
 def omega_wall_value(nu: jnp.ndarray, d: jnp.ndarray, model: SSTModel) -> jnp.ndarray:
-    """Near-wall omega ``60 nu / (beta_1 d**2)``, the value fixed in the wall-adjacent cell.
+    """Near-wall omega ``6 nu / (beta_1 d**2)``, the value fixed in the wall-adjacent cell.
+
+    This is the analytical viscous-sublayer solution evaluated **at the cell centroid**, which is
+    where it is imposed. As ``k -> 0`` at a smooth wall the omega equation collapses to a balance of
+    viscous diffusion against destruction, ``nu d2(omega)/dy2 = beta_1 omega**2``; substituting
+    ``omega = A / y**2`` gives ``6 nu A = beta_1 A**2``, hence ``A = 6 nu / beta_1``. So
+    ``omega(y) = 6 nu / (beta_1 y**2)`` solves the sublayer equation exactly (Wilcox).
+
+    The larger ``60 nu / (beta_1 dy**2)`` seen in the literature is a different quantity: a wall
+    *face* boundary value, ten times the asymptote, standing in for the singularity at ``y = 0``
+    where the analytical solution diverges (Menter, 1994). It is not the value the solution takes at
+    a finite distance, so imposing it at a cell centroid overshoots the near-wall omega by 10x --
+    which suppresses the near-wall eddy viscosity and stiffens the omega equation.
 
     Parameters
     ----------
     nu : jnp.ndarray
         Kinematic (molecular) viscosity at the wall-adjacent cells, shape ``(n_wall,)``.
     d : jnp.ndarray
-        Wall distance of those cells, shape ``(n_wall,)``.
+        Wall distance of those cells (centroid to wall), shape ``(n_wall,)``.
     model : SSTModel
         The model constants (reads ``beta_1``).
 
@@ -41,7 +53,7 @@ def omega_wall_value(nu: jnp.ndarray, d: jnp.ndarray, model: SSTModel) -> jnp.nd
     jnp.ndarray
         The near-wall omega per wall-adjacent cell, shape ``(n_wall,)``.
     """
-    return 60.0 * nu / (model.beta_1 * d**2)
+    return 6.0 * nu / (model.beta_1 * d**2)
 
 
 def inlet_k(velocity_magnitude: jnp.ndarray, intensity: float) -> jnp.ndarray:
