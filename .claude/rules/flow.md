@@ -139,7 +139,12 @@ Engineering Principles.
     ~24% slower on the inlet channel and rejected.
 - **Field initialization — BUILT (`flow/initialization.py`).** `laplace_field(mesh, geometry, boundary,
   …)` solves a scalar Laplace `div(Γ∇φ)=0` (one exact linear step) — the harmonic interpolant of any
-  boundary data; general-purpose, not flow-specific. `potential_flow(momentum)` uses it to build a
+  boundary data; general-purpose, not flow-specific. The step is **multigrid-preconditioned**
+  (smoothed-aggregation V-cycle on the symmetric graph Laplacian; boundary/Dirichlet stiffness from a
+  single `J·1`, fixed cells decoupled): the Laplacian's condition number grows like the **square of the
+  near-wall cell aspect ratio**, so unpreconditioned it stagnated to a non-finite iterate past AR≈600
+  — i.e. on every genuinely wall-resolved mesh (AR 10³–10⁵). Jacobi is not enough (removes one factor
+  of AR, not two). `potential_flow(momentum)` uses it to build a
   Fluent-style irrotational velocity `u=∇φ`: a `Neumann` `∂φ/∂n = u_in·n` at each `VelocityInlet`, a
   `Dirichlet` datum at the `PressureOutlet`, no-penetration (`ZeroGradient`) at walls; returns the flat
   `[u, p=0]` state. Divergence-free, respects geometry (≈plug only in a straight duct), and — being a
