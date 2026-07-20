@@ -20,7 +20,7 @@ Reynolds number, at a **low** (Re_τ ≈ 380) and a **high** (Re_τ ≈ 3600) po
 
 - **OpenFOAM** (`of_case/`): `incompressibleFluid` steady solver + `kOmegaSST` RAS + `meanVelocityForce`
   (the mass-flow constraint holding `Ubar = 0.1335`), cyclic in x, no-slip walls, empty (2D) in z.
-- **aquaflux**: the streamwise-periodic SST channel with the mass-flow controller, at matched `Re_b`.
+- **aquaflux**: the streamwise-periodic SST channel with the mass-flow constraint, at matched `Re_b`.
 
 The comparison is the mean velocity in wall units `u+(y+)` and the **log-law indicator**
 `Ξ = y+ dU+/dy+ = 1/κ`, whose flat-plateau value is the realized `κ`.

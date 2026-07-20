@@ -12,6 +12,7 @@ from .block_preconditioner import BlockPreconditioner
 from .boundary import FlowBoundary, MovingWall, NoSlipWall, PressureOutlet, VelocityInlet
 from .continuation import MomentumShiftPolicy, momentum_continuation, reused_flow_solve
 from .initialization import laplace_field, potential_flow
+from .mean_velocity import bulk_velocity_flow_solve
 from .scales import body_force_velocity, characteristic_velocity
 from .momentum import FlowFields, MomentumContinuity
 from .preconditioner import damped_jacobi_solve, pressure_schur_laplacian
@@ -28,6 +29,7 @@ __all__ = [
     "PressureOutlet",
     "VelocityInlet",
     "body_force_velocity",
+    "bulk_velocity_flow_solve",
     "characteristic_velocity",
     "damped_jacobi_solve",
     "interior_mass_flux",

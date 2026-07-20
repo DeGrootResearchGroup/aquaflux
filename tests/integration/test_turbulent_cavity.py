@@ -31,12 +31,16 @@ WALLS = ("top", "bottom", "left", "right")
 
 
 def _solve_flow(momentum, state):
-    """The validated preconditioned Newton solve of the coupled cavity flow."""
+    """The validated preconditioned Newton solve of the coupled cavity flow.
+
+    The driver's flow seam returns ``(assembler, state)``; this unconstrained solve leaves the
+    assembler unchanged, so it is passed through.
+    """
     preconditioner = BlockPreconditioner.build(momentum).factory()
     solver = ImplicitNewtonSolver(
         max_steps=30, forward_step=DampedNewtonStep(preconditioner=preconditioner)
     )
-    return solver.solve(lambda s, m: m.residual(s), state, momentum)
+    return momentum, solver.solve(lambda s, m: m.residual(s), state, momentum)
 
 
 def _cavity():

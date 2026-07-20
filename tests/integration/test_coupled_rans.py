@@ -137,7 +137,9 @@ def case():
         "momentum": momentum,
         "turbulence": turbulence,
         "coupled": coupled,
-        "solve_flow": solve_flow,
+        # The driver's flow seam returns (assembler, state); an unconstrained solve leaves the
+        # assembler unchanged, so pass it through.
+        "solve_flow": lambda m, s: (m, solve_flow(m, s)),
         # The coupled Newton's start: the full hybrid IC, potential-flow velocity included. Built
         # once here so the adjoint test can hand the solve a *concrete* state -- an IC constructed
         # inside jax.grad would trace the preconditioner it seeds.

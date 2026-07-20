@@ -1,10 +1,10 @@
 # Turbulent channel — aquaflux k-ω SST vs the law of the wall
 
 A fully-developed plane-channel validation of the aquaflux k-ω SST turbulence solver against the
-**law of the wall**, built on the streamwise-periodic flow + mass-flow-controller machinery.
+**law of the wall**, built on the streamwise-periodic flow + mass-flow-constraint machinery.
 
 The channel is **streamwise-periodic** (two no-slip walls, periodic in x) driven to a fixed bulk
-velocity by the mass-flow controller — the canonical fully-developed setup. Because the flow is
+velocity by a mass-flow constraint — the canonical fully-developed setup. Because the flow is
 x-homogeneous the streamwise mesh is trivial (`nx = 4`) and high `Re_τ` stays cheap; the wall-normal
 mesh is graded to `y+ < 1`. Each Reynolds number is solved with the segregated SST driver and reduced
 to wall units.

@@ -17,18 +17,16 @@ Kept modest (``nx = 4`` since the flow is x-homogeneous; Re_tau ~ 1000) so it ru
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
-import equinox as eqx
 import jax.numpy as jnp
 import lineax as lx
 import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import MomentumContinuity, NoSlipWall
+from aquaflux.flow import MomentumContinuity, NoSlipWall, bulk_velocity_flow_solve
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import ImplicitNewtonSolver
 from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
@@ -76,17 +74,17 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
         k_boundary=BoundaryConditions({"bottom": Dirichlet(0.0), "top": Dirichlet(0.0)}),
         omega_boundary=BoundaryConditions({"bottom": ZeroGradient(), "top": ZeroGradient()}),
     )
-    # The momentum block is nonlinear (upwind convection), so the inner solve stops on a
-    # convergence test rather than a fixed step count. Built once and jitted once: the assembler is
-    # an *argument*, so a sweep changes only its eddy-viscosity values and the compiled solve is a
-    # cache hit. The mesh is small, so a direct linear solve is the cheap, robust choice.
-    flow_solver = ImplicitNewtonSolver(
-        max_steps=FLOW_MAX_STEPS, solver=lx.AutoLinearSolver(well_posed=True)
+    # The body force is a solve unknown enforcing <U_x> = U_b (beta a scalar Lagrange multiplier in the
+    # augmented flow residual), so the bulk velocity is held exactly each sweep -- no feedback
+    # controller that could overshoot while the eddy viscosity is still developing. The momentum block
+    # is nonlinear (upwind convection), so the augmented solve stops on a convergence test; the mesh is
+    # small, so a direct linear solve is the cheap, robust choice.
+    solve_flow = bulk_velocity_flow_solve(
+        target=U_B,
+        flow_direction=0,
+        max_steps=FLOW_MAX_STEPS,
+        solver=lx.AutoLinearSolver(well_posed=True),
     )
-
-    @eqx.filter_jit
-    def solve_flow(mom: MomentumContinuity, state: jnp.ndarray) -> jnp.ndarray:
-        return flow_solver.solve(lambda s, m: m.residual(s), state, mom)
 
     # A uniform k leaves the first sweep's residual essentially unchanged for ~30 pseudo-transient
     # steps, so the SER schedule's beta never relaxes and the march exhausts its budget before the
@@ -102,9 +100,6 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
         omega0,
         max_sweeps=sweeps,
         relaxation=0.9,
-        bulk_velocity_target=U_B,
-        flow_direction=0,
-        bulk_velocity_gain=0.5,
     )
     return mesh, geom, momentum, turbulence, flow, k, omega, nu
 

@@ -33,11 +33,15 @@ to a full step near the fixed point, so a safe floor need not throttle the whole
 ``relaxation_max`` left at the floor the relaxation is constant (the plain Picard loop).
 
 The flow and scalar solvers are **injected** rather than chosen here (the preconditioner, iteration
-counts, and adjoint are the caller's to set): ``solve_flow(momentum, state)`` solves the momentum
-residual for the (re-viscosified) assembler, and ``solve_scalar(residual, state, policy)`` solves a
-scalar residual. Both stiff reactive scalars are globalized by pseudo-transient continuation -- the
-driver builds the per-sweep :class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` and the
-caller wires :func:`~aquaflux.turbulence.scalar_pseudo_transient_solve`.
+counts, and adjoint are the caller's to set): ``solve_flow(momentum, state) -> (momentum, state)``
+solves the momentum residual for the (re-viscosified) assembler, and
+``solve_scalar(residual, state, policy)`` solves a scalar residual. The flow solve returns the
+assembler as well so a solve that adjusts it -- a bulk-velocity-constrained solve carrying its body
+force out as a converged multiplier, driving a periodic channel to a target flow rate with no separate
+controller -- threads that forward. Both stiff reactive scalars are globalized by pseudo-transient
+continuation -- the driver builds the per-sweep
+:class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy` and the caller wires
+:func:`~aquaflux.turbulence.scalar_pseudo_transient_solve`.
 
 The two halves of that policy have deliberately different lifetimes. The **shift diagonal** is rebuilt
 every sweep, so the pseudo-time damping keeps tracking the operator as the eddy viscosity grows. The
@@ -165,7 +169,7 @@ def bulk_velocity(
 def solve_segregated(
     momentum: MomentumContinuity,
     turbulence: SSTTurbulence,
-    solve_flow: Callable[[MomentumContinuity, jnp.ndarray], jnp.ndarray],
+    solve_flow: Callable[[MomentumContinuity, jnp.ndarray], tuple[MomentumContinuity, jnp.ndarray]],
     solve_scalar: Callable[..., jnp.ndarray],
     flow: jnp.ndarray,
     k: jnp.ndarray,
@@ -179,9 +183,6 @@ def solve_segregated(
     k_floor: float = 1e-8,
     omega_floor: float = 1e-8,
     scalar_preconditioner: str | None = None,
-    bulk_velocity_target: float | None = None,
-    flow_direction: int = 0,
-    bulk_velocity_gain: float = 1.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system by the segregated Picard loop.
 
@@ -194,8 +195,12 @@ def solve_segregated(
     turbulence : SSTTurbulence
         The k-omega SST closure and equation assembler.
     solve_flow : callable
-        ``solve_flow(momentum, state) -> state`` solves the momentum residual of the (re-viscosified)
-        assembler from ``state`` (e.g. a preconditioned Newton solve).
+        ``solve_flow(momentum, state) -> (momentum, state)`` solves the momentum residual of the
+        (re-viscosified) assembler from ``state`` (e.g. a preconditioned Newton solve). It returns the
+        assembler as well as the state because the solve may adjust it -- a bulk-velocity-constrained
+        solve (:func:`~aquaflux.flow.bulk_velocity_flow_solve`) carries the converged body force out on
+        the assembler, so a mass-flow-driven channel needs no separate controller. An unconstrained
+        solve returns the assembler unchanged.
     solve_scalar : callable
         ``solve_scalar(residual, state, policy) -> state`` solves a scalar residual function from
         ``state``, globalizing it by pseudo-transient continuation. ``policy`` is the per-sweep
@@ -233,21 +238,6 @@ def solve_segregated(
         convection-diffusion AMG (the given multigrid method) for its shifted-operator solve -- the
         mesh-independent scalar solve a high-Reynolds case needs. ``None`` is a shift-only
         (unpreconditioned) continuation solve.
-    bulk_velocity_target : float or None
-        When set, drive a streamwise-periodic channel to this **bulk velocity** by a mass-flow
-        controller: after each sweep's flow solve the body force is rescaled toward the
-        linear-response estimate that would hit the target,
-        ``beta <- beta + gain (beta U_target / U_bulk - beta)`` (the standard mass-flow feedback for a
-        periodic pressure drop, cast for the body-force formulation, where it is scale-free -- no gain
-        tuning per Reynolds number). Requires
-        ``momentum`` to carry a nonzero initial ``body_force`` along ``flow_direction`` and a
-        ``pressure_pin``. ``None`` leaves the body force fixed.
-    flow_direction : int
-        The streamwise axis the bulk velocity is measured and the body force is applied along.
-    bulk_velocity_gain : float
-        Relaxation on the controller update in ``(0, 1]``: ``1.0`` takes the full linear-response
-        step (exact in one sweep for Stokes flow), lower it if the bulk velocity oscillates under the
-        nonlinear closure.
 
     Returns
     -------
@@ -275,17 +265,9 @@ def solve_segregated(
         flow_prev, k_prev, omega_prev = flow, k, omega
         nu_t = _sweep_eddy_viscosity(momentum, turbulence, flow, k, omega)
         momentum = momentum.with_eddy_viscosity(nu_t)
-        flow = solve_flow(momentum, flow)
-
-        if bulk_velocity_target is not None:
-            u_bulk = bulk_velocity(momentum, flow, flow_direction)
-            beta = momentum.body_force[flow_direction]
-            # Linear-response estimate of the force that hits the target, relaxed for the closure's
-            # nonlinearity; scale-free, so no per-Reynolds gain tuning (unlike a raw additive step).
-            beta_target = beta * bulk_velocity_target / jnp.maximum(u_bulk, 1e-12)
-            new_beta = beta + bulk_velocity_gain * (beta_target - beta)
-            new_force = momentum.body_force.at[flow_direction].set(new_beta)
-            momentum = eqx.tree_at(lambda m: m.body_force, momentum, new_force)
+        # The flow solve may adjust the assembler (e.g. a bulk-velocity-constrained solve carries the
+        # body force out as a converged multiplier), so it returns the assembler alongside the state.
+        momentum, flow = solve_flow(momentum, flow)
 
         mdot, closure = _sweep_closure(momentum, turbulence, flow, k, omega)
         # Each stiff reactive scalar is globalized by pseudo-transient continuation: the shift policy
