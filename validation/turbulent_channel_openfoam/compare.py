@@ -9,7 +9,7 @@ Reynolds number, at a low (Re_tau ~ 380) and a high (Re_tau ~ 3600) point:
 
 * OpenFOAM: ``incompressibleFluid`` + ``kOmegaSST`` + ``meanVelocityForce`` (see ``of_case``); run it
   first with ``of_case/run_of.sh`` inside the openfoam13 container, which writes ``runs/{low,high}``.
-* aquaflux: the streamwise-periodic SST channel with the mass-flow controller, at matched ``Re_b``.
+* aquaflux: the streamwise-periodic SST channel with the mass-flow constraint, at matched ``Re_b``.
 
 The comparison is the mean velocity in wall units and the log-law indicator ``Xi = y+ dU+/dy+ = 1/kappa``.
 
@@ -45,11 +45,10 @@ import lineax as lx
 import numpy as np
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind
-from aquaflux.flow import MomentumContinuity, NoSlipWall
+from aquaflux.flow import MomentumContinuity, NoSlipWall, bulk_velocity_flow_solve
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import NewtonSolver
 from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
@@ -161,8 +160,10 @@ def solve_aquaflux(nu_of, ny, growth):
     )
     direct = lx.AutoLinearSolver(well_posed=True)
 
-    def solve_flow(mom, state):
-        return NewtonSolver(iterations=15, solver=direct).solve(mom.residual, state)
+    # The body force is a solve unknown enforcing <U_x> = 1 (a bordered Newton with beta as a scalar
+    # Lagrange multiplier), so the bulk velocity is held exactly at every sweep -- no feedback
+    # controller that could overshoot while the eddy viscosity is still developing.
+    solve_flow = bulk_velocity_flow_solve(target=1.0, flow_direction=0, solver=direct)
 
     # Seed from the hybrid IC. A uniform k leaves the first sweep's residual essentially unchanged
     # for ~30 pseudo-transient steps, so the SER schedule's beta never relaxes and the scalar march
@@ -183,9 +184,6 @@ def solve_aquaflux(nu_of, ny, growth):
         density=1.0,
         max_sweeps=sweeps,
         relaxation=0.9,
-        bulk_velocity_target=1.0,
-        flow_direction=0,
-        bulk_velocity_gain=0.5,
     )
     velocity, _ = momentum.unpack(flow)
     c = np.asarray(geom.cell.centroid)
@@ -285,7 +283,7 @@ def _report(pairs, unconverged=()):
         "`validation/turbulent_channel`) is standard SST behaviour or an aquaflux gap.",
         "",
         "- OpenFOAM: `incompressibleFluid` + `kOmegaSST` + `meanVelocityForce` (`of_case/`).",
-        "- aquaflux: streamwise-periodic SST channel + mass-flow controller, matched `Re_b`.",
+        "- aquaflux: streamwise-periodic SST channel + mass-flow constraint, matched `Re_b`.",
         "",
         "## Results",
         "",

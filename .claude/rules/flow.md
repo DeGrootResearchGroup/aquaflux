@@ -117,10 +117,49 @@ Engineering Principles.
   `a_P`↔`mdot` circularity). Closed domains pin the pressure at one cell (`pressure_pin=`).
 - **Body force — BUILT.** `body_force=(β,…)` adds a uniform per-volume source to the momentum
   residual (subtracted per component: `R = flux − β·V`). Sign: with `p = p̃ + G·x`, `β>0` drives
-  `+x` and the mean gradient is `G = −β`. It is a differentiable leaf (a mass-flow controller swaps
-  it via `eqx.tree_at`), and drives a **streamwise-periodic** channel (`structured_grid_2d(periodic=
+  `+x` and the mean gradient is `G = −β`. It is a differentiable leaf (the mass-flow constraint below
+  swaps it via `eqx.tree_at`), and drives a **streamwise-periodic** channel (`structured_grid_2d(periodic=
   ("x",))` + `pressure_pin`): verified against exact fully-developed Poiseuille in
   `test_periodic_channel.py`. A uniform force needs no Rhie–Chow term and does not enter continuity.
+- **Bulk-velocity constraint — BUILT (`flow/mean_velocity.py`, `bulk_velocity_flow_solve`).** A
+  streamwise-periodic channel is driven to a target **bulk velocity** `U_bar` by making the body force
+  `β` a **scalar Lagrange multiplier** on the constraint `⟨U_dir⟩ − U_bar = 0`, solved *jointly* with
+  the flow — not by an outer proportional controller. `β` is **appended to the flow state** and the
+  flow residual is augmented with the constraint equation, `R_aug([w,β]) = [R_flow(w;β); ⟨U_dir⟩(w) −
+  U_bar]`; this **one honest residual** is handed to the production `ImplicitNewtonSolver`, and **AD
+  assembles the whole bordered Jacobian** (the force column `∂R/∂β = −V` on the flow-direction momentum
+  rows, since `R = flux − βV`, and the averaging row `∂⟨U⟩/∂w = V/ΣV`) — **no bespoke solver, no
+  hand-derived border** (an earlier version hand-rolled a two-solve rank-one elimination purely to keep
+  the block preconditioner applicable to the border; that is a preconditioner concern, and the study
+  uses a direct solve where it buys nothing — so it was dropped for the augmented residual, which also
+  respects the "AD assembles the Jacobian" rule the hand-derived form broke). `⟨U⟩ = U_bar` holds **by
+  construction** at the converged root, so the bulk velocity can never overshoot while the eddy
+  viscosity is still developing (the failure the old proportional controller had at high Re / high
+  aspect ratio: it measured `U_bulk` at a fixed β, which spiked ~17× before the feedback reacted,
+  collapsing the near-wall `k` onto its floor). Being the production solve it is **convergence-gated**
+  (stops on tolerance, not a fixed count) and **reverse-differentiable** through the IFT adjoint at the
+  root — the constraint is part of the differentiable model at no extra cost. Returns `(momentum,
+  state)` — the assembler carries the converged β out, so a segregated outer loop threads it forward
+  with no controller. The **proportional mass-flow controller in `solve_segregated` was DELETED** (its
+  `bulk_velocity_target`/`bulk_velocity_gain`/`flow_direction` args gone); the driver's flow-solve seam
+  is now `solve_flow(momentum, state) → (momentum, state)`.
+  - **Preconditioning the augmented system — constraint preconditioning (`_bordered_preconditioner`).**
+    β is a multiplier, not a function of `w`, so — unlike a nested gradient sub-solve, which AD absorbs
+    into the outer Jacobian — the border cannot be absorbed inside the residual; it is eliminated one
+    layer down, **in the preconditioner**. Given the flow block preconditioner `M ≈ J⁻¹` (the block-
+    SIMPLE AMG `BlockPreconditioner.factory()`), `_bordered_preconditioner(M, a, c)` returns a
+    preconditioner for the `(dim+1)·n_cells + 1` augmented system that Schur-eliminates the scalar β:
+    `y = M·r_flow`, `dβ = (cᵀy − r_β)/(cᵀMa)`, `dw = y − dβ·(Ma)` — one flow-preconditioner apply plus
+    O(n) dots per augmented Krylov iteration, exact when `M = J⁻¹` (converges in one step), inheriting
+    the flow block's mesh-independence otherwise. **Hand-building `a`/`c` here is legitimate** — a
+    preconditioner is an approximate, `stop_gradient`-ed inverse that changes only Krylov convergence,
+    never the solution or adjoint (contrast the *residual*, whose Jacobian is AD-assembled). This is the
+    robust production path (large iterative solve); `preconditioner=None` (a direct or small solve) needs
+    none of it. Pinned by `test_mean_velocity.py`: with an exact `M` the bordered preconditioner is
+    exactly `J_aug⁻¹` (and AD's border matches the hand-built `a`/`c`), and the block-preconditioned
+    GMRES augmented solve lands on the direct solve's answer.
+  Pinned by `tests/unit/test_mean_velocity.py` (constraint met to machine precision; analytic β
+  recovered; initial-force-independent; the preconditioner tests above).
   - **The periodic seam is NOT a preconditioner problem — do not go looking there again.** A
     `reused_flow_solve` on a periodic mesh was suspected of a block-SIMPLE defect "across the seam";
     it was measured and the seam is clean. The offset is absorbed one layer down (`interpolation_factor`
@@ -172,8 +211,8 @@ Engineering Principles.
   **Why it exists:** a streamwise-periodic channel prescribes velocity *nowhere*, so the old
   boundary-only estimate returned exactly zero and silently degraded `velocity="convection"` to the
   viscous block. `BlockPreconditioner.build` now warns (`RuntimeWarning`) when the convection block is
-  asked for but the reference mass flux is zero. A caller that *knows* the speed (the mass-flow
-  controller holds `bulk_velocity_target`) should pass `reference_state=` explicitly instead.
+  asked for but the reference mass flux is zero. A caller that *knows* the speed (a bulk-velocity
+  constraint targets `U_bar`) should pass `reference_state=` explicitly instead.
 - **Validated:**
   - Poiseuille (`test_poiseuille.py`) — parabolic `u`, `v≈0`, linear `p`; **2nd-order**; Stokes
     is linear so **one Newton step**; differentiable.

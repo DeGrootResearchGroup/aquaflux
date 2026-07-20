@@ -1,7 +1,7 @@
 """Fully-developed turbulent channel: aquaflux k-omega SST vs the law of the wall.
 
 A streamwise-periodic channel (two no-slip walls, periodic in x, driven to a target bulk velocity
-by the mass-flow controller) is the canonical fully-developed case for the law of the wall. Because
+by a mass-flow constraint) is the canonical fully-developed case for the law of the wall. Because
 the flow is x-homogeneous the streamwise resolution is trivial (nx = 4); the wall-normal mesh is
 graded to ``y+ < 1`` at the wall. Each Reynolds number is solved with the segregated SST driver,
 then reduced to wall units and compared to
@@ -29,11 +29,10 @@ import lineax as lx
 import numpy as np
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import MomentumContinuity, NoSlipWall
+from aquaflux.flow import MomentumContinuity, NoSlipWall, bulk_velocity_flow_solve
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import NewtonSolver
 from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
@@ -49,7 +48,7 @@ FIGS = HERE / "figures"
 RHO, U_B, H = 1.0, 1.0, 2.0  # full height H = 2 -> half-height h = 1; Re_tau based on h
 KAPPA, B_LOG = 0.41, 5.2
 
-# (Re_b, ny, growth, beta0, sweeps) per case; Re_b = U_b H / nu sets nu, the controller finds beta.
+# (Re_b, ny, growth, beta0, sweeps) per case; Re_b = U_b H / nu sets nu, the constraint solves for beta.
 CASES = [
     dict(Re_b=20000, ny=96, growth=1.09, beta0=0.004, sweeps=100),
     dict(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=110),
@@ -107,8 +106,10 @@ def solve_case(Re_b, ny, growth, beta0, sweeps):
         well_posed=True
     )  # tiny (nx=4) coupled system: a direct solve is exact
 
-    def solve_flow(mom, state):
-        return NewtonSolver(iterations=15, solver=direct).solve(mom.residual, state)
+    # The body force is a solve unknown enforcing <U_x> = U_b (a bordered Newton with beta as a scalar
+    # Lagrange multiplier), so the bulk velocity is held exactly at every sweep -- no feedback
+    # controller that could overshoot while the eddy viscosity is still developing.
+    solve_flow = bulk_velocity_flow_solve(target=U_B, flow_direction=0, solver=direct)
 
     # Seed from the hybrid IC. A uniform k leaves the first sweep's residual essentially unchanged
     # for ~30 pseudo-transient steps, so the SER schedule's beta never relaxes and the scalar march
@@ -119,18 +120,19 @@ def solve_case(Re_b, ny, growth, beta0, sweeps):
         momentum,
         turbulence,
         solve_flow,
-        # A backstop, not a cost: the solver exits on tolerance, so a generous cap only bounds
-        # the worst case rather than truncating a march mid-descent.
-        scalar_pseudo_transient_solve(max_steps=200),
+        # At near-wall aspect ratios of ~10^3 the k/omega operators are ill-conditioned (condition
+        # number grows like AR^2), so the scalar solve needs the mesh-independent convection-diffusion
+        # AMG; the default rtol=1e-10 sits below that operator's noise floor, so loosen it to 1e-8; and
+        # the pseudo-transient march needs a deeper step budget at this aspect ratio (a generous
+        # backstop -- the solve exits on tolerance -- not a per-case knob).
+        scalar_pseudo_transient_solve(max_steps=400, rtol=1e-8, atol=1e-10),
         flow0,
         k0,
         omega0,
         density=RHO,
         max_sweeps=sweeps,
         relaxation=0.9,
-        bulk_velocity_target=U_B,  # the mass-flow controller drives the body force to hit U_b
-        flow_direction=0,
-        bulk_velocity_gain=0.5,
+        scalar_preconditioner="air",
     )
     dt = time.time() - t0
 
@@ -217,7 +219,7 @@ def _report(results, failed=()):
         "# Turbulent channel: aquaflux k-omega SST vs the law of the wall",
         "",
         "Fully-developed plane channel, **streamwise-periodic** (two no-slip walls, periodic in x,",
-        "driven to a fixed bulk velocity by the mass-flow controller). The flow is x-homogeneous, so",
+        "driven to a fixed bulk velocity by a mass-flow constraint). The flow is x-homogeneous, so",
         "`nx = 4`; the wall-normal mesh is graded to `y+ < 1`. Half-height `h = H/2 = 1`, so `Re_tau`",
         "is `u_tau h / nu`. Molecular wall stress `tau_w = nu (du/dy)|_wall` from the near-wall cell",
         "(which sits in the viscous sublayer, `y+ < 1`).",
@@ -228,7 +230,7 @@ def _report(results, failed=()):
         "|---|---|",
         "| Geometry | plane channel, height `H = 2`, streamwise-periodic |",
         "| Turbulence | k-omega SST (`SSTTurbulence`, segregated Picard driver) |",
-        "| Forcing | uniform body force, mass-flow controller to `U_bulk = 1` |",
+        "| Forcing | uniform body force, mass-flow constraint to `U_bulk = 1` |",
         "| Advection | first-order upwind (momentum + k/omega) |",
         "| Flow solve | coupled Newton, direct linear solve (tiny system) |",
         "",

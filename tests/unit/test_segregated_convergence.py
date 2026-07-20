@@ -125,7 +125,7 @@ def _drive(*, max_sweeps, rtol, contraction, relaxation=1.0, relaxation_max=None
 
     def solve_flow(m, flow):
         sweeps.append(1)
-        return flow_target + contraction * (flow - flow_target)
+        return m, flow_target + contraction * (flow - flow_target)
 
     def solve_scalar(residual, state, policy):
         return scalar_target + contraction * (state - scalar_target)

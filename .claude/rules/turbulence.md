@@ -52,6 +52,16 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   `rtol`), with `max_sweeps` only a backstop; the outer under-relaxation is the **SER ramp**
   `_sweep_relaxation` (opens from the `relaxation` floor toward `relaxation_max` as that increment
   falls, constant when `relaxation_max is None`). Hitting `max_sweeps` without converging warns.
+  - **Flow-solve seam is `solve_flow(momentum, state) → (momentum, state)` (binding).** The flow solve
+    returns the assembler as well as the state, because a **bulk-velocity-constrained** solve
+    (`flow.bulk_velocity_flow_solve`) carries its converged body force out on the assembler — so a
+    mass-flow-driven periodic channel needs **no separate controller**, the constraint is enforced
+    inside the flow Newton. The old inline **proportional mass-flow controller was DELETED** (its
+    `bulk_velocity_target`/`bulk_velocity_gain`/`flow_direction` args gone): it updated β *after* a
+    fixed-β flow solve, so at high Reynolds / high aspect ratio it measured a bulk velocity that had
+    already spiked ~17× (β tripled while μ_t was stale) and collapsed the near-wall `k` onto its floor.
+    The bordered solve makes `⟨U⟩ = U_bar` hold by construction; see `.claude/rules/flow.md`. An
+    unconstrained `solve_flow` returns the assembler unchanged.
 - **`coupled.py` — `CoupledRANS`, `solve_coupled` (Option 2, the target engine).** The monolithic
   residual `R(u, p, k, ω)` over the flat `[flow…, k, ω]` state (`CoupledRANSLayout`, whose `unpack`
   yields the momentum block's own `[u,p]` sub-vector so `MomentumContinuity` runs on it unchanged),

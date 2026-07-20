@@ -23,11 +23,10 @@ import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import MomentumContinuity, NoSlipWall
+from aquaflux.flow import MomentumContinuity, NoSlipWall, bulk_velocity_flow_solve
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import NewtonSolver
 from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
@@ -76,8 +75,9 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
     )
     direct = lx.AutoLinearSolver(well_posed=True)
 
-    def solve_flow(mom, state):
-        return NewtonSolver(iterations=15, solver=direct).solve(mom.residual, state)
+    # The body force is a solve unknown enforcing <U_x> = U_b (a bordered Newton with beta as a scalar
+    # Lagrange multiplier), so the bulk velocity is held exactly each sweep -- no feedback controller.
+    solve_flow = bulk_velocity_flow_solve(target=U_B, flow_direction=0, solver=direct)
 
     # A uniform k leaves the first sweep's residual essentially unchanged for ~30 pseudo-transient
     # steps, so the SER schedule's beta never relaxes and the march exhausts its budget before the
@@ -94,9 +94,6 @@ def _solve(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=100):
         density=RHO,
         max_sweeps=sweeps,
         relaxation=0.9,
-        bulk_velocity_target=U_B,
-        flow_direction=0,
-        bulk_velocity_gain=0.5,
     )
     return mesh, geom, momentum, turbulence, flow, k, omega, nu
 
