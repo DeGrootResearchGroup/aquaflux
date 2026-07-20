@@ -38,8 +38,7 @@ from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
     bulk_velocity,
-    inlet_k,
-    inlet_omega,
+    hybrid_initialize,
     scalar_pseudo_transient_solve,
     solve_segregated,
 )
@@ -52,9 +51,9 @@ KAPPA, B_LOG = 0.41, 5.2
 
 # (Re_b, ny, growth, beta0, sweeps) per case; Re_b = U_b H / nu sets nu, the controller finds beta.
 CASES = [
-    dict(Re_b=20000, ny=96, growth=1.09, beta0=0.004, sweeps=70),
-    dict(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=80),
-    dict(Re_b=240000, ny=224, growth=1.052, beta0=0.00175, sweeps=110),
+    dict(Re_b=20000, ny=96, growth=1.09, beta0=0.004, sweeps=100),
+    dict(Re_b=45000, ny=120, growth=1.075, beta0=0.0035, sweeps=110),
+    dict(Re_b=240000, ny=224, growth=1.052, beta0=0.00175, sweeps=150),
 ]
 
 
@@ -82,8 +81,6 @@ def solve_case(Re_b, ny, growth, beta0, sweeps):
     )
     geom = mesh.geometry()
     model = SSTModel()
-    k_in = float(inlet_k(jnp.array(U_B), 0.05))
-    omega_in = float(inlet_omega(jnp.array(k_in), 0.1, model))
     momentum = MomentumContinuity.build(
         mesh,
         geom,
@@ -113,20 +110,24 @@ def solve_case(Re_b, ny, growth, beta0, sweeps):
     def solve_flow(mom, state):
         return NewtonSolver(iterations=15, solver=direct).solve(mom.residual, state)
 
-    warm = jnp.zeros((mesh.n_cells, 2)).at[:, 0].set(U_B)  # warm start at the target bulk velocity
-    flow0 = momentum.pack(warm, jnp.zeros(mesh.n_cells))
+    # Seed from the hybrid IC. A uniform k leaves the first sweep's residual essentially unchanged
+    # for ~30 pseudo-transient steps, so the SER schedule's beta never relaxes and the scalar march
+    # exhausts its budget before the residual moves; the hybrid start descends from the first step.
+    flow0, k0, omega0 = hybrid_initialize(momentum, turbulence)
     t0 = time.time()
     flow, _, _ = solve_segregated(
         momentum,
         turbulence,
         solve_flow,
-        scalar_pseudo_transient_solve(max_steps=40),
+        # A backstop, not a cost: the solver exits on tolerance, so a generous cap only bounds
+        # the worst case rather than truncating a march mid-descent.
+        scalar_pseudo_transient_solve(max_steps=200),
         flow0,
-        jnp.full(mesh.n_cells, k_in),
-        jnp.full(mesh.n_cells, omega_in),
+        k0,
+        omega0,
         density=RHO,
         max_sweeps=sweeps,
-        relaxation=0.5,
+        relaxation=0.9,
         bulk_velocity_target=U_B,  # the mass-flow controller drives the body force to hit U_b
         flow_direction=0,
         bulk_velocity_gain=0.5,
@@ -211,7 +212,7 @@ def _figures(results):
     print(f"wrote {FIGS / 'law_of_the_wall.png'}")
 
 
-def _report(results):
+def _report(results, failed=()):
     lines = [
         "# Turbulent channel: aquaflux k-omega SST vs the law of the wall",
         "",
@@ -275,15 +276,29 @@ def _report(results):
         "mesh into aquaflux via `read_openfoam`, and compare the profiles cell-for-cell). That",
         "comparison is the next step.",
     ]
+    for case, exc in failed:
+        lines += [
+            "",
+            f"- **Re_b = {case['Re_b']} (ny = {case['ny']})**: the segregated solve did not converge "
+            f"(`{exc}`) and is omitted above. Tracked in issue #99.",
+        ]
     (HERE / "report.md").write_text("\n".join(lines) + "\n")
     print(f"wrote {HERE / 'report.md'}")
 
 
 def main():
-    results = []
+    results, failed = [], []
     for case in CASES:
         print(f"solving Re_b={case['Re_b']} (ny={case['ny']}) ...", flush=True)
-        r = solve_case(**case)
+        # A case whose segregated solve does not converge is recorded and skipped rather than
+        # aborting: one failure should not discard the cases that did converge, nor leave the
+        # tracked report and figures describing an earlier run.
+        try:
+            r = solve_case(**case)
+        except Exception as exc:  # any solver failure is reported, not swallowed
+            failed.append((case, type(exc).__name__))
+            print(f"  DID NOT CONVERGE ({type(exc).__name__}) -- skipped", flush=True)
+            continue
         print(
             f"  Re_tau={r['Re_tau']:.0f}  u_tau={r['u_tau']:.4f} (Dean {r['u_tau_dean']:.4f})  "
             f"U_bulk={r['u_bulk']:.4f}  kappa_plateau={r['kappa_plateau']:.3f}  ({r['dt']:.0f}s)",
@@ -291,7 +306,7 @@ def main():
         )
         results.append(r)
     _figures(results)
-    _report(results)
+    _report(results, failed)
 
 
 if __name__ == "__main__":
