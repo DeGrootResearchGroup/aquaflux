@@ -47,8 +47,12 @@ communication** — the step that is a notorious, error-prone hand-derivation in
 - `padding.py` — **`PaddedLayout`** and **`pad_partition`**: uniform per-shard shapes. Deliberately
   **operator-independent**.
 - `halo.py` — **`HaloExchange`** strategy: `plan(layout) -> HaloPlan` at setup, `fill(owned_local,
-  plan, axis_name)` inside the sharded body with the collective *inside* `fill`. `AllGatherHaloExchange`
-  / `AllGatherPlan` is the current implementation.
+  plan, axis_name)` inside the sharded body with the collective *inside* `fill`.
+  **`AllToAllHaloExchange`** is the default — a neighbour exchange over a single `all_to_all` that
+  moves only the boundary cells each neighbour ghosts, so it distributes memory.
+  **`AllGatherHaloExchange`** stacks every partition's owned values on every device — O(P × owned)
+  per device, so it does not distribute memory; kept as the dead-simple correctness reference the
+  all-to-all is cross-checked against.
 - `distributed.py` — **`build_distributed_residual`** / **`DistributedResidual`**: the `shard_map`
   driver. Also operator-independent.
 
@@ -159,35 +163,47 @@ AD-linearized limiter and the exact adjoint are preserved automatically.
   bearing one: a residual on a padded local mesh matches the unpadded one row for row.
 - `tests/unit/test_shard_map_smoke.py` — the `shard_map` + `all_gather` mechanism matches a serial
   reference in **value and gradient** (adjoint exact to 0).
-- `tests/unit/test_distributed.py` — the full sharded residual and its gradient match serial. Uses a
-  **mix of boundary closures** (`Dirichlet`, `Neumann`, `ZeroGradient`) precisely because the
-  solution-dependent ones cannot be pre-baked — they only pass if the real closures run per device.
+- `tests/unit/test_distributed.py` — the full sharded residual and its gradient match serial (on the
+  default all-to-all halo). Uses a **mix of boundary closures** (`Dirichlet`, `Neumann`,
+  `ZeroGradient`) precisely because the solution-dependent ones cannot be pre-baked — they only pass
+  if the real closures run per device. Also checks the exchange carries a per-cell **vector** field.
+- `tests/unit/test_halo_all_to_all.py` — the neighbour `all_to_all` halo fills every real owned+ghost
+  row to **bit-for-bit the all-gather values** (scalar and vector), and a full distributed residual
+  on it matches serial in value and gradient. The all-gather exchange is the reference the scaling
+  path is validated against.
 
 The device tests simulate 4 CPU devices via `--xla_force_host_platform_device_count=4`, which must
 be set **before JAX initializes** — hence the subprocess.
 
 ## Not yet built (in priority order)
 
-1. **A neighbour-only `ppermute` `HaloExchange`.** The interface is now shaped for it: `plan` owns
-   the setup bookkeeping and `fill` issues its own collective, so `AllGatherHaloExchange` swaps for a
-   permutation variant with no change to the sharded body. `fill` is already generic in the trailing
-   axes (a per-cell vector field carries unchanged — pinned by
-   `test_halo_exchange_carries_a_vector_field`), which is what the derived-field halo below needs.
-2. **The derived-field halo** (`grad`, limiter) per the one-layer scheme above — an exchange hook
+1. **The derived-field halo** (`grad`, limiter) per the one-layer scheme above — an exchange hook
    between gradient reconstruction and the flux loop. Needed the moment a non-orthogonal correction
    or a limiter runs distributed; the current gate is orthogonal-grid, where the correction vanishes.
-3. **Node remapping.** Each local mesh keeps the **full global** `node_coords`, so the stacked
+   `fill` is already generic in the trailing axes (a per-cell vector field carries unchanged, pinned
+   by `test_halo_exchange_carries_a_vector_field`), so exchanging a reconstructed gradient reuses the
+   existing exchange — the work is the hook placement, not a new collective.
+2. **Node remapping.** Each local mesh keeps the **full global** `node_coords`, so the stacked
    sharded arrays replicate it P times. Correct but wasteful; remap to a partition-local node set.
-4. **Per-partition reverse Cuthill–McKee**, applied as a transform over a built `PartitionedMesh`
+3. **Per-partition reverse Cuthill–McKee**, applied as a transform over a built `PartitionedMesh`
    (not woven into the build loop) so it stays contained.
-5. **Multi-node** via `jax.distributed.initialize()`. Note the honest gap: multi-host is
+4. **Multi-node** via `jax.distributed.initialize()`. Note the honest gap: multi-host is
    production-grade on GPU/TPU, but multi-node **CPU** leans on Gloo and is materially slower than
    MPI — re-verify before committing to a CPU cluster.
 
+## Decided: collective pattern is `all_to_all`, not `ppermute`
+
+Measured the partition adjacency the halo must serve. A min-cut (Scotch) partition gives an
+**irregular** neighbour set: on a 40³ cube the number of partitions a given one borders ranges from
+4 to 14 at 32 parts, and is non-uniform. `ppermute` is a one-to-one permutation primitive — a
+general irregular many-to-many exchange would need edge-colouring that (data-dependent) graph into up
+to `max_degree` permutation rounds. `all_to_all` expresses the whole exchange in one collective with
+uniform per-pair buffers, so it handles the irregular set directly; that is why `AllToAllHaloExchange`
+uses it. `ppermute` is only clean for a genuinely structured neighbour set (a Cartesian brick
+decomposition), which the target unstructured regime is not — so it is not pursued.
+
 ## Open questions
 
-- **Collective pattern:** `ppermute` (structured neighbour set) vs `all_to_all` (general partition
-  graph) — depends on how irregular real partition adjacency turns out to be.
 - **Load balance vs halo size** in the Scotch objective for the coupled block.
 - **Distributed AMG setup.** The smoothed-aggregation hierarchy is built off-jit from the global
   connectivity once and frozen, so partitioning does not disturb the *setup*; only the frozen

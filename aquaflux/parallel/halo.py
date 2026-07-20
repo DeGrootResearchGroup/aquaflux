@@ -16,14 +16,23 @@ A strategy owns **both halves** of the exchange:
 - :meth:`HaloExchange.fill` runs inside the sharded residual and issues **its own** collectives.
 
 Keeping the collective inside ``fill`` is what makes the strategies genuinely interchangeable: an
-all-gather and a neighbour-only permutation need different communication *and* different plans, so
-an interface that named either one in its signature could only ever describe the strategy it was
+all-gather and a neighbour ``all_to_all`` need different communication *and* different plans, so an
+interface that named either one in its signature could only ever describe the strategy it was
 written for.
 
-:class:`AllGatherHaloExchange` gathers every partition's owned values onto every partition: simple,
-exactly correct for any partition graph, and O(n_partitions × owned) per device — right at modest
-partition counts. A neighbour-only variant, exchanging with just the partitions a given one
-actually borders, is the scaling upgrade behind this same interface.
+Two implementations, both correct for an arbitrary (irregular) partition graph:
+
+- :class:`AllGatherHaloExchange` gathers *every* partition's owned values onto every partition.
+  Dead simple, but communication and memory are O(n_partitions × owned_max) per device — it does
+  not distribute memory, so it is a correctness reference and a small-scale convenience, not the
+  scaling path.
+- :class:`AllToAllHaloExchange` sends each partition only the boundary cells its neighbours actually
+  ghost, via a single ``all_to_all``. Communication is the real halo volume and per-device memory is
+  O(n_partitions × max halo *per pair*), so it scales. This is the default. It uses plain
+  ``all_to_all`` (uniform per-pair buffers, padded to a common size) rather than a neighbour-only
+  ``ppermute``, because a min-cut partitioner produces an *irregular* neighbour set — the number of
+  partitions a given one borders varies — which a one-to-one permutation primitive cannot express in
+  a fixed schedule, but a general all-to-all handles directly.
 """
 
 from __future__ import annotations
@@ -33,6 +42,7 @@ import abc
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from .padding import PaddedLayout
 
@@ -130,4 +140,86 @@ class AllGatherHaloExchange(HaloExchange):
         # `(n_partitions, n_owned_max, ...)` — the layout the plan's index pair addresses.
         all_owned = jax.lax.all_gather(owned_local, axis_name, axis=0, tiled=False)
         ghost = all_owned[plan.src_partition, plan.src_owned_index]
+        return jnp.concatenate([owned_local, ghost], axis=0)
+
+
+class AllToAllPlan(HaloPlan):
+    """The pack/unpack bookkeeping for a neighbour exchange over ``all_to_all``.
+
+    Attributes
+    ----------
+    send_gather : jnp.ndarray
+        For each sending partition, which owned cells to pack into the buffer for each destination:
+        shape ``(n_partitions_send, n_partitions_dest, n_send_max)``. ``send_gather[s, d, k]`` is the
+        owned-index within partition ``s`` of the ``k``-th cell it sends to partition ``d`` (padding
+        slots read owned cell 0 — the value lands in a buffer slot no ghost reads).
+    src_partition : jnp.ndarray
+        Owning partition of each ghost cell, shape ``(n_partitions, n_ghost_max)`` — which received
+        buffer to read it from.
+    recv_slot : jnp.ndarray
+        Position of each ghost cell within its source's buffer, same shape — which slot to read.
+    """
+
+    send_gather: jnp.ndarray
+    src_partition: jnp.ndarray
+    recv_slot: jnp.ndarray
+
+
+class AllToAllHaloExchange(HaloExchange):
+    """Fill ghosts by exchanging only boundary cells, via a single ``all_to_all``.
+
+    Each partition packs, for every other partition, exactly the owned cells that partition ghosts
+    from it, and one ``all_to_all`` delivers every packed buffer to its destination; each ghost then
+    reads its value out of the buffer from its source. Communication is the true halo volume and
+    per-device memory is O(n_partitions × per-pair halo), so unlike the all-gather this actually
+    distributes memory.
+
+    Correct for an arbitrary partition graph: the pairwise buffers are padded to one common size, so
+    an irregular neighbour set (a partition bordering a variable number of others — what a min-cut
+    partitioner produces) needs no special handling. A partition that borders another only lightly
+    still exchanges a full (mostly-padding) buffer with it; that padding is the price of using a
+    uniform ``all_to_all`` instead of a ragged one, and is small when the per-pair halos are.
+    """
+
+    def plan(self, layout: PaddedLayout) -> AllToAllPlan:
+        """Build the pack/unpack indices from the ghost→(owning partition, owned index) map.
+
+        Pure build-time numpy (off the jit path). For each destination partition, its ghost cells
+        are grouped by source partition, and each is assigned the next free slot in that source's
+        buffer; the send side is the transpose of the same enumeration, so the slot a cell is packed
+        into on the sender equals the slot the ghost reads on the receiver.
+        """
+        n_parts = layout.n_partitions
+        src = np.asarray(layout.ghost_src_partition)  # (n_partitions, n_ghost_max)
+        owned_index = np.asarray(layout.ghost_src_owned_index)
+        recv_slot = np.zeros_like(src)
+        # (sender, dest) -> owned indices to pack, in the order the destination will read them.
+        packed: dict[tuple[int, int], list[int]] = {}
+        for dest in range(n_parts):
+            next_slot: dict[int, int] = {}
+            for g in range(layout.n_ghost[dest]):
+                s = int(src[dest, g])
+                slot = next_slot.get(s, 0)
+                recv_slot[dest, g] = slot
+                next_slot[s] = slot + 1
+                packed.setdefault((s, dest), []).append(int(owned_index[dest, g]))
+
+        n_send_max = max((len(v) for v in packed.values()), default=1) or 1
+        send_gather = np.zeros((n_parts, n_parts, n_send_max), dtype=np.int64)
+        for (s, dest), indices in packed.items():
+            send_gather[s, dest, : len(indices)] = indices
+
+        return AllToAllPlan(
+            send_gather=jnp.asarray(send_gather),
+            src_partition=layout.ghost_src_partition,
+            recv_slot=jnp.asarray(recv_slot),
+        )
+
+    def fill(self, owned_local: jnp.ndarray, plan: AllToAllPlan, axis_name: str) -> jnp.ndarray:
+        """Pack per-destination buffers, exchange them, then read each ghost from its source."""
+        # Pack: buffer for destination d is this partition's owned cells that d ghosts from it.
+        send = owned_local[plan.send_gather]  # (n_partitions_dest, n_send_max, ...)
+        # Exchange: send[d] goes to device d; recv[s] is the buffer partition s sent to this one.
+        recv = jax.lax.all_to_all(send, axis_name, split_axis=0, concat_axis=0, tiled=True)
+        ghost = recv[plan.src_partition, plan.recv_slot]  # (n_ghost_max, ...)
         return jnp.concatenate([owned_local, ghost], axis=0)
