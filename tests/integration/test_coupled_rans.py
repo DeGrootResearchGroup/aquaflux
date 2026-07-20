@@ -32,12 +32,20 @@ from aquaflux.schemes import CompactGreenGauss
 from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
+    hybrid_initialize,
     inlet_k,
     inlet_omega,
     scalar_pseudo_transient_solve,
     solve_segregated,
 )
 from aquaflux.turbulence.coupled import CoupledRANS, coupled_continuation, solve_coupled
+
+# Step caps are backstops, not costs: the solvers' while_loop exits on tolerance, so a generous cap
+# is free (measured identical wall time and physics at 200 vs 500). These are sized to clear the
+# pseudo-transient march's slow phase rather than truncate it mid-descent, which the convergence
+# guard rightly rejects.
+SCALAR_MAX_STEPS = 200
+FLOW_MAX_STEPS = 300
 
 RHO, U_IN, H, L = 1.0, 1.0, 1.0, 4.0
 NU = 4e-4  # Re = U H / nu = 2500
@@ -104,17 +112,27 @@ def _channel(nx=28, ny=20, growth=1.2):
 @pytest.fixture(scope="module")
 def warm_started():
     """A short segregated pre-smooth, shared by the coupled tests as their warm start / reference."""
-    mesh, momentum, turbulence, k_in, omega_in = _channel()
+    mesh, momentum, turbulence, _, _ = _channel()
     n = mesh.n_cells
     coupled = CoupledRANS.build(momentum, turbulence, RHO)
     reference = jnp.full(n, RHO * 21 * NU)
-    solve_flow = reused_flow_solve(_with_viscosity(momentum, reference), **PRECONDITIONER)
-    flow0, k0, omega0 = momentum.initial_state(), jnp.full(n, k_in), jnp.full(n, omega_in)
+    solve_flow = reused_flow_solve(
+        _with_viscosity(momentum, reference), max_steps=FLOW_MAX_STEPS, **PRECONDITIONER
+    )
+    # Take the hybrid initial condition's *scalars* but keep the flow at rest. A uniform k leaves
+    # the first sweep's k residual essentially unchanged for ~30 pseudo-transient steps (measured
+    # rel 0.997, 1.007, 1.016, ... -- it briefly *rises*), so the SER schedule's beta never relaxes
+    # and the march burns its budget; the smoothed k descends from the first step (51 -> 29 steps).
+    # The flow block wants the opposite: from rest it converges in 20 steps, but from the potential
+    # field in 70 -- a smaller ||R0|| tightens the relative stopping target faster than it shortens
+    # the march, and the potential start decays slowly (~0.977/step) rather than dropping.
+    _, k0, omega0 = hybrid_initialize(momentum, turbulence)
+    flow0 = momentum.initial_state()
     flow_ws, k_ws, omega_ws = solve_segregated(
         momentum,
         turbulence,
         solve_flow,
-        scalar_pseudo_transient_solve(max_steps=40),
+        scalar_pseudo_transient_solve(max_steps=SCALAR_MAX_STEPS),
         flow0,
         k0,
         omega0,
@@ -158,7 +176,7 @@ def test_coupled_newton_converges_and_matches_the_segregated_solution(warm_start
         momentum,
         turbulence,
         warm_started["solve_flow"],
-        scalar_pseudo_transient_solve(max_steps=40),
+        scalar_pseudo_transient_solve(max_steps=SCALAR_MAX_STEPS),
         flow0,
         k0,
         omega0,
