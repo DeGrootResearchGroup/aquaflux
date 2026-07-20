@@ -199,7 +199,8 @@ double-count ghost rows and are not `psum`-reduced across partitions), so it **r
 distributed Krylov solver), not built. `HessianCorrectedGradient` also **raises**: its gradient couples
 to the Hessian through nested Schur / inner-`A_HH` solves whose operators read ghost gradients *and*
 ghost Hessians that the outer exchange does not refresh — a correct build would exchange inside each
-nested solve. The distributed swept solve also drops the sweep's host-side under-resolution diagnostic
+nested solve. (Lifting this swept-only limitation — a distributed GMRES + the nested-solve Hessian
+exchanges — is tracked as GitHub issue #134.) The distributed swept solve also drops the sweep's host-side under-resolution diagnostic
 (a faithful global residual norm would need the owned-only reduction the operator-wrapping seam does not
 carry; the sweep count is a static, mesh-property-driven choice regardless).
 
@@ -239,12 +240,27 @@ distributed-advection path yet); it reuses the identical hook mechanism.
 The device tests simulate 4 CPU devices via `--xla_force_host_platform_device_count=4`, which must
 be set **before JAX initializes** — hence the subprocess.
 
-## Not yet built (in priority order)
+## Not yet built
 
-1. **The limiter (`psi`) exchange** for distributed limited advection — reuses the `gradient_hook`
-   mechanism; deferred until there is a distributed-advection path to exercise it.
-2. **Per-partition reverse Cuthill–McKee**, applied as a transform over a built `PartitionedMesh`
-   (not woven into the build loop) so it stays contained.
+The distributed **core is complete and correct**: the decomposition, the owned+halo `PartitionedMesh`,
+uniform-shape padding, the injected-assembler `shard_map` residual, the `all_to_all` halo, the
+partition-local node sets, and the derived-field + per-sweep gradient exchange — all matching serial in
+value *and* adjoint. What remains is optimizations and infrastructure whose value is currently either
+**unrealized** (no consumer to exercise it) or **blocked** (a prerequisite path does not exist), so none
+is a clear next build; each waits on a real need.
+
+1. **Distributed GMRES / Hessian gradient solve** — lift the swept-only limitation of the per-sweep
+   exchange (a distributed Krylov solve with owned-only `psum` inner products, plus the nested-solve
+   exchanges for `HessianCorrectedGradient`). Not a blocker — `SweptGradientSolve` is the scalable
+   production path. Tracked as GitHub issue #134.
+2. **The limiter (`psi`) exchange** for distributed limited advection — reuses the identical
+   `gradient_hook` mechanism; **blocked** until a distributed-advection path exists to exercise it.
+3. **Per-partition reverse Cuthill–McKee** — a contained transform over a built `PartitionedMesh`,
+   reusing `permute_cells` + `ReverseCuthillMcKee`. **Deferred:** its benefits (local matvec locality,
+   AMG coarse space) have no consumer yet — there is no distributed/per-partition preconditioner and no
+   matvec benchmark, and `BlockPartitioner` already RCM-orders globally so its owned blocks are already
+   locally ordered (only a Scotch cut would gain). Revisit when a local preconditioner or a matvec
+   benchmark exists to measure it. Tracked as GitHub issue #135.
 4. **Multi-node** via `jax.distributed.initialize()`. Note the honest gap: multi-host is
    production-grade on GPU/TPU, but multi-node **CPU** leans on Gloo and is materially slower than
    MPI — re-verify before committing to a CPU cluster.
