@@ -203,5 +203,65 @@ def test_engine_leaves_a_clean_ift_adjoint() -> None:
     assert abs(grad - fd) < 1e-6 * abs(fd)
 
 
+def _sweep_traces(*, freeze):
+    """Trace counts per simulated outer sweep, reusing (or rebuilding) the AMG preconditioner.
+
+    Mimics the driver's sweep: a shift diagonal rebuilt from a changing diffusivity each sweep, with
+    the preconditioner either carried across sweeps or rebuilt. Returns the per-sweep count of
+    residual traces and the converged field.
+    """
+    mesh, geometry, volume_flux, residual = _reactive_transport(16, 8)
+    n = mesh.n_cells
+    reference, gamma = jnp.full(n, 0.5), jnp.full(n, GAMMA)
+    traces = {"n": 0}
+
+    def counting_residual(phi):
+        traces["n"] += 1
+        return residual(phi)
+
+    solve = scalar_pseudo_transient_solve(max_steps=20)
+    carried = scalar_transport_preconditioner(
+        mesh, geometry, gamma, volume_flux, residual, reference
+    )
+    state = jnp.zeros(n) + 1.0  # not a weak-typed literal: avoids a spurious second compile
+    per_sweep = []
+    for sweep in range(4):
+        diffusivity = gamma * (1.0 + 0.3 * sweep)
+        shift = scalar_transport_shift_diagonal(
+            mesh, geometry, diffusivity, volume_flux, residual, reference
+        )
+        precond = (
+            carried
+            if freeze
+            else scalar_transport_preconditioner(
+                mesh, geometry, diffusivity, volume_flux, residual, reference
+            )
+        )
+        before = traces["n"]
+        state = solve(counting_residual, state, ScalarShiftPolicy(shift, precond))
+        per_sweep.append(traces["n"] - before)
+    return per_sweep, state
+
+
+def test_a_carried_preconditioner_compiles_the_scalar_solve_once() -> None:
+    """Reusing one preconditioner across sweeps makes the jitted solve a compilation-cache hit.
+
+    The preconditioner is a frozen, off-jit constant, so ``equinox.filter_jit`` keeps it on the
+    static side, hashed by object identity: carrying **one** instance across sweeps reuses the
+    compiled solve, while a freshly built one each sweep re-compiles the whole
+    ``ImplicitNewtonSolver`` -- the escalation loop, the GMRES, and the V-cycle. Only the shift
+    diagonal changes per sweep, and being an array it re-traces nothing.
+    """
+    frozen, frozen_state = _sweep_traces(freeze=True)
+    rebuilt, rebuilt_state = _sweep_traces(freeze=False)
+
+    assert frozen[0] > 0  # the first sweep compiles
+    assert frozen[1:] == [0, 0, 0]  # and every later sweep is a cache hit
+    assert all(count > 0 for count in rebuilt)  # rebuilding re-compiles every sweep
+    # Freezing the preconditioner only changes how fast the Krylov iteration converges, never the
+    # converged field -- so the two paths agree to solver tolerance.
+    assert float(jnp.max(jnp.abs(frozen_state - rebuilt_state))) < 1e-10
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

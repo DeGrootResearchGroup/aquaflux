@@ -42,14 +42,12 @@ from aquaflux.solve import (
 )
 
 from .initialization import hybrid_initialize
+from .preconditioner import ScalarTransportPreconditioner
 
 if TYPE_CHECKING:
     from aquaflux.flow import MomentumContinuity
 
     from .transport import SSTTurbulence
-
-# A frozen ``phi -> M`` preconditioner factory (the scalar convection-diffusion AMG carriers).
-_ScalarFactory = Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]
 
 
 class CoupledRANSLayout(eqx.Module):
@@ -227,8 +225,8 @@ class CoupledShiftPolicy(eqx.Module):
     flow_preconditioner: BlockPreconditioner
     k_shift_diagonal: jnp.ndarray
     omega_shift_diagonal: jnp.ndarray
-    k_preconditioner: _ScalarFactory | None = None
-    omega_preconditioner: _ScalarFactory | None = None
+    k_preconditioner: ScalarTransportPreconditioner | None = None
+    omega_preconditioner: ScalarTransportPreconditioner | None = None
 
     def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
         """The block-diagonal full-state shift and the ``beta -> M`` composed preconditioner at ``phi``.
@@ -332,16 +330,18 @@ def coupled_continuation(
 
     mdot = momentum.mass_flux(flow_ref)
     closure = coupled.turbulence.closure_fields(grad_velocity, k_ref, omega_ref)
-    k_policy = coupled.turbulence.k_shift_policy(mdot, closure, k_ref, method=method)
-    omega_policy = coupled.turbulence.omega_shift_policy(mdot, closure, omega_ref, method=method)
+    k_amg = omega_amg = None
+    if method is not None:
+        k_amg = coupled.turbulence.k_preconditioner(mdot, closure, k_ref, method=method)
+        omega_amg = coupled.turbulence.omega_preconditioner(mdot, closure, omega_ref, method=method)
 
     policy = CoupledShiftPolicy(
         coupled.layout,
         block,
-        k_policy.shift_diagonal,
-        omega_policy.shift_diagonal,
-        k_policy.preconditioner,
-        omega_policy.preconditioner,
+        coupled.turbulence.k_shift_policy(mdot, closure, k_ref).shift_diagonal,
+        coupled.turbulence.omega_shift_policy(mdot, closure, omega_ref).shift_diagonal,
+        k_amg,
+        omega_amg,
     )
     return PseudoTransientStep(
         policy,

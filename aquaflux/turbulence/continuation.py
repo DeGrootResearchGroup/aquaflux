@@ -36,7 +36,8 @@ from aquaflux.solve import (
     ShiftTerm,
 )
 
-_Factory = Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]
+from .preconditioner import ScalarTransportPreconditioner
+
 _ScalarResidual = Callable[[jnp.ndarray], jnp.ndarray]
 
 
@@ -45,8 +46,16 @@ class ScalarShiftPolicy(eqx.Module):
 
     Supplies the two problem-specific choices :class:`~aquaflux.solve.PseudoTransientStep` needs for a
     scalar: the base pseudo-time shift diagonal (the transport operator diagonal, the ``a_P`` analogue)
-    and the shifted-operator preconditioner. Both are frozen at build time (from the sweep's closure),
-    so the policy is a cheap per-sweep carrier the engine scales by ``beta`` each step.
+    and the shifted-operator preconditioner. The policy is a cheap per-sweep carrier the engine scales
+    by ``beta`` each step.
+
+    The two have different lifetimes in a segregated outer loop, and the fields are typed to allow
+    that: the shift diagonal is rebuilt each sweep from the live closure, so the pseudo-time damping
+    always scales with the current operator, while the preconditioner is built **once** and carried
+    across sweeps (it only accelerates the Krylov iteration, so freezing it costs at most a few extra
+    iterations — see :func:`~aquaflux.turbulence.preconditioner.scalar_transport_preconditioner`).
+    Because both fields are pytrees, a policy rebuilt each sweep is still a compilation-cache *hit*
+    for a jitted solve that takes it as an argument.
 
     Attributes
     ----------
@@ -54,15 +63,15 @@ class ScalarShiftPolicy(eqx.Module):
         The non-negative per-cell base shift ``d``, shape ``(n_cells,)`` (from
         :func:`~aquaflux.turbulence.preconditioner.scalar_transport_shift_diagonal`). Already the full
         scalar state, so no packing is needed. The engine adds ``beta d`` to the Jacobian diagonal.
-    preconditioner : callable or None
-        The frozen ``phi -> M`` convection-diffusion AMG factory for the *unshifted* operator, or
-        ``None`` for an unpreconditioned solve. Reused unchanged for the shifted operator: the shift
-        only increases diagonal dominance, so the unshifted AMG remains a valid preconditioner (and its
-        off-jit hierarchy need not be rebuilt per step).
+    preconditioner : ScalarTransportPreconditioner or None
+        The frozen ``phi -> M`` convection-diffusion AMG for the *unshifted* operator, or ``None`` for
+        an unpreconditioned solve. Reused unchanged for the shifted operator: the shift only increases
+        diagonal dominance, so the unshifted AMG remains a valid preconditioner (and its off-jit
+        hierarchy need not be rebuilt per step).
     """
 
     shift_diagonal: jnp.ndarray
-    preconditioner: _Factory | None = None
+    preconditioner: ScalarTransportPreconditioner | None = None
 
     def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
         """The base shift diagonal and the (beta-independent) frozen preconditioner at ``phi``."""

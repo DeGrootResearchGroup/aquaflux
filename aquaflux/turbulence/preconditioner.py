@@ -24,6 +24,8 @@ field and the segregated solve's adjoint untouched (the same guarantee as the fl
 
 from __future__ import annotations
 
+import abc
+import dataclasses
 from collections.abc import Callable
 
 import jax
@@ -34,6 +36,8 @@ from aquaflux.mesh import Mesh
 from aquaflux.mesh.geometry import MeshGeometry
 from aquaflux.schemes.interpolation import interpolate_owner_neighbour, interpolation_factor
 from aquaflux.solve import (
+    AirHierarchy,
+    SmoothedHierarchy,
     air_multigrid_solve,
     build_air_hierarchy,
     build_convection_hierarchy,
@@ -42,7 +46,71 @@ from aquaflux.solve import (
 )
 from aquaflux.vectors import dot
 
-_Factory = Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class ScalarTransportPreconditioner(abc.ABC):
+    """A frozen multigrid preconditioner for a scalar transport solve, as a ``phi -> M`` factory.
+
+    The hierarchy is frozen at build, so the returned matvec does not depend on ``phi``; calling the
+    preconditioner is how the continuation asks for it at the current iterate.
+
+    **Deliberately not an ``equinox.Module`` / pytree.** The hierarchy is built off the jit path and
+    held fixed, so it is a compile-time *constant*, not solver state. Two things follow, and both
+    break if it is made a pytree. First, a solve that takes it as an argument would trace its arrays;
+    they would then reach the implicit-function-theorem ``custom_vjp`` as tracers in a
+    ``nondiff_argnums`` position, which JAX rejects. Second, it is precisely because the object is
+    opaque to JAX that reusing **one** instance across outer sweeps is a compilation-cache *hit*:
+    ``equinox.filter_jit`` puts a non-array argument on the static side, hashed by object identity.
+    Build it once and carry it; a freshly built one each sweep re-compiles the whole solve.
+
+    Concrete strategies differ only in which cycle they apply; add a subclass rather than a branch.
+    """
+
+    @abc.abstractmethod
+    def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
+        """Apply the preconditioner: approximate ``A^{-1} residual``, shape ``(n_cells,)``."""
+
+    def __call__(self, phi: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
+        """The frozen matvec ``M`` at iterate ``phi`` (which it does not depend on)."""
+        return self.apply
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class ConvectionAmgPreconditioner(ScalarTransportPreconditioner):
+    """Two-level nonsymmetric aggregation multigrid on the convection-diffusion operator.
+
+    Attributes
+    ----------
+    hierarchy : SmoothedHierarchy
+        The frozen aggregation hierarchy.
+    v_cycles : int
+        V-cycles per apply.
+    """
+
+    hierarchy: SmoothedHierarchy
+    v_cycles: int = 1
+
+    def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
+        return convection_multigrid_solve(self.hierarchy, residual, cycles=self.v_cycles)
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class AirAmgPreconditioner(ScalarTransportPreconditioner):
+    """Reduction-based (lAIR) multigrid, which coarsens fully and stays mesh-independent.
+
+    Attributes
+    ----------
+    hierarchy : AirHierarchy
+        The frozen lAIR hierarchy.
+    v_cycles : int
+        V-cycles per apply.
+    """
+
+    hierarchy: AirHierarchy
+    v_cycles: int = 1
+
+    def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
+        return air_multigrid_solve(self.hierarchy, residual, cycles=self.v_cycles)
 
 
 def _scalar_operator_pieces(
@@ -165,7 +233,7 @@ def scalar_transport_preconditioner(
     method: str = "twolevel",
     v_cycles: int = 1,
     fixed_cells: jnp.ndarray | None = None,
-) -> _Factory:
+) -> ScalarTransportPreconditioner:
     """A frozen convection-diffusion V-cycle preconditioner for a scalar transport equation.
 
     Parameters
@@ -196,8 +264,8 @@ def scalar_transport_preconditioner(
 
     Returns
     -------
-    callable
-        A ``phi -> M`` factory giving the (frozen, ``phi``-independent) preconditioner matvec ``M``.
+    ScalarTransportPreconditioner
+        The frozen, ``phi``-independent preconditioner, callable as a ``phi -> M`` factory.
     """
     if method not in ("twolevel", "air"):
         raise ValueError(f"unknown method {method!r}; use 'twolevel' or 'air'")
@@ -219,14 +287,5 @@ def scalar_transport_preconditioner(
         owner_e, nb_e, visc_int, n, flux=mdot_int, boundary_diagonal=boundary_diagonal
     )
     if method == "air":
-        hierarchy = build_air_hierarchy(a)
-
-        def solve(r: jnp.ndarray) -> jnp.ndarray:
-            return air_multigrid_solve(hierarchy, r, cycles=v_cycles)
-    else:
-        hierarchy = build_convection_hierarchy(a)
-
-        def solve(r: jnp.ndarray) -> jnp.ndarray:
-            return convection_multigrid_solve(hierarchy, r, cycles=v_cycles)
-
-    return lambda phi: solve
+        return AirAmgPreconditioner(build_air_hierarchy(a), v_cycles=v_cycles)
+    return ConvectionAmgPreconditioner(build_convection_hierarchy(a), v_cycles=v_cycles)

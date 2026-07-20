@@ -114,6 +114,15 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   globalizing the stiff k/omega solves via `scalar_pseudo_transient_solve` — the **only** scalar path
   the SST driver supports (the fixed-count Newton sub-solve was removed). When a new nonlinear residual
   needs pseudo-time globalization, write a `ShiftPolicy` — do **not** re-implement the march.
+  - **A `ShiftPolicy`'s preconditioner must stay a non-pytree (binding, #105).** `ScalarTransportPreconditioner`
+    (`turbulence/preconditioner.py`) is a plain `dataclasses.dataclass(frozen=True, eq=False)` ABC with
+    `ConvectionAmgPreconditioner` / `AirAmgPreconditioner` concrete strategies — deliberately **not** an
+    `equinox.Module`. Two things break if it is made a pytree: (i) a solve taking it as an argument traces
+    its hierarchy arrays, which then reach `_implicit_solve`'s `custom_vjp` as tracers in a
+    `nondiff_argnums` slot and JAX raises `UnexpectedTracerError`; (ii) it is *because* the object is opaque
+    to JAX that carrying one instance across outer sweeps is a `filter_jit` cache **hit** (non-array
+    arguments go to the static side, hashed by identity). Both were hit and fixed while building #105 —
+    do not "modernize" these into `equinox.Module`s.
 - **Gate C — PASSED (`tests/integration/test_skewed_diffusion.py`).** With
   `CorrectedGreenGauss` injected into the residual on a 25%-skewed mesh, one Newton step
   drives `‖R‖` ~24 → ~1e-12 and reproduces a harmonic linear field to ~5e-13 (linear-exact

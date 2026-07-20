@@ -115,7 +115,7 @@ def test_exact_production_limiter_solves_with_the_preconditioner() -> None:
 
     residual = turbulence.k_residual(mdot, closure)
     # The AMG the continuation policy carries, applied to a bare Newton solve to isolate it.
-    preconditioner = turbulence.k_shift_policy(mdot, closure, k, method="twolevel").preconditioner
+    preconditioner = turbulence.k_preconditioner(mdot, closure, k, method="twolevel")
     gmres = lineax.GMRES(rtol=1e-8, atol=1e-8, restart=32, stagnation_iters=32)
     solved = NewtonSolver(iterations=6, solver=gmres, preconditioner=preconditioner).solve(
         residual, k
