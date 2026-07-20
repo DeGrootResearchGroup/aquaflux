@@ -1,4 +1,4 @@
-"""Stage 1b-i — the distributed mechanism works: `shard_map` + `all_gather` + `jax.grad`.
+"""The distributed mechanism works: `shard_map` + `all_gather` + `jax.grad`.
 
 Before wiring the full padded distributed residual, this guards the environment capability the
 whole distributed path depends on: that a `shard_map` program with an `all_gather` collective (the

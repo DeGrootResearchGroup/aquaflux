@@ -1,11 +1,11 @@
-"""Gate 1a — domain decomposition reproduces the serial residual (and its gradient).
+"""Domain decomposition reproduces the serial residual (and its gradient).
 
 Before any `shard_map` or collective, this proves the *decomposition itself* is correct: split the
 mesh into partitions with halo rings, gather each partition's local field (owned + ghost) from the
 true global field, run the existing serial residual on each local mesh, and scatter the owned rows
 back — the result must equal the serial residual cell-for-cell, and differentiating a parameter
 through it must match the serial gradient. The halo is filled here directly from the global field
-(no collective yet); replacing that fill with a `shard_map` all-gather is Gate 1b.
+(no collective yet), isolating the decomposition from the collective that replaces it.
 
 Uses an **orthogonal** grid with no gradient scheme, so the non-orthogonal correction vanishes and a
 single ghost layer is sufficient (the two-layer / gradient-halo case is a documented follow-on).
@@ -140,7 +140,7 @@ def test_halo_plan_reproduces_the_global_gather() -> None:
 
 def test_distributed_residual_via_halo_matches_serial() -> None:
     """The full distributed residual with ghosts filled by the halo exchange equals serial — the
-    only remaining Gate-1b step is wiring this per-partition function into `shard_map` with padding."""
+    same per-partition function is what the sharded residual runs, once padded to uniform shapes."""
     mesh = structured_grid_3d(6, 6, 6, named_boundaries=True)
     geom = mesh.geometry()
     pmesh = partition_mesh(mesh, _slab_labels(mesh.n_cells, 3))
@@ -153,7 +153,7 @@ def test_distributed_residual_via_halo_matches_serial() -> None:
 
 def test_distributed_parameter_gradient_matches_serial() -> None:
     """Differentiating a physical parameter (gamma) through the decomposition matches serial —
-    the adjoint flows correctly across the partition gather/scatter (the Gate-1b precondition)."""
+    the adjoint flows correctly across the partition gather/scatter."""
     mesh = structured_grid_3d(5, 5, 5, named_boundaries=True)
     geom = mesh.geometry()
     pmesh = partition_mesh(mesh, _slab_labels(mesh.n_cells, 3))

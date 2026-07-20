@@ -20,9 +20,10 @@ Key correctness facts for a cell-centred FVM decomposition:
 - **Global owner/neighbour roles are preserved.** Remapping keeps each face's global owner as the
   local owner, so the gathered owner-outward normals stay consistent — no re-orientation.
 
-The current builder keeps the full global node array on every partition (correct, simple). Node
-remapping to a partition-local node set — and padding partitions to a uniform size for
-``shard_map`` — are scaling follow-ons; this module is the correctness foundation they build on.
+This module produces a correct decomposition and nothing more; extending each partition to the
+uniform shapes ``shard_map`` needs is a separate concern, in
+:mod:`~aquaflux.parallel.padding`. The current builder keeps the full global node array on every
+partition (correct, simple); remapping to a partition-local node set is a scaling follow-on.
 """
 
 from __future__ import annotations
@@ -212,8 +213,9 @@ def partition_mesh(mesh: Mesh, labels) -> PartitionedMesh:
     Notes
     -----
     Pure build-time topology work in numpy (not part of the differentiable solve). The local mesh
-    keeps the full global node array; node remapping and uniform-size padding for ``shard_map``
-    are scaling follow-ons.
+    keeps the full global node array; node remapping is a scaling follow-on. Padding to the
+    uniform shapes ``shard_map`` needs is applied separately, by
+    :func:`~aquaflux.parallel.padding.pad_partition`.
     """
     labels = np.asarray(labels)
     owner = np.asarray(mesh.face_cells.owner)

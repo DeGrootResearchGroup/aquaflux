@@ -13,8 +13,8 @@ both in a plain-Python emulation (stack every partition's owned state) and under
 `all_gather` over the device axis).
 
 The `AllGatherHaloExchange` here gathers *all* owned values onto every partition: simple and exactly
-correct, but O(n_partitions × owned) per device — right for the correctness gate and modest partition
-counts, to be superseded by a neighbour-only `ppermute` variant behind this same interface for scale.
+correct, but O(n_partitions × owned) per device — right while correctness is the priority and partition
+counts are modest, to be superseded by a neighbour-only `ppermute` variant behind this same interface.
 """
 
 from __future__ import annotations
@@ -62,8 +62,8 @@ class AllGatherHaloExchange(HaloExchange):
     """Fill ghosts by indexing into the all-gathered stack of every partition's owned values.
 
     Correct for any partition graph (each ghost reads its exact remote owner). Communication is the
-    full all-gather, so memory is O(n_partitions × owned_max) per device — fine for the correctness
-    gate and small partition counts; a `ppermute` neighbour-exchange variant is the scaling upgrade.
+    full all-gather, so memory is O(n_partitions × owned_max) per device — fine at small partition
+    counts; a `ppermute` neighbour-exchange variant is the scaling upgrade.
     """
 
     def fill(
