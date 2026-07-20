@@ -159,6 +159,15 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     chosen to give a diagonally dominant M-matrix an aggregation hierarchy can coarsen. Its parameters
     are a weighted graph (`coefficient`, `flux`), not flow quantities. Keeping it in `solve/` also adds
     no new dependency edge: every consumer already imports `solve.multigrid`.
+  - **The V-cycle recursion AND its outer fixed-cycle driver are single-homed (binding, #52).** A
+    family (`smoothed_multigrid_solve`, `convection_multigrid_solve`, `air_multigrid_solve`) contributes
+    **only** its `_VCycleOps` — restriction, prolongation, smoother. The recursion is `_frozen_v_cycle`
+    and the outer loop (zero initial guess, `cycles` residual-correction passes,
+    `x += _frozen_v_cycle(levels, b - A x, …)`) is `_fixed_cycle_solve`; both are written once. That
+    outer loop is what makes `b -> x` a constant linear operator — the property the frozen-left-PC and
+    the adjoint transpose depend on — so it must not be re-typed per family where one copy could drift.
+    A new family adds a `_VCycleOps` builder and a thin entry point that calls `_fixed_cycle_solve`; do
+    **not** re-write the cycle loop in it.
   - **Degenerate-mesh guard (binding — validated where the graph is consumed).** Because the
     hierarchies are built once off-jit and then frozen, a degenerate mesh must fail *there*, not as a
     silently stalling runtime V-cycle. Now that the builders are operator-in, the **graph** check lives
