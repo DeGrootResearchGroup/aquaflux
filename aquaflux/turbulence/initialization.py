@@ -2,18 +2,27 @@
 
 The monolithic coupled Newton solve (:func:`~aquaflux.turbulence.solve_coupled`) is a local method: it
 converges quadratically once in the basin, but from a raw ``u=0, k=k_in, omega=omega_in`` cold start it
-stalls -- the near-wall ``omega`` fixation alone puts a ``~60 nu / (beta_1 d^2)`` jump into the residual,
+stalls -- the near-wall ``omega`` fixation alone puts a ``~6 nu / (beta_1 d^2)`` jump into the residual,
 and a uniform interior is far from a consistent field. This module builds a **cheap, physical** initial
 state (a few linear Laplace solves) that lands directly in the basin, so the coupled solve self-starts
 from nothing. It is the Fluent-style "hybrid initialization" specialized to the k-omega SST fields:
 
 - **velocity** -- potential flow ``u = grad phi`` (:func:`~aquaflux.flow.potential_flow`), respecting the
   through-flow and geometry;
-- **k** -- the harmonic interpolant of its boundary values (``k_in`` at the inlet decaying to ``0`` at
-  the walls);
-- **omega** -- its boundary-propagated interior value with the near-wall cells set to the analytical
-  wall value ``omega_wall = 60 nu / (beta_1 d^2)`` (a Laplace-smoothed ``omega`` instead over-diffuses
-  that large wall value into the interior and slows the solve, so only the wall cells are set).
+- **k** -- the harmonic interpolant of its boundary values, then **floored to a turbulent level** so the
+  interior does not start laminar (the interpolant otherwise collapses toward the wall ``k = 0`` -- see
+  below);
+- **omega** -- its boundary-propagated interior value raised to the analytical viscous-sublayer profile
+  ``omega(y) = 6 nu / (beta_1 y^2)`` at every cell's own wall distance. That profile is the exact
+  solution of the near-wall balance ``nu d2(omega)/dy2 = beta_1 omega^2``, so each near-wall cell starts
+  on the same analytical decay curve; a Laplace-smoothed ``omega`` instead over-diffuses the large wall
+  value into the interior, while setting only the wall cells leaves a cliff to the flat interpolant that
+  concentrates almost all of the initial ``omega`` residual in the wall-adjacent cell (seeding the
+  profile everywhere roughly halves that initial residual). It is also smooth in the log variable
+  ``w = log omega``, where the profile is the ramp ``w(y) = log(6 nu / beta_1) - 2 log(y)`` rather than
+  the ``~log(omega_wall / omega_core)`` cliff a wall-cells-only seed leaves -- the ramp's largest
+  cross-cell step is set by the mesh growth ratio, where the cliff grows with Reynolds number as the
+  wall spacing shrinks.
 
 Each field is one linear SPD solve -- together far cheaper than a single coupled Newton iteration.
 
@@ -25,7 +34,15 @@ regime, which for a turbulent case is the wrong problem. Such a domain still has
 the friction velocity fixed by the global force balance
 (:func:`~aquaflux.flow.scales.friction_velocity`), and the equilibrium levels it implies
 (:func:`~aquaflux.turbulence.equilibrium_k` and a length scale) replace the degenerate interpolants.
-An inlet-driven domain is unaffected: its friction velocity is zero, so the estimate never applies.
+
+An **inlet-driven wall-bounded domain has the same failure for a subtler reason**: it does have an
+inlet, but the walls carry ``k = 0`` over the whole domain and dominate the small inlet patch by area,
+so the harmonic interpolant still collapses toward zero a few channel heights downstream (median ``k``
+orders of magnitude below ``k_in``). Its friction velocity is zero, so the equilibrium estimate does not
+apply; instead ``k`` is floored at the inlet turbulence level -- the interpolant's own maximum, which by
+the maximum principle is the peak boundary (inlet) value. ``omega`` needs no such floor in either case:
+its walls are zero-gradient, not Dirichlet-``0``, so its interpolant stays at ~``omega_in`` and does not
+collapse.
 """
 
 from __future__ import annotations
@@ -63,8 +80,8 @@ def hybrid_initialize(
     momentum : MomentumContinuity
         The flow assembler (supplies the potential-flow boundary data and mesh).
     turbulence : SSTTurbulence
-        The SST closure (supplies the k/omega boundary conditions, the near-wall cells, and the wall
-        distance / viscosity that set the analytical ``omega`` wall value).
+        The SST closure (supplies the k/omega boundary conditions and the per-cell wall distance /
+        viscosity that set the analytical near-wall ``omega`` profile).
     gradient_scheme : GradientScheme or None
         The scheme for the Laplace solves' gradient reconstruction (defaults to
         :class:`~aquaflux.schemes.CompactGreenGauss`).
@@ -91,28 +108,50 @@ def hybrid_initialize(
     omega, _ = laplace_field(
         mesh, geometry, turbulence.omega_boundary, gradient_scheme=gradient_scheme
     )
-    wall_values = omega_wall_value(
-        turbulence.molecular_viscosity[turbulence.wall_cells],
-        turbulence.wall_distance[turbulence.wall_cells],
-        turbulence.model,
+    # Seed the analytical viscous-sublayer profile omega(y) = 6 nu / (beta_1 y^2) on EVERY cell, at
+    # its own wall distance -- not only the wall-adjacent cells. This is the exact solution of the
+    # near-wall balance nu d2(omega)/dy2 = beta_1 omega^2, so every near-wall cell starts on the same
+    # analytical decay curve. Setting only the wall cells leaves a cliff between the fixed wall cell
+    # (large omega) and its neighbour on the flat interpolant, and that neighbour's omega equation then
+    # carries almost the entire initial residual. The profile falls off as 1/y^2, so a few cells out it
+    # drops below the interpolant and the maximum leaves the core untouched; at the wall cells it equals
+    # the fixation value (same distance, same expression), so those rows stay consistent. Seeding the
+    # profile everywhere roughly halves the initial omega residual. It is also smooth in the log variable
+    # w = log omega -- the profile is the ramp w(y) = log(6 nu / beta_1) - 2 log(y), not the
+    # ~log(omega_wall / omega_core) cliff a wall-cells-only seed leaves across the first cell.
+    near_wall_omega = omega_wall_value(
+        turbulence.molecular_viscosity, turbulence.wall_distance, turbulence.model
     )
-    omega = omega.at[turbulence.wall_cells].set(wall_values)
+    omega = jnp.maximum(omega, near_wall_omega)
 
-    # A body-force-driven domain has no inlet, so both interpolants above are degenerate: k is
-    # harmonic between all-zero wall values (identically zero), and omega is a pure-Neumann solve
-    # whose interior carries nothing. Lifting k alone would be worse than either -- nu_t = k/omega
-    # with omega at its floor is enormous -- so both levels come from the same place: the friction
-    # velocity the force balance fixes, which is the one velocity scale such a domain always has.
-    # Zero for an inlet-driven domain, where `maximum` then leaves the interpolants untouched.
+    # Give the interior a turbulent-level k, or the coupled solve starts laminar. The k interpolant
+    # is pulled toward its wall Dirichlet(0) values, and because the walls dominate a wall-bounded
+    # domain by area the interior k collapses toward zero -- a channel only a few heights long already
+    # has a median k orders of magnitude below the inlet level. That is the *laminar* field
+    # (nu_t = k/omega ~ 0), so a turbulent case must then grow k across the whole interior, a swing the
+    # coupled Newton must absorb. (omega does not need the same treatment: its walls are zero-gradient,
+    # not Dirichlet-0, so its interpolant stays at ~omega_in and does not collapse.) The turbulent level
+    # comes from whatever drives the flow:
     u_tau = friction_velocity(momentum)
-    k_equilibrium = equilibrium_k(u_tau, turbulence.model)
-    # The outer mixing length of wall-bounded turbulence, so k/omega lands at the ~0.09 u_tau h
-    # eddy viscosity a developed channel carries rather than several times it.
-    length_scale = length_scale_factor * hydraulic_length(momentum)
     if float(u_tau) > 0.0:
+        # Body-force-driven domain: no inlet to read a level from, and every wall is k = 0, so the
+        # interpolant is ~0 everywhere. Set k -- and omega with it, to keep nu_t = k/omega sane -- from
+        # the equilibrium turbulence the friction velocity the force balance fixes implies. The outer
+        # mixing length 0.09 h lands k/omega at the ~0.09 u_tau h eddy viscosity a developed channel
+        # carries rather than several times it.
+        k_equilibrium = equilibrium_k(u_tau, turbulence.model)
+        length_scale = length_scale_factor * hydraulic_length(momentum)
         k = jnp.maximum(k, k_equilibrium)
-        # The wall cells keep their analytical value, which is far larger than this core level.
+        # The near-wall cells keep their analytical profile, far larger than this core level.
         omega = jnp.maximum(omega, inlet_omega(k_equilibrium, length_scale, turbulence.model))
+    else:
+        # Inlet-driven domain: the interpolant carries the inlet k only near the inlet and collapses
+        # downstream. Floor the whole interior at the inlet turbulence level -- by the maximum principle
+        # the peak boundary k is the interpolant's maximum -- so nu_t starts turbulent across the
+        # domain. With omega already at ~omega_in in the core, (k_in, omega_in) is the consistent
+        # inlet-level eddy viscosity. A domain with no inlet turbulence (all-zero k boundaries) has a
+        # ~0 interpolant, so this lifts nothing and the k_floor below carries positivity.
+        k = jnp.maximum(k, jnp.max(k))
 
     k = jnp.maximum(k, k_floor)
     omega = jnp.maximum(omega, omega_floor)

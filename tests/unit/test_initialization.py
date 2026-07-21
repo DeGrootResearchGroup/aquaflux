@@ -38,8 +38,8 @@ from aquaflux.turbulence import (
 RHO, U_IN, NU = 1.0, 1.0, 1e-2
 
 
-def _channel(nx=16, ny=12, lx=3.0, ly=1.0):
-    mesh = structured_grid_2d(nx, ny, lx=lx, ly=ly, named_boundaries=True)
+def _channel(nx=16, ny=12, lx=3.0, ly=1.0, y_nodes=None):
+    mesh = structured_grid_2d(nx, ny, lx=lx, ly=ly, named_boundaries=True, y_nodes=y_nodes)
     geometry = mesh.geometry()
     momentum = MomentumContinuity.build(
         mesh,
@@ -191,17 +191,94 @@ def test_hybrid_initialize_is_positive_with_analytical_wall_omega() -> None:
     assert bool(jnp.all(jnp.isfinite(flow)))
     assert float(jnp.min(k)) > 0.0
     assert float(jnp.min(omega)) > 0.0
-    assert float(jnp.max(k)) <= k_in + 1e-12  # harmonic interpolant is bounded by its boundary data
+    assert float(jnp.max(k)) <= k_in + 1e-12  # k floored at the inlet level, still bounded by k_in
 
-    # the near-wall cells carry the analytical omega_wall = 60 nu / (beta_1 d^2)
-    expected_wall = omega_wall_value(
-        turbulence.molecular_viscosity[turbulence.wall_cells],
-        turbulence.wall_distance[turbulence.wall_cells],
-        model,
+    # every cell sits on the analytical viscous-sublayer profile omega(y) = 6 nu / (beta_1 y^2) at its
+    # own wall distance, or above it where the interpolant is larger -- so the wall-adjacent cells carry
+    # the fixation value exactly and the near-wall band follows the same 1/y^2 decay (not a flat cliff).
+    profile = omega_wall_value(turbulence.molecular_viscosity, turbulence.wall_distance, model)
+    assert bool(jnp.all(omega >= profile - 1e-12))
+    assert jnp.allclose(omega[turbulence.wall_cells], profile[turbulence.wall_cells])
+    # a wall-adjacent interior cell (not itself fixed) is lifted onto the profile, above the interpolant
+    interior = jnp.ones(mesh.n_cells, bool).at[turbulence.wall_cells].set(False)
+    near_wall_interior = interior & (profile > omega_in)
+    assert bool(jnp.any(near_wall_interior))
+    assert jnp.allclose(omega[near_wall_interior], profile[near_wall_interior])
+    # omega is the interpolant *raised* onto the profile, so it is never below the interpolant floor
+    # (omega_in here, the constant harmonic solution of the inlet-Dirichlet / zero-gradient-wall data).
+    assert float(jnp.min(omega)) >= omega_in * (1.0 - 1e-6)
+
+
+def test_hybrid_initialize_omega_is_a_smooth_ramp_in_log_space() -> None:
+    """On a wall-resolved (graded) mesh the seeded omega is a smooth ramp in the log variable log(omega).
+
+    The analytical profile ``6 nu/(beta_1 y^2)`` gives ``log omega(y) = log(6 nu/beta_1) - 2 log y``,
+    whose largest cross-face step is set by the mesh growth ratio, not the Reynolds number. Seeding only
+    the wall cells would instead put ``omega_wall`` next to the flat interpolant, a jump of
+    ``~log(omega_wall / omega_core)`` in ``log omega`` across the first face that *grows* as the
+    near-wall spacing shrinks. That matters wherever the near-wall omega enters logarithmically: pin that
+    the seeded field is the ramp -- its max cross-face jump in ``log omega`` is far below that cliff.
+    """
+    ny, growth, ly = 32, 1.3, 1.0
+    y_nodes = graded_nodes(ny, ly, growth)
+    mesh, geometry, momentum = _channel(ny=ny, ly=ly, y_nodes=y_nodes)
+    model = SSTModel()
+    k_in = float(inlet_k(jnp.array(U_IN), 0.05))
+    omega_in = float(inlet_omega(jnp.array(k_in), 0.07, model))
+    turbulence = _turbulence(mesh, geometry, k_in, omega_in)
+
+    _, _, omega = hybrid_initialize(momentum, turbulence)
+
+    w = jnp.log(omega)
+    owner, neighbour = mesh.face_cells.owner, mesh.face_cells.neighbour
+    interior = neighbour >= 0
+    max_face_jump = float(jnp.max(jnp.abs(w[owner[interior]] - w[neighbour[interior]])))
+    # The wall-cell fixation value against the interior interpolant -- the jump the wall-cells-only seed
+    # would leave across the first face (the cliff this profile replaces).
+    wall_value = float(
+        jnp.max(
+            omega_wall_value(
+                turbulence.molecular_viscosity[turbulence.wall_cells],
+                turbulence.wall_distance[turbulence.wall_cells],
+                model,
+            )
+        )
     )
-    assert jnp.allclose(omega[turbulence.wall_cells], expected_wall)
-    # the interior (non-wall) omega is the boundary-propagated inlet value
-    assert float(jnp.min(omega)) == pytest.approx(omega_in, rel=1e-4)
+    cliff_jump = float(jnp.log(wall_value) - jnp.log(omega_in))
+    assert max_face_jump < 0.5 * cliff_jump  # a ramp set by the grading, not the wall-to-core cliff
+    assert max_face_jump < 3.0  # ~2 log(growth) per face, an absolute bound independent of Reynolds
+
+
+def test_hybrid_initialize_floors_inlet_driven_k_at_the_turbulent_level() -> None:
+    """An inlet-driven wall-bounded channel starts with a turbulent-level interior k, not laminar.
+
+    The k Laplace interpolant is pulled toward its wall Dirichlet(0) values, and on a domain several
+    heights long the walls dominate the small inlet patch by area, so the raw interior k collapses
+    orders of magnitude below ``k_in`` -- the *laminar* field (``nu_t = k/omega ~ 0``). A turbulent case
+    started there must then grow k across the whole interior, a swing the coupled Newton must absorb. The
+    IC floors k at the inlet turbulence level (the interpolant's own maximum) so it starts turbulent.
+    """
+    lx, ly = (
+        8.0,
+        1.0,
+    )  # long enough that the raw interpolant collapses (this is a real test of the floor)
+    mesh, geometry, momentum = _channel(nx=96, ny=24, lx=lx, ly=ly)
+    model = SSTModel()
+    k_in = float(inlet_k(jnp.array(U_IN), 0.05))
+    omega_in = float(inlet_omega(jnp.array(k_in), 0.07, model))
+    turbulence = _turbulence(mesh, geometry, k_in, omega_in)
+
+    # Establish that the raw interpolant really does collapse here -- median orders of magnitude below
+    # k_in -- so the assertion below is testing the floor, not a short channel where it barely matters.
+    raw, _ = laplace_field(
+        mesh, geometry, turbulence.k_boundary, gradient_scheme=CompactGreenGauss()
+    )
+    assert float(jnp.median(raw)) < 0.01 * k_in
+
+    _, k, _ = hybrid_initialize(momentum, turbulence)
+    # The floor lifts the whole interior to the inlet level: even the least cell is turbulent, not ~0.
+    assert float(jnp.min(k)) >= 0.5 * k_in
+    assert float(jnp.median(k)) >= 0.5 * k_in
 
 
 if __name__ == "__main__":

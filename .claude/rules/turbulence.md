@@ -172,9 +172,22 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   consistent field the inner solve can precondition. `hybrid_initialize(momentum, turbulence)` builds a
   cheap physical IC (a few linear Laplace solves): **potential-flow velocity** (`flow/initialization.py`
   `potential_flow`), **Laplace-smoothed k** (harmonic interpolant of its BCs), and **ω** =
-  boundary-propagated interior with the near-wall cells set to the analytical wall value (a *Laplace*-ω
-  over-diffuses that large value and slows the solve — set only the wall cells). From this IC the coupled
-  Newton converges from nothing (~10–15 steps, FD-verified). `solve_coupled(coupled)` with no initial
+  boundary-propagated interior **raised to the analytical viscous-sublayer profile `ω(y)=6ν/(β₁y²)` at
+  every cell's own wall distance** (via `jnp.maximum`). A *Laplace*-ω over-diffuses the large wall value
+  into the interior; seeding only the wall cells (the earlier form) leaves a **cliff** between the fixed
+  wall cell and its neighbour on the flat interpolant, and that neighbour's ω equation then carries
+  almost the entire initial ω residual. The profile is the exact solution of the near-wall balance
+  `ν d²ω/dy² = β₁ω²`, so every near-wall cell starts on the same decay curve; it falls off as `1/y²`, so
+  a few cells out it drops below the interpolant and the `maximum` leaves the core untouched, and at the
+  wall cells it equals the fixation value (same distance/expression) so those rows stay consistent.
+  Measured: this roughly **halves** the initial ‖R_ω‖ (otherwise ~99% concentrated in the wall-adjacent
+  cells — the discrete **diffusion-vs-quadratic-destruction** balance, independent of convection /
+  production / cross-diffusion). The profile is also the **smooth ramp the held-in-reserve log-ω form
+  wants** (`w=log ω`, below): `w(y)=log(6ν/β₁)−2 log y`, whose largest cross-face `Δw` is set by the
+  mesh growth ratio (~2, Reynolds-independent), where the cliff would be a `~log(ω_wall/ω_core)` jump in
+  `w` that **grows with Reynolds number** as the wall spacing shrinks (measured max `Δw` 5.4→8.3 from Re
+  2.5k→25k, vs ~2.4 for the profile). From this IC the coupled Newton converges from nothing
+  (~10–15 steps, FD-verified). `solve_coupled(coupled)` with no initial
   state calls it automatically; the segregated pre-smooth is no longer required to reach the basin (still
   available as a fallback). **An exactly symmetric velocity is fine** — the coupled solve self-starts
   from the exactly-uniform body-force plug (`u_y ≡ 0`) with no perturbation. (Earlier this stalled, and
@@ -190,13 +203,26 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     `ν_t=0` — not a poor guess but the **laminar** problem, which for a turbulent case is the wrong
     equations. Both levels therefore come from the **friction velocity the force balance fixes**,
     `u_τ = √(βh/ρ)` (`flow/scales.py::friction_velocity`, `h = V/A_wall`): `k = u_τ²/√β*`
-    (`boundary.py::equilibrium_k`) and `ω = inlet_omega(k, 0.09h)`, applied with `jnp.maximum` so an
-    inlet-driven domain (whose `u_τ` is zero) is bit-unchanged. **Fix k and ω together or not at
+    (`boundary.py::equilibrium_k`) and `ω = inlet_omega(k, 0.09h)`, applied with `jnp.maximum` so it
+    only ever raises the fields (the `u_τ>0` branch). **Fix k and ω together or not at
     all** — raising `k` while `ω` sits at its `1e-8` floor gives `ν_t = k/ω ~ 10⁶`, far worse than the
     laminar start. The length scale is the **outer mixing length `0.09h`**, not the `0.07·D_h`
     inlet-specification convention: the latter is for an inlet, and here overshot the developed-channel
     `ν_t` by ~3.5× (measured `ν_t/ν` 373 vs the correct 120 = `0.09u_τh/ν`, which the shipped default
     now hits exactly). Pinned by `test_hybrid_initialize_gives_a_developed_channel_eddy_viscosity`.
+  - **Inlet-driven wall-bounded domains collapse k too — floor it at the inlet level (binding).** The
+    body-force degeneracy has a subtler inlet-driven twin: even *with* an inlet, the walls carry
+    `k=Dirichlet(0)` over the whole domain and **dominate the small inlet patch by area**, so the
+    harmonic `k` interpolant decays toward zero a few channel heights downstream (measured median `k`
+    `~1e-6` at L/H≈8, collapsing further with length — the **laminar** field again). `friction_velocity`
+    is zero here, so the equilibrium branch does not fire; the `else` branch instead floors `k` at
+    **`jnp.max(k)`** — the interpolant's peak, which by the maximum principle is the inlet Dirichlet
+    value — giving a uniform inlet-level interior. **ω needs no matching floor**: its walls are
+    *zero-gradient*, not Dirichlet-0, so its interpolant stays at `~ω_in` (verified: exactly `ω_in` for
+    a constant-`ω_in` inlet) and `(k_in, ω_in)` is the consistent inlet eddy viscosity `ν_t=k_in/ω_in`.
+    Low interior `k` is a prime suspect for the coupled Newton's large near-wall k-swing on a separating
+    high-Re case, so this is a coupled-convergence fix, not only a cosmetic IC one. Pinned by
+    `test_hybrid_initialize_floors_inlet_driven_k_at_the_turbulent_level`.
 
 **Issue #69 — CLOSED path (do not re-derive without reading it):** all three planned steps shipped —
 scalar continuation (#73), Option 1 hardening (convergence stop + adaptive relaxation), and Option 2
