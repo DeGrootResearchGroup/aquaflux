@@ -131,6 +131,27 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   globalizing the stiff k/omega solves via `scalar_pseudo_transient_solve` — the **only** scalar path
   the SST driver supports (the fixed-count Newton sub-solve was removed). When a new nonlinear residual
   needs pseudo-time globalization, write a `ShiftPolicy` — do **not** re-implement the march.
+  - **`line_search` — backtrack the shifted step before escalating β (binding, the coupled-RANS fix).**
+    The step optionally scales the shifted correction `δ` back along `{1, 1/2, …, 1/2**line_search}`
+    (`backtracking_line_search`, extracted from `implicit.py` and shared with `DampedNewtonStep` — one
+    home for the ladder) and keeps the largest length that reduces the residual, **before** the
+    accept/escalate test. `line_search=0` (default) is the old behaviour: take the full step `φ+δ`, and
+    the **only** recourse to an overshoot is escalating β — a *full re-solve*. This was measured to be
+    the dominant coupled-RANS cost: from the hybrid IC the full coupled Newton step overshoots by
+    ~10⁷× (‖R‖ 220 → 5.8e9), so every step burned ~4–7 expensive re-solves and, worse, escalating β
+    (β=16/64) still did **not** descend (rel ≈ 1.0 — the march stalled). A line search on the **one**
+    β₀ solve finds α≈¼ → rel≈0.48 (residual halved) in a few cheap residual evaluations. So the
+    coupled path sets `line_search>0` (`coupled_continuation`, `_COUPLED_LINE_SEARCH=10`); β escalation
+    stays the fallback for a genuinely bad *direction* (an ill-conditioned shifted solve), not an
+    overshoot. Like the shift, the search only reshapes the forward path — converged state and IFT
+    adjoint unchanged. The flow path leaves `line_search=0`, so it is bit-identical.
+  - **`forward_solver` overrides the shared `_INEXACT_CONTINUATION_SOLVER`.** `default_solver()` returns
+    the injected `forward_solver` when set, else the shared restart-40 GMRES. The coupled path injects a
+    larger-restart GMRES (`_COUPLED_FORWARD_SOLVER`, restart 120): the stiff coupled saddle system needs
+    hundreds of restart-40 cycles (a 40-vector subspace discards too much Arnoldi history), whereas a
+    120-vector subspace reaches the same tight solution ~1.4× faster and tighter. Tolerances stay tight
+    — an *inexact* linear solve is unsafe under log-ω (an inaccurate step in the log variable is
+    exponentiated and diverges), so the accuracy is load-bearing, not wasteful.
   - **A `ShiftPolicy`'s preconditioner must stay a non-pytree (binding, #105).** `ScalarTransportPreconditioner`
     (`turbulence/preconditioner.py`) is a plain `dataclasses.dataclass(frozen=True, eq=False)` ABC with
     `ConvectionAmgPreconditioner` / `AirAmgPreconditioner` concrete strategies — deliberately **not** an

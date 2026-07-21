@@ -13,12 +13,14 @@ from __future__ import annotations
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import pytest
 from aquaflux.solve import (
     DivergenceGuard,
     ImplicitNewtonSolver,
     PseudoTransientStep,
     ShiftTerm,
 )
+from aquaflux.solve.implicit import backtracking_line_search
 
 
 class UniformShiftPolicy(eqx.Module):
@@ -113,3 +115,56 @@ def test_injected_acceptance_policy_is_honoured() -> None:
     phi = solver.solve(_residual, jnp.ones_like(theta), theta)
 
     assert jnp.allclose(phi, jnp.cbrt(theta), atol=1e-6)
+
+
+def test_backtracking_line_search_picks_largest_descending_rung() -> None:
+    """The shared backtracking helper keeps the largest step length that reduces the residual, and
+    falls back to the smallest rung when none does. Physics-free: ``R(x) = x`` so ``||R|| = |x|``."""
+    residual = lambda x: x  # noqa: E731
+    phi = jnp.array([1.0])
+    reference = jnp.asarray(1.0)  # ||R(phi)||
+
+    # delta = -4: full step x = -3 (|R| = 3, overshoot); alpha = 1/2 -> x = -1 (|R| = 1, not < 1);
+    # alpha = 1/4 -> x = 0 (|R| = 0 < 1). Largest descending rung is 1/4.
+    out = backtracking_line_search(residual, phi, jnp.array([-4.0]), reference, steps=4)
+    assert jnp.allclose(out, 0.0)
+
+    # steps = 0 takes the full (overshooting) step unchanged.
+    full = backtracking_line_search(residual, phi, jnp.array([-4.0]), reference, steps=0)
+    assert jnp.allclose(full, -3.0)
+
+    # delta = +4: every rung increases the residual, so it falls back to the smallest, 1/16.
+    fallback = backtracking_line_search(residual, phi, jnp.array([4.0]), reference, steps=4)
+    assert jnp.allclose(fallback, 1.0 + (1.0 / 16.0) * 4.0)
+
+
+def test_line_search_recovers_an_overshooting_step_without_escalation() -> None:
+    """With the escalation fallback disabled, the line search alone rescues a step whose full shifted
+    correction overshoots -- the stiff-first-step regime the coupled RANS solve hits.
+
+    From ``phi = 1`` toward the root ``phi = 10`` (``theta = 1000``) with only a weak shift, the full
+    Newton correction lands near ``phi ~ 334`` and the cubic residual explodes. A backtracking search
+    scales it back to a descent; without it (and without escalation) the step is rejected every
+    iteration and the solve never converges.
+    """
+    theta = jnp.array([1000.0])
+    policy = UniformShiftPolicy(strength=1.0)
+
+    searched = ImplicitNewtonSolver(
+        rtol=1e-8,
+        atol=1e-10,
+        max_steps=200,
+        forward_step=PseudoTransientStep(policy, beta0=0.01, max_escalations=0, line_search=40),
+    )
+    phi = searched.solve(_residual, jnp.ones_like(theta), theta)
+    assert jnp.allclose(phi, jnp.cbrt(theta), atol=1e-5)
+
+    # No line search and no escalation: the overshoot is never tamed, so the solve cannot converge.
+    unsearched = ImplicitNewtonSolver(
+        rtol=1e-8,
+        atol=1e-10,
+        max_steps=50,
+        forward_step=PseudoTransientStep(policy, beta0=0.01, max_escalations=0, line_search=0),
+    )
+    with pytest.raises(Exception):  # noqa: B017  (EquinoxRuntimeError, raised at solve time)
+        jax.block_until_ready(unsearched.solve(_residual, jnp.ones_like(theta), theta))

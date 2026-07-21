@@ -38,7 +38,7 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
-from .implicit import _ForwardStep
+from .implicit import _ForwardStep, backtracking_line_search
 from .linear import solve_linear
 
 # Inexact-Newton forward solver for the pseudo-transient march: a loose *relative* tolerance (each
@@ -181,6 +181,24 @@ class PseudoTransientStep(eqx.Module):
         :class:`DivergenceGuard` (accept unless the candidate is non-finite or exceeds
         ``divergence_cap × ‖R₀‖``) — the divergence guard the non-monotone march needs. Swap in a
         monotone / sufficient-decrease or forcing rule without touching the escalation loop.
+    line_search : int
+        Maximum backtracking step-halvings applied to the shifted correction *before* the step is
+        judged (static). ``0`` (the default) takes the full shifted step ``φ + δ``, so escalating
+        the damping ``β`` — a full re-solve — is the only recourse when that step overshoots. A
+        positive value first scales ``δ`` back along the ladder ``{1, 1/2, …, 1/2**line_search}``
+        (:func:`~aquaflux.solve.implicit.backtracking_line_search`, cheap residual evaluations, no
+        re-solve), keeping the largest length that reduces the residual. When the shifted direction
+        is accurate but the *full* step overshoots — the stiff coupled-RANS regime, where a full step
+        blows up while a quarter-step descends — this recovers a descent from the **one** expensive
+        solve instead of re-solving at larger ``β`` (which changes the direction and, measured, does
+        not descend). The ``β`` escalation remains the fallback for a genuinely bad direction (an
+        ill-conditioned shifted solve). Like the shift, it only reshapes the forward path, so the
+        converged state and the IFT adjoint are unchanged.
+    forward_solver : lineax.AbstractLinearSolver or None
+        The linear solver for the shifted forward solves, overriding the shared
+        :data:`_INEXACT_CONTINUATION_SOLVER` when set (static). A stiff coupled system whose shifted
+        operator needs a larger Krylov subspace to converge without restarting can pass a
+        larger-``restart`` GMRES here; ``None`` uses the shared default.
     adjoint_preconditioner_factory : callable or None
         The ``state -> M`` preconditioner factory for the converged transpose (adjoint) solve, or
         ``None`` for an unpreconditioned adjoint (static). At ``φ*`` the operator is the
@@ -194,6 +212,8 @@ class PseudoTransientStep(eqx.Module):
     max_escalations: int = eqx.field(static=True, default=6)
     escalation_factor: float = eqx.field(static=True, default=2.0)
     acceptance: StepAcceptance = eqx.field(default_factory=DivergenceGuard)
+    line_search: int = eqx.field(static=True, default=0)
+    forward_solver: lx.AbstractLinearSolver | None = eqx.field(static=True, default=None)
     adjoint_preconditioner_factory: (
         Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
     ) = eqx.field(static=True, default=None)
@@ -201,11 +221,14 @@ class PseudoTransientStep(eqx.Module):
     def default_solver(self) -> lx.AbstractLinearSolver:
         """The forward-loop solver for the pseudo-transient march when the caller supplies none.
 
-        A loose relative tolerance with a tight absolute floor and a generous restart/stagnation
-        budget, so the march is not capped short of the nonlinear tolerance and rides out the
-        stiffer shifted operators a graded, high-Reynolds mesh produces.
+        The injected :attr:`forward_solver` when set, else the shared
+        :data:`_INEXACT_CONTINUATION_SOLVER` — a loose relative tolerance with a tight absolute floor
+        and a generous restart/stagnation budget, so the march is not capped short of the nonlinear
+        tolerance and rides out the stiffer shifted operators a graded, high-Reynolds mesh produces.
         """
-        return _INEXACT_CONTINUATION_SOLVER
+        return (
+            self.forward_solver if self.forward_solver is not None else _INEXACT_CONTINUATION_SOLVER
+        )
 
     def adjoint_preconditioner(
         self,
@@ -230,6 +253,7 @@ class PseudoTransientStep(eqx.Module):
         beta0, exponent = self.beta0, self.exponent
         max_escalations, escalation_factor = self.max_escalations, self.escalation_factor
         acceptance = self.acceptance
+        line_search = self.line_search
 
         def step(
             residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
@@ -265,7 +289,12 @@ class PseudoTransientStep(eqx.Module):
                     preconditioner=preconditioner,
                     throw=False,
                 )
-                candidate = phi + delta
+                # Backtrack the step length before judging it: when the shifted direction is accurate
+                # but the full step overshoots, a scaled-back step descends from this one solve,
+                # sparing a re-solve at larger beta. `line_search == 0` takes the full step.
+                candidate = backtracking_line_search(
+                    residual_fn, phi, delta, residual_norm, line_search
+                )
                 return candidate, jnp.linalg.norm(residual_fn(candidate))
 
             # Escalate the damping on a rejected attempt, taking the first the acceptance policy

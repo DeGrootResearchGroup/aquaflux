@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import lineax as lx
 import numpy as np
 
 from aquaflux.flow import BlockPreconditioner
@@ -440,6 +441,24 @@ def _reparametrized_preconditioner(
     return ScaledScalarPreconditioner(preconditioner, 1.0 / scale)
 
 
+# The shifted forward solve for the coupled march. Restarted GMRES with a larger Krylov subspace than
+# the shared default (restart 40 -> 120): the coupled turbulent saddle system is stiff enough that a
+# 40-vector restart discards too much Arnoldi history and converges only after hundreds of restart
+# cycles, whereas a 120-vector subspace reaches the same tight solution in far fewer (measured ~1.4x
+# faster and to a tighter residual on the ~12k-cell backward-facing step). The tolerances stay tight
+# (an inexact/loose linear solve is unsafe here -- an inaccurate step in the log-omega variable is
+# exponentiated and diverges), so the accuracy the log-variable closure needs is preserved.
+_COUPLED_FORWARD_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-10, restart=120, stagnation_iters=40)
+
+# Backtracking rungs for the shifted step. The full coupled Newton step from the hybrid initial
+# condition overshoots violently (the residual blows up many orders of magnitude), so the step length
+# is scaled back along {1, 1/2, ..., 1/2**N} until it descends -- recovering a residual-reducing step
+# from the one expensive shifted solve, instead of escalating beta (a full re-solve, which changes the
+# direction and, measured, does not descend on this case). Ten rungs reach 1/1024, well past the
+# ~1/4 the stiff first steps need.
+_COUPLED_LINE_SEARCH = 10
+
+
 def coupled_continuation(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
@@ -450,6 +469,8 @@ def coupled_continuation(
     max_escalations: int = 6,
     escalation_factor: float = 2.0,
     divergence_cap: float = 10.0,
+    line_search: int = _COUPLED_LINE_SEARCH,
+    forward_solver: lx.AbstractLinearSolver | None = None,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
     """Build the pseudo-transient continuation step for the coupled Newton solve.
@@ -471,6 +492,14 @@ def coupled_continuation(
     beta0, exponent, max_escalations, escalation_factor, divergence_cap
         The pseudo-transient schedule and divergence-guard parameters (see
         :class:`~aquaflux.solve.PseudoTransientStep`).
+    line_search : int
+        Backtracking step-halvings applied to the shifted step before it is judged (default
+        :data:`_COUPLED_LINE_SEARCH`); scales an accurate-but-overshooting direction back to a descent
+        from the one shifted solve rather than re-solving at larger ``beta``. See
+        :class:`~aquaflux.solve.PseudoTransientStep`.
+    forward_solver : lineax.AbstractLinearSolver or None
+        The shifted-solve Krylov solver; ``None`` uses :data:`_COUPLED_FORWARD_SOLVER` (a
+        larger-restart GMRES suited to the stiff coupled system).
     **preconditioner_kwargs
         Forwarded to :meth:`~aquaflux.flow.BlockPreconditioner.build` for the flow block (e.g.
         ``schur_scaling``, ``velocity``).
@@ -488,6 +517,8 @@ def coupled_continuation(
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        line_search=line_search,
+        forward_solver=forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER,
         adjoint_preconditioner_factory=policy.adjoint_factory(),
     )
 
@@ -684,6 +715,8 @@ def mass_flow_coupled_continuation(
     max_escalations: int = 6,
     escalation_factor: float = 2.0,
     divergence_cap: float = 10.0,
+    line_search: int = _COUPLED_LINE_SEARCH,
+    forward_solver: lx.AbstractLinearSolver | None = None,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
     """The pseudo-transient continuation step for the **mass-flow-constrained** coupled Newton solve.
@@ -691,8 +724,8 @@ def mass_flow_coupled_continuation(
     The globalization of :func:`coupled_continuation`, with its :class:`CoupledShiftPolicy` bordered by
     the mass-flow constraint (:class:`_MassFlowBorderedPolicy`), so it drives the augmented
     ``[flow..., k, omega, beta]`` system where ``beta`` is a Lagrange multiplier for ``<U_dir> =
-    target``. Parameters are :func:`coupled_continuation`'s; ``flow_direction`` selects the constrained
-    velocity component.
+    target``. Parameters are :func:`coupled_continuation`'s (including ``line_search`` /
+    ``forward_solver``); ``flow_direction`` selects the constrained velocity component.
     """
     policy = _coupled_shift_policy(coupled, reference_state, method, **preconditioner_kwargs)
     force, average = _coupled_constraint_vectors(coupled, flow_direction)
@@ -704,6 +737,8 @@ def mass_flow_coupled_continuation(
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        line_search=line_search,
+        forward_solver=forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER,
         adjoint_preconditioner_factory=bordered.adjoint_factory(),
     )
 

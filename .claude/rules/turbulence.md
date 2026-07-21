@@ -162,12 +162,26 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     and wraps its (physical-operator) AMG in `ScaledScalarPreconditioner` by the reciprocal — so the frozen
     preconditioner acts on the reparametrized block without rebuilding the hierarchy. `_reparametrized_preconditioner`
     returns the preconditioner **unchanged** when the factor is one, so the `DirectScalars` path is bit-identical.
-  - **Open efficiency follow-up (not correctness).** On the small channel `omega`-log converges in ~12
-    Newton steps to machine zero. On the full 12k-cell pitzDaily mesh it keeps `ω > 0` and the *per-field
-    relative* residuals descend (the absolute ‖R‖ is dominated by `ω`'s ~1e5 scale and is a misleading
-    metric — track per-variable relative norms), but each Newton step is ~7× a direct step and the descent
-    is slow, so the full run is compute-heavy. The reparametrized-block preconditioner scaling and the
-    globalization are the levers; treat efficient large-mesh `omega`-log convergence as a tuning follow-up.
+  - **`coupled_continuation` globalizes with a line search + a larger-restart Krylov (the pitzDaily
+    performance fix).** Track the **per-field relative** residuals, not the absolute ‖R‖ (dominated by
+    `ω`'s scale — a misleading metric). Two measured facts drove this. **(1) The full coupled Newton step
+    from the hybrid IC overshoots by ~10⁷×** (‖R‖ 220 → 5.8e9); the pseudo-transient step's only recourse
+    used to be escalating β — a *full re-solve* — and escalating β (16/64) still did **not** descend
+    (rel ≈ 1.0 → the full-mesh march *stalled*, which had been misread as "slow, compute-heavy"). A
+    **backtracking line search** on the one β₀ solve finds α≈¼ → rel≈0.48 (residual halved), so
+    `coupled_continuation` sets `line_search=_COUPLED_LINE_SEARCH` (see `.claude/rules/solve.md`); β
+    escalation stays the fallback for a bad *direction*, not an overshoot. With it the full-mesh solve
+    **descends and accelerates** (rel 0.48→0.47→0.44→0.31→0.20 over the first five steps) instead of
+    stalling — a correctness fix, not just speed. **(2) The shifted solve needs a large Krylov subspace:**
+    `_COUPLED_FORWARD_SOLVER` is restart-120 GMRES (the shared restart-40 default discards too much
+    Arnoldi history on this stiff saddle system; ~1.4× faster to the same tight solution). Tolerances stay
+    **tight** — an inexact solve is unsafe under log-`ω` (an inaccurate log step is exponentiated and
+    diverges), so loosening the linear tolerance is **not** a lever here (measured: it breaks the march).
+  - **Remaining efficiency follow-up — the preconditioner.** Each shifted solve still costs ~10–16k
+    matvecs because the block-diagonal `CoupledShiftPolicy` preconditioner ignores the flow↔turbulence
+    coupling (`nu_t↔k,ω`; the k/ω transport on the Rhie–Chow flux); flow-only laminar needs ~8 GMRES
+    cycles, the coupled system ~450. A coupled (block-triangular) preconditioner capturing that coupling
+    is the lever to bring the per-solve cost down; treat it as the open tuning item.
   - **The per-scalar transform is layout-consistent through both coupled solves (binding).** `solve_coupled`
     and `solve_coupled_mass_flow` both map the physical IC into the solved space with `state_from_physical`
     and return `physical_fields` — so `LogScalars` is correct through the mass-flow-constrained path too

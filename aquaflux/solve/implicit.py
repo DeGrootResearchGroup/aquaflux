@@ -79,6 +79,48 @@ class ForwardStep(Protocol):
 _INEXACT_FORWARD_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-3)
 
 
+def backtracking_line_search(residual_fn, phi, delta, reference_norm, steps):
+    """Backtrack the step length: the largest ``alpha`` in ``{1, 1/2, ..., 1/2**steps}`` with
+    ``||R(phi + alpha delta)|| < reference_norm``, falling back to the smallest rung if none reduces
+    the residual.
+
+    A fixed (unrolled) ladder keeps the step a constant-length operation, so it composes with a
+    ``lax.while_loop`` and the implicit-function-theorem ``custom_vjp`` without a data-dependent
+    branch. ``steps == 0`` returns the undamped full step ``phi + delta`` unchanged, so a
+    well-behaved iterate (near the root, or a linear residual) is unaffected. The search only
+    reshapes the forward path — the converged state, and hence the IFT adjoint, is unchanged. Shared
+    by the line-searched Newton step and the pseudo-transient march, so an accurate direction that
+    overshoots is scaled back cheaply (residual evaluations) rather than re-solved.
+
+    Parameters
+    ----------
+    residual_fn : callable
+        The single-argument residual ``phi -> R(phi)``.
+    phi : jnp.ndarray
+        The current iterate.
+    delta : jnp.ndarray
+        The (full) correction direction; the search scales it by ``alpha``.
+    reference_norm : jnp.ndarray
+        The residual norm the candidate must beat (typically ``||R(phi)||``).
+    steps : int
+        Maximum step-halvings (static). ``0`` disables the search.
+    """
+    if steps == 0:
+        return phi + delta
+
+    # Keep the *largest* rung that reduces the residual (locked in by ``accepted``); the smallest
+    # rung is the fallback when none does.
+    alpha = 1.0
+    chosen = 0.5**steps
+    accepted = jnp.asarray(False)
+    for _ in range(steps + 1):
+        reduces = (jnp.linalg.norm(residual_fn(phi + alpha * delta)) < reference_norm) & ~accepted
+        chosen = jnp.where(reduces, alpha, chosen)
+        accepted = accepted | reduces
+        alpha = 0.5 * alpha
+    return phi + chosen * delta
+
+
 def _damped_newton_step(residual_fn, phi, solver, preconditioner, line_search_steps):
     """One Newton step with a monotone backtracking line search on the residual norm.
 
@@ -91,23 +133,7 @@ def _damped_newton_step(residual_fn, phi, solver, preconditioner, line_search_st
     adjoint depends solely on the converged state, so it stays gradient-transparent.
     """
     delta, r = newton_correction(residual_fn, phi, solver=solver, preconditioner=preconditioner)
-    if line_search_steps == 0:
-        return phi + delta
-    r_norm = jnp.linalg.norm(r)
-
-    # Backtracking over a fixed ladder alpha in {1, 1/2, ..., 1/2**line_search_steps}: keep the
-    # *largest* rung that reduces the residual (locked in by ``accepted``), falling back to the
-    # smallest if none does. A fixed (unrolled) count keeps the step a constant-length operation, so
-    # it composes with the ``while_loop`` and the IFT ``custom_vjp`` without a data-dependent branch.
-    alpha = 1.0
-    chosen = 0.5**line_search_steps  # smallest rung, used if nothing reduces the residual
-    accepted = jnp.asarray(False)
-    for _ in range(line_search_steps + 1):
-        reduces = (jnp.linalg.norm(residual_fn(phi + alpha * delta)) < r_norm) & ~accepted
-        chosen = jnp.where(reduces, alpha, chosen)
-        accepted = accepted | reduces
-        alpha = 0.5 * alpha
-    return phi + chosen * delta
+    return backtracking_line_search(residual_fn, phi, delta, jnp.linalg.norm(r), line_search_steps)
 
 
 class DampedNewtonStep(eqx.Module):
