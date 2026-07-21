@@ -242,7 +242,8 @@ Engineering Principles.
   of AR, not two). `potential_flow(momentum)` uses it to build a
   Fluent-style irrotational velocity `u=∇φ`: a `Neumann` `∂φ/∂n = u_in·n` at each `VelocityInlet`, a
   `Dirichlet` datum at the `PressureOutlet`, no-penetration (`ZeroGradient`) at walls; returns the flat
-  `[u, p=0]` state. Divergence-free, respects geometry (≈plug only in a straight duct). A domain with
+  `[u, p]` state with `p` the **Bernoulli** seed (below). Divergence-free, respects geometry (≈plug only
+  in a straight duct). A domain with
   **no through-flow boundary** has no potential to solve for, but may still be
   driven: a body-force periodic channel returns the **plug** `scales.body_force_velocity(momentum)` (see
   the velocity-scale bullet below). A moving-lid cavity is deliberately *not* that case (no net
@@ -250,6 +251,23 @@ Engineering Principles.
   `test_potential_flow_is_zero_on_a_closed_domain` is the guard — do not widen the fallback to
   `characteristic_velocity`, which reports the *lid* speed. Otherwise closed domains return the zero
   state (or pin `pressure_pin`). Usable to warm-start **any** solve (flow-only, segregated, coupled).
+- **Bernoulli pressure seed — BUILT (`flow/initialization.py`, `bernoulli_pressure`).** `potential_flow`
+  no longer returns `p=0`: it seeds the **dynamic** pressure `p = ½ρ(|u_ref|² − |u|²)` consistent with
+  the irrotational velocity (`p + ½ρ|u|² = const`), anchored so the mean pressure over the
+  `PressureOutlet` cells is **zero** — consistent with the `p=0` outlet datum (`_pressure_outlet_cells`;
+  a domain with no outlet anchors the domain-mean to zero instead, so a uniform plug / quiescent cavity
+  stays at 0). **Why:** a coupled Newton solve otherwise starts with the *whole* dynamic-head pressure
+  field as a first-step correction — measured `‖δ_flow‖≈2694` with `p=0`, of which `‖δ_pressure‖` is
+  ~100% while `‖δ_vel‖≈8`; the seed **halves** it (`δ_flow≈1348`). **Closed-form on purpose (not the
+  pressure-Poisson equation):** the PPE source `ρ·tr(∇u·∇u)` blows up at a sharp geometric corner (the
+  backward-facing step, whose potential-flow `∇u` is singular) — measured `‖p_ppe‖≈9.4e4` and `δ_flow`
+  *35× worse*; Bernoulli reads `|u|`, not `∇u`, so it is immune. This matches how ANSYS/OpenFOAM actually
+  behave — ANSYS hybrid init solves a **source-free** pressure Laplace (`∇²p=0`) from the pressure BCs
+  and, for a velocity-inlet/pressure-outlet case with no pressure-inlet info, seeds `p≈const` and lets
+  the SIMPLE pressure under-relaxation build the field. So the remaining intrinsic `δ_pressure` (the
+  potential→viscous change) is a **solver-side** concern (per-block step / pressure under-relaxation in
+  the coupled step), not an IC one. Pinned by `test_bernoulli_pressure_*` (outlet-anchored, dynamic-head
+  ordering, uniform-flow → 0).
 - **Velocity scale — BUILT (`flow/scales.py`), the one home for "how fast is this flow".** Two consumers
   need a representative speed before any flow exists — the convection velocity block's frozen
   linearization and the initializer's plug — so it is derived once here rather than in either.
