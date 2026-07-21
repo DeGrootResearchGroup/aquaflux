@@ -40,6 +40,7 @@ import lineax as lx
 
 from .implicit import _ForwardStep, backtracking_line_search
 from .linear import solve_linear
+from .norm import ResidualNorm
 
 # Inexact-Newton forward solver for the pseudo-transient march: a loose *relative* tolerance (each
 # shifted step need only make Newton progress; the next step corrects the leftover) but a *tight*
@@ -199,6 +200,17 @@ class PseudoTransientStep(eqx.Module):
         :data:`_INEXACT_CONTINUATION_SOLVER` when set (static). A stiff coupled system whose shifted
         operator needs a larger Krylov subspace to converge without restarting can pass a
         larger-``restart`` GMRES here; ``None`` uses the shared default.
+    residual_norm : ResidualNorm
+        The residual measure ``R -> scalar`` the march judges progress by (static, default the
+        Euclidean norm): the switched-evolution-relaxation ramp ``β = β₀(‖R‖/‖R₀‖)^p``, the line
+        search, and the acceptance/divergence guard all use it, and :class:`ImplicitNewtonSolver`
+        reads it (via :meth:`norm`) for the outer stopping test, so one measure governs the whole
+        solve. A heterogeneous block system (e.g. coupled RANS, where ``omega`` is O(1e5) and ``k``
+        O(1e-3)) passes a :class:`~aquaflux.solve.BlockScaledNorm` so the march can *see* every block
+        — with the plain norm the ‖R‖ is ~100% ``omega`` and the line search neither judges nor
+        protects the ``k`` block (a step that collapses ``k`` is accepted, one that reduces it
+        vetoed). Like the shift, it only reshapes the forward path; the IFT adjoint never forms a
+        norm, so the converged state and its gradient are unchanged.
     adjoint_preconditioner_factory : callable or None
         The ``state -> M`` preconditioner factory for the converged transpose (adjoint) solve, or
         ``None`` for an unpreconditioned adjoint (static). At ``φ*`` the operator is the
@@ -214,9 +226,14 @@ class PseudoTransientStep(eqx.Module):
     acceptance: StepAcceptance = eqx.field(default_factory=DivergenceGuard)
     line_search: int = eqx.field(static=True, default=0)
     forward_solver: lx.AbstractLinearSolver | None = eqx.field(static=True, default=None)
+    residual_norm: ResidualNorm = eqx.field(static=True, default=jnp.linalg.norm)
     adjoint_preconditioner_factory: (
         Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
     ) = eqx.field(static=True, default=None)
+
+    def norm(self) -> ResidualNorm:
+        """The residual measure the march and the outer stopping test share (:attr:`residual_norm`)."""
+        return self.residual_norm
 
     def default_solver(self) -> lx.AbstractLinearSolver:
         """The forward-loop solver for the pseudo-transient march when the caller supplies none.
@@ -254,6 +271,7 @@ class PseudoTransientStep(eqx.Module):
         max_escalations, escalation_factor = self.max_escalations, self.escalation_factor
         acceptance = self.acceptance
         line_search = self.line_search
+        norm = self.residual_norm
 
         def step(
             residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
@@ -262,7 +280,7 @@ class PseudoTransientStep(eqx.Module):
             solver: lx.AbstractLinearSolver,
         ) -> jnp.ndarray:
             residual = residual_fn(phi)
-            residual_norm = jnp.linalg.norm(residual)
+            residual_norm = norm(residual)
             term = policy.shift_term(phi)  # base diagonal + β -> M, from the same iterate
             # Switched-evolution-relaxation: strong damping while the residual is large, none as it
             # vanishes (β → 0 recovers the undamped Newton step and its terminal quadratic rate).
@@ -293,9 +311,9 @@ class PseudoTransientStep(eqx.Module):
                 # but the full step overshoots, a scaled-back step descends from this one solve,
                 # sparing a re-solve at larger beta. `line_search == 0` takes the full step.
                 candidate = backtracking_line_search(
-                    residual_fn, phi, delta, residual_norm, line_search
+                    residual_fn, phi, delta, residual_norm, line_search, norm=norm
                 )
-                return candidate, jnp.linalg.norm(residual_fn(candidate))
+                return candidate, norm(residual_fn(candidate))
 
             # Escalate the damping on a rejected attempt, taking the first the acceptance policy
             # admits. The loop *mechanics* — grow β, cap at max_escalations, carry the best candidate

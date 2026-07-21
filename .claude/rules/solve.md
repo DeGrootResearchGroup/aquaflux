@@ -152,6 +152,26 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     120-vector subspace reaches the same tight solution ~1.4× faster and tighter. Tolerances stay tight
     — an *inexact* linear solve is unsafe under log-ω (an inaccurate step in the log variable is
     exponentiated and diverges), so the accuracy is load-bearing, not wasteful.
+  - **The residual measure is an injected `ResidualNorm`, owned by the `ForwardStep` (`solve/norm.py`).**
+    Every `ForwardStep` exposes `norm()`; `ImplicitNewtonSolver` reads it for the outer stopping test
+    (threaded through `_forward`/`_implicit_solve` as the extra nondiff arg `norm_fn`) and the strategy
+    uses the *same* measure for its own globalization — so the convergence test, the SER ramp
+    `β = β₀(‖R‖/‖R₀‖)^p`, `backtracking_line_search` (which now takes a `norm=` kwarg), and the
+    `DivergenceGuard` all agree on one scale. Default is `jnp.linalg.norm` (`DampedNewtonStep.norm()` and
+    `PseudoTransientStep`'s `residual_norm` field both default to it), so **the flow path is
+    bit-identical**. The non-trivial impl is `BlockScaledNorm(sizes, scales)`: it splits the flat
+    residual into contiguous blocks, divides each by its own reference magnitude, and returns the L2 of
+    those per-block relative residuals — `sqrt(Σ_b (‖R_b‖/scale_b)²)`. **Why it exists (the coupled-RANS
+    fix):** the plain Euclidean ‖R‖ on `[flow, k, ω]` is ~100% ω (ω residual O(1e5), k O(1e-3)), so the
+    line search can neither *see* nor *protect* the k block — a step that collapses k is accepted (barely
+    moves the ω-dominated norm) while one that reduces k is vetoed because ω ticked up, and k gets
+    starved (measured: k median collapses to ~7e-5 vs a physical ~0.5, and the march freezes). `coupled.py`
+    builds a `BlockScaledNorm` over `[flow, k, ω]` (and `[…, β]` for the mass-flow bordered march) with
+    per-field scales `‖R0_field‖` at the reference state, so the whole system is judged. The adjoint never
+    forms a residual norm, so `norm_fn` is a **forward-only** device — the converged state and IFT
+    gradient are norm-independent (the bwd pass takes it as a `del`-ed nondiff arg). Since it is a static
+    field holding an `eqx.Module` with static tuple fields, it stays hashable for the `custom_vjp` nondiff
+    slot (like the `lineax` solver already carried there).
   - **A `ShiftPolicy`'s preconditioner must stay a non-pytree (binding, #105).** `ScalarTransportPreconditioner`
     (`turbulence/preconditioner.py`) is a plain `dataclasses.dataclass(frozen=True, eq=False)` ABC with
     `ConvectionAmgPreconditioner` / `AirAmgPreconditioner` concrete strategies — deliberately **not** an

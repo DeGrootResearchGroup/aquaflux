@@ -47,14 +47,17 @@ from .multigrid import (
     smoothed_multigrid_solve,
 )
 from .newton import newton_step
+from .norm import BlockScaledNorm, ResidualNorm
 
 __all__ = [
     "AirHierarchy",
+    "BlockScaledNorm",
     "DampedNewtonStep",
     "DivergenceGuard",
     "ForwardStep",
     "ImplicitNewtonSolver",
     "PseudoTransientStep",
+    "ResidualNorm",
     "ShiftPolicy",
     "ShiftTerm",
     "SmoothedHierarchy",

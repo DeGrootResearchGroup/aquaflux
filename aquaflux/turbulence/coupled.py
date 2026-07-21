@@ -51,6 +51,7 @@ from aquaflux.flow.mean_velocity import (
     _with_body_force,
 )
 from aquaflux.solve import (
+    BlockScaledNorm,
     DivergenceGuard,
     ImplicitNewtonSolver,
     PseudoTransientStep,
@@ -459,6 +460,41 @@ _COUPLED_FORWARD_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-10, restart=120, stagnatio
 _COUPLED_LINE_SEARCH = 10
 
 
+def _coupled_block_scales(coupled: CoupledRANS, reference_state: jnp.ndarray) -> tuple[float, ...]:
+    """The per-field reference residual magnitudes ``(‖R_flow‖, ‖R_k‖, ‖R_omega‖)`` at
+    ``reference_state``, each floored positive so it can divide a block norm."""
+    parts = coupled.layout.unpack(coupled.residual(reference_state))
+    return tuple(max(float(jnp.linalg.norm(part)), 1e-30) for part in parts)
+
+
+def _coupled_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray) -> BlockScaledNorm:
+    """A block-scaled residual norm over ``[flow, k, omega]`` for the coupled march.
+
+    Each field's residual is divided by its own initial magnitude before the norm is formed, so the
+    switched-evolution-relaxation ramp, the line search, and the outer stopping test all judge every
+    field rather than the ``omega`` block that dominates the plain Euclidean norm (``omega`` is
+    O(1e5) here, ``k`` O(1e-3)). Without it the globalization cannot see the ``k`` block: a step
+    that collapses ``k`` is accepted because it barely moves the ``omega``-dominated norm, so ``k``
+    is starved while the line search chases ``omega``.
+    """
+    n = coupled.momentum.mesh.n_cells
+    sizes = (coupled.layout.flow_size, n, n)
+    return BlockScaledNorm(sizes, _coupled_block_scales(coupled, reference_state))
+
+
+def _mass_flow_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray) -> BlockScaledNorm:
+    """The :func:`_coupled_residual_norm` measure extended with the mass-flow constraint dof.
+
+    The bordered march carries the augmented residual ``[R_flow, R_k, R_omega, ⟨U⟩ − target]``; the
+    trailing scalar constraint is a bulk-velocity (velocity-magnitude) equation, so it shares the
+    flow block's reference scale.
+    """
+    n = coupled.momentum.mesh.n_cells
+    s_flow, s_k, s_omega = _coupled_block_scales(coupled, reference_state)
+    sizes = (coupled.layout.flow_size, n, n, 1)
+    return BlockScaledNorm(sizes, (s_flow, s_k, s_omega, s_flow))
+
+
 def coupled_continuation(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
@@ -519,6 +555,7 @@ def coupled_continuation(
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),
         line_search=line_search,
         forward_solver=forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER,
+        residual_norm=_coupled_residual_norm(coupled, reference_state),
         adjoint_preconditioner_factory=policy.adjoint_factory(),
     )
 
@@ -749,6 +786,7 @@ def mass_flow_coupled_continuation(
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),
         line_search=line_search,
         forward_solver=forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER,
+        residual_norm=_mass_flow_residual_norm(coupled, reference_state),
         adjoint_preconditioner_factory=bordered.adjoint_factory(),
     )
 
