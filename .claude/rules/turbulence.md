@@ -178,14 +178,27 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     the same tight solution). Tolerances stay **tight** — an inexact solve is unsafe under log-`ω` (an
     inaccurate log step is exponentiated and diverges), so loosening the linear tolerance is **not** a
     lever here (measured: it breaks the march).
-  - **Remaining follow-up — the coupled preconditioner (the plateau).** With the line search the march
-    descends fast to rel ~0.18 and then **plateaus** (the flow residual sticks at ~0.44, `k` drifts):
-    the block-diagonal `CoupledShiftPolicy` preconditioner ignores the flow↔turbulence coupling
-    (`nu_t↔k,ω`; the k/ω transport on the Rhie–Chow flux), so near the plateau the shifted Newton
-    direction is too poor to make progress and the line search backtracks to tiny steps. It is also why
-    each shifted solve costs ~10–16k matvecs (flow-only laminar needs ~8 GMRES cycles, the coupled
-    system ~450). A coupled (block-triangular) preconditioner capturing that coupling is the lever to
-    push through the plateau **and** cut the per-solve cost; treat it as the open item.
+  - **The coupled flow block uses the convection-aware AMG + MSIMPLER Schur, not the smoothed/SIMPLE
+    default (`_coupled_shift_policy`).** A RANS case is high-Reynolds, and the default
+    `BlockPreconditioner.build` config (viscous-**smoothed** velocity AMG, which is Peclet-blind, + the
+    **SIMPLE** `a_P` Schur, which degrades with convection) produces a poor momentum-block direction once
+    the flow separates. Measured on the developed pitzDaily field (shifted Newton direction vs the true
+    one): smoothed+SIMPLE gives **cos 0.40** and the march stalls at rel ~0.18; **`velocity="convection"`
+    + `schur_scaling="msimpler"` gives cos 0.998** *and* cuts the shifted solve from ~120–580 GMRES
+    cycles to ~17 (each march step ~8× cheaper). Both stay valid **frozen at the cold initial state**
+    (MSIMPLER's Schur is velocity-independent; the convection linearization is Peclet-robust), so **no
+    reference refresh is needed** — verified: IC-frozen cos 0.996 vs plateau-rebuilt 0.998. It is **not**
+    the flow↔turbulence cross-coupling (the block-*diagonal* preconditioner with the right config already
+    reaches cos 0.998 — do not build a block-triangular coupling) and **not** staleness (rebuilding the
+    smoothed config at the plateau does not help). Overridable via `preconditioner_kwargs`.
+  - **Remaining limiter — the k equation drift (the open item).** With the config above the march pushes
+    past the omega plateau (rel 0.18 → ~0.09), but past there the **direct-`k` residual grows** (rel 1 →
+    ~5× over a few steps) as the high-Reynolds production develops, while `ω` and the flow converge; `k`'s
+    *absolute* residual stays small (so ‖R‖ still descends) but the growth re-stalls the march near rel
+    ~0.09. This is a `k`-stability issue, not a preconditioner one. **log-`k` is not the fix** (ill-
+    conditioned at the `k→0` no-slip walls — the reason `k` is direct). The k-tied realizability floor
+    (#126) and the production limiter are the closure levers; treat high-Reynolds `k` stability under the
+    coupled log-`ω` solve as the open follow-up.
   - **The per-scalar transform is layout-consistent through both coupled solves (binding).** `solve_coupled`
     and `solve_coupled_mass_flow` both map the physical IC into the solved space with `state_from_physical`
     and return `physical_fields` — so `LogScalars` is correct through the mass-flow-constrained path too

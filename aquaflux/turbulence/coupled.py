@@ -541,7 +541,17 @@ def _coupled_shift_policy(
     grad_velocity = coupled.momentum.velocity_gradient(flow_ref)
     closure = coupled.turbulence.closure_fields(grad_velocity, k_ref, omega_ref)
     momentum = coupled.momentum.with_eddy_viscosity(closure.nu_t)
-    block = BlockPreconditioner.build(momentum, **preconditioner_kwargs)
+    # The coupled flow block uses the convection-aware velocity AMG + MSIMPLER Schur, not the viscous-
+    # smoothed / SIMPLE default: a RANS case is high-Reynolds, and the Peclet-blind smoothed velocity
+    # block with the ``a_P`` Schur produces a poor momentum-block direction once the flow separates
+    # (the shifted Newton direction was measured only ~40% aligned with the true one on the developed
+    # pitzDaily field, stalling the march). The convection block's convective linearization and the
+    # MSIMPLER Schur's velocity-independent scaling both stay valid frozen at the cold initial state
+    # (the reference), so no per-sweep refresh is needed. Overridable via preconditioner_kwargs.
+    block = BlockPreconditioner.build(
+        momentum,
+        **{"velocity": "convection", "schur_scaling": "msimpler", **preconditioner_kwargs},
+    )
 
     mdot = momentum.mass_flux(flow_ref)
 
