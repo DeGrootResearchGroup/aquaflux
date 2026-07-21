@@ -145,6 +145,27 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   under a full Newton step is carried by the pseudo-transient shift + divergence guard, no in-residual
   floor. FD-verified: coupled ‖R‖→machine-zero, agrees with the segregated fixed point, adjoint
   matches finite differences.
+  - **`solve_coupled_mass_flow` — the coupled solve with the bulk velocity held by a Lagrange
+    multiplier (#128).** A streamwise-periodic channel is driven to a target bulk velocity `U_bar`, so
+    the body force `β` along the flow direction is itself a **coupled unknown** appended to the state
+    and the coupled residual bordered with the constraint row `⟨U_dir⟩ − U_bar = 0`: one honest
+    augmented residual `R_aug([flow…, k, ω, β]) = [R_coupled(state; β); ⟨U_dir⟩ − U_bar]`, driven by a
+    single `ImplicitNewtonSolver`. The border column/row `(a, c)` and the Schur (constraint)
+    preconditioner are the flow block's own primitives (`_constraint_vectors`,
+    `_bordered_preconditioner`, `_with_body_force` from `flow/mean_velocity.py`) reused in the coupled
+    `[flow…, k, ω]` layout by `_coupled_constraint_vectors` — the same Schur elimination one careful
+    place keeps consistent, not re-derived. Globalized by `mass_flow_coupled_continuation`, which
+    borders the **same** `_coupled_shift_policy` (extracted from `coupled_continuation` for exactly this
+    reuse) with a `_MassFlowBorderedPolicy`: the shift diagonal gains a **zero** for `β` (the linear
+    constraint row needs no pseudo-time damping) and the block preconditioner is wrapped by the
+    constraint preconditioner. Because the constraint lives *inside* the coupled residual, the coupled
+    IFT adjoint **carries it** — `jax.grad` through the converged constrained solve is the sensitivity
+    of the turbulent field *at fixed bulk velocity* (FD-verified). This is the monolithic counterpart of
+    the segregated bordered flow solve (`flow.bulk_velocity_flow_solve`): the segregated loop does **not**
+    converge on this body-force channel, so the constrained fixed point is cross-validated by two
+    independent AMG coarsenings (`air` ≡ `twolevel`, same `β`) — the periodic analogue of the inlet
+    coupled-vs-segregated cross-check. Pinned by `test_coupled_mass_flow.py` (constraint met + turbulent
+    + floors inactive; method-independence; the adjoint FD gate).
 - **`initialization.py` — `hybrid_initialize` (cold-start, the reason `solve_coupled` self-starts).**
   The monolithic Newton is a *local* method: from a raw cold start (`u=0`, uniform k/ω) it **stalls** —
   the near-wall ω fixation alone injects a `~6ν/(β₁d²)` jump, and a uniform interior is far from a
