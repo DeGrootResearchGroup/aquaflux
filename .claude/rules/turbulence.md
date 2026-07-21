@@ -66,6 +66,8 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   (`ConvectionAmgPreconditioner` / `AirAmgPreconditioner`) rather than the old opaque `lambda phi: solve`.
   These are plain frozen dataclasses, **not `equinox.Module`s** — see the binding note in
   `.claude/rules/solve.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
+  `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output factor — the
+  reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a frozen dataclass.
 - **The scalar policy's two halves have different lifetimes (binding, #105).** `ScalarShiftPolicy` carries
   a **shift diagonal rebuilt every sweep** (so the pseudo-time damping keeps tracking the operator as
   ν_t grows — freezing it would under-damp the march and lean on `DivergenceGuard` escalation) and an
@@ -141,10 +143,37 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   (#106):** it builds the `closure` first and takes `nu_t` from it (rather than a separate
   `eddy_viscosity` recomputing the same strain), then one `momentum.flow_fields(flow)` feeds both
   `residual_from_fields` and the `mdot` the scalars advect on — was 3× `_flow_fields` per eval, ~1.85×
-  the trace/compile and AD-tape size. **Direct k/ω variables** (log-variables held in reserve, below); positivity
-  under a full Newton step is carried by the pseudo-transient shift + divergence guard, no in-residual
-  floor. FD-verified: coupled ‖R‖→machine-zero, agrees with the segregated fixed point, adjoint
-  matches finite differences.
+  the trace/compile and AD-tape size. **Per-scalar variable parametrization** (`k_transform` /
+  `omega_transform`, both `ScalarVariableTransform`, default `DirectScalars` = identity): the coupled
+  residual is always written in the *physical* `k`/`ω` (recovered by `physical_fields`), so a transform
+  changes only the Newton iterate space, not the root — the residual at the mapped state equals the
+  direct residual at the same physical fields (unit-pinned to 1e-13). `DirectScalars` carries positivity
+  by the pseudo-transient shift + divergence guard (no in-residual floor); `LogScalars` (`φ = e^w`) makes
+  the field `> 0` **by construction under any Newton step** — the fix for the stiff high-Re case where a
+  full step drives `ω` negative and `ν_t = k/ω` flips sign without the residual going non-finite (so the
+  guard never trips). **Use `omega_transform=LogScalars()`, `k` direct (binding):** `ω` is the field that
+  goes negative and `log(ω)` is well-conditioned (`ω` bounded away from 0, large near walls); `log(k)` is
+  **not** — `k → 0` at a no-slip wall (Dirichlet 0) so `log(k) → −∞` there stalls the near-wall cells (the
+  full-log form descends then freezes; measured). FD-verified for both forms: coupled ‖R‖→machine-zero,
+  agrees with the segregated fixed point, adjoint matches finite differences.
+  - **The reparametrized block's preconditioner/shift are chain-rule-scaled at the reference (binding).**
+    The physics Jacobian w.r.t. `w` picks up `d(φ)/d(w) = jacobian_scale(φ)` (`= φ` for log). `coupled_continuation`
+    recovers the physical reference via `physical_fields`, scales each scalar shift diagonal by that factor,
+    and wraps its (physical-operator) AMG in `ScaledScalarPreconditioner` by the reciprocal — so the frozen
+    preconditioner acts on the reparametrized block without rebuilding the hierarchy. `_reparametrized_preconditioner`
+    returns the preconditioner **unchanged** when the factor is one, so the `DirectScalars` path is bit-identical.
+  - **Open efficiency follow-up (not correctness).** On the small channel `omega`-log converges in ~12
+    Newton steps to machine zero. On the full 12k-cell pitzDaily mesh it keeps `ω > 0` and the *per-field
+    relative* residuals descend (the absolute ‖R‖ is dominated by `ω`'s ~1e5 scale and is a misleading
+    metric — track per-variable relative norms), but each Newton step is ~7× a direct step and the descent
+    is slow, so the full run is compute-heavy. The reparametrized-block preconditioner scaling and the
+    globalization are the levers; treat efficient large-mesh `omega`-log convergence as a tuning follow-up.
+  - **The per-scalar transform is layout-consistent through both coupled solves (binding).** `solve_coupled`
+    and `solve_coupled_mass_flow` both map the physical IC into the solved space with `state_from_physical`
+    and return `physical_fields` — so `LogScalars` is correct through the mass-flow-constrained path too
+    (identity for `DirectScalars`, which is all the mass-flow tests exercise). Do not reintroduce a bare
+    `pack_state`/`layout.unpack` at a solve boundary: it packs physical values as if they were the solved
+    unknown, silently wrong under any non-identity transform.
   - **`solve_coupled_mass_flow` — the coupled solve with the bulk velocity held by a Lagrange
     multiplier (#128).** A streamwise-periodic channel is driven to a target bulk velocity `U_bar`, so
     the body force `β` along the flow direction is itself a **coupled unknown** appended to the state
@@ -203,8 +232,12 @@ scalar continuation (#73), Option 1 hardening (convergence stop + adaptive relax
 (the monolithic coupled residual + its IFT adjoint, the target engine). The segregated loop is
 **retained as a forward pre-smoother / fallback**, not the sensitivity model; for gradients use the
 coupled `solve_coupled` (its adjoint is exact) — never differentiate `solve_segregated` (forward-only,
-unrolls the Picard sweeps, which §5 forbids). The remaining held-in-reserve item is the **log-variable
-fallback** (below), promoted only if a stiff high-Re case shows the direct coupled form non-robust.
+unrolls the Picard sweeps, which §5 forbids). The formerly-held-in-reserve **log-variable form is now
+built** (`LogScalars` on `omega_transform`, above), promoted exactly as anticipated: the stiff high-Re
+separating pitzDaily case (`validation/pitzdaily_openfoam`) drives the direct `ω` negative, and
+`omega_transform=LogScalars()` keeps `ω > 0` so the coupled solve no longer poisons its closure. The
+form is validated (channel + tests); efficient convergence on the *full* pitzDaily mesh is the open
+tuning follow-up noted above.
 
 ## Binding decisions
 
@@ -246,7 +279,9 @@ fallback** (below), promoted only if a stiff high-Re case shows the direct coupl
   gradient in the clamped region; they pollute the sensitivity **unless inactive at the fixed point**
   (`k, ω > floor` everywhere, which holds for any properly resolved RANS field). State this precondition
   in code and **check it**: if a case converges with a floor active, the sensitivity through that cell is
-  wrong — surface it, do not ship it. (Log-variable `k = e^{k̃}` is the held-in-reserve structural fix.)
+  wrong — surface it, do not ship it. (Log-variable transport `φ = e^w` — **built** as `LogScalars`, above —
+  is the structural fix: it removes the floor entirely for the transformed field, which stays `> 0` by
+  construction, so there is no clamped region to pollute the sensitivity. Use it on `ω`, not `k`.)
   - **The ω floor is the k-tied realizability floor `ω ≥ k/(nut_max_coeff·ν)` (default `nut_max_coeff
     = 1e5`), NOT a fixed value (#126).** It caps `ν_t = k/ω` at `nut_max_coeff·ν`; being tied to the
     current `k` it is **inactive at convergence** for a physical field (`ν_t/ν` is O(10²) ≪ 1e5), so it
