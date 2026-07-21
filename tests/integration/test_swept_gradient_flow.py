@@ -20,7 +20,7 @@ from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import BlockPreconditioner, MomentumContinuity, MovingWall, NoSlipWall
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CorrectedGreenGauss, SweptGradientSolve
+from aquaflux.schemes import CorrectedGreenGauss, GmresGradientSolve, SweptGradientSolve
 from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver, newton_step
 
 from tests.support.meshes import perturbed_grid_2d
@@ -66,7 +66,9 @@ def test_swept_gradient_matches_iterative_solution() -> None:
     """The fixed-sweep gradient is a drop-in: it converges to the same flow field as the exact
     iteratively-solved corrected gradient."""
     swept = _cavity(CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=16)))
-    iterative = _cavity(CorrectedGreenGauss())
+    # The baseline is the exact GMRES gradient solve (the default is now the fixed-sweep swept solver,
+    # so a bare CorrectedGreenGauss would compare swept-16 against swept-4, not against the exact solve).
+    iterative = _cavity(CorrectedGreenGauss(solver=GmresGradientSolve()))
     phi_s, phi_i = swept.initial_state(), iterative.initial_state()
     for _ in range(10):
         phi_s = newton_step(swept.residual, phi_s)

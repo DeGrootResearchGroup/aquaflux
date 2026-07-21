@@ -29,7 +29,7 @@ import numpy as np
 from aquaflux.boundary import BoundaryConditions, DirichletField
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CorrectedGreenGauss, GradientScheme
+from aquaflux.schemes import CorrectedGreenGauss, GmresGradientSolve, GradientScheme
 from aquaflux.solve import newton_step
 
 from tests.support.meshes import perturbed_grid_2d
@@ -85,8 +85,15 @@ def test_gate_c_one_newton_step_on_skewed_mesh() -> None:
 
 
 def test_gate_c_linear_exact_on_skewed_mesh() -> None:
-    """The consistently-linearized operator reproduces a linear field exactly on a skewed grid."""
-    mesh, cell_geometry, assembler = _skewed_laplace(CorrectedGreenGauss())
+    """The consistently-linearized operator reproduces a linear field exactly on a skewed grid.
+
+    Linear-*exactness* of the reconstruction needs the exact gradient solve, so this pins
+    :class:`GmresGradientSolve`; the default fixed-sweep swept solver still converges the operator in
+    one step (:func:`test_gate_c_one_newton_step_on_skewed_mesh`) but only to within its sweep
+    residual of the analytic field on this skewed mesh."""
+    mesh, cell_geometry, assembler = _skewed_laplace(
+        CorrectedGreenGauss(solver=GmresGradientSolve())
+    )
     phi = eqx.filter_jit(newton_step)(assembler.residual, jnp.zeros(mesh.n_cells))
     exact = _linear_field(cell_geometry.centroid)
     assert float(jnp.max(jnp.abs(phi - exact))) < 1e-9

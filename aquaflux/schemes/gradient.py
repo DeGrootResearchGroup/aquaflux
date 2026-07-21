@@ -189,8 +189,14 @@ class GmresGradientSolve(GradientSolve):
     """Solve the corrected-gradient system with matrix-free GMRES, differentiated by implicit diff.
 
     Robust to any conditioning — GMRES converges to the requested tolerance regardless of skew —
-    and exact to that tolerance. The default strategy: self-tuning where the fixed-sweep count of
-    :class:`SweptGradientSolve` would have to be raised for a badly-skewed mesh.
+    and exact to that tolerance, self-tuning where the fixed-sweep count of
+    :class:`SweptGradientSolve` would have to be raised for a badly-skewed mesh. That robustness comes
+    at a price that rules it out as the default: a nested Krylov solve carrying its own implicit-diff
+    tangent, re-entered on **every** reconstruction, which dominates the cost when the gradient is
+    reconstructed inside a nonlinear (e.g. coupled RANS) Newton solve — where each Jacobian--vector
+    product then differentiates through a full inner GMRES. :class:`SweptGradientSolve` (the default)
+    replaces that with a short unrolled sparse apply; reach for this strategy only when a mesh is
+    skewed enough that the swept sweep count would have to grow impractically.
 
     Attributes
     ----------
@@ -237,6 +243,12 @@ class SweptGradientSolve(GradientSolve):
     dense LU of ``A_g`` would be ``O((n·dim)²)`` per apply and cross over to a loss on finer meshes.
     Differentiated by simply unrolling the short, static-length loop, so the gradient's response to
     ``φ`` is carried implicitly into the flow Jacobian **without** an implicit-diff tangent solve.
+
+    This is the **default** ``GradientSolve`` for :class:`CorrectedGreenGauss`: the unrolled sparse
+    apply carries no nested Krylov solve and no implicit-diff tangent, so reconstructing the gradient
+    inside a nonlinear (e.g. coupled RANS) Newton solve stays cheap — each Jacobian--vector product
+    differentiates only through a handful of matvecs, not through a full inner GMRES (which made the
+    :class:`GmresGradientSolve` alternative impractical there).
 
     Because ``A_g`` is volume-dominated the iteration converges in very few sweeps — the default
     ``sweeps=4`` reproduces the exact solve to machine precision on mild-to-moderate skew and stays
@@ -318,9 +330,11 @@ class CorrectedGreenGauss(GradientScheme):
         A_g . G = B . phi ,     A_g = V (.) I  -  (the correction coupling)
 
     with ``A_g`` **geometry-only** and well-conditioned (``V`` dominates for mild skew). *How* the
-    system is solved is an injected :class:`GradientSolve` strategy — :class:`GmresGradientSolve`
-    (default, exact via ``lineax`` + implicit diff) or :class:`SweptGradientSolve` (fixed sweeps,
-    ``O(n)``, scalable); the discretization is identical either way. This is the standalone,
+    system is solved is an injected :class:`GradientSolve` strategy — :class:`SweptGradientSolve`
+    (default; fixed sweeps, ``O(n)``, and cheap to differentiate inside a nonlinear solve) or
+    :class:`GmresGradientSolve` (exact via ``lineax`` + implicit diff, for a mesh skewed enough that
+    the swept sweep count would grow impractically); the discretization is identical either way. This
+    is the standalone,
     physics-free form; coupling ``A_g``/``B`` into a flow Newton solve later is the Schur step (same
     ``A_g``/``B``). The correction makes the face value exact for linear fields, so the
     reconstruction is **linear-exact on any mesh** — the fix for :class:`CompactGreenGauss`'s
@@ -330,10 +344,11 @@ class CorrectedGreenGauss(GradientScheme):
     ----------
     solver : GradientSolve
         The strategy applying ``A_g⁻¹`` to solve ``A_g·G = B·φ`` (default
-        :class:`GmresGradientSolve`; use :class:`SweptGradientSolve` for the scalable sweep).
+        :class:`SweptGradientSolve`, the scalable unrolled sweep; use :class:`GmresGradientSolve` for
+        a mesh skewed enough to need an exact Krylov solve).
     """
 
-    solver: GradientSolve = eqx.field(default_factory=GmresGradientSolve)
+    solver: GradientSolve = eqx.field(default_factory=SweptGradientSolve)
 
     @staticmethod
     def terms(mesh: Mesh, geometry: MeshGeometry) -> _CorrectedTerms:
