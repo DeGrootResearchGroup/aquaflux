@@ -171,17 +171,21 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     **backtracking line search** on the one β₀ solve finds α≈¼ → rel≈0.48 (residual halved), so
     `coupled_continuation` sets `line_search=_COUPLED_LINE_SEARCH` (see `.claude/rules/solve.md`); β
     escalation stays the fallback for a bad *direction*, not an overshoot. With it the full-mesh solve
-    **descends and accelerates** (rel 0.48→0.47→0.44→0.31→0.20 over the first five steps) instead of
-    stalling — a correctness fix, not just speed. **(2) The shifted solve needs a large Krylov subspace:**
-    `_COUPLED_FORWARD_SOLVER` is restart-120 GMRES (the shared restart-40 default discards too much
-    Arnoldi history on this stiff saddle system; ~1.4× faster to the same tight solution). Tolerances stay
-    **tight** — an inexact solve is unsafe under log-`ω` (an inaccurate log step is exponentiated and
-    diverges), so loosening the linear tolerance is **not** a lever here (measured: it breaks the march).
-  - **Remaining efficiency follow-up — the preconditioner.** Each shifted solve still costs ~10–16k
-    matvecs because the block-diagonal `CoupledShiftPolicy` preconditioner ignores the flow↔turbulence
-    coupling (`nu_t↔k,ω`; the k/ω transport on the Rhie–Chow flux); flow-only laminar needs ~8 GMRES
-    cycles, the coupled system ~450. A coupled (block-triangular) preconditioner capturing that coupling
-    is the lever to bring the per-solve cost down; treat it as the open tuning item.
+    **descends** (rel 1.0 → 0.48 → 0.44 → 0.31 → 0.20 → ~0.18 over ~6 steps) instead of *stalling at
+    rel 1.0* — the case is now solvable at all, a correctness fix, not just speed. **(2) The shifted
+    solve needs a large Krylov subspace:** `_COUPLED_FORWARD_SOLVER` is restart-120 GMRES (the shared
+    restart-40 default discards too much Arnoldi history on this stiff saddle system; ~1.4× faster to
+    the same tight solution). Tolerances stay **tight** — an inexact solve is unsafe under log-`ω` (an
+    inaccurate log step is exponentiated and diverges), so loosening the linear tolerance is **not** a
+    lever here (measured: it breaks the march).
+  - **Remaining follow-up — the coupled preconditioner (the plateau).** With the line search the march
+    descends fast to rel ~0.18 and then **plateaus** (the flow residual sticks at ~0.44, `k` drifts):
+    the block-diagonal `CoupledShiftPolicy` preconditioner ignores the flow↔turbulence coupling
+    (`nu_t↔k,ω`; the k/ω transport on the Rhie–Chow flux), so near the plateau the shifted Newton
+    direction is too poor to make progress and the line search backtracks to tiny steps. It is also why
+    each shifted solve costs ~10–16k matvecs (flow-only laminar needs ~8 GMRES cycles, the coupled
+    system ~450). A coupled (block-triangular) preconditioner capturing that coupling is the lever to
+    push through the plateau **and** cut the per-solve cost; treat it as the open item.
   - **The per-scalar transform is layout-consistent through both coupled solves (binding).** `solve_coupled`
     and `solve_coupled_mass_flow` both map the physical IC into the solved space with `state_from_physical`
     and return `physical_fields` — so `LogScalars` is correct through the mass-flow-constrained path too
