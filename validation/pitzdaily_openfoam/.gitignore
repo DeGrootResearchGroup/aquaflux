@@ -1,0 +1,10 @@
+# Regenerable run artifacts; report.md, figures/, and of_case/ (the case template) ARE tracked.
+runs/
+of_case/0/
+of_case/[1-9]*/
+of_case/log.*
+of_case/postProcessing/
+of_case/processor*/
+__pycache__/
+*.npz
+of_case/constant/polyMesh/
