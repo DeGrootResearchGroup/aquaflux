@@ -176,11 +176,42 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       so bad GMRES could not converge at all: stronger flow↔turbulence coupling *amplifies* the inexact
       diagonal blocks' inversion error it propagates downstream. So the missing cross-coupling is **not**
       the bottleneck.
-    - **The real cost is diagonal-block-preconditioner inexactness at high Reynolds number.** The
-      block-diagonal conv+MSIMPLER preconditioner is *excellent* at low Re (4 outer cycles on a Re=2500
-      channel) and weak only at high Re / recirculation (17 cycles on a Re=1e5 channel). The remaining
-      lever is strengthening the weakest diagonal block's inner solve (more AMG V-cycles / tighter inner
-      tolerance on that block), not adding coupling structure.
+    - **The real cost is the pressure-Schur *approximation* at high Reynolds number — and strengthening
+      the inner solve CANNOT fix it (measured; do not re-attempt).** The block-diagonal conv+MSIMPLER
+      preconditioner is *excellent* at low Re (4 outer cycles on a Re=2500 channel) and weak only at high
+      Re / recirculation (17 cycles on a Re=1e5 channel). The weak block is the **flow saddle**, not the
+      k/ω scalars (per-block error operator `E_b = I − A_b·M_b` on a developed Re=1e5 channel: flow
+      ρ=34.0 / one-shot 24.1, vs ω 13.9 / **2.4** and k 8.5 / 7.9 — ω's high ρ with a low one-shot is an
+      isolated outlier eigenvalue GMRES kills in one iteration, a red herring). But every lever *inside*
+      that block is dead:
+      - **More velocity-AMG V-cycles (×2/×4/×8): ρ 34.019 → 33.995 → 34.031 → 34.046 — no effect at all.**
+      - **More Schur V-cycles (×2/×4/×8): ρ 41.6 / 48.7 / 48.5 — strictly worse.** Inverting `Ŝ` *more
+        accurately* making the preconditioner *worse* is the signature that `Ŝ` is the **wrong operator**:
+        the error is the Schur *approximation*, not its inversion (a partial V-cycle was accidentally
+        regularizing it). Driving both sub-solves toward exact never beats the 1-cycle baseline.
+      - **Rebuilding the preconditioner at the developed state (staleness) does not help** the flow block
+        (ρ 34.0 → 31.6 on the channel; 49.9 → 91.9, i.e. worse, on pitzDaily, with an identical one-shot).
+        The frozen reference is fine — the convective linearization is Peclet-robust and MSIMPLER's Schur
+        is velocity-independent. (The *scalar* k/ω blocks do go stale — ω ρ 13.9 → 3.3 when rebuilt — but
+        they are not the cycle bottleneck.)
+      - **Rescaling the MSIMPLER `k` is a ρ mirage — validate on the real march, never on ρ.** Growing `k`
+        collapses ρ (34.0 → 9.6) but barely moves the one-shot error (24.1 → 22.6), and the ρ-minimizing
+        `k` sits ~40× *above the maximum* of the whole per-cell `ρV/a_P` distribution — i.e. the degenerate
+        limit `schur_a_p → 0`, `Ŝ⁻¹ → 0`, which simply switches the pressure correction off. On the real
+        production march it is **slower**: shipped auto-`k` 348 s / 8 steps vs `k×4` 447 s (28% slower) at
+        an identical residual trajectory. **The shipped per-apply `mean(ρV/a_P)` calibration is
+        near-optimal — do not "fix" it**, and do not make the Schur "shift-consistent" with the
+        pseudo-transient `a_P(1+β)` either (that direction is strictly worse at every β).
+      **Root cause:** the MSIMPLER Schur is a *constant-coefficient* (scaled pressure-mass-matrix) Poisson,
+      which is a near-Stokes/low-Re approximation and degrades as convection strengthens — exactly the
+      high-Re/recirculating regime here. **The fix is a better Schur approximation, not a better solve of
+      this one:** the stabilized least-squares-commutator (LSC) of Elman, Howle, Shadid, Silvester &
+      Tuminaro (2007), which needs only momentum-operator applies, `diag(V)`, and the assembled pressure
+      Poisson `B Q̂⁻¹ Bᵀ` this file's Schur already builds. Use the **stabilized** (2007) variant — a
+      Rhie–Chow collocated discretization is equal-order stabilized, so the original (2006) LSC
+      underperforms on it — and re-derive its boundary treatment for cell-centred FVM. Prefer LSC over
+      pressure-convection–diffusion (PCD), whose auxiliary operator carries finite-element boundary
+      recipes that do not transfer cleanly to FVM.
   - **The residual measure is an injected `ResidualNorm`, owned by the `ForwardStep` (`solve/norm.py`).**
     Every `ForwardStep` exposes `norm()`; `ImplicitNewtonSolver` reads it for the outer stopping test
     (threaded through `_forward`/`_implicit_solve` as the extra nondiff arg `norm_fn`) and the strategy

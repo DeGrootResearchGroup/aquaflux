@@ -402,6 +402,29 @@ Engineering Principles.
   +D-coupling 4→8 ~O(N^0.25).) The tiny residual growth is the 1-cycle-AMG block approximation, not the
   structure. **Two cheaper diagonals were measured and rejected** — velocity block-Jacobi and
   inverse-volume-Jacobi on the gradient solve; see `solve.md`, do not re-attempt.
+- **Outer block preconditioner — Stage 3: the remaining limit IS the Schur approximation, and no amount
+  of inner accuracy reaches it (measured on a developed Re=1e5 SST channel; binding, do not re-attempt).**
+  The `v_cycles` knob and the MSIMPLER scale are both exhausted: **velocity-AMG V-cycles ×2/×4/×8 leave
+  the flow block's error operator `ρ(I − A_flow·M_flow)` at 34.02 / 33.99 / 34.03 / 34.05 (no effect);
+  Schur V-cycles ×2/×4/×8 make it *worse* (41.6 / 48.7 / 48.5)**; both-exact never beats the 1-cycle
+  baseline; and **rebuilding the whole block at the developed state does not help** (34.0 → 31.6 on the
+  channel, 49.9 → 91.9 on pitzDaily). Inverting `Ŝ` more accurately making the preconditioner worse is
+  the signature that `Ŝ` is the **wrong operator**. **Rescaling MSIMPLER's `k` is a ρ mirage:** it
+  collapses ρ (34.0 → 9.6) while barely moving the one-shot error (24.1 → 22.6) and the ρ-optimal `k`
+  sits ~40× above the *maximum* of the per-cell `ρV/a_P` distribution — the degenerate limit that
+  switches the pressure correction off — and on the **real march it is slower** (auto-`k` 348 s / 8 steps
+  vs `k×4` 447 s, identical trajectory). So the shipped per-apply `mean(ρV/a_P)` calibration is
+  near-optimal, and **preconditioner changes must be validated on the real march, not on ρ** (ρ here is
+  dominated by isolated outlier eigenvalues GMRES kills anyway). **Root cause:** the MSIMPLER Schur is a
+  constant-coefficient (scaled pressure-mass-matrix) Poisson — a near-Stokes/low-Re approximation that
+  degrades as convection strengthens. **Stage 3 is therefore a better Schur, as a new `InnerSchurSolver`
+  strategy** (the seam already exists): the **stabilized** least-squares-commutator (LSC) of Elman,
+  Howle, Shadid, Silvester & Tuminaro (2007), which needs only momentum applies, `diag(V)`, and the
+  assembled pressure Poisson `B Q̂⁻¹ Bᵀ` that `SmoothedAmgSchur` already builds. Use the **stabilized
+  (2007)** variant — Rhie–Chow collocated *is* an equal-order stabilized discretization, so the original
+  (2006) LSC underperforms on it — and re-derive its boundary treatment for cell-centred FVM. Prefer it
+  over PCD, whose auxiliary pressure convection–diffusion operator carries finite-element boundary
+  recipes that do not transfer cleanly to FVM.
 - **Fully-AD `a_P`** — a possible refinement (the diffusion Gate-C / limiter pattern), not yet needed.
 - **Gradient-scheme cost — largely solved (use `SweptCorrectedGradient`).** The *per-matvec* and
   *compile* cost of the nested corrected-gradient solve (distinct from the outer iteration count) is
