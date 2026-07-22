@@ -653,3 +653,25 @@ def test_refreshing_a_hierarchy_is_a_compilation_cache_hit() -> None:
 
     # The refreshed values genuinely change the preconditioner (else the cache hit is meaningless).
     assert not np.allclose(np.asarray(x_cold), np.asarray(x_developed))
+
+
+def test_lair_structure_is_value_dependent_unlike_aggregation() -> None:
+    """A reduction (lAIR) hierarchy is NOT refreshable on a fixed structure — its split reads values.
+
+    The aggregation coarsening reads only the graph, so re-deriving it at a new operator is shape-stable
+    (above). lAIR instead picks its coarse points from a strength graph thresholded on ``|A_ij|``
+    (:func:`_strength_classical`), so changing the coefficients changes the C/F split and, from some
+    level down, every shape. That is why a cheap lAIR refresh has to *reuse* the reference's frozen split
+    rather than re-derive it: a from-scratch rebuild is a different jit signature, so it would recompile
+    even though the values are all that changed. Pinned so the asymmetry is not mistaken for a bug.
+    """
+    n = 600
+    cold = build_air_hierarchy(_chain_operator(n, 0.01, np.ones(n - 1)))
+    developed = build_air_hierarchy(_chain_operator(n, 50.0, np.linspace(1.0, 1000.0, n - 1)))
+
+    shapes = [(lv.n, lv.n_coarse, lv.val.shape) for lv in cold.levels]
+    developed_shapes = [(lv.n, lv.n_coarse, lv.val.shape) for lv in developed.levels]
+    assert shapes != developed_shapes, (
+        "lAIR coarsening happened to be shape-stable here; the refresh-by-reusing-the-split "
+        "requirement is justified by its value dependence, so re-check _strength_classical"
+    )

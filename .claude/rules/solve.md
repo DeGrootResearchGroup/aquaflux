@@ -343,10 +343,18 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     operator has identical aggregates, coarse sizes and array shapes, and only values differ. Both
     properties are pinned in `tests/unit/test_multigrid.py`
     (`test_aggregation_hierarchy_structure_is_value_independent`,
-    `test_refreshing_a_hierarchy_is_a_compilation_cache_hit`). **Caveat:** lAIR's coarsening *does* read
-    values (`_strength_classical`), so a reduction hierarchy is **not** guaranteed refreshable on a fixed
-    structure — re-deriving it can legitimately change the C/F split and every shape. Do not add a
-    strength-of-connection filter to `_aggregate` without revisiting this, since that would make the
+    `test_refreshing_a_hierarchy_is_a_compilation_cache_hit`). **Caveat — lAIR does NOT get this for
+    free, and this is measured, not hypothetical.** Its C/F split comes from `_strength_classical`, which
+    thresholds on `|A_ij|`, so re-deriving a reduction hierarchy at a new operator changes the split and
+    the shapes: on a 600-cell chain, cold vs developed coefficients (5000× flux, 1000× viscosity ramp)
+    gave **identical L0–L2 but divergent L3–L5** (`n_coarse` 37→38, then `n` 37→38 / `nnz` 109→112,
+    18→19 / 52→55), i.e. a different jit signature and therefore a recompile anyway. The aggregation
+    path was invariant at *every* level in the same comparison. **Consequence:** for `method="air"` (and
+    `velocity="convection-air"`) a cheap refresh requires **reusing the reference's frozen C/F split and
+    `R`/`P` sparsity and recomputing only the values on it** — legitimate, since any valid split gives a
+    valid preconditioner, but it must be done explicitly (a `refresh` entry point that does not re-run
+    `_rs_split`/`_strength_classical`), whereas the aggregation path gets it for free. Also: do not add a
+    strength-of-connection filter to `_aggregate` without revisiting this, as that would make the
     aggregation path value-dependent too.
   - **Degenerate-mesh guard (binding — validated where the graph is consumed).** Because the
     hierarchies are built once off-jit and then frozen, a degenerate mesh must fail *there*, not as a
