@@ -1,0 +1,6 @@
+# Regenerable OpenFOAM run trees (meshes, fields, logs) and the sweep console log.
+# The figures/ and report*.md deliverables ARE tracked.
+runs/
+runs_sweep/
+sweep.log
+__pycache__/
