@@ -156,8 +156,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     through the march, the *unshifted* coupled saddle Jacobian is severely ill-conditioned, so the
     diagonally-shifted GMRES burns thousands of matvecs per solve (measured: one shifted solve ≈ 36 s at
     β=2, 127 s at β=0.2 on ~12k-cell pitzDaily — note lineax `num_steps` counts restart **cycles**
-    ×`restart`, not iterations). Three levers were probed; two are wired but **off by default** (kept for
-    further evaluation, not the fix) and one is dead:
+    ×`restart`, not iterations). Several levers were probed: two are wired but **off by default** (kept
+    for further evaluation, not the fix), one is dead, and one — refreshing the **scalar** k/ω AMGs after
+    the flow separates — is a real ~2.6× win that is not yet built:
     - **Flooring the SER `β` below (`β = max(beta_floor, β₀(‖R‖/‖R₀‖)^p)`, `PseudoTransientStep.beta_floor`,
       default 0 = off) — correctness-safe, a measured WASH, kept off-by-default.** It never moves the
       converged root (the shift `β d` scales the correction `δ`, which vanishes at `R=0`; it only damps the
@@ -189,11 +190,44 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         accurately* making the preconditioner *worse* is the signature that `Ŝ` is the **wrong operator**:
         the error is the Schur *approximation*, not its inversion (a partial V-cycle was accidentally
         regularizing it). Driving both sub-solves toward exact never beats the 1-cycle baseline.
-      - **Rebuilding the preconditioner at the developed state (staleness) does not help** the flow block
-        (ρ 34.0 → 31.6 on the channel; 49.9 → 91.9, i.e. worse, on pitzDaily, with an identical one-shot).
-        The frozen reference is fine — the convective linearization is Peclet-robust and MSIMPLER's Schur
-        is velocity-independent. (The *scalar* k/ω blocks do go stale — ω ρ 13.9 → 3.3 when rebuilt — but
-        they are not the cycle bottleneck.)
+      - **Rebuilding the preconditioner at the developed state (staleness) does not help *the flow
+        block*** (ρ 34.0 → 31.6 on the channel; 49.9 → 91.9, i.e. worse, on pitzDaily, with an identical
+        one-shot). The frozen *flow* reference is fine — the convective linearization is Peclet-robust and
+        MSIMPLER's Schur is velocity-independent. **Confirmed on the real solve:** refreshing only the flow
+        block at a separated pitzDaily state made it slightly *worse* (31 → 34 outer cycles at β=2).
+      - **BUT refreshing the *scalar* k/ω AMGs is a real 2.6× cycle win once the flow separates — the one
+        staleness lever that does pay (measured on the real solve, not ρ).** The scalars were noted above
+        as going stale (ω ρ 13.9 → 3.3 rebuilt) but dismissed as "not the cycle bottleneck" on the ρ /
+        one-shot proxy; on the **real coupled shifted solve** that dismissal does not hold. Marching
+        pitzDaily to a genuinely separated state (25 pseudo-transient steps, rel 3.0e-2, 70 recirculation
+        cells, `x_r/h` 0.87) and re-solving the **same** shifted system with the preconditioner refreshed
+        block-by-block (operator held fixed; every solve converged, `‖Aδ−b‖/‖b‖` ~1e-8):
+
+        | refreshed | cycles | matvecs | wall |
+        |---|---|---|---|
+        | nothing (all frozen at the cold IC) | 31 | 3720 | 68.9 s |
+        | **k/ω scalar AMGs only** | **12** | **1440** | **27.4 s** |
+        | flow block only | 34 | 4080 | 71.8 s |
+        | everything | 13 | 1560 | 30.4 s |
+
+        So the entire gain is the **scalars** (31 → 12), the flow refresh contributes nothing (everything
+        ≈ scalars-only), and this is a textbook instance of the ρ caution above — the scalars' low one-shot
+        made them look harmless while they were worth 2.6× on the real iteration. **The benefit only
+        appears once the flow has separated**: at a *pre-separation* state (4 march steps, no recirculation)
+        a full refresh is worthless (17 → 14 cycles at β=2, and *worse* at β=0.2, 43 → 83), which is why an
+        early measurement gives the wrong answer. Full-refresh gains were confirmed at β ∈ {2, 0.5, 0.2}
+        (31→13, 19→12, 31→18); the block-by-block isolation above was run at β=2. **Implication for
+        implementation: refresh only the two `ScalarTransportPreconditioner`s and leave the flow block
+        frozen** — much cheaper than a whole-policy rebuild, and it avoids the flow refresh's small
+        regression. It is adjoint-safe (the preconditioner is `stop_gradient`-ed whatever it is frozen at,
+        so a refresh changes only the forward Krylov count, never the converged state or its IFT adjoint).
+        Not yet built: the march must be segmented around an off-jit rebuild (the solve is one
+        `lax.while_loop`, and scipy AMG assembly cannot run inside it), and a refresh currently forces a
+        full recompile (~60–240 s) because these are non-pytrees hashed by identity. That recompile is
+        avoidable in principle — **the coarsening structure is value-independent** (`_aggregate` takes only
+        `(owner, nb, n)`, pure graph topology, so for a fixed mesh the aggregates, `n_coarse` and every
+        sparsity pattern are invariant), so only `val`/`diagonal`/`lam_max`/`coarse_inv` change; making
+        those traced leaves over a static index structure would turn a refresh into a cache hit.
       - **Rescaling the MSIMPLER `k` is a ρ mirage — validate on the real march, never on ρ.** Growing `k`
         collapses ρ (34.0 → 9.6) but barely moves the one-shot error (24.1 → 22.6), and the ρ-minimizing
         `k` sits ~40× *above the maximum* of the whole per-cell `ρV/a_P` distribution — i.e. the degenerate

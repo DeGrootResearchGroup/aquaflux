@@ -202,11 +202,15 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     one): smoothed+SIMPLE gives **cos 0.40** and the march stalls at rel ~0.18; **`velocity="convection"`
     + `schur_scaling="msimpler"` gives cos 0.998** *and* cuts the shifted solve from ~120–580 GMRES
     cycles to ~17 (each march step ~8× cheaper). Both stay valid **frozen at the cold initial state**
-    (MSIMPLER's Schur is velocity-independent; the convection linearization is Peclet-robust), so **no
-    reference refresh is needed** — verified: IC-frozen cos 0.996 vs plateau-rebuilt 0.998. It is **not**
-    the flow↔turbulence cross-coupling (the block-*diagonal* preconditioner with the right config already
-    reaches cos 0.998 — do not build a block-triangular coupling) and **not** staleness (rebuilding the
-    smoothed config at the plateau does not help). Overridable via `preconditioner_kwargs`.
+    (MSIMPLER's Schur is velocity-independent; the convection linearization is Peclet-robust), so **the
+    FLOW block needs no reference refresh** — verified two ways: IC-frozen cos 0.996 vs plateau-rebuilt
+    0.998, and refreshing the flow block alone at a separated pitzDaily state is if anything slightly
+    *worse* (31 → 34 outer cycles). It is **not** the flow↔turbulence cross-coupling (the block-*diagonal*
+    preconditioner with the right config already reaches cos 0.998 — a block-triangular coupling was
+    built, measured, and is worse; see `.claude/rules/solve.md`). **The k/ω *scalar* AMGs are the
+    exception: they do go stale, and refreshing them alone once the flow separates is worth ~2.6× in
+    outer cycles** (31 → 12) — the one staleness lever that pays; see the staleness bullet in
+    `.claude/rules/solve.md`. Overridable via `preconditioner_kwargs`.
   - **Remaining limiter — the k equation drift (the open item).** With the config above the march pushes
     past the omega plateau (rel 0.18 → ~0.09), but past there the **direct-`k` residual grows** (rel 1 →
     ~5× over a few steps) as the high-Reynolds production develops, while `ω` and the flow converge; `k`'s
