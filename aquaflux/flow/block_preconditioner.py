@@ -129,11 +129,16 @@ class _SchurGeometry(eqx.Module):
     interp_factor: jnp.ndarray
     normal_distance: jnp.ndarray
     rho: jnp.ndarray
+    owner_e: jnp.ndarray
+    nb_e: jnp.ndarray
+    interior_faces: jnp.ndarray
+    n_cells: int = eqx.field(static=True)
     pressure_pin: int | None = eqx.field(static=True)
 
     @classmethod
     def of(cls, assembler: MomentumContinuity) -> _SchurGeometry:
         """Extract the Schur-coefficient geometry from a flow assembler."""
+        owner_e, nb_e, interior_faces = assembler.mesh.face_cells.interior_edges()
         return cls(
             assembler.mesh.face_cells,
             assembler.geometry,
@@ -141,8 +146,30 @@ class _SchurGeometry(eqx.Module):
             assembler.interp_factor,
             assembler.normal_distance,
             assembler.density,
+            jnp.asarray(owner_e),
+            jnp.asarray(nb_e),
+            jnp.asarray(interior_faces),
+            assembler.mesh.n_cells,
             assembler.pressure_pin,
         )
+
+    def diagonal(self, a_p: jnp.ndarray) -> jnp.ndarray:
+        """The current pressure-Schur operator diagonal at momentum diagonal ``a_P``.
+
+        The interior coefficient scattered to both of each face's cells, plus the boundary stiffness
+        the reference hierarchy also carries, with the pin row set to one where a closed domain pins
+        the pressure. This is the ``diag_cur`` every frozen-hierarchy Schur block rescales against, so
+        it lives here — on the object that owns the coefficient — rather than in each strategy.
+        """
+        coefficient = self.coefficient(a_p)[self.interior_faces]
+        diagonal = (
+            segment_sum(coefficient, self.owner_e, self.n_cells)
+            + segment_sum(coefficient, self.nb_e, self.n_cells)
+            + self.boundary_diagonal(a_p)
+        )
+        if self.pressure_pin is not None:
+            diagonal = diagonal.at[self.pressure_pin].set(1.0)
+        return diagonal
 
     def coefficient(self, a_p: jnp.ndarray) -> jnp.ndarray:
         """The (frozen) per-face SIMPLE Schur coefficient at momentum diagonal ``a_P``."""
@@ -215,12 +242,25 @@ class InnerSchurSolver(eqx.Module):
     """Strategy: solve the compact pressure Schur ``Ŝ x = rp`` for the preconditioner.
 
     Built once off the jit path; :meth:`apply` returns the solve ``rp -> Ŝ⁻¹ rp`` specialized to the
-    current (frozen) momentum diagonal ``a_P``.
+    current (frozen) momentum diagonal ``a_P`` and the frozen saddle blocks at the current iterate.
+
+    Both arguments are offered because the family spans two kinds of approximation: a *scaled-Laplacian*
+    Schur (:class:`SmoothedAmgSchur`) is a pure function of ``a_P`` and ignores ``blocks``, whereas a
+    *commutator-based* Schur (:class:`StabilizedLscSchur`) needs the momentum, gradient, and divergence
+    operators themselves. Taking both keeps the seam one method rather than branching the caller.
     """
 
     @abc.abstractmethod
-    def apply(self, a_p: jnp.ndarray) -> _PressureSolve:
-        """Return the pressure solve ``rp -> Ŝ⁻¹ rp`` at momentum diagonal ``a_P``."""
+    def apply(self, a_p: jnp.ndarray, blocks: FlowBlocks) -> _PressureSolve:
+        """Return the pressure solve ``rp -> Ŝ⁻¹ rp`` at momentum diagonal ``a_P``.
+
+        Parameters
+        ----------
+        a_p : jnp.ndarray
+            The frozen isotropic momentum diagonal, shape ``(n_cells,)``.
+        blocks : FlowBlocks
+            The saddle's matrix-free Jacobian blocks at the current frozen state.
+        """
 
 
 class SmoothedAmgSchur(InnerSchurSolver):
@@ -233,10 +273,6 @@ class SmoothedAmgSchur(InnerSchurSolver):
 
     geometry: _SchurGeometry
     hierarchy: SmoothedHierarchy
-    owner: jnp.ndarray
-    nb: jnp.ndarray
-    interior_faces: jnp.ndarray
-    n_cells: int = eqx.field(static=True)
     v_cycles: int = eqx.field(static=True)
 
     @classmethod
@@ -246,7 +282,6 @@ class SmoothedAmgSchur(InnerSchurSolver):
         owner_e: np.ndarray,
         nb_e: np.ndarray,
         interior: np.ndarray,
-        interior_faces: jnp.ndarray,
         n_cells: int,
         v_cycles: int,
         reference_diagonal: jnp.ndarray | None = None,
@@ -280,30 +315,17 @@ class SmoothedAmgSchur(InnerSchurSolver):
         if geometry.pressure_pin is not None:  # closed domain: regularize by decoupling the pin
             a = decouple_dof(a, geometry.pressure_pin)
         hierarchy = build_smoothed_hierarchy(a)
-        return cls(
-            geometry,
-            hierarchy,
-            jnp.asarray(owner_e),
-            jnp.asarray(nb_e),
-            interior_faces,
-            n_cells,
-            v_cycles,
-        )
+        return cls(geometry, hierarchy, v_cycles)
 
-    def apply(self, a_p: jnp.ndarray) -> _PressureSolve:
-        current_coeff = self.geometry.coefficient(a_p)[self.interior_faces]
-        diag_cur = segment_sum(current_coeff, self.owner, self.n_cells) + segment_sum(
-            current_coeff, self.nb, self.n_cells
-        )
-        # The reference hierarchy carries the boundary (outlet) stiffness in its diagonal, so the
-        # current diagonal must include it too for the symmetric rescaling to be consistent.
-        diag_cur = diag_cur + self.geometry.boundary_diagonal(a_p)
-        if self.geometry.pressure_pin is not None:
-            diag_cur = diag_cur.at[self.geometry.pressure_pin].set(1.0)
+    def apply(self, a_p: jnp.ndarray, blocks: FlowBlocks) -> _PressureSolve:
+        # `blocks` is unused: this Schur is a scaled discrete Laplacian in `a_P` alone. It is part of
+        # the interface for the commutator-based strategies, which do need the saddle's operators.
+        # The reference hierarchy carries the boundary (outlet) stiffness in its diagonal, and
+        # `geometry.diagonal` includes it, so the symmetric rescaling stays consistent.
         return _symmetric_rescaled(
             lambda rp: smoothed_multigrid_solve(self.hierarchy, rp, cycles=self.v_cycles),
             self.hierarchy.levels[0].diagonal,
-            diag_cur,
+            self.geometry.diagonal(a_p),
         )
 
 
@@ -503,6 +525,340 @@ def _characteristic_reference_state(assembler: MomentumContinuity) -> jnp.ndarra
     return jax.lax.stop_gradient(assembler.pack(velocity, jnp.zeros(assembler.mesh.n_cells)))
 
 
+# --- the flow saddle's Jacobian blocks, matrix-free ------------------------------------
+
+
+class FlowBlocks(eqx.Module):
+    """The four Jacobian blocks of the flow saddle point, as matrix-free operators at a frozen state.
+
+    The coupled flow Jacobian has the saddle structure ``[[F, G], [B, Ĉ]]`` over the state
+    ``[velocity, pressure]``: ``F`` the momentum block, ``G`` the pressure gradient (velocity rows,
+    pressure columns), ``B`` the divergence (pressure rows, velocity columns), and ``Ĉ`` the
+    pressure--pressure coupling — which for a collocated Rhie--Chow discretization is the pressure
+    damping that suppresses checkerboarding, i.e. this discretization's *stabilization* operator.
+
+    **Sign convention (measured, not assumed).** In this residual's signs ``Ĉ`` is *positive* definite
+    and ``B F⁻¹ G`` is *negative* definite, so the pressure Schur complement ``S = Ĉ - B F⁻¹ G`` is
+    positive definite — which is the convention every Schur strategy here follows (they return an
+    approximate ``S⁻¹`` for that positive ``S``). Note the consequence for anything written in the
+    usual textbook saddle form ``[[F, Bᵀ], [B, -C]]``: that form's ``Bᵀ`` is ``-G`` here, so a product
+    with an *odd* number of gradient factors — such as the least-squares commutator
+    ``B Q̂⁻¹ F Q̂⁻¹ Bᵀ`` — picks up a sign flip against the literature formula.
+
+    Every block is one ``jax.jvp`` through the **frozen** residual: inject a tangent in one field and
+    read the response in one field. Both the assembler and the state are ``stop_gradient``-ed, so the
+    resulting operators are constant — a preconditioner built from them changes only the Krylov
+    iteration, never the converged solution or its adjoint.
+
+    The two combined methods are the primitives (each is a *single* ``jvp`` yielding both blocks of a
+    column); the four named single-block accessors compose them, so a caller that needs both halves of
+    a column pays for one residual linearization rather than two.
+    """
+
+    assembler: MomentumContinuity
+    state: jnp.ndarray
+
+    @classmethod
+    def of(cls, assembler: MomentumContinuity, state: jnp.ndarray) -> FlowBlocks:
+        """Freeze the blocks at ``state`` (both the assembler and the state are detached)."""
+        return cls(jax.lax.stop_gradient(assembler), jax.lax.stop_gradient(state))
+
+    def _column(self, tangent: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """One linearization: the (velocity, pressure) response to a packed tangent."""
+        return self.assembler.unpack(jax.jvp(self.assembler.residual, (self.state,), (tangent,))[1])
+
+    def velocity_column(self, du: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """``δu -> (F δu, B δu)`` — the momentum and divergence responses, in one linearization."""
+        return self._column(self.assembler.pack(du, jnp.zeros(self.assembler.mesh.n_cells)))
+
+    def pressure_column(self, dp: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """``δp -> (G δp, Ĉ δp)`` — the gradient and pressure-coupling responses, in one pass."""
+        zeros = jnp.zeros((self.assembler.mesh.n_cells, self.assembler.mesh.dim))
+        return self._column(self.assembler.pack(zeros, dp))
+
+    def momentum(self, du: jnp.ndarray) -> jnp.ndarray:
+        """``F δu``, shape ``(n_cells, dim) -> (n_cells, dim)``."""
+        return self.velocity_column(du)[0]
+
+    def divergence(self, du: jnp.ndarray) -> jnp.ndarray:
+        """``B δu``, shape ``(n_cells, dim) -> (n_cells,)``."""
+        return self.velocity_column(du)[1]
+
+    def gradient(self, dp: jnp.ndarray) -> jnp.ndarray:
+        """``G δp``, shape ``(n_cells,) -> (n_cells, dim)``."""
+        return self.pressure_column(dp)[0]
+
+    def pressure_coupling(self, dp: jnp.ndarray) -> jnp.ndarray:
+        """The stabilization block ``Ĉ δp``, shape ``(n_cells,) -> (n_cells,)``.
+
+        Positive definite as the residual writes it (see the sign convention above), which is the sign
+        the stabilized least-squares-commutator Schur approximation is written in terms of.
+        """
+        return self.pressure_column(dp)[1]
+
+
+# The commutator Schur inverts `P_γ` **twice** per apply, so its inversion error compounds — unlike
+# the scaled-Laplacian Schurs, which invert theirs once. A single V-cycle is too inexact and the whole
+# approximation breaks down: measured on a convection-dominated channel, one cycle fails to converge at
+# all, while four or more converge in *fewer* outer iterations than either scaled-Laplacian Schur. This
+# is the floor the strategy enforces on the shared V-cycle count.
+_COMMUTATOR_MIN_V_CYCLES = 4
+
+
+def _spectral_radius(matvec: Callable[[np.ndarray], np.ndarray], n: int, iterations: int) -> float:
+    """Dominant eigenvalue magnitude of a linear operator, by power iteration (off the jit path).
+
+    Used to size the two scalar parameters of the stabilized least-squares-commutator Schur. A plain
+    power iteration is enough: both scalars only set the *balance* between the preconditioner's two
+    additive parts, so a few significant figures suffice, and it needs no eigensolver dependency.
+    """
+    rng = np.random.default_rng(0)
+    v = rng.standard_normal(n)
+    v /= np.linalg.norm(v)
+    magnitude = 0.0
+    for _ in range(iterations):
+        w = matvec(v)
+        magnitude = float(np.linalg.norm(w))
+        if magnitude == 0.0:
+            return 0.0
+        v = w / magnitude
+    return magnitude
+
+
+class StabilizedLscSchur(InnerSchurSolver):
+    """Stabilized least-squares-commutator (LSC) Schur approximation, for convection-dominated flow.
+
+    :class:`SmoothedAmgSchur` approximates the Schur complement by a *scaled discrete Laplacian*. That
+    is a near-Stokes approximation: as convection strengthens it stops representing
+    ``S = B F⁻¹ Bᵀ + Ĉ``, and — this is the practical point — no amount of extra accuracy in *inverting*
+    it recovers the loss, because the error is in the approximation rather than its inversion. This
+    strategy instead builds the Schur approximation from the momentum operator itself, via the
+    least-squares commutator of Elman, Howle, Shadid, Shuttleworth & Tuminaro (2006), in the
+    **stabilized** form of Elman, Howle, Shadid, Silvester & Tuminaro (2007).
+
+    The stabilized form is the required one here: a collocated Rhie--Chow discretization is *equal-order
+    stabilized*, so the saddle's pressure--pressure block ``Ĉ`` (the Rhie--Chow pressure damping) is
+    nonzero and the unstabilized commutator is singular on the checkerboard pressure mode. Of the two
+    stabilized variants in that work, this implements the **algebraic** one, which needs only assembled
+    operators — the element-based variant needs local finite-element assembly information that a
+    cell-centred finite-volume solver does not have. Specifically it is the nonuniform-mesh form,
+
+    ``M_S⁻¹ = P_γ⁻¹ (B Q̂⁻¹ F Q̂⁻¹ Bᵀ) P_γ⁻¹ + α D⁻¹``,
+    ``P_γ = B Q̂⁻¹ Bᵀ + γ̃ D_r^½ Ĉ D_r^½``,
+
+    with ``Q̂`` the velocity mass diagonal ``ρV``, ``D_r`` the componentwise ratio of ``diag(B Q̂⁻¹ Bᵀ)``
+    to ``diag(Ĉ)`` (which makes the added dissipation's spatial variation follow the Laplacian's, the
+    adaptation that carries the method to graded and unstructured meshes), and ``D`` the diagonal of
+    ``B diag(F)⁻¹ Bᵀ + Ĉ``. The ``α D⁻¹`` term is what keeps the checkerboard mode bounded, and the
+    ``γ̃`` term is what keeps the commutator well defined on it.
+
+    **Both scalars are viscosity-free here, by construction.** As published, ``γ = ρ(Q̂⁻¹F)/(3ν)`` and
+    ``D`` carry an explicit kinematic viscosity ``ν``. A turbulent flow has no single ``ν`` — the
+    effective viscosity ``μ + ρν_t`` varies across the field by orders of magnitude — so that form is
+    not directly usable. Writing the expressions in terms of the *assembled* pressure--pressure block
+    (``Ĉ``, which already carries the viscosity scaling) rather than a bare stabilization matrix, the
+    ``ν`` cancels identically: ``D_r`` scales as ``1/ν``, so ``γ̃ = γ/‖diag(D_r)‖_∞`` is
+    ``ρ(Q̂⁻¹F)/(3‖diag(D_r)‖_∞)`` and ``D_r^½ Ĉ D_r^½`` is unchanged. The implementation therefore never
+    needs a viscosity value, which is what lets it serve a variable-viscosity turbulent closure.
+
+    Cost, relative to the scaled-Laplacian Schur: two multigrid solves and three residual
+    linearizations per apply, against one solve. It buys a Schur approximation that keeps working when
+    the cheap one has stopped.
+    """
+
+    geometry: _SchurGeometry
+    hierarchy: SmoothedHierarchy
+    mass_diagonal: jnp.ndarray
+    alpha_diagonal: jnp.ndarray
+    alpha: float = eqx.field(static=True)
+    v_cycles: int = eqx.field(static=True)
+
+    @classmethod
+    def build(
+        cls,
+        geometry: _SchurGeometry,
+        owner_e: np.ndarray,
+        nb_e: np.ndarray,
+        interior: np.ndarray,
+        n_cells: int,
+        v_cycles: int,
+        mass_diagonal: jnp.ndarray,
+        reference_a_p: jnp.ndarray,
+        momentum_radius: float,
+        *,
+        gamma: float | None = None,
+        alpha: float | None = None,
+        power_iterations: int = 50,
+    ) -> StabilizedLscSchur:
+        """Assemble ``P_γ``'s multigrid hierarchy and calibrate the two scalars, off the jit path.
+
+        Parameters
+        ----------
+        geometry : _SchurGeometry
+            The frozen pressure-Schur geometry (owns the face coefficient at a given diagonal).
+        owner_e, nb_e, interior : np.ndarray
+            Interior-edge owner/neighbour indices and the interior-face mask.
+        n_cells : int
+            Number of cells.
+        v_cycles : int
+            Multigrid V-cycles per ``P_γ`` solve, raised to at least ``_COMMUTATOR_MIN_V_CYCLES``
+            (this Schur inverts ``P_γ`` twice, so too inexact an inner solve breaks it).
+        mass_diagonal : jnp.ndarray
+            The velocity mass diagonal ``Q̂ = ρV``, shape ``(n_cells,)``.
+        reference_a_p : jnp.ndarray
+            The momentum diagonal the stabilization block is frozen at, shape ``(n_cells,)``.
+        momentum_radius : float
+            The spectral radius of ``Q̂⁻¹F``, used only to size ``γ``. Computed by the builder (which
+            owns the assembler) and handed in, so this build stays assembler-free.
+        gamma, alpha : float, optional
+            Override the calibrated scalars (for a parameter study). ``None`` calibrates them.
+        power_iterations : int
+            Power-iteration count for the two spectral radii.
+        """
+        import scipy.sparse as sp
+
+        # The two pressure-space operators, both from the one shared Schur-coefficient definition so
+        # they cannot drift: the Laplacian `B Q̂⁻¹ Bᵀ` is that coefficient at the mass diagonal, and the
+        # stabilization block `Ĉ` (Rhie--Chow pressure damping) is the same coefficient at `a_P`.
+        laplacian = cls._pressure_operator(
+            geometry, owner_e, nb_e, interior, n_cells, mass_diagonal
+        )
+        stabilization = cls._pressure_operator(
+            geometry, owner_e, nb_e, interior, n_cells, reference_a_p
+        )
+
+        laplacian_diagonal = np.asarray(laplacian.diagonal())
+        stabilization_diagonal = np.asarray(stabilization.diagonal())
+        safe = np.where(np.abs(stabilization_diagonal) > 0.0, stabilization_diagonal, 1.0)
+        ratio = laplacian_diagonal / safe  # D_r
+
+        if gamma is None:
+            # γ = ρ(Q̂⁻¹F) / 3, then normalized by ‖diag(D_r)‖_∞ (the viscosity cancels — see the class
+            # docstring), giving the scale at which the stabilization enters `P_γ`.
+            gamma = momentum_radius / 3.0
+        scaled_gamma = gamma / max(float(np.max(np.abs(ratio))), 1e-300)
+
+        root = np.sqrt(np.abs(ratio))
+        p_gamma = laplacian + scaled_gamma * (sp.diags(root) @ stabilization @ sp.diags(root))
+        if geometry.pressure_pin is not None:  # closed domain: regularize by decoupling the pin
+            p_gamma = decouple_dof(p_gamma, geometry.pressure_pin)
+
+        # The additive term α D⁻¹ that bounds the checkerboard mode. `B diag(F)⁻¹ Bᵀ` is the Schur
+        # coefficient at the momentum diagonal — the same assembled operator as the stabilization
+        # block here, since both are that Laplacian at `a_P`.
+        alpha_diagonal_np = stabilization_diagonal + stabilization_diagonal
+        if alpha is None:
+            inverse_alpha_diagonal = 1.0 / np.where(
+                np.abs(alpha_diagonal_np) > 0.0, alpha_diagonal_np, 1.0
+            )
+            radius = _spectral_radius(
+                lambda v: stabilization @ (inverse_alpha_diagonal * v), n_cells, power_iterations
+            )
+            alpha = 1.0 / radius if radius > 0.0 else 0.0
+
+        return cls(
+            geometry,
+            build_smoothed_hierarchy(p_gamma),
+            jnp.asarray(mass_diagonal),
+            jnp.asarray(alpha_diagonal_np),
+            float(alpha),
+            max(v_cycles, _COMMUTATOR_MIN_V_CYCLES),
+        )
+
+    @staticmethod
+    def _pressure_operator(
+        geometry: _SchurGeometry,
+        owner_e: np.ndarray,
+        nb_e: np.ndarray,
+        interior: np.ndarray,
+        n_cells: int,
+        diagonal: jnp.ndarray,
+    ) -> object:
+        """The assembled pressure-space Laplacian ``B diag⁻¹ Bᵀ`` at a given momentum-like diagonal."""
+        coefficient = np.asarray(geometry.coefficient(diagonal))[interior]
+        boundary = np.asarray(geometry.boundary_diagonal(diagonal))
+        return convection_diffusion_operator(
+            owner_e, nb_e, coefficient, n_cells, boundary_diagonal=boundary
+        )
+
+    def apply(self, a_p: jnp.ndarray, blocks: FlowBlocks) -> _PressureSolve:
+        """The stabilized commutator solve ``rp -> M_S⁻¹ rp``.
+
+        ``a_P`` is unused, and deliberately so: unlike the scaled-Laplacian Schurs, whose operator *is*
+        a function of the momentum diagonal and so has to be rescaled as it develops, this one is built
+        on the velocity mass diagonal ``Q̂ = ρV`` — pure geometry, with no state dependence to track.
+        All of this strategy's dependence on the current iterate enters through ``blocks``, i.e. the
+        commutator, which is where the convection information actually lives.
+        """
+        del a_p
+
+        def p_gamma_solve(rp: jnp.ndarray) -> jnp.ndarray:
+            return smoothed_multigrid_solve(self.hierarchy, rp, cycles=self.v_cycles)
+
+        inverse_mass = 1.0 / self.mass_diagonal
+        alpha_scale = self.alpha / self.alpha_diagonal
+
+        def commutator(pressure: jnp.ndarray) -> jnp.ndarray:
+            """``B Q̂⁻¹ F Q̂⁻¹ Bᵀ`` — three linearizations of the frozen residual.
+
+            Negated because this residual's gradient block ``G`` is ``-Bᵀ`` in the textbook saddle
+            form the formula is written in (see :class:`FlowBlocks`); with the single gradient factor
+            here that is one sign flip, and it is what makes the result positive definite like the
+            Schur complement it approximates.
+            """
+            gradient = blocks.gradient(pressure)
+            momentum = blocks.momentum(gradient * inverse_mass[:, None])
+            return -blocks.divergence(momentum * inverse_mass[:, None])
+
+        def solve(rp: jnp.ndarray) -> jnp.ndarray:
+            return p_gamma_solve(commutator(p_gamma_solve(rp))) + alpha_scale * rp
+
+        return solve
+
+
+def _isotropic_momentum_diagonal(assembler: MomentumContinuity, state: jnp.ndarray) -> jnp.ndarray:
+    """The frozen, isotropic (component-averaged) momentum diagonal ``a_P`` at ``state``.
+
+    The plain all-faces form (``boundary_corrected=False``): this frozen diagonal is a forward-path
+    stabilization scale (the shift and the block it inverts), not the residual's operator-consistent
+    coefficient, so it keeps the extra boundary damping that carries the high-Reynolds march. It never
+    enters the converged residual or the adjoint.
+    """
+    velocity, _ = assembler.unpack(jax.lax.stop_gradient(state))
+    return jnp.mean(
+        jax.lax.stop_gradient(
+            assembler.momentum_matrix_diagonal(velocity, boundary_corrected=False)
+        ),
+        axis=1,
+    )
+
+
+def _scaled_momentum_radius(
+    assembler: MomentumContinuity,
+    state: jnp.ndarray,
+    mass_diagonal: jnp.ndarray,
+    iterations: int = 30,
+) -> float:
+    """Spectral radius of ``Q̂⁻¹F`` at ``state``, by power iteration on the frozen momentum block.
+
+    Assembler behaviour (it linearizes the residual), so it is computed here — where the assembler
+    lives — and handed to the Schur strategy as a plain number, keeping that strategy assembler-free.
+    """
+    blocks = FlowBlocks.of(assembler, state)
+    inverse_mass = 1.0 / mass_diagonal
+    rng = np.random.default_rng(0)
+    v = jnp.asarray(rng.standard_normal((assembler.mesh.n_cells, assembler.mesh.dim)))
+    v = v / jnp.linalg.norm(v)
+    magnitude = 0.0
+    for _ in range(iterations):
+        w = inverse_mass[:, None] * blocks.momentum(v)
+        magnitude = float(jnp.linalg.norm(w))
+        if magnitude == 0.0:
+            return 0.0
+        v = w / magnitude
+    return magnitude
+
+
 # --- the composed preconditioner -------------------------------------------------------
 
 
@@ -568,12 +924,18 @@ class BlockPreconditioner(eqx.Module):
             the frozen linearization carries the operating cell Peclet with no assumption on the flow
             speed. Pass a state only to pin the linearization to a better-known operating point (for
             instance a previously converged flow).
-        schur_scaling : {"simple", "msimpler"}
-            How the pressure Schur is scaled. ``"simple"`` uses the momentum diagonal ``a_P`` (the
-            classical SIMPLE Schur ``V / a_P``, which degrades as convection strengthens);
+        schur_scaling : {"simple", "msimpler", "lsc"}
+            Which pressure-Schur approximation to use. ``"simple"`` uses the momentum diagonal ``a_P``
+            (the classical SIMPLE Schur ``V / a_P``, which degrades as convection strengthens);
             ``"msimpler"`` uses a **frozen, velocity-independent** diagonal ``Q̂ = ρ V / k`` so the
             Schur is a constant-coefficient pressure Poisson (coefficient ``k · A/(d·n)``) that stays
-            Re-robust — the fix that carries the coupled solve past the ``a_P``-Schur stall.
+            Re-robust — the fix that carries the coupled solve past the ``a_P``-Schur stall. Both are
+            *scaled Laplacians*, hence near-Stokes approximations that eventually stop representing the
+            Schur complement as convection grows, at which point inverting them more accurately does
+            not help. ``"lsc"`` instead builds the approximation from the momentum operator itself
+            (:class:`StabilizedLscSchur`, the stabilized least-squares commutator) — markedly dearer per
+            apply (two multigrid solves plus three residual linearizations, against one solve) but it
+            keeps working in the convection-dominated regime where the scaled Laplacians have stalled.
         msimpler_scale : float, optional
             The MSIMPLER scale ``k`` (only for ``schur_scaling="msimpler"``). It sets the Schur
             magnitude to the operating convection, or the block preconditioner is unbalanced and
@@ -588,13 +950,14 @@ class BlockPreconditioner(eqx.Module):
             raise ValueError(
                 f"unknown velocity block {velocity!r}; use 'smoothed', 'convection' or 'convection-air'"
             )
-        if schur_scaling not in ("simple", "msimpler"):
-            raise ValueError(f"unknown schur_scaling {schur_scaling!r}; use 'simple' or 'msimpler'")
+        if schur_scaling not in ("simple", "msimpler", "lsc"):
+            raise ValueError(
+                f"unknown schur_scaling {schur_scaling!r}; use 'simple', 'msimpler' or 'lsc'"
+            )
         geometry = _SchurGeometry.of(assembler)
         n_cells = assembler.mesh.n_cells
-        owner_e, nb_e, interior_faces_np = assembler.mesh.face_cells.interior_edges()
+        owner_e, nb_e, _ = assembler.mesh.face_cells.interior_edges()
         interior = np.asarray(assembler.mesh.face_cells.interior)
-        interior_faces = jnp.asarray(interior_faces_np)
 
         # MSIMPLER replaces the SIMPLE Schur scaling ``a_P`` with a frozen, velocity-independent
         # diagonal ``Q̂ = ρ V / k``; ``None`` keeps the classical SIMPLE (a_P) Schur. The hierarchy is
@@ -604,22 +967,39 @@ class BlockPreconditioner(eqx.Module):
         # ``mean(ρV / a_P)`` from the **real** momentum diagonal (in the same ``ρV`` units as ``Q̂``, so
         # the density is not divided back out of the Schur coefficient), so it tracks the true velocity /
         # density / viscosity scale with no unit-speed assumption; ``msimpler_scale`` overrides it.
-        schur_mass_diagonal = None
-        if schur_scaling == "msimpler":
-            schur_mass_diagonal = jax.lax.stop_gradient(
-                assembler.density * assembler.geometry.cell.volume
-            )
+        mass_diagonal = jax.lax.stop_gradient(assembler.density * assembler.geometry.cell.volume)
+        # Only MSIMPLER reinterprets the Schur's diagonal as a mass matrix scaled per iterate by `k`.
+        # The commutator Schur uses the mass diagonal directly (it is `Q̂` in the least-squares
+        # commutator, not a stand-in for `a_P`), so it wants no `k` calibration and no per-iterate
+        # rescaling — leaving this None keeps `apply_at` from applying either.
+        schur_mass_diagonal = mass_diagonal if schur_scaling == "msimpler" else None
 
-        schur = SmoothedAmgSchur.build(
-            geometry,
-            owner_e,
-            nb_e,
-            interior,
-            interior_faces,
-            n_cells,
-            v_cycles,
-            reference_diagonal=schur_mass_diagonal,
-        )
+        schur: InnerSchurSolver
+        if schur_scaling == "lsc":
+            if reference_state is None:
+                reference_state = _characteristic_reference_state(assembler)
+            reference_a_p = _isotropic_momentum_diagonal(assembler, reference_state)
+            schur = StabilizedLscSchur.build(
+                geometry,
+                owner_e,
+                nb_e,
+                interior,
+                n_cells,
+                v_cycles,
+                mass_diagonal,
+                reference_a_p,
+                _scaled_momentum_radius(assembler, reference_state, mass_diagonal),
+            )
+        else:
+            schur = SmoothedAmgSchur.build(
+                geometry,
+                owner_e,
+                nb_e,
+                interior,
+                n_cells,
+                v_cycles,
+                reference_diagonal=schur_mass_diagonal,
+            )
         velocity_geometry = _VelocityGeometry.of(assembler)
         velocity_block: VelocityBlockSolver
         if velocity in ("convection", "convection-air"):
@@ -666,22 +1046,6 @@ class BlockPreconditioner(eqx.Module):
             msimpler_scale=msimpler_scale,
         )
 
-    def _divergence(self, state: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
-        """The velocity predictor's divergence ``δu -> D·δu`` as a jvp through the frozen residual."""
-        frozen = jax.lax.stop_gradient(self.assembler)
-        frozen_state = jax.lax.stop_gradient(state)
-
-        def divergence(velocity_correction: jnp.ndarray) -> jnp.ndarray:
-            tangent = self.assembler.pack(
-                velocity_correction, jnp.zeros(self.assembler.mesh.n_cells)
-            )
-            _, pressure = self.assembler.unpack(
-                jax.jvp(frozen.residual, (frozen_state,), (tangent,))[1]
-            )
-            return pressure
-
-        return divergence
-
     def frozen_momentum_diagonal(self, state: jnp.ndarray) -> jnp.ndarray:
         """The isotropic, frozen momentum diagonal ``a_P`` at ``state``, shape ``(n_cells,)``.
 
@@ -692,17 +1056,7 @@ class BlockPreconditioner(eqx.Module):
         called on a live state. Exposed so a continuation driver (implicit under-relaxation) can
         form its diagonal shift from the *same* ``a_P`` the preconditioner inverts.
         """
-        velocity, _ = self.assembler.unpack(jax.lax.stop_gradient(state))
-        # The plain all-faces ``a_P`` (``boundary_corrected=False``): this frozen diagonal is a
-        # forward-path stabilization scale (the shift and the block it inverts), not the residual's
-        # operator-consistent coefficient, so it keeps the extra boundary damping that carries the
-        # high-Reynolds march. It never enters the converged residual or the adjoint.
-        return jnp.mean(
-            jax.lax.stop_gradient(
-                self.assembler.momentum_matrix_diagonal(velocity, boundary_corrected=False)
-            ),
-            axis=1,
-        )
+        return _isotropic_momentum_diagonal(self.assembler, state)
 
     def _msimpler_scale(self, state: jnp.ndarray) -> jnp.ndarray:
         """The MSIMPLER scale ``k`` at ``state`` — ``mean(ρV / a_P)`` from the real momentum diagonal.
@@ -745,9 +1099,10 @@ class BlockPreconditioner(eqx.Module):
             schur_a_p = a_p
         else:  # MSIMPLER: Q̂ = ρ V / k with the operating-scale k
             schur_a_p = self.schur_mass_diagonal / self._msimpler_scale(state)
-        schur_solve = self.schur.apply(schur_a_p)
+        blocks = FlowBlocks.of(self.assembler, state)
+        schur_solve = self.schur.apply(schur_a_p, blocks)
         velocity_solve = self.velocity.apply(a_p)
-        divergence = self._divergence(state)
+        divergence = blocks.divergence
 
         def apply(v: jnp.ndarray) -> jnp.ndarray:
             velocity_residual, pressure_residual = self.assembler.unpack(v)
