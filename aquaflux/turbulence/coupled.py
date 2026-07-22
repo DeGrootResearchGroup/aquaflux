@@ -510,6 +510,7 @@ def coupled_continuation(
     line_search: int = _COUPLED_LINE_SEARCH,
     forward_solver: lx.AbstractLinearSolver | None = None,
     block_scaled_norm: bool = False,
+    reuse: CoupledShiftPolicy | None = None,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
     """Build the pseudo-transient continuation step for the coupled Newton solve.
@@ -549,16 +550,22 @@ def coupled_continuation(
         block-scaled measure was found to *stall* the pitzDaily march (the per-block relative norm stops
         descending long before the fields converge), so it is available for experimentation but off by
         default; the Euclidean norm is what the solver uses.
+    reuse : CoupledShiftPolicy, optional
+        An existing policy to **refresh** at ``reference_state`` instead of building one from scratch:
+        the k/omega AMGs are re-derived on their reused coarsening while the flow block is carried over
+        untouched (see :func:`_coupled_shift_policy`). Use it to re-freeze a stale preconditioner part
+        way through a march, once the flow has developed.
     **preconditioner_kwargs
         Forwarded to :meth:`~aquaflux.flow.BlockPreconditioner.build` for the flow block (e.g.
-        ``schur_scaling``, ``velocity``).
+        ``schur_scaling``, ``velocity``). Ignored when ``reuse`` is given, since the flow block is then
+        carried over rather than rebuilt.
 
     Returns
     -------
     PseudoTransientStep
         The forward step to hand :class:`~aquaflux.solve.ImplicitNewtonSolver` as ``forward_step``.
     """
-    policy = _coupled_shift_policy(coupled, reference_state, method, **preconditioner_kwargs)
+    policy = _coupled_shift_policy(coupled, reference_state, method, reuse, **preconditioner_kwargs)
     residual_norm = (
         _coupled_residual_norm(coupled, reference_state) if block_scaled_norm else jnp.linalg.norm
     )
@@ -581,6 +588,7 @@ def _coupled_shift_policy(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
     method: str | None,
+    reuse: CoupledShiftPolicy | None = None,
     **preconditioner_kwargs: object,
 ) -> CoupledShiftPolicy:
     """Build the block-diagonal :class:`CoupledShiftPolicy` frozen at ``reference_state``.
@@ -588,6 +596,17 @@ def _coupled_shift_policy(
     The preconditioner-freezing half of :func:`coupled_continuation`, split out so the mass-flow
     constraint (:func:`mass_flow_coupled_continuation`) can border the *same* policy rather than
     re-derive it.
+
+    ``reuse`` **refreshes** an existing policy at a new (more developed) ``reference_state`` rather than
+    building one from scratch, and it is deliberately asymmetric across the blocks because that is what
+    the measurements support. The **scalar k/omega AMGs are re-derived** on their reused coarsening
+    (:func:`~aquaflux.turbulence.preconditioner.scalar_transport_preconditioner`'s ``reuse=``) -- on a
+    separated backward-facing-step state that is worth ~2.4x in outer Krylov cycles. The **flow block is
+    carried over untouched**, because re-freezing it at the developed state was measured to be no help
+    and slightly harmful (its convective linearization is Peclet-robust and the MSIMPLER Schur is
+    velocity-independent, so it does not go stale), and rebuilding it is the expensive half. The shift
+    diagonals *are* rebuilt at the new state: they are the pseudo-time damping scale, which should track
+    the operator as it develops.
     """
     # The reference's scalar blocks are the *solved* unknown; the frozen operators (closure, AMG, shift
     # diagonals) are all assembled in the physical fields, so recover them through the transform.
@@ -602,9 +621,13 @@ def _coupled_shift_policy(
     # pitzDaily field, stalling the march). The convection block's convective linearization and the
     # MSIMPLER Schur's velocity-independent scaling both stay valid frozen at the cold initial state
     # (the reference), so no per-sweep refresh is needed. Overridable via preconditioner_kwargs.
-    block = BlockPreconditioner.build(
-        momentum,
-        **{"velocity": "convection", "schur_scaling": "msimpler", **preconditioner_kwargs},
+    block = (
+        reuse.flow_preconditioner  # measured: re-freezing the flow block does not help
+        if reuse is not None
+        else BlockPreconditioner.build(
+            momentum,
+            **{"velocity": "convection", "schur_scaling": "msimpler", **preconditioner_kwargs},
+        )
     )
 
     mdot = momentum.mass_flux(flow_ref)
@@ -618,10 +641,23 @@ def _coupled_shift_policy(
     k_amg = omega_amg = None
     if method is not None:
         k_amg = _reparametrized_preconditioner(
-            coupled.turbulence.k_preconditioner(mdot, closure, k_ref, method=method), k_scale
+            coupled.turbulence.k_preconditioner(
+                mdot,
+                closure,
+                k_ref,
+                method=method,
+                reuse=None if reuse is None else reuse.k_preconditioner,
+            ),
+            k_scale,
         )
         omega_amg = _reparametrized_preconditioner(
-            coupled.turbulence.omega_preconditioner(mdot, closure, omega_ref, method=method),
+            coupled.turbulence.omega_preconditioner(
+                mdot,
+                closure,
+                omega_ref,
+                method=method,
+                reuse=None if reuse is None else reuse.omega_preconditioner,
+            ),
             omega_scale,
         )
 
@@ -648,6 +684,7 @@ def solve_coupled(
     max_steps: int = 60,
     rtol: float = 1e-10,
     atol: float = 1e-12,
+    refresh_rtol: float | None = None,
     **continuation_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system ``R(u, p, k, omega) = 0`` by one monolithic Newton solve.
@@ -684,6 +721,24 @@ def solve_coupled(
         Newton iteration cap for the continuation march.
     rtol, atol : float
         Nonlinear stopping tolerances on the coupled residual norm.
+    refresh_rtol : float, optional
+        Re-freeze the preconditioner part way through the march, once the flow has developed. The
+        march is run in two convergence-gated stages: first to this (loose) relative tolerance with the
+        preconditioner frozen at the initial condition, then -- after re-deriving the k/omega AMGs at
+        the state reached -- on to ``rtol``. ``None`` (default) is the single-stage march.
+
+        **Why:** the frozen scalar preconditioners go stale as the flow separates. On a separated
+        backward-facing-step state, re-freezing them cut the shifted solve from 30 to 13 outer Krylov
+        cycles (~2.4x); the flow block does *not* go stale and is carried over untouched. The refresh
+        costs one extra compilation of the shifted solve, which that saving repays within a step or two
+        at mesh sizes where this matters. Pick a tolerance loose enough to reach before the stale
+        preconditioner dominates but late enough that the flow has developed (the win appears only once
+        the flow separates -- refreshing at a pre-separation state buys nothing).
+
+        The converged state and its adjoint are unchanged: both stages solve the same residual, the
+        preconditioner is ``stop_gradient``-ed either way, and the implicit-function-theorem adjoint of
+        the final solve returns a zero cotangent to its initial guess, so the staging cannot leak into
+        the gradient.
     **continuation_kwargs
         Forwarded to :func:`coupled_continuation` when building internally (schedule + preconditioner
         options).
@@ -703,6 +758,32 @@ def solve_coupled(
         continuation = coupled_continuation(
             coupled, reference, method=method, **continuation_kwargs
         )
+    elif refresh_rtol is not None:
+        raise ValueError(
+            "refresh_rtol needs solve_coupled to build the continuation (it re-freezes the "
+            "preconditioner part way through), but an explicit `continuation` was supplied. Pass the "
+            "schedule via **continuation_kwargs instead, or stage the refresh yourself with "
+            "coupled_continuation(..., reuse=<the old policy>)."
+        )
+
+    if refresh_rtol is not None:
+        # Stage one: march only to the loose `refresh_rtol`, with the preconditioner frozen at the
+        # initial condition. This is a genuine convergence-gated solve (not a step count), so the
+        # staging cannot hide a non-converging march; it simply stops early enough that the flow has
+        # developed but the solve is not yet paying for a stale preconditioner.
+        state = ImplicitNewtonSolver(
+            max_steps=max_steps, rtol=refresh_rtol, atol=atol, forward_step=continuation
+        ).solve(lambda s, c: c.residual(s), state, coupled)
+        # Re-freeze at the developed state: the k/omega AMGs are re-derived on their reused
+        # coarsening, the flow block carried over (measured -- see `_coupled_shift_policy`).
+        continuation = coupled_continuation(
+            coupled,
+            jax.lax.stop_gradient(state),
+            method=method,
+            reuse=continuation.shift_policy,
+            **continuation_kwargs,
+        )
+
     solver = ImplicitNewtonSolver(
         max_steps=max_steps, rtol=rtol, atol=atol, forward_step=continuation
     )

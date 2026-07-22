@@ -303,3 +303,71 @@ def test_coupled_solve_self_starts_from_a_cold_hybrid_initial_condition() -> Non
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
+
+
+@pytest.mark.slow
+def test_staged_preconditioner_refresh_reaches_the_same_fixed_point(case) -> None:
+    """``refresh_rtol`` re-freezes the preconditioner mid-march without moving the converged state.
+
+    The refresh is a forward-path device: both stages drive the *same* residual, and the preconditioner
+    is ``stop_gradient``-ed whichever state it is frozen at. So a staged march must land on exactly the
+    single-stage fixed point -- if it does not, the refresh has leaked into the physics.
+    """
+    coupled = case["coupled"]
+    flow_ws, k_ws, omega_ws = case["coupled_start"]
+
+    single = solve_coupled(
+        coupled, flow_ws, k_ws, omega_ws, method="twolevel", max_steps=40, **PRECONDITIONER
+    )
+    staged = solve_coupled(
+        coupled,
+        flow_ws,
+        k_ws,
+        omega_ws,
+        method="twolevel",
+        max_steps=40,
+        refresh_rtol=1e-2,  # loose first stage, then re-freeze and finish
+        **PRECONDITIONER,
+    )
+
+    for name, one, two in zip(("flow", "k", "omega"), single, staged, strict=True):
+        rel = float(jnp.linalg.norm(two - one) / jnp.linalg.norm(one))
+        assert rel < 1e-6, f"{name} moved by {rel:.2e} under a staged refresh"
+
+
+@pytest.mark.slow
+def test_staged_refresh_keeps_the_coupled_adjoint_exact(case) -> None:
+    """The coupled implicit-function-theorem adjoint is unchanged by a mid-march refresh.
+
+    The final stage is an ordinary converged solve, and its adjoint returns a zero cotangent to its
+    initial guess, so the earlier stage (and the refresh between them) cannot enter the gradient. This
+    checks that against finite differences, the same gate the unstaged solve passes.
+    """
+    coupled = case["coupled"]
+    flow_ws, k_ws, omega_ws = case["coupled_start"]
+
+    def objective(nu_scale, **kwargs):
+        scaled = eqx.tree_at(
+            lambda c: c.turbulence.molecular_viscosity,
+            coupled,
+            coupled.turbulence.molecular_viscosity * nu_scale,
+        )
+        _, k, _ = solve_coupled(
+            scaled,
+            flow_ws,
+            k_ws,
+            omega_ws,
+            method="twolevel",
+            max_steps=40,
+            **PRECONDITIONER,
+            **kwargs,
+        )
+        return jnp.sum(k**2)
+
+    analytic = float(jax.grad(objective)(1.0, refresh_rtol=1e-2))
+    eps = 1e-4
+    finite_difference = float(
+        (objective(1.0 + eps, refresh_rtol=1e-2) - objective(1.0 - eps, refresh_rtol=1e-2))
+        / (2 * eps)
+    )
+    assert abs(analytic - finite_difference) / abs(finite_difference) < 1e-5
