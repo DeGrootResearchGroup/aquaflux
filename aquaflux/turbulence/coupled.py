@@ -754,6 +754,14 @@ def solve_coupled(
         frozen). Collapsing the two stages into one continuous march with an in-place refresh has the
         same effect for the same reason.
 
+        ``rtol`` means the same thing with and without a refresh -- the staged solve stops at the same
+        residual as the single-stage one. That needs compensating, because each solver measures its own
+        reference residual from the state it is handed: stage two starts from stage one's result, so an
+        uncompensated ``rtol`` would stop a factor ``refresh_rtol`` *tighter* than requested (with
+        ``rtol=3e-2, refresh_rtol=1e-1``, a 10x tighter target -- enough to turn a converging solve into
+        a ``max_steps`` failure). ``refresh_rtol`` must therefore be looser than ``rtol``, and passing a
+        tighter one raises rather than silently re-freezing after convergence.
+
         ``max_steps`` applies to **each** stage, so a staged solve may take up to ``2 * max_steps``
         Newton steps in total. The budget is deliberately not split: either stage may legitimately need
         the full allowance, and halving it would fail a march that a single-stage solve completes.
@@ -766,6 +774,12 @@ def solve_coupled(
     tuple of jnp.ndarray
         The converged ``(flow, k, omega)``.
     """
+    if refresh_rtol is not None and refresh_rtol <= rtol:
+        raise ValueError(
+            f"refresh_rtol ({refresh_rtol}) must be looser than rtol ({rtol}): the refresh is meant to "
+            "happen part way through the march, and a refresh_rtol at or below rtol would only "
+            "re-freeze the preconditioner after the solve has already converged."
+        )
     if flow is None or k is None or omega is None:
         flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
     # `flow, k, omega` are the physical initial condition; map into the solved-variable space (the
@@ -784,6 +798,7 @@ def solve_coupled(
             "coupled_continuation(..., reuse=<the old policy>)."
         )
 
+    stage_rtol = rtol
     if refresh_rtol is not None:
         # Stage one: march only to the loose `refresh_rtol`, with the preconditioner frozen at the
         # initial condition. This is a genuine convergence-gated solve (not a step count), so the
@@ -801,9 +816,20 @@ def solve_coupled(
             reuse=continuation.shift_policy,
             **continuation_kwargs,
         )
+        # Compensate the second stage's relative tolerance, or staging would silently *tighten* the
+        # solve. Each solver measures its own reference residual from the state it is handed
+        # (`solve/implicit.py::_forward`), so stage two's reference is stage one's result --
+        # about `refresh_rtol * ||R0||` -- and an uncompensated `rtol` there would stop at
+        # `rtol * refresh_rtol * ||R0||`, i.e. a factor `refresh_rtol` tighter than the caller asked
+        # for. Dividing restores `rtol * ||R0||`, so `rtol` means the same thing with and without a
+        # refresh. (The exact alternative -- handing stage two the absolute target `rtol * ||R0||` as
+        # its `atol` -- is not available: `atol` is a static field, while `||R0||` is a traced value
+        # whenever the solve is differentiated. This form is accurate to how far stage one overshot
+        # its own tolerance, and never stops looser than requested.)
+        stage_rtol = rtol / refresh_rtol
 
     solver = ImplicitNewtonSolver(
-        max_steps=max_steps, rtol=rtol, atol=atol, forward_step=continuation
+        max_steps=max_steps, rtol=stage_rtol, atol=atol, forward_step=continuation
     )
     solved = solver.solve(lambda s, c: c.residual(s), state, coupled)
     return coupled.physical_fields(solved)

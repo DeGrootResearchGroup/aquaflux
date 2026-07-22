@@ -21,7 +21,7 @@ from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.turbulence import DirectScalars, LogScalars, SSTModel, SSTTurbulence
-from aquaflux.turbulence.coupled import CoupledRANS, CoupledRANSLayout
+from aquaflux.turbulence.coupled import CoupledRANS, CoupledRANSLayout, solve_coupled
 
 RHO, NU, U_LID = 1.0, 1e-2, 1.0
 WALLS = ("top", "bottom", "left", "right")
@@ -216,3 +216,17 @@ def test_layout_matches_the_assembler_dimensions() -> None:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_refresh_rtol_must_be_looser_than_rtol() -> None:
+    """A ``refresh_rtol`` at or below ``rtol`` is rejected, before any expensive setup.
+
+    Such a schedule would only re-freeze the preconditioner *after* the solve has already converged,
+    and it breaks the second stage's tolerance compensation (which divides by ``refresh_rtol``). The
+    guard therefore protects a stopping test, not just a nonsensical schedule -- an uncompensated
+    staged solve silently stops a factor ``refresh_rtol`` tighter than the caller asked for.
+    """
+    mesh, coupled = _cavity()
+    flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
+    with pytest.raises(ValueError, match="must be looser than rtol"):
+        solve_coupled(coupled, flow, k, omega, rtol=1e-2, refresh_rtol=1e-3)

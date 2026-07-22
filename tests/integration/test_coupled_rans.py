@@ -336,6 +336,45 @@ def test_staged_preconditioner_refresh_reaches_the_same_fixed_point(case) -> Non
 
 
 @pytest.mark.slow
+def test_staged_refresh_stops_at_the_same_tolerance(case) -> None:
+    """``rtol`` must mean the same thing with and without ``refresh_rtol``.
+
+    Each solver measures its own reference residual from the state it is handed, so stage two -- which
+    starts from stage one's result -- would stop at ``rtol * refresh_rtol * ||R0||`` if its relative
+    tolerance were not compensated: a factor ``refresh_rtol`` tighter than the caller asked for, which
+    silently turns a converging solve into far more work or a ``max_steps`` failure. Both paths are
+    driven to a loose ``rtol`` here so each stops *on tolerance* rather than overshooting to machine
+    zero, which is what makes the comparison able to detect the difference.
+    """
+    coupled = case["coupled"]
+    flow_ws, k_ws, omega_ws = case["coupled_start"]
+    start = coupled.pack_state(flow_ws, k_ws, omega_ws)
+    reference_norm = float(jnp.linalg.norm(coupled.residual(start)))
+    rtol = 1e-3
+
+    common = dict(method="twolevel", max_steps=40, rtol=rtol, **PRECONDITIONER)
+    single = solve_coupled(coupled, flow_ws, k_ws, omega_ws, **common)
+    staged = solve_coupled(coupled, flow_ws, k_ws, omega_ws, refresh_rtol=1e-1, **common)
+
+    def terminal_residual(fields):
+        return float(jnp.linalg.norm(coupled.residual(coupled.pack_state(*fields))))
+
+    single_residual = terminal_residual(single)
+    staged_residual = terminal_residual(staged)
+    target = rtol * reference_norm
+
+    # Both must satisfy the *requested* tolerance ...
+    assert single_residual <= target
+    assert staged_residual <= target
+    # ... and the staged one must not be dramatically over-solved, which is what an uncompensated
+    # relative tolerance would produce (it would chase `rtol * refresh_rtol * ||R0||`, 10x tighter).
+    assert staged_residual > target * 1e-2, (
+        f"staged solve stopped at {staged_residual:.3e} against a target of {target:.3e} -- far "
+        "tighter than requested, so the second stage's tolerance is not being compensated"
+    )
+
+
+@pytest.mark.slow
 def test_staged_refresh_keeps_the_coupled_adjoint_exact(case) -> None:
     """The coupled implicit-function-theorem adjoint is unchanged by a mid-march refresh.
 
