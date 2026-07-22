@@ -329,6 +329,25 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     the adjoint transpose depend on — so it must not be re-typed per family where one copy could drift.
     A new family adds a `_VCycleOps` builder and a thin entry point that calls `_fixed_cycle_solve`; do
     **not** re-write the cycle loop in it.
+  - **A level is STATIC indices + TRACED values, so a hierarchy refresh is a jit cache hit (binding).**
+    `_SparseLevel` / `_AirLevel` are `equinox.Module`s in which **only `n` and `n_coarse` are static** —
+    they size the sparse matvec output (`_coo_apply`'s `n_out`), so they must be concrete. Everything
+    else (`val`, `diagonal`, `coarse_inv`, the prolongation/restriction values, and **`lam_max`**) is a
+    traced leaf. `lam_max` is deliberately a **0-d array, not a Python `float`**: it is only smoother
+    arithmetic, and as a static field any refreshed value would be a new compilation-cache key —
+    defeating the point. Consequence: a hierarchy passed as a **jit argument** survives a refresh as a
+    *cache hit* (one compiled V-cycle), which is what lets a frozen preconditioner track a developing
+    flow without paying a recompile per refresh (the ~2.6× scalar-AMG staleness win above). This is only
+    sound because **the aggregation coarsening is a pure function of the graph** — `_aggregate` reads
+    `owner`/`nb`/`n` and never the coefficients — so on a fixed mesh a hierarchy re-derived at a new
+    operator has identical aggregates, coarse sizes and array shapes, and only values differ. Both
+    properties are pinned in `tests/unit/test_multigrid.py`
+    (`test_aggregation_hierarchy_structure_is_value_independent`,
+    `test_refreshing_a_hierarchy_is_a_compilation_cache_hit`). **Caveat:** lAIR's coarsening *does* read
+    values (`_strength_classical`), so a reduction hierarchy is **not** guaranteed refreshable on a fixed
+    structure — re-deriving it can legitimately change the C/F split and every shape. Do not add a
+    strength-of-connection filter to `_aggregate` without revisiting this, since that would make the
+    aggregation path value-dependent too.
   - **Degenerate-mesh guard (binding — validated where the graph is consumed).** Because the
     hierarchies are built once off-jit and then frozen, a degenerate mesh must fail *there*, not as a
     silently stalling runtime V-cycle. Now that the builders are operator-in, the **graph** check lives

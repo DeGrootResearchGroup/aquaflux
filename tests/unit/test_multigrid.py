@@ -585,3 +585,71 @@ def test_boundary_stiffened_cell_is_allowed() -> None:
         )
     )
     assert len(hierarchy.levels) >= 1  # builds without raising
+
+
+def _chain_operator(n, flux_scale, diffusivity):
+    """A 1-D chain convection-diffusion operator: same graph, caller-chosen coefficients."""
+    owner, nb = np.arange(n - 1), np.arange(1, n)
+    return convection_diffusion_operator(
+        owner, nb, diffusivity, n, flux=flux_scale * np.ones(n - 1)
+    )
+
+
+def test_aggregation_hierarchy_structure_is_value_independent() -> None:
+    """Re-deriving the hierarchy at a different operator on the same graph gives the same structure.
+
+    The aggregation reads only the sparsity pattern (``_aggregate`` takes ``owner``/``nb``/``n``, never
+    the coefficients), so on a fixed mesh the aggregates, the coarse sizes and every array shape are
+    invariant under a change of viscosity or mass flux — only the *values* differ. This is what makes a
+    frozen hierarchy refreshable at a developed state instead of rebuildable, and it is asserted here
+    because the no-recompile refresh below depends on it.
+    """
+    n = 600
+    cold = build_convection_hierarchy(_chain_operator(n, 0.01, np.ones(n - 1)))
+    developed = build_convection_hierarchy(
+        _chain_operator(n, 50.0, np.linspace(1.0, 1000.0, n - 1))
+    )
+
+    assert len(cold.levels) == len(developed.levels)
+    for lo, hi in zip(cold.levels, developed.levels, strict=True):
+        assert (lo.n, lo.n_coarse) == (hi.n, hi.n_coarse)  # static metadata
+        assert lo.val.shape == hi.val.shape  # operator sparsity
+        assert lo.diagonal.shape == hi.diagonal.shape
+        if lo.p_val is not None:
+            assert lo.p_val.shape == hi.p_val.shape  # prolongation sparsity
+    # ...and the values really do differ, so the invariance above is not a trivial no-op.
+    assert not np.allclose(np.asarray(cold.levels[0].val), np.asarray(developed.levels[0].val))
+
+
+def test_refreshing_a_hierarchy_is_a_compilation_cache_hit() -> None:
+    """Swapping in a hierarchy rebuilt at another operator must not retrace the jitted V-cycle.
+
+    Only ``n``/``n_coarse`` are static (they size the sparse matvec); the operator values, diagonal,
+    ``lam_max``, prolongation values and coarse inverse are all traced leaves. So a hierarchy passed as
+    a jit *argument* keeps one compiled V-cycle across a refresh — which is what lets the frozen
+    preconditioner track a developing flow without paying a recompile per refresh.
+    """
+    n = 600
+    cold = build_convection_hierarchy(_chain_operator(n, 0.01, np.ones(n - 1)))
+    developed = build_convection_hierarchy(
+        _chain_operator(n, 50.0, np.linspace(1.0, 1000.0, n - 1))
+    )
+    traces = []
+
+    @jax.jit
+    def apply(hierarchy, b):
+        traces.append(1)  # appended once per trace, not per call
+        return convection_multigrid_solve(hierarchy, b, cycles=1)
+
+    b = jnp.asarray(np.random.default_rng(0).normal(size=n))
+    x_cold = apply(cold, b)
+    x_cold.block_until_ready()
+    assert len(traces) == 1
+
+    apply(cold, b).block_until_ready()  # same hierarchy: no retrace
+    x_developed = apply(developed, b)  # refreshed values: still no retrace
+    x_developed.block_until_ready()
+    assert len(traces) == 1, "refreshing the hierarchy values retraced the jitted V-cycle"
+
+    # The refreshed values genuinely change the preconditioner (else the cache hit is meaningless).
+    assert not np.allclose(np.asarray(x_cold), np.asarray(x_developed))

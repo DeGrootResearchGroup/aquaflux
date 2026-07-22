@@ -45,6 +45,7 @@ import heapq
 from collections.abc import Callable
 from typing import NamedTuple
 
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
@@ -167,23 +168,35 @@ def _aggregate(owner: np.ndarray, nb: np.ndarray, n: int) -> tuple[np.ndarray, i
 # patched post-hoc (which fights the constant-preserving smoothed prolongation).
 
 
-class _SparseLevel(NamedTuple):
-    """One smoothed-aggregation level: a general sparse operator + its prolongation, all frozen."""
+class _SparseLevel(eqx.Module):
+    """One smoothed-aggregation level: a general sparse operator + its prolongation, all frozen.
 
-    n: int  # cells at this level (static)
+    **The level is split into a static index structure and dynamic values (binding).** Only ``n`` and
+    ``n_coarse`` are static: they size the sparse matvec's output (:func:`_coo_apply`'s ``n_out``), so
+    they must be concrete. Everything else — including ``lam_max``, which is pure arithmetic in the
+    smoothers — rides as a **traced** leaf. That split is what makes a hierarchy *refreshable*: because
+    the coarsening is a pure function of the graph (see :func:`_aggregate`, which reads only the
+    sparsity pattern), re-deriving a hierarchy at a new operator on the same mesh yields the identical
+    structure and changes only these values, so a refreshed hierarchy passed as a **jit argument** has
+    unchanged static metadata and array shapes — a compilation-cache hit rather than a rebuild-and-
+    recompile. Keeping ``lam_max`` a Python ``float`` would defeat exactly that (a changed static field
+    is a changed cache key), which is why it is stored as a 0-d array.
+    """
+
+    n: int = eqx.field(static=True)  # cells at this level (sizes the matvec output)
     row: jnp.ndarray  # (nnz,) COO row of the level operator A
     col: jnp.ndarray  # (nnz,) COO col
     val: jnp.ndarray  # (nnz,) COO value
     diagonal: jnp.ndarray  # (n,) diagonal of A
-    lam_max: float  # largest eigenvalue of D^-1 A, for the Chebyshev smoother (static)
+    lam_max: jnp.ndarray  # 0-d: largest eigenvalue of D^-1 A, for the smoother damping
     coarse_inv: jnp.ndarray | None  # dense pseudo-inverse (coarsest level only); None otherwise
     p_frow: jnp.ndarray | None  # (pnnz,) prolongation fine row (this level); None on coarsest
     p_ccol: jnp.ndarray | None  # (pnnz,) prolongation coarse col (next level)
     p_val: jnp.ndarray | None  # (pnnz,) prolongation value
-    n_coarse: int  # next-coarser cell count (static; 0 on coarsest)
+    n_coarse: int = eqx.field(static=True)  # next-coarser cell count (0 on coarsest)
 
 
-class SmoothedHierarchy(NamedTuple):
+class SmoothedHierarchy(eqx.Module):
     """A built smoothed-aggregation hierarchy: general-sparse levels, finest to coarsest."""
 
     levels: tuple[_SparseLevel, ...]
@@ -209,7 +222,7 @@ def _sparse_level(
         col=jnp.asarray(a_coo.col),
         val=jnp.asarray(a_coo.data),
         diagonal=jnp.asarray(a.diagonal()),
-        lam_max=float(lam_max),
+        lam_max=jnp.asarray(float(lam_max)),
         coarse_inv=None if coarse_inv is None else jnp.asarray(coarse_inv),
         p_frow=p_frow,
         p_ccol=p_ccol,
@@ -644,15 +657,21 @@ def convection_multigrid_solve(
 # the adjoint (``R != Pᵀ`` is handled by the transpose of the linear apply).
 
 
-class _AirLevel(NamedTuple):
+class _AirLevel(eqx.Module):
     """One lAIR level: the operator, its restriction and prolongation, and the C/F masks — all frozen.
 
     Unlike :class:`_SparseLevel` (which stores one prolongation and takes ``R = Pᵀ``), a reduction-based
     level carries an **independent** restriction ``R`` (fine → coarse) and prolongation ``P`` (coarse →
     fine), plus the fine/coarse masks the FC-Jacobi smoother relaxes over.
+
+    Split static-index / dynamic-value on the same rule as :class:`_SparseLevel` (only the two counts
+    that size a matvec are static). Note the **refreshability caveat**: unlike the aggregation path,
+    lAIR's coarsening reads operator *values* (:func:`_strength_classical`), so re-deriving it at a new
+    operator can legitimately change the C/F split and every shape — a reduction hierarchy is therefore
+    **not** guaranteed refreshable on a fixed structure the way an aggregation one is.
     """
 
-    n: int  # cells at this level (static)
+    n: int = eqx.field(static=True)  # cells at this level (sizes the matvec output)
     row: jnp.ndarray  # (nnz,) COO row of the level operator A
     col: jnp.ndarray  # (nnz,) COO col
     val: jnp.ndarray  # (nnz,) COO value
@@ -666,10 +685,10 @@ class _AirLevel(NamedTuple):
     p_col: jnp.ndarray | None  # (pnnz,) prolongation COO coarse col
     p_val: jnp.ndarray | None  # (pnnz,) prolongation value
     coarse_inv: jnp.ndarray | None  # dense pseudo-inverse (coarsest level only); None otherwise
-    n_coarse: int  # next-coarser cell count (static; 0 on coarsest)
+    n_coarse: int = eqx.field(static=True)  # next-coarser cell count (0 on coarsest)
 
 
-class AirHierarchy(NamedTuple):
+class AirHierarchy(eqx.Module):
     """A built lAIR hierarchy: reduction-based levels, finest to coarsest."""
 
     levels: tuple[_AirLevel, ...]
