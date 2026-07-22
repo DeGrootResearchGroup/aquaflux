@@ -32,6 +32,7 @@ import lineax as lx
 
 from .linear import default_linear_solver, solve_linear
 from .newton import newton_correction
+from .norm import ResidualNorm
 
 # The step a forward-step strategy supplies: given the (single-argument) residual, the current
 # iterate, the starting residual norm, and the linear solver, return the next iterate.
@@ -63,6 +64,15 @@ class ForwardStep(Protocol):
         """The forward-loop linear solver to use when the caller supplies none (an inexact-Newton
         default whose tolerances suit this strategy's march)."""
 
+    def norm(self) -> ResidualNorm:
+        """The residual measure ``R -> scalar`` this strategy judges progress by.
+
+        Owns the norm so the outer convergence test and this strategy's own globalization (the
+        line search / switched-evolution-relaxation ramp / divergence guard) use **one** consistent
+        measure. Defaults to the Euclidean norm; a heterogeneous block system returns a
+        :class:`~aquaflux.solve.BlockScaledNorm` so no single large-magnitude block dominates the
+        stopping test or the globalization."""
+
     def adjoint_preconditioner(
         self,
     ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None:
@@ -79,35 +89,71 @@ class ForwardStep(Protocol):
 _INEXACT_FORWARD_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-3)
 
 
-def _damped_newton_step(residual_fn, phi, solver, preconditioner, line_search_steps):
-    """One Newton step with a monotone backtracking line search on the residual norm.
+def backtracking_line_search(residual_fn, phi, delta, reference_norm, steps, norm=jnp.linalg.norm):
+    """Backtrack the step length: the largest ``alpha`` in ``{1, 1/2, ..., 1/2**steps}`` with
+    ``norm(R(phi + alpha delta)) < reference_norm``, falling back to the smallest rung if none reduces
+    the residual.
 
-    ``line_search_steps == 0`` recovers the undamped full step ``phi + delta``. Otherwise the step
-    length ``alpha`` is halved (up to ``line_search_steps`` times) until
-    ``||R(phi + alpha delta)|| < ||R(phi)||`` — the globalization a convection-dominated open flow
-    needs, where the full Newton step from a uniform field overshoots and diverges. A full step is
-    kept unchanged whenever it already reduces the residual, so a well-behaved iterate (near the
-    root, or a linear residual) is unaffected. The search only reshapes the forward path; the IFT
-    adjoint depends solely on the converged state, so it stays gradient-transparent.
+    A fixed (unrolled) ladder keeps the step a constant-length operation, so it composes with a
+    ``lax.while_loop`` and the implicit-function-theorem ``custom_vjp`` without a data-dependent
+    branch. ``steps == 0`` returns the undamped full step ``phi + delta`` unchanged, so a
+    well-behaved iterate (near the root, or a linear residual) is unaffected. The search only
+    reshapes the forward path — the converged state, and hence the IFT adjoint, is unchanged. Shared
+    by the line-searched Newton step and the pseudo-transient march, so an accurate direction that
+    overshoots is scaled back cheaply (residual evaluations) rather than re-solved.
+
+    Parameters
+    ----------
+    residual_fn : callable
+        The single-argument residual ``phi -> R(phi)``.
+    phi : jnp.ndarray
+        The current iterate.
+    delta : jnp.ndarray
+        The (full) correction direction; the search scales it by ``alpha``.
+    reference_norm : jnp.ndarray
+        The residual norm the candidate must beat (typically ``norm(R(phi))``), measured with the
+        same ``norm`` passed here.
+    steps : int
+        Maximum step-halvings (static). ``0`` disables the search.
+    norm : callable, optional
+        The residual measure ``R -> scalar`` the acceptance is judged by (default the Euclidean
+        norm). A heterogeneous block system passes a :class:`~aquaflux.solve.BlockScaledNorm` so the
+        search judges every block, not only the largest-magnitude one — otherwise a step that lets a
+        small-scale block (e.g. ``k`` in a coupled RANS state) blow up is accepted because the norm
+        is dominated by another block (``omega``).
     """
-    delta, r = newton_correction(residual_fn, phi, solver=solver, preconditioner=preconditioner)
-    if line_search_steps == 0:
+    if steps == 0:
         return phi + delta
-    r_norm = jnp.linalg.norm(r)
 
-    # Backtracking over a fixed ladder alpha in {1, 1/2, ..., 1/2**line_search_steps}: keep the
-    # *largest* rung that reduces the residual (locked in by ``accepted``), falling back to the
-    # smallest if none does. A fixed (unrolled) count keeps the step a constant-length operation, so
-    # it composes with the ``while_loop`` and the IFT ``custom_vjp`` without a data-dependent branch.
+    # Keep the *largest* rung that reduces the residual (locked in by ``accepted``); the smallest
+    # rung is the fallback when none does.
     alpha = 1.0
-    chosen = 0.5**line_search_steps  # smallest rung, used if nothing reduces the residual
+    chosen = 0.5**steps
     accepted = jnp.asarray(False)
-    for _ in range(line_search_steps + 1):
-        reduces = (jnp.linalg.norm(residual_fn(phi + alpha * delta)) < r_norm) & ~accepted
+    for _ in range(steps + 1):
+        reduces = (norm(residual_fn(phi + alpha * delta)) < reference_norm) & ~accepted
         chosen = jnp.where(reduces, alpha, chosen)
         accepted = accepted | reduces
         alpha = 0.5 * alpha
     return phi + chosen * delta
+
+
+def _damped_newton_step(
+    residual_fn, phi, solver, preconditioner, line_search_steps, norm=jnp.linalg.norm
+):
+    """One Newton step with a monotone backtracking line search on the residual norm.
+
+    ``line_search_steps == 0`` recovers the undamped full step ``phi + delta``. Otherwise the step
+    length ``alpha`` is halved (up to ``line_search_steps`` times) until
+    ``norm(R(phi + alpha delta)) < norm(R(phi))`` — the globalization a convection-dominated open
+    flow needs, where the full Newton step from a uniform field overshoots and diverges. A full step
+    is kept unchanged whenever it already reduces the residual, so a well-behaved iterate (near the
+    root, or a linear residual) is unaffected. The search only reshapes the forward path; the IFT
+    adjoint depends solely on the converged state, so it stays gradient-transparent. ``norm`` is the
+    residual measure the search is judged by (default Euclidean).
+    """
+    delta, r = newton_correction(residual_fn, phi, solver=solver, preconditioner=preconditioner)
+    return backtracking_line_search(residual_fn, phi, delta, norm(r), line_search_steps, norm=norm)
 
 
 class DampedNewtonStep(eqx.Module):
@@ -138,17 +184,21 @@ class DampedNewtonStep(eqx.Module):
         eqx.field(static=True, default=None)
     )
     line_search: int = eqx.field(static=True, default=10)
+    residual_norm: ResidualNorm = eqx.field(static=True, default=jnp.linalg.norm)
 
     def stepper(self) -> _ForwardStep:
         """The line-searched Newton step ``(residual_fn, phi, ‖R₀‖, solver) -> phi_next``."""
         preconditioner = self.preconditioner
         line_search = self.line_search
+        norm = self.residual_norm
 
         def step(residual_fn, phi, residual_norm_0, solver):
             # The starting norm is unused: each step's line search is decided from the residual at
             # the current iterate, not the initial one.
             del residual_norm_0
-            return _damped_newton_step(residual_fn, phi, solver, preconditioner, line_search)
+            return _damped_newton_step(
+                residual_fn, phi, solver, preconditioner, line_search, norm=norm
+            )
 
         return step
 
@@ -156,6 +206,10 @@ class DampedNewtonStep(eqx.Module):
         """The inexact-Newton forward solver (loose relative tolerance; the next step corrects the
         leftover, cutting the matvec count per step several-fold with the converged state unchanged)."""
         return _INEXACT_FORWARD_SOLVER
+
+    def norm(self) -> ResidualNorm:
+        """The residual measure the line search is judged by (the injected :attr:`residual_norm`)."""
+        return self.residual_norm
 
     def adjoint_preconditioner(
         self,
@@ -169,7 +223,7 @@ def _within_tolerance(residual_norm, residual_norm_0, rtol, atol):
     return residual_norm <= atol + rtol * residual_norm_0
 
 
-def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn):
+def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn, norm_fn):
     """Newton iterate to convergence (``lax.while_loop``); return the converged field or error.
 
     Each iteration applies the injected ``forward_step_fn`` — the globalized Newton step the
@@ -177,6 +231,11 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
     continuation for a high-Reynolds convective flow). Every strategy's shift vanishes at the fixed
     point, so the converged field solves the same unshifted ``R(phi, theta) = 0`` and the stopping
     test is unchanged.
+
+    ``norm_fn`` is the residual measure the stopping test uses — the **same** measure the forward
+    step judges its own globalization by (the strategy owns it, via :meth:`ForwardStep.norm`), so a
+    heterogeneous block system's convergence and its line search agree on one scale. The default is
+    the Euclidean norm.
 
     The loop can exit without converging in two ways: it exhausts ``max_steps`` short of tolerance,
     or the residual norm becomes non-finite (``NaN``/``Inf``), which makes the ``residual_norm > tol``
@@ -187,7 +246,7 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
     or above tolerance, raise instead of returning a poisoned field, so neither the forward value nor
     the gradient built on it can be used unknowingly.
     """
-    residual_norm_0 = jnp.linalg.norm(residual_fn(phi0, theta))
+    residual_norm_0 = norm_fn(residual_fn(phi0, theta))
 
     def cond(carry):
         _, step, residual_norm = carry
@@ -200,7 +259,7 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
             return residual_fn(p, theta)
 
         phi = forward_step_fn(residual_theta, phi, residual_norm_0, solver)
-        return phi, step + 1, jnp.linalg.norm(residual_fn(phi, theta))
+        return phi, step + 1, norm_fn(residual_fn(phi, theta))
 
     phi, _, residual_norm = jax.lax.while_loop(cond, body, (phi0, 0, residual_norm_0))
     converged = jnp.isfinite(residual_norm) & _within_tolerance(
@@ -217,7 +276,7 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
     )
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(0, 3, 4, 5, 6, 7, 8, 9))
+@partial(jax.custom_vjp, nondiff_argnums=(0, 3, 4, 5, 6, 7, 8, 9, 10))
 def _implicit_solve(
     residual_fn,
     phi0,
@@ -229,8 +288,11 @@ def _implicit_solve(
     adjoint_solver,
     adjoint_preconditioner,
     forward_step_fn,
+    norm_fn,
 ):
-    return _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn)
+    return _forward(
+        residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn, norm_fn
+    )
 
 
 def _implicit_solve_fwd(
@@ -244,8 +306,11 @@ def _implicit_solve_fwd(
     adjoint_solver,
     adjoint_preconditioner,
     forward_step_fn,
+    norm_fn,
 ):
-    phi_star = _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn)
+    phi_star = _forward(
+        residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn, norm_fn
+    )
     return phi_star, (phi_star, theta)
 
 
@@ -274,9 +339,13 @@ def _implicit_solve_bwd(
     adjoint_solver,
     adjoint_preconditioner,
     forward_step_fn,
+    norm_fn,
     residuals,
     cotangent,
 ):
+    # norm_fn is a forward-only measure (stopping test + globalization); the adjoint never forms a
+    # residual norm, so it is unused here.
+    del norm_fn
     phi_star, theta = residuals
     # Transpose Jacobian solve: (dR/dphi)^T lambda = cotangent, left-preconditioned by M^T so the
     # adjoint solve is mesh-independent (unpreconditioned it grows with the system size). This solve
@@ -388,4 +457,5 @@ class ImplicitNewtonSolver(eqx.Module):
             adjoint_solver,
             forward.adjoint_preconditioner(),
             forward.stepper(),
+            forward.norm(),
         )

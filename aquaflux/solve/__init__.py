@@ -16,7 +16,10 @@ unit tests. The surface is three groups:
   modes), `solve_linear`, `default_linear_solver`.
 * **Forward globalization** — the `ForwardStep` strategies `DampedNewtonStep` and
   `PseudoTransientStep`, with the `ShiftPolicy` / `ShiftTerm` / `StepAcceptance` seams a caller
-  implements and the default `DivergenceGuard`.
+  implements and the default `DivergenceGuard`, and the injected `ResidualNorm` the strategy judges
+  progress by (default the Euclidean norm; `BlockScaledNorm` scales each block of a heterogeneous
+  state by its own reference magnitude so no single large-magnitude block dominates the convergence
+  test or the globalization).
 * **Frozen algebraic multigrid** — the operator assembler `convection_diffusion_operator` (plus
   `decouple_dof` for a closed-domain pressure pin), the hierarchy builders
   `build_smoothed_hierarchy` / `build_convection_hierarchy` / `build_air_hierarchy`, and their
@@ -47,14 +50,17 @@ from .multigrid import (
     smoothed_multigrid_solve,
 )
 from .newton import newton_step
+from .norm import BlockScaledNorm, ResidualNorm
 
 __all__ = [
     "AirHierarchy",
+    "BlockScaledNorm",
     "DampedNewtonStep",
     "DivergenceGuard",
     "ForwardStep",
     "ImplicitNewtonSolver",
     "PseudoTransientStep",
+    "ResidualNorm",
     "ShiftPolicy",
     "ShiftTerm",
     "SmoothedHierarchy",

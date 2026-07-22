@@ -76,6 +76,33 @@ class ScalarTransportPreconditioner(abc.ABC):
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
+class ScaledScalarPreconditioner(ScalarTransportPreconditioner):
+    """Wrap a scalar preconditioner with a fixed per-cell output scaling ``M(r) = scale * inner(r)``.
+
+    The coupled solve for a reparametrized scalar (``phi = to_physical(w)``) has Jacobian block
+    ``J_w = J_phi * diag(d(phi)/d(w))``, so its inverse is ``diag(1 / (d(phi)/d(w))) * J_phi^{-1}``.
+    The frozen ``inner`` preconditioner approximates ``J_phi^{-1}`` (it is built for the physical
+    operator), and this wrapper supplies the leading diagonal ``scale = 1 / (d(phi)/d(w))`` evaluated
+    at the reference state -- so the frozen preconditioner acts on the reparametrized block without
+    rebuilding the hierarchy. ``scale`` is a plain array held as a compile-time constant, exactly like
+    the wrapped hierarchy (this stays a frozen dataclass, not a pytree -- see the base class note).
+
+    Attributes
+    ----------
+    inner : ScalarTransportPreconditioner
+        The frozen physical-operator preconditioner being rescaled.
+    scale : np.ndarray
+        Per-cell output factor ``1 / (d(phi)/d(w))`` at the reference state, shape ``(n_cells,)``.
+    """
+
+    inner: ScalarTransportPreconditioner
+    scale: np.ndarray
+
+    def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
+        return self.scale * self.inner.apply(residual)
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
 class ConvectionAmgPreconditioner(ScalarTransportPreconditioner):
     """Two-level nonsymmetric aggregation multigrid on the convection-diffusion operator.
 

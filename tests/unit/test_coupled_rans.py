@@ -20,7 +20,7 @@ from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.turbulence import SSTModel, SSTTurbulence
+from aquaflux.turbulence import DirectScalars, LogScalars, SSTModel, SSTTurbulence
 from aquaflux.turbulence.coupled import CoupledRANS, CoupledRANSLayout
 
 RHO, NU, U_LID = 1.0, 1e-2, 1.0
@@ -112,6 +112,40 @@ def test_residual_jacobian_matches_finite_difference() -> None:
     )
     rel = float(jnp.linalg.norm(fd - jvp) / jnp.linalg.norm(jvp))
     assert rel < 1e-6
+
+
+def test_scalar_variable_transforms() -> None:
+    """DirectScalars is the identity; LogScalars is ``e^w`` with derivative ``e^w`` (physics-free)."""
+    w = jnp.array([-3.0, 0.0, 2.5])
+    direct = DirectScalars()
+    assert jnp.array_equal(direct.to_physical(w), w)
+    assert jnp.array_equal(direct.to_solved(w), w)
+    assert jnp.array_equal(direct.jacobian_scale(w), jnp.ones_like(w))
+
+    log_scalars = LogScalars()
+    phi = log_scalars.to_physical(w)
+    assert jnp.allclose(phi, jnp.exp(w))
+    assert bool(jnp.all(phi > 0.0))  # positive for any real w -- the structural guarantee
+    assert jnp.allclose(log_scalars.to_solved(phi), w)  # round trip
+    assert jnp.allclose(log_scalars.jacobian_scale(phi), phi)  # d(e^w)/dw = e^w = phi
+
+
+def test_log_omega_reparametrization_preserves_the_residual() -> None:
+    """omega-log reparametrizes the Newton *unknown*, not the physics.
+
+    The coupled residual at the log-mapped state equals the direct residual at the same physical
+    fields (so the two forms share a root), and it stays differentiable through the ``e^w`` map.
+    """
+    mesh, direct = _cavity()
+    log_omega = CoupledRANS.build(direct.momentum, direct.turbulence, omega_transform=LogScalars())
+    physical = _healthy_state(mesh, direct)
+    flow, k, omega = direct.layout.unpack(physical)
+    solved = log_omega.state_from_physical(flow, k, omega)
+
+    assert jnp.allclose(direct.residual(physical), log_omega.residual(solved), atol=1e-10)
+    direction = jax.random.normal(jax.random.PRNGKey(4), (solved.shape[0],))
+    jvp = jax.jvp(log_omega.residual, (solved,), (direction,))[1]
+    assert bool(jnp.all(jnp.isfinite(jvp)))
 
 
 def _count_rhie_chow_assemblies(monkeypatch):

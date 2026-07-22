@@ -131,6 +131,141 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   globalizing the stiff k/omega solves via `scalar_pseudo_transient_solve` — the **only** scalar path
   the SST driver supports (the fixed-count Newton sub-solve was removed). When a new nonlinear residual
   needs pseudo-time globalization, write a `ShiftPolicy` — do **not** re-implement the march.
+  - **`line_search` — backtrack the shifted step before escalating β (binding, the coupled-RANS fix).**
+    The step optionally scales the shifted correction `δ` back along `{1, 1/2, …, 1/2**line_search}`
+    (`backtracking_line_search`, extracted from `implicit.py` and shared with `DampedNewtonStep` — one
+    home for the ladder) and keeps the largest length that reduces the residual, **before** the
+    accept/escalate test. `line_search=0` (default) is the old behaviour: take the full step `φ+δ`, and
+    the **only** recourse to an overshoot is escalating β — a *full re-solve*. This was measured to be
+    the dominant coupled-RANS cost: from the hybrid IC the full coupled Newton step overshoots by
+    ~10⁷× (‖R‖ 220 → 5.8e9), so every step burned ~4–7 expensive re-solves and, worse, escalating β
+    (β=16/64) still did **not** descend (rel ≈ 1.0 — the march stalled). A line search on the **one**
+    β₀ solve finds α≈¼ → rel≈0.48 (residual halved) in a few cheap residual evaluations. So the
+    coupled path sets `line_search>0` (`coupled_continuation`, `_COUPLED_LINE_SEARCH=10`); β escalation
+    stays the fallback for a genuinely bad *direction* (an ill-conditioned shifted solve), not an
+    overshoot. Like the shift, the search only reshapes the forward path — converged state and IFT
+    adjoint unchanged. The flow path leaves `line_search=0`, so it is bit-identical.
+  - **`forward_solver` overrides the shared `_INEXACT_CONTINUATION_SOLVER`.** `default_solver()` returns
+    the injected `forward_solver` when set, else the shared restart-40 GMRES. The coupled path injects a
+    larger-restart GMRES (`_COUPLED_FORWARD_SOLVER`, restart 120): the stiff coupled saddle system needs
+    hundreds of restart-40 cycles (a 40-vector subspace discards too much Arnoldi history), whereas a
+    120-vector subspace reaches the same tight solution ~1.4× faster and tighter. Tolerances stay tight
+    — an *inexact* linear solve is unsafe under log-ω (an inaccurate step in the log variable is
+    exponentiated and diverges), so the accuracy is load-bearing, not wasteful.
+  - **Where the coupled-solve cost actually is (settled by measurement).** As the SER ramp drives `β → 0`
+    through the march, the *unshifted* coupled saddle Jacobian is severely ill-conditioned, so the
+    diagonally-shifted GMRES burns thousands of matvecs per solve (measured: one shifted solve ≈ 36 s at
+    β=2, 127 s at β=0.2 on ~12k-cell pitzDaily — note lineax `num_steps` counts restart **cycles**
+    ×`restart`, not iterations). Several levers were probed: two are wired but **off by default** (kept
+    for further evaluation, not the fix), one is dead, and one — refreshing the **scalar** k/ω AMGs after
+    the flow separates — is a real ~2.6× win that is not yet built:
+    - **Flooring the SER `β` below (`β = max(beta_floor, β₀(‖R‖/‖R₀‖)^p)`, `PseudoTransientStep.beta_floor`,
+      default 0 = off) — correctness-safe, a measured WASH, kept off-by-default.** It never moves the
+      converged root (the shift `β d` scales the correction `δ`, which vanishes at `R=0`; it only damps the
+      *path*, linear instead of quadratic terminal steps) and it does make each late solve cheaper. But
+      end-to-end it is a net wash: floor 0.0 vs 0.3 reached the same tolerance in the same wall time on
+      `solve_coupled`, because the cheaper late solves cancel the extra Newton steps. Wired through
+      `coupled_continuation(beta_floor=…)` for further evaluation; not a default because it is a wash.
+    - **The block-scaled per-field residual measure (`block_scaled_norm=True`) — kept off-by-default
+      because it *stalls* the march.** A `BlockScaledNorm` over `[flow, k, ω]` weighs every field rather
+      than the `ω` block that dominates ‖R‖, but the per-block relative norm plateaus long before the
+      fields converge, so `coupled_continuation` defaults to the Euclidean `jnp.linalg.norm` and exposes
+      `block_scaled_norm` (default `False`) to request the block measure for experimentation. The
+      `BlockScaledNorm` class and its `_coupled_residual_norm` builder are kept as that opt-in path.
+    - **A block-*triangular* preconditioner (forward-substituting `∂R_turb/∂flow·δ_flow`) — tried, WORSE,
+      dead.** It made the channel worse (85 vs 51 outer cycles at β=0.5) and on recirculating pitzDaily was
+      so bad GMRES could not converge at all: stronger flow↔turbulence coupling *amplifies* the inexact
+      diagonal blocks' inversion error it propagates downstream. So the missing cross-coupling is **not**
+      the bottleneck.
+    - **The real cost is the pressure-Schur *approximation* at high Reynolds number — and strengthening
+      the inner solve CANNOT fix it (measured; do not re-attempt).** The block-diagonal conv+MSIMPLER
+      preconditioner is *excellent* at low Re (4 outer cycles on a Re=2500 channel) and weak only at high
+      Re / recirculation (17 cycles on a Re=1e5 channel). The weak block is the **flow saddle**, not the
+      k/ω scalars (per-block error operator `E_b = I − A_b·M_b` on a developed Re=1e5 channel: flow
+      ρ=34.0 / one-shot 24.1, vs ω 13.9 / **2.4** and k 8.5 / 7.9 — ω's high ρ with a low one-shot is an
+      isolated outlier eigenvalue GMRES kills in one iteration, a red herring). But every lever *inside*
+      that block is dead:
+      - **More velocity-AMG V-cycles (×2/×4/×8): ρ 34.019 → 33.995 → 34.031 → 34.046 — no effect at all.**
+      - **More Schur V-cycles (×2/×4/×8): ρ 41.6 / 48.7 / 48.5 — strictly worse.** Inverting `Ŝ` *more
+        accurately* making the preconditioner *worse* is the signature that `Ŝ` is the **wrong operator**:
+        the error is the Schur *approximation*, not its inversion (a partial V-cycle was accidentally
+        regularizing it). Driving both sub-solves toward exact never beats the 1-cycle baseline.
+      - **Rebuilding the preconditioner at the developed state (staleness) does not help *the flow
+        block*** (ρ 34.0 → 31.6 on the channel; 49.9 → 91.9, i.e. worse, on pitzDaily, with an identical
+        one-shot). The frozen *flow* reference is fine — the convective linearization is Peclet-robust and
+        MSIMPLER's Schur is velocity-independent. **Confirmed on the real solve:** refreshing only the flow
+        block at a separated pitzDaily state made it slightly *worse* (31 → 34 outer cycles at β=2).
+      - **BUT refreshing the *scalar* k/ω AMGs is a real 2.6× cycle win once the flow separates — the one
+        staleness lever that does pay (measured on the real solve, not ρ).** The scalars were noted above
+        as going stale (ω ρ 13.9 → 3.3 rebuilt) but dismissed as "not the cycle bottleneck" on the ρ /
+        one-shot proxy; on the **real coupled shifted solve** that dismissal does not hold. Marching
+        pitzDaily to a genuinely separated state (25 pseudo-transient steps, rel 3.0e-2, 70 recirculation
+        cells, `x_r/h` 0.87) and re-solving the **same** shifted system with the preconditioner refreshed
+        block-by-block (operator held fixed; every solve converged, `‖Aδ−b‖/‖b‖` ~1e-8):
+
+        | refreshed | cycles | matvecs | wall |
+        |---|---|---|---|
+        | nothing (all frozen at the cold IC) | 31 | 3720 | 68.9 s |
+        | **k/ω scalar AMGs only** | **12** | **1440** | **27.4 s** |
+        | flow block only | 34 | 4080 | 71.8 s |
+        | everything | 13 | 1560 | 30.4 s |
+
+        So the entire gain is the **scalars** (31 → 12), the flow refresh contributes nothing (everything
+        ≈ scalars-only), and this is a textbook instance of the ρ caution above — the scalars' low one-shot
+        made them look harmless while they were worth 2.6× on the real iteration. **The benefit only
+        appears once the flow has separated**: at a *pre-separation* state (4 march steps, no recirculation)
+        a full refresh is worthless (17 → 14 cycles at β=2, and *worse* at β=0.2, 43 → 83), which is why an
+        early measurement gives the wrong answer. Full-refresh gains were confirmed at β ∈ {2, 0.5, 0.2}
+        (31→13, 19→12, 31→18); the block-by-block isolation above was run at β=2. **Implication for
+        implementation: refresh only the two `ScalarTransportPreconditioner`s and leave the flow block
+        frozen** — much cheaper than a whole-policy rebuild, and it avoids the flow refresh's small
+        regression. It is adjoint-safe (the preconditioner is `stop_gradient`-ed whatever it is frozen at,
+        so a refresh changes only the forward Krylov count, never the converged state or its IFT adjoint).
+        Not yet built: the march must be segmented around an off-jit rebuild (the solve is one
+        `lax.while_loop`, and scipy AMG assembly cannot run inside it), and a refresh currently forces a
+        full recompile (~60–240 s) because these are non-pytrees hashed by identity. That recompile is
+        avoidable in principle — **the coarsening structure is value-independent** (`_aggregate` takes only
+        `(owner, nb, n)`, pure graph topology, so for a fixed mesh the aggregates, `n_coarse` and every
+        sparsity pattern are invariant), so only `val`/`diagonal`/`lam_max`/`coarse_inv` change; making
+        those traced leaves over a static index structure would turn a refresh into a cache hit.
+      - **Rescaling the MSIMPLER `k` is a ρ mirage — validate on the real march, never on ρ.** Growing `k`
+        collapses ρ (34.0 → 9.6) but barely moves the one-shot error (24.1 → 22.6), and the ρ-minimizing
+        `k` sits ~40× *above the maximum* of the whole per-cell `ρV/a_P` distribution — i.e. the degenerate
+        limit `schur_a_p → 0`, `Ŝ⁻¹ → 0`, which simply switches the pressure correction off. On the real
+        production march it is **slower**: shipped auto-`k` 348 s / 8 steps vs `k×4` 447 s (28% slower) at
+        an identical residual trajectory. **The shipped per-apply `mean(ρV/a_P)` calibration is
+        near-optimal — do not "fix" it**, and do not make the Schur "shift-consistent" with the
+        pseudo-transient `a_P(1+β)` either (that direction is strictly worse at every β).
+      **Root cause:** the MSIMPLER Schur is a *constant-coefficient* (scaled pressure-mass-matrix) Poisson,
+      which is a near-Stokes/low-Re approximation and degrades as convection strengthens — exactly the
+      high-Re/recirculating regime here. **The fix is a better Schur approximation, not a better solve of
+      this one:** the stabilized least-squares-commutator (LSC) of Elman, Howle, Shadid, Silvester &
+      Tuminaro (2007), which needs only momentum-operator applies, `diag(V)`, and the assembled pressure
+      Poisson `B Q̂⁻¹ Bᵀ` this file's Schur already builds. Use the **stabilized** (2007) variant — a
+      Rhie–Chow collocated discretization is equal-order stabilized, so the original (2006) LSC
+      underperforms on it — and re-derive its boundary treatment for cell-centred FVM. Prefer LSC over
+      pressure-convection–diffusion (PCD), whose auxiliary operator carries finite-element boundary
+      recipes that do not transfer cleanly to FVM.
+  - **The residual measure is an injected `ResidualNorm`, owned by the `ForwardStep` (`solve/norm.py`).**
+    Every `ForwardStep` exposes `norm()`; `ImplicitNewtonSolver` reads it for the outer stopping test
+    (threaded through `_forward`/`_implicit_solve` as the extra nondiff arg `norm_fn`) and the strategy
+    uses the *same* measure for its own globalization — so the convergence test, the SER ramp
+    `β = β₀(‖R‖/‖R₀‖)^p`, `backtracking_line_search` (which now takes a `norm=` kwarg), and the
+    `DivergenceGuard` all agree on one scale. Default is `jnp.linalg.norm` (`DampedNewtonStep.norm()` and
+    `PseudoTransientStep`'s `residual_norm` field both default to it), so **the flow path is
+    bit-identical**. The non-trivial impl is `BlockScaledNorm(sizes, scales)`: it splits the flat
+    residual into contiguous blocks, divides each by its own reference magnitude, and returns the L2 of
+    those per-block relative residuals — `sqrt(Σ_b (‖R_b‖/scale_b)²)`. **Why it exists (the coupled-RANS
+    fix):** the plain Euclidean ‖R‖ on `[flow, k, ω]` is ~100% ω (ω residual O(1e5), k O(1e-3)), so the
+    line search can neither *see* nor *protect* the k block — a step that collapses k is accepted (barely
+    moves the ω-dominated norm) while one that reduces k is vetoed because ω ticked up, and k gets
+    starved (measured: k median collapses to ~7e-5 vs a physical ~0.5, and the march freezes). `coupled.py`
+    builds a `BlockScaledNorm` over `[flow, k, ω]` (and `[…, β]` for the mass-flow bordered march) with
+    per-field scales `‖R0_field‖` at the reference state, so the whole system is judged. The adjoint never
+    forms a residual norm, so `norm_fn` is a **forward-only** device — the converged state and IFT
+    gradient are norm-independent (the bwd pass takes it as a `del`-ed nondiff arg). Since it is a static
+    field holding an `eqx.Module` with static tuple fields, it stays hashable for the `custom_vjp` nondiff
+    slot (like the `lineax` solver already carried there).
   - **A `ShiftPolicy`'s preconditioner must stay a non-pytree (binding, #105).** `ScalarTransportPreconditioner`
     (`turbulence/preconditioner.py`) is a plain `dataclasses.dataclass(frozen=True, eq=False)` ABC with
     `ConvectionAmgPreconditioner` / `AirAmgPreconditioner` concrete strategies — deliberately **not** an

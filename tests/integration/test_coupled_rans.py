@@ -31,6 +31,7 @@ from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.turbulence import (
+    LogScalars,
     SSTModel,
     SSTTurbulence,
     hybrid_initialize,
@@ -204,6 +205,72 @@ def test_coupled_adjoint_matches_finite_difference(case) -> None:
             lambda c: c.turbulence.molecular_viscosity,
             coupled,
             coupled.turbulence.molecular_viscosity * nu_scale,
+        )
+        _, k, _ = solve_coupled(
+            scaled, flow_ws, k_ws, omega_ws, continuation=continuation, max_steps=40
+        )
+        return jnp.sum(k**2)
+
+    analytic = float(jax.grad(objective)(1.0))
+    eps = 1e-4
+    finite_difference = float((objective(1.0 + eps) - objective(1.0 - eps)) / (2 * eps))
+    assert abs(analytic - finite_difference) / abs(finite_difference) < 1e-5
+
+
+@pytest.mark.slow
+def test_coupled_log_omega_converges_to_the_same_positive_fixed_point(case) -> None:
+    """The omega-log parametrization reaches the *same* coupled fixed point as the direct form, with
+    ``omega`` strictly positive by construction.
+
+    ``omega = e^w`` is a smooth bijection onto the positives, so the root of ``R(u, p, k, e^w) = 0`` is
+    the direct root; only the Newton iterate space changes. This confirms the reparametrization is
+    physics-preserving on a case both forms solve -- the payoff (positivity a full step cannot violate)
+    is what lets it solve the stiff separating cases the direct form cannot.
+    """
+    momentum, turbulence, coupled = case["momentum"], case["turbulence"], case["coupled"]
+    flow_ws, k_ws, omega_ws = case["coupled_start"]
+    log_omega = CoupledRANS.build(momentum, turbulence, omega_transform=LogScalars())
+
+    flow_l, k_l, omega_l = solve_coupled(
+        log_omega, flow_ws, k_ws, omega_ws, method="twolevel", max_steps=40, **PRECONDITIONER
+    )
+    residual_norm = float(
+        jnp.linalg.norm(log_omega.residual(log_omega.state_from_physical(flow_l, k_l, omega_l)))
+    )
+    assert residual_norm < 1e-8
+    assert float(jnp.min(omega_l)) > 0.0  # structural: e^w > 0 for every w
+
+    flow_d, k_d, omega_d = solve_coupled(
+        coupled, flow_ws, k_ws, omega_ws, method="twolevel", max_steps=40, **PRECONDITIONER
+    )
+    assert float(jnp.linalg.norm(flow_l - flow_d) / jnp.linalg.norm(flow_d)) < 1e-4
+    assert float(jnp.linalg.norm(k_l - k_d) / jnp.linalg.norm(k_d)) < 1e-3
+    assert float(jnp.linalg.norm(omega_l - omega_d) / jnp.linalg.norm(omega_d)) < 1e-4
+
+
+@pytest.mark.slow
+def test_coupled_log_omega_adjoint_matches_finite_difference(case) -> None:
+    """The coupled implicit-function-theorem adjoint is exact through the omega-log reparametrization.
+
+    At the converged state the realizability floor is inactive and ``e^w`` is smooth, so the adjoint is
+    the same single transpose solve on the unfrozen residual -- ``jax.grad`` through the omega-log solve
+    matches finite differences, exactly as for the direct form.
+    """
+    momentum, turbulence = case["momentum"], case["turbulence"]
+    flow_ws, k_ws, omega_ws = case["coupled_start"]
+    log_omega = CoupledRANS.build(momentum, turbulence, omega_transform=LogScalars())
+    continuation = coupled_continuation(
+        log_omega,
+        log_omega.state_from_physical(flow_ws, k_ws, omega_ws),
+        method="twolevel",
+        **PRECONDITIONER,
+    )
+
+    def objective(nu_scale):
+        scaled = eqx.tree_at(
+            lambda c: c.turbulence.molecular_viscosity,
+            log_omega,
+            log_omega.turbulence.molecular_viscosity * nu_scale,
         )
         _, k, _ = solve_coupled(
             scaled, flow_ws, k_ws, omega_ws, continuation=continuation, max_steps=40

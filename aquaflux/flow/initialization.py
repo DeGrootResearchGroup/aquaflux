@@ -162,6 +162,60 @@ def laplace_field(
     return field, assembler
 
 
+def bernoulli_pressure(momentum: MomentumContinuity, velocity: jnp.ndarray) -> jnp.ndarray:
+    """The closed-form potential-flow (Bernoulli) pressure for a velocity, anchored at the outlet.
+
+    A velocity initializer (:func:`potential_flow`) leaves the pressure at zero, but the coupled
+    momentum balance of that velocity implies a substantial pressure field (the dynamic head), so a
+    coupled Newton solve otherwise has to build the *entire* pressure from nothing in its first
+    step -- a large pressure correction that the shared step length must then throttle, starving the
+    other equations. For an irrotational velocity ``u = grad phi`` the exact pressure is Bernoulli's
+    ``p + ½ρ|u|² = const``: low where the flow is fast, high where it is slow. Seeding it removes the
+    dynamic-head part of that first-step correction.
+
+    It is the **dynamic** pressure the momentum residual carries (the explicit ``ρ``). The constant is
+    fixed by **anchoring the mean pressure over the pressure-outlet cells to zero**, so the seed is
+    consistent with the ``p = 0`` datum there rather than leaving a constant offset the solve must undo
+    (referencing the free stream instead would put ``p > 0`` at a decelerated outlet). With no pressure
+    outlet the level is free, so it anchors the **domain-mean** pressure to zero instead (which leaves a
+    uniform through-flow or a quiescent closed domain at zero). It is closed-form -- unlike the
+    pressure-Poisson equation, it reads ``|u|`` rather than ``grad u``, so a sharp geometric corner
+    (whose potential-flow velocity gradient is singular) does not pollute it.
+
+    Parameters
+    ----------
+    momentum : MomentumContinuity
+        The flow assembler (supplies the per-cell density and the boundary closures locating the
+        pressure outlet).
+    velocity : jnp.ndarray
+        The cell velocity to seed the pressure for, shape ``(n_cells, dim)``.
+
+    Returns
+    -------
+    jnp.ndarray
+        The Bernoulli pressure, shape ``(n_cells,)``.
+    """
+    dynamic_head = 0.5 * momentum.density * jnp.sum(velocity * velocity, axis=1)  # ½ρ|u|²
+    # Anchor the constant: mean pressure zero over the outlet cells (the p = 0 datum), or over the whole
+    # domain when there is no pressure outlet (the level is otherwise free). p = reference − ½ρ|u|².
+    outlet_cells = _pressure_outlet_cells(momentum)
+    anchor = dynamic_head[outlet_cells] if outlet_cells.size > 0 else dynamic_head
+    return jnp.mean(anchor) - dynamic_head
+
+
+def _pressure_outlet_cells(momentum: MomentumContinuity) -> jnp.ndarray:
+    """The owner cells of the pressure-outlet boundary faces (empty if the domain has no outlet)."""
+    mesh = momentum.mesh
+    outlet_faces = [
+        mesh.face_patches.indices(name)
+        for name, closure in momentum.boundary.conditions.items()
+        if isinstance(closure, PressureOutlet)
+    ]
+    if not outlet_faces:
+        return jnp.asarray([], dtype=mesh.face_cells.owner.dtype)
+    return jnp.unique(mesh.face_cells.owner[jnp.concatenate(outlet_faces)])
+
+
 def potential_flow(
     momentum: MomentumContinuity, *, gradient_scheme: GradientScheme | None = None
 ) -> jnp.ndarray:
@@ -241,4 +295,8 @@ def potential_flow(
         fixed_values=fixed_values,
     )
     velocity = assembler.gradient(phi)
-    return momentum.pack(velocity, jnp.zeros(mesh.n_cells))
+    # Seed the Bernoulli pressure consistent with this velocity, so a coupled solve does not start with
+    # the whole dynamic-head pressure field as a first-step correction. Only meaningful with a pressure
+    # datum; a body-force / closed domain returned above, and its varying pressure is nearly uniform.
+    pressure = bernoulli_pressure(momentum, velocity)
+    return momentum.pack(velocity, pressure)

@@ -14,24 +14,30 @@ coupled adjoint** as a single transpose solve on the unfrozen ``R_coupled`` at t
 The segregated loop is retained as a robust startup pre-smoother / fallback, not the sensitivity
 model.
 
-Positivity of ``k, omega`` under a full Newton step is carried by the pseudo-transient continuation
+Positivity of ``k, omega`` under a full Newton step. With the default :class:`DirectScalars`
+parametrization it is carried by the pseudo-transient continuation
 (:mod:`~aquaflux.turbulence.continuation` block policy): the shift damps the step heavily far from the
 fixed point, and a step that drives ``k`` or ``omega`` non-positive makes the closure non-finite
-through ``sqrt(k)`` -- rejected by the divergence guard, which escalates the damping. The realizability
-floor stays **out** of this residual (design note S3.3): a converged RANS field is strictly positive,
-so the floor is inactive there and the coupled adjoint sees only the smooth interior physics.
-Log-variable transport (``k = e^k~``) is the design note's held-in-reserve structural fix if the
-direct form proves non-robust at high Reynolds number.
+through ``sqrt(k)`` -- rejected by the divergence guard, which escalates the damping. That is not
+airtight at high Reynolds number: a full step can drive ``omega`` negative while the residual stays
+finite (``nu_t = k/omega`` flips sign without a NaN), so the guard never trips. The **log-variable**
+parametrization (:class:`LogScalars` on ``omega``) is the structural fix -- ``omega = e^w > 0`` for
+every ``w`` -- and is exact for the adjoint because the realizability floor stays **out** of this
+residual (a converged RANS field is strictly positive, so the floor is inactive and the coupled
+adjoint sees only the smooth interior physics).
 """
 
 from __future__ import annotations
 
+import abc
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import lineax as lx
+import numpy as np
 
 from aquaflux.flow import BlockPreconditioner
 
@@ -45,6 +51,7 @@ from aquaflux.flow.mean_velocity import (
     _with_body_force,
 )
 from aquaflux.solve import (
+    BlockScaledNorm,
     DivergenceGuard,
     ImplicitNewtonSolver,
     PseudoTransientStep,
@@ -52,12 +59,84 @@ from aquaflux.solve import (
 )
 
 from .initialization import hybrid_initialize
-from .preconditioner import ScalarTransportPreconditioner
+from .preconditioner import ScalarTransportPreconditioner, ScaledScalarPreconditioner
 
 if TYPE_CHECKING:
     from aquaflux.flow import MomentumContinuity
 
     from .transport import SSTTurbulence
+
+
+class ScalarVariableTransform(eqx.Module):
+    """Strategy: the change of variable between the *solved* turbulence unknown and the physical
+    ``k`` / ``omega`` the closure needs.
+
+    The coupled Newton solves for a per-cell scalar unknown ``w``; the closure and transport physics
+    are always written in the physical field ``phi = to_physical(w)``. A strategy that maps ``w`` onto
+    a strictly positive ``phi`` therefore makes ``k, omega > 0`` hold **by construction under any Newton
+    step**, which is what the direct (identity) parametrization cannot guarantee: a full step there can
+    drive ``omega`` negative, and ``nu_t = k / omega`` then flips sign without the residual going
+    non-finite, so the divergence guard never catches it.
+
+    Because the physics residual is written in ``phi``, its Jacobian with respect to the solved ``w``
+    picks up the chain-rule factor ``d(phi)/d(w) = jacobian_scale(phi)``. The frozen scalar
+    preconditioner and pseudo-transient shift are assembled for the *physical* operator, so they are
+    rescaled by this factor to precondition the reparametrized block (see
+    :func:`coupled_continuation`).
+    """
+
+    @abc.abstractmethod
+    def to_physical(self, w: jnp.ndarray) -> jnp.ndarray:
+        """Map the solved unknown ``w`` to the physical field ``phi`` (shape preserved)."""
+
+    @abc.abstractmethod
+    def to_solved(self, phi: jnp.ndarray) -> jnp.ndarray:
+        """Map a physical field ``phi`` to the solved unknown ``w`` (the inverse of
+        :meth:`to_physical`)."""
+
+    @abc.abstractmethod
+    def jacobian_scale(self, phi: jnp.ndarray) -> jnp.ndarray:
+        """``d(phi)/d(w)`` evaluated at physical ``phi`` -- the factor the physical operator's rows are
+        scaled by to precondition/shift the reparametrized block."""
+
+
+class DirectScalars(ScalarVariableTransform):
+    """The identity parametrization: the solved unknown *is* the physical field (``phi = w``).
+
+    Positivity is not structural here -- it is carried by the pseudo-transient shift and the
+    realizability floor -- so a full Newton step can transiently violate ``omega > 0`` on a stiff
+    high-Reynolds case. The historical default; use :class:`LogScalars` where that matters.
+    """
+
+    def to_physical(self, w: jnp.ndarray) -> jnp.ndarray:
+        return w
+
+    def to_solved(self, phi: jnp.ndarray) -> jnp.ndarray:
+        return phi
+
+    def jacobian_scale(self, phi: jnp.ndarray) -> jnp.ndarray:
+        return jnp.ones_like(phi)
+
+
+class LogScalars(ScalarVariableTransform):
+    """The log parametrization ``phi = e^w`` for both ``k`` and ``omega``.
+
+    ``phi = e^w > 0`` for every real ``w``, so ``k`` and ``omega`` stay strictly positive under **any**
+    Newton step -- the structural fix for the direct form's transient negativity at high Reynolds
+    number. The physical root is unchanged (``e^w`` is a smooth bijection onto the positives, so
+    ``R(e^w) = 0`` has the same solution as ``R(phi) = 0``); only the Newton iterate space changes, and
+    at the converged state the realizability floor is inactive, so the coupled adjoint is unaffected.
+    The chain-rule factor is ``d(e^w)/d(w) = e^w = phi``.
+    """
+
+    def to_physical(self, w: jnp.ndarray) -> jnp.ndarray:
+        return jnp.exp(w)
+
+    def to_solved(self, phi: jnp.ndarray) -> jnp.ndarray:
+        return jnp.log(phi)
+
+    def jacobian_scale(self, phi: jnp.ndarray) -> jnp.ndarray:
+        return phi
 
 
 class CoupledRANSLayout(eqx.Module):
@@ -138,13 +217,30 @@ class CoupledRANS(eqx.Module):
         evaluation (the molecular viscosity comes from ``turbulence``).
     turbulence : SSTTurbulence
         The k-omega SST closure and equation assembler.
+    k_transform, omega_transform : ScalarVariableTransform
+        The change of variable between each solved turbulence unknown and its physical field (default
+        :class:`DirectScalars`, the identity). :class:`LogScalars` makes that field ``> 0`` by
+        construction under any Newton step. The two are **independent** on purpose: ``omega`` is the
+        field a full Newton step drives negative at high Reynolds number, and ``log(omega)`` is
+        well-conditioned (``omega`` is bounded away from zero -- large near walls); ``log(k)`` is not,
+        because ``k -> 0`` at a no-slip wall (its Dirichlet value), so ``log(k) -> -inf`` there stalls
+        the near-wall cells. The productive high-Reynolds configuration is therefore ``omega`` log, ``k``
+        direct -- ``CoupledRANS.build(momentum, turbulence, omega_transform=LogScalars())``.
     """
 
     momentum: MomentumContinuity
     turbulence: SSTTurbulence
+    k_transform: ScalarVariableTransform = DirectScalars()
+    omega_transform: ScalarVariableTransform = DirectScalars()
 
     @classmethod
-    def build(cls, momentum: MomentumContinuity, turbulence: SSTTurbulence) -> CoupledRANS:
+    def build(
+        cls,
+        momentum: MomentumContinuity,
+        turbulence: SSTTurbulence,
+        k_transform: ScalarVariableTransform | None = None,
+        omega_transform: ScalarVariableTransform | None = None,
+    ) -> CoupledRANS:
         """Assemble the coupled system, pre-resolving the turbulence boundaries off the jit path.
 
         The turbulence residual rebuilds its scalar :class:`~aquaflux.discretization.ResidualAssembler`
@@ -153,8 +249,43 @@ class CoupledRANS(eqx.Module):
         those boundaries **once here** (the momentum boundary is already resolved by
         :meth:`~aquaflux.flow.MomentumContinuity.build`) makes the per-evaluation rebuild's ``resolve``
         an idempotent no-op, so the whole coupled residual is jit- and adjoint-safe.
+
+        ``k_transform`` / ``omega_transform`` select each scalar's parametrization (default
+        :class:`DirectScalars`); pass ``omega_transform=LogScalars()`` for the productive
+        ``omega`` log / ``k`` direct high-Reynolds combination.
         """
-        return cls(momentum, turbulence.resolve_boundaries())
+        return cls(
+            momentum,
+            turbulence.resolve_boundaries(),
+            k_transform or DirectScalars(),
+            omega_transform or DirectScalars(),
+        )
+
+    def physical_fields(self, state: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Unpack a coupled state into the flow sub-vector and the **physical** ``k``, ``omega``.
+
+        Applies each :meth:`ScalarVariableTransform.to_physical` to its solved scalar block, so the
+        result is the physical fields regardless of the parametrization -- what a caller (and the
+        closure) always wants. This is the inverse of :meth:`state_from_physical`.
+        """
+        flow, k_solved, omega_solved = self.layout.unpack(state)
+        return (
+            flow,
+            self.k_transform.to_physical(k_solved),
+            self.omega_transform.to_physical(omega_solved),
+        )
+
+    def state_from_physical(
+        self, flow: jnp.ndarray, k: jnp.ndarray, omega: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Pack a flow sub-vector and **physical** ``k``, ``omega`` into a coupled state.
+
+        Applies each :meth:`ScalarVariableTransform.to_solved`, so a physical initial condition (e.g.
+        from :func:`~aquaflux.turbulence.hybrid_initialize`) is mapped into the solved variable space.
+        """
+        return self.layout.pack(
+            flow, self.k_transform.to_solved(k), self.omega_transform.to_solved(omega)
+        )
 
     @property
     def layout(self) -> CoupledRANSLayout:
@@ -172,8 +303,15 @@ class CoupledRANS(eqx.Module):
         ``(k, omega, grad u)``, the momentum block runs on ``mu_eff = rho (nu + nu_t)``, and both
         scalars advect on the current Rhie--Chow flux. The near-wall ``omega`` rows are the analytical
         fixation carried by :meth:`~aquaflux.turbulence.SSTTurbulence.omega_residual`.
+
+        The scalar blocks of ``state`` hold the *solved* turbulence unknown; the physics below is
+        written in the physical ``k`` / ``omega`` recovered by the :attr:`transform` (the identity for
+        :class:`DirectScalars`, ``e^w`` for :class:`LogScalars`). The returned scalar residuals are the
+        physical transport residuals ``R_k(k, omega)`` / ``R_omega(k, omega)`` -- the same root either
+        way -- so the reparametrization changes only the Newton iterate space, and automatic
+        differentiation supplies the chain-rule Jacobian.
         """
-        flow, k, omega = self.layout.unpack(state)
+        flow, k, omega = self.physical_fields(state)
 
         # The closure carries nu_t and the mean strain, so build it first and take nu_t from it --
         # eddy_viscosity would otherwise recompute the same strain and nu_t the closure already forms.
@@ -285,6 +423,79 @@ class CoupledShiftPolicy(eqx.Module):
         return lambda state: self.shift_term(state).make_preconditioner(jnp.asarray(0.0))
 
 
+def _reparametrized_preconditioner(
+    preconditioner: ScalarTransportPreconditioner | None, jacobian_scale: jnp.ndarray
+) -> ScalarTransportPreconditioner | None:
+    """Rescale a frozen physical-operator scalar preconditioner for the reparametrized block.
+
+    The reparametrized Jacobian's inverse carries a leading ``diag(1 / jacobian_scale)``, so the
+    physical-operator preconditioner is wrapped to apply it (:class:`ScaledScalarPreconditioner`). For
+    the identity transform ``jacobian_scale`` is one, so the preconditioner is returned unchanged and
+    the direct path stays bit-identical. The scale is materialized off the jit path (the reference
+    state is concrete), matching the frozen hierarchy it wraps.
+    """
+    if preconditioner is None:
+        return None
+    scale = np.asarray(jacobian_scale)
+    if np.allclose(scale, 1.0):
+        return preconditioner
+    return ScaledScalarPreconditioner(preconditioner, 1.0 / scale)
+
+
+# The shifted forward solve for the coupled march. Restarted GMRES with a larger Krylov subspace than
+# the shared default (restart 40 -> 120): the coupled turbulent saddle system is stiff enough that a
+# 40-vector restart discards too much Arnoldi history and converges only after hundreds of restart
+# cycles, whereas a 120-vector subspace reaches the same tight solution in far fewer (measured ~1.4x
+# faster and to a tighter residual on the ~12k-cell backward-facing step). The tolerances stay tight
+# (an inexact/loose linear solve is unsafe here -- an inaccurate step in the log-omega variable is
+# exponentiated and diverges), so the accuracy the log-variable closure needs is preserved.
+_COUPLED_FORWARD_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-10, restart=120, stagnation_iters=40)
+
+# Backtracking rungs for the shifted step. The full coupled Newton step from the hybrid initial
+# condition overshoots violently (the residual blows up many orders of magnitude), so the step length
+# is scaled back along {1, 1/2, ..., 1/2**N} until it descends -- recovering a residual-reducing step
+# from the one expensive shifted solve, instead of escalating beta (a full re-solve, which changes the
+# direction and, measured, does not descend on this case). Ten rungs reach 1/1024, well past the
+# ~1/4 the stiff first steps need.
+_COUPLED_LINE_SEARCH = 10
+
+
+def _coupled_block_scales(coupled: CoupledRANS, reference_state: jnp.ndarray) -> tuple[float, ...]:
+    """The per-field reference residual magnitudes ``(‖R_flow‖, ‖R_k‖, ‖R_omega‖)`` at
+    ``reference_state``, each floored positive so it can divide a block norm."""
+    parts = coupled.layout.unpack(coupled.residual(reference_state))
+    return tuple(max(float(jnp.linalg.norm(part)), 1e-30) for part in parts)
+
+
+def _coupled_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray) -> BlockScaledNorm:
+    """The opt-in block-scaled residual norm over ``[flow, k, omega]`` (``block_scaled_norm=True``).
+
+    Each field's residual is divided by its own initial magnitude before the norm is formed, so the
+    switched-evolution-relaxation ramp, the line search, and the outer stopping test all judge every
+    field rather than the ``omega`` block that dominates the plain Euclidean norm (``omega`` is
+    O(1e5) here, ``k`` O(1e-3)): with the plain norm a step that collapses ``k`` barely moves ‖R‖ and
+    is accepted. It weighs every block, but was found to *stall* the pitzDaily march (the per-block
+    relative norm plateaus long before the fields converge), so the march uses the Euclidean norm by
+    default and this is available only when ``block_scaled_norm=True`` is requested.
+    """
+    n = coupled.momentum.mesh.n_cells
+    sizes = (coupled.layout.flow_size, n, n)
+    return BlockScaledNorm(sizes, _coupled_block_scales(coupled, reference_state))
+
+
+def _mass_flow_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray) -> BlockScaledNorm:
+    """The :func:`_coupled_residual_norm` measure extended with the mass-flow constraint dof.
+
+    The bordered march carries the augmented residual ``[R_flow, R_k, R_omega, ⟨U⟩ − target]``; the
+    trailing scalar constraint is a bulk-velocity (velocity-magnitude) equation, so it shares the
+    flow block's reference scale.
+    """
+    n = coupled.momentum.mesh.n_cells
+    s_flow, s_k, s_omega = _coupled_block_scales(coupled, reference_state)
+    sizes = (coupled.layout.flow_size, n, n, 1)
+    return BlockScaledNorm(sizes, (s_flow, s_k, s_omega, s_flow))
+
+
 def coupled_continuation(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
@@ -292,9 +503,13 @@ def coupled_continuation(
     method: str | None = "twolevel",
     beta0: float = 2.0,
     exponent: float = 1.0,
+    beta_floor: float = 0.0,
     max_escalations: int = 6,
     escalation_factor: float = 2.0,
     divergence_cap: float = 10.0,
+    line_search: int = _COUPLED_LINE_SEARCH,
+    forward_solver: lx.AbstractLinearSolver | None = None,
+    block_scaled_norm: bool = False,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
     """Build the pseudo-transient continuation step for the coupled Newton solve.
@@ -313,9 +528,27 @@ def coupled_continuation(
         The coupled state the preconditioner and shift diagonals are frozen at.
     method : {"twolevel", "air"} or None
         The AMG method for the k and omega blocks (``None`` leaves those blocks unpreconditioned).
-    beta0, exponent, max_escalations, escalation_factor, divergence_cap
+    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap
         The pseudo-transient schedule and divergence-guard parameters (see
-        :class:`~aquaflux.solve.PseudoTransientStep`).
+        :class:`~aquaflux.solve.PseudoTransientStep`). ``beta_floor`` (default ``0`` = off) bounds the
+        switched-evolution-relaxation ``β`` below to keep the shifted solve out of the ill-conditioned
+        low-``β`` regime; it never moves the converged root, only damps the path.
+    line_search : int
+        Backtracking step-halvings applied to the shifted step before it is judged (default
+        :data:`_COUPLED_LINE_SEARCH`); scales an accurate-but-overshooting direction back to a descent
+        from the one shifted solve rather than re-solving at larger ``beta``. See
+        :class:`~aquaflux.solve.PseudoTransientStep`.
+    forward_solver : lineax.AbstractLinearSolver or None
+        The shifted-solve Krylov solver; ``None`` uses :data:`_COUPLED_FORWARD_SOLVER` (a
+        larger-restart GMRES suited to the stiff coupled system).
+    block_scaled_norm : bool
+        Which residual measure the march judges progress by (default ``False`` = the plain Euclidean
+        norm). When ``True`` the march uses a :class:`~aquaflux.solve.BlockScaledNorm` over
+        ``[flow, k, omega]`` (each block divided by its own initial magnitude), so the globalization
+        weighs every field rather than the ``omega`` block that dominates the Euclidean norm. The
+        block-scaled measure was found to *stall* the pitzDaily march (the per-block relative norm stops
+        descending long before the fields converge), so it is available for experimentation but off by
+        default; the Euclidean norm is what the solver uses.
     **preconditioner_kwargs
         Forwarded to :meth:`~aquaflux.flow.BlockPreconditioner.build` for the flow block (e.g.
         ``schur_scaling``, ``velocity``).
@@ -326,13 +559,20 @@ def coupled_continuation(
         The forward step to hand :class:`~aquaflux.solve.ImplicitNewtonSolver` as ``forward_step``.
     """
     policy = _coupled_shift_policy(coupled, reference_state, method, **preconditioner_kwargs)
+    residual_norm = (
+        _coupled_residual_norm(coupled, reference_state) if block_scaled_norm else jnp.linalg.norm
+    )
     return PseudoTransientStep(
         policy,
         beta0=beta0,
         exponent=exponent,
+        beta_floor=beta_floor,
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        line_search=line_search,
+        forward_solver=forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER,
+        residual_norm=residual_norm,
         adjoint_preconditioner_factory=policy.adjoint_factory(),
     )
 
@@ -349,23 +589,48 @@ def _coupled_shift_policy(
     constraint (:func:`mass_flow_coupled_continuation`) can border the *same* policy rather than
     re-derive it.
     """
-    flow_ref, k_ref, omega_ref = coupled.layout.unpack(reference_state)
+    # The reference's scalar blocks are the *solved* unknown; the frozen operators (closure, AMG, shift
+    # diagonals) are all assembled in the physical fields, so recover them through the transform.
+    flow_ref, k_ref, omega_ref = coupled.physical_fields(reference_state)
     grad_velocity = coupled.momentum.velocity_gradient(flow_ref)
     closure = coupled.turbulence.closure_fields(grad_velocity, k_ref, omega_ref)
     momentum = coupled.momentum.with_eddy_viscosity(closure.nu_t)
-    block = BlockPreconditioner.build(momentum, **preconditioner_kwargs)
+    # The coupled flow block uses the convection-aware velocity AMG + MSIMPLER Schur, not the viscous-
+    # smoothed / SIMPLE default: a RANS case is high-Reynolds, and the Peclet-blind smoothed velocity
+    # block with the ``a_P`` Schur produces a poor momentum-block direction once the flow separates
+    # (the shifted Newton direction was measured only ~40% aligned with the true one on the developed
+    # pitzDaily field, stalling the march). The convection block's convective linearization and the
+    # MSIMPLER Schur's velocity-independent scaling both stay valid frozen at the cold initial state
+    # (the reference), so no per-sweep refresh is needed. Overridable via preconditioner_kwargs.
+    block = BlockPreconditioner.build(
+        momentum,
+        **{"velocity": "convection", "schur_scaling": "msimpler", **preconditioner_kwargs},
+    )
 
     mdot = momentum.mass_flux(flow_ref)
+
+    # The reparametrized block's Jacobian is the physical one scaled by d(phi)/d(w): its shift diagonal
+    # is scaled by that factor and its (physical-operator) preconditioner by the reciprocal. For the
+    # identity transform the factor is one, so the direct path is unchanged.
+    k_scale = coupled.k_transform.jacobian_scale(k_ref)
+    omega_scale = coupled.omega_transform.jacobian_scale(omega_ref)
+
     k_amg = omega_amg = None
     if method is not None:
-        k_amg = coupled.turbulence.k_preconditioner(mdot, closure, k_ref, method=method)
-        omega_amg = coupled.turbulence.omega_preconditioner(mdot, closure, omega_ref, method=method)
+        k_amg = _reparametrized_preconditioner(
+            coupled.turbulence.k_preconditioner(mdot, closure, k_ref, method=method), k_scale
+        )
+        omega_amg = _reparametrized_preconditioner(
+            coupled.turbulence.omega_preconditioner(mdot, closure, omega_ref, method=method),
+            omega_scale,
+        )
 
     return CoupledShiftPolicy(
         coupled.layout,
         block,
-        coupled.turbulence.k_shift_policy(mdot, closure, k_ref).shift_diagonal,
-        coupled.turbulence.omega_shift_policy(mdot, closure, omega_ref).shift_diagonal,
+        coupled.turbulence.k_shift_policy(mdot, closure, k_ref).shift_diagonal * k_scale,
+        coupled.turbulence.omega_shift_policy(mdot, closure, omega_ref).shift_diagonal
+        * omega_scale,
         k_amg,
         omega_amg,
     )
@@ -430,7 +695,9 @@ def solve_coupled(
     """
     if flow is None or k is None or omega is None:
         flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
-    state = coupled.pack_state(flow, k, omega)
+    # `flow, k, omega` are the physical initial condition; map into the solved-variable space (the
+    # identity for DirectScalars, log for LogScalars) so the Newton march iterates on the right unknown.
+    state = coupled.state_from_physical(flow, k, omega)
     if continuation is None:
         reference = state if reference_state is None else reference_state
         continuation = coupled_continuation(
@@ -440,7 +707,7 @@ def solve_coupled(
         max_steps=max_steps, rtol=rtol, atol=atol, forward_step=continuation
     )
     solved = solver.solve(lambda s, c: c.residual(s), state, coupled)
-    return coupled.layout.unpack(solved)
+    return coupled.physical_fields(solved)
 
 
 class _MassFlowBorderedPolicy(eqx.Module):
@@ -509,9 +776,13 @@ def mass_flow_coupled_continuation(
     method: str | None = "twolevel",
     beta0: float = 2.0,
     exponent: float = 1.0,
+    beta_floor: float = 0.0,
     max_escalations: int = 6,
     escalation_factor: float = 2.0,
     divergence_cap: float = 10.0,
+    line_search: int = _COUPLED_LINE_SEARCH,
+    forward_solver: lx.AbstractLinearSolver | None = None,
+    block_scaled_norm: bool = False,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
     """The pseudo-transient continuation step for the **mass-flow-constrained** coupled Newton solve.
@@ -519,19 +790,27 @@ def mass_flow_coupled_continuation(
     The globalization of :func:`coupled_continuation`, with its :class:`CoupledShiftPolicy` bordered by
     the mass-flow constraint (:class:`_MassFlowBorderedPolicy`), so it drives the augmented
     ``[flow..., k, omega, beta]`` system where ``beta`` is a Lagrange multiplier for ``<U_dir> =
-    target``. Parameters are :func:`coupled_continuation`'s; ``flow_direction`` selects the constrained
-    velocity component.
+    target``. Parameters are :func:`coupled_continuation`'s (including ``beta_floor`` / ``line_search`` /
+    ``forward_solver`` / ``block_scaled_norm``); ``flow_direction`` selects the constrained velocity
+    component. ``block_scaled_norm`` here extends the same block-scaled measure with the constraint dof.
     """
     policy = _coupled_shift_policy(coupled, reference_state, method, **preconditioner_kwargs)
     force, average = _coupled_constraint_vectors(coupled, flow_direction)
     bordered = _MassFlowBorderedPolicy(policy, force, average)
+    residual_norm = (
+        _mass_flow_residual_norm(coupled, reference_state) if block_scaled_norm else jnp.linalg.norm
+    )
     return PseudoTransientStep(
         bordered,
         beta0=beta0,
         exponent=exponent,
+        beta_floor=beta_floor,
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        line_search=line_search,
+        forward_solver=forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER,
+        residual_norm=residual_norm,
         adjoint_preconditioner_factory=bordered.adjoint_factory(),
     )
 
@@ -584,7 +863,9 @@ def solve_coupled_mass_flow(
     """
     if flow is None or k is None or omega is None:
         flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)
-    state = coupled.pack_state(flow, k, omega)
+    # Map the physical initial condition into the solved-variable space (identity for DirectScalars,
+    # log for LogScalars) so the constrained Newton march iterates on the right scalar unknown.
+    state = coupled.state_from_physical(flow, k, omega)
     augmented0 = jnp.append(state, coupled.momentum.body_force[flow_direction])
 
     if continuation is None:
@@ -609,5 +890,5 @@ def solve_coupled_mass_flow(
         return jnp.append(r_coupled, bulk - target)
 
     solved = solver.solve(constrained_residual, augmented0, coupled)
-    flow_s, k_s, omega_s = coupled.layout.unpack(solved[:-1])
+    flow_s, k_s, omega_s = coupled.physical_fields(solved[:-1])
     return flow_s, k_s, omega_s, solved[-1]

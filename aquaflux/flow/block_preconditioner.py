@@ -229,6 +229,17 @@ class SmoothedAmgSchur(InnerSchurSolver):
     The hierarchy is frozen at a reference coefficient; the current operator's scale is tracked by a
     symmetric diagonal rescaling ``Ŝ_cur⁻¹ ≈ D⁻¹ Ŝ_ref⁻¹ D⁻¹``, ``D = sqrt(diag_cur/diag_ref)`` — exact
     for a uniform rescale, and capturing per-cell scale (including convection) otherwise.
+
+    Regime limit (measured, and the reason ``v_cycles`` is not a high-Reynolds lever): with the
+    ``"msimpler"`` scaling this is a **constant-coefficient** pressure Poisson — a near-Stokes
+    approximation of the true Schur complement that degrades as convection strengthens. Once the flow is
+    convection-dominated (high Reynolds number, recirculation) that *approximation* — not its inversion —
+    sets the outer Krylov cost: inverting it more accurately does not help and can hurt, and neither
+    rescaling it nor rebuilding it at a developed state recovers the loss. Escaping that ceiling needs a
+    genuinely better Schur approximation, such as the stabilized least-squares-commutator preconditioner
+    of Elman, Howle, Shadid, Silvester & Tuminaro (2007) — which reuses this class's assembled pressure
+    Poisson. The *stabilized* variant is the relevant one: a Rhie--Chow collocated discretization is
+    equal-order stabilized, which the original least-squares-commutator form does not account for.
     """
 
     geometry: _SchurGeometry
@@ -582,7 +593,11 @@ class BlockPreconditioner(eqx.Module):
             / density / viscosity scale, so it matches the SIMPLE Schur magnitude with no assumption
             on the characteristic speed. Pass an explicit value only to pin ``k`` (e.g. for a study).
         v_cycles : int
-            Multigrid V-cycles per apply.
+            Multigrid V-cycles per apply. Raising it does **not** rescue the high-Reynolds coupled solve:
+            at high cell Peclet the block's accuracy is limited by the *Schur approximation*, not by how
+            well that approximation is inverted, so extra velocity cycles leave the preconditioned error
+            operator ``I - A M`` unchanged and extra Schur cycles make it worse (inverting the wrong
+            operator more accurately). See the regime note on :class:`SmoothedAmgSchur`.
         """
         if velocity not in ("smoothed", "convection", "convection-air"):
             raise ValueError(

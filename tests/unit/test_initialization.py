@@ -20,9 +20,11 @@ from aquaflux.flow import (
     NoSlipWall,
     PressureOutlet,
     VelocityInlet,
+    bernoulli_pressure,
     laplace_field,
     potential_flow,
 )
+from aquaflux.flow.initialization import _pressure_outlet_cells
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -85,6 +87,32 @@ def test_potential_flow_matches_the_through_flow_without_wall_penetration() -> N
     # straight channel: streamwise velocity == inlet, no transverse penetration
     assert float(jnp.max(jnp.abs(velocity[:, 0] - U_IN))) < 1e-6
     assert float(jnp.max(jnp.abs(velocity[:, 1]))) < 1e-6
+
+
+def test_bernoulli_pressure_is_anchored_at_the_outlet_and_tracks_the_dynamic_head() -> None:
+    # A velocity that accelerates downstream, so the dynamic head varies across the channel.
+    _, geometry, momentum = _channel()
+    speed = 1.0 + geometry.cell.centroid[:, 0]
+    velocity = jnp.stack([speed, jnp.zeros_like(speed)], axis=1)
+    pressure = bernoulli_pressure(momentum, velocity)
+
+    outlet_cells = _pressure_outlet_cells(momentum)
+    # Consistent with the p = 0 outlet BC: the mean pressure over the outlet cells is zero.
+    assert abs(float(jnp.mean(pressure[outlet_cells]))) < 1e-10
+    # Bernoulli's ``p + ½ρ|u|² = const``: the faster cell carries the lower pressure.
+    assert float(pressure[jnp.argmax(speed)]) < float(pressure[jnp.argmin(speed)])
+    # Exact closed form p = ½ρ(mean_outlet(|u|²) - |u|²).
+    reference = 0.5 * RHO * float(jnp.mean(speed[outlet_cells] ** 2))
+    expected = reference - 0.5 * RHO * speed**2
+    assert float(jnp.max(jnp.abs(pressure - expected))) < 1e-10
+
+
+def test_bernoulli_pressure_is_uniform_for_a_uniform_velocity() -> None:
+    # A uniform through-flow has no dynamic-head variation, so the seed is the (zero) outlet datum.
+    _, geometry, momentum = _channel()
+    velocity = jnp.broadcast_to(jnp.array([U_IN, 0.0]), (geometry.cell.centroid.shape[0], 2))
+    pressure = bernoulli_pressure(momentum, velocity)
+    assert float(jnp.max(jnp.abs(pressure))) < 1e-12
 
 
 def test_potential_flow_is_zero_on_a_closed_domain() -> None:

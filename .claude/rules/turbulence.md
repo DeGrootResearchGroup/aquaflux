@@ -66,6 +66,8 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   (`ConvectionAmgPreconditioner` / `AirAmgPreconditioner`) rather than the old opaque `lambda phi: solve`.
   These are plain frozen dataclasses, **not `equinox.Module`s** — see the binding note in
   `.claude/rules/solve.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
+  `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output factor — the
+  reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a frozen dataclass.
 - **The scalar policy's two halves have different lifetimes (binding, #105).** `ScalarShiftPolicy` carries
   a **shift diagonal rebuilt every sweep** (so the pseudo-time damping keeps tracking the operator as
   ν_t grows — freezing it would under-damp the march and lean on `DivergenceGuard` escalation) and an
@@ -141,10 +143,88 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   (#106):** it builds the `closure` first and takes `nu_t` from it (rather than a separate
   `eddy_viscosity` recomputing the same strain), then one `momentum.flow_fields(flow)` feeds both
   `residual_from_fields` and the `mdot` the scalars advect on — was 3× `_flow_fields` per eval, ~1.85×
-  the trace/compile and AD-tape size. **Direct k/ω variables** (log-variables held in reserve, below); positivity
-  under a full Newton step is carried by the pseudo-transient shift + divergence guard, no in-residual
-  floor. FD-verified: coupled ‖R‖→machine-zero, agrees with the segregated fixed point, adjoint
-  matches finite differences.
+  the trace/compile and AD-tape size. **Per-scalar variable parametrization** (`k_transform` /
+  `omega_transform`, both `ScalarVariableTransform`, default `DirectScalars` = identity): the coupled
+  residual is always written in the *physical* `k`/`ω` (recovered by `physical_fields`), so a transform
+  changes only the Newton iterate space, not the root — the residual at the mapped state equals the
+  direct residual at the same physical fields (unit-pinned to 1e-13). `DirectScalars` carries positivity
+  by the pseudo-transient shift + divergence guard (no in-residual floor); `LogScalars` (`φ = e^w`) makes
+  the field `> 0` **by construction under any Newton step** — the fix for the stiff high-Re case where a
+  full step drives `ω` negative and `ν_t = k/ω` flips sign without the residual going non-finite (so the
+  guard never trips). **Use `omega_transform=LogScalars()`, `k` direct (binding):** `ω` is the field that
+  goes negative and `log(ω)` is well-conditioned (`ω` bounded away from 0, large near walls); `log(k)` is
+  **not** — `k → 0` at a no-slip wall (Dirichlet 0) so `log(k) → −∞` there stalls the near-wall cells (the
+  full-log form descends then freezes; measured). FD-verified for both forms: coupled ‖R‖→machine-zero,
+  agrees with the segregated fixed point, adjoint matches finite differences.
+  - **The reparametrized block's preconditioner/shift are chain-rule-scaled at the reference (binding).**
+    The physics Jacobian w.r.t. `w` picks up `d(φ)/d(w) = jacobian_scale(φ)` (`= φ` for log). `coupled_continuation`
+    recovers the physical reference via `physical_fields`, scales each scalar shift diagonal by that factor,
+    and wraps its (physical-operator) AMG in `ScaledScalarPreconditioner` by the reciprocal — so the frozen
+    preconditioner acts on the reparametrized block without rebuilding the hierarchy. `_reparametrized_preconditioner`
+    returns the preconditioner **unchanged** when the factor is one, so the `DirectScalars` path is bit-identical.
+  - **`coupled_continuation` globalizes with a line search + a larger-restart Krylov (the pitzDaily
+    performance fix).** Two measured facts drove this. **(1) The full coupled Newton step
+    from the hybrid IC overshoots by ~10⁷×** (‖R‖ 220 → 5.8e9); the pseudo-transient step's only recourse
+    used to be escalating β — a *full re-solve* — and escalating β (16/64) still did **not** descend
+    (rel ≈ 1.0 → the full-mesh march *stalled*, which had been misread as "slow, compute-heavy"). A
+    **backtracking line search** on the one β₀ solve finds α≈¼ → rel≈0.48 (residual halved), so
+    `coupled_continuation` sets `line_search=_COUPLED_LINE_SEARCH` (see `.claude/rules/solve.md`); β
+    escalation stays the fallback for a bad *direction*, not an overshoot. With it the full-mesh solve
+    **descends** (rel 1.0 → 0.48 → 0.44 → 0.31 → 0.20 → ~0.18 over ~6 steps) instead of *stalling at
+    rel 1.0* — the case is now solvable at all, a correctness fix, not just speed. **(2) The shifted
+    solve needs a large Krylov subspace:** `_COUPLED_FORWARD_SOLVER` is restart-120 GMRES (the shared
+    restart-40 default discards too much Arnoldi history on this stiff saddle system; ~1.4× faster to
+    the same tight solution). Tolerances stay **tight** — an inexact solve is unsafe under log-`ω` (an
+    inaccurate log step is exponentiated and diverges), so loosening the linear tolerance is **not** a
+    lever here (measured: it breaks the march).
+  - **The march's residual measure is the plain Euclidean ‖R‖ by default; the block-scaled per-field
+    measure is opt-in (`block_scaled_norm=True`).** A `BlockScaledNorm` over `[flow, k, ω]` (each block
+    divided by its own initial magnitude, `_coupled_residual_norm`) was built so the globalization weighs
+    every field rather than the `ω` block that dominates ‖R‖ (`ω` O(1e5), `k` O(1e-3)) — the concern being
+    that a step collapsing `k` barely moves the `ω`-dominated ‖R‖ and is accepted. But **measured, it
+    *stalls* the pitzDaily march**: the per-block relative norm plateaus long before the fields converge,
+    so `coupled_continuation`/`mass_flow_coupled_continuation` default to `jnp.linalg.norm` and expose
+    `block_scaled_norm` (default `False`) to request the block measure for experimentation. The helper and
+    the `BlockScaledNorm` class are kept as that opt-in path, not deleted.
+  - **`beta_floor` (SER lower bound) is available but off by default (a measured wash).** Bounding
+    `β = max(beta_floor, β₀(‖R‖/‖R₀‖)^p)` keeps each late shifted solve out of the ill-conditioned low-`β`
+    regime (correctness-safe — the floor scales the correction `δ`, which vanishes at the root, so it never
+    moves the converged state). But end-to-end it is a **net wash** (cheaper late solves cancel the extra
+    Newton steps), so it defaults to `0`; wired through `coupled_continuation` for further evaluation. The
+    settled coupled-solve cost is the diagonal-block-preconditioner weakness at high Reynolds number, **not**
+    the residual measure, `β` floor, or missing cross-coupling (a block-triangular preconditioner was worse
+    — non-convergent on recirculating pitzDaily). See `.claude/rules/solve.md`.
+  - **The coupled flow block uses the convection-aware AMG + MSIMPLER Schur, not the smoothed/SIMPLE
+    default (`_coupled_shift_policy`).** A RANS case is high-Reynolds, and the default
+    `BlockPreconditioner.build` config (viscous-**smoothed** velocity AMG, which is Peclet-blind, + the
+    **SIMPLE** `a_P` Schur, which degrades with convection) produces a poor momentum-block direction once
+    the flow separates. Measured on the developed pitzDaily field (shifted Newton direction vs the true
+    one): smoothed+SIMPLE gives **cos 0.40** and the march stalls at rel ~0.18; **`velocity="convection"`
+    + `schur_scaling="msimpler"` gives cos 0.998** *and* cuts the shifted solve from ~120–580 GMRES
+    cycles to ~17 (each march step ~8× cheaper). Both stay valid **frozen at the cold initial state**
+    (MSIMPLER's Schur is velocity-independent; the convection linearization is Peclet-robust), so **the
+    FLOW block needs no reference refresh** — verified two ways: IC-frozen cos 0.996 vs plateau-rebuilt
+    0.998, and refreshing the flow block alone at a separated pitzDaily state is if anything slightly
+    *worse* (31 → 34 outer cycles). It is **not** the flow↔turbulence cross-coupling (the block-*diagonal*
+    preconditioner with the right config already reaches cos 0.998 — a block-triangular coupling was
+    built, measured, and is worse; see `.claude/rules/solve.md`). **The k/ω *scalar* AMGs are the
+    exception: they do go stale, and refreshing them alone once the flow separates is worth ~2.6× in
+    outer cycles** (31 → 12) — the one staleness lever that pays; see the staleness bullet in
+    `.claude/rules/solve.md`. Overridable via `preconditioner_kwargs`.
+  - **Remaining limiter — the k equation drift (the open item).** With the config above the march pushes
+    past the omega plateau (rel 0.18 → ~0.09), but past there the **direct-`k` residual grows** (rel 1 →
+    ~5× over a few steps) as the high-Reynolds production develops, while `ω` and the flow converge; `k`'s
+    *absolute* residual stays small (so ‖R‖ still descends) but the growth re-stalls the march near rel
+    ~0.09. This is a `k`-stability issue, not a preconditioner one. **log-`k` is not the fix** (ill-
+    conditioned at the `k→0` no-slip walls — the reason `k` is direct). The k-tied realizability floor
+    (#126) and the production limiter are the closure levers; treat high-Reynolds `k` stability under the
+    coupled log-`ω` solve as the open follow-up.
+  - **The per-scalar transform is layout-consistent through both coupled solves (binding).** `solve_coupled`
+    and `solve_coupled_mass_flow` both map the physical IC into the solved space with `state_from_physical`
+    and return `physical_fields` — so `LogScalars` is correct through the mass-flow-constrained path too
+    (identity for `DirectScalars`, which is all the mass-flow tests exercise). Do not reintroduce a bare
+    `pack_state`/`layout.unpack` at a solve boundary: it packs physical values as if they were the solved
+    unknown, silently wrong under any non-identity transform.
   - **`solve_coupled_mass_flow` — the coupled solve with the bulk velocity held by a Lagrange
     multiplier (#128).** A streamwise-periodic channel is driven to a target bulk velocity `U_bar`, so
     the body force `β` along the flow direction is itself a **coupled unknown** appended to the state
@@ -229,8 +309,12 @@ scalar continuation (#73), Option 1 hardening (convergence stop + adaptive relax
 (the monolithic coupled residual + its IFT adjoint, the target engine). The segregated loop is
 **retained as a forward pre-smoother / fallback**, not the sensitivity model; for gradients use the
 coupled `solve_coupled` (its adjoint is exact) — never differentiate `solve_segregated` (forward-only,
-unrolls the Picard sweeps, which §5 forbids). The remaining held-in-reserve item is the **log-variable
-fallback** (below), promoted only if a stiff high-Re case shows the direct coupled form non-robust.
+unrolls the Picard sweeps, which §5 forbids). The formerly-held-in-reserve **log-variable form is now
+built** (`LogScalars` on `omega_transform`, above), promoted exactly as anticipated: the stiff high-Re
+separating pitzDaily case (`validation/pitzdaily_openfoam`) drives the direct `ω` negative, and
+`omega_transform=LogScalars()` keeps `ω > 0` so the coupled solve no longer poisons its closure. The
+form is validated (channel + tests); efficient convergence on the *full* pitzDaily mesh is the open
+tuning follow-up noted above.
 
 ## Binding decisions
 
@@ -272,7 +356,9 @@ fallback** (below), promoted only if a stiff high-Re case shows the direct coupl
   gradient in the clamped region; they pollute the sensitivity **unless inactive at the fixed point**
   (`k, ω > floor` everywhere, which holds for any properly resolved RANS field). State this precondition
   in code and **check it**: if a case converges with a floor active, the sensitivity through that cell is
-  wrong — surface it, do not ship it. (Log-variable `k = e^{k̃}` is the held-in-reserve structural fix.)
+  wrong — surface it, do not ship it. (Log-variable transport `φ = e^w` — **built** as `LogScalars`, above —
+  is the structural fix: it removes the floor entirely for the transformed field, which stays `> 0` by
+  construction, so there is no clamped region to pollute the sensitivity. Use it on `ω`, not `k`.)
   - **The ω floor is the k-tied realizability floor `ω ≥ k/(nut_max_coeff·ν)` (default `nut_max_coeff
     = 1e5`), NOT a fixed value (#126).** It caps `ν_t = k/ω` at `nut_max_coeff·ν`; being tied to the
     current `k` it is **inactive at convergence** for a physical field (`ν_t/ν` is O(10²) ≪ 1e5), so it

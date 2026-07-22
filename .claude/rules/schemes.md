@@ -34,10 +34,20 @@ root `CLAUDE.md` Engineering Principles.
   Green–Gauss deficiency. Differentiable (`jax.grad` flows).
 - **`CorrectedGreenGauss` — BUILT.** The non-orthogonal correction makes the gradient a
   *sparse coupled system* `A_g·G = B·φ` (`A_g` geometry-only, well-conditioned). **How `A_g⁻¹` is
-  applied is an injected `GradientSolve` strategy** — `GmresGradientSolve` (default; matrix-free
-  `lineax` GMRES, differentiable by implicit diff) or `SweptGradientSolve` (fixed sweeps); the
+  applied is an injected `GradientSolve` strategy** — `SweptGradientSolve` (**default**; fixed
+  matrix-free Richardson sweeps) or `GmresGradientSolve` (matrix-free `lineax` GMRES, differentiable
+  by implicit diff, for a mesh skewed enough that the swept sweep count would grow impractically); the
   discretization (`terms`/`operator`/`rhs`) is identical either way, so the swept path is **not** a
-  separate scheme (it was `SweptCorrectedGradient`; retired). Verified:
+  separate scheme (it was `SweptCorrectedGradient`; retired). **Default is swept, not GMRES (binding,
+  changed after the pitzDaily study).** GMRES is a *nested Krylov solve carrying its own implicit-diff
+  tangent*, re-entered on every reconstruction; inside a nonlinear (coupled RANS) Newton it is
+  re-differentiated by every Jacobian–vector product, which measured **2.16 s vs 0.014 s per
+  coupled-residual eval** on the ~12k-cell pitzDaily backward-facing step (≈180×) — impractical for a
+  real solve. The swept apply carries no nested solve, so it stays cheap under AD. The discretization-
+  *exactness* unit tests (linear-exact, Gate-C one-step, the swept-vs-exact reference) pin
+  `GmresGradientSolve()` explicitly, because they assert machine-precision properties the fixed
+  `sweeps=4` default does not reach on a skewed mesh (it is exact only to within discretization error
+  there — the swept solver's own accuracy is a separate, dedicated test). Verified:
   **linear-exact on irregular grids** (fixes compact GG's inconsistency), reduces to compact
   on orthogonal, but **measured to cap near 1st order** on irregular grids (the DeGroot-2019
   wall). **Now consumed by the diffusion residual** (`discretization/residual.py`) as the
@@ -90,7 +100,9 @@ root `CLAUDE.md` Engineering Principles.
   Validated in the coupled skewed cavity (`tests/integration/test_swept_gradient_flow.py`): converges,
   matches the GMRES solution, differentiable through the nonlinear solve. The Schur complement
   `∂R/∂x + (∂R/∂g)A_g⁻¹B` is still formed by AD; only `A_g⁻¹` changes from a nested solve to a cheap
-  unrolled sparse apply. **The default solve strategy for skewed flow meshes.**
+  unrolled sparse apply. **The default `GradientSolve` for `CorrectedGreenGauss`** (every flow mesh,
+  not only skewed ones) — cheap to differentiate inside a nonlinear Newton, where the `GmresGradientSolve`
+  nested Krylov+implicit-diff alternative is impractical (see the `CorrectedGreenGauss` note above).
   - **The `GradientSolve.solve(..., operator_hook=None)` distributed seam.** `operator_hook` is an
     optional transform applied to the unknown before **every operator apply**. `SweptGradientSolve`
     honours it — the Richardson sweeps form no global inner product, so a domain-decomposed residual

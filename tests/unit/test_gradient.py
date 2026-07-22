@@ -141,8 +141,13 @@ def test_compact_gg_polynomials_exact_interior_on_orthogonal(func, grad_func) ->
 
 def test_corrected_gg_reconstructs_linear_exactly_on_irregular() -> None:
     """The fix: corrected Green–Gauss is linear-exact even on irregular grids, where compact
-    Green–Gauss is inconsistent."""
-    err = _interior_gradient_error(CorrectedGreenGauss(), 16, _linear, _linear_grad, perturb=0.2)
+    Green–Gauss is inconsistent.
+
+    This asserts a machine-precision property of the *discretization*, so it pins the exact
+    :class:`GmresGradientSolve`; the default :class:`SweptGradientSolve` (fixed 4 sweeps) reaches this
+    only to within its sweep residual on an irregular mesh (its own accuracy is tested separately)."""
+    scheme = CorrectedGreenGauss(solver=GmresGradientSolve())
+    err = _interior_gradient_error(scheme, 16, _linear, _linear_grad, perturb=0.2)
     assert err < 1e-10
 
 
@@ -194,7 +199,8 @@ def test_swept_matches_corrected_at_sufficient_sweeps() -> None:
     geom = mesh.geometry()
     phi = _trig(geom.cell.centroid)
     bvals = _trig(geom.face.centroid)
-    exact = CorrectedGreenGauss().gradients(phi, mesh, geom, bvals)
+    # The exact reference is the GMRES solve (the default is now the fixed-sweep swept solver).
+    exact = CorrectedGreenGauss(solver=GmresGradientSolve()).gradients(phi, mesh, geom, bvals)
     swept = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=20)).gradients(
         phi, mesh, geom, bvals
     )
@@ -210,7 +216,7 @@ def test_swept_convergence_is_mesh_independent() -> None:
         geom = mesh.geometry()
         phi = _trig(geom.cell.centroid)
         bvals = _trig(geom.face.centroid)
-        exact = CorrectedGreenGauss().gradients(phi, mesh, geom, bvals)
+        exact = CorrectedGreenGauss(solver=GmresGradientSolve()).gradients(phi, mesh, geom, bvals)
         swept = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=12)).gradients(
             phi, mesh, geom, bvals
         )

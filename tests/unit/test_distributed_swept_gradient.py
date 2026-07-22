@@ -122,7 +122,11 @@ print("ok")
 _ADJOINT = (
     _SETUP
     + r"""
-from aquaflux.schemes import CorrectedGreenGauss as _CGG, HessianCorrectedGradient
+from aquaflux.schemes import (
+    CorrectedGreenGauss as _CGG,
+    GmresGradientSolve,
+    HessianCorrectedGradient,
+)
 
 g_s = jax.grad(lambda p: jnp.sum(weight * serial.residual(p)))(phi)
 g_d = jax.grad(lambda p: jnp.sum(weight * distributed.residual(p)))(phi)
@@ -140,7 +144,8 @@ def _distributed_with(scheme):
 
 # GMRES forms inner products over the whole local vector, so a per-apply ghost exchange cannot make
 # it serial-exact; the distributed solve must refuse rather than silently return a wrong gradient.
-gmres = _distributed_with(_CGG())  # default solver is GmresGradientSolve
+# (Named explicitly: the CorrectedGreenGauss default is the distributed-capable SweptGradientSolve.)
+gmres = _distributed_with(_CGG(solver=GmresGradientSolve()))
 try:
     gmres.residual(phi)
     raise AssertionError("expected the distributed GMRES gradient solve to be refused")

@@ -11,7 +11,7 @@ from __future__ import annotations
 from .block_preconditioner import BlockPreconditioner
 from .boundary import FlowBoundary, MovingWall, NoSlipWall, PressureOutlet, VelocityInlet
 from .continuation import MomentumShiftPolicy, momentum_continuation, reused_flow_solve
-from .initialization import laplace_field, potential_flow
+from .initialization import bernoulli_pressure, laplace_field, potential_flow
 from .mean_velocity import bulk_velocity_flow_solve
 from .scales import body_force_velocity, characteristic_velocity
 from .momentum import FlowFields, MomentumContinuity
@@ -28,6 +28,7 @@ __all__ = [
     "NoSlipWall",
     "PressureOutlet",
     "VelocityInlet",
+    "bernoulli_pressure",
     "body_force_velocity",
     "bulk_velocity_flow_solve",
     "characteristic_velocity",
