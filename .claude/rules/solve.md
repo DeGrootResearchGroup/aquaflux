@@ -152,6 +152,27 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     120-vector subspace reaches the same tight solution ~1.4× faster and tighter. Tolerances stay tight
     — an *inexact* linear solve is unsafe under log-ω (an inaccurate step in the log variable is
     exponentiated and diverges), so the accuracy is load-bearing, not wasteful.
+  - **Where the coupled-solve cost actually is (settled by measurement).** As the SER ramp drives `β → 0`
+    through the march, the *unshifted* coupled saddle Jacobian is severely ill-conditioned, so the
+    diagonally-shifted GMRES burns thousands of matvecs per solve (measured: one shifted solve ≈ 36 s at
+    β=2, 127 s at β=0.2 on ~12k-cell pitzDaily — note lineax `num_steps` counts restart **cycles**
+    ×`restart`, not iterations). Two levers were tested and *rejected*, leaving one:
+    - **Flooring the SER `β` below (`β = max(floor, β₀(‖R‖/‖R₀‖)^p)`) — tried, a WASH, not kept.** It is
+      correctness-safe (the shift `β d` scales the correction `δ`, which vanishes at the root, so a floor
+      never moves the converged state — it only damps the *path*, linear instead of quadratic terminal
+      steps) and it does make each late solve cheaper. But end-to-end it is a net wash: floor 0.0 vs 0.3
+      reached the same tolerance in the same wall time on `solve_coupled`, because the cheaper late solves
+      exactly cancel the extra Newton steps. A dominated, default-off knob — not carried.
+    - **A block-*triangular* preconditioner (forward-substituting `∂R_turb/∂flow·δ_flow`) — tried, WORSE,
+      dead.** It made the channel worse (85 vs 51 outer cycles at β=0.5) and on recirculating pitzDaily was
+      so bad GMRES could not converge at all: stronger flow↔turbulence coupling *amplifies* the inexact
+      diagonal blocks' inversion error it propagates downstream. So the missing cross-coupling is **not**
+      the bottleneck.
+    - **The real cost is diagonal-block-preconditioner inexactness at high Reynolds number.** The
+      block-diagonal conv+MSIMPLER preconditioner is *excellent* at low Re (4 outer cycles on a Re=2500
+      channel) and weak only at high Re / recirculation (17 cycles on a Re=1e5 channel). The remaining
+      lever is strengthening the weakest diagonal block's inner solve (more AMG V-cycles / tighter inner
+      tolerance on that block), not adding coupling structure.
   - **The residual measure is an injected `ResidualNorm`, owned by the `ForwardStep` (`solve/norm.py`).**
     Every `ForwardStep` exposes `norm()`; `ImplicitNewtonSolver` reads it for the outer stopping test
     (threaded through `_forward`/`_implicit_solve` as the extra nondiff arg `norm_fn`) and the strategy
