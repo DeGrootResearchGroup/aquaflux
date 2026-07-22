@@ -598,15 +598,26 @@ def _coupled_shift_policy(
     re-derive it.
 
     ``reuse`` **refreshes** an existing policy at a new (more developed) ``reference_state`` rather than
-    building one from scratch, and it is deliberately asymmetric across the blocks because that is what
-    the measurements support. The **scalar k/omega AMGs are re-derived** on their reused coarsening
-    (:func:`~aquaflux.turbulence.preconditioner.scalar_transport_preconditioner`'s ``reuse=``) -- on a
-    separated backward-facing-step state that is worth ~2.4x in outer Krylov cycles. The **flow block is
-    carried over untouched**, because re-freezing it at the developed state was measured to be no help
-    and slightly harmful (its convective linearization is Peclet-robust and the MSIMPLER Schur is
-    velocity-independent, so it does not go stale), and rebuilding it is the expensive half. The shift
-    diagonals *are* rebuilt at the new state: they are the pseudo-time damping scale, which should track
-    the operator as it develops.
+    building one from scratch, and **only the scalar k/omega AMGs are re-derived** on their reused
+    coarsening (:func:`~aquaflux.turbulence.preconditioner.scalar_transport_preconditioner`'s ``reuse=``)
+    -- on a separated backward-facing-step state that is worth ~2.4x in outer Krylov cycles. Everything
+    else is **carried over from ``reuse`` untouched**: the flow block (re-freezing it at the developed
+    state was measured no help and slightly harmful, and it is the expensive half), *and the pseudo-time
+    shift diagonals*.
+
+    **The shift diagonals must be carried, not rebuilt (binding -- rebuilding them freezes the march).**
+    The coupled shift diagonal is the transport-operator diagonal times ``jacobian_scale(field)``, which
+    under :class:`LogScalars` is ``omega``; at a developed state both factors grow (stiffer operator,
+    larger ``omega``), so a rebuilt diagonal ``d`` is much larger, the pseudo-transient shift ``beta d``
+    over-damps, and the Newton step collapses to a standstill -- the relative residual creeps *upward*
+    ~1e-5 per step with the recirculation and ``k`` static, no error and no divergence-guard trip.
+    (Isolated by a controlled discriminator: from one post-stage-one state, rebuilding the shift and
+    carrying the AMG froze the march *byte-identically* to rebuilding both, while carrying the shift and
+    refreshing only the AMG descended cleanly -- so the shift rebuild is the freeze, independent of the
+    switched-evolution-relaxation ``beta``.) This is safe for the same reason the flow block is carried:
+    the shift is a transient device that vanishes at the root, so a slightly-stale ``d`` changes only the
+    path, never the converged state or its adjoint. A non-refresh build (``reuse is None``) still builds
+    the shift at ``reference_state`` as before.
     """
     # The reference's scalar blocks are the *solved* unknown; the frozen operators (closure, AMG, shift
     # diagonals) are all assembled in the physical fields, so recover them through the transform.
@@ -661,15 +672,19 @@ def _coupled_shift_policy(
             omega_scale,
         )
 
-    return CoupledShiftPolicy(
-        coupled.layout,
-        block,
-        coupled.turbulence.k_shift_policy(mdot, closure, k_ref).shift_diagonal * k_scale,
-        coupled.turbulence.omega_shift_policy(mdot, closure, omega_ref).shift_diagonal
-        * omega_scale,
-        k_amg,
-        omega_amg,
-    )
+    if reuse is not None:
+        # Carry the shift diagonals from the reused policy -- rebuilding them at the developed state
+        # over-damps the step and freezes the march (see the docstring). Only the AMGs are refreshed.
+        k_shift = reuse.k_shift_diagonal
+        omega_shift = reuse.omega_shift_diagonal
+    else:
+        k_shift = coupled.turbulence.k_shift_policy(mdot, closure, k_ref).shift_diagonal * k_scale
+        omega_shift = (
+            coupled.turbulence.omega_shift_policy(mdot, closure, omega_ref).shift_diagonal
+            * omega_scale
+        )
+
+    return CoupledShiftPolicy(coupled.layout, block, k_shift, omega_shift, k_amg, omega_amg)
 
 
 def solve_coupled(

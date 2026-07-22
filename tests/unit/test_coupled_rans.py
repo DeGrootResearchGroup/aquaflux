@@ -230,3 +230,38 @@ def test_refresh_rtol_must_be_looser_than_rtol() -> None:
     flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
     with pytest.raises(ValueError, match="must be looser than rtol"):
         solve_coupled(coupled, flow, k, omega, rtol=1e-2, refresh_rtol=1e-3)
+
+
+def test_refreshing_the_policy_carries_the_shift_diagonals() -> None:
+    """A ``reuse=`` refresh must re-derive only the AMGs and carry the shift diagonals unchanged.
+
+    Rebuilding the shift diagonals at a developed state over-damps the pseudo-transient step and freezes
+    the coupled log-omega march (the shift is ``transport_diagonal * jacobian_scale``, and under
+    ``LogScalars`` ``jacobian_scale(omega) = omega`` grows with the field). So the refreshed policy's
+    shift diagonals must be *identical* to the reused ones -- pinned here at the mechanism, without
+    needing a full separating march to exhibit the freeze. The flow block is carried too; the scalar AMG
+    refresh itself is pinned in ``test_scalar_transport_preconditioner``. ``method=None`` and the
+    symmetric viscous velocity block keep the policy build robust to the two synthetic states.
+    """
+    from aquaflux.turbulence.coupled import _coupled_shift_policy
+
+    mesh, base_coupled = _cavity()
+    coupled = CoupledRANS.build(
+        base_coupled.momentum, base_coupled.turbulence, omega_transform=LogScalars()
+    )
+    cold = _healthy_state(mesh, coupled, seed=0)
+    developed = _healthy_state(mesh, coupled, seed=1)  # a *different*, more-developed reference
+
+    kw = dict(velocity="smoothed")
+    base = _coupled_shift_policy(coupled, cold, None, **kw)
+    refreshed = _coupled_shift_policy(coupled, developed, None, base, **kw)
+    rebuilt = _coupled_shift_policy(coupled, developed, None, **kw)
+
+    # The shift diagonals are carried from `base` verbatim ...
+    assert jnp.array_equal(refreshed.k_shift_diagonal, base.k_shift_diagonal)
+    assert jnp.array_equal(refreshed.omega_shift_diagonal, base.omega_shift_diagonal)
+    # ... and rebuilding at the developed state genuinely WOULD have changed them (so the carry matters).
+    assert not jnp.allclose(rebuilt.k_shift_diagonal, base.k_shift_diagonal)
+    assert not jnp.allclose(rebuilt.omega_shift_diagonal, base.omega_shift_diagonal)
+    # The flow block is carried over (the expensive half; measured no help to re-freeze).
+    assert refreshed.flow_preconditioner is base.flow_preconditioner
