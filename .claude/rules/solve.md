@@ -156,13 +156,21 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     through the march, the *unshifted* coupled saddle Jacobian is severely ill-conditioned, so the
     diagonally-shifted GMRES burns thousands of matvecs per solve (measured: one shifted solve ≈ 36 s at
     β=2, 127 s at β=0.2 on ~12k-cell pitzDaily — note lineax `num_steps` counts restart **cycles**
-    ×`restart`, not iterations). Two levers were tested and *rejected*, leaving one:
-    - **Flooring the SER `β` below (`β = max(floor, β₀(‖R‖/‖R₀‖)^p)`) — tried, a WASH, not kept.** It is
-      correctness-safe (the shift `β d` scales the correction `δ`, which vanishes at the root, so a floor
-      never moves the converged state — it only damps the *path*, linear instead of quadratic terminal
-      steps) and it does make each late solve cheaper. But end-to-end it is a net wash: floor 0.0 vs 0.3
-      reached the same tolerance in the same wall time on `solve_coupled`, because the cheaper late solves
-      exactly cancel the extra Newton steps. A dominated, default-off knob — not carried.
+    ×`restart`, not iterations). Three levers were probed; two are wired but **off by default** (kept for
+    further evaluation, not the fix) and one is dead:
+    - **Flooring the SER `β` below (`β = max(beta_floor, β₀(‖R‖/‖R₀‖)^p)`, `PseudoTransientStep.beta_floor`,
+      default 0 = off) — correctness-safe, a measured WASH, kept off-by-default.** It never moves the
+      converged root (the shift `β d` scales the correction `δ`, which vanishes at `R=0`; it only damps the
+      *path*, linear instead of quadratic terminal steps) and it does make each late solve cheaper. But
+      end-to-end it is a net wash: floor 0.0 vs 0.3 reached the same tolerance in the same wall time on
+      `solve_coupled`, because the cheaper late solves cancel the extra Newton steps. Wired through
+      `coupled_continuation(beta_floor=…)` for further evaluation; not a default because it is a wash.
+    - **The block-scaled per-field residual measure (`block_scaled_norm=True`) — kept off-by-default
+      because it *stalls* the march.** A `BlockScaledNorm` over `[flow, k, ω]` weighs every field rather
+      than the `ω` block that dominates ‖R‖, but the per-block relative norm plateaus long before the
+      fields converge, so `coupled_continuation` defaults to the Euclidean `jnp.linalg.norm` and exposes
+      `block_scaled_norm` (default `False`) to request the block measure for experimentation. The
+      `BlockScaledNorm` class and its `_coupled_residual_norm` builder are kept as that opt-in path.
     - **A block-*triangular* preconditioner (forward-substituting `∂R_turb/∂flow·δ_flow`) — tried, WORSE,
       dead.** It made the channel worse (85 vs 51 outer cycles at β=0.5) and on recirculating pitzDaily was
       so bad GMRES could not converge at all: stronger flow↔turbulence coupling *amplifies* the inexact

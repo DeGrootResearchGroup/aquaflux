@@ -170,6 +170,18 @@ class PseudoTransientStep(eqx.Module):
     exponent : float
         Switched-evolution-relaxation exponent ``p`` in ``β = β₀ (‖R‖/‖R₀‖)^p`` (static). ``1`` ramps
         the shift linearly with the residual norm.
+    beta_floor : float
+        A lower bound on the switched-evolution-relaxation ``β`` — the schedule becomes
+        ``β = max(beta_floor, β₀ (‖R‖/‖R₀‖)^p)`` (static, default ``0`` = no floor). It keeps the shifted
+        forward solve in a well-conditioned regime: the *unshifted* coupled saddle Jacobian (``β → 0``
+        far from the root) is severely ill-conditioned, so a diagonally-shifted GMRES that lets ``β``
+        ramp to zero stagnates and burns many matrix–vector products per step. Holding ``β ≳ beta_floor``
+        keeps each linear solve cheap. **Correctness-safe:** the shift ``β d`` scales the correction
+        ``δ``, which vanishes at the fixed point (``R = 0 ⇒ δ = 0``), so a non-zero floor never moves the
+        converged root — it only damps the *path* (roughly linear terminal steps rather than quadratic),
+        trading a few more cheap Newton steps for solves that do not stagnate. Off by default pending
+        further evaluation (early end-to-end measurements were a wash — the cheaper late solves cancelled
+        the extra Newton steps).
     max_escalations : int
         Maximum damping escalations per step (static). If a step's shifted solve fails to descend (an
         ill-conditioned shifted system, or an overshoot), ``β`` is multiplied by
@@ -206,11 +218,12 @@ class PseudoTransientStep(eqx.Module):
         search, and the acceptance/divergence guard all use it, and :class:`ImplicitNewtonSolver`
         reads it (via :meth:`norm`) for the outer stopping test, so one measure governs the whole
         solve. A heterogeneous block system (e.g. coupled RANS, where ``omega`` is O(1e5) and ``k``
-        O(1e-3)) passes a :class:`~aquaflux.solve.BlockScaledNorm` so the march can *see* every block
+        O(1e-3)) *can* pass a :class:`~aquaflux.solve.BlockScaledNorm` so the march *sees* every block
         — with the plain norm the ‖R‖ is ~100% ``omega`` and the line search neither judges nor
-        protects the ``k`` block (a step that collapses ``k`` is accepted, one that reduces it
-        vetoed). Like the shift, it only reshapes the forward path; the IFT adjoint never forms a
-        norm, so the converged state and its gradient are unchanged.
+        protects the ``k`` block. (In practice the block-scaled measure stalled the coupled march, so
+        coupled RANS defaults to the Euclidean norm; the block-scaled option remains for
+        experimentation.) Like the shift, it only reshapes the forward path; the IFT adjoint never
+        forms a norm, so the converged state and its gradient are unchanged.
     adjoint_preconditioner_factory : callable or None
         The ``state -> M`` preconditioner factory for the converged transpose (adjoint) solve, or
         ``None`` for an unpreconditioned adjoint (static). At ``φ*`` the operator is the
@@ -221,6 +234,7 @@ class PseudoTransientStep(eqx.Module):
     shift_policy: ShiftPolicy
     beta0: float = eqx.field(static=True, default=2.0)
     exponent: float = eqx.field(static=True, default=1.0)
+    beta_floor: float = eqx.field(static=True, default=0.0)
     max_escalations: int = eqx.field(static=True, default=6)
     escalation_factor: float = eqx.field(static=True, default=2.0)
     acceptance: StepAcceptance = eqx.field(default_factory=DivergenceGuard)
@@ -267,7 +281,7 @@ class PseudoTransientStep(eqx.Module):
         state and the IFT adjoint are unchanged.
         """
         policy = self.shift_policy
-        beta0, exponent = self.beta0, self.exponent
+        beta0, exponent, beta_floor = self.beta0, self.exponent, self.beta_floor
         max_escalations, escalation_factor = self.max_escalations, self.escalation_factor
         acceptance = self.acceptance
         line_search = self.line_search
@@ -282,9 +296,13 @@ class PseudoTransientStep(eqx.Module):
             residual = residual_fn(phi)
             residual_norm = norm(residual)
             term = policy.shift_term(phi)  # base diagonal + β -> M, from the same iterate
-            # Switched-evolution-relaxation: strong damping while the residual is large, none as it
-            # vanishes (β → 0 recovers the undamped Newton step and its terminal quadratic rate).
-            base_relaxation = beta0 * (residual_norm / residual_norm_0) ** exponent
+            # Switched-evolution-relaxation: strong damping while the residual is large, easing as it
+            # vanishes (β → 0 recovers the undamped Newton step and its terminal quadratic rate),
+            # optionally held at ``beta_floor`` to keep the shifted solve out of the ill-conditioned,
+            # GMRES-stagnating low-β regime (the floor still vanishes from the *step* as δ → 0).
+            base_relaxation = jnp.maximum(
+                beta_floor, beta0 * (residual_norm / residual_norm_0) ** exponent
+            )
 
             def attempt(relaxation: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
                 # The shift only reshapes the forward path (like the preconditioner it damps), so it

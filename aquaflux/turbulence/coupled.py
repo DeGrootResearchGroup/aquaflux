@@ -468,14 +468,15 @@ def _coupled_block_scales(coupled: CoupledRANS, reference_state: jnp.ndarray) ->
 
 
 def _coupled_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray) -> BlockScaledNorm:
-    """A block-scaled residual norm over ``[flow, k, omega]`` for the coupled march.
+    """The opt-in block-scaled residual norm over ``[flow, k, omega]`` (``block_scaled_norm=True``).
 
     Each field's residual is divided by its own initial magnitude before the norm is formed, so the
     switched-evolution-relaxation ramp, the line search, and the outer stopping test all judge every
     field rather than the ``omega`` block that dominates the plain Euclidean norm (``omega`` is
-    O(1e5) here, ``k`` O(1e-3)). Without it the globalization cannot see the ``k`` block: a step
-    that collapses ``k`` is accepted because it barely moves the ``omega``-dominated norm, so ``k``
-    is starved while the line search chases ``omega``.
+    O(1e5) here, ``k`` O(1e-3)): with the plain norm a step that collapses ``k`` barely moves ‖R‖ and
+    is accepted. It weighs every block, but was found to *stall* the pitzDaily march (the per-block
+    relative norm plateaus long before the fields converge), so the march uses the Euclidean norm by
+    default and this is available only when ``block_scaled_norm=True`` is requested.
     """
     n = coupled.momentum.mesh.n_cells
     sizes = (coupled.layout.flow_size, n, n)
@@ -502,11 +503,13 @@ def coupled_continuation(
     method: str | None = "twolevel",
     beta0: float = 2.0,
     exponent: float = 1.0,
+    beta_floor: float = 0.0,
     max_escalations: int = 6,
     escalation_factor: float = 2.0,
     divergence_cap: float = 10.0,
     line_search: int = _COUPLED_LINE_SEARCH,
     forward_solver: lx.AbstractLinearSolver | None = None,
+    block_scaled_norm: bool = False,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
     """Build the pseudo-transient continuation step for the coupled Newton solve.
@@ -525,9 +528,11 @@ def coupled_continuation(
         The coupled state the preconditioner and shift diagonals are frozen at.
     method : {"twolevel", "air"} or None
         The AMG method for the k and omega blocks (``None`` leaves those blocks unpreconditioned).
-    beta0, exponent, max_escalations, escalation_factor, divergence_cap
+    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap
         The pseudo-transient schedule and divergence-guard parameters (see
-        :class:`~aquaflux.solve.PseudoTransientStep`).
+        :class:`~aquaflux.solve.PseudoTransientStep`). ``beta_floor`` (default ``0`` = off) bounds the
+        switched-evolution-relaxation ``β`` below to keep the shifted solve out of the ill-conditioned
+        low-``β`` regime; it never moves the converged root, only damps the path.
     line_search : int
         Backtracking step-halvings applied to the shifted step before it is judged (default
         :data:`_COUPLED_LINE_SEARCH`); scales an accurate-but-overshooting direction back to a descent
@@ -536,6 +541,14 @@ def coupled_continuation(
     forward_solver : lineax.AbstractLinearSolver or None
         The shifted-solve Krylov solver; ``None`` uses :data:`_COUPLED_FORWARD_SOLVER` (a
         larger-restart GMRES suited to the stiff coupled system).
+    block_scaled_norm : bool
+        Which residual measure the march judges progress by (default ``False`` = the plain Euclidean
+        norm). When ``True`` the march uses a :class:`~aquaflux.solve.BlockScaledNorm` over
+        ``[flow, k, omega]`` (each block divided by its own initial magnitude), so the globalization
+        weighs every field rather than the ``omega`` block that dominates the Euclidean norm. The
+        block-scaled measure was found to *stall* the pitzDaily march (the per-block relative norm stops
+        descending long before the fields converge), so it is available for experimentation but off by
+        default; the Euclidean norm is what the solver uses.
     **preconditioner_kwargs
         Forwarded to :meth:`~aquaflux.flow.BlockPreconditioner.build` for the flow block (e.g.
         ``schur_scaling``, ``velocity``).
@@ -546,16 +559,20 @@ def coupled_continuation(
         The forward step to hand :class:`~aquaflux.solve.ImplicitNewtonSolver` as ``forward_step``.
     """
     policy = _coupled_shift_policy(coupled, reference_state, method, **preconditioner_kwargs)
+    residual_norm = (
+        _coupled_residual_norm(coupled, reference_state) if block_scaled_norm else jnp.linalg.norm
+    )
     return PseudoTransientStep(
         policy,
         beta0=beta0,
         exponent=exponent,
+        beta_floor=beta_floor,
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),
         line_search=line_search,
         forward_solver=forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER,
-        residual_norm=_coupled_residual_norm(coupled, reference_state),
+        residual_norm=residual_norm,
         adjoint_preconditioner_factory=policy.adjoint_factory(),
     )
 
@@ -759,11 +776,13 @@ def mass_flow_coupled_continuation(
     method: str | None = "twolevel",
     beta0: float = 2.0,
     exponent: float = 1.0,
+    beta_floor: float = 0.0,
     max_escalations: int = 6,
     escalation_factor: float = 2.0,
     divergence_cap: float = 10.0,
     line_search: int = _COUPLED_LINE_SEARCH,
     forward_solver: lx.AbstractLinearSolver | None = None,
+    block_scaled_norm: bool = False,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
     """The pseudo-transient continuation step for the **mass-flow-constrained** coupled Newton solve.
@@ -771,22 +790,27 @@ def mass_flow_coupled_continuation(
     The globalization of :func:`coupled_continuation`, with its :class:`CoupledShiftPolicy` bordered by
     the mass-flow constraint (:class:`_MassFlowBorderedPolicy`), so it drives the augmented
     ``[flow..., k, omega, beta]`` system where ``beta`` is a Lagrange multiplier for ``<U_dir> =
-    target``. Parameters are :func:`coupled_continuation`'s (including ``line_search`` /
-    ``forward_solver``); ``flow_direction`` selects the constrained velocity component.
+    target``. Parameters are :func:`coupled_continuation`'s (including ``beta_floor`` / ``line_search`` /
+    ``forward_solver`` / ``block_scaled_norm``); ``flow_direction`` selects the constrained velocity
+    component. ``block_scaled_norm`` here extends the same block-scaled measure with the constraint dof.
     """
     policy = _coupled_shift_policy(coupled, reference_state, method, **preconditioner_kwargs)
     force, average = _coupled_constraint_vectors(coupled, flow_direction)
     bordered = _MassFlowBorderedPolicy(policy, force, average)
+    residual_norm = (
+        _mass_flow_residual_norm(coupled, reference_state) if block_scaled_norm else jnp.linalg.norm
+    )
     return PseudoTransientStep(
         bordered,
         beta0=beta0,
         exponent=exponent,
+        beta_floor=beta_floor,
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),
         line_search=line_search,
         forward_solver=forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER,
-        residual_norm=_mass_flow_residual_norm(coupled, reference_state),
+        residual_norm=residual_norm,
         adjoint_preconditioner_factory=bordered.adjoint_factory(),
     )
 

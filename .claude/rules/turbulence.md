@@ -163,8 +163,7 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     preconditioner acts on the reparametrized block without rebuilding the hierarchy. `_reparametrized_preconditioner`
     returns the preconditioner **unchanged** when the factor is one, so the `DirectScalars` path is bit-identical.
   - **`coupled_continuation` globalizes with a line search + a larger-restart Krylov (the pitzDaily
-    performance fix).** Track the **per-field relative** residuals, not the absolute ‖R‖ (dominated by
-    `ω`'s scale — a misleading metric). Two measured facts drove this. **(1) The full coupled Newton step
+    performance fix).** Two measured facts drove this. **(1) The full coupled Newton step
     from the hybrid IC overshoots by ~10⁷×** (‖R‖ 220 → 5.8e9); the pseudo-transient step's only recourse
     used to be escalating β — a *full re-solve* — and escalating β (16/64) still did **not** descend
     (rel ≈ 1.0 → the full-mesh march *stalled*, which had been misread as "slow, compute-heavy"). A
@@ -178,6 +177,23 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     the same tight solution). Tolerances stay **tight** — an inexact solve is unsafe under log-`ω` (an
     inaccurate log step is exponentiated and diverges), so loosening the linear tolerance is **not** a
     lever here (measured: it breaks the march).
+  - **The march's residual measure is the plain Euclidean ‖R‖ by default; the block-scaled per-field
+    measure is opt-in (`block_scaled_norm=True`).** A `BlockScaledNorm` over `[flow, k, ω]` (each block
+    divided by its own initial magnitude, `_coupled_residual_norm`) was built so the globalization weighs
+    every field rather than the `ω` block that dominates ‖R‖ (`ω` O(1e5), `k` O(1e-3)) — the concern being
+    that a step collapsing `k` barely moves the `ω`-dominated ‖R‖ and is accepted. But **measured, it
+    *stalls* the pitzDaily march**: the per-block relative norm plateaus long before the fields converge,
+    so `coupled_continuation`/`mass_flow_coupled_continuation` default to `jnp.linalg.norm` and expose
+    `block_scaled_norm` (default `False`) to request the block measure for experimentation. The helper and
+    the `BlockScaledNorm` class are kept as that opt-in path, not deleted.
+  - **`beta_floor` (SER lower bound) is available but off by default (a measured wash).** Bounding
+    `β = max(beta_floor, β₀(‖R‖/‖R₀‖)^p)` keeps each late shifted solve out of the ill-conditioned low-`β`
+    regime (correctness-safe — the floor scales the correction `δ`, which vanishes at the root, so it never
+    moves the converged state). But end-to-end it is a **net wash** (cheaper late solves cancel the extra
+    Newton steps), so it defaults to `0`; wired through `coupled_continuation` for further evaluation. The
+    settled coupled-solve cost is the diagonal-block-preconditioner weakness at high Reynolds number, **not**
+    the residual measure, `β` floor, or missing cross-coupling (a block-triangular preconditioner was worse
+    — non-convergent on recirculating pitzDaily). See `.claude/rules/solve.md`.
   - **The coupled flow block uses the convection-aware AMG + MSIMPLER Schur, not the smoothed/SIMPLE
     default (`_coupled_shift_policy`).** A RANS case is high-Reynolds, and the default
     `BlockPreconditioner.build` config (viscous-**smoothed** velocity AMG, which is Peclet-blind, + the
