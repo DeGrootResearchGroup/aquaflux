@@ -329,6 +329,50 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     the adjoint transpose depend on — so it must not be re-typed per family where one copy could drift.
     A new family adds a `_VCycleOps` builder and a thin entry point that calls `_fixed_cycle_solve`; do
     **not** re-write the cycle loop in it.
+  - **A level is STATIC indices + TRACED values, so a hierarchy refresh is a jit cache hit (binding).**
+    `_SparseLevel` / `_AirLevel` are `equinox.Module`s in which **only `n` and `n_coarse` are static** —
+    they size the sparse matvec output (`_coo_apply`'s `n_out`), so they must be concrete. Everything
+    else (`val`, `diagonal`, `coarse_inv`, the prolongation/restriction values, and **`lam_max`**) is a
+    traced leaf. `lam_max` is deliberately a **0-d array, not a Python `float`**: it is only smoother
+    arithmetic, and as a static field any refreshed value would be a new compilation-cache key —
+    defeating the point. Consequence: a hierarchy passed as a **jit argument** survives a refresh as a
+    *cache hit* (one compiled V-cycle), which is what lets a frozen preconditioner track a developing
+    flow without paying a recompile per refresh (the ~2.6× scalar-AMG staleness win above). This is only
+    sound because **the aggregation coarsening is a pure function of the graph** — `_aggregate` reads
+    `owner`/`nb`/`n` and never the coefficients — so on a fixed mesh a hierarchy re-derived at a new
+    operator has identical aggregates, coarse sizes and array shapes, and only values differ. Both
+    properties are pinned in `tests/unit/test_multigrid.py`
+    (`test_aggregation_hierarchy_structure_is_value_independent`,
+    `test_refreshing_a_hierarchy_is_a_compilation_cache_hit`). **Caveat — lAIR does NOT get this for
+    free, and this is measured, not hypothetical.** Its C/F split comes from `_strength_classical`, which
+    thresholds on `|A_ij|`, so re-deriving a reduction hierarchy at a new operator changes the split and
+    the shapes: on a 600-cell chain, cold vs developed coefficients (5000× flux, 1000× viscosity ramp)
+    gave **identical L0–L2 but divergent L3–L5** (`n_coarse` 37→38, then `n` 37→38 / `nnz` 109→112,
+    18→19 / 52→55), i.e. a different jit signature and therefore a recompile anyway. The aggregation
+    path was invariant at *every* level in the same comparison. **Consequence:** for `method="air"` (and
+    `velocity="convection-air"`) a cheap refresh requires **reusing the reference's frozen C/F split and
+    prolongation and recomputing only the values on it** — legitimate, since any valid split gives a
+    valid preconditioner. That is **`refresh_air_hierarchy(hierarchy, a_new, degree=…)`** (below),
+    whereas the aggregation path gets it for free by rebuilding. Also: do not add a
+    strength-of-connection filter to `_aggregate` without revisiting this, as that would make the
+    aggregation path value-dependent too.
+  - **`refresh_air_hierarchy` — the lAIR refresh that keeps the compilation signature (BUILT).** It
+    re-derives an lAIR hierarchy's **values** at a new operator while holding the coarsening fixed: each
+    level reuses its stored C/F split (recovered from the level's own masks) and its stored
+    prolongation, and re-solves only the local approximate-ideal restriction against the new `a`. The
+    prolongation must be *carried over*, not re-derived, because `_one_point_interpolation` picks each
+    F-point's strongest C-neighbour by `argmax |a_ij|` — a value-dependent column choice. The
+    restriction's sparsity, by contrast, depends only on the split and on `a`'s *pattern* (the
+    degree-`d` neighbourhood walk), so it is invariant, and the Galerkin `R A P` patterns below follow
+    inductively. The result is verified before returning (`_require_matching_structure`) and a
+    mismatched operator raises rather than silently returning a hierarchy that would recompile. Pinned
+    by `test_refresh_air_hierarchy_keeps_the_structure_and_is_a_cache_hit` (shapes preserved, values
+    changed, jitted V-cycle traces once), `test_refreshed_air_hierarchy_preconditions_the_new_operator`
+    (a refreshed cycle beats the stale one on the new operator, so the reused split is a real trade and
+    not a no-op), and `test_refresh_air_hierarchy_rejects_a_mismatched_operator`. **Why it matters:**
+    measured on the separated pitzDaily state with the production lAIR scalars, refreshing the k/ω AMGs
+    is worth ~2.4× in outer cycles (30 → 13 at β=2; the flow block 30 → 29, i.e. nothing), and this is
+    the only way to take that win without paying a recompile per refresh.
   - **Degenerate-mesh guard (binding — validated where the graph is consumed).** Because the
     hierarchies are built once off-jit and then frozen, a degenerate mesh must fail *there*, not as a
     silently stalling runtime V-cycle. Now that the builders are operator-in, the **graph** check lives

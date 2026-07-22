@@ -44,6 +44,7 @@ from .multigrid import (
     SmoothedHierarchy,
     air_multigrid_solve,
     build_air_hierarchy,
+    refresh_air_hierarchy,
     build_convection_hierarchy,
     build_smoothed_hierarchy,
     convection_multigrid_solve,
@@ -74,6 +75,7 @@ __all__ = [
     "decouple_dof",
     "default_linear_solver",
     "newton_step",
+    "refresh_air_hierarchy",
     "smoothed_multigrid_solve",
     "solve_linear",
 ]

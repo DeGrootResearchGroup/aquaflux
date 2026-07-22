@@ -45,6 +45,7 @@ import heapq
 from collections.abc import Callable
 from typing import NamedTuple
 
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
@@ -167,23 +168,35 @@ def _aggregate(owner: np.ndarray, nb: np.ndarray, n: int) -> tuple[np.ndarray, i
 # patched post-hoc (which fights the constant-preserving smoothed prolongation).
 
 
-class _SparseLevel(NamedTuple):
-    """One smoothed-aggregation level: a general sparse operator + its prolongation, all frozen."""
+class _SparseLevel(eqx.Module):
+    """One smoothed-aggregation level: a general sparse operator + its prolongation, all frozen.
 
-    n: int  # cells at this level (static)
+    **The level is split into a static index structure and dynamic values (binding).** Only ``n`` and
+    ``n_coarse`` are static: they size the sparse matvec's output (:func:`_coo_apply`'s ``n_out``), so
+    they must be concrete. Everything else — including ``lam_max``, which is pure arithmetic in the
+    smoothers — rides as a **traced** leaf. That split is what makes a hierarchy *refreshable*: because
+    the coarsening is a pure function of the graph (see :func:`_aggregate`, which reads only the
+    sparsity pattern), re-deriving a hierarchy at a new operator on the same mesh yields the identical
+    structure and changes only these values, so a refreshed hierarchy passed as a **jit argument** has
+    unchanged static metadata and array shapes — a compilation-cache hit rather than a rebuild-and-
+    recompile. Keeping ``lam_max`` a Python ``float`` would defeat exactly that (a changed static field
+    is a changed cache key), which is why it is stored as a 0-d array.
+    """
+
+    n: int = eqx.field(static=True)  # cells at this level (sizes the matvec output)
     row: jnp.ndarray  # (nnz,) COO row of the level operator A
     col: jnp.ndarray  # (nnz,) COO col
     val: jnp.ndarray  # (nnz,) COO value
     diagonal: jnp.ndarray  # (n,) diagonal of A
-    lam_max: float  # largest eigenvalue of D^-1 A, for the Chebyshev smoother (static)
+    lam_max: jnp.ndarray  # 0-d: largest eigenvalue of D^-1 A, for the smoother damping
     coarse_inv: jnp.ndarray | None  # dense pseudo-inverse (coarsest level only); None otherwise
     p_frow: jnp.ndarray | None  # (pnnz,) prolongation fine row (this level); None on coarsest
     p_ccol: jnp.ndarray | None  # (pnnz,) prolongation coarse col (next level)
     p_val: jnp.ndarray | None  # (pnnz,) prolongation value
-    n_coarse: int  # next-coarser cell count (static; 0 on coarsest)
+    n_coarse: int = eqx.field(static=True)  # next-coarser cell count (0 on coarsest)
 
 
-class SmoothedHierarchy(NamedTuple):
+class SmoothedHierarchy(eqx.Module):
     """A built smoothed-aggregation hierarchy: general-sparse levels, finest to coarsest."""
 
     levels: tuple[_SparseLevel, ...]
@@ -209,7 +222,7 @@ def _sparse_level(
         col=jnp.asarray(a_coo.col),
         val=jnp.asarray(a_coo.data),
         diagonal=jnp.asarray(a.diagonal()),
-        lam_max=float(lam_max),
+        lam_max=jnp.asarray(float(lam_max)),
         coarse_inv=None if coarse_inv is None else jnp.asarray(coarse_inv),
         p_frow=p_frow,
         p_ccol=p_ccol,
@@ -644,15 +657,21 @@ def convection_multigrid_solve(
 # the adjoint (``R != Pᵀ`` is handled by the transpose of the linear apply).
 
 
-class _AirLevel(NamedTuple):
+class _AirLevel(eqx.Module):
     """One lAIR level: the operator, its restriction and prolongation, and the C/F masks — all frozen.
 
     Unlike :class:`_SparseLevel` (which stores one prolongation and takes ``R = Pᵀ``), a reduction-based
     level carries an **independent** restriction ``R`` (fine → coarse) and prolongation ``P`` (coarse →
     fine), plus the fine/coarse masks the FC-Jacobi smoother relaxes over.
+
+    Split static-index / dynamic-value on the same rule as :class:`_SparseLevel` (only the two counts
+    that size a matvec are static). Note the **refreshability caveat**: unlike the aggregation path,
+    lAIR's coarsening reads operator *values* (:func:`_strength_classical`), so re-deriving it at a new
+    operator can legitimately change the C/F split and every shape — a reduction hierarchy is therefore
+    **not** guaranteed refreshable on a fixed structure the way an aggregation one is.
     """
 
-    n: int  # cells at this level (static)
+    n: int = eqx.field(static=True)  # cells at this level (sizes the matvec output)
     row: jnp.ndarray  # (nnz,) COO row of the level operator A
     col: jnp.ndarray  # (nnz,) COO col
     val: jnp.ndarray  # (nnz,) COO value
@@ -666,10 +685,10 @@ class _AirLevel(NamedTuple):
     p_col: jnp.ndarray | None  # (pnnz,) prolongation COO coarse col
     p_val: jnp.ndarray | None  # (pnnz,) prolongation value
     coarse_inv: jnp.ndarray | None  # dense pseudo-inverse (coarsest level only); None otherwise
-    n_coarse: int  # next-coarser cell count (static; 0 on coarsest)
+    n_coarse: int = eqx.field(static=True)  # next-coarser cell count (0 on coarsest)
 
 
-class AirHierarchy(NamedTuple):
+class AirHierarchy(eqx.Module):
     """A built lAIR hierarchy: reduction-based levels, finest to coarsest."""
 
     levels: tuple[_AirLevel, ...]
@@ -843,6 +862,100 @@ def _air_level(a: sp.csr_matrix, split: np.ndarray, restriction, prolongation) -
         coarse_inv=jnp.asarray(np.linalg.pinv(a.toarray())) if coarsest else None,
         n_coarse=0 if coarsest else prolongation.shape[1],
     )
+
+
+def refresh_air_hierarchy(
+    hierarchy: AirHierarchy, a: sp.csr_matrix, *, degree: int = 2
+) -> AirHierarchy:
+    """Re-derive an lAIR hierarchy's **values** at a new operator, reusing its frozen coarsening.
+
+    A frozen preconditioner goes stale as the flow develops, and re-freezing it at the current state is
+    a large win on the scalar transport blocks. Simply calling :func:`build_air_hierarchy` again would
+    work numerically but is a *different* hierarchy: lAIR's coarsening reads operator **values** (the
+    strength graph in :func:`_strength_classical`, and the strongest-C-neighbour choice in
+    :func:`_one_point_interpolation`), so a rebuild generally changes the C/F split and every shape
+    below the first level or two — a new compilation signature, so the refreshed preconditioner would
+    force a recompile of the solve it accelerates.
+
+    This instead holds the **structural** decisions fixed and recomputes only the numbers: each level
+    reuses its stored C/F split and its stored prolongation, and re-solves the local approximate-ideal
+    restriction against ``a``. That is legitimate because *any* valid C/F split gives a valid
+    preconditioner — freezing the reference's split trades a possibly better-adapted coarse space for a
+    refresh that costs no recompile. The restriction's sparsity depends only on the split and on ``a``'s
+    *pattern* (the degree-``d`` neighbourhood walk), both unchanged, so every level's shapes — and hence
+    the Galerkin ``R A P`` patterns below it — are invariant by construction; this is checked before
+    returning.
+
+    Parameters
+    ----------
+    hierarchy : AirHierarchy
+        The hierarchy whose coarsening is reused (built by :func:`build_air_hierarchy`).
+    a : scipy.sparse matrix
+        The new fine operator. Must have the same sparsity pattern as the one ``hierarchy`` was built
+        from (same mesh graph), which is what makes the structure invariant.
+    degree : int
+        The restriction neighbourhood degree; must match the one used to build ``hierarchy``.
+
+    Returns
+    -------
+    AirHierarchy
+        A hierarchy with identical static metadata and array shapes, carrying values from ``a``.
+
+    Raises
+    ------
+    ValueError
+        If the refreshed structure does not match ``hierarchy`` — which means the assumption above was
+        violated (a different mesh graph, or a mismatched ``degree``).
+    """
+    a = a.tocsr()
+    if a.shape[0] != hierarchy.levels[0].n:
+        raise ValueError(
+            f"refresh_air_hierarchy: operator has {a.shape[0]} rows but the hierarchy's finest level "
+            f"has {hierarchy.levels[0].n}. A refresh reuses the frozen coarsening, so the operator "
+            "must come from the same mesh graph."
+        )
+    levels: list[_AirLevel] = []
+    for index, level in enumerate(hierarchy.levels):
+        _require_positive_diagonal(a.diagonal(), f"refresh_air_hierarchy (level {index})")
+        if level.r_row is None:  # coarsest: a direct solve, no transfers to rebuild
+            levels.append(_air_level(a, np.ones(a.shape[0], dtype=np.int64), None, None))
+            break
+        # Reuse the frozen coarsening: the C/F split (from the stored masks) and the prolongation
+        # (whose column choice is value-dependent, so it must be carried over rather than re-derived).
+        split = np.asarray(level.c_mask).astype(np.int64)
+        prolongation = sp.csr_matrix(
+            (
+                np.asarray(level.p_val),
+                (np.asarray(level.p_row), np.asarray(level.p_col)),
+            ),
+            shape=(level.n, level.n_coarse),
+        )
+        restriction = _lair_restriction(a, split, degree)  # same pattern, values from `a`
+        levels.append(_air_level(a, split, restriction, prolongation))
+        a = (restriction @ a @ prolongation).tocsr()
+
+    refreshed = AirHierarchy(tuple(levels))
+    _require_matching_structure(hierarchy, refreshed, "refresh_air_hierarchy")
+    return refreshed
+
+
+def _require_matching_structure(original, refreshed, where: str) -> None:
+    """Reject a refresh that changed any shape — the property the no-recompile refresh depends on."""
+    if len(original.levels) != len(refreshed.levels):
+        raise ValueError(
+            f"{where}: refreshed hierarchy has {len(refreshed.levels)} levels, not "
+            f"{len(original.levels)}. The operator's sparsity pattern must match the one the "
+            "hierarchy was built from (same mesh graph), and `degree` must match the build."
+        )
+    for i, (old, new) in enumerate(zip(original.levels, refreshed.levels, strict=True)):
+        if (old.n, old.n_coarse) != (new.n, new.n_coarse) or old.val.shape != new.val.shape:
+            raise ValueError(
+                f"{where}: level {i} changed shape — (n, n_coarse, nnz) "
+                f"{(old.n, old.n_coarse, old.val.shape[0])} -> "
+                f"{(new.n, new.n_coarse, new.val.shape[0])}. The refreshed values would be a new "
+                "compilation signature, defeating the purpose; check that `a` has the same sparsity "
+                "pattern and that `degree` matches the build."
+            )
 
 
 def build_air_hierarchy(
