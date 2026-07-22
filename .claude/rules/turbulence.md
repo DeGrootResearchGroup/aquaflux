@@ -68,6 +68,23 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   `.claude/rules/solve.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
   `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output factor — the
   reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a frozen dataclass.
+  - **`reuse=` refreshes a stale k/ω preconditioner without changing the compilation signature.**
+    `scalar_transport_preconditioner(..., reuse=old)` (threaded through
+    `SSTTurbulence.k_preconditioner` / `omega_preconditioner`) re-derives the *values* at a new state on
+    the reused hierarchy's **frozen coarsening**. This is what makes a mid-march refresh affordable, and
+    the measured reason to want one: on a separated pitzDaily state, refreshing the **scalar** AMGs is
+    worth ~2.4× in outer GMRES cycles (30 → 13 at β=2 with the production lAIR scalars; refreshing the
+    *flow* block is worth nothing, 30 → 29). It matters **only for `method="air"`** — lAIR's C/F split
+    reads operator values, so a plain rebuild changes every shape below the first level or two and would
+    force a recompile of the solve it accelerates (`reuse` routes to
+    `~aquaflux.solve.refresh_air_hierarchy`). For `method="twolevel"` the aggregation reads only the
+    graph, so a rebuild is already structure-preserving and `reuse` is accepted but changes nothing.
+    A `ScaledScalarPreconditioner` wrapper is unwrapped (the log chain-rule scale is re-derived at the
+    new state by the caller), and reusing across *different* methods raises. Pinned in
+    `tests/unit/test_scalar_transport_preconditioner.py`: the lAIR refresh preserves shapes **where a
+    rebuild provably does not**, the twolevel path is structure-preserving either way, and a refreshed
+    preconditioner **beats the stale one on the developed operator** (so the reused split is a real
+    trade, not a no-op).
 - **The scalar policy's two halves have different lifetimes (binding, #105).** `ScalarShiftPolicy` carries
   a **shift diagonal rebuilt every sweep** (so the pseudo-time damping keeps tracking the operator as
   ν_t grows — freezing it would under-damp the march and lean on `DivergenceGuard` escalation) and an

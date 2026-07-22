@@ -43,6 +43,7 @@ from aquaflux.solve import (
     build_convection_hierarchy,
     convection_diffusion_operator,
     convection_multigrid_solve,
+    refresh_air_hierarchy,
 )
 from aquaflux.vectors import dot
 
@@ -260,6 +261,7 @@ def scalar_transport_preconditioner(
     method: str = "twolevel",
     v_cycles: int = 1,
     fixed_cells: jnp.ndarray | None = None,
+    reuse: ScalarTransportPreconditioner | None = None,
 ) -> ScalarTransportPreconditioner:
     """A frozen convection-diffusion V-cycle preconditioner for a scalar transport equation.
 
@@ -288,6 +290,16 @@ def scalar_transport_preconditioner(
         Cells whose residual is a value fixation ``phi - target`` (e.g. the omega near-wall cells):
         their rows are the identity, so they are detached from the aggregation (their incident edges
         dropped, unit diagonal) to match the operator the solve actually inverts.
+    reuse : ScalarTransportPreconditioner, optional
+        A preconditioner built earlier on the same mesh whose **coarsening is reused**, so this call
+        re-derives only the values at the new state. This matters for ``method="air"``: lAIR's C/F
+        split reads operator values, so a plain rebuild changes every shape below the first level or
+        two and the refreshed preconditioner would force a recompile of the solve it accelerates;
+        reusing the frozen split keeps the compilation signature (see
+        :func:`~aquaflux.solve.refresh_air_hierarchy`). For ``method="twolevel"`` the aggregation reads
+        only the graph, so a rebuild is already structure-preserving and this argument changes nothing.
+        Must have been built with the same ``method``. A :class:`ScaledScalarPreconditioner` wrapper is
+        unwrapped, since the reparametrization scale is re-derived at the new state by the caller.
 
     Returns
     -------
@@ -314,5 +326,34 @@ def scalar_transport_preconditioner(
         owner_e, nb_e, visc_int, n, flux=mdot_int, boundary_diagonal=boundary_diagonal
     )
     if method == "air":
-        return AirAmgPreconditioner(build_air_hierarchy(a), v_cycles=v_cycles)
+        # Reduction coarsening reads operator values, so a plain rebuild at a new state would change
+        # the C/F split and every shape below the first level or two -- a new compilation signature.
+        # Re-deriving the values on the reused hierarchy's frozen coarsening keeps the signature, so
+        # the solve this preconditions is not recompiled by the refresh.
+        hierarchy = (
+            build_air_hierarchy(a)
+            if reuse is None
+            else refresh_air_hierarchy(_reused_hierarchy(reuse, AirAmgPreconditioner), a)
+        )
+        return AirAmgPreconditioner(hierarchy, v_cycles=v_cycles)
+    # Aggregation coarsening reads only the graph, so on a fixed mesh a plain rebuild already
+    # reproduces the structure exactly -- `reuse` needs no special handling here.
     return ConvectionAmgPreconditioner(build_convection_hierarchy(a), v_cycles=v_cycles)
+
+
+def _reused_hierarchy(reuse: ScalarTransportPreconditioner, expected: type) -> object:
+    """The hierarchy inside a preconditioner being refreshed, unwrapping any output scaling.
+
+    A reparametrized scalar block carries its preconditioner wrapped in a
+    :class:`ScaledScalarPreconditioner` (the chain-rule factor for a log variable), and the scale is
+    re-derived at the new state by the caller — so a refresh reuses the *inner* frozen hierarchy.
+    """
+    while isinstance(reuse, ScaledScalarPreconditioner):
+        reuse = reuse.inner
+    if not isinstance(reuse, expected):
+        raise ValueError(
+            f"cannot refresh a {type(reuse).__name__} as a {expected.__name__}: the reused "
+            "preconditioner must have been built with the same `method`, since the coarsening "
+            "families are not interchangeable."
+        )
+    return reuse.hierarchy
