@@ -864,6 +864,100 @@ def _air_level(a: sp.csr_matrix, split: np.ndarray, restriction, prolongation) -
     )
 
 
+def refresh_air_hierarchy(
+    hierarchy: AirHierarchy, a: sp.csr_matrix, *, degree: int = 2
+) -> AirHierarchy:
+    """Re-derive an lAIR hierarchy's **values** at a new operator, reusing its frozen coarsening.
+
+    A frozen preconditioner goes stale as the flow develops, and re-freezing it at the current state is
+    a large win on the scalar transport blocks. Simply calling :func:`build_air_hierarchy` again would
+    work numerically but is a *different* hierarchy: lAIR's coarsening reads operator **values** (the
+    strength graph in :func:`_strength_classical`, and the strongest-C-neighbour choice in
+    :func:`_one_point_interpolation`), so a rebuild generally changes the C/F split and every shape
+    below the first level or two — a new compilation signature, so the refreshed preconditioner would
+    force a recompile of the solve it accelerates.
+
+    This instead holds the **structural** decisions fixed and recomputes only the numbers: each level
+    reuses its stored C/F split and its stored prolongation, and re-solves the local approximate-ideal
+    restriction against ``a``. That is legitimate because *any* valid C/F split gives a valid
+    preconditioner — freezing the reference's split trades a possibly better-adapted coarse space for a
+    refresh that costs no recompile. The restriction's sparsity depends only on the split and on ``a``'s
+    *pattern* (the degree-``d`` neighbourhood walk), both unchanged, so every level's shapes — and hence
+    the Galerkin ``R A P`` patterns below it — are invariant by construction; this is checked before
+    returning.
+
+    Parameters
+    ----------
+    hierarchy : AirHierarchy
+        The hierarchy whose coarsening is reused (built by :func:`build_air_hierarchy`).
+    a : scipy.sparse matrix
+        The new fine operator. Must have the same sparsity pattern as the one ``hierarchy`` was built
+        from (same mesh graph), which is what makes the structure invariant.
+    degree : int
+        The restriction neighbourhood degree; must match the one used to build ``hierarchy``.
+
+    Returns
+    -------
+    AirHierarchy
+        A hierarchy with identical static metadata and array shapes, carrying values from ``a``.
+
+    Raises
+    ------
+    ValueError
+        If the refreshed structure does not match ``hierarchy`` — which means the assumption above was
+        violated (a different mesh graph, or a mismatched ``degree``).
+    """
+    a = a.tocsr()
+    if a.shape[0] != hierarchy.levels[0].n:
+        raise ValueError(
+            f"refresh_air_hierarchy: operator has {a.shape[0]} rows but the hierarchy's finest level "
+            f"has {hierarchy.levels[0].n}. A refresh reuses the frozen coarsening, so the operator "
+            "must come from the same mesh graph."
+        )
+    levels: list[_AirLevel] = []
+    for index, level in enumerate(hierarchy.levels):
+        _require_positive_diagonal(a.diagonal(), f"refresh_air_hierarchy (level {index})")
+        if level.r_row is None:  # coarsest: a direct solve, no transfers to rebuild
+            levels.append(_air_level(a, np.ones(a.shape[0], dtype=np.int64), None, None))
+            break
+        # Reuse the frozen coarsening: the C/F split (from the stored masks) and the prolongation
+        # (whose column choice is value-dependent, so it must be carried over rather than re-derived).
+        split = np.asarray(level.c_mask).astype(np.int64)
+        prolongation = sp.csr_matrix(
+            (
+                np.asarray(level.p_val),
+                (np.asarray(level.p_row), np.asarray(level.p_col)),
+            ),
+            shape=(level.n, level.n_coarse),
+        )
+        restriction = _lair_restriction(a, split, degree)  # same pattern, values from `a`
+        levels.append(_air_level(a, split, restriction, prolongation))
+        a = (restriction @ a @ prolongation).tocsr()
+
+    refreshed = AirHierarchy(tuple(levels))
+    _require_matching_structure(hierarchy, refreshed, "refresh_air_hierarchy")
+    return refreshed
+
+
+def _require_matching_structure(original, refreshed, where: str) -> None:
+    """Reject a refresh that changed any shape — the property the no-recompile refresh depends on."""
+    if len(original.levels) != len(refreshed.levels):
+        raise ValueError(
+            f"{where}: refreshed hierarchy has {len(refreshed.levels)} levels, not "
+            f"{len(original.levels)}. The operator's sparsity pattern must match the one the "
+            "hierarchy was built from (same mesh graph), and `degree` must match the build."
+        )
+    for i, (old, new) in enumerate(zip(original.levels, refreshed.levels, strict=True)):
+        if (old.n, old.n_coarse) != (new.n, new.n_coarse) or old.val.shape != new.val.shape:
+            raise ValueError(
+                f"{where}: level {i} changed shape — (n, n_coarse, nnz) "
+                f"{(old.n, old.n_coarse, old.val.shape[0])} -> "
+                f"{(new.n, new.n_coarse, new.val.shape[0])}. The refreshed values would be a new "
+                "compilation signature, defeating the purpose; check that `a` has the same sparsity "
+                "pattern and that `degree` matches the build."
+            )
+
+
 def build_air_hierarchy(
     a: sp.csr_matrix,
     *,

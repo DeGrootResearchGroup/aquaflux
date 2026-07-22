@@ -29,6 +29,7 @@ from aquaflux.solve.multigrid import (
     build_convection_hierarchy,
     build_smoothed_hierarchy,
     convection_multigrid_solve,
+    refresh_air_hierarchy,
     smoothed_multigrid_solve,
 )
 
@@ -675,3 +676,73 @@ def test_lair_structure_is_value_dependent_unlike_aggregation() -> None:
         "lAIR coarsening happened to be shape-stable here; the refresh-by-reusing-the-split "
         "requirement is justified by its value dependence, so re-check _strength_classical"
     )
+
+
+def test_refresh_air_hierarchy_keeps_the_structure_and_is_a_cache_hit() -> None:
+    """Refreshing lAIR on its frozen coarsening changes only values — so it is a jit cache hit.
+
+    A plain rebuild at a new operator changes lAIR's C/F split and shapes (above), which would force a
+    recompile of the solve the preconditioner accelerates. Reusing the frozen split and prolongation
+    and re-solving only the restriction keeps every shape, so the compiled V-cycle is reused.
+    """
+    n = 600
+    cold_operator = _chain_operator(n, 0.01, np.ones(n - 1))
+    developed_operator = _chain_operator(n, 50.0, np.linspace(1.0, 1000.0, n - 1))
+    cold = build_air_hierarchy(cold_operator)
+    refreshed = refresh_air_hierarchy(cold, developed_operator)
+
+    # Structure preserved exactly (a from-scratch rebuild does NOT preserve it -- see the test above).
+    assert len(refreshed.levels) == len(cold.levels)
+    for old, new in zip(cold.levels, refreshed.levels, strict=True):
+        assert (old.n, old.n_coarse) == (new.n, new.n_coarse)
+        assert old.val.shape == new.val.shape
+    # ...but the values genuinely moved to the new operator.
+    assert not np.allclose(np.asarray(cold.levels[0].val), np.asarray(refreshed.levels[0].val))
+
+    traces = []
+
+    @jax.jit
+    def apply(hierarchy, b):
+        traces.append(1)
+        return air_multigrid_solve(hierarchy, b, cycles=1)
+
+    b = jnp.asarray(np.random.default_rng(0).normal(size=n))
+    apply(cold, b).block_until_ready()
+    assert len(traces) == 1
+    apply(refreshed, b).block_until_ready()
+    assert len(traces) == 1, "refreshing the lAIR hierarchy retraced the jitted V-cycle"
+
+
+def test_refreshed_air_hierarchy_preconditions_the_new_operator() -> None:
+    """The refreshed hierarchy must actually precondition the *new* operator, not just keep its shape.
+
+    Reusing the reference's C/F split is a deliberate trade (any valid split gives a valid
+    preconditioner), so the test is that one refreshed V-cycle reduces the new operator's residual
+    substantially better than the stale hierarchy does — i.e. the recomputed restriction really tracks
+    the new coefficients.
+    """
+    n = 600
+    cold_operator = _chain_operator(n, 0.01, np.ones(n - 1))
+    developed_operator = _chain_operator(n, 50.0, np.linspace(1.0, 1000.0, n - 1))
+    cold = build_air_hierarchy(cold_operator)
+    refreshed = refresh_air_hierarchy(cold, developed_operator)
+
+    rng = np.random.default_rng(0)
+    b = jnp.asarray(rng.normal(size=n))
+    a_dev = jnp.asarray(developed_operator.toarray())
+
+    def residual(hierarchy):
+        x = air_multigrid_solve(hierarchy, b, cycles=1)
+        return float(jnp.linalg.norm(a_dev @ x - b) / jnp.linalg.norm(b))
+
+    stale_residual, fresh_residual = residual(cold), residual(refreshed)
+    assert fresh_residual < stale_residual, (
+        f"refreshed V-cycle ({fresh_residual:.3e}) did not beat the stale one ({stale_residual:.3e})"
+    )
+
+
+def test_refresh_air_hierarchy_rejects_a_mismatched_operator() -> None:
+    """A refresh that would change any shape raises instead of silently returning a recompiling one."""
+    cold = build_air_hierarchy(_chain_operator(600, 0.01, np.ones(599)))
+    with pytest.raises(ValueError, match="refresh_air_hierarchy"):
+        refresh_air_hierarchy(cold, _chain_operator(400, 0.01, np.ones(399)))
