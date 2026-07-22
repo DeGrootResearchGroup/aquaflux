@@ -68,6 +68,27 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   `.claude/rules/solve.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
   `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output factor — the
   reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a frozen dataclass.
+  - **`solve_coupled(refresh_rtol=…)` stages the march to re-freeze the preconditioner — and the TWO
+    STAGES ARE LOAD-BEARING (binding, do not collapse them).** With `refresh_rtol` set, the march runs
+    two *convergence-gated* stages: to that loose tolerance with the preconditioner frozen at the IC,
+    then — after re-deriving the k/ω AMGs at the state reached (flow block carried over) — on to `rtol`.
+    The obvious "cleanup" is to collapse this into one continuous march with an in-place refresh, or to
+    carry `‖R0‖` across the boundary so the switched-evolution-relaxation ramp stays continuous. **Both
+    silently freeze the march**, and the failure mode is nasty because nothing raises.
+    *Why:* a refresh rebuilds the **shift diagonals** as well as the AMGs, and under `LogScalars` those
+    carry `d(φ)/d(w) = ω`. Re-derived at a developed state where `ω` has grown, the shift diagonal `d`
+    grows with it. Two separate solves means the second computes its **own** `‖R0‖` from the state
+    handed to it (`solve/implicit.py::_forward`), so `β` restarts at `β₀` and the grown `d` is paired
+    with a fresh `β`. Retaining `‖R0‖` instead pairs the grown `d` with the *small* `β` appropriate to
+    the pre-refresh residual — over-damping, so the step collapses and the march stops descending with
+    the relative residual creeping *upward* ~1e-5/step, recirculation and `k` static, no error and no
+    divergence-guard trip. (Observed directly on a prototype that held `‖R0‖` fixed across the refresh:
+    rel 2.2086e-01 at step 6 → 2.2146e-01 at step 18, 13 recirculation cells throughout.)
+    Also note `max_steps` applies to **each** stage, so a staged solve may take up to `2·max_steps`
+    Newton steps; the budget is deliberately not split, since either stage may need the full allowance.
+    The constrained path (`mass_flow_coupled_continuation` / `solve_coupled_mass_flow`) has **no**
+    staged refresh — it always builds a policy from scratch; thread `reuse` through if that driver is
+    added.
   - **`reuse=` refreshes a stale k/ω preconditioner without changing the compilation signature.**
     `scalar_transport_preconditioner(..., reuse=old)` (threaded through
     `SSTTurbulence.k_preconditioner` / `omega_preconditioner`) re-derives the *values* at a new state on

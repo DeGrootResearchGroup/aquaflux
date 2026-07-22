@@ -739,6 +739,24 @@ def solve_coupled(
         preconditioner is ``stop_gradient``-ed either way, and the implicit-function-theorem adjoint of
         the final solve returns a zero cotangent to its initial guess, so the staging cannot leak into
         the gradient.
+
+        **Two stages are load-bearing, not merely tidy (binding -- do not collapse them).** A refresh
+        rebuilds the pseudo-transient *shift diagonals* as well as the preconditioner, and under
+        :class:`LogScalars` those carry a factor ``d(phi)/d(w) = omega``. Re-derived at a developed
+        state, where ``omega`` has grown, the shift diagonal ``d`` grows with it. Because each stage is
+        a *separate* solve, the second computes its own ``||R0||`` from the state handed to it, so the
+        switched-evolution-relaxation ramp restarts at ``beta0`` and the larger ``d`` is paired with a
+        correspondingly fresh ``beta``. Carrying ``||R0||`` across the refresh instead -- to keep the
+        ramp "continuous", which looks like the more principled choice -- pairs the grown ``d`` with the
+        small ``beta`` appropriate to the *pre-refresh* residual. That is over-damping: the step
+        collapses and the march **silently stops descending** (no error, no divergence, no guard trip --
+        the relative residual simply creeps upward by ~1e-5 per step while the recirculation stays
+        frozen). Collapsing the two stages into one continuous march with an in-place refresh has the
+        same effect for the same reason.
+
+        ``max_steps`` applies to **each** stage, so a staged solve may take up to ``2 * max_steps``
+        Newton steps in total. The budget is deliberately not split: either stage may legitimately need
+        the full allowance, and halving it would fail a march that a single-stage solve completes.
     **continuation_kwargs
         Forwarded to :func:`coupled_continuation` when building internally (schedule + preconditioner
         options).
@@ -875,6 +893,9 @@ def mass_flow_coupled_continuation(
     ``forward_solver`` / ``block_scaled_norm``); ``flow_direction`` selects the constrained velocity
     component. ``block_scaled_norm`` here extends the same block-scaled measure with the constraint dof.
     """
+    # No `reuse` here: the mass-flow-constrained path has no staged-refresh driver (there is no
+    # `refresh_rtol` on `solve_coupled_mass_flow`), so a policy is always built from scratch. Thread
+    # `reuse` through if that driver is ever added -- the bordered policy wraps this one unchanged.
     policy = _coupled_shift_policy(coupled, reference_state, method, **preconditioner_kwargs)
     force, average = _coupled_constraint_vectors(coupled, flow_direction)
     bordered = _MassFlowBorderedPolicy(policy, force, average)
