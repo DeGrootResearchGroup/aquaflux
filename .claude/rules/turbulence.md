@@ -211,14 +211,34 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     exception: they do go stale, and refreshing them alone once the flow separates is worth ~2.6× in
     outer cycles** (31 → 12) — the one staleness lever that pays; see the staleness bullet in
     `.claude/rules/solve.md`. Overridable via `preconditioner_kwargs`.
-  - **Remaining limiter — the k equation drift (the open item).** With the config above the march pushes
-    past the omega plateau (rel 0.18 → ~0.09), but past there the **direct-`k` residual grows** (rel 1 →
-    ~5× over a few steps) as the high-Reynolds production develops, while `ω` and the flow converge; `k`'s
-    *absolute* residual stays small (so ‖R‖ still descends) but the growth re-stalls the march near rel
-    ~0.09. This is a `k`-stability issue, not a preconditioner one. **log-`k` is not the fix** (ill-
-    conditioned at the `k→0` no-slip walls — the reason `k` is direct). The k-tied realizability floor
-    (#126) and the production limiter are the closure levers; treat high-Reynolds `k` stability under the
-    coupled log-`ω` solve as the open follow-up.
+  - **~~Remaining limiter — the k equation drift~~ — RETIRED: the stall no longer reproduces (measured
+    2026-07-22).** This bullet used to record that past rel ~0.09 the direct-`k` residual grew (rel 1 →
+    ~5×) and re-stalled the march, and named high-Reynolds `k` stability as the open follow-up. **It
+    does not happen on the current code.** Re-measured on the full ~12k-cell pitzDaily from the cold
+    hybrid IC, second-order (Venkatakrishnan-limited) momentum, log-`ω`, conv+MSIMPLER: the march
+    descends **monotonically straight through 0.09** with no plateau —
+    rel 9.4e-2 (step 14) → 6.6e-2 (18) → 4.7e-2 (21) → 3.5e-2 (24) → 2.7e-2 (26) —
+    while the recirculation keeps growing (110 → 416 cells). **`k` does not diverge**: its peak *falls*
+    (13.1 → 11.2) once separation establishes. The fixes that landed after the original observation —
+    the inlet-driven `k` floor and the near-wall `ω` profile in the hybrid IC (#139), the Bernoulli
+    pressure seed, and the backtracking line search — appear to have removed it. Do **not** reopen `k`
+    stability, nonlinear elimination of the k–ω closure, or Reynolds-number continuation on the strength
+    of the old claim; re-measure first.
+  - **What is actually left on this case is COST, and it is preconditioner staleness (measured).** Over
+    that same march the *residual falls the whole way* but the **wall time per step grows ~7×**
+    (27 s at step 8 → 197 s at step 26) as the recirculation develops. That is the frozen scalar
+    preconditioner degrading in real time, and it is the same post-separation regime where refreshing
+    the k/ω AMGs is worth ~2.4–2.6× in outer cycles (see the staleness bullet in `.claude/rules/solve.md`).
+    The `reuse=` seam exists; driving a refresh **from the march** is the open item.
+  - **The slope limiter is NOT implicated (measured — do not re-derive this).** pitzDaily is the first
+    case that genuinely exercises `LimitedUpwind` (Poiseuille / cavity / smooth channels never activate a
+    limiter), so it was the natural suspect for the second-order march being slower than first-order.
+    Measured over an identical 14-step march: first-order rel 6.96e-2, limited `K=5` 9.39e-2, limited
+    `K=100` 9.63e-2, **unlimited (`limiter=None`, ψ≡1) 9.71e-2**. Removing the limiter entirely
+    reproduces the limited result, so the first-vs-second-order difference is inherent to the
+    *reconstruction*, not to limiting. (Two genuine limiter defects were found in that audit and filed —
+    a periodic-image inconsistency, and a dimensionally inconsistent `eps²` softening — but neither
+    causes this, and neither should be pursued as a convergence fix.)
   - **The per-scalar transform is layout-consistent through both coupled solves (binding).** `solve_coupled`
     and `solve_coupled_mass_flow` both map the physical IC into the solved space with `state_from_physical`
     and return `physical_fields` — so `LogScalars` is correct through the mass-flow-constrained path too
