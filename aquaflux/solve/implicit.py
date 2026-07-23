@@ -94,13 +94,19 @@ def backtracking_line_search(residual_fn, phi, delta, reference_norm, steps, nor
     ``norm(R(phi + alpha delta)) < reference_norm``, falling back to the smallest rung if none reduces
     the residual.
 
-    A fixed (unrolled) ladder keeps the step a constant-length operation, so it composes with a
-    ``lax.while_loop`` and the implicit-function-theorem ``custom_vjp`` without a data-dependent
-    branch. ``steps == 0`` returns the undamped full step ``phi + delta`` unchanged, so a
-    well-behaved iterate (near the root, or a linear residual) is unaffected. The search only
-    reshapes the forward path — the converged state, and hence the IFT adjoint, is unchanged. Shared
-    by the line-searched Newton step and the pseudo-transient march, so an accurate direction that
-    overshoots is scaled back cheaply (residual evaluations) rather than re-solved.
+    The ladder is walked by a ``lax.while_loop`` that **stops at the first (largest) reducing rung**,
+    so a step whose full length already descends (the common case near the root) costs a single
+    residual evaluation rather than ``steps + 1``. The loop compiles its body once, which keeps this
+    off the compile-time cost of an unrolled ladder. It is a **forward-only** device — the search
+    lives inside :class:`ImplicitNewtonSolver`'s ``custom_vjp`` forward pass, whose reverse rule is
+    the implicit-function-theorem transpose solve at the converged root and never differentiates the
+    iteration — so the non-differentiability of ``lax.while_loop`` is not a constraint here. Do not
+    call it on a path that is itself differentiated. ``steps == 0`` returns the undamped full step
+    ``phi + delta`` unchanged, so a well-behaved iterate (near the root, or a linear residual) is
+    unaffected. The search only reshapes the forward path — the converged state, and hence the IFT
+    adjoint, is unchanged. Shared by the line-searched Newton step and the pseudo-transient march, so
+    an accurate direction that overshoots is scaled back cheaply (residual evaluations) rather than
+    re-solved.
 
     Parameters
     ----------
@@ -125,16 +131,22 @@ def backtracking_line_search(residual_fn, phi, delta, reference_norm, steps, nor
     if steps == 0:
         return phi + delta
 
-    # Keep the *largest* rung that reduces the residual (locked in by ``accepted``); the smallest
-    # rung is the fallback when none does.
-    alpha = 1.0
-    chosen = 0.5**steps
-    accepted = jnp.asarray(False)
-    for _ in range(steps + 1):
-        reduces = (norm(residual_fn(phi + alpha * delta)) < reference_norm) & ~accepted
-        chosen = jnp.where(reduces, alpha, chosen)
-        accepted = accepted | reduces
-        alpha = 0.5 * alpha
+    # Walk the ladder alpha = 1, 1/2, ..., 1/2**steps (rung index 0..steps) and stop at the first that
+    # reduces the residual -- the largest, since we descend. ``chosen`` starts at the smallest rung, so
+    # if none reduces it is the fallback; when a rung reduces, ``found`` ends the loop with that alpha.
+    # The carry (index, chosen, found) is fixed-shape, so the body compiles once.
+    def cond(carry):
+        index, _, found = carry
+        return (~found) & (index <= steps)
+
+    def body(carry):
+        index, chosen, _ = carry
+        alpha = 0.5**index
+        reduces = norm(residual_fn(phi + alpha * delta)) < reference_norm
+        return index + 1, jnp.where(reduces, alpha, chosen), reduces
+
+    smallest = jnp.asarray(0.5**steps)
+    _, chosen, _ = jax.lax.while_loop(cond, body, (jnp.asarray(0), smallest, jnp.asarray(False)))
     return phi + chosen * delta
 
 
