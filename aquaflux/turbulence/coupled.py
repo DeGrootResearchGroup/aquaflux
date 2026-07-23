@@ -315,9 +315,10 @@ class CoupledRANS(eqx.Module):
 
         # The closure carries nu_t and the mean strain, so build it first and take nu_t from it --
         # eddy_viscosity would otherwise recompute the same strain and nu_t the closure already forms.
-        grad_velocity = self.momentum.velocity_gradient(flow)
-        closure = self.turbulence.closure_fields(grad_velocity, k, omega)
-        momentum = self.momentum.with_eddy_viscosity(closure.nu_t)
+        closure = self.turbulence.closure_fields(self.momentum.velocity_fields(flow), k, omega)
+        momentum = self.momentum.with_eddy_viscosity(
+            closure.nu_t, self.turbulence.wall_face_eddy_viscosity(k)
+        )
 
         # One Rhie--Chow assembly at the re-viscosified state feeds both the flow residual and the
         # mass flux the scalars advect on.
@@ -622,8 +623,9 @@ def _coupled_shift_policy(
     # The reference's scalar blocks are the *solved* unknown; the frozen operators (closure, AMG, shift
     # diagonals) are all assembled in the physical fields, so recover them through the transform.
     flow_ref, k_ref, omega_ref = coupled.physical_fields(reference_state)
-    grad_velocity = coupled.momentum.velocity_gradient(flow_ref)
-    closure = coupled.turbulence.closure_fields(grad_velocity, k_ref, omega_ref)
+    closure = coupled.turbulence.closure_fields(
+        coupled.momentum.velocity_fields(flow_ref), k_ref, omega_ref
+    )
     momentum = coupled.momentum.with_eddy_viscosity(closure.nu_t)
     # The coupled flow block uses the convection-aware velocity AMG + MSIMPLER Schur, not the viscous-
     # smoothed / SIMPLE default: a RANS case is high-Reynolds, and the Peclet-blind smoothed velocity

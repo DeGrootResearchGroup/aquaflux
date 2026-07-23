@@ -18,7 +18,7 @@ turbulent field is strictly positive). Constant density (see :mod:`~aquaflux.tur
 The parts of a sweep between the two injected solves -- the pre-solve eddy viscosity and the
 post-solve mass flux and closure -- run in two ``jit``-compiled prologues (``_sweep_eddy_viscosity``,
 ``_sweep_closure``) rather than op-by-op eagerly, and the post-solve prologue assembles the flow
-fields **once** (:meth:`~aquaflux.flow.MomentumContinuity.flow_fields`) for both the velocity gradient
+fields **once** (:meth:`~aquaflux.flow.MomentumContinuity.flow_fields`) for both the velocity fields
 the closure reads and the mass flux the scalars advect on. The k/omega boundaries are bound to the
 mesh once before the loop so those compiled prologues never re-run the dynamic-shape patch resolve.
 
@@ -84,11 +84,10 @@ def _sweep_eddy_viscosity(
 
     Jitted so the velocity-gradient reconstruction, the strain magnitude, and the eddy-viscosity model
     fuse into one compiled call rather than dispatching op-by-op eagerly. The gradient is the
-    lightweight :meth:`~aquaflux.flow.MomentumContinuity.velocity_gradient` (no Rhie--Chow assembly),
+    lightweight :meth:`~aquaflux.flow.MomentumContinuity.velocity_fields` (no Rhie--Chow assembly),
     which is all ``nu_t`` needs -- the mass flux is not yet defined before the flow solve.
     """
-    grad_velocity = momentum.velocity_gradient(flow)
-    return turbulence.eddy_viscosity(grad_velocity, k, omega)
+    return turbulence.eddy_viscosity(momentum.velocity_fields(flow).gradient, k, omega)
 
 
 @eqx.filter_jit
@@ -102,13 +101,13 @@ def _sweep_closure(
     """The post-flow-solve scalar-transport inputs ``(mdot, closure)`` for the solved flow.
 
     One :meth:`~aquaflux.flow.MomentumContinuity.flow_fields` assembly yields both the velocity
-    gradient the SST closure reads and the Rhie--Chow mass flux the k/omega equations advect on, so
+    fields the SST closure reads and the Rhie--Chow mass flux the k/omega equations advect on, so
     the whole assembly (boundary fields, gradients, lagged ``a_P``, Rhie--Chow flux) runs a single
     time per sweep instead of once for the gradient and again for the mass flux. Jitted so none of it
     runs op-by-op eagerly.
     """
     fields = momentum.flow_fields(flow)
-    closure = turbulence.closure_fields(fields.grad_velocity, k, omega)
+    closure = turbulence.closure_fields(fields.velocity_fields, k, omega)
     return fields.mdot, closure
 
 
@@ -272,7 +271,9 @@ def solve_segregated(
 
         flow_prev, k_prev, omega_prev = flow, k, omega
         nu_t = _sweep_eddy_viscosity(momentum, turbulence, flow, k, omega)
-        momentum = momentum.with_eddy_viscosity(nu_t)
+        # The same adaptive wall-function eddy viscosity the coupled residual applies, so the
+        # segregated and coupled paths solve the identical near-wall model (zero on a resolved wall).
+        momentum = momentum.with_eddy_viscosity(nu_t, turbulence.wall_face_eddy_viscosity(k))
         # The flow solve may adjust the assembler (e.g. a bulk-velocity-constrained solve carries the
         # body force out as a converged multiplier), so it returns the assembler alongside the state.
         momentum, flow = solve_flow(momentum, flow)

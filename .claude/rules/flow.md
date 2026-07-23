@@ -32,12 +32,24 @@ Engineering Principles.
     one state (a coupled RANS residual wanting the residual **and** `mdot`, a segregated sweep wanting
     the gradient **and** `mdot`) must call `flow_fields` **once** and read the fields — not call the
     accessors separately, which re-assembles the whole Rhie–Chow flux per accessor (was 3× per coupled
-    residual eval; the pre-optimization HLO / AD-tape size scaled with that). **`velocity_gradient` is
+    residual eval; the pre-optimization HLO / AD-tape size scaled with that). **`velocity_fields` is
     deliberately the lightweight path** (boundary velocity + the shared `_velocity_gradient` only, **no**
     `a_P`/`mdot`): the eddy viscosity a segregated sweep needs comes before the mass flux is even
     defined, so dragging the Rhie–Chow assembly through it would defeat the point. Same formula as the
     bundle (both compose `_boundary_fields` + `_velocity_gradient`), so no duplication. Pinned by
-    `test_flow_fields_accessors_agree_with_the_bundle` / `test_velocity_gradient_skips_the_rhie_chow_assembly`.
+    `test_flow_fields_accessors_agree_with_the_bundle` / `test_velocity_fields_skips_the_rhie_chow_assembly`.
+  - **The kinematic half is its own bundle, `VelocityFields` (`velocity`, `boundary_velocity`,
+    `gradient`), nested inside `FlowFields` (binding — Principle 3).** It is exactly the part of a flow
+    state that is a pure function of the velocity unknowns (no pressure, no `a_P`, no `mdot`), and it is
+    the *whole* of what the turbulence closure reads from the flow — `SSTTurbulence.closure_fields`
+    takes this one object. It exists because the adaptive wall treatment needs `velocity` and
+    `boundary_velocity` **as well as** the gradient (the near-wall shear rate is `|U_P − U_wall|/d`
+    measured against the patch's own velocity), and threading three arrays that always travel together
+    is the primitive-obsession smell. `MomentumContinuity.velocity_fields(state)` returns it directly;
+    `flow_fields(state).velocity_fields` is the same record inside the full bundle — **nested, not a
+    second view**, so there is no duplicate spelling of those three arrays. It replaced
+    `velocity_gradient(state)` outright (pre-release, no shim); a caller that only wants the tensor
+    writes `velocity_fields(state).gradient`.
   - **Fluid properties come
   from a `PropertyModel`** (`build(mesh, geom, properties, gradient_scheme, boundary, …)`, must supply
   `"viscosity"`+`"density"`; `.viscosity`/`.density` evaluate them per-cell) — see
@@ -143,6 +155,18 @@ Engineering Principles.
   - `with_eddy_viscosity` is part of the contract the segregated driver requires of any injected
     momentum stand-in. Pinned in `tests/unit/test_momentum_coupling.py` on a `ρ≠1` fluid, so a dropped
     density factor cannot pass.
+  - **The wall-function eddy viscosity enters the SAME seam, as a second (per-face) leaf.**
+    `with_eddy_viscosity(nu_t, wall_eddy_viscosity=None)` also carries an optional per-face **kinematic**
+    `ν_t,wall` (shape `(n_faces,)`), the adaptive wall function's value (`turbulence.wall_face_eddy_viscosity(k)`,
+    the `nut_wall` blend on wall faces, zero off them). `_wall_boundary_viscosity()` turns it into the
+    momentum diffusion's `boundary_coefficient`: on the flow's **shearing walls** (`FlowBoundary.shears_flow()`)
+    the wall-face coefficient is `μ + ρ·ν_t,wall` — the wall model's value replacing the owner-cell
+    `k/ω` closure — every other face keeps the owner `μ_eff`, and interior faces are ignored by
+    `DiffusionFlux`. `μ_eff = μ + ρν_t` stays formed **here** (the closure still supplies only the
+    kinematic value). `None` (default) leaves walls resolved, so the momentum block is **bit-identical**;
+    on a wall-resolved mesh `ν_t,wall = 0` (below `y*_lam`), so it is a no-op there too — this is what
+    lets it be always-on. Applied in **both** paths so they solve the identical near-wall model:
+    `coupled.py` inside the residual (live, in the coupled Jacobian) and `driver.py` per sweep (frozen).
   - **The same call means different things in the two paths**, and nothing at the call site says
     which: `driver.py` applies it *outside* the residual, so `ν_t` is frozen for the sweep and the
     coupling is invisible to AD; `coupled.py` applies it *inside*, so `dR_momentum/d(k,ω)` flows

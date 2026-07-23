@@ -2,7 +2,7 @@
 
 ``MomentumContinuity.mass_flux`` must return exactly the Rhie--Chow mass flux the continuity
 residual is built from (so a transported scalar advects on the same conservative flux), and
-``velocity_gradient`` must return the tensor a turbulence model reads. Both are checked without a
+``velocity_fields`` must return the kinematic bundle a turbulence model reads. Both are checked without a
 solve -- they are functions of the state. Also the shared :meth:`MomentumContinuity.flow_fields`
 seam: the accessors and the residual read off one assembly so a coupling caller re-derives the
 boundary fields, gradients, and Rhie--Chow flux once rather than per accessor.
@@ -82,32 +82,34 @@ def test_mass_flux_is_the_continuity_mdot() -> None:
     assert jnp.allclose(pressure_residual, mesh.face_cells.scatter_conservative(mdot))
 
 
-def test_velocity_gradient_shape_and_differentiable() -> None:
-    """The tensor has shape (n_cells, dim, dim), is finite, and grad flows through it."""
+def test_velocity_fields_shape_and_differentiable() -> None:
+    """The bundle's arrays have the documented shapes, are finite, and grad flows through them."""
     mesh, asm = _assembler()
     state = _arbitrary_state(mesh)
-    grad = asm.velocity_gradient(state)
-    assert grad.shape == (mesh.n_cells, mesh.dim, mesh.dim)
-    assert not bool(jnp.any(jnp.isnan(grad)))
-    g = jax.grad(lambda s: jnp.sum(asm.velocity_gradient(s) ** 2))(state)
+    fields = asm.velocity_fields(state)
+    assert fields.gradient.shape == (mesh.n_cells, mesh.dim, mesh.dim)
+    assert fields.velocity.shape == (mesh.n_cells, mesh.dim)
+    assert fields.boundary_velocity.shape == (mesh.n_faces, mesh.dim)
+    assert not bool(jnp.any(jnp.isnan(fields.gradient)))
+    g = jax.grad(lambda s: jnp.sum(asm.velocity_fields(s).gradient ** 2))(state)
     assert not bool(jnp.any(jnp.isnan(g)))
 
 
 def test_flow_fields_accessors_agree_with_the_bundle() -> None:
-    """mass_flux / velocity_gradient / residual read the same values a single flow_fields yields."""
+    """mass_flux / velocity_fields / residual read the same values a single flow_fields yields."""
     mesh, asm = _assembler()
     state = _arbitrary_state(mesh)
     fields = asm.flow_fields(state)
     assert jnp.array_equal(asm.mass_flux(state), fields.mdot)
-    assert jnp.array_equal(asm.velocity_gradient(state), fields.grad_velocity)
+    assert jnp.array_equal(asm.velocity_fields(state).gradient, fields.velocity_fields.gradient)
     assert jnp.array_equal(asm.residual(state), asm.residual_from_fields(fields))
 
 
-def test_velocity_gradient_skips_the_rhie_chow_assembly(monkeypatch) -> None:
-    """velocity_gradient is the lightweight reconstruction: it does not build the lagged a_P / mdot.
+def test_velocity_fields_skips_the_rhie_chow_assembly(monkeypatch) -> None:
+    """velocity_fields is the lightweight reconstruction: it does not build the lagged a_P / mdot.
 
     A segregated sweep needs the eddy viscosity (from the gradient) before the mass flux is even
-    defined, so ``velocity_gradient`` must not drag the whole Rhie--Chow assembly along; ``flow_fields``
+    defined, so ``velocity_fields`` must not drag the whole Rhie--Chow assembly along; ``flow_fields``
     and ``mass_flux`` do exactly one such assembly.
     """
     mesh, asm = _assembler()
@@ -115,8 +117,8 @@ def test_velocity_gradient_skips_the_rhie_chow_assembly(monkeypatch) -> None:
     calls = _count_rhie_chow_assemblies(monkeypatch)
 
     calls[0] = 0
-    asm.velocity_gradient(state)
-    assert calls[0] == 0  # gradient only -- no a_P / Rhie--Chow work
+    asm.velocity_fields(state)
+    assert calls[0] == 0  # kinematic only -- no a_P / Rhie--Chow work
 
     calls[0] = 0
     asm.flow_fields(state)

@@ -364,7 +364,7 @@ def test_hybrid_initialize_gives_a_developed_channel_eddy_viscosity() -> None:
     """
     _, momentum, turbulence = _periodic_channel(beta=0.0035)
     flow, k, omega = hybrid_initialize(momentum, turbulence)
-    nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
+    nu_t = turbulence.eddy_viscosity(momentum.velocity_fields(flow).gradient, k, omega)
 
     u_tau = (0.0035 * 1.0 / RHO) ** 0.5
     assert float(jnp.max(nu_t)) == pytest.approx(0.09 * u_tau * 1.0, rel=0.05)

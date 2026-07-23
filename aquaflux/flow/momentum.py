@@ -46,21 +46,48 @@ if TYPE_CHECKING:
     from aquaflux.schemes import GradientScheme
 
 
+class VelocityFields(NamedTuple):
+    """The kinematic velocity state: cell values, boundary-face values, and the cell gradient.
+
+    The part of a flow state that is a pure function of the velocity unknowns -- no pressure, no
+    lagged ``a_P``, no Rhie--Chow flux -- and the whole of what a turbulence closure reads from the
+    flow. It is produced both by the lightweight :meth:`MomentumContinuity.velocity_fields` (before a
+    mass flux is even defined) and, as part of :class:`FlowFields`, by the full assembly, so a
+    consumer takes this one bundle rather than three arrays that always travel together.
+
+    Attributes
+    ----------
+    velocity : jnp.ndarray
+        Cell velocity, shape ``(n_cells, dim)``.
+    boundary_velocity : jnp.ndarray
+        Boundary-face velocity from the flow boundary conditions, shape ``(n_faces, dim)`` (the
+        entries on interior faces are unused). The wall value a near-wall shear rate measures the
+        cell velocity against.
+    gradient : jnp.ndarray
+        Cell velocity-gradient tensor, shape ``(n_cells, dim, dim)``, ``[c, i, j] = d u_i / d x_j``.
+    """
+
+    velocity: jnp.ndarray  # (n_cells, dim)
+    boundary_velocity: jnp.ndarray  # (n_faces, dim)
+    gradient: jnp.ndarray  # (n_cells, dim, dim), [c, i, j] = d u_i/d x_j
+
+
 class FlowFields(NamedTuple):
     """The per-evaluation flow quantities the residual assembles once and shares.
 
     Returned by :meth:`MomentumContinuity.flow_fields`, so a caller that needs several of these
     quantities at one state (a coupled residual wanting both the residual and the mass flux, a
-    segregated sweep wanting both the velocity gradient and the mass flux) assembles them **once**
+    segregated sweep wanting both the velocity fields and the mass flux) assembles them **once**
     and reads the fields it needs, rather than re-deriving the boundary fields, gradients, lagged
     ``a_P``, and Rhie--Chow flux per accessor.
+
+    The kinematic half is the nested :class:`VelocityFields`, which is also what the lightweight
+    :meth:`MomentumContinuity.velocity_fields` returns on its own.
     """
 
-    velocity: jnp.ndarray  # (n_cells, dim)
+    velocity_fields: VelocityFields
     pressure: jnp.ndarray  # (n_cells,)
-    boundary_velocity: jnp.ndarray  # (n_faces, dim)
     boundary_pressure: jnp.ndarray  # (n_faces,)
-    grad_velocity: jnp.ndarray  # (n_cells, dim, dim), [c, i, j] = d u_i/d x_j
     grad_pressure: jnp.ndarray  # (n_cells, dim)
     mdot: jnp.ndarray  # (n_faces,) Rhie--Chow face mass flux
 
@@ -114,6 +141,7 @@ class MomentumContinuity(eqx.Module):
     pressure_pin: int | None = eqx.field(static=True)
     pressure_pin_value: float
     eddy_viscosity: jnp.ndarray | None = None
+    wall_eddy_viscosity: jnp.ndarray | None = None
 
     @classmethod
     def build(
@@ -191,7 +219,9 @@ class MomentumContinuity(eqx.Module):
         """A zero flat state vector, shape ``((dim + 1) n_cells,)``."""
         return self._layout.zeros()
 
-    def with_eddy_viscosity(self, eddy_viscosity: jnp.ndarray) -> MomentumContinuity:
+    def with_eddy_viscosity(
+        self, eddy_viscosity: jnp.ndarray, wall_eddy_viscosity: jnp.ndarray | None = None
+    ) -> MomentumContinuity:
         """Return a copy carrying the turbulence closure's eddy viscosity ``nu_t``.
 
         The one seam a RANS closure enters the momentum block through. The closure supplies only its
@@ -205,18 +235,31 @@ class MomentumContinuity(eqx.Module):
         once per sweep with the closure frozen; the coupled residual applies it live, so
         ``dR_momentum / d(k, omega)`` flows through ``nu_t`` under AD.
 
+        ``wall_eddy_viscosity`` is the optional **wall-function** contribution: a per-face kinematic
+        eddy viscosity (shape ``(n_faces,)``) that overrides the momentum wall-face diffusion
+        coefficient with ``mu + rho nu_t,wall`` on the flow's shearing walls, so the wall shear
+        follows the law of the wall on a mesh whose first cell is not in the viscous sublayer (see
+        :meth:`_wall_boundary_viscosity`). ``None`` (default) leaves the walls resolved (the plain
+        no-slip diffusion), so the momentum block is bit-identical.
+
         Parameters
         ----------
         eddy_viscosity : jnp.ndarray
             Per-cell **kinematic** eddy viscosity ``nu_t``, shape ``(n_cells,)``.
+        wall_eddy_viscosity : jnp.ndarray or None
+            Per-face wall-function **kinematic** eddy viscosity ``nu_t,wall``, shape ``(n_faces,)``
+            (meaningful on shearing-wall faces, ignored elsewhere), or ``None`` for resolved walls.
 
         Returns
         -------
         MomentumContinuity
-            A new assembler carrying ``nu_t``; ``self`` is unchanged.
+            A new assembler carrying ``nu_t`` (and the wall value); ``self`` is unchanged.
         """
         return eqx.tree_at(
-            lambda m: m.eddy_viscosity, self, eddy_viscosity, is_leaf=lambda x: x is None
+            lambda m: (m.eddy_viscosity, m.wall_eddy_viscosity),
+            self,
+            (eddy_viscosity, wall_eddy_viscosity),
+            is_leaf=lambda x: x is None,
         )
 
     # --- properties -----------------------------------------------------------
@@ -238,6 +281,32 @@ class MomentumContinuity(eqx.Module):
     def density(self) -> jnp.ndarray:
         """Per-cell density, shape ``(n_cells,)``."""
         return self.properties.evaluate(self.mesh.cell_zones)["density"]
+
+    def _wall_boundary_viscosity(self) -> jnp.ndarray | None:
+        """Per-face momentum diffusion coefficient carrying the wall-function override, or ``None``.
+
+        On the flow's **shearing walls** (:meth:`~aquaflux.flow.boundary.FlowBoundary.shears_flow`) the
+        wall-face effective viscosity is ``mu + rho nu_t,wall`` — the wall model's value in place of the
+        owner-cell ``k/omega`` closure — so the wall shear follows the law of the wall on a mesh whose
+        first cell is not in the viscous sublayer. Every other boundary face keeps the owner-cell
+        ``mu_eff`` (a no-op there), and interior faces are ignored by the diffusion operator. Returns
+        ``None`` when no wall eddy viscosity is set, so the momentum diffusion stays on the plain
+        per-cell coefficient and is bit-identical.
+
+        The molecular ``mu`` and ``rho`` come from this assembler, so the ``mu_eff = mu + rho nu_t``
+        relation stays in one place (the closure supplies only the kinematic ``nu_t,wall``).
+        """
+        if self.wall_eddy_viscosity is None:
+            return None
+        owner = self.mesh.face_cells.owner
+        molecular = self.properties.evaluate(self.mesh.cell_zones)["viscosity"]
+        wall_mu = molecular[owner] + self.density[owner] * self.wall_eddy_viscosity
+        shears = self.boundary.apply(
+            self.mesh.face_cells,
+            jnp.zeros(self.mesh.n_faces),
+            lambda bc, faces, owner: jnp.full(faces.shape, float(bc.shears_flow())),
+        )
+        return jnp.where(shears > 0.0, wall_mu, self.viscosity[owner])
 
     # --- boundary assembly -------------------------------------------------------------
 
@@ -467,7 +536,11 @@ class MomentumContinuity(eqx.Module):
         viscosity = self.viscosity  # per-cell mu, the momentum diffusion coefficient
         normal, area = self.geometry.face.normal, self.geometry.face.area
         volume = self.geometry.cell.volume
-        diffusion = DiffusionFlux(coefficient="viscosity")
+        # The wall-function effective viscosity, if any, overrides only the shearing-wall boundary
+        # faces (None -> plain per-cell coefficient, bit-identical).
+        diffusion = DiffusionFlux(
+            coefficient="viscosity", boundary_coefficient=self._wall_boundary_viscosity()
+        )
         advection = (
             AdvectionFlux(mass_flux=mdot, scheme=self.advection_scheme)
             if self.advection_scheme is not None
@@ -513,7 +586,7 @@ class MomentumContinuity(eqx.Module):
         consumer that needs more than one of them at a single state -- the residual and ``mdot`` in a
         coupled solve, the velocity gradient and ``mdot`` in a segregated sweep -- calls this **once**
         and reads the fields it needs (via :meth:`residual_from_fields`, :attr:`FlowFields.mdot`,
-        :attr:`FlowFields.grad_velocity`), so the boundary fields, gradients, lagged ``a_P``, and
+        :attr:`FlowFields.velocity_fields`), so the boundary fields, gradients, lagged ``a_P``, and
         Rhie--Chow flux are assembled a single time instead of once per accessor.
 
         Parameters
@@ -536,11 +609,9 @@ class MomentumContinuity(eqx.Module):
         d_coeff = self.geometry.cell.volume[:, None] / a_p  # Rhie--Chow coefficient V / a_P
         mdot = self._mass_flux(velocity, grad_velocity, pressure, grad_pressure, d_coeff)
         return FlowFields(
-            velocity,
+            VelocityFields(velocity, boundary_velocity, grad_velocity),
             pressure,
-            boundary_velocity,
             boundary_pressure,
-            grad_velocity,
             grad_pressure,
             mdot,
         )
@@ -560,10 +631,11 @@ class MomentumContinuity(eqx.Module):
         pressure_face = self._face_pressure(
             fields.pressure, fields.grad_pressure, fields.boundary_pressure
         )
+        kinematic = fields.velocity_fields
         velocity_residual = self._momentum_residual(
-            fields.velocity,
-            fields.grad_velocity,
-            fields.boundary_velocity,
+            kinematic.velocity,
+            kinematic.gradient,
+            kinematic.boundary_velocity,
             pressure_face,
             fields.mdot,
         )
@@ -591,17 +663,19 @@ class MomentumContinuity(eqx.Module):
         """
         return self.flow_fields(state).mdot
 
-    def velocity_gradient(self, state: jnp.ndarray) -> jnp.ndarray:
-        """The per-cell velocity-gradient tensor for ``state``, shape ``(n_cells, dim, dim)``.
+    def velocity_fields(self, state: jnp.ndarray) -> VelocityFields:
+        """The kinematic velocity bundle for ``state`` (cell, boundary-face, and gradient).
 
-        ``[c, i, j] = d u_i / d x_j``; its symmetric part is the mean strain rate a turbulence model
-        consumes. Evaluate on the converged flow ``state``.
+        The velocity-gradient tensor's symmetric part is the mean strain rate a turbulence model
+        consumes, and the cell/boundary velocity pair is what a near-wall shear rate is measured
+        from. Evaluate on the converged flow ``state``.
 
         Reconstructed directly from the boundary velocity and the shared per-component gradient
         (:meth:`_velocity_gradient`) -- the same formula :meth:`flow_fields` uses -- **without** the
-        Rhie--Chow ``a_P`` / ``mdot`` work, since only the gradient is wanted here (a segregated sweep
-        needs ``nu_t`` before the mass flux is even defined). A caller that also needs ``mdot`` at this
-        state should call :meth:`flow_fields` once.
+        Rhie--Chow ``a_P`` / ``mdot`` work, since only the kinematic half is wanted here (a segregated
+        sweep needs ``nu_t`` before the mass flux is even defined). A caller that also needs ``mdot``
+        at this state should call :meth:`flow_fields` once and read
+        :attr:`FlowFields.velocity_fields`.
 
         Parameters
         ----------
@@ -610,4 +684,6 @@ class MomentumContinuity(eqx.Module):
         """
         velocity, pressure = self.unpack(state)
         boundary_velocity, _ = self._boundary_fields(velocity, pressure)
-        return self._velocity_gradient(velocity, boundary_velocity)
+        return VelocityFields(
+            velocity, boundary_velocity, self._velocity_gradient(velocity, boundary_velocity)
+        )

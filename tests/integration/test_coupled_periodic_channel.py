@@ -118,7 +118,7 @@ def test_coupled_newton_converges_on_a_periodic_body_force_channel(case) -> None
     assert residual_norm < 1e-8
 
     # Genuinely turbulent, not the laminar (nu_t = 0) branch the degenerate IC would have started.
-    nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
+    nu_t = turbulence.eddy_viscosity(momentum.velocity_fields(flow).gradient, k, omega)
     assert float(jnp.max(nu_t) / NU) > 10.0
 
     # The realizability floors are strictly inactive at the converged state (adjoint honesty): k sits

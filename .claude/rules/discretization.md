@@ -56,7 +56,20 @@ Principles.
   for the eventual properties model, so keep it single-sourced on the assembler, not baked into
   `DiffusionFlux` as operator config.
 - **`diffusion.py` — BUILT.** `DiffusionFlux` (a `FaceFluxOperator` that gathers phi/grad/gamma/x
-  from the context). Implements the flux-*continuous* DeGroot–Straatman normal
+  from the context). Its optional **`boundary_coefficient`** field (`(n_faces,)`, default `None`)
+  overrides the owner-cell `Gamma` **on boundary faces only** — a surface whose effective transport
+  coefficient differs from its owner cell's. `None` and every interior face are untouched, so
+  it is behaviour-neutral wherever not supplied (pinned in `test_diffusion.py`). **Two live consumers,
+  both in the adaptive wall treatment** (see `.claude/rules/turbulence.md`), plus the obvious future
+  ones (contact resistance, surface film): the momentum wall-function eddy viscosity `mu + rho
+  nu_t,wall`, and the k equation's wall-face diffusivity `(1-f)·gamma` faded to zero as the wall cell
+  enters the log layer. That second one is worth noting as a *pattern*: a boundary flux that must
+  vanish smoothly is expressed by fading the **coefficient**, not by making the boundary **face value**
+  approach the owner value — the flux is identical, but a state-dependent face value contributes
+  `d(phi_ip)/d(phi_P)` to the residual's linearization and can drive it past one (measured: the k
+  version diverges), whereas the coefficient carries the same dependence at the *frozen* closure state.
+  Implements the
+  flux-*continuous* DeGroot–Straatman normal
   derivative: one-sided extrapolation from each cell centroid to the integration point, the
   common face value eliminated via `Gamma_P dphi/dn = Gamma_N dphi/dn`, giving
   `[(phi_N − phi_P) + corr_N − corr_P] / denom`, `denom = (D_P·n) − (Gamma_P/Gamma_N)(D_N·n)`.

@@ -82,6 +82,33 @@ def test_boundary_flux_one_sided() -> None:
     assert abs(float(flux[0]) + 1.0 * (2.0 - 1.0) / 0.5 * 0.5) < 1e-13
 
 
+def test_boundary_coefficient_overrides_the_boundary_face_gamma() -> None:
+    """On a boundary face the per-face coefficient replaces the owner-cell gamma (linear scaling)."""
+    field, context = _single_face(1.0, 0.0, boundary_value=2.0, interior=False)
+    default = DiffusionFlux().face_flux(field, context)  # gamma = 1
+    overridden = DiffusionFlux(boundary_coefficient=jnp.array([3.0])).face_flux(field, context)
+    assert jnp.allclose(overridden, 3.0 * default)
+
+
+def test_boundary_coefficient_leaves_interior_faces_unchanged() -> None:
+    """An interior face ignores the per-face boundary coefficient (only boundary faces are overridden)."""
+    field, context = _single_face(1.0, 3.0)  # interior
+    default = DiffusionFlux().face_flux(field, context)
+    overridden = DiffusionFlux(boundary_coefficient=jnp.array([99.0])).face_flux(field, context)
+    assert jnp.allclose(overridden, default)
+
+
+def test_boundary_coefficient_is_differentiable() -> None:
+    """Gradients flow through the boundary coefficient (state-dependent in a wall-function residual)."""
+
+    def loss(gamma_b):
+        field, context = _single_face(1.0, 0.0, boundary_value=2.0, interior=False)
+        return jnp.sum(DiffusionFlux(boundary_coefficient=gamma_b).face_flux(field, context) ** 2)
+
+    g = jax.grad(loss)(jnp.array([3.0]))
+    assert bool(jnp.all(jnp.isfinite(g)))
+
+
 def test_non_orthogonal_correction_enters_flux() -> None:
     """A face-tangential gradient contributes through the correction terms."""
     # Face centroid offset off the P-N line; distinct owner/neighbour gradients so the correction

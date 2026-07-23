@@ -193,12 +193,12 @@ def test_segregated_prologues_match_the_eager_assembly() -> None:
     flow, k, omega = coupled.layout.unpack(_healthy_state(mesh, coupled))
 
     nu_t = _sweep_eddy_viscosity(momentum, turbulence, flow, k, omega)
-    expected_nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
+    expected_nu_t = turbulence.eddy_viscosity(momentum.velocity_fields(flow).gradient, k, omega)
     assert jnp.allclose(nu_t, expected_nu_t)
 
     mdot, closure = _sweep_closure(momentum, turbulence, flow, k, omega)
     assert jnp.allclose(mdot, momentum.mass_flux(flow))
-    expected_closure = turbulence.closure_fields(momentum.velocity_gradient(flow), k, omega)
+    expected_closure = turbulence.closure_fields(momentum.velocity_fields(flow), k, omega)
     assert jnp.allclose(closure.nu_t, expected_closure.nu_t)
     assert jnp.allclose(closure.strain_rate, expected_closure.strain_rate)
 

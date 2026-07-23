@@ -297,7 +297,7 @@ def test_coupled_solve_self_starts_from_a_cold_hybrid_initial_condition() -> Non
     assert residual_norm < 1e-8
     assert float(jnp.min(k)) >= 0.0
     assert float(jnp.min(omega)) > 0.0
-    nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
+    nu_t = turbulence.eddy_viscosity(momentum.velocity_fields(flow).gradient, k, omega)
     assert float(jnp.max(nu_t) / NU) > 1.0  # genuinely turbulent at the converged state
 
 

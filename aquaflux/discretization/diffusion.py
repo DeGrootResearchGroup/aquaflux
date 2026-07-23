@@ -33,6 +33,11 @@ hand-derived coefficients.
 At a boundary face the neighbour side is replaced by the weak boundary value ``phi_ip``
 supplied by a :class:`~aquaflux.boundary.conditions.BoundaryCondition`, giving the
 one-sided flux ``Gamma_P (phi_ip - phi_P - corr_P) / (D_P . n) A``.
+
+An optional per-face ``boundary_coefficient`` overrides ``Gamma_P`` on boundary faces only, for a
+surface whose effective transport coefficient differs from its owner cell's — a wall-function eddy
+viscosity, a contact resistance, a surface film. Interior faces and the ``None`` default are
+untouched, so it is behaviour-neutral wherever it is not supplied.
 """
 
 from __future__ import annotations
@@ -60,9 +65,16 @@ class DiffusionFlux(FaceFluxOperator):
         The name of the property this operator uses as its diffusion coefficient
         ``Gamma`` (``"diffusivity"`` for a generic scalar, ``"conductivity"`` for heat,
         ``"viscosity"`` for momentum) — read from ``context.properties``. Static.
+    boundary_coefficient : jnp.ndarray or None
+        Optional per-face coefficient ``(n_faces,)`` that replaces the owner-cell ``Gamma`` **on
+        boundary faces only** (interior entries are ignored). Its home is a surface whose effective
+        transport coefficient differs from its owner cell's — the wall-function eddy viscosity, where
+        the momentum wall-face ``mu_eff`` is the wall model's value rather than ``k/omega``. ``None``
+        (default) leaves every face on the owner-cell coefficient, so the operator is unchanged.
     """
 
     coefficient: str = eqx.field(static=True, default="diffusivity")
+    boundary_coefficient: jnp.ndarray | None = None
 
     def face_flux(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
         fc = context.face_cells
@@ -93,5 +105,11 @@ class DiffusionFlux(FaceFluxOperator):
         normal_grad_boundary = (context.boundary_values - phi_owner - corr_p) / dpn
 
         normal_grad = fc.combine_face_values(normal_grad_interior, normal_grad_boundary)
+        # The face coefficient is the owner-cell value, except where a per-face boundary coefficient
+        # overrides it on boundary faces (combine_face_values keeps the owner value on interior
+        # faces, so interior fluxes and the None default are untouched).
+        gamma_face = gamma_owner
+        if self.boundary_coefficient is not None:
+            gamma_face = fc.combine_face_values(gamma_owner, self.boundary_coefficient)
         # Owner-outward flux of phi is down-gradient (Fourier): -Gamma (grad phi . n) A.
-        return -gamma_owner * normal_grad * area
+        return -gamma_face * normal_grad * area

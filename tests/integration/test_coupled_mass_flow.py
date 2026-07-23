@@ -132,7 +132,7 @@ def test_constrained_solve_holds_bulk_velocity_and_converges(case) -> None:
     assert jnp.isfinite(beta)
 
     # Genuinely turbulent, not the laminar (nu_t = 0) branch the degenerate IC would have started.
-    nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
+    nu_t = turbulence.eddy_viscosity(momentum.velocity_fields(flow).gradient, k, omega)
     assert float(jnp.max(nu_t) / NU) > 10.0
 
     # The realizability floors are strictly inactive at the converged state (adjoint honesty): the

@@ -14,7 +14,20 @@ the segregated outer loop coupling the flow and turbulence solves in
 
 from __future__ import annotations
 
-from .boundary import equilibrium_k, inlet_k, inlet_omega, omega_wall_value
+from .boundary import (
+    equilibrium_k,
+    log_layer_shear_rate,
+    inlet_k,
+    inlet_omega,
+    k_wall_production,
+    nut_wall,
+    omega_wall,
+    omega_wall_value,
+    wall_function_weight,
+    wall_k_diffusivity,
+    wall_shear_stress,
+    wall_y_star,
+)
 from .continuation import ScalarShiftPolicy, scalar_pseudo_transient_solve
 from .coupled import (
     CoupledRANS,
@@ -39,6 +52,7 @@ from .preconditioner import (
 from .sources import (
     KDestruction,
     KProduction,
+    NearWallKClosure,
     OmegaCrossDiffusion,
     OmegaDestruction,
     OmegaProduction,
@@ -57,6 +71,7 @@ __all__ = [
     "KDestruction",
     "KProduction",
     "LogScalars",
+    "NearWallKClosure",
     "OmegaCrossDiffusion",
     "OmegaDestruction",
     "OmegaProduction",
@@ -74,6 +89,10 @@ __all__ = [
     "hybrid_initialize",
     "inlet_k",
     "inlet_omega",
+    "k_wall_production",
+    "log_layer_shear_rate",
+    "nut_wall",
+    "omega_wall",
     "omega_wall_value",
     "scalar_pseudo_transient_solve",
     "scalar_transport_preconditioner",
@@ -81,4 +100,8 @@ __all__ = [
     "solve_coupled",
     "solve_segregated",
     "strain_rate_magnitude",
+    "wall_function_weight",
+    "wall_k_diffusivity",
+    "wall_shear_stress",
+    "wall_y_star",
 ]

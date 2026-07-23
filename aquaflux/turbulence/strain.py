@@ -12,7 +12,7 @@ continuous there, but the ``sqrt`` chain rule differentiates to ``dS = dq / (2 S
 ``q = 2 S_ij S_ij``, which is ``0/0 = NaN`` at ``S = 0``. A perfectly uniform velocity region has
 ``S = 0`` identically (zero gradient), so that NaN reaches the whole automatic-differentiation
 Jacobian — a body-force-driven periodic channel starts from a uniform plug and hits it in every
-interior cell. The magnitude is therefore taken through a **guarded ``sqrt``** (:func:`_safe_sqrt`)
+interior cell. The magnitude is therefore taken through a **guarded ``sqrt``** (:func:`safe_sqrt`)
 whose argument is clamped away from zero *only on the branch that is discarded there*, so the
 derivative at exactly ``q = 0`` is the finite minimum-norm subgradient ``dS = 0`` while the value and
 the derivative are bit-identical to a plain ``sqrt`` wherever ``q > 0``.
@@ -29,7 +29,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 
-def _safe_sqrt(argument: jnp.ndarray) -> jnp.ndarray:
+def safe_sqrt(argument: jnp.ndarray) -> jnp.ndarray:
     """``sqrt(argument)`` with a finite (zero) derivative at ``argument = 0`` instead of ``inf``.
 
     ``d/dx sqrt(x) = 1 / (2 sqrt(x)) -> inf`` at ``x = 0``, so automatic differentiation of a plain
@@ -46,7 +46,7 @@ def _safe_sqrt(argument: jnp.ndarray) -> jnp.ndarray:
 def strain_rate_magnitude(velocity_gradient: jnp.ndarray) -> jnp.ndarray:
     """Strain-rate magnitude ``S = sqrt(2 S_ij S_ij)`` per cell, shape ``(n_cells,)``.
 
-    Differentiable at ``S = 0`` (via :func:`_safe_sqrt`), where the plain ``sqrt`` chain rule gives
+    Differentiable at ``S = 0`` (via :func:`safe_sqrt`), where the plain ``sqrt`` chain rule gives
     ``0/0 = NaN``; the value and derivative are bit-identical to a plain ``sqrt`` wherever ``S > 0``
     (see the module docstring).
 
@@ -63,4 +63,4 @@ def strain_rate_magnitude(velocity_gradient: jnp.ndarray) -> jnp.ndarray:
         The strain-rate magnitude per cell, shape ``(n_cells,)``.
     """
     strain = 0.5 * (velocity_gradient + jnp.swapaxes(velocity_gradient, -1, -2))
-    return _safe_sqrt(2.0 * jnp.sum(strain * strain, axis=(-2, -1)))
+    return safe_sqrt(2.0 * jnp.sum(strain * strain, axis=(-2, -1)))
