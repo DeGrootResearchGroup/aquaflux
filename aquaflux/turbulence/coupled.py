@@ -687,6 +687,27 @@ def _coupled_shift_policy(
     return CoupledShiftPolicy(coupled.layout, block, k_shift, omega_shift, k_amg, omega_amg)
 
 
+def _is_traced(pytree: object) -> bool:
+    """Whether any array leaf of ``pytree`` is a JAX tracer (i.e. we are inside a JAX transform).
+
+    ``solve_coupled`` orchestrates the march eagerly (the scalar-block AMG hierarchies are assembled
+    off the jit path as ``scipy.sparse`` matrices, so the whole solve cannot be traced), so a tracer
+    leaf means the caller has wrapped the solve in ``jax.grad`` / ``jvp`` / ``vmap``. Used to reject the
+    forward-only preconditioner refresh under differentiation with a clear error.
+
+    Parameters
+    ----------
+    pytree : object
+        Any pytree (here the ``(coupled, flow, k, omega)`` inputs), possibly containing ``None`` leaves.
+
+    Returns
+    -------
+    bool
+        ``True`` if at least one leaf is a :class:`jax.core.Tracer`.
+    """
+    return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(pytree))
+
+
 def solve_coupled(
     coupled: CoupledRANS,
     flow: jnp.ndarray | None = None,
@@ -750,10 +771,17 @@ def solve_coupled(
         preconditioner dominates but late enough that the flow has developed (the win appears only once
         the flow separates -- refreshing at a pre-separation state buys nothing).
 
-        The converged state and its adjoint are unchanged: both stages solve the same residual, the
-        preconditioner is ``stop_gradient``-ed either way, and the implicit-function-theorem adjoint of
-        the final solve returns a zero cotangent to its initial guess, so the staging cannot leak into
-        the gradient.
+        **Forward-only accelerator -- not usable under ``jax.grad`` (raises).** The refresh re-derives
+        the preconditioner from the *mid-march* state; when differentiating, that state is a tracer, so
+        the refreshed preconditioner would capture it and escape the converged solve's ``custom_vjp`` as
+        a leaked tracer (the same reason a preconditioner must be built from concrete parameters outside
+        ``jax.grad``). Since a refresh also forbids an explicit ``continuation`` (it must rebuild), there
+        is no concrete-preconditioner path through it, so ``refresh_rtol`` set under differentiation
+        raises rather than leaking. To obtain gradients, drop ``refresh_rtol`` and differentiate the
+        single-stage solve with a ``continuation`` built on concrete parameters outside ``jax.grad`` --
+        the adjoint is refresh-independent anyway (the preconditioner is ``stop_gradient``-ed and only
+        accelerates the Krylov iteration, so both marches reach the same converged state and thus the
+        same implicit-function-theorem adjoint).
 
         **Two stages are load-bearing, not merely tidy (binding -- do not collapse them).** A refresh
         rebuilds the pseudo-transient *shift diagonals* as well as the preconditioner, and under
@@ -794,6 +822,19 @@ def solve_coupled(
             f"refresh_rtol ({refresh_rtol}) must be looser than rtol ({rtol}): the refresh is meant to "
             "happen part way through the march, and a refresh_rtol at or below rtol would only "
             "re-freeze the preconditioner after the solve has already converged."
+        )
+    if refresh_rtol is not None and _is_traced((coupled, flow, k, omega)):
+        # The refresh re-derives the preconditioner from the mid-march state, which is a tracer when
+        # differentiating; the refreshed preconditioner would capture it and escape the converged
+        # solve's custom_vjp as a leaked tracer. There is no concrete-preconditioner path through a
+        # refresh (it forbids an explicit `continuation`), so this cannot be worked around here --
+        # raise with the fix rather than letting the leak surface as an opaque UnexpectedTracerError.
+        raise ValueError(
+            "refresh_rtol is a forward-only accelerator and cannot be used under jax.grad (or any "
+            "JAX transform): the mid-march preconditioner rebuild would capture the differentiation "
+            "tracer. Drop refresh_rtol and differentiate the single-stage solve with a `continuation` "
+            "built on concrete parameters outside jax.grad -- the adjoint is refresh-independent, so "
+            "the gradient is identical."
         )
     if flow is None or k is None or omega is None:
         flow, k, omega = hybrid_initialize(coupled.momentum, coupled.turbulence)

@@ -232,6 +232,33 @@ def test_refresh_rtol_must_be_looser_than_rtol() -> None:
         solve_coupled(coupled, flow, k, omega, rtol=1e-2, refresh_rtol=1e-3)
 
 
+def test_refresh_rtol_is_rejected_under_differentiation() -> None:
+    """``refresh_rtol`` is a forward-only accelerator: it raises under ``jax.grad``, not leaks.
+
+    The refresh re-derives the preconditioner from the mid-march state, which is a tracer when
+    differentiating; the refreshed preconditioner would then capture that tracer and escape the
+    converged solve's ``custom_vjp`` as an opaque ``UnexpectedTracerError``. A refresh also forbids an
+    explicit (concrete) ``continuation``, so there is no way to build the preconditioner outside the
+    trace -- the only honest behaviour is a clear up-front error. The guard fires before any solve, so
+    this stays a fast test. Differentiating the single-stage solve (no ``refresh_rtol``) remains the
+    supported path and is exercised by the integration adjoint gate.
+    """
+    mesh, coupled = _cavity()
+    flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
+
+    def objective(nu_scale):
+        scaled = eqx.tree_at(
+            lambda c: c.turbulence.molecular_viscosity,
+            coupled,
+            coupled.turbulence.molecular_viscosity * nu_scale,
+        )
+        f, _, _ = solve_coupled(scaled, flow, k, omega, rtol=1e-2, refresh_rtol=1e-1)
+        return jnp.sum(f**2)
+
+    with pytest.raises(ValueError, match="forward-only accelerator"):
+        jax.grad(objective)(1.0)
+
+
 def test_refreshing_the_policy_carries_the_shift_diagonals() -> None:
     """A ``reuse=`` refresh must re-derive only the AMGs and carry the shift diagonals unchanged.
 
