@@ -95,6 +95,21 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     one (each solve measures its own `‖R0‖`), and the constrained path
     (`mass_flow_coupled_continuation` / `solve_coupled_mass_flow`) has **no** staged refresh — thread
     `reuse` through if that driver is added.
+    - **`refresh_rtol` is forward-only — it *raises* under `jax.grad`, and must (binding).** The refresh
+      re-derives the preconditioner from the **mid-march** state, which is a tracer when differentiating;
+      the refreshed preconditioner would capture it and escape the converged solve's `custom_vjp` as an
+      `UnexpectedTracerError` (the general "build the preconditioner from concrete params *outside*
+      `jax.grad`" footgun — [[precond-outside-grad]]). A refresh also forbids an explicit `continuation`,
+      so there is **no** concrete-preconditioner path through it — hence the honest behaviour is a clear
+      up-front `ValueError`, not a leak. `solve_coupled` guards this with `_is_traced((coupled, flow, k,
+      omega))` (reliable because the solve is eager-only — the scalar AMGs are off-jit scipy, so a tracer
+      leaf can only mean a wrapping transform). To differentiate, drop `refresh_rtol` and take the
+      gradient of the single-stage solve with a `continuation` built on concrete params outside
+      `jax.grad`; the adjoint is refresh-independent (the preconditioner is `stop_gradient`-ed, both
+      marches reach the same converged state, so the IFT adjoint is identical), so nothing is lost. This
+      is why the refresh's gradient property is covered by *forward* tests (`same fixed point`) plus the
+      existing single-stage adjoint gate, and by a fast unit test that the guard fires — **not** by an
+      adjoint test through the staged solve (there is none: that path cannot be differentiated).
   - **`reuse=` refreshes a stale k/ω preconditioner without changing the compilation signature.**
     `scalar_transport_preconditioner(..., reuse=old)` (threaded through
     `SSTTurbulence.k_preconditioner` / `omega_preconditioner`) re-derives the *values* at a new state on
