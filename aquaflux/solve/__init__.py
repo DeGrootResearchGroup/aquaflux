@@ -13,7 +13,8 @@ unit tests. The surface is three groups:
 * **The Newton driver, the single step, and the linear solve** — `ImplicitNewtonSolver` (the
   driver: converges, globalizes, and carries the implicit-function-theorem adjoint), `newton_step`
   (one matrix-free correction — exact in one call for a linear residual, and differentiable in both
-  modes), `solve_linear`, `default_linear_solver`.
+  modes), `solve_linear` (returns the solution together with the solve's restart-cycle count —
+  the staleness signal a mid-march preconditioner refresh triggers on), `default_linear_solver`.
 * **Forward globalization** — the `ForwardStep` strategies `DampedNewtonStep` and
   `PseudoTransientStep`, with the `ShiftPolicy` / `ShiftTerm` / `StepAcceptance` seams a caller
   implements and the default `DivergenceGuard`, and the injected `ResidualNorm` the strategy judges

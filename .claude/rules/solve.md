@@ -40,6 +40,27 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   convergence, not the solution or its gradient — **verified transparent** in
   `test_preconditioning.py` (solution and gradient identical with/without `M`). This is the seam
   the **outer block preconditioner** (below) attaches to.
+  - **`solve_linear` returns `(x, cycles)` — there is ONE linear-solve entry point, not a counted/
+    uncounted pair (binding, do not re-split).** A caller that only wants the answer writes
+    `x, _ = solve_linear(...)`. A `solve_linear_counted` sibling existed briefly and was **deleted**: it
+    held the real body while `solve_linear` forwarded to it and dropped the count, i.e. the old shape
+    preserved across a refactor — the delegating-wrapper form the pre-release no-shims policy bans. It
+    also duplicated the whole signature and `Parameters` block (its docstring had already degenerated to
+    "the arguments mean exactly what they do there", which cannot stand alone), and it was *dominated*:
+    it did `solve_linear`'s job plus more. The blast radius of collapsing was ~9 lines — the function has
+    exactly **two** library call sites (`newton.py`'s `newton_correction`, `implicit.py`'s adjoint
+    transpose solve); the "it has too many callers to change" intuition is false, so do not resurrect the
+    pair on that argument. **The count is restart CYCLES, not matvecs** (each cycle is up to `restart`
+    matvecs — the standing misreading of `lineax`'s `num_steps`), pinned to `int32` so a caller can carry
+    it through a `lax.while_loop` (whose carry structure must be invariant — exactly one call site does,
+    the pseudo-transient escalation loop), and `0` for a solver that reports none (a direct
+    factorization). **Why the count:** a frozen preconditioner going stale shows up first as a *rising
+    cycle count on an otherwise-unchanged system*, before the residual history shows anything — so it is
+    the honest trigger for re-freezing the preconditioner mid-march, and a robust one. Wall-clock time is
+    the tempting proxy and a bad one: it moves with machine load or a suspended process while the linear
+    algebra has not changed at all. Pinned in `test_preconditioning.py`, including the load-bearing
+    behavioural check that **a better preconditioner strictly lowers the count** (otherwise it measures
+    nothing).
 - **`newton.py` — BUILT: `newton_step` / `newton_correction`, one correction each. There is NO
   `NewtonSolver` class — it was deleted (binding, #102).** Each forms `J` matrix-free via `jax.jvp`
   and calls `solve_linear`; no hand-derived Jacobian.
@@ -131,6 +152,22 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   globalizing the stiff k/omega solves via `scalar_pseudo_transient_solve` — the **only** scalar path
   the SST driver supports (the fixed-count Newton sub-solve was removed). When a new nonlinear residual
   needs pseudo-time globalization, write a `ShiftPolicy` — do **not** re-implement the march.
+  - **`stepper()` returns `(phi_next, cycles)` — ONE step method on the whole `ForwardStep` protocol,
+    counted/uncounted pair deleted (binding).** Every strategy reports its step's restart-cycle count
+    (`DampedNewtonStep` gets it from `newton_correction`, which now returns `(delta, r, cycles)`); a
+    consumer with no use for it drops it (`phi, _ = step(…)`). A `counted_stepper()` sibling existed
+    briefly, with `stepper()` forwarding to it and dropping the count — deleted for the same reason as
+    `solve_linear_counted` above, and note it had **no production consumer at all** while it existed.
+    The reported count is the **accepted** attempt's, not the sum over rejected escalation attempts —
+    the cost of the step actually taken. **A step whose every attempt was rejected reports `0`**
+    (`best_cycles` is only written on acceptance): a consumer must treat `0` as *no measurement*, not
+    as *free*, or a rejected step reads as the cheapest in the march. Dropped by `_forward`.
+  - **The count is NOT carried out of `_forward`'s `while_loop` (binding).** Two reasons, both concrete:
+    it would put an `int32` in the primal output of `_implicit_solve`'s `custom_vjp`, so the reverse rule
+    would have to handle a `float0` cotangent leaf in the most correctness-critical function in the
+    package, for a number the differentiated path can never use; and it would force the *generic* Newton
+    loop to pick which step's count survives (last / max / sum), which is a reporting policy the solver
+    has no business owning. Per-step cost must be observed eagerly instead.
   - **`line_search` — backtrack the shifted step before escalating β (binding, the coupled-RANS fix).**
     The step optionally scales the shifted correction `δ` back along `{1, 1/2, …, 1/2**line_search}`
     (`backtracking_line_search`, extracted from `implicit.py` and shared with `DampedNewtonStep` — one
