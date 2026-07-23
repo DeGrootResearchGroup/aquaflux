@@ -135,7 +135,14 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     The step optionally scales the shifted correction `δ` back along `{1, 1/2, …, 1/2**line_search}`
     (`backtracking_line_search`, extracted from `implicit.py` and shared with `DampedNewtonStep` — one
     home for the ladder) and keeps the largest length that reduces the residual, **before** the
-    accept/escalate test. `line_search=0` (default) is the old behaviour: take the full step `φ+δ`, and
+    accept/escalate test. The ladder is a **`lax.while_loop` that stops at the first (largest) reducing
+    rung** — a full step that already descends (the common case near the root) costs one residual
+    evaluation, not `line_search+1`, and the loop body compiles once instead of unrolling `line_search+1`
+    residual copies into the graph. It is safe as a non-differentiable `while_loop` because the search is
+    **forward-only**: it runs inside `ImplicitNewtonSolver`'s `custom_vjp` forward pass, whose reverse
+    rule is the IFT transpose solve at the root and never differentiates the iteration (every caller is a
+    `ForwardStep`; nothing differentiates through it — audited). Do **not** call it on a differentiated
+    path. `line_search=0` (default) is the old behaviour: take the full step `φ+δ`, and
     the **only** recourse to an overshoot is escalating β — a *full re-solve*. This was measured to be
     the dominant coupled-RANS cost: from the hybrid IC the full coupled Newton step overshoots by
     ~10⁷× (‖R‖ 220 → 5.8e9), so every step burned ~4–7 expensive re-solves and, worse, escalating β
