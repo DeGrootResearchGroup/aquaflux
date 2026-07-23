@@ -394,6 +394,7 @@ class SSTTurbulence(eqx.Module):
         reference: jnp.ndarray,
         *,
         method: str = "twolevel",
+        reuse: ScalarTransportPreconditioner | None = None,
     ) -> ScalarTransportPreconditioner:
         """The convection-diffusion AMG preconditioning the k-equation's shifted solve.
 
@@ -430,6 +431,7 @@ class SSTTurbulence(eqx.Module):
             self.k_residual(mdot, closure),
             reference,
             method=method,
+            reuse=reuse,
         )
 
     def k_shift_policy(
@@ -482,6 +484,7 @@ class SSTTurbulence(eqx.Module):
         reference: jnp.ndarray,
         *,
         method: str = "twolevel",
+        reuse: ScalarTransportPreconditioner | None = None,
     ) -> ScalarTransportPreconditioner:
         """The convection-diffusion AMG preconditioning the omega-equation's shifted solve.
 
@@ -500,6 +503,7 @@ class SSTTurbulence(eqx.Module):
             reference,
             method=method,
             fixed_cells=self.wall_cells,
+            reuse=reuse,
         )
 
     def omega_shift_policy(

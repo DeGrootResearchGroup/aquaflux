@@ -102,3 +102,135 @@ def test_preconditioner_apply_is_linear() -> None:
     a = jnp.asarray(rng.standard_normal(mesh.n_cells))
     b = jnp.asarray(rng.standard_normal(mesh.n_cells))
     assert jnp.allclose(m(2.0 * a - 3.0 * b), 2.0 * m(a) - 3.0 * m(b), atol=1e-9)
+
+
+def _built(method, diffusivity_scale, flux_scale, *, reuse=None):
+    """A preconditioner for the transport operator at a scaled diffusivity / flux (same mesh)."""
+    mesh, geometry, volume_flux, residual = _transport(24, 12)
+    reference = jnp.ones(mesh.n_cells)
+    return scalar_transport_preconditioner(
+        mesh,
+        geometry,
+        jnp.full(mesh.n_cells, GAMMA * diffusivity_scale),
+        volume_flux * flux_scale,
+        residual,
+        reference,
+        method=method,
+        reuse=reuse,
+    )
+
+
+def test_refreshing_an_air_scalar_preconditioner_preserves_its_structure() -> None:
+    """``reuse=`` re-derives an lAIR k/omega preconditioner's values on its frozen coarsening.
+
+    lAIR's C/F split reads operator values, so rebuilding it at a developed state changes the shapes
+    and the refreshed preconditioner would force a recompile of the solve it accelerates. Reusing the
+    frozen coarsening keeps every shape, which is what makes a mid-march refresh affordable; a plain
+    rebuild is checked here to actually differ, so the test cannot pass vacuously.
+    """
+    cold = _built("air", 1.0, 1.0)
+    refreshed = _built("air", 0.05, 20.0, reuse=cold)
+    rebuilt = _built("air", 0.05, 20.0)
+
+    cold_shapes = [(lv.n, lv.n_coarse, lv.val.shape) for lv in cold.hierarchy.levels]
+    refreshed_shapes = [(lv.n, lv.n_coarse, lv.val.shape) for lv in refreshed.hierarchy.levels]
+    rebuilt_shapes = [(lv.n, lv.n_coarse, lv.val.shape) for lv in rebuilt.hierarchy.levels]
+
+    assert refreshed_shapes == cold_shapes  # the point: signature preserved
+    assert rebuilt_shapes != cold_shapes  # ...and a rebuild genuinely would not preserve it
+    # The refresh moved the values to the new operator.
+    assert not np.allclose(
+        np.asarray(cold.hierarchy.levels[0].val), np.asarray(refreshed.hierarchy.levels[0].val)
+    )
+
+
+def test_refreshing_a_twolevel_scalar_preconditioner_is_structure_preserving_anyway() -> None:
+    """The aggregation path needs no ``reuse``: its coarsening reads only the graph.
+
+    Pinned so the asymmetry with lAIR is explicit — for ``method="twolevel"`` a plain rebuild at a new
+    state already reproduces the structure, so ``reuse`` is accepted but changes nothing.
+    """
+    cold = _built("twolevel", 1.0, 1.0)
+    rebuilt = _built("twolevel", 0.05, 20.0)
+    reused = _built("twolevel", 0.05, 20.0, reuse=cold)
+
+    shapes = [(lv.n, lv.n_coarse, lv.val.shape) for lv in cold.hierarchy.levels]
+    assert [(lv.n, lv.n_coarse, lv.val.shape) for lv in rebuilt.hierarchy.levels] == shapes
+    assert [(lv.n, lv.n_coarse, lv.val.shape) for lv in reused.hierarchy.levels] == shapes
+
+
+def _scaled_transport(gamma_scale, flux_scale, nx=24, ny=12):
+    """The same transport problem at a scaled diffusivity and flux — a 'developed' operating point."""
+    mesh = structured_grid_2d(nx, ny, lx=4.0, ly=1.0, named_boundaries=True)
+    geometry = mesh.geometry()
+    gamma = GAMMA * gamma_scale
+    volume_flux = U * flux_scale * geometry.face.normal[:, 0] * geometry.face.area
+    assembler = ResidualAssembler.build(
+        mesh,
+        geometry,
+        PropertyModel({"diffusivity": Constant(gamma)}),
+        (AdvectionFlux(volume_flux, FirstOrderUpwind()), DiffusionFlux()),
+        BoundaryConditions(
+            {
+                "left": Dirichlet(1.0),
+                "right": ZeroGradient(),
+                "bottom": Dirichlet(0.0),
+                "top": Dirichlet(0.0),
+            }
+        ),
+    )
+    return mesh, geometry, gamma, volume_flux, assembler.residual
+
+
+def test_refreshed_air_preconditioner_tracks_the_new_operator() -> None:
+    """A refreshed lAIR preconditioner must beat the stale one *on the developed operator*.
+
+    Reusing the reference state's C/F split is a deliberate trade (any valid split preconditions), so
+    preserving the structure is only worth anything if the recomputed values genuinely track the new
+    coefficients. Judged by the residual left after one V-cycle applied to the developed operator's
+    Jacobian — the thing the solve actually iterates on.
+    """
+    mesh, geometry, _, cold_flux, cold_residual = _scaled_transport(1.0, 1.0)
+    _, _, dev_gamma, dev_flux, dev_residual = _scaled_transport(0.05, 20.0)
+    reference = jnp.ones(mesh.n_cells)
+
+    cold = scalar_transport_preconditioner(
+        mesh,
+        geometry,
+        jnp.full(mesh.n_cells, GAMMA),
+        cold_flux,
+        cold_residual,
+        reference,
+        method="air",
+    )
+    refreshed = scalar_transport_preconditioner(
+        mesh,
+        geometry,
+        jnp.full(mesh.n_cells, dev_gamma),
+        dev_flux,
+        dev_residual,
+        reference,
+        method="air",
+        reuse=cold,
+    )
+
+    def developed_jacobian(v):
+        return jax.jvp(dev_residual, (reference,), (v,))[1]
+
+    b = jnp.asarray(np.random.default_rng(0).normal(size=mesh.n_cells))
+
+    def left_residual(preconditioner):
+        x = preconditioner(reference)(b)
+        return float(jnp.linalg.norm(developed_jacobian(x) - b) / jnp.linalg.norm(b))
+
+    stale, fresh = left_residual(cold), left_residual(refreshed)
+    assert fresh < stale, f"refreshed ({fresh:.3e}) did not beat stale ({stale:.3e})"
+
+
+def test_refreshing_rejects_a_mismatched_method() -> None:
+    """Refreshing an aggregation preconditioner as lAIR (or vice versa) raises rather than mis-reusing."""
+    import pytest
+
+    cold_twolevel = _built("twolevel", 1.0, 1.0)
+    with pytest.raises(ValueError, match="same `method`"):
+        _built("air", 0.05, 20.0, reuse=cold_twolevel)

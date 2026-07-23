@@ -68,6 +68,50 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   `.claude/rules/solve.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
   `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output factor — the
   reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a frozen dataclass.
+  - **`solve_coupled(refresh_rtol=…)` stages the march to re-freeze the preconditioner — and a refresh
+    must CARRY the shift diagonals, not rebuild them (binding).** With `refresh_rtol` set, the march runs
+    two *convergence-gated* stages: to that loose tolerance with the preconditioner frozen at the IC,
+    then — after re-deriving the k/ω AMGs at the state reached — on to `rtol`. Two stages exist because
+    the AMG rebuild is off-jit scipy work that cannot run inside the `lax.while_loop`; that part is not
+    subtle. **What is subtle, and was a real bug caught in review:** a refresh must rebuild *only the
+    AMGs*, and carry the pseudo-time **shift diagonals** (and the flow block) over from the reused policy
+    — because **rebuilding the shift diagonals at the developed state freezes the march.** The coupled
+    shift diagonal is the transport-operator diagonal × `jacobian_scale(field)`, which under `LogScalars`
+    is `ω`; at a developed state both factors grow, so a rebuilt `d` is much larger, the pseudo-transient
+    shift `β·d` over-damps, and the step collapses — the relative residual creeps *upward* ~1e-5/step
+    with the recirculation and `k` static, no error and no divergence-guard trip (on pitzDaily the
+    un-fixed FULL refresh raised the convergence guard; the fixed AMG-only refresh converged **and** ran
+    ~1.87× faster end-to-end, ~925 s vs 1726 s to rel 3e-2, with flat ~22 s/step vs a stale baseline
+    climbing to 100–300 s/step). **This is independent of the SER `β`** — do not attribute it to the `β`
+    reset (an earlier version of this note did, wrongly): a controlled discriminator from one
+    post-stage-one state showed rebuilding the shift + carrying the AMG froze the march *byte-identically*
+    to rebuilding both, while carrying the shift + refreshing the AMG descended — so the shift rebuild is
+    the freeze, at whatever `β`. `_coupled_shift_policy(..., reuse=…)` therefore takes `k_shift_diagonal`
+    / `omega_shift_diagonal` straight from `reuse`. Safe because the shift vanishes at the root, so a
+    slightly-stale `d` changes only the path, never the converged state or its adjoint (the same argument
+    that carries the flow block). Also: `max_steps` applies to **each** stage (so up to `2·max_steps`
+    total, deliberately not split — either stage may need the full allowance), stage two's `rtol` is
+    compensated by `rtol/refresh_rtol` so a staged solve stops at the *same* residual as a single-stage
+    one (each solve measures its own `‖R0‖`), and the constrained path
+    (`mass_flow_coupled_continuation` / `solve_coupled_mass_flow`) has **no** staged refresh — thread
+    `reuse` through if that driver is added.
+  - **`reuse=` refreshes a stale k/ω preconditioner without changing the compilation signature.**
+    `scalar_transport_preconditioner(..., reuse=old)` (threaded through
+    `SSTTurbulence.k_preconditioner` / `omega_preconditioner`) re-derives the *values* at a new state on
+    the reused hierarchy's **frozen coarsening**. This is what makes a mid-march refresh affordable, and
+    the measured reason to want one: on a separated pitzDaily state, refreshing the **scalar** AMGs is
+    worth ~2.4× in outer GMRES cycles (30 → 13 at β=2 with the production lAIR scalars; refreshing the
+    *flow* block is worth nothing, 30 → 29). It matters **only for `method="air"`** — lAIR's C/F split
+    reads operator values, so a plain rebuild changes every shape below the first level or two and would
+    force a recompile of the solve it accelerates (`reuse` routes to
+    `~aquaflux.solve.refresh_air_hierarchy`). For `method="twolevel"` the aggregation reads only the
+    graph, so a rebuild is already structure-preserving and `reuse` is accepted but changes nothing.
+    A `ScaledScalarPreconditioner` wrapper is unwrapped (the log chain-rule scale is re-derived at the
+    new state by the caller), and reusing across *different* methods raises. Pinned in
+    `tests/unit/test_scalar_transport_preconditioner.py`: the lAIR refresh preserves shapes **where a
+    rebuild provably does not**, the twolevel path is structure-preserving either way, and a refreshed
+    preconditioner **beats the stale one on the developed operator** (so the reused split is a real
+    trade, not a no-op).
 - **The scalar policy's two halves have different lifetimes (binding, #105).** `ScalarShiftPolicy` carries
   a **shift diagonal rebuilt every sweep** (so the pseudo-time damping keeps tracking the operator as
   ν_t grows — freezing it would under-damp the march and lean on `DivergenceGuard` escalation) and an
