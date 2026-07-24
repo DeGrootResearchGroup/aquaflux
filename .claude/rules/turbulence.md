@@ -172,9 +172,11 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   contrast with the preconditioner above: a *per-sweep* callable must be a pytree, a *frozen* one must not.
 - **`boundary.py`** — inlet/wall closures for k and ω over the generic scalar boundary machinery.
   - **The wall ω is the adaptive (`y+`-insensitive) blend `omega_wall`, imposed at the wall-adjacent
-    cell centroid (binding).** `omega_wall(nu, d, k, model) = sqrt(omega_vis² + omega_log²)` — the Menter
-    (2003) automatic near-wall treatment — with the **viscous branch** `omega_vis = 6ν/(β₁d²)` (the
-    single-homed `omega_wall_value`) and the **log branch** `omega_log = √k/(β*^{1/4}·κ·d)` (equilibrium
+    cell centroid (binding).** `omega_wall(nu, d, k, model) = [omega_vis^p + omega_log^p]^{1/p}` — a
+    **generalized power mean** of exponent `p = SSTModel.wall_omega_exponent` (default `2.0`, the Menter
+    (2003) quadrature `sqrt(omega_vis² + omega_log²)`) — with the **viscous branch**
+    `omega_vis = C·6ν/(β₁d²)` (`C = SSTModel.wall_omega_viscous_coeff`, default `1.0`; the raw branch is
+    the single-homed `omega_wall_value`) and the **log branch** `omega_log = √k/(β*^{1/4}·κ·d)` (equilibrium
     log layer, `κ = SSTModel.kappa = 0.41`). The blend recovers `omega_vis` as `d→0` (it grows `1/d²`,
     the log branch only `1/d`) and `omega_log` once the first cell is out in the log layer, so the same
     wall value is correct across `y+` with **no switch** — on a wall-resolved (`y+~1`) mesh it reduces
@@ -188,10 +190,15 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     Menter 1994) — imposing `60` at the centroid puts near-wall ω 10× high. Do **not** "restore" the 60
     without also moving the imposition to the wall face. **The blend reads `k` at the wall cells, so the
     fixation is state-dependent:** frozen per sweep in the segregated path (`closure.k`), and a **live
-    `dω_wall/dk` coupling in the coupled Jacobian** (AD carries it). It is written in **squared** form
-    (`omega_log²` linear in `k`, radicand kept `>0` by `omega_vis²`) so `d(omega_wall)/dk` is **finite at
-    `k=0`** — a naive `√k` would give a NaN derivative and poison the wall rows; `k` is clamped `≥0` for
-    the log term (off-solution, inactive at convergence). The unit test pins the **ODE residual** of the
+    `dω_wall/dk` coupling in the coupled Jacobian** (AD carries it). It is `d(omega_wall)/dk`-**finite at
+    `k=0`** for any `p≥1`: the log branch carries `√k` through a guarded `safe_sqrt` (zero derivative at
+    `k=0`) and enters the mean raised to `p`, so its contribution *and* its derivative vanish as `k→0`
+    while `omega_vis>0` keeps the mean bounded below — a naive `√k` differentiated at zero would give a
+    NaN derivative and poison the wall rows. The power mean is computed max-factored
+    (`m·[(omega_vis/m)^p+(omega_log/m)^p]^{1/p}`, `m=max`) so no power overflows for large `p`, and the
+    log branch's power is double-`where` guarded (the `safe_sqrt` trick) so `0^p` never differentiates
+    through `exp(p·log 0)` — which also keeps `grad` w.r.t. `p`/`C` clean (both are differentiable
+    leaves). `k` is clamped `≥0` for the log term (off-solution, inactive at convergence). The unit test pins the **ODE residual** of the
     viscous branch (so the `6`/`60` swap cannot recur silently) plus the blend's `k→0` recovery, log-layer
     limit, and finite `k=0` derivative. Consumed by `omega_residual` (transport.py) for **both** the
     segregated and coupled paths (one change point). `omega_wall_value` is retained as the viscous branch
@@ -230,25 +237,37 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     the source of the near-wall ω disagreement, and it is a modelling choice, not a bug (measured
     2026-07-24 against a *clean* reference; supersedes the corrupt-reference wall-ω numbers above).** All
     three codes use the *same* two branches `omega_vis`, `omega_log`; they differ only in how they combine
-    them, which is the power-mean family `omega_wall = omega_vis·[1 + (omega_log/omega_vis)^p]^{1/p}`:
-    - **aquaflux: `p = 2`** — `sqrt(omega_vis² + omega_log²)` (Menter's quadrature), raw coefficient `6`.
-    - **OpenFOAM `omegaWallFunction` (default): `p → ∞`** — `max(omega_vis, omega_log)`. On pitzDaily wall
-      cells this matches OF's field to **<2 %** (median ratio 1.00, std 0.06); aquaflux's `p = 2` runs
-      **~20 % high in the buffer layer** (`y+≈8–15`, where the branches are comparable — `sqrt(a²+b²)`
-      exceeds `max(a,b)` by up to 41 %; median aquaflux/OF `omega_wall` = 1.20). The wall distance and
-      constants **agree** — only the blend exponent differs — so the entire ~20 % near-wall ω residual when
-      aquaflux is fed OF's field is this blend choice.
-    - **Ansys Fluent (`correlation` default, Theory Guide §4.18.3, eqs 4.404–4.407): `p = C_exp = 1.3`**,
-      *and* a **calibrated viscous coefficient** `omega_vis = C_calib·6ν/(β₁d²)` with `C_calib = 1/3` — both
-      fit on plane Couette flow (Re 1e6) to flatten the wall shear across `y+` (Fluent also blends `u*`,
-      `u_τ`, and the k-production consistently, and offers a `tabulated` table-lookup option).
+    them, which is now the **implemented** power-mean family (`SSTModel.wall_omega_exponent = p`,
+    `wall_omega_viscous_coeff = C`, `omega_vis = C·6ν/(β₁d²)`):
+    - **aquaflux default: `p = 2`, `C = 1`** — `sqrt(omega_vis² + omega_log²)` (Menter's quadrature). The
+      default is **unchanged** by the parametrization (all existing wall tests pin it).
+    - **OpenFOAM `omegaWallFunction` (default): `p → ∞`, `C = 1`** — `max(omega_vis, omega_log)`; reached in
+      aquaflux with a large exponent (`p ≈ 60` is `max` to <2 %). On pitzDaily wall cells `max` matches OF's
+      field to **<2 %** (median ratio 1.00); aquaflux's `p = 2` runs **~20 % high in the buffer layer**
+      (`y+≈8–15`, `sqrt(a²+b²)` exceeds `max(a,b)` by up to 41 %; median aquaflux/OF `omega_wall` = 1.20).
+      The wall distance and constants **agree** — only the exponent differs.
+    - **Ansys Fluent (`correlation` default, Theory Guide §4.18.3, eqs 4.404–4.407): `p = C_exp = 1.3`,
+      `C = C_calib = 1/3`** — both fit on plane Couette flow (Re 1e6) to flatten the wall shear across `y+`
+      (Fluent also blends `u*`, `u_τ`, and the k-production consistently, and offers a `tabulated` option).
 
-    So there is **no single "the" near-wall ω model**: each code picks an exponent and Fluent recalibrates
-    the coefficient. aquaflux's `p = 2` with the raw `6` is Menter's analytical form — principled but **not
-    calibrated for `y+`-insensitivity** (hence the ~5–7 % buffer-layer error). **To genuinely match Fluent's
-    y+-insensitivity, make the exponent (and viscous coefficient) a CALIBRATABLE power-mean fit on Couette
-    flow — do *not* just copy OF's `max`.** Whether to match OF (`max`), keep Menter (`sqrt`), or adopt a
-    calibrated blend is an open model decision.
+    So there is **no single "the" near-wall ω model**: each code picks an exponent, and Fluent recalibrates
+    the coefficient. Whether to change the aquaflux *default* (match OF `max`, keep Menter `sqrt`, or adopt
+    the Couette-calibrated Fluent blend) is still an open model decision; the *mechanism* to select any of
+    them is now shipped.
+  - **The max blend makes aquaflux accept the clean pimpleFoam field as an on-root IC (measured
+    2026-07-24, `pimple_ic_blend`).** Feeding the converged pimpleFoam field (`of_transient/0.14`, the
+    clean reference — *not* the corrupt steady run) into the coupled residual: the **flow, k, and interior-ω
+    blocks are already ~0** (`|R_flow|≈6e-3`, `|R_k|≈1e-2`, interior `|R_ω|≈20` over 11.8k cells) for every
+    blend — the bulk field is accepted; the *entire* ω-block residual lives in the **472 wall-fixation
+    cells**. There the scale-free `|R_ω|/ω` per wall cell is **median 0.20 under the default `p=2`** (exactly
+    the ~20 % blend bias) but **median 7e-5 under the `max` blend** (`p=60`) — the imposed near-wall ω then
+    matches OF cell-for-cell, ~3500× smaller. Fluent's `p=1.3, C=1/3` gives median 0.13 — *worse*, because
+    `C=1/3` is calibrated to Fluent's own treatment, not OF's, confirming **`max` (not Fluent's constants) is
+    what matches OF**. A residual tail (p95 ≈ 0.19) survives the `max` blend only at the highest-ω cells (step
+    lip `x≈0`, upper-wall separation `x≈0.12–0.17`, ω ~ 3e4–1e5), where the transient pimpleFoam field is
+    itself not deeply converged; the absolute `|R_ω|` L2 (~4e4) is large only because those few ω~1e5 cells
+    dominate the norm. Bottom line: the ~20 % near-wall disagreement was **entirely** the blend exponent, and
+    it is removed by the `max` blend — the interior model was never in question.
   - **pitzDaily validation status (2026-07-24, binding for whoever re-runs it — read before trusting any
     OF-vs-aquaflux number).** The shipped OpenFOAM *steady* reference (`validation/pitzdaily_openfoam/runs/kwsst/`,
     `foamRun` with `ddtSchemes: steadyState` = SIMPLE) is **CORRUPT**: its ω field *checkerboards* in the

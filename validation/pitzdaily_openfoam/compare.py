@@ -120,7 +120,7 @@ def read_openfoam_reference():
     )
 
 
-def build_case():
+def build_case(model=None):
     """Assemble the benchmark: mesh, momentum, turbulence and the coupled residual -- no solve.
 
     Split out from :func:`solve_aquaflux` so a solver study can re-solve at a saved state (a
@@ -128,11 +128,21 @@ def build_case():
     mesh import, boundary conditions, model constants and scheme choices *are* the definition of
     this benchmark; a second copy of them would drift from the one the validation figures use.
 
+    Parameters
+    ----------
+    model : SSTModel, optional
+        The SST constants to use. Defaults to :class:`~aquaflux.turbulence.SSTModel`. Passing a model
+        that differs only in the near-wall omega blend (``wall_omega_exponent`` /
+        ``wall_omega_viscous_coeff``) is how a wall-treatment study compares blend shapes on the same
+        case -- e.g. a large exponent to reproduce the ``max(omega_vis, omega_log)`` blend.
+
     Returns
     -------
     dict
         ``coupled``, ``momentum``, ``turbulence`` and ``geom`` for the assembled case.
     """
+    if model is None:
+        model = SSTModel()
     mesh = read_openfoam(RUNS / "polyMesh")
     geom = mesh.geometry()
     # Corrected (non-orthogonal / skewness) Green-Gauss gradients. Its A_g^-1 apply is the default O(n)
@@ -170,7 +180,7 @@ def build_case():
         advection_scheme=momentum_upwind,
     )
     turbulence = SSTTurbulence.build(
-        SSTModel(),
+        model,
         mesh,
         geom,
         grad,

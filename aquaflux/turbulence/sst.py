@@ -42,6 +42,17 @@ class SSTModel(eqx.Module):
     e_wall : float
         The log-law wall roughness constant ``E`` in ``u+ = ln(E y+) / kappa`` (smooth wall), used
         by the adaptive momentum wall function.
+    wall_omega_exponent : float
+        The power-mean exponent ``p`` that combines the viscous and log near-wall omega branches in
+        :func:`~aquaflux.turbulence.omega_wall`, ``omega_wall = [omega_vis**p + omega_log**p]**(1/p)``.
+        ``p = 2`` is the quadrature blend ``sqrt(omega_vis**2 + omega_log**2)`` (Menter, 2003); a
+        large ``p`` approaches the ``max(omega_vis, omega_log)`` blend; ``p ~ 1.3`` is the softer
+        blend some correlation-based wall treatments adopt. See :func:`~aquaflux.turbulence.omega_wall`.
+    wall_omega_viscous_coeff : float
+        The multiplier ``C`` on the viscous branch, ``omega_vis = C * 6 nu / (beta_1 d**2)``, in the
+        near-wall omega blend. ``C = 1`` is the analytical sublayer solution
+        (:func:`~aquaflux.turbulence.omega_wall_value`); a calibrated ``C < 1`` is used by wall
+        treatments tuned to flatten the wall shear across ``y+`` on plane Couette flow.
     """
 
     a1: float = 0.31
@@ -56,6 +67,8 @@ class SSTModel(eqx.Module):
     sigma_omega2: float = 0.856
     kappa: float = 0.41
     e_wall: float = 9.8
+    wall_omega_exponent: float = 2.0
+    wall_omega_viscous_coeff: float = 1.0
 
     @property
     def wall_y_star_lam(self) -> jnp.ndarray:

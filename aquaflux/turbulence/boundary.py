@@ -80,26 +80,43 @@ def omega_wall_value(nu: jnp.ndarray, d: jnp.ndarray, model: SSTModel) -> jnp.nd
 
 
 def omega_wall(nu: jnp.ndarray, d: jnp.ndarray, k: jnp.ndarray, model: SSTModel) -> jnp.ndarray:
-    r"""Adaptive (``y+``-insensitive) near-wall omega: ``sqrt(omega_vis**2 + omega_log**2)``.
+    r"""Adaptive (``y+``-insensitive) near-wall omega: a power-mean blend of the two branches.
 
-    The automatic near-wall treatment (Menter, 2003): a smooth blend of the two limiting near-wall
-    omega solutions, so the same wall value is correct whether the wall-adjacent cell sits in the
-    viscous sublayer or the log layer, with no ``y+`` switch.
+    The automatic near-wall treatment: a smooth blend of the two limiting near-wall omega solutions,
+    so the same wall value is correct whether the wall-adjacent cell sits in the viscous sublayer or
+    the log layer, with no ``y+`` switch.
 
-    - **Viscous branch** ``omega_vis = 6 nu / (beta_1 d**2)`` (:func:`omega_wall_value`) -- the
-      analytical sublayer solution, correct as ``y+ -> 0``.
+    - **Viscous branch** ``omega_vis = C 6 nu / (beta_1 d**2)`` -- the analytical sublayer solution
+      (:func:`omega_wall_value`), correct as ``y+ -> 0``, scaled by the calibration coefficient ``C``
+      (``model.wall_omega_viscous_coeff``, ``1`` for the uncalibrated analytical value).
     - **Log branch** ``omega_log = sqrt(k) / (beta_star**0.25 kappa d)`` -- the equilibrium log-layer
       value, where ``omega = u_tau / (sqrt(beta_star) kappa d)`` and ``u_tau**2 = sqrt(beta_star) k``
       (so ``u_tau = beta_star**0.25 sqrt(k)``).
 
-    The quadrature blend ``sqrt(omega_vis**2 + omega_log**2)`` recovers whichever branch dominates:
-    ``omega_vis`` as ``d -> 0`` (it grows like ``1/d**2``, the log branch only ``1/d``), ``omega_log``
-    once the first cell is out in the log layer. Because ``omega_vis > 0`` keeps the radicand away
-    from zero and the log branch enters as ``k`` (not ``sqrt(k)``), the value is differentiable in
-    ``k`` everywhere including ``k = 0`` -- where it reduces exactly to :func:`omega_wall_value`, so
-    the wall-resolved limit is unchanged. ``k`` is clamped at zero for the log term (a negative ``k``
-    is off-solution and has no log-layer omega); the clamp is inactive at a converged field, so it
-    does not pollute the sensitivity.
+    The two are combined by a **generalized power mean** of exponent ``p``
+    (``model.wall_omega_exponent``),
+
+    ``omega_wall = [omega_vis**p + omega_log**p]**(1/p)``,
+
+    which recovers whichever branch dominates -- ``omega_vis`` as ``d -> 0`` (it grows like
+    ``1/d**2``, the log branch only ``1/d``), ``omega_log`` once the first cell is out in the log
+    layer -- but with a blend *shape* set by ``p``. The exponent is a genuine model choice, and
+    different RANS codes pick different values in the buffer layer where the two branches are
+    comparable: ``p = 2`` is the quadrature blend ``sqrt(omega_vis**2 + omega_log**2)`` (Menter,
+    2003); ``p -> inf`` is the ``max(omega_vis, omega_log)`` blend (the OpenFOAM ``omegaWallFunction``
+    default); ``p ~ 1.3`` with a calibrated ``C ~ 1/3`` is the softer correlation blend Ansys Fluent
+    fits to flatten the wall shear across ``y+``. At ``p = 2, C = 1`` this is exactly the Menter
+    quadrature form.
+
+    The value is computed by factoring out the larger branch,
+    ``m [ (omega_vis/m)**p + (omega_log/m)**p ]**(1/p)`` with ``m = max(omega_vis, omega_log)``, so
+    every base is in ``[0, 1]`` and no power overflows for large ``p``. Because ``omega_vis > 0``
+    keeps the mean bounded below and the log branch is guarded to contribute a zero derivative as it
+    vanishes, the value is differentiable in ``k`` everywhere including ``k = 0`` (for any ``p >= 1``)
+    -- where it reduces exactly to ``C`` times :func:`omega_wall_value`, so the wall-resolved limit is
+    unchanged. ``k`` is clamped at zero for the log term (a negative ``k`` is off-solution and has no
+    log-layer omega); the clamp is inactive at a converged field, so it does not pollute the
+    sensitivity.
 
     Parameters
     ----------
@@ -110,16 +127,51 @@ def omega_wall(nu: jnp.ndarray, d: jnp.ndarray, k: jnp.ndarray, model: SSTModel)
     k : jnp.ndarray
         Turbulent kinetic energy at those cells, shape ``(n_wall,)``.
     model : SSTModel
-        The model constants (reads ``beta_1``, ``beta_star``, ``kappa``).
+        The model constants (reads ``beta_1``, ``beta_star``, ``kappa``, ``wall_omega_exponent``,
+        ``wall_omega_viscous_coeff``).
 
     Returns
     -------
     jnp.ndarray
         The adaptive near-wall omega per wall-adjacent cell, shape ``(n_wall,)``.
     """
-    omega_vis = omega_wall_value(nu, d, model)
-    omega_log_squared = jnp.maximum(k, 0.0) / (jnp.sqrt(model.beta_star) * model.kappa**2 * d**2)
-    return jnp.sqrt(omega_vis**2 + omega_log_squared)
+    omega_vis = model.wall_omega_viscous_coeff * omega_wall_value(nu, d, model)
+    omega_log = safe_sqrt(jnp.maximum(k, 0.0)) / (model.beta_star**0.25 * model.kappa * d)
+    return _power_mean(omega_vis, omega_log, model.wall_omega_exponent)
+
+
+def _power_mean(a: jnp.ndarray, b: jnp.ndarray, p: float) -> jnp.ndarray:
+    r"""Generalized power mean ``[a**p + b**p]**(1/p)`` of two non-negative branches, ``a > 0``.
+
+    Computed by factoring out the larger branch, ``m [ (a/m)**p + (b/m)**p ]**(1/p)`` with
+    ``m = max(a, b)``, so every base is in ``[0, 1]`` and no power overflows however large ``p`` is
+    (the ``p -> inf`` limit is ``max(a, b)``). The ``b`` branch -- the one that may reach zero -- is
+    taken through a double ``where`` (the same guard as :func:`~aquaflux.turbulence.strain.safe_sqrt`)
+    so ``b = 0`` contributes value and derivative zero rather than differentiating ``0**p`` through
+    ``exp(p log 0)``; ``a > 0`` needs no guard. The result is differentiable in ``a`` and ``b`` (and
+    in ``p``) everywhere the first argument is positive.
+
+    Parameters
+    ----------
+    a : jnp.ndarray
+        The strictly positive branch (here the viscous omega, ``> 0`` for finite ``nu``, ``d``).
+    b : jnp.ndarray
+        The non-negative branch that may vanish (here the log-layer omega, ``0`` at ``k = 0``).
+    p : float
+        The power-mean exponent (``>= 1``).
+
+    Returns
+    -------
+    jnp.ndarray
+        The power mean, matching the shape of ``a`` and ``b``.
+    """
+    m = jnp.maximum(a, b)
+    ratio_a = a / m
+    ratio_b = b / m
+    positive_b = ratio_b > 0.0
+    ratio_b_safe = jnp.where(positive_b, ratio_b, jnp.ones_like(ratio_b))
+    b_term = jnp.where(positive_b, ratio_b_safe**p, jnp.zeros_like(ratio_b))
+    return m * (ratio_a**p + b_term) ** (1.0 / p)
 
 
 def nut_wall(nu: jnp.ndarray, d: jnp.ndarray, k: jnp.ndarray, model: SSTModel) -> jnp.ndarray:
