@@ -144,22 +144,112 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   `ResidualAssembler.residual`, which equinox treats as a pytree — that one was always fine.) Note the
   contrast with the preconditioner above: a *per-sweep* callable must be a pytree, a *frozen* one must not.
 - **`boundary.py`** — inlet/wall closures for k and ω over the generic scalar boundary machinery.
-  - **The wall ω is `6ν/(β₁d²)`, NOT `60ν/(β₁d²)` (binding — the constant depends on where it is
-    imposed).** `omega_wall_value` is fixed at the wall-adjacent **cell centroid** (`FixedValueCells`
-    at `wall_distance[wall_cells]`), so it must be the analytical sublayer solution *at that distance*:
-    `ν d²ω/dy² = β₁ω²` with `ω = A/y²` gives `A = 6ν/β₁`. The `60` form is a wall-**face** value — 10×
-    the asymptote, standing in for the singularity at `y = 0` (Menter, 1994) — and was being imposed at
-    the cell centroid, putting near-wall ω 10× high (suppressed near-wall `ν_t`, stiffer ω equation, and
-    a realized κ below the reference). Do **not** "restore" the 60 without also moving the imposition to
-    the wall face. The unit test pins the **ODE residual**, not the coefficient, so the two forms cannot
-    be swapped silently again.
+  - **The wall ω is the adaptive (`y+`-insensitive) blend `omega_wall`, imposed at the wall-adjacent
+    cell centroid (binding).** `omega_wall(nu, d, k, model) = sqrt(omega_vis² + omega_log²)` — the Menter
+    (2003) automatic near-wall treatment — with the **viscous branch** `omega_vis = 6ν/(β₁d²)` (the
+    single-homed `omega_wall_value`) and the **log branch** `omega_log = √k/(β*^{1/4}·κ·d)` (equilibrium
+    log layer, `κ = SSTModel.kappa = 0.41`). The blend recovers `omega_vis` as `d→0` (it grows `1/d²`,
+    the log branch only `1/d`) and `omega_log` once the first cell is out in the log layer, so the same
+    wall value is correct across `y+` with **no switch** — on a wall-resolved (`y+~1`) mesh it reduces
+    to the old pure-viscous fixation exactly (`k→0` kills the log branch). **Why it replaced the
+    pure-viscous fixation:** on the wall-**function** pitzDaily mesh (`y+~30`) the sublayer value was
+    ~2× too low (measured OF wall ω ~5715 vs the fixation ~3027), so near-wall `ν_t=k/ω` was ~2× too
+    high, over-diffusing the free shear layer and pushing interior `k` below the reference — the
+    diagnosed k anti-correlation. **Imposition is still at the cell centroid** (`FixedValueCells` at
+    `wall_distance[wall_cells]`), so the viscous branch must stay the `6ν/(β₁d²)` centroid value, **not**
+    the `60ν/(β₁dy²)` wall-**face** surrogate (10× the asymptote, standing in for the `y=0` singularity,
+    Menter 1994) — imposing `60` at the centroid puts near-wall ω 10× high. Do **not** "restore" the 60
+    without also moving the imposition to the wall face. **The blend reads `k` at the wall cells, so the
+    fixation is state-dependent:** frozen per sweep in the segregated path (`closure.k`), and a **live
+    `dω_wall/dk` coupling in the coupled Jacobian** (AD carries it). It is written in **squared** form
+    (`omega_log²` linear in `k`, radicand kept `>0` by `omega_vis²`) so `d(omega_wall)/dk` is **finite at
+    `k=0`** — a naive `√k` would give a NaN derivative and poison the wall rows; `k` is clamped `≥0` for
+    the log term (off-solution, inactive at convergence). The unit test pins the **ODE residual** of the
+    viscous branch (so the `6`/`60` swap cannot recur silently) plus the blend's `k→0` recovery, log-layer
+    limit, and finite `k=0` derivative. Consumed by `omega_residual` (transport.py) for **both** the
+    segregated and coupled paths (one change point). `omega_wall_value` is retained as the viscous branch
+    and for the IC seed (`initialization.py`, the smooth near-wall ω ramp — an IC device, unchanged).
+  - **The momentum companion is the adaptive wall-face eddy viscosity `nut_wall` (binding).** The
+    `y+`-insensitive treatment also needs the momentum wall shear to follow the law of the wall on a
+    non-sublayer mesh, not the molecular gradient. `nut_wall(nu, d, k, model) = nu·max(0, y*·κ/ln(E·y*) − 1)`
+    with the **k-based** wall coordinate `y* = β*^{1/4}√k·d/ν` is the `nutkWallFunction`: **velocity-independent**,
+    so it has **no reattachment singularity** (a velocity-based law blows up where the near-wall velocity
+    vanishes) and the wall shear `(μ+ρ·nut_wall)|U|/d` passes through zero there on its own — the correct
+    behaviour on a reattaching flow like pitzDaily. Below the laminar/log crossover `y*_lam`
+    (`SSTModel.wall_y_star_lam`, the fixed point of `y=ln(E y)/κ`, ~11) it is **zero** — a resolved wall,
+    reducing to the plain no-slip molecular shear — so it is a no-op on a wall-resolved mesh and can be
+    **always-on** (verified: the wall-resolved `test_channel_law_of_the_wall` is unaffected). The `ln`
+    argument is floored at its crossover value on the discarded sublayer branch, so the switch is finite
+    and differentiable (no `ln` singularity), and `k` is clamped `≥0`. `E = SSTModel.e_wall = 9.8` (the
+    log-law constant). `SSTTurbulence.wall_face_eddy_viscosity(k)` scatters it onto the stored `wall_faces`
+    (zero elsewhere) and hands it to `MomentumContinuity.with_eddy_viscosity(nu_t, wall_nu_t)`; the momentum
+    block applies it **only at the shearing-wall boundary faces** via the diffusion `boundary_coefficient`
+    (the interior closure stays `ν_t=k/ω`). Applied in **both** forward paths (coupled residual live, in
+    the Jacobian; segregated driver per sweep) so they solve the identical model. Operator-tested in
+    `test_turbulence_boundary.py` (sublayer→0, log-law value, velocity-independence/finiteness, `y*_lam`,
+    differentiability); the flow-side seam is in `.claude/rules/flow.md` / `.claude/rules/discretization.md`.
+  - **The near-wall `k` budget is closed by FOUR pieces that only work together (binding — measured on the
+    periodic channel; do not remove or reorder one in isolation).** Wiring `omega_wall` + `nut_wall` alone
+    left the wall-function channel predicting **−25%** of the wall-resolved `u_τ`. The full set brings the
+    same mesh to **−2.0%** with the wall-resolved mesh a no-op (`u_τ` unchanged to all printed digits) and
+    the segregated loop *converging* where it previously hit `max_sweeps`. All four cross the sublayer/log
+    boundary on the **one** smooth weight `wall_function_weight(nu,d,k,model) = tanh((y*/y*_lam)⁴)`
+    (never a `y*` switch — an AD-Newton residual cannot converge through a jump; see the docstring), and
+    all live in `boundary.py` as pure functions with a `NearWallKClosure` collaborator in `sources.py`
+    holding the per-wall-cell data (`cells`/`distance`/`viscosity`/`shear_rate`) that always travels
+    together.
+    1. **The production carries the WALL-FACE shear, not the cell strain.** `wall_shear_stress =
+       (ν+ν_t,wall)·|dU/dn|_wall` with `|dU/dn|_wall = |U_P − U_wall|/d` (`SSTTurbulence.wall_shear_rate`,
+       area-averaged over each wall cell's faces, guarded `sqrt` so a quiescent field has no NaN
+       derivative), and `k_wall_production = wall_shear_stress · log_layer_shear_rate(d,k)`. The *stress*
+       is the discrete wall flux momentum actually applies; the *mean shear* is the analytical
+       `u_τ/(κd)`. Substituting `nut_wall` gives `τ_w = u_k·u_log` — the geometric mean of the k-based and
+       velocity-based friction velocities — so the balance holds **only** where they agree: a genuine
+       equation for `k`, unlike the pure-`k` form `β*^{3/4}k^{1.5}/(κd)`, which cancels the destruction
+       identically (still forbidden). The previous version passed the *cell strain-rate magnitude* here;
+       measured on a `y+~26` channel that shear is `11.5` where the wall gradient is `17.9` and the true
+       log-layer shear `2.8`, and it left production 19% under destruction, `k/k_eq = 0.72`.
+    2. **The wall-face `k` diffusivity is faded out** (`wall_k_diffusivity = (1−f)·γ`, applied through
+       `DiffusionFlux(boundary_coefficient=…)`). A modelled sublayer carries no turbulent-energy flux to
+       the wall (the `kqRWallFunction` zero-gradient condition), and retaining `Dirichlet(0)`'s drain costs
+       ~7.5% of the local destruction. **Fade the COEFFICIENT, not the face value:** a `k`-dependent face
+       value `f·k_P` has `d(φ_ip)/d(k_P) = f + k_P f′ > 1` near the crossover, which makes the wall face a
+       `k`-amplifying source and the solve **does not converge** (this is why the earlier `AdaptiveWallK`
+       `BoundaryCondition` failed and was **deleted**). The identical flux, a clean linearization.
+    3. **The wall cells' k-destruction reads the LIVE wall `ω`** (`NearWallKClosure.dissipation_rate`
+       substitutes `omega_wall(k)` there, no blend — the ω equation fixes exactly that value at every
+       `y+`). **Mandatory alongside piece 1, not optional:** out in the log layer the modelled production
+       is ≈linear in `k` (`ν_t,wall ∝ √k`, `u_τ ∝ √k`), so against a *frozen* `ω` the destruction `β*kω` is
+       linear too — the wall row degenerates into a homogeneous equation whose diagonal flips sign as soon
+       as production exceeds destruction, and the k solve **runs away** (measured: piece 1 alone raises the
+       `EquinoxRuntimeError`). The live `ω` restores the physical `k^{1.5}` destruction. A no-op on a
+       resolved mesh, where the fixed `ω` is the `k`-independent viscous branch.
+    4. **The strain rate the CLOSURE sees is blended onto `log_layer_shear_rate` in the wall cells**
+       (`SSTTurbulence.strain_rate`, used by both `eddy_viscosity` and `closure_fields`). The sensitive
+       consumer is not a production term but the **SST shear limiter** `ν_t = a₁k/max(a₁ω, F₂S)`: in an
+       equilibrium log layer `a₁ω` beats `S` by only a few percent (2.52 vs 2.44 `u_k/d`), so the limiter is
+       *just* inactive; a wall-function mesh's reconstructed `S` overshoots several-fold and throws it hard
+       the other way. Measured with pieces 1–3 in place but not this one: wall-cell `ν_t` ~5× low, `U+`
+       jumping **6.6** across the first cell spacing where the log law gives 2.7, and `u_τ` still **−12%**
+       despite the wall stress itself being right (first-cell `U+` 13.6 vs log-law 13.9). With it, the
+       profile tracks the log law and the gap closes to −2%.
+    **Known residual — the buffer layer.** A wall-function mesh landing at `y+ ≈ 11–16` (the crossover
+    itself) is the worst case for any wall function, and the blend smooths it without making it exact:
+    measured `u_τ` error on the channel is **−0.6% at y+≈68, −2.0% at y+≈33, −6.9% at y+≈16, −5.0% at
+    y+≈11**, versus 0 on the wall-resolved mesh. Place the first cell either inside the sublayer or out
+    past `y+ ~ 30`; the buffer-layer dip is a model limitation, not a bug to chase.
 - **`driver.py` — `solve_segregated`.** The outer Picard loop: μ_t → flow solve → k solve → ω
   solve, with under-relaxation and positivity floors as the stabilizers, and injected
   `solve_flow` / `solve_scalar` so the driver is pure orchestration. The per-sweep coupling is
   `momentum.with_eddy_viscosity(ν_t)` — the driver hands over the closure's **kinematic** `ν_t` and
   the flow assembler forms `μ_eff = μ + ρν_t` from its own material properties, so the driver never
   restates the closure relation and takes **no `density=` argument** (see `.claude/rules/flow.md`).
-  An injected momentum stand-in must therefore provide `with_eddy_viscosity`. The loop **stops on the coupled
+  An injected momentum stand-in must therefore provide `with_eddy_viscosity`. **The per-sweep call is now
+  `with_eddy_viscosity(ν_t, turbulence.wall_face_eddy_viscosity(k))`** — the driver also applies the adaptive
+  wall-function eddy viscosity, so the segregated and coupled paths solve the identical near-wall model — which
+  widens the injected contract by two: a **momentum** stand-in's `with_eddy_viscosity` must accept the optional
+  second (per-face) argument, and a **turbulence** stand-in must provide `wall_face_eddy_viscosity(k)`. A
+  resolved-wall stub returns zeros for it (`tests/unit/test_segregated_convergence.py`). The loop **stops on the coupled
   Picard increment** (`_relative_change` — the largest per-field relative L2 change over a sweep <
   `rtol`), with `max_sweeps` only a backstop; the outer under-relaxation is the **SER ramp**
   `_sweep_relaxation` (opens from the `relaxation` floor toward `relaxation_max` as that increment
@@ -177,10 +267,10 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   - **The sweep body between the injected solves is jitted and assembles the flow fields once
     (binding, #106).** The pre-solve μ_t and the post-solve `(mdot, closure)` run in two module-level
     `eqx.filter_jit` prologues (`_sweep_eddy_viscosity`, `_sweep_closure`) instead of op-by-op eagerly
-    (the eager path dispatched `velocity_gradient` / `mass_flux` / `closure_fields` one op at a time —
+    (the eager path dispatched `velocity_fields` / `mass_flux` / `closure_fields` one op at a time —
     ~130 ms/sweep of avoidable overhead at 1600 cells). `_sweep_closure` calls
     `momentum.flow_fields(flow)` **once** for both the velocity gradient the closure reads and the
-    Rhie–Chow `mdot` the scalars advect on (the pre-solve μ_t uses the lightweight `velocity_gradient`,
+    Rhie–Chow `mdot` the scalars advect on (the pre-solve μ_t uses the lightweight `velocity_fields`,
     which is all it needs before `mdot` exists). `solve_segregated` binds the k/ω boundaries once via
     `turbulence.resolve_boundaries()` before the loop, so those compiled prologues never re-run the
     dynamic-shape patch resolve inside `closure_fields`'s gradient assembler. Bit-identical to the old

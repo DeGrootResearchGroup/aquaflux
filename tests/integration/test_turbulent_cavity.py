@@ -99,7 +99,7 @@ def test_segregated_cavity_is_stable_and_active() -> None:
     assert not bool(jnp.any(jnp.isnan(omega)))
     assert float(jnp.min(k)) >= 0.0
     assert float(jnp.min(omega)) > 0.0
-    nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
+    nu_t = turbulence.eddy_viscosity(momentum.velocity_fields(flow).gradient, k, omega)
     assert float(jnp.max(nu_t)) > 0.0
     velocity, _ = momentum.unpack(flow)
     assert float(jnp.max(jnp.abs(velocity[:, 0]))) > 0.3 * U_LID

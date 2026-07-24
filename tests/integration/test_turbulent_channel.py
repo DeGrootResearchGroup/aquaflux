@@ -18,7 +18,13 @@ import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
-from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
+from aquaflux.flow import (
+    MomentumContinuity,
+    NoSlipWall,
+    PressureOutlet,
+    VelocityFields,
+    VelocityInlet,
+)
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -106,7 +112,15 @@ def test_exact_production_limiter_solves_with_the_preconditioner() -> None:
     velocity_gradient = jnp.zeros((n, mesh.dim, mesh.dim)).at[:, 0, 1].set(50.0)  # du_x/dy shear
     k = jnp.full(n, k_in)
     omega = jnp.full(n, omega_in)
-    closure = turbulence.closure_fields(velocity_gradient, k, omega)
+    closure = turbulence.closure_fields(
+        VelocityFields(
+            velocity=jnp.zeros((n, mesh.dim)),
+            boundary_velocity=jnp.zeros((mesh.n_faces, mesh.dim)),
+            gradient=velocity_gradient,
+        ),
+        k,
+        omega,
+    )
     mdot = RHO * U_IN * geometry.face.normal[:, 0] * geometry.face.area  # a uniform-flow mass flux
 
     production = np.asarray(closure.nu_t * closure.strain_rate**2)

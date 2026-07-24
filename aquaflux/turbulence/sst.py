@@ -36,6 +36,12 @@ class SSTModel(eqx.Module):
         The inner (near-wall, k-omega) constant set.
     alpha_2, beta_2, sigma_k2, sigma_omega2 : float
         The outer (free-stream, k-epsilon) constant set.
+    kappa : float
+        The von Karman constant, used by the log-layer near-wall relations (the adaptive wall
+        treatment's log branch).
+    e_wall : float
+        The log-law wall roughness constant ``E`` in ``u+ = ln(E y+) / kappa`` (smooth wall), used
+        by the adaptive momentum wall function.
     """
 
     a1: float = 0.31
@@ -48,6 +54,32 @@ class SSTModel(eqx.Module):
     beta_2: float = 0.0828
     sigma_k2: float = 1.0
     sigma_omega2: float = 0.856
+    kappa: float = 0.41
+    e_wall: float = 9.8
+
+    @property
+    def wall_y_star_lam(self) -> jnp.ndarray:
+        """The laminar/log intersection ``y*_lam`` of the near-wall coordinate.
+
+        The wall coordinate at which the viscous ``u+ = y+`` and log ``u+ = ln(E y+)/kappa``
+        profiles cross, i.e. the root of ``y = ln(E y) / kappa``. Below it the wall function is in
+        the viscous sublayer (zero extra eddy viscosity); above it, the log law. It depends only on
+        :attr:`kappa` and :attr:`e_wall`, so a short fixed-point iteration (``y <- ln(E y)/kappa``,
+        contractive here) converges it once.
+
+        Kept in ``jnp`` (not a Python ``float``) so it stays valid when the model constants are
+        traced — the SST constants are differentiable leaves, so a sensitivity path carries ``kappa``
+        and ``e_wall`` as tracers.
+
+        Returns
+        -------
+        jnp.ndarray
+            The laminar/log intersection ``y*_lam`` (~11 for the standard constants), a scalar.
+        """
+        y = jnp.asarray(11.0)
+        for _ in range(10):
+            y = jnp.log(self.e_wall * y) / self.kappa
+        return y
 
     def blend(self, f1: jnp.ndarray, inner: float, outer: float) -> jnp.ndarray:
         """Blend an inner/outer constant pair by ``F1``: ``f1 * inner + (1 - f1) * outer``.

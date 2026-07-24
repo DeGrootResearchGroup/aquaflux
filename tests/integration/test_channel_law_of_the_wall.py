@@ -137,7 +137,7 @@ def test_periodic_channel_reproduces_the_law_of_the_wall() -> None:
     assert 0.33 < kappa < 0.42  # realized SST value, a few percent below the nominal 0.41
 
     # Genuinely turbulent closure.
-    nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
+    nu_t = turbulence.eddy_viscosity(momentum.velocity_fields(flow).gradient, k, omega)
     assert float(jnp.max(nu_t) / nu) > 10.0
 
     # The k-tied realizability omega floor (omega >= k / (nut_max_coeff nu), nut_max_coeff = 1e5) is

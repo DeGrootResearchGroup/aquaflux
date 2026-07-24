@@ -22,10 +22,16 @@ from aquaflux.properties import Constant, PropertyModel
 from aquaflux.turbulence.driver import _relative_change, _sweep_relaxation, solve_segregated
 
 
+class _StubVelocityFields(NamedTuple):
+    """The kinematic bundle the closure reads (only its identity matters to this stub)."""
+
+    gradient: jax.Array
+
+
 class _StubFlowFields(NamedTuple):
     """The two fields the driver's post-solve prologue reads off ``momentum.flow_fields``."""
 
-    grad_velocity: jax.Array
+    velocity_fields: _StubVelocityFields
     mdot: jax.Array
 
 
@@ -92,17 +98,21 @@ class _StubMomentum(eqx.Module):
     properties: PropertyModel
     eddy_viscosity: jax.Array | None = None
 
-    def with_eddy_viscosity(self, eddy_viscosity: jax.Array) -> _StubMomentum:
+    def with_eddy_viscosity(
+        self, eddy_viscosity: jax.Array, wall_eddy_viscosity: jax.Array | None = None
+    ) -> _StubMomentum:
+        # The wall-function value is a per-face boundary diffusion coefficient; this stub has no
+        # faces and no diffusion operator, so it is accepted (the driver always passes it) and dropped.
         return _StubMomentum(self.properties, eddy_viscosity)
 
-    def velocity_gradient(self, flow: jax.Array) -> jax.Array:
-        return flow
+    def velocity_fields(self, flow: jax.Array) -> _StubVelocityFields:
+        return _StubVelocityFields(gradient=flow)
 
     def mass_flux(self, flow: jax.Array) -> jax.Array:
         return flow
 
     def flow_fields(self, flow: jax.Array) -> _StubFlowFields:
-        return _StubFlowFields(grad_velocity=flow, mdot=flow)
+        return _StubFlowFields(velocity_fields=_StubVelocityFields(gradient=flow), mdot=flow)
 
 
 class _StubTurbulence(eqx.Module):
@@ -114,10 +124,14 @@ class _StubTurbulence(eqx.Module):
     def resolve_boundaries(self):
         return self
 
-    def eddy_viscosity(self, velocity_gradient, k, omega):
+    def eddy_viscosity(self, gradient, k, omega):
         return jnp.zeros_like(k)
 
-    def closure_fields(self, velocity_gradient, k, omega):
+    def wall_face_eddy_viscosity(self, k):
+        # A resolved wall contributes no wall-function eddy viscosity, which is what this stub models.
+        return jnp.zeros_like(k)
+
+    def closure_fields(self, velocity_fields, k, omega):
         return None
 
     def k_preconditioner(self, mdot, closure, k, method="twolevel"):

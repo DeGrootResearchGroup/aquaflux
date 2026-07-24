@@ -15,10 +15,13 @@ from aquaflux.mesh import structured_grid_2d
 from aquaflux.turbulence import (
     KDestruction,
     KProduction,
+    NearWallKClosure,
     OmegaCrossDiffusion,
     OmegaDestruction,
     OmegaProduction,
     SSTModel,
+    k_wall_production,
+    omega_wall,
 )
 
 
@@ -87,6 +90,77 @@ def test_k_destruction_is_a_negative_sink() -> None:
     context, volume = _context_and_volume()
     op = KDestruction(omega=_cell(3.0, 3.0), model=MODEL)
     assert jnp.allclose(op.source(_cell(2.0, 2.0), context), -MODEL.beta_star * 2.0 * 3.0 * volume)
+
+
+# --- the adaptive near-wall k closure the two k sources share -----------------------------------
+
+
+def _near_wall(cells, d, nu=1e-5, shear=900.0):
+    """The near-wall collaborator for a chosen subset of the two-cell context."""
+    ones = jnp.ones(len(cells))
+    return NearWallKClosure(
+        cells=jnp.array(cells),
+        distance=ones * d,
+        viscosity=ones * nu,
+        shear_rate=ones * shear,
+        model=MODEL,
+    )
+
+
+def test_near_wall_closure_touches_only_its_own_cells() -> None:
+    """Cell 1 is not in the wall set, so both closures leave its row exactly as supplied."""
+    resolved, omega, k = _cell(0.5, 0.5), _cell(7.0, 7.0), _cell(0.3, 0.3)
+    near_wall = _near_wall([0], d=3e-3)
+    assert float(near_wall.production(resolved, k)[1]) == 0.5
+    assert float(near_wall.dissipation_rate(omega, k)[1]) == 7.0
+
+
+def test_near_wall_production_is_the_resolved_value_when_the_wall_is_resolved() -> None:
+    """Deep in the sublayer the log-layer weight is ~0, so the resolved production survives.
+
+    Not to the last bit: the quartic tanh weight is ~1e-9 rather than exactly zero there, which is
+    the price of a differentiable transition. What it buys back is a residual Newton can converge.
+    """
+    resolved, k = _cell(0.5, 0.5), _cell(0.01, 0.01)
+    got = _near_wall([0, 1], d=1e-5).production(resolved, k)
+    assert jnp.allclose(got, resolved, rtol=1e-6)
+
+
+def test_near_wall_production_is_the_log_layer_value_out_in_the_log_layer() -> None:
+    """Far out, the weight is ~1 and the resolved value is replaced by ``k_wall_production``."""
+    d, nu, shear = 3e-3, 1e-5, 900.0
+    resolved, k = _cell(0.5, 0.5), _cell(0.3, 0.3)
+    got = _near_wall([0, 1], d=d, nu=nu, shear=shear).production(resolved, k)
+    expected = k_wall_production(jnp.full(2, nu), jnp.full(2, d), k, jnp.full(2, shear), MODEL)
+    assert jnp.allclose(got, expected, rtol=1e-6)
+
+
+def test_near_wall_dissipation_rate_is_the_wall_omega_at_the_live_k() -> None:
+    """The wall rows carry ``omega_wall(k)`` -- the same value the omega equation fixes there."""
+    d, nu = 3e-3, 1e-5
+    omega, k = _cell(7.0, 7.0), _cell(0.3, 0.3)
+    got = _near_wall([0, 1], d=d, nu=nu).dissipation_rate(omega, k)
+    assert jnp.allclose(got, omega_wall(jnp.full(2, nu), jnp.full(2, d), k, MODEL))
+
+
+def test_near_wall_destruction_grows_faster_than_linearly_in_k() -> None:
+    """The wall destruction must be super-linear in ``k``, or the wall row has no stable root.
+
+    With a frozen ``omega`` the k destruction is exactly linear, and out in the log layer so is the
+    modelled production -- a homogeneous wall row whose diagonal flips sign as soon as production
+    wins. Reading the wall ``omega`` live restores the ``k**1.5`` growth that closes the balance.
+    """
+    context, _ = _context_and_volume()
+    near_wall = _near_wall([0, 1], d=3e-3)
+    frozen = KDestruction(omega=_cell(7.0, 7.0), model=MODEL)
+    live = KDestruction(omega=_cell(7.0, 7.0), model=MODEL, near_wall=near_wall)
+    small, large = _cell(0.3, 0.3), _cell(1.2, 0.3)
+
+    def ratio(op):
+        return float(op.source(large, context)[0] / op.source(small, context)[0])
+
+    assert abs(ratio(frozen) - 4.0) < 1e-9  # 4x the k, 4x the sink -- exactly linear
+    assert ratio(live) > 4.0 * 1.5  # super-linear: k**1.5 would give 8x
 
 
 def _omega_production(s, f1, nu_t=None, k=None, omega=None):

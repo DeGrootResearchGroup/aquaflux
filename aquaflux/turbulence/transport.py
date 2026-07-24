@@ -28,8 +28,15 @@ import jax.numpy as jnp
 from aquaflux.discretization import AdvectionFlux, DiffusionFlux, FixedValueCells, ResidualAssembler
 from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import FieldProperty, PropertyModel
+from aquaflux.vectors import norm_squared
 
-from .boundary import omega_wall_value
+from .boundary import (
+    log_layer_shear_rate,
+    nut_wall,
+    omega_wall,
+    wall_function_weight,
+    wall_k_diffusivity,
+)
 from .continuation import ScalarShiftPolicy
 from .preconditioner import (
     ScalarTransportPreconditioner,
@@ -39,17 +46,19 @@ from .preconditioner import (
 from .sources import (
     KDestruction,
     KProduction,
+    NearWallKClosure,
     OmegaCrossDiffusion,
     OmegaDestruction,
     OmegaProduction,
 )
-from .strain import strain_rate_magnitude
+from .strain import safe_sqrt, strain_rate_magnitude
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from aquaflux.boundary import BoundaryConditions
     from aquaflux.discretization import AdvectionScheme
+    from aquaflux.flow import VelocityFields
     from aquaflux.mesh import Mesh, MeshGeometry
     from aquaflux.schemes import GradientScheme
 
@@ -78,6 +87,10 @@ class SSTClosureFields(NamedTuple):
     k : jnp.ndarray
         The frozen ``k`` field, shape ``(n_cells,)`` (the ω-production limiter's ``10 β* k ω`` cap
         reads it).
+    wall_shear_rate : jnp.ndarray
+        Wall-face normal velocity gradient magnitude at the wall-adjacent cells, shape ``(n_wall,)``
+        (see :meth:`SSTTurbulence.wall_shear_rate`) -- what the adaptive near-wall k production
+        measures the wall stress from.
     """
 
     nu_t: jnp.ndarray
@@ -87,6 +100,7 @@ class SSTClosureFields(NamedTuple):
     grad_omega: jnp.ndarray
     omega: jnp.ndarray
     k: jnp.ndarray
+    wall_shear_rate: jnp.ndarray
 
 
 class WallFixedResidual(eqx.Module):
@@ -143,6 +157,9 @@ class SSTTurbulence(eqx.Module):
         Distance to the nearest wall per cell, shape ``(n_cells,)``.
     wall_cells : jnp.ndarray
         Indices of the wall-adjacent cells whose ``omega`` is fixed, shape ``(n_wall,)``.
+    wall_faces : jnp.ndarray
+        Indices of the wall boundary faces, shape ``(n_wall_faces,)`` — the faces the momentum
+        wall-function eddy viscosity is scattered onto (see :meth:`wall_face_eddy_viscosity`).
     k_boundary, omega_boundary : BoundaryConditions
         The scalar boundary closures for each field (Dirichlet inlet / wall, zero-gradient outlet;
         the omega wall is imposed by cell fixation, so its wall closure is a placeholder).
@@ -165,6 +182,7 @@ class SSTTurbulence(eqx.Module):
     molecular_viscosity: jnp.ndarray
     wall_distance: jnp.ndarray
     wall_cells: jnp.ndarray
+    wall_faces: jnp.ndarray
     k_boundary: BoundaryConditions
     omega_boundary: BoundaryConditions
     explicit_production_limiter: bool = eqx.field(static=True, default=True)
@@ -211,6 +229,7 @@ class SSTTurbulence(eqx.Module):
             molecular_viscosity=molecular_viscosity,
             wall_distance=wall_distance,
             wall_cells=wall_cells,
+            wall_faces=wall_faces,
             k_boundary=k_boundary,
             omega_boundary=omega_boundary,
             explicit_production_limiter=explicit_production_limiter,
@@ -244,6 +263,49 @@ class SSTTurbulence(eqx.Module):
         sigma = self.model.blend(f1, inner, outer)
         return FieldProperty(values=self.molecular_viscosity + sigma * nu_t)
 
+    def strain_rate(self, velocity_gradient: jnp.ndarray, k: jnp.ndarray) -> jnp.ndarray:
+        """Mean strain-rate magnitude ``S`` the closure reads, shape ``(n_cells,)``.
+
+        The reconstructed :func:`~aquaflux.turbulence.strain_rate_magnitude` everywhere, except that
+        the wall-adjacent cells are blended onto the analytical
+        :func:`~aquaflux.turbulence.log_layer_shear_rate` as they leave the viscous sublayer (the
+        smooth :func:`~aquaflux.turbulence.wall_function_weight` crossover, so a wall-resolved mesh
+        keeps the reconstructed value).
+
+        **Why the substitution matters, and why it belongs here rather than in a source term.** The
+        quantity most sensitive to ``S`` is not a production term but the SST shear-stress limiter
+        ``nu_t = a1 k / max(a1 omega, F2 S)``. In an equilibrium log layer the two arguments are
+        deliberately near-equal (``a1 omega`` edges out ``S`` by a few percent), so the limiter is
+        *just* inactive and ``nu_t`` is the mixing-length value ``kappa u_tau y``. A wall-function
+        mesh's reconstructed ``S`` overshoots the log-layer shear several-fold, which throws the
+        limiter hard the other way and clamps the wall cell's ``nu_t`` to a fraction of its correct
+        value -- measured on a ``y+ ~ 30`` channel: ``nu_t`` ~5x low, the velocity profile far too
+        steep out of the wall cell (``U+`` jumping 6.6 over the first cell spacing where the log law
+        gives 2.7), and the predicted wall shear ~12% low even with the wall stress itself correct.
+
+        Parameters
+        ----------
+        velocity_gradient : jnp.ndarray
+            The velocity-gradient tensor, shape ``(n_cells, dim, dim)``.
+        k : jnp.ndarray
+            The turbulent kinetic energy per cell, shape ``(n_cells,)``.
+
+        Returns
+        -------
+        jnp.ndarray
+            The strain-rate magnitude per cell, shape ``(n_cells,)``.
+        """
+        strain = strain_rate_magnitude(velocity_gradient)
+        wall = self.wall_cells
+        nu_wall = self.molecular_viscosity[wall]
+        d_wall = self.wall_distance[wall]
+        k_wall = k[wall]
+        weight = wall_function_weight(nu_wall, d_wall, k_wall, self.model)
+        return strain.at[wall].set(
+            (1.0 - weight) * strain[wall]
+            + weight * log_layer_shear_rate(d_wall, k_wall, self.model)
+        )
+
     def eddy_viscosity(
         self, velocity_gradient: jnp.ndarray, k: jnp.ndarray, omega: jnp.ndarray
     ) -> jnp.ndarray:
@@ -258,10 +320,39 @@ class SSTTurbulence(eqx.Module):
         k, omega : jnp.ndarray
             The current turbulence fields, shape ``(n_cells,)``.
         """
-        strain = strain_rate_magnitude(velocity_gradient)
         return self.model.eddy_viscosity(
-            k, omega, strain, self.molecular_viscosity, self.wall_distance
+            k,
+            omega,
+            self.strain_rate(velocity_gradient, k),
+            self.molecular_viscosity,
+            self.wall_distance,
         )
+
+    def wall_face_eddy_viscosity(self, k: jnp.ndarray) -> jnp.ndarray:
+        """Per-face wall-function eddy viscosity ``nu_t,wall``, shape ``(n_faces,)`` (zero off walls).
+
+        The adaptive (``y+``-insensitive) wall-face value :func:`~aquaflux.turbulence.nut_wall`
+        scattered onto the wall boundary faces, computed from ``k`` at each wall face's owner cell and
+        its wall distance. Handed to the momentum block through
+        :meth:`~aquaflux.flow.MomentumContinuity.with_eddy_viscosity` so the wall shear follows the law
+        of the wall; it is zero (a resolved wall) where the first cell is in the viscous sublayer, so on
+        a wall-resolved mesh the momentum block is unchanged.
+
+        Parameters
+        ----------
+        k : jnp.ndarray
+            The turbulent kinetic energy per cell, shape ``(n_cells,)``.
+
+        Returns
+        -------
+        jnp.ndarray
+            The wall-face eddy viscosity per face, shape ``(n_faces,)``.
+        """
+        owner = self.mesh.face_cells.owner[self.wall_faces]
+        values = nut_wall(
+            self.molecular_viscosity[owner], self.wall_distance[owner], k[owner], self.model
+        )
+        return jnp.zeros(self.mesh.n_faces).at[self.wall_faces].set(values)
 
     def _field_gradient(self, field: jnp.ndarray, boundary: BoundaryConditions) -> jnp.ndarray:
         """Reconstruct the cell gradient of a turbulence field with its boundary closures.
@@ -280,23 +371,65 @@ class SSTTurbulence(eqx.Module):
         )
         return assembler.gradient(field)
 
+    def wall_shear_rate(self, velocity: VelocityFields) -> jnp.ndarray:
+        """Wall-face normal velocity gradient at the wall-adjacent cells, shape ``(n_wall,)``.
+
+        ``|U_P - U_wall| / d`` per wall face -- the discrete wall-normal derivative of the velocity
+        the momentum block's wall flux is built on -- area-averaged over the wall faces of each
+        wall-adjacent cell (a corner cell touches more than one). Multiplied by the wall-face
+        effective viscosity it is the wall shear stress
+        (:func:`~aquaflux.turbulence.wall_shear_stress`), which is why the adaptive near-wall k
+        production reads *this* shear rather than the cell strain-rate magnitude: it makes the energy
+        fed into the wall cell the work the wall stress actually does.
+
+        The velocity difference is taken against the patch's own boundary velocity, so a moving wall
+        contributes only the *relative* shear. Its magnitude uses the guarded square root: the
+        Euclidean norm has a cone point at zero, and a stationary fluid (a cold start, a stagnation
+        point) sits exactly on it, where a plain ``sqrt`` would return a NaN derivative into every
+        Jacobian row that reads a wall closure.
+
+        Parameters
+        ----------
+        velocity : VelocityFields
+            The kinematic flow state (cell velocity, boundary-face velocity, gradient).
+
+        Returns
+        -------
+        jnp.ndarray
+            The wall-normal shear rate per wall-adjacent cell, shape ``(n_wall,)``.
+        """
+        owner = self.mesh.face_cells.owner[self.wall_faces]
+        slip = velocity.velocity[owner] - velocity.boundary_velocity[self.wall_faces]
+        rate = safe_sqrt(norm_squared(slip)) / self.wall_distance[owner]
+
+        # Area-average onto the owner cells through the connectivity scatter, keeping the division
+        # until after the wall cells are gathered (every non-wall cell has zero weight, and a 0/0
+        # there would put a NaN into the reverse-mode tape even though its value is discarded).
+        zeros = jnp.zeros(self.mesh.n_faces)
+        area = zeros.at[self.wall_faces].set(self.geometry.face.area[self.wall_faces])
+        weighted = zeros.at[self.wall_faces].set(rate) * area
+        scatter = self.mesh.face_cells.scatter
+        return scatter(weighted, zeros)[self.wall_cells] / scatter(area, zeros)[self.wall_cells]
+
     def closure_fields(
-        self, velocity_gradient: jnp.ndarray, k: jnp.ndarray, omega: jnp.ndarray
+        self, velocity: VelocityFields, k: jnp.ndarray, omega: jnp.ndarray
     ) -> SSTClosureFields:
         """Assemble the frozen SST closure fields for the current state.
 
         Computes the strain rate from the velocity gradient, reconstructs ``grad k`` and
-        ``grad omega`` with their boundary closures, and evaluates ``F1`` and the eddy viscosity --
-        the fields the k and omega equation builders freeze for a sweep.
+        ``grad omega`` with their boundary closures, evaluates ``F1`` and the eddy viscosity, and
+        measures the near-wall shear rate -- the fields the k and omega equation builders freeze for
+        a sweep.
 
         Parameters
         ----------
-        velocity_gradient : jnp.ndarray
-            The velocity-gradient tensor, shape ``(n_cells, dim, dim)``.
+        velocity : VelocityFields
+            The kinematic flow state: cell velocity, boundary-face velocity, and the cell
+            velocity-gradient tensor.
         k, omega : jnp.ndarray
             The current turbulence fields, shape ``(n_cells,)``.
         """
-        strain = strain_rate_magnitude(velocity_gradient)
+        strain = self.strain_rate(velocity.gradient, k)
         grad_k = self._field_gradient(k, self.k_boundary)
         grad_omega = self._field_gradient(omega, self.omega_boundary)
         f1 = self.model.f1(
@@ -305,7 +438,9 @@ class SSTTurbulence(eqx.Module):
         nu_t = self.model.eddy_viscosity(
             k, omega, strain, self.molecular_viscosity, self.wall_distance
         )
-        return SSTClosureFields(nu_t, strain, f1, grad_k, grad_omega, omega, k)
+        return SSTClosureFields(
+            nu_t, strain, f1, grad_k, grad_omega, omega, k, self.wall_shear_rate(velocity)
+        )
 
     def k_residual(
         self, mdot: jnp.ndarray, closure: SSTClosureFields
@@ -314,17 +449,26 @@ class SSTTurbulence(eqx.Module):
 
         Advection on the volume flux, diffusion of ``nu + sigma_k nu_t``, and the limited production
         minus destruction sources.
+
+        Both halves of the adaptive near-wall ``k`` treatment enter here, over the same smooth
+        crossover and inactive on a wall-resolved mesh: the wall-adjacent cells' production is blended
+        toward the log-layer form (:class:`~aquaflux.turbulence.NearWallKClosure`), and the wall-face
+        diffusivity is faded out (:func:`~aquaflux.turbulence.wall_k_diffusivity`) so a modelled
+        sublayer carries no turbulent-energy flux into the wall.
         """
         diffusivity = self._diffusivity(
             closure.nu_t, closure.f1, self.model.sigma_k1, self.model.sigma_k2
         )
+        near_wall = self._near_wall_closure(closure.wall_shear_rate)
         assembler = ResidualAssembler.build(
             self.mesh,
             self.geometry,
             PropertyModel({"diffusivity": diffusivity}),
             (
                 AdvectionFlux(self._volume_flux(mdot), self.advection_scheme),
-                DiffusionFlux(),
+                DiffusionFlux(
+                    boundary_coefficient=self._wall_k_diffusivity(diffusivity, closure.k)
+                ),
             ),
             self.k_boundary,
             source_operators=(
@@ -334,12 +478,43 @@ class SSTTurbulence(eqx.Module):
                     closure.omega,
                     self.model,
                     explicit_limiter=self.explicit_production_limiter,
+                    near_wall=near_wall,
                 ),
-                KDestruction(closure.omega, self.model),
+                KDestruction(closure.omega, self.model, near_wall=near_wall),
             ),
             gradient_scheme=self.gradient_scheme,
         )
         return assembler.residual
+
+    def _near_wall_closure(self, wall_shear_rate: jnp.ndarray) -> NearWallKClosure:
+        """The adaptive near-wall k-budget collaborator for this sweep's wall shear rate."""
+        return NearWallKClosure(
+            self.wall_cells,
+            self.wall_distance[self.wall_cells],
+            self.molecular_viscosity[self.wall_cells],
+            wall_shear_rate,
+            self.model,
+        )
+
+    def _wall_k_diffusivity(self, diffusivity: FieldProperty, k: jnp.ndarray) -> jnp.ndarray:
+        """Per-face k diffusion coefficient with the wall faces faded out, shape ``(n_faces,)``.
+
+        The owner-cell coefficient everywhere (which is what the diffusion operator would use anyway),
+        overridden on the wall faces by :func:`~aquaflux.turbulence.wall_k_diffusivity`. Only the
+        boundary entries are read by :class:`~aquaflux.discretization.DiffusionFlux`.
+        """
+        owner = self.mesh.face_cells.owner
+        face_gamma = diffusivity.values[owner]
+        wall_owner = owner[self.wall_faces]
+        return face_gamma.at[self.wall_faces].set(
+            wall_k_diffusivity(
+                face_gamma[self.wall_faces],
+                self.molecular_viscosity[wall_owner],
+                self.wall_distance[wall_owner],
+                k[wall_owner],
+                self.model,
+            )
+        )
 
     def omega_residual(
         self, mdot: jnp.ndarray, closure: SSTClosureFields
@@ -379,9 +554,10 @@ class SSTTurbulence(eqx.Module):
         )
         wall_fix = FixedValueCells(
             self.wall_cells,
-            omega_wall_value(
+            omega_wall(
                 self.molecular_viscosity[self.wall_cells],
                 self.wall_distance[self.wall_cells],
+                closure.k[self.wall_cells],
                 self.model,
             ),
         )

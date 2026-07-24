@@ -20,6 +20,11 @@ injected :class:`~aquaflux.turbulence.sst.SSTModel`.
 Sign convention follows the volume-source contract: a source returns its volume-integrated value
 (production positive), and the residual assembler subtracts it — so a destruction term returns a
 negative value.
+
+The two k terms additionally accept a shared :class:`NearWallKClosure` collaborator: in a
+wall-adjacent cell that has left the viscous sublayer, neither the near-wall velocity profile nor the
+``omega`` peak is resolved, so both sides of that cell's k budget are modelled instead. It is one
+object because the two substitutions only work together (see its docstring).
 """
 
 from __future__ import annotations
@@ -36,7 +41,10 @@ from aquaflux.vectors import dot
 if TYPE_CHECKING:
     from aquaflux.discretization import FaceContext
 
-    from .sst import SSTModel
+# Runtime imports: the adaptive near-wall k treatment is evaluated inside `NearWallKClosure`, so
+# these must not be deferred into the type-checking block.
+from .boundary import k_wall_production, omega_wall, wall_function_weight
+from .sst import SSTModel
 
 # The ratio capping production against destruction in the k-production limiter,
 # P̃_k = min(P_k, ratio * β* k ω) — a standard SST safeguard against build-up in stagnation regions.
@@ -47,6 +55,111 @@ _PRODUCTION_LIMIT_RATIO = 10.0
 # affects a physical field: ν_t is orders above it wherever the cap is active (k / ν_t stays finite as
 # both vanish), so it only prevents a 0/0 at an all-zero cold-start cell.
 _EDDY_VISCOSITY_FLOOR = 1e-30
+
+
+class NearWallKClosure(eqx.Module):
+    """The wall-adjacent cells' k budget: log-layer production, and the wall's own dissipation rate.
+
+    A wall-adjacent cell that has left the viscous sublayer resolves neither the near-wall velocity
+    profile nor the ``omega`` peak, so **both** sides of its k budget are modelled rather than
+    computed from the mesh, and they must be modelled *together*:
+
+    - :meth:`production` blends the resolved ``nu_t S**2`` toward the log-layer form
+      (:func:`~aquaflux.turbulence.k_wall_production` -- the wall shear stress times the analytical
+      log-law mean shear) over the smooth crossover
+      :func:`~aquaflux.turbulence.wall_function_weight`.
+    - :meth:`dissipation_rate` returns the ``omega`` the destruction ``beta_star k omega`` must read
+      there: the analytical wall value :func:`~aquaflux.turbulence.omega_wall` **as a live function of
+      the solved k**, since that is exactly the value the ``omega`` equation fixes in these cells.
+
+    **Both, or neither.** Out in the log layer the modelled production grows very nearly *linearly*
+    in ``k`` (the wall eddy viscosity scales like ``sqrt(k)`` and so does the friction velocity), so
+    against a **frozen** ``omega`` the destruction ``beta_star k omega`` is linear in ``k`` too: the
+    wall row degenerates into a homogeneous equation whose diagonal changes sign the moment production
+    exceeds destruction, and the k solve runs away (measured -- it fails outright). Reading the wall
+    ``omega`` live restores the physical ``k**1.5`` destruction, so the balance closes at the
+    equilibrium ``k`` and the diagonal stays positive. On a wall-resolved mesh this is a no-op in all
+    but name: the fixed ``omega`` there is the viscous ``6 nu/(beta_1 d**2)``, independent of ``k``.
+
+    The wall-adjacent cell indices and the three per-cell quantities the closures read always travel
+    together, so they are carried as one collaborator rather than threaded as loose arrays.
+
+    Attributes
+    ----------
+    cells : jnp.ndarray
+        Indices of the wall-adjacent cells, shape ``(n_wall,)``.
+    distance : jnp.ndarray
+        Wall distance of those cells, shape ``(n_wall,)``.
+    viscosity : jnp.ndarray
+        Molecular (kinematic) viscosity there, shape ``(n_wall,)``.
+    shear_rate : jnp.ndarray
+        Wall-face normal velocity gradient magnitude ``|U_P - U_wall| / d`` there, shape
+        ``(n_wall,)`` — frozen for the sweep in the segregated path, live in the coupled residual.
+    model : SSTModel
+        The model constants (reads ``beta_star``, ``beta_1``, ``kappa``, ``e_wall``,
+        ``wall_y_star_lam``).
+    """
+
+    cells: jnp.ndarray
+    distance: jnp.ndarray
+    viscosity: jnp.ndarray
+    shear_rate: jnp.ndarray
+    model: SSTModel
+
+    def production(self, resolved: jnp.ndarray, k: jnp.ndarray) -> jnp.ndarray:
+        """``resolved`` with the wall-adjacent rows blended toward the log-layer production.
+
+        Parameters
+        ----------
+        resolved : jnp.ndarray
+            The resolved (limited) production per cell, shape ``(n_cells,)``.
+        k : jnp.ndarray
+            The **solved** turbulent kinetic energy per cell, shape ``(n_cells,)``.
+
+        Returns
+        -------
+        jnp.ndarray
+            The production per cell with the near-wall blend applied, shape ``(n_cells,)``.
+        """
+        # The wall production reads the LIVE `k`, never a frozen copy. Freezing is right for the
+        # production *cap* (whose exact linearization is a large positive diagonal that breaks the
+        # M-matrix) but wrong here: a frozen source turns the k update into the Picard map
+        # k <- P(k)/(beta* omega), whose slope is P'(k)/(beta* omega). Where the production's
+        # k-sensitivity exceeds the destruction's, that slope passes 1 and the iteration *diverges*
+        # (measured). Linearizing it exactly keeps Newton on a genuine root instead.
+        k_wall = k[self.cells]
+        log_layer = wall_function_weight(self.viscosity, self.distance, k_wall, self.model)
+        wall_value = k_wall_production(
+            self.viscosity, self.distance, k_wall, self.shear_rate, self.model
+        )
+        # Blend, do not switch: the two branches differ by several-fold at the crossover, and a jump
+        # would make the residual non-differentiable (see `wall_function_weight`).
+        return resolved.at[self.cells].set(
+            (1.0 - log_layer) * resolved[self.cells] + log_layer * wall_value
+        )
+
+    def dissipation_rate(self, omega: jnp.ndarray, k: jnp.ndarray) -> jnp.ndarray:
+        """``omega`` with the wall-adjacent rows replaced by the analytical wall value at ``k``.
+
+        No blend and no crossover: the ``omega`` equation replaces these cells' balance by the
+        fixation :func:`~aquaflux.turbulence.omega_wall` at *every* ``y+``, so this is simply the same
+        value read at the solved ``k`` instead of the previous sweep's copy.
+
+        Parameters
+        ----------
+        omega : jnp.ndarray
+            The frozen specific dissipation rate per cell, shape ``(n_cells,)``.
+        k : jnp.ndarray
+            The **solved** turbulent kinetic energy per cell, shape ``(n_cells,)``.
+
+        Returns
+        -------
+        jnp.ndarray
+            The dissipation rate per cell with the wall fixation applied, shape ``(n_cells,)``.
+        """
+        return omega.at[self.cells].set(
+            omega_wall(self.viscosity, self.distance, k[self.cells], self.model)
+        )
 
 
 class KProduction(VolumeSource):
@@ -78,6 +191,9 @@ class KProduction(VolumeSource):
         The model constants (reads ``beta_star``).
     explicit_limiter : bool
         Freeze the cap's ``k`` for the linearization (a forward-solve stabilization); static.
+    near_wall : NearWallKClosure or None
+        The adaptive near-wall treatment, blending the resolved production toward the log-layer wall
+        form in the wall-adjacent cells. ``None`` (default) keeps the resolved production everywhere.
     """
 
     nu_t: jnp.ndarray
@@ -85,18 +201,25 @@ class KProduction(VolumeSource):
     omega: jnp.ndarray
     model: SSTModel
     explicit_limiter: bool = eqx.field(static=True, default=False)
+    near_wall: NearWallKClosure | None = None
 
     def source(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
         production = self.nu_t * self.strain_rate**2
         cap_field = jax.lax.stop_gradient(field) if self.explicit_limiter else field
         limit = _PRODUCTION_LIMIT_RATIO * self.model.beta_star * cap_field * self.omega
-        return jnp.minimum(production, limit) * context.geometry.cell.volume
+        limited = jnp.minimum(production, limit)
+        if self.near_wall is not None:
+            limited = self.near_wall.production(limited, field)
+        return limited * context.geometry.cell.volume
 
 
 class KDestruction(VolumeSource):
     """Destruction of turbulent kinetic energy, ``− β* k ω`` (a sink).
 
-    Linear in the solved ``k`` with ``ω`` frozen, so its linearization is exact.
+    Linear in the solved ``k`` with ``ω`` frozen, so its linearization is exact — except in the
+    wall-adjacent cells, where ``near_wall`` substitutes the analytical wall ``ω`` evaluated at the
+    solved ``k`` (making the term ``k**1.5`` there, and its linearization still exact under automatic
+    differentiation).
 
     Attributes
     ----------
@@ -104,13 +227,21 @@ class KDestruction(VolumeSource):
         Specific dissipation rate per cell, shape ``(n_cells,)`` (frozen).
     model : SSTModel
         The model constants (reads ``beta_star``).
+    near_wall : NearWallKClosure or None
+        The adaptive near-wall treatment, supplying the wall cells' own dissipation rate. Must be
+        given whenever :class:`KProduction` is given one — see the "both, or neither" note there.
+        ``None`` (default) uses the frozen ``omega`` everywhere.
     """
 
     omega: jnp.ndarray
     model: SSTModel
+    near_wall: NearWallKClosure | None = None
 
     def source(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
-        return -self.model.beta_star * field * self.omega * context.geometry.cell.volume
+        omega = self.omega
+        if self.near_wall is not None:
+            omega = self.near_wall.dissipation_rate(omega, field)
+        return -self.model.beta_star * field * omega * context.geometry.cell.volume
 
 
 class OmegaProduction(VolumeSource):
