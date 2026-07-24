@@ -121,6 +121,14 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       is why the refresh's gradient property is covered by *forward* tests (`same fixed point`) plus the
       existing single-stage adjoint gate, and by a fast unit test that the guard fires — **not** by an
       adjoint test through the staged solve (there is none: that path cannot be differentiated).
+  - **`on_step` / `on_checkpoint` instrument the march, and work WITHOUT a refresh trigger.** `on_step`
+    receives each `StepReport` (step, cycles, ‖R‖, ratio); `on_checkpoint` additionally receives the
+    *solved-variable* state (map with `physical_fields`). Both are the seam a solver study logs a long
+    march through — needed because a multi-hour coupled march that prints nothing cannot be told from a
+    hung one, and this case's documented failure mode is a march that keeps stepping while the residual
+    creeps *upward*. Only the observed segments call back; the finishing solve is traced. See the
+    `march.py` bullets in `.claude/rules/solve.md` for why observation is not gated on the trigger and why
+    the state rides a separate seam from the report history.
   - **`reuse=` refreshes a stale k/ω preconditioner without changing the compilation signature.**
     `scalar_transport_preconditioner(..., reuse=old)` (threaded through
     `SSTTurbulence.k_preconditioner` / `omega_preconditioner`) re-derives the *values* at a new state on

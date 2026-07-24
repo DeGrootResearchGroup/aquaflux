@@ -392,6 +392,41 @@ def test_staged_refresh_stops_at_the_same_tolerance(case) -> None:
 
 
 @pytest.mark.slow
+def test_the_march_reports_progress_without_a_refresh_trigger(case) -> None:
+    """``on_step`` must fire on an ordinary solve, not only when a refresh is enabled.
+
+    Observability cannot be a side effect of asking for a refresh. The reference march that a refresh
+    is *calibrated against* is by definition unrefreshed, and it is the longest-running one -- so it
+    is precisely the run that must report progress rather than sit silent. (Regression: the observed
+    pre-march was originally gated on the trigger alone, which would have made an instrumented
+    reference march produce no output at all.)
+    """
+    coupled = case["coupled"]
+    flow_ws, k_ws, omega_ws = case["coupled_start"]
+    seen, saved = [], []
+
+    solve_coupled(
+        coupled,
+        flow_ws,
+        k_ws,
+        omega_ws,
+        method="twolevel",
+        max_steps=40,  # must actually converge: the finishing solve raises on a non-root
+        rtol=1e-2,  # loose -- this test is about reporting, not about how deep it gets
+        on_step=seen.append,
+        on_checkpoint=lambda report, state: saved.append((report.step, state)),
+        **PRECONDITIONER,
+    )
+
+    assert seen, "an instrumented solve produced no step reports"
+    assert [report.step for report in seen] == list(range(len(seen)))
+    assert all(report.cycles > 0 for report in seen)
+    # The checkpoint seam carries the state alongside the identical reports.
+    assert [step for step, _ in saved] == [report.step for report in seen]
+    assert saved[-1][1].shape == coupled.pack_state(flow_ws, k_ws, omega_ws).shape
+
+
+@pytest.mark.slow
 def test_a_refresh_is_observed_as_two_reported_segments(case) -> None:
     """The reporting seam works across a refresh: both segments reach the observer, with their costs.
 

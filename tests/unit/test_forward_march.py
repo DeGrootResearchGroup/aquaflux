@@ -171,6 +171,35 @@ def test_march_reports_every_step_to_an_observer() -> None:
     assert seen[-1].residual_ratio < seen[0].residual_ratio
 
 
+def test_checkpoint_receives_the_state_behind_each_report() -> None:
+    """``checkpoint`` pairs each report with the state that produced it.
+
+    Separate from ``observer`` on purpose: the report history a :class:`RefreshTrigger` reads stays
+    purely numeric, which is what lets a trigger be replayed offline against a logged march. Here the
+    two callbacks must agree step for step, and the final checkpointed state must be the one the
+    march returns.
+    """
+    residual, phi0, _ = _march_and_solver_inputs()
+    seen: list[StepReport] = []
+    saved: list[tuple[StepReport, jnp.ndarray]] = []
+
+    result = forward_march(
+        DampedNewtonStep(line_search=10),
+        residual,
+        phi0,
+        max_steps=4,
+        rtol=1e-14,
+        atol=1e-16,
+        observer=seen.append,
+        checkpoint=lambda report, state: saved.append((report, state)),
+    )
+
+    assert [report for report, _ in saved] == seen
+    assert jnp.allclose(saved[-1][1], result.state)
+    # Each checkpointed state really is that step's, not a shared reference to the last one.
+    assert not jnp.allclose(saved[0][1], saved[-1][1])
+
+
 def test_repeated_steps_reuse_the_compiled_march_step() -> None:
     """Stepping the march must be a compilation-cache hit, or an eager march is unusable.
 

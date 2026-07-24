@@ -374,6 +374,20 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     **calibrated offline**: log one march with `refresh_trigger=None` and an `on_step` observer, then
     replay candidate parameters against the log. No numeric default here is calibrated — they are chosen
     conservative (late rather than early) and must be set from an instrumented full-mesh run.
+  - **Observation does NOT require a refresh (binding — this was a real bug).** `solve_coupled` runs the
+    observed pre-march when the caller wants a refresh **or** merely wants to watch
+    (`observing = refreshing or on_step or on_checkpoint`). Gating it on the trigger alone makes an
+    *instrumented reference march* — `refresh_trigger=None` plus an observer, which is exactly the run a
+    trigger is calibrated against, and the longest-running one — produce **no output at all** and sit
+    silent for hours. Consequence to keep in mind: an observed solve spends `max_steps` on the pre-march
+    and `max_steps` again on the finishing solve, so the budget is larger but *split*; instrumenting a
+    solve already near its limit can turn a pass into a convergence-guard raise. Pinned by
+    `test_the_march_reports_progress_without_a_refresh_trigger`.
+  - **`checkpoint` is a SECOND seam, separate from `observer` (binding).** `checkpoint(report, state)`
+    carries the state; `observer(report)` carries only numbers. Keeping the state off the report history
+    is what keeps a `RefreshTrigger` a pure function that can be replayed offline against a logged march
+    — put the state on that seam and a trigger could read the physics, and trigger calibration would cost
+    one full solve per candidate instead of one logged run for all of them.
   - **Reporting seam.** `StepReport(step, cycles, residual_norm, residual_ratio)` + `MarchResult`, plus an
     optional streaming `observer` (a long march must not withhold all logging until it finishes). The
     trigger and a future logger consume the identical objects, so there is no second reporting path.

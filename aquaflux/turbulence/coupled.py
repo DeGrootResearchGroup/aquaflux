@@ -728,6 +728,7 @@ def solve_coupled(
     refresh_trigger: RefreshTrigger | None = None,
     refresh_limit: int = 1,
     on_step: Callable[[StepReport], None] | None = None,
+    on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     **continuation_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system ``R(u, p, k, omega) = 0`` by one monolithic Newton solve.
@@ -788,6 +789,23 @@ def solve_coupled(
     on_step : callable, optional
         Called with each :class:`~aquaflux.solve.StepReport` as the march produces it -- the seam for
         logging a long solve's progress and cost. The refresh trigger reads the same reports.
+    on_checkpoint : callable, optional
+        Called with ``(report, state)`` after each observed step, for saving intermediate states of a
+        long march. Kept separate from ``on_step`` so the report history stays purely numeric and a
+        refresh trigger remains replayable offline (see
+        :func:`~aquaflux.solve.forward_march`). Note the *state* here is the solved-variable state,
+        not the physical fields -- map it with :meth:`CoupledRANS.physical_fields`.
+
+        Both callbacks see only the **observed** segments, not the finishing solve, whose march is
+        traced and cannot call back into Python.
+
+        **Supplying either one makes the march observed, which changes how ``max_steps`` is spent.**
+        An unobserved solve runs one traced march with the whole ``max_steps`` budget; an observed one
+        runs the eager pre-march to ``max_steps`` and then gives the finishing solve ``max_steps``
+        again. That is more budget in total, but it is *split*, so a solve needing many contiguous
+        steps can exhaust a tight budget in the pre-march and leave the finishing solve unable to
+        reach a root -- which it reports by raising, rather than returning a non-root. Raise
+        ``max_steps`` when instrumenting a solve that was already near its limit.
 
         **Why:** the frozen scalar preconditioners go stale as the flow separates. On a separated
         backward-facing-step state, re-freezing them cut the shifted solve from 30 to 13 outer Krylov
@@ -842,16 +860,22 @@ def solve_coupled(
         The converged ``(flow, k, omega)``.
     """
     refreshing = refresh_trigger is not None and refresh_limit > 0
-    if refreshing and _is_traced((coupled, flow, k, omega)):
+    # The observed pre-march also runs when the caller only wants to *watch* the solve. Observability
+    # must not require enabling a refresh: the reference march a refresh is calibrated against is by
+    # definition unrefreshed, and it is the longest-running one, so it is the one that most needs to
+    # report progress rather than sit silent for hours.
+    observing = refreshing or on_step is not None or on_checkpoint is not None
+    if observing and _is_traced((coupled, flow, k, omega)):
         # The refresh re-derives the preconditioner from the mid-march state, which is a tracer when
         # differentiating; the refreshed preconditioner would capture it and escape the converged
         # solve's custom_vjp as a leaked tracer. There is no concrete-preconditioner path through a
         # refresh (it forbids an explicit `continuation`), so this cannot be worked around here --
         # raise with the fix rather than letting the leak surface as an opaque UnexpectedTracerError.
         raise ValueError(
-            "refresh_trigger is a forward-only accelerator and cannot be used under jax.grad (or any "
-            "JAX transform): the mid-march preconditioner rebuild would capture the differentiation "
-            "tracer. Drop refresh_trigger and differentiate the single-stage solve with a `continuation` "
+            "refresh_trigger/on_step/on_checkpoint drive a forward-only eager march and cannot be used "
+            "under jax.grad (or any JAX transform): the march steps in Python on concrete residual "
+            "norms, and a mid-march preconditioner rebuild would capture the differentiation tracer. "
+            "Drop them and differentiate the single-stage solve with a `continuation` "
             "built on concrete parameters outside jax.grad -- the adjoint is refresh-independent, so "
             "the gradient is identical."
         )
@@ -874,7 +898,7 @@ def solve_coupled(
         )
 
     stage_rtol, stage_atol = rtol, atol
-    if refreshing:
+    if observing:
         # Observed pre-march: step until the trigger judges the frozen preconditioner stale, re-freeze,
         # and continue from there. Each segment is an accelerator only -- it may stop short of a root,
         # and carries no convergence guard -- so the finishing solve below still produces the result.
@@ -895,6 +919,7 @@ def solve_coupled(
                 reference_norm=reference_norm,
                 trigger=refresh_trigger,
                 observer=on_step,
+                checkpoint=on_checkpoint,
             )
             state = result.state
             if not result.triggered or segment == refresh_limit:

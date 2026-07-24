@@ -107,8 +107,19 @@ def read_openfoam_reference():
     )
 
 
-def solve_aquaflux():
-    """Solve the coupled RANS system on the imported OpenFOAM mesh; return fields + geometry."""
+def solve_aquaflux(**solve_kwargs):
+    """Solve the coupled RANS system on the imported OpenFOAM mesh; return fields + geometry.
+
+    Parameters
+    ----------
+    **solve_kwargs
+        Forwarded to :func:`~aquaflux.turbulence.solve_coupled`, overriding the defaults set
+        here. This is the seam a solver study uses to instrument or reconfigure the march --
+        an ``on_step`` observer, a ``refresh_trigger``, a different ``method`` -- **without**
+        restating the case. The mesh import, boundary conditions, model constants and scheme
+        choices above are the definition of this benchmark, and a second copy of them would
+        drift from the one the validation figures are generated from.
+    """
     mesh = read_openfoam(RUNS / "polyMesh")
     geom = mesh.geometry()
     # Corrected (non-orthogonal / skewness) Green-Gauss gradients. Its A_g^-1 apply is the default O(n)
@@ -179,7 +190,8 @@ def solve_aquaflux():
     # The monolithic Newton is globalized by the default pseudo-transient continuation: an a_P /
     # transport-diagonal shift that damps each step heavily far from the fixed point and ramps to
     # zero on the residual, recovering the exact steady Newton state at convergence.
-    flow, k, omega = solve_coupled(coupled, max_steps=MAX_STEPS, rtol=RTOL)
+    solve_options = dict(max_steps=MAX_STEPS, rtol=RTOL) | solve_kwargs
+    flow, k, omega = solve_coupled(coupled, **solve_options)
     velocity, pressure = momentum.unpack(flow)
     nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
     return dict(
