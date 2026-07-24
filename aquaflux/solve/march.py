@@ -226,6 +226,7 @@ def forward_march(
     reference_norm: float | None = None,
     trigger: RefreshTrigger | None = None,
     observer: Callable[[StepReport], None] | None = None,
+    checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     solver: lx.AbstractLinearSolver | None = None,
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
@@ -266,6 +267,18 @@ def forward_march(
     observer : callable, optional
         Called with each :class:`StepReport` as it is produced, for streaming progress out of a long
         march. The full history is also returned, so an observer is only needed for live reporting.
+    checkpoint : callable, optional
+        Called with ``(report, state)`` after each step — the same report the observer sees, plus the
+        state that produced it. For saving intermediate states of a long march, so a later study can
+        re-solve at a chosen point without re-marching to it, and so a crash costs steps rather than
+        the whole run.
+
+        **Deliberately separate from** ``observer``, rather than putting the state on the report.
+        A :class:`RefreshTrigger` reads the report history, and keeping that history purely numeric is
+        what makes a trigger a pure function that can be replayed offline against a logged march. If
+        the state travelled on the same seam, a trigger could reach into the physics and that replay
+        property — the reason trigger calibration costs one logged run instead of one run per
+        candidate — would be lost.
     solver : lineax.AbstractLinearSolver, optional
         The linear solver for each step; defaults to ``forward_step.default_solver()``.
 
@@ -305,6 +318,8 @@ def forward_march(
         reports.append(report)
         if observer is not None:
             observer(report)
+        if checkpoint is not None:
+            checkpoint(report, state)
         # A non-finite residual can never satisfy the tolerance test, so without this the march
         # would spend its whole budget stepping a poisoned state. Stop and let the finishing solve
         # report the failure, which is where non-convergence is diagnosed.
