@@ -234,10 +234,32 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       indicator** — the drift of the frozen operator's coefficients, `‖Δν_t‖`/`‖Δṁ‖` relative to the
       freeze state — is the clean refresh trigger this motivates (it fixes the `CycleGrowthTrigger`
       confound, #19: cycle count rises from β→0 *and* staleness, drift rises only from staleness).
-    - **NOT YET validated end-to-end.** The above is per-step / frozen-state evidence. An α-targeting
-      controller must be A/B'd against SER on the full march to the same residual, **wall-clock deciding** —
-      per-step wins have misled on this project repeatedly (LSC, MSIMPLER-`k`, air-vs-twolevel). Tracked as
-      task work; harnesses in the study scratchpad (`beta_sweep.py`, `alpha_probe.py`).
+    - **VALIDATED end-to-end (α-targeting controller + PC refresh strictly dominates SER on pitzDaily).**
+      A prototype controller — raise β toward the α=1 boundary (`β ← β/α`, capped), ease gently when
+      α=1 — with the k/ω AMGs refreshed every 5 steps and the step `filter_jit`'d (to match SER's
+      compiled `while_loop` footing, ~2.2 s/cyc), A/B'd from the cold hybrid IC against E1's SER march:
+
+      | reach | SER (E1) | α-controller + refresh |
+      |---|---|---|
+      | rel 0.10 | 15.5 min | 11.4 min |
+      | rel 0.054 | **64 min** | **24 min (2.6×)** |
+      | deepest | **rel 0.052** (67 min, then stalled) | **rel 0.032** (41 min) |
+
+      Faster at every overlapping residual, the lead *widens* into the tail (1.3× → 2.6×), and it
+      reaches residuals SER never touched. The mechanism is the diagnosis playing out live: as the
+      state stiffens α drops below 1 and the controller *raises* β into the 2–5 band (refresh holding
+      cycles ~16) while SER collapses to β≈0.10 and grinds. Two prior arms confirm the attribution:
+      (a) the **frozen-PC** α-controller *lost* (0.65×) — cycles rose with β (25 vs SER's ≤14),
+      the β↔PC-refresh coupling biting, so the refresh is load-bearing; (b) the **eager** (un-jitted)
+      version was handicapped ~1.4×/cyc — the jit is needed for a fair comparison, not for the physics.
+    - **The controller has a CEILING — it does not converge either (it stalls at rel ~0.03, deeper than
+      SER's ~0.05, not at a root).** The cause is its own **over-damped hunting**: the `β/α` raise
+      overshoots *past* the α=1 boundary to where the full step is tiny (α=1, ρ~2%), then eases slowly;
+      α saturates at 1 above the boundary, so the controller is blind there and cannot sit at the
+      productive edge (the sweep's 20–60%/step β). So the direction is right and the win is real, but a
+      dynamics rework is needed: approach α=1 *from below* without overshooting, or pair α with a
+      step-productivity signal. Harnesses in the study scratchpad (`beta_sweep.py`, `alpha_probe.py`,
+      `alpha_controller_march.py` = frozen-PC, `alpha_refresh_march.py` = the winning arm).
   - **Where the coupled-solve cost actually is (settled by measurement).** As the SER ramp drives `β → 0`
     through the march, the *unshifted* coupled saddle Jacobian is severely ill-conditioned, so the
     diagonally-shifted GMRES burns thousands of matvecs per solve (measured: one shifted solve ≈ 36 s at
