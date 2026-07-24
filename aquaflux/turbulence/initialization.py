@@ -12,8 +12,9 @@ from nothing. It is the Fluent-style "hybrid initialization" specialized to the 
 - **k** -- the harmonic interpolant of its boundary values, then **floored to a turbulent level** so the
   interior does not start laminar (the interpolant otherwise collapses toward the wall ``k = 0`` -- see
   below);
-- **omega** -- its boundary-propagated interior value raised to the analytical viscous-sublayer profile
-  ``omega(y) = 6 nu / (beta_1 y^2)`` at every cell's own wall distance. That profile is the exact
+- **omega** -- its boundary-propagated interior value raised, at every cell's own wall distance, to the
+  same near-wall closure the residual imposes at the wall: the adaptive blend
+  ``sqrt(omega_vis^2 + omega_log^2)`` (``omega_vis = 6 nu / (beta_1 y^2)``). That profile is the exact
   solution of the near-wall balance ``nu d2(omega)/dy2 = beta_1 omega^2``, so each near-wall cell starts
   on the same analytical decay curve; a Laplace-smoothed ``omega`` instead over-diffuses the large wall
   value into the interior, while setting only the wall cells leaves a cliff to the flat interpolant that
@@ -55,7 +56,7 @@ from aquaflux.flow.initialization import laplace_field, potential_flow
 from aquaflux.flow.scales import friction_velocity, hydraulic_length
 from aquaflux.schemes import CompactGreenGauss
 
-from .boundary import equilibrium_k, inlet_omega, omega_wall_value
+from .boundary import equilibrium_k, inlet_omega, omega_wall
 
 if TYPE_CHECKING:
     from aquaflux.flow import MomentumContinuity
@@ -108,22 +109,6 @@ def hybrid_initialize(
     omega, _ = laplace_field(
         mesh, geometry, turbulence.omega_boundary, gradient_scheme=gradient_scheme
     )
-    # Seed the analytical viscous-sublayer profile omega(y) = 6 nu / (beta_1 y^2) on EVERY cell, at
-    # its own wall distance -- not only the wall-adjacent cells. This is the exact solution of the
-    # near-wall balance nu d2(omega)/dy2 = beta_1 omega^2, so every near-wall cell starts on the same
-    # analytical decay curve. Setting only the wall cells leaves a cliff between the fixed wall cell
-    # (large omega) and its neighbour on the flat interpolant, and that neighbour's omega equation then
-    # carries almost the entire initial residual. The profile falls off as 1/y^2, so a few cells out it
-    # drops below the interpolant and the maximum leaves the core untouched; at the wall cells it equals
-    # the fixation value (same distance, same expression), so those rows stay consistent. Seeding the
-    # profile everywhere roughly halves the initial omega residual. It is also smooth in the log variable
-    # w = log omega -- the profile is the ramp w(y) = log(6 nu / beta_1) - 2 log(y), not the
-    # ~log(omega_wall / omega_core) cliff a wall-cells-only seed leaves across the first cell.
-    near_wall_omega = omega_wall_value(
-        turbulence.molecular_viscosity, turbulence.wall_distance, turbulence.model
-    )
-    omega = jnp.maximum(omega, near_wall_omega)
-
     # Give the interior a turbulent-level k, or the coupled solve starts laminar. The k interpolant
     # is pulled toward its wall Dirichlet(0) values, and because the walls dominate a wall-bounded
     # domain by area the interior k collapses toward zero -- a channel only a few heights long already
@@ -154,5 +139,29 @@ def hybrid_initialize(
         k = jnp.maximum(k, jnp.max(k))
 
     k = jnp.maximum(k, k_floor)
+
+    # Seed the near-wall omega profile on EVERY cell, at its own wall distance, using the SAME closure
+    # the residual imposes at the wall (`omega_wall`) -- the adaptive blend
+    # sqrt(omega_vis^2 + omega_log^2), not the viscous branch alone. Matching the closure is the whole
+    # point: where the seed and the wall condition disagree, the wall-adjacent cells start off their own
+    # boundary condition and carry a large initial omega residual, which is exactly what this seeding is
+    # meant to remove. The two agree as y+ -> 0 (the blend reduces to the viscous 6 nu / (beta_1 y^2)),
+    # so a wall-resolved mesh is unaffected; they diverge on a wall-function mesh, where the log branch
+    # dominates -- ~3x at y+ = 30 and ~10x at y+ = 100.
+    #
+    # Seeded everywhere rather than only on the wall-adjacent cells: setting only those leaves a cliff
+    # between the fixed wall cell (large omega) and its neighbour on the flat interpolant, and that
+    # neighbour's omega equation then carries almost the entire initial residual. The profile falls off
+    # with distance, so a few cells out it drops below the interpolant and the maximum leaves the core
+    # untouched. It is also smooth in the log variable w = log omega -- a ramp rather than the
+    # ~log(omega_wall / omega_core) cliff a wall-cells-only seed leaves across the first cell.
+    #
+    # This must come after k is settled: the blend's log branch reads sqrt(k), so seeding it against the
+    # bare Laplace interpolant (k ~ 0 in the interior of a wall-bounded domain) would evaluate the
+    # closure at a k the solve never sees.
+    near_wall_omega = omega_wall(
+        turbulence.molecular_viscosity, turbulence.wall_distance, k, turbulence.model
+    )
+    omega = jnp.maximum(omega, near_wall_omega)
     omega = jnp.maximum(omega, omega_floor)
     return flow, k, omega
