@@ -284,6 +284,42 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       trigger's. The dynamics rework above is the open follow-up. Study harnesses in the scratchpad
       (`beta_sweep.py`, `alpha_probe.py`, `alpha_controller_march.py` = frozen-PC, `alpha_refresh_march.py`
       = the winning arm) remain as the calibration/replay tools.
+    - **A PER-BLOCK β (separate shift damping for flow / k / ω) is DOMINATED — measured, do not re-attempt
+      (`per_block_sweep.py`).** The Euclidean ‖R‖ on the coupled state is ~100 % ω (ω O(1e1) vs flow O(1e-2),
+      k O(1e-3)), so a natural idea is to damp each block by its own β — the block-diagonal shift already
+      supports it (unpack the shift diagonal `[a_P·u, 0·p, d_k·k, d_ω·ω]`, scale each slice, repack; the flow
+      preconditioner keys off `β_flow` via its `a_P(1+β)`, the scalar AMGs are β-independent). Swept at the
+      developed state (rel 0.05), holding `β_ω` high and lowering `β_k`/`β_flow`, it loses on every axis
+      against uniform β:
+
+      | (β_flow, β_k, β_ω) | α | ‖R‖ kept | d(flow) | d(k) | d(ω) |
+      |---|---|---|---|---|---|
+      | **3, 3, 3** (uniform) | **1.00** | **29 %** | −1 | −2 | 29 |
+      | 3, **1**, 3 | 0.25 | 10 % | 0 | +0 | 10 |
+      | 3, **0.1**, 3 | 0.06 | 1 % | 0 | +2 | 1 |
+      | **1**, 3, 3 | 1.00 | 24 % | −2 | −9 | 24 |
+      | **0.1**, 3, 3 | 0.50 | 1 % | +2 | −26 | 1 |
+
+      Two failure modes, **neither a damping problem**: (i) **k is acceptance-limited** — a smaller `β_k`
+      *does* let k descend (d(k) −2 → +2 %), but the bigger k-step makes the *coupled* full step overshoot the
+      ω-dominated norm, so the line search clips α (1.0 → 0.06) and ω progress collapses (29 → 1 %); crediting
+      k would need a block-aware *acceptance* norm, which is the dead `BlockScaledNorm` (below). (ii) **flow is
+      coupling-limited** — no `β_flow` un-sticks it (d(flow) stays ≤ 0 down to β_flow=0.3; only the ruinous
+      β_flow=0.1 at 98 cycles nudges it +2 % while cratering k −26 %), because flow is waiting on ω through the
+      two-way ν_t coupling. The blocks are coupled through **both** the direction (flow↔ω) and the acceptance
+      (ω-norm), so per-block *damping* cannot separate them. This re-confirms the old "Lever D" per-block
+      under-relaxation ruling, now with the mechanism visible under log-ω + the adaptive wall.
+    - **The lever is a HIGHER uniform β, not a per-block one — the same sweep shows β=5 ≫ β=3.** At rel 0.05,
+      uniform **β=5 keeps α=1 and cuts ‖R‖ 63 % in one step, vs β=3's 29 %**, flow/k barely perturbed
+      (−1 %, −1 %) — i.e. the efficiency-optimal β at the developed state is *above* 3, extending the
+      "optimum β rises as ‖R‖ falls" table above. Per-cycle efficiency is ~flat (~1.7 %/cyc at both β=3 and
+      β=5, α=1), so a higher β is not free per cycle; it wins on **step count and overhead** (fewer Newton
+      steps → fewer PC refreshes, recompiles, line searches) and it stays productive (α=1). Confirmed on a
+      real march: a **constant β=3** march (`const_beta_march.py`, jit + refresh-every-5, from the cold hybrid
+      IC) descends monotonically **past SER's ~0.052 floor** (reached rel ≲ 0.035) but then *grinds* in the
+      tail at ρ ~2 %/step — the too-low-β symptom, exactly where β≥5 would nearly halve ‖R‖ per step. So the
+      settled next step is the β-climbing controller (#22: climb β while α=1), **not** a per-block β, a norm
+      change, or physical/order continuation.
   - **Where the coupled-solve cost actually is (settled by measurement).** As the SER ramp drives `β → 0`
     through the march, the *unshifted* coupled saddle Jacobian is severely ill-conditioned, so the
     diagonally-shifted GMRES burns thousands of matvecs per solve (measured: one shifted solve ≈ 36 s at

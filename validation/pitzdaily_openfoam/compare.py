@@ -33,6 +33,19 @@ The physics caveat this study documents: the pitzDaily mesh is a **wall-function
 analytical sublayer ``omega`` at the wall-adjacent cell). The comparison therefore isolates the *outer*
 flow -- the shear-layer development, the recirculation bubble, and the reattachment length -- where the
 near-wall treatment matters least, and reports the near-wall fields as the expected point of departure.
+The near-wall ``omega`` also differs because the two codes blend the viscous and log branches
+differently: aquaflux uses ``sqrt(omega_vis**2 + omega_log**2)`` (the quadrature blend) while OpenFOAM's
+default ``omegaWallFunction`` uses ``max(omega_vis, omega_log)`` -- a ~20% difference in the buffer layer
+that is a blend-shape choice, not an error in either code.
+
+**Reference caveat (binding -- do not skip):** the OpenFOAM *steady* (SIMPLE / ``ddtSchemes steadyState``)
+run does **not** converge this case -- its ``omega`` field limit-cycles and *checkerboards* in the inlet
+channel (adjacent cells oscillating between O(0.1) and O(1e8)), which is a non-physical, non-converged
+field, not a valid solution. Comparing aquaflux's residual against such a field is meaningless (it will be
+huge because the field is garbage, not because aquaflux is wrong). A stable steady solution *does* exist
+and is recovered by a time-accurate transient (``pimpleFoam`` / an unsteady ``ddtSchemes``) run to a
+statistically steady state; use a **transient-converged** OpenFOAM field as the comparison target, and
+compare the outer-flow profiles (velocity, reattachment length) rather than the raw residual.
 
 **Cost note (binding for whoever runs this):** the coupled log-omega solve on the full ~12k-cell mesh
 is compute-heavy -- each Newton step is several minutes and the march is long, so a full run is a
@@ -213,7 +226,7 @@ def solve_aquaflux(**solve_kwargs):
     solve_options = dict(max_steps=MAX_STEPS, rtol=RTOL) | solve_kwargs
     flow, k, omega = solve_coupled(coupled, **solve_options)
     velocity, pressure = momentum.unpack(flow)
-    nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
+    nu_t = turbulence.closure_fields(momentum.velocity_fields(flow), k, omega).nu_t
     return dict(
         centroid=np.asarray(geom.cell.centroid),
         U=np.asarray(velocity),

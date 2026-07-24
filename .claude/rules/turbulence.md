@@ -226,6 +226,48 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       convex profile. For ω the latter barely arises — advection is first-order upwind and the
       flux-continuous diffusion eliminates the face value — but it would matter for a gradient-using
       advection scheme.
+  - **The blend SHAPE is a power-mean choice, and OpenFOAM / Fluent pick DIFFERENT exponents — this is
+    the source of the near-wall ω disagreement, and it is a modelling choice, not a bug (measured
+    2026-07-24 against a *clean* reference; supersedes the corrupt-reference wall-ω numbers above).** All
+    three codes use the *same* two branches `omega_vis`, `omega_log`; they differ only in how they combine
+    them, which is the power-mean family `omega_wall = omega_vis·[1 + (omega_log/omega_vis)^p]^{1/p}`:
+    - **aquaflux: `p = 2`** — `sqrt(omega_vis² + omega_log²)` (Menter's quadrature), raw coefficient `6`.
+    - **OpenFOAM `omegaWallFunction` (default): `p → ∞`** — `max(omega_vis, omega_log)`. On pitzDaily wall
+      cells this matches OF's field to **<2 %** (median ratio 1.00, std 0.06); aquaflux's `p = 2` runs
+      **~20 % high in the buffer layer** (`y+≈8–15`, where the branches are comparable — `sqrt(a²+b²)`
+      exceeds `max(a,b)` by up to 41 %; median aquaflux/OF `omega_wall` = 1.20). The wall distance and
+      constants **agree** — only the blend exponent differs — so the entire ~20 % near-wall ω residual when
+      aquaflux is fed OF's field is this blend choice.
+    - **Ansys Fluent (`correlation` default, Theory Guide §4.18.3, eqs 4.404–4.407): `p = C_exp = 1.3`**,
+      *and* a **calibrated viscous coefficient** `omega_vis = C_calib·6ν/(β₁d²)` with `C_calib = 1/3` — both
+      fit on plane Couette flow (Re 1e6) to flatten the wall shear across `y+` (Fluent also blends `u*`,
+      `u_τ`, and the k-production consistently, and offers a `tabulated` table-lookup option).
+
+    So there is **no single "the" near-wall ω model**: each code picks an exponent and Fluent recalibrates
+    the coefficient. aquaflux's `p = 2` with the raw `6` is Menter's analytical form — principled but **not
+    calibrated for `y+`-insensitivity** (hence the ~5–7 % buffer-layer error). **To genuinely match Fluent's
+    y+-insensitivity, make the exponent (and viscous coefficient) a CALIBRATABLE power-mean fit on Couette
+    flow — do *not* just copy OF's `max`.** Whether to match OF (`max`), keep Menter (`sqrt`), or adopt a
+    calibrated blend is an open model decision.
+  - **pitzDaily validation status (2026-07-24, binding for whoever re-runs it — read before trusting any
+    OF-vs-aquaflux number).** The shipped OpenFOAM *steady* reference (`validation/pitzdaily_openfoam/runs/kwsst/`,
+    `foamRun` with `ddtSchemes: steadyState` = SIMPLE) is **CORRUPT**: its ω field *checkerboards* in the
+    inlet channel (adjacent cells oscillate ω ≈ 0.2 ↔ 1e8 — a non-converged `omegaWallFunction` limit-cycle;
+    the steady solver's residuals swing ~500× and never settle). **Do not compare aquaflux against it** —
+    aquaflux's residual on that field is ~4e8, which is aquaflux *correctly rejecting a non-physical field*,
+    not a bug (verified by reading the raw OF ω). A **stable steady root DOES exist**: a time-accurate
+    `pimpleFoam` transient (Euler ddt, PIMPLE, CFL≈0.9) started from that field *relaxes* (velocity residuals
+    decay ~50×) and holds reattachment `x_r/h = 7.74`; its ω is clean (`[160, 1.1e5]`, no checkerboard). **Use
+    that transient-converged field as the reference.** aquaflux's turbulence under-prediction (`x_r/h` 1.16
+    vs 7.74, `k` 1.6 vs 5.0, `ν_t/ν` 85 vs 422 at rel 0.052) is **UNDER-CONVERGENCE, not a model bug** —
+    verified three ways: (1) the closure reproduces OF's `ν_t = 422` *exactly* when fed OF's own converged
+    `k`,`ω`; (2) the "flat ν_t ≈ 85" is the **inlet** value `k_in/ω_in`, not a cap (interior ν_t is *below*
+    inlet — under-developed); (3) `x_r`,`k` climb *monotonically* toward OF as the march progresses, stalling
+    only at rel ~0.05 (the SER-schedule convergence problem — see `.claude/rules/solve.md`). On the clean field
+    aquaflux accepts the **bulk** to `|R|/ω ~2e-6`; the only residual is the near-wall fixed-cell blend
+    difference above. (`compare.py` was also silently broken — it called the renamed `momentum.velocity_gradient`;
+    fixed to `turbulence.closure_fields(...).nu_t`, so the cell-for-cell profile comparison had *never actually
+    run* until this session.)
   - **The momentum companion is the adaptive wall-face eddy viscosity `nut_wall` (binding).** The
     `y+`-insensitive treatment also needs the momentum wall shear to follow the law of the wall on a
     non-sublayer mesh, not the molecular gradient. `nut_wall(nu, d, k, model) = nu·max(0, y*·κ/ln(E·y*) − 1)`
