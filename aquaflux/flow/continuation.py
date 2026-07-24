@@ -56,6 +56,7 @@ from aquaflux.solve import (
     ImplicitNewtonSolver,
     PseudoTransientStep,
     ShiftTerm,
+    SwitchedEvolutionRelaxation,
 )
 
 from .block_preconditioner import BlockPreconditioner
@@ -174,8 +175,7 @@ def momentum_continuation(
     preconditioner = BlockPreconditioner.build(assembler, **preconditioner_kwargs)
     return PseudoTransientStep(
         MomentumShiftPolicy(preconditioner),
-        beta0=beta0,
-        exponent=exponent,
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent),
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),

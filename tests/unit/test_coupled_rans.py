@@ -248,7 +248,7 @@ def test_refresh_trigger_is_rejected_under_differentiation() -> None:
         )
         return jnp.sum(f**2)
 
-    with pytest.raises(ValueError, match="forward-only accelerator"):
+    with pytest.raises(ValueError, match="forward-only eager march"):
         jax.grad(objective)(1.0)
 
 

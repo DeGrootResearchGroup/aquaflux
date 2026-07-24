@@ -129,6 +129,14 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     creeps *upward*. Only the observed segments call back; the finishing solve is traced. See the
     `march.py` bullets in `.claude/rules/solve.md` for why observation is not gated on the trigger and why
     the state rides a separate seam from the report history.
+  - **`solve_coupled(step_control=…)` — opt-in α-targeting β control, composes with `refresh_trigger`
+    (experimental).** A `StepControl` (currently `AlphaTargetingControl`) reshapes the shift strength β
+    each step toward the line-search-factor α=1 boundary, the measured efficiency optimum SER misses.
+    Measured to strictly beat SER on pitzDaily (~2.6× to a given residual, reaching deeper) **when paired
+    with the AMG refresh** — the two are co-designed, not independent (a bolder β stales the frozen PC
+    faster). It is forward-only (raises under `jax.grad`, same guard as the refresh) and does **not**
+    converge standalone (stalls rel ~0.03), so it is opt-in and never a default. Full analysis: the "SER β
+    schedule runs backwards" bullet in `.claude/rules/solve.md`.
   - **`reuse=` refreshes a stale k/ω preconditioner without changing the compilation signature.**
     `scalar_transport_preconditioner(..., reuse=old)` (threaded through
     `SSTTurbulence.k_preconditioner` / `omega_preconditioner`) re-derives the *values* at a new state on

@@ -126,10 +126,26 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   acceptance), add a `ForwardStep` — do **not** grow a branch in `_forward`.
 - **`continuation.py` — BUILT (`PseudoTransientStep`, residual-agnostic).** The pseudo-transient
   continuation engine lives **here in `solve/`, not in `flow/`** — it is a `ForwardStep`
-  (`stepper`/`default_solver`/`adjoint_preconditioner`) that owns the switched-evolution-relaxation
-  schedule `β = β₀(‖R‖/‖R₀‖)^p`, the diagonally-shifted solve `(J + diag(βd))δ = −R`
-  (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop`. **Two injected
-  seams**, both `Protocol`s: the physics comes from a **`ShiftPolicy`**
+  (`stepper`/`default_solver`/`adjoint_preconditioner`) that runs an **injected**
+  `RelaxationSchedule` for the shift strength β, the diagonally-shifted solve `(J + diag(βd))δ = −R`
+  (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop`. **`stepper()`
+  returns `(φ_next, cycles, alpha)`** — the accepted attempt's cycle count *and* its line-search
+  factor α (the step-quality signal, ≤1; `_forward` drops both off the `custom_vjp` primal, a march
+  reads them).
+  - **The β schedule is an injected `RelaxationSchedule` (`solve/relaxation.py`), SER extracted as the
+    default (binding — do not re-inline the β rule).** The old `beta0`/`exponent`/`beta_floor` fields on
+    `PseudoTransientStep` are gone; the field is `relaxation_schedule: RelaxationSchedule`, defaulting to
+    `SwitchedEvolutionRelaxation(beta0=2, exponent=1, beta_floor=0)` — byte-identical to the old inline
+    `max(beta_floor, β₀(‖R‖/‖R₀‖)^p)`. It is the direct twin of the injected `ResidualNorm`
+    (`solve/norm.py`). A `RelaxationSchedule` is **memoryless** (β from the two residual norms only), which
+    is what keeps it on the differentiable traced path. `ConstantRelaxation(β)` carries β as a **dynamic
+    0-d leaf** so an external control can vary it per step as a `filter_jit` cache hit (the `lam_max`
+    precedent). The five builder factories (`momentum_continuation`, `coupled_continuation`,
+    `mass_flow_coupled_continuation`, the two scalar builders) keep their public `beta0=/exponent=` knobs
+    and translate them into `SwitchedEvolutionRelaxation(...)` at the one construction line — a factory
+    building the real object, not a shim. A *stateful* or α-driven damping rule is **not** a schedule; it
+    is a `StepControl` on the eager march (see `march.py`).
+  - **Two injected seams**, both `Protocol`s: the physics comes from a **`ShiftPolicy`**
   (`shift_term(φ) -> ShiftTerm(diagonal, make_preconditioner)`; `ShiftTerm.diagonal` is the full-state
   base shift, `make_preconditioner(β)` the frozen shifted `M`), and the per-attempt accept/reject
   decision from a **`StepAcceptance`** (`accept(candidate_norm, residual_norm, residual_norm_0,
@@ -258,8 +274,16 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       α saturates at 1 above the boundary, so the controller is blind there and cannot sit at the
       productive edge (the sweep's 20–60%/step β). So the direction is right and the win is real, but a
       dynamics rework is needed: approach α=1 *from below* without overshooting, or pair α with a
-      step-productivity signal. Harnesses in the study scratchpad (`beta_sweep.py`, `alpha_probe.py`,
-      `alpha_controller_march.py` = frozen-PC, `alpha_refresh_march.py` = the winning arm).
+      step-productivity signal.
+    - **PRODUCTIONIZED as an injected strategy pair (the direction is shipped, opt-in).** The β schedule
+      is now the injected `RelaxationSchedule` (SER = `SwitchedEvolutionRelaxation`, the default; see the
+      `continuation.py` bullet), and the α-targeting control is `AlphaTargetingControl`, a `StepControl`
+      on the eager `forward_march` (opt-in via `solve_coupled(step_control=…)`, composes with
+      `refresh_trigger`). It is **never a default** — it does not converge standalone and loses without
+      the refresh — and its numeric gains (`beta_start`/`growth_cap`/`ease`) are placeholders, like the
+      trigger's. The dynamics rework above is the open follow-up. Study harnesses in the scratchpad
+      (`beta_sweep.py`, `alpha_probe.py`, `alpha_controller_march.py` = frozen-PC, `alpha_refresh_march.py`
+      = the winning arm) remain as the calibration/replay tools.
   - **Where the coupled-solve cost actually is (settled by measurement).** As the SER ramp drives `β → 0`
     through the march, the *unshifted* coupled saddle Jacobian is severely ill-conditioned, so the
     diagonally-shifted GMRES burns thousands of matvecs per solve (measured: one shifted solve ≈ 36 s at
@@ -452,11 +476,24 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     is what keeps a `RefreshTrigger` a pure function that can be replayed offline against a logged march
     — put the state on that seam and a trigger could read the physics, and trigger calibration would cost
     one full solve per candidate instead of one logged run for all of them.
-  - **Reporting seam.** `StepReport(step, cycles, residual_norm, residual_ratio)` + `MarchResult`, plus an
-    optional streaming `observer` (a long march must not withhold all logging until it finishes). The
-    trigger and a future logger consume the identical objects, so there is no second reporting path.
+  - **Reporting seam.** `StepReport(step, cycles, residual_norm, residual_ratio, alpha)` + `MarchResult`,
+    plus an optional streaming `observer` (a long march must not withhold all logging until it finishes).
+    The trigger and a future logger consume the identical objects, so there is no second reporting path.
     Per-step observation exists only where the march is eager — the traced `_forward` would need
     `jax.debug.callback`, a separate decision; do not promise per-step reporting on the differentiable path.
+  - **`StepControl` — stateful, feedback-driven step reshaping on the eager march only (binding — the
+    twin of `RelaxationSchedule`, deliberately NOT one interface).** A `RelaxationSchedule` is memoryless
+    and lives on the differentiable step; a `StepControl` reads the *previous* `StepReport` (α, cost) —
+    feedback available only after a step — to reshape the next step, and may raise under `jax.grad`, so it
+    lives here beside `RefreshTrigger`, never on the traced path. `forward_march(step_control=…)` calls
+    `next_step(base, previous, state) -> (ForwardStep, new_state)`, threading the control's own state; the
+    march stays β-ignorant (the control returns a ready-to-run step, typically `base` with a
+    `ConstantRelaxation` β leaf via `tree_at`, so `_march_step` stays a cache hit). Unifying the two into
+    one `(rn, rn0, α, state) -> (β, state)` interface was rejected: it would union SER's needs with the
+    control's (dead α/state args for SER), drag α onto the differentiable core where the line search
+    cannot even produce it before the step, and risk the byte-identity of the default path. The one
+    concrete `StepControl` is `AlphaTargetingControl` (`solve/step_control.py`) — experimental, opt-in,
+    see the "SER β schedule runs backwards" bullet.
 - **Gate C — PASSED (`tests/integration/test_skewed_diffusion.py`).** With
   `CorrectedGreenGauss` injected into the residual on a 25%-skewed mesh, one Newton step
   drives `‖R‖` ~24 → ~1e-12 and reproduces a harmonic linear field to ~5e-13 (linear-exact

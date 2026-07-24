@@ -57,7 +57,9 @@ from aquaflux.solve import (
     PseudoTransientStep,
     RefreshTrigger,
     ShiftTerm,
+    StepControl,
     StepReport,
+    SwitchedEvolutionRelaxation,
     forward_march,
 )
 
@@ -575,9 +577,9 @@ def coupled_continuation(
     )
     return PseudoTransientStep(
         policy,
-        beta0=beta0,
-        exponent=exponent,
-        beta_floor=beta_floor,
+        relaxation_schedule=SwitchedEvolutionRelaxation(
+            beta0=beta0, exponent=exponent, beta_floor=beta_floor
+        ),
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),
@@ -727,6 +729,7 @@ def solve_coupled(
     atol: float = 1e-12,
     refresh_trigger: RefreshTrigger | None = None,
     refresh_limit: int = 1,
+    step_control: StepControl | None = None,
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     **continuation_kwargs: object,
@@ -864,7 +867,9 @@ def solve_coupled(
     # must not require enabling a refresh: the reference march a refresh is calibrated against is by
     # definition unrefreshed, and it is the longest-running one, so it is the one that most needs to
     # report progress rather than sit silent for hours.
-    observing = refreshing or on_step is not None or on_checkpoint is not None
+    observing = (
+        refreshing or step_control is not None or on_step is not None or on_checkpoint is not None
+    )
     if observing and _is_traced((coupled, flow, k, omega)):
         # The refresh re-derives the preconditioner from the mid-march state, which is a tracer when
         # differentiating; the refreshed preconditioner would capture it and escape the converged
@@ -872,7 +877,8 @@ def solve_coupled(
         # refresh (it forbids an explicit `continuation`), so this cannot be worked around here --
         # raise with the fix rather than letting the leak surface as an opaque UnexpectedTracerError.
         raise ValueError(
-            "refresh_trigger/on_step/on_checkpoint drive a forward-only eager march and cannot be used "
+            "refresh_trigger/step_control/on_step/on_checkpoint drive a forward-only eager march and cannot "
+            "be used "
             "under jax.grad (or any JAX transform): the march steps in Python on concrete residual "
             "norms, and a mid-march preconditioner rebuild would capture the differentiation tracer. "
             "Drop them and differentiate the single-stage solve with a `continuation` "
@@ -918,6 +924,7 @@ def solve_coupled(
                 atol=atol,
                 reference_norm=reference_norm,
                 trigger=refresh_trigger,
+                step_control=step_control,
                 observer=on_step,
                 checkpoint=on_checkpoint,
             )
@@ -1043,9 +1050,9 @@ def mass_flow_coupled_continuation(
     )
     return PseudoTransientStep(
         bordered,
-        beta0=beta0,
-        exponent=exponent,
-        beta_floor=beta_floor,
+        relaxation_schedule=SwitchedEvolutionRelaxation(
+            beta0=beta0, exponent=exponent, beta_floor=beta_floor
+        ),
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),
