@@ -15,10 +15,14 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from aquaflux.solve import (
+    AlphaTargetingControl,
     CycleGrowthTrigger,
     DampedNewtonStep,
     ImplicitNewtonSolver,
+    PseudoTransientStep,
+    ShiftTerm,
     StepReport,
+    SwitchedEvolutionRelaxation,
     forward_march,
 )
 
@@ -46,7 +50,9 @@ class _Cubic(eqx.Module):
 
 def _report(step: int, cycles: int, ratio: float) -> StepReport:
     """A synthetic report; only ``cycles`` and ``residual_ratio`` drive the trigger."""
-    return StepReport(step=step, cycles=cycles, residual_norm=ratio, residual_ratio=ratio)
+    return StepReport(
+        step=step, cycles=cycles, residual_norm=ratio, residual_ratio=ratio, alpha=1.0
+    )
 
 
 def _history(cycles: list[int], ratio: float = 1e-3) -> list[StepReport]:
@@ -169,6 +175,51 @@ def test_march_reports_every_step_to_an_observer() -> None:
     assert [report.step for report in seen] == list(range(len(seen)))
     # The ratio is measured against the march's reference, so it starts at or below 1 and falls.
     assert seen[-1].residual_ratio < seen[0].residual_ratio
+    # Every report carries a valid line-search factor (this base line-searches, so α ∈ (0, 1]).
+    assert all(0.0 < report.alpha <= 1.0 for report in seen)
+
+
+class _UnitShiftPolicy(eqx.Module):
+    """A trivial pseudo-transient shift policy (unit diagonal, no preconditioner) for a scalar root."""
+
+    def shift_term(self, phi):
+        return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _relaxation: None)
+
+
+def test_step_control_drives_the_march_and_stays_a_cache_hit() -> None:
+    """A ``step_control`` reshapes the step each iteration, and the controlled march does not retrace.
+
+    The α-targeting control replaces the base step's schedule with a ``ConstantRelaxation`` on a
+    dynamic β leaf. Two things must hold: β actually changes across steps (the control is doing
+    something), and ``_march_step`` compiles once despite a fresh controlled step object each iteration
+    (the load-bearing cache-hit property — a per-step recompile would dominate a real march).
+    """
+    # A state size no other test uses, so the compiled step cannot already be a module-level cache
+    # hit from another test (the compilation cache lives for the whole process).
+    theta = 1.0 + jnp.arange(7, dtype=float)
+    residual = _Cubic(theta)
+    phi0 = jnp.full(7, 0.5)
+    base = PseudoTransientStep(
+        _UnitShiftPolicy(),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=2.0),
+        line_search=8,
+    )
+    control = AlphaTargetingControl(beta_start=2.0)
+    common = dict(rtol=1e-12, atol=1e-14, step_control=control)
+
+    # One controlled step pays the compilation (which invokes the residual several times per trace).
+    _TRACES.clear()
+    one = forward_march(base, residual, phi0, max_steps=1, **common)
+    compiled = len(_TRACES)
+    assert compiled > 0 and len(one.reports) == 1
+
+    # Several controlled steps: β adapts each step (the control is live), yet no step recompiles --
+    # the controlled steps differ only in a dynamic β leaf, so _march_step stays a cache hit.
+    _TRACES.clear()
+    several = forward_march(base, residual, phi0, max_steps=5, **common)
+    assert len(several.reports) > 1
+    assert len({round(r.residual_ratio, 12) for r in several.reports}) > 1  # β is doing something
+    assert len(_TRACES) == compiled  # extra controlled steps added no traces
 
 
 def test_checkpoint_receives_the_state_behind_each_report() -> None:

@@ -60,12 +60,18 @@ class StepReport(NamedTuple):
     residual_ratio : float
         ``residual_norm`` divided by the march's global reference norm — how far the solve has come,
         on the same scale for every segment.
+    alpha : float
+        The line-search factor of the accepted step: ``1`` if the full shifted step descended, smaller
+        if it was clipped. The step-quality signal a :class:`StepControl` drives the next shift by
+        (``α < 1`` means the step overshot — the shift is too weak). ``1`` for a step with no line
+        search, and for a fully-rejected step.
     """
 
     step: int
     cycles: int
     residual_norm: float
     residual_ratio: float
+    alpha: float
 
 
 class MarchResult(NamedTuple):
@@ -187,6 +193,40 @@ class CycleGrowthTrigger(eqx.Module):
         return all(report.cycles > 0 and report.cycles >= threshold for report in recent)
 
 
+class StepControl(Protocol):
+    """Reshapes the forward step each iteration from the march's own feedback (forward-only).
+
+    Where a :class:`~aquaflux.solve.RelaxationSchedule` is a *memoryless* rule that lives on the
+    differentiable step, a step control is **stateful and reads the previous step's outcome** — the
+    line-search factor α, the cost, the residual — to decide the next step. That feedback is only
+    available *after* a step, and a control may raise under ``jax.grad``, so it lives here on the eager
+    march, alongside :class:`RefreshTrigger`, never on the traced Newton path.
+
+    ``next_step`` returns a ready-to-run :class:`~aquaflux.solve.ForwardStep` (typically ``base_step``
+    with its shift strength replaced, via :class:`~aquaflux.solve.ConstantRelaxation` on a dynamic β
+    leaf so :func:`_march_step` stays a compilation-cache hit) plus its own updated state. The march
+    threads that state and stays ignorant of what the control adjusts, so it works for any
+    ``ForwardStep`` — the control, not the march, knows about β.
+    """
+
+    def next_step(
+        self, base_step: ForwardStep, previous: StepReport | None, state: object
+    ) -> tuple[ForwardStep, object]:
+        """The step to run next, and the control's carried state.
+
+        Parameters
+        ----------
+        base_step : ForwardStep
+            The march's base step, whose non-shift configuration (preconditioner, line search, norm)
+            the control reuses.
+        previous : StepReport or None
+            The report of the step just taken (``None`` before the first step) — the feedback the
+            control adapts on.
+        state : object
+            The control's own state from the previous call (``None`` on the first call).
+        """
+
+
 @eqx.filter_jit
 def _march_step(
     forward_step: ForwardStep,
@@ -194,8 +234,8 @@ def _march_step(
     phi: jnp.ndarray,
     residual_norm_0: jnp.ndarray,
     solver: lx.AbstractLinearSolver,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """One observed step: the next state, its linear-solve cycle count, and the new residual norm.
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """One observed step: the next state, its cycle count, line-search factor, and new residual norm.
 
     Compiled as a unit, and — this is the load-bearing part — ``forward_step`` and ``residual_fn``
     are **arguments, not captured values**, so repeated steps hit the compilation cache instead of
@@ -211,8 +251,8 @@ def _march_step(
     The next residual norm is returned from inside this same compiled call so the march does not pay
     a second, separate residual evaluation per step.
     """
-    phi_next, cycles = forward_step.stepper()(residual_fn, phi, residual_norm_0, solver)
-    return phi_next, cycles, forward_step.norm()(residual_fn(phi_next))
+    phi_next, cycles, alpha = forward_step.stepper()(residual_fn, phi, residual_norm_0, solver)
+    return phi_next, cycles, alpha, forward_step.norm()(residual_fn(phi_next))
 
 
 def forward_march(
@@ -225,6 +265,7 @@ def forward_march(
     atol: float,
     reference_norm: float | None = None,
     trigger: RefreshTrigger | None = None,
+    step_control: StepControl | None = None,
     observer: Callable[[StepReport], None] | None = None,
     checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     solver: lx.AbstractLinearSolver | None = None,
@@ -264,6 +305,10 @@ def forward_march(
     trigger : RefreshTrigger, optional
         Consulted after every step; when it fires the march stops and reports ``triggered=True``.
         ``None`` marches to convergence or ``max_steps``.
+    step_control : StepControl, optional
+        Reshapes the step each iteration from the previous step's report (e.g. driving the shift
+        strength β toward a line-search-factor target). ``None`` runs ``forward_step`` unchanged, so
+        the march is byte-identical to an uncontrolled one. Forward-only, like ``trigger``.
     observer : callable, optional
         Called with each :class:`StepReport` as it is produced, for streaming progress out of a long
         march. The full history is also returned, so an observer is only needed for live reporting.
@@ -300,13 +345,21 @@ def forward_march(
     current = float(residual_norm_0)
     reports: list[StepReport] = []
     triggered = False
+    control_state: object = None
 
     def converged_at(residual_norm: float) -> bool:
         return bool(_within_tolerance(jnp.asarray(residual_norm), reference, rtol, atol))
 
     while len(reports) < max_steps and not converged_at(current) and not triggered:
-        state, cycles, residual_norm = _march_step(
-            forward_step, residual_fn, state, residual_norm_0, solver
+        # A step control reshapes the base step from the previous report (None runs it unchanged, so
+        # the loop is byte-identical). It threads its own state; the march stays ignorant of β.
+        active_step = forward_step
+        if step_control is not None:
+            active_step, control_state = step_control.next_step(
+                forward_step, reports[-1] if reports else None, control_state
+            )
+        state, cycles, alpha, residual_norm = _march_step(
+            active_step, residual_fn, state, residual_norm_0, solver
         )
         current = float(residual_norm)
         report = StepReport(
@@ -314,6 +367,7 @@ def forward_march(
             cycles=int(cycles),
             residual_norm=current,
             residual_ratio=current / reference if reference > 0.0 else 0.0,
+            alpha=float(alpha),
         )
         reports.append(report)
         if observer is not None:
