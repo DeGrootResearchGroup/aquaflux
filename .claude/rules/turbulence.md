@@ -392,15 +392,28 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     pressure seed, and the backtracking line search — appear to have removed it. Do **not** reopen `k`
     stability, nonlinear elimination of the k–ω closure, or Reynolds-number continuation on the strength
     of the old claim; re-measure first.
-  - **What is actually left on this case is COST, and it is preconditioner staleness (measured).** Over
-    that same march the *residual falls the whole way* but the **wall time per step grows ~7×**
-    (27 s at step 8 → 197 s at step 26) as the recirculation develops. That is the frozen scalar
-    preconditioner degrading in real time, and it is the same post-separation regime where refreshing
-    the k/ω AMGs is worth ~2.4–2.6× in outer cycles (see the staleness bullet in `.claude/rules/solve.md`).
-    The `reuse=` seam exists, and driving a refresh **from the march** is now BUILT:
-    `solve_coupled(refresh_trigger=CycleGrowthTrigger(…))` re-freezes on measured cycle-count growth.
-    Its numeric thresholds are **not** calibrated — they are deliberately conservative placeholders; see
-    the offline-replay calibration procedure in `.claude/rules/solve.md`.
+  - **What is actually left on this case is COST — and the DOMINANT part is the SER β schedule
+    under-damping, not the preconditioner (measured, corrected-IC run).** An instrumented full march
+    (E1: `solve_coupled` to `rtol=1e-6`, cold hybrid IC, per-step logged) does **not** converge — it
+    *decelerates* (per-step residual decay 0.918 → 0.971, step efficiency down 19×) instead of entering
+    the quadratic basin. The cause is the globalization: SER lowers β as ‖R‖ falls, but the
+    efficiency-optimal β *rises* (≈2 at rel 0.38, ≥5 at rel 0.05), so in the tail SER runs at β ~50× too
+    low, where the full Newton step overshoots ~33× and the line search claws back ~0.4%/step (diagnosed
+    directly via the step-length factor α — the full analysis and data are the "SER β schedule runs
+    backwards" bullet in `.claude/rules/solve.md`). **A ~1.9× preconditioner refresh cannot rescue a march
+    the schedule is grinding to a halt** — this reorders the priorities: fixing the β schedule (an
+    α-targeting PTC step control) is ahead of calibrating the refresh.
+  - **Preconditioner staleness is the SECONDARY cost, and it is coupled to the β schedule (measured).**
+    Over the march the wall time per step also grows (~7×: 27 s @ step 8 → 197 s @ step 26 on the older
+    run) as the recirculation develops and the frozen scalar preconditioner degrades — the same
+    post-separation regime where refreshing the k/ω AMGs is worth ~2.4–2.6× in outer cycles (staleness
+    bullet in `.claude/rules/solve.md`). Driving a refresh **from the march** is BUILT:
+    `solve_coupled(refresh_trigger=CycleGrowthTrigger(…))`. **But note the coupling:** a bolder β moves
+    the state faster and stales the IC-frozen PC faster, so the β schedule and the refresh must be
+    co-designed, and the cycle-count trigger is confounded (it rises from β→0 *and* staleness — #19). The
+    clean fix is a **β-independent staleness trigger** keyed on the drift of the frozen operator's
+    coefficients (`‖Δν_t‖`, `‖Δṁ‖`), not the cycle count. Its numeric thresholds are **not** calibrated —
+    conservative placeholders; see the offline-replay procedure in `.claude/rules/solve.md`.
   - **The slope limiter is NOT implicated (measured — do not re-derive this).** pitzDaily is the first
     case that genuinely exercises `LimitedUpwind` (Poiseuille / cavity / smooth channels never activate a
     limiter), so it was the natural suspect for the second-order march being slower than first-order.

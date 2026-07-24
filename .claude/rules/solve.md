@@ -197,13 +197,55 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     120-vector subspace reaches the same tight solution ~1.4× faster and tighter. Tolerances stay tight
     — an *inexact* linear solve is unsafe under log-ω (an inaccurate step in the log variable is
     exponentiated and diverges), so the accuracy is load-bearing, not wasteful.
+  - **THE SER β SCHEDULE RUNS BACKWARDS FOR STIFF COUPLED RANS (measured, pitzDaily — the dominant
+    cost, and it is the globalization, not the preconditioner).** The switched-evolution-relaxation
+    schedule `β = β₀(‖R‖/‖R₀‖)^p` *lowers* β as the residual falls, on the premise that a smaller shift
+    means a more Newton-like, more productive step near the root. **On this problem the premise is false:
+    the efficiency-optimal β *rises* as ‖R‖ falls, so SER drives β the wrong way and the coupled march
+    grinds instead of entering the quadratic basin.** Two independent measurements on E1's checkpoints
+    (`solve_coupled`, twolevel, corrected hybrid IC; each re-solving one frozen step across fixed β, PC
+    rebuilt at that state):
+    - **Efficiency (residual reduction per second):** optimum β ≈ 2 at rel 0.38, **≥ 5 at rel 0.05**,
+      while SER's β *fell* 0.76 → 0.10. At the developed state SER's β is ~50× below the optimum, a **~190×**
+      step-efficiency gap (0.003 vs 0.56 %/s).
+    - **The mechanism is line-search CLIPPING, seen directly via the step-length factor α.** α (the
+      fraction of the shifted step the backtracking search keeps) is a clean monotone signal: it rises
+      with β and hits **α = 1 exactly at the efficiency-optimal β** — the point where the full damped step
+      *just stops overshooting*. Below it the step overshoots and is clipped to near-nothing; at it the
+      step is full and productive.
+
+      | β | α @ rel 0.38 | α @ rel 0.05 |
+      |---|---|---|
+      | 0.10 (≈SER in the tail) | 0.016 | **0.031** |
+      | 1.0 | 0.50 | 0.25 |
+      | 2.0 | **1.00** | 0.50 |
+      | 5.0 | 1.00 | **1.00** |
+
+      **SER operates at α ≈ 0.03 in the tail:** the full Newton step overshoots by ~33× (at β=0.05, ~80×),
+      and the line search salvages a ~0.4% crawl from it. *That* is the grind — not near-convergence, not
+      preconditioner cost. The α = 1 boundary is the controller target (raise β until the full step is
+      marginally accepted); α is far less noisy than the per-step residual reduction ρ (which swings
+      37%↔6% at fixed β and wrecked a first, ρ-driven controller that ratcheted β into a runaway).
+    - **Caveat — β-schedule and PC-refresh are COUPLED; the optimal-β numbers above use a PC rebuilt at
+      each state.** In a real march the preconditioner is frozen at the cold IC, and a bolder β moves the
+      state faster, staling that frozen PC faster (the ρ-controller runaway hit 119 cycles at β=10.4 — high
+      β should be *cheaper*, so that was PC staleness, not the shift). So an α-targeting β schedule and the
+      scalar-AMG refresh (below) must be co-designed, not tuned in isolation. A **β-independent staleness
+      indicator** — the drift of the frozen operator's coefficients, `‖Δν_t‖`/`‖Δṁ‖` relative to the
+      freeze state — is the clean refresh trigger this motivates (it fixes the `CycleGrowthTrigger`
+      confound, #19: cycle count rises from β→0 *and* staleness, drift rises only from staleness).
+    - **NOT YET validated end-to-end.** The above is per-step / frozen-state evidence. An α-targeting
+      controller must be A/B'd against SER on the full march to the same residual, **wall-clock deciding** —
+      per-step wins have misled on this project repeatedly (LSC, MSIMPLER-`k`, air-vs-twolevel). Tracked as
+      task work; harnesses in the study scratchpad (`beta_sweep.py`, `alpha_probe.py`).
   - **Where the coupled-solve cost actually is (settled by measurement).** As the SER ramp drives `β → 0`
     through the march, the *unshifted* coupled saddle Jacobian is severely ill-conditioned, so the
     diagonally-shifted GMRES burns thousands of matvecs per solve (measured: one shifted solve ≈ 36 s at
     β=2, 127 s at β=0.2 on ~12k-cell pitzDaily — note lineax `num_steps` counts restart **cycles**
-    ×`restart`, not iterations). Several levers were probed: two are wired but **off by default** (kept
-    for further evaluation, not the fix), one is dead, and one — refreshing the **scalar** k/ω AMGs after
-    the flow separates — is a real ~2.6× win, now BUILT (see below):
+    ×`restart`, not iterations). **The `β → 0` here is SER-induced and correctable, not inevitable — see
+    the schedule-runs-backwards finding above.** Several levers were probed: two are wired but **off by
+    default** (kept for further evaluation, not the fix), one is dead, and one — refreshing the **scalar**
+    k/ω AMGs after the flow separates — is a real ~2.6× win, now BUILT (see below):
     - **Flooring the SER `β` below (`β = max(beta_floor, β₀(‖R‖/‖R₀‖)^p)`, `PseudoTransientStep.beta_floor`,
       default 0 = off) — correctness-safe, a measured WASH, kept off-by-default.** It never moves the
       converged root (the shift `β d` scales the correction `δ`, which vanishes at `R=0`; it only damps the
