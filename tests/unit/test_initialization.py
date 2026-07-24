@@ -34,6 +34,7 @@ from aquaflux.turbulence import (
     hybrid_initialize,
     inlet_k,
     inlet_omega,
+    omega_wall,
     omega_wall_value,
 )
 
@@ -177,7 +178,7 @@ def test_potential_flow_survives_a_wall_resolved_aspect_ratio(growth: float) -> 
     assert float(jnp.max(jnp.abs(velocity[:, 1]))) < 1e-3
 
 
-def _turbulence(mesh, geometry, k_in, omega_in):
+def _turbulence(mesh, geometry, k_in, omega_in, nu=NU):
     return SSTTurbulence.build(
         SSTModel(),
         mesh,
@@ -185,7 +186,7 @@ def _turbulence(mesh, geometry, k_in, omega_in):
         CompactGreenGauss(),
         FirstOrderUpwind(),
         density=RHO,
-        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        molecular_viscosity=jnp.full(mesh.n_cells, nu),
         wall_patches=["bottom", "top"],
         k_boundary=BoundaryConditions(
             {
@@ -221,10 +222,14 @@ def test_hybrid_initialize_is_positive_with_analytical_wall_omega() -> None:
     assert float(jnp.min(omega)) > 0.0
     assert float(jnp.max(k)) <= k_in + 1e-12  # k floored at the inlet level, still bounded by k_in
 
-    # every cell sits on the analytical viscous-sublayer profile omega(y) = 6 nu / (beta_1 y^2) at its
-    # own wall distance, or above it where the interpolant is larger -- so the wall-adjacent cells carry
-    # the fixation value exactly and the near-wall band follows the same 1/y^2 decay (not a flat cliff).
-    profile = omega_wall_value(turbulence.molecular_viscosity, turbulence.wall_distance, model)
+    # Every cell sits on the near-wall omega closure at its own wall distance, or above it where the
+    # interpolant is larger -- so the wall-adjacent cells carry the fixation value exactly and the
+    # near-wall band follows the same decay (not a flat cliff). The closure asserted here is the one the
+    # *residual* imposes at the wall (`omega_wall`, the adaptive blend), not the viscous branch alone:
+    # matching the residual's own boundary condition is the property that keeps the wall-adjacent cells
+    # off the initial residual, and it is the one that silently broke when the wall treatment gained its
+    # log branch while this seed did not.
+    profile = omega_wall(turbulence.molecular_viscosity, turbulence.wall_distance, k, model)
     assert bool(jnp.all(omega >= profile - 1e-12))
     assert jnp.allclose(omega[turbulence.wall_cells], profile[turbulence.wall_cells])
     # a wall-adjacent interior cell (not itself fixed) is lifted onto the profile, above the interpolant
@@ -371,3 +376,45 @@ def test_hybrid_initialize_gives_a_developed_channel_eddy_viscosity() -> None:
     # The degenerate interpolant would leave k at its 1e-8 floor, i.e. nu_t ~ 1e-9 -- no
     # turbulence at all. Pin the gap so a regression to that start cannot pass.
     assert float(jnp.max(nu_t)) > 1e-4
+
+
+def test_hybrid_initialize_seeds_the_wall_closure_the_residual_imposes() -> None:
+    """The seeded near-wall omega must equal the wall condition the residual applies -- on a
+    wall-function mesh, where the adaptive blend and its viscous branch genuinely differ.
+
+    This is the property the seeding exists for: where the initial field and the boundary condition
+    disagree, the wall-adjacent cells start off their own condition and carry a large initial omega
+    residual, which is exactly what seeding the profile is meant to remove.
+
+    It needs a **coarse** near-wall mesh to have teeth. The adaptive blend
+    ``sqrt(omega_vis^2 + omega_log^2)`` reduces to ``omega_vis`` as ``y+ -> 0``, so on a wall-resolved
+    mesh a seed built from either one agrees and the check cannot fail. Out in the log layer the log
+    branch dominates -- and that is the regime a wall-function mesh (this project's backward-facing-step
+    validation case) actually runs in, and where seeding the viscous branch alone put the wall cells a
+    factor of several off their own boundary condition.
+    """
+    # A coarse near-wall mesh at high Reynolds number, so the first cell centroid sits out in the log
+    # layer. Both matter: the blend's branches are ordered by y+, which is set by the wall distance
+    # *and* the viscosity -- the default test channel is viscous enough (nu = 1e-2) that the viscous
+    # branch dominates however coarse the mesh, and the check would have no teeth.
+    high_reynolds_nu = 1e-5
+    mesh, geometry, momentum = _channel(nx=8, ny=4, ly=1.0)
+    model = SSTModel()
+    k_in = float(inlet_k(jnp.array(U_IN), 0.05))
+    omega_in = float(inlet_omega(jnp.array(k_in), 0.07, model))
+    turbulence = _turbulence(mesh, geometry, k_in, omega_in, nu=high_reynolds_nu)
+
+    _, k, omega = hybrid_initialize(momentum, turbulence)
+
+    imposed = omega_wall(turbulence.molecular_viscosity, turbulence.wall_distance, k, model)
+    viscous_only = omega_wall_value(turbulence.molecular_viscosity, turbulence.wall_distance, model)
+    wall = turbulence.wall_cells
+
+    # The check has teeth here: the two closures disagree materially at these wall distances, so a seed
+    # built from the viscous branch alone would fail the assertion below.
+    assert float(jnp.max(imposed[wall] / viscous_only[wall])) > 1.5
+
+    # The seeded field carries the imposed closure exactly at the fixed wall cells, and is never below
+    # it anywhere (the profile is applied with a maximum against the interpolant).
+    assert jnp.allclose(omega[wall], imposed[wall], rtol=1e-10)
+    assert bool(jnp.all(omega >= imposed - 1e-12))
