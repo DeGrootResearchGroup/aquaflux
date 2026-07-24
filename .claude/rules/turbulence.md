@@ -68,12 +68,18 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   `.claude/rules/solve.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
   `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output factor — the
   reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a frozen dataclass.
-  - **`solve_coupled(refresh_rtol=…)` stages the march to re-freeze the preconditioner — and a refresh
-    must CARRY the shift diagonals, not rebuild them (binding).** With `refresh_rtol` set, the march runs
-    two *convergence-gated* stages: to that loose tolerance with the preconditioner frozen at the IC,
-    then — after re-deriving the k/ω AMGs at the state reached — on to `rtol`. Two stages exist because
-    the AMG rebuild is off-jit scipy work that cannot run inside the `lax.while_loop`; that part is not
-    subtle. **What is subtle, and was a real bug caught in review:** a refresh must rebuild *only the
+  - **`solve_coupled(refresh_trigger=…)` segments the march to re-freeze the preconditioner — and a refresh
+    must CARRY the shift diagonals, not rebuild them (binding).** With a trigger set, the march runs as a
+    sequence of *observed* segments (`aquaflux.solve.forward_march`): each steps until the trigger judges
+    the frozen preconditioner stale, the k/ω AMGs are re-derived at the state reached, and the next
+    segment continues — then a real `ImplicitNewtonSolver.solve()` finishes and produces the result.
+    Segments exist because the AMG rebuild is off-jit scipy work that cannot run inside the
+    `lax.while_loop`; that part is not subtle. **The trigger is the GMRES restart-cycle count, not a
+    residual tolerance** — staleness is a *cost* phenomenon, and the count reveals it before the residual
+    history does (`CycleGrowthTrigger`; it still gates on the residual having fallen, because the SER ramp
+    also raises the cost — see `.claude/rules/solve.md`). The earlier `refresh_rtol` (a residual-threshold
+    two-stage form) was **replaced** by this; do not reintroduce it. **What is subtle, and was a real bug
+    caught in review:** a refresh must rebuild *only the
     AMGs*, and carry the pseudo-time **shift diagonals** (and the flow block) over from the reused policy
     — because **rebuilding the shift diagonals at the developed state freezes the march.** The coupled
     shift diagonal is the transport-operator diagonal × `jacobian_scale(field)`, which under `LogScalars`
@@ -89,13 +95,18 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     the freeze, at whatever `β`. `_coupled_shift_policy(..., reuse=…)` therefore takes `k_shift_diagonal`
     / `omega_shift_diagonal` straight from `reuse`. Safe because the shift vanishes at the root, so a
     slightly-stale `d` changes only the path, never the converged state or its adjoint (the same argument
-    that carries the flow block). Also: `max_steps` applies to **each** stage (so up to `2·max_steps`
-    total, deliberately not split — either stage may need the full allowance), stage two's `rtol` is
-    compensated by `rtol/refresh_rtol` so a staged solve stops at the *same* residual as a single-stage
-    one (each solve measures its own `‖R0‖`), and the constrained path
+    that carries the flow block). Also: `max_steps` applies to **each** segment (so up to
+    `(refresh_limit+1)·max_steps` march steps plus the finishing solve's own allowance, deliberately not
+    split — either segment may need the full allowance); the finishing solve is handed the **absolute**
+    target `atol + rtol·‖R0‖` measured at the initial state, so a refreshed solve stops exactly where an
+    unrefreshed one does for **any** number of refreshes (a relative tolerance would be measured against
+    whatever the pre-march reached and compound a silent tightening per refresh — this is what the old
+    `rtol/refresh_rtol` compensation approximated, and why the `refresh_rtol <= rtol` constraint existed;
+    both are now gone). The absolute form is available precisely *because* the refresh path is
+    forward-only, so `‖R0‖` is concrete rather than traced. The constrained path
     (`mass_flow_coupled_continuation` / `solve_coupled_mass_flow`) has **no** staged refresh — thread
     `reuse` through if that driver is added.
-    - **`refresh_rtol` is forward-only — it *raises* under `jax.grad`, and must (binding).** The refresh
+    - **The trigger is forward-only — it *raises* under `jax.grad`, and must (binding).** The refresh
       re-derives the preconditioner from the **mid-march** state, which is a tracer when differentiating;
       the refreshed preconditioner would capture it and escape the converged solve's `custom_vjp` as an
       `UnexpectedTracerError` (the general "build the preconditioner from concrete params *outside*
@@ -103,7 +114,7 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       so there is **no** concrete-preconditioner path through it — hence the honest behaviour is a clear
       up-front `ValueError`, not a leak. `solve_coupled` guards this with `_is_traced((coupled, flow, k,
       omega))` (reliable because the solve is eager-only — the scalar AMGs are off-jit scipy, so a tracer
-      leaf can only mean a wrapping transform). To differentiate, drop `refresh_rtol` and take the
+      leaf can only mean a wrapping transform). To differentiate, drop `refresh_trigger` and take the
       gradient of the single-stage solve with a `continuation` built on concrete params outside
       `jax.grad`; the adjoint is refresh-independent (the preconditioner is `stop_gradient`-ed, both
       marches reach the same converged state, so the IFT adjoint is identical), so nothing is lost. This
@@ -378,7 +389,10 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     (27 s at step 8 → 197 s at step 26) as the recirculation develops. That is the frozen scalar
     preconditioner degrading in real time, and it is the same post-separation regime where refreshing
     the k/ω AMGs is worth ~2.4–2.6× in outer cycles (see the staleness bullet in `.claude/rules/solve.md`).
-    The `reuse=` seam exists; driving a refresh **from the march** is the open item.
+    The `reuse=` seam exists, and driving a refresh **from the march** is now BUILT:
+    `solve_coupled(refresh_trigger=CycleGrowthTrigger(…))` re-freezes on measured cycle-count growth.
+    Its numeric thresholds are **not** calibrated — they are deliberately conservative placeholders; see
+    the offline-replay calibration procedure in `.claude/rules/solve.md`.
   - **The slope limiter is NOT implicated (measured — do not re-derive this).** pitzDaily is the first
     case that genuinely exercises `LimitedUpwind` (Poiseuille / cavity / smooth channels never activate a
     limiter), so it was the natural suspect for the second-order march being slower than first-order.

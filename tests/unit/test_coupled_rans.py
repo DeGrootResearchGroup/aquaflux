@@ -20,8 +20,13 @@ from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
+from aquaflux.solve import CycleGrowthTrigger, PseudoTransientStep, ShiftTerm
 from aquaflux.turbulence import DirectScalars, LogScalars, SSTModel, SSTTurbulence
-from aquaflux.turbulence.coupled import CoupledRANS, CoupledRANSLayout, solve_coupled
+from aquaflux.turbulence.coupled import (
+    CoupledRANS,
+    CoupledRANSLayout,
+    solve_coupled,
+)
 
 RHO, NU, U_LID = 1.0, 1e-2, 1.0
 WALLS = ("top", "bottom", "left", "right")
@@ -218,30 +223,16 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
 
-def test_refresh_rtol_must_be_looser_than_rtol() -> None:
-    """A ``refresh_rtol`` at or below ``rtol`` is rejected, before any expensive setup.
-
-    Such a schedule would only re-freeze the preconditioner *after* the solve has already converged,
-    and it breaks the second stage's tolerance compensation (which divides by ``refresh_rtol``). The
-    guard therefore protects a stopping test, not just a nonsensical schedule -- an uncompensated
-    staged solve silently stops a factor ``refresh_rtol`` tighter than the caller asked for.
-    """
-    mesh, coupled = _cavity()
-    flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
-    with pytest.raises(ValueError, match="must be looser than rtol"):
-        solve_coupled(coupled, flow, k, omega, rtol=1e-2, refresh_rtol=1e-3)
-
-
-def test_refresh_rtol_is_rejected_under_differentiation() -> None:
-    """``refresh_rtol`` is a forward-only accelerator: it raises under ``jax.grad``, not leaks.
+def test_refresh_trigger_is_rejected_under_differentiation() -> None:
+    """``refresh_trigger`` is a forward-only accelerator: it raises under ``jax.grad``, not leaks.
 
     The refresh re-derives the preconditioner from the mid-march state, which is a tracer when
     differentiating; the refreshed preconditioner would then capture that tracer and escape the
     converged solve's ``custom_vjp`` as an opaque ``UnexpectedTracerError``. A refresh also forbids an
     explicit (concrete) ``continuation``, so there is no way to build the preconditioner outside the
     trace -- the only honest behaviour is a clear up-front error. The guard fires before any solve, so
-    this stays a fast test. Differentiating the single-stage solve (no ``refresh_rtol``) remains the
-    supported path and is exercised by the integration adjoint gate.
+    this stays a fast test. Differentiating the single-stage solve (no trigger) remains the supported
+    path and is exercised by the integration adjoint gate.
     """
     mesh, coupled = _cavity()
     flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
@@ -252,11 +243,41 @@ def test_refresh_rtol_is_rejected_under_differentiation() -> None:
             coupled,
             coupled.turbulence.molecular_viscosity * nu_scale,
         )
-        f, _, _ = solve_coupled(scaled, flow, k, omega, rtol=1e-2, refresh_rtol=1e-1)
+        f, _, _ = solve_coupled(
+            scaled, flow, k, omega, rtol=1e-2, refresh_trigger=CycleGrowthTrigger()
+        )
         return jnp.sum(f**2)
 
     with pytest.raises(ValueError, match="forward-only accelerator"):
         jax.grad(objective)(1.0)
+
+
+class _TrivialShiftPolicy(eqx.Module):
+    """A shift policy with a unit diagonal and no preconditioner -- enough to build a step object."""
+
+    def shift_term(self, phi):
+        return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _relaxation: None)
+
+
+def test_refresh_trigger_with_an_explicit_continuation_is_rejected() -> None:
+    """A refresh must rebuild the continuation, so it cannot accept a pre-built one.
+
+    The error names the two supported alternatives rather than silently ignoring either argument.
+    The guard is on the argument combination and fires before the continuation is ever stepped, so a
+    trivial step object is sufficient here -- no preconditioner needs to be built.
+    """
+    mesh, coupled = _cavity()
+    flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
+    with pytest.raises(ValueError, match="needs solve_coupled to build the continuation"):
+        solve_coupled(
+            coupled,
+            flow,
+            k,
+            omega,
+            rtol=1e-2,
+            continuation=PseudoTransientStep(_TrivialShiftPolicy()),
+            refresh_trigger=CycleGrowthTrigger(),
+        )
 
 
 def test_refreshing_the_policy_carries_the_shift_diagonals() -> None:

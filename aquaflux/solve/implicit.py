@@ -35,10 +35,13 @@ from .newton import newton_correction
 from .norm import ResidualNorm
 
 # The step a forward-step strategy supplies: given the (single-argument) residual, the current
-# iterate, the starting residual norm, and the linear solver, return the next iterate.
+# iterate, the starting residual norm, and the linear solver, return the next iterate **and the
+# restart-cycle count of the linear solve that produced it**. The count is the step's cost, not part
+# of its result: a staged march watches it rise to detect a frozen preconditioner going stale, while
+# the plain Newton loop drops it at the call site.
 _ForwardStep = Callable[
     [Callable[[jnp.ndarray], jnp.ndarray], jnp.ndarray, jnp.ndarray, lx.AbstractLinearSolver],
-    jnp.ndarray,
+    tuple[jnp.ndarray, jnp.ndarray],
 ]
 
 
@@ -46,10 +49,11 @@ class ForwardStep(Protocol):
     """A globalized Newton forward-step strategy (line search, pseudo-transient continuation, ...).
 
     The single point of variation in the forward loop: given the residual, the current iterate, the
-    starting residual norm, and the linear solver, a strategy returns the next iterate. Every
-    strategy must reduce to the undamped Newton step near the root and impose no shift at the fixed
-    point, so the converged state solves the unshifted ``R = 0`` and the implicit-function-theorem
-    adjoint is independent of which strategy produced the forward path.
+    starting residual norm, and the linear solver, a strategy returns the next iterate and the cost
+    of the linear solve that produced it. Every strategy must reduce to the undamped Newton step
+    near the root and impose no shift at the fixed point, so the converged state solves the
+    unshifted ``R = 0`` and the implicit-function-theorem adjoint is independent of which strategy
+    produced the forward path.
 
     Structural interface only (a ``Protocol``), so the generic solver stays free of any flow
     specifics. The concrete strategies are :class:`DampedNewtonStep` (the default backtracking line
@@ -58,7 +62,12 @@ class ForwardStep(Protocol):
     """
 
     def stepper(self) -> _ForwardStep:
-        """The forward step ``(residual_fn, phi, residual_norm_0, solver) -> phi_next``."""
+        """The forward step ``(residual_fn, phi, residual_norm_0, solver) -> (phi_next, cycles)``.
+
+        ``cycles`` is the restart-cycle count of the linear solve behind the accepted step — the
+        step's cost, which an observed march reads to detect a stale preconditioner. There is no
+        count-free variant of this method; a caller that does not want it writes ``phi, _ = step(…)``.
+        """
 
     def default_solver(self) -> lx.AbstractLinearSolver:
         """The forward-loop linear solver to use when the caller supplies none (an inexact-Newton
@@ -163,9 +172,18 @@ def _damped_newton_step(
     root, or a linear residual) is unaffected. The search only reshapes the forward path; the IFT
     adjoint depends solely on the converged state, so it stays gradient-transparent. ``norm`` is the
     residual measure the search is judged by (default Euclidean).
+
+    Returns ``(phi_next, cycles)`` — the stepped iterate and the restart-cycle count of the one
+    linear solve behind it. The line search itself costs only residual evaluations, so the step's
+    linear-solve cost is exactly that single solve's.
     """
-    delta, r = newton_correction(residual_fn, phi, solver=solver, preconditioner=preconditioner)
-    return backtracking_line_search(residual_fn, phi, delta, norm(r), line_search_steps, norm=norm)
+    delta, r, cycles = newton_correction(
+        residual_fn, phi, solver=solver, preconditioner=preconditioner
+    )
+    stepped = backtracking_line_search(
+        residual_fn, phi, delta, norm(r), line_search_steps, norm=norm
+    )
+    return stepped, cycles
 
 
 class DampedNewtonStep(eqx.Module):
@@ -199,7 +217,7 @@ class DampedNewtonStep(eqx.Module):
     residual_norm: ResidualNorm = eqx.field(static=True, default=jnp.linalg.norm)
 
     def stepper(self) -> _ForwardStep:
-        """The line-searched Newton step ``(residual_fn, phi, ‖R₀‖, solver) -> phi_next``."""
+        """The line-searched Newton step ``(residual_fn, phi, ‖R₀‖, solver) -> (phi_next, cycles)``."""
         preconditioner = self.preconditioner
         line_search = self.line_search
         norm = self.residual_norm
@@ -270,7 +288,13 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
         def residual_theta(p):
             return residual_fn(p, theta)
 
-        phi = forward_step_fn(residual_theta, phi, residual_norm_0, solver)
+        # The step's linear-solve cycle count is dropped here, deliberately. Carrying it out of this
+        # loop would put an integer in the primal output of the surrounding `custom_vjp`, so the
+        # reverse rule would have to handle a float0 cotangent leaf for a number the differentiated
+        # path can never use; and it would force this generic loop to choose which step's count
+        # survives (last / max / sum), which is a reporting policy the Newton solver has no business
+        # owning. A march that wants the per-step cost observes it eagerly instead (`forward_march`).
+        phi, _ = forward_step_fn(residual_theta, phi, residual_norm_0, solver)
         return phi, step + 1, norm_fn(residual_fn(phi, theta))
 
     phi, _, residual_norm = jax.lax.while_loop(cond, body, (phi0, 0, residual_norm_0))
@@ -364,7 +388,7 @@ def _implicit_solve_bwd(
     # sets the gradient accuracy, so it uses the (tight) adjoint solver, not the inexact forward one.
     _, vjp_phi = jax.vjp(lambda p: residual_fn(p, theta), phi_star)
     adjoint_precond = _adjoint_preconditioner(adjoint_preconditioner, phi_star, cotangent)
-    lam = solve_linear(
+    lam, _ = solve_linear(
         lambda u: vjp_phi(u)[0], cotangent, solver=adjoint_solver, preconditioner=adjoint_precond
     )
     # Parameter cotangent -(dR/dtheta)^T lambda: negate lambda so no pytree (float0) negation.
