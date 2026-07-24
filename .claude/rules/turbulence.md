@@ -68,12 +68,18 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   `.claude/rules/solve.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
   `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output factor — the
   reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a frozen dataclass.
-  - **`solve_coupled(refresh_rtol=…)` stages the march to re-freeze the preconditioner — and a refresh
-    must CARRY the shift diagonals, not rebuild them (binding).** With `refresh_rtol` set, the march runs
-    two *convergence-gated* stages: to that loose tolerance with the preconditioner frozen at the IC,
-    then — after re-deriving the k/ω AMGs at the state reached — on to `rtol`. Two stages exist because
-    the AMG rebuild is off-jit scipy work that cannot run inside the `lax.while_loop`; that part is not
-    subtle. **What is subtle, and was a real bug caught in review:** a refresh must rebuild *only the
+  - **`solve_coupled(refresh_trigger=…)` segments the march to re-freeze the preconditioner — and a refresh
+    must CARRY the shift diagonals, not rebuild them (binding).** With a trigger set, the march runs as a
+    sequence of *observed* segments (`aquaflux.solve.forward_march`): each steps until the trigger judges
+    the frozen preconditioner stale, the k/ω AMGs are re-derived at the state reached, and the next
+    segment continues — then a real `ImplicitNewtonSolver.solve()` finishes and produces the result.
+    Segments exist because the AMG rebuild is off-jit scipy work that cannot run inside the
+    `lax.while_loop`; that part is not subtle. **The trigger is the GMRES restart-cycle count, not a
+    residual tolerance** — staleness is a *cost* phenomenon, and the count reveals it before the residual
+    history does (`CycleGrowthTrigger`; it still gates on the residual having fallen, because the SER ramp
+    also raises the cost — see `.claude/rules/solve.md`). The earlier `refresh_rtol` (a residual-threshold
+    two-stage form) was **replaced** by this; do not reintroduce it. **What is subtle, and was a real bug
+    caught in review:** a refresh must rebuild *only the
     AMGs*, and carry the pseudo-time **shift diagonals** (and the flow block) over from the reused policy
     — because **rebuilding the shift diagonals at the developed state freezes the march.** The coupled
     shift diagonal is the transport-operator diagonal × `jacobian_scale(field)`, which under `LogScalars`
@@ -89,13 +95,18 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     the freeze, at whatever `β`. `_coupled_shift_policy(..., reuse=…)` therefore takes `k_shift_diagonal`
     / `omega_shift_diagonal` straight from `reuse`. Safe because the shift vanishes at the root, so a
     slightly-stale `d` changes only the path, never the converged state or its adjoint (the same argument
-    that carries the flow block). Also: `max_steps` applies to **each** stage (so up to `2·max_steps`
-    total, deliberately not split — either stage may need the full allowance), stage two's `rtol` is
-    compensated by `rtol/refresh_rtol` so a staged solve stops at the *same* residual as a single-stage
-    one (each solve measures its own `‖R0‖`), and the constrained path
+    that carries the flow block). Also: `max_steps` applies to **each** segment (so up to
+    `(refresh_limit+1)·max_steps` march steps plus the finishing solve's own allowance, deliberately not
+    split — either segment may need the full allowance); the finishing solve is handed the **absolute**
+    target `atol + rtol·‖R0‖` measured at the initial state, so a refreshed solve stops exactly where an
+    unrefreshed one does for **any** number of refreshes (a relative tolerance would be measured against
+    whatever the pre-march reached and compound a silent tightening per refresh — this is what the old
+    `rtol/refresh_rtol` compensation approximated, and why the `refresh_rtol <= rtol` constraint existed;
+    both are now gone). The absolute form is available precisely *because* the refresh path is
+    forward-only, so `‖R0‖` is concrete rather than traced. The constrained path
     (`mass_flow_coupled_continuation` / `solve_coupled_mass_flow`) has **no** staged refresh — thread
     `reuse` through if that driver is added.
-    - **`refresh_rtol` is forward-only — it *raises* under `jax.grad`, and must (binding).** The refresh
+    - **The trigger is forward-only — it *raises* under `jax.grad`, and must (binding).** The refresh
       re-derives the preconditioner from the **mid-march** state, which is a tracer when differentiating;
       the refreshed preconditioner would capture it and escape the converged solve's `custom_vjp` as an
       `UnexpectedTracerError` (the general "build the preconditioner from concrete params *outside*
@@ -103,13 +114,29 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       so there is **no** concrete-preconditioner path through it — hence the honest behaviour is a clear
       up-front `ValueError`, not a leak. `solve_coupled` guards this with `_is_traced((coupled, flow, k,
       omega))` (reliable because the solve is eager-only — the scalar AMGs are off-jit scipy, so a tracer
-      leaf can only mean a wrapping transform). To differentiate, drop `refresh_rtol` and take the
+      leaf can only mean a wrapping transform). To differentiate, drop `refresh_trigger` and take the
       gradient of the single-stage solve with a `continuation` built on concrete params outside
       `jax.grad`; the adjoint is refresh-independent (the preconditioner is `stop_gradient`-ed, both
       marches reach the same converged state, so the IFT adjoint is identical), so nothing is lost. This
       is why the refresh's gradient property is covered by *forward* tests (`same fixed point`) plus the
       existing single-stage adjoint gate, and by a fast unit test that the guard fires — **not** by an
       adjoint test through the staged solve (there is none: that path cannot be differentiated).
+  - **`on_step` / `on_checkpoint` instrument the march, and work WITHOUT a refresh trigger.** `on_step`
+    receives each `StepReport` (step, cycles, ‖R‖, ratio); `on_checkpoint` additionally receives the
+    *solved-variable* state (map with `physical_fields`). Both are the seam a solver study logs a long
+    march through — needed because a multi-hour coupled march that prints nothing cannot be told from a
+    hung one, and this case's documented failure mode is a march that keeps stepping while the residual
+    creeps *upward*. Only the observed segments call back; the finishing solve is traced. See the
+    `march.py` bullets in `.claude/rules/solve.md` for why observation is not gated on the trigger and why
+    the state rides a separate seam from the report history.
+  - **`solve_coupled(step_control=…)` — opt-in α-targeting β control, composes with `refresh_trigger`
+    (experimental).** A `StepControl` (currently `AlphaTargetingControl`) reshapes the shift strength β
+    each step toward the line-search-factor α=1 boundary, the measured efficiency optimum SER misses.
+    Measured to strictly beat SER on pitzDaily (~2.6× to a given residual, reaching deeper) **when paired
+    with the AMG refresh** — the two are co-designed, not independent (a bolder β stales the frozen PC
+    faster). It is forward-only (raises under `jax.grad`, same guard as the refresh) and does **not**
+    converge standalone (stalls rel ~0.03), so it is opt-in and never a default. Full analysis: the "SER β
+    schedule runs backwards" bullet in `.claude/rules/solve.md`.
   - **`reuse=` refreshes a stale k/ω preconditioner without changing the compilation signature.**
     `scalar_transport_preconditioner(..., reuse=old)` (threaded through
     `SSTTurbulence.k_preconditioner` / `omega_preconditioner`) re-derives the *values* at a new state on
@@ -373,12 +400,28 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     pressure seed, and the backtracking line search — appear to have removed it. Do **not** reopen `k`
     stability, nonlinear elimination of the k–ω closure, or Reynolds-number continuation on the strength
     of the old claim; re-measure first.
-  - **What is actually left on this case is COST, and it is preconditioner staleness (measured).** Over
-    that same march the *residual falls the whole way* but the **wall time per step grows ~7×**
-    (27 s at step 8 → 197 s at step 26) as the recirculation develops. That is the frozen scalar
-    preconditioner degrading in real time, and it is the same post-separation regime where refreshing
-    the k/ω AMGs is worth ~2.4–2.6× in outer cycles (see the staleness bullet in `.claude/rules/solve.md`).
-    The `reuse=` seam exists; driving a refresh **from the march** is the open item.
+  - **What is actually left on this case is COST — and the DOMINANT part is the SER β schedule
+    under-damping, not the preconditioner (measured, corrected-IC run).** An instrumented full march
+    (E1: `solve_coupled` to `rtol=1e-6`, cold hybrid IC, per-step logged) does **not** converge — it
+    *decelerates* (per-step residual decay 0.918 → 0.971, step efficiency down 19×) instead of entering
+    the quadratic basin. The cause is the globalization: SER lowers β as ‖R‖ falls, but the
+    efficiency-optimal β *rises* (≈2 at rel 0.38, ≥5 at rel 0.05), so in the tail SER runs at β ~50× too
+    low, where the full Newton step overshoots ~33× and the line search claws back ~0.4%/step (diagnosed
+    directly via the step-length factor α — the full analysis and data are the "SER β schedule runs
+    backwards" bullet in `.claude/rules/solve.md`). **A ~1.9× preconditioner refresh cannot rescue a march
+    the schedule is grinding to a halt** — this reorders the priorities: fixing the β schedule (an
+    α-targeting PTC step control) is ahead of calibrating the refresh.
+  - **Preconditioner staleness is the SECONDARY cost, and it is coupled to the β schedule (measured).**
+    Over the march the wall time per step also grows (~7×: 27 s @ step 8 → 197 s @ step 26 on the older
+    run) as the recirculation develops and the frozen scalar preconditioner degrades — the same
+    post-separation regime where refreshing the k/ω AMGs is worth ~2.4–2.6× in outer cycles (staleness
+    bullet in `.claude/rules/solve.md`). Driving a refresh **from the march** is BUILT:
+    `solve_coupled(refresh_trigger=CycleGrowthTrigger(…))`. **But note the coupling:** a bolder β moves
+    the state faster and stales the IC-frozen PC faster, so the β schedule and the refresh must be
+    co-designed, and the cycle-count trigger is confounded (it rises from β→0 *and* staleness — #19). The
+    clean fix is a **β-independent staleness trigger** keyed on the drift of the frozen operator's
+    coefficients (`‖Δν_t‖`, `‖Δṁ‖`), not the cycle count. Its numeric thresholds are **not** calibrated —
+    conservative placeholders; see the offline-replay procedure in `.claude/rules/solve.md`.
   - **The slope limiter is NOT implicated (measured — do not re-derive this).** pitzDaily is the first
     case that genuinely exercises `LimitedUpwind` (Poiseuille / cavity / smooth channels never activate a
     limiter), so it was the natural suspect for the second-order march being slower than first-order.

@@ -54,14 +54,14 @@ def test_block_norm_lets_the_line_search_see_a_small_scale_block():
 
     # The plain Euclidean norm is dominated by block 1's rise (||[1, 15]|| = 15.03 > ||[10, 10]|| =
     # 14.14), so the search backtracks away from the full step instead of taking block 0's descent.
-    plain = backtracking_line_search(residual_fn, phi, delta, jnp.linalg.norm(phi), steps=4)
+    plain, _ = backtracking_line_search(residual_fn, phi, delta, jnp.linalg.norm(phi), steps=4)
     assert not jnp.allclose(plain, phi + delta)
     assert float(plain[0]) > 1.5  # block 0 not fully reduced
 
     # Scaling block 1 by a large reference makes its rise negligible and block 0's descent visible,
     # so the full step is accepted.
     norm = BlockScaledNorm(sizes=(1, 1), scales=(1.0, 100.0))
-    got = backtracking_line_search(
+    got, _ = backtracking_line_search(
         residual_fn, phi, delta, norm(residual_fn(phi)), steps=4, norm=norm
     )
     assert jnp.allclose(got, phi + delta)

@@ -25,6 +25,28 @@ def test_linear_residual_solved_in_one_step() -> None:
     assert jnp.allclose(phi, jnp.linalg.solve(A, B), atol=1e-10)
 
 
+def test_damped_newton_stepper_reports_its_linear_solve_cost() -> None:
+    """``DampedNewtonStep.stepper()`` returns ``(phi_next, cycles, alpha)`` like every forward step.
+
+    The line search itself costs only residual evaluations, so a step's reported cost is the single
+    linear solve behind it. Nothing consumes the line-searched path's count or α today; they are
+    reported because the step contract is one contract, not one per strategy.
+    """
+    from aquaflux.solve import DampedNewtonStep
+
+    step = DampedNewtonStep(line_search=0).stepper()
+    phi0 = jnp.array([9.0, -9.0])
+    residual_fn = lambda x: A @ x - B  # noqa: E731
+    phi_next, cycles, alpha = step(residual_fn, phi0, jnp.linalg.norm(residual_fn(phi0)), None)
+
+    # A linear residual: the undamped step is exact in one call, so the step is unchanged by
+    # reporting the count and line-search factor alongside it.
+    assert jnp.allclose(phi_next, jnp.linalg.solve(A, B), atol=1e-10)
+    assert int(cycles) > 0
+    assert cycles.dtype == jnp.int32
+    assert jnp.allclose(alpha, 1.0)  # line_search=0 takes the full step
+
+
 def _solved_sum(k):
     """The solved field's sum as a function of a residual parameter."""
     a = jnp.array([[k, 1.0], [1.0, 3.0]])
@@ -52,18 +74,24 @@ def test_forward_mode_differentiable_through_the_step() -> None:
     assert jnp.allclose(forward, fd, atol=1e-6)
 
 
-def test_newton_correction_returns_the_step_and_the_residual() -> None:
-    """``newton_correction`` exposes ``(delta, R(phi))`` so a line search need not recompute R."""
+def test_newton_correction_returns_the_step_the_residual_and_the_solve_cost() -> None:
+    """``newton_correction`` exposes ``(delta, R(phi), cycles)``.
+
+    ``R(phi)`` is returned so a line search need not recompute it, and ``cycles`` is the linear
+    solve's restart-cycle count -- the cost a forward-step strategy passes on to an observed march.
+    """
     from aquaflux.solve.newton import newton_correction
 
     phi = jnp.array([9.0, -9.0])
-    delta, r = newton_correction(lambda x: A @ x - B, phi)
+    delta, r, cycles = newton_correction(lambda x: A @ x - B, phi)
     assert jnp.allclose(r, A @ phi - B, atol=1e-12)
     assert jnp.allclose(phi + delta, jnp.linalg.solve(A, B), atol=1e-10)
+    assert int(cycles) > 0
+    assert cycles.dtype == jnp.int32
 
 
 def test_solve_linear_matches_dense() -> None:
     """The matrix-free linear solve agrees with a dense solve."""
     a = jnp.array([[5.0, 2.0, 0.0], [2.0, 4.0, 1.0], [0.0, 1.0, 3.0]])
     b = jnp.array([1.0, -2.0, 0.5])
-    assert jnp.allclose(solve_linear(lambda x: a @ x, b), jnp.linalg.solve(a, b), atol=1e-9)
+    assert jnp.allclose(solve_linear(lambda x: a @ x, b)[0], jnp.linalg.solve(a, b), atol=1e-9)

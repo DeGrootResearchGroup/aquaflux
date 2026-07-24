@@ -40,6 +40,27 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   convergence, not the solution or its gradient — **verified transparent** in
   `test_preconditioning.py` (solution and gradient identical with/without `M`). This is the seam
   the **outer block preconditioner** (below) attaches to.
+  - **`solve_linear` returns `(x, cycles)` — there is ONE linear-solve entry point, not a counted/
+    uncounted pair (binding, do not re-split).** A caller that only wants the answer writes
+    `x, _ = solve_linear(...)`. A `solve_linear_counted` sibling existed briefly and was **deleted**: it
+    held the real body while `solve_linear` forwarded to it and dropped the count, i.e. the old shape
+    preserved across a refactor — the delegating-wrapper form the pre-release no-shims policy bans. It
+    also duplicated the whole signature and `Parameters` block (its docstring had already degenerated to
+    "the arguments mean exactly what they do there", which cannot stand alone), and it was *dominated*:
+    it did `solve_linear`'s job plus more. The blast radius of collapsing was ~9 lines — the function has
+    exactly **two** library call sites (`newton.py`'s `newton_correction`, `implicit.py`'s adjoint
+    transpose solve); the "it has too many callers to change" intuition is false, so do not resurrect the
+    pair on that argument. **The count is restart CYCLES, not matvecs** (each cycle is up to `restart`
+    matvecs — the standing misreading of `lineax`'s `num_steps`), pinned to `int32` so a caller can carry
+    it through a `lax.while_loop` (whose carry structure must be invariant — exactly one call site does,
+    the pseudo-transient escalation loop), and `0` for a solver that reports none (a direct
+    factorization). **Why the count:** a frozen preconditioner going stale shows up first as a *rising
+    cycle count on an otherwise-unchanged system*, before the residual history shows anything — so it is
+    the honest trigger for re-freezing the preconditioner mid-march, and a robust one. Wall-clock time is
+    the tempting proxy and a bad one: it moves with machine load or a suspended process while the linear
+    algebra has not changed at all. Pinned in `test_preconditioning.py`, including the load-bearing
+    behavioural check that **a better preconditioner strictly lowers the count** (otherwise it measures
+    nothing).
 - **`newton.py` — BUILT: `newton_step` / `newton_correction`, one correction each. There is NO
   `NewtonSolver` class — it was deleted (binding, #102).** Each forms `J` matrix-free via `jax.jvp`
   and calls `solve_linear`; no hand-derived Jacobian.
@@ -105,10 +126,26 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   acceptance), add a `ForwardStep` — do **not** grow a branch in `_forward`.
 - **`continuation.py` — BUILT (`PseudoTransientStep`, residual-agnostic).** The pseudo-transient
   continuation engine lives **here in `solve/`, not in `flow/`** — it is a `ForwardStep`
-  (`stepper`/`default_solver`/`adjoint_preconditioner`) that owns the switched-evolution-relaxation
-  schedule `β = β₀(‖R‖/‖R₀‖)^p`, the diagonally-shifted solve `(J + diag(βd))δ = −R`
-  (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop`. **Two injected
-  seams**, both `Protocol`s: the physics comes from a **`ShiftPolicy`**
+  (`stepper`/`default_solver`/`adjoint_preconditioner`) that runs an **injected**
+  `RelaxationSchedule` for the shift strength β, the diagonally-shifted solve `(J + diag(βd))δ = −R`
+  (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop`. **`stepper()`
+  returns `(φ_next, cycles, alpha)`** — the accepted attempt's cycle count *and* its line-search
+  factor α (the step-quality signal, ≤1; `_forward` drops both off the `custom_vjp` primal, a march
+  reads them).
+  - **The β schedule is an injected `RelaxationSchedule` (`solve/relaxation.py`), SER extracted as the
+    default (binding — do not re-inline the β rule).** The old `beta0`/`exponent`/`beta_floor` fields on
+    `PseudoTransientStep` are gone; the field is `relaxation_schedule: RelaxationSchedule`, defaulting to
+    `SwitchedEvolutionRelaxation(beta0=2, exponent=1, beta_floor=0)` — byte-identical to the old inline
+    `max(beta_floor, β₀(‖R‖/‖R₀‖)^p)`. It is the direct twin of the injected `ResidualNorm`
+    (`solve/norm.py`). A `RelaxationSchedule` is **memoryless** (β from the two residual norms only), which
+    is what keeps it on the differentiable traced path. `ConstantRelaxation(β)` carries β as a **dynamic
+    0-d leaf** so an external control can vary it per step as a `filter_jit` cache hit (the `lam_max`
+    precedent). The five builder factories (`momentum_continuation`, `coupled_continuation`,
+    `mass_flow_coupled_continuation`, the two scalar builders) keep their public `beta0=/exponent=` knobs
+    and translate them into `SwitchedEvolutionRelaxation(...)` at the one construction line — a factory
+    building the real object, not a shim. A *stateful* or α-driven damping rule is **not** a schedule; it
+    is a `StepControl` on the eager march (see `march.py`).
+  - **Two injected seams**, both `Protocol`s: the physics comes from a **`ShiftPolicy`**
   (`shift_term(φ) -> ShiftTerm(diagonal, make_preconditioner)`; `ShiftTerm.diagonal` is the full-state
   base shift, `make_preconditioner(β)` the frozen shifted `M`), and the per-attempt accept/reject
   decision from a **`StepAcceptance`** (`accept(candidate_norm, residual_norm, residual_norm_0,
@@ -131,6 +168,23 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   globalizing the stiff k/omega solves via `scalar_pseudo_transient_solve` — the **only** scalar path
   the SST driver supports (the fixed-count Newton sub-solve was removed). When a new nonlinear residual
   needs pseudo-time globalization, write a `ShiftPolicy` — do **not** re-implement the march.
+  - **`stepper()` returns `(phi_next, cycles)` — ONE step method on the whole `ForwardStep` protocol,
+    counted/uncounted pair deleted (binding).** Every strategy reports its step's restart-cycle count
+    (`DampedNewtonStep` gets it from `newton_correction`, which now returns `(delta, r, cycles)`); a
+    consumer with no use for it drops it (`phi, _ = step(…)`). A `counted_stepper()` sibling existed
+    briefly, with `stepper()` forwarding to it and dropping the count — deleted for the same reason as
+    `solve_linear_counted` above, and note it had **no production consumer at all** while it existed.
+    The reported count is the **accepted** attempt's, not the sum over rejected escalation attempts —
+    the cost of the step actually taken. **A step whose every attempt was rejected reports `0`**
+    (`best_cycles` is only written on acceptance): a consumer must treat `0` as *no measurement*, not
+    as *free*, or a rejected step reads as the cheapest in the march. Consumed by `forward_march`
+    (below); dropped by `_forward`.
+  - **The count is NOT carried out of `_forward`'s `while_loop` (binding).** Two reasons, both concrete:
+    it would put an `int32` in the primal output of `_implicit_solve`'s `custom_vjp`, so the reverse rule
+    would have to handle a `float0` cotangent leaf in the most correctness-critical function in the
+    package, for a number the differentiated path can never use; and it would force the *generic* Newton
+    loop to pick which step's count survives (last / max / sum), which is a reporting policy the solver
+    has no business owning. Per-step cost is observed eagerly instead, by `forward_march`.
   - **`line_search` — backtrack the shifted step before escalating β (binding, the coupled-RANS fix).**
     The step optionally scales the shifted correction `δ` back along `{1, 1/2, …, 1/2**line_search}`
     (`backtracking_line_search`, extracted from `implicit.py` and shared with `DampedNewtonStep` — one
@@ -159,13 +213,85 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     120-vector subspace reaches the same tight solution ~1.4× faster and tighter. Tolerances stay tight
     — an *inexact* linear solve is unsafe under log-ω (an inaccurate step in the log variable is
     exponentiated and diverges), so the accuracy is load-bearing, not wasteful.
+  - **THE SER β SCHEDULE RUNS BACKWARDS FOR STIFF COUPLED RANS (measured, pitzDaily — the dominant
+    cost, and it is the globalization, not the preconditioner).** The switched-evolution-relaxation
+    schedule `β = β₀(‖R‖/‖R₀‖)^p` *lowers* β as the residual falls, on the premise that a smaller shift
+    means a more Newton-like, more productive step near the root. **On this problem the premise is false:
+    the efficiency-optimal β *rises* as ‖R‖ falls, so SER drives β the wrong way and the coupled march
+    grinds instead of entering the quadratic basin.** Two independent measurements on E1's checkpoints
+    (`solve_coupled`, twolevel, corrected hybrid IC; each re-solving one frozen step across fixed β, PC
+    rebuilt at that state):
+    - **Efficiency (residual reduction per second):** optimum β ≈ 2 at rel 0.38, **≥ 5 at rel 0.05**,
+      while SER's β *fell* 0.76 → 0.10. At the developed state SER's β is ~50× below the optimum, a **~190×**
+      step-efficiency gap (0.003 vs 0.56 %/s).
+    - **The mechanism is line-search CLIPPING, seen directly via the step-length factor α.** α (the
+      fraction of the shifted step the backtracking search keeps) is a clean monotone signal: it rises
+      with β and hits **α = 1 exactly at the efficiency-optimal β** — the point where the full damped step
+      *just stops overshooting*. Below it the step overshoots and is clipped to near-nothing; at it the
+      step is full and productive.
+
+      | β | α @ rel 0.38 | α @ rel 0.05 |
+      |---|---|---|
+      | 0.10 (≈SER in the tail) | 0.016 | **0.031** |
+      | 1.0 | 0.50 | 0.25 |
+      | 2.0 | **1.00** | 0.50 |
+      | 5.0 | 1.00 | **1.00** |
+
+      **SER operates at α ≈ 0.03 in the tail:** the full Newton step overshoots by ~33× (at β=0.05, ~80×),
+      and the line search salvages a ~0.4% crawl from it. *That* is the grind — not near-convergence, not
+      preconditioner cost. The α = 1 boundary is the controller target (raise β until the full step is
+      marginally accepted); α is far less noisy than the per-step residual reduction ρ (which swings
+      37%↔6% at fixed β and wrecked a first, ρ-driven controller that ratcheted β into a runaway).
+    - **Caveat — β-schedule and PC-refresh are COUPLED; the optimal-β numbers above use a PC rebuilt at
+      each state.** In a real march the preconditioner is frozen at the cold IC, and a bolder β moves the
+      state faster, staling that frozen PC faster (the ρ-controller runaway hit 119 cycles at β=10.4 — high
+      β should be *cheaper*, so that was PC staleness, not the shift). So an α-targeting β schedule and the
+      scalar-AMG refresh (below) must be co-designed, not tuned in isolation. A **β-independent staleness
+      indicator** — the drift of the frozen operator's coefficients, `‖Δν_t‖`/`‖Δṁ‖` relative to the
+      freeze state — is the clean refresh trigger this motivates (it fixes the `CycleGrowthTrigger`
+      confound, #19: cycle count rises from β→0 *and* staleness, drift rises only from staleness).
+    - **VALIDATED end-to-end (α-targeting controller + PC refresh strictly dominates SER on pitzDaily).**
+      A prototype controller — raise β toward the α=1 boundary (`β ← β/α`, capped), ease gently when
+      α=1 — with the k/ω AMGs refreshed every 5 steps and the step `filter_jit`'d (to match SER's
+      compiled `while_loop` footing, ~2.2 s/cyc), A/B'd from the cold hybrid IC against E1's SER march:
+
+      | reach | SER (E1) | α-controller + refresh |
+      |---|---|---|
+      | rel 0.10 | 15.5 min | 11.4 min |
+      | rel 0.054 | **64 min** | **24 min (2.6×)** |
+      | deepest | **rel 0.052** (67 min, then stalled) | **rel 0.032** (41 min) |
+
+      Faster at every overlapping residual, the lead *widens* into the tail (1.3× → 2.6×), and it
+      reaches residuals SER never touched. The mechanism is the diagnosis playing out live: as the
+      state stiffens α drops below 1 and the controller *raises* β into the 2–5 band (refresh holding
+      cycles ~16) while SER collapses to β≈0.10 and grinds. Two prior arms confirm the attribution:
+      (a) the **frozen-PC** α-controller *lost* (0.65×) — cycles rose with β (25 vs SER's ≤14),
+      the β↔PC-refresh coupling biting, so the refresh is load-bearing; (b) the **eager** (un-jitted)
+      version was handicapped ~1.4×/cyc — the jit is needed for a fair comparison, not for the physics.
+    - **The controller has a CEILING — it does not converge either (it stalls at rel ~0.03, deeper than
+      SER's ~0.05, not at a root).** The cause is its own **over-damped hunting**: the `β/α` raise
+      overshoots *past* the α=1 boundary to where the full step is tiny (α=1, ρ~2%), then eases slowly;
+      α saturates at 1 above the boundary, so the controller is blind there and cannot sit at the
+      productive edge (the sweep's 20–60%/step β). So the direction is right and the win is real, but a
+      dynamics rework is needed: approach α=1 *from below* without overshooting, or pair α with a
+      step-productivity signal.
+    - **PRODUCTIONIZED as an injected strategy pair (the direction is shipped, opt-in).** The β schedule
+      is now the injected `RelaxationSchedule` (SER = `SwitchedEvolutionRelaxation`, the default; see the
+      `continuation.py` bullet), and the α-targeting control is `AlphaTargetingControl`, a `StepControl`
+      on the eager `forward_march` (opt-in via `solve_coupled(step_control=…)`, composes with
+      `refresh_trigger`). It is **never a default** — it does not converge standalone and loses without
+      the refresh — and its numeric gains (`beta_start`/`growth_cap`/`ease`) are placeholders, like the
+      trigger's. The dynamics rework above is the open follow-up. Study harnesses in the scratchpad
+      (`beta_sweep.py`, `alpha_probe.py`, `alpha_controller_march.py` = frozen-PC, `alpha_refresh_march.py`
+      = the winning arm) remain as the calibration/replay tools.
   - **Where the coupled-solve cost actually is (settled by measurement).** As the SER ramp drives `β → 0`
     through the march, the *unshifted* coupled saddle Jacobian is severely ill-conditioned, so the
     diagonally-shifted GMRES burns thousands of matvecs per solve (measured: one shifted solve ≈ 36 s at
     β=2, 127 s at β=0.2 on ~12k-cell pitzDaily — note lineax `num_steps` counts restart **cycles**
-    ×`restart`, not iterations). Several levers were probed: two are wired but **off by default** (kept
-    for further evaluation, not the fix), one is dead, and one — refreshing the **scalar** k/ω AMGs after
-    the flow separates — is a real ~2.6× win that is not yet built:
+    ×`restart`, not iterations). **The `β → 0` here is SER-induced and correctable, not inevitable — see
+    the schedule-runs-backwards finding above.** Several levers were probed: two are wired but **off by
+    default** (kept for further evaluation, not the fix), one is dead, and one — refreshing the **scalar**
+    k/ω AMGs after the flow separates — is a real ~2.6× win, now BUILT (see below):
     - **Flooring the SER `β` below (`β = max(beta_floor, β₀(‖R‖/‖R₀‖)^p)`, `PseudoTransientStep.beta_floor`,
       default 0 = off) — correctness-safe, a measured WASH, kept off-by-default.** It never moves the
       converged root (the shift `β d` scales the correction `δ`, which vanishes at `R=0`; it only damps the
@@ -228,9 +354,11 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         frozen** — much cheaper than a whole-policy rebuild, and it avoids the flow refresh's small
         regression. It is adjoint-safe (the preconditioner is `stop_gradient`-ed whatever it is frozen at,
         so a refresh changes only the forward Krylov count, never the converged state or its IFT adjoint).
-        Not yet built: the march must be segmented around an off-jit rebuild (the solve is one
-        `lax.while_loop`, and scipy AMG assembly cannot run inside it), and a refresh currently forces a
-        full recompile (~60–240 s) because these are non-pytrees hashed by identity. That recompile is
+        **BUILT** — `forward_march` + `CycleGrowthTrigger` (see the `march.py` section) segment the march
+        around the off-jit rebuild, which is required because the traced solve is one `lax.while_loop` and
+        scipy AMG assembly cannot run inside it; `solve_coupled(refresh_trigger=…)` is the driver. A
+        refresh still forces a full recompile (~60–240 s) because these are non-pytrees hashed by
+        identity, which is why `refresh_limit` bounds how often it may happen. That recompile is
         avoidable in principle — **the coarsening structure is value-independent** (`_aggregate` takes only
         `(owner, nb, n)`, pure graph topology, so for a fixed mesh the aggregates, `n_coarse` and every
         sparsity pattern are invariant), so only `val`/`diagonal`/`lam_max`/`coarse_inv` change; making
@@ -282,6 +410,90 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     to JAX that carrying one instance across outer sweeps is a `filter_jit` cache **hit** (non-array
     arguments go to the static side, hashed by identity). Both were hit and fixed while building #105 —
     do not "modernize" these into `equinox.Module`s.
+- **`march.py` — BUILT (`forward_march`, `StepReport`/`MarchResult`, `RefreshTrigger`/`CycleGrowthTrigger`):
+  the observed, forward-only march that drives a mid-march preconditioner refresh.**
+  - **Two marches, ONE decision layer (binding — this is the shape to hold).** `_forward` (traced,
+    inside `custom_vjp`, has the root guard, cannot stop early, cannot be observed) and `forward_march`
+    (eager Python loop, forward-only, **no guard by design**, stops on an injected trigger, reports every
+    step). They are not duplicates: `forward_march` calls the **same** `forward_step.stepper()`, the same
+    `forward_step.norm()`, and the same `_within_tolerance`. The only residue is a ~6-line loop shell,
+    pinned against drift by a test that both marches reach the same state on the same residual.
+  - **Why the early-stop could NOT go inside `ImplicitNewtonSolver` (binding — do not "simplify" it back).**
+    `_forward`'s guard raises whenever the terminal state is not a root, and a trigger-stopped segment
+    exits un-converged *by design*. Injecting a count-based early stop would therefore require an
+    **exemption** in that guard — creating a production path that returns a non-root without raising,
+    which is exactly the silent-wrong-gradient hole the guard exists to close. Chunking `_forward` with
+    `max_steps=1` fails independently: it recomputes `residual_norm_0` per chunk, pinning the SER ramp at
+    β₀ forever.
+  - **The eager march NEVER returns the answer.** It is a pure accelerator; every staged solve ends with
+    a real `ImplicitNewtonSolver.solve()` that owns the guard, the `custom_vjp`, and the result. So the
+    guard has exactly one home and is unconditionally on the path that produces the returned state.
+  - **Two reference norms, and conflating them freezes the march (binding).** `residual_norm_0` is
+    **segment-local** (recomputed at each `forward_march` entry, handed to `stepper()` for the SER ramp);
+    `reference_norm` is **global** (fixed across segments, used for the convergence test and the reported
+    ratio). Substituting the second for the first pairs a refreshed, larger shift diagonal with the small
+    β belonging to the pre-refresh residual — the over-damping freeze documented in `turbulence.md`.
+  - **Per-step jit cache hit is mandatory, not an optimization (top implementation risk).** The per-step
+    call goes through the module-level `eqx.filter_jit`'d `_march_step`, taking the `ForwardStep` **and**
+    the residual as *arguments*. Two caller obligations: pass the **same** `forward_step` object across a
+    segment (a rebuilt one is the intended one-off recompile per refresh), and pass a **bound module
+    method** (`coupled.residual`) rather than a freshly-built `lambda`, which `filter_jit` hashes by
+    identity. Retracing per step would cost the 60–240 s compile *every step* and dominate the march it
+    accelerates. Pinned by a trace-counting test (extra steps add zero traces). Note the residual is
+    invoked several times *within one trace* (step, line-search ladder, norm), so trace count ≠ compile
+    count — assert that further steps add none, not that the total is 1.
+  - **`CycleGrowthTrigger` — cost growth is the trigger, the residual is the GATE.** Fires only when: the
+    `warmup` is past; `residual_ratio <= max_residual_ratio`; and the last `patience` steps each measured
+    `>= growth ×` the segment's **running-minimum** non-zero count. **Why the residual is demoted to a
+    gate:** the cycle count rises for two reasons, and on this case the *wrong* one is larger. From the
+    measurements above — staleness at fixed β=2 is 17 → 31 cycles (**1.8×**), while β alone at a fixed
+    pre-separation state is 17 → 43 (**2.5×**). So a bare "cost has doubled" rule fires from the SER ramp
+    before the flow separates, and a mis-fire is not neutral: a pre-separation refresh measured
+    **43 → 83 cycles**, plus a wasted scipy rebuild and a recompile. Since `β = β₀(‖R‖/‖R₀‖)^p` is a
+    function of the residual ratio alone, gating on the ratio normalizes the confound **without**
+    re-deriving the schedule or widening the `stepper()` contract to return β.
+  - **Zero-count trap (real, pinned).** `stepper()` reports `0` for a fully-rejected step, and a direct
+    solver reports `0` too. A running-minimum baseline of `0` makes `cycles >= growth*0` always true and
+    latches the trigger on permanently — so the trigger **ignores zero-count reports** for both the
+    baseline and the growth test, and stays disarmed until one positive count exists.
+  - **`refresh_limit` lives on the driver, not the trigger.** That keeps the trigger a **pure function of
+    one segment's history** — which is what lets `warmup`/`patience` re-apply correctly after each
+    refresh, lets it be unit-tested on synthetic histories with no solve, and (the big one) lets it be
+    **calibrated offline**: log one march with `refresh_trigger=None` and an `on_step` observer, then
+    replay candidate parameters against the log. No numeric default here is calibrated — they are chosen
+    conservative (late rather than early) and must be set from an instrumented full-mesh run.
+  - **Observation does NOT require a refresh (binding — this was a real bug).** `solve_coupled` runs the
+    observed pre-march when the caller wants a refresh **or** merely wants to watch
+    (`observing = refreshing or on_step or on_checkpoint`). Gating it on the trigger alone makes an
+    *instrumented reference march* — `refresh_trigger=None` plus an observer, which is exactly the run a
+    trigger is calibrated against, and the longest-running one — produce **no output at all** and sit
+    silent for hours. Consequence to keep in mind: an observed solve spends `max_steps` on the pre-march
+    and `max_steps` again on the finishing solve, so the budget is larger but *split*; instrumenting a
+    solve already near its limit can turn a pass into a convergence-guard raise. Pinned by
+    `test_the_march_reports_progress_without_a_refresh_trigger`.
+  - **`checkpoint` is a SECOND seam, separate from `observer` (binding).** `checkpoint(report, state)`
+    carries the state; `observer(report)` carries only numbers. Keeping the state off the report history
+    is what keeps a `RefreshTrigger` a pure function that can be replayed offline against a logged march
+    — put the state on that seam and a trigger could read the physics, and trigger calibration would cost
+    one full solve per candidate instead of one logged run for all of them.
+  - **Reporting seam.** `StepReport(step, cycles, residual_norm, residual_ratio, alpha)` + `MarchResult`,
+    plus an optional streaming `observer` (a long march must not withhold all logging until it finishes).
+    The trigger and a future logger consume the identical objects, so there is no second reporting path.
+    Per-step observation exists only where the march is eager — the traced `_forward` would need
+    `jax.debug.callback`, a separate decision; do not promise per-step reporting on the differentiable path.
+  - **`StepControl` — stateful, feedback-driven step reshaping on the eager march only (binding — the
+    twin of `RelaxationSchedule`, deliberately NOT one interface).** A `RelaxationSchedule` is memoryless
+    and lives on the differentiable step; a `StepControl` reads the *previous* `StepReport` (α, cost) —
+    feedback available only after a step — to reshape the next step, and may raise under `jax.grad`, so it
+    lives here beside `RefreshTrigger`, never on the traced path. `forward_march(step_control=…)` calls
+    `next_step(base, previous, state) -> (ForwardStep, new_state)`, threading the control's own state; the
+    march stays β-ignorant (the control returns a ready-to-run step, typically `base` with a
+    `ConstantRelaxation` β leaf via `tree_at`, so `_march_step` stays a cache hit). Unifying the two into
+    one `(rn, rn0, α, state) -> (β, state)` interface was rejected: it would union SER's needs with the
+    control's (dead α/state args for SER), drag α onto the differentiable core where the line search
+    cannot even produce it before the step, and risk the byte-identity of the default path. The one
+    concrete `StepControl` is `AlphaTargetingControl` (`solve/step_control.py`) — experimental, opt-in,
+    see the "SER β schedule runs backwards" bullet.
 - **Gate C — PASSED (`tests/integration/test_skewed_diffusion.py`).** With
   `CorrectedGreenGauss` injected into the residual on a 25%-skewed mesh, one Newton step
   drives `‖R‖` ~24 → ~1e-12 and reproduces a harmonic linear field to ~5e-13 (linear-exact
