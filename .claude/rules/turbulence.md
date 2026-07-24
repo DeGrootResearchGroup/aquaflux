@@ -443,7 +443,8 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   consistent field the inner solve can precondition. `hybrid_initialize(momentum, turbulence)` builds a
   cheap physical IC (a few linear Laplace solves): **potential-flow velocity** (`flow/initialization.py`
   `potential_flow`), **Laplace-smoothed k** (harmonic interpolant of its BCs), and **ω** =
-  boundary-propagated interior **raised to the analytical viscous-sublayer profile `ω(y)=6ν/(β₁y²)` at
+  boundary-propagated interior **raised to the SAME near-wall closure the residual imposes — the adaptive
+  blend `omega_wall = sqrt(ω_vis²+ω_log²)`, `ω_vis = 6ν/(β₁y²)` (binding, see below) — at
   every cell's own wall distance** (via `jnp.maximum`). A *Laplace*-ω over-diffuses the large wall value
   into the interior; seeding only the wall cells (the earlier form) leaves a **cliff** between the fixed
   wall cell and its neighbour on the flat interpolant, and that neighbour's ω equation then carries
@@ -467,6 +468,18 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   source by the guarded `sqrt`, see the `strain.py` note. Do **not** reintroduce an IC perturbation to
   "lift" it: the degeneracy was never in the IC.) The IC is a forward device (the converged-state
   adjoint is IC-independent); when differentiating, pass an explicit state built outside `jax.grad`.
+  - **The seed MUST be the closure the residual imposes, not the viscous branch alone (binding — this
+    was a real regression).** The whole point of seeding the profile is that the wall-adjacent cells start
+    *on their own boundary condition* and therefore do not carry the initial ω residual. When the wall
+    treatment gained its log branch (`omega_wall`, the adaptive blend) the seed was left on
+    `omega_wall_value` (viscous only), so on a **wall-function** mesh the IC disagreed with the BC by
+    ~3× at y⁺=30 and ~10× at y⁺=100 — and `‖R₀‖` on pitzDaily rose ~350× (≈2.2e2 → ≈7.8e4), with the
+    march then spending its early steps repairing the IC instead of developing the flow. Wall-resolved is
+    unaffected (the blend → `ω_vis` as y⁺→0), **which is exactly why a wall-resolved no-op check could not
+    catch it**, and why the unit test now asserts against `omega_wall` on a *coarse, high-Re* mesh where
+    the branches genuinely differ (a low-Re or fine mesh makes the assertion vacuous). The seed therefore
+    runs **after** `k` is settled — the log branch reads `sqrt(k)`, so seeding it against the bare Laplace
+    interpolant (k≈0 in a wall-bounded interior) would evaluate the closure at a `k` the solve never sees.
   - **Body-force-driven domains need equilibrium levels, not interpolants (binding).** A
     streamwise-periodic channel has **no inlet**, so both smoothed fields are degenerate: `k` is the
     harmonic interpolant between all-zero wall Dirichlets (**identically zero**), and `ω` is a
