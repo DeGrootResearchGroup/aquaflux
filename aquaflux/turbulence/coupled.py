@@ -54,8 +54,10 @@ from aquaflux.solve import (
     BlockScaledNorm,
     DivergenceGuard,
     ImplicitNewtonSolver,
+    LocalCourantBasis,
     PseudoTransientStep,
     RefreshTrigger,
+    ShiftBasis,
     ShiftTerm,
     StepControl,
     StepReport,
@@ -65,6 +67,10 @@ from aquaflux.solve import (
 
 from .initialization import hybrid_initialize
 from .preconditioner import ScalarTransportPreconditioner, ScaledScalarPreconditioner
+
+# The default pseudo-time shift basis (full operator diagonal = uniform under-relaxation), held as a
+# module singleton so it is not reconstructed in each function's argument defaults.
+_DEFAULT_SHIFT_BASIS = LocalCourantBasis()
 
 if TYPE_CHECKING:
     from aquaflux.flow import MomentumContinuity
@@ -366,6 +372,11 @@ class CoupledShiftPolicy(eqx.Module):
     k_preconditioner, omega_preconditioner : callable or None
         The frozen ``phi -> M`` convection-diffusion AMG factories for the k and omega blocks, or
         ``None`` for an unpreconditioned (identity) scalar block.
+    shift_basis : ShiftBasis
+        How the live velocity shift diagonal is built from the momentum diagonal's convective/dissipative
+        parts (the scalar shift diagonals are pre-combined at build time). The default
+        :class:`~aquaflux.solve.LocalCourantBasis` (weight ``1``) is ``a_P`` -- uniform under-relaxation,
+        unchanged from the historical shift; a convective basis gives a local convective time step.
     """
 
     layout: CoupledRANSLayout
@@ -374,6 +385,7 @@ class CoupledShiftPolicy(eqx.Module):
     omega_shift_diagonal: jnp.ndarray
     k_preconditioner: ScalarTransportPreconditioner | None = None
     omega_preconditioner: ScalarTransportPreconditioner | None = None
+    shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS
 
     def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
         """The block-diagonal full-state shift and the ``beta -> M`` composed preconditioner at ``phi``.
@@ -387,12 +399,16 @@ class CoupledShiftPolicy(eqx.Module):
         block = self.flow_preconditioner
         assembler = block.assembler
         n_cells = self.layout.n_cells
-        a_p = block.frozen_momentum_diagonal(flow)  # live per-iterate velocity a_P (jittable)
+        # Live per-iterate velocity a_P (jittable), split so the shift basis can build a convective (or
+        # weighted) local time step; a_p = convective + dissipative is what the velocity block inverts.
+        convective, dissipative = block.frozen_momentum_diagonal_parts(flow)
+        a_p = convective + dissipative
+        d_vel = self.shift_basis.local_diagonal(convective, dissipative)
 
-        # Full-state base shift d: a_P on every velocity component, 0 on pressure, the frozen scalar
+        # Full-state base shift: d_vel on every velocity component, 0 on pressure, the frozen scalar
         # transport diagonals on k and omega.
         flow_diagonal = assembler.pack(
-            jnp.broadcast_to(a_p[:, None], (n_cells, self.layout.dim)), jnp.zeros(n_cells)
+            jnp.broadcast_to(d_vel[:, None], (n_cells, self.layout.dim)), jnp.zeros(n_cells)
         )
         diagonal = self.layout.pack(
             flow_diagonal,
@@ -401,9 +417,9 @@ class CoupledShiftPolicy(eqx.Module):
         )
 
         def make_preconditioner(relaxation: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
-            # Flow block at the under-relaxed a_P (1 + beta) matching the shifted Jacobian; scalar
+            # Flow block at the shifted diagonal a_P + beta*d_vel matching the shifted Jacobian; scalar
             # blocks at their frozen AMG (beta-independent -- the shift only adds positive diagonal).
-            flow_m = block.apply_at(flow, jax.lax.stop_gradient(a_p * (1.0 + relaxation)))
+            flow_m = block.apply_at(flow, jax.lax.stop_gradient(a_p + relaxation * d_vel))
             k_m = None if self.k_preconditioner is None else self.k_preconditioner(k)
             omega_m = (
                 None if self.omega_preconditioner is None else self.omega_preconditioner(omega)
@@ -516,6 +532,7 @@ def coupled_continuation(
     line_search: int = _COUPLED_LINE_SEARCH,
     forward_solver: lx.AbstractLinearSolver | None = None,
     block_scaled_norm: bool = False,
+    shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     reuse: CoupledShiftPolicy | None = None,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
@@ -556,6 +573,13 @@ def coupled_continuation(
         block-scaled measure was found to *stall* the pitzDaily march (the per-block relative norm stops
         descending long before the fields converge), so it is available for experimentation but off by
         default; the Euclidean norm is what the solver uses.
+    shift_basis : ShiftBasis
+        How the pseudo-time shift diagonal is built from each block's convective/dissipative operator
+        parts (velocity, k and omega alike; see :class:`CoupledShiftPolicy`). Defaults to
+        :class:`~aquaflux.solve.LocalCourantBasis` -- the full operator diagonal (uniform
+        under-relaxation), unchanged from the historical shift. Pass
+        ``LocalCourantBasis(dissipative_weight=0.0)`` for a local convective time step on the transport
+        blocks (pressure keeps its zero shift either way).
     reuse : CoupledShiftPolicy, optional
         An existing policy to **refresh** at ``reference_state`` instead of building one from scratch:
         the k/omega AMGs are re-derived on their reused coarsening while the flow block is carried over
@@ -571,7 +595,9 @@ def coupled_continuation(
     PseudoTransientStep
         The forward step to hand :class:`~aquaflux.solve.ImplicitNewtonSolver` as ``forward_step``.
     """
-    policy = _coupled_shift_policy(coupled, reference_state, method, reuse, **preconditioner_kwargs)
+    policy = _coupled_shift_policy(
+        coupled, reference_state, method, reuse, shift_basis, **preconditioner_kwargs
+    )
     residual_norm = (
         _coupled_residual_norm(coupled, reference_state) if block_scaled_norm else jnp.linalg.norm
     )
@@ -595,6 +621,7 @@ def _coupled_shift_policy(
     reference_state: jnp.ndarray,
     method: str | None,
     reuse: CoupledShiftPolicy | None = None,
+    shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     **preconditioner_kwargs: object,
 ) -> CoupledShiftPolicy:
     """Build the block-diagonal :class:`CoupledShiftPolicy` frozen at ``reference_state``.
@@ -679,19 +706,31 @@ def _coupled_shift_policy(
             omega_scale,
         )
 
+    # On a refresh the shift diagonals are carried, so keep the basis they were built with; the live
+    # velocity basis is the same object, so it stays consistent with the carried scalar diagonals.
+    basis = reuse.shift_basis if reuse is not None else shift_basis
     if reuse is not None:
         # Carry the shift diagonals from the reused policy -- rebuilding them at the developed state
         # over-damps the step and freezes the march (see the docstring). Only the AMGs are refreshed.
         k_shift = reuse.k_shift_diagonal
         omega_shift = reuse.omega_shift_diagonal
     else:
-        k_shift = coupled.turbulence.k_shift_policy(mdot, closure, k_ref).shift_diagonal * k_scale
+        k_shift = (
+            coupled.turbulence.k_shift_policy(
+                mdot, closure, k_ref, shift_basis=shift_basis
+            ).shift_diagonal
+            * k_scale
+        )
         omega_shift = (
-            coupled.turbulence.omega_shift_policy(mdot, closure, omega_ref).shift_diagonal
+            coupled.turbulence.omega_shift_policy(
+                mdot, closure, omega_ref, shift_basis=shift_basis
+            ).shift_diagonal
             * omega_scale
         )
 
-    return CoupledShiftPolicy(coupled.layout, block, k_shift, omega_shift, k_amg, omega_amg)
+    return CoupledShiftPolicy(
+        coupled.layout, block, k_shift, omega_shift, k_amg, omega_amg, shift_basis=basis
+    )
 
 
 def _is_traced(pytree: object) -> bool:

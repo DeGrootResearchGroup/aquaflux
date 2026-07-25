@@ -145,6 +145,59 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     and translate them into `SwitchedEvolutionRelaxation(...)` at the one construction line — a factory
     building the real object, not a shim. A *stateful* or α-driven damping rule is **not** a schedule; it
     is a `StepControl` on the eager march (see `march.py`).
+  - **The shift's SPATIAL distribution is an injected `ShiftBasis` (`solve/shift_basis.py`) — the
+    spatial twin of the `RelaxationSchedule` (binding).** `RelaxationSchedule` sets *how much* damping
+    (the scalar β); `ShiftBasis` sets the per-cell base diagonal `d` the shift `β d` is built on, from
+    the operator's two diagonal buckets: `local_diagonal(convective, dissipative) -> d`. The one concrete
+    is `LocalCourantBasis(dissipative_weight=w)`: `d = convective + w·dissipative`. **`w = 1` (default) is
+    the full operator diagonal `a_P`** — and because `d = a_P` (the same diagonal the operator carries),
+    `β a_P` is spatially-*uniform* under-relaxation (relaxation `1/(1+β)` in every cell), byte-compatible
+    with the historical shift. **`w = 0` is a genuine local convective time step** (`d = Σ_f max(mdot_f,0)`
+    = ½Σ|mdot|), the non-uniform per-cell `Δt` a Courant condition implies — OF's `Co = ½Δt Σ|φ|/V` and
+    Fluent's *segregated* local pseudo-time step are this same convective basis. The buckets are supplied
+    by each block: `rhie_chow.momentum_diagonal_parts` (velocity) and
+    `preconditioner.scalar_transport_shift_diagonal_parts` (k/ω), each summing to the block's total shift
+    diagonal to rounding. **Consequence for the preconditioner (binding):** with a non-`a_P` basis the
+    shifted diagonal is `a_P + β d`, *not* `a_P(1+β)`, so `make_preconditioner` must invert `a_P + β d` —
+    the velocity block's `apply_at` is fed exactly that (was `a_P(1+β)`; identical when `w=1`). Threaded
+    through `momentum_continuation`/`coupled_continuation`/`solve_coupled(shift_basis=…)` and the k/ω
+    shift policies; **pressure keeps zero shift regardless** (elliptic), which is why a *local* basis is
+    defensible on this coupled solver where Fluent uses a global time scale for its coupled path. Adding a
+    basis (e.g. a Fluent-style global min-physical-time-scale) is a new `ShiftBasis`; do not branch the
+    policies.
+    - **First measurement of the convective basis: WORSE at a weakly-separated state, but NOT yet a fair
+      test of its regime (`local_ts_ab.py`, 2026-07-24).** Probing both bases on pitzDaily checkpoints at
+      `β ∈ {3, 12}` with a fresh preconditioner:
+
+      | state | basis | β | cycles | α | ‖R‖ kept |
+      |---|---|---|---|---|---|
+      | known-good rel 0.052 | spectral (`w=1`) | 3 | 17 | **1.00** | **29.3 %** |
+      | known-good rel 0.052 | convective (`w=0`) | 3 | 14 | 0.25 | 7.8 % |
+      | plateau rel 0.032 | either | 3 / 12 | 13–163 | **0.001** | ~0 |
+
+      At the productive state the convective basis **lowers** α (1.0 → 0.25) and the residual reduction
+      (29 → 8 %), and does not help the flow or k blocks either (d(flow) −0.7 %, d(k) −0.5 %) — consistent
+      with the dissipative diagonal being **load-bearing stabilization** on a wall-resolved,
+      high-aspect-ratio mesh: the near-wall and recirculation cells are diffusion-controlled, so dropping
+      their damping makes the coupled step overshoot and the line search clip harder. It is also cheaper
+      per step at low β (14 vs 17 cycles) but degrades faster at high β (dropping the dissipative diagonal
+      weakens diagonal dominance). **Caveat that keeps this open, not settled: the only state where steps
+      are productive (rel 0.052) is barely separated, so this probe never exercised the developed
+      recirculation the convective basis is *meant* for** — and the one genuinely separated state available
+      (the plateau) is direction-limited (α = 0.001 for *every* basis and β), so it cannot discriminate
+      between bases at all. Re-test at a state that is both **well separated and still productive** before
+      concluding. Hence: shipped as an opt-in with the **default unchanged** (`w=1` = the historical `a_P`),
+      not adopted and not withdrawn.
+    - **The plateau is a step-DIRECTION problem, and no shift basis (nor a preconditioner, nor a per-block
+      β) can move it.** Every basis/β combination at rel 0.032 gives α = 0.001 and zero descent. Worth
+      stating explicitly because all three of those levers get proposed for it: a **preconditioner** only
+      changes Krylov cycles — for fixed `J`, `β`, `d`, `R` the shifted step `δ` is unique regardless of `M`,
+      so it cannot change α or the basin; a **per-block β** is measured-dominated for a separate reason (the
+      acceptance and direction couplings below); and a **shift basis** only redistributes damping. What
+      *does* change `δ` is altering the operator itself — the pseudo-time shift already does (and is
+      legitimate because it vanishes at the root), as would a grad-div / augmented-Lagrangian **augmentation**
+      of the momentum residual (vanishing at `∇·u = 0`) or physical continuation. Do not aim preconditioner
+      or damping work at the plateau.
   - **Two injected seams**, both `Protocol`s: the physics comes from a **`ShiftPolicy`**
   (`shift_term(φ) -> ShiftTerm(diagonal, make_preconditioner)`; `ShiftTerm.diagonal` is the full-state
   base shift, `make_preconditioner(β)` the frozen shifted `M`), and the per-attempt accept/reject

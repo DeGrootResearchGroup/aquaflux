@@ -117,26 +117,80 @@ def momentum_diagonal(
         normal as ``sum_i n_i^2 (V / a_P_i)``, which reduces to the scalar ``V / a_P`` for equal
         components.
     """
-    viscous = viscous_face_coefficient(mu, normal_distance, interp_factor, face_cells, geometry)
-
-    # The scatter masks the neighbour coefficient to zero on boundary faces, so pass it unmasked.
-    owner_coeff = viscous
-    neighbour_coeff = viscous
-    if mdot_lagged is not None:  # convective upwind: outflow leaves the owner, inflow the neighbour
-        owner_coeff = owner_coeff + jnp.maximum(mdot_lagged, 0.0)
-        neighbour_coeff = neighbour_coeff + jnp.maximum(-mdot_lagged, 0.0)
-
-    # On boundary faces the owner contribution is the patch's own diagonal coefficient (a wall drops
-    # the convective term, a zero-gradient outlet the viscous one), not the interior-style sum above;
-    # the scatter already zeros the neighbour coefficient on boundary faces.
-    if boundary_owner_coeff is not None:
+    if boundary_owner_coeff is None:
+        # The interior-style all-faces form: the isotropic diagonal is exactly the sum of the
+        # convective and dissipative buckets (single-homed in momentum_diagonal_parts).
+        convective, dissipative = momentum_diagonal_parts(
+            face_cells, geometry, mu, normal_distance, interp_factor, mdot_lagged=mdot_lagged, dt=dt
+        )
+        a_p_isotropic = convective + dissipative
+    else:
+        viscous = viscous_face_coefficient(mu, normal_distance, interp_factor, face_cells, geometry)
+        # The scatter masks the neighbour coefficient to zero on boundary faces, so pass it unmasked.
+        owner_coeff = viscous
+        neighbour_coeff = viscous
+        if mdot_lagged is not None:  # convective upwind: outflow leaves owner, inflow the neighbour
+            owner_coeff = owner_coeff + jnp.maximum(mdot_lagged, 0.0)
+            neighbour_coeff = neighbour_coeff + jnp.maximum(-mdot_lagged, 0.0)
+        # On boundary faces the owner contribution is the patch's own diagonal coefficient (a wall
+        # drops the convective term, a zero-gradient outlet the viscous one), not the interior-style
+        # sum above; the scatter already zeros the neighbour coefficient on boundary faces.
         owner_coeff = jnp.where(face_cells.interior, owner_coeff, boundary_owner_coeff)
+        a_p_isotropic = face_cells.scatter(owner_coeff, neighbour_coeff)
+        if dt is not None:
+            a_p_isotropic = a_p_isotropic + geometry.cell.volume / dt
 
-    a_p_isotropic = face_cells.scatter(owner_coeff, neighbour_coeff)
-    if dt is not None:
-        a_p_isotropic = a_p_isotropic + geometry.cell.volume / dt
     dim = geometry.face.normal.shape[-1]
     return jnp.broadcast_to(a_p_isotropic[:, None], (*a_p_isotropic.shape, dim))
+
+
+def momentum_diagonal_parts(
+    face_cells: FaceCellConnectivity,
+    geometry: MeshGeometry,
+    mu: jnp.ndarray,
+    normal_distance: jnp.ndarray,
+    interp_factor: jnp.ndarray,
+    mdot_lagged: jnp.ndarray | None = None,
+    dt: float | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """The convective and dissipative buckets of the all-faces momentum diagonal ``a_P``, per cell.
+
+    Splits the interior-style (``boundary_corrected=False``) isotropic ``a_P`` into the two parts a
+    local-time-step pseudo-transient shift is built from (see :class:`~aquaflux.solve.ShiftBasis`):
+
+    - ``convective`` -- the first-order-upwind outflow ``Sum_f max(mdot_f, 0)`` scattered to each cell
+      (equivalently ``1/2 Sum_f |mdot_f|`` on a divergence-free flux); zero for Stokes flow.
+    - ``dissipative`` -- the viscous stiffness ``Sum_f mu_f A_f / (d.n)_f`` plus any transient
+      ``V / dt``.
+
+    Their sum is the isotropic all-faces ``a_P`` (to rounding), so a shift basis that adds them
+    one-to-one reproduces the historical shift. Every face -- including boundary faces -- contributes
+    the interior-style term, matching the uncorrected diagonal the frozen shift/preconditioner uses (a
+    forward-path stabilization scale, not the residual's operator-consistent coefficient). Isotropic
+    (the viscous and convective contributions are component-independent), so the parts are scalars, the
+    form the pseudo-time shift consumes.
+
+    Parameters
+    ----------
+    face_cells, geometry, mu, normal_distance, interp_factor, mdot_lagged, dt
+        As :func:`momentum_diagonal` (the ``boundary_owner_coeff=None`` case).
+
+    Returns
+    -------
+    tuple of jnp.ndarray
+        ``(convective, dissipative)``, each shape ``(n_cells,)`` and ``>= 0``.
+    """
+    viscous = viscous_face_coefficient(mu, normal_distance, interp_factor, face_cells, geometry)
+    dissipative = face_cells.scatter(viscous, viscous)
+    if dt is not None:
+        dissipative = dissipative + geometry.cell.volume / dt
+    if mdot_lagged is None:
+        convective = jnp.zeros_like(dissipative)
+    else:  # convective upwind: outflow leaves the owner, inflow leaves the neighbour
+        convective = face_cells.scatter(
+            jnp.maximum(mdot_lagged, 0.0), jnp.maximum(-mdot_lagged, 0.0)
+        )
+    return convective, dissipative
 
 
 def advective_momentum_flux(

@@ -75,6 +75,7 @@ from .multigrid import (
 from .newton import newton_step
 from .norm import BlockScaledNorm, ResidualNorm
 from .relaxation import ConstantRelaxation, RelaxationSchedule, SwitchedEvolutionRelaxation
+from .shift_basis import LocalCourantBasis, ShiftBasis
 from .step_control import AlphaTargetingControl
 
 __all__ = [
@@ -87,11 +88,13 @@ __all__ = [
     "DivergenceGuard",
     "ForwardStep",
     "ImplicitNewtonSolver",
+    "LocalCourantBasis",
     "MarchResult",
     "PseudoTransientStep",
     "RefreshTrigger",
     "RelaxationSchedule",
     "ResidualNorm",
+    "ShiftBasis",
     "ShiftPolicy",
     "ShiftTerm",
     "SmoothedHierarchy",

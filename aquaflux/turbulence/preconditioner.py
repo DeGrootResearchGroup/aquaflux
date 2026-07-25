@@ -235,19 +235,65 @@ def scalar_transport_shift_diagonal(
     jnp.ndarray
         The non-negative per-cell shift diagonal ``d``, shape ``(n_cells,)``.
     """
-    owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, _n = _scalar_operator_pieces(
+    convective, dissipative = scalar_transport_shift_diagonal_parts(
+        mesh, geometry, diffusivity, volume_flux, residual_fn, reference, fixed_cells=fixed_cells
+    )
+    return convective + dissipative
+
+
+def scalar_transport_shift_diagonal_parts(
+    mesh: Mesh,
+    geometry: MeshGeometry,
+    diffusivity: jnp.ndarray,
+    volume_flux: jnp.ndarray,
+    residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
+    reference: jnp.ndarray,
+    *,
+    fixed_cells: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """The convective and dissipative buckets of the scalar shift diagonal, per cell.
+
+    The split a :class:`~aquaflux.solve.ShiftBasis` combines into the pseudo-time shift for a scalar
+    transport equation (the scalar counterpart of
+    :func:`~aquaflux.flow.rhie_chow.momentum_diagonal_parts`):
+
+    - ``convective`` -- the first-order-upwind outflow (owner loses when ``mdot > 0``, neighbour when
+      ``mdot < 0``) scattered to each cell.
+    - ``dissipative`` -- the diffusion stiffness on both incident cells plus the clamped
+      reaction+Dirichlet boundary diagonal.
+
+    Their sum is :func:`scalar_transport_shift_diagonal`. Both are zeroed on any ``fixed_cells`` (an
+    exact value fixation needs no pseudo-time damping), so the sum stays zero there. Built off the jit
+    path from the same frozen pieces and returned ``stop_gradient``-detached, so the shift only reshapes
+    the forward march and never enters the converged field or its adjoint.
+
+    Parameters
+    ----------
+    mesh, geometry, diffusivity, volume_flux, residual_fn, reference, fixed_cells
+        As :func:`scalar_transport_shift_diagonal`.
+
+    Returns
+    -------
+    tuple of jnp.ndarray
+        ``(convective, dissipative)``, each shape ``(n_cells,)`` and ``>= 0``.
+    """
+    owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n = _scalar_operator_pieces(
         mesh, geometry, diffusivity, volume_flux, residual_fn, reference
     )
-    diagonal = boundary_diagonal.copy()  # reaction + Dirichlet boundary stiffness (>= 0)
-    np.add.at(diagonal, owner_e, visc_int)  # diffusion stiffness on both incident cells
-    np.add.at(diagonal, nb_e, visc_int)
-    np.add.at(
-        diagonal, owner_e, np.maximum(mdot_int, 0.0)
-    )  # upwind outflow: owner loses when mdot>0
-    np.add.at(diagonal, nb_e, np.maximum(-mdot_int, 0.0))  # neighbour loses when mdot<0
+    dissipative = boundary_diagonal.copy()  # reaction + Dirichlet boundary stiffness (>= 0)
+    np.add.at(dissipative, owner_e, visc_int)  # diffusion stiffness on both incident cells
+    np.add.at(dissipative, nb_e, visc_int)
+    convective = np.zeros(n)
+    np.add.at(convective, owner_e, np.maximum(mdot_int, 0.0))  # upwind outflow: owner when mdot>0
+    np.add.at(convective, nb_e, np.maximum(-mdot_int, 0.0))  # neighbour when mdot<0
     if fixed_cells is not None:
-        diagonal[np.asarray(fixed_cells)] = 0.0
-    return jax.lax.stop_gradient(jnp.asarray(diagonal))
+        fixed = np.asarray(fixed_cells)
+        dissipative[fixed] = 0.0
+        convective[fixed] = 0.0
+    return (
+        jax.lax.stop_gradient(jnp.asarray(convective)),
+        jax.lax.stop_gradient(jnp.asarray(dissipative)),
+    )
 
 
 def scalar_transport_preconditioner(

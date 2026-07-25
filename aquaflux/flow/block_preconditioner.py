@@ -844,6 +844,20 @@ def _isotropic_momentum_diagonal(assembler: MomentumContinuity, state: jnp.ndarr
     )
 
 
+def _isotropic_momentum_diagonal_parts(
+    assembler: MomentumContinuity, state: jnp.ndarray
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """The frozen convective/dissipative buckets of the all-faces ``a_P`` at ``state``.
+
+    The two parts a :class:`~aquaflux.solve.ShiftBasis` combines into the pseudo-transient shift; their
+    sum is :func:`_isotropic_momentum_diagonal` (to rounding). Frozen and evaluated at a detached state,
+    like the total, so the shift stays a constant forward-path scale.
+    """
+    velocity, _ = assembler.unpack(jax.lax.stop_gradient(state))
+    convective, dissipative = assembler.momentum_matrix_diagonal_parts(velocity)
+    return jax.lax.stop_gradient(convective), jax.lax.stop_gradient(dissipative)
+
+
 def _scaled_momentum_radius(
     assembler: MomentumContinuity,
     state: jnp.ndarray,
@@ -1072,6 +1086,15 @@ class BlockPreconditioner(eqx.Module):
         form its diagonal shift from the *same* ``a_P`` the preconditioner inverts.
         """
         return _isotropic_momentum_diagonal(self.assembler, state)
+
+    def frozen_momentum_diagonal_parts(self, state: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """The convective/dissipative buckets of the frozen ``a_P`` at ``state``, each ``(n_cells,)``.
+
+        The split a :class:`~aquaflux.solve.ShiftBasis` combines into a local-time-step pseudo-transient
+        shift; their sum is :meth:`frozen_momentum_diagonal` (to rounding). Exposed so a continuation
+        driver can build a convective (or weighted) shift while still inverting the total ``a_P``.
+        """
+        return _isotropic_momentum_diagonal_parts(self.assembler, state)
 
     def _msimpler_scale(self, state: jnp.ndarray) -> jnp.ndarray:
         """The MSIMPLER scale ``k`` at ``state`` — ``mean(ρV / a_P)`` from the real momentum diagonal.
