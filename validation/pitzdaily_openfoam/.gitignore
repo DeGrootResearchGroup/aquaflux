@@ -8,3 +8,8 @@ of_case/processor*/
 __pycache__/
 *.npz
 of_case/constant/polyMesh/
+# The transient reference: its mesh is byte-identical to of_case's (same blockMeshDict), so it is
+# regenerated rather than stored twice; the solver log and probe output are regenerable too.
+of_transient/constant/polyMesh/
+of_transient/log.*
+of_transient/postProcessing/
