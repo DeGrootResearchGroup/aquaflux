@@ -300,6 +300,38 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       building it: the *point* gradient (right for the cell-centred sources) is **not** the best *linear
       reconstruction slope* over a finite cell for a convex profile — for ω the latter barely arises,
       since advection is first-order upwind and the flux-continuous diffusion eliminates the face value.
+  - **THE "FIRST RING" IS NOT SPECIAL — the OF-vs-aquaflux ω imbalance is UNIFORM ~13 % across the
+    domain (term decomposition, 2026-07-25). This retires a whole line of investigation.** At the clean
+    pimpleFoam field, 91 % of the interior ω residual sits in the 471 cells adjacent to the wall-fixed
+    band, which reads as a near-wall defect. Decomposing the residual term by term shows it is not:
+
+    | | first ring | bulk |
+    |---|---|---|
+    | advection / diffusion | 27.8 / 49.9 | 18.1 / 17.5 |
+    | production / destruction | 119 / 169 | 44.9 / 64.1 |
+    | cross-diffusion | 24.1 | 14.3 |
+    | **residual** | **20.5** | **9.33** |
+    | **residual ÷ largest term** | **0.121** | **0.146** |
+
+    The *relative* imbalance is the same everywhere — the bulk is if anything slightly worse. The ring
+    dominates the absolute residual only because its terms are 2–3× larger there (destruction 169 vs 64).
+    **So there is no localized near-wall defect**, and the "91 % in the first ring" framing was an
+    artifact of reading absolute magnitudes in the stiffest region — the same error as the wall-row
+    scaling defect, one level down. It is also **not** a near-cancellation of stiff terms (that would be
+    ~1e-3, not 0.12).
+    - **What it is:** a **global** discretization/model difference — OF's converged field leaves a ~13 %
+      relative imbalance in *our* discrete ω equation everywhere. That is a two-codes statement, not a
+      defect in ours, and **not a convergence blocker**.
+    - **Four local candidates were eliminated first, all by measurement — do not re-open them without new
+      evidence:** the non-orthogonal correction (0.03 % of ‖R_ω‖); the fixed-cell ω gradient (genuinely
+      4–6× wrong, fixed, and measured **inert** because `F1` saturates at 1.0 there); the wall-blend
+      exponent (removed by the max blend, wall rows 4.91 → 1.33); and the ω **advection scheme**, which
+      makes the ring *worse* (18.4 → 19.9) while improving the bulk.
+    - **Actionable follow-up (accuracy, not convergence):** second-order scalar advection cuts the *bulk*
+      ω residual **15 %** (8.26 → 6.98), consistent with OpenFOAM using `Gauss limitedLinear 1` for both
+      k and ω while we use `FirstOrderUpwind`. The original reason for first-order — ω driven negative by
+      a second-order Newton update — was explicitly conditioned on log-variable transport not existing.
+      **It exists now (`LogScalars`)**, so that choice is worth re-testing rather than inherited.
   - **The blend SHAPE is a power-mean choice, and OpenFOAM / Fluent pick DIFFERENT exponents — this is
     the source of the near-wall ω disagreement, and it is a modelling choice, not a bug (measured
     2026-07-24 against a *clean* reference; supersedes the corrupt-reference wall-ω numbers above).** All
