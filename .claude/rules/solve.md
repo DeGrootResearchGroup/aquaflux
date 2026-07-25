@@ -238,31 +238,46 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     package, for a number the differentiated path can never use; and it would force the *generic* Newton
     loop to pick which step's count survives (last / max / sum), which is a reporting policy the solver
     has no business owning. Per-step cost is observed eagerly instead, by `forward_march`.
-  - **⚠️ SUSPECTED PERFORMANCE REGRESSION in the `growth` parameter — investigate before using
-    `RelaxedFarFromRoot` or trusting any timing (2026-07-25, UNRESOLVED).** `backtracking_line_search`
-    gained a `growth` argument (the non-monotone acceptance schedule, `solve/line_search_growth.py`).
-    With it, a coupled step on the pitzDaily plateau state went from **~2–3 min to >27 min for a SINGLE
-    step** (measured directly: `forward_march(..., max_steps=1)` ran 27 min 42 s without returning).
-    Reproduced on two independent march harnesses. A third probe on the **direct** `solve_linear` +
-    `backtracking_line_search` path (no `forward_march`) was **suggestive but not conclusive**: it had
-    not reached the result line it printed earlier the same day after ~6–8 min, but it was killed
-    rather than run to completion — so "the direct path is also affected" is **unproven**, and
-    isolating march-driver versus ladder is the first thing to settle. The continuation itself still
-    builds in 8 s, and the unit tests (which use trivial residuals) are unaffected, so whatever the
-    cost is, it only appears at real problem size.
-    - **Leading hypothesis:** `admissible = growth * reference_norm` makes the ladder's comparison
-      bound a **traced** value where it was previously loop-invariant, inside a `lax.while_loop` that
-      itself sits inside the escalation `while_loop`. A traced bound in the inner loop plausibly defeats
-      the "compile the body once" property the ladder was built for.
-    - **Two candidate fixes, both keeping the schedule injected and memoryless:** (a) compute
-      `admissible` *outside* and pass that scalar in, so the loop sees one constant; or (b) make the
-      growth factor **static per march segment** — it is a function of the segment's residual ratio and
-      need not vary within a step.
-    - **The default path is unaffected and was measured clean before this change** (`MonotoneLineSearch`
-      returns `1.0`, and `growth` defaults to a Python `1.0` float at the other call site), but **do not
-      assume** the default is free until the above is isolated — the regression reproduced with the
-      *monotone* schedule active, i.e. at `growth = 1.0`, which is itself evidence that the traced-bound
-      hypothesis is the right one rather than the relaxation being expensive.
+  - **The `growth` parameter is NOT a performance regression — hypothesis raised, then DISPROVEN by
+    measurement (2026-07-25, settled; do not re-open on the original evidence).** A
+    `forward_march(..., max_steps=1)` on the pitzDaily *plateau* state ran **27 min 42 s** without
+    returning, shortly after `backtracking_line_search` gained its `growth` argument, and the
+    coincidence was recorded here as a suspected regression with a traced-bound hypothesis. Both the
+    hypothesis and the attribution are wrong:
+    - **`admissible` was never inside the loop.** `admissible = growth * reference_norm` is computed
+      *outside* the ladder body (`implicit.py`), so the bound is a loop-invariant closure capture
+      exactly as the bare `reference_norm` was before. The "compute it outside" fix that was filed as
+      a candidate is already the code as written.
+    - **The default bound is not even traced.** `MonotoneLineSearch.growth` returns a **concrete**
+      `jnp.asarray(1.0)`, not a tracer, so under the default the comparison is structurally identical
+      to the pre-change one. The recorded observation that the slowdown appeared *with the monotone
+      schedule active* was read as evidence **for** the traced-bound hypothesis; it is evidence
+      against it.
+    - **The decisive measurement.** A jitted `_march_step` at the plateau with **`max_escalations = 0`
+      and `MonotoneLineSearch`** — i.e. exactly ONE shifted linear solve, default growth, no
+      escalation ladder, strictly less work than the step that took 27 min — ran **> 57 min without
+      returning**. Since that configuration contains neither the escalation ladder nor any non-default
+      growth, neither can be the cost.
+    - **The ladder was never a plausible candidate on size grounds either:** one coupled residual
+      evaluation is ~0.3 s, so all 11 rungs cost ~3 s against a 27-minute step.
+    - **What the cost actually is: ONE shifted solve at the plateau under a preconditioner carried
+      from the cold IC.** The "36 s at β=2 / 127 s at β=0.2" figures elsewhere in this file were
+      measured with the preconditioner **rebuilt at the state**; carried from the cold IC to the
+      developed plateau it is two orders of magnitude worse. That is a *staleness* result, and it is
+      the concrete cost behind the scalar-AMG refresh win recorded above — not a line-search defect.
+      (Not isolated further: the carried-vs-rebuilt A/B at the plateau costs ~1 h per arm, and the
+      plateau is a direction-limited state nothing is expected to move. Rebuild-vs-carry belongs in
+      the refresh-trigger calibration, #17, on a *cold-IC* march.)
+    - **Methodological trap this cost an hour to learn (binding for future probes):** timing a
+      `solve_linear` **eagerly** measures nothing comparable to the march, which runs the whole step
+      inside one `eqx.filter_jit`; eager JAX dispatches each Krylov operation separately. An eager
+      version of this same probe was still inside a single solve after 60 min of busy CPU. Always
+      time the jitted `_march_step`, and prefer *differencing two configurations* over instrumenting
+      inside the compiled region.
+    - **Do not probe step cost at the plateau.** Every configuration measured there costs ~1 h/step
+      because the state is direction-limited (α = 0.001 at every β and shift basis) *and* maximally
+      stale for a carried preconditioner. Cost questions belong on a cold-IC march, where steps are
+      accepted on the first attempt.
   - **`line_search` — backtrack the shifted step before escalating β (binding, the coupled-RANS fix).**
     The step optionally scales the shifted correction `δ` back along `{1, 1/2, …, 1/2**line_search}`
     (`backtracking_line_search`, extracted from `implicit.py` and shared with `DampedNewtonStep` — one
