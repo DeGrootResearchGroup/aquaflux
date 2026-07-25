@@ -39,6 +39,7 @@ import jax.numpy as jnp
 import lineax as lx
 
 from .implicit import _ForwardStep, backtracking_line_search
+from .line_search_growth import LineSearchGrowth, MonotoneLineSearch
 from .linear import solve_linear
 from .norm import ResidualNorm
 from .relaxation import RelaxationSchedule, SwitchedEvolutionRelaxation
@@ -221,6 +222,7 @@ class PseudoTransientStep(eqx.Module):
 
     shift_policy: ShiftPolicy
     relaxation_schedule: RelaxationSchedule = eqx.field(default_factory=SwitchedEvolutionRelaxation)
+    line_search_growth: LineSearchGrowth = eqx.field(default_factory=MonotoneLineSearch)
     max_escalations: int = eqx.field(static=True, default=6)
     escalation_factor: float = eqx.field(static=True, default=2.0)
     acceptance: StepAcceptance = eqx.field(default_factory=DivergenceGuard)
@@ -287,6 +289,7 @@ class PseudoTransientStep(eqx.Module):
         """
         policy = self.shift_policy
         schedule = self.relaxation_schedule
+        growth_schedule = self.line_search_growth
         max_escalations, escalation_factor = self.max_escalations, self.escalation_factor
         acceptance = self.acceptance
         line_search = self.line_search
@@ -305,6 +308,11 @@ class PseudoTransientStep(eqx.Module):
             # default: strong damping while ‖R‖ is large, easing to zero at the root). Escalation below
             # only grows it from here on a rejected attempt.
             base_relaxation = schedule.relaxation(residual_norm, residual_norm_0)
+            # How far the residual may rise and still count as progress. A pseudo-time march is not a
+            # descent method -- the steady residual is non-monotone along a transient path -- so a
+            # strict-descent ladder vetoes correct steps far from the root. The schedule relaxes that
+            # far away and restores strict descent in the basin (monotone by default).
+            growth_factor = growth_schedule.growth(residual_norm, residual_norm_0)
 
             def attempt(
                 relaxation: jnp.ndarray,
@@ -333,7 +341,13 @@ class PseudoTransientStep(eqx.Module):
                 # but the full step overshoots, a scaled-back step descends from this one solve,
                 # sparing a re-solve at larger beta. `line_search == 0` takes the full step (alpha = 1).
                 candidate, alpha = backtracking_line_search(
-                    residual_fn, phi, delta, residual_norm, line_search, norm=norm
+                    residual_fn,
+                    phi,
+                    delta,
+                    residual_norm,
+                    line_search,
+                    norm=norm,
+                    growth=growth_factor,
                 )
                 return candidate, norm(residual_fn(candidate)), cycles, alpha
 

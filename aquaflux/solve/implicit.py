@@ -101,7 +101,9 @@ class ForwardStep(Protocol):
 _INEXACT_FORWARD_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-3)
 
 
-def backtracking_line_search(residual_fn, phi, delta, reference_norm, steps, norm=jnp.linalg.norm):
+def backtracking_line_search(
+    residual_fn, phi, delta, reference_norm, steps, norm=jnp.linalg.norm, growth=1.0
+):
     """Backtrack the step length: the largest ``alpha`` in ``{1, 1/2, ..., 1/2**steps}`` with
     ``norm(R(phi + alpha delta)) < reference_norm``, falling back to the smallest rung if none reduces
     the residual.
@@ -133,6 +135,22 @@ def backtracking_line_search(residual_fn, phi, delta, reference_norm, steps, nor
         same ``norm`` passed here.
     steps : int
         Maximum step-halvings (static). ``0`` disables the search.
+    growth : float or jnp.ndarray, optional
+        How much the residual may **grow** and still be accepted, as a multiple of ``reference_norm``
+        (default ``1.0`` = strict descent, the classical monotone search). A value above one makes the
+        search **non-monotone**: it keeps the largest step whose residual is below
+        ``growth * reference_norm`` rather than below ``reference_norm``.
+
+        **Why a monotone search is wrong far from the root here.** A pseudo-transient step is a
+        pseudo-time march, not a descent method: the steady residual is legitimately non-monotone along
+        a transient path, so a strict-descent test *vetoes physically correct steps*. Measured on a
+        separating RANS case, the rejected step was improving the momentum and ``k`` balances
+        monotonically and growing the recirculation while the ``omega`` block -- which dominates the
+        norm -- rose; the search then returned its smallest rung (a near-null step), the divergence
+        guard accepted it as finite, and the march reported progress while standing still. Allowing
+        controlled growth far from the root admits those steps. Near the root the monotone test is
+        wanted again, for the terminal quadratic phase -- hence a *schedule* rather than a constant
+        (see :class:`~aquaflux.solve.LineSearchGrowth`).
     norm : callable, optional
         The residual measure ``R -> scalar`` the acceptance is judged by (default the Euclidean
         norm). A heterogeneous block system passes a :class:`~aquaflux.solve.BlockScaledNorm` so the
@@ -161,10 +179,12 @@ def backtracking_line_search(residual_fn, phi, delta, reference_norm, steps, nor
         index, _, found = carry
         return (~found) & (index <= steps)
 
+    admissible = growth * reference_norm
+
     def body(carry):
         index, chosen, _ = carry
         alpha = 0.5**index
-        reduces = norm(residual_fn(phi + alpha * delta)) < reference_norm
+        reduces = norm(residual_fn(phi + alpha * delta)) < admissible
         return index + 1, jnp.where(reduces, alpha, chosen), reduces
 
     smallest = jnp.asarray(0.5**steps)

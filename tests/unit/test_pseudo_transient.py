@@ -17,7 +17,9 @@ import pytest
 from aquaflux.solve import (
     DivergenceGuard,
     ImplicitNewtonSolver,
+    MonotoneLineSearch,
     PseudoTransientStep,
+    RelaxedFarFromRoot,
     ShiftTerm,
     SwitchedEvolutionRelaxation,
 )
@@ -223,3 +225,51 @@ def test_stepper_returns_the_step_and_its_linear_solve_cycle_count() -> None:
     assert cycles.dtype == jnp.int32  # invariant carry dtype for a lax.while_loop
     # This step has no line search (default line_search=0), so the full shifted step is taken: alpha=1.
     assert jnp.allclose(alpha, 1.0)
+
+
+def test_monotone_growth_is_the_default_and_reproduces_strict_descent() -> None:
+    """The default schedule is ``1`` everywhere, i.e. the classical strict-descent ladder."""
+    schedule = MonotoneLineSearch()
+    for ratio in (1.0, 1e-2, 1e-8):
+        got = schedule.growth(jnp.asarray(ratio), jnp.asarray(1.0))
+        assert float(got) == 1.0
+
+
+def test_relaxed_growth_admits_growth_far_out_and_restores_descent_in_the_basin() -> None:
+    """``RelaxedFarFromRoot`` relaxes monotonicity far from the root and restores it below ``basin``.
+
+    The point of the schedule: a pseudo-time march is not a descent method, so strict descent vetoes
+    correct steps while the transient is still being traversed -- but near the root monotonicity is
+    what delivers the terminal quadratic phase, so it must come back.
+    """
+    schedule = RelaxedFarFromRoot(max_growth=2.0, basin=1e-2)
+    far = float(schedule.growth(jnp.asarray(1.0), jnp.asarray(1.0)))
+    edge = float(schedule.growth(jnp.asarray(3e-2), jnp.asarray(1.0)))
+    basin = float(schedule.growth(jnp.asarray(1e-2), jnp.asarray(1.0)))
+    deep = float(schedule.growth(jnp.asarray(1e-6), jnp.asarray(1.0)))
+    assert far == 2.0  # fully relaxed far from the root
+    assert 1.0 < edge < 2.0  # smooth transition, not a switch
+    assert basin == 1.0 and deep == 1.0  # strict descent restored in the basin
+    assert edge > basin  # monotone in the ratio
+
+
+def test_growth_factor_widens_what_the_line_search_accepts() -> None:
+    """A growth factor above one accepts a step the strict-descent ladder rejects.
+
+    Built on a residual whose every step-length *increases* the norm -- the measured plateau signature
+    -- so the monotone search must fall back to its smallest rung while the relaxed one keeps a real
+    step.
+    """
+
+    def residual_fn(phi):
+        return phi * 1.05  # any step along +delta raises the norm
+
+    phi = jnp.array([1.0])
+    delta = jnp.array([1.0])
+    reference = jnp.linalg.norm(residual_fn(phi))
+    _, alpha_monotone = backtracking_line_search(residual_fn, phi, delta, reference, 10)
+    _, alpha_relaxed = backtracking_line_search(residual_fn, phi, delta, reference, 10, growth=2.5)
+    # The full step doubles the residual here, so strict descent finds nothing and falls back to
+    # its smallest rung; allowing a 2.5x rise admits the full step.
+    assert float(alpha_monotone) == 0.5**10  # the failure sentinel: nothing descended
+    assert float(alpha_relaxed) == 1.0  # the full step is admissible under controlled growth

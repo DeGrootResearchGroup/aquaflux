@@ -52,6 +52,11 @@ from .continuation import (
 )
 from .frozen_operator import convection_diffusion_operator, decouple_dof
 from .implicit import DampedNewtonStep, ForwardStep, ImplicitNewtonSolver
+from .line_search_growth import (
+    LineSearchGrowth,
+    MonotoneLineSearch,
+    RelaxedFarFromRoot,
+)
 from .linear import default_linear_solver, solve_linear
 from .march import (
     CycleGrowthTrigger,
@@ -88,11 +93,14 @@ __all__ = [
     "DivergenceGuard",
     "ForwardStep",
     "ImplicitNewtonSolver",
+    "LineSearchGrowth",
     "LocalCourantBasis",
     "MarchResult",
+    "MonotoneLineSearch",
     "PseudoTransientStep",
     "RefreshTrigger",
     "RelaxationSchedule",
+    "RelaxedFarFromRoot",
     "ResidualNorm",
     "ShiftBasis",
     "ShiftPolicy",
