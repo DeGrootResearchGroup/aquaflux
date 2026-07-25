@@ -242,10 +242,14 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     `RelaxedFarFromRoot` or trusting any timing (2026-07-25, UNRESOLVED).** `backtracking_line_search`
     gained a `growth` argument (the non-monotone acceptance schedule, `solve/line_search_growth.py`).
     With it, a coupled step on the pitzDaily plateau state went from **~2–3 min to >27 min for a SINGLE
-    step**, reproduced on two independent harnesses *and* on a direct `solve_linear` +
-    `backtracking_line_search` probe with no `forward_march` involved — so it is **not** the march
-    driver. The continuation itself still builds in 8 s, and the unit tests (which use trivial
-    residuals) are unaffected, so the cost only appears at real problem size.
+    step** (measured directly: `forward_march(..., max_steps=1)` ran 27 min 42 s without returning).
+    Reproduced on two independent march harnesses. A third probe on the **direct** `solve_linear` +
+    `backtracking_line_search` path (no `forward_march`) was **suggestive but not conclusive**: it had
+    not reached the result line it printed earlier the same day after ~6–8 min, but it was killed
+    rather than run to completion — so "the direct path is also affected" is **unproven**, and
+    isolating march-driver versus ladder is the first thing to settle. The continuation itself still
+    builds in 8 s, and the unit tests (which use trivial residuals) are unaffected, so whatever the
+    cost is, it only appears at real problem size.
     - **Leading hypothesis:** `admissible = growth * reference_norm` makes the ladder's comparison
       bound a **traced** value where it was previously loop-invariant, inside a `lax.while_loop` that
       itself sits inside the escalation `while_loop`. A traced bound in the inner loop plausibly defeats
