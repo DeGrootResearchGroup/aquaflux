@@ -623,8 +623,27 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       and burn the whole `refresh_limit` in consecutive steps. Same discipline as the segment-local
       `residual_norm_0`. Pinned by
       `test_the_drift_measure_is_rebased_at_every_refresh`.
-    - The default `threshold` is **provisional** (conservative, not calibrated) — like every trigger
-      numeric here, it must come from an instrumented march (#17).
+    - **CALIBRATED, and the premise validated, on an instrumented cold-IC pitzDaily march (2026-07-25 —
+      this closes #17 for this case).** One logged march with `refresh_trigger=None` + `on_step`, which
+      still records drift because `solve_coupled` observes whenever an observer is supplied:
+
+      | step | 5 | 10 | 12 | 14 | **15** | 17 | 19 | 20 | 22 | 23 |
+      |---|---|---|---|---|---|---|---|---|---|---|
+      | drift | 0.038 | 0.057 | 0.073 | 0.092 | **0.106** | 0.137 | 0.172 | 0.189 | 0.226 | 0.243 |
+      | cycles | 10 | 12 | 13 | 17 | **21** | 28 | 45 | 53 | 85 | 84 |
+
+      **The premise holds:** the cycle count sits flat at its 9–13 floor while drift climbs steadily,
+      then rises monotonically with it — so `ν_t` movement is what makes the frozen preconditioner
+      expensive, and drift *leads* cost early (drift is already 5× its step-0 value at step 5 while
+      cycles are still at the floor). `threshold = 0.1` fires at step 15, where cost has just doubled
+      off the floor and the recirculation has formed (`x_r/h` 0.32) — before the steep part
+      (45→53→85) and clear of the pre-separation regime where a rebuild was measured to make things
+      *worse*.
+    - **The shipped default was originally 0.5 and would never have fired on this march** (drift
+      reaches only 0.24 by step 23). A "conservative" placeholder chosen by intuition was not
+      conservative — it was inert. Trigger numerics must come from a logged march, not from judgement
+      about what sounds safe; the replay procedure exists precisely because that judgement is unreliable.
+      Calibrated on **one** geometry, so treat 0.1 as a starting point elsewhere, not a constant.
   - **`CycleGrowthTrigger` — cost growth is the trigger, the residual is the GATE.** Fires only when: the
     `warmup` is past; `residual_ratio <= max_residual_ratio`; and the last `patience` steps each measured
     `>= growth ×` the segment's **running-minimum** non-zero count. **Why the residual is demoted to a

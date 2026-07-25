@@ -230,21 +230,33 @@ class CoefficientDriftTrigger(eqx.Module):
     Attributes
     ----------
     threshold : float
-        Fire once the reported drift reaches this value (static). The drift measure is relative, so
-        ``0.5`` means "the coefficients have moved by half their reference magnitude".
+        Fire once the reported drift reaches this value (static). The measure is relative, so ``0.1``
+        means "the coefficients have moved by a tenth of their magnitude at the freeze state".
     warmup : int
         Ignore this many leading steps of a segment (static). A segment's opening steps are measured
         against a preconditioner that is fresh by construction.
 
     Notes
     -----
-    The default threshold is **provisional** -- conservative (late rather than early) rather than
-    calibrated. Like every trigger here it is a pure function of a :class:`StepReport` history, so
-    candidates are calibrated by logging one march with ``trigger=None`` and a ``drift_measure``, then
-    replaying thresholds against the log with no further solves.
+    The default threshold is **calibrated on one instrumented march** -- a backward-facing step at
+    Reynolds ~ 4.7e4 from a cold start -- rather than guessed, but it is one case, so treat it as a
+    starting point for a new geometry rather than a universal constant. On that march the restart-cycle
+    count sat flat near its floor while the drift climbed, then rose steeply with it:
+
+    ==========  =====  =====  =====  =====  =====  =====
+    drift        0.04   0.07   0.11   0.15   0.19   0.24
+    cycles         10     13     21     33     53     84
+    ==========  =====  =====  =====  =====  =====  =====
+
+    ``0.1`` is where the cost has just doubled off its floor and the recirculation has formed, which
+    is early enough to skip the steep part entirely and late enough to stay out of the pre-separation
+    regime where a rebuild was measured to make the solve *worse*. Re-calibrating is deliberately
+    cheap: because this is a pure function of a :class:`StepReport` history, log one march with
+    ``trigger=None`` and a ``drift_measure``, then replay candidate thresholds against the log with no
+    further solves.
     """
 
-    threshold: float = eqx.field(static=True, default=0.5)
+    threshold: float = eqx.field(static=True, default=0.1)
     warmup: int = eqx.field(static=True, default=3)
 
     def should_refresh(self, history: Sequence[StepReport]) -> bool:

@@ -640,8 +640,11 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     bolder β moves the state faster and stales the IC-frozen PC faster, so a *cost*-based trigger is
     confounded (cycles rise from β→0 **and** staleness — #19). The β-independent staleness trigger keyed
     on `‖Δν_t‖` is now **BUILT** and is the default recommendation; a `‖Δṁ‖` measure would be a second
-    `drift_measure` against the same trigger, needing no new trigger. Thresholds are **not** calibrated —
-    conservative placeholders; see the offline-replay procedure in `.claude/rules/solve.md`.
+    `drift_measure` against the same trigger, needing no new trigger. The threshold is **calibrated on an
+    instrumented cold-IC pitzDaily march** (`threshold = 0.1`, firing where the cycle count has just
+    doubled off its floor and the bubble has formed) — the table, and the validation that drift really
+    does track cost, are in `.claude/rules/solve.md`. One geometry, so re-calibrate by offline replay
+    on a new case rather than assuming it transfers.
   - **The slope limiter is NOT implicated (measured — do not re-derive this).** pitzDaily is the first
     case that genuinely exercises `LimitedUpwind` (Poiseuille / cavity / smooth channels never activate a
     limiter), so it was the natural suspect for the second-order march being slower than first-order.
