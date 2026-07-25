@@ -52,6 +52,30 @@ class FixationRow(Protocol):
             The residual entries, shape ``(n_fixed,)``.
         """
 
+    def jacobian_scale(self, phi: jnp.ndarray, chain: jnp.ndarray) -> jnp.ndarray:
+        """``d(row)/d(unknown)`` at the fixed cells, given the field's own ``d(phi)/d(unknown)``.
+
+        A block solved for a reparametrized unknown ``w`` (``phi = phi(w)``) has transport rows
+        assembled in the physical field, so each carries the chain factor ``chain = d(phi)/d(w)``. A
+        fixation row need not: it is written by this object, and may already be expressed in ``w``.
+        So the two kinds of row can differ by orders of magnitude, and anything that scales the block
+        per row -- a diagonal rescale of a frozen preconditioner built for the physical operator --
+        must ask the row rather than assume the chain factor everywhere.
+
+        Parameters
+        ----------
+        phi : jnp.ndarray
+            The solved field's values at the fixed cells, shape ``(n_fixed,)``.
+        chain : jnp.ndarray
+            ``d(phi)/d(unknown)`` at those cells, shape ``(n_fixed,)`` (one for a field solved
+            directly).
+
+        Returns
+        -------
+        jnp.ndarray
+            The row derivatives with respect to the solved unknown, shape ``(n_fixed,)``.
+        """
+
 
 class DifferenceRow(eqx.Module):
     """The plain difference ``phi - target`` -- the right form when the solved unknown is ``phi``.
@@ -62,6 +86,11 @@ class DifferenceRow(eqx.Module):
 
     def row(self, phi: jnp.ndarray, target: jnp.ndarray) -> jnp.ndarray:
         return phi - target
+
+    def jacobian_scale(self, phi: jnp.ndarray, chain: jnp.ndarray) -> jnp.ndarray:
+        """``d(phi - target)/d(unknown) = d(phi)/d(unknown)`` -- the chain factor itself."""
+        del phi
+        return chain
 
 
 class LogRatioRow(eqx.Module):
@@ -82,6 +111,14 @@ class LogRatioRow(eqx.Module):
 
     def row(self, phi: jnp.ndarray, target: jnp.ndarray) -> jnp.ndarray:
         return jnp.log(phi / target)
+
+    def jacobian_scale(self, phi: jnp.ndarray, chain: jnp.ndarray) -> jnp.ndarray:
+        """``d(log(phi/target))/d(unknown) = chain / phi`` -- exactly **one** for ``phi = e**w``.
+
+        This is the whole point of the row under a log parametrization, and it is why a block-wide
+        rescale by the chain factor is wrong here: the transport rows scale as ``phi``, these do not.
+        """
+        return chain / phi
 
 
 class FixedValueCells(eqx.Module):

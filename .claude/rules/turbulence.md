@@ -271,6 +271,28 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       to internalize: every conclusion drawn from comparing raw ‖R‖ across march states before this
       date is suspect** — including the choice to prefer the const-β march and the α-controller
       because they reached a "deeper" residual.
+    - **The fixation row's derivative must also reach the PRECONDITIONER — this was a real regression
+      the row change introduced, caught 2026-07-25 (binding).** `_reparametrized_preconditioner`
+      rescales the frozen physical-operator scalar AMG by `1/(dφ/dw)`, because a reparametrized block's
+      Jacobian is `J_φ·diag(dφ/dw)`. **That identity holds only for rows assembled in physical φ.** The
+      472 wall-fixation rows are not: `LogRatioRow` writes them directly in `w`, so their true
+      derivative is **1**, while the frozen operator carries a unit identity row there
+      (`boundary_diagonal[fixed] = 1.0`). Scaling them by `1/ω` anyway left the preconditioned operator
+      with a `1/ω ≈ 1e-5` eigenvalue cluster on those rows. Measured at the cold IC, capping GMRES at 5
+      restart cycles: linear residual **1.03e-3 → 3.87e-5 (27×)** once the fixation rows are exempted.
+      Under the *old* `DifferenceRow` the row was `e^w − target`, so `J_ii = ω` and `(1/ω)·ω = 1`
+      matched exactly — i.e. **fixing the residual metric silently broke the preconditioner on the same
+      rows**, and the two changes must always be made together.
+      - **The fix is on the row, not on ω.** `FixationRow.jacobian_scale(phi, chain)` gives each row its
+        own derivative (`DifferenceRow` → `chain`; `LogRatioRow` → `chain/phi`, hence exactly 1 under
+        `LogScalars`), and `coupled._row_jacobian_scale` assembles the per-row array the preconditioner
+        is rescaled by. Correct for either row under either transform, so a new transform/row pair
+        cannot silently reintroduce this. The directly-solved path stays all-ones, i.e. bit-identical.
+        Pinned by tests that check `jacobian_scale` against **AD of the row itself**, so it cannot drift.
+      - **Generalize the lesson:** anything that rescales a scalar block *per row* — a diagonal
+        preconditioner rescale, a row-equilibrated norm — must ask each row for its derivative rather
+        than assume every row is a transport balance. The shift diagonal escapes this only because it is
+        **zeroed** on fixed cells, so mis-scaling zero is still zero.
   - **OPEN DEFECT: the reconstructed ω *gradient* in the fixed cells is ~4× too small (measured
     2026-07-25; fix tracked, not yet built).** We impose a value on those cells but let their gradient
     be *inferred from neighbours* as if they were ordinary unknowns. Measured against the analytical

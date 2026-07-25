@@ -5,7 +5,7 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
-from aquaflux.discretization import FixedValueCells
+from aquaflux.discretization import DifferenceRow, FixedValueCells, LogRatioRow
 
 
 def test_replaces_only_the_fixed_rows() -> None:
@@ -35,3 +35,47 @@ def test_is_differentiable_in_the_target() -> None:
 
     g = jax.grad(loss)(jnp.array([0.5, 0.5]))
     assert not bool(jnp.any(jnp.isnan(g)))
+
+
+def test_difference_row_jacobian_scale_matches_ad_through_the_parametrization() -> None:
+    """``d(phi - target)/d(w)`` is the chain factor itself, and agrees with automatic differentiation.
+
+    Checked against AD of the row composed with ``phi = e**w`` so the analytical derivative cannot
+    drift from the row it describes.
+    """
+    w = jnp.array([1.5, -0.5, 4.0])
+    target = jnp.array([2.0, 0.3, 90.0])
+    phi = jnp.exp(w)
+    row = DifferenceRow()
+    analytic = row.jacobian_scale(phi, chain=phi)
+    ad = jax.grad(lambda ww: jnp.sum(row.row(jnp.exp(ww), target)))(w)
+    assert jnp.allclose(analytic, ad)
+    # The difference row inherits the exponential: its derivative is phi, not one.
+    assert jnp.allclose(analytic, phi)
+
+
+def test_log_ratio_row_jacobian_scale_is_one_for_a_log_solved_field() -> None:
+    """``d(log(phi/target))/d(w) = 1`` when ``phi = e**w`` -- the property the row exists for.
+
+    This is what separates the fixation rows from the transport rows of the same block, which carry
+    ``d(phi)/d(w) = phi``: near a wall the two differ by orders of magnitude.
+    """
+    w = jnp.array([1.5, -0.5, 11.0])
+    target = jnp.array([2.0, 0.3, 1.0e5])
+    phi = jnp.exp(w)
+    row = LogRatioRow()
+    analytic = row.jacobian_scale(phi, chain=phi)
+    ad = jax.grad(lambda ww: jnp.sum(row.row(jnp.exp(ww), target)))(w)
+    assert jnp.allclose(analytic, ad)
+    assert jnp.allclose(analytic, 1.0)
+
+
+def test_log_ratio_row_jacobian_scale_matches_ad_for_a_directly_solved_field() -> None:
+    """With ``phi`` itself the unknown the chain factor is one, so the derivative is ``1/phi``."""
+    phi = jnp.array([2.0, 5.0, 100.0])
+    target = jnp.array([1.0, 7.0, 20.0])
+    row = LogRatioRow()
+    analytic = row.jacobian_scale(phi, chain=jnp.ones_like(phi))
+    ad = jax.grad(lambda p: jnp.sum(row.row(p, target)))(phi)
+    assert jnp.allclose(analytic, ad)
+    assert jnp.allclose(analytic, 1.0 / phi)

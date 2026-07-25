@@ -260,14 +260,26 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       growth, neither can be the cost.
     - **The ladder was never a plausible candidate on size grounds either:** one coupled residual
       evaluation is ~0.3 s, so all 11 rungs cost ~3 s against a 27-minute step.
-    - **What the cost actually is: ONE shifted solve at the plateau under a preconditioner carried
-      from the cold IC.** The "36 s at β=2 / 127 s at β=0.2" figures elsewhere in this file were
-      measured with the preconditioner **rebuilt at the state**; carried from the cold IC to the
-      developed plateau it is two orders of magnitude worse. That is a *staleness* result, and it is
-      the concrete cost behind the scalar-AMG refresh win recorded above — not a line-search defect.
-      (Not isolated further: the carried-vs-rebuilt A/B at the plateau costs ~1 h per arm, and the
-      plateau is a direction-limited state nothing is expected to move. Rebuild-vs-carry belongs in
-      the refresh-trigger calibration, #17, on a *cold-IC* march.)
+    - **What the cost actually was: a PRECONDITIONER BUG introduced by the fixation-row change in the
+      same PR — found and fixed the same day.** The scalar block's frozen preconditioner was rescaled
+      by `1/(dφ/dw) = 1/ω` on *every* row, including the 472 near-wall ω **fixation** rows, whose row
+      (`LogRatioRow`, written in the solved variable) has derivative **1** against the frozen
+      operator's unit identity row — a `1e-5` eigenvalue cluster that stalls GMRES. So the coupled
+      solves were not converging and ground to their step cap. Fixed by giving each `FixationRow` its
+      own derivative; measured 27× better linear residual at fixed cycle count (see
+      `.claude/rules/turbulence.md` for the full finding).
+      **The chain of three wrong attributions is the lesson:** the `growth` argument, the fixation row
+      itself, and nested `jax.grad` in the residual were each blamed in turn because all three landed
+      in the same window. What discriminated was measuring *components* rather than the whole step —
+      the residual is 8.1 ms, `jvp/residual` is **1.5×** (healthy AD, killing the nested-grad theory),
+      and one 120-vector restart cycle is ~1.5 s, so a healthy solve is seconds. Any step costing
+      minutes therefore had to be **iteration count**, not per-matvec cost — which pointed straight at
+      the preconditioner and away from everything else.
+    - **Staleness is still real but was NOT the main term here, and the old figures stand.** The
+      "36 s at β=2 / 127 s at β=0.2" numbers elsewhere in this file predate the bug and remain valid.
+      Rebuild-vs-carry belongs in the refresh-trigger calibration (#17) on a *cold-IC* march; re-measure
+      it now that the solves converge, since the pre-fix carried-vs-rebuilt comparison (#31) was taken
+      through the broken preconditioner and cannot be trusted.
     - **Methodological trap this cost an hour to learn (binding for future probes):** timing a
       `solve_linear` **eagerly** measures nothing comparable to the march, which runs the whole step
       inside one `eqx.filter_jit`; eager JAX dispatches each Krylov operation separately. An eager

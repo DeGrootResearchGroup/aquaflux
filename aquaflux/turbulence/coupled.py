@@ -477,6 +477,33 @@ class CoupledShiftPolicy(eqx.Module):
         return lambda state: self.shift_term(state).make_preconditioner(jnp.asarray(0.0))
 
 
+def _row_jacobian_scale(
+    transform: ScalarVariableTransform,
+    reference: jnp.ndarray,
+    fixed_cells: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """``d(row)/d(solved unknown)`` for every row of a scalar block, transport and fixation alike.
+
+    Transport rows are assembled in the physical field, so each carries the chain factor
+    ``d(phi)/d(w)``. A **value-fixation** row is not: it is written by the transform's own
+    :class:`~aquaflux.discretization.FixationRow`, which for a log-solved field is already expressed
+    in ``w`` and so has derivative one, not ``phi``. Applying the chain factor to those rows too
+    mis-scales them by ``phi`` -- which near a wall spans orders of magnitude -- so anything that
+    rescales the block per row must ask each row for its own derivative.
+
+    Returns the chain factor unchanged when there are no fixed cells, and (for the identity
+    transform, where the chain factor is one and the difference row's derivative is one) an array of
+    ones, so the directly-solved path is unaffected.
+    """
+    chain = transform.jacobian_scale(reference)
+    if fixed_cells is None:
+        return chain
+    index = jnp.asarray(fixed_cells)
+    return chain.at[index].set(
+        transform.fixation_row().jacobian_scale(reference[index], chain[index])
+    )
+
+
 def _reparametrized_preconditioner(
     preconditioner: ScalarTransportPreconditioner | None, jacobian_scale: jnp.ndarray
 ) -> ScalarTransportPreconditioner | None:
@@ -487,6 +514,11 @@ def _reparametrized_preconditioner(
     the identity transform ``jacobian_scale`` is one, so the preconditioner is returned unchanged and
     the direct path stays bit-identical. The scale is materialized off the jit path (the reference
     state is concrete), matching the frozen hierarchy it wraps.
+
+    ``jacobian_scale`` must be the **per-row** derivative from :func:`_row_jacobian_scale`, not the
+    transform's chain factor alone: the frozen operator carries an identity row at each fixed cell,
+    so scaling those rows by ``d(phi)/d(w)`` when the fixation row's own derivative is one leaves the
+    preconditioned operator with a cluster of ``1/phi`` eigenvalues that stalls the Krylov solve.
     """
     if preconditioner is None:
         return None
@@ -711,9 +743,13 @@ def _coupled_shift_policy(
 
     # The reparametrized block's Jacobian is the physical one scaled by d(phi)/d(w): its shift diagonal
     # is scaled by that factor and its (physical-operator) preconditioner by the reciprocal. For the
-    # identity transform the factor is one, so the direct path is unchanged.
-    k_scale = coupled.k_transform.jacobian_scale(k_ref)
-    omega_scale = coupled.omega_transform.jacobian_scale(omega_ref)
+    # identity transform the factor is one, so the direct path is unchanged. The omega block's
+    # near-wall rows are a value fixation rather than a transport balance, so they take the fixation
+    # row's own derivative instead of the chain factor (the shift is zero there either way).
+    k_scale = _row_jacobian_scale(coupled.k_transform, k_ref)
+    omega_scale = _row_jacobian_scale(
+        coupled.omega_transform, omega_ref, coupled.turbulence.wall_cells
+    )
 
     k_amg = omega_amg = None
     if method is not None:

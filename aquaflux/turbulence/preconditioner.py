@@ -366,7 +366,12 @@ def scalar_transport_preconditioner(
         owner_e, nb_e = owner_e[keep], nb_e[keep]
         visc_int, mdot_int = visc_int[keep], mdot_int[keep]
         boundary_diagonal = boundary_diagonal.copy()
-        boundary_diagonal[fixed] = 1.0  # identity rows: residual is phi - target
+        # Identity rows: the residual there is the value fixation, not a transport balance. A unit
+        # diagonal presumes the fixation row has unit derivative in the solved unknown -- true of the
+        # row forms in use, but a caller rescaling this operator for a reparametrized block must take
+        # each row's own derivative rather than the block-wide chain factor, or these rows come out
+        # mis-scaled by the field itself.
+        boundary_diagonal[fixed] = 1.0
 
     a = convection_diffusion_operator(
         owner_e, nb_e, visc_int, n, flux=mdot_int, boundary_diagonal=boundary_diagonal

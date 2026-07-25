@@ -120,6 +120,15 @@ Principles.
   choice (`fixation_row()`), since it is the only object that knows which variable is being stepped;
   do **not** branch on the transform inside the residual. Measured impact on the coupled RANS case:
   see `.claude/rules/turbulence.md`.
+  - **A `FixationRow` also reports its own derivative — `jacobian_scale(phi, chain)` (binding).** Given
+    the field's `chain = d(phi)/d(unknown)`, it returns `d(row)/d(unknown)`: `DifferenceRow` → `chain`;
+    `LogRatioRow` → `chain/phi`, hence exactly **1** for a log-solved field. **Why the interface needs
+    it:** a fixation row and a transport row of the same block can differ by orders of magnitude in the
+    solved unknown, so anything rescaling the block *per row* must ask each row rather than apply the
+    block-wide chain factor everywhere. Skipping this was a real regression — the coupled RANS
+    preconditioner rescaled the near-wall ω fixation rows by `1/ω`, giving a `1e-5` eigenvalue cluster
+    that stalled the Krylov solve (27× worse linear residual; see `.claude/rules/turbulence.md`). Pin
+    any implementation against **AD of its own `row`**, which is what keeps the two from drifting.
 - **`source.py` — BUILT.** `VolumeSource` (ABC, `source(field, context) -> (n_cells,)`): a
   volumetric term produced/consumed *in* the cell rather than across faces (reaction, turbulence
   production/dissipation). Returns the volume-integrated source (production positive; bakes in its

@@ -25,6 +25,7 @@ from aquaflux.turbulence import DirectScalars, LogScalars, SSTModel, SSTTurbulen
 from aquaflux.turbulence.coupled import (
     CoupledRANS,
     CoupledRANSLayout,
+    _row_jacobian_scale,
     solve_coupled,
 )
 
@@ -344,3 +345,29 @@ def test_refreshing_the_policy_carries_the_shift_diagonals() -> None:
     assert not jnp.allclose(rebuilt.omega_shift_diagonal, base.omega_shift_diagonal)
     # The flow block is carried over (the expensive half; measured no help to re-freeze).
     assert refreshed.flow_preconditioner is base.flow_preconditioner
+
+
+def test_fixation_rows_take_their_own_derivative_not_the_chain_factor() -> None:
+    """The per-row Jacobian scale is ``phi`` on transport rows but **one** on the fixation rows.
+
+    Regression test. The scalar block's frozen preconditioner is built for the physical operator and
+    rescaled by ``1 / (d(row)/d(w))``; the frozen operator carries a unit identity row at each fixed
+    cell. Rescaling those rows by the block-wide chain factor ``d(phi)/d(w) = phi`` instead of the
+    fixation row's own unit derivative leaves the preconditioned operator with a cluster of ``1/phi``
+    eigenvalues -- measured at ~1e-5 on a wall-resolved mesh -- which stalls the Krylov solve.
+    """
+    omega = jnp.array([10.0, 1.0e5, 3.0, 250.0])
+    fixed = jnp.array([1, 3])
+    transport = jnp.array([0, 2])
+
+    scale = _row_jacobian_scale(LogScalars(), omega, fixed)
+
+    assert jnp.allclose(scale[transport], omega[transport])
+    assert jnp.allclose(scale[fixed], 1.0)
+
+
+def test_row_jacobian_scale_is_all_ones_for_a_directly_solved_scalar() -> None:
+    """The directly-solved path keeps a unit scale with or without fixed cells, so it is unchanged."""
+    omega = jnp.array([10.0, 1.0e5, 3.0, 250.0])
+    assert jnp.allclose(_row_jacobian_scale(DirectScalars(), omega), 1.0)
+    assert jnp.allclose(_row_jacobian_scale(DirectScalars(), omega, jnp.array([1, 3])), 1.0)
