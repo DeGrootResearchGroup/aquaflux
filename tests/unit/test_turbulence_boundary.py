@@ -13,6 +13,7 @@ from aquaflux.turbulence import (
     log_layer_shear_rate,
     nut_wall,
     omega_wall,
+    omega_wall_gradient,
     omega_wall_value,
     wall_function_weight,
     wall_k_diffusivity,
@@ -313,3 +314,47 @@ def test_boundary_values_are_differentiable() -> None:
     grad_u = jax.grad(lambda u: jnp.sum(inlet_k(u, 0.05)))(jnp.array([10.0]))
     assert not bool(jnp.any(jnp.isnan(grad_nu)))
     assert not bool(jnp.any(jnp.isnan(grad_u)))
+
+
+def test_omega_wall_gradient_is_the_analytical_chain_rule() -> None:
+    """``grad(omega_wall)`` is the exact chain rule through the wall distance and ``k``.
+
+    ``omega_wall`` is an elementwise function of ``(nu, d, k)``, so its gradient is
+    ``d(omega)/d(d) grad(d) + d(omega)/d(k) grad(k)``. Checked against an independent central finite
+    difference of :func:`omega_wall` rather than against a restatement of the formula, so a change to
+    the wall blend cannot silently desynchronize the two.
+    """
+    nu = jnp.full((4,), 1e-5)
+    d = jnp.array([1e-4, 3e-4, 6e-4, 1e-3])
+    k = jnp.array([0.05, 0.2, 0.5, 1.0])
+    grad_d = jnp.array([[1.0, 0.0], [0.7, 0.7], [0.0, 1.0], [-0.6, 0.8]])
+    grad_k = jnp.array([[10.0, -5.0], [0.0, 3.0], [-2.0, 1.0], [4.0, 4.0]])
+    got = omega_wall_gradient(nu, d, k, grad_d, grad_k, MODEL)
+
+    eps = 1e-6
+    d_dd = (omega_wall(nu, d * (1 + eps), k, MODEL) - omega_wall(nu, d * (1 - eps), k, MODEL)) / (
+        2 * d * eps
+    )
+    d_dk = (omega_wall(nu, d, k * (1 + eps), MODEL) - omega_wall(nu, d, k * (1 - eps), MODEL)) / (
+        2 * k * eps
+    )
+    expected = d_dd[:, None] * grad_d + d_dk[:, None] * grad_k
+    assert jnp.allclose(got, expected, rtol=1e-5)
+
+
+def test_omega_wall_gradient_dominated_by_the_inverse_square_distance_term() -> None:
+    """With ``k`` uniform the gradient is the ``1/d**2`` term alone, and it is steep.
+
+    The physical point behind imposing rather than reconstructing it: ``omega_wall ~ 1/d**2`` gives
+    ``|grad| ~ 2 omega / d``, which on a near-wall cell is orders of magnitude larger than anything a
+    linear reconstruction across that cell can represent.
+    """
+    nu, d = jnp.full((3,), 1e-5), jnp.array([1e-4, 2e-4, 4e-4])
+    k = jnp.zeros(3)  # kills the log branch, leaving the pure viscous 1/d**2 form
+    grad_d = jnp.tile(jnp.array([[1.0, 0.0]]), (3, 1))
+    got = omega_wall_gradient(nu, d, k, grad_d, jnp.zeros((3, 2)), MODEL)
+    # d/dd [A/d**2] = -2 A / d**3 = -2 omega / d
+    expected = -2.0 * omega_wall_value(nu, d, MODEL) / d
+    assert jnp.allclose(got[:, 0], expected, rtol=1e-6)
+    assert jnp.allclose(got[:, 1], 0.0)
+    assert bool(jnp.all(jnp.abs(got[:, 0]) > 1e6))  # genuinely steep near a wall
