@@ -228,6 +228,20 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       smooth and O(geometry), so unlike ω it reconstructs well. `closure_fields` overwrites only the
       wall-adjacent rows. Safe because ω needs **no wall-normal flux** there (the row is a value
       fixation, the wall closure is zero-gradient), so the only consumers are inward.
+    - **MEASURED INERT ON pitzDaily — the fix is right, its effect here is nil (2026-07-25).** After the
+      fix the imposed gradient at the fixed cells is **5.85×** the reconstruction (and off-wall cells are
+      untouched, max diff exactly `0`), yet the coupled residual at the clean OpenFOAM field is
+      **bit-identical** in every block. The chain is closed: the ω rows at those cells are the *fixation*,
+      so their cross-diffusion source is discarded; the diffusion `corr` path is 0.03 %; and the one live
+      route — `F1` → blended constants → the (unfixed) k rows — is **saturated**: `F1 = 1.000000` at
+      *every* fixed cell (min = median = 1.0, 100 % above 0.999), so a 3.6–5.9× error in `CD_kω` cannot
+      move it by one float. **Do not cite this fix as a convergence or accuracy improvement on this
+      case.** It is a latent-trap removal: it would bite immediately under a gradient-using ω advection
+      scheme, a blend or regime where `F1` does not saturate, or a mesh where the non-orthogonal
+      correction is not negligible. Corollary: the first interior ring's residual (91 % of the interior)
+      is **still unexplained** — with both the gradient and the non-orthogonal correction now ruled out,
+      the leading candidate is the ω advection scheme (first-order upwind here vs OpenFOAM's
+      second-order `limitedLinear`).
     - **Distinction to keep in mind if this is ever extended:** the *point* gradient (right for the
       cell-centred sources) is **not** the best *linear reconstruction slope* over a finite cell for a
       convex profile. For ω the latter barely arises — advection is first-order upwind and the
