@@ -238,6 +238,27 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     package, for a number the differentiated path can never use; and it would force the *generic* Newton
     loop to pick which step's count survives (last / max / sum), which is a reporting policy the solver
     has no business owning. Per-step cost is observed eagerly instead, by `forward_march`.
+  - **⚠️ SUSPECTED PERFORMANCE REGRESSION in the `growth` parameter — investigate before using
+    `RelaxedFarFromRoot` or trusting any timing (2026-07-25, UNRESOLVED).** `backtracking_line_search`
+    gained a `growth` argument (the non-monotone acceptance schedule, `solve/line_search_growth.py`).
+    With it, a coupled step on the pitzDaily plateau state went from **~2–3 min to >27 min for a SINGLE
+    step**, reproduced on two independent harnesses *and* on a direct `solve_linear` +
+    `backtracking_line_search` probe with no `forward_march` involved — so it is **not** the march
+    driver. The continuation itself still builds in 8 s, and the unit tests (which use trivial
+    residuals) are unaffected, so the cost only appears at real problem size.
+    - **Leading hypothesis:** `admissible = growth * reference_norm` makes the ladder's comparison
+      bound a **traced** value where it was previously loop-invariant, inside a `lax.while_loop` that
+      itself sits inside the escalation `while_loop`. A traced bound in the inner loop plausibly defeats
+      the "compile the body once" property the ladder was built for.
+    - **Two candidate fixes, both keeping the schedule injected and memoryless:** (a) compute
+      `admissible` *outside* and pass that scalar in, so the loop sees one constant; or (b) make the
+      growth factor **static per march segment** — it is a function of the segment's residual ratio and
+      need not vary within a step.
+    - **The default path is unaffected and was measured clean before this change** (`MonotoneLineSearch`
+      returns `1.0`, and `growth` defaults to a Python `1.0` float at the other call site), but **do not
+      assume** the default is free until the above is isolated — the regression reproduced with the
+      *monotone* schedule active, i.e. at `growth = 1.0`, which is itself evidence that the traced-bound
+      hypothesis is the right one rather than the relaxation being expensive.
   - **`line_search` — backtrack the shifted step before escalating β (binding, the coupled-RANS fix).**
     The step optionally scales the shifted correction `δ` back along `{1, 1/2, …, 1/2**line_search}`
     (`backtracking_line_search`, extracted from `implicit.py` and shared with `DampedNewtonStep` — one
