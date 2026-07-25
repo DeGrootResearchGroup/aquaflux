@@ -169,6 +169,36 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     limit, and finite `k=0` derivative. Consumed by `omega_residual` (transport.py) for **both** the
     segregated and coupled paths (one change point). `omega_wall_value` is retained as the viscous branch
     and for the IC seed (`initialization.py`, the smooth near-wall ω ramp — an IC device, unchanged).
+  - **The fixed cells' ω GRADIENT is imposed analytically too, not reconstructed (binding — bug fix).**
+    Those cells carry an *imposed* value rather than a solved balance, so their gradient is a model
+    quantity as well; inferring it from neighbours is both inconsistent and badly inaccurate. Measured
+    on pitzDaily against the analytical gradient of the field we impose: the reconstruction is
+    **0.256× the exact magnitude** (p5 0.205, p95 0.374) in the fixed cells, and the error does not stay
+    local — the **first interior ring reconstructs 2.24× too large** (p5 0.845, p95 5.04). Two causes,
+    both structural: `ω_wall ∝ 1/d²` is strongly convex while Green–Gauss is a *linear* fit over cells
+    whose `d` spans 8.5e-5→5.6e-4 here; and the stencil folds in the **wall face**, whose ω a
+    zero-gradient closure sets to the cell value although the true profile diverges there.
+    - **A gradient-scheme A/B CANNOT detect this** — every scheme treats these as ordinary cells, so all
+      are wrong identically and the difference cancels. Measured: `CorrectedGreenGauss` vs
+      `CompactGreenGauss` give **bit-identical** ratios (and differ by 0.03 % in ‖R_ω‖). Compare against
+      the *analytical* gradient, never against another scheme.
+    - **What it corrupts:** `∇k·∇ω` in `OmegaCrossDiffusion` and the `F1` blend, which set the blended
+      constants for **both** scalar equations — and the k rows at these cells are **not** fixed, so a
+      genuinely solved equation was reading a 4×-wrong gradient (measured `CD_kω` there was **3.6×** too
+      small). Also the diffusion's non-orthogonal `corr` on faces to interior neighbours (measured
+      negligible on this mesh, 0.03 %).
+    - **The fix:** `omega_wall_gradient` = `dω_wall/dd·∇d + dω_wall/dk·∇k`, with both partials taken by
+      **automatic differentiation of `omega_wall` itself**, so it cannot drift from whatever blend that
+      function implements. `∇d` is reconstructed **once at build** (`wall_distance_gradient`, pure
+      geometry) with the exact boundary closure `d = 0` on the wall patches; the distance field is
+      smooth and O(geometry), so unlike ω it reconstructs well. `closure_fields` overwrites only the
+      wall-adjacent rows. Safe because ω needs **no wall-normal flux** there (the row is a value
+      fixation, the wall closure is zero-gradient), so the only consumers are inward.
+    - **Distinction to keep in mind if this is ever extended:** the *point* gradient (right for the
+      cell-centred sources) is **not** the best *linear reconstruction slope* over a finite cell for a
+      convex profile. For ω the latter barely arises — advection is first-order upwind and the
+      flux-continuous diffusion eliminates the face value — but it would matter for a gradient-using
+      advection scheme.
   - **The momentum companion is the adaptive wall-face eddy viscosity `nut_wall` (binding).** The
     `y+`-insensitive treatment also needs the momentum wall shear to follow the law of the wall on a
     non-sublayer mesh, not the molecular gradient. `nut_wall(nu, d, k, model) = nu·max(0, y*·κ/ln(E·y*) − 1)`

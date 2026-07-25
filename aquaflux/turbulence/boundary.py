@@ -31,7 +31,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import jax
 import jax.numpy as jnp
+
+from aquaflux.vectors import scale
 
 from .strain import safe_sqrt
 
@@ -471,3 +474,60 @@ def wall_k_diffusivity(
         The faded wall-face diffusivity, matching the shape of its inputs.
     """
     return (1.0 - wall_function_weight(nu, d, k, model)) * gamma
+
+
+def omega_wall_gradient(
+    nu: jnp.ndarray,
+    d: jnp.ndarray,
+    k: jnp.ndarray,
+    wall_distance_gradient: jnp.ndarray,
+    k_gradient: jnp.ndarray,
+    model: SSTModel,
+) -> jnp.ndarray:
+    r"""The **analytical** gradient of the imposed near-wall omega, ``grad(omega_wall)``.
+
+    The wall-adjacent cells do not solve a transport balance -- their value is *imposed*
+    (:func:`omega_wall`) -- so their gradient is likewise a model quantity and should be imposed
+    rather than reconstructed. Reconstructing it instead is badly wrong: ``omega_wall`` varies like
+    ``1/d**2``, which is strongly convex, while a Green-Gauss reconstruction is a *linear* fit over
+    cells whose wall distance varies sharply; and the reconstruction folds in the wall face, whose
+    ``omega`` comes from a zero-gradient closure (face value = cell value) even though the true
+    profile diverges there. Measured on a backward-facing step, the reconstructed magnitude is about
+    a quarter of this analytical one in the fixed cells, and the error does not stay local -- the
+    first interior ring reconstructs roughly twice too large.
+
+    ``omega_wall`` is an elementwise function of ``(nu, d, k)``, so the chain rule is
+
+    ``grad(omega_wall) = d(omega_wall)/d(d) grad(d) + d(omega_wall)/d(k) grad(k)``,
+
+    with both partial derivatives taken by automatic differentiation of :func:`omega_wall` itself --
+    so this stays exact for **any** form of the wall blend, and cannot drift from it. ``grad(d)`` is a
+    reconstruction of the wall-distance field, which is smooth and of order the geometry, so it is far
+    better posed than a reconstruction of ``omega`` itself.
+
+    Parameters
+    ----------
+    nu : jnp.ndarray
+        Kinematic (molecular) viscosity at the wall-adjacent cells, shape ``(n_wall,)``.
+    d : jnp.ndarray
+        Wall distance of those cells, shape ``(n_wall,)``.
+    k : jnp.ndarray
+        Turbulent kinetic energy there, shape ``(n_wall,)``.
+    wall_distance_gradient : jnp.ndarray
+        The reconstructed gradient of the wall-distance field at those cells, shape
+        ``(n_wall, dim)``.
+    k_gradient : jnp.ndarray
+        The reconstructed gradient of ``k`` there, shape ``(n_wall, dim)``.
+    model : SSTModel
+        The model constants (whatever :func:`omega_wall` reads).
+
+    Returns
+    -------
+    jnp.ndarray
+        The analytical gradient of the imposed near-wall omega, shape ``(n_wall, dim)``.
+    """
+    # Elementwise partials: omega_wall maps each cell's (nu, d, k) to its own value, so summing
+    # before differentiating recovers the per-cell derivative rather than mixing cells.
+    d_omega_d_distance = jax.grad(lambda dd: jnp.sum(omega_wall(nu, dd, k, model)))(d)
+    d_omega_d_k = jax.grad(lambda kk: jnp.sum(omega_wall(nu, d, kk, model)))(k)
+    return scale(wall_distance_gradient, d_omega_d_distance) + scale(k_gradient, d_omega_d_k)

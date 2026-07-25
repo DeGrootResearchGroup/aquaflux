@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import equinox as eqx
 import jax.numpy as jnp
 
+from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import AdvectionFlux, DiffusionFlux, FixedValueCells, ResidualAssembler
 from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import FieldProperty, PropertyModel
@@ -34,6 +35,7 @@ from .boundary import (
     log_layer_shear_rate,
     nut_wall,
     omega_wall,
+    omega_wall_gradient,
     wall_function_weight,
     wall_k_diffusivity,
 )
@@ -63,6 +65,33 @@ if TYPE_CHECKING:
     from aquaflux.schemes import GradientScheme
 
     from .sst import SSTModel
+
+
+def _reconstruct_wall_distance_gradient(
+    mesh, geometry, gradient_scheme, wall_distance, wall_patches
+):
+    """Reconstruct the gradient of the wall-distance field, with its exact boundary closure.
+
+    The distance to the nearest wall is **zero on that wall**, so a Dirichlet zero is the exact
+    boundary value there; every other patch takes zero gradient. Unlike ``omega``, this field is
+    smooth and of order the geometry, so its reconstruction is well posed -- which is what makes it a
+    sound carrier for the near-wall ``omega`` chain rule.
+    """
+    boundary = BoundaryConditions(
+        {
+            name: (Dirichlet(0.0) if name in set(wall_patches) else ZeroGradient())
+            for name in mesh.face_patches.names
+        }
+    )
+    assembler = ResidualAssembler.build(
+        mesh,
+        geometry,
+        PropertyModel({}),
+        (),
+        boundary,
+        gradient_scheme=gradient_scheme,
+    )
+    return assembler.gradient(wall_distance)
 
 
 class SSTClosureFields(NamedTuple):
@@ -155,6 +184,10 @@ class SSTTurbulence(eqx.Module):
         Kinematic molecular viscosity ``nu`` per cell, shape ``(n_cells,)``.
     wall_distance : jnp.ndarray
         Distance to the nearest wall per cell, shape ``(n_cells,)``.
+    wall_distance_gradient : jnp.ndarray
+        Gradient of that distance field, shape ``(n_cells, dim)`` -- pure geometry, so it is
+        reconstructed once at build. It carries the chain rule for the *analytical* near-wall
+        ``omega`` gradient (see :meth:`closure_fields`).
     wall_cells : jnp.ndarray
         Indices of the wall-adjacent cells whose ``omega`` is fixed, shape ``(n_wall,)``.
     wall_faces : jnp.ndarray
@@ -181,6 +214,7 @@ class SSTTurbulence(eqx.Module):
     density: float
     molecular_viscosity: jnp.ndarray
     wall_distance: jnp.ndarray
+    wall_distance_gradient: jnp.ndarray
     wall_cells: jnp.ndarray
     wall_faces: jnp.ndarray
     k_boundary: BoundaryConditions
@@ -219,6 +253,12 @@ class SSTTurbulence(eqx.Module):
         wall_distance = distance_to_patches(mesh, geometry, wall_patches)
         wall_faces = jnp.concatenate([mesh.face_patches.indices(p) for p in wall_patches])
         wall_cells = jnp.unique(mesh.face_cells.owner[wall_faces])
+        # The wall-distance gradient is pure geometry, so it is reconstructed once here rather
+        # than per residual evaluation. Its boundary closure is exact: the distance to a wall is
+        # zero *on* that wall, and zero-gradient elsewhere.
+        wall_distance_gradient = _reconstruct_wall_distance_gradient(
+            mesh, geometry, gradient_scheme, wall_distance, wall_patches
+        )
         return cls(
             model=model,
             mesh=mesh,
@@ -228,6 +268,7 @@ class SSTTurbulence(eqx.Module):
             density=density,
             molecular_viscosity=molecular_viscosity,
             wall_distance=wall_distance,
+            wall_distance_gradient=wall_distance_gradient,
             wall_cells=wall_cells,
             wall_faces=wall_faces,
             k_boundary=k_boundary,
@@ -371,6 +412,37 @@ class SSTTurbulence(eqx.Module):
         )
         return assembler.gradient(field)
 
+    def _imposed_wall_omega_gradient(
+        self, reconstructed: jnp.ndarray, k: jnp.ndarray, grad_k: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Replace the wall-adjacent cells' ``omega`` gradient with the analytical one.
+
+        Those cells do not solve a transport balance -- their ``omega`` is *imposed*
+        (:func:`~aquaflux.turbulence.omega_wall`) -- so their gradient is a model quantity too, and
+        reconstructing it from neighbours is both inconsistent and badly inaccurate: ``omega_wall``
+        varies like ``1/d**2`` (strongly convex) while the reconstruction is a linear fit, and the
+        stencil folds in the wall face, whose ``omega`` a zero-gradient closure sets to the cell value
+        even though the true profile diverges there. Measured on a backward-facing step, the
+        reconstructed magnitude is ~0.26x the analytical one in these cells.
+
+        The imposed gradient is exact and cheap (:func:`~aquaflux.turbulence.omega_wall_gradient`);
+        only the wall-adjacent rows are replaced, every other cell keeps its reconstruction.
+        Overwriting is safe because ``omega`` needs no wall-normal flux at these cells -- the row is a
+        value fixation and the wall closure is zero-gradient -- so the only consumers are inward: the
+        cross-diffusion and ``F1`` blend that read ``grad(k).grad(omega)``, and the diffusion's
+        non-orthogonal correction on faces to interior neighbours.
+        """
+        wall = self.wall_cells
+        imposed = omega_wall_gradient(
+            self.molecular_viscosity[wall],
+            self.wall_distance[wall],
+            k[wall],
+            self.wall_distance_gradient[wall],
+            grad_k[wall],
+            self.model,
+        )
+        return reconstructed.at[wall].set(imposed)
+
     def wall_shear_rate(self, velocity: VelocityFields) -> jnp.ndarray:
         """Wall-face normal velocity gradient at the wall-adjacent cells, shape ``(n_wall,)``.
 
@@ -431,7 +503,9 @@ class SSTTurbulence(eqx.Module):
         """
         strain = self.strain_rate(velocity.gradient, k)
         grad_k = self._field_gradient(k, self.k_boundary)
-        grad_omega = self._field_gradient(omega, self.omega_boundary)
+        grad_omega = self._imposed_wall_omega_gradient(
+            self._field_gradient(omega, self.omega_boundary), k, grad_k
+        )
         f1 = self.model.f1(
             k, omega, self.molecular_viscosity, self.wall_distance, grad_k, grad_omega
         )
