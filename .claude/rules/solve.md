@@ -188,16 +188,25 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       between bases at all. Re-test at a state that is both **well separated and still productive** before
       concluding. Hence: shipped as an opt-in with the **default unchanged** (`w=1` = the historical `a_P`),
       not adopted and not withdrawn.
-    - **The plateau is a step-DIRECTION problem, and no shift basis (nor a preconditioner, nor a per-block
-      β) can move it.** Every basis/β combination at rel 0.032 gives α = 0.001 and zero descent. Worth
-      stating explicitly because all three of those levers get proposed for it: a **preconditioner** only
-      changes Krylov cycles — for fixed `J`, `β`, `d`, `R` the shifted step `δ` is unique regardless of `M`,
-      so it cannot change α or the basin; a **per-block β** is measured-dominated for a separate reason (the
-      acceptance and direction couplings below); and a **shift basis** only redistributes damping. What
-      *does* change `δ` is altering the operator itself — the pseudo-time shift already does (and is
-      legitimate because it vanishes at the root), as would a grad-div / augmented-Lagrangian **augmentation**
-      of the momentum residual (vanishing at `∇·u = 0`) or physical continuation. Do not aim preconditioner
-      or damping work at the plateau.
+    - **⚠️ SUSPECT — the "plateau is a step-DIRECTION problem" conclusion was measured through a broken
+      preconditioner (see the fixation-row/`1/ω` bug below) and a corrected re-measurement CONTRADICTS
+      part of it. Re-derive before relying on any of it (#31).** As originally written: every basis/β
+      combination at rel 0.032 gave α = 0.001 and zero descent, so neither a preconditioner, nor a
+      per-block β, nor a shift basis could move it — the argument being that a **preconditioner** only
+      changes Krylov cycles, since for fixed `J`, `β`, `d`, `R` the shifted step `δ` is unique regardless
+      of `M`.
+      - **That uniqueness argument is only valid for a CONVERGED linear solve, and the coupled forward
+        solver is deliberately inexact** (`_COUPLED_FORWARD_SOLVER` runs at `rtol = 1e-3`). At a finite
+        tolerance `δ` depends on `M`, so a preconditioner *can* change α. Measured directly: refreshing
+        the scalar AMGs mid-march on the pitzDaily cold-IC run took α from **0.5 → 1.0** (sustained over
+        the following steps) while cutting cycles 53 → 10. So "a preconditioner cannot change α" is false
+        as stated here; state it as "cannot change the *converged* `δ`, hence not the fixed point".
+      - The α = 0.001 observations themselves came from probes at a state reached through the
+        `1/ω` preconditioner mis-scaling, i.e. through solves that were not converging. Treat the whole
+        plateau diagnosis as unverified until re-measured on a cold-IC march with the fixed code.
+      - What is *not* in doubt: a **shift basis** only redistributes damping, and altering the operator
+        itself (the pseudo-time shift, a grad-div / augmented-Lagrangian augmentation vanishing at
+        `∇·u = 0`, or physical continuation) is what changes `δ` at convergence.
   - **Two injected seams**, both `Protocol`s: the physics comes from a **`ShiftPolicy`**
   (`shift_term(φ) -> ShiftTerm(diagonal, make_preconditioner)`; `ShiftTerm.diagonal` is the full-state
   base shift, `make_preconditioner(β)` the frozen shifted `M`), and the per-attempt accept/reject
@@ -644,6 +653,29 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       conservative — it was inert. Trigger numerics must come from a logged march, not from judgement
       about what sounds safe; the replay procedure exists precisely because that judgement is unreliable.
       Calibrated on **one** geometry, so treat 0.1 as a starting point elsewhere, not a constant.
+    - **END-TO-END RESULT at `threshold = 0.1`, `refresh_limit = 8`, against the logged control (same
+      cold IC, same everything, `refresh_trigger=None`) — a 5–8× cost win, sustained and repeatable:**
+
+      | global step | 16 | 18 | 20 | 21 | 22 | 23 |
+      |---|---|---|---|---|---|---|
+      | refreshed cycles | 13 | 11 | **10** | 10 | 10 | 11 |
+      | control cycles | 24 | 33 | **53** | 74 | 85 | 84 |
+
+      ~21 s/step versus ~190 s/step, and the refreshed march was simultaneously **ahead on residual**
+      (rel 2.67e-2 vs 3.03e-2 at step 23). Three further observations worth keeping:
+      - **A refresh costs ~38 s, not the 60–240 s assumed elsewhere in this file** (the refresh step took
+        59 s against a 21 s steady step). It repays itself inside one step, which is why
+        `refresh_limit` can be generous rather than hoarded.
+      - **It repeats across segments.** Refreshes fired at steps 15 and 30, each time on that segment's
+        *own* drift accumulating from ~0 to 0.10 — the production confirmation of the per-segment
+        re-basing.
+      - **α improved 0.5 → 1.0** across the refresh (see the correction to the "preconditioner cannot
+        change α" claim above).
+    - **What the refresh does NOT fix — state this when reporting it.** The march still grinds: after the
+      second refresh the residual moved ~0.3 %/step (rel ~1.77e-2) with cheap (11-cycle) full (α = 1)
+      steps, and `x_r/h` crept 0.48 → 0.71 against OpenFOAM's 7.74. So the refresh solved the **cost**
+      problem, not the **step-productivity** problem (#22). Its real value beyond the speedup is that the
+      cost confound is now *gone*, so a β/α-control experiment finally measures what it claims to.
   - **`CycleGrowthTrigger` — cost growth is the trigger, the residual is the GATE.** Fires only when: the
     `warmup` is past; `residual_ratio <= max_residual_ratio`; and the last `patience` steps each measured
     `>= growth ×` the segment's **running-minimum** non-zero count. **Why the residual is demoted to a
