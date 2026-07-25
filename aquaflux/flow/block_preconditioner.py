@@ -673,8 +673,19 @@ class StabilizedLscSchur(InnerSchurSolver):
     needs a viscosity value, which is what lets it serve a variable-viscosity turbulent closure.
 
     Cost, relative to the scaled-Laplacian Schur: two multigrid solves and three residual
-    linearizations per apply, against one solve. It buys a Schur approximation that keeps working when
-    the cheap one has stopped.
+    linearizations per apply, against one solve.
+
+    **Where this pays, and where it does not — measured, so choose deliberately.** On an *isolated*
+    flow saddle it is the stronger approximation, as intended: 9 outer GMRES iterations against the
+    scaled-Laplacian Schur's 15 on a Reynolds-1e4 channel. On the **coupled** flow--turbulence solve it
+    is dramatically worse — at a developed, separated backward-facing-step state one shifted solve took
+    96 restart cycles / 526 s against the scaled-Laplacian Schur's 13 cycles / 38.9 s, both solves
+    converged to a relative linear residual near 2e-9, and roughly 2.9x slower on a coupled channel at
+    an identical residual trajectory. The reason the isolated win does not carry over: with a
+    block-*diagonal* preconditioner and a pseudo-transient shift, the coupled iteration is not limited
+    by the quality of the flow block's Schur approximation, so improving it buys nothing while costing
+    several times more per apply. **Prefer ``"msimpler"`` for a coupled solve; reach for this only when
+    solving the flow block on its own.**
     """
 
     geometry: _SchurGeometry
@@ -959,8 +970,10 @@ class BlockPreconditioner(eqx.Module):
             Schur complement as convection grows, at which point inverting them more accurately does
             not help. ``"lsc"`` instead builds the approximation from the momentum operator itself
             (:class:`StabilizedLscSchur`, the stabilized least-squares commutator) — markedly dearer per
-            apply (two multigrid solves plus three residual linearizations, against one solve) but it
-            keeps working in the convection-dominated regime where the scaled Laplacians have stalled.
+            apply (two multigrid solves plus three residual linearizations, against one solve), and
+            stronger on an **isolated** flow saddle, but **measured far worse on a coupled
+            flow--turbulence solve** (see :class:`StabilizedLscSchur`, which carries the numbers).
+            **Use ``"msimpler"`` for a coupled solve.**
         msimpler_scale : float, optional
             The MSIMPLER scale ``k`` (only for ``schur_scaling="msimpler"``). It sets the Schur
             magnitude to the operating convection, or the block preconditioner is unbalanced and

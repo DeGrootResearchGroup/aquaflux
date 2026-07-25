@@ -441,14 +441,19 @@ Engineering Principles.
   near-optimal, and **preconditioner changes must be validated on the real march, not on ρ** (ρ here is
   dominated by isolated outlier eigenvalues GMRES kills anyway). **Root cause:** the MSIMPLER Schur is a
   constant-coefficient (scaled pressure-mass-matrix) Poisson — a near-Stokes/low-Re approximation that
-  degrades as convection strengthens. **Stage 3 is therefore a better Schur, as a new `InnerSchurSolver`
-  strategy** (the seam already exists): the **stabilized** least-squares-commutator (LSC) of Elman,
-  Howle, Shadid, Silvester & Tuminaro (2007), which needs only momentum applies, `diag(V)`, and the
-  assembled pressure Poisson `B Q̂⁻¹ Bᵀ` that `SmoothedAmgSchur` already builds. Use the **stabilized
-  (2007)** variant — Rhie–Chow collocated *is* an equal-order stabilized discretization, so the original
-  (2006) LSC underperforms on it — and re-derive its boundary treatment for cell-centred FVM. Prefer it
-  over PCD, whose auxiliary pressure convection–diffusion operator carries finite-element boundary
-  recipes that do not transfer cleanly to FVM.
+  degrades as convection strengthens. **A better Schur was the obvious next move — it is BUILT
+  (`schur_scaling="lsc"`, the algebraic nonuniform-mesh stabilized least-squares commutator of Elman,
+  Howle, Shadid, Silvester & Tuminaro 2007) and it LOSES BADLY on the coupled solve. Do not re-derive
+  it.** At a developed/separated pitzDaily state, one shifted solve: msimpler **13 cycles / 38.9 s** vs
+  lsc **96 cycles / 526 s** (`v_cycles=4`) and **82 / 662 s** (`v_cycles=8`) — 6–7× the cycles, 13–17×
+  the wall time, both genuinely converged (`lin_rel ~2e-9`); and ~2.9× slower on the coupled channel at
+  an identical residual trajectory. **The flow-only win does not transfer:** LSC beats MSIMPLER on the
+  *isolated* flow block (9 vs 15 GMRES at Re=1e4), but under the coupled block-**diagonal**
+  preconditioner plus the pseudo-transient shift, the coupled iteration is not limited by the flow
+  Schur's quality, so improving it buys nothing. The strategy stays available for a flow-only solve;
+  it is not the coupled default and is not the cure for coupled cost. PCD remains deprioritized
+  independently (finite-element boundary recipes that do not transfer to FVM). Full numbers and the
+  matching "what a preconditioner can and cannot change" rule are in `.claude/rules/solve.md`.
 - **Fully-AD `a_P`** — a possible refinement (the diffusion Gate-C / limiter pattern), not yet needed.
 - **Gradient-scheme cost — largely solved (use `SweptCorrectedGradient`).** The *per-matvec* and
   *compile* cost of the nested corrected-gradient solve (distinct from the outer iteration count) is

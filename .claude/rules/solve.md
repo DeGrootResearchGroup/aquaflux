@@ -536,14 +536,48 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         pseudo-transient `a_P(1+β)` either (that direction is strictly worse at every β).
       **Root cause:** the MSIMPLER Schur is a *constant-coefficient* (scaled pressure-mass-matrix) Poisson,
       which is a near-Stokes/low-Re approximation and degrades as convection strengthens — exactly the
-      high-Re/recirculating regime here. **The fix is a better Schur approximation, not a better solve of
-      this one:** the stabilized least-squares-commutator (LSC) of Elman, Howle, Shadid, Silvester &
-      Tuminaro (2007), which needs only momentum-operator applies, `diag(V)`, and the assembled pressure
-      Poisson `B Q̂⁻¹ Bᵀ` this file's Schur already builds. Use the **stabilized** (2007) variant — a
-      Rhie–Chow collocated discretization is equal-order stabilized, so the original (2006) LSC
-      underperforms on it — and re-derive its boundary treatment for cell-centred FVM. Prefer LSC over
-      pressure-convection–diffusion (PCD), whose auxiliary operator carries finite-element boundary
-      recipes that do not transfer cleanly to FVM.
+      high-Re/recirculating regime here.
+      - **⚠️ The "obvious" fix — a better Schur (stabilized LSC) — WAS BUILT AND LOSES BADLY on the
+        coupled solve. Do not re-derive it (binding).** `schur_scaling="lsc"`
+        (`flow/block_preconditioner.py`) implements the algebraic, nonuniform-mesh stabilized
+        least-squares commutator of Elman, Howle, Shadid, Silvester & Tuminaro (2007) — the *right*
+        variant for a Rhie–Chow collocated (equal-order stabilized) discretization, with the viscosity
+        cancelled so it serves a variable-viscosity closure. Measured on one shifted solve at a
+        developed/separated pitzDaily state:
+
+        | Schur | cycles | wall |
+        |---|---|---|
+        | **msimpler** | **13** | **38.9 s** |
+        | lsc (`v_cycles=4`) | 96 | 526 s |
+        | lsc (`v_cycles=8`) | 82 | 662 s |
+
+        6–7× the cycles and 13–17× the wall time, with both solves genuinely converged
+        (`lin_rel ~2e-9`), plus ~2.9× slower on the coupled channel at an identical residual trajectory.
+        **Why the flow-only win does not transfer:** LSC *does* beat MSIMPLER on the isolated flow block
+        (9 vs 15 GMRES at Re=1e4), but on the coupled block-*diagonal* preconditioner under the
+        pseudo-transient shift, a better isolated flow-Schur does not reduce *coupled* cycles — the
+        coupled iteration is not limited by the flow block's Schur quality. Keep the strategy (it is a
+        legitimate option for a flow-only solve); do **not** make it the coupled default, and do not
+        propose it again as the cure for coupled cost.
+      - PCD remains deprioritized regardless: its auxiliary pressure convection–diffusion operator
+        carries finite-element boundary recipes that do not transfer cleanly to cell-centred FVM.
+      - **What a preconditioner can and cannot change — state this precisely, both halves are measured.**
+        *While the linear solve actually converges*, swapping the preconditioner changes **cost only**:
+        msimpler vs LSC gave coupled residual trajectories identical to **5 significant figures**, so the
+        Newton direction, the accepted step, and whether the march converges are all preconditioner-
+        independent. That rules out a whole class of experiment — you cannot precondition your way out
+        of a stalled march, only out of an expensive one.
+        **But the guarantee is conditional on convergence, and it fails when a preconditioner is stale
+        enough to degrade the solve.** Measured 2026-07-25 on the pitzDaily cold-IC march, refreshed vs
+        unrefreshed at *identical* step indices: the unrefreshed arm sat at **α = 0.5 for steps 16–23
+        while needing 53–85 cycles**, and the refreshed arm took **α = 1.0 at 10–13 cycles**, with
+        different residual trajectories (rel 4.45e-2 vs 4.13e-2 at step 20). So a sufficiently stale
+        preconditioner *does* change the step. The mechanism is not isolated — the natural reading is
+        that the degraded solve is truncating or stagnating rather than reaching its tolerance, so the
+        returned `δ` is no longer the tolerance-defined one — and `_COUPLED_FORWARD_SOLVER` runs
+        `rtol=1e-3` with `stagnation_iters=40`, which makes that reachable. **Practical rule:** treat
+        "preconditioner ⇒ cost only" as true when solves converge comfortably, and stop trusting it
+        once the cycle count is climbing toward the solver's limits.
   - **The residual measure is an injected `ResidualNorm`, owned by the `ForwardStep` (`solve/norm.py`).**
     Every `ForwardStep` exposes `norm()`; `ImplicitNewtonSolver` reads it for the outer stopping test
     (threaded through `_forward`/`_implicit_solve` as the extra nondiff arg `norm_fn`) and the strategy
