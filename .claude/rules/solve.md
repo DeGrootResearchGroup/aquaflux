@@ -266,6 +266,19 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     120-vector subspace reaches the same tight solution ~1.4× faster and tighter. Tolerances stay tight
     — an *inexact* linear solve is unsafe under log-ω (an inaccurate step in the log variable is
     exponentiated and diverges), so the accuracy is load-bearing, not wasteful.
+  - **⚠️ READ FIRST: every raw-‖R‖ comparison ACROSS coupled-RANS march states recorded below predates
+    the 2026-07-25 fixation-row fix and is suspect.** Until then the near-wall ω fixation was written
+    in physical ω under a log-ω unknown, so 472 of 12 225 rows — scaled by an ω spanning 160→1.1e5 —
+    dominated the norm that drives the line search, the SER ramp, the divergence guard and the stopping
+    test (see `.claude/rules/turbulence.md`). Measured consequences: ‖R‖ at the *converged* pimpleFoam
+    field was **1.533e5**, i.e. the metric rated the right answer ~1.7e4× worse than a half-developed
+    state and 800× worse than the cold IC; and it ranked the const-β state at "rel 0.032" above the SER
+    state at "rel 0.052" although the former's recirculation bubble is **4× worse** (`x_r/h` 0.29 vs
+    1.16, target 7.74). After the fix the same field reads **20.7** and the ranking matches the physics.
+    **So: "reached a deeper rel" was not evidence of a better state, and the preference for the const-β
+    march and the α-targeting controller rests on exactly that comparison.** Re-measure before trusting
+    any relative-residual claim in this section; the *mechanistic* findings (exact linear solves, the
+    α-sentinel, the modal attenuation) are unaffected because they were measured at a single state.
   - **THE SER β SCHEDULE RUNS BACKWARDS FOR STIFF COUPLED RANS (measured, pitzDaily — the dominant
     cost, and it is the globalization, not the preconditioner).** The switched-evolution-relaxation
     schedule `β = β₀(‖R‖/‖R₀‖)^p` *lowers* β as the residual falls, on the premise that a smaller shift

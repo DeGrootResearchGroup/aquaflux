@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
-from aquaflux.discretization import FirstOrderUpwind
+from aquaflux.discretization import DifferenceRow, FirstOrderUpwind, LogRatioRow
 from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
@@ -135,11 +135,17 @@ def test_scalar_variable_transforms() -> None:
     assert jnp.allclose(log_scalars.jacobian_scale(phi), phi)  # d(e^w)/dw = e^w = phi
 
 
-def test_log_omega_reparametrization_preserves_the_residual() -> None:
+def test_log_omega_reparametrization_preserves_the_transport_residual() -> None:
     """omega-log reparametrizes the Newton *unknown*, not the physics.
 
-    The coupled residual at the log-mapped state equals the direct residual at the same physical
-    fields (so the two forms share a root), and it stays differentiable through the ``e^w`` map.
+    Every **transport** row of the coupled residual at the log-mapped state equals the direct
+    residual at the same physical fields, and it stays differentiable through the ``e^w`` map.
+
+    The near-wall **fixation** rows are deliberately *not* identical: each transform writes the
+    fixation in its own solved variable (``omega - omega_wall`` directly, ``log(omega/omega_wall)``
+    under the log map), which is what keeps that row linear in the unknown actually being stepped.
+    Both vanish on exactly the same set, so the two forms still share a root -- which the companion
+    test pins.
     """
     mesh, direct = _cavity()
     log_omega = CoupledRANS.build(direct.momentum, direct.turbulence, omega_transform=LogScalars())
@@ -147,10 +153,35 @@ def test_log_omega_reparametrization_preserves_the_residual() -> None:
     flow, k, omega = direct.layout.unpack(physical)
     solved = log_omega.state_from_physical(flow, k, omega)
 
-    assert jnp.allclose(direct.residual(physical), log_omega.residual(solved), atol=1e-10)
+    _, _, direct_omega = direct.layout.unpack(direct.residual(physical))
+    _, _, log_omega_rows = log_omega.layout.unpack(log_omega.residual(solved))
+    interior = jnp.setdiff1d(jnp.arange(direct_omega.shape[0]), direct.turbulence.wall_cells)
+    assert jnp.allclose(direct_omega[interior], log_omega_rows[interior], atol=1e-10)
+
     direction = jax.random.normal(jax.random.PRNGKey(4), (solved.shape[0],))
     jvp = jax.jvp(log_omega.residual, (solved,), (direction,))[1]
     assert bool(jnp.all(jnp.isfinite(jvp)))
+
+
+def test_the_two_fixation_row_forms_share_a_root_and_the_log_form_is_linear() -> None:
+    """The transform-matched fixation rows vanish together, and the log form is linear in ``w``.
+
+    Linearity is the point: the difference row's Newton correction in the log variable is
+    ``target/phi - 1`` (the linearization of an exponential, which overshoots by ``e**(r-1)`` at a
+    target ratio ``r``), while the log-ratio row's is ``log(target/phi)`` -- exact at any ratio, so a
+    full step lands on the constraint however far off it starts.
+    """
+    phi = jnp.array([1.0, 5.0, 1.0e4])
+    target = jnp.array([1.0, 5.0, 5.0])  # first two already satisfied, the third far off
+    difference = DifferenceRow().row(phi, target)
+    log_ratio = LogRatioRow().row(phi, target)
+    # Same root: both vanish exactly where phi == target, and nowhere else.
+    assert jnp.array_equal(difference == 0.0, log_ratio == 0.0)
+    assert bool(jnp.all(difference[:2] == 0.0)) and bool(jnp.all(log_ratio[:2] == 0.0))
+
+    # The log row is exactly linear in w = log(phi): its derivative is 1 regardless of the ratio.
+    slope = jax.grad(lambda w: jnp.sum(LogRatioRow().row(jnp.exp(w), target)))(jnp.log(phi))
+    assert jnp.allclose(slope, jnp.ones_like(slope))
 
 
 def _count_rhie_chow_assemblies(monkeypatch):

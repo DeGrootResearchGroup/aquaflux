@@ -26,7 +26,14 @@ import equinox as eqx
 import jax.numpy as jnp
 
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
-from aquaflux.discretization import AdvectionFlux, DiffusionFlux, FixedValueCells, ResidualAssembler
+from aquaflux.discretization import (
+    AdvectionFlux,
+    DifferenceRow,
+    DiffusionFlux,
+    FixationRow,
+    FixedValueCells,
+    ResidualAssembler,
+)
 from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import FieldProperty, PropertyModel
 from aquaflux.solve import LocalCourantBasis, ShiftBasis
@@ -59,6 +66,9 @@ from .strain import safe_sqrt, strain_rate_magnitude
 # The default pseudo-time shift basis (full operator diagonal = uniform under-relaxation), held as a
 # module singleton so it is not reconstructed in each method's argument defaults.
 _DEFAULT_SHIFT_BASIS = LocalCourantBasis()
+# The default near-wall omega fixation row (the plain difference, right when omega is solved
+# directly); a module singleton for the same reason.
+_DEFAULT_FIXATION_ROW = DifferenceRow()
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -596,12 +606,29 @@ class SSTTurbulence(eqx.Module):
         )
 
     def omega_residual(
-        self, mdot: jnp.ndarray, closure: SSTClosureFields
+        self,
+        mdot: jnp.ndarray,
+        closure: SSTClosureFields,
+        fixation_row: FixationRow = _DEFAULT_FIXATION_ROW,
     ) -> Callable[[jnp.ndarray], jnp.ndarray]:
         """The omega-equation residual function ``omega -> R_omega`` for the frozen ``closure``.
 
         Advection, diffusion of ``nu + sigma_omega nu_t``, the production/destruction/cross-diffusion
         sources, and the near-wall cells fixed to the analytical ``omega`` (their balance replaced).
+
+        Parameters
+        ----------
+        mdot : jnp.ndarray
+            The flow's Rhie--Chow mass flux, shape ``(n_faces,)``.
+        closure : SSTClosureFields
+            The frozen closure fields of the current sweep.
+        fixation_row : FixationRow
+            How the near-wall fixation is written as a residual row (see
+            :class:`~aquaflux.discretization.FixationRow`). Defaults to the plain difference
+            ``omega - omega_wall``, which is right when ``omega`` itself is the solved unknown. A
+            caller solving in a transformed variable passes that variable's own row form -- the
+            coupled solve takes it from its ``omega_transform`` -- so the fixation stays linear in the
+            unknown actually being stepped.
         """
         diffusivity = self._diffusivity(
             closure.nu_t, closure.f1, self.model.sigma_omega1, self.model.sigma_omega2
@@ -639,6 +666,7 @@ class SSTTurbulence(eqx.Module):
                 closure.k[self.wall_cells],
                 self.model,
             ),
+            fixation_row,
         )
         return WallFixedResidual(assembler, wall_fix)
 

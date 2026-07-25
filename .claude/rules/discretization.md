@@ -105,6 +105,21 @@ Principles.
     `HessianCorrectedGradient` **raise** — see `.claude/rules/parallel.md`.)
 - **`transient.py` — BUILT.** `TransientTerm`: BDF1 at step 1 (static `first_step`), BDF2
   after; carries no physical coefficient. Verified against the closed BDF formulae.
+- **`fixed_value.py` — BUILT (`FixedValueCells` + the injected `FixationRow`).** Replaces a chosen set
+  of cells' residual rows with a strong algebraic constraint (a pinned reference pressure, the
+  near-wall ω fixed to its analytical value) while every other cell keeps its balance. The target is a
+  differentiable leaf. **How the constraint is written is an injected strategy, because it must match
+  the variable being solved (binding).** `DifferenceRow` (`phi − target`, the default) is right when
+  the solved unknown *is* `phi`; `LogRatioRow` (`log(phi/target)`) is its counterpart for a field
+  solved in log form, where it equals `w − log target` and so is **exactly linear in the unknown with
+  derivative 1 at any ratio**. The difference row under a log parametrization is instead exponential
+  in the unknown: its correction `δw = target/phi − 1` overshoots to `phi·e^(r−1)` against a target
+  ratio `r`, which both wrecks the step and (because the row then carries the scale of `phi`) lets a
+  handful of fixation cells dominate the residual norm the whole march is judged by. Same root either
+  way — only the path and the conditioning differ. The turbulence `ScalarVariableTransform` owns the
+  choice (`fixation_row()`), since it is the only object that knows which variable is being stepped;
+  do **not** branch on the transform inside the residual. Measured impact on the coupled RANS case:
+  see `.claude/rules/turbulence.md`.
 - **`source.py` — BUILT.** `VolumeSource` (ABC, `source(field, context) -> (n_cells,)`): a
   volumetric term produced/consumed *in* the cell rather than across faces (reaction, turbulence
   production/dissipation). Returns the volume-integrated source (production positive; bakes in its

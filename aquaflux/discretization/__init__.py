@@ -15,7 +15,7 @@ from .advection import (
 )
 from .diffusion import DiffusionFlux
 from .face_flux import FaceContext, FaceFluxOperator
-from .fixed_value import FixedValueCells
+from .fixed_value import DifferenceRow, FixationRow, FixedValueCells, LogRatioRow
 from .residual import ResidualAssembler
 from .source import VolumeSource
 from .transient import TransientTerm
@@ -23,12 +23,15 @@ from .transient import TransientTerm
 __all__ = [
     "AdvectionFlux",
     "AdvectionScheme",
+    "DifferenceRow",
     "DiffusionFlux",
     "FaceContext",
     "FaceFluxOperator",
     "FirstOrderUpwind",
+    "FixationRow",
     "FixedValueCells",
     "LimitedUpwind",
+    "LogRatioRow",
     "ResidualAssembler",
     "TransientTerm",
     "VolumeSource",

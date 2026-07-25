@@ -233,6 +233,59 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       convex profile. For ω the latter barely arises — advection is first-order upwind and the
       flux-continuous diffusion eliminates the face value — but it would matter for a gradient-using
       advection scheme.
+  - **The near-wall ω fixation row is written in the SOLVED variable, not in physical ω (binding —
+    this was the single biggest defect in the coupled march, fixed 2026-07-25).** `FixedValueCells`
+    now carries an injected `FixationRow` (`discretization/fixed_value.py`), and
+    `ScalarVariableTransform.fixation_row()` picks it: `DirectScalars` → `DifferenceRow`
+    (`ω − ω_wall`, **bit-identical** to the old behaviour), `LogScalars` → `LogRatioRow`
+    (`log(ω/ω_wall) = w − log ω_wall`). **Why it matters, two ways:**
+    - *Newton.* Under log-ω the old physical row `e^w − ω_wall` gives a correction `δw = r − 1` with
+      `r = ω_wall/ω` — the **linearization of an exponential**, landing at `ω·e^(r−1)` instead of the
+      target `ω·r`. The log-ratio row is **exactly linear in `w` (derivative 1 at any ratio)**, so a
+      full step satisfies the constraint in one iteration. This is what makes the *zeroed shift* on
+      those cells correct: the "an exact fixation converges in one Newton step, so it needs no
+      pseudo-time damping" justification is true under `DirectScalars` and was **false under
+      `LogScalars`** from the day the transform landed until this fix.
+    - *Measurement (the bigger effect).* The physical row is scaled by ω, which spans 160→1.1e5 near a
+      wall, so **472 of 12 225 cells dominated the residual norm** — the metric that drives the line
+      search, the SER β ramp, the divergence guard and the stopping test. Measured on the clean
+      pimpleFoam field, ‖R‖ fell **1.533e5 → 20.7 (7 400×)** with the log-ratio row; what remains is
+      the genuine wall-blend model difference, not scaling. And the metric now **orders states the way
+      the physics does**: before the fix raw ‖R‖ ranked the const-β state at "rel 0.032" *better* than
+      the SER state at "rel 0.052", though the former's bubble is 4× worse (`x_r/h` 0.29 vs 1.16,
+      against OF's 7.74); after the fix the ranking matches `x_r/h`, `k_peak` and `ν_t`. **Consequence
+      to internalize: every conclusion drawn from comparing raw ‖R‖ across march states before this
+      date is suspect** — including the choice to prefer the const-β march and the α-controller
+      because they reached a "deeper" residual.
+  - **OPEN DEFECT: the reconstructed ω *gradient* in the fixed cells is ~4× too small (measured
+    2026-07-25; fix tracked, not yet built).** We impose a value on those cells but let their gradient
+    be *inferred from neighbours* as if they were ordinary unknowns. Measured against the analytical
+    gradient of the field we impose (`∇ω_wall = dω_wall/dd · ∇d`): **reconstructed/exact = 0.256**
+    (p5 0.205, p95 0.374) at the fixed cells, and **2.236** (p5 0.845, p95 5.037) at the first interior
+    ring — so the error does not stay local. Two causes, both structural: `ω_wall ∝ 1/d²` is strongly
+    convex while Green–Gauss is a *linear* fit across cells whose `d` spans 8.5e-5→5.6e-4; and the
+    reconstruction folds in the **wall face**, whose ω comes from the `ZeroGradient` closure (face value
+    = cell value) although the true profile diverges there.
+    - **A gradient-scheme A/B CANNOT detect this** — every scheme treats the fixed cells as ordinary
+      cells, so all are wrong identically and the difference cancels. Measured: `CorrectedGreenGauss` vs
+      `CompactGreenGauss` give **bit-identical** ratios, and their residual difference is 0.03 % of
+      ‖R_ω‖. Do not re-run that comparison expecting an answer; compare against the *analytical*
+      gradient instead.
+    - **Consumers.** Face interpolation and the diffusion `corr` on faces to interior neighbours
+      (measured negligible here, 0.03 %), and — the one with teeth — `∇k·∇ω` in `OmegaCrossDiffusion`
+      and the `F1` blend, which set the blended constants for **both** scalar equations. The k rows at
+      those cells are **not** fixed, so a wrong gradient corrupts a genuinely solved equation: measured
+      `CD_kω` there is **3.6× too small** (median exact/reconstructed 3.569, p5 2.98, p95 6.34). Whether
+      that moves `F1 = tanh(arg₁⁴)` is **not yet measured** — it saturates near a wall by design and may
+      absorb the error, so treat this as a correctness/consistency defect until shown otherwise.
+    - **Fix (agreed direction):** impose the gradient alongside the value, from the closed form
+      `dω_wall/dd · ∇d` — differentiating the smooth **power-mean** blend (not the bare viscous branch,
+      which kinks where the branches cross), with `∇d` a well-posed reconstruction of a smooth O(1)
+      field. Safe to overwrite because ω needs **no wall-ward flux** at those cells (the row is fixed and
+      the wall closure is zero-gradient), so the only consumers are inward. Note the distinction when
+      building it: the *point* gradient (right for the cell-centred sources) is **not** the best *linear
+      reconstruction slope* over a finite cell for a convex profile — for ω the latter barely arises,
+      since advection is first-order upwind and the flux-continuous diffusion eliminates the face value.
   - **The blend SHAPE is a power-mean choice, and OpenFOAM / Fluent pick DIFFERENT exponents — this is
     the source of the near-wall ω disagreement, and it is a modelling choice, not a bug (measured
     2026-07-24 against a *clean* reference; supersedes the corrupt-reference wall-ω numbers above).** All

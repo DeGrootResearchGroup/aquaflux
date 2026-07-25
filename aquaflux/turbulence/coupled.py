@@ -39,6 +39,7 @@ import jax.numpy as jnp
 import lineax as lx
 import numpy as np
 
+from aquaflux.discretization import DifferenceRow, FixationRow, LogRatioRow
 from aquaflux.flow import BlockPreconditioner
 
 # The mass-flow-constraint primitives (a body force that is a solve unknown enforcing a bulk velocity)
@@ -110,6 +111,18 @@ class ScalarVariableTransform(eqx.Module):
         """``d(phi)/d(w)`` evaluated at physical ``phi`` -- the factor the physical operator's rows are
         scaled by to precondition/shift the reparametrized block."""
 
+    @abc.abstractmethod
+    def fixation_row(self) -> FixationRow:
+        """How an algebraic value fixation on this field should be written as a residual row.
+
+        A value fixation must be expressed in the **solved** unknown, not the physical field, or its
+        linearization inherits the transform's nonlinearity: under ``phi = e**w`` the plain difference
+        row ``phi - target`` gives a Newton correction ``dw = target/phi - 1``, which overshoots by
+        ``e**(r-1)`` against a target ratio ``r``, while the log-ratio row is linear in ``w`` and lands
+        on the constraint in one full step. The transform owns this choice because it is the only
+        object that knows which variable is actually being solved for.
+        """
+
 
 class DirectScalars(ScalarVariableTransform):
     """The identity parametrization: the solved unknown *is* the physical field (``phi = w``).
@@ -127,6 +140,10 @@ class DirectScalars(ScalarVariableTransform):
 
     def jacobian_scale(self, phi: jnp.ndarray) -> jnp.ndarray:
         return jnp.ones_like(phi)
+
+    def fixation_row(self) -> FixationRow:
+        """The plain difference -- the solved unknown *is* the physical field here."""
+        return DifferenceRow()
 
 
 class LogScalars(ScalarVariableTransform):
@@ -148,6 +165,17 @@ class LogScalars(ScalarVariableTransform):
 
     def jacobian_scale(self, phi: jnp.ndarray) -> jnp.ndarray:
         return phi
+
+    def fixation_row(self) -> FixationRow:
+        """The log ratio ``log(phi/target) = w - log(target)`` -- linear in the solved unknown ``w``.
+
+        The difference row would be exponential in ``w`` here, so a near-wall cell whose ``omega`` is a
+        factor ``r`` from its target takes a correction ``dw = r - 1`` and overshoots to ``phi e**(r-1)``
+        instead of landing on ``phi r``. It also writes the row on the scale of ``phi`` (which spans
+        orders of magnitude near a wall) rather than of ``w``, which lets a handful of fixation cells
+        dominate the residual measure the whole march is judged by.
+        """
+        return LogRatioRow()
 
 
 class CoupledRANSLayout(eqx.Module):
@@ -336,7 +364,11 @@ class CoupledRANS(eqx.Module):
         fields = momentum.flow_fields(flow)
         flow_residual = momentum.residual_from_fields(fields)
         k_residual = self.turbulence.k_residual(fields.mdot, closure)(k)
-        omega_residual = self.turbulence.omega_residual(fields.mdot, closure)(omega)
+        # The near-wall omega fixation is written in the *solved* unknown, so under a log
+        # parametrization it is linear in that unknown instead of exponential in it.
+        omega_residual = self.turbulence.omega_residual(
+            fields.mdot, closure, self.omega_transform.fixation_row()
+        )(omega)
 
         return self.layout.pack(flow_residual, k_residual, omega_residual)
 
