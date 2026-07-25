@@ -31,9 +31,11 @@ unit tests. The surface is three groups:
 * **The observed forward march** — `forward_march`, an eager, forward-only march that applies the
   same `ForwardStep` as the Newton driver but reports each step (`StepReport`, `MarchResult`) and
   may stop early. It is what lets a driver rebuild a frozen preconditioner part way through a solve,
-  on the evidence of the `RefreshTrigger` it injects (`CycleGrowthTrigger` watches the per-step
-  linear-solve cost). It is an accelerator, not a solver: a real `ImplicitNewtonSolver` solve still
-  produces the result.
+  on the evidence of the `RefreshTrigger` it injects — `CoefficientDriftTrigger` watches how far the
+  operator's own coefficients have moved since they were frozen (the direct staleness signal, fed by
+  the march's `drift_measure`), while `CycleGrowthTrigger` infers it from the per-step linear-solve
+  cost. It is an accelerator, not a solver: a real `ImplicitNewtonSolver` solve still produces the
+  result.
 * **Frozen algebraic multigrid** — the operator assembler `convection_diffusion_operator` (plus
   `decouple_dof` for a closed-domain pressure pin), the hierarchy builders
   `build_smoothed_hierarchy` / `build_convection_hierarchy` / `build_air_hierarchy`, and their
@@ -59,6 +61,7 @@ from .line_search_growth import (
 )
 from .linear import default_linear_solver, solve_linear
 from .march import (
+    CoefficientDriftTrigger,
     CycleGrowthTrigger,
     MarchResult,
     RefreshTrigger,
@@ -87,6 +90,7 @@ __all__ = [
     "AirHierarchy",
     "AlphaTargetingControl",
     "BlockScaledNorm",
+    "CoefficientDriftTrigger",
     "ConstantRelaxation",
     "CycleGrowthTrigger",
     "DampedNewtonStep",

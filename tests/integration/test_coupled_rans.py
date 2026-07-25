@@ -472,3 +472,43 @@ def test_a_refresh_is_observed_as_two_reported_segments(case) -> None:
     assert all(report.cycles > 0 for report in reports)
     # The march kept descending across the rebuild -- the refresh reshaped the path, not the problem.
     assert post[-1].residual_ratio < pre[0].residual_ratio
+
+
+@pytest.mark.slow
+def test_the_drift_measure_is_rebased_at_every_refresh(case) -> None:
+    """Coefficient drift is reported relative to the state the *current* preconditioner was frozen at.
+
+    The march reports how far ``nu_t`` has moved since its segment began, and a refresh re-freezes at
+    the state it stopped on -- so the first step after a refresh must report a *small* drift, not the
+    accumulated movement since the initial condition. Carrying one measure across segments instead
+    would report drift a refresh had already absorbed, and a drift trigger would then re-fire
+    immediately and burn its whole refresh budget in consecutive steps.
+
+    Detected by reading the reports either side of the segment boundary, which ``StepReport.step``
+    marks by restarting at zero.
+    """
+    coupled = case["coupled"]
+    flow_ws, k_ws, omega_ws = case["coupled_start"]
+    reports: list = []
+
+    solve_coupled(
+        coupled,
+        flow_ws,
+        k_ws,
+        omega_ws,
+        method="twolevel",
+        max_steps=40,
+        refresh_trigger=_RefreshAfter(steps=4),
+        on_step=reports.append,
+        **PRECONDITIONER,
+    )
+
+    boundaries = [i for i, r in enumerate(reports) if r.step == 0 and i > 0]
+    assert boundaries, "expected a refresh, so a second segment starting at step 0"
+    first_of_second = boundaries[0]
+    last_of_first = reports[first_of_second - 1]
+
+    # The measure is live (it moved at all during the first segment) and re-based (the first step of
+    # the next segment measures from the new freeze state, not from the initial condition).
+    assert last_of_first.drift > 0.0
+    assert reports[first_of_second].drift < last_of_first.drift

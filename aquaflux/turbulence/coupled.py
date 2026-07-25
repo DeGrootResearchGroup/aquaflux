@@ -300,6 +300,20 @@ class CoupledRANS(eqx.Module):
             omega_transform or DirectScalars(),
         )
 
+    def eddy_viscosity(self, state: jnp.ndarray) -> jnp.ndarray:
+        """The eddy viscosity ``nu_t`` at a coupled state, shape ``(n_cells,)``.
+
+        The coefficient the frozen scalar-transport preconditioners are built from, so it is also
+        what a staleness measure watches (:func:`eddy_viscosity_drift`).
+
+        Parameters
+        ----------
+        state : jnp.ndarray
+            The flat coupled state, shape ``((dim + 3) n_cells,)``.
+        """
+        flow, k, omega = self.physical_fields(state)
+        return self.turbulence.closure_fields(self.momentum.velocity_fields(flow), k, omega).nu_t
+
     def physical_fields(self, state: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """Unpack a coupled state into the flow sub-vector and the **physical** ``k``, ``omega``.
 
@@ -475,6 +489,51 @@ class CoupledShiftPolicy(eqx.Module):
         flow and scalar preconditioners, transposed by the implicit solver.
         """
         return lambda state: self.shift_term(state).make_preconditioner(jnp.asarray(0.0))
+
+
+def eddy_viscosity_drift(
+    coupled: CoupledRANS, reference_state: jnp.ndarray
+) -> Callable[[jnp.ndarray], jnp.ndarray]:
+    """A staleness measure: how far ``nu_t`` has moved from ``reference_state``, relatively.
+
+    ``||nu_t(state) - nu_t(reference)|| / ||nu_t(reference)||``, the drift signal a
+    :class:`~aquaflux.solve.CoefficientDriftTrigger` fires on. ``nu_t`` is the right coefficient to
+    watch because it is what the frozen k/omega transport operators are assembled from: when it has
+    moved, those operators no longer describe the system being solved, which is precisely staleness.
+
+    **Why drift rather than the linear solve's cost.** The restart-cycle count also rises with
+    staleness, but it rises with the pseudo-transient damping ``beta`` as well -- by more, on a
+    separating flow -- so a cost-based trigger must be gated to suppress that confound. Drift
+    responds only to the coefficients, so it measures staleness directly and needs no gate.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled assembler, used to evaluate ``nu_t`` at a state.
+    reference_state : jnp.ndarray
+        The state the current preconditioner was frozen at, shape ``((dim + 3) n_cells,)``. **Re-base
+        this at every refresh**, or the measure keeps reporting movement the refresh already absorbed.
+
+    Returns
+    -------
+    callable
+        ``state -> drift``, a non-negative scalar that is zero at ``reference_state``. Compiled, so
+        the per-step cost is one jitted closure evaluation.
+
+    Notes
+    -----
+    The denominator is floored at a tiny positive value, so a state with no turbulence anywhere
+    (``nu_t`` identically zero) yields a finite drift rather than a division by zero. Any real initial
+    condition carries some eddy viscosity, so the floor is a guard, not a regime.
+    """
+    reference = jax.lax.stop_gradient(coupled.eddy_viscosity(reference_state))
+    scale = jnp.maximum(jnp.linalg.norm(reference), jnp.finfo(reference.dtype).tiny)
+
+    @eqx.filter_jit
+    def drift(state: jnp.ndarray) -> jnp.ndarray:
+        return jnp.linalg.norm(coupled.eddy_viscosity(state) - reference) / scale
+
+    return drift
 
 
 def _row_jacobian_scale(
@@ -882,13 +941,17 @@ def solve_coupled(
         the k/omega AMGs are re-derived at the state reached and the next segment continues from
         there. ``None`` (default) is the single-stage march.
 
-        Use :class:`~aquaflux.solve.CycleGrowthTrigger`, which watches the linear solve's
-        restart-cycle count. **The cycle count, not the residual, is the staleness signal:** a frozen
-        preconditioner drifting from the operator shows up as a rising cost on a system that is
-        otherwise unchanged, before the residual history shows anything, and unlike wall-clock time
-        the count is unaffected by machine load. (That trigger still *gates* on the residual having
-        fallen, because the damping schedule also raises the cost as it ramps down -- see its own
-        documentation.)
+        Prefer :class:`~aquaflux.solve.CoefficientDriftTrigger`, which fires on how far ``nu_t`` has
+        moved since the current preconditioner was frozen. **That movement *is* the staleness:** the
+        frozen k/omega transport operators are assembled from ``nu_t``, so once it has changed they no
+        longer describe the system being solved. This solve supplies the measure itself
+        (:func:`eddy_viscosity_drift`), re-based at every refresh so each segment reports drift from
+        its own freeze state.
+
+        :class:`~aquaflux.solve.CycleGrowthTrigger` infers staleness from the linear solve's
+        restart-cycle count instead. That works, but the count also rises as the damping schedule
+        ramps down -- on a separating flow, by more than staleness does -- so it needs a residual gate
+        to separate the two, which the drift signal does not.
     refresh_limit : int
         The most refreshes one solve may perform (default ``1``). Each costs a preconditioner rebuild
         and a recompilation of the shifted solve, so this bounds that expense independently of how
@@ -1034,6 +1097,11 @@ def solve_coupled(
                 step_control=step_control,
                 observer=on_step,
                 checkpoint=on_checkpoint,
+                # Re-based every segment, against the state this segment's preconditioner was frozen
+                # at -- which is the segment's own starting state, since a refresh re-freezes at the
+                # state it stopped on. Carrying one measure across segments would keep reporting the
+                # drift a refresh had just absorbed, and re-fire immediately.
+                drift_measure=eddy_viscosity_drift(coupled, jax.lax.stop_gradient(state)),
             )
             state = result.state
             if not result.triggered or segment == refresh_limit:

@@ -21,7 +21,13 @@ from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import CycleGrowthTrigger, PseudoTransientStep, ShiftTerm
-from aquaflux.turbulence import DirectScalars, LogScalars, SSTModel, SSTTurbulence
+from aquaflux.turbulence import (
+    DirectScalars,
+    LogScalars,
+    SSTModel,
+    SSTTurbulence,
+    eddy_viscosity_drift,
+)
 from aquaflux.turbulence.coupled import (
     CoupledRANS,
     CoupledRANSLayout,
@@ -371,3 +377,45 @@ def test_row_jacobian_scale_is_all_ones_for_a_directly_solved_scalar() -> None:
     omega = jnp.array([10.0, 1.0e5, 3.0, 250.0])
     assert jnp.allclose(_row_jacobian_scale(DirectScalars(), omega), 1.0)
     assert jnp.allclose(_row_jacobian_scale(DirectScalars(), omega, jnp.array([1, 3])), 1.0)
+
+
+def test_eddy_viscosity_drift_is_zero_at_its_reference_and_grows_away_from_it() -> None:
+    """The staleness measure a drift trigger fires on: relative movement of ``nu_t``.
+
+    Zero at the state the preconditioner was frozen at (nothing has gone stale yet) and positive
+    once the turbulence field moves, which is what makes it a direct staleness signal rather than an
+    inference from solver cost.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    drift = eddy_viscosity_drift(coupled, state)
+
+    assert float(drift(state)) == pytest.approx(0.0, abs=1e-12)
+
+    # Raise k, which raises nu_t = k / omega: the frozen scalar operators no longer describe this
+    # state, and the measure must say so.
+    flow, k, omega = coupled.physical_fields(state)
+    moved = coupled.state_from_physical(flow, 1.5 * k, omega)
+    assert float(drift(moved)) > 0.1
+
+
+def test_eddy_viscosity_drift_matches_its_definition() -> None:
+    """The measure is exactly the relative L2 movement of ``nu_t`` -- pinned against a direct compute.
+
+    Stated as the definition rather than as an invariance: ``nu_t`` is **not** proportional to ``k``
+    once the shear limiter ``a1 k / max(a1 omega, S F2)`` engages, so properties that assume
+    homogeneity in ``k`` do not hold, and asserting one would be testing the closure rather than the
+    measure.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    flow, k, omega = coupled.physical_fields(state)
+    moved = coupled.state_from_physical(flow, 1.3 * k, 0.8 * omega)
+
+    reference_nu_t = coupled.eddy_viscosity(state)
+    expected = float(
+        jnp.linalg.norm(coupled.eddy_viscosity(moved) - reference_nu_t)
+        / jnp.linalg.norm(reference_nu_t)
+    )
+    assert float(eddy_viscosity_drift(coupled, state)(moved)) == pytest.approx(expected, rel=1e-10)
+    assert expected > 0.0

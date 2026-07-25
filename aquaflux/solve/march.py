@@ -65,6 +65,18 @@ class StepReport(NamedTuple):
         if it was clipped. The step-quality signal a :class:`StepControl` drives the next shift by
         (``α < 1`` means the step overshot — the shift is too weak). ``1`` for a step with no line
         search, and for a fully-rejected step.
+    drift : float
+        How far the frozen operator's coefficients have moved since the segment's reference state, as
+        a relative measure, from the march's injected ``drift_measure``. **The staleness signal a
+        :class:`CoefficientDriftTrigger` fires on**, and the one quantity here that reports on the
+        *preconditioner* rather than on the step. ``0.0`` when no measure was supplied — "not
+        measured", like ``cycles = 0``, and it fails closed because a drift trigger compares against a
+        positive threshold.
+
+        It is a **scalar**, deliberately: computing it needs the state, but putting the state on the
+        report would cost the replay property that makes trigger calibration cheap (see
+        ``forward_march``'s ``checkpoint``). Reducing it to a number here keeps a trigger a pure
+        function of numbers while still letting it see the physics.
     """
 
     step: int
@@ -72,6 +84,7 @@ class StepReport(NamedTuple):
     residual_norm: float
     residual_ratio: float
     alpha: float
+    drift: float = 0.0
 
 
 class MarchResult(NamedTuple):
@@ -193,6 +206,66 @@ class CycleGrowthTrigger(eqx.Module):
         return all(report.cycles > 0 and report.cycles >= threshold for report in recent)
 
 
+class CoefficientDriftTrigger(eqx.Module):
+    """Fire when the frozen operator's coefficients have drifted from the state they were frozen at.
+
+    The **direct** staleness signal, and the reason it is preferred to
+    :class:`CycleGrowthTrigger`: a preconditioner is stale exactly when the operator it approximates
+    has moved, so measuring that movement asks the question directly instead of inferring it from
+    cost. On a coupled RANS march the moving coefficient is the eddy viscosity ``nu_t`` -- it is what
+    the frozen scalar-transport operators are built from, and it changes by orders of magnitude as a
+    recirculation develops.
+
+    **Why this is a better trigger than watching the cycle count.** The cycle count rises for two
+    independent reasons -- the preconditioner drifting (the signal) and the pseudo-transient damping
+    ``beta`` ramping toward zero, which ill-conditions the shifted system whether or not anything is
+    stale -- and on a backward-facing step the second was measured to be the *larger*. So
+    :class:`CycleGrowthTrigger` needs a residual-ratio **gate** to suppress the confound, plus
+    ``patience`` because a single expensive step must not buy a rebuild. Coefficient drift has
+    neither problem: it does not respond to ``beta`` at all, so it needs no gate, and it moves
+    smoothly with the flow rather than jumping with one stiff solve, so it needs no patience. It also
+    cannot fire before the flow develops -- which is when a refresh was measured to be actively
+    harmful -- because an undeveloped flow is, by definition, one whose ``nu_t`` has not moved.
+
+    Attributes
+    ----------
+    threshold : float
+        Fire once the reported drift reaches this value (static). The drift measure is relative, so
+        ``0.5`` means "the coefficients have moved by half their reference magnitude".
+    warmup : int
+        Ignore this many leading steps of a segment (static). A segment's opening steps are measured
+        against a preconditioner that is fresh by construction.
+
+    Notes
+    -----
+    The default threshold is **provisional** -- conservative (late rather than early) rather than
+    calibrated. Like every trigger here it is a pure function of a :class:`StepReport` history, so
+    candidates are calibrated by logging one march with ``trigger=None`` and a ``drift_measure``, then
+    replaying thresholds against the log with no further solves.
+    """
+
+    threshold: float = eqx.field(static=True, default=0.5)
+    warmup: int = eqx.field(static=True, default=3)
+
+    def should_refresh(self, history: Sequence[StepReport]) -> bool:
+        """Whether the coefficients have drifted past :attr:`threshold` since the segment began.
+
+        Parameters
+        ----------
+        history : sequence of StepReport
+            Every step of the current march segment, in order.
+
+        Returns
+        -------
+        bool
+            ``True`` once the warmup is past and the latest step's drift reaches the threshold. A
+            march with no ``drift_measure`` reports ``0.0`` and so never fires.
+        """
+        if len(history) <= self.warmup:
+            return False
+        return history[-1].drift >= self.threshold
+
+
 class StepControl(Protocol):
     """Reshapes the forward step each iteration from the march's own feedback (forward-only).
 
@@ -268,6 +341,7 @@ def forward_march(
     step_control: StepControl | None = None,
     observer: Callable[[StepReport], None] | None = None,
     checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
+    drift_measure: Callable[[jnp.ndarray], float] | None = None,
     solver: lx.AbstractLinearSolver | None = None,
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
@@ -324,6 +398,16 @@ def forward_march(
         the state travelled on the same seam, a trigger could reach into the physics and that replay
         property — the reason trigger calibration costs one logged run instead of one run per
         candidate — would be lost.
+    drift_measure : callable, optional
+        ``state -> float``, a relative measure of how far the frozen operator's coefficients have
+        moved from the ones this segment's preconditioner was built at. Evaluated once per step and
+        reported as :attr:`StepReport.drift`, which is what a
+        :class:`CoefficientDriftTrigger` fires on. ``None`` reports ``0.0`` throughout.
+
+        **It must be re-based per segment**, against the state the current preconditioner was frozen
+        at — the same discipline as the segment-local damping reference. Measuring drift from a state
+        older than the last refresh would report movement that has already been absorbed and refresh
+        again immediately.
     solver : lineax.AbstractLinearSolver, optional
         The linear solver for each step; defaults to ``forward_step.default_solver()``.
 
@@ -368,6 +452,7 @@ def forward_march(
             residual_norm=current,
             residual_ratio=current / reference if reference > 0.0 else 0.0,
             alpha=float(alpha),
+            drift=0.0 if drift_measure is None else float(drift_measure(state)),
         )
         reports.append(report)
         if observer is not None:

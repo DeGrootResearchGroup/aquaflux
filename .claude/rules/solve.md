@@ -596,6 +596,35 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     accelerates. Pinned by a trace-counting test (extra steps add zero traces). Note the residual is
     invoked several times *within one trace* (step, line-search ladder, norm), so trace count ≠ compile
     count — assert that further steps add none, not that the total is 1.
+  - **`CoefficientDriftTrigger` — the PREFERRED staleness trigger: measure the drift, don't infer it
+    from cost (binding for new work).** A frozen preconditioner is stale exactly when the operator it
+    approximates has moved, so the honest signal is that movement itself. `StepReport.drift` carries a
+    **scalar** relative drift produced by `forward_march(drift_measure=…)`; the coupled RANS measure is
+    `turbulence.eddy_viscosity_drift(coupled, reference_state)` — `‖Δν_t‖/‖ν_t,ref‖` — because `ν_t` is
+    what the frozen k/ω transport operators are assembled from.
+    - **Why it beats `CycleGrowthTrigger` (which it supersedes for this job).** The cycle count rises
+      from staleness **and** from `β → 0` ill-conditioning the shifted system, and on a separating flow
+      the second is the *larger* — hence that class's `max_residual_ratio` gate and its `patience`.
+      Drift has neither confound: it does not respond to `β`, so **no gate**, and it moves smoothly with
+      the flow instead of jumping on one stiff solve, so **no patience**. It also cannot fire before the
+      flow develops — the regime where a refresh was measured to be actively *harmful* (43 → 83 cycles)
+      — because an undeveloped flow is by definition one whose `ν_t` has not moved. This is the fix for
+      the confound recorded as #19.
+    - **The scalar is the whole design (binding).** Drift needs the *state*, but the state must not
+      reach a trigger: `checkpoint` carries state and `observer` carries only numbers precisely so a
+      trigger stays a pure function replayable against one logged march (see below). Reducing drift to a
+      number on the report keeps that property *and* lets the trigger see the physics — so calibration
+      is still "log one march with `trigger=None` and a `drift_measure`, replay thresholds offline".
+      Do **not** widen the trigger interface to take the state.
+    - **The measure must be RE-BASED at every refresh (binding — a real trap).** `solve_coupled` builds
+      a fresh `eddy_viscosity_drift` per segment against that segment's starting state, which *is* the
+      state the current preconditioner was frozen at. Carrying one measure across segments would keep
+      reporting drift the refresh had already absorbed, so the trigger would re-fire on the next step
+      and burn the whole `refresh_limit` in consecutive steps. Same discipline as the segment-local
+      `residual_norm_0`. Pinned by
+      `test_the_drift_measure_is_rebased_at_every_refresh`.
+    - The default `threshold` is **provisional** (conservative, not calibrated) — like every trigger
+      numeric here, it must come from an instrumented march (#17).
   - **`CycleGrowthTrigger` — cost growth is the trigger, the residual is the GATE.** Fires only when: the
     `warmup` is past; `residual_ratio <= max_residual_ratio`; and the last `patience` steps each measured
     `>= growth ×` the segment's **running-minimum** non-zero count. **Why the residual is demoted to a

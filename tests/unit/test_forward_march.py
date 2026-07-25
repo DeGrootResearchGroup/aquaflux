@@ -14,8 +14,10 @@ import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import pytest
 from aquaflux.solve import (
     AlphaTargetingControl,
+    CoefficientDriftTrigger,
     CycleGrowthTrigger,
     DampedNewtonStep,
     ImplicitNewtonSolver,
@@ -277,3 +279,78 @@ def test_repeated_steps_reuse_the_compiled_march_step() -> None:
     more = forward_march(step, residual, first.state, max_steps=4, **common)
     assert len(more.reports) > 1  # it really did take several steps
     assert len(_TRACES) == compiled  # ...and none of them recompiled
+
+
+def _drift_history(drifts: list[float]) -> list[StepReport]:
+    """A synthetic history in which only the drift varies -- the drift trigger reads nothing else."""
+    return [
+        StepReport(step=i, cycles=10, residual_norm=1.0, residual_ratio=1.0, alpha=1.0, drift=d)
+        for i, d in enumerate(drifts)
+    ]
+
+
+def test_drift_trigger_fires_once_the_coefficients_have_moved_past_the_threshold() -> None:
+    trigger = CoefficientDriftTrigger(threshold=0.5, warmup=2)
+    assert not trigger.should_refresh(_drift_history([0.0, 0.1, 0.2]))
+    assert trigger.should_refresh(_drift_history([0.0, 0.1, 0.2, 0.6]))
+
+
+def test_drift_trigger_ignores_its_warmup_however_large_the_drift() -> None:
+    """A segment's opening steps run against a preconditioner that is fresh by construction."""
+    trigger = CoefficientDriftTrigger(threshold=0.5, warmup=3)
+    assert not trigger.should_refresh(_drift_history([9.0, 9.0, 9.0]))
+    assert trigger.should_refresh(_drift_history([9.0, 9.0, 9.0, 9.0]))
+
+
+def test_drift_trigger_never_fires_without_a_drift_measure() -> None:
+    """Reports default to ``drift = 0.0`` -- "not measured" -- so the trigger fails closed."""
+    trigger = CoefficientDriftTrigger(threshold=0.5, warmup=0)
+    history = [
+        StepReport(step=i, cycles=10, residual_norm=1.0, residual_ratio=1.0, alpha=1.0)
+        for i in range(6)
+    ]
+    assert not trigger.should_refresh(history)
+
+
+def test_drift_trigger_is_independent_of_the_damping_confound() -> None:
+    """The residual ratio does not gate this trigger, unlike the cost-growth one.
+
+    The cycle count rises both with staleness and with the damping ``beta`` ramping toward zero as
+    the residual falls, so a cost trigger needs a residual gate to separate them. Drift responds only
+    to the coefficients, so an identical drift history fires the same way at any residual level --
+    which is the whole reason to prefer it.
+    """
+    trigger = CoefficientDriftTrigger(threshold=0.5, warmup=1)
+    for ratio in (1.0, 1e-1, 1e-4):
+        history = [
+            StepReport(
+                step=i, cycles=10, residual_norm=ratio, residual_ratio=ratio, alpha=1.0, drift=d
+            )
+            for i, d in enumerate([0.0, 0.2, 0.9])
+        ]
+        assert trigger.should_refresh(history)
+
+
+def test_march_reports_the_injected_drift_measure() -> None:
+    """``forward_march`` evaluates the measure once per step and puts the scalar on the report."""
+    residual = _Cubic(theta=jnp.asarray(1.0))
+    step = DampedNewtonStep(line_search=10)
+    seen: list[float] = []
+
+    result = forward_march(
+        step,
+        residual.__call__,
+        jnp.asarray(2.0),
+        max_steps=3,
+        rtol=1e-12,
+        atol=1e-14,
+        drift_measure=lambda state: jnp.abs(state - 2.0),
+        observer=lambda report: seen.append(report.drift),
+    )
+    assert len(seen) == len(result.reports) > 0
+    assert all(
+        report.drift == pytest.approx(abs(float(s)))
+        for report, s in zip(result.reports, seen, strict=True)
+    )
+    # The measure is zero only at the state it was based on, and the march has moved away from it.
+    assert seen[-1] > 0.0

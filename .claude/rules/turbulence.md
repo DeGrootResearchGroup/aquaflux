@@ -74,11 +74,19 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     the frozen preconditioner stale, the k/ω AMGs are re-derived at the state reached, and the next
     segment continues — then a real `ImplicitNewtonSolver.solve()` finishes and produces the result.
     Segments exist because the AMG rebuild is off-jit scipy work that cannot run inside the
-    `lax.while_loop`; that part is not subtle. **The trigger is the GMRES restart-cycle count, not a
-    residual tolerance** — staleness is a *cost* phenomenon, and the count reveals it before the residual
-    history does (`CycleGrowthTrigger`; it still gates on the residual having fallen, because the SER ramp
-    also raises the cost — see `.claude/rules/solve.md`). The earlier `refresh_rtol` (a residual-threshold
-    two-stage form) was **replaced** by this; do not reintroduce it. **What is subtle, and was a real bug
+    `lax.while_loop`; that part is not subtle. **The trigger is the drift of `ν_t` since the freeze
+    state** — `CoefficientDriftTrigger` reading `StepReport.drift`, which `solve_coupled` fills from
+    `eddy_viscosity_drift(coupled, <segment start>)`. `ν_t` is the right coefficient because it is what
+    the frozen k/ω transport operators are assembled from, so its movement *is* the staleness. The
+    earlier signals are both superseded: `refresh_rtol` (a residual threshold) was replaced first, and
+    `CycleGrowthTrigger` (the restart-cycle count) is dominated because cost rises from the SER `β` ramp
+    as well as from staleness — on a separating flow, by more — which is why it needs a residual gate
+    and `patience` that drift needs neither of. Do not reintroduce either. **Re-base the measure at
+    every refresh** (`solve_coupled` builds a fresh one per segment); carrying one across segments
+    reports drift the refresh already absorbed and re-fires immediately. Measured evidence for
+    preferring drift: on the pitzDaily cold-IC march the per-step cycle count exploded **identically in
+    two arms with very different step boldness** (monotone 10→12→21→53→119, relaxed 15→27→40→134), i.e.
+    cost tracked flow development, not the stepping — so cost alone cannot separate the two causes. **What is subtle, and was a real bug
     caught in review:** a refresh must rebuild *only the
     AMGs*, and carry the pseudo-time **shift diagonals** (and the flow block) over from the reused policy
     — because **rebuilding the shift diagonals at the developed state freezes the march.** The coupled
@@ -628,11 +636,11 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     run) as the recirculation develops and the frozen scalar preconditioner degrades — the same
     post-separation regime where refreshing the k/ω AMGs is worth ~2.4–2.6× in outer cycles (staleness
     bullet in `.claude/rules/solve.md`). Driving a refresh **from the march** is BUILT:
-    `solve_coupled(refresh_trigger=CycleGrowthTrigger(…))`. **But note the coupling:** a bolder β moves
-    the state faster and stales the IC-frozen PC faster, so the β schedule and the refresh must be
-    co-designed, and the cycle-count trigger is confounded (it rises from β→0 *and* staleness — #19). The
-    clean fix is a **β-independent staleness trigger** keyed on the drift of the frozen operator's
-    coefficients (`‖Δν_t‖`, `‖Δṁ‖`), not the cycle count. Its numeric thresholds are **not** calibrated —
+    `solve_coupled(refresh_trigger=CoefficientDriftTrigger(…))`. **The β coupling that motivated it:** a
+    bolder β moves the state faster and stales the IC-frozen PC faster, so a *cost*-based trigger is
+    confounded (cycles rise from β→0 **and** staleness — #19). The β-independent staleness trigger keyed
+    on `‖Δν_t‖` is now **BUILT** and is the default recommendation; a `‖Δṁ‖` measure would be a second
+    `drift_measure` against the same trigger, needing no new trigger. Thresholds are **not** calibrated —
     conservative placeholders; see the offline-replay procedure in `.claude/rules/solve.md`.
   - **The slope limiter is NOT implicated (measured — do not re-derive this).** pitzDaily is the first
     case that genuinely exercises `LimitedUpwind` (Poiseuille / cavity / smooth channels never activate a

@@ -38,6 +38,7 @@ from .coupled import (
     LogScalars,
     ScalarVariableTransform,
     coupled_continuation,
+    eddy_viscosity_drift,
     solve_coupled,
 )
 from .driver import bulk_velocity, solve_segregated
@@ -86,6 +87,7 @@ __all__ = [
     "WallFixedResidual",
     "bulk_velocity",
     "coupled_continuation",
+    "eddy_viscosity_drift",
     "equilibrium_k",
     "hybrid_initialize",
     "inlet_k",
