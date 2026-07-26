@@ -84,7 +84,17 @@ Engineering Principles.
   `momentum_diagonal_coefficient`): a zero-gradient outlet adds **no** viscous diagonal (its viscous
   flux `μ(u_owner−u_owner)/(d·n)` is zero), and a no-through-flow wall adds **no** convective diagonal
   (its mass flux is exactly zero) — assembling over *all* faces uniformly over-counted both. Applied to
-  the **residual** `a_P` only (`momentum_matrix_diagonal`, default `boundary_corrected=True`). The
+  the **residual** `a_P` only (`momentum_matrix_diagonal`, default `boundary_corrected=True`).
+  **The viscous boundary term uses the operator's per-face boundary viscosity, not the owner cell's
+  (binding, #155).** `boundary_momentum_diagonal` builds `μ_f A/(d·n)` from `_boundary_face_viscosity()`
+  — the same per-face coefficient the residual's `DiffusionFlux` carries at the boundary
+  (`_wall_boundary_viscosity()`, falling back to the owner-cell `μ_eff` off the shearing walls). On a
+  **wall-function** mesh the wall model's `μ + ρ·ν_t,wall` and the wall-adjacent cell's *log-layer*
+  `k/ω` `μ_eff` differ by a large factor (measured ~6.5× on a `y*≈38` cavity), so gathering the owner
+  cell's viscosity left `a_P ≠ diag(J_momentum)` exactly where the wall model is active (suppressing the
+  Rhie–Chow damping `V/a_P` there — a converged-solution effect, like #154). Wall-**resolved** meshes
+  have `ν_t,wall = 0` (a no-op), which is why the wall-resolved `test_channel_law_of_the_wall` cannot see
+  it; pinned instead by a wall-function `a_P` vs `diag(jacfwd(residual))` test (`test_preconditioner.py`). The
   **frozen** preconditioner / continuation-shift diagonal (`frozen_momentum_diagonal`) keeps the plain
   all-faces form (`boundary_corrected=False`): it is a forward-path *stabilization* scale, not the
   operator coefficient, and the extra boundary damping is what carries the high-Reynolds pseudo-transient
@@ -182,7 +192,10 @@ Engineering Principles.
     the wall-face coefficient is `μ + ρ·ν_t,wall` — the wall model's value replacing the owner-cell
     `k/ω` closure — every other face keeps the owner `μ_eff`, and interior faces are ignored by
     `DiffusionFlux`. `μ_eff = μ + ρν_t` stays formed **here** (the closure still supplies only the
-    kinematic value). `None` (default) leaves walls resolved, so the momentum block is **bit-identical**;
+    kinematic value). The **residual `a_P` reads this same per-face coefficient at the boundary**
+    (`_boundary_face_viscosity()` → `boundary_momentum_diagonal`), so the momentum diagonal matches the
+    operator at wall faces rather than gathering the (large, log-layer) owner-cell `μ_eff` there — see
+    the `a_P` boundary bullet above (#155). `None` (default) leaves walls resolved, so the momentum block is **bit-identical**;
     on a wall-resolved mesh `ν_t,wall = 0` (below `y*_lam`), so it is a no-op there too — this is what
     lets it be always-on. Applied in **both** paths so they solve the identical near-wall model:
     `coupled.py` inside the residual (live, in the coupled Jacobian) and `driver.py` per sweep (frozen).
