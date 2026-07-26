@@ -279,7 +279,7 @@ def test_momentum_diagonal_is_the_residual_operator_diagonal_under_graded_viscos
     asm = asm0.with_eddy_viscosity(nu_t)
 
     velocity = jnp.zeros((mesh.n_cells, mesh.dim))
-    a_p = asm.momentum_matrix_diagonal(velocity)  # (n_cells, dim), operator-consistent boundary form
+    a_p = asm.momentum_matrix_diagonal(velocity)  # (n_cells, dim), boundary-consistent form
     state = asm.pack(velocity, jnp.zeros(mesh.n_cells))
     velocity_diag, _ = asm.unpack(jnp.diag(jax.jacfwd(asm.residual)(state)))
     assert jnp.allclose(a_p, velocity_diag, rtol=1e-9, atol=1e-9)
