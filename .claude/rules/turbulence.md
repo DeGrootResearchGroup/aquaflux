@@ -93,24 +93,32 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     reports drift the refresh already absorbed and re-fires immediately. Measured evidence for
     preferring drift: on the pitzDaily cold-IC march the per-step cycle count exploded **identically in
     two arms with very different step boldness** (monotone 10→12→21→53→119, relaxed 15→27→40→134), i.e.
-    cost tracked flow development, not the stepping — so cost alone cannot separate the two causes. **What is subtle, and was a real bug
-    caught in review:** a refresh must rebuild *only the
-    AMGs*, and carry the pseudo-time **shift diagonals** (and the flow block) over from the reused policy
-    — because **rebuilding the shift diagonals at the developed state freezes the march.** The coupled
-    shift diagonal is the transport-operator diagonal × `jacobian_scale(field)`, which under `LogScalars`
-    is `ω`; at a developed state both factors grow, so a rebuilt `d` is much larger, the pseudo-transient
-    shift `β·d` over-damps, and the step collapses — the relative residual creeps *upward* ~1e-5/step
-    with the recirculation and `k` static, no error and no divergence-guard trip (on pitzDaily the
-    un-fixed FULL refresh raised the convergence guard; the fixed AMG-only refresh converged **and** ran
-    ~1.87× faster end-to-end, ~925 s vs 1726 s to rel 3e-2, with flat ~22 s/step vs a stale baseline
-    climbing to 100–300 s/step). **This is independent of the SER `β`** — do not attribute it to the `β`
-    reset (an earlier version of this note did, wrongly): a controlled discriminator from one
-    post-stage-one state showed rebuilding the shift + carrying the AMG froze the march *byte-identically*
-    to rebuilding both, while carrying the shift + refreshing the AMG descended — so the shift rebuild is
-    the freeze, at whatever `β`. `_coupled_shift_policy(..., reuse=…)` therefore takes `k_shift_diagonal`
-    / `omega_shift_diagonal` straight from `reuse`. Safe because the shift vanishes at the root, so a
-    slightly-stale `d` changes only the path, never the converged state or its adjoint (the same argument
-    that carries the flow block). Also: `max_steps` applies to **each** segment (so up to
+    cost tracked flow development, not the stepping — so cost alone cannot separate the two causes. **What is subtle:** a refresh rebuilds the
+    AMGs **and the shift's transport time scale**, but carries the shift's **coordinate factor**
+    `jacobian_scale` (and the flow block) over from the reused policy. The shift diagonal is
+    `d = transport_diagonal(state) × jacobian_scale(field)`, and under `LogScalars`
+    `jacobian_scale(ω) = ω`. **Rebuilding the whole product at the developed state freezes the march**:
+    both factors grow, `d` blows up, the pseudo-transient shift `β·d` over-damps, and the step collapses
+    — the relative residual creeps *upward* ~1e-5/step with the recirculation and `k` static, no error
+    and no divergence-guard trip (on pitzDaily the un-fixed FULL refresh raised the convergence guard).
+    **This is independent of the SER `β`** — do not attribute it to the `β` reset: a controlled
+    discriminator from one post-stage-one state showed rebuilding the *product* + carrying the AMG froze
+    the march *byte-identically* to rebuilding both, while carrying the *product* + refreshing the AMG
+    descended — so the shift rebuild is the freeze, at whatever `β`. **The cure (issue #156) is to store
+    the two factors separately, not to freeze the shift.** `CoupledShiftPolicy` carries
+    `k_shift_transport`/`k_jacobian_scale` (likewise ω) rather than the product; a refresh rebuilds the
+    transport time scale (physics that should track the flow — measured on a real march that upgrades its
+    shift every refresh, it holds a full unclipped step) while carrying the coordinate factor frozen, so
+    the temporal ratio it presents is `transport(state)/transport(reference)` in which `ω` cancels (the
+    `>2×` over-damped tail — 15 % of ω cells when the product is rebuilt — drops to the 0.0–0.1 % of the
+    velocity/`k` blocks). `_coupled_shift_policy(..., reuse=…)` therefore rebuilds `k_shift_transport`/
+    `omega_shift_transport` at the new state and takes `k_jacobian_scale`/`omega_jacobian_scale` from
+    `reuse`. (The preconditioner's copy of the factor, `k_scale`/`omega_scale`, is *re-derived* at the
+    new state instead, because its AMG is refreshed at the new physical operator — the same quantity from
+    two states, deliberately.) Carrying the frozen factor is safe because the shift vanishes at the root,
+    so a slightly-stale factor changes only the path, never the converged state or its adjoint (the same
+    argument that carries the flow block). Rebuilding the transport was measured ~1.87× faster end-to-end
+    on pitzDaily than a stale baseline (~925 s vs 1726 s to rel 3e-2, flat ~22 s/step vs 100–300 s/step). Also: `max_steps` applies to **each** segment (so up to
     `(refresh_limit+1)·max_steps` march steps plus the finishing solve's own allowance, deliberately not
     split — either segment may need the full allowance); the finishing solve is handed the **absolute**
     target `atol + rtol·‖R0‖` measured at the initial state, so a refreshed solve stops exactly where an
@@ -371,11 +379,15 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       (it supplies the near-wall weighting the bare transport diagonal lacks); *temporally* it is the
       problem (it drags ω's evolving range into the shift, creating the tail). Carrying the cold-IC
       diagonal keeps the good half and freezes the bad half — but only by freezing **both**.
-    - **✅ THE SHIFT *CAN* BE REFRESHED — `transport_diagonal(state) × ω(cold)` (measured; the
-      "never refresh" rule is NOT intrinsic).** Refresh the *physics* (the transport diagonal, a local
-      time scale that genuinely should track the developing flow) and freeze only the *coordinate
-      transformation* (the ω weighting, a property of the log parametrization, not of the flow). The
-      temporal ratio is then `transport(state)/transport(cold)` — the ω factor cancels exactly:
+    - **✅ THE SHIFT *CAN* BE REFRESHED — `transport_diagonal(state) × ω(cold)` — BUILT (issue #156).**
+      `CoupledShiftPolicy` now stores the two factors separately (`k_shift_transport`/`k_jacobian_scale`,
+      likewise ω) instead of the product, and `_coupled_shift_policy(reuse=…)` rebuilds the transport
+      diagonal at the new state while carrying the coordinate factor frozen — so the "never rebuild the
+      shift" rule is replaced by "rebuild the transport, carry the coordinate factor." Refresh the
+      *physics* (the transport diagonal, a local time scale that genuinely should track the developing
+      flow) and freeze only the *coordinate transformation* (the ω weighting, a property of the log
+      parametrization, not of the flow). The temporal ratio is then `transport(state)/transport(cold)` —
+      the ω factor cancels exactly:
 
       | build state | temporal tail >2× (shipped → variant) | near-wall weighting (shipped → variant) |
       |---|---|---|
