@@ -268,7 +268,23 @@ class PseudoTransientStep(eqx.Module):
         return self.adjoint_preconditioner_factory
 
     def stepper(self) -> _ForwardStep:
-        """Return the accepted shifted-Newton step ``(residual_fn, φ, ‖R₀‖, solver) -> φ_next``.
+        """The accepted shifted-Newton step and its linear solve's cycle count.
+
+        ``(residual_fn, φ, ‖R₀‖, solver) -> (φ_next, cycles)``. ``cycles`` is the restart-cycle count
+        of the **accepted** attempt's shifted linear solve — the cost of the step that was actually
+        taken, not the sum over rejected escalation attempts.
+
+        **A step in which every attempt was rejected reports ``0``.** The count is only recorded on
+        acceptance, so a fully-rejected step (the escalation ladder exhausted without the acceptance
+        policy admitting anything) carries the initial zero rather than the cost of the attempts it
+        burned. A consumer that reads the count as a cost signal must therefore treat ``0`` as "no
+        measurement", not as "free" — otherwise a rejected step looks like the cheapest in the march.
+
+        **Why the count is worth carrying.** On a *fixed* system the cycle count rises as a frozen
+        preconditioner goes stale, and it does so before the residual history shows anything. That
+        makes it the honest trigger for re-freezing the preconditioner mid-march, and a robust one:
+        unlike elapsed wall-clock time (a tempting proxy), it is unaffected by machine load or a
+        suspended process, and it measures the linear algebra rather than the wall clock.
 
         Each step forms the shifted-Newton correction at ``β = β₀ (‖R‖/‖R₀‖)^p`` and **accepts it
         only if the injected :attr:`acceptance` policy admits it** (by default, unless it diverges);
@@ -292,7 +308,7 @@ class PseudoTransientStep(eqx.Module):
             phi: jnp.ndarray,
             residual_norm_0: jnp.ndarray,
             solver: lx.AbstractLinearSolver,
-        ) -> jnp.ndarray:
+        ) -> tuple[jnp.ndarray, jnp.ndarray]:
             residual = residual_fn(phi)
             residual_norm = norm(residual)
             term = policy.shift_term(phi)  # base diagonal + β -> M, from the same iterate
@@ -304,7 +320,9 @@ class PseudoTransientStep(eqx.Module):
                 beta_floor, beta0 * (residual_norm / residual_norm_0) ** exponent
             )
 
-            def attempt(relaxation: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+            def attempt(
+                relaxation: jnp.ndarray,
+            ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
                 # The shift only reshapes the forward path (like the preconditioner it damps), so it
                 # is detached: it never perturbs the converged state or its adjoint.
                 shift = jax.lax.stop_gradient(relaxation * term.diagonal)  # β d over the full state
@@ -318,7 +336,7 @@ class PseudoTransientStep(eqx.Module):
                 # not throw: a non-convergent shifted system yields a candidate the acceptance test
                 # rejects (triggering more damping), rather than raising.
                 preconditioner = term.make_preconditioner(relaxation)
-                delta = solve_linear(
+                delta, cycles = solve_linear(
                     shifted_jacobian,
                     -residual,
                     solver=solver,
@@ -331,7 +349,7 @@ class PseudoTransientStep(eqx.Module):
                 candidate = backtracking_line_search(
                     residual_fn, phi, delta, residual_norm, line_search, norm=norm
                 )
-                return candidate, norm(residual_fn(candidate))
+                return candidate, norm(residual_fn(candidate)), cycles
 
             # Escalate the damping on a rejected attempt, taking the first the acceptance policy
             # admits. The loop *mechanics* — grow β, cap at max_escalations, carry the best candidate
@@ -341,19 +359,23 @@ class PseudoTransientStep(eqx.Module):
             # exits as soon as an attempt is accepted, so a healthy first attempt costs a single solve;
             # only a rejected step pays for extra, more-damped attempts.
             def cond(state: tuple) -> jnp.ndarray:
-                _, _, attempts, accepted = state
+                _, _, attempts, accepted, _ = state
                 return (~accepted) & (attempts <= max_escalations)
 
             def body(state: tuple) -> tuple:
-                relaxation, best, attempts, _ = state
-                candidate, candidate_norm = attempt(relaxation)
+                relaxation, best, attempts, _, best_cycles = state
+                candidate, candidate_norm, cycles = attempt(relaxation)
                 accept = acceptance.accept(candidate_norm, residual_norm, residual_norm_0, attempts)
                 best = jnp.where(accept, candidate, best)
-                return relaxation * escalation_factor, best, attempts + 1, accept
+                # Report the cycles of the attempt actually taken, not the rejected escalations'.
+                best_cycles = jnp.where(accept, cycles, best_cycles)
+                return relaxation * escalation_factor, best, attempts + 1, accept, best_cycles
 
-            _, phi_next, _, _ = jax.lax.while_loop(
-                cond, body, (base_relaxation, phi, 0, jnp.asarray(False))
+            _, phi_next, _, _, step_cycles = jax.lax.while_loop(
+                cond,
+                body,
+                (base_relaxation, phi, 0, jnp.asarray(False), jnp.asarray(0, dtype=jnp.int32)),
             )
-            return phi_next
+            return phi_next, step_cycles
 
         return step

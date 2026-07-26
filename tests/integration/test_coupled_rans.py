@@ -305,13 +305,27 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
 
 
+class _RefreshAfter(eqx.Module):
+    """A trigger that fires after a fixed number of steps, so a test does not depend on tuning.
+
+    The production :class:`~aquaflux.solve.CycleGrowthTrigger` fires on measured cost growth, whose
+    thresholds are calibrated per case. These tests are about what a refresh does to the *answer*,
+    not about when it should happen, so they pin the timing deterministically instead.
+    """
+
+    steps: int = eqx.field(static=True)
+
+    def should_refresh(self, history) -> bool:
+        return len(history) >= self.steps
+
+
 @pytest.mark.slow
 def test_staged_preconditioner_refresh_reaches_the_same_fixed_point(case) -> None:
-    """``refresh_rtol`` re-freezes the preconditioner mid-march without moving the converged state.
+    """A mid-march re-freeze must not move the converged state.
 
-    The refresh is a forward-path device: both stages drive the *same* residual, and the preconditioner
-    is ``stop_gradient``-ed whichever state it is frozen at. So a staged march must land on exactly the
-    single-stage fixed point -- if it does not, the refresh has leaked into the physics.
+    The refresh is a forward-path device: every segment drives the *same* residual, and the
+    preconditioner is ``stop_gradient``-ed whichever state it is frozen at. So a refreshed march must
+    land on the unrefreshed fixed point -- if it does not, the refresh has leaked into the physics.
     """
     coupled = case["coupled"]
     flow_ws, k_ws, omega_ws = case["coupled_start"]
@@ -326,7 +340,7 @@ def test_staged_preconditioner_refresh_reaches_the_same_fixed_point(case) -> Non
         omega_ws,
         method="twolevel",
         max_steps=40,
-        refresh_rtol=1e-2,  # loose first stage, then re-freeze and finish
+        refresh_trigger=_RefreshAfter(steps=3),  # march a little, re-freeze, then finish
         **PRECONDITIONER,
     )
 
@@ -337,14 +351,15 @@ def test_staged_preconditioner_refresh_reaches_the_same_fixed_point(case) -> Non
 
 @pytest.mark.slow
 def test_staged_refresh_stops_at_the_same_tolerance(case) -> None:
-    """``rtol`` must mean the same thing with and without ``refresh_rtol``.
+    """``rtol`` must mean the same thing with and without a refresh.
 
-    Each solver measures its own reference residual from the state it is handed, so stage two -- which
-    starts from stage one's result -- would stop at ``rtol * refresh_rtol * ||R0||`` if its relative
-    tolerance were not compensated: a factor ``refresh_rtol`` tighter than the caller asked for, which
-    silently turns a converging solve into far more work or a ``max_steps`` failure. Both paths are
-    driven to a loose ``rtol`` here so each stops *on tolerance* rather than overshooting to machine
-    zero, which is what makes the comparison able to detect the difference.
+    The finishing solve is handed the *absolute* target measured at the initial state, so a refreshed
+    solve stops where an unrefreshed one does however many segments it took. A relative tolerance
+    would instead be measured against whatever residual the pre-march reached, silently tightening
+    the solve by that factor (and compounding with each further refresh) -- which turns a converging
+    solve into far more work or a ``max_steps`` failure. Both paths are driven to a loose ``rtol``
+    here so each stops *on tolerance* rather than overshooting to machine zero, which is what makes
+    the comparison able to detect the difference.
     """
     coupled = case["coupled"]
     flow_ws, k_ws, omega_ws = case["coupled_start"]
@@ -354,7 +369,9 @@ def test_staged_refresh_stops_at_the_same_tolerance(case) -> None:
 
     common = dict(method="twolevel", max_steps=40, rtol=rtol, **PRECONDITIONER)
     single = solve_coupled(coupled, flow_ws, k_ws, omega_ws, **common)
-    staged = solve_coupled(coupled, flow_ws, k_ws, omega_ws, refresh_rtol=1e-1, **common)
+    staged = solve_coupled(
+        coupled, flow_ws, k_ws, omega_ws, refresh_trigger=_RefreshAfter(steps=2), **common
+    )
 
     def terminal_residual(fields):
         return float(jnp.linalg.norm(coupled.residual(coupled.pack_state(*fields))))
@@ -366,9 +383,57 @@ def test_staged_refresh_stops_at_the_same_tolerance(case) -> None:
     # Both must satisfy the *requested* tolerance ...
     assert single_residual <= target
     assert staged_residual <= target
-    # ... and the staged one must not be dramatically over-solved, which is what an uncompensated
-    # relative tolerance would produce (it would chase `rtol * refresh_rtol * ||R0||`, 10x tighter).
+    # ... and the refreshed one must not be dramatically over-solved, which is what measuring the
+    # finishing tolerance against the pre-march's residual would produce.
     assert staged_residual > target * 1e-2, (
         f"staged solve stopped at {staged_residual:.3e} against a target of {target:.3e} -- far "
-        "tighter than requested, so the second stage's tolerance is not being compensated"
+        "tighter than requested, so the finishing solve is not using the absolute target"
     )
+
+
+@pytest.mark.slow
+def test_a_refresh_is_observed_as_two_reported_segments(case) -> None:
+    """The reporting seam works across a refresh: both segments reach the observer, with their costs.
+
+    **This deliberately does not assert that the refresh made the solve cheaper.** The measured
+    ~2.4-2.6x cycle-count win is a property of a *developed, separated* flow on a large mesh; at a
+    pre-separation state a refresh was measured to buy nothing and to be capable of costing (the
+    preconditioner is not yet stale, so there is nothing to recover). This fixture is small and stops
+    a few steps in, squarely in that regime, so a cost assertion here would be testing the headline
+    claim where the evidence says it does not apply -- and would fail or pass on noise. What *is*
+    testable here is the machinery: that the march segments around the rebuild, and that every step of
+    both segments is reported with a real measured cost. Whether the refresh pays is a question for an
+    instrumented full-mesh run, not for this tier.
+    """
+    coupled = case["coupled"]
+    flow_ws, k_ws, omega_ws = case["coupled_start"]
+    refresh_after = 3
+    reports = []
+
+    solve_coupled(
+        coupled,
+        flow_ws,
+        k_ws,
+        omega_ws,
+        method="twolevel",
+        max_steps=40,
+        refresh_trigger=_RefreshAfter(steps=refresh_after),
+        on_step=reports.append,
+        **PRECONDITIONER,
+    )
+
+    # Each segment numbers its own steps from 0, so the refresh boundary is where the index resets.
+    boundary = next((i for i, r in enumerate(reports) if i > 0 and r.step == 0), None)
+    assert boundary is not None, "the post-refresh segment was never marched or never reported"
+    pre, post = reports[:boundary], reports[boundary:]
+
+    # The trigger fired exactly where the stub said, and the segment after the rebuild was marched
+    # here rather than being swallowed by the finishing solve (which cannot report).
+    assert len(pre) == refresh_after
+    assert post
+
+    # Every reported step carries a real measurement, so a consumer reading these as a cost signal
+    # is not seeing the "no measurement" zero that a fully-rejected step would report.
+    assert all(report.cycles > 0 for report in reports)
+    # The march kept descending across the rebuild -- the refresh reshaped the path, not the problem.
+    assert post[-1].residual_ratio < pre[0].residual_ratio

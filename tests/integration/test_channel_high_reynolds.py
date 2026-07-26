@@ -144,7 +144,7 @@ def test_inner_gmres_does_not_stall_at_high_reynolds() -> None:
         return apply_m(jvp)
 
     rhs = apply_m(-residual)  # M (−R)
-    solution = solve_linear(
+    solution, _ = solve_linear(
         preconditioned_jacobian,
         rhs,
         solver=lx.GMRES(rtol=1e-8, atol=1e-8, restart=60, stagnation_iters=60),

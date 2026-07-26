@@ -35,8 +35,25 @@ def solve_linear(
     preconditioner: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     *,
     throw: bool = True,
-) -> jnp.ndarray:
-    """Solve ``A x = b`` for ``x`` given the linear map ``matvec(x) = A x``.
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Solve ``A x = b`` for ``x`` given the linear map ``matvec(x) = A x``, with the solve's cost.
+
+    Returns the solution **and** the solver's reported iteration count. The count is the *cost* of
+    the solve rather than part of its result — how hard the preconditioned system was this time — so
+    a caller that only wants the answer drops it at the call site (``x, _ = solve_linear(...)``).
+    There is deliberately no count-free variant to wrap this one: a second entry point would mean a
+    second signature and a second parameter docstring to keep in step.
+
+    **The count is restart cycles, not matrix-vector products (binding — the easy misreading).** For a
+    restarted GMRES ``stats["num_steps"]`` counts *cycles*, each of which is up to ``restart``
+    matvecs, so a "17" is ~17x``restart`` matvecs. A solver that reports no iteration count (a direct
+    factorization) yields ``0``.
+
+    **Why the count is worth returning:** a frozen preconditioner going stale shows up first as a
+    *rising cycle count* on an otherwise-unchanged system, well before it shows up in the residual
+    history. That makes the cycle count the honest trigger for re-freezing the preconditioner
+    mid-march — and a robust one, unlike wall-clock time, which a suspended or loaded machine
+    perturbs without the linear algebra having changed at all.
 
     Parameters
     ----------
@@ -60,8 +77,12 @@ def solve_linear(
 
     Returns
     -------
-    jnp.ndarray
-        The solution ``x``, of shape ``b.shape``.
+    x : jnp.ndarray
+        The solution, of shape ``b.shape``.
+    cycles : jnp.ndarray
+        The solver's iteration count (restart **cycles** for a restarted GMRES), an ``int32`` scalar.
+        The dtype is pinned so a caller can carry it through a ``lax.while_loop`` whose carry
+        structure must be invariant (the escalation loop in the pseudo-transient step does).
     """
     if solver is None:
         solver = default_linear_solver()
@@ -76,4 +97,5 @@ def solve_linear(
     operator = lx.FunctionLinearOperator(
         preconditioned_matvec, jax.ShapeDtypeStruct(b.shape, b.dtype)
     )
-    return lx.linear_solve(operator, rhs, solver=solver, throw=throw).value
+    solution = lx.linear_solve(operator, rhs, solver=solver, throw=throw)
+    return solution.value, jnp.asarray(solution.stats.get("num_steps", 0), dtype=jnp.int32)

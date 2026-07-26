@@ -168,3 +168,30 @@ def test_line_search_recovers_an_overshooting_step_without_escalation() -> None:
     )
     with pytest.raises(Exception):  # noqa: B017  (EquinoxRuntimeError, raised at solve time)
         jax.block_until_ready(unsearched.solve(_residual, jnp.ones_like(theta), theta))
+
+
+def test_stepper_returns_the_step_and_its_linear_solve_cycle_count() -> None:
+    """``stepper()`` returns ``(phi_next, cycles)`` -- the step, and what its shifted solve cost.
+
+    The count is the cost of the *accepted* attempt's shifted solve, the signal an observed march
+    watches to decide a frozen preconditioner has gone stale. There is one stepper: a caller with no
+    use for the count drops it, rather than there being a second count-free method to drift from.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+    phi0 = jnp.ones_like(theta)
+    step = PseudoTransientStep(UniformShiftPolicy(strength=1.0), beta0=1.0)
+    residual_norm_0 = jnp.linalg.norm(_residual(phi0, theta))
+    solver = step.default_solver()
+
+    def residual_fn(phi):
+        return _residual(phi, theta)
+
+    phi_next, cycles = step.stepper()(residual_fn, phi0, residual_norm_0, solver)
+
+    # A real shifted solve was taken: the iterate moved, and stayed finite. Deliberately not a
+    # descent assertion -- the pseudo-transient march is non-monotone (which is why its acceptance
+    # policy is a divergence guard rather than a descent test), so one step need not reduce ‖R‖.
+    assert not jnp.allclose(phi_next, phi0)
+    assert bool(jnp.all(jnp.isfinite(phi_next)))
+    assert int(cycles) > 0
+    assert cycles.dtype == jnp.int32  # invariant carry dtype for a lax.while_loop

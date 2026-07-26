@@ -66,7 +66,7 @@ def newton_step(
         ``J^{-1}``) for the step's linear solve; built at the current iterate. ``M``'s
         coefficients must be ``stop_gradient``-ed so preconditioning stays gradient-transparent.
     """
-    delta, _ = newton_correction(residual_fn, phi, solver=solver, preconditioner=preconditioner)
+    delta, _, _ = newton_correction(residual_fn, phi, solver=solver, preconditioner=preconditioner)
     return phi + delta
 
 
@@ -75,12 +75,22 @@ def newton_correction(
     phi: jnp.ndarray,
     solver: lx.AbstractLinearSolver | None = None,
     preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """The raw Newton correction ``delta`` (solving ``J delta = -R(phi)``) and the residual ``R(phi)``.
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """The raw Newton correction ``delta`` (solving ``J delta = -R(phi)``), ``R(phi)``, and the cost.
 
     Separated from :func:`newton_step` so a globalized driver can damp the step (a line search on
-    ``phi + alpha delta``) using the same matrix-free, differentiable solve. Returns ``(delta, r)``
-    with ``r = R(phi)`` so a caller doing a line search need not recompute it.
+    ``phi + alpha delta``) using the same matrix-free, differentiable solve.
+
+    Returns
+    -------
+    delta : jnp.ndarray
+        The correction solving ``J delta = -R(phi)``, shape ``(n_cells,)``.
+    r : jnp.ndarray
+        The residual ``R(phi)``, returned so a caller doing a line search need not recompute it.
+    cycles : jnp.ndarray
+        The linear solve's restart-cycle count (an ``int32`` scalar), the cost of this step's solve.
+        A forward-step strategy passes it on so a staged march can watch a frozen preconditioner go
+        stale; a caller with no use for it drops it.
     """
     r = residual_fn(phi)
 
@@ -88,7 +98,7 @@ def newton_correction(
         return jax.jvp(residual_fn, (_phi,), (v,))[1]
 
     preconditioner_matvec = None if preconditioner is None else preconditioner(phi)
-    delta = solve_linear(
+    delta, cycles = solve_linear(
         jacobian_vector_product, -r, solver=solver, preconditioner=preconditioner_matvec
     )
-    return delta, r
+    return delta, r, cycles

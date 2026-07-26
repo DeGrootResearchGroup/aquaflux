@@ -128,7 +128,7 @@ def test_bordered_preconditioner_inverts_the_augmented_jacobian() -> None:
     def flow_inverse(_augmented_flow: jnp.ndarray) -> object:
         def solve_flow(residual: jnp.ndarray) -> jnp.ndarray:
             matvec = lambda v: jax.jvp(forced0.residual, (flow0,), (v,))[1]  # noqa: E731
-            return solve_linear(matvec, residual, _DIRECT)
+            return solve_linear(matvec, residual, _DIRECT)[0]
 
         return solve_flow
 
