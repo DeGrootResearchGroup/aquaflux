@@ -699,7 +699,11 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     *stalls* the pitzDaily march**: the per-block relative norm plateaus long before the fields converge,
     so `coupled_continuation`/`mass_flow_coupled_continuation` default to `jnp.linalg.norm` and expose
     `block_scaled_norm` (default `False`) to request the block measure for experimentation. The helper and
-    the `BlockScaledNorm` class are kept as that opt-in path, not deleted.
+    the `BlockScaledNorm` class are kept as that opt-in path, not deleted. **When a march refreshes, the
+    measure is held fixed at the initial state** — `solve_coupled` passes `coupled_continuation(residual_norm=
+    base_norm)` on every refresh rather than letting it rebuild `_coupled_residual_norm` at the developed
+    state, or the self-normalising block scales would re-base and the convergence test become unreachable
+    (#156 seam 4; see `.claude/rules/solve.md`).
   - **`beta_floor` (SER lower bound) is available but off by default (a measured wash).** Bounding
     `β = max(beta_floor, β₀(‖R‖/‖R₀‖)^p)` keeps each late shifted solve out of the ill-conditioned low-`β`
     regime (correctness-safe — the floor scales the correction `δ`, which vanishes at the root, so it never

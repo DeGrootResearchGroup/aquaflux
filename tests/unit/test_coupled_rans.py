@@ -33,6 +33,7 @@ from aquaflux.turbulence.coupled import (
     CoupledRANSLayout,
     LiveViscosityVelocityParts,
     _row_jacobian_scale,
+    coupled_continuation,
     solve_coupled,
 )
 
@@ -357,6 +358,34 @@ def test_refreshing_the_policy_rebuilds_transport_and_carries_the_coordinate_fac
     assert not jnp.allclose(refreshed.omega_shift_transport, base.omega_shift_transport)
     # The flow block is carried over (the expensive half; measured no help to re-freeze).
     assert refreshed.flow_preconditioner is base.flow_preconditioner
+
+
+def test_refresh_carries_the_block_scaled_progress_norm_fixed_at_the_initial_state() -> None:
+    """A refresh reuses the initial residual measure, so block-scaled progress does not re-base (#156 s4).
+
+    ``BlockScaledNorm`` is self-normalising: at the state its per-block scales were built at it returns
+    ``sqrt(n_blocks)``. If a refresh rebuilt it at the developed state, every ``residual_ratio`` would
+    jump back toward one and the convergence test become unreachable. ``coupled_continuation`` with an
+    explicit ``residual_norm`` (what ``solve_coupled`` passes on every refresh) uses it verbatim instead
+    of rebuilding, so the measure stays fixed at the state the global progress reference was measured at.
+    """
+    mesh, coupled = _cavity()
+    cold = _healthy_state(mesh, coupled, seed=0)
+    developed = _healthy_state(mesh, coupled, seed=1)
+    kw = dict(method=None, block_scaled_norm=True, velocity="smoothed")
+
+    base = coupled_continuation(coupled, cold, **kw)
+    base_norm = base.norm()
+    refreshed = coupled_continuation(
+        coupled, developed, reuse=base.shift_policy, residual_norm=base_norm, **kw
+    )
+    # The refreshed continuation measures progress with the *same* norm object, not a re-based one.
+    assert refreshed.norm() is base_norm
+    # And that carry matters: a from-scratch rebuild at the developed state re-bases the per-block
+    # scales, so it scores the same residual differently (it self-normalises to sqrt(n_blocks) there).
+    rebuilt = coupled_continuation(coupled, developed, **kw)
+    r_dev = coupled.residual(developed)
+    assert not jnp.allclose(base_norm(r_dev), rebuilt.norm()(r_dev))
 
 
 def test_fixation_rows_take_their_own_derivative_not_the_chain_factor() -> None:

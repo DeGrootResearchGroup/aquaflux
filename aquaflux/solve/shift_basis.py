@@ -89,3 +89,39 @@ class LocalCourantBasis(eqx.Module):
 
     def local_diagonal(self, convective: jnp.ndarray, dissipative: jnp.ndarray) -> jnp.ndarray:
         return convective + self.dissipative_weight * dissipative
+
+
+class VelocityShiftParts(Protocol):
+    """Where the velocity shift's two diagonal buckets come from — the sibling of :class:`ShiftBasis`.
+
+    ``ShiftBasis`` says *how* to combine the convective/dissipative buckets into the base shift; this
+    says *where they come from*. The distinction matters because the pseudo-time shift and the frozen
+    preconditioner have deliberately different lifetimes: the preconditioner is frozen for many steps
+    (re-freezing the flow block was measured unhelpful), while the shift is a *local time scale* that
+    should describe the operator being solved now. Deriving the shift's buckets from the
+    preconditioner's frozen ``a_P`` couples those lifetimes for no reason, so the source is injected.
+
+    Structural interface only (a ``Protocol``). An implementation returns ``(convective, dissipative)``
+    per cell, each ``>= 0``, in the split a :class:`ShiftBasis` consumes. It lives here, beside
+    ``ShiftBasis``, rather than with any one solver, so both the flow-only shift policy
+    (:class:`~aquaflux.flow.MomentumShiftPolicy`) and the coupled one
+    (:class:`~aquaflux.turbulence.CoupledShiftPolicy`) can inject it without an import cycle.
+    """
+
+    def parts(
+        self,
+        flow: jnp.ndarray,
+        k_solved: jnp.ndarray | None = None,
+        omega_solved: jnp.ndarray | None = None,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """The velocity shift's convective and dissipative buckets, each shape ``(n_cells,)``.
+
+        Parameters
+        ----------
+        flow : jnp.ndarray
+            The flow sub-vector ``[velocity..., pressure]``.
+        k_solved, omega_solved : jnp.ndarray, optional
+            The turbulence blocks **as solved** (the log variable under a log parametrization, not the
+            physical field). Extra context only a coupled, viscosity-tracking implementation needs; a
+            flow-only or frozen-viscosity source ignores them, so they default to ``None``.
+        """

@@ -67,12 +67,45 @@ from aquaflux.solve import (
     ShiftBasis,
     ShiftTerm,
     SwitchedEvolutionRelaxation,
+    VelocityShiftParts,
 )
 
 from .block_preconditioner import BlockPreconditioner
 
 if TYPE_CHECKING:
     from .momentum import MomentumContinuity
+
+
+class FrozenViscosityVelocityParts(eqx.Module):
+    """The velocity shift buckets at the **preconditioner's frozen** effective viscosity (the default).
+
+    Live in velocity, frozen in viscosity: the ``(convective, dissipative)`` buckets come from the block
+    preconditioner's own frozen assembler, so ``mu_eff`` is whatever it was at the freeze state. For a
+    flow-only solve that is exact, because the viscosity really is constant; for a coupled solve it means
+    the velocity time scale ignores the eddy viscosity that develops (use
+    :class:`~aquaflux.turbulence.LiveViscosityVelocityParts` there when the shift should track it). This
+    is the historical behaviour and the explicit, injectable spelling of the ``None`` default.
+
+    Implements the :class:`~aquaflux.solve.VelocityShiftParts` protocol; it needs only a
+    :class:`BlockPreconditioner`, so it lives here in ``flow`` (not with the turbulence-specific live
+    variant) and both shift policies can inject it.
+
+    Attributes
+    ----------
+    block : BlockPreconditioner
+        The frozen flow-block preconditioner whose assembler supplies the buckets.
+    """
+
+    block: BlockPreconditioner
+
+    def parts(
+        self,
+        flow: jnp.ndarray,
+        k_solved: jnp.ndarray | None = None,
+        omega_solved: jnp.ndarray | None = None,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        del k_solved, omega_solved  # frozen viscosity needs no turbulence context
+        return self.block.frozen_momentum_diagonal_parts(flow)
 
 
 class MomentumShiftPolicy(eqx.Module):
@@ -98,10 +131,18 @@ class MomentumShiftPolicy(eqx.Module):
         preconditioner is now fed ``a_P + beta d`` rather than ``a_P (1 + beta)``; equal in exact
         arithmetic, and bitwise equal only for a dyadic ``beta``);
         a convective basis (weight ``0``) gives a genuine local convective time step.
+    velocity_shift_parts : VelocityShiftParts or None
+        Where the shift's convective/dissipative buckets come from (its own concern, separate from the
+        preconditioner's ``a_P``). ``None`` (default) takes them from the frozen preconditioner — live
+        in velocity, frozen in viscosity, the historical behaviour and bit-identical. This is the same
+        seam the coupled :class:`~aquaflux.turbulence.CoupledShiftPolicy` carries; for a flow-only solve
+        the frozen viscosity is exact (constant ``mu``), so it exists for symmetry and for a future
+        variable-viscosity flow rather than to change today's behaviour.
     """
 
     preconditioner: BlockPreconditioner
     shift_basis: ShiftBasis = LocalCourantBasis()
+    velocity_shift_parts: VelocityShiftParts | None = None
 
     def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
         """The base velocity shift diagonal and the ``β -> M`` shifted preconditioner at ``phi``.
@@ -119,8 +160,14 @@ class MomentumShiftPolicy(eqx.Module):
             returns the block preconditioner at the shifted diagonal ``a_P + β d``.
         """
         block = self.preconditioner
+        # `a_P` is a PRECONDITIONER quantity (what the velocity block inverts), always the frozen
+        # diagonal. The SHIFT's buckets are a separate concern with their own lifetime, so their source
+        # is injected (:class:`FrozenViscosityVelocityParts` is its explicit default spelling); `None`
+        # reuses the preconditioner's frozen parts inline, keeping the default path bit-identical.
         convective, dissipative = block.frozen_momentum_diagonal_parts(phi)
         a_p = convective + dissipative  # the isotropic frozen a_P the velocity block inverts at
+        if self.velocity_shift_parts is not None:
+            convective, dissipative = self.velocity_shift_parts.parts(phi)
         d = self.shift_basis.local_diagonal(
             convective, dissipative
         )  # base shift diagonal (n_cells,)

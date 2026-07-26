@@ -83,7 +83,7 @@ from .multigrid import (
 from .newton import newton_step
 from .norm import BlockScaledNorm, ResidualNorm
 from .relaxation import ConstantRelaxation, RelaxationSchedule, SwitchedEvolutionRelaxation
-from .shift_basis import LocalCourantBasis, ShiftBasis
+from .shift_basis import LocalCourantBasis, ShiftBasis, VelocityShiftParts
 from .step_control import AlphaTargetingControl
 
 __all__ = [
@@ -114,6 +114,7 @@ __all__ = [
     "StepControl",
     "StepReport",
     "SwitchedEvolutionRelaxation",
+    "VelocityShiftParts",
     "air_multigrid_solve",
     "build_air_hierarchy",
     "build_convection_hierarchy",

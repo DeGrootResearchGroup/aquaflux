@@ -13,7 +13,9 @@ from aquaflux.boundary import BoundaryConditions
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import (
     BlockPreconditioner,
+    FrozenViscosityVelocityParts,
     MomentumContinuity,
+    MomentumShiftPolicy,
     MovingWall,
     NoSlipWall,
     PressureOutlet,
@@ -320,6 +322,38 @@ def test_momentum_diagonal_matches_the_operator_at_active_wall_faces() -> None:
     state = asm.pack(velocity, jnp.zeros(mesh.n_cells))
     velocity_diag, _ = asm.unpack(jnp.diag(jax.jacfwd(asm.residual)(state)))
     assert jnp.allclose(a_p, velocity_diag, rtol=1e-9, atol=1e-12)
+
+
+def test_momentum_shift_policy_injects_its_velocity_parts_source() -> None:
+    """``MomentumShiftPolicy`` takes its shift buckets from an injected source (issue #156, seam 3).
+
+    The flow-only shift policy now has the same ``velocity_shift_parts`` seam as the coupled one — which
+    it could not reach before the :class:`~aquaflux.solve.VelocityShiftParts` protocol was moved out of
+    ``turbulence`` (a flow→turbulence import cycle). The explicit
+    :class:`~aquaflux.flow.FrozenViscosityVelocityParts` spelling equals the ``None`` default
+    (bit-identical, the historical inline path), and a different injected source genuinely changes the
+    shift diagonal, so the seam is live rather than cosmetic.
+    """
+    asm = _channel(u_in=1.0)
+    block = BlockPreconditioner.build(asm)
+    velocity = jnp.zeros((asm.mesh.n_cells, asm.mesh.dim)).at[:, 0].set(1.0)
+    phi = asm.pack(velocity, jnp.zeros(asm.mesh.n_cells))
+
+    default = MomentumShiftPolicy(block).shift_term(phi).diagonal
+    explicit = (
+        MomentumShiftPolicy(block, velocity_shift_parts=FrozenViscosityVelocityParts(block))
+        .shift_term(phi)
+        .diagonal
+    )
+    assert jnp.array_equal(default, explicit)  # the frozen spelling IS the None default
+
+    class _Doubled:  # a stub source that doubles the buckets, so the shift must change if it is used
+        def parts(self, flow, k_solved=None, omega_solved=None):
+            convective, dissipative = block.frozen_momentum_diagonal_parts(flow)
+            return 2.0 * convective, 2.0 * dissipative
+
+    injected = MomentumShiftPolicy(block, velocity_shift_parts=_Doubled()).shift_term(phi).diagonal
+    assert not jnp.allclose(injected, default)
 
 
 def test_schur_laplacian_is_conservative_and_spd() -> None:

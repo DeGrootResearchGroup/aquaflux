@@ -178,8 +178,18 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       would silently build the shift from the wrong field. Note `a_p` still comes from the preconditioner
       and must: it is what the velocity block inverts, so the two would otherwise disagree.
       *Measured:* live vs frozen viscosity at a developed state is a modest p50 0.96 / max 1.82 with **no
-      tail** — a correctness fix, not a large lever. The flow-only path (`MomentumShiftPolicy`) is
-      unaffected: with constant μ, frozen and live coincide.
+      tail** — a correctness fix, not a large lever.
+      - **Where the pieces live (binding, #156 seam 3).** The `VelocityShiftParts` **protocol** lives in
+        `solve/shift_basis.py`, beside `ShiftBasis` — the natural sibling: `ShiftBasis` says *how* to
+        combine the buckets, `VelocityShiftParts` says *where they come from*. `FrozenViscosityVelocityParts`
+        (needs only a `BlockPreconditioner`) lives in `flow/continuation.py`; only `LiveViscosityVelocityParts`
+        (needs `SSTTurbulence` + the transforms) stays in `turbulence/coupled.py`. This is what lets the
+        **flow-only** `MomentumShiftPolicy` carry the *same* `velocity_shift_parts` seam (it could not
+        before — the protocol lived in `turbulence`, and `flow` importing it would be a cycle). Its
+        `parts(flow, k_solved=None, omega_solved=None)` makes the turbulence blocks optional, so the
+        flow-only policy calls `parts(flow)` while the coupled one passes all three. The flow-only path is
+        still behaviour-unaffected (constant μ ⇒ frozen and live coincide); the seam exists for symmetry
+        and a future variable-viscosity flow, and to delete the byte-for-byte duplicated inline pattern.
     Adding a
     basis (e.g. a Fluent-style global min-physical-time-scale) is a new `ShiftBasis`; do not branch the
     policies.
@@ -594,6 +604,16 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       fields converge, so `coupled_continuation` defaults to the Euclidean `jnp.linalg.norm` and exposes
       `block_scaled_norm` (default `False`) to request the block measure for experimentation. The
       `BlockScaledNorm` class and its `_coupled_residual_norm` builder are kept as that opt-in path.
+      **The measure must be held FIXED across a refresh (binding, #156 seam 4).** `BlockScaledNorm` is
+      self-normalising — at the state its per-block scales were built at it returns `sqrt(n_blocks)` — so
+      rebuilding it at each refresh's developed state re-bases every `residual_ratio` back toward one,
+      making the convergence test unreachable and mismatching the finishing solve's absolute
+      `stage_atol` (computed on the pre-refresh scale). `solve_coupled` therefore captures the initial
+      measure once (`base_norm`, the same state the global `reference_norm` is measured at) and passes it
+      to every refreshed `coupled_continuation(residual_norm=base_norm)`, which uses it verbatim instead
+      of rebuilding. The invariant is "the global progress reference and the norm come from the same
+      state." Latent before the fix (only bites with `block_scaled_norm=True` *and* a refresh); pinned by
+      a unit test that a refreshed continuation reuses the initial norm object.
     - **A block-*triangular* preconditioner (forward-substituting `∂R_turb/∂flow·δ_flow`) — tried, WORSE,
       dead.** It made the channel worse (85 vs 51 outer cycles at β=0.5) and on recirculating pitzDaily was
       so bad GMRES could not converge at all: stronger flow↔turbulence coupling *amplifies* the inexact
