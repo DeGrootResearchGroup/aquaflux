@@ -218,6 +218,34 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       neighbouring rung `α = 0.5` (+0.081 %) — **74 % unclaimed**. Note the directional derivative is available almost free here, since
       the shifted solve gives `J δ = −R − β D δ` exactly, so a quadratic/cubic backtrack is cheap; and a
       residual evaluation is ~8 ms against a ~40 s solve, so a finer search is ~0.1 % of a step.
+    - **⚠️ MARCHES REVERSE THE SWEEP: on this case the productive lever is the damping LEVEL, not the
+      basis (2026-07-25).** The %/s table above is single-step at one state, and it picked the wrong
+      winner. Four cold-IC marches, all with the drift refresh, judged on the recirculation length:
+
+      | arm | steps | **x_r/h** | k_peak | rel | α |
+      |---|---|---|---|---|---|
+      | a_P, β₀ = 2, shift carried (the shipped config) | 158 / 80 min | 1.67 | 3.10 | 8.1e-3 | 1.0 |
+      | a_P, β₀ = 2, shift refreshable | 89 / 41 min | 1.22 | 2.04 | 1.3e-2 | 1.0 |
+      | **a_P, β₀ = 0.5, shift refreshable** | **109 / 76 min** | **2.43** | **3.04** | **4.6e-3** | **1.0** |
+      | convective at nominal Co ≈ 1, refreshable | 85 / 77 min | 1.07 | 2.58 | 1.5e-2 | **0.001 stalled** |
+
+      **`β₀ = 0.5` is the result to take from all of this: a 46 % larger bubble than the shipped
+      configuration, in fewer steps and slightly less wall time, at 1.8× the residual depth with α = 1
+      sustained.** It is the best this case has produced. The convective arm did not merely lose, it
+      **stalled** — α pinned at the 0.001 ladder sentinel with the residual frozen to five figures for
+      four consecutive steps.
+      - **The single-step sweep rated convective at Co ≈ 1 (0.051 %/s) level with a_P at β = 0.5 (0.056)
+        and better than a_P at every β ≥ 1.** The marches say the opposite. That is the **second** time
+        in one session that a single-state single-step ‖R‖ measurement chose the wrong winner (the first
+        was the log-space ω shift, `.claude/rules/turbulence.md`). **Treat %/s sweeps as a way to find
+        candidates, never as a way to choose between them** — the choice needs a march judged on physics.
+      - **This does NOT close out local timestepping (open question).** The Co ≈ 1 optimum was measured
+        with the shift frozen at the cold initial condition, so the Courant number it optimized was
+        *nominal*: `d_conv` was built from potential-flow mass fluxes, not the developed ones. With a
+        refreshable shift `Co` finally means what it says, and the optimum can move — if developed fluxes
+        exceed cold-IC fluxes, nominal Co ≈ 1 corresponded to a larger *actual* Co, which would leave the
+        refreshable arm under-damped and is consistent with the stall. Re-sweep Co **on marches** with the
+        refreshable shift before concluding; do not reuse the frozen-shift optimum.
     - **Neither α nor the cycle count can serve as a controller target on this problem.** Across the
       whole sweep above — two bases, a 12× span in β — **α is 1.0000 at every single point**, and the
       cycle count is flat at 14 through `a_P`'s entire productive range. Both are constant where the
@@ -414,7 +442,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
 
     Three consequences. (i) Enabling the refresh silently converts SER into **constant-β ≈ 2** — if a
     different damping is wanted it must come from `β₀` or a different schedule, not from expecting SER
-    to ramp. (ii) **An α-targeting controller has nothing to push against**: α is already 1.0000 at
+    to ramp. **And β₀ = 2 is too much: a march at `β₀ = 0.5` reaches `x_r/h` 2.43 against the shipped
+    configuration's 1.67 in fewer steps and less wall time (see the `ShiftBasis` section) — so the
+    pinning is not a curiosity, it is holding the solve at ~4× the useful damping.** (ii) **An α-targeting controller has nothing to push against**: α is already 1.0000 at
     every step from 45 on, so the controller sits at its set-point while the residual falls ~0.5 %/step
     — the productivity ceiling is *not* an α problem, which re-scopes #22. (iii) Any probe that derives
     "the march's operating β" from the global ratio is wrong by ~80× at a developed state.
