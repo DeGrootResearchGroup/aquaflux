@@ -23,10 +23,12 @@ place means a march that ends short of a root can never be mistaken for a conver
 **Two reference residual norms, and conflating them breaks the march.** Each call to
 :func:`forward_march` computes its own ``residual_norm_0`` from the state it is handed, and passes
 *that* to the step. The pseudo-transient schedule ramps its damping as ``beta = beta_0 (‖R‖/‖R₀‖)^p``,
-so a segment restarted after a refresh must restart its ramp too: a refresh rebuilds the shift
-diagonals, and under a logarithmic solve variable those grow at a developed state, so pairing a
-grown diagonal with the small ``beta`` belonging to the *pre-refresh* residual over-damps the step
-and the march silently stops descending. The separate ``reference_norm`` is the *global* scale
+so a segment restarted after a refresh must restart its ramp too. (A refresh **carries** the shift
+diagonals rather than rebuilding them -- rebuilding them was measured to freeze the march -- so the
+reason is not a grown diagonal: it is that the ramp is defined relative to where the segment began,
+and feeding it a residual ratio measured against a different state makes ``beta`` mean something
+else. Note the consequence, which is easy to miss: with frequent refreshes the ratio never falls
+far below one, so ``beta`` stays pinned near ``beta_0`` for the whole march.) The separate ``reference_norm`` is the *global* scale
 progress is reported and tested against, held fixed across every segment so that "converged" and the
 reported ratio mean the same thing throughout. The first must never be substituted for the second.
 """
@@ -60,12 +62,31 @@ class StepReport(NamedTuple):
     residual_ratio : float
         ``residual_norm`` divided by the march's global reference norm — how far the solve has come,
         on the same scale for every segment.
+    alpha : float
+        The line-search factor of the accepted step: ``1`` if the full shifted step descended, smaller
+        if it was clipped. The step-quality signal a :class:`StepControl` drives the next shift by
+        (``α < 1`` means the step overshot — the shift is too weak). ``1`` for a step with no line
+        search, and for a fully-rejected step.
+    drift : float
+        How far the frozen operator's coefficients have moved since the segment's reference state, as
+        a relative measure, from the march's injected ``drift_measure``. **The staleness signal a
+        :class:`CoefficientDriftTrigger` fires on**, and the one quantity here that reports on the
+        *preconditioner* rather than on the step. ``0.0`` when no measure was supplied — "not
+        measured", like ``cycles = 0``, and it fails closed because a drift trigger compares against a
+        positive threshold.
+
+        It is a **scalar**, deliberately: computing it needs the state, but putting the state on the
+        report would cost the replay property that makes trigger calibration cheap (see
+        ``forward_march``'s ``checkpoint``). Reducing it to a number here keeps a trigger a pure
+        function of numbers while still letting it see the physics.
     """
 
     step: int
     cycles: int
     residual_norm: float
     residual_ratio: float
+    alpha: float
+    drift: float = 0.0
 
 
 class MarchResult(NamedTuple):
@@ -187,6 +208,119 @@ class CycleGrowthTrigger(eqx.Module):
         return all(report.cycles > 0 and report.cycles >= threshold for report in recent)
 
 
+class CoefficientDriftTrigger(eqx.Module):
+    """Fire when the frozen operator's coefficients have drifted from the state they were frozen at.
+
+    The **direct** staleness signal, and the reason it is preferred to
+    :class:`CycleGrowthTrigger`: a preconditioner is stale exactly when the operator it approximates
+    has moved, so measuring that movement asks the question directly instead of inferring it from
+    cost. On a coupled RANS march the moving coefficient is the eddy viscosity ``nu_t`` -- it is what
+    the frozen scalar-transport operators are built from, and it changes by orders of magnitude as a
+    recirculation develops.
+
+    **Why this is a better trigger than watching the cycle count.** The cycle count rises for two
+    independent reasons -- the preconditioner drifting (the signal) and the pseudo-transient damping
+    ``beta`` ramping toward zero, which ill-conditions the shifted system whether or not anything is
+    stale -- and on a backward-facing step the second was measured to be the *larger*. So
+    :class:`CycleGrowthTrigger` needs a residual-ratio **gate** to suppress the confound, plus
+    ``patience`` because a single expensive step must not buy a rebuild. Coefficient drift has
+    neither problem: it does not respond to ``beta`` at all, so it needs no gate, and it moves
+    smoothly with the flow rather than jumping with one stiff solve, so it needs no patience. It is
+    also *unlikely* to fire before the flow develops -- which is when a refresh was measured to be
+    actively harmful -- because an undeveloped flow is largely one whose coefficients have not moved.
+    That is an argument, not a guarantee: nothing enforces it, and an initial condition being repaired
+    early in a march can move ``nu_t`` without the flow separating, so :attr:`warmup` is the only
+    actual guard.
+
+    Attributes
+    ----------
+    threshold : float
+        Fire once the reported drift reaches this value (static). The measure is relative, so ``0.1``
+        means "the coefficients have moved by a tenth of their magnitude at the freeze state".
+    warmup : int
+        Ignore this many leading steps of a segment (static). A segment's opening steps are measured
+        against a preconditioner that is fresh by construction.
+
+    Notes
+    -----
+    The default threshold is **calibrated on one instrumented march** -- a backward-facing step at
+    Reynolds ~ 4.7e4 from a cold start -- rather than guessed, but it is one case, so treat it as a
+    starting point for a new geometry rather than a universal constant. On that march the restart-cycle
+    count sat flat near its floor while the drift climbed, then rose steeply with it:
+
+    ==========  =====  =====  =====  =====  =====  =====
+    drift        0.04   0.07   0.11   0.15   0.19   0.24
+    cycles         10     13     21     33     53     84
+    ==========  =====  =====  =====  =====  =====  =====
+
+    ``0.1`` is where the cost has just doubled off its floor and the recirculation has formed, which
+    is early enough to skip the steep part entirely and late enough to stay out of the pre-separation
+    regime where a rebuild was measured to make the solve *worse*. Re-calibrating is deliberately
+    cheap: because this is a pure function of a :class:`StepReport` history, log one march with
+    ``trigger=None`` and a ``drift_measure``, then replay candidate thresholds against the log with no
+    further solves.
+    """
+
+    threshold: float = eqx.field(static=True, default=0.1)
+    warmup: int = eqx.field(static=True, default=3)
+
+    def should_refresh(self, history: Sequence[StepReport]) -> bool:
+        """Whether the coefficients have drifted past :attr:`threshold` since the segment began.
+
+        Parameters
+        ----------
+        history : sequence of StepReport
+            Every step of the current march segment, in order.
+
+        Returns
+        -------
+        bool
+            ``True`` once the warmup is past and the latest step's drift reaches the threshold. A
+            march with no ``drift_measure`` reports ``0.0`` and so never fires.
+        """
+        if len(history) <= self.warmup:
+            return False
+        return history[-1].drift >= self.threshold
+
+
+class StepControl(Protocol):
+    """Reshapes the forward step each iteration from the march's own feedback (forward-only).
+
+    Where a :class:`~aquaflux.solve.RelaxationSchedule` is a *memoryless* rule that lives on the
+    differentiable step, a step control is **stateful and reads the previous step's outcome** — the
+    line-search factor α, the cost, the residual — to decide the next step. That feedback is only
+    available *after* a step, and a control may raise under ``jax.grad``, so it lives here on the eager
+    march, alongside :class:`RefreshTrigger`, never on the traced Newton path.
+
+    ``next_step`` returns a ready-to-run :class:`~aquaflux.solve.ForwardStep` (typically ``base_step``
+    with its shift strength replaced, via :class:`~aquaflux.solve.ConstantRelaxation` on a dynamic β
+    leaf so :func:`_march_step` stays a compilation-cache hit) plus its own updated state. The march
+    threads that state and stays ignorant of what the control adjusts, so it works for any
+    ``ForwardStep`` — the control, not the march, knows about β.
+    """
+
+    def next_step(
+        self, base_step: ForwardStep, previous: StepReport | None, state: object
+    ) -> tuple[ForwardStep, object]:
+        # NOTE: the shipped control reshapes the shift strength, so it requires a
+        # `PseudoTransientStep` specifically -- the annotation is wider than the real contract, and
+        # passing a `DampedNewtonStep` raises `AttributeError` inside the march loop rather than
+        # being rejected at the seam. Narrow this if a second, step-agnostic control ever appears.
+        """The step to run next, and the control's carried state.
+
+        Parameters
+        ----------
+        base_step : ForwardStep
+            The march's base step, whose non-shift configuration (preconditioner, line search, norm)
+            the control reuses.
+        previous : StepReport or None
+            The report of the step just taken (``None`` before the first step) — the feedback the
+            control adapts on.
+        state : object
+            The control's own state from the previous call (``None`` on the first call).
+        """
+
+
 @eqx.filter_jit
 def _march_step(
     forward_step: ForwardStep,
@@ -194,8 +328,8 @@ def _march_step(
     phi: jnp.ndarray,
     residual_norm_0: jnp.ndarray,
     solver: lx.AbstractLinearSolver,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """One observed step: the next state, its linear-solve cycle count, and the new residual norm.
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """One observed step: the next state, its cycle count, line-search factor, and new residual norm.
 
     Compiled as a unit, and — this is the load-bearing part — ``forward_step`` and ``residual_fn``
     are **arguments, not captured values**, so repeated steps hit the compilation cache instead of
@@ -211,8 +345,8 @@ def _march_step(
     The next residual norm is returned from inside this same compiled call so the march does not pay
     a second, separate residual evaluation per step.
     """
-    phi_next, cycles = forward_step.stepper()(residual_fn, phi, residual_norm_0, solver)
-    return phi_next, cycles, forward_step.norm()(residual_fn(phi_next))
+    phi_next, cycles, alpha = forward_step.stepper()(residual_fn, phi, residual_norm_0, solver)
+    return phi_next, cycles, alpha, forward_step.norm()(residual_fn(phi_next))
 
 
 def forward_march(
@@ -225,7 +359,10 @@ def forward_march(
     atol: float,
     reference_norm: float | None = None,
     trigger: RefreshTrigger | None = None,
+    step_control: StepControl | None = None,
     observer: Callable[[StepReport], None] | None = None,
+    checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
+    drift_measure: Callable[[jnp.ndarray], float] | None = None,
     solver: lx.AbstractLinearSolver | None = None,
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
@@ -263,9 +400,35 @@ def forward_march(
     trigger : RefreshTrigger, optional
         Consulted after every step; when it fires the march stops and reports ``triggered=True``.
         ``None`` marches to convergence or ``max_steps``.
+    step_control : StepControl, optional
+        Reshapes the step each iteration from the previous step's report (e.g. driving the shift
+        strength β toward a line-search-factor target). ``None`` runs ``forward_step`` unchanged, so
+        the march is byte-identical to an uncontrolled one. Forward-only, like ``trigger``.
     observer : callable, optional
         Called with each :class:`StepReport` as it is produced, for streaming progress out of a long
         march. The full history is also returned, so an observer is only needed for live reporting.
+    checkpoint : callable, optional
+        Called with ``(report, state)`` after each step — the same report the observer sees, plus the
+        state that produced it. For saving intermediate states of a long march, so a later study can
+        re-solve at a chosen point without re-marching to it, and so a crash costs steps rather than
+        the whole run.
+
+        **Deliberately separate from** ``observer``, rather than putting the state on the report.
+        A :class:`RefreshTrigger` reads the report history, and keeping that history purely numeric is
+        what makes a trigger a pure function that can be replayed offline against a logged march. If
+        the state travelled on the same seam, a trigger could reach into the physics and that replay
+        property — the reason trigger calibration costs one logged run instead of one run per
+        candidate — would be lost.
+    drift_measure : callable, optional
+        ``state -> float``, a relative measure of how far the frozen operator's coefficients have
+        moved from the ones this segment's preconditioner was built at. Evaluated once per step and
+        reported as :attr:`StepReport.drift`, which is what a
+        :class:`CoefficientDriftTrigger` fires on. ``None`` reports ``0.0`` throughout.
+
+        **It must be re-based per segment**, against the state the current preconditioner was frozen
+        at — the same discipline as the segment-local damping reference. Measuring drift from a state
+        older than the last refresh would report movement that has already been absorbed and refresh
+        again immediately.
     solver : lineax.AbstractLinearSolver, optional
         The linear solver for each step; defaults to ``forward_step.default_solver()``.
 
@@ -287,13 +450,21 @@ def forward_march(
     current = float(residual_norm_0)
     reports: list[StepReport] = []
     triggered = False
+    control_state: object = None
 
     def converged_at(residual_norm: float) -> bool:
         return bool(_within_tolerance(jnp.asarray(residual_norm), reference, rtol, atol))
 
     while len(reports) < max_steps and not converged_at(current) and not triggered:
-        state, cycles, residual_norm = _march_step(
-            forward_step, residual_fn, state, residual_norm_0, solver
+        # A step control reshapes the base step from the previous report (None runs it unchanged, so
+        # the loop is byte-identical). It threads its own state; the march stays ignorant of β.
+        active_step = forward_step
+        if step_control is not None:
+            active_step, control_state = step_control.next_step(
+                forward_step, reports[-1] if reports else None, control_state
+            )
+        state, cycles, alpha, residual_norm = _march_step(
+            active_step, residual_fn, state, residual_norm_0, solver
         )
         current = float(residual_norm)
         report = StepReport(
@@ -301,10 +472,14 @@ def forward_march(
             cycles=int(cycles),
             residual_norm=current,
             residual_ratio=current / reference if reference > 0.0 else 0.0,
+            alpha=float(alpha),
+            drift=0.0 if drift_measure is None else float(drift_measure(state)),
         )
         reports.append(report)
         if observer is not None:
             observer(report)
+        if checkpoint is not None:
+            checkpoint(report, state)
         # A non-finite residual can never satisfy the tolerance test, so without this the march
         # would spend its whole budget stepping a poisoned state. Stop and let the finishing solve
         # report the failure, which is where non-convergence is diagnosed.

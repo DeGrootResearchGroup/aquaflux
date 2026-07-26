@@ -37,6 +37,38 @@ cell). The comparison therefore focuses on the **outer** flow — the shear-laye
 recirculation bubble, and the lower-wall **reattachment length** — where the near-wall treatment
 matters least, and reports the near-wall fields as the expected point of departure.
 
+## The comparison target is the TRANSIENT run, not the steady one
+
+**The steady SIMPLE reference does not converge on this case, and its fields must not be used as the
+target.** Run to `endTime`, `of_case/` leaves a **checkerboard** in the inlet region — adjacent cells
+carrying ω values that differ by many orders of magnitude (order 0.2 next to order 1e8) — which is the
+classic signature of an odd–even decoupled solution sitting on a non-converged state, not of a
+physical field. Anything calibrated against it is calibrated against numerical noise.
+
+The backward-facing step at this Reynolds number is genuinely unsteady in the shear layer, so a steady
+solver is being asked for a fixed point the discretization does not cleanly possess. A **time-accurate**
+run does reach a statistically steady state with a well-defined, stable reattachment: `of_transient/`
+(the `incompressibleFluid` solver with unsteady `ddtSchemes`, adjustable time step at `maxCo = 0.9`,
+run to 0.15 s) gives **x_r/h ≈ 7.74**, which is the number this study compares against.
+
+`of_transient/` therefore ships the case definition *and* its written time directories, so the
+reference fields are available without re-running OpenFOAM. Excluded as regenerable: the solver log,
+the probe output, and `constant/polyMesh` — the mesh is byte-identical to `of_case/`'s (same
+`blockMeshDict`), so it is regenerated rather than stored a second time.
+
+Reproduce it the same way as the steady case, from `of_transient/`:
+
+```
+docker run --rm -v <study dir>:/work -w /work/of_transient openfoam13:latest \
+  bash -c 'blockMesh && foamRun'
+```
+
+**Consequence for reading aquaflux results:** an aquaflux solve that under-predicts the bubble is
+usually **under-converged**, not wrong — the reattachment length grows monotonically as the coupled
+solve converges, so a short march reports a short bubble. Judge against x_r/h ≈ 7.74 and the peak k
+of the transient field, and check how far the march actually got before concluding anything about the
+closure.
+
 ## Status / cost
 
 The OpenFOAM kOmegaSST reference (fields, mesh, SIMPLE residual history) is fully reproducible via
@@ -52,9 +84,13 @@ latter is dominated by ω's ~1e5 near-wall scale and looks stalled while the flo
 
 ## Layout
 
-- `of_case/` — the OpenFOAM case template + `run_of.sh` (runs blockMesh + foamRun inside the
-  openfoam13 container, writing the converged fields, the mesh, and the residual history to
-  `runs/kwsst/`).
+- `of_case/` — the OpenFOAM **steady** case template + `run_of.sh` (runs blockMesh + foamRun inside
+  the openfoam13 container, writing the fields, the mesh, and the residual history to `runs/kwsst/`).
+  Retained because it supplies the mesh and the SIMPLE convergence history that shows the
+  non-convergence described above — **not** because its fields are the comparison target.
+- `of_transient/` — the **time-accurate** case whose statistically-steady field *is* the comparison
+  target (x_r/h ≈ 7.74). Case definition plus its written time directories; mesh, log and probe output
+  are regenerable and excluded.
 - `compare.py` — imports that mesh into aquaflux, runs the coupled solve on it, compares cell-for-cell,
   and writes `report.md` + `figures/comparison.png`.
 - `report.md`, `figures/` — the tracked deliverables, **produced by running `compare.py`**. They are

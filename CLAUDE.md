@@ -501,6 +501,25 @@ So: `LabelledGroups`, `cell-centred`, `neighbour` (already used throughout).
 > The workflow mirrors aquakin: branch → PR → green lint gate → merge; never commit on
 > `main`; commit/push only when the user asks.
 
+### Long-running probes and solves stream progress (binding)
+
+**Any run longer than ~30 s — a coupled march, a β/α sweep, a validation solve, a diagnostic probe —
+must stream per-step progress to a log you can read *while it runs*, never buffer to the end.** The
+repeated, expensive failure mode this guards against: a job pipes its output through `tail`/`head` or
+otherwise captures-at-EOF, so you fly blind for the entire run and only discover a bug, a stall, or a
+useless result *after* minutes (or hours) of runtime are already spent.
+
+Concretely:
+- Run the script with **`python3 -u`** (unbuffered) and **redirect to a log file** (`> run.log 2>&1`);
+  do **not** pipe it through `tail`/`head` (both wait for EOF and emit nothing until the process ends).
+- Have the script **print one line per outer step / sweep / β-value with `flush=True`** — the residual,
+  α, cycle count, whatever the run is deciding on — so the log grows continuously.
+- **Watch it live**: read the log as it grows (a background watcher that emits new lines as they land),
+  so a bad trajectory can be killed early instead of run to completion.
+
+This is a first-class rule, not a nicety: knowing what a long run is doing is how you avoid burning
+runtime on a job that was never going to tell you anything.
+
 ### Start from an up-to-date main (do this FIRST — binding)
 
 **Before creating a feature branch, putting any change on it, or running the test suite,

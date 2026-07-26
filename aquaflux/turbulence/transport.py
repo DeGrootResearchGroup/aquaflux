@@ -26,9 +26,17 @@ import equinox as eqx
 import jax.numpy as jnp
 
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
-from aquaflux.discretization import AdvectionFlux, DiffusionFlux, FixedValueCells, ResidualAssembler
+from aquaflux.discretization import (
+    AdvectionFlux,
+    DifferenceRow,
+    DiffusionFlux,
+    FixationRow,
+    FixedValueCells,
+    ResidualAssembler,
+)
 from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import FieldProperty, PropertyModel
+from aquaflux.solve import LocalCourantBasis, ShiftBasis
 from aquaflux.vectors import norm_squared
 
 from .boundary import (
@@ -43,7 +51,7 @@ from .continuation import ScalarShiftPolicy
 from .preconditioner import (
     ScalarTransportPreconditioner,
     scalar_transport_preconditioner,
-    scalar_transport_shift_diagonal,
+    scalar_transport_shift_diagonal_parts,
 )
 from .sources import (
     KDestruction,
@@ -54,6 +62,13 @@ from .sources import (
     OmegaProduction,
 )
 from .strain import safe_sqrt, strain_rate_magnitude
+
+# The default pseudo-time shift basis (full operator diagonal = uniform under-relaxation), held as a
+# module singleton so it is not reconstructed in each method's argument defaults.
+_DEFAULT_SHIFT_BASIS = LocalCourantBasis()
+# The default near-wall omega fixation row (the plain difference, right when omega is solved
+# directly); a module singleton for the same reason.
+_DEFAULT_FIXATION_ROW = DifferenceRow()
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -591,12 +606,29 @@ class SSTTurbulence(eqx.Module):
         )
 
     def omega_residual(
-        self, mdot: jnp.ndarray, closure: SSTClosureFields
+        self,
+        mdot: jnp.ndarray,
+        closure: SSTClosureFields,
+        fixation_row: FixationRow = _DEFAULT_FIXATION_ROW,
     ) -> Callable[[jnp.ndarray], jnp.ndarray]:
         """The omega-equation residual function ``omega -> R_omega`` for the frozen ``closure``.
 
         Advection, diffusion of ``nu + sigma_omega nu_t``, the production/destruction/cross-diffusion
         sources, and the near-wall cells fixed to the analytical ``omega`` (their balance replaced).
+
+        Parameters
+        ----------
+        mdot : jnp.ndarray
+            The flow's Rhie--Chow mass flux, shape ``(n_faces,)``.
+        closure : SSTClosureFields
+            The frozen closure fields of the current sweep.
+        fixation_row : FixationRow
+            How the near-wall fixation is written as a residual row (see
+            :class:`~aquaflux.discretization.FixationRow`). Defaults to the plain difference
+            ``omega - omega_wall``, which is right when ``omega`` itself is the solved unknown. A
+            caller solving in a transformed variable passes that variable's own row form -- the
+            coupled solve takes it from its ``omega_transform`` -- so the fixation stays linear in the
+            unknown actually being stepped.
         """
         diffusivity = self._diffusivity(
             closure.nu_t, closure.f1, self.model.sigma_omega1, self.model.sigma_omega2
@@ -634,6 +666,7 @@ class SSTTurbulence(eqx.Module):
                 closure.k[self.wall_cells],
                 self.model,
             ),
+            fixation_row,
         )
         return WallFixedResidual(assembler, wall_fix)
 
@@ -684,6 +717,33 @@ class SSTTurbulence(eqx.Module):
             reuse=reuse,
         )
 
+    def _scalar_shift_diagonal(
+        self,
+        diffusivity_values: jnp.ndarray,
+        mdot: jnp.ndarray,
+        residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
+        reference: jnp.ndarray,
+        shift_basis: ShiftBasis,
+        fixed_cells: jnp.ndarray | None = None,
+    ) -> jnp.ndarray:
+        """Combine the scalar shift diagonal's convective/dissipative parts through ``shift_basis``.
+
+        Shared by :meth:`k_shift_policy` and :meth:`omega_shift_policy`: the default
+        :class:`~aquaflux.solve.LocalCourantBasis` (weight ``1``) reproduces the full operator
+        diagonal (uniform under-relaxation); a convective basis (weight ``0``) gives a local convective
+        pseudo-time step on the scalar.
+        """
+        convective, dissipative = scalar_transport_shift_diagonal_parts(
+            self.mesh,
+            self.geometry,
+            diffusivity_values,
+            self._volume_flux(mdot),
+            residual_fn,
+            reference,
+            fixed_cells=fixed_cells,
+        )
+        return shift_basis.local_diagonal(convective, dissipative)
+
     def k_shift_policy(
         self,
         mdot: jnp.ndarray,
@@ -691,6 +751,7 @@ class SSTTurbulence(eqx.Module):
         reference: jnp.ndarray,
         *,
         preconditioner: ScalarTransportPreconditioner | None = None,
+        shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     ) -> ScalarShiftPolicy:
         """The pseudo-transient continuation policy for the k-equation solve.
 
@@ -717,13 +778,8 @@ class SSTTurbulence(eqx.Module):
         diffusivity = self._diffusivity(
             closure.nu_t, closure.f1, self.model.sigma_k1, self.model.sigma_k2
         )
-        shift_diagonal = scalar_transport_shift_diagonal(
-            self.mesh,
-            self.geometry,
-            diffusivity.values,
-            self._volume_flux(mdot),
-            self.k_residual(mdot, closure),
-            reference,
+        shift_diagonal = self._scalar_shift_diagonal(
+            diffusivity.values, mdot, self.k_residual(mdot, closure), reference, shift_basis
         )
         return ScalarShiftPolicy(shift_diagonal, preconditioner)
 
@@ -763,6 +819,7 @@ class SSTTurbulence(eqx.Module):
         reference: jnp.ndarray,
         *,
         preconditioner: ScalarTransportPreconditioner | None = None,
+        shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     ) -> ScalarShiftPolicy:
         """The pseudo-transient continuation policy for the omega-equation solve.
 
@@ -773,13 +830,12 @@ class SSTTurbulence(eqx.Module):
         diffusivity = self._diffusivity(
             closure.nu_t, closure.f1, self.model.sigma_omega1, self.model.sigma_omega2
         )
-        shift_diagonal = scalar_transport_shift_diagonal(
-            self.mesh,
-            self.geometry,
+        shift_diagonal = self._scalar_shift_diagonal(
             diffusivity.values,
-            self._volume_flux(mdot),
+            mdot,
             self.omega_residual(mdot, closure),
             reference,
+            shift_basis,
             fixed_cells=self.wall_cells,
         )
         return ScalarShiftPolicy(shift_diagonal, preconditioner)

@@ -126,10 +126,169 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   acceptance), add a `ForwardStep` — do **not** grow a branch in `_forward`.
 - **`continuation.py` — BUILT (`PseudoTransientStep`, residual-agnostic).** The pseudo-transient
   continuation engine lives **here in `solve/`, not in `flow/`** — it is a `ForwardStep`
-  (`stepper`/`default_solver`/`adjoint_preconditioner`) that owns the switched-evolution-relaxation
-  schedule `β = β₀(‖R‖/‖R₀‖)^p`, the diagonally-shifted solve `(J + diag(βd))δ = −R`
-  (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop`. **Two injected
-  seams**, both `Protocol`s: the physics comes from a **`ShiftPolicy`**
+  (`stepper`/`default_solver`/`adjoint_preconditioner`) that runs an **injected**
+  `RelaxationSchedule` for the shift strength β, the diagonally-shifted solve `(J + diag(βd))δ = −R`
+  (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop`. **`stepper()`
+  returns `(φ_next, cycles, alpha)`** — the accepted attempt's cycle count *and* its line-search
+  factor α (the step-quality signal, ≤1; `_forward` drops both off the `custom_vjp` primal, a march
+  reads them).
+  - **The β schedule is an injected `RelaxationSchedule` (`solve/relaxation.py`), SER extracted as the
+    default (binding — do not re-inline the β rule).** The old `beta0`/`exponent`/`beta_floor` fields on
+    `PseudoTransientStep` are gone; the field is `relaxation_schedule: RelaxationSchedule`, defaulting to
+    `SwitchedEvolutionRelaxation(beta0=2, exponent=1, beta_floor=0)` — byte-identical to the old inline
+    `max(beta_floor, β₀(‖R‖/‖R₀‖)^p)`. It is the direct twin of the injected `ResidualNorm`
+    (`solve/norm.py`). A `RelaxationSchedule` is **memoryless** (β from the two residual norms only), which
+    is what keeps it on the differentiable traced path. `ConstantRelaxation(β)` carries β as a **dynamic
+    0-d leaf** so an external control can vary it per step as a `filter_jit` cache hit (the `lam_max`
+    precedent). The five builder factories (`momentum_continuation`, `coupled_continuation`,
+    `mass_flow_coupled_continuation`, the two scalar builders) keep their public `beta0=/exponent=` knobs
+    and translate them into `SwitchedEvolutionRelaxation(...)` at the one construction line — a factory
+    building the real object, not a shim. A *stateful* or α-driven damping rule is **not** a schedule; it
+    is a `StepControl` on the eager march (see `march.py`).
+  - **The shift's SPATIAL distribution is an injected `ShiftBasis` (`solve/shift_basis.py`) — the
+    spatial twin of the `RelaxationSchedule` (binding).** `RelaxationSchedule` sets *how much* damping
+    (the scalar β); `ShiftBasis` sets the per-cell base diagonal `d` the shift `β d` is built on, from
+    the operator's two diagonal buckets: `local_diagonal(convective, dissipative) -> d`. The one concrete
+    is `LocalCourantBasis(dissipative_weight=w)`: `d = convective + w·dissipative`. **`w = 1` (default) is
+    the full operator diagonal `a_P`** — and because `d = a_P` (the same diagonal the operator carries),
+    `β a_P` is spatially-*uniform* under-relaxation (relaxation `1/(1+β)` in every cell), byte-compatible
+    with the historical shift. **`w = 0` is a genuine local convective time step** (`d = Σ_f max(mdot_f,0)`
+    = ½Σ|mdot|), the non-uniform per-cell `Δt` a Courant condition implies — OF's `Co = ½Δt Σ|φ|/V` and
+    Fluent's *segregated* local pseudo-time step are this same convective basis. The buckets are supplied
+    by each block: `rhie_chow.momentum_diagonal_parts` (velocity) and
+    `preconditioner.scalar_transport_shift_diagonal_parts` (k/ω), each summing to the block's total shift
+    diagonal to rounding. **Consequence for the preconditioner (binding):** with a non-`a_P` basis the
+    shifted diagonal is `a_P + β d`, *not* `a_P(1+β)`, so `make_preconditioner` must invert `a_P + β d` —
+    the velocity block's `apply_at` is fed exactly that (was `a_P(1+β)`; identical when `w=1`). Threaded
+    through `momentum_continuation`/`coupled_continuation`/`solve_coupled(shift_basis=…)` and the k/ω
+    shift policies; **pressure keeps zero shift regardless** (elliptic), which is why a *local* basis is
+    defensible on this coupled solver where Fluent uses a global time scale for its coupled path.
+    - **The velocity buckets' SOURCE is injected (`VelocityShiftParts`), because the shift and the
+      preconditioner have different lifetimes (binding).** `CoupledShiftPolicy` used to take them from
+      the frozen flow preconditioner, which welded two unrelated lifetimes together: the preconditioner
+      is deliberately frozen for many steps (re-freezing the flow block is measured unhelpful), while the
+      shift is a *local time scale* that should describe the operator being solved now. Worse, the
+      borrowed quantity was **live in velocity but frozen in viscosity**, so in a coupled solve `μ_eff =
+      ρ(ν + ν_t)` was stuck at its freeze-state value and the velocity time scale ignored the eddy
+      viscosity that develops — nobody chose that, it fell out of reusing the preconditioner's assembler.
+      `FrozenViscosityVelocityParts` (the default, `None`) reproduces the old diagonal **exactly**;
+      `LiveViscosityVelocityParts` re-forms the closure at the state being stepped, costing one closure
+      evaluation per *step* (milliseconds against a tens-of-seconds solve). It receives the scalar blocks
+      **as solved**, so it holds the transforms and maps back to physical — passing `log ω` to the closure
+      would silently build the shift from the wrong field. Note `a_p` still comes from the preconditioner
+      and must: it is what the velocity block inverts, so the two would otherwise disagree.
+      *Measured:* live vs frozen viscosity at a developed state is a modest p50 0.96 / max 1.82 with **no
+      tail** — a correctness fix, not a large lever. The flow-only path (`MomentumShiftPolicy`) is
+      unaffected: with constant μ, frozen and live coincide.
+    Adding a
+    basis (e.g. a Fluent-style global min-physical-time-scale) is a new `ShiftBasis`; do not branch the
+    policies.
+    - **First measurement of the convective basis: WORSE at a weakly-separated state, but NOT yet a fair
+      test of its regime (`local_ts_ab.py`, 2026-07-24).** Probing both bases on pitzDaily checkpoints at
+      `β ∈ {3, 12}` with a fresh preconditioner:
+
+      | state | basis | β | cycles | α | ‖R‖ kept |
+      |---|---|---|---|---|---|
+      | known-good rel 0.052 | spectral (`w=1`) | 3 | 17 | **1.00** | **29.3 %** |
+      | known-good rel 0.052 | convective (`w=0`) | 3 | 14 | 0.25 | 7.8 % |
+      | plateau rel 0.032 | either | 3 / 12 | 13–163 | **0.001** | ~0 |
+
+      At the productive state the convective basis **lowers** α (1.0 → 0.25) and the residual reduction
+      (29 → 8 %), and does not help the flow or k blocks either (d(flow) −0.7 %, d(k) −0.5 %) — consistent
+      with the dissipative diagonal being **load-bearing stabilization** on a wall-resolved,
+      high-aspect-ratio mesh: the near-wall and recirculation cells are diffusion-controlled, so dropping
+      their damping makes the coupled step overshoot and the line search clip harder. It is also cheaper
+      per step at low β (14 vs 17 cycles) but degrades faster at high β (dropping the dissipative diagonal
+      weakens diagonal dominance). **Caveat that keeps this open, not settled: the only state where steps
+      are productive (rel 0.052) is barely separated, so this probe never exercised the developed
+      recirculation the convective basis is *meant* for** — and the one genuinely separated state available
+      (the plateau) is direction-limited (α = 0.001 for *every* basis and β), so it cannot discriminate
+      between bases at all. Re-test at a state that is both **well separated and still productive** before
+      concluding. Hence: shipped as an opt-in with the **default unchanged** (`w=1` = the historical `a_P`),
+      not adopted and not withdrawn.
+    - **RE-TESTED PROPERLY (2026-07-25, #28): the convective basis is NOT dominated — it is 2.2× better
+      at the march's own operating point, with an optimum at Co ≈ 1.** The earlier probe above rebuilt
+      the continuation at the state it measured, and used a state that was barely separated; this one
+      uses the **carried protocol** at a state that is both developed (`x_r/h` ~1.2) and productive
+      (α = 1, 14 cycles), with β taken from the **segment-local** ratio. Residual reduction, %/s:
+
+      | β (= 1/Co for w=0) | 0.5 | 1.0 | **1.79 ← the march** | 3.0 | 6.0 |
+      |---|---|---|---|---|---|
+      | `w = 1` (a_P, uniform relaxation) | **0.056** | 0.030 | 0.016 | 0.007 | 0.002 |
+      | `w = 0` (convective local Δt) | 0.035 | **0.051** | **0.035** | 0.019 | 0.007 |
+
+      The convective basis wins at every β ≥ 1 (1.7–3×) and needs fewer cycles there (10–11 vs 14). It
+      has a genuine **interior optimum at Co ≈ 1** with symmetric fall-off — the canonical stability
+      limit, i.e. a target with physical meaning that should transfer between cases. `a_P` has **no**
+      optimum in range: its reduction follows a strict inverse law (`β × keep% ≈ 1.23` across a 12× span)
+      with cycles flat below β ≈ 2, so it simply improves as damping falls and its best measured value
+      is at the bottom of the sweep. Two roughly equivalent routes to ~3.5× over the march's 0.016 —
+      lower β on `a_P` (0.056), or convective at Co ≈ 1 (0.051) — which do **not** compose (convective at
+      β = 0.5 is 0.035).
+    - **A non-uniform shift creates INTERIOR optima that the backtracking ladder cannot find — so a
+      local-Δt basis and an interpolating line search are coupled design choices.** With `w = 1` the
+      ideal step length was exactly `α = 1` at every β, so the powers-of-½ quantization cost nothing.
+      With `w = 0` at β = 0.5 the ideal was `α = 0.658` (+2.26 %) while the ladder took `α = 1` (+1.76 %)
+      — **22 % of the available reduction unclaimed**, because `backtracking_line_search` accepts the
+      *first* rung that reduces and never asks whether a shorter step is better (a sufficient-decrease
+      search, not a minimizing one). The loss grows as the optimum moves further off a rung: on an
+      over-damped log-space ω shift the ideal was `α = 0.285` (+0.307 %) while the ladder took the
+      neighbouring rung `α = 0.5` (+0.081 %) — **74 % unclaimed**. Note the directional derivative is available almost free here, since
+      the shifted solve gives `J δ = −R − β D δ` exactly, so a quadratic/cubic backtrack is cheap; and a
+      residual evaluation is ~8 ms against a ~40 s solve, so a finer search is ~0.1 % of a step.
+    - **⚠️ MARCHES REVERSE THE SWEEP: on this case the productive lever is the damping LEVEL, not the
+      basis (2026-07-25).** The %/s table above is single-step at one state, and it picked the wrong
+      winner. Four cold-IC marches, all with the drift refresh, judged on the recirculation length:
+
+      | arm | steps | **x_r/h** | k_peak | rel | α |
+      |---|---|---|---|---|---|
+      | a_P, β₀ = 2, shift carried (the shipped config) | 158 / 80 min | 1.67 | 3.10 | 8.1e-3 | 1.0 |
+      | a_P, β₀ = 2, shift refreshable | 89 / 41 min | 1.22 | 2.04 | 1.3e-2 | 1.0 |
+      | **a_P, β₀ = 0.5, shift refreshable** | **109 / 76 min** | **2.43** | **3.04** | **4.6e-3** | **1.0** |
+      | convective at nominal Co ≈ 1, refreshable | 85 / 77 min | 1.07 | 2.58 | 1.5e-2 | **0.001 stalled** |
+
+      **`β₀ = 0.5` is the result to take from all of this: a 46 % larger bubble than the shipped
+      configuration, in fewer steps and slightly less wall time, at 1.8× the residual depth with α = 1
+      sustained.** It is the best this case has produced. The convective arm did not merely lose, it
+      **stalled** — α pinned at the 0.001 ladder sentinel with the residual frozen to five figures for
+      four consecutive steps.
+      - **The single-step sweep rated convective at Co ≈ 1 (0.051 %/s) level with a_P at β = 0.5 (0.056)
+        and better than a_P at every β ≥ 1.** The marches say the opposite. That is the **second** time
+        in one session that a single-state single-step ‖R‖ measurement chose the wrong winner (the first
+        was the log-space ω shift, `.claude/rules/turbulence.md`). **Treat %/s sweeps as a way to find
+        candidates, never as a way to choose between them** — the choice needs a march judged on physics.
+      - **This does NOT close out local timestepping (open question).** The Co ≈ 1 optimum was measured
+        with the shift frozen at the cold initial condition, so the Courant number it optimized was
+        *nominal*: `d_conv` was built from potential-flow mass fluxes, not the developed ones. With a
+        refreshable shift `Co` finally means what it says, and the optimum can move — if developed fluxes
+        exceed cold-IC fluxes, nominal Co ≈ 1 corresponded to a larger *actual* Co, which would leave the
+        refreshable arm under-damped and is consistent with the stall. Re-sweep Co **on marches** with the
+        refreshable shift before concluding; do not reuse the frozen-shift optimum.
+    - **Neither α nor the cycle count can serve as a controller target on this problem.** Across the
+      whole sweep above — two bases, a 12× span in β — **α is 1.0000 at every single point**, and the
+      cycle count is flat at 14 through `a_P`'s entire productive range. Both are constant where the
+      efficiency varies 28×. The only quantity that discriminates is **residual reduction per unit
+      time**, which is what any Courant/β controller would have to estimate.
+    - **⚠️ SUSPECT — the "plateau is a step-DIRECTION problem" conclusion was measured through a broken
+      preconditioner (see the fixation-row/`1/ω` bug below) and a corrected re-measurement CONTRADICTS
+      part of it. Re-derive before relying on any of it (#31).** As originally written: every basis/β
+      combination at rel 0.032 gave α = 0.001 and zero descent, so neither a preconditioner, nor a
+      per-block β, nor a shift basis could move it — the argument being that a **preconditioner** only
+      changes Krylov cycles, since for fixed `J`, `β`, `d`, `R` the shifted step `δ` is unique regardless
+      of `M`.
+      - **That uniqueness argument is only valid for a CONVERGED linear solve, and the coupled forward
+        solver is deliberately inexact** (`_COUPLED_FORWARD_SOLVER` runs at `rtol = 1e-3`). At a finite
+        tolerance `δ` depends on `M`, so a preconditioner *can* change α. Measured directly: refreshing
+        the scalar AMGs mid-march on the pitzDaily cold-IC run took α from **0.5 → 1.0** (sustained over
+        the following steps) while cutting cycles 53 → 10. So "a preconditioner cannot change α" is false
+        as stated here; state it as "cannot change the *converged* `δ`, hence not the fixed point".
+      - The α = 0.001 observations themselves came from probes at a state reached through the
+        `1/ω` preconditioner mis-scaling, i.e. through solves that were not converging. Treat the whole
+        plateau diagnosis as unverified until re-measured on a cold-IC march with the fixed code.
+      - What is *not* in doubt: a **shift basis** only redistributes damping, and altering the operator
+        itself (the pseudo-time shift, a grad-div / augmented-Lagrangian augmentation vanishing at
+        `∇·u = 0`, or physical continuation) is what changes `δ` at convergence.
+  - **Two injected seams**, both `Protocol`s: the physics comes from a **`ShiftPolicy`**
   (`shift_term(φ) -> ShiftTerm(diagonal, make_preconditioner)`; `ShiftTerm.diagonal` is the full-state
   base shift, `make_preconditioner(β)` the frozen shifted `M`), and the per-attempt accept/reject
   decision from a **`StepAcceptance`** (`accept(candidate_norm, residual_norm, residual_norm_0,
@@ -152,7 +311,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   globalizing the stiff k/omega solves via `scalar_pseudo_transient_solve` — the **only** scalar path
   the SST driver supports (the fixed-count Newton sub-solve was removed). When a new nonlinear residual
   needs pseudo-time globalization, write a `ShiftPolicy` — do **not** re-implement the march.
-  - **`stepper()` returns `(phi_next, cycles)` — ONE step method on the whole `ForwardStep` protocol,
+  - **`stepper()` returns `(phi_next, cycles, alpha)` — ONE step method on the whole `ForwardStep` protocol,
     counted/uncounted pair deleted (binding).** Every strategy reports its step's restart-cycle count
     (`DampedNewtonStep` gets it from `newton_correction`, which now returns `(delta, r, cycles)`); a
     consumer with no use for it drops it (`phi, _ = step(…)`). A `counted_stepper()` sibling existed
@@ -169,6 +328,82 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     package, for a number the differentiated path can never use; and it would force the *generic* Newton
     loop to pick which step's count survives (last / max / sum), which is a reporting policy the solver
     has no business owning. Per-step cost is observed eagerly instead, by `forward_march`.
+  - **The `growth` parameter is NOT a performance regression — hypothesis raised, then DISPROVEN by
+    measurement (2026-07-25, settled; do not re-open on the original evidence).** A
+    `forward_march(..., max_steps=1)` on the pitzDaily *plateau* state ran **27 min 42 s** without
+    returning, shortly after `backtracking_line_search` gained its `growth` argument, and the
+    coincidence was recorded here as a suspected regression with a traced-bound hypothesis. Both the
+    hypothesis and the attribution are wrong:
+    - **`admissible` was never inside the loop.** `admissible = growth * reference_norm` is computed
+      *outside* the ladder body (`implicit.py`), so the bound is a loop-invariant closure capture
+      exactly as the bare `reference_norm` was before. The "compute it outside" fix that was filed as
+      a candidate is already the code as written.
+    - **The default bound is not even traced.** `MonotoneLineSearch.growth` returns a **concrete**
+      `jnp.asarray(1.0)`, not a tracer, so under the default the comparison is structurally identical
+      to the pre-change one. The recorded observation that the slowdown appeared *with the monotone
+      schedule active* was read as evidence **for** the traced-bound hypothesis; it is evidence
+      against it.
+    - **The decisive measurement.** A jitted `_march_step` at the plateau with **`max_escalations = 0`
+      and `MonotoneLineSearch`** — i.e. exactly ONE shifted linear solve, default growth, no
+      escalation ladder, strictly less work than the step that took 27 min — ran **> 57 min without
+      returning**. Since that configuration contains neither the escalation ladder nor any non-default
+      growth, neither can be the cost.
+    - **The ladder was never a plausible candidate on size grounds either:** one coupled residual
+      evaluation is ~0.3 s, so all 11 rungs cost ~3 s against a 27-minute step.
+    - **What the cost actually was: a PRECONDITIONER BUG introduced by the fixation-row change in the
+      same PR — found and fixed the same day.** The scalar block's frozen preconditioner was rescaled
+      by `1/(dφ/dw) = 1/ω` on *every* row, including the 472 near-wall ω **fixation** rows, whose row
+      (`LogRatioRow`, written in the solved variable) has derivative **1** against the frozen
+      operator's unit identity row — a `1e-5` eigenvalue cluster that stalls GMRES. So the coupled
+      solves were not converging and ground to their step cap. Fixed by giving each `FixationRow` its
+      own derivative; measured 27× better linear residual at fixed cycle count (see
+      `.claude/rules/turbulence.md` for the full finding).
+      **The chain of three wrong attributions is the lesson:** the `growth` argument, the fixation row
+      itself, and nested `jax.grad` in the residual were each blamed in turn because all three landed
+      in the same window. What discriminated was measuring *components* rather than the whole step —
+      the residual is 8.1 ms, `jvp/residual` is **1.5×** (healthy AD, killing the nested-grad theory),
+      and one 120-vector restart cycle is ~1.5 s, so a healthy solve is seconds. Any step costing
+      minutes therefore had to be **iteration count**, not per-matvec cost — which pointed straight at
+      the preconditioner and away from everything else.
+    - **Staleness is still real but was NOT the main term here, and the old figures stand.** The
+      "36 s at β=2 / 127 s at β=0.2" numbers elsewhere in this file predate the bug and remain valid.
+      Rebuild-vs-carry belongs in the refresh-trigger calibration (#17) on a *cold-IC* march; re-measure
+      it now that the solves converge, since the pre-fix carried-vs-rebuilt comparison (#31) was taken
+      through the broken preconditioner and cannot be trusted.
+    - **Methodological trap this cost an hour to learn (binding for future probes):** timing a
+      `solve_linear` **eagerly** measures nothing comparable to the march, which runs the whole step
+      inside one `eqx.filter_jit`; eager JAX dispatches each Krylov operation separately. An eager
+      version of this same probe was still inside a single solve after 60 min of busy CPU. Always
+      time the jitted `_march_step`, and prefer *differencing two configurations* over instrumenting
+      inside the compiled region.
+    - **⚠️ THE CARRIED PROTOCOL — how to probe a coupled step at all (binding; four separate sweeps
+      were invalidated by getting this wrong in one session).** A probe that loads a checkpoint and
+      calls `coupled_continuation(coupled, checkpoint)` builds a **self-consistent** (state, shift,
+      preconditioner) triple. **The march never occupies that configuration**: it freezes the shift at
+      the cold IC and carries it through every refresh, so its shift always *lags* the state. The
+      difference is not academic — at the same state and the same β, a rebuilt continuation took
+      **148 cycles and found no descent** where the march takes **14 cycles at α = 1 and descends**.
+      Reproduce a refresh instead:
+      ```
+      cold_cont = coupled_continuation(coupled, cold_ic, method=...)
+      cont      = coupled_continuation(coupled, state, method=..., reuse=cold_cont.shift_policy)
+      ```
+      **Validate the harness before trusting it**: the `reuse=` build at the march's own β must
+      reproduce the march's cycle count and α from its log. When it finally did (14 cycles, α = 1.0000,
+      +0.677 %), every earlier number in that session turned out to have been measuring something else.
+    - **Take β from the SEGMENT-LOCAL residual ratio, never the global one (this is what made three of
+      those four sweeps wrong).** SER's reference is reset at every refresh, so on a refreshing march
+      β stays pinned near β₀ = 2 rather than decaying — see the `RelaxationSchedule` section. Computing
+      "the march's operating β" from the global ratio gave 0.022 where the true value was 1.79, an 80×
+      error that silently produced an apparently-solid "ascent at every Courant number" result.
+    - **A median is the wrong statistic for a shift diagonal.** Comparing rebuilt against carried gave
+      a median ratio of 0.96 — "no effect" — while the effect was a >2× tail over 15 % of ω cells,
+      reaching 24×. Report p99/max and the fraction above 2×, per block; a whole-state statistic also
+      hides that the pressure block is identically zero (20 % of the vector) and dilutes everything.
+    - **Do not probe step cost at the plateau.** Every configuration measured there costs ~1 h/step
+      because the state is direction-limited (α = 0.001 at every β and shift basis) *and* maximally
+      stale for a carried preconditioner. Cost questions belong on a cold-IC march, where steps are
+      accepted on the first attempt.
   - **`line_search` — backtrack the shifted step before escalating β (binding, the coupled-RANS fix).**
     The step optionally scales the shifted correction `δ` back along `{1, 1/2, …, 1/2**line_search}`
     (`backtracking_line_search`, extracted from `implicit.py` and shared with `DampedNewtonStep` — one
@@ -197,13 +432,155 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     120-vector subspace reaches the same tight solution ~1.4× faster and tighter. Tolerances stay tight
     — an *inexact* linear solve is unsafe under log-ω (an inaccurate step in the log variable is
     exponentiated and diverges), so the accuracy is load-bearing, not wasteful.
+  - **⚠️ READ FIRST: every raw-‖R‖ comparison ACROSS coupled-RANS march states recorded below predates
+    the 2026-07-25 fixation-row fix and is suspect.** Until then the near-wall ω fixation was written
+    in physical ω under a log-ω unknown, so 472 of 12 225 rows — scaled by an ω spanning 160→1.1e5 —
+    dominated the norm that drives the line search, the SER ramp, the divergence guard and the stopping
+    test (see `.claude/rules/turbulence.md`). Measured consequences: ‖R‖ at the *converged* pimpleFoam
+    field was **1.533e5**, i.e. the metric rated the right answer ~1.7e4× worse than a half-developed
+    state and 800× worse than the cold IC; and it ranked the const-β state at "rel 0.032" above the SER
+    state at "rel 0.052" although the former's recirculation bubble is **4× worse** (`x_r/h` 0.29 vs
+    1.16, target 7.74). After the fix the same field reads **20.7** and the ranking matches the physics.
+    **So: "reached a deeper rel" was not evidence of a better state, and the preference for the const-β
+    march and the α-targeting controller rests on exactly that comparison.** Re-measure before trusting
+    any relative-residual claim in this section; the *mechanistic* findings (exact linear solves, the
+    α-sentinel, the modal attenuation) are unaffected because they were measured at a single state.
+  - **⚠️ SCOPE FIRST: the "SER runs backwards" finding below applies ONLY to a march that does NOT
+    refresh (2026-07-25).** SER's `residual_norm_0` is **segment-local** — recomputed at each
+    `forward_march` entry, hence reset at every preconditioner refresh. With refreshes every ~15 steps
+    the ratio `‖R‖/‖R₀‖` never falls far below one, so **β is pinned near β₀ = 2 for the entire march**
+    rather than decaying. Measured on the drift-refreshed cold-IC pitzDaily march (158 steps, 6
+    refreshes):
+
+    | step | 45 | 60 | 90 | 110 | 158 |
+    |---|---|---|---|---|---|
+    | β from the **global** ratio | 0.033 | 0.027 | 0.024 | 0.022 | 0.016 |
+    | β **actually used** (segment-local) | 1.74 | 1.98 | 1.99 | 1.79 | 1.85 |
+    | α | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
+
+    Three consequences. (i) Enabling the refresh silently converts SER into **constant-β ≈ 2** — if a
+    different damping is wanted it must come from `β₀` or a different schedule, not from expecting SER
+    to ramp. **And β₀ = 2 is too much: a march at `β₀ = 0.5` reaches `x_r/h` 2.43 against the shipped
+    configuration's 1.67 in fewer steps and less wall time (see the `ShiftBasis` section) — so the
+    pinning is not a curiosity, it is holding the solve at ~4× the useful damping.** (ii) **An α-targeting controller has nothing to push against**: α is already 1.0000 at
+    every step from 45 on, so the controller sits at its set-point while the residual falls ~0.5 %/step
+    — the productivity ceiling is *not* an α problem, which re-scopes #22. (iii) Any probe that derives
+    "the march's operating β" from the global ratio is wrong by ~80× at a developed state.
+  - **THE SER β SCHEDULE RUNS BACKWARDS FOR STIFF COUPLED RANS (measured, pitzDaily — the dominant
+    cost, and it is the globalization, not the preconditioner).** The switched-evolution-relaxation
+    schedule `β = β₀(‖R‖/‖R₀‖)^p` *lowers* β as the residual falls, on the premise that a smaller shift
+    means a more Newton-like, more productive step near the root. **On this problem the premise is false:
+    the efficiency-optimal β *rises* as ‖R‖ falls, so SER drives β the wrong way and the coupled march
+    grinds instead of entering the quadratic basin.** Two independent measurements on E1's checkpoints
+    (`solve_coupled`, twolevel, corrected hybrid IC; each re-solving one frozen step across fixed β, PC
+    rebuilt at that state):
+    - **Efficiency (residual reduction per second):** optimum β ≈ 2 at rel 0.38, **≥ 5 at rel 0.05**,
+      while SER's β *fell* 0.76 → 0.10. At the developed state SER's β is ~50× below the optimum, a **~190×**
+      step-efficiency gap (0.003 vs 0.56 %/s).
+    - **The mechanism is line-search CLIPPING, seen directly via the step-length factor α.** α (the
+      fraction of the shifted step the backtracking search keeps) is a clean monotone signal: it rises
+      with β and hits **α = 1 exactly at the efficiency-optimal β** — the point where the full damped step
+      *just stops overshooting*. Below it the step overshoots and is clipped to near-nothing; at it the
+      step is full and productive.
+
+      | β | α @ rel 0.38 | α @ rel 0.05 |
+      |---|---|---|
+      | 0.10 (≈SER in the tail) | 0.016 | **0.031** |
+      | 1.0 | 0.50 | 0.25 |
+      | 2.0 | **1.00** | 0.50 |
+      | 5.0 | 1.00 | **1.00** |
+
+      **SER operates at α ≈ 0.03 in the tail:** the full Newton step overshoots by ~33× (at β=0.05, ~80×),
+      and the line search salvages a ~0.4% crawl from it. *That* is the grind — not near-convergence, not
+      preconditioner cost. The α = 1 boundary is the controller target (raise β until the full step is
+      marginally accepted); α is far less noisy than the per-step residual reduction ρ (which swings
+      37%↔6% at fixed β and wrecked a first, ρ-driven controller that ratcheted β into a runaway).
+    - **Caveat — β-schedule and PC-refresh are COUPLED; the optimal-β numbers above use a PC rebuilt at
+      each state.** In a real march the preconditioner is frozen at the cold IC, and a bolder β moves the
+      state faster, staling that frozen PC faster (the ρ-controller runaway hit 119 cycles at β=10.4 — high
+      β should be *cheaper*, so that was PC staleness, not the shift). So an α-targeting β schedule and the
+      scalar-AMG refresh (below) must be co-designed, not tuned in isolation. A **β-independent staleness
+      indicator** — the drift of the frozen operator's coefficients, `‖Δν_t‖`/`‖Δṁ‖` relative to the
+      freeze state — is the clean refresh trigger this motivates (it fixes the `CycleGrowthTrigger`
+      confound, #19: cycle count rises from β→0 *and* staleness, drift rises only from staleness).
+    - **VALIDATED end-to-end (α-targeting controller + PC refresh strictly dominates SER on pitzDaily).**
+      A prototype controller — raise β toward the α=1 boundary (`β ← β/α`, capped), ease gently when
+      α=1 — with the k/ω AMGs refreshed every 5 steps and the step `filter_jit`'d (to match SER's
+      compiled `while_loop` footing, ~2.2 s/cyc), A/B'd from the cold hybrid IC against E1's SER march:
+
+      | reach | SER (E1) | α-controller + refresh |
+      |---|---|---|
+      | rel 0.10 | 15.5 min | 11.4 min |
+      | rel 0.054 | **64 min** | **24 min (2.6×)** |
+      | deepest | **rel 0.052** (67 min, then stalled) | **rel 0.032** (41 min) |
+
+      Faster at every overlapping residual, the lead *widens* into the tail (1.3× → 2.6×), and it
+      reaches residuals SER never touched. The mechanism is the diagnosis playing out live: as the
+      state stiffens α drops below 1 and the controller *raises* β into the 2–5 band (refresh holding
+      cycles ~16) while SER collapses to β≈0.10 and grinds. Two prior arms confirm the attribution:
+      (a) the **frozen-PC** α-controller *lost* (0.65×) — cycles rose with β (25 vs SER's ≤14),
+      the β↔PC-refresh coupling biting, so the refresh is load-bearing; (b) the **eager** (un-jitted)
+      version was handicapped ~1.4×/cyc — the jit is needed for a fair comparison, not for the physics.
+    - **The controller has a CEILING — it does not converge either (it stalls at rel ~0.03, deeper than
+      SER's ~0.05, not at a root).** The cause is its own **over-damped hunting**: the `β/α` raise
+      overshoots *past* the α=1 boundary to where the full step is tiny (α=1, ρ~2%), then eases slowly;
+      α saturates at 1 above the boundary, so the controller is blind there and cannot sit at the
+      productive edge (the sweep's 20–60%/step β). So the direction is right and the win is real, but a
+      dynamics rework is needed: approach α=1 *from below* without overshooting, or pair α with a
+      step-productivity signal.
+    - **PRODUCTIONIZED as an injected strategy pair (the direction is shipped, opt-in).** The β schedule
+      is now the injected `RelaxationSchedule` (SER = `SwitchedEvolutionRelaxation`, the default; see the
+      `continuation.py` bullet), and the α-targeting control is `AlphaTargetingControl`, a `StepControl`
+      on the eager `forward_march` (opt-in via `solve_coupled(step_control=…)`, composes with
+      `refresh_trigger`). It is **never a default** — it does not converge standalone and loses without
+      the refresh — and its numeric gains (`beta_start`/`growth_cap`/`ease`) are placeholders, like the
+      trigger's. The dynamics rework above is the open follow-up. Study harnesses in the scratchpad
+      (`beta_sweep.py`, `alpha_probe.py`, `alpha_controller_march.py` = frozen-PC, `alpha_refresh_march.py`
+      = the winning arm) remain as the calibration/replay tools.
+    - **A PER-BLOCK β (separate shift damping for flow / k / ω) is DOMINATED — measured, do not re-attempt
+      (`per_block_sweep.py`).** The Euclidean ‖R‖ on the coupled state is ~100 % ω (ω O(1e1) vs flow O(1e-2),
+      k O(1e-3)), so a natural idea is to damp each block by its own β — the block-diagonal shift already
+      supports it (unpack the shift diagonal `[a_P·u, 0·p, d_k·k, d_ω·ω]`, scale each slice, repack; the flow
+      preconditioner keys off `β_flow` via its `a_P(1+β)`, the scalar AMGs are β-independent). Swept at the
+      developed state (rel 0.05), holding `β_ω` high and lowering `β_k`/`β_flow`, it loses on every axis
+      against uniform β:
+
+      | (β_flow, β_k, β_ω) | α | ‖R‖ kept | d(flow) | d(k) | d(ω) |
+      |---|---|---|---|---|---|
+      | **3, 3, 3** (uniform) | **1.00** | **29 %** | −1 | −2 | 29 |
+      | 3, **1**, 3 | 0.25 | 10 % | 0 | +0 | 10 |
+      | 3, **0.1**, 3 | 0.06 | 1 % | 0 | +2 | 1 |
+      | **1**, 3, 3 | 1.00 | 24 % | −2 | −9 | 24 |
+      | **0.1**, 3, 3 | 0.50 | 1 % | +2 | −26 | 1 |
+
+      Two failure modes, **neither a damping problem**: (i) **k is acceptance-limited** — a smaller `β_k`
+      *does* let k descend (d(k) −2 → +2 %), but the bigger k-step makes the *coupled* full step overshoot the
+      ω-dominated norm, so the line search clips α (1.0 → 0.06) and ω progress collapses (29 → 1 %); crediting
+      k would need a block-aware *acceptance* norm, which is the dead `BlockScaledNorm` (below). (ii) **flow is
+      coupling-limited** — no `β_flow` un-sticks it (d(flow) stays ≤ 0 down to β_flow=0.3; only the ruinous
+      β_flow=0.1 at 98 cycles nudges it +2 % while cratering k −26 %), because flow is waiting on ω through the
+      two-way ν_t coupling. The blocks are coupled through **both** the direction (flow↔ω) and the acceptance
+      (ω-norm), so per-block *damping* cannot separate them. This re-confirms the old "Lever D" per-block
+      under-relaxation ruling, now with the mechanism visible under log-ω + the adaptive wall.
+    - **The lever is a HIGHER uniform β, not a per-block one — the same sweep shows β=5 ≫ β=3.** At rel 0.05,
+      uniform **β=5 keeps α=1 and cuts ‖R‖ 63 % in one step, vs β=3's 29 %**, flow/k barely perturbed
+      (−1 %, −1 %) — i.e. the efficiency-optimal β at the developed state is *above* 3, extending the
+      "optimum β rises as ‖R‖ falls" table above. Per-cycle efficiency is ~flat (~1.7 %/cyc at both β=3 and
+      β=5, α=1), so a higher β is not free per cycle; it wins on **step count and overhead** (fewer Newton
+      steps → fewer PC refreshes, recompiles, line searches) and it stays productive (α=1). Confirmed on a
+      real march: a **constant β=3** march (`const_beta_march.py`, jit + refresh-every-5, from the cold hybrid
+      IC) descends monotonically **past SER's ~0.052 floor** (reached rel ≲ 0.035) but then *grinds* in the
+      tail at ρ ~2 %/step — the too-low-β symptom, exactly where β≥5 would nearly halve ‖R‖ per step. So the
+      settled next step is the β-climbing controller (#22: climb β while α=1), **not** a per-block β, a norm
+      change, or physical/order continuation.
   - **Where the coupled-solve cost actually is (settled by measurement).** As the SER ramp drives `β → 0`
     through the march, the *unshifted* coupled saddle Jacobian is severely ill-conditioned, so the
     diagonally-shifted GMRES burns thousands of matvecs per solve (measured: one shifted solve ≈ 36 s at
     β=2, 127 s at β=0.2 on ~12k-cell pitzDaily — note lineax `num_steps` counts restart **cycles**
-    ×`restart`, not iterations). Several levers were probed: two are wired but **off by default** (kept
-    for further evaluation, not the fix), one is dead, and one — refreshing the **scalar** k/ω AMGs after
-    the flow separates — is a real ~2.6× win, now BUILT (see below):
+    ×`restart`, not iterations). **The `β → 0` here is SER-induced and correctable, not inevitable — see
+    the schedule-runs-backwards finding above.** Several levers were probed: two are wired but **off by
+    default** (kept for further evaluation, not the fix), one is dead, and one — refreshing the **scalar**
+    k/ω AMGs after the flow separates — is a real ~2.6× win, now BUILT (see below):
     - **Flooring the SER `β` below (`β = max(beta_floor, β₀(‖R‖/‖R₀‖)^p)`, `PseudoTransientStep.beta_floor`,
       default 0 = off) — correctness-safe, a measured WASH, kept off-by-default.** It never moves the
       converged root (the shift `β d` scales the correction `δ`, which vanishes at `R=0`; it only damps the
@@ -285,14 +662,48 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         pseudo-transient `a_P(1+β)` either (that direction is strictly worse at every β).
       **Root cause:** the MSIMPLER Schur is a *constant-coefficient* (scaled pressure-mass-matrix) Poisson,
       which is a near-Stokes/low-Re approximation and degrades as convection strengthens — exactly the
-      high-Re/recirculating regime here. **The fix is a better Schur approximation, not a better solve of
-      this one:** the stabilized least-squares-commutator (LSC) of Elman, Howle, Shadid, Silvester &
-      Tuminaro (2007), which needs only momentum-operator applies, `diag(V)`, and the assembled pressure
-      Poisson `B Q̂⁻¹ Bᵀ` this file's Schur already builds. Use the **stabilized** (2007) variant — a
-      Rhie–Chow collocated discretization is equal-order stabilized, so the original (2006) LSC
-      underperforms on it — and re-derive its boundary treatment for cell-centred FVM. Prefer LSC over
-      pressure-convection–diffusion (PCD), whose auxiliary operator carries finite-element boundary
-      recipes that do not transfer cleanly to FVM.
+      high-Re/recirculating regime here.
+      - **⚠️ The "obvious" fix — a better Schur (stabilized LSC) — WAS BUILT AND LOSES BADLY on the
+        coupled solve. Do not re-derive it (binding).** `schur_scaling="lsc"`
+        (`flow/block_preconditioner.py`) implements the algebraic, nonuniform-mesh stabilized
+        least-squares commutator of Elman, Howle, Shadid, Silvester & Tuminaro (2007) — the *right*
+        variant for a Rhie–Chow collocated (equal-order stabilized) discretization, with the viscosity
+        cancelled so it serves a variable-viscosity closure. Measured on one shifted solve at a
+        developed/separated pitzDaily state:
+
+        | Schur | cycles | wall |
+        |---|---|---|
+        | **msimpler** | **13** | **38.9 s** |
+        | lsc (`v_cycles=4`) | 96 | 526 s |
+        | lsc (`v_cycles=8`) | 82 | 662 s |
+
+        6–7× the cycles and 13–17× the wall time, with both solves genuinely converged
+        (`lin_rel ~2e-9`), plus ~2.9× slower on the coupled channel at an identical residual trajectory.
+        **Why the flow-only win does not transfer:** LSC *does* beat MSIMPLER on the isolated flow block
+        (9 vs 15 GMRES at Re=1e4), but on the coupled block-*diagonal* preconditioner under the
+        pseudo-transient shift, a better isolated flow-Schur does not reduce *coupled* cycles — the
+        coupled iteration is not limited by the flow block's Schur quality. Keep the strategy (it is a
+        legitimate option for a flow-only solve); do **not** make it the coupled default, and do not
+        propose it again as the cure for coupled cost.
+      - PCD remains deprioritized regardless: its auxiliary pressure convection–diffusion operator
+        carries finite-element boundary recipes that do not transfer cleanly to cell-centred FVM.
+      - **What a preconditioner can and cannot change — state this precisely, both halves are measured.**
+        *While the linear solve actually converges*, swapping the preconditioner changes **cost only**:
+        msimpler vs LSC gave coupled residual trajectories identical to **5 significant figures**, so the
+        Newton direction, the accepted step, and whether the march converges are all preconditioner-
+        independent. That rules out a whole class of experiment — you cannot precondition your way out
+        of a stalled march, only out of an expensive one.
+        **But the guarantee is conditional on convergence, and it fails when a preconditioner is stale
+        enough to degrade the solve.** Measured 2026-07-25 on the pitzDaily cold-IC march, refreshed vs
+        unrefreshed at *identical* step indices: the unrefreshed arm sat at **α = 0.5 for steps 16–23
+        while needing 53–85 cycles**, and the refreshed arm took **α = 1.0 at 10–13 cycles**, with
+        different residual trajectories (rel 4.45e-2 vs 4.13e-2 at step 20). So a sufficiently stale
+        preconditioner *does* change the step. The mechanism is not isolated — the natural reading is
+        that the degraded solve is truncating or stagnating rather than reaching its tolerance, so the
+        returned `δ` is no longer the tolerance-defined one — and `_COUPLED_FORWARD_SOLVER` runs
+        `rtol=1e-3` with `stagnation_iters=40`, which makes that reachable. **Practical rule:** treat
+        "preconditioner ⇒ cost only" as true when solves converge comfortably, and stop trusting it
+        once the cycle count is climbing toward the solver's limits.
   - **The residual measure is an injected `ResidualNorm`, owned by the `ForwardStep` (`solve/norm.py`).**
     Every `ForwardStep` exposes `norm()`; `ImplicitNewtonSolver` reads it for the outer stopping test
     (threaded through `_forward`/`_implicit_solve` as the extra nondiff arg `norm_fn`) and the strategy
@@ -354,6 +765,77 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     accelerates. Pinned by a trace-counting test (extra steps add zero traces). Note the residual is
     invoked several times *within one trace* (step, line-search ladder, norm), so trace count ≠ compile
     count — assert that further steps add none, not that the total is 1.
+  - **`CoefficientDriftTrigger` — the PREFERRED staleness trigger: measure the drift, don't infer it
+    from cost (binding for new work).** A frozen preconditioner is stale exactly when the operator it
+    approximates has moved, so the honest signal is that movement itself. `StepReport.drift` carries a
+    **scalar** relative drift produced by `forward_march(drift_measure=…)`; the coupled RANS measure is
+    `turbulence.eddy_viscosity_drift(coupled, reference_state)` — `‖Δν_t‖/‖ν_t,ref‖` — because `ν_t` is
+    what the frozen k/ω transport operators are assembled from.
+    - **Why it beats `CycleGrowthTrigger` (which it supersedes for this job).** The cycle count rises
+      from staleness **and** from `β → 0` ill-conditioning the shifted system, and on a separating flow
+      the second is the *larger* — hence that class's `max_residual_ratio` gate and its `patience`.
+      Drift has neither confound: it does not respond to `β`, so **no gate**, and it moves smoothly with
+      the flow instead of jumping on one stiff solve, so **no patience**. It also cannot fire before the
+      flow develops — the regime where a refresh was measured to be actively *harmful* (43 → 83 cycles)
+      — because an undeveloped flow is by definition one whose `ν_t` has not moved. This is the fix for
+      the confound recorded as #19.
+    - **The scalar is the whole design (binding).** Drift needs the *state*, but the state must not
+      reach a trigger: `checkpoint` carries state and `observer` carries only numbers precisely so a
+      trigger stays a pure function replayable against one logged march (see below). Reducing drift to a
+      number on the report keeps that property *and* lets the trigger see the physics — so calibration
+      is still "log one march with `trigger=None` and a `drift_measure`, replay thresholds offline".
+      Do **not** widen the trigger interface to take the state.
+    - **The measure must be RE-BASED at every refresh (binding — a real trap).** `solve_coupled` builds
+      a fresh `eddy_viscosity_drift` per segment against that segment's starting state, which *is* the
+      state the current preconditioner was frozen at. Carrying one measure across segments would keep
+      reporting drift the refresh had already absorbed, so the trigger would re-fire on the next step
+      and burn the whole `refresh_limit` in consecutive steps. Same discipline as the segment-local
+      `residual_norm_0`. Pinned by
+      `test_the_drift_measure_is_rebased_at_every_refresh`.
+    - **CALIBRATED, and the premise validated, on an instrumented cold-IC pitzDaily march (2026-07-25 —
+      this closes #17 for this case).** One logged march with `refresh_trigger=None` + `on_step`, which
+      still records drift because `solve_coupled` observes whenever an observer is supplied:
+
+      | step | 5 | 10 | 12 | 14 | **15** | 17 | 19 | 20 | 22 | 23 |
+      |---|---|---|---|---|---|---|---|---|---|---|
+      | drift | 0.038 | 0.057 | 0.073 | 0.092 | **0.106** | 0.137 | 0.172 | 0.189 | 0.226 | 0.243 |
+      | cycles | 10 | 12 | 13 | 17 | **21** | 28 | 45 | 53 | 85 | 84 |
+
+      **The premise holds:** the cycle count sits flat at its 9–13 floor while drift climbs steadily,
+      then rises monotonically with it — so `ν_t` movement is what makes the frozen preconditioner
+      expensive, and drift *leads* cost early (drift is already 5× its step-0 value at step 5 while
+      cycles are still at the floor). `threshold = 0.1` fires at step 15, where cost has just doubled
+      off the floor and the recirculation has formed (`x_r/h` 0.32) — before the steep part
+      (45→53→85) and clear of the pre-separation regime where a rebuild was measured to make things
+      *worse*.
+    - **The shipped default was originally 0.5 and would never have fired on this march** (drift
+      reaches only 0.24 by step 23). A "conservative" placeholder chosen by intuition was not
+      conservative — it was inert. Trigger numerics must come from a logged march, not from judgement
+      about what sounds safe; the replay procedure exists precisely because that judgement is unreliable.
+      Calibrated on **one** geometry, so treat 0.1 as a starting point elsewhere, not a constant.
+    - **END-TO-END RESULT at `threshold = 0.1`, `refresh_limit = 8`, against the logged control (same
+      cold IC, same everything, `refresh_trigger=None`) — a 5–8× cost win, sustained and repeatable:**
+
+      | global step | 16 | 18 | 20 | 21 | 22 | 23 |
+      |---|---|---|---|---|---|---|
+      | refreshed cycles | 13 | 11 | **10** | 10 | 10 | 11 |
+      | control cycles | 24 | 33 | **53** | 74 | 85 | 84 |
+
+      ~21 s/step versus ~190 s/step, and the refreshed march was simultaneously **ahead on residual**
+      (rel 2.67e-2 vs 3.03e-2 at step 23). Three further observations worth keeping:
+      - **A refresh costs ~38 s, not the 60–240 s assumed elsewhere in this file** (the refresh step took
+        59 s against a 21 s steady step). It repays itself inside one step, which is why
+        `refresh_limit` can be generous rather than hoarded.
+      - **It repeats across segments.** Refreshes fired at steps 15 and 30, each time on that segment's
+        *own* drift accumulating from ~0 to 0.10 — the production confirmation of the per-segment
+        re-basing.
+      - **α improved 0.5 → 1.0** across the refresh (see the correction to the "preconditioner cannot
+        change α" claim above).
+    - **What the refresh does NOT fix — state this when reporting it.** The march still grinds: after the
+      second refresh the residual moved ~0.3 %/step (rel ~1.77e-2) with cheap (11-cycle) full (α = 1)
+      steps, and `x_r/h` crept 0.48 → 0.71 against OpenFOAM's 7.74. So the refresh solved the **cost**
+      problem, not the **step-productivity** problem (#22). Its real value beyond the speedup is that the
+      cost confound is now *gone*, so a β/α-control experiment finally measures what it claims to.
   - **`CycleGrowthTrigger` — cost growth is the trigger, the residual is the GATE.** Fires only when: the
     `warmup` is past; `residual_ratio <= max_residual_ratio`; and the last `patience` steps each measured
     `>= growth ×` the segment's **running-minimum** non-zero count. **Why the residual is demoted to a
@@ -374,11 +856,38 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     **calibrated offline**: log one march with `refresh_trigger=None` and an `on_step` observer, then
     replay candidate parameters against the log. No numeric default here is calibrated — they are chosen
     conservative (late rather than early) and must be set from an instrumented full-mesh run.
-  - **Reporting seam.** `StepReport(step, cycles, residual_norm, residual_ratio)` + `MarchResult`, plus an
-    optional streaming `observer` (a long march must not withhold all logging until it finishes). The
-    trigger and a future logger consume the identical objects, so there is no second reporting path.
+  - **Observation does NOT require a refresh (binding — this was a real bug).** `solve_coupled` runs the
+    observed pre-march when the caller wants a refresh **or** merely wants to watch
+    (`observing = refreshing or on_step or on_checkpoint`). Gating it on the trigger alone makes an
+    *instrumented reference march* — `refresh_trigger=None` plus an observer, which is exactly the run a
+    trigger is calibrated against, and the longest-running one — produce **no output at all** and sit
+    silent for hours. Consequence to keep in mind: an observed solve spends `max_steps` on the pre-march
+    and `max_steps` again on the finishing solve, so the budget is larger but *split*; instrumenting a
+    solve already near its limit can turn a pass into a convergence-guard raise. Pinned by
+    `test_the_march_reports_progress_without_a_refresh_trigger`.
+  - **`checkpoint` is a SECOND seam, separate from `observer` (binding).** `checkpoint(report, state)`
+    carries the state; `observer(report)` carries only numbers. Keeping the state off the report history
+    is what keeps a `RefreshTrigger` a pure function that can be replayed offline against a logged march
+    — put the state on that seam and a trigger could read the physics, and trigger calibration would cost
+    one full solve per candidate instead of one logged run for all of them.
+  - **Reporting seam.** `StepReport(step, cycles, residual_norm, residual_ratio, alpha)` + `MarchResult`,
+    plus an optional streaming `observer` (a long march must not withhold all logging until it finishes).
+    The trigger and a future logger consume the identical objects, so there is no second reporting path.
     Per-step observation exists only where the march is eager — the traced `_forward` would need
     `jax.debug.callback`, a separate decision; do not promise per-step reporting on the differentiable path.
+  - **`StepControl` — stateful, feedback-driven step reshaping on the eager march only (binding — the
+    twin of `RelaxationSchedule`, deliberately NOT one interface).** A `RelaxationSchedule` is memoryless
+    and lives on the differentiable step; a `StepControl` reads the *previous* `StepReport` (α, cost) —
+    feedback available only after a step — to reshape the next step, and may raise under `jax.grad`, so it
+    lives here beside `RefreshTrigger`, never on the traced path. `forward_march(step_control=…)` calls
+    `next_step(base, previous, state) -> (ForwardStep, new_state)`, threading the control's own state; the
+    march stays β-ignorant (the control returns a ready-to-run step, typically `base` with a
+    `ConstantRelaxation` β leaf via `tree_at`, so `_march_step` stays a cache hit). Unifying the two into
+    one `(rn, rn0, α, state) -> (β, state)` interface was rejected: it would union SER's needs with the
+    control's (dead α/state args for SER), drag α onto the differentiable core where the line search
+    cannot even produce it before the step, and risk the byte-identity of the default path. The one
+    concrete `StepControl` is `AlphaTargetingControl` (`solve/step_control.py`) — experimental, opt-in,
+    see the "SER β schedule runs backwards" bullet.
 - **Gate C — PASSED (`tests/integration/test_skewed_diffusion.py`).** With
   `CorrectedGreenGauss` injected into the residual on a 25%-skewed mesh, one Newton step
   drives `‖R‖` ~24 → ~1e-12 and reproduces a harmonic linear field to ~5e-13 (linear-exact

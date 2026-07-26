@@ -673,8 +673,19 @@ class StabilizedLscSchur(InnerSchurSolver):
     needs a viscosity value, which is what lets it serve a variable-viscosity turbulent closure.
 
     Cost, relative to the scaled-Laplacian Schur: two multigrid solves and three residual
-    linearizations per apply, against one solve. It buys a Schur approximation that keeps working when
-    the cheap one has stopped.
+    linearizations per apply, against one solve.
+
+    **Where this pays, and where it does not — measured, so choose deliberately.** On an *isolated*
+    flow saddle it is the stronger approximation, as intended: 9 outer GMRES iterations against the
+    scaled-Laplacian Schur's 15 on a Reynolds-1e4 channel. On the **coupled** flow--turbulence solve it
+    is dramatically worse — at a developed, separated backward-facing-step state one shifted solve took
+    96 restart cycles / 526 s against the scaled-Laplacian Schur's 13 cycles / 38.9 s, both solves
+    converged to a relative linear residual near 2e-9, and roughly 2.9x slower on a coupled channel at
+    an identical residual trajectory. The reason the isolated win does not carry over: with a
+    block-*diagonal* preconditioner and a pseudo-transient shift, the coupled iteration is not limited
+    by the quality of the flow block's Schur approximation, so improving it buys nothing while costing
+    several times more per apply. **Prefer ``"msimpler"`` for a coupled solve; reach for this only when
+    solving the flow block on its own.**
     """
 
     geometry: _SchurGeometry
@@ -844,6 +855,20 @@ def _isotropic_momentum_diagonal(assembler: MomentumContinuity, state: jnp.ndarr
     )
 
 
+def _isotropic_momentum_diagonal_parts(
+    assembler: MomentumContinuity, state: jnp.ndarray
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """The frozen convective/dissipative buckets of the all-faces ``a_P`` at ``state``.
+
+    The two parts a :class:`~aquaflux.solve.ShiftBasis` combines into the pseudo-transient shift; their
+    sum is :func:`_isotropic_momentum_diagonal` (to rounding). Frozen and evaluated at a detached state,
+    like the total, so the shift stays a constant forward-path scale.
+    """
+    velocity, _ = assembler.unpack(jax.lax.stop_gradient(state))
+    convective, dissipative = assembler.momentum_matrix_diagonal_parts(velocity)
+    return jax.lax.stop_gradient(convective), jax.lax.stop_gradient(dissipative)
+
+
 def _scaled_momentum_radius(
     assembler: MomentumContinuity,
     state: jnp.ndarray,
@@ -889,7 +914,7 @@ class BlockPreconditioner(eqx.Module):
     ``V/a_P`` — does not degrade as convection strengthens (Klaij & Vuik 2013, for exactly this
     collocated-FV coupled discretization), which carries the coupled solve past the Reynolds number
     where the ``a_P``-Schur stalls. The hierarchy is frozen at the mass matrix ``ρ V`` (``k = 1``); the
-    scale ``k`` is applied per iterate in :meth:`apply_at`, auto-calibrated to ``mean(V / a_P)`` from
+    scale ``k`` is applied per iterate in :meth:`apply_at`, auto-calibrated to ``mean(rho V / a_P)`` from
     the real momentum diagonal (see :meth:`_msimpler_scale`) so its magnitude matches the SIMPLE Schur
     at the operating convection with no assumption on the characteristic speed. Only the Schur uses
     ``Q̂``; the velocity block always uses the true ``a_P``.
@@ -945,12 +970,14 @@ class BlockPreconditioner(eqx.Module):
             Schur complement as convection grows, at which point inverting them more accurately does
             not help. ``"lsc"`` instead builds the approximation from the momentum operator itself
             (:class:`StabilizedLscSchur`, the stabilized least-squares commutator) — markedly dearer per
-            apply (two multigrid solves plus three residual linearizations, against one solve) but it
-            keeps working in the convection-dominated regime where the scaled Laplacians have stalled.
+            apply (two multigrid solves plus three residual linearizations, against one solve), and
+            stronger on an **isolated** flow saddle, but **measured far worse on a coupled
+            flow--turbulence solve** (see :class:`StabilizedLscSchur`, which carries the numbers).
+            **Use ``"msimpler"`` for a coupled solve.**
         msimpler_scale : float, optional
             The MSIMPLER scale ``k`` (only for ``schur_scaling="msimpler"``). It sets the Schur
             magnitude to the operating convection, or the block preconditioner is unbalanced and
-            stalls. ``None`` (default) calibrates it automatically, per iterate, to ``mean(V / a_P)``
+            stalls. ``None`` (default) calibrates it automatically, per iterate, to ``mean(rho V / a_P)``
             from the **real** momentum diagonal at the current flow — which encodes the true velocity
             / density / viscosity scale, so it matches the SIMPLE Schur magnitude with no assumption
             on the characteristic speed. Pass an explicit value only to pin ``k`` (e.g. for a study).
@@ -1072,6 +1099,15 @@ class BlockPreconditioner(eqx.Module):
         form its diagonal shift from the *same* ``a_P`` the preconditioner inverts.
         """
         return _isotropic_momentum_diagonal(self.assembler, state)
+
+    def frozen_momentum_diagonal_parts(self, state: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """The convective/dissipative buckets of the frozen ``a_P`` at ``state``, each ``(n_cells,)``.
+
+        The split a :class:`~aquaflux.solve.ShiftBasis` combines into a local-time-step pseudo-transient
+        shift; their sum is :meth:`frozen_momentum_diagonal` (to rounding). Exposed so a continuation
+        driver can build a convective (or weighted) shift while still inverting the total ``a_P``.
+        """
+        return _isotropic_momentum_diagonal_parts(self.assembler, state)
 
     def _msimpler_scale(self, state: jnp.ndarray) -> jnp.ndarray:
         """The MSIMPLER scale ``k`` at ``state`` — ``mean(ρV / a_P)`` from the real momentum diagonal.

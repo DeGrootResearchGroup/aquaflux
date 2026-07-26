@@ -17,8 +17,11 @@ import pytest
 from aquaflux.solve import (
     DivergenceGuard,
     ImplicitNewtonSolver,
+    MonotoneLineSearch,
     PseudoTransientStep,
+    RelaxedFarFromRoot,
     ShiftTerm,
+    SwitchedEvolutionRelaxation,
 )
 from aquaflux.solve.implicit import backtracking_line_search
 
@@ -47,7 +50,9 @@ def _residual(phi: jnp.ndarray, theta: jnp.ndarray) -> jnp.ndarray:
 def test_pseudo_transient_engine_runs_without_flow() -> None:
     """The engine converges a nonlinear root using only an injected scalar shift policy."""
     theta = jnp.array([8.0, 27.0, 64.0])
-    step = PseudoTransientStep(UniformShiftPolicy(strength=1.0), beta0=1.0)
+    step = PseudoTransientStep(
+        UniformShiftPolicy(strength=1.0), relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0)
+    )
     solver = ImplicitNewtonSolver(rtol=1e-10, atol=1e-10, max_steps=200, forward_step=step)
 
     phi = solver.solve(_residual, jnp.ones_like(theta), theta)
@@ -59,7 +64,9 @@ def test_pseudo_transient_engine_runs_without_flow() -> None:
 def test_pseudo_transient_engine_is_differentiable() -> None:
     """Reverse-mode gradient through the engine's converged solve matches the closed form."""
     theta = jnp.array([8.0])
-    step = PseudoTransientStep(UniformShiftPolicy(strength=1.0), beta0=1.0)
+    step = PseudoTransientStep(
+        UniformShiftPolicy(strength=1.0), relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0)
+    )
     solver = ImplicitNewtonSolver(rtol=1e-10, atol=1e-10, max_steps=200, forward_step=step)
 
     def solved_sum(t: jnp.ndarray) -> jnp.ndarray:
@@ -108,7 +115,9 @@ def test_injected_acceptance_policy_is_honoured() -> None:
 
     theta = jnp.array([8.0, 27.0])
     step = PseudoTransientStep(
-        UniformShiftPolicy(strength=1.0), beta0=1.0, acceptance=RejectFirstAttempt()
+        UniformShiftPolicy(strength=1.0),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
+        acceptance=RejectFirstAttempt(),
     )
     solver = ImplicitNewtonSolver(rtol=1e-10, atol=1e-10, max_steps=200, forward_step=step)
 
@@ -126,16 +135,23 @@ def test_backtracking_line_search_picks_largest_descending_rung() -> None:
 
     # delta = -4: full step x = -3 (|R| = 3, overshoot); alpha = 1/2 -> x = -1 (|R| = 1, not < 1);
     # alpha = 1/4 -> x = 0 (|R| = 0 < 1). Largest descending rung is 1/4.
-    out = backtracking_line_search(residual, phi, jnp.array([-4.0]), reference, steps=4)
+    out, alpha = backtracking_line_search(residual, phi, jnp.array([-4.0]), reference, steps=4)
     assert jnp.allclose(out, 0.0)
+    assert jnp.allclose(alpha, 0.25)  # the kept fraction is reported
 
-    # steps = 0 takes the full (overshooting) step unchanged.
-    full = backtracking_line_search(residual, phi, jnp.array([-4.0]), reference, steps=0)
+    # steps = 0 takes the full (overshooting) step unchanged, and reports alpha = 1.
+    full, full_alpha = backtracking_line_search(
+        residual, phi, jnp.array([-4.0]), reference, steps=0
+    )
     assert jnp.allclose(full, -3.0)
+    assert jnp.allclose(full_alpha, 1.0)
 
     # delta = +4: every rung increases the residual, so it falls back to the smallest, 1/16.
-    fallback = backtracking_line_search(residual, phi, jnp.array([4.0]), reference, steps=4)
+    fallback, fb_alpha = backtracking_line_search(
+        residual, phi, jnp.array([4.0]), reference, steps=4
+    )
     assert jnp.allclose(fallback, 1.0 + (1.0 / 16.0) * 4.0)
+    assert jnp.allclose(fb_alpha, 1.0 / 16.0)
 
 
 def test_line_search_recovers_an_overshooting_step_without_escalation() -> None:
@@ -154,7 +170,12 @@ def test_line_search_recovers_an_overshooting_step_without_escalation() -> None:
         rtol=1e-8,
         atol=1e-10,
         max_steps=200,
-        forward_step=PseudoTransientStep(policy, beta0=0.01, max_escalations=0, line_search=40),
+        forward_step=PseudoTransientStep(
+            policy,
+            relaxation_schedule=SwitchedEvolutionRelaxation(beta0=0.01),
+            max_escalations=0,
+            line_search=40,
+        ),
     )
     phi = searched.solve(_residual, jnp.ones_like(theta), theta)
     assert jnp.allclose(phi, jnp.cbrt(theta), atol=1e-5)
@@ -164,7 +185,12 @@ def test_line_search_recovers_an_overshooting_step_without_escalation() -> None:
         rtol=1e-8,
         atol=1e-10,
         max_steps=50,
-        forward_step=PseudoTransientStep(policy, beta0=0.01, max_escalations=0, line_search=0),
+        forward_step=PseudoTransientStep(
+            policy,
+            relaxation_schedule=SwitchedEvolutionRelaxation(beta0=0.01),
+            max_escalations=0,
+            line_search=0,
+        ),
     )
     with pytest.raises(Exception):  # noqa: B017  (EquinoxRuntimeError, raised at solve time)
         jax.block_until_ready(unsearched.solve(_residual, jnp.ones_like(theta), theta))
@@ -179,14 +205,16 @@ def test_stepper_returns_the_step_and_its_linear_solve_cycle_count() -> None:
     """
     theta = jnp.array([8.0, 27.0, 64.0])
     phi0 = jnp.ones_like(theta)
-    step = PseudoTransientStep(UniformShiftPolicy(strength=1.0), beta0=1.0)
+    step = PseudoTransientStep(
+        UniformShiftPolicy(strength=1.0), relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0)
+    )
     residual_norm_0 = jnp.linalg.norm(_residual(phi0, theta))
     solver = step.default_solver()
 
     def residual_fn(phi):
         return _residual(phi, theta)
 
-    phi_next, cycles = step.stepper()(residual_fn, phi0, residual_norm_0, solver)
+    phi_next, cycles, alpha = step.stepper()(residual_fn, phi0, residual_norm_0, solver)
 
     # A real shifted solve was taken: the iterate moved, and stayed finite. Deliberately not a
     # descent assertion -- the pseudo-transient march is non-monotone (which is why its acceptance
@@ -195,3 +223,53 @@ def test_stepper_returns_the_step_and_its_linear_solve_cycle_count() -> None:
     assert bool(jnp.all(jnp.isfinite(phi_next)))
     assert int(cycles) > 0
     assert cycles.dtype == jnp.int32  # invariant carry dtype for a lax.while_loop
+    # This step has no line search (default line_search=0), so the full shifted step is taken: alpha=1.
+    assert jnp.allclose(alpha, 1.0)
+
+
+def test_monotone_growth_is_the_default_and_reproduces_strict_descent() -> None:
+    """The default schedule is ``1`` everywhere, i.e. the classical strict-descent ladder."""
+    schedule = MonotoneLineSearch()
+    for ratio in (1.0, 1e-2, 1e-8):
+        got = schedule.growth(jnp.asarray(ratio), jnp.asarray(1.0))
+        assert float(got) == 1.0
+
+
+def test_relaxed_growth_admits_growth_far_out_and_restores_descent_in_the_basin() -> None:
+    """``RelaxedFarFromRoot`` relaxes monotonicity far from the root and restores it below ``basin``.
+
+    The point of the schedule: a pseudo-time march is not a descent method, so strict descent vetoes
+    correct steps while the transient is still being traversed -- but near the root monotonicity is
+    what delivers the terminal quadratic phase, so it must come back.
+    """
+    schedule = RelaxedFarFromRoot(max_growth=2.0, basin=1e-2)
+    far = float(schedule.growth(jnp.asarray(1.0), jnp.asarray(1.0)))
+    edge = float(schedule.growth(jnp.asarray(3e-2), jnp.asarray(1.0)))
+    basin = float(schedule.growth(jnp.asarray(1e-2), jnp.asarray(1.0)))
+    deep = float(schedule.growth(jnp.asarray(1e-6), jnp.asarray(1.0)))
+    assert far == 2.0  # fully relaxed far from the root
+    assert 1.0 < edge < 2.0  # smooth transition, not a switch
+    assert basin == 1.0 and deep == 1.0  # strict descent restored in the basin
+    assert edge > basin  # monotone in the ratio
+
+
+def test_growth_factor_widens_what_the_line_search_accepts() -> None:
+    """A growth factor above one accepts a step the strict-descent ladder rejects.
+
+    Built on a residual whose every step-length *increases* the norm -- the measured plateau signature
+    -- so the monotone search must fall back to its smallest rung while the relaxed one keeps a real
+    step.
+    """
+
+    def residual_fn(phi):
+        return phi * 1.05  # any step along +delta raises the norm
+
+    phi = jnp.array([1.0])
+    delta = jnp.array([1.0])
+    reference = jnp.linalg.norm(residual_fn(phi))
+    _, alpha_monotone = backtracking_line_search(residual_fn, phi, delta, reference, 10)
+    _, alpha_relaxed = backtracking_line_search(residual_fn, phi, delta, reference, 10, growth=2.5)
+    # The full step doubles the residual here, so strict descent finds nothing and falls back to
+    # its smallest rung; allowing a 2.5x rise admits the full step.
+    assert float(alpha_monotone) == 0.5**10  # the failure sentinel: nothing descended
+    assert float(alpha_relaxed) == 1.0  # the full step is admissible under controlled growth

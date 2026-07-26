@@ -15,16 +15,24 @@ import jax
 import jax.numpy as jnp
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
-from aquaflux.discretization import FirstOrderUpwind
+from aquaflux.discretization import DifferenceRow, FirstOrderUpwind, LogRatioRow
 from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import CycleGrowthTrigger, PseudoTransientStep, ShiftTerm
-from aquaflux.turbulence import DirectScalars, LogScalars, SSTModel, SSTTurbulence
+from aquaflux.turbulence import (
+    DirectScalars,
+    LogScalars,
+    SSTModel,
+    SSTTurbulence,
+    eddy_viscosity_drift,
+)
 from aquaflux.turbulence.coupled import (
     CoupledRANS,
     CoupledRANSLayout,
+    LiveViscosityVelocityParts,
+    _row_jacobian_scale,
     solve_coupled,
 )
 
@@ -135,11 +143,17 @@ def test_scalar_variable_transforms() -> None:
     assert jnp.allclose(log_scalars.jacobian_scale(phi), phi)  # d(e^w)/dw = e^w = phi
 
 
-def test_log_omega_reparametrization_preserves_the_residual() -> None:
+def test_log_omega_reparametrization_preserves_the_transport_residual() -> None:
     """omega-log reparametrizes the Newton *unknown*, not the physics.
 
-    The coupled residual at the log-mapped state equals the direct residual at the same physical
-    fields (so the two forms share a root), and it stays differentiable through the ``e^w`` map.
+    Every **transport** row of the coupled residual at the log-mapped state equals the direct
+    residual at the same physical fields, and it stays differentiable through the ``e^w`` map.
+
+    The near-wall **fixation** rows are deliberately *not* identical: each transform writes the
+    fixation in its own solved variable (``omega - omega_wall`` directly, ``log(omega/omega_wall)``
+    under the log map), which is what keeps that row linear in the unknown actually being stepped.
+    Both vanish on exactly the same set, so the two forms still share a root -- which the companion
+    test pins.
     """
     mesh, direct = _cavity()
     log_omega = CoupledRANS.build(direct.momentum, direct.turbulence, omega_transform=LogScalars())
@@ -147,10 +161,35 @@ def test_log_omega_reparametrization_preserves_the_residual() -> None:
     flow, k, omega = direct.layout.unpack(physical)
     solved = log_omega.state_from_physical(flow, k, omega)
 
-    assert jnp.allclose(direct.residual(physical), log_omega.residual(solved), atol=1e-10)
+    _, _, direct_omega = direct.layout.unpack(direct.residual(physical))
+    _, _, log_omega_rows = log_omega.layout.unpack(log_omega.residual(solved))
+    interior = jnp.setdiff1d(jnp.arange(direct_omega.shape[0]), direct.turbulence.wall_cells)
+    assert jnp.allclose(direct_omega[interior], log_omega_rows[interior], atol=1e-10)
+
     direction = jax.random.normal(jax.random.PRNGKey(4), (solved.shape[0],))
     jvp = jax.jvp(log_omega.residual, (solved,), (direction,))[1]
     assert bool(jnp.all(jnp.isfinite(jvp)))
+
+
+def test_the_two_fixation_row_forms_share_a_root_and_the_log_form_is_linear() -> None:
+    """The transform-matched fixation rows vanish together, and the log form is linear in ``w``.
+
+    Linearity is the point: the difference row's Newton correction in the log variable is
+    ``target/phi - 1`` (the linearization of an exponential, which overshoots by ``e**(r-1)`` at a
+    target ratio ``r``), while the log-ratio row's is ``log(target/phi)`` -- exact at any ratio, so a
+    full step lands on the constraint however far off it starts.
+    """
+    phi = jnp.array([1.0, 5.0, 1.0e4])
+    target = jnp.array([1.0, 5.0, 5.0])  # first two already satisfied, the third far off
+    difference = DifferenceRow().row(phi, target)
+    log_ratio = LogRatioRow().row(phi, target)
+    # Same root: both vanish exactly where phi == target, and nowhere else.
+    assert jnp.array_equal(difference == 0.0, log_ratio == 0.0)
+    assert bool(jnp.all(difference[:2] == 0.0)) and bool(jnp.all(log_ratio[:2] == 0.0))
+
+    # The log row is exactly linear in w = log(phi): its derivative is 1 regardless of the ratio.
+    slope = jax.grad(lambda w: jnp.sum(LogRatioRow().row(jnp.exp(w), target)))(jnp.log(phi))
+    assert jnp.allclose(slope, jnp.ones_like(slope))
 
 
 def _count_rhie_chow_assemblies(monkeypatch):
@@ -248,7 +287,7 @@ def test_refresh_trigger_is_rejected_under_differentiation() -> None:
         )
         return jnp.sum(f**2)
 
-    with pytest.raises(ValueError, match="forward-only accelerator"):
+    with pytest.raises(ValueError, match="forward-only eager march"):
         jax.grad(objective)(1.0)
 
 
@@ -313,3 +352,125 @@ def test_refreshing_the_policy_carries_the_shift_diagonals() -> None:
     assert not jnp.allclose(rebuilt.omega_shift_diagonal, base.omega_shift_diagonal)
     # The flow block is carried over (the expensive half; measured no help to re-freeze).
     assert refreshed.flow_preconditioner is base.flow_preconditioner
+
+
+def test_fixation_rows_take_their_own_derivative_not_the_chain_factor() -> None:
+    """The per-row Jacobian scale is ``phi`` on transport rows but **one** on the fixation rows.
+
+    Regression test. The scalar block's frozen preconditioner is built for the physical operator and
+    rescaled by ``1 / (d(row)/d(w))``; the frozen operator carries a unit identity row at each fixed
+    cell. Rescaling those rows by the block-wide chain factor ``d(phi)/d(w) = phi`` instead of the
+    fixation row's own unit derivative leaves the preconditioned operator with a cluster of ``1/phi``
+    eigenvalues -- measured at ~1e-5 on a wall-resolved mesh -- which stalls the Krylov solve.
+    """
+    omega = jnp.array([10.0, 1.0e5, 3.0, 250.0])
+    fixed = jnp.array([1, 3])
+    transport = jnp.array([0, 2])
+
+    scale = _row_jacobian_scale(LogScalars(), omega, fixed)
+
+    assert jnp.allclose(scale[transport], omega[transport])
+    assert jnp.allclose(scale[fixed], 1.0)
+
+
+def test_row_jacobian_scale_is_all_ones_for_a_directly_solved_scalar() -> None:
+    """The directly-solved path keeps a unit scale with or without fixed cells, so it is unchanged."""
+    omega = jnp.array([10.0, 1.0e5, 3.0, 250.0])
+    assert jnp.allclose(_row_jacobian_scale(DirectScalars(), omega), 1.0)
+    assert jnp.allclose(_row_jacobian_scale(DirectScalars(), omega, jnp.array([1, 3])), 1.0)
+
+
+def test_eddy_viscosity_drift_is_zero_at_its_reference_and_grows_away_from_it() -> None:
+    """The staleness measure a drift trigger fires on: relative movement of ``nu_t``.
+
+    Zero at the state the preconditioner was frozen at (nothing has gone stale yet) and positive
+    once the turbulence field moves, which is what makes it a direct staleness signal rather than an
+    inference from solver cost.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    drift = eddy_viscosity_drift(coupled, state)
+
+    assert float(drift(state)) == pytest.approx(0.0, abs=1e-12)
+
+    # Raise k, which raises nu_t = k / omega: the frozen scalar operators no longer describe this
+    # state, and the measure must say so.
+    flow, k, omega = coupled.physical_fields(state)
+    moved = coupled.state_from_physical(flow, 1.5 * k, omega)
+    assert float(drift(moved)) > 0.1
+
+
+def test_eddy_viscosity_drift_matches_its_definition() -> None:
+    """The measure is exactly the relative L2 movement of ``nu_t`` -- pinned against a direct compute.
+
+    Stated as the definition rather than as an invariance: ``nu_t`` is **not** proportional to ``k``
+    once the shear limiter ``a1 k / max(a1 omega, S F2)`` engages, so properties that assume
+    homogeneity in ``k`` do not hold, and asserting one would be testing the closure rather than the
+    measure.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    flow, k, omega = coupled.physical_fields(state)
+    moved = coupled.state_from_physical(flow, 1.3 * k, 0.8 * omega)
+
+    reference_nu_t = coupled.eddy_viscosity(state)
+    expected = float(
+        jnp.linalg.norm(coupled.eddy_viscosity(moved) - reference_nu_t)
+        / jnp.linalg.norm(reference_nu_t)
+    )
+    assert float(eddy_viscosity_drift(coupled, state)(moved)) == pytest.approx(expected, rel=1e-10)
+    assert expected > 0.0
+
+
+def test_live_velocity_shift_parts_use_the_current_eddy_viscosity() -> None:
+    """The injected live source reproduces the momentum diagonal at the state's own ``nu_t``.
+
+    The velocity shift's buckets are a *local time scale* and must describe the operator being solved,
+    so they have to see the current effective viscosity rather than one frozen at a reference state.
+    Pinned by composing the closure by hand and comparing.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    flow, k, omega = coupled.physical_fields(state)
+
+    closure = coupled.turbulence.closure_fields(coupled.momentum.velocity_fields(flow), k, omega)
+    live_assembler = coupled.momentum.with_eddy_viscosity(
+        closure.nu_t, coupled.turbulence.wall_face_eddy_viscosity(k)
+    )
+    velocity, _pressure = live_assembler.unpack(flow)
+    expected = live_assembler.momentum_matrix_diagonal_parts(velocity)
+
+    source = LiveViscosityVelocityParts(
+        coupled.momentum, coupled.turbulence, coupled.k_transform, coupled.omega_transform
+    )
+    flow_block, k_solved, omega_solved = coupled.layout.unpack(state)
+    got = source.parts(flow_block, k_solved, omega_solved)
+
+    for mine, theirs in zip(got, expected, strict=True):
+        assert jnp.allclose(mine, theirs)
+
+
+def test_live_velocity_shift_parts_map_the_solved_unknown_back_to_physical() -> None:
+    """The buckets are the same whether omega is solved directly or in log form.
+
+    The source receives the block **as solved**, so under a log parametrization it must exponentiate
+    before forming the closure. Without that it would build the shift from ``log(omega)`` as if it were
+    ``omega`` -- a silent, badly wrong local time scale.
+    """
+    mesh, direct = _cavity()
+    log_omega = CoupledRANS.build(direct.momentum, direct.turbulence, omega_transform=LogScalars())
+    physical = _healthy_state(mesh, direct)
+    flow, k, omega = direct.layout.unpack(physical)
+
+    direct_parts = LiveViscosityVelocityParts(
+        direct.momentum, direct.turbulence, direct.k_transform, direct.omega_transform
+    ).parts(flow, k, omega)
+
+    solved = log_omega.state_from_physical(flow, k, omega)
+    flow_l, k_l, omega_l = log_omega.layout.unpack(solved)
+    log_parts = LiveViscosityVelocityParts(
+        log_omega.momentum, log_omega.turbulence, log_omega.k_transform, log_omega.omega_transform
+    ).parts(flow_l, k_l, omega_l)
+
+    for a, b in zip(direct_parts, log_parts, strict=True):
+        assert jnp.allclose(a, b)

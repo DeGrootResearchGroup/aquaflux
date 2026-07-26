@@ -14,11 +14,17 @@ import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import pytest
 from aquaflux.solve import (
+    AlphaTargetingControl,
+    CoefficientDriftTrigger,
     CycleGrowthTrigger,
     DampedNewtonStep,
     ImplicitNewtonSolver,
+    PseudoTransientStep,
+    ShiftTerm,
     StepReport,
+    SwitchedEvolutionRelaxation,
     forward_march,
 )
 
@@ -46,7 +52,9 @@ class _Cubic(eqx.Module):
 
 def _report(step: int, cycles: int, ratio: float) -> StepReport:
     """A synthetic report; only ``cycles`` and ``residual_ratio`` drive the trigger."""
-    return StepReport(step=step, cycles=cycles, residual_norm=ratio, residual_ratio=ratio)
+    return StepReport(
+        step=step, cycles=cycles, residual_norm=ratio, residual_ratio=ratio, alpha=1.0
+    )
 
 
 def _history(cycles: list[int], ratio: float = 1e-3) -> list[StepReport]:
@@ -169,6 +177,80 @@ def test_march_reports_every_step_to_an_observer() -> None:
     assert [report.step for report in seen] == list(range(len(seen)))
     # The ratio is measured against the march's reference, so it starts at or below 1 and falls.
     assert seen[-1].residual_ratio < seen[0].residual_ratio
+    # Every report carries a valid line-search factor (this base line-searches, so α ∈ (0, 1]).
+    assert all(0.0 < report.alpha <= 1.0 for report in seen)
+
+
+class _UnitShiftPolicy(eqx.Module):
+    """A trivial pseudo-transient shift policy (unit diagonal, no preconditioner) for a scalar root."""
+
+    def shift_term(self, phi):
+        return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _relaxation: None)
+
+
+def test_step_control_drives_the_march_and_stays_a_cache_hit() -> None:
+    """A ``step_control`` reshapes the step each iteration, and the controlled march does not retrace.
+
+    The α-targeting control replaces the base step's schedule with a ``ConstantRelaxation`` on a
+    dynamic β leaf. Two things must hold: β actually changes across steps (the control is doing
+    something), and ``_march_step`` compiles once despite a fresh controlled step object each iteration
+    (the load-bearing cache-hit property — a per-step recompile would dominate a real march).
+    """
+    # A state size no other test uses, so the compiled step cannot already be a module-level cache
+    # hit from another test (the compilation cache lives for the whole process).
+    theta = 1.0 + jnp.arange(7, dtype=float)
+    residual = _Cubic(theta)
+    phi0 = jnp.full(7, 0.5)
+    base = PseudoTransientStep(
+        _UnitShiftPolicy(),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=2.0),
+        line_search=8,
+    )
+    control = AlphaTargetingControl(beta_start=2.0)
+    common = dict(rtol=1e-12, atol=1e-14, step_control=control)
+
+    # One controlled step pays the compilation (which invokes the residual several times per trace).
+    _TRACES.clear()
+    one = forward_march(base, residual, phi0, max_steps=1, **common)
+    compiled = len(_TRACES)
+    assert compiled > 0 and len(one.reports) == 1
+
+    # Several controlled steps: β adapts each step (the control is live), yet no step recompiles --
+    # the controlled steps differ only in a dynamic β leaf, so _march_step stays a cache hit.
+    _TRACES.clear()
+    several = forward_march(base, residual, phi0, max_steps=5, **common)
+    assert len(several.reports) > 1
+    assert len({round(r.residual_ratio, 12) for r in several.reports}) > 1  # β is doing something
+    assert len(_TRACES) == compiled  # extra controlled steps added no traces
+
+
+def test_checkpoint_receives_the_state_behind_each_report() -> None:
+    """``checkpoint`` pairs each report with the state that produced it.
+
+    Separate from ``observer`` on purpose: the report history a :class:`RefreshTrigger` reads stays
+    purely numeric, which is what lets a trigger be replayed offline against a logged march. Here the
+    two callbacks must agree step for step, and the final checkpointed state must be the one the
+    march returns.
+    """
+    residual, phi0, _ = _march_and_solver_inputs()
+    seen: list[StepReport] = []
+    saved: list[tuple[StepReport, jnp.ndarray]] = []
+
+    result = forward_march(
+        DampedNewtonStep(line_search=10),
+        residual,
+        phi0,
+        max_steps=4,
+        rtol=1e-14,
+        atol=1e-16,
+        observer=seen.append,
+        checkpoint=lambda report, state: saved.append((report, state)),
+    )
+
+    assert [report for report, _ in saved] == seen
+    assert jnp.allclose(saved[-1][1], result.state)
+    # Each checkpointed state really is that step's, not a shared reference to the last one.
+    assert not jnp.allclose(saved[0][1], saved[-1][1])
 
 
 def test_repeated_steps_reuse_the_compiled_march_step() -> None:
@@ -197,3 +279,78 @@ def test_repeated_steps_reuse_the_compiled_march_step() -> None:
     more = forward_march(step, residual, first.state, max_steps=4, **common)
     assert len(more.reports) > 1  # it really did take several steps
     assert len(_TRACES) == compiled  # ...and none of them recompiled
+
+
+def _drift_history(drifts: list[float]) -> list[StepReport]:
+    """A synthetic history in which only the drift varies -- the drift trigger reads nothing else."""
+    return [
+        StepReport(step=i, cycles=10, residual_norm=1.0, residual_ratio=1.0, alpha=1.0, drift=d)
+        for i, d in enumerate(drifts)
+    ]
+
+
+def test_drift_trigger_fires_once_the_coefficients_have_moved_past_the_threshold() -> None:
+    trigger = CoefficientDriftTrigger(threshold=0.5, warmup=2)
+    assert not trigger.should_refresh(_drift_history([0.0, 0.1, 0.2]))
+    assert trigger.should_refresh(_drift_history([0.0, 0.1, 0.2, 0.6]))
+
+
+def test_drift_trigger_ignores_its_warmup_however_large_the_drift() -> None:
+    """A segment's opening steps run against a preconditioner that is fresh by construction."""
+    trigger = CoefficientDriftTrigger(threshold=0.5, warmup=3)
+    assert not trigger.should_refresh(_drift_history([9.0, 9.0, 9.0]))
+    assert trigger.should_refresh(_drift_history([9.0, 9.0, 9.0, 9.0]))
+
+
+def test_drift_trigger_never_fires_without_a_drift_measure() -> None:
+    """Reports default to ``drift = 0.0`` -- "not measured" -- so the trigger fails closed."""
+    trigger = CoefficientDriftTrigger(threshold=0.5, warmup=0)
+    history = [
+        StepReport(step=i, cycles=10, residual_norm=1.0, residual_ratio=1.0, alpha=1.0)
+        for i in range(6)
+    ]
+    assert not trigger.should_refresh(history)
+
+
+def test_drift_trigger_is_independent_of_the_damping_confound() -> None:
+    """The residual ratio does not gate this trigger, unlike the cost-growth one.
+
+    The cycle count rises both with staleness and with the damping ``beta`` ramping toward zero as
+    the residual falls, so a cost trigger needs a residual gate to separate them. Drift responds only
+    to the coefficients, so an identical drift history fires the same way at any residual level --
+    which is the whole reason to prefer it.
+    """
+    trigger = CoefficientDriftTrigger(threshold=0.5, warmup=1)
+    for ratio in (1.0, 1e-1, 1e-4):
+        history = [
+            StepReport(
+                step=i, cycles=10, residual_norm=ratio, residual_ratio=ratio, alpha=1.0, drift=d
+            )
+            for i, d in enumerate([0.0, 0.2, 0.9])
+        ]
+        assert trigger.should_refresh(history)
+
+
+def test_march_reports_the_injected_drift_measure() -> None:
+    """``forward_march`` evaluates the measure once per step and puts the scalar on the report."""
+    residual = _Cubic(theta=jnp.asarray(1.0))
+    step = DampedNewtonStep(line_search=10)
+    seen: list[float] = []
+
+    result = forward_march(
+        step,
+        residual.__call__,
+        jnp.asarray(2.0),
+        max_steps=3,
+        rtol=1e-12,
+        atol=1e-14,
+        drift_measure=lambda state: jnp.abs(state - 2.0),
+        observer=lambda report: seen.append(report.drift),
+    )
+    assert len(seen) == len(result.reports) > 0
+    assert all(
+        report.drift == pytest.approx(abs(float(s)))
+        for report, s in zip(result.reports, seen, strict=True)
+    )
+    # The measure is zero only at the state it was based on, and the march has moved away from it.
+    assert seen[-1] > 0.0

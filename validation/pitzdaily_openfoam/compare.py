@@ -33,6 +33,19 @@ The physics caveat this study documents: the pitzDaily mesh is a **wall-function
 analytical sublayer ``omega`` at the wall-adjacent cell). The comparison therefore isolates the *outer*
 flow -- the shear-layer development, the recirculation bubble, and the reattachment length -- where the
 near-wall treatment matters least, and reports the near-wall fields as the expected point of departure.
+The near-wall ``omega`` also differs because the two codes blend the viscous and log branches
+differently: aquaflux uses ``sqrt(omega_vis**2 + omega_log**2)`` (the quadrature blend) while OpenFOAM's
+default ``omegaWallFunction`` uses ``max(omega_vis, omega_log)`` -- a ~20% difference in the buffer layer
+that is a blend-shape choice, not an error in either code.
+
+**Reference caveat (binding -- do not skip):** the OpenFOAM *steady* (SIMPLE / ``ddtSchemes steadyState``)
+run does **not** converge this case -- its ``omega`` field limit-cycles and *checkerboards* in the inlet
+channel (adjacent cells oscillating between O(0.1) and O(1e8)), which is a non-physical, non-converged
+field, not a valid solution. Comparing aquaflux's residual against such a field is meaningless (it will be
+huge because the field is garbage, not because aquaflux is wrong). A stable steady solution *does* exist
+and is recovered by a time-accurate transient (``pimpleFoam`` / an unsteady ``ddtSchemes``) run to a
+statistically steady state; use a **transient-converged** OpenFOAM field as the comparison target, and
+compare the outer-flow profiles (velocity, reattachment length) rather than the raw residual.
 
 **Cost note (binding for whoever runs this):** the coupled log-omega solve on the full ~12k-cell mesh
 is compute-heavy -- each Newton step is several minutes and the march is long, so a full run is a
@@ -107,8 +120,29 @@ def read_openfoam_reference():
     )
 
 
-def solve_aquaflux():
-    """Solve the coupled RANS system on the imported OpenFOAM mesh; return fields + geometry."""
+def build_case(model=None):
+    """Assemble the benchmark: mesh, momentum, turbulence and the coupled residual -- no solve.
+
+    Split out from :func:`solve_aquaflux` so a solver study can re-solve at a saved state (a
+    mid-march checkpoint, say) without re-marching to it, and without restating the case. The
+    mesh import, boundary conditions, model constants and scheme choices *are* the definition of
+    this benchmark; a second copy of them would drift from the one the validation figures use.
+
+    Parameters
+    ----------
+    model : SSTModel, optional
+        The SST constants to use. Defaults to :class:`~aquaflux.turbulence.SSTModel`. Passing a model
+        that differs only in the near-wall omega blend (``wall_omega_exponent`` /
+        ``wall_omega_viscous_coeff``) is how a wall-treatment study compares blend shapes on the same
+        case -- e.g. a large exponent to reproduce the ``max(omega_vis, omega_log)`` blend.
+
+    Returns
+    -------
+    dict
+        ``coupled``, ``momentum``, ``turbulence`` and ``geom`` for the assembled case.
+    """
+    if model is None:
+        model = SSTModel()
     mesh = read_openfoam(RUNS / "polyMesh")
     geom = mesh.geometry()
     # Corrected (non-orthogonal / skewness) Green-Gauss gradients. Its A_g^-1 apply is the default O(n)
@@ -146,7 +180,7 @@ def solve_aquaflux():
         advection_scheme=momentum_upwind,
     )
     turbulence = SSTTurbulence.build(
-        SSTModel(),
+        model,
         mesh,
         geom,
         grad,
@@ -179,9 +213,30 @@ def solve_aquaflux():
     # The monolithic Newton is globalized by the default pseudo-transient continuation: an a_P /
     # transport-diagonal shift that damps each step heavily far from the fixed point and ramps to
     # zero on the residual, recovering the exact steady Newton state at convergence.
-    flow, k, omega = solve_coupled(coupled, max_steps=MAX_STEPS, rtol=RTOL)
+    return dict(coupled=coupled, momentum=momentum, turbulence=turbulence, geom=geom)
+
+
+def solve_aquaflux(**solve_kwargs):
+    """Solve the coupled RANS system on the imported OpenFOAM mesh; return fields + geometry.
+
+    Parameters
+    ----------
+    **solve_kwargs
+        Forwarded to :func:`~aquaflux.turbulence.solve_coupled`, overriding the defaults set here.
+        This is the seam a solver study uses to instrument or reconfigure the march -- an ``on_step``
+        observer, a ``refresh_trigger``, a different ``method``.
+    """
+    case = build_case()
+    coupled, momentum, turbulence, geom = (
+        case["coupled"],
+        case["momentum"],
+        case["turbulence"],
+        case["geom"],
+    )
+    solve_options = dict(max_steps=MAX_STEPS, rtol=RTOL) | solve_kwargs
+    flow, k, omega = solve_coupled(coupled, **solve_options)
     velocity, pressure = momentum.unpack(flow)
-    nu_t = turbulence.eddy_viscosity(momentum.velocity_gradient(flow), k, omega)
+    nu_t = turbulence.closure_fields(momentum.velocity_fields(flow), k, omega).nu_t
     return dict(
         centroid=np.asarray(geom.cell.centroid),
         U=np.asarray(velocity),

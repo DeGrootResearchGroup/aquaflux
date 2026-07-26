@@ -94,10 +94,11 @@ def test_omega_wall_recovers_the_log_branch_when_it_dominates() -> None:
 def test_omega_wall_has_a_finite_k_derivative_at_zero() -> None:
     """The blend is differentiable in ``k`` at ``k = 0`` -- no ``sqrt(k)`` cone point.
 
-    Writing the log branch as ``k`` (not ``sqrt(k)``) under a radicand kept positive by the viscous
-    branch is what keeps ``d(omega_wall)/dk`` finite at ``k = 0``; a naive ``sqrt(k)`` would give an
-    infinite (NaN) derivative there and poison the coupled Jacobian at a wall-adjacent cell whose
-    ``k`` approaches zero.
+    The log branch carries ``sqrt(k)`` through a guarded square root (zero derivative at ``k = 0``),
+    and it enters the power mean raised to ``p >= 1``, so its contribution and the contribution's
+    derivative both vanish as ``k -> 0`` while the viscous branch keeps the mean bounded below. A
+    naive ``sqrt(k)`` differentiated at zero would instead give an infinite (NaN) derivative and
+    poison the coupled Jacobian at a wall-adjacent cell whose ``k`` approaches zero.
     """
     nu, d = jnp.array([1e-5]), jnp.array([1e-3])
     grad_k = jax.grad(lambda k: jnp.sum(omega_wall(nu, d, k, MODEL)))(jnp.array([0.0]))
@@ -105,6 +106,55 @@ def test_omega_wall_has_a_finite_k_derivative_at_zero() -> None:
     # A negative k is off-solution and clamped out of the log term, so it has zero sensitivity there.
     grad_neg = jax.grad(lambda k: jnp.sum(omega_wall(nu, d, k, MODEL)))(jnp.array([-0.1]))
     assert jnp.allclose(grad_neg, 0.0)
+
+
+def test_omega_wall_large_exponent_approaches_the_max_blend() -> None:
+    """As ``p -> inf`` the power mean collapses to ``max(omega_vis, omega_log)``.
+
+    A large exponent is how the blend reproduces the ``max`` shape (the OpenFOAM ``omegaWallFunction``
+    default): in the buffer layer, where the two branches are comparable, the quadrature ``p = 2``
+    exceeds ``max`` by up to ``sqrt(2)`` while a large ``p`` sits within a fraction of a percent of it.
+    """
+    nu, d, k = jnp.array([1e-5]), jnp.array([1.5e-3]), jnp.array([0.02])
+    omega_vis = omega_wall_value(nu, d, MODEL)
+    omega_log = _omega_log(k, d, MODEL)
+    hard_max = jnp.maximum(omega_vis, omega_log)
+    # Deliberately near the crossover so the max limit is a genuine test, not either branch alone.
+    assert bool(0.4 < omega_vis[0] / omega_log[0] < 2.5)
+    big_p = SSTModel(wall_omega_exponent=60.0)
+    assert jnp.allclose(omega_wall(nu, d, k, big_p), hard_max, rtol=0.02)
+    # The default quadrature blend sits above max by a non-trivial margin here (the ~20% buffer bias).
+    assert bool(omega_wall(nu, d, k, MODEL)[0] > 1.1 * hard_max[0])
+
+
+def test_omega_wall_viscous_coefficient_scales_the_viscous_branch() -> None:
+    """``wall_omega_viscous_coeff`` multiplies the viscous branch (the calibrated ``C``).
+
+    At ``k = 0`` the blend is purely the viscous branch, so it must equal ``C`` times
+    :func:`omega_wall_value` -- the knob a correlation-fit wall treatment uses to flatten the wall
+    shear across ``y+``.
+    """
+    nu, d = jnp.full((4,), 1e-5), jnp.logspace(-5.0, -3.0, 4)
+    calibrated = SSTModel(wall_omega_viscous_coeff=1.0 / 3.0)
+    got = omega_wall(nu, d, jnp.zeros_like(d), calibrated)
+    assert jnp.allclose(got, omega_wall_value(nu, d, MODEL) / 3.0)
+
+
+def test_omega_wall_exponent_and_coefficient_are_differentiable_leaves() -> None:
+    """``grad`` flows to the two new blend parameters without NaNs (they are calibration targets).
+
+    The whole point of exposing them as model constants is that a sensitivity / calibration path can
+    differentiate the wall omega with respect to them; at a genuine (positive-``k``) wall state the
+    derivative must be finite.
+    """
+    nu, d, k = jnp.array([1e-5]), jnp.array([1.5e-3]), jnp.array([0.25])
+
+    def wall(p, c):
+        model = SSTModel(wall_omega_exponent=p, wall_omega_viscous_coeff=c)
+        return jnp.sum(omega_wall(nu, d, k, model))
+
+    grads = jax.grad(wall, argnums=(0, 1))(2.0, 1.0)
+    assert all(bool(jnp.isfinite(g)) for g in grads)
 
 
 def test_wall_y_star_lam_solves_the_laminar_log_crossover() -> None:

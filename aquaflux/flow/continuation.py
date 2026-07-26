@@ -5,7 +5,7 @@ convection-dominated (a few hundred Reynolds). As convection strengthens, the un
 from the uniform cold start **overshoots** — the full step *increases* the residual, more steeply as
 the Reynolds number rises — so the basin the step must land in shrinks and the backtracking line
 search must retreat to ever-smaller steps, until it can no longer march the convective path
-(:mod:`tests.integration.test_channel` documents the Re ~ 100 floor this lifts).
+(it lifts a Reynolds-number floor near ~100 that an undamped Newton solve stalls at).
 
 The dominant missing ingredient is *outer* Newton globalization, not a better linear solve. The
 block-SIMPLE preconditioner (:mod:`aquaflux.flow.block_preconditioner`) — a velocity block on the
@@ -37,9 +37,17 @@ Everything that is *not* flow-specific — the switched-evolution-relaxation sch
 step at convergence), the shifted linear solve, and the closed-loop accept/escalate loop that turns
 ``β₀`` into a starting guess rather than a per-case knob — lives in the residual-agnostic
 :class:`aquaflux.solve.PseudoTransientStep`. This module supplies only the flow's choices through a
-:class:`MomentumShiftPolicy`: the velocity ``a_P`` shift above and the matching shifted SIMPLE
-preconditioner. Because the shift vanishes at the fixed point (``R(φ*) = 0`` exactly), the
-implicit-function-theorem adjoint is untouched — continuation only reshapes the forward path.
+:class:`MomentumShiftPolicy`: the velocity shift and the matching shifted SIMPLE preconditioner.
+Because the shift vanishes at the fixed point (``R(φ*) = 0`` exactly), the implicit-function-theorem
+adjoint is untouched — continuation only reshapes the forward path.
+
+The ``a_P`` shift above is the **default** :class:`~aquaflux.solve.ShiftBasis`
+(:class:`~aquaflux.solve.LocalCourantBasis` at full weight): the velocity shift diagonal is built from
+the momentum diagonal's convective and dissipative buckets, and combining them one-to-one gives ``a_P``
+(hence the spatially-uniform relaxation described above). A convective-only basis instead gives a
+genuine **local convective time step** — the per-cell ``Δt ∝ V / Σ_f max(mdot_f, 0)`` a Courant
+condition implies, damping the fast shear layer more than the slow recirculation — while the
+preconditioner tracks the actual shifted diagonal ``a_P + β d`` either way.
 """
 
 from __future__ import annotations
@@ -54,8 +62,11 @@ import jax.numpy as jnp
 from aquaflux.solve import (
     DivergenceGuard,
     ImplicitNewtonSolver,
+    LocalCourantBasis,
     PseudoTransientStep,
+    ShiftBasis,
     ShiftTerm,
+    SwitchedEvolutionRelaxation,
 )
 
 from .block_preconditioner import BlockPreconditioner
@@ -78,11 +89,19 @@ class MomentumShiftPolicy(eqx.Module):
     Attributes
     ----------
     preconditioner : BlockPreconditioner
-        The block-SIMPLE preconditioner, applied at the shifted diagonal ``a_P (1 + β)`` each step,
-        and the source of the frozen ``a_P`` the shift is formed from.
+        The block-SIMPLE preconditioner, applied at the shifted diagonal ``a_P + β d`` each step, and
+        the source of the frozen ``a_P`` (and its convective/dissipative parts) the shift is formed from.
+    shift_basis : ShiftBasis
+        How the base velocity shift diagonal ``d`` is built from the momentum diagonal's convective and
+        dissipative buckets. The default :class:`~aquaflux.solve.LocalCourantBasis` (weight ``1``) is
+        ``d = a_P`` -- spatially-uniform under-relaxation, mathematically the historical shift (the
+        preconditioner is now fed ``a_P + beta d`` rather than ``a_P (1 + beta)``; equal in exact
+        arithmetic, and bitwise equal only for a dyadic ``beta``);
+        a convective basis (weight ``0``) gives a genuine local convective time step.
     """
 
     preconditioner: BlockPreconditioner
+    shift_basis: ShiftBasis = LocalCourantBasis()
 
     def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
         """The base velocity shift diagonal and the ``β -> M`` shifted preconditioner at ``phi``.
@@ -95,26 +114,30 @@ class MomentumShiftPolicy(eqx.Module):
         Returns
         -------
         ShiftTerm
-            ``diagonal`` places the isotropic per-cell ``a_P`` on every velocity component and zero on
-            pressure (the full-state base shift ``d``); ``make_preconditioner(β)`` returns the block
-            preconditioner at the under-relaxed diagonal ``a_P (1 + β)``.
+            ``diagonal`` places the per-cell base shift ``d`` (from :attr:`shift_basis`) on every
+            velocity component and zero on pressure (the full-state base shift); ``make_preconditioner(β)``
+            returns the block preconditioner at the shifted diagonal ``a_P + β d``.
         """
         block = self.preconditioner
-        a_p = block.frozen_momentum_diagonal(phi)  # isotropic per-cell a_P, (n_cells,)
+        convective, dissipative = block.frozen_momentum_diagonal_parts(phi)
+        a_p = convective + dissipative  # the isotropic frozen a_P the velocity block inverts at
+        d = self.shift_basis.local_diagonal(
+            convective, dissipative
+        )  # base shift diagonal (n_cells,)
         assembler = block.assembler
         n_cells = assembler.mesh.n_cells
-        # a_P on every velocity component, zero on pressure — the full-state base shift d(φ). The
-        # engine scales it by β and adds β·d to the Jacobian diagonal (velocity DOFs only).
+        # d on every velocity component, zero on pressure — the full-state base shift. The engine
+        # scales it by β and adds β·d to the Jacobian diagonal (velocity DOFs only).
         diagonal = assembler.pack(
-            jnp.broadcast_to(a_p[:, None], (n_cells, assembler.mesh.dim)), jnp.zeros(n_cells)
+            jnp.broadcast_to(d[:, None], (n_cells, assembler.mesh.dim)), jnp.zeros(n_cells)
         )
 
         def make_preconditioner(
             relaxation: jnp.ndarray,
         ) -> Callable[[jnp.ndarray], jnp.ndarray]:
-            # Invert the same under-relaxed diagonal a_P (1 + β) the shift adds to the Jacobian, so
-            # the preconditioner matches the shifted operator. Frozen: the coefficient is detached.
-            return block.apply_at(phi, jax.lax.stop_gradient(a_p * (1.0 + relaxation)))
+            # Invert the same shifted diagonal a_P + β·d the shift adds to the Jacobian, so the
+            # preconditioner matches the shifted operator. Frozen: the coefficient is detached.
+            return block.apply_at(phi, jax.lax.stop_gradient(a_p + relaxation * d))
 
         return ShiftTerm(diagonal, make_preconditioner)
 
@@ -127,6 +150,7 @@ def momentum_continuation(
     max_escalations: int = 6,
     escalation_factor: float = 2.0,
     divergence_cap: float = 10.0,
+    shift_basis: ShiftBasis | None = None,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
     """The pseudo-transient continuation ``ForwardStep`` for the coupled flow solve.
@@ -163,6 +187,12 @@ def momentum_continuation(
         The :class:`~aquaflux.solve.DivergenceGuard` threshold: an attempt is rejected (and the damping
         escalated) if its residual is non-finite or exceeds ``divergence_cap × ‖R₀‖`` — measured
         against the *initial* residual, since the non-monotone march oscillates around and below it.
+    shift_basis : ShiftBasis, optional
+        How the velocity shift diagonal is built from the momentum diagonal's convective/dissipative
+        parts (see :class:`MomentumShiftPolicy`). Defaults to
+        :class:`~aquaflux.solve.LocalCourantBasis` — the full ``a_P`` (uniform under-relaxation),
+        unchanged from the historical shift. Pass ``LocalCourantBasis(dissipative_weight=0.0)`` for a
+        local convective time step.
     **preconditioner_kwargs
         Forwarded to :meth:`BlockPreconditioner.build` (e.g. ``schur_scaling``, ``velocity``).
 
@@ -172,10 +202,14 @@ def momentum_continuation(
         The configured continuation, ready to pass as ``ImplicitNewtonSolver(forward_step=...)``.
     """
     preconditioner = BlockPreconditioner.build(assembler, **preconditioner_kwargs)
+    policy = (
+        MomentumShiftPolicy(preconditioner)
+        if shift_basis is None
+        else MomentumShiftPolicy(preconditioner, shift_basis)
+    )
     return PseudoTransientStep(
-        MomentumShiftPolicy(preconditioner),
-        beta0=beta0,
-        exponent=exponent,
+        policy,
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent),
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),

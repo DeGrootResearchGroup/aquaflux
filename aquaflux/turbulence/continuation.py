@@ -34,6 +34,7 @@ from aquaflux.solve import (
     ImplicitNewtonSolver,
     PseudoTransientStep,
     ShiftTerm,
+    SwitchedEvolutionRelaxation,
 )
 
 from .preconditioner import ScalarTransportPreconditioner
@@ -148,8 +149,7 @@ def scalar_pseudo_transient_solve(
         if policy is None:
             forward = PseudoTransientStep(
                 ScalarShiftPolicy(jnp.zeros_like(state)),
-                beta0=beta0,
-                exponent=exponent,
+                relaxation_schedule=SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent),
                 max_escalations=max_escalations,
                 escalation_factor=escalation_factor,
                 acceptance=DivergenceGuard(divergence_cap=divergence_cap),
@@ -157,8 +157,7 @@ def scalar_pseudo_transient_solve(
         else:
             forward = PseudoTransientStep(
                 policy,
-                beta0=beta0,
-                exponent=exponent,
+                relaxation_schedule=SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent),
                 max_escalations=max_escalations,
                 escalation_factor=escalation_factor,
                 acceptance=DivergenceGuard(divergence_cap=divergence_cap),

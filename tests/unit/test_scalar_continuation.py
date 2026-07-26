@@ -28,6 +28,7 @@ from aquaflux.properties import Constant, PropertyModel
 from aquaflux.solve.continuation import PseudoTransientStep
 from aquaflux.solve.implicit import ImplicitNewtonSolver
 from aquaflux.solve.newton import newton_step
+from aquaflux.solve.relaxation import SwitchedEvolutionRelaxation
 from aquaflux.turbulence import ScalarShiftPolicy, scalar_pseudo_transient_solve
 from aquaflux.turbulence.preconditioner import (
     scalar_transport_preconditioner,
@@ -198,7 +199,9 @@ def test_engine_leaves_a_clean_ift_adjoint() -> None:
     )
 
     def solved_norm(c):
-        engine = PseudoTransientStep(ScalarShiftPolicy(shift), beta0=2.0)
+        engine = PseudoTransientStep(
+            ScalarShiftPolicy(shift), relaxation_schedule=SwitchedEvolutionRelaxation(beta0=2.0)
+        )
         solver = ImplicitNewtonSolver(max_steps=60, forward_step=engine)
         return jnp.sum(solver.solve(residual_fn, jnp.full(n, 1.0), c) ** 2)
 

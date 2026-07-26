@@ -37,7 +37,12 @@ from aquaflux.schemes.interpolation import (
 )
 from aquaflux.vectors import dot
 
-from .rhie_chow import advective_momentum_flux, interior_mass_flux, momentum_diagonal
+from .rhie_chow import (
+    advective_momentum_flux,
+    interior_mass_flux,
+    momentum_diagonal,
+    momentum_diagonal_parts,
+)
 from .state import BlockStateLayout
 
 if TYPE_CHECKING:
@@ -487,22 +492,7 @@ class MomentumContinuity(eqx.Module):
         needs ``a_P`` as a *frozen* coefficient; it ``stop_gradient``-s the result itself (and evaluates
         it at a ``stop_gradient``-ed state).
         """
-        mdot_estimate = None
-        if self.advection_scheme is not None:
-            # Lagged momentum-flux estimate: the shared advective flux (reconstructed rho*u projected
-            # on the normal), times area — the same face flux the Rhie--Chow mass flux uses, so a_P's
-            # convective term stays consistent with the mdot it stands in for.
-            mdot_estimate = (
-                advective_momentum_flux(
-                    velocity,
-                    self.density,
-                    self.interp_factor,
-                    self.mesh.face_cells,
-                    self.geometry,
-                    grad_velocity,
-                )
-                * self.geometry.face.area
-            )
+        mdot_estimate = self._lagged_mdot_estimate(velocity, grad_velocity)
         boundary_owner_coeff = (
             self.boundary_momentum_diagonal(self.viscosity, mdot_estimate)
             if boundary_corrected
@@ -516,6 +506,62 @@ class MomentumContinuity(eqx.Module):
             self.interp_factor,
             mdot_lagged=mdot_estimate,
             boundary_owner_coeff=boundary_owner_coeff,
+        )
+
+    def _lagged_mdot_estimate(
+        self, velocity: jnp.ndarray, grad_velocity: jnp.ndarray | None = None
+    ) -> jnp.ndarray | None:
+        """The lagged face mass-flux estimate ``a_P``'s convective term uses (``None`` for Stokes).
+
+        The shared advective flux (reconstructed ``rho u`` projected on the normal), times area — the
+        same face flux the Rhie--Chow mass flux uses, so the convective diagonal stays consistent with
+        the ``mdot`` it stands in for, and it breaks the ``a_P`` <-> ``mdot`` circularity.
+        """
+        if self.advection_scheme is None:
+            return None
+        return (
+            advective_momentum_flux(
+                velocity,
+                self.density,
+                self.interp_factor,
+                self.mesh.face_cells,
+                self.geometry,
+                grad_velocity,
+            )
+            * self.geometry.face.area
+        )
+
+    def momentum_matrix_diagonal_parts(
+        self, velocity: jnp.ndarray, grad_velocity: jnp.ndarray | None = None
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """The convective and dissipative buckets of the all-faces ``a_P``, per cell (isotropic).
+
+        The split :class:`~aquaflux.solve.ShiftBasis` consumes to build a local-time-step
+        pseudo-transient shift: ``convective`` is the first-order-upwind outflow sum, ``dissipative``
+        the viscous stiffness. Their sum is the ``boundary_corrected=False`` isotropic ``a_P`` (to
+        rounding) that :meth:`momentum_matrix_diagonal` returns per component — this is the same frozen
+        stabilization scale, only separated into its two parts, so it is likewise not
+        operator-consistent at the boundary and never enters the residual or its adjoint.
+
+        Parameters
+        ----------
+        velocity : jnp.ndarray
+            Per-cell velocity, shape ``(n_cells, dim)``.
+        grad_velocity : jnp.ndarray, optional
+            Per-cell velocity gradient for the 2nd-order flux estimate; omit for the leading-order one.
+
+        Returns
+        -------
+        tuple of jnp.ndarray
+            ``(convective, dissipative)``, each shape ``(n_cells,)`` and ``>= 0``.
+        """
+        return momentum_diagonal_parts(
+            self.mesh.face_cells,
+            self.geometry,
+            self.viscosity,
+            self.normal_distance,
+            self.interp_factor,
+            mdot_lagged=self._lagged_mdot_estimate(velocity, grad_velocity),
         )
 
     def _momentum_residual(
