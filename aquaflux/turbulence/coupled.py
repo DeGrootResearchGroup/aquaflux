@@ -772,8 +772,23 @@ def _coupled_shift_policy(
     ``k`` blocks have no such tail at all (0 % above 2x). Those over-damped cells are effectively frozen
     (``delta_omega ~ 0``) while the rest of the field moves, which is precisely the observed failure --
     the recirculation and ``k`` static while the residual creeps upward. The tail appears within ~20
-    steps, so there is no safe refresh cadence: carrying the initial diagonal works because a cold start
-    is smooth, not because staleness is desirable.
+    steps, so there is no safe refresh cadence *for this form*: carrying the initial diagonal works
+    because a cold start is smooth, not because staleness is desirable.
+
+    **The restriction is a property of that product, not of the method — a shift built as
+    ``transport_diagonal(state) * omega(reference)`` refreshes cleanly.** Two things are entangled in
+    ``transport_diagonal(state) * omega(state)`` and they pull opposite ways: ``omega`` supplies the
+    near-wall weighting the bare transport diagonal lacks (which is why simply dropping it inverts
+    wall-versus-bulk damping and starves the solve), while also dragging the field's evolving range into
+    the shift. Refreshing the transport factor -- a local time scale, which genuinely should track the
+    developing flow -- while holding the ``omega`` weighting at its frozen value separates them: the
+    temporal ratio becomes ``transport(state)/transport(reference)``, in which ``omega`` cancels, and the
+    tail disappears (>2x on 0.0-0.1 % of cells, the same class as the velocity and ``k`` blocks) with the
+    near-wall weighting preserved. Measured on a march that upgrades its shift at every refresh, that
+    holds a full unclipped step where rebuilding the shipped form collapses it. The reason for the split
+    is that the transport diagonal is *physics* while the ``omega`` factor is the *coordinate
+    transformation* between the physical field and the solved log variable; the former should follow the
+    flow, the latter should not.
     The coupled shift diagonal is the transport-operator diagonal times ``jacobian_scale(field)``, which
     under :class:`LogScalars` is ``omega``; at a developed state both factors grow (stiffer operator,
     larger ``omega``), so a rebuilt diagonal ``d`` is much larger, the pseudo-transient shift ``beta d``

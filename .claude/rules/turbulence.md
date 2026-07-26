@@ -360,12 +360,38 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       stiffest cells** — and multiplying by ω corrects that to 2.95×. So `× ω` is doing real work:
       dropping it inverts the wall/bulk damping ratio and under-damps the near-wall region by ~20×
       once the global factor is included, which is what clips α on step 0 and starves the bubble after.
-    - **The settled picture: the shipped design is close to right, and the "never refresh" rule is a
-      consequence of a genuine trade, not a defect.** *Spatially* `× ω` is correct (stiff near-wall
-      cells need more damping); *temporally* it is the problem (it drags ω's evolving range into the
-      shift, creating the tail). **Carrying the cold-IC diagonal keeps the good half and freezes the
-      bad half.** A cure must preserve the near-wall weighting while removing the temporal drift —
-      dropping `× ω` discards the wrong half.
+    - **The diagnosis: `× ω` entangles two things that should be separated.** *Spatially* it is correct
+      (it supplies the near-wall weighting the bare transport diagonal lacks); *temporally* it is the
+      problem (it drags ω's evolving range into the shift, creating the tail). Carrying the cold-IC
+      diagonal keeps the good half and freezes the bad half — but only by freezing **both**.
+    - **✅ THE SHIFT *CAN* BE REFRESHED — `transport_diagonal(state) × ω(cold)` (measured; the
+      "never refresh" rule is NOT intrinsic).** Refresh the *physics* (the transport diagonal, a local
+      time scale that genuinely should track the developing flow) and freeze only the *coordinate
+      transformation* (the ω weighting, a property of the log parametrization, not of the flow). The
+      temporal ratio is then `transport(state)/transport(cold)` — the ω factor cancels exactly:
+
+      | build state | temporal tail >2× (shipped → variant) | near-wall weighting (shipped → variant) |
+      |---|---|---|
+      | g0020 | 8.01 % → **0.00 %** | 2.92 → **2.83** |
+      | g0060 | 12.06 % → **0.06 %** | 3.43 → **2.79** |
+      | g0110 | 14.98 % → **0.10 %** | 3.37 → **2.70** |
+
+      Both properties at once: the tail vanishes (p99 1.69 vs 14.4 — the same class as velocity and k,
+      which have never needed carrying) *and* the near-wall weighting is preserved (~2.7–2.8 against the
+      shipped 2.9–3.4; the failed log-space form inverted it to 0.54).
+    - **Confirmed on a march that upgrades its shift at every refresh.** Identical to the control up to
+      the first refresh (bit-identical through step 15, as it must be — `transport(cold) × ω(cold)` *is*
+      the shipped diagonal), then diverging. Post-upgrade steps 16–20 ran at **α = 1.0000 throughout**,
+      9–13 cycles, residual falling steadily — where a shipped-form rebuild collapses α to the ladder
+      floor with an ascent direction. At step 20: rel 3.69e-2 vs the control's 4.45e-2, α 1.0 vs 0.5,
+      `x_r/h` 0.39 in both. By steps 25–30 the two are level (rel 2.33e-2 vs 2.23e-2; `x_r/h` 0.61 in
+      both).
+    - **So: structurally sound, performance-neutral on this case.** The march neither gains nor loses,
+      because the control *also* refreshes its AMGs and its cycle counts were already healthy (10–16) —
+      a stale shift was not costing it much here. The value is that a constraint which should not exist
+      is removed: a stabilizer whose correctness depends on being frozen at one smooth initial state
+      would fail on a case whose cold start is rougher, or which needs far more development. Expect the
+      benefit to appear there, not on pitzDaily. **Do not sell this as a speed-up.**
     - **Not a free lunch either way:** over-damping the ω block destroys the direction by *any* route —
       a uniform 4× on the log-space form collapses exactly like the tail does (α floor, ascent, 34
       cycles). The unifying statement is **the coupled direction fails when the ω block is over-damped**.
