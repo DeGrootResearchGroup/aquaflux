@@ -13,7 +13,11 @@ from .advection import (
     FirstOrderUpwind,
     LimitedUpwind,
 )
-from .diffusion import DiffusionFlux
+from .diffusion import (
+    DiffusionFlux,
+    flux_continuous_conductance,
+    flux_continuous_denominator,
+)
 from .face_flux import FaceContext, FaceFluxOperator
 from .fixed_value import DifferenceRow, FixationRow, FixedValueCells, LogRatioRow
 from .residual import ResidualAssembler
@@ -35,4 +39,6 @@ __all__ = [
     "ResidualAssembler",
     "TransientTerm",
     "VolumeSource",
+    "flux_continuous_conductance",
+    "flux_continuous_denominator",
 ]

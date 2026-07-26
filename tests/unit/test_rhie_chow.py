@@ -12,7 +12,6 @@ from aquaflux.mesh import (
     MeshGeometry,
     structured_grid_2d,
 )
-from aquaflux.schemes.interpolation import interpolation_factor
 
 
 def _single_face(*, p_owner=0.0, p_neighbour=0.0, grad=(0.0, 0.0), d_coeff=0.5):
@@ -71,16 +70,7 @@ def test_mass_flux_correction_cancels_when_compact_equals_interpolated() -> None
 def test_momentum_diagonal_positive_and_scales_with_viscosity() -> None:
     mesh = structured_grid_2d(4, 4)
     geom = mesh.geometry()
-    owner = mesh.face_cells.owner
-    nb = jnp.where(mesh.face_cells.neighbour >= 0, mesh.face_cells.neighbour, owner)
-    d = geom.cell.centroid[nb] - geom.cell.centroid[owner]
-    dn = jnp.where(
-        mesh.face_cells.neighbour >= 0,
-        jnp.sum(d * geom.face.normal, axis=1),
-        jnp.sum((geom.face.centroid - geom.cell.centroid[owner]) * geom.face.normal, axis=1),
-    )
-    g = interpolation_factor(mesh.face_cells, geom)
-    a1 = momentum_diagonal(mesh.face_cells, geom, jnp.ones(mesh.n_cells), dn, g)
-    a2 = momentum_diagonal(mesh.face_cells, geom, 2.0 * jnp.ones(mesh.n_cells), dn, g)
+    a1 = momentum_diagonal(mesh.face_cells, geom, jnp.ones(mesh.n_cells))
+    a2 = momentum_diagonal(mesh.face_cells, geom, 2.0 * jnp.ones(mesh.n_cells))
     assert bool(jnp.all(a1 > 0.0))
     assert jnp.allclose(a2, 2.0 * a1)  # viscous diagonal is linear in mu

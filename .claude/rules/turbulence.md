@@ -61,7 +61,14 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   its frozen operator with the shared `aquaflux.solve.frozen_operator.convection_diffusion_operator` and
   hands the **assembled matrix** to `build_convection_hierarchy` / `build_air_hierarchy` (the coarsening
   library is operator-in, #45); its reaction+boundary diagonal still comes from its own `J·1`
-  derivation, which is a genuinely different source, not a copy of the interior stencil.
+  derivation, which is a genuinely different source, not a copy of the interior stencil. Its interior
+  diffusion coupling (`_scalar_operator_pieces`, feeding both the AMG operator and the pseudo-time shift)
+  is `discretization.flux_continuous_conductance(Γ, geometry, face_cells)` — the scalar transport
+  operator's own diagonal contribution, harmonic on a graded diffusivity `Γ = ν + σν_t`, the *same*
+  conductance the k/ω residual's `DiffusionFlux` carries (binding, #154). It replaced a g-weighted
+  **arithmetic** face `Γ` that agreed only for constant `Γ` and over-counted a graded face by
+  `(1+r)²/(4r)`; for a pure-diffusion scalar the shift diagonal now equals `diag(jacfwd(residual))`
+  exactly (pinned in `test_scalar_transport_preconditioner.py`).
   `scalar_transport_preconditioner` returns a **`ScalarTransportPreconditioner`** strategy
   (`ConvectionAmgPreconditioner` / `AirAmgPreconditioner`) rather than the old opaque `lambda phi: solve`.
   These are plain frozen dataclasses, **not `equinox.Module`s** — see the binding note in

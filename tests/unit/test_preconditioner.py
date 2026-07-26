@@ -246,13 +246,43 @@ def test_convection_velocity_operator_diagonal_is_the_momentum_diagonal() -> Non
             asm.mesh.face_cells,
             asm.geometry,
             asm.viscosity,
-            asm.normal_distance,
-            asm.interp_factor,
             mdot_lagged=reference_mdot,
         ),
         axis=1,
     )
     assert jnp.allclose(block.hierarchy.levels[0].diagonal, reference_a_p, rtol=1e-12, atol=0.0)
+
+
+def test_momentum_diagonal_is_the_residual_operator_diagonal_under_graded_viscosity() -> None:
+    """``a_P`` equals ``diag(J_momentum)`` even where the viscosity is graded (issue #154).
+
+    ``a_P``'s viscous term is the diffusion operator's own diagonal contribution (harmonic on a graded
+    face), so ``a_P`` *is* the true momentum-matrix diagonal — the coefficient the Rhie--Chow damping
+    ``V / a_P`` (a differentiated, solution-affecting term) and the pseudo-time shift both assume. The
+    g-weighted arithmetic viscosity it replaced over-estimated a graded face by ``(1+r)^2/(4r)`` and
+    failed this at non-constant viscosity; at constant viscosity both forms are byte-identical, which is
+    why every prior (constant-``mu``) test passed it. A Stokes flow (no advection) isolates the viscous
+    diagonal; graded ``mu_eff = mu + rho nu_t`` is injected through the turbulence-closure seam.
+    """
+    mesh = structured_grid_2d(8, 8, named_boundaries=True)
+    geom = mesh.geometry()
+    asm0 = MomentumContinuity.build(
+        mesh,
+        geom,
+        PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
+        CompactGreenGauss(),
+        BoundaryConditions({side: NoSlipWall() for side in ("top", "bottom", "left", "right")}),
+        pressure_pin=0,  # closed domain
+    )  # no advection_scheme -> Stokes: a_P is purely viscous, the residual is linear
+    x = geom.cell.centroid[:, 0]
+    nu_t = jnp.exp(3.0 * (x - x.min()) / (x.max() - x.min())) - 1.0  # 0 .. ~19, smoothly graded
+    asm = asm0.with_eddy_viscosity(nu_t)
+
+    velocity = jnp.zeros((mesh.n_cells, mesh.dim))
+    a_p = asm.momentum_matrix_diagonal(velocity)  # (n_cells, dim), boundary-consistent form
+    state = asm.pack(velocity, jnp.zeros(mesh.n_cells))
+    velocity_diag, _ = asm.unpack(jnp.diag(jax.jacfwd(asm.residual)(state)))
+    assert jnp.allclose(a_p, velocity_diag, rtol=1e-9, atol=1e-9)
 
 
 def test_schur_laplacian_is_conservative_and_spd() -> None:
@@ -441,14 +471,13 @@ def test_velocity_block_builds_from_a_narrow_geometry_seam() -> None:
     """
     mesh = structured_grid_2d(4, 3)
     face_cells = mesh.face_cells
-    n_cells, n_faces = mesh.n_cells, mesh.n_faces
-    # SmoothedAmgVelocity reads only the mesh geometry (face area, normal distance, owner, dim); the
-    # interp_factor / viscosity fields belong to the convection-aware sibling, so they are unit here.
+    n_cells = mesh.n_cells
+    # SmoothedAmgVelocity reads only the mesh geometry (centroids/areas via the flux-continuous
+    # conductance, owner, dim); the viscosity field belongs to the convection-aware sibling, so it is
+    # unit here.
     geometry = _VelocityGeometry(
         face_cells=face_cells,
         mesh_geometry=mesh.geometry(),
-        interp_factor=jnp.ones(n_faces),
-        normal_distance=jnp.ones(n_faces),
         viscosity=jnp.ones(n_cells),
         dim=mesh.dim,
     )
