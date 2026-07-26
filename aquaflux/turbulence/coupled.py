@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 import equinox as eqx
 import jax
@@ -58,11 +58,13 @@ from aquaflux.solve import (
     LocalCourantBasis,
     PseudoTransientStep,
     RefreshTrigger,
+    ResidualNorm,
     ShiftBasis,
     ShiftTerm,
     StepControl,
     StepReport,
     SwitchedEvolutionRelaxation,
+    VelocityShiftParts,
     forward_march,
 )
 
@@ -386,62 +388,6 @@ class CoupledRANS(eqx.Module):
         )(omega)
 
         return self.layout.pack(flow_residual, k_residual, omega_residual)
-
-
-class VelocityShiftParts(Protocol):
-    """Where the velocity shift's two diagonal buckets come from — its own concern, not the
-    preconditioner's.
-
-    Structural interface only (a ``Protocol``). The pseudo-time shift and the frozen preconditioner have
-    deliberately different lifetimes: the preconditioner is frozen for many steps (re-freezing the flow
-    block was measured unhelpful), while the shift is a *local time scale* that should describe the
-    operator being solved now. Deriving one from the other couples those lifetimes for no reason, so the
-    source of the velocity buckets is injected instead.
-
-    An implementation returns ``(convective, dissipative)`` per cell, each ``>= 0``, in the split a
-    :class:`~aquaflux.solve.ShiftBasis` consumes.
-    """
-
-    def parts(
-        self, flow: jnp.ndarray, k_solved: jnp.ndarray, omega_solved: jnp.ndarray
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        """The velocity shift's convective and dissipative buckets, each shape ``(n_cells,)``.
-
-        Parameters
-        ----------
-        flow : jnp.ndarray
-            The flow sub-vector ``[velocity..., pressure]``.
-        k_solved, omega_solved : jnp.ndarray
-            The turbulence blocks **as solved** -- the log variable where a log parametrization is in
-            use, not the physical field. An implementation that needs the physical values must hold the
-            matching :class:`ScalarVariableTransform` and convert; one that does not need them at all
-            ignores them.
-        """
-
-
-class FrozenViscosityVelocityParts(eqx.Module):
-    """The momentum diagonal at the **preconditioner's frozen** effective viscosity (the default).
-
-    Live in velocity, frozen in viscosity: the buckets come from the block preconditioner's own frozen
-    assembler, so ``mu_eff`` is whatever it was at the freeze state. For a flow-only solve that is
-    exact, because the viscosity really is constant. For the **coupled** solve it is not: ``mu_eff =
-    rho (nu + nu_t)`` grows with the turbulence, so the velocity time scale ignores the eddy viscosity
-    that develops. This is the historical behaviour; the shipped default is ``None``, which runs the
-    same expression inline, and this class is its explicit, injectable spelling.
-
-    Attributes
-    ----------
-    block : BlockPreconditioner
-        The frozen flow-block preconditioner whose assembler supplies the buckets.
-    """
-
-    block: BlockPreconditioner
-
-    def parts(
-        self, flow: jnp.ndarray, k_solved: jnp.ndarray, omega_solved: jnp.ndarray
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        del k_solved, omega_solved
-        return self.block.frozen_momentum_diagonal_parts(flow)
 
 
 class LiveViscosityVelocityParts(eqx.Module):
@@ -780,6 +726,7 @@ def coupled_continuation(
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     velocity_shift_parts: VelocityShiftParts | None = None,
     reuse: CoupledShiftPolicy | None = None,
+    residual_norm: ResidualNorm | None = None,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
     """Build the pseudo-transient continuation step for the coupled Newton solve.
@@ -831,6 +778,12 @@ def coupled_continuation(
         the k/omega AMGs are re-derived on their reused coarsening while the flow block is carried over
         untouched (see :func:`_coupled_shift_policy`). Use it to re-freeze a stale preconditioner part
         way through a march, once the flow has developed.
+    residual_norm : ResidualNorm, optional
+        The progress measure to use, overriding ``block_scaled_norm``. ``solve_coupled`` passes the
+        march's initial measure here on every refresh, so a self-normalising :class:`BlockScaledNorm`
+        keeps its per-block reference magnitudes fixed at the state the global progress reference was
+        measured against, rather than re-basing toward one at each developed refresh state (seam 4).
+        ``None`` (a fresh, non-refresh build) constructs the measure from ``block_scaled_norm``.
     **preconditioner_kwargs
         Forwarded to :meth:`~aquaflux.flow.BlockPreconditioner.build` for the flow block (e.g.
         ``schur_scaling``, ``velocity``). Ignored when ``reuse`` is given, since the flow block is then
@@ -850,9 +803,17 @@ def coupled_continuation(
         velocity_shift_parts,
         **preconditioner_kwargs,
     )
-    residual_norm = (
-        _coupled_residual_norm(coupled, reference_state) if block_scaled_norm else jnp.linalg.norm
-    )
+    # An explicit `residual_norm` (passed by `solve_coupled` on every refresh) is used as-is, so the
+    # block-scaled measure's per-field reference magnitudes stay fixed at the state the *global*
+    # progress reference was measured against. Rebuilding it at each refresh's developed state would
+    # re-base a self-normalising `BlockScaledNorm` back toward one, making the convergence test
+    # unreachable and mismatching the finishing solve's absolute target (issue #156, seam 4).
+    if residual_norm is None:
+        residual_norm = (
+            _coupled_residual_norm(coupled, reference_state)
+            if block_scaled_norm
+            else jnp.linalg.norm
+        )
     return PseudoTransientStep(
         policy,
         relaxation_schedule=SwitchedEvolutionRelaxation(
@@ -1245,7 +1206,12 @@ def solve_coupled(
         # and carries no convergence guard -- so the finishing solve below still produces the result.
         # `coupled.residual` is passed as a bound method (a pytree), not a lambda, so its arrays ride
         # as dynamic leaves and every step within a segment is a compilation-cache hit.
-        reference_norm = float(continuation.norm()(coupled.residual(state)))
+        # The global progress reference AND the residual measure that produces it must come from the
+        # same state, held fixed across every segment: a `BlockScaledNorm` is self-normalising, so a
+        # per-refresh rebuild would re-base it and make the convergence test unreachable (seam 4). Hold
+        # the initial measure and re-inject it into every refreshed continuation.
+        base_norm = continuation.norm()
+        reference_norm = float(base_norm(coupled.residual(state)))
         # `refresh_limit` refreshes means `refresh_limit + 1` segments: the segment *after* the last
         # refresh must still be marched here, or the newly-refreshed preconditioner would only ever be
         # used by the finishing solve and its steps would go unobserved.
@@ -1285,6 +1251,7 @@ def solve_coupled(
                 jax.lax.stop_gradient(state),
                 method=method,
                 reuse=continuation.shift_policy,
+                residual_norm=base_norm,  # keep the progress measure fixed at the initial state (seam 4)
                 **continuation_kwargs,
             )
         # Hand the finishing solve the *absolute* target measured at the initial state, so a refreshed
