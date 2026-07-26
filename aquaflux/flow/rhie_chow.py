@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
 
+from aquaflux.discretization import flux_continuous_conductance
 from aquaflux.schemes.interpolation import interpolate_owner_neighbour, interpolate_to_face
 from aquaflux.vectors import dot, scale
 
@@ -36,64 +37,32 @@ if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, MeshGeometry
 
 
-def viscous_face_coefficient(
-    mu: jnp.ndarray,
-    normal_distance: jnp.ndarray,
-    interp_factor: jnp.ndarray,
-    face_cells: FaceCellConnectivity,
-    geometry: MeshGeometry,
-) -> jnp.ndarray:
-    """Central viscous face coefficient ``mu_f A / (d.n)`` per face, shape ``(n_faces,)``.
-
-    The face viscosity is the owner/neighbour interpolation ``mu_f`` (the same blend every other face
-    value uses), times the face area over the normal distance. The single definition of the viscous
-    coupling shared by the momentum diagonal (:func:`momentum_diagonal`) and the frozen
-    convection-diffusion operator the velocity-block preconditioner coarsens, so the two cannot drift.
-
-    Parameters
-    ----------
-    mu : jnp.ndarray
-        Per-cell dynamic viscosity, shape ``(n_cells,)``.
-    normal_distance : jnp.ndarray
-        Owner-to-neighbour (or owner-to-face on boundaries) normal distance ``d . n`` per face,
-        shape ``(n_faces,)``.
-    interp_factor : jnp.ndarray
-        Face interpolation factor ``g``, shape ``(n_faces,)``.
-    face_cells : FaceCellConnectivity
-        The face→cell incidence (``mesh.face_cells``).
-    geometry : MeshGeometry
-        The mesh metrics; reads face areas.
-    """
-    mu_face = interpolate_owner_neighbour(mu, interp_factor, face_cells)
-    return mu_face * geometry.face.area / normal_distance
-
-
 def momentum_diagonal(
     face_cells: FaceCellConnectivity,
     geometry: MeshGeometry,
     mu: jnp.ndarray,
-    normal_distance: jnp.ndarray,
-    interp_factor: jnp.ndarray,
     mdot_lagged: jnp.ndarray | None = None,
     dt: float | None = None,
     boundary_owner_coeff: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Per-cell momentum-matrix diagonal ``a_P`` (viscous + convective + transient central coeff).
 
+    The viscous term is the flux-continuous conductance
+    (:func:`~aquaflux.discretization.flux_continuous_conductance`) — the momentum diffusion operator's
+    own diagonal contribution — so ``a_P`` equals the operator diagonal even where the viscosity is
+    graded (turbulent ``mu_eff = mu + rho nu_t``). The g-weighted arithmetic face viscosity it replaced
+    agreed only for constant ``mu``; on a face with a viscosity ratio ``r`` it over-estimated the
+    coupling by ``(1 + r)^2 / (4 r)``, which fed the Rhie--Chow damping ``V / a_P`` (a differentiated,
+    solution-affecting term) and the pseudo-time shift a wrong near-wall/shear-layer value.
+
     Parameters
     ----------
     face_cells : FaceCellConnectivity
         The face→cell incidence (``mesh.face_cells``).
     geometry : MeshGeometry
-        The mesh metrics; reads cell volumes and face areas.
+        The mesh metrics; reads cell volumes, face areas, and the centroids the conductance needs.
     mu : jnp.ndarray
         Per-cell dynamic viscosity, shape ``(n_cells,)``.
-    normal_distance : jnp.ndarray
-        Owner-to-neighbour (or owner-to-face on boundaries) normal distance ``d . n`` per face,
-        shape ``(n_faces,)``.
-    interp_factor : jnp.ndarray
-        Face interpolation factor ``g``, shape ``(n_faces,)`` — the same owner/neighbour blend used
-        for every other face value, applied here to the viscosity.
     mdot_lagged : jnp.ndarray, optional
         Lagged face mass flux for the convective contribution, shape ``(n_faces,)``; omit for
         Stokes flow (no convection).
@@ -121,11 +90,11 @@ def momentum_diagonal(
         # The interior-style all-faces form: the isotropic diagonal is exactly the sum of the
         # convective and dissipative buckets (single-homed in momentum_diagonal_parts).
         convective, dissipative = momentum_diagonal_parts(
-            face_cells, geometry, mu, normal_distance, interp_factor, mdot_lagged=mdot_lagged, dt=dt
+            face_cells, geometry, mu, mdot_lagged=mdot_lagged, dt=dt
         )
         a_p_isotropic = convective + dissipative
     else:
-        viscous = viscous_face_coefficient(mu, normal_distance, interp_factor, face_cells, geometry)
+        viscous = flux_continuous_conductance(mu, geometry, face_cells)
         # The scatter masks the neighbour coefficient to zero on boundary faces, so pass it unmasked.
         owner_coeff = viscous
         neighbour_coeff = viscous
@@ -148,8 +117,6 @@ def momentum_diagonal_parts(
     face_cells: FaceCellConnectivity,
     geometry: MeshGeometry,
     mu: jnp.ndarray,
-    normal_distance: jnp.ndarray,
-    interp_factor: jnp.ndarray,
     mdot_lagged: jnp.ndarray | None = None,
     dt: float | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -160,19 +127,19 @@ def momentum_diagonal_parts(
 
     - ``convective`` -- the first-order-upwind outflow ``Sum_f max(mdot_f, 0)`` scattered to each cell
       (equivalently ``1/2 Sum_f |mdot_f|`` on a divergence-free flux); zero for Stokes flow.
-    - ``dissipative`` -- the viscous stiffness ``Sum_f mu_f A_f / (d.n)_f`` plus any transient
+    - ``dissipative`` -- the viscous stiffness ``Sum_f Gamma_f A_f / denom_f`` (the flux-continuous
+      conductance, so it equals the diffusion operator's diagonal on graded ``mu``) plus any transient
       ``V / dt``.
 
     Their sum is the isotropic all-faces ``a_P`` (to rounding), so a shift basis that adds them
-    one-to-one reproduces the historical shift. Every face -- including boundary faces -- contributes
+    one-to-one reproduces the operator diagonal. Every face -- including boundary faces -- contributes
     the interior-style term, matching the uncorrected diagonal the frozen shift/preconditioner uses (a
-    forward-path stabilization scale, not the residual's operator-consistent coefficient). Isotropic
-    (the viscous and convective contributions are component-independent), so the parts are scalars, the
-    form the pseudo-time shift consumes.
+    forward-path stabilization scale). Isotropic (the viscous and convective contributions are
+    component-independent), so the parts are scalars, the form the pseudo-time shift consumes.
 
     Parameters
     ----------
-    face_cells, geometry, mu, normal_distance, interp_factor, mdot_lagged, dt
+    face_cells, geometry, mu, mdot_lagged, dt
         As :func:`momentum_diagonal` (the ``boundary_owner_coeff=None`` case).
 
     Returns
@@ -180,7 +147,7 @@ def momentum_diagonal_parts(
     tuple of jnp.ndarray
         ``(convective, dissipative)``, each shape ``(n_cells,)`` and ``>= 0``.
     """
-    viscous = viscous_face_coefficient(mu, normal_distance, interp_factor, face_cells, geometry)
+    viscous = flux_continuous_conductance(mu, geometry, face_cells)
     dissipative = face_cells.scatter(viscous, viscous)
     if dt is not None:
         dissipative = dissipative + geometry.cell.volume / dt

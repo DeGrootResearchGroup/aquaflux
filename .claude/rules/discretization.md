@@ -81,6 +81,19 @@ Principles.
   Verified (`test_diffusion.py`): orthogonal interior/boundary flux vs closed form, the
   correction is the difference `corr_N − corr_P` (cancels for equal gradients), Laplacian
   recovered at 2nd order, differentiable.
+  - **The `denom` formula and the operator-diagonal conductance are single-homed here (binding, #154).**
+    `flux_continuous_denominator(dpn, dnn, Γ_P, Γ_N)` = `(D_P·n) − (Γ_P/Γ_N)(D_N·n)` is the one home of
+    the coefficient-jump denominator (`DiffusionFlux` imports it), and
+    `flux_continuous_conductance(Γ, geometry, face_cells)` = `Γ_P A / denom` is the per-face **conductance**
+    — exactly `d(owner-outward flux)/d(phi_P)`, so scattering it to both incident cells reproduces this
+    operator's diagonal, and on an orthogonal graded face it is the harmonic mean `2Γ_PΓ_N/(Γ_P+Γ_N)·A/h`.
+    It is the shared definition every consumer of "the transport operator's viscous/diffusive diagonal"
+    calls — the momentum `a_P` (`flow/rhie_chow.py`), the scalar pseudo-time shift and frozen AMG
+    operators (`turbulence/preconditioner.py`, `flow/block_preconditioner.py`) — so none can drift from
+    the residual flux. Do **not** re-derive a face conductance with an owner/neighbour *arithmetic*
+    interpolation of `Γ`: it agrees only for constant `Γ` and over-counts a graded face by `(1+r)²/(4r)`
+    (`r = Γ_N/Γ_P`), which is what made `a_P` disagree with the operator diagonal under a graded turbulent
+    viscosity (issue #154; the `.claude/rules/flow.md` `a_P` note has the consequences).
 - **`residual.py` — BUILT.** `ResidualAssembler` (`equinox.Module`, built via `.build()` from an
   injected `BoundaryConditions({name: closure})` collection, which it binds to the mesh
   (`boundary.resolve(mesh.face_patches)`, off the jit path) and stores as a single `boundary` field).

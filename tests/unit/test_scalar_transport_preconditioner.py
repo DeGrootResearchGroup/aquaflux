@@ -22,8 +22,11 @@ from aquaflux.discretization import (
     ResidualAssembler,
 )
 from aquaflux.mesh import structured_grid_2d
-from aquaflux.properties import Constant, PropertyModel
-from aquaflux.turbulence.preconditioner import scalar_transport_preconditioner
+from aquaflux.properties import Constant, FieldProperty, PropertyModel
+from aquaflux.turbulence.preconditioner import (
+    scalar_transport_preconditioner,
+    scalar_transport_shift_diagonal,
+)
 
 U, GAMMA = 1.0, 1e-3  # cell Peclet ~ U dx / Gamma is large -> convection-dominated
 
@@ -48,6 +51,42 @@ def _transport(nx, ny):
         ),
     )
     return mesh, geometry, volume_flux, assembler.residual
+
+
+def test_scalar_shift_diagonal_is_the_operator_diagonal_under_graded_diffusivity() -> None:
+    """The scalar pseudo-time shift diagonal equals ``diag(J)`` for a pure-diffusion graded scalar (#154).
+
+    For a pure diffusion operator (no advection, no reaction) the shift is built to be exactly the
+    operator diagonal: the interior conductance scattered to both cells plus the ``J . 1`` boundary
+    stiffness. That identity only holds when the interior conductance is the operator's own (the
+    flux-continuous, harmonic-on-graded-``Gamma`` form) — the g-weighted arithmetic coefficient it
+    replaced over-counts a graded face and breaks it. Constant ``Gamma`` is byte-identical either way,
+    which is why no prior test caught this.
+    """
+    mesh = structured_grid_2d(6, 5, lx=4.0, ly=1.0, named_boundaries=True)
+    geometry = mesh.geometry()
+    x = geometry.cell.centroid[:, 0]
+    gamma = jnp.exp(2.5 * (x - x.min()) / (x.max() - x.min()))  # graded ~12x across the domain
+    assembler = ResidualAssembler.build(
+        mesh,
+        geometry,
+        PropertyModel({"diffusivity": FieldProperty(gamma)}),
+        (DiffusionFlux(),),  # pure diffusion: shift diagonal must reproduce diag(J) exactly
+        BoundaryConditions(
+            {
+                "left": Dirichlet(1.0),
+                "right": ZeroGradient(),
+                "bottom": Dirichlet(0.0),
+                "top": Dirichlet(0.0),
+            }
+        ),
+    )
+    reference = jnp.zeros(mesh.n_cells)
+    shift = scalar_transport_shift_diagonal(
+        mesh, geometry, gamma, jnp.zeros(mesh.n_faces), assembler.residual, reference
+    )
+    diag_j = jnp.diag(jax.jacfwd(assembler.residual)(reference))
+    assert jnp.allclose(shift, diag_j, rtol=1e-9, atol=1e-9)
 
 
 def _contraction(nx, ny, method, *, seed=0):

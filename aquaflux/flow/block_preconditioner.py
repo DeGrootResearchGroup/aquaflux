@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.ops import segment_sum
 
+from aquaflux.discretization import flux_continuous_conductance
 from aquaflux.solve import (
     air_multigrid_solve,
     build_air_hierarchy,
@@ -41,7 +42,7 @@ from aquaflux.solve import (
 )
 
 from .preconditioner import schur_face_coefficient
-from .rhie_chow import momentum_diagonal, viscous_face_coefficient
+from .rhie_chow import momentum_diagonal
 from .scales import characteristic_velocity
 
 if TYPE_CHECKING:
@@ -217,8 +218,6 @@ class _VelocityGeometry(eqx.Module):
 
     face_cells: FaceCellConnectivity
     mesh_geometry: MeshGeometry
-    interp_factor: jnp.ndarray
-    normal_distance: jnp.ndarray
     viscosity: jnp.ndarray
     dim: int = eqx.field(static=True)
 
@@ -228,8 +227,6 @@ class _VelocityGeometry(eqx.Module):
         return cls(
             assembler.mesh.face_cells,
             assembler.geometry,
-            assembler.interp_factor,
-            assembler.normal_distance,
             assembler.viscosity,
             assembler.mesh.dim,
         )
@@ -311,8 +308,6 @@ class SmoothedAmgSchur(InnerSchurSolver):
                     geometry.face_cells,
                     geometry.mesh_geometry,
                     jnp.ones(n_cells),
-                    geometry.normal_distance,
-                    geometry.interp_factor,
                 ),
                 axis=1,
             )
@@ -398,15 +393,11 @@ class SmoothedAmgVelocity(_RescaledAmgVelocity):
         v_cycles: int,
     ) -> SmoothedAmgVelocity:
         face_cells = geometry.face_cells
-        # Unit-viscosity viscous coefficient A/(d·n) — the geometry-only part of the momentum
-        # diagonal, rescaled to the current a_P in :meth:`apply`. From the shared coefficient with a
+        # Unit-viscosity viscous coefficient A/denom — the geometry-only part of the momentum
+        # diagonal, rescaled to the current a_P in :meth:`apply`. From the shared conductance with a
         # unit viscosity, so the reference operator matches the momentum diagonal's viscous term.
-        over_distance = viscous_face_coefficient(
-            jnp.ones(n_cells),
-            geometry.normal_distance,
-            geometry.interp_factor,
-            face_cells,
-            geometry.mesh_geometry,
+        over_distance = flux_continuous_conductance(
+            jnp.ones(n_cells), geometry.mesh_geometry, face_cells
         )
         # Boundary-face owner stiffness (the boundary part of the momentum diagonal), scattered to
         # cells via the connectivity's own scatter rather than a hand-rolled index add.
@@ -474,11 +465,10 @@ class SmoothedAmgConvectionVelocity(_RescaledAmgVelocity):
         # supplied by the caller because it is assembler behaviour (the flux operator), not geometry.
         face_cells = geometry.face_cells
         mu = jax.lax.stop_gradient(geometry.viscosity)
-        # Central viscous coefficient, from the shared definition so the frozen operator's viscous term
-        # cannot drift from the momentum diagonal's.
-        viscous = viscous_face_coefficient(
-            mu, geometry.normal_distance, geometry.interp_factor, face_cells, geometry.mesh_geometry
-        )
+        # Flux-continuous viscous conductance, from the shared definition so the frozen operator's
+        # viscous term cannot drift from the momentum diagonal's (both are the diffusion operator's
+        # own diagonal contribution, harmonic on graded viscosity).
+        viscous = flux_continuous_conductance(mu, geometry.mesh_geometry, face_cells)
         # Boundary-face owner contribution to the momentum diagonal ``a_P`` (the plain all-faces form
         # the frozen diagonal keeps: ``viscous + max(mdot, 0)`` on each boundary face), scattered to
         # cells by the connectivity's own scatter. Built from the same ``viscous`` and reference flux as

@@ -32,9 +32,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux.discretization import flux_continuous_conductance
 from aquaflux.mesh import Mesh
 from aquaflux.mesh.geometry import MeshGeometry
-from aquaflux.schemes.interpolation import interpolate_owner_neighbour, interpolation_factor
 from aquaflux.solve import (
     AirHierarchy,
     SmoothedHierarchy,
@@ -45,7 +45,6 @@ from aquaflux.solve import (
     convection_multigrid_solve,
     refresh_air_hierarchy,
 )
-from aquaflux.vectors import dot
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -155,7 +154,7 @@ def _scalar_operator_pieces(
     stencil (``viscous + first-order-upwind convection``) and the same reaction-plus-boundary diagonal.
 
     Returns ``(owner_e, nb_e, visc_int, mdot_int, boundary_diagonal, n)`` -- the interior-face edge
-    endpoints, the per-edge viscous coefficient ``Gamma_face A / (d.n)`` and owner-outward volume flux
+    endpoints, the per-edge flux-continuous diffusion conductance ``Gamma_P A / denom`` and owner-outward volume flux
     ``mdot``, the clamped reaction+boundary diagonal, and the cell count. Value fixations (e.g. the
     omega near-wall cells) are *not* applied here -- each consumer imposes its own (the preconditioner
     detaches them from the aggregation; the shift zeroes them).
@@ -164,17 +163,11 @@ def _scalar_operator_pieces(
     owner_e, nb_e, interior_faces = face_cells.interior_edges()
     n = mesh.n_cells
 
-    # Diffusion face coefficient Gamma_face * A / (d . n), interpolated to faces as the flux forms it.
+    # Flux-continuous diffusion conductance Gamma_P * A / denom -- the scalar transport operator's own
+    # diagonal contribution per face (harmonic-mean limit on graded Gamma), the same conductance the
+    # k/omega residual's DiffusionFlux carries, so the shift/operator cannot drift from it.
     gamma = jax.lax.stop_gradient(diffusivity)
-    gamma_face = interpolate_owner_neighbour(
-        gamma, interpolation_factor(face_cells, geometry), face_cells
-    )
-    d = (
-        face_cells.neighbour_centroid(geometry.cell.centroid)
-        - geometry.cell.centroid[face_cells.owner]
-    )
-    normal_distance = dot(d, geometry.face.normal)
-    viscous = gamma_face * geometry.face.area / normal_distance
+    viscous = flux_continuous_conductance(gamma, geometry, face_cells)
     visc_int = np.asarray(jax.lax.stop_gradient(viscous))[interior_faces]
     mdot_int = np.asarray(jax.lax.stop_gradient(volume_flux))[interior_faces]
 

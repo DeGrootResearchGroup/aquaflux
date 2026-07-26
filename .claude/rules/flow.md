@@ -90,11 +90,30 @@ Engineering Principles.
   operator coefficient, and the extra boundary damping is what carries the high-Reynolds pseudo-transient
   march — correcting it there regressed `test_channel_high_reynolds` and never affects the converged
   residual or its adjoint (the shift vanishes at the fixed point). The broader assembler unification is #58.
+- **`a_P`'s viscous term is the flux-continuous conductance, i.e. the diffusion operator's own diagonal
+  (binding, #154).** `momentum_diagonal`/`momentum_diagonal_parts` build the viscous coupling from
+  `discretization.flux_continuous_conductance(μ_eff, geometry, face_cells)` — `Γ_P A / denom`,
+  `denom = (D_P·n) − (Γ_P/Γ_N)(D_N·n)`, the *same* per-face value AD gets by differentiating
+  `DiffusionFlux`'s owner-outward flux, so scattering it to both cells reproduces the residual's momentum
+  diagonal. On an orthogonal graded face it is the **harmonic mean** `2Γ_PΓ_N/(Γ_P+Γ_N)·A/h`. The old
+  g-weighted **arithmetic** face viscosity (`viscous_face_coefficient`, now deleted) agreed only for
+  constant `μ`; on a face with viscosity ratio `r` it over-estimated the coupling by `(1+r)²/(4r)`, so
+  under a graded turbulent `μ_eff = μ + ρν_t` `a_P` was *not* the operator diagonal — which mattered
+  because `a_P` is not solver-internal: it sets the differentiated Rhie–Chow damping `V/a_P` (so it
+  changed the *converged* solution in the shear layer/near-wall), and it is the base of the
+  pseudo-transient shift (so `βd` was not the spatially-uniform relaxation `1/(1+β)` the shift-basis
+  assumes). **Constant `μ` is byte-identical** to the old form on any mesh (`Γ_P=Γ_N ⇒ denom = (x_N−x_P)·n`),
+  which is why every prior test — all constant-`μ` — passed the wrong form. The **same** helper feeds the
+  frozen velocity AMG operators and the scalar shift/AMG (`turbulence/preconditioner.py`), so none can
+  drift from the residual. Note `g`-weighting still governs the *other* face interpolations
+  (`interp(ρu)`, `interp(∇p)`, `interp(V/a_P)`); only the viscosity face value moved to the owner-based
+  conductance. Regression-pinned: `momentum_matrix_diagonal` vs `diag(jacfwd(residual))` at graded `ν_t`
+  (`test_preconditioner.py`), the conductance vs the `DiffusionFlux` diagonal (`test_diffusion.py`).
 - **The velocity-block AMG derives its frozen operator from the shared diagonal definitions — no numpy
   re-derivation (binding, #45).** The velocity strategies used to rebuild the interior upwind stencil in
   numpy (`np.add.at`) purely to subtract it back out of `a_P` and recover a boundary diagonal — a
   reconstruction that had to match the `jnp` formula bit-for-bit across two modules and two languages.
-  Now: the viscous coupling comes from `rhie_chow.viscous_face_coefficient` (the *same* helper
+  Now: the viscous coupling comes from `discretization.flux_continuous_conductance` (the *same* helper
   `momentum_diagonal` uses, so the two cannot drift), and the boundary diagonal is the boundary-face
   owner coefficient scattered by `face_cells.scatter` — built from the same `viscous` / reference-flux
   arrays as the off-diagonals, so the assembled operator's diagonal **is** the frozen `a_P` by

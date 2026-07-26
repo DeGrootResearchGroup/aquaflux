@@ -42,12 +42,95 @@ untouched, so it is behaviour-neutral wherever it is not supplied.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import equinox as eqx
 import jax.numpy as jnp
 
 from aquaflux.vectors import dot, scale
 
 from .face_flux import FaceContext, FaceFluxOperator
+
+if TYPE_CHECKING:
+    from aquaflux.mesh import FaceCellConnectivity, MeshGeometry
+
+
+def flux_continuous_denominator(
+    dpn: jnp.ndarray,
+    dnn: jnp.ndarray,
+    gamma_owner: jnp.ndarray,
+    gamma_neighbour: jnp.ndarray,
+) -> jnp.ndarray:
+    """Coefficient-jump-corrected normal distance ``(D_P.n) - (Gamma_P/Gamma_N)(D_N.n)``.
+
+    The denominator of the flux-continuous normal derivative: eliminating the common face value from
+    the two one-sided extrapolations under ``Gamma_P dphi/dn|_P = Gamma_N dphi/dn|_N`` leaves this in
+    the denominator, so a coefficient jump is carried natively (it reduces to ``(x_N - x_P).n`` when
+    ``Gamma_P = Gamma_N``, the orthogonal-limit harmonic mean). Defined once here so the residual flux
+    (:class:`DiffusionFlux`) and the operator-diagonal conductance
+    (:func:`flux_continuous_conductance`) cannot use different denominators.
+
+    Parameters
+    ----------
+    dpn, dnn : jnp.ndarray
+        The owner/neighbour centroid → face-centroid normal displacements ``D_P.n`` (``> 0``) and
+        ``D_N.n`` (``< 0`` on interior faces), shape ``(n_faces,)`` each.
+    gamma_owner, gamma_neighbour : jnp.ndarray
+        The owner/neighbour cell diffusion coefficient gathered to each face, shape ``(n_faces,)``.
+    """
+    return dpn - (gamma_owner / gamma_neighbour) * dnn
+
+
+def flux_continuous_conductance(
+    gamma: jnp.ndarray,
+    geometry: MeshGeometry,
+    face_cells: FaceCellConnectivity,
+) -> jnp.ndarray:
+    """Per-face flux-continuous diffusion conductance ``Gamma_P A / denom``, shape ``(n_faces,)``.
+
+    This is exactly the contribution each face makes to the diffusion operator's diagonal — and the
+    magnitude of its symmetric off-diagonal coupling: differentiating :class:`DiffusionFlux`'s
+    owner-outward face flux ``-Gamma_P (grad phi . n) A`` w.r.t. the owner value gives ``Gamma_P A /
+    denom``, and (through the ``owner +`` / ``neighbour -`` scatter) w.r.t. the neighbour value gives the
+    same magnitude to the neighbour's diagonal — so scattering this one per-face value to *both* incident
+    cells reproduces the operator diagonal. On an orthogonal face it is the harmonic mean ``2
+    Gamma_P Gamma_N / (Gamma_P + Gamma_N) . A / h``; it reduces to ``Gamma A / h`` for a constant
+    coefficient. Boundary faces use the one-sided ``D_P.n`` (there is no neighbour), matching the
+    one-sided boundary flux.
+
+    The single definition of the diffusion coupling shared by the momentum diagonal ``a_P``, the scalar
+    pseudo-time shift, and the frozen convection-diffusion operators the AMG hierarchies coarsen — so
+    none can drift from the residual's :class:`DiffusionFlux`. It uses the owner coefficient ``Gamma_P``
+    (not an owner/neighbour interpolation), which is what makes the assembled coupling equal to the
+    operator's actual diagonal contribution rather than an arithmetic-mean approximation.
+
+    Parameters
+    ----------
+    gamma : jnp.ndarray
+        Per-cell diffusion coefficient (viscosity for momentum, ``nu + sigma nu_t`` for a scalar), shape
+        ``(n_cells,)``.
+    geometry : MeshGeometry
+        The mesh metrics; reads face normals/areas and the cell/face centroids.
+    face_cells : FaceCellConnectivity
+        The face→cell incidence (``mesh.face_cells``).
+    """
+    fg = geometry.face
+    x_cell = geometry.cell.centroid
+    normal = fg.normal
+    d_p = fg.centroid - x_cell[face_cells.owner]
+    d_n = fg.centroid - face_cells.neighbour_centroid(
+        x_cell
+    )  # periodic-image neighbour across a seam
+    dpn = dot(d_p, normal)  # D_P . n  (> 0)
+    dnn = dot(d_n, normal)  # D_N . n  (< 0 on interior faces)
+    gamma_owner = gamma[face_cells.owner]
+    gamma_neighbour = gamma[face_cells.safe_neighbour]
+    # Boundary faces have no neighbour (safe_neighbour is the owner, so D_N.n collapses to D_P.n and the
+    # interior denom to zero); use the one-sided D_P.n there, as the one-sided boundary flux does.
+    denom = face_cells.combine_face_values(
+        flux_continuous_denominator(dpn, dnn, gamma_owner, gamma_neighbour), dpn
+    )
+    return gamma_owner * fg.area / denom
 
 
 class DiffusionFlux(FaceFluxOperator):
@@ -97,7 +180,7 @@ class DiffusionFlux(FaceFluxOperator):
         corr_n = dot(grad_neighbour, d_n - scale(n, dnn))
 
         # Interior: two-sided, flux-continuous normal derivative (Gamma-jump in denom).
-        denom = dpn - (gamma_owner / gamma_neighbour) * dnn
+        denom = flux_continuous_denominator(dpn, dnn, gamma_owner, gamma_neighbour)
         denom_safe = fc.combine_face_values(denom, 1.0)  # boundary branch unused; keep grad finite
         normal_grad_interior = ((phi_neighbour - phi_owner) + corr_n - corr_p) / denom_safe
 

@@ -502,8 +502,6 @@ class MomentumContinuity(eqx.Module):
             self.mesh.face_cells,
             self.geometry,
             self.viscosity,
-            self.normal_distance,
-            self.interp_factor,
             mdot_lagged=mdot_estimate,
             boundary_owner_coeff=boundary_owner_coeff,
         )
@@ -559,8 +557,6 @@ class MomentumContinuity(eqx.Module):
             self.mesh.face_cells,
             self.geometry,
             self.viscosity,
-            self.normal_distance,
-            self.interp_factor,
             mdot_lagged=self._lagged_mdot_estimate(velocity, grad_velocity),
         )
 

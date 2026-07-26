@@ -9,11 +9,18 @@ scatter plumbing is verified independently of any physics.
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.boundary import BoundaryConditions, ZeroGradient
-from aquaflux.discretization import DiffusionFlux, FaceContext, FaceFluxOperator, ResidualAssembler
+from aquaflux.discretization import (
+    DiffusionFlux,
+    FaceContext,
+    FaceFluxOperator,
+    ResidualAssembler,
+    flux_continuous_conductance,
+)
 from aquaflux.mesh import (
     CellGeometry,
     FaceCellConnectivity,
@@ -73,6 +80,38 @@ def test_interior_flux_orthogonal_matches_finite_difference() -> None:
     field, context = _single_face(1.0, 3.0)
     flux = DiffusionFlux().face_flux(field, context)
     assert abs(float(flux[0]) + 0.5 * (3.0 - 1.0)) < 1e-13
+
+
+def test_flux_continuous_conductance_is_the_harmonic_mean_on_a_graded_face() -> None:
+    """On an orthogonal face with graded ``Gamma`` the conductance is ``2 g_P g_N/(g_P+g_N) . A/h``.
+
+    The arithmetic (g-weighted) face coefficient it replaces would give ``(g_P+g_N)/2 . A/h`` — larger
+    by ``(1+r)^2/(4r)`` (``r = g_N/g_P``), the overestimate issue #154 traced through ``a_P``.
+    """
+    _, context = _single_face(0.0, 0.0)  # unit-spacing orthogonal geometry (A = 0.5, h = 1)
+    g_p, g_n = 2.0, 8.0
+    gamma = jnp.array([g_p, g_n])
+    cond = flux_continuous_conductance(gamma, context.geometry, context.face_cells)
+    harmonic = 2.0 * g_p * g_n / (g_p + g_n)
+    assert abs(float(cond[0]) - harmonic * 0.5 / 1.0) < 1e-13
+
+
+def test_flux_continuous_conductance_is_the_diffusion_operator_diagonal() -> None:
+    """The conductance equals ``d(owner-outward flux)/d(phi_P)`` of :class:`DiffusionFlux` itself.
+
+    So scattering this one per-face value to both incident cells reproduces the operator diagonal —
+    the identity that makes ``a_P`` (and the scalar shift) the true operator diagonal on graded fields.
+    """
+    gamma = jnp.array([2.0, 8.0])
+
+    def owner_flux(phi_owner: float) -> jnp.ndarray:
+        field, context = _single_face(phi_owner, 0.0)  # zero gradient -> no correction
+        context = eqx.tree_at(lambda c: c.properties, context, {"diffusivity": gamma})
+        return DiffusionFlux().face_flux(field, context)[0]
+
+    _, context = _single_face(0.0, 0.0)
+    cond = flux_continuous_conductance(gamma, context.geometry, context.face_cells)
+    assert abs(float(jax.grad(owner_flux)(1.0)) - float(cond[0])) < 1e-13
 
 
 def test_boundary_flux_one_sided() -> None:
