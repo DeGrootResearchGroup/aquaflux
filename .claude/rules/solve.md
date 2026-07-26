@@ -162,7 +162,25 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     the velocity block's `apply_at` is fed exactly that (was `a_P(1+β)`; identical when `w=1`). Threaded
     through `momentum_continuation`/`coupled_continuation`/`solve_coupled(shift_basis=…)` and the k/ω
     shift policies; **pressure keeps zero shift regardless** (elliptic), which is why a *local* basis is
-    defensible on this coupled solver where Fluent uses a global time scale for its coupled path. Adding a
+    defensible on this coupled solver where Fluent uses a global time scale for its coupled path.
+    - **The velocity buckets' SOURCE is injected (`VelocityShiftParts`), because the shift and the
+      preconditioner have different lifetimes (binding).** `CoupledShiftPolicy` used to take them from
+      the frozen flow preconditioner, which welded two unrelated lifetimes together: the preconditioner
+      is deliberately frozen for many steps (re-freezing the flow block is measured unhelpful), while the
+      shift is a *local time scale* that should describe the operator being solved now. Worse, the
+      borrowed quantity was **live in velocity but frozen in viscosity**, so in a coupled solve `μ_eff =
+      ρ(ν + ν_t)` was stuck at its freeze-state value and the velocity time scale ignored the eddy
+      viscosity that develops — nobody chose that, it fell out of reusing the preconditioner's assembler.
+      `FrozenViscosityVelocityParts` (the default, `None`) reproduces the old diagonal **exactly**;
+      `LiveViscosityVelocityParts` re-forms the closure at the state being stepped, costing one closure
+      evaluation per *step* (milliseconds against a tens-of-seconds solve). It receives the scalar blocks
+      **as solved**, so it holds the transforms and maps back to physical — passing `log ω` to the closure
+      would silently build the shift from the wrong field. Note `a_p` still comes from the preconditioner
+      and must: it is what the velocity block inverts, so the two would otherwise disagree.
+      *Measured:* live vs frozen viscosity at a developed state is a modest p50 0.96 / max 1.82 with **no
+      tail** — a correctness fix, not a large lever. The flow-only path (`MomentumShiftPolicy`) is
+      unaffected: with constant μ, frozen and live coincide.
+    Adding a
     basis (e.g. a Fluent-style global min-physical-time-scale) is a new `ShiftBasis`; do not branch the
     policies.
     - **First measurement of the convective basis: WORSE at a weakly-separated state, but NOT yet a fair
@@ -293,7 +311,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   globalizing the stiff k/omega solves via `scalar_pseudo_transient_solve` — the **only** scalar path
   the SST driver supports (the fixed-count Newton sub-solve was removed). When a new nonlinear residual
   needs pseudo-time globalization, write a `ShiftPolicy` — do **not** re-implement the march.
-  - **`stepper()` returns `(phi_next, cycles)` — ONE step method on the whole `ForwardStep` protocol,
+  - **`stepper()` returns `(phi_next, cycles, alpha)` — ONE step method on the whole `ForwardStep` protocol,
     counted/uncounted pair deleted (binding).** Every strategy reports its step's restart-cycle count
     (`DampedNewtonStep` gets it from `newton_correction`, which now returns `(delta, r, cycles)`); a
     consumer with no use for it drops it (`phi, _ = step(…)`). A `counted_stepper()` sibling existed

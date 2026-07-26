@@ -171,7 +171,8 @@ class AdvectionFlux(FaceFluxOperator):
     mass_flux : jnp.ndarray
         Owner-outward face mass flux ``mdot_f``, shape ``(n_faces,)`` — the flux the scalar is
         transported by, injected by the caller. For a prescribed divergence-free velocity this is
-        ``(u . n) A`` (see :func:`face_mass_flux`); in a coupled momentum solve it is the
+        ``(u . n) A`` for a prescribed divergence-free velocity (a verification-only construction, which is
+        why it is not a library function); in a coupled momentum solve it is the
         Rhie--Chow face flux, the *same* flux that closes continuity — sharing it is what keeps the
         momentum convection and continuity discretely consistent. The operator only reads
         ``mdot_f``; how it was formed is the caller's concern.

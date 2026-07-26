@@ -331,7 +331,7 @@ Engineering Principles.
   preconditioner (the old `MomentumContinuity.simple_preconditioner` convenience wrapper was removed
   precisely because it made `momentum.py` import `block_preconditioner`, a cycle; do not reintroduce it).
   The low-level coefficient/Laplacian kernels stay in `preconditioner.py`. `a_P` comes from
-  `MomentumContinuity.lagged_momentum_diagonal`. `InnerSchurSolver` / `VelocityBlockSolver` stay abstract
+  `MomentumContinuity.momentum_matrix_diagonal` / `BlockPreconditioner.frozen_momentum_diagonal`. `InnerSchurSolver` / `VelocityBlockSolver` stay abstract
   as the extension seam — when adding a strategy, add a subclass; do **not** grow an `if … == …` branch.
 - **Frozen operators are assembled by `aquaflux/solve/frozen_operator.py`, not here (#45).** All three preconditioner hierarchies (pressure Schur, viscous velocity block,
   convection velocity block) build their scipy CSR operator with

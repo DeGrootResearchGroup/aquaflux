@@ -5,7 +5,7 @@ convection-dominated (a few hundred Reynolds). As convection strengthens, the un
 from the uniform cold start **overshoots** — the full step *increases* the residual, more steeply as
 the Reynolds number rises — so the basin the step must land in shrinks and the backtracking line
 search must retreat to ever-smaller steps, until it can no longer march the convective path
-(:mod:`tests.integration.test_channel` documents the Re ~ 100 floor this lifts).
+(it lifts a Reynolds-number floor near ~100 that an undamped Newton solve stalls at).
 
 The dominant missing ingredient is *outer* Newton globalization, not a better linear solve. The
 block-SIMPLE preconditioner (:mod:`aquaflux.flow.block_preconditioner`) — a velocity block on the
@@ -94,7 +94,9 @@ class MomentumShiftPolicy(eqx.Module):
     shift_basis : ShiftBasis
         How the base velocity shift diagonal ``d`` is built from the momentum diagonal's convective and
         dissipative buckets. The default :class:`~aquaflux.solve.LocalCourantBasis` (weight ``1``) is
-        ``d = a_P`` -- spatially-uniform under-relaxation, byte-compatible with the historical shift;
+        ``d = a_P`` -- spatially-uniform under-relaxation, mathematically the historical shift (the
+        preconditioner is now fed ``a_P + beta d`` rather than ``a_P (1 + beta)``; equal in exact
+        arithmetic, and bitwise equal only for a dyadic ``beta``);
         a convective basis (weight ``0``) gives a genuine local convective time step.
     """
 

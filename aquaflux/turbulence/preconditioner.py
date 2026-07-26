@@ -226,7 +226,8 @@ def scalar_transport_shift_diagonal(
     mesh, geometry, diffusivity, volume_flux, residual_fn, reference
         As :func:`scalar_transport_preconditioner`.
     fixed_cells : jnp.ndarray, optional
-        Cells whose residual is a value fixation ``phi - target`` (e.g. the omega near-wall cells).
+        Cells whose residual is a value fixation written by its own :class:`~aquaflux.discretization.FixationRow`
+        (``phi - target`` directly, ``log(phi/target)`` under a log parametrization) (e.g. the omega near-wall cells).
         Their shift is zeroed: an exact algebraic constraint needs no pseudo-time damping (a full
         Newton step converges it in one), and shifting an identity row only slows it.
 
@@ -333,7 +334,8 @@ def scalar_transport_preconditioner(
     v_cycles : int
         V-cycles per apply.
     fixed_cells : jnp.ndarray, optional
-        Cells whose residual is a value fixation ``phi - target`` (e.g. the omega near-wall cells):
+        Cells whose residual is a value fixation written by its own :class:`~aquaflux.discretization.FixationRow`
+        (``phi - target`` directly, ``log(phi/target)`` under a log parametrization) (e.g. the omega near-wall cells):
         their rows are the identity, so they are detached from the aggregation (their incident edges
         dropped, unit diagonal) to match the operator the solve actually inverts.
     reuse : ScalarTransportPreconditioner, optional

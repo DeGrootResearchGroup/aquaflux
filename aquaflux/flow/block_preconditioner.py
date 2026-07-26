@@ -914,7 +914,7 @@ class BlockPreconditioner(eqx.Module):
     ``V/a_P`` — does not degrade as convection strengthens (Klaij & Vuik 2013, for exactly this
     collocated-FV coupled discretization), which carries the coupled solve past the Reynolds number
     where the ``a_P``-Schur stalls. The hierarchy is frozen at the mass matrix ``ρ V`` (``k = 1``); the
-    scale ``k`` is applied per iterate in :meth:`apply_at`, auto-calibrated to ``mean(V / a_P)`` from
+    scale ``k`` is applied per iterate in :meth:`apply_at`, auto-calibrated to ``mean(rho V / a_P)`` from
     the real momentum diagonal (see :meth:`_msimpler_scale`) so its magnitude matches the SIMPLE Schur
     at the operating convection with no assumption on the characteristic speed. Only the Schur uses
     ``Q̂``; the velocity block always uses the true ``a_P``.
@@ -977,7 +977,7 @@ class BlockPreconditioner(eqx.Module):
         msimpler_scale : float, optional
             The MSIMPLER scale ``k`` (only for ``schur_scaling="msimpler"``). It sets the Schur
             magnitude to the operating convection, or the block preconditioner is unbalanced and
-            stalls. ``None`` (default) calibrates it automatically, per iterate, to ``mean(V / a_P)``
+            stalls. ``None`` (default) calibrates it automatically, per iterate, to ``mean(rho V / a_P)``
             from the **real** momentum diagonal at the current flow — which encodes the true velocity
             / density / viscosity scale, so it matches the SIMPLE Schur magnitude with no assumption
             on the characteristic speed. Pass an explicit value only to pin ``k`` (e.g. for a study).

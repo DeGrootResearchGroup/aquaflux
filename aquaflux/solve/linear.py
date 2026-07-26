@@ -12,6 +12,12 @@ left: the solver is handed ``M A`` and ``M b`` instead of ``A`` and ``b``. Since
 of ``(M A) x = M b`` is exactly ``A^{-1} b``, and ``M``'s coefficients are treated as constant
 (the caller ``stop_gradient``s them), preconditioning changes only the Krylov convergence, not
 the solution or its gradient — it is implicit-diff-transparent.
+
+**That transparency is a property of a CONVERGED solve.** At a finite tolerance the returned ``x``
+is whatever the iteration reached, which does depend on ``M``; a caller running a deliberately
+inexact solve (a loose ``rtol``, ``throw=False``, or one that stagnates) can and does see the step
+change when the preconditioner changes. Rely on ``M``-independence only where the solve actually
+meets its tolerance.
 """
 
 from __future__ import annotations

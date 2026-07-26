@@ -171,6 +171,12 @@ class PseudoTransientStep(eqx.Module):
         old fields here and are now that class's constructor arguments. Memoryless by contract, so it
         stays on the differentiable path; a stateful/feedback damping rule is a forward-only
         :class:`~aquaflux.solve.StepControl` on the eager march, not a schedule.
+    line_search_growth : LineSearchGrowth
+        How far the residual may rise and still be accepted by the backtracking ladder
+        (:class:`~aquaflux.solve.LineSearchGrowth`). Defaults to strict descent
+        (:class:`~aquaflux.solve.MonotoneLineSearch`); a pseudo-time march far from the root may want
+        :class:`~aquaflux.solve.RelaxedFarFromRoot`. **Not exposed by any builder** -- set it by
+        constructing this class directly.
     max_escalations : int
         Maximum damping escalations per step (static). If a step's shifted solve fails to descend (an
         ill-conditioned shifted system, or an overshoot), ``β`` is multiplied by

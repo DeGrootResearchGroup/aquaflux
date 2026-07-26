@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import equinox as eqx
 import jax
@@ -358,7 +358,8 @@ class CoupledRANS(eqx.Module):
         fixation carried by :meth:`~aquaflux.turbulence.SSTTurbulence.omega_residual`.
 
         The scalar blocks of ``state`` hold the *solved* turbulence unknown; the physics below is
-        written in the physical ``k`` / ``omega`` recovered by the :attr:`transform` (the identity for
+        written in the physical ``k`` / ``omega`` recovered by :attr:`k_transform` / :attr:`omega_transform`
+        (the identity for
         :class:`DirectScalars`, ``e^w`` for :class:`LogScalars`). The returned scalar residuals are the
         physical transport residuals ``R_k(k, omega)`` / ``R_omega(k, omega)`` -- the same root either
         way -- so the reparametrization changes only the Newton iterate space, and automatic
@@ -385,6 +386,102 @@ class CoupledRANS(eqx.Module):
         )(omega)
 
         return self.layout.pack(flow_residual, k_residual, omega_residual)
+
+
+class VelocityShiftParts(Protocol):
+    """Where the velocity shift's two diagonal buckets come from — its own concern, not the
+    preconditioner's.
+
+    Structural interface only (a ``Protocol``). The pseudo-time shift and the frozen preconditioner have
+    deliberately different lifetimes: the preconditioner is frozen for many steps (re-freezing the flow
+    block was measured unhelpful), while the shift is a *local time scale* that should describe the
+    operator being solved now. Deriving one from the other couples those lifetimes for no reason, so the
+    source of the velocity buckets is injected instead.
+
+    An implementation returns ``(convective, dissipative)`` per cell, each ``>= 0``, in the split a
+    :class:`~aquaflux.solve.ShiftBasis` consumes.
+    """
+
+    def parts(
+        self, flow: jnp.ndarray, k_solved: jnp.ndarray, omega_solved: jnp.ndarray
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """The velocity shift's convective and dissipative buckets, each shape ``(n_cells,)``.
+
+        Parameters
+        ----------
+        flow : jnp.ndarray
+            The flow sub-vector ``[velocity..., pressure]``.
+        k_solved, omega_solved : jnp.ndarray
+            The turbulence blocks **as solved** -- the log variable where a log parametrization is in
+            use, not the physical field. An implementation that needs the physical values must hold the
+            matching :class:`ScalarVariableTransform` and convert; one that does not need them at all
+            ignores them.
+        """
+
+
+class FrozenViscosityVelocityParts(eqx.Module):
+    """The momentum diagonal at the **preconditioner's frozen** effective viscosity (the default).
+
+    Live in velocity, frozen in viscosity: the buckets come from the block preconditioner's own frozen
+    assembler, so ``mu_eff`` is whatever it was at the freeze state. For a flow-only solve that is
+    exact, because the viscosity really is constant. For the **coupled** solve it is not: ``mu_eff =
+    rho (nu + nu_t)`` grows with the turbulence, so the velocity time scale ignores the eddy viscosity
+    that develops. This is the historical behaviour; the shipped default is ``None``, which runs the
+    same expression inline, and this class is its explicit, injectable spelling.
+
+    Attributes
+    ----------
+    block : BlockPreconditioner
+        The frozen flow-block preconditioner whose assembler supplies the buckets.
+    """
+
+    block: BlockPreconditioner
+
+    def parts(
+        self, flow: jnp.ndarray, k_solved: jnp.ndarray, omega_solved: jnp.ndarray
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        del k_solved, omega_solved
+        return self.block.frozen_momentum_diagonal_parts(flow)
+
+
+class LiveViscosityVelocityParts(eqx.Module):
+    """The momentum diagonal at the **current** effective viscosity — a genuine local time scale.
+
+    Re-forms the closure at the state being stepped, so the velocity buckets carry the eddy viscosity as
+    it develops rather than as it was at the freeze state. Costs one closure evaluation per *step* (not
+    per residual evaluation), which is a few milliseconds against a shifted solve of tens of seconds.
+
+    Use this when the shift is meant to be a local time step that tracks the flow — in particular with a
+    convective :class:`~aquaflux.solve.ShiftBasis`, where a frozen viscosity means the "local Courant
+    number" is computed from the wrong operator.
+
+    Attributes
+    ----------
+    momentum : MomentumContinuity
+        The flow assembler at molecular viscosity; the eddy viscosity is applied per call.
+    turbulence : SSTTurbulence
+        The closure, used to form ``nu_t`` and the wall-face eddy viscosity at the current fields.
+    k_transform, omega_transform : ScalarVariableTransform
+        The parametrizations of the two scalar blocks, so the solved unknowns handed in can be mapped
+        back to the physical fields the closure needs (the identity for a directly-solved scalar).
+    """
+
+    momentum: MomentumContinuity
+    turbulence: SSTTurbulence
+    k_transform: ScalarVariableTransform
+    omega_transform: ScalarVariableTransform
+
+    def parts(
+        self, flow: jnp.ndarray, k_solved: jnp.ndarray, omega_solved: jnp.ndarray
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        k = self.k_transform.to_physical(k_solved)
+        omega = self.omega_transform.to_physical(omega_solved)
+        closure = self.turbulence.closure_fields(self.momentum.velocity_fields(flow), k, omega)
+        live = self.momentum.with_eddy_viscosity(
+            closure.nu_t, self.turbulence.wall_face_eddy_viscosity(k)
+        )
+        velocity, _pressure = live.unpack(flow)
+        return live.momentum_matrix_diagonal_parts(velocity)
 
 
 class CoupledShiftPolicy(eqx.Module):
@@ -418,6 +515,12 @@ class CoupledShiftPolicy(eqx.Module):
     k_preconditioner, omega_preconditioner : callable or None
         The frozen ``phi -> M`` convection-diffusion AMG factories for the k and omega blocks, or
         ``None`` for an unpreconditioned (identity) scalar block.
+    velocity_shift_parts : VelocityShiftParts or None
+        Where the velocity shift's two diagonal buckets come from. ``None`` (default) takes them from
+        the frozen flow preconditioner -- live in velocity, frozen in viscosity -- which is the
+        historical behaviour. Pass :class:`LiveViscosityVelocityParts` to form them at the current
+        effective viscosity instead. **Carried across a refresh**, since it is a configuration choice
+        rather than frozen state.
     shift_basis : ShiftBasis
         How the live velocity shift diagonal is built from the momentum diagonal's convective/dissipative
         parts (the scalar shift diagonals are pre-combined at build time). The default
@@ -432,6 +535,7 @@ class CoupledShiftPolicy(eqx.Module):
     k_preconditioner: ScalarTransportPreconditioner | None = None
     omega_preconditioner: ScalarTransportPreconditioner | None = None
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS
+    velocity_shift_parts: VelocityShiftParts | None = None
 
     def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
         """The block-diagonal full-state shift and the ``beta -> M`` composed preconditioner at ``phi``.
@@ -445,10 +549,15 @@ class CoupledShiftPolicy(eqx.Module):
         block = self.flow_preconditioner
         assembler = block.assembler
         n_cells = self.layout.n_cells
-        # Live per-iterate velocity a_P (jittable), split so the shift basis can build a convective (or
-        # weighted) local time step; a_p = convective + dissipative is what the velocity block inverts.
+        # `a_p` is a PRECONDITIONER quantity: it is what the velocity block inverts, so it must come
+        # from the block itself or the two disagree.
         convective, dissipative = block.frozen_momentum_diagonal_parts(flow)
         a_p = convective + dissipative
+        # The SHIFT's buckets are a separate concern with a different lifetime (see
+        # `VelocityShiftParts`), so their source is injected; `None` reuses the preconditioner's, which
+        # is the historical behaviour and keeps the default path bit-identical.
+        if self.velocity_shift_parts is not None:
+            convective, dissipative = self.velocity_shift_parts.parts(flow, k, omega)
         d_vel = self.shift_basis.local_diagonal(convective, dissipative)
 
         # Full-state base shift: d_vel on every velocity component, 0 on pressure, the frozen scalar
@@ -656,6 +765,7 @@ def coupled_continuation(
     forward_solver: lx.AbstractLinearSolver | None = None,
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+    velocity_shift_parts: VelocityShiftParts | None = None,
     reuse: CoupledShiftPolicy | None = None,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
@@ -719,7 +829,13 @@ def coupled_continuation(
         The forward step to hand :class:`~aquaflux.solve.ImplicitNewtonSolver` as ``forward_step``.
     """
     policy = _coupled_shift_policy(
-        coupled, reference_state, method, reuse, shift_basis, **preconditioner_kwargs
+        coupled,
+        reference_state,
+        method,
+        reuse,
+        shift_basis,
+        velocity_shift_parts,
+        **preconditioner_kwargs,
     )
     residual_norm = (
         _coupled_residual_norm(coupled, reference_state) if block_scaled_norm else jnp.linalg.norm
@@ -745,6 +861,7 @@ def _coupled_shift_policy(
     method: str | None,
     reuse: CoupledShiftPolicy | None = None,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+    velocity_shift_parts: VelocityShiftParts | None = None,
     **preconditioner_kwargs: object,
 ) -> CoupledShiftPolicy:
     """Build the block-diagonal :class:`CoupledShiftPolicy` frozen at ``reference_state``.
@@ -775,8 +892,11 @@ def _coupled_shift_policy(
     steps, so there is no safe refresh cadence *for this form*: carrying the initial diagonal works
     because a cold start is smooth, not because staleness is desirable.
 
-    **The restriction is a property of that product, not of the method — a shift built as
-    ``transport_diagonal(state) * omega(reference)`` refreshes cleanly.** Two things are entangled in
+    **The restriction is a property of that product, not of the method.** A shift built as
+    ``transport_diagonal(state) * omega(reference)`` was measured to refresh cleanly, but **this code
+    does not implement it** -- only the product is stored, so the two factors cannot be refreshed
+    independently. The paragraph below records why, for whoever separates them; it is not a
+    description of current behaviour. Two things are entangled in
     ``transport_diagonal(state) * omega(state)`` and they pull opposite ways: ``omega`` supplies the
     near-wall weighting the bare transport diagonal lacks (which is why simply dropping it inverts
     wall-versus-bulk damping and starves the solve), while also dragging the field's evolving range into
@@ -882,8 +1002,18 @@ def _coupled_shift_policy(
             * omega_scale
         )
 
+    # Carried on a refresh like the basis: the source is a configuration choice, not frozen state, so
+    # a refresh must not silently drop the caller's selection back to the preconditioner-derived default.
+    parts = reuse.velocity_shift_parts if reuse is not None else velocity_shift_parts
     return CoupledShiftPolicy(
-        coupled.layout, block, k_shift, omega_shift, k_amg, omega_amg, shift_basis=basis
+        coupled.layout,
+        block,
+        k_shift,
+        omega_shift,
+        k_amg,
+        omega_amg,
+        shift_basis=basis,
+        velocity_shift_parts=parts,
     )
 
 
@@ -1012,8 +1142,10 @@ def solve_coupled(
         cycles (~2.4x); the flow block does *not* go stale and is carried over untouched. The refresh
         costs one extra compilation of the shifted solve, which that saving repays within a step or two
         at mesh sizes where this matters. The win appears only once the flow separates -- refreshing at
-        a pre-separation state buys nothing and can cost, which is why the trigger gates on the
-        residual having fallen as well as on the cost having risen.
+        a pre-separation state buys nothing and can cost. :class:`~aquaflux.solve.CycleGrowthTrigger`
+        therefore gates on the residual having fallen as well as on the cost having risen;
+        :class:`~aquaflux.solve.CoefficientDriftTrigger` needs no such gate, because an undeveloped
+        flow is one whose coefficients have not moved.
 
         **Forward-only accelerator -- not usable under ``jax.grad`` (raises).** The refresh re-derives
         the preconditioner from the *mid-march* state; when differentiating, that state is a tracer, so
@@ -1027,18 +1159,21 @@ def solve_coupled(
         accelerates the Krylov iteration, so both marches reach the same converged state and thus the
         same implicit-function-theorem adjoint).
 
-        **Each segment restarts the damping ramp, and that is load-bearing (binding).** A refresh
-        rebuilds the pseudo-transient *shift diagonals* as well as the preconditioner, and under
-        :class:`LogScalars` those carry a factor ``d(phi)/d(w) = omega``. Re-derived at a developed
-        state, where ``omega`` has grown, the shift diagonal ``d`` grows with it. Each march segment
-        therefore measures its **own** reference residual from the state it is handed, so the
-        switched-evolution-relaxation ramp restarts at ``beta0`` and the larger ``d`` is paired with a
-        correspondingly fresh ``beta``. Carrying the pre-refresh reference across instead -- to keep the
-        ramp "continuous", which looks like the more principled choice -- pairs the grown ``d`` with the
-        small ``beta`` appropriate to the *pre-refresh* residual. That is over-damping: the step
-        collapses and the march **silently stops descending** (no error, no divergence, no guard trip --
-        the relative residual simply creeps upward by ~1e-5 per step while the recirculation stays
-        frozen). This is why the progress reference and the damping reference are separate quantities.
+        **Each segment restarts the damping ramp, and that is load-bearing (binding).** The
+        switched-evolution ramp is defined relative to where a segment began, so a segment handed a new
+        state must measure its **own** reference residual; carrying the pre-refresh reference across --
+        to keep the ramp "continuous", which looks like the more principled choice -- makes ``beta``
+        mean something measured against a state the march has left, and the step is damped by a factor
+        chosen for a residual that no longer applies.
+
+        Two corrections to note, because earlier versions of this docstring stated both wrongly. First,
+        a refresh **carries** the pseudo-transient shift diagonals rather than rebuilding them
+        (rebuilding them at a developed state was measured to freeze the march), so the justification
+        is *not* that a grown ``d`` must be paired with a fresh ``beta``. Second, the consequence of
+        the segment-local reference is easy to miss and matters more than the rule itself: with
+        refreshes every few steps the residual ratio never falls far below one, so **``beta`` stays
+        pinned near ``beta0`` for the whole march** instead of ramping down -- if a different damping
+        level is wanted it has to come from ``beta0``, not from expecting the ramp to find it.
 
         ``rtol`` means the same thing with and without a refresh: the finishing solve is given the
         **absolute** target ``atol + rtol * ||R0||`` measured at the initial state, so a refreshed solve
@@ -1230,6 +1365,8 @@ def mass_flow_coupled_continuation(
     line_search: int = _COUPLED_LINE_SEARCH,
     forward_solver: lx.AbstractLinearSolver | None = None,
     block_scaled_norm: bool = False,
+    shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+    velocity_shift_parts: VelocityShiftParts | None = None,
     **preconditioner_kwargs: object,
 ) -> PseudoTransientStep:
     """The pseudo-transient continuation step for the **mass-flow-constrained** coupled Newton solve.
@@ -1244,7 +1381,15 @@ def mass_flow_coupled_continuation(
     # No `reuse` here: the mass-flow-constrained path has no staged-refresh driver (there is no
     # `refresh_trigger` on `solve_coupled_mass_flow`), so a policy is always built from scratch. Thread
     # `reuse` through if that driver is ever added -- the bordered policy wraps this one unchanged.
-    policy = _coupled_shift_policy(coupled, reference_state, method, **preconditioner_kwargs)
+    policy = _coupled_shift_policy(
+        coupled,
+        reference_state,
+        method,
+        None,
+        shift_basis,
+        velocity_shift_parts,
+        **preconditioner_kwargs,
+    )
     force, average = _coupled_constraint_vectors(coupled, flow_direction)
     bordered = _MassFlowBorderedPolicy(policy, force, average)
     residual_norm = (

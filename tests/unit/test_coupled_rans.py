@@ -31,6 +31,7 @@ from aquaflux.turbulence import (
 from aquaflux.turbulence.coupled import (
     CoupledRANS,
     CoupledRANSLayout,
+    LiveViscosityVelocityParts,
     _row_jacobian_scale,
     solve_coupled,
 )
@@ -419,3 +420,57 @@ def test_eddy_viscosity_drift_matches_its_definition() -> None:
     )
     assert float(eddy_viscosity_drift(coupled, state)(moved)) == pytest.approx(expected, rel=1e-10)
     assert expected > 0.0
+
+
+def test_live_velocity_shift_parts_use_the_current_eddy_viscosity() -> None:
+    """The injected live source reproduces the momentum diagonal at the state's own ``nu_t``.
+
+    The velocity shift's buckets are a *local time scale* and must describe the operator being solved,
+    so they have to see the current effective viscosity rather than one frozen at a reference state.
+    Pinned by composing the closure by hand and comparing.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    flow, k, omega = coupled.physical_fields(state)
+
+    closure = coupled.turbulence.closure_fields(coupled.momentum.velocity_fields(flow), k, omega)
+    live_assembler = coupled.momentum.with_eddy_viscosity(
+        closure.nu_t, coupled.turbulence.wall_face_eddy_viscosity(k)
+    )
+    velocity, _pressure = live_assembler.unpack(flow)
+    expected = live_assembler.momentum_matrix_diagonal_parts(velocity)
+
+    source = LiveViscosityVelocityParts(
+        coupled.momentum, coupled.turbulence, coupled.k_transform, coupled.omega_transform
+    )
+    flow_block, k_solved, omega_solved = coupled.layout.unpack(state)
+    got = source.parts(flow_block, k_solved, omega_solved)
+
+    for mine, theirs in zip(got, expected, strict=True):
+        assert jnp.allclose(mine, theirs)
+
+
+def test_live_velocity_shift_parts_map_the_solved_unknown_back_to_physical() -> None:
+    """The buckets are the same whether omega is solved directly or in log form.
+
+    The source receives the block **as solved**, so under a log parametrization it must exponentiate
+    before forming the closure. Without that it would build the shift from ``log(omega)`` as if it were
+    ``omega`` -- a silent, badly wrong local time scale.
+    """
+    mesh, direct = _cavity()
+    log_omega = CoupledRANS.build(direct.momentum, direct.turbulence, omega_transform=LogScalars())
+    physical = _healthy_state(mesh, direct)
+    flow, k, omega = direct.layout.unpack(physical)
+
+    direct_parts = LiveViscosityVelocityParts(
+        direct.momentum, direct.turbulence, direct.k_transform, direct.omega_transform
+    ).parts(flow, k, omega)
+
+    solved = log_omega.state_from_physical(flow, k, omega)
+    flow_l, k_l, omega_l = log_omega.layout.unpack(solved)
+    log_parts = LiveViscosityVelocityParts(
+        log_omega.momentum, log_omega.turbulence, log_omega.k_transform, log_omega.omega_transform
+    ).parts(flow_l, k_l, omega_l)
+
+    for a, b in zip(direct_parts, log_parts, strict=True):
+        assert jnp.allclose(a, b)

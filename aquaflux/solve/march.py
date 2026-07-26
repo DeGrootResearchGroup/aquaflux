@@ -23,10 +23,12 @@ place means a march that ends short of a root can never be mistaken for a conver
 **Two reference residual norms, and conflating them breaks the march.** Each call to
 :func:`forward_march` computes its own ``residual_norm_0`` from the state it is handed, and passes
 *that* to the step. The pseudo-transient schedule ramps its damping as ``beta = beta_0 (‖R‖/‖R₀‖)^p``,
-so a segment restarted after a refresh must restart its ramp too: a refresh rebuilds the shift
-diagonals, and under a logarithmic solve variable those grow at a developed state, so pairing a
-grown diagonal with the small ``beta`` belonging to the *pre-refresh* residual over-damps the step
-and the march silently stops descending. The separate ``reference_norm`` is the *global* scale
+so a segment restarted after a refresh must restart its ramp too. (A refresh **carries** the shift
+diagonals rather than rebuilding them -- rebuilding them was measured to freeze the march -- so the
+reason is not a grown diagonal: it is that the ramp is defined relative to where the segment began,
+and feeding it a residual ratio measured against a different state makes ``beta`` mean something
+else. Note the consequence, which is easy to miss: with frequent refreshes the ratio never falls
+far below one, so ``beta`` stays pinned near ``beta_0`` for the whole march.) The separate ``reference_norm`` is the *global* scale
 progress is reported and tested against, held fixed across every segment so that "converged" and the
 reported ratio mean the same thing throughout. The first must never be substituted for the second.
 """
@@ -223,9 +225,12 @@ class CoefficientDriftTrigger(eqx.Module):
     :class:`CycleGrowthTrigger` needs a residual-ratio **gate** to suppress the confound, plus
     ``patience`` because a single expensive step must not buy a rebuild. Coefficient drift has
     neither problem: it does not respond to ``beta`` at all, so it needs no gate, and it moves
-    smoothly with the flow rather than jumping with one stiff solve, so it needs no patience. It also
-    cannot fire before the flow develops -- which is when a refresh was measured to be actively
-    harmful -- because an undeveloped flow is, by definition, one whose ``nu_t`` has not moved.
+    smoothly with the flow rather than jumping with one stiff solve, so it needs no patience. It is
+    also *unlikely* to fire before the flow develops -- which is when a refresh was measured to be
+    actively harmful -- because an undeveloped flow is largely one whose coefficients have not moved.
+    That is an argument, not a guarantee: nothing enforces it, and an initial condition being repaired
+    early in a march can move ``nu_t`` without the flow separating, so :attr:`warmup` is the only
+    actual guard.
 
     Attributes
     ----------
@@ -297,6 +302,10 @@ class StepControl(Protocol):
     def next_step(
         self, base_step: ForwardStep, previous: StepReport | None, state: object
     ) -> tuple[ForwardStep, object]:
+        # NOTE: the shipped control reshapes the shift strength, so it requires a
+        # `PseudoTransientStep` specifically -- the annotation is wider than the real contract, and
+        # passing a `DampedNewtonStep` raises `AttributeError` inside the march loop rather than
+        # being rejected at the seam. Narrow this if a second, step-agnostic control ever appears.
         """The step to run next, and the control's carried state.
 
         Parameters

@@ -238,6 +238,9 @@ class DampedNewtonStep(eqx.Module):
         transposed, for the adjoint (transpose) solve, so gradients are mesh-independent too.
         ``None`` solves unpreconditioned — usable only on small or well-conditioned systems; the
         coupled flow saddle-point needs one. Static.
+    residual_norm : ResidualNorm
+        The residual measure this step judges progress by, shared with the outer stopping test so both
+        agree on one scale. Defaults to the Euclidean norm.
     line_search : int
         Maximum step-halvings in the backtracking line search (static). ``0`` disables it (pure
         full Newton).
@@ -459,7 +462,10 @@ class ImplicitNewtonSolver(eqx.Module):
         :func:`default_linear_solver`, because this single solve at the converged state sets the
         gradient accuracy directly and should not be loosened along with the forward steps.
     forward_step : ForwardStep
-        The globalized forward-step strategy that supplies each Newton iteration (static): a
+        The globalized forward-step strategy that supplies each Newton iteration. A **pytree field,
+        deliberately not static**: a step control varies the shift strength by swapping in a
+        :class:`~aquaflux.solve.ConstantRelaxation` carrying ``beta`` as a dynamic leaf, and that is
+        what keeps a controlled march a compilation-cache hit rather than a recompile per step. It is a
         :class:`DampedNewtonStep` backtracking line search by default, or a :class:`PseudoTransientStep`
         (e.g. from :func:`aquaflux.flow.momentum_continuation`) for a high-Reynolds convective flow. The
         strategy also owns the forward preconditioner and, transposed, the adjoint preconditioner

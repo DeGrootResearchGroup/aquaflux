@@ -67,7 +67,7 @@ class LocalCourantBasis(eqx.Module):
 
     - ``w = 1`` (default) -- ``d`` is the **full operator diagonal** (the momentum ``a_P`` / its scalar
       analogue). Since it equals the operator diagonal, ``beta d`` is spatially-uniform under-relaxation
-      (relaxation factor ``1/(1+beta)`` in every cell). This is byte-for-byte the historical shift, so
+      (relaxation factor ``1/(1+beta)`` in every cell). This is mathematically the historical shift, so
       it is the default and leaves every existing march unchanged.
     - ``w = 0`` -- ``d`` is the **pure convective** local time step, ``Sum_f max(mdot_f, 0)``. The
       per-cell pseudo-time ``dt = Co* V / d`` then follows the local convective condition, so a
