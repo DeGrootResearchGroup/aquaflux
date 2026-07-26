@@ -316,9 +316,11 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       At the march's own β, carried gives α = 1.0 and +0.677 %; diagonals built at *any* later state
       (g0020/g0060/g0100/g0110, all genuine, self-consistent) give α at the ladder floor and **ascent**.
       Confirmed β-independent (same collapse at β = 0.5).
-    - **THE CURE — march `w = log ω` in pseudo-time instead (drop the `× ω` factor).** That is a
-      different but equally legitimate globalization, whose damping is uniform in the *solved* variable.
-      Measured, same state, only the ω block changed:
+    - **⚠️ A PROPOSED CURE THAT FAILS END-TO-END — dropping the `× ω` factor (marching `w = log ω` in
+      pseudo-time). Single-step numbers looked transformative; the march refutes them. Do not retry
+      without reading why.** The single-step measurements below are real and reproducible, but they were
+      taken at one developed state and judged on ‖R‖, and on this case ‖R‖ has repeatedly failed to
+      track the physics. Measured, same state, only the ω block changed:
 
       | ω shift form | source | β_ω | cyc | α | reduction |
       |---|---|---|---|---|---|
@@ -328,21 +330,50 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       | log-space | **g0110 (REFRESHED)** | ¼ matched | 16 | 1.0 | **+25.12 %** |
       | log-space | **g0110 (REFRESHED)** | matched median | 15 | 1.0 | **+9.31 %** |
 
-      Three things at once: the tail collapses (>2× from 15 % → **0.17 %**, p99 14.4 → **1.73**); at
-      *matched median damping* the step is **11× better**, so the gain is the shift's **shape**, not its
-      magnitude (the further 3× is the level); and it is **refresh-invariant** — refreshed matches
-      carried to 0.1 pp, where the shipped form collapses. That removes the constraint that has shaped
-      the whole refresh design.
-    - **Not a free lunch:** over-damping the ω block destroys the direction by *any* route — a uniform
-      4× on the log-space form collapses exactly like the tail does (α floor, ascent, 34 cycles). The
-      unifying statement is **the coupled direction fails when the ω block is over-damped**, and the
-      shipped `× ω` form sits near the top of that window by construction.
-    - **Before adopting:** measured at one state and judged on ‖R‖ — the metric that failed to track the
-      physics three separate times on this case — so it needs a cold-IC march judged on `x_r/h` and
-      `k_peak`. It also wants `β_ω` on a different scale from `β`, i.e. a **per-block shift strength**,
-      which the coupled policy does not currently expose (and which was separately measured *dominated*
-      as a damping lever — that ruling was about per-block β on the shipped form and would need
-      revisiting here).
+      Three things at once, all real: the tail collapses (>2× from 15 % → **0.17 %**, p99 14.4 →
+      **1.73**); at *matched median damping* the step is **11× better**; and it is **refresh-invariant**
+      — refreshed matches carried to 0.1 pp, where the shipped form collapses.
+    - **AND YET IT LOSES BADLY ON A MARCH.** Cold-IC march, everything held identical to the control
+      (same IC, drift trigger, refresh limit, solver) with only the ω shift form changed:
+
+      | step | 10 | 15 | 20 | 25 |
+      |---|---|---|---|---|
+      | control `x_r/h` | 0.09 | 0.32 | 0.39 | ~0.45 |
+      | log-space `x_r/h` | 0.03 | 0.05 | 0.09 | 0.14 |
+      | control rel | 1.28e-1 | 9.50e-2 | 4.45e-2 | 3.0e-2 |
+      | log-space rel | 3.24e-2 | 3.01e-2 | 2.10e-2 | 1.23e-2 |
+
+      **A far deeper residual with a 3–6× smaller recirculation** — at rel ≈ 0.030 the control has
+      `x_r/h` ≈ 0.6 against the log-space arm's 0.05, an order of magnitude worse bubble at equal
+      residual. The single-step ‖R‖ gain was largely a *norm* effect, which is exactly what the caveat
+      about ‖R‖ on this case warned of. It also clipped hard on the very first step (α = 0.031).
+    - **WHY — and this reverses the reading of the `× ω` factor (measured at the cold IC).** Spatial
+      spread *within* a state is a different quantity from the temporal tail, and conflating them is
+      what produced the wrong proposal. ω spans 440→1.14e5 even at the cold start, and:
+
+      | | near-wall decile / median | bulk decile / median | max/median |
+      |---|---|---|---|
+      | shipped (`× ω`) | **2.95** | 0.82 | 30.7 |
+      | log-space | **0.54** | 0.91 | 3.6 |
+
+      The bare transport diagonal is *smaller* near the wall (0.54× median) — it **under-weights the
+      stiffest cells** — and multiplying by ω corrects that to 2.95×. So `× ω` is doing real work:
+      dropping it inverts the wall/bulk damping ratio and under-damps the near-wall region by ~20×
+      once the global factor is included, which is what clips α on step 0 and starves the bubble after.
+    - **The settled picture: the shipped design is close to right, and the "never refresh" rule is a
+      consequence of a genuine trade, not a defect.** *Spatially* `× ω` is correct (stiff near-wall
+      cells need more damping); *temporally* it is the problem (it drags ω's evolving range into the
+      shift, creating the tail). **Carrying the cold-IC diagonal keeps the good half and freezes the
+      bad half.** A cure must preserve the near-wall weighting while removing the temporal drift —
+      dropping `× ω` discards the wrong half.
+    - **Not a free lunch either way:** over-damping the ω block destroys the direction by *any* route —
+      a uniform 4× on the log-space form collapses exactly like the tail does (α floor, ascent, 34
+      cycles). The unifying statement is **the coupled direction fails when the ω block is over-damped**.
+    - **Untested variant, if this is revisited:** only `factor = 0.25` was marched, chosen because it
+      maximized single-step ‖R‖ reduction — i.e. selected on the metric we do not trust. `factor = 1.0`
+      (matched median damping) still gave +9.3 %/step and would pace ω much closer to the shipped form.
+      That is the fair second attempt; it does **not** fix the inverted wall/bulk ratio, so expect it to
+      help but not to win.
   - **OPEN DEFECT: the reconstructed ω *gradient* in the fixed cells is ~4× too small (measured
     2026-07-25; fix tracked, not yet built).** We impose a value on those cells but let their gradient
     be *inferred from neighbours* as if they were ordinary unknowns. Measured against the analytical
