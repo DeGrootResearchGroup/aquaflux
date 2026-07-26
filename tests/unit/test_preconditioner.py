@@ -133,8 +133,9 @@ def test_boundary_a_p_drops_wall_convection() -> None:
     """
     asm = _geometry(6)  # closed cavity: every patch is a NoSlipWall
     n_faces = asm.mesh.n_faces
-    viscous_only = asm.boundary_momentum_diagonal(asm.viscosity, None)
-    with_huge_mdot = asm.boundary_momentum_diagonal(asm.viscosity, jnp.full(n_faces, 1e6))
+    boundary_mu = asm.viscosity[asm.mesh.face_cells.owner]  # per-face (no wall model)
+    viscous_only = asm.boundary_momentum_diagonal(boundary_mu, None)
+    with_huge_mdot = asm.boundary_momentum_diagonal(boundary_mu, jnp.full(n_faces, 1e6))
     assert jnp.allclose(viscous_only, with_huge_mdot)  # convective dropped at every wall face
     assert float(jnp.sum(viscous_only)) > 0.0  # the Dirichlet viscous stiffness is still there
 
@@ -148,7 +149,9 @@ def test_boundary_a_p_drops_outlet_viscosity() -> None:
     """
     asm = _channel(u_in=1.0)  # velocity inlet + pressure outlet + no-slip walls
     fc = asm.mesh.face_cells
-    boundary_a_p = asm.boundary_momentum_diagonal(asm.viscosity, jnp.zeros(asm.mesh.n_faces))
+    boundary_a_p = asm.boundary_momentum_diagonal(
+        asm.viscosity[fc.owner], jnp.zeros(asm.mesh.n_faces)
+    )
     all_faces_viscous = jnp.where(
         fc.interior, 0.0, asm.viscosity[fc.owner] * asm.geometry.face.area / asm.normal_distance
     )
@@ -283,6 +286,40 @@ def test_momentum_diagonal_is_the_residual_operator_diagonal_under_graded_viscos
     state = asm.pack(velocity, jnp.zeros(mesh.n_cells))
     velocity_diag, _ = asm.unpack(jnp.diag(jax.jacfwd(asm.residual)(state)))
     assert jnp.allclose(a_p, velocity_diag, rtol=1e-9, atol=1e-9)
+
+
+def test_momentum_diagonal_matches_the_operator_at_active_wall_faces() -> None:
+    """``a_P``'s wall-face term uses the wall-model boundary viscosity, matching the operator (#155).
+
+    On a wall-function mesh the momentum ``DiffusionFlux`` uses the wall model's ``mu + rho nu_t,wall``
+    at wall faces (its ``boundary_coefficient``), while the wall-adjacent cell's own ``mu_eff`` is the
+    log-layer ``k/omega`` value — larger by a big factor. Building ``a_P``'s boundary term from the
+    **owner-cell** viscosity (the bug) left ``a_P`` disagreeing with ``diag(J_momentum)`` at every wall
+    cell; building it from the operator's own **per-face** boundary viscosity fixes it. A wall-resolved
+    mesh has ``nu_t,wall = 0`` and is a no-op, which is why the wall-resolved law-of-the-wall test
+    structurally cannot see this.
+    """
+    mesh = structured_grid_2d(8, 8, named_boundaries=True)
+    geom = mesh.geometry()
+    asm0 = MomentumContinuity.build(
+        mesh,
+        geom,
+        PropertyModel({"viscosity": Constant(1e-3), "density": Constant(1.0)}),
+        CompactGreenGauss(),
+        BoundaryConditions({side: NoSlipWall() for side in ("top", "bottom", "left", "right")}),
+        pressure_pin=0,
+    )  # Stokes closed cavity: a_P is purely viscous, the residual is linear
+    # A large log-layer cell eddy viscosity with a much smaller wall-model value on the wall faces —
+    # the wall-function regime where the owner-cell and wall-model viscosities genuinely differ (~7x).
+    nu_t = jnp.full(mesh.n_cells, 1.6e-2)
+    wall_nu_t = jnp.full(mesh.n_faces, 1.6e-3)
+    asm = asm0.with_eddy_viscosity(nu_t, wall_nu_t)
+
+    velocity = jnp.zeros((mesh.n_cells, mesh.dim))
+    a_p = asm.momentum_matrix_diagonal(velocity)  # (n_cells, dim), boundary-consistent form
+    state = asm.pack(velocity, jnp.zeros(mesh.n_cells))
+    velocity_diag, _ = asm.unpack(jnp.diag(jax.jacfwd(asm.residual)(state)))
+    assert jnp.allclose(a_p, velocity_diag, rtol=1e-9, atol=1e-12)
 
 
 def test_schur_laplacian_is_conservative_and_spd() -> None:

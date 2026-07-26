@@ -313,6 +313,21 @@ class MomentumContinuity(eqx.Module):
         )
         return jnp.where(shears > 0.0, wall_mu, self.viscosity[owner])
 
+    def _boundary_face_viscosity(self) -> jnp.ndarray:
+        """The per-face effective viscosity the momentum diffusion uses at each boundary face.
+
+        The wall-function override :meth:`_wall_boundary_viscosity` where a wall eddy viscosity is set
+        (``mu + rho nu_t,wall`` on the shearing walls, the owner-cell ``mu_eff`` elsewhere), else the
+        owner-cell ``mu_eff`` on every face. This is exactly the coefficient
+        :meth:`residual_from_fields`'s ``DiffusionFlux`` carries at the boundary (its
+        ``boundary_coefficient`` is :meth:`_wall_boundary_viscosity`, which falls back to the owner
+        value on non-wall faces, and its default owner-cell ``gamma`` is that same value) — so building
+        the boundary ``a_P`` from it makes the diagonal match the operator at wall faces, where the
+        wall model's value and the log-layer owner-cell ``k/omega`` value differ by a large factor.
+        """
+        wall = self._wall_boundary_viscosity()
+        return wall if wall is not None else self.viscosity[self.mesh.face_cells.owner]
+
     # --- boundary assembly -------------------------------------------------------------
 
     def _boundary_fields(
@@ -430,30 +445,38 @@ class MomentumContinuity(eqx.Module):
         return self._boundary_mass_flux(velocity, pressure, grad_pressure, d_coeff, mdot)
 
     def boundary_momentum_diagonal(
-        self, viscosity: jnp.ndarray, mdot: jnp.ndarray | None
+        self, boundary_viscosity: jnp.ndarray, mdot: jnp.ndarray | None
     ) -> jnp.ndarray:
         """Per-face boundary owner contribution to ``a_P``, zero on interior faces, shape ``(n_faces,)``.
 
         Each patch's :meth:`~aquaflux.flow.boundary.FlowBoundary.momentum_diagonal_coefficient` selects
-        which of the Dirichlet viscous term ``mu A/(d·n)`` and the upwind convective term
+        which of the Dirichlet viscous term ``mu_f A/(d·n)`` and the upwind convective term
         ``max(mdot, 0)`` its faces contribute — a Dirichlet-velocity wall or inlet the viscous, a
         through-flow outlet the convective — so the diagonal matches the operator each patch actually
         imposes (no viscous stiffness where the velocity is zero-gradient, no convective flux through a
-        wall). Passed to :func:`~aquaflux.flow.rhie_chow.momentum_diagonal` as ``boundary_owner_coeff``,
-        and shared by the block preconditioner so its frozen ``a_P`` references match the operator's.
+        wall). Passed to :func:`~aquaflux.flow.rhie_chow.momentum_diagonal` as ``boundary_owner_coeff``
+        for the **residual** ``a_P`` (``momentum_matrix_diagonal``); the frozen preconditioner path uses
+        ``boundary_corrected=False`` and does not call this.
+
+        The viscous term uses the **per-face** boundary viscosity the diffusion operator carries at each
+        face (:meth:`_boundary_face_viscosity`), not the owner-cell ``mu_eff``: on a wall-function mesh
+        the wall model's ``mu + rho nu_t,wall`` and the log-layer owner-cell ``k/omega`` value differ by
+        a large factor, so gathering the owner cell's viscosity would over-count the wall stiffness and
+        leave ``a_P`` disagreeing with the operator exactly where the wall model is active.
 
         Parameters
         ----------
-        viscosity : jnp.ndarray
-            Per-cell viscosity used for the viscous term, shape ``(n_cells,)`` (a unit field where the
-            preconditioner wants the geometry-only ``A/(d·n)``).
+        boundary_viscosity : jnp.ndarray
+            Per-face effective viscosity the diffusion operator uses at each boundary face, shape
+            ``(n_faces,)`` (:meth:`_boundary_face_viscosity`; a unit field recovers the geometry-only
+            ``A/(d·n)``).
         mdot : jnp.ndarray or None
             Per-face mass flux for the convective term, shape ``(n_faces,)``; ``None`` for Stokes.
         """
         fg = self.geometry.face
 
         def coefficient(bc, faces, owner):
-            viscous_owner = viscosity[owner] * fg.area[faces] / self.normal_distance[faces]
+            viscous_owner = boundary_viscosity[faces] * fg.area[faces] / self.normal_distance[faces]
             convective_owner = (
                 jnp.maximum(mdot[faces], 0.0) if mdot is not None else jnp.zeros(faces.shape)
             )
@@ -494,7 +517,7 @@ class MomentumContinuity(eqx.Module):
         """
         mdot_estimate = self._lagged_mdot_estimate(velocity, grad_velocity)
         boundary_owner_coeff = (
-            self.boundary_momentum_diagonal(self.viscosity, mdot_estimate)
+            self.boundary_momentum_diagonal(self._boundary_face_viscosity(), mdot_estimate)
             if boundary_corrected
             else None
         )
