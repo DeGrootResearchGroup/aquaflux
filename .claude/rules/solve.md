@@ -882,7 +882,13 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     lives here beside `RefreshTrigger`, never on the traced path. `forward_march(step_control=…)` calls
     `next_step(base, previous, state) -> (ForwardStep, new_state)`, threading the control's own state; the
     march stays β-ignorant (the control returns a ready-to-run step, typically `base` with a
-    `ConstantRelaxation` β leaf via `tree_at`, so `_march_step` stays a cache hit). Unifying the two into
+    `ConstantRelaxation` β leaf via `tree_at`, so `_march_step` stays a cache hit). **The control state
+    survives across preconditioner refreshes (issue #156):** `forward_march` takes an incoming
+    `control_state` and returns the final one on `MarchResult`, and `solve_coupled` threads it from each
+    segment into the next — so a control that climbs β over many steps continues past a refresh instead of
+    resetting to `beta_start` at every segment (the α-controller and the refresh were co-designed but
+    could not compose before this). This is the *global*-lifetime carry, deliberately opposite the
+    segment-local SER `residual_norm_0` and `drift_measure`. Unifying the two into
     one `(rn, rn0, α, state) -> (β, state)` interface was rejected: it would union SER's needs with the
     control's (dead α/state args for SER), drag α onto the differentiable core where the line search
     cannot even produce it before the step, and risk the byte-identity of the default path. The one

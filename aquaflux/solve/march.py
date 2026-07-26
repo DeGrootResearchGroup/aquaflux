@@ -103,12 +103,19 @@ class MarchResult(NamedTuple):
         Whether the march reached the requested tolerance against the global reference norm.
     triggered : bool
         Whether the march stopped early because the injected trigger fired.
+    control_state : object
+        The injected :class:`StepControl`'s carried state as of the last step (``None`` if no control
+        was used). Returned so a driver running one segment per preconditioner refresh can **thread** it
+        into the next segment's :func:`forward_march`, rather than each segment restarting the control
+        from scratch — a stateful control (e.g. one climbing the shift strength over many steps) would
+        otherwise throw its progress away at every refresh.
     """
 
     state: jnp.ndarray
     reports: tuple[StepReport, ...]
     converged: bool
     triggered: bool
+    control_state: object = None
 
 
 class RefreshTrigger(Protocol):
@@ -360,6 +367,7 @@ def forward_march(
     reference_norm: float | None = None,
     trigger: RefreshTrigger | None = None,
     step_control: StepControl | None = None,
+    control_state: object = None,
     observer: Callable[[StepReport], None] | None = None,
     checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     drift_measure: Callable[[jnp.ndarray], float] | None = None,
@@ -404,6 +412,12 @@ def forward_march(
         Reshapes the step each iteration from the previous step's report (e.g. driving the shift
         strength β toward a line-search-factor target). ``None`` runs ``forward_step`` unchanged, so
         the march is byte-identical to an uncontrolled one. Forward-only, like ``trigger``.
+    control_state : object, optional
+        The initial state for ``step_control`` (``None`` on a fresh march). A driver that runs one
+        segment per refresh passes the previous segment's :attr:`MarchResult.control_state` here, so a
+        stateful control continues across the refresh instead of resetting — the same discipline the
+        *global* ``reference_norm`` follows, and the opposite of the deliberately segment-local damping
+        reference and ``drift_measure``. Ignored when ``step_control is None``.
     observer : callable, optional
         Called with each :class:`StepReport` as it is produced, for streaming progress out of a long
         march. The full history is also returned, so an observer is only needed for live reporting.
@@ -450,7 +464,8 @@ def forward_march(
     current = float(residual_norm_0)
     reports: list[StepReport] = []
     triggered = False
-    control_state: object = None
+    # `control_state` is a parameter (the initial state), threaded and returned so a multi-segment
+    # driver can continue a stateful control across a refresh instead of restarting it.
 
     def converged_at(residual_norm: float) -> bool:
         return bool(_within_tolerance(jnp.asarray(residual_norm), reference, rtol, atol))
@@ -493,4 +508,5 @@ def forward_march(
         reports=tuple(reports),
         converged=converged_at(current),
         triggered=triggered,
+        control_state=control_state,
     )

@@ -319,16 +319,18 @@ def test_refresh_trigger_with_an_explicit_continuation_is_rejected() -> None:
         )
 
 
-def test_refreshing_the_policy_carries_the_shift_diagonals() -> None:
-    """A ``reuse=`` refresh must re-derive only the AMGs and carry the shift diagonals unchanged.
+def test_refreshing_the_policy_rebuilds_transport_and_carries_the_coordinate_factor() -> None:
+    """A ``reuse=`` refresh rebuilds the shift's transport time scale and carries its coordinate factor.
 
-    Rebuilding the shift diagonals at a developed state over-damps the pseudo-transient step and freezes
-    the coupled log-omega march (the shift is ``transport_diagonal * jacobian_scale``, and under
-    ``LogScalars`` ``jacobian_scale(omega) = omega`` grows with the field). So the refreshed policy's
-    shift diagonals must be *identical* to the reused ones -- pinned here at the mechanism, without
-    needing a full separating march to exhibit the freeze. The flow block is carried too; the scalar AMG
-    refresh itself is pinned in ``test_scalar_transport_preconditioner``. ``method=None`` and the
-    symmetric viscous velocity block keep the policy build robust to the two synthetic states.
+    The shift diagonal is ``transport_diagonal * jacobian_scale``. Rebuilding the *product* at a
+    developed state over-damps and freezes the coupled log-omega march, because under ``LogScalars``
+    ``jacobian_scale(omega) = omega`` drags the field's growing range into the shift. Storing the two
+    factors separately (issue #156) lets a refresh rebuild the transport time scale -- physics that
+    should track the flow -- while carrying the coordinate factor frozen, so the temporal ratio
+    ``transport(state)/transport(reference)`` has that range cancel. Pinned here at the mechanism,
+    without a full separating march. The flow block is carried too; the scalar AMG refresh itself is
+    pinned in ``test_scalar_transport_preconditioner``. ``method=None`` and the symmetric viscous
+    velocity block keep the policy build robust to the two synthetic states.
     """
     from aquaflux.turbulence.coupled import _coupled_shift_policy
 
@@ -344,12 +346,15 @@ def test_refreshing_the_policy_carries_the_shift_diagonals() -> None:
     refreshed = _coupled_shift_policy(coupled, developed, None, base, **kw)
     rebuilt = _coupled_shift_policy(coupled, developed, None, **kw)
 
-    # The shift diagonals are carried from `base` verbatim ...
-    assert jnp.array_equal(refreshed.k_shift_diagonal, base.k_shift_diagonal)
-    assert jnp.array_equal(refreshed.omega_shift_diagonal, base.omega_shift_diagonal)
-    # ... and rebuilding at the developed state genuinely WOULD have changed them (so the carry matters).
-    assert not jnp.allclose(rebuilt.k_shift_diagonal, base.k_shift_diagonal)
-    assert not jnp.allclose(rebuilt.omega_shift_diagonal, base.omega_shift_diagonal)
+    # The coordinate factor (jacobian_scale) is carried from `base` frozen ...
+    assert jnp.array_equal(refreshed.k_jacobian_scale, base.k_jacobian_scale)
+    assert jnp.array_equal(refreshed.omega_jacobian_scale, base.omega_jacobian_scale)
+    # ... while the transport time scale is rebuilt at the developed state (== a from-scratch build
+    # there, and genuinely different from the cold-reference one, so the refresh actually tracks it).
+    assert jnp.array_equal(refreshed.k_shift_transport, rebuilt.k_shift_transport)
+    assert jnp.array_equal(refreshed.omega_shift_transport, rebuilt.omega_shift_transport)
+    assert not jnp.allclose(refreshed.k_shift_transport, base.k_shift_transport)
+    assert not jnp.allclose(refreshed.omega_shift_transport, base.omega_shift_transport)
     # The flow block is carried over (the expensive half; measured no help to re-freeze).
     assert refreshed.flow_preconditioner is base.flow_preconditioner
 

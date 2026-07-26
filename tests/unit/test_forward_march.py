@@ -224,6 +224,45 @@ def test_step_control_drives_the_march_and_stays_a_cache_hit() -> None:
     assert len(_TRACES) == compiled  # extra controlled steps added no traces
 
 
+class _CountingControl:
+    """A stub step control that leaves the step unchanged and counts its calls in its state.
+
+    Isolates the state-threading seam from any real controller dynamics: it returns ``base_step``
+    untouched (so the march runs exactly as an uncontrolled one) and its state is just the number of
+    times it has been called.
+    """
+
+    def next_step(self, base_step, previous, state):
+        return base_step, (0 if state is None else state) + 1
+
+
+def test_forward_march_threads_the_step_control_state_across_calls() -> None:
+    """``forward_march`` returns the control state and resumes from a passed-in one (issue #156).
+
+    ``solve_coupled`` runs one ``forward_march`` per preconditioner refresh, so without this a stateful
+    control (the α-targeting shift climb) restarts every segment. ``rtol = atol = 0`` makes each march
+    take exactly ``max_steps`` steps, so the counter is deterministic.
+    """
+    residual = _Cubic(1.0 + jnp.arange(6, dtype=float))
+    phi0 = jnp.full(6, 0.5)
+    base = DampedNewtonStep()
+    common = dict(rtol=0.0, atol=0.0, step_control=_CountingControl())
+
+    first = forward_march(base, residual, phi0, max_steps=3, **common)
+    assert first.control_state == 3  # one count per step, started from None
+
+    # Threading the returned state continues the count instead of restarting ...
+    threaded = forward_march(
+        base, residual, first.state, max_steps=2, control_state=first.control_state, **common
+    )
+    assert threaded.control_state == 5  # 3 carried in + 2 more steps
+
+    # ... whereas omitting it restarts from None (the pre-fix per-segment reset).
+    restarted = forward_march(base, residual, first.state, max_steps=2, **common)
+    assert restarted.control_state == 2
+    assert threaded.control_state > restarted.control_state
+
+
 def test_checkpoint_receives_the_state_behind_each_report() -> None:
     """``checkpoint`` pairs each report with the state that produced it.
 

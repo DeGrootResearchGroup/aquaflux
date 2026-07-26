@@ -509,9 +509,18 @@ class CoupledShiftPolicy(eqx.Module):
     flow_preconditioner : BlockPreconditioner
         The block-SIMPLE preconditioner built at the reference effective viscosity; supplies the
         frozen ``a_P`` and the velocity/Schur solves.
-    k_shift_diagonal, omega_shift_diagonal : jnp.ndarray
-        The frozen per-cell transport-operator shift diagonals for k and omega, shape ``(n_cells,)``
-        (the omega one has its near-wall fixed cells zeroed).
+    k_shift_transport, omega_shift_transport : jnp.ndarray
+        The per-cell transport-operator shift diagonals for k and omega, shape ``(n_cells,)`` (the
+        omega one has its near-wall fixed cells zeroed). This is the **local time scale** — the
+        physics half of the shift — so a refresh *rebuilds* it at the developed state.
+    k_jacobian_scale, omega_jacobian_scale : jnp.ndarray
+        The per-cell ``d(phi)/d(w)`` coordinate factor for k and omega, shape ``(n_cells,)`` (``omega``
+        under :class:`LogScalars`, ``1`` for the identity transform). This is the **coordinate
+        transformation** between the physical field and the solved variable — not physics — so a refresh
+        *carries* it frozen. Storing the two factors separately (rather than their product) is what lets
+        a refresh update the transport time scale while holding the coordinate factor, so the temporal
+        ratio ``transport(state)/transport(reference)`` has the field's range cancel and the shift does
+        not inherit ``omega``'s growth. :meth:`shift_term` multiplies them.
     k_preconditioner, omega_preconditioner : callable or None
         The frozen ``phi -> M`` convection-diffusion AMG factories for the k and omega blocks, or
         ``None`` for an unpreconditioned (identity) scalar block.
@@ -530,8 +539,10 @@ class CoupledShiftPolicy(eqx.Module):
 
     layout: CoupledRANSLayout
     flow_preconditioner: BlockPreconditioner
-    k_shift_diagonal: jnp.ndarray
-    omega_shift_diagonal: jnp.ndarray
+    k_shift_transport: jnp.ndarray
+    k_jacobian_scale: jnp.ndarray
+    omega_shift_transport: jnp.ndarray
+    omega_jacobian_scale: jnp.ndarray
     k_preconditioner: ScalarTransportPreconditioner | None = None
     omega_preconditioner: ScalarTransportPreconditioner | None = None
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS
@@ -565,10 +576,12 @@ class CoupledShiftPolicy(eqx.Module):
         flow_diagonal = assembler.pack(
             jnp.broadcast_to(d_vel[:, None], (n_cells, self.layout.dim)), jnp.zeros(n_cells)
         )
+        # The scalar shift diagonal is transport-time-scale * coordinate factor; kept as two fields so a
+        # refresh rebuilds the transport half and carries the coordinate half (see `_coupled_shift_policy`).
         diagonal = self.layout.pack(
             flow_diagonal,
-            jax.lax.stop_gradient(self.k_shift_diagonal),
-            jax.lax.stop_gradient(self.omega_shift_diagonal),
+            jax.lax.stop_gradient(self.k_shift_transport * self.k_jacobian_scale),
+            jax.lax.stop_gradient(self.omega_shift_transport * self.omega_jacobian_scale),
         )
 
         def make_preconditioner(relaxation: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
@@ -871,56 +884,42 @@ def _coupled_shift_policy(
     re-derive it.
 
     ``reuse`` **refreshes** an existing policy at a new (more developed) ``reference_state`` rather than
-    building one from scratch, and **only the scalar k/omega AMGs are re-derived** on their reused
-    coarsening (:func:`~aquaflux.turbulence.preconditioner.scalar_transport_preconditioner`'s ``reuse=``)
-    -- on a separated backward-facing-step state that is worth ~2.4x in outer Krylov cycles. Everything
-    else is **carried over from ``reuse`` untouched**: the flow block (re-freezing it at the developed
-    state was measured no help and slightly harmful, and it is the expensive half), *and the pseudo-time
-    shift diagonals*.
+    building one from scratch. The scalar k/omega AMGs are re-derived on their reused coarsening
+    (:func:`~aquaflux.turbulence.preconditioner.scalar_transport_preconditioner`'s ``reuse=`` -- worth
+    ~2.4x in outer Krylov cycles on a separated backward-facing-step state), and the shift's **transport
+    time scale is rebuilt** at the new state. **Carried over from ``reuse`` untouched**: the flow block
+    (re-freezing it at the developed state was measured no help and slightly harmful, and it is the
+    expensive half) and the shift's **coordinate factor** ``jacobian_scale``.
 
-    **The shift diagonals must be carried, not rebuilt (binding -- rebuilding them freezes the march).**
-    The reason is narrower than "a developed state needs a different shift", and worth stating exactly,
-    because it points at the cure. Under a log-solved scalar the shift diagonal is the transport
-    diagonal times ``jacobian_scale``, which **is the field itself** -- the correct linearization of a
-    pseudo-time term on ``omega``, since ``V/dt (omega^{n+1} - omega^n)`` becomes ``V/dt * omega * dw``.
-    Its side effect is that the damping inherits ``omega``'s dynamic range. Measured against the
-    cold-initial-condition diagonal on a developed backward-facing step, the ``omega`` block's ratio has
-    median 0.87 but a p99 of 14 and a maximum of 24, with **15 % of cells above 2x**; the velocity and
-    ``k`` blocks have no such tail at all (0 % above 2x). Those over-damped cells are effectively frozen
-    (``delta_omega ~ 0``) while the rest of the field moves, which is precisely the observed failure --
-    the recirculation and ``k`` static while the residual creeps upward. The tail appears within ~20
-    steps, so there is no safe refresh cadence *for this form*: carrying the initial diagonal works
-    because a cold start is smooth, not because staleness is desirable.
+    **Why the shift is split into transport time scale x coordinate factor (binding).** Under a
+    log-solved scalar the shift diagonal is the transport-operator diagonal times ``jacobian_scale``,
+    which **is the field itself** -- the correct linearization of a pseudo-time term on ``omega``, since
+    ``V/dt (omega^{n+1} - omega^n)`` becomes ``V/dt * omega * dw``. Its side effect is that the damping
+    inherits ``omega``'s dynamic range, and that is what made the **product** unsafe to rebuild: measured
+    against the cold-initial-condition diagonal on a developed backward-facing step, the rebuilt ``omega``
+    block's ratio has median 0.87 but a p99 of 14 and a maximum of 24, with **15 % of cells above 2x**
+    (the velocity and ``k`` blocks have no such tail). Those over-damped cells freeze (``delta_omega ~
+    0``) while the rest of the field moves -- the recirculation and ``k`` static while the residual creeps
+    upward ~1e-5 per step, no error and no divergence-guard trip. (Isolated by a controlled discriminator:
+    rebuilding the product and carrying the AMG froze the march *byte-identically* to rebuilding both,
+    while carrying the product and refreshing only the AMG descended -- so the shift rebuild was the
+    freeze, independent of the switched-evolution-relaxation ``beta``.) So storing only the product forced
+    a choice between a stale time scale and a frozen march.
 
-    **The restriction is a property of that product, not of the method.** A shift built as
-    ``transport_diagonal(state) * omega(reference)`` was measured to refresh cleanly, but **this code
-    does not implement it** -- only the product is stored, so the two factors cannot be refreshed
-    independently. The paragraph below records why, for whoever separates them; it is not a
-    description of current behaviour. Two things are entangled in
-    ``transport_diagonal(state) * omega(state)`` and they pull opposite ways: ``omega`` supplies the
-    near-wall weighting the bare transport diagonal lacks (which is why simply dropping it inverts
-    wall-versus-bulk damping and starves the solve), while also dragging the field's evolving range into
-    the shift. Refreshing the transport factor -- a local time scale, which genuinely should track the
-    developing flow -- while holding the ``omega`` weighting at its frozen value separates them: the
-    temporal ratio becomes ``transport(state)/transport(reference)``, in which ``omega`` cancels, and the
-    tail disappears (>2x on 0.0-0.1 % of cells, the same class as the velocity and ``k`` blocks) with the
-    near-wall weighting preserved. Measured on a march that upgrades its shift at every refresh, that
-    holds a full unclipped step where rebuilding the shipped form collapses it. The reason for the split
-    is that the transport diagonal is *physics* while the ``omega`` factor is the *coordinate
-    transformation* between the physical field and the solved log variable; the former should follow the
-    flow, the latter should not.
-    The coupled shift diagonal is the transport-operator diagonal times ``jacobian_scale(field)``, which
-    under :class:`LogScalars` is ``omega``; at a developed state both factors grow (stiffer operator,
-    larger ``omega``), so a rebuilt diagonal ``d`` is much larger, the pseudo-transient shift ``beta d``
-    over-damps, and the Newton step collapses to a standstill -- the relative residual creeps *upward*
-    ~1e-5 per step with the recirculation and ``k`` static, no error and no divergence-guard trip.
-    (Isolated by a controlled discriminator: from one post-stage-one state, rebuilding the shift and
-    carrying the AMG froze the march *byte-identically* to rebuilding both, while carrying the shift and
-    refreshing only the AMG descended cleanly -- so the shift rebuild is the freeze, independent of the
-    switched-evolution-relaxation ``beta``.) This is safe for the same reason the flow block is carried:
-    the shift is a transient device that vanishes at the root, so a slightly-stale ``d`` changes only the
-    path, never the converged state or its adjoint. A non-refresh build (``reuse is None``) still builds
-    the shift at ``reference_state`` as before.
+    Storing the two factors separately dissolves that. The transport diagonal is *physics* -- a local
+    time scale that should track the developing flow -- so a refresh rebuilds it; the ``jacobian_scale``
+    factor is the *coordinate transformation* between the physical field and the solved log variable, not
+    physics, so a refresh carries it frozen. The temporal ratio the shift then presents is
+    ``transport(state)/transport(reference)``, in which the frozen ``omega`` weighting cancels, so the
+    near-wall weighting is preserved while the field's range no longer leaks in: the ``>2x`` tail drops to
+    the ``0.0-0.1 %`` of the velocity/``k`` blocks, and a march upgrading its shift at every refresh holds
+    a full unclipped step where rebuilding the old product collapses it. (The preconditioner's copy of the
+    factor, ``k_scale``/``omega_scale``, is instead re-derived at the new state, because its AMG is
+    refreshed at the new *physical* operator -- so the same quantity legitimately comes from two states in
+    one policy.) Carrying the frozen factor is safe for the same reason the flow block is: the shift is a
+    transient device that vanishes at the root, so a slightly-stale factor changes only the path, never
+    the converged state or its adjoint. A non-refresh build (``reuse is None``) uses the reference-state
+    factor, so the shift product is bit-identical to the pre-split form.
     """
     # The reference's scalar blocks are the *solved* unknown; the frozen operators (closure, AMG, shift
     # diagonals) are all assembled in the physical fields, so recover them through the transform.
@@ -980,27 +979,29 @@ def _coupled_shift_policy(
             omega_scale,
         )
 
-    # On a refresh the shift diagonals are carried, so keep the basis they were built with; the live
-    # velocity basis is the same object, so it stays consistent with the carried scalar diagonals.
+    # On a refresh keep the basis the reused policy was built with, so the rebuilt transport diagonal
+    # combines its convective/dissipative parts the same way the carried coordinate factor expects.
     basis = reuse.shift_basis if reuse is not None else shift_basis
-    if reuse is not None:
-        # Carry the shift diagonals from the reused policy -- rebuilding them at the developed state
-        # over-damps the step and freezes the march (see the docstring). Only the AMGs are refreshed.
-        k_shift = reuse.k_shift_diagonal
-        omega_shift = reuse.omega_shift_diagonal
-    else:
-        k_shift = (
-            coupled.turbulence.k_shift_policy(
-                mdot, closure, k_ref, shift_basis=shift_basis
-            ).shift_diagonal
-            * k_scale
-        )
-        omega_shift = (
-            coupled.turbulence.omega_shift_policy(
-                mdot, closure, omega_ref, shift_basis=shift_basis
-            ).shift_diagonal
-            * omega_scale
-        )
+
+    # The transport time scale is (re)built at THIS reference state -- physics that should track the
+    # developing flow. It no longer carries the field's dynamic range: that now lives in the coordinate
+    # factor below, which a refresh carries frozen, so the temporal ratio transport(state)/transport(ref)
+    # has the range cancel and the shift does not inherit omega's growth (the freeze the old carried
+    # product suffered -- see the docstring).
+    k_transport = coupled.turbulence.k_shift_policy(
+        mdot, closure, k_ref, shift_basis=basis
+    ).shift_diagonal
+    omega_transport = coupled.turbulence.omega_shift_policy(
+        mdot, closure, omega_ref, shift_basis=basis
+    ).shift_diagonal
+
+    # The coordinate factor d(phi)/d(w) is the transform between the physical field and the solved
+    # variable, not physics: a refresh carries it frozen (the preconditioner's copy, `k_scale`/
+    # `omega_scale`, is re-derived at the new state instead, since its AMG is refreshed at the new
+    # physical operator -- so the same quantity legitimately comes from two states here). A non-refresh
+    # build uses the reference-state factor, which makes the product bit-identical to the old shift.
+    k_coord = reuse.k_jacobian_scale if reuse is not None else k_scale
+    omega_coord = reuse.omega_jacobian_scale if reuse is not None else omega_scale
 
     # Carried on a refresh like the basis: the source is a configuration choice, not frozen state, so
     # a refresh must not silently drop the caller's selection back to the preconditioner-derived default.
@@ -1008,8 +1009,10 @@ def _coupled_shift_policy(
     return CoupledShiftPolicy(
         coupled.layout,
         block,
-        k_shift,
-        omega_shift,
+        k_transport,
+        k_coord,
+        omega_transport,
+        omega_coord,
         k_amg,
         omega_amg,
         shift_basis=basis,
@@ -1246,6 +1249,7 @@ def solve_coupled(
         # `refresh_limit` refreshes means `refresh_limit + 1` segments: the segment *after* the last
         # refresh must still be marched here, or the newly-refreshed preconditioner would only ever be
         # used by the finishing solve and its steps would go unobserved.
+        control_state: object = None
         for segment in range(refresh_limit + 1):
             result = forward_march(
                 continuation,
@@ -1257,6 +1261,10 @@ def solve_coupled(
                 reference_norm=reference_norm,
                 trigger=refresh_trigger,
                 step_control=step_control,
+                # Threaded across segments so a stateful control (the alpha-targeting shift climb)
+                # continues past each refresh rather than restarting -- the same global-lifetime carry
+                # as `reference_norm`, unlike the per-segment damping reference and drift measure.
+                control_state=control_state,
                 observer=on_step,
                 checkpoint=on_checkpoint,
                 # Re-based every segment, against the state this segment's preconditioner was frozen
@@ -1266,11 +1274,12 @@ def solve_coupled(
                 drift_measure=eddy_viscosity_drift(coupled, jax.lax.stop_gradient(state)),
             )
             state = result.state
+            control_state = result.control_state
             if not result.triggered or segment == refresh_limit:
                 break
             # Re-freeze at the developed state: the k/omega AMGs are re-derived on their reused
-            # coarsening, the flow block and the pseudo-time shift diagonals carried over (measured --
-            # see `_coupled_shift_policy`). Rebuilding the shift diagonals instead freezes the march.
+            # coarsening and the shift's transport time scale is rebuilt, while the flow block and the
+            # shift's coordinate factor are carried over (measured -- see `_coupled_shift_policy`).
             continuation = coupled_continuation(
                 coupled,
                 jax.lax.stop_gradient(state),
