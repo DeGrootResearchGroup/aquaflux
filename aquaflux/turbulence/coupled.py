@@ -762,6 +762,18 @@ def _coupled_shift_policy(
     shift diagonals*.
 
     **The shift diagonals must be carried, not rebuilt (binding -- rebuilding them freezes the march).**
+    The reason is narrower than "a developed state needs a different shift", and worth stating exactly,
+    because it points at the cure. Under a log-solved scalar the shift diagonal is the transport
+    diagonal times ``jacobian_scale``, which **is the field itself** -- the correct linearization of a
+    pseudo-time term on ``omega``, since ``V/dt (omega^{n+1} - omega^n)`` becomes ``V/dt * omega * dw``.
+    Its side effect is that the damping inherits ``omega``'s dynamic range. Measured against the
+    cold-initial-condition diagonal on a developed backward-facing step, the ``omega`` block's ratio has
+    median 0.87 but a p99 of 14 and a maximum of 24, with **15 % of cells above 2x**; the velocity and
+    ``k`` blocks have no such tail at all (0 % above 2x). Those over-damped cells are effectively frozen
+    (``delta_omega ~ 0``) while the rest of the field moves, which is precisely the observed failure --
+    the recirculation and ``k`` static while the residual creeps upward. The tail appears within ~20
+    steps, so there is no safe refresh cadence: carrying the initial diagonal works because a cold start
+    is smooth, not because staleness is desirable.
     The coupled shift diagonal is the transport-operator diagonal times ``jacobian_scale(field)``, which
     under :class:`LogScalars` is ``omega``; at a developed state both factors grow (stiffer operator,
     larger ``omega``), so a rebuilt diagonal ``d`` is much larger, the pseudo-transient shift ``beta d``

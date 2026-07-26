@@ -301,6 +301,48 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
         preconditioner rescale, a row-equilibrated norm — must ask each row for its derivative rather
         than assume every row is a transport balance. The shift diagonal escapes this only because it is
         **zeroed** on fixed cells, so mis-scaling zero is still zero.
+  - **⚠️ THE ω SHIFT DIAGONAL INHERITS ω's DYNAMIC RANGE — the root of the "never rebuild the shift"
+    rule, and (measured) a ~11–37× step-productivity penalty (2026-07-25, #33).** The coupled shift for
+    the log-solved ω block is `d_ω = transport_diagonal × jacobian_scale`, and under `LogScalars` that
+    scale **is ω**. That is the *correct* linearization of a pseudo-time term on ω (`V/Δt (ω^{n+1}−ω^n)`
+    → `V/Δt · ω · δw`), but it makes the damping proportional to a field spanning orders of magnitude.
+    - **The pathology is a tail, not a level.** Against the cold-IC diagonal, the ω block's ratio at a
+      developed state is median 0.87 / p99 **14.4** / max **24**, with **15 % of cells above 2×** —
+      while velocity and k have **0 %** above 2× and max < 2. The tail is present within **20 steps**
+      (8 % already at step 20), so there is no safe refresh cadence. A *median* comparison reads 0.96
+      and shows nothing; this is why the effect was mis-diagnosed twice.
+    - **Any diagonal carrying that tail destroys the coupled Newton step**, with the linear solve still
+      converging (`lin_rel` 1e-8…1e-10, unchanged cycle count) — so it is not preconditioner mismatch.
+      At the march's own β, carried gives α = 1.0 and +0.677 %; diagonals built at *any* later state
+      (g0020/g0060/g0100/g0110, all genuine, self-consistent) give α at the ladder floor and **ascent**.
+      Confirmed β-independent (same collapse at β = 0.5).
+    - **THE CURE — march `w = log ω` in pseudo-time instead (drop the `× ω` factor).** That is a
+      different but equally legitimate globalization, whose damping is uniform in the *solved* variable.
+      Measured, same state, only the ω block changed:
+
+      | ω shift form | source | β_ω | cyc | α | reduction |
+      |---|---|---|---|---|---|
+      | shipped (`× ω`) | cold (carried) | march's | 14 | 1.0 | **+0.68 %** |
+      | log-space | cold (carried) | matched median | 14 | 1.0 | **+7.75 %** |
+      | log-space | cold (carried) | ¼ matched | 15 | 1.0 | **+25.01 %** |
+      | log-space | **g0110 (REFRESHED)** | ¼ matched | 16 | 1.0 | **+25.12 %** |
+      | log-space | **g0110 (REFRESHED)** | matched median | 15 | 1.0 | **+9.31 %** |
+
+      Three things at once: the tail collapses (>2× from 15 % → **0.17 %**, p99 14.4 → **1.73**); at
+      *matched median damping* the step is **11× better**, so the gain is the shift's **shape**, not its
+      magnitude (the further 3× is the level); and it is **refresh-invariant** — refreshed matches
+      carried to 0.1 pp, where the shipped form collapses. That removes the constraint that has shaped
+      the whole refresh design.
+    - **Not a free lunch:** over-damping the ω block destroys the direction by *any* route — a uniform
+      4× on the log-space form collapses exactly like the tail does (α floor, ascent, 34 cycles). The
+      unifying statement is **the coupled direction fails when the ω block is over-damped**, and the
+      shipped `× ω` form sits near the top of that window by construction.
+    - **Before adopting:** measured at one state and judged on ‖R‖ — the metric that failed to track the
+      physics three separate times on this case — so it needs a cold-IC march judged on `x_r/h` and
+      `k_peak`. It also wants `β_ω` on a different scale from `β`, i.e. a **per-block shift strength**,
+      which the coupled policy does not currently expose (and which was separately measured *dominated*
+      as a damping lever — that ruling was about per-block β on the shipped form and would need
+      revisiting here).
   - **OPEN DEFECT: the reconstructed ω *gradient* in the fixed cells is ~4× too small (measured
     2026-07-25; fix tracked, not yet built).** We impose a value on those cells but let their gradient
     be *inferred from neighbours* as if they were ordinary unknowns. Measured against the analytical

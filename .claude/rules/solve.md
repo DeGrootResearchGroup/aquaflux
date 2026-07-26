@@ -188,6 +188,41 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       between bases at all. Re-test at a state that is both **well separated and still productive** before
       concluding. Hence: shipped as an opt-in with the **default unchanged** (`w=1` = the historical `a_P`),
       not adopted and not withdrawn.
+    - **RE-TESTED PROPERLY (2026-07-25, #28): the convective basis is NOT dominated — it is 2.2× better
+      at the march's own operating point, with an optimum at Co ≈ 1.** The earlier probe above rebuilt
+      the continuation at the state it measured, and used a state that was barely separated; this one
+      uses the **carried protocol** at a state that is both developed (`x_r/h` ~1.2) and productive
+      (α = 1, 14 cycles), with β taken from the **segment-local** ratio. Residual reduction, %/s:
+
+      | β (= 1/Co for w=0) | 0.5 | 1.0 | **1.79 ← the march** | 3.0 | 6.0 |
+      |---|---|---|---|---|---|
+      | `w = 1` (a_P, uniform relaxation) | **0.056** | 0.030 | 0.016 | 0.007 | 0.002 |
+      | `w = 0` (convective local Δt) | 0.035 | **0.051** | **0.035** | 0.019 | 0.007 |
+
+      The convective basis wins at every β ≥ 1 (1.7–3×) and needs fewer cycles there (10–11 vs 14). It
+      has a genuine **interior optimum at Co ≈ 1** with symmetric fall-off — the canonical stability
+      limit, i.e. a target with physical meaning that should transfer between cases. `a_P` has **no**
+      optimum in range: its reduction follows a strict inverse law (`β × keep% ≈ 1.23` across a 12× span)
+      with cycles flat below β ≈ 2, so it simply improves as damping falls and its best measured value
+      is at the bottom of the sweep. Two roughly equivalent routes to ~3.5× over the march's 0.016 —
+      lower β on `a_P` (0.056), or convective at Co ≈ 1 (0.051) — which do **not** compose (convective at
+      β = 0.5 is 0.035).
+    - **A non-uniform shift creates INTERIOR optima that the backtracking ladder cannot find — so a
+      local-Δt basis and an interpolating line search are coupled design choices.** With `w = 1` the
+      ideal step length was exactly `α = 1` at every β, so the powers-of-½ quantization cost nothing.
+      With `w = 0` at β = 0.5 the ideal was `α = 0.658` (+2.26 %) while the ladder took `α = 1` (+1.76 %)
+      — **22 % of the available reduction unclaimed**, because `backtracking_line_search` accepts the
+      *first* rung that reduces and never asks whether a shorter step is better (a sufficient-decrease
+      search, not a minimizing one). The loss grows as the optimum moves further off a rung: on an
+      over-damped log-space ω shift the ideal was `α = 0.285` (+0.307 %) while the ladder took the
+      neighbouring rung `α = 0.5` (+0.081 %) — **74 % unclaimed**. Note the directional derivative is available almost free here, since
+      the shifted solve gives `J δ = −R − β D δ` exactly, so a quadratic/cubic backtrack is cheap; and a
+      residual evaluation is ~8 ms against a ~40 s solve, so a finer search is ~0.1 % of a step.
+    - **Neither α nor the cycle count can serve as a controller target on this problem.** Across the
+      whole sweep above — two bases, a 12× span in β — **α is 1.0000 at every single point**, and the
+      cycle count is flat at 14 through `a_P`'s entire productive range. Both are constant where the
+      efficiency varies 28×. The only quantity that discriminates is **residual reduction per unit
+      time**, which is what any Courant/β controller would have to estimate.
     - **⚠️ SUSPECT — the "plateau is a step-DIRECTION problem" conclusion was measured through a broken
       preconditioner (see the fixation-row/`1/ω` bug below) and a corrected re-measurement CONTRADICTS
       part of it. Re-derive before relying on any of it (#31).** As originally written: every basis/β
@@ -295,6 +330,30 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       version of this same probe was still inside a single solve after 60 min of busy CPU. Always
       time the jitted `_march_step`, and prefer *differencing two configurations* over instrumenting
       inside the compiled region.
+    - **⚠️ THE CARRIED PROTOCOL — how to probe a coupled step at all (binding; four separate sweeps
+      were invalidated by getting this wrong in one session).** A probe that loads a checkpoint and
+      calls `coupled_continuation(coupled, checkpoint)` builds a **self-consistent** (state, shift,
+      preconditioner) triple. **The march never occupies that configuration**: it freezes the shift at
+      the cold IC and carries it through every refresh, so its shift always *lags* the state. The
+      difference is not academic — at the same state and the same β, a rebuilt continuation took
+      **148 cycles and found no descent** where the march takes **14 cycles at α = 1 and descends**.
+      Reproduce a refresh instead:
+      ```
+      cold_cont = coupled_continuation(coupled, cold_ic, method=...)
+      cont      = coupled_continuation(coupled, state, method=..., reuse=cold_cont.shift_policy)
+      ```
+      **Validate the harness before trusting it**: the `reuse=` build at the march's own β must
+      reproduce the march's cycle count and α from its log. When it finally did (14 cycles, α = 1.0000,
+      +0.677 %), every earlier number in that session turned out to have been measuring something else.
+    - **Take β from the SEGMENT-LOCAL residual ratio, never the global one (this is what made three of
+      those four sweeps wrong).** SER's reference is reset at every refresh, so on a refreshing march
+      β stays pinned near β₀ = 2 rather than decaying — see the `RelaxationSchedule` section. Computing
+      "the march's operating β" from the global ratio gave 0.022 where the true value was 1.79, an 80×
+      error that silently produced an apparently-solid "ascent at every Courant number" result.
+    - **A median is the wrong statistic for a shift diagonal.** Comparing rebuilt against carried gave
+      a median ratio of 0.96 — "no effect" — while the effect was a >2× tail over 15 % of ω cells,
+      reaching 24×. Report p99/max and the fraction above 2×, per block; a whole-state statistic also
+      hides that the pressure block is identically zero (20 % of the vector) and dilutes everything.
     - **Do not probe step cost at the plateau.** Every configuration measured there costs ~1 h/step
       because the state is direction-limited (α = 0.001 at every β and shift basis) *and* maximally
       stale for a carried preconditioner. Cost questions belong on a cold-IC march, where steps are
@@ -340,6 +399,25 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     march and the α-targeting controller rests on exactly that comparison.** Re-measure before trusting
     any relative-residual claim in this section; the *mechanistic* findings (exact linear solves, the
     α-sentinel, the modal attenuation) are unaffected because they were measured at a single state.
+  - **⚠️ SCOPE FIRST: the "SER runs backwards" finding below applies ONLY to a march that does NOT
+    refresh (2026-07-25).** SER's `residual_norm_0` is **segment-local** — recomputed at each
+    `forward_march` entry, hence reset at every preconditioner refresh. With refreshes every ~15 steps
+    the ratio `‖R‖/‖R₀‖` never falls far below one, so **β is pinned near β₀ = 2 for the entire march**
+    rather than decaying. Measured on the drift-refreshed cold-IC pitzDaily march (158 steps, 6
+    refreshes):
+
+    | step | 45 | 60 | 90 | 110 | 158 |
+    |---|---|---|---|---|---|
+    | β from the **global** ratio | 0.033 | 0.027 | 0.024 | 0.022 | 0.016 |
+    | β **actually used** (segment-local) | 1.74 | 1.98 | 1.99 | 1.79 | 1.85 |
+    | α | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
+
+    Three consequences. (i) Enabling the refresh silently converts SER into **constant-β ≈ 2** — if a
+    different damping is wanted it must come from `β₀` or a different schedule, not from expecting SER
+    to ramp. (ii) **An α-targeting controller has nothing to push against**: α is already 1.0000 at
+    every step from 45 on, so the controller sits at its set-point while the residual falls ~0.5 %/step
+    — the productivity ceiling is *not* an α problem, which re-scopes #22. (iii) Any probe that derives
+    "the march's operating β" from the global ratio is wrong by ~80× at a developed state.
   - **THE SER β SCHEDULE RUNS BACKWARDS FOR STIFF COUPLED RANS (measured, pitzDaily — the dominant
     cost, and it is the globalization, not the preconditioner).** The switched-evolution-relaxation
     schedule `β = β₀(‖R‖/‖R₀‖)^p` *lowers* β as the residual falls, on the premise that a smaller shift
