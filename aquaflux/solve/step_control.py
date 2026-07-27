@@ -1,17 +1,20 @@
 """Feedback step controls for the eager march (experimental, forward-only).
 
 A :class:`~aquaflux.solve.StepControl` reshapes the forward step each iteration from the previous
-step's outcome. The one member here, :class:`AlphaTargetingControl`, drives the pseudo-transient
-shift strength β toward the boundary where the full shifted step just stops being clipped by the
-line search — the measured efficiency optimum for a stiff coupled solve, which the default
-switched-evolution-relaxation schedule misses by ramping β the wrong way.
+step's outcome. Two members drive the pseudo-transient shift strength β from the line-search factor α:
 
-**Experimental, opt-in, never a default.** The α-targeting control was measured to strictly beat SER
-on a stiff coupled RANS march (reaching a given residual far faster and deeper) *when paired with a
-mid-march preconditioner refresh*, but it does **not** by itself converge to a root — it plateaus
-short — and its numeric gains are hand-set placeholders, not calibrated. It is a forward-only
-accelerator on the eager march; the finishing solve (running the default schedule) still owns the
-converged root and the adjoint. Do not promote it to a default until it converges standalone.
+* :class:`AlphaTargetingControl` drives the *single-step* shift toward the boundary where the full
+  shifted step just stops being clipped — the measured efficiency optimum for a stiff coupled solve,
+  which the default switched-evolution-relaxation schedule misses by ramping β the wrong way.
+* :class:`DualTimeControl` ramps the *dual-time* pseudo-timestep by a Courant rule (grow it while the
+  backward-Euler inner loop is comfortable, shrink it when it clips), which lets β be driven well below
+  the single-step divergence floor because the inner loop keeps the larger implicit step stable.
+
+**Both are experimental, opt-in, never a default.** Each was measured to help a stiff coupled RANS
+march but neither converges to a root by itself (they plateau short), and their numeric gains are
+hand-set placeholders, not calibrated. They are forward-only accelerators on the eager march; the
+finishing solve (running the default schedule) still owns the converged root and the adjoint. Do not
+promote either to a default until it converges standalone.
 """
 
 from __future__ import annotations
@@ -78,6 +81,79 @@ class AlphaTargetingControl(eqx.Module):
         is derived from the *previous* step's α; the first step uses :attr:`beta_start`. ``base_step``
         must be a :class:`~aquaflux.solve.PseudoTransientStep` (it is the only step with a
         ``relaxation_schedule`` to replace) — α-targeting is a shift-strength control.
+        """
+        beta = (
+            self.beta_start
+            if state is None or previous is None
+            else self._adapt(state, previous.alpha)
+        )
+        controlled = eqx.tree_at(
+            lambda s: s.relaxation_schedule, base_step, ConstantRelaxation(jnp.asarray(beta))
+        )
+        return controlled, beta
+
+
+class DualTimeControl(eqx.Module):
+    """Ramp the pseudo-timestep of a :class:`~aquaflux.solve.DualTimeStep` march by a Courant rule.
+
+    The dual-time step's reported α is the **smallest inner line-search factor** of its backward-Euler
+    timestep: α = 1 means every inner Newton step took the full length (the pseudo-timestep was
+    comfortable), α < 1 that an inner step had to be clipped (the pseudo-timestep is too large). This
+    control grows the pseudo-timestep (lowers β) while the inner loop is comfortable and shrinks it
+    (raises β) when it clips — the classic explicit-CFL ramp, but around an *implicit* timestep the
+    inner loop keeps stable, so β can be driven well below the level at which a single-step
+    pseudo-transient march diverges.
+
+    - **α ≥ :attr:`grow_above`:** the inner loop was comfortable — grow the pseudo-timestep,
+      ``β ← β / grow``.
+    - **α < :attr:`backoff_below`:** an inner step clipped hard — shrink it, ``β ← β * backoff``.
+    - **otherwise:** hold β (a dead band, so the ramp does not chatter around the boundary).
+
+    Unlike :class:`AlphaTargetingControl` (which drives the *single-step* shift toward the α = 1
+    boundary on the steady residual, and plateaus there), this drives the *dual-time* pseudo-timestep,
+    and the well-behaved backward-Euler residual is what lets it keep growing the step as the flow
+    develops. **Experimental, opt-in, never a default** — its numeric gains are hand-set placeholders
+    (calibration is the open item, tied to the cost of the low-β linear solves); the finishing solve,
+    running the default schedule, still owns the converged root and the adjoint.
+
+    Attributes
+    ----------
+    beta_start : float
+        The pseudo-transient shift strength for the first step (static).
+    grow : float
+        Factor ``> 1`` the pseudo-timestep is grown by (β divided by) on a comfortable step (static).
+    backoff : float
+        Factor ``> 1`` the pseudo-timestep is shrunk by (β multiplied by) on a clipped step (static).
+    grow_above, backoff_below : float
+        The α thresholds bounding the grow / back-off / hold bands (static).
+    beta_min, beta_max : float
+        Clamps on β (static). ``beta_min`` bounds how large the pseudo-timestep may grow.
+    """
+
+    beta_start: float = eqx.field(static=True, default=2.0)
+    grow: float = eqx.field(static=True, default=1.5)
+    backoff: float = eqx.field(static=True, default=2.0)
+    grow_above: float = eqx.field(static=True, default=0.5)
+    backoff_below: float = eqx.field(static=True, default=0.25)
+    beta_min: float = eqx.field(static=True, default=0.02)
+    beta_max: float = eqx.field(static=True, default=4.0)
+
+    def _adapt(self, beta: float, alpha: float) -> float:
+        if alpha < self.backoff_below:  # an inner step clipped hard -> pseudo-timestep too large
+            beta = beta * self.backoff
+        elif alpha >= self.grow_above:  # comfortable -> grow the pseudo-timestep
+            beta = beta / self.grow
+        return float(min(max(beta, self.beta_min), self.beta_max))
+
+    def next_step(
+        self, base_step: ForwardStep, previous: StepReport | None, state: object
+    ) -> tuple[ForwardStep, float]:
+        """The base dual-time step with a constant β, and the new β to carry.
+
+        ``state`` is the previous step's β (``None`` on the first step); β for the step about to run is
+        derived from the *previous* step's α (its smallest inner line-search factor). ``base_step`` must
+        be a :class:`~aquaflux.solve.DualTimeStep` (the step whose reported α is an inner-loop factor and
+        whose ``relaxation_schedule`` this replaces).
         """
         beta = (
             self.beta_start

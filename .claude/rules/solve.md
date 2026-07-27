@@ -152,7 +152,17 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     is `LocalCourantBasis(dissipative_weight=w)`: `d = convective + w·dissipative`. **`w = 1` (default) is
     the full operator diagonal `a_P`** — and because `d = a_P` (the same diagonal the operator carries),
     `β a_P` is spatially-*uniform* under-relaxation (relaxation `1/(1+β)` in every cell), byte-compatible
-    with the historical shift. **`w = 0` is a genuine local convective time step** (`d = Σ_f max(mdot_f,0)`
+    with the historical shift. **That equivalence is exact and worth stating plainly: on the momentum
+    rows, this shift IS the implicit under-relaxation a segregated pressure-correction solver applies,
+    at `α_u = 1/(1+β)`.** Both sides match, not just the diagonal — the shift acts on `δ = φ − φ_k` and
+    so contributes `β a_P φ_k` to the right-hand side, which is exactly the `((1−α_u)/α_u) a_P φ_old`
+    that implicit under-relaxation adds. At the pitzDaily march's operating point `β ≈ 1.9`, that is
+    `α_u ≈ 0.345`, against the 0.3 that established segregated codes use as their default momentum
+    relaxation. **Consequence (load-bearing for the cold-start work): the momentum treatment is the
+    industry-standard one in different notation, so it is NOT where a cold-start reachability gap can
+    be hiding, and "our globalization is exotic / uncovered by theory" is false.** Look instead at what
+    differs — the coupled pressure/continuity treatment, the turbulence relaxation and limiters, and the
+    fact that the reference which reliably reaches this root is a *transient* run. **`w = 0` is a genuine local convective time step** (`d = Σ_f max(mdot_f,0)`
     = ½Σ|mdot|), the non-uniform per-cell `Δt` a Courant condition implies — OF's `Co = ½Δt Σ|φ|/V` and
     Fluent's *segregated* local pseudo-time step are this same convective basis. The buckets are supplied
     by each block: `rhie_chow.momentum_diagonal_parts` (velocity) and
@@ -381,6 +391,62 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         (the true value against the transient field is **+0.13**, i.e. weakly *aligned*). The loader now
         reads `of_transient/0.14`. **Sanity-check any reference measurement against the recorded
         ‖R‖ ≈ 20 before drawing conclusions from it.**
+    - **⚠️ THE CRAWL IS A CORRECT PSEUDO-TIME INTEGRATION OF A GENUINELY LONG TRANSIENT — measured
+      2026-07-27, and it re-scopes the "de-emphasize ω in the measure" lever above.** The `a_P` shift is
+      backward-Euler local time stepping: `β·a_P` on the diagonal is the transient term `ρV/Δτ`, so the
+      per-step pseudo-time is `Δτ = α·V/(β·a_P)` (α the accepted line-search factor, ρ = 1). Accumulating
+      that per cell over two stored cold marches (`profile_base`, β ≈ 1.9; `basis_march_aP05`, β₀ = 0.5),
+      sampled in the recirculation region behind the step, settles what the reachability crawl actually is:
+      - **`a_P` is ~constant (~8.0e-3) for the whole march.** The potential-flow seed already carries
+        free-stream-magnitude velocity, so the momentum diagonal barely moves — hence `Δτ` per step is
+        *fixed and tiny* (~6e-5 s at the median cell), regardless of how the bubble develops.
+      - **`x_r/h` grows smoothly, monotonically, and decelerating with accumulated pseudo-time in both
+        arms — no stall, no reversal.** The step direction is never the problem; every step buys real
+        bubble. `base` reaches `x_r/h` 1.22 at ~5 ms of bubble-median pseudo-time in 90 steps; the
+        β₀ = 0.5 arm reaches 2.43 at ~28 ms in 109 steps. Physical yardstick: the free-stream
+        flow-through of the reattached bubble length (7.74·h ≈ 0.20 m at 10 m/s) is ~20 ms, and `base`'s
+        growth extrapolates to reach 7.74 near **~55 ms ≈ ~800 steps at this `Δτ`**. So the march has
+        elapsed only a small fraction of the transient — the crawl is *insufficient elapsed pseudo-time*,
+        not a wrong direction, a bad merit function, or a stuck state.
+      - **Lower β = larger backward-Euler step = further per step (2.43 vs 1.22) — this confirms `Δτ` is
+        the lever.** The two arms trace the same qualitative decelerating growth but do **not** collapse
+        onto one `x_r/h`(pseudo-time) curve: the β₀ = 0.5 arm sits at ~1.6–2× more pseudo-time per unit
+        bubble, because a larger implicit step integrates the transient more coarsely and its pseudo-time
+        bookkeeping overstates true transient progress. The small-step arm is the truer `x_r(t)`; do not
+        read the imperfect collapse as a defect.
+      - **CONSEQUENCE (binding): no merit function, acceptance rule, filter, or shift *basis* changes
+        this** — every one of those is a direction/measure lever, and the direction is fine. The only
+        levers are the **effective `Δτ` per step** (`α·V/(β·a_P)` — a larger stable step) or a **different
+        homotopy/seed nearer the developed bubble** (physical continuation in Re or a `ν_t` ramp, a
+        coarse-grid or eddy-viscosity-augmented start). A measure change cannot *manufacture* pseudo-time,
+        which bounds the "de-emphasize ω in the measure" target above (#24/#29): worth it for readable
+        per-block reporting, **not** as the reachability fix it was framed as.
+      - **WHAT LIMITS `Δτ`: the cold-start β floor is a NONLINEARITY, and diffusion continuation lifts it
+        — measured 2026-07-27 (`scratchpad/nut_floor_probe.py`, `re_continuation_probe.py`).** A single
+        shifted cold step at the target Re = 25000 is stable at β = 2 (α = 1, ‖R‖ ×0.49) and β = 0.5
+        (α = 0.5) but **blows up at β = 0.25** (ω → 5.6e32, no reducing rung) — the recorded floor. Raising
+        the molecular viscosity (a clean Reynolds continuation, self-consistent seed, no state
+        perturbation) removes it: at Re = 2500, β = 0.5 goes α = 0.5 → **1** and β = 0.25 becomes finite
+        and productive (α = 0.5, ‖R‖ ×0.49); at Re = 250, β = 0.5 takes a near-Newton step (‖R‖ **×0.045**,
+        22× in one step). So the floor is set by the convective nonlinearity, and reducing it (diffusion
+        homotopy) buys a lower β = a larger `Δτ` from step 1 — the automatable, knob-light lever (one
+        scalar that **dissolves at the target Re**, like the shift, so the root is unchanged).
+      - **A `ν_t` seed applied by perturbing the k/ω *state* BACKFIRES — do not.** Scaling ω down to raise
+        `ν_t` unbalances the ω transport equation, and since ‖R‖ is ~100 % ω the coupled step then fights
+        that artificial deficit: measured α = 0 (no reducing rung) at β = 2 where the unperturbed state
+        gives α = 1. An eddy-viscosity seed must add diffusion to the **momentum closure** (a `μ_eff`
+        floor, ramped out), *not* to the k/ω fields — i.e. it is a spatially-varying diffusion
+        continuation, the same family as the Reynolds ramp above.
+      - **This is the `β × travel` finding seen in the residual, and it explains why ‖R‖ points opposite
+        to the physics.** On every shifted row `R(φ+δ) ≈ −βDδ = −(ρV/Δτ)δ ≈ −ρV·(dφ/dt)` — the *physical
+        unsteady term*, nonzero for the entire transient and independent of step size. The equilibrated
+        residual therefore literally cannot fall until the transient completes; it is behaving exactly as
+        an unsteady residual should, which is why judging on `x_r/h` (never a residual) is mandatory here.
+      - **The `of_transient` reference has NO bubble-growth curve — it was restarted from the developed
+        steady field.** `of_transient/0/U` carries `location "2000"` in its header (copied from the steady
+        run's converged step), so `x_r/h` ≈ 7.74 at *every* written time including t = 0. The transient
+        confirms the developed state is stable; it is **not** a growth transient and cannot be overlaid
+        against the march's `x_r` vs pseudo-time. Treat 7.74 as the asymptote only.
     - **⚠️ RE-PROFILED AFTER THE `a_P` FIX (2026-07-26) — the two conclusions above REVERSE. Read this
       bullet, not them.** The flux-continuous (harmonic) face viscosity and the wall-model boundary
       viscosity changed `a_P` itself, and the shift is `β·a_P`, so **every β calibration measured before
@@ -615,16 +681,130 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     improves ~3000× (a negligible absolute contributor), k and ω ~2.5× each, and the **velocity blocks
     get WORSE** — one component 1.80e-3 → 4.61e-3, **2.6× worse** — over a march the Euclidean norm
     reports as converging.
-    - **Consequence: a march steered by the equilibrated measure stalls because there is little
-      fractional progress to be had, not because the measure is defective.** It correctly reports that
-      the solve trades between blocks. The Euclidean 78× is largely ω's *absolute* magnitude shrinking.
-    - **All three disagree, and that is the open problem.** Euclidean says "converging"; equilibrated
-      says "barely moving, momentum degrading"; the physics says "the bubble is growing toward 7.74".
-      No residual measure yet tried tracks the physical target on this case.
-    - **Confound to rule out before over-reading it:** the equilibrated weights come from `a_P` and the
-      field magnitudes, both of which grow strongly as the flow develops, so the *denominator* moves
-      during the march. Some of the apparent stagnation may be the measure's own weights moving.
-      Unmeasured.
+    - **⚠️⚠️ THE TABLE ABOVE IS AN ARTIFACT OF THE MEASURE'S OWN CONSTRUCTION — MEASURED 2026-07-27,
+      and it supersedes the reading that stood here before.** On every row the shift owns, the
+      equilibrated measure after a full step is **`β × per-step travel`, not a distance to the root.**
+      `coupled_scaled_norm` takes its velocity/k/ω row scales from `shift_policy.shift_term(state)
+      .diagonal` — *the very array the shift multiplies* — so with `(J + βD)δ = −R` giving
+      `R(φ+δ) = −βDδ + O(‖δ‖²)`, the equilibrated row is exactly `β|δᵢ|`. Continuity carries `D_c = 0`
+      (the shift packs `jnp.zeros(n_cells)` on pressure), so it is **annihilated to first order**
+      whatever the physics does. Measured against real shifted solves at real march checkpoints
+      (`scratchpad/measure_is_travel.py`), actual ÷ predicted `βDδ` floor:
+
+      | state | β = 2 | β = 1 | β = 0.25 |
+      |---|---|---|---|
+      | cold | 0.995–1.008 | 0.975–1.060 | *diverges, see below* |
+      | g0020 | 1.013–1.038 | 1.049–1.189 | *NaN, see below* |
+      | g0045 | **1.000 ×4** | 0.999–1.005 | 0.994–1.046 |
+      | g0090 | **1.000 ×4** | 1.000–1.003 | 0.999–1.023 |
+
+      Continuity's floor is *exactly* zero everywhere; its actual residual after the step is 5.9e-7 at
+      g0090 against 6.8e-7 before. Nonlinear defect is 0.1–0.2 % of the block value at the developed
+      states, and the Krylov residual is 1e-11–1e-13 throughout — so this is neither nonlinear
+      truncation nor solver inexactness. **The identity is β-independent**: it holds across a factor of
+      eight in β, which is much stronger evidence than the operating point alone.
+      **Therefore: continuity's ~3000× is first-order annihilation of an unshifted row; the velocity
+      blocks' 2.6× "degradation" is the steps getting BIGGER. Neither is a statement about the flow —
+      stop citing them as one.** The measure cannot fall below a floor proportional to `β ×` step while
+      β ≈ 2, which is the whole explanation of "equilibrated stalls at 1.9× while Euclidean falls 78×":
+      the Euclidean norm has no β-proportional floor. Both measures were correct about what they
+      actually measure; neither was measuring convergence.
+    - **⚠️ CORRECTION (2026-07-27, from reading the reference coupled p–U C++): the MEASURE is sound —
+      the `β×travel` is aquaflux feeding it the wrong residual, not a flaw in the measure's
+      construction.** The reference code's scaled-residual convergence measure is the *same* construction
+      (divide each row by its diagonal coefficient, then normalize by field magnitude) and is robust
+      there. What differs is the residual each divides:
+      - **The reference measures the residual of the equation it actually solves** — `transient + flux` =
+        `ρV/Δτ·(φ − φ⁰) + flux(φ)`, scaled by `a_P + ρV/Δτ`, read as the *initial* residual before the
+        field update (the standard finite-volume convergence judge). The pseudo-time term is present in
+        the residual, the matrix diagonal, **and** the scaling, all three consistently, and its reference
+        `φ⁰` is **held fixed across the inner iterations of a timestep**. That residual is `O(‖δ‖²)` after
+        a Newton step and collapses to the pure steady imbalance at each timestep's start — so it
+        converges.
+      - **aquaflux measures the bare *steady* residual `R`** while the shift `βD` is on the **Jacobian
+        only** (`(J + βD)δ = −R`, `R` the unshifted steady residual — `continuation.py`), and the shift
+        reference **resets to the previous iterate every step**. Both take the *same* Newton step on
+        `G = R + βD(φ − φ_k)`; the reference measures `G(φ⁺) = O(‖δ‖²)`, aquaflux measures
+        `R(φ⁺) = G(φ⁺) − βDδ = −βDδ` — the `β×travel`. The missing `−βDδ` is exactly the pseudo-time term
+        the reference keeps in its residual and aquaflux drops.
+      So the earlier conclusion ("valid convergence test near the root, not a merit function far from
+      it") mislocated the fault: the measure is **sound**, and it is being fed the steady residual of a
+      **single-step PTC with a per-step reference** instead of the backward-Euler *initial* residual of a
+      **held-reference dual-time march**. This is the same gap the pseudo-time finding named — aquaflux
+      approximates a transient with single PTC steps. The fix is structural, not a norm change: a true
+      dual-time march (hold `φ⁰`; put the shift in the residual **and** Jacobian as
+      `G = R + (ρV/Δτ)(φ − φ⁰)`, scaled by `a_P + ρV/Δτ`; inner-iterate `G → 0`; advance `φ⁰`; judge on
+      the initial residual per outer step). Then the measure behaves exactly as in the reference — and it
+      is the same change the pseudo-time finding calls for, so the two motivate one build.
+    - **PROTOTYPE VALIDATED (2026-07-27, `scratchpad/pseudotime/dualtime.py`) — the diagnosis holds, and
+      the fix is a per-timestep inner loop, not a norm change.**
+      - **Confirmed current PTC = dual-time with K = 1.** At β = 2 the inner Newton converges
+        `G = R + βd(φ − φⁿ)` in a **single** step (`‖G‖` 2.2e-2 → 6e-4, quadratic — it *is* the shifted
+        Newton step), reproducing the single-step march exactly; the scaled measure then stalls
+        (2.229e-2 → 2.204e-2) while euclidean halves — the β×travel signature.
+      - **At β = 0.5 the inner loop engages (K = 2–3) and is stable**, converging `G` (2.2e-2 → ~3e-4)
+        with a **line search on the scaled `‖G_n‖`** (first inner step clipped α = 0.5, then full). This is
+        the legitimate inner merit (`G_n = 0` is a well-posed fixed-`φⁿ` solve), distinct from the refuted
+        `G`-as-*outer*-merit.
+      - **The measure is now honest.** The scaled `‖R(φⁿ)‖` holds ~2.1e-2 while `x_r/h ≈ 0` — it correctly
+        reports that the slow bubble has not developed — while euclidean falls fast (2.86e2 → 4.6e1 over 3
+        steps) on the quick pressure/momentum modes. That split is physical, not the β×travel artifact.
+      - **CAVEAT — dual-time alone does NOT accelerate reachability.** Development rate is Δτ-governed, and
+        β = 0.5 is still a small Δτ (same crawl). Its contribution is (a) an honest `‖R(φⁿ)‖` that can
+        *drive* a Δτ ramp (single-step's stalling measure is why SER ran backwards) and (b) the
+        inner-line-search-on-`G` tolerating a larger Δτ than one shifted step. Reachability still needs the
+        Δτ ramp **and** the cold-start diffusion/Re continuation (they compose: dual-time is the honest
+        gauge + robust per-step solve, continuation lowers the cold stiffness so Δτ can grow early).
+      - **CFL-ramp A/B (2026-07-27, `scratchpad/pseudotime/dualtime_march.py`) — the hypothesis holds, the
+        gate is now the low-β linear-solve cost.** A `DualTimeStep` + `CflController` (grow Δτ / drop β
+        when the inner loop meets η within ≤ 3 steps with α ≥ 0.5; back off otherwise), cold start:
+
+        | inner solves | β | inner | x_r/h | scaled ‖R(φⁿ)‖ | euclid |
+        |---|---|---|---|---|---|
+        | 9 | 0.263 | 3 | 0.031 | 2.12e-2 | 44 |
+        | 12 | 0.176 | 3 | 0.095 | 2.01e-2 | 29 |
+        | 15 | 0.117 | 3 | 0.227 | **1.51e-2** | 18 |
+
+        - **CONFIRMED: the inner loop unlocks β far below the single-step floor.** β ramped 2.0 → 0.117
+          (still dropping) with every step converging (met, α = 1, ≤ 3 inner) — single-step blows up at
+          β = 0.25 cold, dual-time is stable at less than half that.
+        - **The measure fix is now visible in a march:** once the bubble formed (x_r/h 0.095 → 0.227) the
+          scaled ‖R(φⁿ)‖ fell 25 % in one step, where the single-step scaled measure stalled at 1.9×
+          forever. x_r/h accelerates as β drops (0.031 → 0.095 → 0.227, ~doubling per Δτ doubling).
+        - **NOT YET more efficient per solve, and the reason is the low-β cost.** (i) The controller
+          started at β = 2 (safe cold) and spent ~6 solves in the unproductive high-β regime before the
+          bubble moved, so at 15 solves it trails aP05 (single-step β₀ = 0.5: x_r/h 0.58 @ 15). Fix: start
+          the controller at β = 0.5 (proven stable cold). (ii) As β drops the shifted saddle loses diagonal
+          dominance, so each solve costs more GMRES cycles *and* the inner loop needs 2–3 steps — stability
+          is bought, not cheaply. **That low-β linear-solve cost is exactly what automated Re/ν_t
+          continuation removes** (lower cold stiffness → cheap low-β solves), so dual-time (stability +
+          honest gauge) and continuation (cheap big-Δτ steps) compose — the point to move to Re continuation.
+      - **BUILT (opt-in): `DualTimeStep` (`solve/continuation.py`) + `DualTimeControl`
+        (`solve/step_control.py`).** `DualTimeStep` is a `ForwardStep` whose `stepper()` holds a reference
+        `φⁿ` and runs an inner Newton loop on `G = R + β d (φ − φⁿ)` to `‖G‖ ≤ inner_tol·‖R(φⁿ)‖` (or
+        `inner_steps`), line-searched **monotonically on ‖G‖** (a well-posed fixed-`φⁿ` solve, unlike the
+        non-monotone steady residual). The shift is in the residual *and* the Jacobian, so the measured
+        steady residual is the honest discrete time derivative, not `β×travel`; `inner_steps = 1` is one
+        shifted step (the pseudo-transient attempt, minus the escalation ladder the inner loop replaces).
+        β still vanishes at the root, so the IFT adjoint is unchanged — pinned by
+        `tests/unit/test_dual_time.py` (converges, exact gradient, **iteration-count-independent**).
+        `DualTimeControl` is the Courant β-ramp (grow the pseudo-timestep while the inner α = 1, shrink
+        when it clips), a `StepControl` on the eager march, sibling to `AlphaTargetingControl`; **opt-in,
+        never a default, placeholder gains** (its calibration is gated on the low-β linear-solve cost the
+        Re continuation removes). Wired through `coupled_continuation(inner_steps=…, inner_tol=…)` (returns
+        a `DualTimeStep` when `inner_steps > 1`, else the unchanged `PseudoTransientStep`) and reachable as
+        `solve_coupled(coupled, inner_steps=…, step_control=DualTimeControl())`. **The default path
+        (`inner_steps = 1`) is byte-unchanged.**
+    - **Lowering β is not the escape, and the reason is specific — state it precisely.** At `β = 0.25`
+      the k/ω blocks reach 1e24 / 1e52 at the cold IC and go NaN at step 20, but are **perfectly stable
+      at steps 45 and 90** (ratios 0.994–1.046). So the under-damping is an *early-state* property, not
+      a general one: β can be lowered once the flow is developed, and cannot be lowered at exactly the
+      cold start where the reachability problem lives. This independently re-kills `descent_backoff`,
+      whose whole premise is lowering β from a cold state.
+    - **Still open:** the *across-iteration* weight drift (`a_P` and the field magnitudes both grow as
+      the flow develops, so the denominators move between iterations) is a **separate** effect from the
+      β floor and remains unmeasured. Settle it by replaying one `RowScaledNorm` with scales frozen at
+      the warm-started root over the stored `profile_base/g*.npz` history — seconds of compute.
   - **⚠️ THE MEASURE'S WEIGHTS ARE STATE-DEPENDENT, so there is no single objective across iterations.**
     `f(x) = Σ wᵢ(x)|Rᵢ(x)|` with `w` from the operator diagonals and field magnitudes. The weights are
     frozen within an iteration (so the line search compares like with like) and rebuilt each iteration

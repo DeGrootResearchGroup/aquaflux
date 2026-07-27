@@ -54,6 +54,8 @@ from aquaflux.flow.mean_velocity import (
 from aquaflux.solve import (
     BlockScaledNorm,
     DivergenceGuard,
+    DualTimeStep,
+    ForwardStep,
     ImplicitNewtonSolver,
     LocalCourantBasis,
     PseudoTransientStep,
@@ -753,10 +755,11 @@ def coupled_scaled_norm(
     Returns
     -------
     RowScaledNorm
-        The measure, with its scales frozen at ``state``. It is hashed by identity, so rebuilding it
-        recompiles the solve -- rebuild it on the same cadence as the frozen preconditioner, and hold
-        it fixed across a line search (otherwise a candidate could be preferred for shrinking its own
-        denominator rather than its residual).
+        The measure, with its scales frozen at ``state``. Only the block ``sizes`` are static, so the
+        scales ride as ordinary array leaves and **re-deriving the measure at a new state is a
+        compilation cache hit** -- the block structure is unchanged, only the numbers move. Rebuild it
+        every outer iteration, and hold it fixed across a line search (otherwise a candidate could be
+        preferred for shrinking its own denominator rather than its residual).
     """
     layout = coupled.layout
     n, dim = layout.n_cells, layout.dim
@@ -818,6 +821,8 @@ def coupled_continuation(
     escalation_factor: float = 2.0,
     divergence_cap: float = 10.0,
     line_search: int = _COUPLED_LINE_SEARCH,
+    inner_steps: int = 1,
+    inner_tol: float = 0.05,
     grow: int = 0,
     descent_backoff: int = 0,
     descent_test: bool = False,
@@ -828,7 +833,7 @@ def coupled_continuation(
     reuse: CoupledShiftPolicy | None = None,
     residual_norm: ResidualNorm | None = None,
     **preconditioner_kwargs: object,
-) -> PseudoTransientStep:
+) -> ForwardStep:
     """Build the pseudo-transient continuation step for the coupled Newton solve.
 
     Freezes the block-diagonal preconditioner (flow block-SIMPLE + the k/omega convection-diffusion
@@ -855,6 +860,19 @@ def coupled_continuation(
         :data:`_COUPLED_LINE_SEARCH`); scales an accurate-but-overshooting direction back to a descent
         from the one shifted solve rather than re-solving at larger ``beta``. See
         :class:`~aquaflux.solve.PseudoTransientStep`.
+    inner_steps : int
+        ``> 1`` selects a **dual-time** (backward-Euler) march (:class:`~aquaflux.solve.DualTimeStep`)
+        instead of the default single-step pseudo-transient continuation: each outer timestep holds a
+        reference and runs up to this many inner Newton iterations on the transient residual
+        ``R + beta d (phi - phi_ref)``. That puts the shift in the residual, so the measured steady
+        residual is the honest discrete time derivative (not ``beta x travel``) and a larger
+        pseudo-timestep (smaller ``beta``, driven by a step control) can be taken stably from a cold
+        start. ``1`` (default) is the ordinary single shifted step, unchanged. The inner loop replaces
+        the escalation ladder, so ``max_escalations`` / ``escalation_factor`` / ``divergence_cap`` /
+        ``grow`` / ``descent_backoff`` / ``descent_test`` do not apply when it is on.
+    inner_tol : float
+        The dual-time inner loop stops once ``||G||`` has fallen to this fraction of the anchor residual
+        (default ``0.05``); ignored unless ``inner_steps > 1``.
     forward_solver : lineax.AbstractLinearSolver or None
         The shifted-solve Krylov solver; ``None`` uses :data:`_COUPLED_FORWARD_SOLVER` (a
         larger-restart GMRES suited to the stiff coupled system).
@@ -914,11 +932,27 @@ def coupled_continuation(
             if block_scaled_norm
             else jnp.linalg.norm
         )
+    schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
+    solver = forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER
+    if inner_steps > 1:
+        # Dual-time (backward-Euler) march: an inner Newton loop per outer timestep on the transient
+        # residual, so the measured steady residual is the honest discrete time derivative rather than
+        # beta x travel, and a larger pseudo-timestep (smaller beta, driven by a step control) stays
+        # stable. Reuses the same frozen shift policy, schedule, solver and measure. The inner loop
+        # replaces the escalation ladder, so the escalation/acceptance parameters do not apply.
+        return DualTimeStep(
+            policy,
+            relaxation_schedule=schedule,
+            inner_steps=inner_steps,
+            inner_tol=inner_tol,
+            line_search=line_search,
+            forward_solver=solver,
+            residual_norm=residual_norm,
+            adjoint_preconditioner_factory=policy.adjoint_factory(),
+        )
     return PseudoTransientStep(
         policy,
-        relaxation_schedule=SwitchedEvolutionRelaxation(
-            beta0=beta0, exponent=exponent, beta_floor=beta_floor
-        ),
+        relaxation_schedule=schedule,
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),
@@ -926,7 +960,7 @@ def coupled_continuation(
         grow=grow,
         descent_backoff=descent_backoff,
         descent_test=descent_test,
-        forward_solver=forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER,
+        forward_solver=solver,
         residual_norm=residual_norm,
         adjoint_preconditioner_factory=policy.adjoint_factory(),
     )
@@ -1111,7 +1145,7 @@ def solve_coupled(
     k: jnp.ndarray | None = None,
     omega: jnp.ndarray | None = None,
     *,
-    continuation: PseudoTransientStep | None = None,
+    continuation: ForwardStep | None = None,
     reference_state: jnp.ndarray | None = None,
     method: str | None = "twolevel",
     max_steps: int = 60,
@@ -1284,7 +1318,11 @@ def solve_coupled(
         the full allowance, and halving it would fail a march that a single-stage solve completes.
     **continuation_kwargs
         Forwarded to :func:`coupled_continuation` when building internally (schedule + preconditioner
-        options).
+        options). Notably ``inner_steps > 1`` selects the **dual-time** (backward-Euler) march
+        (:class:`~aquaflux.solve.DualTimeStep`) — an inner Newton loop per outer timestep whose measured
+        steady residual is the honest discrete time derivative rather than ``beta x travel``; pair it
+        with ``step_control=DualTimeControl()`` to ramp the pseudo-timestep by a Courant rule. Both are
+        opt-in accelerators; ``inner_steps = 1`` (default) is the unchanged single-step continuation.
 
     Returns
     -------

@@ -550,3 +550,193 @@ class PseudoTransientStep(eqx.Module):
             return phi_next, step_cycles, step_alpha
 
         return step
+
+
+class DualTimeStep(eqx.Module):
+    """Dual-time (backward-Euler) forward-step strategy: an inner Newton loop per outer timestep.
+
+    :class:`PseudoTransientStep` adds the shift ``β d`` to the Jacobian only and measures the bare
+    steady residual ``R(φ)``. That residual is a poor convergence signal along a pseudo-time march:
+    after a shifted step ``(J + β D) δ = −R`` the steady residual is ``R(φ + δ) = −β D δ``, i.e. ``β``
+    times how far the step travelled, not a distance to the root — so a row-scaled measure of it
+    stalls at a ``β``-proportional floor while the step is productive.
+
+    This strategy instead takes a true backward-Euler timestep. Each call **holds a reference**
+    ``φⁿ`` (the iterate it is given) and runs an **inner Newton loop** on the transient residual
+
+        ``G(φ) = R(φ) + β d · (φ − φⁿ)``,
+
+    solving ``(J(φ) + β d) δ = −G(φ)`` and line-searching on ``‖G‖`` until ``‖G‖ ≤ inner_tol · ‖R(φⁿ)‖``
+    or ``inner_steps`` iterations are spent. Because the shift ``β d · (φ − φⁿ)`` now sits in the
+    residual as well as the Jacobian, the leftover ``−β D δ`` cancels: the returned iterate satisfies
+    the backward-Euler equation, and the steady residual the outer loop measures at the *next* anchor is
+    the discrete unsteady term ``β d · (φⁿ⁺¹ − φⁿ)`` — the physical time derivative, which falls to zero
+    as the transient settles. A row-scaled / block-scaled measure of it is then well-behaved.
+
+    With ``inner_steps = 1`` a step is a **single shifted Newton step** — the transient term is zero at
+    the anchor, so ``G(φⁿ) = R(φⁿ)`` and the one inner solve is exactly the attempt
+    :class:`PseudoTransientStep` forms. The two strategies differ in how they handle an overshoot:
+    ``PseudoTransientStep`` escalates ``β`` (a re-solve at more damping) and guards divergence with an
+    injected acceptance policy, whereas this strategy takes **more inner iterations at fixed ``β``** and
+    line-searches each on ``‖G‖`` — the inner loop *is* the globalization, so there is no escalation
+    ladder or acceptance policy here. ``inner_steps > 1`` is what lets a larger pseudo-timestep (a
+    smaller ``β``) be taken stably from a cold start: the inner iterations converge the implicit step a
+    single shifted step would overshoot, so ``β`` can be driven below the level at which the single-step
+    march diverges. The larger the step the more the outer march accelerates, so a
+    :class:`~aquaflux.solve.StepControl` on the eager march is the natural driver of ``β`` here.
+
+    The shift still **vanishes at the fixed point** — as ``‖R‖ → 0`` the schedule ramps ``β → 0``, so
+    ``G → R`` and the inner loop is a single undamped Newton step. The converged state therefore solves
+    the unshifted ``R = 0`` and the implicit-function-theorem adjoint is identical to the line-searched
+    or pseudo-transient march: this strategy only reshapes the forward path.
+
+    Attributes
+    ----------
+    shift_policy : ShiftPolicy
+        Supplies the base shift diagonal ``d(φ)`` and the ``β -> M`` preconditioner factory at the
+        reference iterate — the same injected policy :class:`PseudoTransientStep` uses.
+    relaxation_schedule : RelaxationSchedule
+        Sets ``β`` from ``‖R(φⁿ)‖ / ‖R₀‖`` (switched-evolution-relaxation by default). Memoryless, so it
+        stays on the differentiable path; a stateful ``β`` ramp is a
+        :class:`~aquaflux.solve.StepControl` on the eager march (it swaps in a
+        :class:`~aquaflux.solve.ConstantRelaxation`), not a schedule.
+    inner_steps : int
+        Maximum inner Newton iterations per outer timestep (static). ``1`` recovers
+        :class:`PseudoTransientStep`; a few (2–5) converge the backward-Euler step at a larger
+        pseudo-timestep.
+    inner_tol : float
+        The inner loop stops once ``‖G‖`` has fallen to this fraction of ``‖R(φⁿ)‖`` (static). A loose
+        value (e.g. ``0.05``) is enough — the outer march re-solves each timestep anyway.
+    line_search : int
+        Maximum backtracking step-halvings applied to each inner correction, judged on ``‖G‖`` (static).
+        ``G = 0`` is a well-posed fixed-``φⁿ`` solve, so the inner line search is strict-descent
+        (monotone) on ``‖G‖`` — unlike the non-monotone steady residual the outer march tolerates.
+        Default ``10``.
+    forward_solver : lineax.AbstractLinearSolver or None
+        The shifted-solve Krylov solver, overriding the shared :data:`_INEXACT_CONTINUATION_SOLVER`
+        when set (static).
+    residual_norm : ResidualNorm
+        The measure ``R -> scalar`` used for the inner target, the inner line search, and (via
+        :meth:`norm`) the outer stopping test — one consistent measure. Defaults to the Euclidean norm;
+        a heterogeneous block system can pass a row-/block-scaled measure, which this strategy makes
+        well-behaved (see the class summary).
+    adjoint_preconditioner_factory : callable or None
+        The ``state -> M`` factory for the converged transpose (adjoint) solve, or ``None`` (static). At
+        ``φ*`` the operator is the unshifted steady Jacobian (``β → 0``), so the ordinary preconditioner
+        is the consistent choice.
+    """
+
+    shift_policy: ShiftPolicy
+    relaxation_schedule: RelaxationSchedule = eqx.field(default_factory=SwitchedEvolutionRelaxation)
+    inner_steps: int = eqx.field(static=True, default=5)
+    inner_tol: float = eqx.field(static=True, default=0.05)
+    line_search: int = eqx.field(static=True, default=10)
+    forward_solver: lx.AbstractLinearSolver | None = eqx.field(static=True, default=None)
+    # Data, not static (matching PseudoTransientStep): an observed march re-derives the measure each
+    # outer iteration and swaps it in with `tree_at`, which needs it to ride as a leaf. The default
+    # plain callable has no array leaves, so it filters to the static side and the default is unchanged.
+    residual_norm: ResidualNorm = eqx.field(default=jnp.linalg.norm)
+    adjoint_preconditioner_factory: (
+        Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
+    ) = eqx.field(static=True, default=None)
+
+    def norm(self) -> ResidualNorm:
+        """The residual measure the inner loop and the outer stopping test share (:attr:`residual_norm`)."""
+        return self.residual_norm
+
+    def default_solver(self) -> lx.AbstractLinearSolver:
+        """The shifted-solve Krylov solver: the injected :attr:`forward_solver`, else the shared default."""
+        return (
+            self.forward_solver if self.forward_solver is not None else _INEXACT_CONTINUATION_SOLVER
+        )
+
+    def adjoint_preconditioner(
+        self,
+    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None:
+        """The (unshifted) ``state -> M`` factory for the adjoint solve at the converged state."""
+        return self.adjoint_preconditioner_factory
+
+    def stepper(self) -> _ForwardStep:
+        """One backward-Euler outer timestep: the inner-converged iterate and its total solve cost.
+
+        ``(residual_fn, φ, ‖R₀‖, solver) -> (φ_next, cycles, alpha)``. The reference ``φⁿ`` is ``φ``;
+        ``cycles`` is the summed restart-cycle count over the inner Newton iterations; ``alpha`` is the
+        **smallest** inner line-search factor (``1`` when every inner step took the full length, smaller
+        when the implicit step had to be clipped) — the step-quality signal a
+        :class:`~aquaflux.solve.StepControl` drives ``β`` by (raise the pseudo-timestep while ``α = 1``,
+        back off when it clips).
+        """
+        policy = self.shift_policy
+        schedule = self.relaxation_schedule
+        inner_steps = self.inner_steps
+        inner_tol = self.inner_tol
+        line_search = self.line_search
+        norm = self.residual_norm
+
+        def step(
+            residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
+            phi: jnp.ndarray,
+            residual_norm_0: jnp.ndarray,
+            solver: lx.AbstractLinearSolver,
+        ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+            reference = phi  # φⁿ, held across the inner loop
+            # ‖R(φⁿ)‖ = ‖G(φⁿ)‖: the transient term β d (φ − φⁿ) is zero at the anchor, so the honest
+            # steady residual at the anchor and the inner loop's starting G-norm are the same number.
+            reference_norm = norm(residual_fn(reference))
+            relaxation = schedule.relaxation(reference_norm, residual_norm_0)
+            term = policy.shift_term(reference)
+            # The shift only reshapes the forward path (like the preconditioner it damps), so detach it:
+            # it never perturbs the converged state or its adjoint.
+            shift = jax.lax.stop_gradient(relaxation * term.diagonal)  # β d over the full state
+            preconditioner = term.make_preconditioner(relaxation)
+            target = inner_tol * reference_norm
+
+            def transient_residual(p: jnp.ndarray) -> jnp.ndarray:
+                # G(p) = R(p) + β d (p − φⁿ): the backward-Euler residual whose root is the implicit
+                # timestep. Its Jacobian is J_R(p) + β d, formed matrix-free below.
+                return residual_fn(p) + shift * (p - reference)
+
+            def cond(carry: tuple) -> jnp.ndarray:
+                _, inner, gnorm, _, _ = carry
+                return (inner < inner_steps) & (gnorm > target)
+
+            def body(carry: tuple) -> tuple:
+                p, inner, gnorm, cycles, min_alpha = carry
+
+                def shifted_jacobian(tangent: jnp.ndarray) -> jnp.ndarray:
+                    return jax.jvp(residual_fn, (p,), (tangent,))[1] + shift * tangent
+
+                delta, step_cycles = solve_linear(
+                    shifted_jacobian,
+                    -transient_residual(p),
+                    solver=solver,
+                    preconditioner=preconditioner,
+                    throw=False,
+                )
+                # Strict-descent (monotone) line search on ‖G‖: G = 0 is a well-posed fixed-φⁿ solve, so
+                # a clipped inner step is a signal the pseudo-timestep is too large, read out via alpha.
+                candidate, alpha = backtracking_line_search(
+                    transient_residual, p, delta, gnorm, line_search, norm=norm
+                )
+                return (
+                    candidate,
+                    inner + 1,
+                    norm(transient_residual(candidate)),
+                    cycles + step_cycles,
+                    jnp.minimum(min_alpha, alpha),
+                )
+
+            phi_next, _, _, cycles, alpha = jax.lax.while_loop(
+                cond,
+                body,
+                (
+                    reference,
+                    jnp.asarray(0, dtype=jnp.int32),
+                    reference_norm,
+                    jnp.asarray(0, dtype=jnp.int32),
+                    jnp.asarray(1.0),
+                ),
+            )
+            return phi_next, cycles, alpha
+
+        return step

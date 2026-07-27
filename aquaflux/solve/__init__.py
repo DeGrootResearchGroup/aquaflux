@@ -47,6 +47,7 @@ from __future__ import annotations
 
 from .continuation import (
     DivergenceGuard,
+    DualTimeStep,
     PseudoTransientStep,
     ShiftPolicy,
     ShiftTerm,
@@ -84,7 +85,7 @@ from .newton import newton_step
 from .norm import BlockScaledNorm, ResidualNorm, RowScaledNorm
 from .relaxation import ConstantRelaxation, RelaxationSchedule, SwitchedEvolutionRelaxation
 from .shift_basis import LocalCourantBasis, ShiftBasis, VelocityShiftParts
-from .step_control import AlphaTargetingControl
+from .step_control import AlphaTargetingControl, DualTimeControl
 
 __all__ = [
     "AirHierarchy",
@@ -95,6 +96,8 @@ __all__ = [
     "CycleGrowthTrigger",
     "DampedNewtonStep",
     "DivergenceGuard",
+    "DualTimeControl",
+    "DualTimeStep",
     "ForwardStep",
     "ImplicitNewtonSolver",
     "LineSearchGrowth",
