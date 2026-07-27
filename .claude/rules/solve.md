@@ -627,12 +627,27 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       |---|---|---|---|---|
       | `∇f·δ` | −2.30 | −1.15 | **+2.30** | **+20.70** |
 
-      Shift every row uniformly and the derivative stays negative at any β. So *"continuity carries no
-      pseudo-transient term"* is load-bearing after all — **not** because the fixed point needs one (it
-      does not; zero shift on an algebraic constraint is the theoretically correct index-1 PTC), but
-      because the **asymmetry** between damped and undamped rows destroys descent above a critical β.
-      This is the concrete argument for putting *some* damping on the constraint row — a grad-div /
-      augmented-Lagrangian augmentation vanishing at `∇·u = 0` would do it without moving the root (#16).
+      ⚠️ **CORRECTION (2026-07-27, same day): "shift every row uniformly and the derivative stays
+      negative at any β" — as first written here — is WRONG.** That was only ever tested on a
+      *symmetric* system, never on the saddle. Damping the constraint row on the saddle above gives:
+
+      | `d_p` | 0 | 0.1 | 1.0 | 5.0 |
+      |---|---|---|---|---|
+      | `∇f·δ` at β = 2 | +2.300 | +1.438 | +0.329 | +0.074 |
+      | `∇f·δ` at β = 50 | **+112.7** | +0.440 | +0.044 | — |
+      | **crossover β** | **0.987** | **0.987** | **0.987** | **0.987** |
+
+      So constraint damping **does not move the descent threshold at all** — it is 0.987 for every
+      `d_p` tested, including zero. What it changes is the *magnitude* past the threshold: with an
+      unshifted constraint row the failure **grows without bound in β** (+2.3 → +113), with a shifted
+      one it **decays toward zero** (+0.33 → +0.044). And on this toy no rung of the ladder reduces the
+      measure at β = 2 for **any** `d_p` — the profile is monotone in α throughout.
+      **Consequence: damping the constraint row is not a fix for non-descent, and should not be sold as
+      one.** What remains true and useful is that the unshifted row makes the failure unbounded rather
+      than bounded, and that the threshold itself (β ≈ 1 here, and between 1 and 2 on the real coupled
+      case) is set by the momentum shift against the Jacobian scale, not by the constraint row. Whether
+      bounding the damage buys anything on the real nonlinear system is unmeasured — the toy is a 2×2
+      linear system and cannot answer it.
     - **Escalation moves β the WRONG WAY for this failure (binding).** A rejected step escalates
       `β *= escalation_factor`, which is right for an overshoot or an ill-conditioned shifted system.
       Against a non-descent direction it is worse than useless: more shift makes `∇f·δ` *less* negative,
