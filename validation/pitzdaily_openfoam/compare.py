@@ -77,6 +77,11 @@ from aquaflux.turbulence import CoupledRANS, LogScalars, SSTModel, SSTTurbulence
 
 HERE = Path(__file__).resolve().parent
 RUNS = HERE / "runs" / "kwsst"
+# The comparison target is the TIME-ACCURATE run, not the steady one. The steady case does not
+# converge on this geometry: it leaves an odd-even checkerboard in the inlet, with omega spanning
+# 0.03 to 1.15e8 across adjacent cells. Ten of those cells alone carry the entire omega residual
+# measured on that field, so anything calibrated against it is calibrated against numerical noise.
+TRANSIENT = HERE / "of_transient" / "0.14"
 FIGS = HERE / "figures"
 
 # The pitzDaily operating point (0/ and constant/): U_in = 10 m/s, nu = 1e-5, k_in = 0.375,
@@ -108,15 +113,29 @@ def _of_vector(path):
 
 
 def read_openfoam_reference():
-    """The OpenFOAM converged fields + cell centres, keyed to their cell centroids."""
+    """The OpenFOAM comparison fields + cell centres, keyed to their cell centroids.
+
+    The **fields** come from the time-accurate run (:data:`TRANSIENT`), which reaches a statistically
+    steady state with a well-defined reattachment (``x_r/h`` 7.74); the steady case's fields are not a
+    valid target and are deliberately not read here (see the comment on :data:`TRANSIENT`). The **cell
+    centres** still come from the steady run's ``Ccx``/``Ccy``: both cases are built from the same
+    ``blockMeshDict``, so the mesh is byte-identical and the centres are geometry rather than a
+    solution -- the transient case ships its written fields but no ``Cc*``.
+
+    Returns
+    -------
+    dict
+        ``centroid`` ``(n_cells, 2)``, ``U`` ``(n_cells, 2)``, and ``p``, ``k``, ``omega``, ``nut``
+        each ``(n_cells,)``, in the mesh's own cell order.
+    """
     ccx, ccy = _of_scalar(RUNS / "Ccx"), _of_scalar(RUNS / "Ccy")
     return dict(
         centroid=np.column_stack([ccx, ccy]),
-        U=_of_vector(RUNS / "U")[:, :2],
-        p=_of_scalar(RUNS / "p"),
-        k=_of_scalar(RUNS / "k"),
-        omega=_of_scalar(RUNS / "omega"),
-        nut=_of_scalar(RUNS / "nut"),
+        U=_of_vector(TRANSIENT / "U")[:, :2],
+        p=_of_scalar(TRANSIENT / "p"),
+        k=_of_scalar(TRANSIENT / "k"),
+        omega=_of_scalar(TRANSIENT / "omega"),
+        nut=_of_scalar(TRANSIENT / "nut"),
     )
 
 

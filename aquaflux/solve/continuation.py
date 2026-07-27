@@ -54,6 +54,82 @@ from .relaxation import RelaxationSchedule, SwitchedEvolutionRelaxation
 _INEXACT_CONTINUATION_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-10, restart=40, stagnation_iters=40)
 
 
+def _shifted_solve(residual_fn, phi, rhs, shift, preconditioner, solver):
+    """Solve the diagonally-shifted Newton system ``(J(phi) + diag(shift)) delta = -rhs``, matrix-free.
+
+    The shifted-Newton correction shared by the pseudo-transient and dual-time marches: the true
+    Jacobian-vector product ``J(phi) v`` (from ``residual_fn``) plus the pseudo-time diagonal ``shift``
+    on the shifted degrees of freedom, solved against ``-rhs`` with the frozen shifted preconditioner.
+    ``rhs`` is the residual the step drives down -- the steady ``R(phi)`` for pseudo-transient
+    continuation, the transient ``R(phi) + shift*(phi - phi_ref)`` for the dual-time inner loop; the
+    Jacobian is ``J(phi) + shift`` either way (the transient term's derivative in ``phi`` is ``shift``).
+    Non-throwing, so a non-convergent shifted system returns a candidate for the caller to judge rather
+    than raising.
+
+    Parameters
+    ----------
+    residual_fn : callable
+        The single-argument steady residual ``phi -> R(phi)``; its Jacobian-vector product forms the
+        unshifted part of the operator.
+    phi : jnp.ndarray
+        The iterate the Jacobian is linearized at, shape ``(n,)``.
+    rhs : jnp.ndarray
+        The residual the shifted system is solved against (``-rhs`` is the right-hand side), shape
+        ``(n,)``.
+    shift : jnp.ndarray
+        The pseudo-time diagonal ``β d`` added to the Jacobian, shape ``(n,)`` (zeros off the shifted
+        degrees of freedom).
+    preconditioner : callable or None
+        The frozen left preconditioner for the shifted operator.
+    solver : lineax.AbstractLinearSolver
+        The Krylov solver for the shifted system.
+
+    Returns
+    -------
+    delta : jnp.ndarray
+        The shifted-Newton correction, shape ``(n,)``.
+    cycles : jnp.ndarray
+        The restart-cycle count of the linear solve (int32 scalar).
+    """
+
+    def shifted_jacobian(tangent: jnp.ndarray) -> jnp.ndarray:
+        return jax.jvp(residual_fn, (phi,), (tangent,))[1] + shift * tangent
+
+    return solve_linear(
+        shifted_jacobian, -rhs, solver=solver, preconditioner=preconditioner, throw=False
+    )
+
+
+class _Attempt(NamedTuple):
+    """One shifted solve, line-searched and measured — everything a step learns for one ``β``.
+
+    These five values are produced together by a single (expensive) shifted linear solve and are
+    consumed together by the accept/reject decision, so they travel as one record rather than as a
+    loose tuple. Carrying the record is what lets a probing loop hand its result to the escalation
+    loop instead of discarding it and paying for the same solve twice.
+
+    Attributes
+    ----------
+    candidate : jnp.ndarray
+        The trial iterate ``φ + α δ``, shape ``(n,)``.
+    residual_norm : jnp.ndarray
+        The measure at :attr:`candidate` — a scalar, in whatever measure the step is judged by.
+    cycles : jnp.ndarray
+        Krylov cycles the shifted solve took — a scalar, the staleness signal a refresh trigger reads.
+    alpha : jnp.ndarray
+        The line-search factor actually taken — a scalar.
+    directional : jnp.ndarray
+        ``d/ds measure(R(φ + s δ))`` at ``s = 0`` — a scalar. Negative means the correction descends
+        in the measure the solve is judged by.
+    """
+
+    candidate: jnp.ndarray
+    residual_norm: jnp.ndarray
+    cycles: jnp.ndarray
+    alpha: jnp.ndarray
+    directional: jnp.ndarray
+
+
 class ShiftTerm(NamedTuple):
     """The per-step data a :class:`ShiftPolicy` produces at one iterate.
 
@@ -234,7 +310,34 @@ class PseudoTransientStep(eqx.Module):
     acceptance: StepAcceptance = eqx.field(default_factory=DivergenceGuard)
     line_search: int = eqx.field(static=True, default=0)
     forward_solver: lx.AbstractLinearSolver | None = eqx.field(static=True, default=None)
-    residual_norm: ResidualNorm = eqx.field(static=True, default=jnp.linalg.norm)
+    # Not a static field: an observed march rebuilds the measure each outer iteration and swaps it in
+    # with `tree_at`, and that is only a compilation-cache hit if the measure rides as data. A plain
+    # callable (the default) has no array leaves, so it is filtered to the static side anyway and the
+    # default path is unchanged.
+    # Back the shift off until the correction descends in the measure the solve is judged by, then
+    # escalate from there as usual. Off by default (0), because each backoff costs one shifted solve.
+    #
+    # Why it exists: the shifted correction is not a descent direction by construction. For the exact
+    # Newton direction it would be -- with J delta = -R the derivative of the measure along delta is
+    # -norm(R) for any positive weighting -- but the shifted direction satisfies J delta = -R -
+    # beta D delta, whose second term has no fixed sign and grows with beta. Measured on a stiff
+    # coupled state, the derivative was negative at beta <= 1 and changed sign between beta = 1 and
+    # beta = 2, with the march running at about 1.9: every step length then increased the measure, the
+    # line search could only pick the least-harmful rung, and the march sat still while reporting
+    # steps. Backing the shift off restores descent; escalating -- the response to an overshoot --
+    # makes it strictly worse.
+    # Rungs the line search may try ABOVE the full step (alpha = 2**grow ... 2, 1, 1/2 ...). Zero is
+    # a one-sided ladder, the historical behaviour. The admissible step is often longer than the full
+    # one: measured at a cold start, alpha = 2 sat inside the acceptance tolerance and travelled twice
+    # as far, but a ladder starting at one could not express it -- so a march reporting alpha = 1 every
+    # step may simply never have been asked whether more was allowed.
+    grow: int = eqx.field(static=True, default=0)
+    descent_backoff: int = eqx.field(static=True, default=0)
+    # Reject a correction that does not descend in the measure, rather than judging it on the
+    # candidate's norm alone. Independent of the backoff: with the backoff off, this makes a
+    # non-descent direction fail so the caller sees it instead of a step that quietly went nowhere.
+    descent_test: bool = eqx.field(static=True, default=False)
+    residual_norm: ResidualNorm = eqx.field(default=jnp.linalg.norm)
     adjoint_preconditioner_factory: (
         Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
     ) = eqx.field(static=True, default=None)
@@ -299,6 +402,8 @@ class PseudoTransientStep(eqx.Module):
         max_escalations, escalation_factor = self.max_escalations, self.escalation_factor
         acceptance = self.acceptance
         line_search = self.line_search
+        descent_backoff, descent_test = self.descent_backoff, self.descent_test
+        grow = self.grow
         norm = self.residual_norm
 
         def step(
@@ -320,28 +425,16 @@ class PseudoTransientStep(eqx.Module):
             # far away and restores strict descent in the basin (monotone by default).
             growth_factor = growth_schedule.growth(residual_norm, residual_norm_0)
 
-            def attempt(
-                relaxation: jnp.ndarray,
-            ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+            def attempt(relaxation: jnp.ndarray) -> _Attempt:
                 # The shift only reshapes the forward path (like the preconditioner it damps), so it
                 # is detached: it never perturbs the converged state or its adjoint.
                 shift = jax.lax.stop_gradient(relaxation * term.diagonal)  # β d over the full state
-
-                def shifted_jacobian(tangent: jnp.ndarray) -> jnp.ndarray:
-                    # True Jacobian-vector product plus the pseudo-transient diagonal on shifted DOFs.
-                    jvp = jax.jvp(residual_fn, (phi,), (tangent,))[1]
-                    return jvp + shift * tangent
-
                 # Preconditioner inverts the *same* shifted operator it is damped by. The solve does
                 # not throw: a non-convergent shifted system yields a candidate the acceptance test
                 # rejects (triggering more damping), rather than raising.
                 preconditioner = term.make_preconditioner(relaxation)
-                delta, cycles = solve_linear(
-                    shifted_jacobian,
-                    -residual,
-                    solver=solver,
-                    preconditioner=preconditioner,
-                    throw=False,
+                delta, cycles = _shifted_solve(
+                    residual_fn, phi, residual, shift, preconditioner, solver
                 )
                 # Backtrack the step length before judging it: when the shifted direction is accurate
                 # but the full step overshoots, a scaled-back step descends from this one solve,
@@ -354,8 +447,41 @@ class PseudoTransientStep(eqx.Module):
                     line_search,
                     norm=norm,
                     growth=growth_factor,
+                    grow=grow,
                 )
-                return candidate, norm(residual_fn(candidate)), cycles, alpha
+                # The directional derivative of the measure along the correction, d/ds norm(R(phi +
+                # s delta)) at s = 0. Negative means the direction descends in the measure the solve
+                # is judged by; non-negative means no step length along it can help, and the line
+                # search will be reduced to picking the least-harmful rung.
+                #
+                # This is not guaranteed by construction here. For the exact Newton direction
+                # (J delta = -R) it would be -- the derivative is then -norm(R) for any positive
+                # weighting -- but the shifted direction satisfies J delta = -R - beta D delta, and
+                # that second term carries no fixed sign. Its damage grows with beta: measured on a
+                # stiff coupled state, the derivative was negative for beta <= 1 and changed sign
+                # between beta = 1 and beta = 2, exactly where that march had been running.
+                directional = jax.jvp(lambda x: norm(residual_fn(x)), (phi,), (delta,))[1]
+                return _Attempt(
+                    candidate=candidate,
+                    residual_norm=norm(residual_fn(candidate)),
+                    cycles=cycles,
+                    alpha=alpha,
+                    directional=directional,
+                )
+
+            def admits(trial: _Attempt, attempts: jnp.ndarray) -> jnp.ndarray:
+                """Whether the injected acceptance policy (and the descent test) admit ``trial``."""
+                accept = acceptance.accept(
+                    trial.residual_norm, residual_norm, residual_norm_0, attempts
+                )
+                # A direction that does not descend in the measure is rejected outright, however the
+                # candidate scores. Escalating on it would be worse than useless: more shift makes
+                # the derivative *less* negative, so the loop would drive itself further from a
+                # usable direction while paying for a solve each time. Rejecting instead lets
+                # `descent_backoff` below take over, which moves β the other way.
+                if descent_test:  # a static choice, so the branch is resolved at trace time
+                    accept = accept & (trial.directional < 0.0)
+                return accept
 
             # Escalate the damping on a rejected attempt, taking the first the acceptance policy
             # admits. The loop *mechanics* — grow β, cap at max_escalations, carry the best candidate
@@ -368,36 +494,286 @@ class PseudoTransientStep(eqx.Module):
                 _, _, attempts, accepted, _, _ = state
                 return (~accepted) & (attempts <= max_escalations)
 
-            def body(state: tuple) -> tuple:
+            def record(state: tuple, trial: _Attempt, accept: jnp.ndarray) -> tuple:
+                """Fold one judged attempt into an escalation carry (the shared accept bookkeeping)."""
                 relaxation, best, attempts, _, best_cycles, best_alpha = state
-                candidate, candidate_norm, cycles, alpha = attempt(relaxation)
-                accept = acceptance.accept(candidate_norm, residual_norm, residual_norm_0, attempts)
-                best = jnp.where(accept, candidate, best)
-                # Report the cycles and line-search factor of the attempt actually taken, not the
-                # rejected escalations'. (A fully-rejected step keeps the initial 0 / 1.)
-                best_cycles = jnp.where(accept, cycles, best_cycles)
-                best_alpha = jnp.where(accept, alpha, best_alpha)
                 return (
                     relaxation * escalation_factor,
-                    best,
+                    jnp.where(accept, trial.candidate, best),
                     attempts + 1,
                     accept,
-                    best_cycles,
-                    best_alpha,
+                    # Report the cycles and line-search factor of the attempt actually taken, not the
+                    # rejected escalations'. (A fully-rejected step keeps the initial 0 / 1.)
+                    jnp.where(accept, trial.cycles, best_cycles),
+                    jnp.where(accept, trial.alpha, best_alpha),
                 )
 
-            _, phi_next, _, _, step_cycles, step_alpha = jax.lax.while_loop(
-                cond,
-                body,
-                (
-                    base_relaxation,
+            def body(state: tuple) -> tuple:
+                relaxation, _, attempts, *_ = state
+                trial = attempt(relaxation)
+                return record(state, trial, admits(trial, attempts))
+
+            def fresh(start: jnp.ndarray) -> tuple:
+                """The escalation carry for a step that has not yet solved anything."""
+                return (
+                    start,
                     phi,
                     0,
                     jnp.asarray(False),
                     jnp.asarray(0, dtype=jnp.int32),
                     jnp.asarray(1.0),
+                )
+
+            # Back the shift OFF until the direction descends, then escalate from there as usual.
+            #
+            # These two loops move beta in opposite directions on purpose, because they answer
+            # different failures. Escalation answers "this step overshot or the shifted system was
+            # ill-conditioned" -- more damping is the cure. The backoff answers "no step length along
+            # this direction can help", which more damping makes strictly worse: the shift term is what
+            # spoils descent, so the derivative only becomes less negative as beta grows. Running
+            # escalation against a non-descent direction therefore spends solves making the direction
+            # worse, which is what a march does when it sits at the shortest rung and does not move.
+            #
+            # Each backoff costs one shifted solve, so it is off by default and bounded when on. The
+            # probe that finally descends is a *complete* attempt at the relaxation the escalation
+            # loop is about to start from, so it is carried out of the loop and folded straight into
+            # the escalation carry. Re-solving it there would double the cost of every step on the
+            # common path — the one where the first probe already descends and nothing is backed off.
+            def backoff_cond(state: tuple) -> jnp.ndarray:
+                _, tries, descends, _ = state
+                return (~descends) & (tries < descent_backoff)
+
+            def backoff_body(state: tuple) -> tuple:
+                relaxation, tries, _, _ = state
+                trial = attempt(relaxation)
+                descends = trial.directional < 0.0
+                return (
+                    jnp.where(descends, relaxation, relaxation / escalation_factor),
+                    tries + 1,
+                    descends,
+                    trial,
+                )
+
+            start_relaxation = base_relaxation
+            if descent_backoff > 0:
+                start_relaxation, _, probed, trial = jax.lax.while_loop(
+                    backoff_cond,
+                    backoff_body,
+                    (
+                        base_relaxation,
+                        jnp.asarray(0, dtype=jnp.int32),
+                        jnp.asarray(False),
+                        _Attempt(
+                            candidate=phi,
+                            residual_norm=residual_norm,
+                            cycles=jnp.asarray(0, dtype=jnp.int32),
+                            alpha=jnp.ones_like(residual_norm),
+                            directional=jnp.zeros_like(residual_norm),
+                        ),
+                    ),
+                )
+                # `probed` is the loop's own descent flag, so the seeded carry is used only when the
+                # carried attempt really was taken at `start_relaxation`. When the backoff instead
+                # exhausted its tries it exits at a *lower*, unprobed relaxation, and the escalation
+                # loop starts there from scratch — the same relaxation ladder as before this fast path.
+                cold = fresh(start_relaxation)
+                seeded = record(cold, trial, probed & admits(trial, 0))
+                start = jax.tree.map(lambda s, c: jnp.where(probed, s, c), seeded, cold)
+            else:
+                start = fresh(start_relaxation)
+
+            _, phi_next, _, _, step_cycles, step_alpha = jax.lax.while_loop(cond, body, start)
+            return phi_next, step_cycles, step_alpha
+
+        return step
+
+
+class DualTimeStep(eqx.Module):
+    """Dual-time (backward-Euler) forward-step strategy: an inner Newton loop per outer timestep.
+
+    :class:`PseudoTransientStep` adds the shift ``β d`` to the Jacobian only and measures the bare
+    steady residual ``R(φ)``. That residual is a poor convergence signal along a pseudo-time march:
+    after a shifted step ``(J + β D) δ = −R`` the steady residual is ``R(φ + δ) = −β D δ``, i.e. ``β``
+    times how far the step travelled, not a distance to the root — so a row-scaled measure of it
+    stalls at a ``β``-proportional floor while the step is productive.
+
+    This strategy instead takes a true backward-Euler timestep. Each call **holds a reference**
+    ``φⁿ`` (the iterate it is given) and runs an **inner Newton loop** on the transient residual
+
+        ``G(φ) = R(φ) + β d · (φ − φⁿ)``,
+
+    solving ``(J(φ) + β d) δ = −G(φ)`` and line-searching on ``‖G‖`` until ``‖G‖ ≤ inner_tol · ‖R(φⁿ)‖``
+    or ``inner_steps`` iterations are spent. Because the shift ``β d · (φ − φⁿ)`` now sits in the
+    residual as well as the Jacobian, the leftover ``−β D δ`` cancels: the returned iterate satisfies
+    the backward-Euler equation, and the steady residual the outer loop measures at the *next* anchor is
+    the discrete unsteady term ``β d · (φⁿ⁺¹ − φⁿ)`` — the physical time derivative, which falls to zero
+    as the transient settles. A row-scaled / block-scaled measure of it is then well-behaved.
+
+    With ``inner_steps = 1`` a step is a **single shifted Newton step** — the transient term is zero at
+    the anchor, so ``G(φⁿ) = R(φⁿ)`` and the one inner **solve** ``(J + β d) δ = −R(φⁿ)`` is exactly the
+    one :class:`PseudoTransientStep` forms (the resulting iterate coincides too when neither line-searches,
+    i.e. ``line_search = 0``). The two strategies differ in how they handle an overshoot:
+    ``PseudoTransientStep`` escalates ``β`` (a re-solve at more damping) and guards divergence with an
+    injected acceptance policy, whereas this strategy takes **more inner iterations at fixed ``β``** and
+    line-searches each on ``‖G‖`` — the inner loop *is* the globalization, so there is no escalation
+    ladder or acceptance policy here. ``inner_steps > 1`` is what lets a larger pseudo-timestep (a
+    smaller ``β``) be taken stably from a cold start: the inner iterations converge the implicit step a
+    single shifted step would overshoot, so ``β`` can be driven below the level at which the single-step
+    march diverges. The larger the step the more the outer march accelerates, so a
+    :class:`~aquaflux.solve.StepControl` on the eager march is the natural driver of ``β`` here.
+
+    The shift still **vanishes at the fixed point** — as ``‖R‖ → 0`` the schedule ramps ``β → 0``, so
+    ``G → R`` and the inner loop is a single undamped Newton step. The converged state therefore solves
+    the unshifted ``R = 0`` and the implicit-function-theorem adjoint is identical to the line-searched
+    or pseudo-transient march: this strategy only reshapes the forward path.
+
+    Attributes
+    ----------
+    shift_policy : ShiftPolicy
+        Supplies the base shift diagonal ``d(φ)`` and the ``β -> M`` preconditioner factory at the
+        reference iterate — the same injected policy :class:`PseudoTransientStep` uses.
+    relaxation_schedule : RelaxationSchedule
+        Sets ``β`` from ``‖R(φⁿ)‖ / ‖R₀‖`` (switched-evolution-relaxation by default). Memoryless, so it
+        stays on the differentiable path; a stateful ``β`` ramp is a
+        :class:`~aquaflux.solve.StepControl` on the eager march (it swaps in a
+        :class:`~aquaflux.solve.ConstantRelaxation`), not a schedule.
+    inner_steps : int
+        Maximum inner Newton iterations per outer timestep (static). ``1`` recovers
+        :class:`PseudoTransientStep`; a few (2–5) converge the backward-Euler step at a larger
+        pseudo-timestep.
+    inner_tol : float
+        The inner loop stops once ``‖G‖`` has fallen to this fraction of ``‖R(φⁿ)‖`` (static). A loose
+        value (e.g. ``0.05``) is enough — the outer march re-solves each timestep anyway.
+    line_search : int
+        Maximum backtracking step-halvings applied to each inner correction, judged on ``‖G‖`` (static).
+        ``G = 0`` is a well-posed fixed-``φⁿ`` solve, so the inner line search is strict-descent
+        (monotone) on ``‖G‖`` — unlike the non-monotone steady residual the outer march tolerates.
+        Default ``10``.
+    forward_solver : lineax.AbstractLinearSolver or None
+        The shifted-solve Krylov solver, overriding the shared :data:`_INEXACT_CONTINUATION_SOLVER`
+        when set (static).
+    residual_norm : ResidualNorm
+        The measure ``R -> scalar`` used for the inner target, the inner line search, and (via
+        :meth:`norm`) the outer stopping test — one consistent measure. Defaults to the Euclidean norm;
+        a heterogeneous block system can pass a row-/block-scaled measure, which this strategy makes
+        well-behaved (see the class summary).
+    adjoint_preconditioner_factory : callable or None
+        The ``state -> M`` factory for the converged transpose (adjoint) solve, or ``None`` (static). At
+        ``φ*`` the operator is the unshifted steady Jacobian (``β → 0``), so the ordinary preconditioner
+        is the consistent choice.
+    """
+
+    shift_policy: ShiftPolicy
+    relaxation_schedule: RelaxationSchedule = eqx.field(default_factory=SwitchedEvolutionRelaxation)
+    inner_steps: int = eqx.field(static=True, default=5)
+    inner_tol: float = eqx.field(static=True, default=0.05)
+    line_search: int = eqx.field(static=True, default=10)
+    forward_solver: lx.AbstractLinearSolver | None = eqx.field(static=True, default=None)
+    # Data, not static (matching PseudoTransientStep): an observed march re-derives the measure each
+    # outer iteration and swaps it in with `tree_at`, which needs it to ride as a leaf. The default
+    # plain callable has no array leaves, so it filters to the static side and the default is unchanged.
+    residual_norm: ResidualNorm = eqx.field(default=jnp.linalg.norm)
+    adjoint_preconditioner_factory: (
+        Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
+    ) = eqx.field(static=True, default=None)
+
+    def norm(self) -> ResidualNorm:
+        """The residual measure the inner loop and the outer stopping test share (:attr:`residual_norm`)."""
+        return self.residual_norm
+
+    def default_solver(self) -> lx.AbstractLinearSolver:
+        """The shifted-solve Krylov solver: the injected :attr:`forward_solver`, else the shared default."""
+        return (
+            self.forward_solver if self.forward_solver is not None else _INEXACT_CONTINUATION_SOLVER
+        )
+
+    def adjoint_preconditioner(
+        self,
+    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None:
+        """The (unshifted) ``state -> M`` factory for the adjoint solve at the converged state."""
+        return self.adjoint_preconditioner_factory
+
+    def stepper(self) -> _ForwardStep:
+        """One backward-Euler outer timestep: the inner-converged iterate and its total solve cost.
+
+        ``(residual_fn, φ, ‖R₀‖, solver) -> (φ_next, cycles, alpha)``. The reference ``φⁿ`` is ``φ``;
+        ``cycles`` is the summed restart-cycle count over the inner Newton iterations; ``alpha`` is the
+        **smallest** inner line-search factor (``1`` when every inner step took the full length, smaller
+        when the implicit step had to be clipped, and ``0`` if any inner step failed to reduce ``‖G‖`` —
+        the line search's non-descent fallback, which a step control must read as "struggling", not as a
+        clean full step). It is the step-quality signal a :class:`~aquaflux.solve.StepControl` drives
+        ``β`` by: raise the pseudo-timestep while ``α = 1``, back off when it clips or fails to descend.
+        """
+        policy = self.shift_policy
+        schedule = self.relaxation_schedule
+        inner_steps = self.inner_steps
+        inner_tol = self.inner_tol
+        line_search = self.line_search
+        norm = self.residual_norm
+
+        def step(
+            residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
+            phi: jnp.ndarray,
+            residual_norm_0: jnp.ndarray,
+            solver: lx.AbstractLinearSolver,
+        ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+            reference = phi  # φⁿ, held across the inner loop
+            # ‖R(φⁿ)‖ = ‖G(φⁿ)‖: the transient term β d (φ − φⁿ) is zero at the anchor, so the honest
+            # steady residual at the anchor and the inner loop's starting G-norm are the same number.
+            reference_norm = norm(residual_fn(reference))
+            relaxation = schedule.relaxation(reference_norm, residual_norm_0)
+            term = policy.shift_term(reference)
+            # The shift only reshapes the forward path (like the preconditioner it damps), so detach it:
+            # it never perturbs the converged state or its adjoint.
+            shift = jax.lax.stop_gradient(relaxation * term.diagonal)  # β d over the full state
+            preconditioner = term.make_preconditioner(relaxation)
+            target = inner_tol * reference_norm
+
+            def transient_residual(p: jnp.ndarray) -> jnp.ndarray:
+                # G(p) = R(p) + β d (p − φⁿ): the backward-Euler residual whose root is the implicit
+                # timestep. Its Jacobian is J_R(p) + β d, formed matrix-free below.
+                return residual_fn(p) + shift * (p - reference)
+
+            def cond(carry: tuple) -> jnp.ndarray:
+                _, inner, gnorm, _, _ = carry
+                return (inner < inner_steps) & (gnorm > target)
+
+            def body(carry: tuple) -> tuple:
+                p, inner, gnorm, cycles, min_alpha = carry
+                delta, step_cycles = _shifted_solve(
+                    residual_fn, p, transient_residual(p), shift, preconditioner, solver
+                )
+                # Strict-descent (monotone) line search on ‖G‖: G = 0 is a well-posed fixed-φⁿ solve, so
+                # a clipped inner step is a signal the pseudo-timestep is too large, read out via alpha.
+                candidate, alpha = backtracking_line_search(
+                    transient_residual, p, delta, gnorm, line_search, norm=norm
+                )
+                new_gnorm = norm(transient_residual(candidate))
+                # An inner step that does NOT reduce ‖G‖ took the line search's non-descent fallback,
+                # which still reports alpha = 1 (the longest finite rung ≤ the full step). Fold that into
+                # the reported min-alpha as 0, so a step control reads it as "struggling" (shrink the
+                # pseudo-timestep) rather than "comfortable" (grow it). The monotone search means no
+                # descent ⇔ the fallback fired, so `new_gnorm < gnorm` detects it exactly.
+                descended = new_gnorm < gnorm
+                return (
+                    candidate,
+                    inner + 1,
+                    new_gnorm,
+                    cycles + step_cycles,
+                    jnp.minimum(min_alpha, jnp.where(descended, alpha, 0.0)),
+                )
+
+            phi_next, _, _, cycles, alpha = jax.lax.while_loop(
+                cond,
+                body,
+                (
+                    reference,
+                    jnp.asarray(0, dtype=jnp.int32),
+                    reference_norm,
+                    jnp.asarray(0, dtype=jnp.int32),
+                    jnp.asarray(1.0),
                 ),
             )
-            return phi_next, step_cycles, step_alpha
+            return phi_next, cycles, alpha
 
         return step

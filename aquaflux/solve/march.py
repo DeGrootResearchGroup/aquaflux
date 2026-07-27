@@ -43,6 +43,7 @@ import jax.numpy as jnp
 import lineax as lx
 
 from .implicit import ForwardStep, _within_tolerance
+from .norm import ResidualNorm
 
 
 class StepReport(NamedTuple):
@@ -371,6 +372,7 @@ def forward_march(
     observer: Callable[[StepReport], None] | None = None,
     checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     drift_measure: Callable[[jnp.ndarray], float] | None = None,
+    norm_builder: Callable[[jnp.ndarray], ResidualNorm] | None = None,
     solver: lx.AbstractLinearSolver | None = None,
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
@@ -453,10 +455,14 @@ def forward_march(
     """
     if solver is None:
         solver = forward_step.default_solver()
-    norm = forward_step.norm()
+    # When the measure is rebuilt each iteration, the segment reference must be taken in that same
+    # measure -- otherwise the damping schedule divides two differently-scaled quantities.
+    norm = norm_builder(phi0) if norm_builder is not None else forward_step.norm()
 
     # The segment-local reference: what the step's damping schedule ramps against. Recomputed here,
-    # never inherited, so a segment resumed after a refresh restarts its ramp.
+    # never inherited, so a segment resumed after a refresh restarts its ramp. It is fixed for the
+    # whole segment: recomputing it per step would hold the ratio at one, pinning the shift at its
+    # starting strength and freezing the march.
     residual_norm_0 = jnp.asarray(norm(residual_fn(phi0)))
     reference = float(residual_norm_0) if reference_norm is None else float(reference_norm)
 
@@ -474,9 +480,17 @@ def forward_march(
         # A step control reshapes the base step from the previous report (None runs it unchanged, so
         # the loop is byte-identical). It threads its own state; the march stays ignorant of β.
         active_step = forward_step
+        if norm_builder is not None:
+            # Re-derive the residual measure at the state this outer iteration starts from, and hold
+            # it for the whole iteration -- every trial step of the line search, the acceptance test
+            # and the reported norm all use this one. Rebuilding it per trial step instead would let a
+            # candidate win by shrinking its own denominator rather than its residual, so the search
+            # would stop comparing like with like. The swap is a compilation-cache hit as long as the
+            # measure carries its scales as data over a fixed block structure.
+            active_step = eqx.tree_at(lambda s: s.residual_norm, active_step, norm_builder(state))
         if step_control is not None:
             active_step, control_state = step_control.next_step(
-                forward_step, reports[-1] if reports else None, control_state
+                active_step, reports[-1] if reports else None, control_state
             )
         state, cycles, alpha, residual_norm = _march_step(
             active_step, residual_fn, state, residual_norm_0, solver

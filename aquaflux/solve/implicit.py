@@ -102,7 +102,7 @@ _INEXACT_FORWARD_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-3)
 
 
 def backtracking_line_search(
-    residual_fn, phi, delta, reference_norm, steps, norm=jnp.linalg.norm, growth=1.0
+    residual_fn, phi, delta, reference_norm, steps, norm=jnp.linalg.norm, growth=1.0, grow=0
 ):
     """Backtrack the step length: the largest ``alpha`` in ``{1, 1/2, ..., 1/2**steps}`` with
     ``norm(R(phi + alpha delta)) < reference_norm``, falling back to the smallest rung if none reduces
@@ -171,24 +171,66 @@ def backtracking_line_search(
     if steps == 0:
         return phi + delta, jnp.asarray(1.0)
 
-    # Walk the ladder alpha = 1, 1/2, ..., 1/2**steps (rung index 0..steps) and stop at the first that
-    # reduces the residual -- the largest, since we descend. ``chosen`` starts at the smallest rung, so
-    # if none reduces it is the fallback; when a rung reduces, ``found`` ends the loop with that alpha.
-    # The carry (index, chosen, found) is fixed-shape, so the body compiles once.
+    # Walk the ladder from the LONGEST step down and keep the first admissible one -- the largest
+    # step the acceptance tolerance allows, not the one that minimizes the residual.
+    #
+    # Taking the largest rather than the best is deliberate, and was measured. A minimizing search
+    # reaches a lower residual per step but travels much less far, and on a marching solve distance is
+    # the point: the same case run both ways developed its recirculation 9x more slowly under the
+    # minimizing search, while reporting *better* residuals at every early step. Residual depth per
+    # step and progress per step are different objectives here, and progress is the one that matters
+    # while the solution is still forming.
+    #
+    # The ladder extends ABOVE one (``grow`` rungs of doubling) because the admissible step is often
+    # longer than the full step. Measured on a developed state: the full step moved the reattachment
+    # not at all, while alpha ~ 5.7 moved it four times further and still sat inside the tolerance the
+    # acceptance rule already allowed -- it was simply unreachable from a ladder that starts at one.
+    #
+    # When NOTHING is admissible the fallback is the longest finite rung **no longer than the full
+    # step**, not the shortest rung. The shortest is a near-null step that changes nothing and which
+    # the divergence guard then accepts as finite, so the march reports a step and stands still -- a
+    # guaranteed stall rather than a slow one, and the observed failure mode on a stiff coupled march.
+    #
+    # The cap at one is not incidental. Without it, extending the ladder upward also extends the
+    # FALLBACK upward, so a step with no admissible length quietly becomes a multiple of the full step:
+    # measured with two growth rungs, a march took alpha = 4 as a fallback and multiplied its residual
+    # measure by 4.6 in a single step. A growth rung must only ever be reachable by PASSING the
+    # acceptance test, never by falling back onto it -- the fallback exists to avoid a null step, not
+    # to license an excursion.
+    #
+    # The carry (index, chosen, found, longest_finite, seen_finite) is fixed-shape, so the body
+    # compiles once. Walking longest-first means the first finite rung encountered IS the longest
+    # finite one, so the fallback needs no second pass.
+    admissible = growth * reference_norm
+    lowest = -grow  # rung index; alpha = 0.5**index, so negative indices are steps longer than one
+
     def cond(carry):
-        index, _, found = carry
+        index, _, found, _, _ = carry
         return (~found) & (index <= steps)
 
-    admissible = growth * reference_norm
-
     def body(carry):
-        index, chosen, _ = carry
+        index, chosen, _, longest_finite, seen_finite = carry
         alpha = 0.5**index
-        reduces = norm(residual_fn(phi + alpha * delta)) < admissible
-        return index + 1, jnp.where(reduces, alpha, chosen), reduces
+        value = norm(residual_fn(phi + alpha * delta))
+        finite = jnp.isfinite(value)
+        accepted = finite & (value < admissible)
+        # The fallback candidate ignores rungs longer than the full step (index < 0).
+        eligible = finite & (index >= 0)
+        return (
+            index + 1,
+            jnp.where(accepted, alpha, chosen),
+            accepted,
+            jnp.where(eligible & ~seen_finite, alpha, longest_finite),
+            seen_finite | eligible,
+        )
 
-    smallest = jnp.asarray(0.5**steps)
-    _, chosen, _ = jax.lax.while_loop(cond, body, (jnp.asarray(0), smallest, jnp.asarray(False)))
+    shortest = jnp.asarray(0.5**steps)
+    _, chosen, found, longest_finite, _ = jax.lax.while_loop(
+        cond,
+        body,
+        (jnp.asarray(lowest), shortest, jnp.asarray(False), shortest, jnp.asarray(False)),
+    )
+    chosen = jnp.where(found, chosen, longest_finite)
     return phi + chosen * delta, chosen
 
 
@@ -250,7 +292,11 @@ class DampedNewtonStep(eqx.Module):
         eqx.field(static=True, default=None)
     )
     line_search: int = eqx.field(static=True, default=10)
-    residual_norm: ResidualNorm = eqx.field(static=True, default=jnp.linalg.norm)
+    # Data rather than static, matching `PseudoTransientStep`: an observed march re-derives the
+    # measure each outer iteration and swaps it in with `tree_at`, which needs it to be a leaf. A
+    # plain callable has no arrays, so it is filtered to the static side anyway and the default path
+    # is unchanged.
+    residual_norm: ResidualNorm = eqx.field(default=jnp.linalg.norm)
 
     def stepper(self) -> _ForwardStep:
         """The line-searched Newton step ``(residual_fn, phi, ‖R₀‖, solver) -> (phi_next, cycles, alpha)``."""

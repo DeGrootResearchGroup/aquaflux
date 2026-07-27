@@ -45,7 +45,8 @@ applies anywhere you want gradients through a flow solve.
   independent of the iteration count.
 - **Solvers** — Krylov linear solves via [lineax](https://github.com/patrick-kidger/lineax),
   a block preconditioner for the flow saddle-point, algebraic multigrid, and
-  pseudo-transient continuation for high-Reynolds cases.
+  pseudo-transient continuation for high-Reynolds cases (with an optional
+  dual-time / backward-Euler march for a larger, still-stable pseudo-timestep).
 - **Swappable numerics** — interpolation, gradient reconstruction, and slope
   limiters are first-class strategy objects with a known order of accuracy,
   injected into operators and tested in isolation, so the numerics can be changed
