@@ -600,6 +600,55 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       because the state is direction-limited (α = 0.001 at every β and shift basis) *and* maximally
       stale for a carried preconditioner. Cost questions belong on a cold-IC march, where steps are
       accepted on the first attempt.
+  - **⚠️⚠️ THE EQUILIBRATED MEASURE BARELY FALLS ON A MARCH THE EUCLIDEAN NORM LOVES — the most
+    consequential measurement of 2026-07-27. Read this before designing around either measure.**
+    Evaluating the row-equilibrated measure along the *default* march's own checkpoints (the march whose
+    Euclidean residual falls 78×, from 2.86e2 to 3.68):
+
+    | step | Euclidean | equilibrated | u0 | u1 | cont | k | ω | x_r/h |
+    |---|---|---|---|---|---|---|---|---|
+    | cold | 2.86e+2 | 2.229e-2 | 4.76e-3 | 1.80e-3 | 2.30e-3 | 1.64e-2 | 1.41e-2 | 0.00 |
+    | 25 | 3.96e+1 | 2.175e-2 | 5.99e-3 | 6.21e-3 | 1.14e-3 | 1.14e-2 | 1.64e-2 | 0.05 |
+    | 90 | 3.68e+0 | 1.158e-2 | **5.23e-3** | **4.61e-3** | 6.84e-7 | 7.55e-3 | 5.34e-3 | 1.22 |
+
+    **The Euclidean norm falls 78×; the equilibrated measure falls 1.9×.** Composition: continuity
+    improves ~3000× (a negligible absolute contributor), k and ω ~2.5× each, and the **velocity blocks
+    get WORSE** — one component 1.80e-3 → 4.61e-3, **2.6× worse** — over a march the Euclidean norm
+    reports as converging.
+    - **Consequence: a march steered by the equilibrated measure stalls because there is little
+      fractional progress to be had, not because the measure is defective.** It correctly reports that
+      the solve trades between blocks. The Euclidean 78× is largely ω's *absolute* magnitude shrinking.
+    - **All three disagree, and that is the open problem.** Euclidean says "converging"; equilibrated
+      says "barely moving, momentum degrading"; the physics says "the bubble is growing toward 7.74".
+      No residual measure yet tried tracks the physical target on this case.
+    - **Confound to rule out before over-reading it:** the equilibrated weights come from `a_P` and the
+      field magnitudes, both of which grow strongly as the flow develops, so the *denominator* moves
+      during the march. Some of the apparent stagnation may be the measure's own weights moving.
+      Unmeasured.
+  - **⚠️ THE MEASURE'S WEIGHTS ARE STATE-DEPENDENT, so there is no single objective across iterations.**
+    `f(x) = Σ wᵢ(x)|Rᵢ(x)|` with `w` from the operator diagonals and field magnitudes. The weights are
+    frozen within an iteration (so the line search compares like with like) and rebuilt each iteration
+    — so a direction that descends in *this* iteration's frozen `f` need not reduce the *next*
+    iteration's `f`. Do not assume the frozen-per-iteration measure behaves like a fixed merit function.
+  - **⚠️ `descent_backoff` IS COUNTERPRODUCTIVE ON THIS CASE — measured, do not enable it blindly.**
+    Backing β off until the correction descends does produce a descending direction, but the finite-step
+    profile along it is *worse*: at β = 0.5 the full step raises the measure 2.59× and is not admissible,
+    forcing α ≤ 0.5. On a march the arm's α fell 1.0 → 0.5 → 0.5 → 0.031 while the measure *rose* every
+    step. **Descent is necessary but not sufficient** — strong positive curvature along δ swamps the
+    negative slope. Note ‖δ‖ *decreases* as β is backed off (1049 → 856 → 760 for β = 2 → 1 → 0.5), so
+    "α collapsing" is not a large-correction artefact.
+  - **⚠️ EXTENDING THE LADDER ABOVE α = 1 (`grow`): inert on the Euclidean measure, live on the
+    equilibrated one — and it exposed a fallback bug (2026-07-27).**
+    - On the **Euclidean** default march, `grow = 2` produced a trajectory **bit-identical** to the
+      control across 10 steps and both checkpoints: α = 2 is never admissible there, so the extended
+      ladder is inert on the shipped configuration.
+    - On the **equilibrated** measure it fires: α = 2 was selected at step 1 and was productive. A
+      cold-start scan confirms α = 2 sits inside the tolerance (ratio 1.291 against a 2× bound) and
+      travels twice as far as the full step.
+    - **The bug it exposed:** extending the ladder upward also extended the *fallback* upward, so a step
+      with no admissible length fell back onto **α = 4** and multiplied the measure by **4.6** in one
+      step. The fallback is now capped at the full step — **a growth rung must only ever be reachable by
+      passing the acceptance test, never by falling back onto it.** Pinned by a unit test.
   - **⚠️ THE SHIFTED CORRECTION IS NOT A DESCENT DIRECTION, AND THE CAUSE IS THE UNSHIFTED CONSTRAINT
     ROW (measured 2026-07-27). This is the mechanism behind the α-at-the-smallest-rung stalls recorded
     throughout this file.** For the *exact* Newton direction (`J δ = −R`) the derivative of any
@@ -654,8 +703,17 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       so the loop spends a solve per attempt making the direction worse. `PseudoTransientStep` therefore
       carries **`descent_backoff`** (lower β until the direction descends, then escalate from there) and
       **`descent_test`** (reject a non-descent direction outright rather than judging the candidate's
-      norm). Both default off — each backoff costs one shifted solve. `∇f·δ` itself is cheap: one `jvp`
-      on a direction already computed.
+      norm). Both default off. `∇f·δ` itself is cheap: one `jvp` on a direction already computed.
+    - **A backoff probe is a COMPLETE attempt and is carried into the escalation loop — do not go back
+      to discarding it.** The probe already computes the correction, the line search, the measure and
+      `∇f·δ` at exactly the β the escalation loop then starts from, so re-solving there made every step
+      pay **two** shifted solves on the path where nothing is backed off — the common one. The five
+      values travel as one `_Attempt` record, and the loop folds its final probe into the escalation
+      carry (`record(fresh(β), trial, probed & admits(trial, 0))`, selected by the loop's own descent
+      flag). The seeding is used **only** when the carried attempt really was taken at the starting β:
+      if the backoff instead exhausts its tries it exits at a *lower, unprobed* β and the escalation
+      loop starts cold there, which is the pre-existing ladder. A backoff that has to lower β still
+      costs one solve per rung; what is now free is the case where the first probe already descends.
   - **⚠️ THE LINE SEARCH TAKES THE LONGEST ADMISSIBLE STEP, NOT THE BEST ONE — a minimizing search was
     built, measured, and REVERTED (2026-07-27). Do not re-propose it.** Replacing "first rung that is
     admissible, walking longest-first" with "the rung that minimizes the measure" lowers the residual per

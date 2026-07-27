@@ -818,6 +818,9 @@ def coupled_continuation(
     escalation_factor: float = 2.0,
     divergence_cap: float = 10.0,
     line_search: int = _COUPLED_LINE_SEARCH,
+    grow: int = 0,
+    descent_backoff: int = 0,
+    descent_test: bool = False,
     forward_solver: lx.AbstractLinearSolver | None = None,
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
@@ -920,6 +923,9 @@ def coupled_continuation(
         escalation_factor=escalation_factor,
         acceptance=DivergenceGuard(divergence_cap=divergence_cap),
         line_search=line_search,
+        grow=grow,
+        descent_backoff=descent_backoff,
+        descent_test=descent_test,
         forward_solver=forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER,
         residual_norm=residual_norm,
         adjoint_preconditioner_factory=policy.adjoint_factory(),
@@ -1115,6 +1121,9 @@ def solve_coupled(
     refresh_limit: int = 1,
     step_control: StepControl | None = None,
     scaled_norm: bool = False,
+    grow: int = 0,
+    descent_backoff: int = 0,
+    descent_test: bool = False,
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     **continuation_kwargs: object,
@@ -1178,6 +1187,18 @@ def solve_coupled(
         finishing solve compile the step separately, so a refreshed solve pays one compilation more
         than an unrefreshed one over and above the per-refresh rebuild -- the price of leaving the
         convergence guard solely with the solve that produces the result.
+    descent_backoff : int
+        Lower the shift strength up to this many times, until the shifted correction actually descends
+        in the residual measure, before the usual escalation ladder runs. Zero (the default) disables
+        it. The shifted correction is not a descent direction by construction -- ``J delta = -R -
+        beta D delta``, whose second term has no fixed sign and worsens with ``beta`` -- and past a
+        critical shift strength every step length raises the measure, so the line search can only pick
+        the least-harmful rung and the march stands still. Escalating there is the wrong direction;
+        this backs off instead. Each backoff costs one shifted solve, which is why it is opt-in.
+    descent_test : bool
+        Reject a correction that does not descend, rather than judging the candidate's norm alone. With
+        the backoff off this surfaces a non-descent direction instead of letting it pass as a step that
+        quietly went nowhere.
     scaled_norm : bool
         Steer the observed march by the **row-equilibrated** measure
         (:class:`~aquaflux.solve.RowScaledNorm`) instead of the continuation's own, rebuilding it at the
@@ -1301,7 +1322,13 @@ def solve_coupled(
     if continuation is None:
         reference = state if reference_state is None else reference_state
         continuation = coupled_continuation(
-            coupled, reference, method=method, **continuation_kwargs
+            coupled,
+            reference,
+            method=method,
+            grow=grow,
+            descent_backoff=descent_backoff,
+            descent_test=descent_test,
+            **continuation_kwargs,
         )
     elif refreshing:
         raise ValueError(
@@ -1378,6 +1405,9 @@ def solve_coupled(
                 method=method,
                 reuse=continuation.shift_policy,
                 residual_norm=base_norm,  # keep the progress measure fixed at the initial state (seam 4)
+                grow=grow,
+                descent_backoff=descent_backoff,
+                descent_test=descent_test,
                 **continuation_kwargs,
             )
         # Hand the finishing solve the *absolute* target measured at the initial state, so a refreshed

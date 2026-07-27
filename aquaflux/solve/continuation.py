@@ -54,6 +54,36 @@ from .relaxation import RelaxationSchedule, SwitchedEvolutionRelaxation
 _INEXACT_CONTINUATION_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-10, restart=40, stagnation_iters=40)
 
 
+class _Attempt(NamedTuple):
+    """One shifted solve, line-searched and measured — everything a step learns for one ``β``.
+
+    These five values are produced together by a single (expensive) shifted linear solve and are
+    consumed together by the accept/reject decision, so they travel as one record rather than as a
+    loose tuple. Carrying the record is what lets a probing loop hand its result to the escalation
+    loop instead of discarding it and paying for the same solve twice.
+
+    Attributes
+    ----------
+    candidate : jnp.ndarray
+        The trial iterate ``φ + α δ``, shape ``(n,)``.
+    residual_norm : jnp.ndarray
+        The measure at :attr:`candidate` — a scalar, in whatever measure the step is judged by.
+    cycles : jnp.ndarray
+        Krylov cycles the shifted solve took — a scalar, the staleness signal a refresh trigger reads.
+    alpha : jnp.ndarray
+        The line-search factor actually taken — a scalar.
+    directional : jnp.ndarray
+        ``d/ds measure(R(φ + s δ))`` at ``s = 0`` — a scalar. Negative means the correction descends
+        in the measure the solve is judged by.
+    """
+
+    candidate: jnp.ndarray
+    residual_norm: jnp.ndarray
+    cycles: jnp.ndarray
+    alpha: jnp.ndarray
+    directional: jnp.ndarray
+
+
 class ShiftTerm(NamedTuple):
     """The per-step data a :class:`ShiftPolicy` produces at one iterate.
 
@@ -250,6 +280,12 @@ class PseudoTransientStep(eqx.Module):
     # line search could only pick the least-harmful rung, and the march sat still while reporting
     # steps. Backing the shift off restores descent; escalating -- the response to an overshoot --
     # makes it strictly worse.
+    # Rungs the line search may try ABOVE the full step (alpha = 2**grow ... 2, 1, 1/2 ...). Zero is
+    # a one-sided ladder, the historical behaviour. The admissible step is often longer than the full
+    # one: measured at a cold start, alpha = 2 sat inside the acceptance tolerance and travelled twice
+    # as far, but a ladder starting at one could not express it -- so a march reporting alpha = 1 every
+    # step may simply never have been asked whether more was allowed.
+    grow: int = eqx.field(static=True, default=0)
     descent_backoff: int = eqx.field(static=True, default=0)
     # Reject a correction that does not descend in the measure, rather than judging it on the
     # candidate's norm alone. Independent of the backoff: with the backoff off, this makes a
@@ -321,6 +357,7 @@ class PseudoTransientStep(eqx.Module):
         acceptance = self.acceptance
         line_search = self.line_search
         descent_backoff, descent_test = self.descent_backoff, self.descent_test
+        grow = self.grow
         norm = self.residual_norm
 
         def step(
@@ -342,9 +379,7 @@ class PseudoTransientStep(eqx.Module):
             # far away and restores strict descent in the basin (monotone by default).
             growth_factor = growth_schedule.growth(residual_norm, residual_norm_0)
 
-            def attempt(
-                relaxation: jnp.ndarray,
-            ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+            def attempt(relaxation: jnp.ndarray) -> _Attempt:
                 # The shift only reshapes the forward path (like the preconditioner it damps), so it
                 # is detached: it never perturbs the converged state or its adjoint.
                 shift = jax.lax.stop_gradient(relaxation * term.diagonal)  # β d over the full state
@@ -376,6 +411,7 @@ class PseudoTransientStep(eqx.Module):
                     line_search,
                     norm=norm,
                     growth=growth_factor,
+                    grow=grow,
                 )
                 # The directional derivative of the measure along the correction, d/ds norm(R(phi +
                 # s delta)) at s = 0. Negative means the direction descends in the measure the solve
@@ -389,7 +425,27 @@ class PseudoTransientStep(eqx.Module):
                 # stiff coupled state, the derivative was negative for beta <= 1 and changed sign
                 # between beta = 1 and beta = 2, exactly where that march had been running.
                 directional = jax.jvp(lambda x: norm(residual_fn(x)), (phi,), (delta,))[1]
-                return candidate, norm(residual_fn(candidate)), cycles, alpha, directional
+                return _Attempt(
+                    candidate=candidate,
+                    residual_norm=norm(residual_fn(candidate)),
+                    cycles=cycles,
+                    alpha=alpha,
+                    directional=directional,
+                )
+
+            def admits(trial: _Attempt, attempts: jnp.ndarray) -> jnp.ndarray:
+                """Whether the injected acceptance policy (and the descent test) admit ``trial``."""
+                accept = acceptance.accept(
+                    trial.residual_norm, residual_norm, residual_norm_0, attempts
+                )
+                # A direction that does not descend in the measure is rejected outright, however the
+                # candidate scores. Escalating on it would be worse than useless: more shift makes
+                # the derivative *less* negative, so the loop would drive itself further from a
+                # usable direction while paying for a solve each time. Rejecting instead lets
+                # `descent_backoff` below take over, which moves β the other way.
+                if descent_test:  # a static choice, so the branch is resolved at trace time
+                    accept = accept & (trial.directional < 0.0)
+                return accept
 
             # Escalate the damping on a rejected attempt, taking the first the acceptance policy
             # admits. The loop *mechanics* — grow β, cap at max_escalations, carry the best candidate
@@ -402,43 +458,34 @@ class PseudoTransientStep(eqx.Module):
                 _, _, attempts, accepted, _, _ = state
                 return (~accepted) & (attempts <= max_escalations)
 
-            def body(state: tuple) -> tuple:
+            def record(state: tuple, trial: _Attempt, accept: jnp.ndarray) -> tuple:
+                """Fold one judged attempt into an escalation carry (the shared accept bookkeeping)."""
                 relaxation, best, attempts, _, best_cycles, best_alpha = state
-                candidate, candidate_norm, cycles, alpha, directional = attempt(relaxation)
-                # A direction that does not descend in the measure is rejected outright, however the
-                # candidate scores. Escalating on it would be worse than useless: more shift makes the
-                # derivative *less* negative, so the loop would drive itself further from a usable
-                # direction while paying for a solve each time. Rejecting instead lets `descent_backoff`
-                # below take over, which moves beta the other way.
-                accept = acceptance.accept(candidate_norm, residual_norm, residual_norm_0, attempts)
-                if descent_test:  # a static choice, so the branch is resolved at trace time
-                    accept = accept & (directional < 0.0)
-                best = jnp.where(accept, candidate, best)
-                # Report the cycles and line-search factor of the attempt actually taken, not the
-                # rejected escalations'. (A fully-rejected step keeps the initial 0 / 1.)
-                best_cycles = jnp.where(accept, cycles, best_cycles)
-                best_alpha = jnp.where(accept, alpha, best_alpha)
                 return (
                     relaxation * escalation_factor,
-                    best,
+                    jnp.where(accept, trial.candidate, best),
                     attempts + 1,
                     accept,
-                    best_cycles,
-                    best_alpha,
+                    # Report the cycles and line-search factor of the attempt actually taken, not the
+                    # rejected escalations'. (A fully-rejected step keeps the initial 0 / 1.)
+                    jnp.where(accept, trial.cycles, best_cycles),
+                    jnp.where(accept, trial.alpha, best_alpha),
                 )
 
-            def escalate_from(start: jnp.ndarray) -> tuple:
-                return jax.lax.while_loop(
-                    cond,
-                    body,
-                    (
-                        start,
-                        phi,
-                        0,
-                        jnp.asarray(False),
-                        jnp.asarray(0, dtype=jnp.int32),
-                        jnp.asarray(1.0),
-                    ),
+            def body(state: tuple) -> tuple:
+                relaxation, _, attempts, *_ = state
+                trial = attempt(relaxation)
+                return record(state, trial, admits(trial, attempts))
+
+            def fresh(start: jnp.ndarray) -> tuple:
+                """The escalation carry for a step that has not yet solved anything."""
+                return (
+                    start,
+                    phi,
+                    0,
+                    jnp.asarray(False),
+                    jnp.asarray(0, dtype=jnp.int32),
+                    jnp.asarray(1.0),
                 )
 
             # Back the shift OFF until the direction descends, then escalate from there as usual.
@@ -451,30 +498,55 @@ class PseudoTransientStep(eqx.Module):
             # escalation against a non-descent direction therefore spends solves making the direction
             # worse, which is what a march does when it sits at the shortest rung and does not move.
             #
-            # Each backoff costs one shifted solve, so it is off by default and bounded when on.
+            # Each backoff costs one shifted solve, so it is off by default and bounded when on. The
+            # probe that finally descends is a *complete* attempt at the relaxation the escalation
+            # loop is about to start from, so it is carried out of the loop and folded straight into
+            # the escalation carry. Re-solving it there would double the cost of every step on the
+            # common path — the one where the first probe already descends and nothing is backed off.
             def backoff_cond(state: tuple) -> jnp.ndarray:
-                _, tries, descends = state
+                _, tries, descends, _ = state
                 return (~descends) & (tries < descent_backoff)
 
             def backoff_body(state: tuple) -> tuple:
-                relaxation, tries, _ = state
-                *_, directional = attempt(relaxation)
-                descends = directional < 0.0
+                relaxation, tries, _, _ = state
+                trial = attempt(relaxation)
+                descends = trial.directional < 0.0
                 return (
                     jnp.where(descends, relaxation, relaxation / escalation_factor),
                     tries + 1,
                     descends,
+                    trial,
                 )
 
             start_relaxation = base_relaxation
             if descent_backoff > 0:
-                start_relaxation, _, _ = jax.lax.while_loop(
+                start_relaxation, _, probed, trial = jax.lax.while_loop(
                     backoff_cond,
                     backoff_body,
-                    (base_relaxation, jnp.asarray(0, dtype=jnp.int32), jnp.asarray(False)),
+                    (
+                        base_relaxation,
+                        jnp.asarray(0, dtype=jnp.int32),
+                        jnp.asarray(False),
+                        _Attempt(
+                            candidate=phi,
+                            residual_norm=residual_norm,
+                            cycles=jnp.asarray(0, dtype=jnp.int32),
+                            alpha=jnp.ones_like(residual_norm),
+                            directional=jnp.zeros_like(residual_norm),
+                        ),
+                    ),
                 )
+                # `probed` is the loop's own descent flag, so the seeded carry is used only when the
+                # carried attempt really was taken at `start_relaxation`. When the backoff instead
+                # exhausted its tries it exits at a *lower*, unprobed relaxation, and the escalation
+                # loop starts there from scratch — the same relaxation ladder as before this fast path.
+                cold = fresh(start_relaxation)
+                seeded = record(cold, trial, probed & admits(trial, 0))
+                start = jax.tree.map(lambda s, c: jnp.where(probed, s, c), seeded, cold)
+            else:
+                start = fresh(start_relaxation)
 
-            _, phi_next, _, _, step_cycles, step_alpha = escalate_from(start_relaxation)
+            _, phi_next, _, _, step_cycles, step_alpha = jax.lax.while_loop(cond, body, start)
             return phi_next, step_cycles, step_alpha
 
         return step

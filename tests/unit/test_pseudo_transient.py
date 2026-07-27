@@ -418,8 +418,87 @@ def test_the_descent_backoff_lowers_the_shift_until_the_correction_descends() ->
     assert float(measure(residual_fn(backed))) < float(r0)
 
 
+def test_a_descending_probe_is_reused_rather_than_re_solved() -> None:
+    """When the first probe already descends, the backoff must cost nothing beyond that one probe.
+
+    The probe is a *complete* attempt -- correction, line search, measure and directional derivative --
+    taken at exactly the shift strength the escalation loop is about to start from. Handing it forward
+    is what keeps the descent test affordable: re-deriving it would mean two shifted linear solves per
+    step on the path where nothing is backed off at all, which is the common one.
+
+    The cost itself is not observable from outside (a traced loop body is traced once however many
+    times it runs), so what is pinned here is the *equivalence* the reuse has to preserve: with a shift
+    weak enough that the very first probe descends, enabling the backoff must reproduce the no-backoff
+    step exactly. A seeded carry that mis-set the attempt index, the acceptance decision or the
+    reported cycle count would diverge here.
+    """
+    matrix = jnp.array([[1.0, 1.0], [-1.0, 0.0]])
+    target = jnp.array([1.0, 0.3])
+
+    def residual_fn(phi):
+        return matrix @ phi - target
+
+    phi = jnp.array([2.0, -1.0])
+    common = dict(
+        shift_policy=_SaddleShift(),
+        line_search=6,
+        max_escalations=2,
+        residual_norm=lambda r: jnp.sum(jnp.abs(r)),
+        descent_test=True,
+        # beta0 = 0.5 sits BELOW the sign change measured in the test above, so the first probe
+        # descends and the backoff loop exits without ever lowering the shift.
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=0.5, exponent=0.0),
+    )
+    without = PseudoTransientStep(**common, descent_backoff=0)
+    with_backoff = PseudoTransientStep(**common, descent_backoff=4)
+
+    r0 = common["residual_norm"](residual_fn(phi))
+    solver = without.default_solver()
+    plain, plain_cycles, plain_alpha = without.stepper()(residual_fn, phi, r0, solver)
+    reused, reused_cycles, reused_alpha = with_backoff.stepper()(residual_fn, phi, r0, solver)
+
+    assert jnp.allclose(reused, plain, rtol=0, atol=0)
+    assert int(reused_cycles) == int(plain_cycles)
+    assert float(reused_alpha) == float(plain_alpha)
+    # And it is a real step, not two matching no-ops.
+    assert float(common["residual_norm"](residual_fn(reused))) < float(r0)
+
+
 def test_the_descent_machinery_is_off_by_default() -> None:
     """Both are opt-in: each backoff costs a shifted solve, so nothing pays for it unasked."""
     step = PseudoTransientStep(shift_policy=_SaddleShift())
     assert step.descent_backoff == 0
     assert step.descent_test is False
+
+
+def test_a_growth_rung_is_never_reached_by_falling_back_onto_it() -> None:
+    """The fallback is capped at the full step, so extending the ladder cannot license an excursion.
+
+    Without the cap, adding rungs above one also moves the no-admissible-step fallback above one, and a
+    step with no acceptable length quietly becomes a multiple of the full step. Measured on a real
+    march with two growth rungs: it fell back onto ``alpha = 4`` and multiplied its residual measure by
+    4.6 in a single step. Growth rungs must be reachable only by PASSING the acceptance test.
+    """
+
+    def residual_fn(phi):
+        return phi * 1.05  # every step length raises the norm, so nothing is admissible
+
+    phi = jnp.array([1.0])
+    delta = jnp.array([1.0])
+    reference = jnp.linalg.norm(residual_fn(phi))
+    _, capped = backtracking_line_search(residual_fn, phi, delta, reference, 6, grow=3)
+    assert float(capped) == 1.0  # not 8.0, the longest rung on the extended ladder
+
+    # ...while a growth rung IS taken when it genuinely passes the acceptance test.
+    def improving(phi):
+        return jnp.abs(phi - 4.0) + 0.1  # keeps improving out to alpha = 4
+
+    _, taken = backtracking_line_search(
+        improving,
+        jnp.array([0.0]),
+        jnp.array([1.0]),
+        jnp.linalg.norm(improving(jnp.array([0.0]))),
+        6,
+        grow=3,
+    )
+    assert float(taken) == 4.0

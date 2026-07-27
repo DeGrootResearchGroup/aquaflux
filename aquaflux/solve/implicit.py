@@ -186,12 +186,17 @@ def backtracking_line_search(
     # not at all, while alpha ~ 5.7 moved it four times further and still sat inside the tolerance the
     # acceptance rule already allowed -- it was simply unreachable from a ladder that starts at one.
     #
-    # When NOTHING is admissible the fallback is the longest rung whose trial state is finite, not the
-    # shortest rung. The shortest is a near-null step that changes nothing and which the divergence
-    # guard then accepts as finite, so the march reports a step and stands still -- a guaranteed stall
-    # rather than a slow one, and the observed failure mode on a stiff coupled march. Moving as far as
-    # the arithmetic permits at least leaves the basin; whether that step is kept is then the
-    # accept/escalate test's decision, which is where "no good step exists" belongs.
+    # When NOTHING is admissible the fallback is the longest finite rung **no longer than the full
+    # step**, not the shortest rung. The shortest is a near-null step that changes nothing and which
+    # the divergence guard then accepts as finite, so the march reports a step and stands still -- a
+    # guaranteed stall rather than a slow one, and the observed failure mode on a stiff coupled march.
+    #
+    # The cap at one is not incidental. Without it, extending the ladder upward also extends the
+    # FALLBACK upward, so a step with no admissible length quietly becomes a multiple of the full step:
+    # measured with two growth rungs, a march took alpha = 4 as a fallback and multiplied its residual
+    # measure by 4.6 in a single step. A growth rung must only ever be reachable by PASSING the
+    # acceptance test, never by falling back onto it -- the fallback exists to avoid a null step, not
+    # to license an excursion.
     #
     # The carry (index, chosen, found, longest_finite, seen_finite) is fixed-shape, so the body
     # compiles once. Walking longest-first means the first finite rung encountered IS the longest
@@ -209,12 +214,14 @@ def backtracking_line_search(
         value = norm(residual_fn(phi + alpha * delta))
         finite = jnp.isfinite(value)
         accepted = finite & (value < admissible)
+        # The fallback candidate ignores rungs longer than the full step (index < 0).
+        eligible = finite & (index >= 0)
         return (
             index + 1,
             jnp.where(accepted, alpha, chosen),
             accepted,
-            jnp.where(finite & ~seen_finite, alpha, longest_finite),
-            seen_finite | finite,
+            jnp.where(eligible & ~seen_finite, alpha, longest_finite),
+            seen_finite | eligible,
         )
 
     shortest = jnp.asarray(0.5**steps)
