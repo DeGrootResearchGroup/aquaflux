@@ -102,6 +102,39 @@ def test_dual_time_gradient_is_iteration_count_independent() -> None:
     assert jnp.allclose(grad_with(inner_steps=2, max_steps=500), reference, atol=1e-8)
 
 
+def test_dual_time_inner_loop_iterates_and_sums_cost() -> None:
+    """inner_steps > 1 runs multiple inner Newton steps: it converges G further and sums the cycles.
+
+    Guards the per-step signals a StepControl reads: a broken accumulation (cycles overwritten instead
+    of summed, or the inner loop not iterating) would still pass the convergence/gradient tests, which
+    only check the root. Here the shared anchor is phi0 and beta = 1 (the residual ratio is 1 at the
+    anchor), so the transient residual is G(p) = R(p) + (p - phi0); more inner iterations must drive it
+    lower and cost more linear-solve cycles.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+    schedule = SwitchedEvolutionRelaxation(beta0=1.0)
+    policy = UniformShiftPolicy(strength=1.0)
+    phi0 = jnp.ones_like(theta)
+    r0 = jnp.linalg.norm(_residual(phi0, theta))
+
+    def residual_theta(p: jnp.ndarray) -> jnp.ndarray:
+        return _residual(p, theta)
+
+    def run(inner_steps: int):
+        step = DualTimeStep(
+            policy, relaxation_schedule=schedule, inner_steps=inner_steps, inner_tol=1e-6
+        )
+        return step.stepper()(residual_theta, phi0, r0, step.default_solver())
+
+    def gnorm(p: jnp.ndarray) -> float:
+        return float(jnp.linalg.norm(_residual(p, theta) + (p - phi0)))
+
+    phi1, cyc1, _ = run(1)
+    phi4, cyc4, _ = run(4)
+    assert gnorm(phi4) < gnorm(phi1)  # more inner iterations converge the implicit step further
+    assert int(cyc4) > int(cyc1)  # cycles are summed over the inner iterations, not overwritten
+
+
 def test_dual_time_one_inner_step_is_a_single_shifted_step() -> None:
     """With one inner step the dual-time step is exactly one shifted Newton step.
 

@@ -789,7 +789,11 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         β still vanishes at the root, so the IFT adjoint is unchanged — pinned by
         `tests/unit/test_dual_time.py` (converges, exact gradient, **iteration-count-independent**).
         `DualTimeControl` is the Courant β-ramp (grow the pseudo-timestep while the inner α = 1, shrink
-        when it clips), a `StepControl` on the eager march, sibling to `AlphaTargetingControl`; **opt-in,
+        when it clips), a `StepControl` on the eager march, sibling to `AlphaTargetingControl`. The step's
+        reported α is the **min** inner line-search factor, and an inner step that fails to reduce ‖G‖
+        (the line search's non-descent fallback, which otherwise reports α = 1) is folded to **α = 0** so
+        the control reads it as struggling and backs off rather than growing — the α-only `StepReport`
+        signal cannot otherwise distinguish a clean full step from a non-descending fallback. **Opt-in,
         never a default, placeholder gains** (its calibration is gated on the low-β linear-solve cost the
         Re continuation removes). Wired through `coupled_continuation(inner_steps=…, inner_tol=…)` (returns
         a `DualTimeStep` when `inner_steps > 1`, else the unchanged `PseudoTransientStep`) and reachable as

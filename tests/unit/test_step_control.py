@@ -143,3 +143,20 @@ def test_dual_time_control_clamps_beta() -> None:
     low_control = DualTimeControl(beta_min=0.5, grow=10.0)
     _, low = low_control.next_step(_dual_step(), _report(alpha=1.0), 1.0)  # 1/10 < beta_min
     assert low == 0.5
+
+
+def test_dual_time_control_step_differs_from_base_only_in_a_dynamic_beta_leaf() -> None:
+    """The control replaces just the schedule with ConstantRelaxation(β) on a dynamic leaf.
+
+    Same compilation-cache-hit invariant AlphaTargetingControl has: two controlled steps share static
+    structure and differ only in the traced β, so the eager march does not recompile per step.
+    """
+    control = DualTimeControl()
+    step_a, _ = control.next_step(_dual_step(), _report(alpha=1.0), 1.0)
+    step_b, _ = control.next_step(_dual_step(), _report(alpha=0.1), 1.0)
+    static_a = eqx.partition(step_a, eqx.is_array)[1]
+    static_b = eqx.partition(step_b, eqx.is_array)[1]
+    assert eqx.tree_equal(static_a, static_b) is True
+    assert not jnp.allclose(step_a.relaxation_schedule.beta, step_b.relaxation_schedule.beta)
+    # The non-schedule configuration (e.g. inner_steps) is untouched.
+    assert step_a.inner_steps == _dual_step().inner_steps

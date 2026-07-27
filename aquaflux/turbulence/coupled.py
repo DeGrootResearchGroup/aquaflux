@@ -909,8 +909,10 @@ def coupled_continuation(
 
     Returns
     -------
-    PseudoTransientStep
-        The forward step to hand :class:`~aquaflux.solve.ImplicitNewtonSolver` as ``forward_step``.
+    ForwardStep
+        The forward step to hand :class:`~aquaflux.solve.ImplicitNewtonSolver` as ``forward_step`` -- a
+        :class:`~aquaflux.solve.PseudoTransientStep` by default, or a
+        :class:`~aquaflux.solve.DualTimeStep` when ``inner_steps > 1``.
     """
     policy = _coupled_shift_policy(
         coupled,
@@ -1182,8 +1184,9 @@ def solve_coupled(
         from a raw cold start otherwise. The initial state also seeds the frozen preconditioner unless
         ``reference_state`` is given. (When differentiating, pass an explicit state built outside
         ``jax.grad``.)
-    continuation : PseudoTransientStep or None
-        A pre-built continuation step. **Build it once outside ``jax.grad`` and pass it here when
+    continuation : ForwardStep or None
+        A pre-built continuation step (a :class:`~aquaflux.solve.PseudoTransientStep` or a
+        :class:`~aquaflux.solve.DualTimeStep`). **Build it once outside ``jax.grad`` and pass it here when
         differentiating** (the block preconditioner must be constructed with concrete parameters, not
         traced -- see the flow preconditioner note); ``None`` builds it internally from the initial
         state, which is the convenient forward-only path.

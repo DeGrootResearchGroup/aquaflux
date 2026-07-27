@@ -54,6 +54,52 @@ from .relaxation import RelaxationSchedule, SwitchedEvolutionRelaxation
 _INEXACT_CONTINUATION_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-10, restart=40, stagnation_iters=40)
 
 
+def _shifted_solve(residual_fn, phi, rhs, shift, preconditioner, solver):
+    """Solve the diagonally-shifted Newton system ``(J(phi) + diag(shift)) delta = -rhs``, matrix-free.
+
+    The shifted-Newton correction shared by the pseudo-transient and dual-time marches: the true
+    Jacobian-vector product ``J(phi) v`` (from ``residual_fn``) plus the pseudo-time diagonal ``shift``
+    on the shifted degrees of freedom, solved against ``-rhs`` with the frozen shifted preconditioner.
+    ``rhs`` is the residual the step drives down -- the steady ``R(phi)`` for pseudo-transient
+    continuation, the transient ``R(phi) + shift*(phi - phi_ref)`` for the dual-time inner loop; the
+    Jacobian is ``J(phi) + shift`` either way (the transient term's derivative in ``phi`` is ``shift``).
+    Non-throwing, so a non-convergent shifted system returns a candidate for the caller to judge rather
+    than raising.
+
+    Parameters
+    ----------
+    residual_fn : callable
+        The single-argument steady residual ``phi -> R(phi)``; its Jacobian-vector product forms the
+        unshifted part of the operator.
+    phi : jnp.ndarray
+        The iterate the Jacobian is linearized at, shape ``(n,)``.
+    rhs : jnp.ndarray
+        The residual the shifted system is solved against (``-rhs`` is the right-hand side), shape
+        ``(n,)``.
+    shift : jnp.ndarray
+        The pseudo-time diagonal ``β d`` added to the Jacobian, shape ``(n,)`` (zeros off the shifted
+        degrees of freedom).
+    preconditioner : callable or None
+        The frozen left preconditioner for the shifted operator.
+    solver : lineax.AbstractLinearSolver
+        The Krylov solver for the shifted system.
+
+    Returns
+    -------
+    delta : jnp.ndarray
+        The shifted-Newton correction, shape ``(n,)``.
+    cycles : jnp.ndarray
+        The restart-cycle count of the linear solve (int32 scalar).
+    """
+
+    def shifted_jacobian(tangent: jnp.ndarray) -> jnp.ndarray:
+        return jax.jvp(residual_fn, (phi,), (tangent,))[1] + shift * tangent
+
+    return solve_linear(
+        shifted_jacobian, -rhs, solver=solver, preconditioner=preconditioner, throw=False
+    )
+
+
 class _Attempt(NamedTuple):
     """One shifted solve, line-searched and measured — everything a step learns for one ``β``.
 
@@ -383,22 +429,12 @@ class PseudoTransientStep(eqx.Module):
                 # The shift only reshapes the forward path (like the preconditioner it damps), so it
                 # is detached: it never perturbs the converged state or its adjoint.
                 shift = jax.lax.stop_gradient(relaxation * term.diagonal)  # β d over the full state
-
-                def shifted_jacobian(tangent: jnp.ndarray) -> jnp.ndarray:
-                    # True Jacobian-vector product plus the pseudo-transient diagonal on shifted DOFs.
-                    jvp = jax.jvp(residual_fn, (phi,), (tangent,))[1]
-                    return jvp + shift * tangent
-
                 # Preconditioner inverts the *same* shifted operator it is damped by. The solve does
                 # not throw: a non-convergent shifted system yields a candidate the acceptance test
                 # rejects (triggering more damping), rather than raising.
                 preconditioner = term.make_preconditioner(relaxation)
-                delta, cycles = solve_linear(
-                    shifted_jacobian,
-                    -residual,
-                    solver=solver,
-                    preconditioner=preconditioner,
-                    throw=False,
+                delta, cycles = _shifted_solve(
+                    residual_fn, phi, residual, shift, preconditioner, solver
                 )
                 # Backtrack the step length before judging it: when the shifted direction is accurate
                 # but the full step overshoots, a scaled-back step descends from this one solve,
@@ -574,8 +610,9 @@ class DualTimeStep(eqx.Module):
     as the transient settles. A row-scaled / block-scaled measure of it is then well-behaved.
 
     With ``inner_steps = 1`` a step is a **single shifted Newton step** — the transient term is zero at
-    the anchor, so ``G(φⁿ) = R(φⁿ)`` and the one inner solve is exactly the attempt
-    :class:`PseudoTransientStep` forms. The two strategies differ in how they handle an overshoot:
+    the anchor, so ``G(φⁿ) = R(φⁿ)`` and the one inner **solve** ``(J + β d) δ = −R(φⁿ)`` is exactly the
+    one :class:`PseudoTransientStep` forms (the resulting iterate coincides too when neither line-searches,
+    i.e. ``line_search = 0``). The two strategies differ in how they handle an overshoot:
     ``PseudoTransientStep`` escalates ``β`` (a re-solve at more damping) and guards divergence with an
     injected acceptance policy, whereas this strategy takes **more inner iterations at fixed ``β``** and
     line-searches each on ``‖G‖`` — the inner loop *is* the globalization, so there is no escalation
@@ -662,9 +699,10 @@ class DualTimeStep(eqx.Module):
         ``(residual_fn, φ, ‖R₀‖, solver) -> (φ_next, cycles, alpha)``. The reference ``φⁿ`` is ``φ``;
         ``cycles`` is the summed restart-cycle count over the inner Newton iterations; ``alpha`` is the
         **smallest** inner line-search factor (``1`` when every inner step took the full length, smaller
-        when the implicit step had to be clipped) — the step-quality signal a
-        :class:`~aquaflux.solve.StepControl` drives ``β`` by (raise the pseudo-timestep while ``α = 1``,
-        back off when it clips).
+        when the implicit step had to be clipped, and ``0`` if any inner step failed to reduce ``‖G‖`` —
+        the line search's non-descent fallback, which a step control must read as "struggling", not as a
+        clean full step). It is the step-quality signal a :class:`~aquaflux.solve.StepControl` drives
+        ``β`` by: raise the pseudo-timestep while ``α = 1``, back off when it clips or fails to descend.
         """
         policy = self.shift_policy
         schedule = self.relaxation_schedule
@@ -702,28 +740,27 @@ class DualTimeStep(eqx.Module):
 
             def body(carry: tuple) -> tuple:
                 p, inner, gnorm, cycles, min_alpha = carry
-
-                def shifted_jacobian(tangent: jnp.ndarray) -> jnp.ndarray:
-                    return jax.jvp(residual_fn, (p,), (tangent,))[1] + shift * tangent
-
-                delta, step_cycles = solve_linear(
-                    shifted_jacobian,
-                    -transient_residual(p),
-                    solver=solver,
-                    preconditioner=preconditioner,
-                    throw=False,
+                delta, step_cycles = _shifted_solve(
+                    residual_fn, p, transient_residual(p), shift, preconditioner, solver
                 )
                 # Strict-descent (monotone) line search on ‖G‖: G = 0 is a well-posed fixed-φⁿ solve, so
                 # a clipped inner step is a signal the pseudo-timestep is too large, read out via alpha.
                 candidate, alpha = backtracking_line_search(
                     transient_residual, p, delta, gnorm, line_search, norm=norm
                 )
+                new_gnorm = norm(transient_residual(candidate))
+                # An inner step that does NOT reduce ‖G‖ took the line search's non-descent fallback,
+                # which still reports alpha = 1 (the longest finite rung ≤ the full step). Fold that into
+                # the reported min-alpha as 0, so a step control reads it as "struggling" (shrink the
+                # pseudo-timestep) rather than "comfortable" (grow it). The monotone search means no
+                # descent ⇔ the fallback fired, so `new_gnorm < gnorm` detects it exactly.
+                descended = new_gnorm < gnorm
                 return (
                     candidate,
                     inner + 1,
-                    norm(transient_residual(candidate)),
+                    new_gnorm,
                     cycles + step_cycles,
-                    jnp.minimum(min_alpha, alpha),
+                    jnp.minimum(min_alpha, jnp.where(descended, alpha, 0.0)),
                 )
 
             phi_next, _, _, cycles, alpha = jax.lax.while_loop(
