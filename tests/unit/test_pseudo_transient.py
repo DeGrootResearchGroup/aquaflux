@@ -146,12 +146,14 @@ def test_backtracking_line_search_picks_largest_descending_rung() -> None:
     assert jnp.allclose(full, -3.0)
     assert jnp.allclose(full_alpha, 1.0)
 
-    # delta = +4: every rung increases the residual, so it falls back to the smallest, 1/16.
+    # delta = +4: every rung increases the residual, so none is admissible and the search falls back
+    # to the LONGEST finite rung -- the full step. Falling back to the shortest instead would return a
+    # near-null step that changes nothing, which is a guaranteed stall rather than a slow step.
     fallback, fb_alpha = backtracking_line_search(
         residual, phi, jnp.array([4.0]), reference, steps=4
     )
-    assert jnp.allclose(fallback, 1.0 + (1.0 / 16.0) * 4.0)
-    assert jnp.allclose(fb_alpha, 1.0 / 16.0)
+    assert jnp.allclose(fallback, 1.0 + 1.0 * 4.0)
+    assert jnp.allclose(fb_alpha, 1.0)
 
 
 def test_line_search_recovers_an_overshooting_step_without_escalation() -> None:
@@ -253,12 +255,56 @@ def test_relaxed_growth_admits_growth_far_out_and_restores_descent_in_the_basin(
     assert edge > basin  # monotone in the ratio
 
 
-def test_growth_factor_widens_what_the_line_search_accepts() -> None:
-    """A growth factor above one accepts a step the strict-descent ladder rejects.
+def test_the_line_search_takes_the_longest_admissible_step_not_the_best_one() -> None:
+    """Largest admissible, not minimizing -- distance travelled beats residual depth on a march.
 
-    Built on a residual whose every step-length *increases* the norm -- the measured plateau signature
-    -- so the monotone search must fall back to its smallest rung while the relaxed one keeps a real
-    step.
+    A minimizing search reaches a lower residual per step but travels much less far. Measured on a
+    stiff coupled case, it developed the recirculation nine times more slowly while reporting better
+    residuals at every early step. Here the measure is minimized at ``alpha = 1/4`` but the full step
+    is also admissible, and the full step is what must be taken.
+    """
+
+    def residual_fn(phi):
+        return jnp.abs(phi - 0.75) + 0.1  # minimized at alpha = 1/4 along delta = -1 from phi = 1
+
+    phi = jnp.array([1.0])
+    delta = jnp.array([-1.0])
+    reference = jnp.linalg.norm(residual_fn(phi))
+    _, alpha = backtracking_line_search(residual_fn, phi, delta, reference, 10, growth=2.0)
+    # alpha = 1 lands at 0.85, outside the 2x tolerance (0.7); alpha = 1/2 lands at 0.35 and is the
+    # longest that fits. The MINIMIZER is alpha = 1/4 (0.1) -- a shorter, better step this must not take.
+    assert float(alpha) == 0.5
+
+
+def test_the_ladder_reaches_step_lengths_longer_than_the_full_step() -> None:
+    """``grow`` rungs above one, because the admissible step is often longer than the full step.
+
+    Measured on a developed state: the full step moved the reattachment not at all while ``alpha`` of
+    about 5.7 moved it four times further, and that longer step already sat inside the tolerance the
+    acceptance rule allowed -- it was simply unreachable from a ladder starting at one. Here every step
+    length keeps reducing out to ``alpha = 4``, so that is what a largest-admissible search must take.
+    """
+
+    def residual_fn(phi):
+        return jnp.abs(phi - 4.0) + 0.1  # still improving all the way out to alpha = 4
+
+    phi = jnp.array([0.0])
+    delta = jnp.array([1.0])
+    reference = jnp.linalg.norm(residual_fn(phi))
+    _, without = backtracking_line_search(residual_fn, phi, delta, reference, 6)
+    _, with_growth = backtracking_line_search(residual_fn, phi, delta, reference, 6, grow=3)
+    assert float(without) == 1.0  # a one-sided ladder cannot express it
+    assert float(with_growth) == 4.0
+
+
+def test_when_nothing_is_admissible_the_search_moves_as_far_as_it_finitely_can() -> None:
+    """The fallback must not be the shortest rung -- that is a null step and a guaranteed stall.
+
+    With no admissible rung the old search returned its smallest, a step so short it changes nothing,
+    which the divergence guard then accepted as finite: the march reported a step and stood still.
+    Moving as far as the arithmetic allows at least leaves the basin, and whether that step is kept is
+    the accept/escalate test's decision. Here every step length raises the norm beyond the tolerance,
+    and the full step is finite, so the full step is what comes back.
     """
 
     def residual_fn(phi):
@@ -267,9 +313,113 @@ def test_growth_factor_widens_what_the_line_search_accepts() -> None:
     phi = jnp.array([1.0])
     delta = jnp.array([1.0])
     reference = jnp.linalg.norm(residual_fn(phi))
-    _, alpha_monotone = backtracking_line_search(residual_fn, phi, delta, reference, 10)
-    _, alpha_relaxed = backtracking_line_search(residual_fn, phi, delta, reference, 10, growth=2.5)
-    # The full step doubles the residual here, so strict descent finds nothing and falls back to
-    # its smallest rung; allowing a 2.5x rise admits the full step.
-    assert float(alpha_monotone) == 0.5**10  # the failure sentinel: nothing descended
-    assert float(alpha_relaxed) == 1.0  # the full step is admissible under controlled growth
+    _, alpha = backtracking_line_search(residual_fn, phi, delta, reference, 10)
+    assert float(alpha) == 1.0  # the longest finite rung, not 0.5**10
+
+
+def test_the_fallback_skips_step_lengths_that_overflow() -> None:
+    """The longest *finite* rung -- an overflowing trial state is never returned.
+
+    A non-finite trial compares False against the acceptance test, so without an explicit finiteness
+    check the fallback could hand back a step that blew the state up.
+    """
+
+    def residual_fn(phi):
+        return jnp.where(
+            phi > 2.5, jnp.inf, phi * 1.05
+        )  # all rungs inadmissible; long ones overflow
+
+    phi = jnp.array([1.0])
+    delta = jnp.array([4.0])
+    reference = jnp.linalg.norm(residual_fn(phi))
+    _, alpha = backtracking_line_search(residual_fn, phi, delta, reference, 6)
+    assert float(alpha) < 1.0  # alpha = 1 would land at phi = 5 and overflow
+    assert bool(jnp.isfinite(residual_fn(phi + float(alpha) * delta)).all())
+
+
+def test_growth_factor_widens_what_the_line_search_accepts() -> None:
+    """A growth factor above one accepts a step strict descent rejects.
+
+    Insisting on a decrease every step is incompatible with pseudo-transient continuation: the shift
+    makes the residual rise along the path out of a bad basin, so a strictly monotone test rejects
+    exactly the steps that would escape it. Allowing controlled growth far from the root admits them.
+    """
+
+    def residual_fn(phi):
+        return phi * 1.05
+
+    phi = jnp.array([1.0])
+    delta = jnp.array([1.0])
+    reference = jnp.linalg.norm(residual_fn(phi))
+    _, monotone = backtracking_line_search(residual_fn, phi, delta, reference, 10)
+    _, relaxed = backtracking_line_search(residual_fn, phi, delta, reference, 10, growth=2.5)
+    # Strict descent finds nothing admissible and falls back to the longest finite rung; the relaxed
+    # test *accepts* the full step outright. Same alpha here, but one is a fallback and one a choice.
+    assert float(monotone) == 1.0
+    assert float(relaxed) == 1.0
+
+
+class _SaddleShift(eqx.Module):
+    """A shift that damps the first row and leaves the second unshifted -- a constraint row.
+
+    This is the shape the coupled flow policy has: the momentum rows carry the operator diagonal while
+    continuity, being an algebraic constraint with no time derivative, carries zero.
+    """
+
+    def shift_term(self, phi):
+        del phi
+        return ShiftTerm(jnp.array([1.0, 0.0]), lambda relaxation: None)
+
+
+def test_the_descent_backoff_lowers_the_shift_until_the_correction_descends() -> None:
+    """The shift is backed OFF, not escalated, when no step length along the direction can help.
+
+    The shifted correction is not a descent direction by construction, and the reason is the *mixture*
+    of shifted and unshifted rows. On a saddle system whose constraint row carries no shift, the
+    directional derivative of the residual measure along the correction goes
+
+        beta = 0 -> -2.3,  beta = 0.5 -> -1.15,  beta = 2 -> +2.3,  beta = 10 -> +20.7
+
+    -- descent is lost above a critical shift strength and gets worse from there. Every step length
+    then raises the measure, so the line search can only pick the least-harmful rung and the march
+    reports steps while standing still. Escalating there makes it worse; the cure is less shift, which
+    is what the backoff does. (Shift *every* row uniformly and the derivative stays negative at any
+    beta, which is why this needs the constraint row to reproduce.)
+    """
+    matrix = jnp.array([[1.0, 1.0], [-1.0, 0.0]])
+    target = jnp.array([1.0, 0.3])
+
+    def residual_fn(phi):
+        return matrix @ phi - target
+
+    phi = jnp.array([2.0, -1.0])
+    # The sign change above is in an L1 measure -- the shape the equilibrated residual measure takes.
+    common = dict(
+        shift_policy=_SaddleShift(),
+        line_search=6,
+        max_escalations=0,
+        residual_norm=lambda r: jnp.sum(jnp.abs(r)),
+    )
+    # beta0 = 2 puts the starting shift past the sign change measured above.
+    schedule = SwitchedEvolutionRelaxation(beta0=2.0, exponent=0.0)
+    without = PseudoTransientStep(**common, relaxation_schedule=schedule)
+    with_backoff = PseudoTransientStep(
+        **common, relaxation_schedule=schedule, descent_backoff=4, descent_test=True
+    )
+
+    measure = common["residual_norm"]
+    r0 = measure(residual_fn(phi))
+    solver = without.default_solver()
+    plain, _, _ = without.stepper()(residual_fn, phi, r0, solver)
+    backed, _, _ = with_backoff.stepper()(residual_fn, phi, r0, solver)
+
+    # Backing the shift off reaches a lower residual than stepping at the non-descent shift strength.
+    assert float(measure(residual_fn(backed))) < float(measure(residual_fn(plain)))
+    assert float(measure(residual_fn(backed))) < float(r0)
+
+
+def test_the_descent_machinery_is_off_by_default() -> None:
+    """Both are opt-in: each backoff costs a shifted solve, so nothing pays for it unasked."""
+    step = PseudoTransientStep(shift_policy=_SaddleShift())
+    assert step.descent_backoff == 0
+    assert step.descent_test is False

@@ -217,7 +217,10 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       concluding. Hence: shipped as an opt-in with the **default unchanged** (`w=1` = the historical `a_P`),
       not adopted and not withdrawn.
     - **RE-TESTED PROPERLY (2026-07-25, #28): the convective basis is NOT dominated — it is 2.2× better
-      at the march's own operating point, with an optimum at Co ≈ 1.** The earlier probe above rebuilt
+      at the march's own operating point, with an optimum at Co ≈ 1.** ⚠️ **SUPERSEDED — this conclusion
+      is wrong and was overturned on marches; see "the convective basis is DOMINATED" below. It is kept
+      only as the third recorded instance of a single-step %/s sweep picking the wrong winner.** The
+      earlier probe above rebuilt
       the continuation at the state it measured, and used a state that was barely separated; this one
       uses the **carried protocol** at a state that is both developed (`x_r/h` ~1.2) and productive
       (α = 1, 14 cycles), with β taken from the **segment-local** ratio. Residual reduction, %/s:
@@ -257,16 +260,18 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       | **a_P, β₀ = 0.5, shift refreshable** | **109 / 76 min** | **2.43** | **3.04** | **4.6e-3** | **1.0** |
       | convective at nominal Co ≈ 1, refreshable | 85 / 77 min | 1.07 | 2.58 | 1.5e-2 | **0.001 stalled** |
 
-      **`β₀ = 0.5` is the result to take from all of this: a 46 % larger bubble than the shipped
-      configuration, in fewer steps and slightly less wall time, at 1.8× the residual depth with α = 1
-      sustained.** It is the best this case has produced. The convective arm did not merely lose, it
-      **stalled** — α pinned at the 0.001 ladder sentinel with the residual frozen to five figures for
-      four consecutive steps.
+      At the time, `β₀ = 0.5` was the best this case had produced (a 46 % larger bubble than the shipped
+      configuration). **⚠️ That is now SUPERSEDED and REVERSED — see the post-`a_P`-fix re-profile below;
+      `β₀ = 0.5` is currently the worst of the three and `β₀ = 2` is right.** The convective arm did not
+      merely lose, it **stalled** — α pinned at the 0.001 ladder sentinel with the residual frozen to
+      five figures for four consecutive steps.
       - **The single-step sweep rated convective at Co ≈ 1 (0.051 %/s) level with a_P at β = 0.5 (0.056)
         and better than a_P at every β ≥ 1.** The marches say the opposite. That is the **second** time
         in one session that a single-state single-step ‖R‖ measurement chose the wrong winner (the first
         was the log-space ω shift, `.claude/rules/turbulence.md`). **Treat %/s sweeps as a way to find
         candidates, never as a way to choose between them** — the choice needs a march judged on physics.
+        (The 2026-07-26 re-profile is the **third** instance: the same sweep's `Co ≈ 1` optimum did not
+        survive a constant-β march either.)
       - **This does NOT close out local timestepping (open question).** The Co ≈ 1 optimum was measured
         with the shift frozen at the cold initial condition, so the Courant number it optimized was
         *nominal*: `d_conv` was built from potential-flow mass fluxes, not the developed ones. With a
@@ -274,6 +279,187 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         exceed cold-IC fluxes, nominal Co ≈ 1 corresponded to a larger *actual* Co, which would leave the
         refreshable arm under-damped and is consistent with the stall. Re-sweep Co **on marches** with the
         refreshable shift before concluding; do not reuse the frozen-shift optimum.
+        **— CLOSED 2026-07-26 by the re-profile below: re-swept, and the under-damping explanation is
+        refuted. The pure convective basis is dominated at every damping level tested.**
+    - **⚠️⚠️ THE EUCLIDEAN ‖R‖ MIS-RANKS STATES — a converged field scores WORSE than a badly wrong one
+      (measured 2026-07-26). This invalidates ‖R‖-based comparisons throughout this file; read this
+      before trusting any of them.** Raw norm against a scale-free per-cell measure, four states, same
+      mesh and model:
+
+      | state | raw ‖R‖ | **`\|R_ω\|/ω` median** | `\|R_k\|/k` | flow | x_r/h |
+      |---|---|---|---|---|---|
+      | cold initial condition | 286.3 | 4.54e-05 | 5.73e-05 | 2.52e-01 | 0.00 |
+      | cold march, step 90 | **3.68** | 2.44e-05 | 3.41e-05 | 5.21e-02 | 1.22 |
+      | OpenFOAM reference (converged) | 21.2 | **3.48e-06** | 3.06e-06 | 6.74e-03 | 7.74 |
+      | our own warm-started root | 4.57 | **2.32e-06** | 2.84e-06 | 1.27e-03 | 8.07 |
+
+      **The scale-free measure ranks all four correctly; the raw norm inverts the middle two**, rating a
+      state whose recirculation is six times too short (3.68) above both converged fields. Two
+      compounding causes, both measured:
+      - **The ω residual is not dimensionless.** OpenFOAM's field is converged to a *relative* imbalance
+        of 3.5e-6 — 7× better than the cold march's 2.4e-5 — but its ω is sharp and developed, so the
+        same relative error yields a far larger absolute residual. Raw ω residuals cannot be compared
+        across states with different turbulence levels, which is exactly what a march does.
+      - **At converged states the ω L2 is a TEN-CELL statistic.** At the reference the top **1** cell
+        carries **41.9 %** of ‖R_ω‖² and the top 10 carry **75.9 %** (the sharp near-wall peaks); at the
+        under-developed marched state it is spread out (top 1 = 1.1 %, top 10 = 5.4 %). A metric that
+        concentrates into a handful of cells precisely as the solution becomes correct is backwards.
+      - **The flow block's raw residual already ranks correctly** (2.5e-1 → 5.2e-2 → 6.7e-3 → 1.3e-3).
+        Only k and ω are mis-scaled — and ω is ~100 % of the norm.
+      **⚠️ CORRECTION (same day): the "mis-ranks states" framing above is OVERSTATED — do not repeat
+      it.** The OpenFOAM field is *not* a root of these equations (another discretization, a different
+      wall treatment, an instantaneous snapshot of an unsteady shear layer), so a residual measure
+      rating it by its own nonzero imbalance is **correct behaviour, not a defect**. Demanding that a
+      measure rank a foreign field as converged is a broken test, and the row-equilibrated measure does
+      not do it either (cold march 1.16e-2 vs that field's 1.34e-2, scales rebuilt per state). On
+      states that *are* ours both measures already rank correctly: our warm-started root scores best
+      under the raw norm (0.98 vs the march's 3.68) as well as the scaled one.
+      **What actually survives, and it is enough:** the raw norm is ~100 % ω, so it does not *report*
+      flow progress. Measured directly at a state known to be near the correct root — the warm-start
+      run — raw ‖R‖ moved 13.87 → 13.70 (**−0.2 %, reading as stalled**) while the flow block fell
+      6.30e-3 → 5.03e-3 (**−20 %**). That is what starves the line search and SER of flow information,
+      and it is the real case for equilibration; the block spread narrows from ~100 %-ω to within ~10×
+      across blocks.
+      **Consequence (binding):** SER's β ramp, the line-search acceptance, the divergence guard, the
+      convergence test, and every β / basis / preconditioner comparison recorded in this file are
+      computed on a measure that is ~100 % one block. This is the concrete,
+      quantified case for row equilibration (#29) — divide each row by its own scale so `|R_ω|/ω` is
+      what is measured — and for per-block reporting (#24). Note this is **not** the earlier claim that
+      "the answer is unreachable by descent": that was measured against the OpenFOAM field as the
+      endpoint and was **wrong**, because that field is another discretization's instantaneous snapshot
+      and not a root of these equations. Our own root scores 2.77–4.57, *below* the cold march's 3.68 —
+      the landscape around the true solution is fine.
+    - **⚠️ THE COLD-START CRAWL IS A REACHABILITY PROBLEM, NOT A WRONG ROOT — settled 2026-07-26 by a
+      warm start, and this reframes every globalization result below.** A cold march reaches only
+      `x_r/h` 1.22 in 91 steps against the reference's 7.74, which is consistent with two completely
+      different stories: the solver cannot *reach* the right root, or it converges correctly to its
+      *own* root, which has a short bubble. Starting **from** the time-accurate reference separates
+      them, and the answer is unambiguous — the root is ours and it is in the right place:
+
+      | arm (near-wall ω blend) | x_r/h | k_peak | ‖R‖ from → after 5-6 steps | flow | k |
+      |---|---|---|---|---|---|
+      | shipped power mean, `p = 2` | 7.74 → **7.82** | 5.03 | 21.20 → **13.70** | 6.7e-3 → 5.0e-3 | 2.0e-2 → 1.5e-2 |
+      | `max` limit, `p = 60` | 7.74 → **7.99** | 5.03 | 20.67 → **6.70** | 6.7e-3 → **1.8e-3** | 1.2e-2 → **2.6e-3** |
+
+      Every block descends and the reattachment holds. **So no closure/model work is required to get
+      the bubble** — the closure was never the problem (which also confirms the older three-way
+      verification recorded in `.claude/rules/turbulence.md`), and the entire remaining gap is the
+      solver's inability to travel from a cold start to a root it is perfectly happy to sit on.
+      - **Consequence for what to build:** de-emphasizing ω in the *measure* is now a justified lever
+        rather than a guess, because a reachable correct root is known to exist. The target is
+        quantitative: along the straight segment from a cold-march state to the reference the total
+        residual **peaks at ~5.9×** while the **flow block falls monotonically 7.7×** (5.2e-2 →
+        6.7e-3). Any measure that lets the march traverse that must stop ω's few-cell L2 from vetoing
+        flow progress. The acceptance rule currently tolerates `1.107×` (`RelaxedFarFromRoot` at
+        rel 1.3e-2), i.e. **~5× too little**.
+      - **The ω-dominance pathology is visible even at the root.** In the `p = 2` arm, ‖R‖ moves
+        13.87 → 13.77 → 13.74 → 13.72 → 13.70 (−0.2 % per checkpoint, reading as "stalled") while the
+        flow block falls 6.30e-3 → 5.03e-3 (−20 %). Since this state is *known* to be near the correct
+        root, that cannot be confused with a genuine stall: it is the global norm failing to report
+        flow convergence. This is the concrete case for per-block reporting (#24) and row
+        equilibration (#29).
+      - **A `max` near-wall blend is better on CONVERGENCE, not only on accuracy.** `.claude/rules/turbulence.md`
+        justified `p → ∞` on agreement grounds (per-wall-cell `|R_ω|/ω` 3500× smaller) and left the
+        default open as "a model decision". This adds an independent argument: from the same start it
+        reaches **2× the residual depth** (6.70 vs 13.70) and a **2.8× lower flow residual** in the same
+        number of steps, while `p = 2` flattens. Note the ω **L2 at the reference** barely moves between
+        blends (21.20 vs 20.67, 2.5 %) — that norm is a handful of ω~1e5 cells and is not the quantity
+        that discriminates, which is itself a caution against judging the blend on ‖R‖.
+      - **Honest caveat on the number:** `x_r/h` does not settle exactly on OpenFOAM's 7.74. It creeps
+        to 7.82 (`p = 2`) and 7.99 (`p = 60`, still rising when measured) — a ~1–3 % longer bubble.
+        Report that as a solver-to-solver difference, not as a match; it is expected for a
+        wall-resolving closure on a wall-function mesh, and it is small beside the cold-start gap.
+      - **Also measured: the residual at the reference is UNCHANGED by the 2026-07-25/26 fixes.**
+        Current code gives flow 6.74e-3, k 1.99e-2, ω 21.2 against the 2026-07-24 record's ~6e-3,
+        ~1e-2, ~20. The fixation-row fix and both `a_P` fixes mattered for the **march**, not for the
+        root.
+      - **Trap that cost an hour here (binding for any future reference comparison):**
+        `compare.read_openfoam_reference()` used to read `runs/kwsst`, the **corrupt steady** case, so a
+        probe calling it silently inherited the inlet checkerboard — ω spanning 0.03 to 1.15e8, with
+        **ten cells carrying 100 % of the ω residual** and a total ‖R‖ of 4.1e8. That produced a
+        spurious "10⁸ residual ridge blocks the path" and a spurious `cos(step, error) = −0.087`
+        (the true value against the transient field is **+0.13**, i.e. weakly *aligned*). The loader now
+        reads `of_transient/0.14`. **Sanity-check any reference measurement against the recorded
+        ‖R‖ ≈ 20 before drawing conclusions from it.**
+    - **⚠️ RE-PROFILED AFTER THE `a_P` FIX (2026-07-26) — the two conclusions above REVERSE. Read this
+      bullet, not them.** The flux-continuous (harmonic) face viscosity and the wall-model boundary
+      viscosity changed `a_P` itself, and the shift is `β·a_P`, so **every β calibration measured before
+      that fix is void** — the harmonic mean is ≤ the arithmetic one it replaced, so the same β now buys
+      *less* damping and the optimal β moves **up**. Three cold-IC marches, shipped `solve_coupled`,
+      drift refresh, judged on the recirculation length:
+
+      | arm | steps | **x_r/h** | k_peak | rel | α (tail) | cyc/step |
+      |---|---|---|---|---|---|---|
+      | **`a_P`, β₀ = 2 (the shipped default)** | **67** | **0.99** | 1.61 | **1.4e-2** | **1.00** | **12.5** |
+      | `a_P`, β₀ = 0.5 (the former "best") | 16 | 0.39 | 1.41 | 9.5e-2 | **0.13** | 29.0 |
+      | convective, Co adapted from α | 2 | — | — | 8.9e-1 | 0.125 | 22 → killed |
+
+      `β₀ = 0.5` is now **under-damped and stalling** (α 0.13, 29 cycles/step, bubble frozen at 0.39),
+      exactly the failure the convective arm shows — and for the same reason, too little effective
+      damping. **Take `β₀ = 2`.**
+    - **The convective basis (`w = 0`) is DOMINATED — settled by a controlled 2×2 plus a β sweep, do not
+      re-open on a %/s sweep (2026-07-26).** Three steps from the same cold IC at **constant** β
+      (`exponent = 0`, so β is genuinely fixed and the arms are compared at equal damping, not equal
+      residual history). The probe reproduces the real march bit-for-bit at step 0, which is the harness
+      validation that must precede any such claim:
+
+      | basis | β | cyc 0/1/2 | α 0/1/2 | rel after 3 steps |
+      |---|---|---|---|---|
+      | **`a_P`** | 2 | 15 / 14 / 13 | **1.000 / 1.000 / 1.000** | **0.2995** |
+      | convective | 1 | 18 / 14 / 13 | 0.125 / 0.125 / 0.125 | 0.8035 |
+      | convective | 3.3 (= matched effective damping) | 36 / 22 / 24 | 0.250 / 0.125 / **0.0039** | 0.8980 |
+
+      The convective basis is clipped at **every** step while `a_P` takes full steps at the same cost,
+      and at *matched* effective damping it is worse still and collapses into the ladder by step 2
+      (α → 0.0039 → 0.0020, the 0.001 sentinel again). Three candidate explanations were each proposed
+      and each **refuted by measurement** — record them so they are not re-proposed:
+      - *Preconditioner inconsistency* (the MSIMPLER Schur ignores the shift, which for a non-uniform
+        basis is a spatially-varying error): refuted by the 2×2 below. **Issue #163, closed as
+        refuted.**
+      - *Damping level / wrong Co calibration* (the convective diagonal is only ~0.61 of `a_P`, so
+        "Co = 1" under-damps 3×): refuted by the β = 3.3 row — matching effective damping does not
+        recover α, and makes progress *worse*.
+      - *Weakened diagonal dominance / near-wall cells left undamped*: refuted directly — `a_P + βd` is
+        **more** diagonally dominant than `a_P`, and the measured convective share bottoms out at
+        p1 = 0.30 (never near zero), with the least-damped cells **mid-channel**, not at the wall.
+      - *The recirculation is left undamped* (a convective-only `Δt → ∞` where the mass flux vanishes,
+        i.e. no damping in the most nonlinear region): refuted, and the correlation runs the **other**
+        way. At a developed state (`x_r/h` 1.22) the reversed-flow cells have a **higher** convective
+        share than the forward-flow ones (median 0.778 vs 0.652), and they are strongly
+        *under*-represented among the least-damped — 0.00× the base rate in the bottom 1 % by share,
+        0.14× in the bottom 5 %. The least-damped 2 % are at `x/h ≈ +10.8`, `y/h ≈ −0.10`, moving at
+        **7.03 m/s against a 5.10 m/s domain median**: the fast downstream core, where the developed
+        eddy viscosity makes the viscous diagonal dominate.
+      **No mechanism is offered — four were proposed and all four were refuted by measurement. The
+      empirical result stands without one; do not add a fifth without a measurement that discriminates
+      it.** What *is* established: the shipped `w = 1` basis is the classical local time step (the shift
+      `β a_P` is `V/Δt` with `Δt = Co·V/λ`, `Co = 1/β`, `λ` the **combined** convective + viscous
+      spectral radius — Blazek's form), and it holds `α = 1.0` for 90+ consecutive steps. `w = 0` is
+      that same formula with the viscous stability limit deleted, on a mesh where the developed `ν_t`
+      makes the viscous half the **larger** one almost everywhere (share median 0.66). So this is not
+      evidence against local timestepping; the default *is* local timestepping and it is what works.
+    - **The Schur's blindness to the shift is NOT a defect — measured, do not "fix" it (2026-07-26,
+      #163).** `apply_at` feeds the velocity block the shifted diagonal `a_P + β d`, while the MSIMPLER
+      Schur uses `Q̂/k` calibrated from the **un-shifted** diagonal, i.e. it ignores the shift entirely.
+      That looks like an inconsistency, and for a non-uniform basis the discrepancy is spatially varying
+      (`1/(1 + β·share)`, share 0.30–0.97) rather than a global scalar. It costs nothing. A 2×2 at fixed
+      β, varying only `schur_scaling` (`simple` uses the shifted `a_p` and is consistent by
+      construction):
+
+      | basis | `msimpler` (shift-blind) | `simple` (consistent) | ratio | α (both) | rel (both) |
+      |---|---|---|---|---|---|
+      | `a_P`, β = 2 | **15** cyc | 36 cyc | 2.4× | 1.000 | 4.8530e-01 |
+      | convective, β = 1 | **18** cyc | 34 cyc | 1.9× | 0.125 | 9.2719e-01 |
+
+      Within each basis `α` and the residual ratio are **bit-identical across all three steps measured**
+      — the "a preconditioner changes cost, not the converged step" property, which also confirms these
+      solves genuinely converge. There is **no interaction**: the consistent Schur is uniformly ~2×
+      worse, and *less* bad on the convective basis (1.9× vs 2.4×) — the opposite of the hypothesis.
+      `Ŝ` is an approximation chosen for **spectral quality**, not a derivation of the true Schur
+      complement; MSIMPLER's whole premise is replacing `a_P` with a velocity-independent mass-matrix
+      stand-in, so being more faithful to `(A + βD)⁻¹` does not make it a better preconditioner. This
+      also confirms the earlier "shift-consistent Schur is strictly worse at every β" finding **does**
+      transfer to a non-uniform basis, contrary to what was argued when #163 was filed.
     - **Neither α nor the cycle count can serve as a controller target on this problem.** Across the
       whole sweep above — two bases, a 12× span in β — **α is 1.0000 at every single point**, and the
       cycle count is flat at 14 through `a_P`'s entire productive range. Both are constant where the
@@ -414,6 +600,75 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       because the state is direction-limited (α = 0.001 at every β and shift basis) *and* maximally
       stale for a carried preconditioner. Cost questions belong on a cold-IC march, where steps are
       accepted on the first attempt.
+  - **⚠️ THE SHIFTED CORRECTION IS NOT A DESCENT DIRECTION, AND THE CAUSE IS THE UNSHIFTED CONSTRAINT
+    ROW (measured 2026-07-27). This is the mechanism behind the α-at-the-smallest-rung stalls recorded
+    throughout this file.** For the *exact* Newton direction (`J δ = −R`) the derivative of any
+    positively-weighted residual measure along `δ` is `−‖R‖ < 0` — descent, for free. The **shifted**
+    direction satisfies `J δ = −R − β D δ`, whose second term has no fixed sign, and its damage grows
+    with β. Measured directly (`∇f·δ` by forward-mode AD through the measure) on a stiff coupled state:
+
+    | β | 0.05 | 0.2 | 0.5 | 1.0 | **2.0** |
+    |---|---|---|---|---|---|
+    | `∇f·δ` | −7.7e-3 | −1.7e-3 | −4.9e-4 | −1.3e-4 | **+3.9e-5** |
+    | ladder minimum α | 1.0 | 1.0 | 0.25 | 0.25 | **0.00098** |
+
+    **The sign changes between β = 1 and β = 2, and the march was running at β ≈ 1.9.** At β = 2 the
+    best rung on the whole ladder is the shortest one, which reproduces the observed stall exactly. Note
+    the lower bound too: at β ≤ 0.2 the trial states go non-finite, so the usable window at that state
+    was roughly **0.5 ≤ β ≤ 1**.
+    - **What causes it is the MIXTURE of shifted and unshifted rows — not the weighting, and not the
+      off-diagonal coupling.** Both of those were proposed and refuted on toy systems: a scalar residual
+      gives `∇f·δ = −|R|·J/(J + βD) < 0` for *any* β, and a symmetric system with strong off-diagonal
+      coupling, or with strongly skewed row weights, still descends at every β tested. What reproduces it
+      is a **saddle system whose constraint row carries no shift** — the exact shape of the flow policy,
+      where momentum rows get the operator diagonal and continuity gets zero:
+
+      | β | 0 | 0.5 | **2** | 10 |
+      |---|---|---|---|---|
+      | `∇f·δ` | −2.30 | −1.15 | **+2.30** | **+20.70** |
+
+      Shift every row uniformly and the derivative stays negative at any β. So *"continuity carries no
+      pseudo-transient term"* is load-bearing after all — **not** because the fixed point needs one (it
+      does not; zero shift on an algebraic constraint is the theoretically correct index-1 PTC), but
+      because the **asymmetry** between damped and undamped rows destroys descent above a critical β.
+      This is the concrete argument for putting *some* damping on the constraint row — a grad-div /
+      augmented-Lagrangian augmentation vanishing at `∇·u = 0` would do it without moving the root (#16).
+    - **Escalation moves β the WRONG WAY for this failure (binding).** A rejected step escalates
+      `β *= escalation_factor`, which is right for an overshoot or an ill-conditioned shifted system.
+      Against a non-descent direction it is worse than useless: more shift makes `∇f·δ` *less* negative,
+      so the loop spends a solve per attempt making the direction worse. `PseudoTransientStep` therefore
+      carries **`descent_backoff`** (lower β until the direction descends, then escalate from there) and
+      **`descent_test`** (reject a non-descent direction outright rather than judging the candidate's
+      norm). Both default off — each backoff costs one shifted solve. `∇f·δ` itself is cheap: one `jvp`
+      on a direction already computed.
+  - **⚠️ THE LINE SEARCH TAKES THE LONGEST ADMISSIBLE STEP, NOT THE BEST ONE — a minimizing search was
+    built, measured, and REVERTED (2026-07-27). Do not re-propose it.** Replacing "first rung that is
+    admissible, walking longest-first" with "the rung that minimizes the measure" lowers the residual per
+    step and is far worse on the physics: on the same cold-start case, judged at identical checkpoints,
+
+    | checkpoint | minimizing | first-acceptable-largest |
+    |---|---|---|
+    | 2 | 0.01 | **0.09** |
+    | 3 | 0.03 | **0.16** |
+    | 4 | 0.05 | **0.34** |
+    | 5 | 0.05 | **0.46** |
+
+    **9× less recirculation development, while reporting BETTER residuals at every early step** (0.377
+    vs 0.430, 0.254 vs 0.293, 0.193 vs 0.212). The α sequences show the mechanism: the minimizing search
+    systematically picks 4–8× shorter steps. **Residual depth per step and distance travelled per step
+    are different objectives, and on a march that has to transport a front across the domain, distance
+    is the one that matters.** This is the fourth time on this case that a residual improvement has
+    pointed the opposite way from the physics — judge a march on `x_r/h`, never on ‖R‖.
+    - **The fallback when NOTHING is admissible is the longest FINITE rung, not the shortest (binding).**
+      Returning the shortest is a near-null step that changes nothing, which the divergence guard then
+      accepts as finite: the march reports a step and stands still. That is a *guaranteed* stall rather
+      than a slow one, and it is what produced the `α = 0.001` signature (`0.001 = 1/2**10`, the smallest
+      rung of the shipped 10-rung ladder — a value that means "nothing passed", not a sentinel).
+    - **The ladder can extend ABOVE α = 1 (`grow` rungs of doubling; default 0 = off).** Measured on a
+      developed state: the full step moved the reattachment not at all, while `α ≈ 5.7` moved it four
+      times further **and already sat inside the tolerance the acceptance rule allowed** — it was simply
+      unreachable from a ladder that starts at 1. Any scan or study of step length must therefore not
+      hard-bound its grid at 1.0, which an earlier one did, making "α = 1 is optimal" unfalsifiable.
   - **`line_search` — backtrack the shifted step before escalating β (binding, the coupled-RANS fix).**
     The step optionally scales the shifted correction `δ` back along `{1, 1/2, …, 1/2**line_search}`
     (`backtracking_line_search`, extracted from `implicit.py` and shared with `DampedNewtonStep` — one
@@ -753,6 +1008,22 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     to JAX that carrying one instance across outer sweeps is a `filter_jit` cache **hit** (non-array
     arguments go to the static side, hashed by identity). Both were hit and fixed while building #105 —
     do not "modernize" these into `equinox.Module`s.
+- **`norm_builder` — the residual measure is re-derived every outer iteration, and held FIXED within
+  one (binding).** `forward_march(norm_builder=…)` takes a `state -> ResidualNorm` and, at the top of
+  each iteration, swaps the rebuilt measure onto the step with `eqx.tree_at` (the same mechanism the
+  α-control uses for β) and re-measures `residual_norm_0` against it so the SER ratio stays on one
+  scale. Every line-search trial step, the acceptance test and the reported norm within that iteration
+  then use the *same* measure — **rebuilding per trial step would let a candidate win by shrinking its
+  own denominator rather than its residual**, so the search would stop comparing like with like.
+  - **This is why `residual_norm` is a DATA field on both `ForwardStep`s, not a static one.** A static
+    field lives in the treedef, so swapping it would be a new compilation *every step*. As data, and
+    with the measure carrying its scales as traced leaves over a fixed block structure
+    (`RowScaledNorm`), the swap is a cache hit. A plain callable (the default) has no array leaves and
+    is filtered to the static side regardless, so the default path is byte-identical.
+  - **⚠️ `RowScaledNorm` is MARCH-ONLY today.** `ImplicitNewtonSolver` passes `forward.norm()` into
+    `custom_vjp`'s `nondiff_argnums`, which requires a hashable object, and a pytree holding arrays is
+    not hashable there. So the finishing solve keeps whatever measure it was constructed with. Letting
+    the traced solver use it requires reworking that slot — not done.
 - **`march.py` — BUILT (`forward_march`, `StepReport`/`MarchResult`, `RefreshTrigger`/`CycleGrowthTrigger`):
   the observed, forward-only march that drives a mid-march preconditioner refresh.**
   - **Two marches, ONE decision layer (binding — this is the shape to hold).** `_forward` (traced,

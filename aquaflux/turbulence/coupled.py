@@ -59,6 +59,7 @@ from aquaflux.solve import (
     PseudoTransientStep,
     RefreshTrigger,
     ResidualNorm,
+    RowScaledNorm,
     ShiftBasis,
     ShiftTerm,
     StepControl,
@@ -709,6 +710,102 @@ def _mass_flow_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray)
     return BlockScaledNorm(sizes, (s_flow, s_k, s_omega, s_flow))
 
 
+def coupled_scaled_norm(
+    coupled: CoupledRANS,
+    shift_policy: CoupledShiftPolicy,
+    state: jnp.ndarray,
+) -> RowScaledNorm:
+    """Build the row-equilibrated residual measure for the coupled state at ``state``.
+
+    Assembles the two scales :class:`~aquaflux.solve.RowScaledNorm` needs, per block of the coupled
+    layout ``[vel_0..vel_{dim-1}, pressure, k, omega]``:
+
+    * **Row scale** -- each row's own diagonal coefficient, taken from the pseudo-transient shift's
+      base diagonal, which is exactly that quantity per block (the momentum ``a_P`` on velocity, the
+      transport diagonal on ``k`` and ``omega``) and so cannot drift from it. Two rows are not covered
+      by it and are supplied here:
+      - **Continuity carries no diagonal** -- it is a constraint, so the shift leaves it at zero. Its
+        residual is a mass imbalance, and the natural scale of the same units is the cell's mass
+        throughput ``sum_f max(mdot_f, 0)``. Dividing by it needs no pressure difference, so it stays
+        well posed on a periodic or closed domain where a pressure scale degenerates.
+      - **The near-wall fixed ``omega`` rows** hold an algebraic constraint rather than a balance, and
+        the shift zeroes them. Their derivative comes from the row itself
+        (:meth:`~aquaflux.discretization.FixationRow.jacobian_scale`) -- one, for a fixation written in
+        the solved variable -- so they pass through unscaled rather than being divided by a
+        neighbouring transport row's diagonal, which would misreport them by orders of magnitude.
+
+    * **Field scale** -- ``mean(phi / (dphi/dw))``, which turns the stage-1 quotient (a change in the
+      *solved* unknown) into a fractional change in the *physical* field. For a directly-solved field
+      this is the familiar ``mean|phi|``; for a log-solved one ``dphi/dw = phi``, so the scale is
+      exactly **one** -- a change in ``log phi`` already *is* a fractional change, and dividing by
+      ``mean|phi|`` a second time would be wrong. Continuity likewise takes one, being dimensionless
+      after stage 1.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled assembler, for the layout and the physical fields.
+    shift_policy : CoupledShiftPolicy
+        The policy whose base shift diagonal supplies the per-row diagonals.
+    state : jnp.ndarray
+        The coupled state the scales are measured at, shape ``((dim + 3) n_cells,)``.
+
+    Returns
+    -------
+    RowScaledNorm
+        The measure, with its scales frozen at ``state``. It is hashed by identity, so rebuilding it
+        recompiles the solve -- rebuild it on the same cadence as the frozen preconditioner, and hold
+        it fixed across a line search (otherwise a candidate could be preferred for shrinking its own
+        denominator rather than its residual).
+    """
+    layout = coupled.layout
+    n, dim = layout.n_cells, layout.dim
+    tiny = 1e-300
+
+    diagonal = jax.lax.stop_gradient(shift_policy.shift_term(state).diagonal)
+    flow_diag, k_diag, omega_diag = layout.unpack(diagonal)
+    velocity_diag, _pressure_diag = coupled.momentum.unpack(flow_diag)
+
+    flow, k, omega = coupled.physical_fields(state)
+    velocity, _pressure = coupled.momentum.unpack(flow)
+    # Continuity's stand-in diagonal: the convective bucket is the per-cell mass throughput, in the
+    # same units as the mass imbalance the row measures.
+    throughput, _dissipative = coupled.momentum.momentum_matrix_diagonal_parts(velocity)
+
+    k_chain = coupled.k_transform.jacobian_scale(k)
+    omega_chain = coupled.omega_transform.jacobian_scale(omega)
+    # A zeroed shift entry marks a row the shift does not own -- the fixed near-wall omega cells. Ask
+    # the fixation row for its own derivative there instead of borrowing a transport row's.
+    omega_fixed = coupled.omega_transform.fixation_row().jacobian_scale(omega, omega_chain)
+    omega_rows = jnp.where(omega_diag > 0.0, omega_diag, omega_fixed)
+    k_rows = jnp.where(
+        k_diag > 0.0, k_diag, coupled.k_transform.fixation_row().jacobian_scale(k, k_chain)
+    )
+
+    row_scale = layout.pack(
+        coupled.momentum.pack(jnp.abs(velocity_diag) + tiny, jnp.abs(throughput) + tiny),
+        jnp.abs(k_rows) + tiny,
+        jnp.abs(omega_rows) + tiny,
+    )
+    velocity_scale = jnp.mean(jnp.abs(velocity))
+    field_scale = jnp.concatenate(
+        [
+            jnp.full((dim,), velocity_scale),
+            # Continuity is already dimensionless once divided by the mass throughput.
+            jnp.ones((1,)),
+            # phi / (dphi/dw) converts a change in the solved unknown into a fractional change in the
+            # physical field: mean|phi| for a directly-solved field, exactly one for a log-solved one.
+            jnp.mean(jnp.abs(k) / jnp.maximum(k_chain, tiny))[None],
+            jnp.mean(jnp.abs(omega) / jnp.maximum(omega_chain, tiny))[None],
+        ]
+    )
+    return RowScaledNorm(
+        sizes=(n,) * (dim + 3),
+        row_scale=jax.lax.stop_gradient(row_scale),
+        field_scale=jax.lax.stop_gradient(field_scale),
+    )
+
+
 def coupled_continuation(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
@@ -1017,6 +1114,7 @@ def solve_coupled(
     refresh_trigger: RefreshTrigger | None = None,
     refresh_limit: int = 1,
     step_control: StepControl | None = None,
+    scaled_norm: bool = False,
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     **continuation_kwargs: object,
@@ -1080,6 +1178,20 @@ def solve_coupled(
         finishing solve compile the step separately, so a refreshed solve pays one compilation more
         than an unrefreshed one over and above the per-refresh rebuild -- the price of leaving the
         convergence guard solely with the solve that produces the result.
+    scaled_norm : bool
+        Steer the observed march by the **row-equilibrated** measure
+        (:class:`~aquaflux.solve.RowScaledNorm`) instead of the continuation's own, rebuilding it at the
+        start of every outer iteration and holding it fixed across that iteration's line search. Each
+        row is divided by its own diagonal and each block by its field's magnitude, so the measure
+        reports a *fractional change* per equation rather than a raw magnitude -- which the plain
+        Euclidean norm on this system cannot, being ~100 % the ``omega`` block and so blind to
+        flow-block progress. **Experimental and off by default.** Two consequences worth knowing before
+        reading a run: the march's stopping test and switched-evolution shift are then in fractional
+        units (a target like ``1e-6`` is meaningful; the old absolute magnitude is not comparable), and
+        the **finishing solve keeps the continuation's measure regardless** -- it passes its norm
+        through a non-differentiated argument slot that requires a hashable object, which a measure
+        holding per-row arrays is not, so its absolute target is computed in that measure and not this
+        one.
     on_step : callable, optional
         Called with each :class:`~aquaflux.solve.StepReport` as the march produces it -- the seam for
         logging a long solve's progress and cost. The refresh trigger reads the same reports.
@@ -1211,7 +1323,20 @@ def solve_coupled(
         # per-refresh rebuild would re-base it and make the convergence test unreachable (seam 4). Hold
         # the initial measure and re-inject it into every refreshed continuation.
         base_norm = continuation.norm()
-        reference_norm = float(base_norm(coupled.residual(state)))
+        # The finishing solve's absolute target is always measured in the continuation's own measure,
+        # whatever the march is steered by, because that solve keeps that measure (see below).
+        base_reference = float(base_norm(coupled.residual(state)))
+        norm_builder = None
+        reference_norm = base_reference
+        if scaled_norm:
+            # Re-derive the row-equilibrated measure at whatever state each outer iteration starts
+            # from -- reading `continuation` at call time, so a refreshed segment's diagonals are used.
+            def norm_builder(at_state: jnp.ndarray) -> ResidualNorm:
+                return coupled_scaled_norm(coupled, continuation.shift_policy, at_state)
+
+            # The march's progress reference must be in the march's own measure, or `residual_ratio`
+            # (and the switched-evolution shift that reads it) would divide two different scales.
+            reference_norm = float(norm_builder(state)(coupled.residual(state)))
         # `refresh_limit` refreshes means `refresh_limit + 1` segments: the segment *after* the last
         # refresh must still be marched here, or the newly-refreshed preconditioner would only ever be
         # used by the finishing solve and its steps would go unobserved.
@@ -1238,6 +1363,7 @@ def solve_coupled(
                 # state it stopped on. Carrying one measure across segments would keep reporting the
                 # drift a refresh had just absorbed, and re-fire immediately.
                 drift_measure=eddy_viscosity_drift(coupled, jax.lax.stop_gradient(state)),
+                norm_builder=norm_builder,
             )
             state = result.state
             control_state = result.control_state
@@ -1259,7 +1385,7 @@ def solve_coupled(
         # against whatever residual the pre-march reached, silently tightening the solve by that factor
         # (and compounding with every extra refresh). This is only possible because the refresh path is
         # forward-only, so `reference_norm` is a concrete number rather than a traced one.
-        stage_rtol, stage_atol = 0.0, atol + rtol * reference_norm
+        stage_rtol, stage_atol = 0.0, atol + rtol * base_reference
 
     solver = ImplicitNewtonSolver(
         max_steps=max_steps, rtol=stage_rtol, atol=stage_atol, forward_step=continuation

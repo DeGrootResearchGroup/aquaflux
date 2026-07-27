@@ -393,3 +393,54 @@ def test_march_reports_the_injected_drift_measure() -> None:
     )
     # The measure is zero only at the state it was based on, and the march has moved away from it.
     assert seen[-1] > 0.0
+
+
+def test_the_march_rebuilds_the_measure_each_outer_iteration_and_holds_it_within_one():
+    """``norm_builder`` re-derives the residual measure per outer iteration, not per trial step.
+
+    The measure's scales depend on the state, so they have to move as the solve does -- but they must
+    be constant *within* an iteration, or the line search stops comparing like with like: a trial step
+    could be preferred for shrinking its own denominator rather than its residual. This records the
+    state each rebuild is asked about, and checks there is exactly one rebuild per step (not one per
+    trial step) and that each is asked about that step's starting state.
+    """
+    asked = []
+
+    def norm_builder(state):
+        asked.append(jnp.asarray(state))
+        # A measure that varies with the state, so a per-trial-step rebuild would be observable.
+        scale = float(jnp.maximum(jnp.mean(jnp.abs(state)), 1e-12))
+        return lambda residual: jnp.linalg.norm(residual) / scale
+
+    def residual_fn(phi):
+        return phi - 1.0
+
+    phi0 = jnp.array([4.0, 4.0])
+    result = forward_march(
+        DampedNewtonStep(),
+        residual_fn,
+        phi0,
+        max_steps=3,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    baseline_states = len(result.reports)
+
+    asked.clear()
+    controlled = forward_march(
+        DampedNewtonStep(),
+        residual_fn,
+        phi0,
+        max_steps=3,
+        rtol=1e-12,
+        atol=1e-12,
+        norm_builder=norm_builder,
+    )
+    # One rebuild to establish the segment reference, then exactly one per outer iteration -- and no
+    # more. A rebuild per *trial* step would show up here as many more calls than steps.
+    assert len(controlled.reports) == baseline_states
+    assert len(asked) == baseline_states + 1
+    # The segment reference is measured in the march's own measure (the setup call), and the first
+    # iteration is asked about the march's starting state rather than some trial point.
+    assert jnp.allclose(asked[0], phi0)
+    assert jnp.allclose(asked[1], phi0)

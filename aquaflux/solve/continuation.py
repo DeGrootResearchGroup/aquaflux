@@ -234,7 +234,28 @@ class PseudoTransientStep(eqx.Module):
     acceptance: StepAcceptance = eqx.field(default_factory=DivergenceGuard)
     line_search: int = eqx.field(static=True, default=0)
     forward_solver: lx.AbstractLinearSolver | None = eqx.field(static=True, default=None)
-    residual_norm: ResidualNorm = eqx.field(static=True, default=jnp.linalg.norm)
+    # Not a static field: an observed march rebuilds the measure each outer iteration and swaps it in
+    # with `tree_at`, and that is only a compilation-cache hit if the measure rides as data. A plain
+    # callable (the default) has no array leaves, so it is filtered to the static side anyway and the
+    # default path is unchanged.
+    # Back the shift off until the correction descends in the measure the solve is judged by, then
+    # escalate from there as usual. Off by default (0), because each backoff costs one shifted solve.
+    #
+    # Why it exists: the shifted correction is not a descent direction by construction. For the exact
+    # Newton direction it would be -- with J delta = -R the derivative of the measure along delta is
+    # -norm(R) for any positive weighting -- but the shifted direction satisfies J delta = -R -
+    # beta D delta, whose second term has no fixed sign and grows with beta. Measured on a stiff
+    # coupled state, the derivative was negative at beta <= 1 and changed sign between beta = 1 and
+    # beta = 2, with the march running at about 1.9: every step length then increased the measure, the
+    # line search could only pick the least-harmful rung, and the march sat still while reporting
+    # steps. Backing the shift off restores descent; escalating -- the response to an overshoot --
+    # makes it strictly worse.
+    descent_backoff: int = eqx.field(static=True, default=0)
+    # Reject a correction that does not descend in the measure, rather than judging it on the
+    # candidate's norm alone. Independent of the backoff: with the backoff off, this makes a
+    # non-descent direction fail so the caller sees it instead of a step that quietly went nowhere.
+    descent_test: bool = eqx.field(static=True, default=False)
+    residual_norm: ResidualNorm = eqx.field(default=jnp.linalg.norm)
     adjoint_preconditioner_factory: (
         Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
     ) = eqx.field(static=True, default=None)
@@ -299,6 +320,7 @@ class PseudoTransientStep(eqx.Module):
         max_escalations, escalation_factor = self.max_escalations, self.escalation_factor
         acceptance = self.acceptance
         line_search = self.line_search
+        descent_backoff, descent_test = self.descent_backoff, self.descent_test
         norm = self.residual_norm
 
         def step(
@@ -355,7 +377,19 @@ class PseudoTransientStep(eqx.Module):
                     norm=norm,
                     growth=growth_factor,
                 )
-                return candidate, norm(residual_fn(candidate)), cycles, alpha
+                # The directional derivative of the measure along the correction, d/ds norm(R(phi +
+                # s delta)) at s = 0. Negative means the direction descends in the measure the solve
+                # is judged by; non-negative means no step length along it can help, and the line
+                # search will be reduced to picking the least-harmful rung.
+                #
+                # This is not guaranteed by construction here. For the exact Newton direction
+                # (J delta = -R) it would be -- the derivative is then -norm(R) for any positive
+                # weighting -- but the shifted direction satisfies J delta = -R - beta D delta, and
+                # that second term carries no fixed sign. Its damage grows with beta: measured on a
+                # stiff coupled state, the derivative was negative for beta <= 1 and changed sign
+                # between beta = 1 and beta = 2, exactly where that march had been running.
+                directional = jax.jvp(lambda x: norm(residual_fn(x)), (phi,), (delta,))[1]
+                return candidate, norm(residual_fn(candidate)), cycles, alpha, directional
 
             # Escalate the damping on a rejected attempt, taking the first the acceptance policy
             # admits. The loop *mechanics* — grow β, cap at max_escalations, carry the best candidate
@@ -370,8 +404,15 @@ class PseudoTransientStep(eqx.Module):
 
             def body(state: tuple) -> tuple:
                 relaxation, best, attempts, _, best_cycles, best_alpha = state
-                candidate, candidate_norm, cycles, alpha = attempt(relaxation)
+                candidate, candidate_norm, cycles, alpha, directional = attempt(relaxation)
+                # A direction that does not descend in the measure is rejected outright, however the
+                # candidate scores. Escalating on it would be worse than useless: more shift makes the
+                # derivative *less* negative, so the loop would drive itself further from a usable
+                # direction while paying for a solve each time. Rejecting instead lets `descent_backoff`
+                # below take over, which moves beta the other way.
                 accept = acceptance.accept(candidate_norm, residual_norm, residual_norm_0, attempts)
+                if descent_test:  # a static choice, so the branch is resolved at trace time
+                    accept = accept & (directional < 0.0)
                 best = jnp.where(accept, candidate, best)
                 # Report the cycles and line-search factor of the attempt actually taken, not the
                 # rejected escalations'. (A fully-rejected step keeps the initial 0 / 1.)
@@ -386,18 +427,54 @@ class PseudoTransientStep(eqx.Module):
                     best_alpha,
                 )
 
-            _, phi_next, _, _, step_cycles, step_alpha = jax.lax.while_loop(
-                cond,
-                body,
-                (
-                    base_relaxation,
-                    phi,
-                    0,
-                    jnp.asarray(False),
-                    jnp.asarray(0, dtype=jnp.int32),
-                    jnp.asarray(1.0),
-                ),
-            )
+            def escalate_from(start: jnp.ndarray) -> tuple:
+                return jax.lax.while_loop(
+                    cond,
+                    body,
+                    (
+                        start,
+                        phi,
+                        0,
+                        jnp.asarray(False),
+                        jnp.asarray(0, dtype=jnp.int32),
+                        jnp.asarray(1.0),
+                    ),
+                )
+
+            # Back the shift OFF until the direction descends, then escalate from there as usual.
+            #
+            # These two loops move beta in opposite directions on purpose, because they answer
+            # different failures. Escalation answers "this step overshot or the shifted system was
+            # ill-conditioned" -- more damping is the cure. The backoff answers "no step length along
+            # this direction can help", which more damping makes strictly worse: the shift term is what
+            # spoils descent, so the derivative only becomes less negative as beta grows. Running
+            # escalation against a non-descent direction therefore spends solves making the direction
+            # worse, which is what a march does when it sits at the shortest rung and does not move.
+            #
+            # Each backoff costs one shifted solve, so it is off by default and bounded when on.
+            def backoff_cond(state: tuple) -> jnp.ndarray:
+                _, tries, descends = state
+                return (~descends) & (tries < descent_backoff)
+
+            def backoff_body(state: tuple) -> tuple:
+                relaxation, tries, _ = state
+                *_, directional = attempt(relaxation)
+                descends = directional < 0.0
+                return (
+                    jnp.where(descends, relaxation, relaxation / escalation_factor),
+                    tries + 1,
+                    descends,
+                )
+
+            start_relaxation = base_relaxation
+            if descent_backoff > 0:
+                start_relaxation, _, _ = jax.lax.while_loop(
+                    backoff_cond,
+                    backoff_body,
+                    (base_relaxation, jnp.asarray(0, dtype=jnp.int32), jnp.asarray(False)),
+                )
+
+            _, phi_next, _, _, step_cycles, step_alpha = escalate_from(start_relaxation)
             return phi_next, step_cycles, step_alpha
 
         return step

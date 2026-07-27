@@ -202,6 +202,35 @@ found and fixed**; treat them as binding, not aspirational.
   existing class, or write a one-line formula that already exists — stop and reach for the
   object/helper instead.*
 
+### 3.5 No scope changes without asking (binding)
+
+**Once the user has agreed to an approach, do not change it — not the design, not the cadence, not the
+coverage — without saying so and getting agreement first.** Narrowing scope is a change just as much as
+widening it. "I'll do the simpler version for now" is a scope change. "Phase 1 / Phase 2" is a scope
+change. Substituting a cheaper approximation of an agreed design is a scope change.
+
+This is not about ceremony; it is about the *evidence* that follows. The observed failure: the user
+agreed a residual measure whose scales are rebuilt every outer iteration and held fixed only across a
+line search. What got built instead froze the scales once at the initial condition — described as
+"Phase 1" rather than flagged as a deviation. The measurement taken under that shortcut then showed the
+measure failing, and that failure was reported as if it were a property of the *formula*. It was a
+property of the unapproved substitution. The user had to catch it.
+
+Concretely:
+- **Flag the deviation at the point of deviation**, in plain terms: "you agreed X; I am about to do Y
+  instead, because Z — is that acceptable?" Do not bury it in scoping language ("for now", "as a first
+  cut", "the pragmatic choice") where it reads as a plan rather than a departure.
+- **Never report a measurement taken under a deviation without naming the deviation** in the same
+  breath as the result. A number obtained from a configuration the user did not agree to is not
+  evidence about the thing they asked about, and presenting it as such actively misleads.
+- If an implementation obstacle forces a change (a hashability constraint, a compile cost, a missing
+  seam), **that obstacle is the thing to surface** — it is usually the most useful information in the
+  task, and the user often knows a way through it that is not visible from the code.
+- Delivering *less* than agreed and calling it done is the same defect as delivering something
+  different. If only part of the agreed work is finished, say which part is missing, in the summary,
+  not only in a tracked issue. (Task #29 was closed with half of it — the row-equilibrated measure —
+  never built; that gap survived unnoticed until it was needed.)
+
 ### 4. No compatibility shims before release (pre-release policy — remove this principle at 1.0)
 
 The project is **pre-release: there are no external API consumers, so breaking API changes are free.**
@@ -646,6 +675,9 @@ After **every code change**, before considering the task complete, review and ac
      has a home, or grow a `# step N` god-method? Fix the seam *now* — reach for the object/helper.
    - **Maintainability (Principle 0):** if you took a quick-to-ship shortcut as an
      intermediate step, refactor it before marking the task done.
+   - **Scope (Principle 3.5):** did you build what was actually agreed? If you narrowed the design,
+     substituted a cheaper approximation, or finished only part of it, say so **in the summary** —
+     and never report a measurement taken under that deviation without naming it.
    - **Solver adjoint & globalization (for any new iterative / coupled / fixed-point solver).**
      Before calling such a solver done, confirm all three: (a) **the adjoint is an
      implicit-function-theorem solve on the converged residual, not the iteration unrolled onto

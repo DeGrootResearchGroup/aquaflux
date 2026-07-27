@@ -81,7 +81,7 @@ from .multigrid import (
     smoothed_multigrid_solve,
 )
 from .newton import newton_step
-from .norm import BlockScaledNorm, ResidualNorm
+from .norm import BlockScaledNorm, ResidualNorm, RowScaledNorm
 from .relaxation import ConstantRelaxation, RelaxationSchedule, SwitchedEvolutionRelaxation
 from .shift_basis import LocalCourantBasis, ShiftBasis, VelocityShiftParts
 from .step_control import AlphaTargetingControl
@@ -106,6 +106,7 @@ __all__ = [
     "RelaxationSchedule",
     "RelaxedFarFromRoot",
     "ResidualNorm",
+    "RowScaledNorm",
     "ShiftBasis",
     "ShiftPolicy",
     "ShiftTerm",
