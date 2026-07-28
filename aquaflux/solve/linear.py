@@ -23,6 +23,7 @@ meets its tolerance.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -32,6 +33,94 @@ import lineax as lx
 def default_linear_solver() -> lx.AbstractLinearSolver:
     """A general-purpose matrix-free solver (restarted GMRES) with tight tolerances."""
     return lx.GMRES(rtol=1e-10, atol=1e-10)
+
+
+def _global_two_norm(pytree: Any) -> jnp.ndarray:
+    """The Euclidean (2-)norm over *all* leaves of ``pytree`` as one flat vector."""
+    leaves = jax.tree_util.tree_leaves(pytree)
+    return jnp.sqrt(sum(jnp.sum(jnp.square(leaf)) for leaf in leaves))
+
+
+class _RelativeResidualGMRES(lx.GMRES):
+    """GMRES whose stopping test is a *global* 2-norm relative residual, not a componentwise one.
+
+    ``lineax``'s stock GMRES applies ``rtol``/``atol`` **componentwise** -- it stops once, for every
+    entry ``i``, ``|r_i| <= atol + rtol*|b_i|`` (default ``max_norm``, so the single worst entry
+    decides). On a coupled saddle system a handful of entries have a near-zero right-hand side (e.g.
+    wall-fixation rows that start satisfied, whose ``|b_i|`` collapses to zero), and there the scale
+    degenerates to ``atol`` alone -- an *absolute* demand. Those few entries then hold the whole solve
+    to ``~atol`` and force it to converge orders of magnitude past the relative tolerance that was
+    actually requested.
+
+    This subclass sidesteps that by scaling the system to unit right-hand-side 2-norm inside
+    :meth:`compute` and deferring to a stock GMRES configured with ``rtol = 0`` (so the componentwise
+    ``rtol*|b_i|`` term vanishes and the scale is the uniform ``atol``), the 2-norm, and ``atol`` set to
+    the desired relative tolerance. Termination is then exactly ``||r||_2 <= atol * ||b||_2`` -- one
+    global relative test that the near-zero entries cannot dominate. Build it with
+    :func:`relative_residual_gmres`.
+    """
+
+    def compute(
+        self, state: Any, vector: Any, options: dict[str, Any]
+    ) -> tuple[Any, Any, dict[str, Any]]:
+        # Scale the right-hand side to unit 2-norm so the (absolute) ``atol`` floor acts as a relative
+        # tolerance; undo the scaling on the returned solution (the map ``b -> x`` is linear, so a
+        # constant factor passes straight through). ``jnp.where`` guards a zero right-hand side.
+        scale = _global_two_norm(vector)
+        scale = jnp.where(scale > 0.0, scale, 1.0)
+        scaled = jax.tree_util.tree_map(lambda v: v / scale, vector)
+        solution, result, stats = super().compute(state, scaled, options)
+        return jax.tree_util.tree_map(lambda x: x * scale, solution), result, stats
+
+
+def relative_residual_gmres(
+    rtol: float,
+    *,
+    restart: int = 120,
+    stagnation_iters: int = 40,
+    max_restarts: int | None = None,
+) -> lx.AbstractLinearSolver:
+    """A GMRES that stops at a **global** 2-norm relative residual ``||Ax - b||_2 <= rtol*||b||_2``.
+
+    The robust termination for an inexact-Newton *forward* solve: it stops when the linear residual
+    has fallen by the factor ``rtol`` in the ordinary Euclidean sense, rather than by ``lineax``'s
+    stock componentwise ``max_norm`` test -- which a few near-zero-right-hand-side entries of a coupled
+    saddle system quietly convert into an absolute ``atol`` demand, forcing the solve orders of
+    magnitude past the tolerance asked for (see :class:`_RelativeResidualGMRES`).
+
+    Parameters
+    ----------
+    rtol : float
+        The relative-residual target ``||r||_2 / ||b||_2`` at which to stop.
+    restart : int
+        The Krylov subspace size before a restart (default ``120``).
+    stagnation_iters : int
+        Restart cycles without progress after which the solve gives up (default ``40``).
+    max_restarts : int or None
+        A hard cap on the number of restart cycles, as an inexact-Newton safety bound; ``None``
+        (default) leaves ``lineax``'s own generous cap in place and relies on ``rtol``.
+
+    Returns
+    -------
+    lineax.AbstractLinearSolver
+        A solver realizing the global relative-residual stop, for injection as a forward solver.
+
+    Notes
+    -----
+    The residual it measures is the **preconditioned** one when the solve is left-preconditioned
+    (``solve_linear`` folds the preconditioner into the operator and right-hand side), so the test is
+    ``||M(Ax - b)||_2 <= rtol*||M b||_2``. That is the standard, and adequate, inexact-Newton stopping
+    quantity for a globalized march; the converged root and its adjoint are unaffected either way,
+    since the shift vanishes at the root and the adjoint is a separate transpose solve.
+    """
+    return _RelativeResidualGMRES(
+        rtol=0.0,
+        atol=rtol,
+        norm=_global_two_norm,
+        restart=restart,
+        stagnation_iters=stagnation_iters,
+        max_steps=max_restarts,
+    )
 
 
 def solve_linear(

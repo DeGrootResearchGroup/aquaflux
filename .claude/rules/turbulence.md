@@ -688,9 +688,14 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     rel 1.0* — the case is now solvable at all, a correctness fix, not just speed. **(2) The shifted
     solve needs a large Krylov subspace:** `_COUPLED_FORWARD_SOLVER` is restart-120 GMRES (the shared
     restart-40 default discards too much Arnoldi history on this stiff saddle system; ~1.4× faster to
-    the same tight solution). Tolerances stay **tight** — an inexact solve is unsafe under log-`ω` (an
-    inaccurate log step is exponentiated and diverges), so loosening the linear tolerance is **not** a
-    lever here (measured: it breaks the march).
+    the same solution). **The forward-solve TERMINATION, not a tight tolerance, was the dominant coupled
+    cost — and the old "tight tolerance is load-bearing under log-`ω` / loosening breaks the march" claim
+    was STALE (corrected 2026-07-28).** `_COUPLED_FORWARD_SOLVER` now stops on a global 2-norm relative
+    residual (`relative_residual_gmres`, ~1% per inexact-Newton step): it reproduces the over-solving
+    march's `x_r/h` trajectory to 3-4 significant figures per step with no log-`ω` divergence, at ~4×
+    fewer matvecs. See the `forward_solver` bullet in `.claude/rules/solve.md` for the mechanism
+    (`lineax`'s componentwise stop plus the near-zero-right-hand-side ω wall-fixation rows pinned it to
+    the absolute `atol=1e-10` floor, ~9 orders past the requested 1e-3) and the two-arm refutation.
   - **The march's residual measure is the plain Euclidean ‖R‖ by default; the block-scaled per-field
     measure is opt-in (`block_scaled_norm=True`).** A `BlockScaledNorm` over `[flow, k, ω]` (each block
     divided by its own initial magnitude, `_coupled_residual_norm`) was built so the globalization weighs
