@@ -69,6 +69,7 @@ from aquaflux.solve import (
     SwitchedEvolutionRelaxation,
     VelocityShiftParts,
     forward_march,
+    relative_residual_gmres,
 )
 
 from .initialization import hybrid_initialize
@@ -692,14 +693,25 @@ def _reparametrized_preconditioner(
     return ScaledScalarPreconditioner(preconditioner, 1.0 / scale)
 
 
-# The shifted forward solve for the coupled march. Restarted GMRES with a larger Krylov subspace than
-# the shared default (restart 40 -> 120): the coupled turbulent saddle system is stiff enough that a
-# 40-vector restart discards too much Arnoldi history and converges only after hundreds of restart
-# cycles, whereas a 120-vector subspace reaches the same tight solution in far fewer (measured ~1.4x
-# faster and to a tighter residual on the ~12k-cell backward-facing step). The tolerances stay tight
-# (an inexact/loose linear solve is unsafe here -- an inaccurate step in the log-omega variable is
-# exponentiated and diverges), so the accuracy the log-variable closure needs is preserved.
-_COUPLED_FORWARD_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-10, restart=120, stagnation_iters=40)
+# The shifted forward solve for the coupled march. Two measured choices on the ~12k-cell
+# backward-facing step:
+#  * Restart 120 (vs the shared default 40): the coupled turbulent saddle is stiff enough that a
+#    40-vector restart discards too much Arnoldi history and needs hundreds of restart cycles, while a
+#    120-vector subspace reaches the same solution in far fewer.
+#  * A GLOBAL 2-norm relative-residual stop at ~1% (`relative_residual_gmres`), rather than lineax's
+#    stock componentwise `rtol`/`atol` test. Each pseudo-transient step is an inexact Newton step, so
+#    the linear solve only has to resolve the correction to the accuracy the globalized march actually
+#    uses -- ~1% is ample here, and the converged root and its adjoint are fixed by the nonlinear stop
+#    and the vanishing shift, not by the linear tolerance. The stock test does *not* deliver a genuine
+#    relative stop on this system: it applies the tolerance per row under a max-norm, and the near-wall
+#    omega rows start satisfied -- their right-hand side is ~0 -- so their per-row scale collapses onto
+#    the absolute `atol` floor and a handful of them hold the whole solve to ~1e-10, about nine orders
+#    past the relative tolerance nominally requested. Stopping on the global 2-norm relative residual is
+#    immune to those rows and cuts the solve from ~15 restart cycles to ~3-5 (~3-4x fewer matrix-vector
+#    products) with the march trajectory -- the reattachment length reached per step -- unchanged.
+_COUPLED_FORWARD_SOLVER = relative_residual_gmres(
+    1e-2, restart=120, stagnation_iters=40, max_restarts=15
+)
 
 # Backtracking rungs for the shifted step. The full coupled Newton step from the hybrid initial
 # condition overshoots violently (the residual blows up many orders of magnitude), so the step length
@@ -909,7 +921,9 @@ def coupled_continuation(
         (default ``0.05``); ignored unless ``inner_steps > 1``.
     forward_solver : lineax.AbstractLinearSolver or None
         The shifted-solve Krylov solver; ``None`` uses :data:`_COUPLED_FORWARD_SOLVER` (a
-        larger-restart GMRES suited to the stiff coupled system).
+        larger-restart GMRES that stops on a global 2-norm relative residual, so each inexact-Newton
+        step is solved to ~1% rather than driven to machine precision by the near-zero-right-hand-side
+        wall rows).
     block_scaled_norm : bool
         Which residual measure the march judges progress by (default ``False`` = the plain Euclidean
         norm). When ``True`` the march uses a :class:`~aquaflux.solve.BlockScaledNorm` over

@@ -14,7 +14,10 @@ unit tests. The surface is three groups:
   driver: converges, globalizes, and carries the implicit-function-theorem adjoint), `newton_step`
   (one matrix-free correction — exact in one call for a linear residual, and differentiable in both
   modes), `solve_linear` (returns the solution together with the solve's restart-cycle count —
-  the staleness signal a mid-march preconditioner refresh triggers on), `default_linear_solver`.
+  the staleness signal a mid-march preconditioner refresh triggers on), `default_linear_solver`, and
+  `relative_residual_gmres` (a GMRES that stops on a *global* 2-norm relative residual — the robust
+  inexact-Newton forward stop, immune to the near-zero-right-hand-side rows that make the stock
+  componentwise test over-solve).
 * **Forward globalization** — the `ForwardStep` strategies `DampedNewtonStep` and
   `PseudoTransientStep`, with the `ShiftPolicy` / `ShiftTerm` / `StepAcceptance` seams a caller
   implements and the default `DivergenceGuard`, and the injected `ResidualNorm` the strategy judges
@@ -60,7 +63,7 @@ from .line_search_growth import (
     MonotoneLineSearch,
     RelaxedFarFromRoot,
 )
-from .linear import default_linear_solver, solve_linear
+from .linear import default_linear_solver, relative_residual_gmres, solve_linear
 from .march import (
     CoefficientDriftTrigger,
     CycleGrowthTrigger,
@@ -130,6 +133,7 @@ __all__ = [
     "forward_march",
     "newton_step",
     "refresh_air_hierarchy",
+    "relative_residual_gmres",
     "smoothed_multigrid_solve",
     "solve_linear",
 ]

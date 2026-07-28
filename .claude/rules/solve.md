@@ -947,13 +947,32 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     stays the fallback for a genuinely bad *direction* (an ill-conditioned shifted solve), not an
     overshoot. Like the shift, the search only reshapes the forward path — converged state and IFT
     adjoint unchanged. The flow path leaves `line_search=0`, so it is bit-identical.
-  - **`forward_solver` overrides the shared `_INEXACT_CONTINUATION_SOLVER`.** `default_solver()` returns
-    the injected `forward_solver` when set, else the shared restart-40 GMRES. The coupled path injects a
-    larger-restart GMRES (`_COUPLED_FORWARD_SOLVER`, restart 120): the stiff coupled saddle system needs
-    hundreds of restart-40 cycles (a 40-vector subspace discards too much Arnoldi history), whereas a
-    120-vector subspace reaches the same tight solution ~1.4× faster and tighter. Tolerances stay tight
-    — an *inexact* linear solve is unsafe under log-ω (an inaccurate step in the log variable is
-    exponentiated and diverges), so the accuracy is load-bearing, not wasteful.
+  - **`forward_solver` overrides the shared `_INEXACT_CONTINUATION_SOLVER`; the coupled default now stops
+    on a GLOBAL 2-norm relative residual (`relative_residual_gmres`, `solve/linear.py`).** `default_solver()`
+    returns the injected `forward_solver` when set, else the shared restart-40 GMRES. The coupled path
+    injects restart 120 (the stiff saddle needs hundreds of restart-40 cycles; a 40-vector subspace
+    discards too much Arnoldi history). **The dominant waste was the TERMINATION, not the restart.** The
+    old `GMRES(rtol=1e-3, atol=1e-10)` reached true_rel ~4e-12 in ~15 restart cycles / 1800 matvecs on the
+    cold-IC pitzDaily solve although only rtol=1e-3 was asked — because `lineax`'s stock stop is
+    **componentwise** (`|r_i| ≤ atol + rtol|b_i|` under max_norm), and the ~470 near-wall ω wall-fixation
+    rows start satisfied (right-hand side ~0), so their per-row scale collapses onto the absolute `atol`
+    floor and a handful of them hold the whole solve to ~1e-10 (~9 orders past 1e-3). `relative_residual_gmres`
+    scales the system to unit right-hand-side 2-norm and runs GMRES at `rtol=0, atol=target, norm=2-norm`,
+    so it stops on `‖Mr‖₂/‖Mb‖₂ ≤ target` (≈ 1% *solution* accuracy at `target=1e-2`, since M≈A⁻¹) —
+    immune to those rows. Measured on the real cold-IC march: ~3-5 cycles (often 2-3/step), ~4× fewer
+    matvecs to the same `x_r/h`, trajectory unchanged.
+  - **⚠️ THE "TIGHT TOLERANCE IS LOAD-BEARING UNDER LOG-ω" CLAIM WAS STALE — corrected 2026-07-28.** The
+    old note here (and in `turbulence.md`) said an inexact/loose forward solve is unsafe under log-ω
+    ("an inaccurate log step is exponentiated and diverges; loosening breaks the march"). Two-arm cold-IC
+    pitzDaily marches — the over-solving default vs a 4-cycle-capped ~1e-3 solve, then the adaptive
+    `relative_residual_gmres` — **refute it**: the honest ~1e-3 solve reproduces the over-solve march to
+    3-4 significant figures per step (**including the line-search α**), tracks the same `x_r/h`, and never
+    diverges, at ~3-4× fewer matvecs. The original evidence was almost certainly an artifact — "loosening
+    rtol" never loosened the solve, because `atol=1e-10` bound regardless of rtol (the componentwise floor
+    above), so it kept over-solving to ~1e-12. Do **not** reinstate a tight fixed tolerance on the forward
+    solve. Same-root-safe by construction: inexact Newton, the shift vanishes at the root, the nonlinear
+    stop is on ‖R‖, and the adjoint is a separate transpose solve — none touched by the forward-solve
+    looseness (pinned by the `slow` `test_coupled_rans` convergence + adjoint gates).
   - **⚠️ READ FIRST: every raw-‖R‖ comparison ACROSS coupled-RANS march states recorded below predates
     the 2026-07-25 fixation-row fix and is suspect.** Until then the near-wall ω fixation was written
     in physical ω under a log-ω unknown, so 472 of 12 225 rows — scaled by an ω spanning 160→1.1e5 —
