@@ -31,6 +31,12 @@ def test_constant_is_differentiable_in_its_value() -> None:
     assert float(g) == 4.0  # d/dk of sum(k over 4 cells)
 
 
+def test_constant_scaled_multiplies_the_value() -> None:
+    scaled = Constant(value=1e-5).scaled(10.0)
+    assert isinstance(scaled, Constant)
+    assert scaled.value == 1e-4
+
+
 # --- ZoneConstant ----------------------------------------------------------------------
 
 
@@ -49,6 +55,12 @@ def test_zone_constant_is_differentiable_per_zone() -> None:
         )
 
     assert float(jax.grad(total)(1e-3)) == 3.0  # three fluid cells
+
+
+def test_zone_constant_scaled_multiplies_every_zone() -> None:
+    zones = _two_zones()
+    scaled = ZoneConstant.from_dict(zones, {"fluid": 1e-3, "solid": 15.0}).scaled(2.0)
+    np.testing.assert_allclose(np.asarray(scaled.evaluate(zones, {})), [2e-3] * 3 + [30.0] * 3)
 
 
 def test_zone_constant_rejects_unknown_zone() -> None:
@@ -91,6 +103,11 @@ def test_field_property_rejects_wrong_length() -> None:
         FieldProperty(values=jnp.ones(3)).evaluate(CellZones.default(5), {})
 
 
+def test_field_property_scaled_multiplies_the_field() -> None:
+    scaled = FieldProperty(values=jnp.array([1.0, 2.0, 3.0])).scaled(4.0)
+    np.testing.assert_allclose(np.asarray(scaled.values), [4.0, 8.0, 12.0])
+
+
 # --- PropertyModel ---------------------------------------------------------------------
 
 
@@ -121,6 +138,23 @@ def test_property_model_require_lists_every_missing_property() -> None:
         model.require("viscosity", "conductivity")
     message = str(excinfo.value)
     assert "viscosity" in message and "conductivity" in message
+
+
+def test_property_model_with_scaled_rescales_only_the_named_property() -> None:
+    model = PropertyModel(
+        properties={"viscosity": Constant(value=1e-5), "density": Constant(value=1.2)}
+    )
+    scaled = model.with_scaled("viscosity", 10.0)
+    assert scaled.properties["viscosity"].value == 1e-4  # rescaled
+    assert scaled.properties["density"].value == 1.2  # untouched
+    # The original is unchanged (immutable).
+    assert model.properties["viscosity"].value == 1e-5
+
+
+def test_property_model_with_scaled_requires_the_named_property() -> None:
+    model = PropertyModel(properties={"density": Constant(value=1.0)})
+    with pytest.raises(ValueError, match="missing required property"):
+        model.with_scaled("viscosity", 2.0)
 
 
 def test_property_model_evaluate_threads_state_fields() -> None:

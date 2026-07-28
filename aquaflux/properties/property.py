@@ -51,6 +51,21 @@ class Property(eqx.Module):
             state-independent properties.
         """
 
+    @abc.abstractmethod
+    def scaled(self, factor: float) -> Property:
+        """Return a copy of this property with every value multiplied by ``factor``.
+
+        The uniform rescale a homotopy applies to a material property — e.g. raising the molecular
+        viscosity to lower the Reynolds number — without knowing the property's internal
+        representation. ``factor`` is a plain multiplier; a tracer flows through it under
+        differentiation, the same as a property value.
+
+        Parameters
+        ----------
+        factor : float
+            The multiplier applied to every value the property evaluates to.
+        """
+
 
 class Constant(Property):
     """A uniform property value everywhere.
@@ -66,6 +81,9 @@ class Constant(Property):
 
     def evaluate(self, cell_zones, fields):
         return jnp.full((cell_zones.label.shape[0],), self.value)
+
+    def scaled(self, factor):
+        return Constant(self.value * factor)
 
 
 class ZoneConstant(Property):
@@ -117,6 +135,9 @@ class ZoneConstant(Property):
     def evaluate(self, cell_zones, fields):
         return self.values[cell_zones.label]
 
+    def scaled(self, factor):
+        return ZoneConstant(self.values * factor)
+
 
 class FieldProperty(Property):
     """An arbitrary per-cell field of property values, supplied directly.
@@ -143,3 +164,6 @@ class FieldProperty(Property):
                 f"{n_cells} cells"
             )
         return self.values
+
+    def scaled(self, factor):
+        return FieldProperty(self.values * factor)

@@ -50,6 +50,14 @@ module owns them. Governed by the root `CLAUDE.md` Engineering Principles.
   gathered).
 - **Static caching is acceptable but not required.** Evaluate per residual (state-independent
   properties are cheap and XLA constant-folds them); optimize only if a profile demands it.
+- **Uniform rescale is one primitive, `Property.scaled(factor)` (+ `PropertyModel.with_scaled(name,
+  factor)`).** `scaled` returns a copy with every value multiplied by `factor`, delegated to each kind
+  (`Constant.value`, `ZoneConstant.values`, `FieldProperty.values`), so a caller can rescale a material
+  coefficient without knowing its representation; `with_scaled` applies it to one named entry
+  (`require`-checked) and leaves the rest untouched. Built for Reynolds-number continuation — raising the
+  molecular viscosity of a lower-Re companion problem — but it is a generic property operation. `factor`
+  is a plain multiplier, so a tracer flows through it under differentiation, the same as a property value.
+  Unit-tested per kind in `test_properties.py`.
 
 ## Wired in (Stage 2 — DONE)
 `FaceContext` carries the evaluated `properties: {name: (n_cells,) array}` map (not a per-coefficient

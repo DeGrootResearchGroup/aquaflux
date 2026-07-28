@@ -308,6 +308,26 @@ class SSTTurbulence(eqx.Module):
             (self.k_boundary.resolve(face_patches), self.omega_boundary.resolve(face_patches)),
         )
 
+    def with_scaled_molecular_viscosity(self, factor: float) -> SSTTurbulence:
+        """Return a copy whose kinematic molecular viscosity is multiplied by ``factor``.
+
+        Scales the per-cell ``molecular_viscosity`` field the k/omega diffusion is built on; the SST
+        constants and boundaries are unchanged. The turbulence half of the Reynolds-number rescale a
+        homotopy applies to a lower-Re companion problem. ``factor`` is a plain multiplier and a tracer
+        flows through it under differentiation.
+
+        Parameters
+        ----------
+        factor : float
+            The multiplier applied to the molecular viscosity.
+
+        Returns
+        -------
+        SSTTurbulence
+            A new closure at the scaled molecular viscosity; ``self`` is unchanged.
+        """
+        return eqx.tree_at(lambda t: t.molecular_viscosity, self, self.molecular_viscosity * factor)
+
     def _volume_flux(self, mdot: jnp.ndarray) -> jnp.ndarray:
         """The volume face flux ``mdot / rho`` the kinematic transport advects on."""
         return mdot / self.density

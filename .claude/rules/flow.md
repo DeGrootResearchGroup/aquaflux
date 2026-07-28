@@ -170,6 +170,12 @@ Engineering Principles.
   `MomentumContinuity.viscosity` (binding).** `ν_t` (**kinematic**, the closure's own quantity) rides
   on its own differentiable leaf, set by `with_eddy_viscosity(nu_t)`; `viscosity` adds it to the
   molecular `μ` from `properties`. Callers pass only `ν_t` and never restate the closure relation.
+  - **`with_scaled_molecular_viscosity(factor)` rescales the molecular `μ` only** (the `"viscosity"`
+    entry in `properties`, via `PropertyModel.with_scaled`), leaving the eddy-viscosity leaves alone.
+    It is the momentum half of the coupled Reynolds-number rescale a continuation applies (the
+    turbulence half scales `SSTTurbulence.molecular_viscosity`; `CoupledRANS.with_scaled_molecular_viscosity`
+    composes both) — see `.claude/rules/turbulence.md`. Molecular `μ` and eddy `ν_t` stay separate leaves,
+    so the rescale cannot disturb the closure.
   - **Do not put `ν_t` into the `PropertyModel`.** It is not a material property — water has no eddy
     viscosity, a turbulent flow of water does. The previous design overwrote the `"viscosity"` entry
     with a pre-summed `ρ(ν+ν_t)` field, which **destroyed the molecular value**, forced a second home
@@ -410,13 +416,20 @@ Engineering Principles.
   strategy is gone.
 
 ## Binding decisions
-- **`a_P` (momentum diagonal) is a LAGGED stabilization coefficient, not the AD Jacobian.**
-  Computed from the standard central-coefficient formula (viscous + convective + transient) and
-  `stop_gradient`-ed. Justified because the Rhie–Chow term vanishes at convergence (continuity
-  holds for any positive `a_P`), so lagging affects only the convergence path, not the converged
-  solution — matches the Fortran reference (which hand-extracts `diag = A(0,i,i)` and lags it).
-  A fully AD-linearized `a_P` is a possible refinement (the diffusion Gate-C / limiter pattern),
-  not yet needed.
+- **`a_P` (momentum diagonal) is DIFFERENTIATED in the residual; only the PRECONDITIONER freezes it
+  (binding — do not describe `a_P` as a lagged/`stop_gradient`-ed coefficient).** It is computed from
+  the standard central-coefficient formula (viscous + convective + transient), with its convective part
+  using a velocity-flux *estimate* for the mass flux (not the Rhie–Chow `mdot` itself), which breaks the
+  `a_P` ↔ `mdot` circularity and makes `a_P` a non-circular function of the velocity. It then enters the
+  Rhie–Chow damping `V/a_P`, whose term is non-zero for a non-linear pressure field, so `a_P` genuinely
+  affects the **converged solution's sensitivity** — freezing it (`stop_gradient`) would leave the
+  implicit-function-theorem adjoint linearizing a *different* residual than the one solved (the converged
+  *value* would be unchanged, the *sensitivity* not). So the residual differentiates `a_P` (verified: on
+  pitzDaily the AD-jvp of the coupled residual matches a central finite difference to ~1e-7 in the flow
+  block). The **block preconditioner**, which needs a constant operator, `stop_gradient`-s `a_P` on its
+  side (and evaluates it at a `stop_gradient`-ed state) — that is where the freezing lives.
+  (Historical note: an earlier design lagged `a_P` in the residual; the code moved to differentiating it.
+  See `rhie_chow.py` / `momentum.py`.)
 - **Monolithic block, AD Jacobian.** The reference (`reference_codes/…conjugatecfd`) assembles
   the 4×4-per-face block `A(0:6,4,4)` **by hand** in an outer **Picard** loop with lagged
   coefficients, one **BiCGStab** solve (default PC, **no AMG** — "reasonable convergence" for

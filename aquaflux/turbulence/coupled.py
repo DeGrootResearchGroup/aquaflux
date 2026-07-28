@@ -345,6 +345,40 @@ class CoupledRANS(eqx.Module):
             flow, self.k_transform.to_solved(k), self.omega_transform.to_solved(omega)
         )
 
+    def with_scaled_molecular_viscosity(self, factor: float) -> CoupledRANS:
+        """Return a copy whose molecular viscosity is multiplied by ``factor`` in **both** blocks.
+
+        The molecular viscosity lives in two places that must move together: the momentum block's
+        dynamic ``mu`` (in its property model) and the turbulence block's kinematic ``nu`` (its
+        per-cell field). Both are scaled by the same ``factor`` -- consistent because ``mu = rho nu``
+        and the density is unchanged -- so the result is a self-consistent lower-Reynolds-number
+        version of the same case (``Re`` scaled by ``1 / factor``). This is the single place that
+        knows where the molecular viscosity is stored; a Reynolds-number homotopy builds each
+        companion problem through it rather than restating the case.
+
+        Because it rescales the *molecular* viscosity only, the closure's eddy viscosity and every
+        other model quantity are unchanged, and the transform / boundaries carry over untouched.
+
+        Parameters
+        ----------
+        factor : float
+            The multiplier applied to the molecular viscosity of both blocks; ``> 1`` lowers the
+            Reynolds number. A tracer flows through it under differentiation.
+
+        Returns
+        -------
+        CoupledRANS
+            The same coupled system at the scaled molecular viscosity; ``self`` is unchanged.
+        """
+        return eqx.tree_at(
+            lambda c: (c.momentum, c.turbulence),
+            self,
+            (
+                self.momentum.with_scaled_molecular_viscosity(factor),
+                self.turbulence.with_scaled_molecular_viscosity(factor),
+            ),
+        )
+
     @property
     def layout(self) -> CoupledRANSLayout:
         """The coupled state layout ``[flow..., k, omega]`` for this system."""
