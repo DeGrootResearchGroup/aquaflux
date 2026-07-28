@@ -293,6 +293,7 @@ class SmoothedAmgSchur(InnerSchurSolver):
         n_cells: int,
         v_cycles: int,
         reference_diagonal: jnp.ndarray | None = None,
+        strength_threshold: float = 0.0,
     ) -> SmoothedAmgSchur:
         # Reference diagonal for the frozen hierarchy, fed to the Schur coefficient ``V / d``. SIMPLE
         # uses a unit-viscosity momentum ``a_P`` (the multigrid is scale-invariant, so a concrete
@@ -320,7 +321,7 @@ class SmoothedAmgSchur(InnerSchurSolver):
         )
         if geometry.pressure_pin is not None:  # closed domain: regularize by decoupling the pin
             a = decouple_dof(a, geometry.pressure_pin)
-        hierarchy = build_smoothed_hierarchy(a)
+        hierarchy = build_smoothed_hierarchy(a, strength_threshold=strength_threshold)
         return cls(geometry, hierarchy, v_cycles)
 
     def apply(self, a_p: jnp.ndarray, blocks: FlowBlocks) -> _PressureSolve:
@@ -391,6 +392,7 @@ class SmoothedAmgVelocity(_RescaledAmgVelocity):
         interior: np.ndarray,
         n_cells: int,
         v_cycles: int,
+        strength_threshold: float = 0.0,
     ) -> SmoothedAmgVelocity:
         face_cells = geometry.face_cells
         # Unit-viscosity viscous coefficient A/denom — the geometry-only part of the momentum
@@ -410,7 +412,7 @@ class SmoothedAmgVelocity(_RescaledAmgVelocity):
             n_cells,
             boundary_diagonal=np.asarray(boundary_diagonal),
         )
-        hierarchy = build_smoothed_hierarchy(a)
+        hierarchy = build_smoothed_hierarchy(a, strength_threshold=strength_threshold)
         return cls(hierarchy, geometry.dim, v_cycles)
 
     def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
@@ -458,6 +460,7 @@ class SmoothedAmgConvectionVelocity(_RescaledAmgVelocity):
         method: str = "twolevel",
         sweeps: int = 2,
         omega: float = 0.8,
+        strength_threshold: float = 0.0,
     ) -> SmoothedAmgConvectionVelocity:
         # ``reference_mdot`` is the (frozen) Rhie--Chow mass flux of a representative operating state
         # -- the convective linearization the hierarchy is frozen at, so the operator diagonal matches
@@ -489,13 +492,16 @@ class SmoothedAmgConvectionVelocity(_RescaledAmgVelocity):
         hierarchy: SmoothedHierarchy | AirHierarchy
         if method == "air":
             # Reduction-based (lAIR) coarsening: coarsens fully and stays Peclet-robust /
-            # mesh-independent, so it scales where the two-level direct coarse solve cannot.
+            # mesh-independent, so it scales where the two-level direct coarse solve cannot. Its C/F
+            # split is already strength-based, so ``strength_threshold`` (an aggregation knob) does not
+            # apply here.
             hierarchy = build_air_hierarchy(a)
         elif method == "twolevel":
             # A single aggregation with a direct coarse solve: the aggregation coarse space stays a
             # stable correction at high cell Peclet, where a deeper Galerkin recursion does not (the
-            # builder is two-level for exactly this reason).
-            hierarchy = build_convection_hierarchy(a)
+            # builder is two-level for exactly this reason). ``strength_threshold > 0`` aggregates along
+            # strong connections only — the fix for a high-aspect-ratio near-wall velocity operator.
+            hierarchy = build_convection_hierarchy(a, strength_threshold=strength_threshold)
         else:
             raise ValueError(f"unknown convection method {method!r}; use 'twolevel' or 'air'")
         return cls(hierarchy, geometry.dim, v_cycles, method, sweeps, omega)
@@ -926,6 +932,7 @@ class BlockPreconditioner(eqx.Module):
         schur_scaling: str = "simple",
         msimpler_scale: float | None = None,
         v_cycles: int = 1,
+        strength_threshold: float = 0.0,
     ) -> BlockPreconditioner:
         """Build the block-triangular preconditioner for ``assembler``.
 
@@ -977,6 +984,16 @@ class BlockPreconditioner(eqx.Module):
             well that approximation is inverted, so extra velocity cycles leave the preconditioned error
             operator ``I - A M`` unchanged and extra Schur cycles make it worse (inverting the wrong
             operator more accurately). See the regime note on :class:`SmoothedAmgSchur`.
+        strength_threshold : float
+            Strength-of-connection threshold for the velocity and Schur AMG aggregation (default ``0`` =
+            the isotropic aggregation on the full graph). ``> 0`` (e.g. ``0.25``) aggregates only along
+            **strong** connections, which is what keeps those V-cycles contracting on a **high-aspect-
+            ratio / skewed** mesh — where isotropic aggregation coarsens across the stiff (wall-normal)
+            direction and the V-cycle stalls (contraction → 1 as the aspect ratio grows). It is a no-op
+            on a low-aspect-ratio mesh and does not apply to the reduction-based ``convection-air`` and
+            ``lsc`` blocks (whose coarsening is already strength-based). It makes the coarsening
+            **value-dependent**, so use it where the hierarchy is frozen (as the coupled flow block is)
+            rather than refreshed — see :func:`~aquaflux.solve.build_smoothed_hierarchy`.
         """
         if velocity not in ("smoothed", "convection", "convection-air"):
             raise ValueError(
@@ -1031,6 +1048,7 @@ class BlockPreconditioner(eqx.Module):
                 n_cells,
                 v_cycles,
                 reference_diagonal=schur_mass_diagonal,
+                strength_threshold=strength_threshold,
             )
         velocity_geometry = _VelocityGeometry.of(assembler)
         velocity_block: VelocityBlockSolver
@@ -1065,10 +1083,17 @@ class BlockPreconditioner(eqx.Module):
                 v_cycles,
                 reference_mdot,
                 method="air" if velocity == "convection-air" else "twolevel",
+                strength_threshold=strength_threshold,
             )
         else:
             velocity_block = SmoothedAmgVelocity.build(
-                velocity_geometry, owner_e, nb_e, interior, n_cells, v_cycles
+                velocity_geometry,
+                owner_e,
+                nb_e,
+                interior,
+                n_cells,
+                v_cycles,
+                strength_threshold=strength_threshold,
             )
         return cls(
             assembler,

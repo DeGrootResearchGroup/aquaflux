@@ -361,7 +361,13 @@ Engineering Principles.
   `VelocityBlockSolver` (`SmoothedAmgVelocity` on the viscous operator / `SmoothedAmgConvectionVelocity`
   on the convection-diffusion operator) for the momentum block, **always** block-triangular (the `D·δu`
   coupling). Build it with `BlockPreconditioner.build(assembler, velocity=…).factory()` (the factory is
-  the `preconditioner` argument `newton_step` expects). The dominated Stage-1 fallbacks
+  the `preconditioner` argument `newton_step` expects). **`strength_threshold=θ` (default `0`) turns on
+  strength-of-connection aggregation** for the velocity/Schur AMGs — aggregate along strong connections
+  only, the fix that keeps the V-cycle contracting on a high-aspect-ratio / skewed mesh where isotropic
+  aggregation coarsens across the stiff wall-normal direction and stalls; `θ=0` is byte-identical to the
+  historical build, and the coupled RANS path turns it on at `0.25` (a no-op on low-AR pitzDaily, the
+  payoff is the wall-resolved regime). Full evidence + the value-dependence/refresh caveat live in the
+  AMG section of `.claude/rules/solve.md`. The dominated Stage-1 fallbacks
   (`AggregationSchur`/`inner="multigrid"`, `DampedJacobiSchur`/`inner="jacobi"`, `DiagonalVelocity`) and
   the geometric coefficient-flow multigrid they used were **deleted** as superseded (see root `CLAUDE.md`
   Principle 0); there is no `inner=` selector — the smoothed AMG is the one pressure Schur. **The

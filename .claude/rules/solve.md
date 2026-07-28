@@ -1524,10 +1524,12 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     defeating the point. Consequence: a hierarchy passed as a **jit argument** survives a refresh as a
     *cache hit* (one compiled V-cycle), which is what lets a frozen preconditioner track a developing
     flow without paying a recompile per refresh (the ~2.6× scalar-AMG staleness win above). This is only
-    sound because **the aggregation coarsening is a pure function of the graph** — `_aggregate` reads
-    `owner`/`nb`/`n` and never the coefficients — so on a fixed mesh a hierarchy re-derived at a new
-    operator has identical aggregates, coarse sizes and array shapes, and only values differ. Both
-    properties are pinned in `tests/unit/test_multigrid.py`
+    sound because **the aggregation coarsening is a pure function of the graph at the default
+    `strength_threshold=0`** — `_aggregate` reads `owner`/`nb`/`n` and never the coefficients — so on a
+    fixed mesh a hierarchy re-derived at a new operator has identical aggregates, coarse sizes and array
+    shapes, and only values differ (this is why the refreshed *scalar k/ω* AMGs keep `strength_threshold=0`
+    — the flow block is frozen, so it can afford the value-dependent SoC below; the scalars cannot without
+    a value-refresh). Both properties are pinned in `tests/unit/test_multigrid.py`
     (`test_aggregation_hierarchy_structure_is_value_independent`,
     `test_refreshing_a_hierarchy_is_a_compilation_cache_hit`). **Caveat — lAIR does NOT get this for
     free, and this is measured, not hypothetical.** Its C/F split comes from `_strength_classical`, which
@@ -1539,9 +1541,26 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     `velocity="convection-air"`) a cheap refresh requires **reusing the reference's frozen C/F split and
     prolongation and recomputing only the values on it** — legitimate, since any valid split gives a
     valid preconditioner. That is **`refresh_air_hierarchy(hierarchy, a_new, degree=…)`** (below),
-    whereas the aggregation path gets it for free by rebuilding. Also: do not add a
-    strength-of-connection filter to `_aggregate` without revisiting this, as that would make the
-    aggregation path value-dependent too.
+    whereas the aggregation path gets it for free by rebuilding.
+    - **Strength-of-connection (SoC) aggregation IS available now — opt-in via `strength_threshold`,
+      and it makes the aggregation path value-dependent (so it forfeits the free refresh above).**
+      `build_smoothed_hierarchy(a, strength_threshold=θ)` / `build_convection_hierarchy(a, …)` (and
+      `BlockPreconditioner.build(…, strength_threshold=θ)`) aggregate on the **strong** subgraph only —
+      edge `(i,j)` kept iff `|A_ij| ≥ θ·max_k|A_ik|` from either endpoint (`_aggregation_edges`, reusing
+      `_strength_classical`, symmetrized) — instead of the full graph. **Why it exists:** isotropic
+      aggregation coarsens *across* the stiff direction of a high-aspect-ratio / skewed operator and the
+      V-cycle stalls; SoC coarsens *along* the strong coupling and keeps contracting. Measured on a
+      uniformly-anisotropic Poisson (cycles to true 1%): plain `>20` and rising toward failure as the
+      aspect ratio grows (contraction 0.22→0.56→0.90→0.97 at AR 1→10→100→1000), **SoC a flat 3 cycles at
+      every AR, mesh-independent** — the difference between a converging and a non-converging solve at
+      AR≥100 (`test_multigrid.py::test_strength_of_connection_aggregation_fixes_an_anisotropic_operator`).
+      **`θ=0` (default) is byte-identical to the historical isotropic build.** It is turned **on (θ=0.25)
+      for the coupled flow block** (`_coupled_shift_policy`: the convection velocity AMG + MSIMPLER Schur),
+      which is frozen at the reference state so the value-dependence costs no refresh; it is a **no-op on
+      the low-aspect-ratio pitzDaily case**, and the payoff is the future wall-resolved / skewed regime.
+      It does **not** apply to the reduction-based `air`/`lsc` blocks (already strength-based), and the
+      refreshed scalar k/ω AMGs stay `θ=0` to keep their refresh cache-hit — a value-refresh (à la
+      `refresh_air_hierarchy`) to let them use SoC too is the tracked follow-up.
   - **`refresh_air_hierarchy` — the lAIR refresh that keeps the compilation signature (BUILT).** It
     re-derives an lAIR hierarchy's **values** at a new operator while holding the coarsening fixed: each
     level reuses its stored C/F split (recovered from the level's own masks) and its stored
