@@ -72,7 +72,7 @@ from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind
 from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
 from aquaflux.io import read_openfoam
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CorrectedGreenGauss, SweptGradientSolve, VenkatakrishnanLimiter
+from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
 from aquaflux.turbulence import CoupledRANS, LogScalars, SSTModel, SSTTurbulence, solve_coupled
 
 HERE = Path(__file__).resolve().parent
@@ -165,11 +165,15 @@ def build_case(model=None):
     mesh = read_openfoam(RUNS / "polyMesh")
     geom = mesh.geometry()
     # Corrected (non-orthogonal / skewness) Green-Gauss gradients. Its A_g^-1 apply is the default O(n)
-    # matrix-free swept solve, not a nested GMRES: identical discretization, but it avoids a nested
-    # Krylov solve (carrying its own implicit-diff tangent) inside every coupled-residual evaluation,
-    # which otherwise dominates the monolithic Newton cost on this ~12k-cell mesh (measured ~180x per
-    # residual eval here).
-    grad = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=8))
+    # matrix-free swept solve (fixed Richardson sweeps), not a nested GMRES: identical discretization,
+    # but it avoids a nested Krylov solve (carrying its own implicit-diff tangent) inside every
+    # coupled-residual evaluation, which otherwise dominates the monolithic Newton cost on this
+    # ~12k-cell mesh (measured ~180x per residual eval here). The default sweep count is used: this mesh
+    # is only mildly non-orthogonal (worst face angle ~6 degrees), so the swept solve reaches the
+    # converged corrected-gradient to machine precision in the default few sweeps -- and the
+    # reconstructed gradient, the coupled residual, and the reattachment length are all unchanged from a
+    # much higher sweep count, so paying for more sweeps only enlarges the differentiated residual.
+    grad = CorrectedGreenGauss()
     # Momentum advection: second-order upwind = Venkatakrishnan-limited linear upwind (the upwind cell
     # reconstructed to the face with its corrected-Green-Gauss gradient, slope-limited so the
     # reconstruction is monotonicity-bounded) -- the analogue of OpenFOAM's `Gauss linearUpwind`.
