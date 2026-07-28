@@ -46,6 +46,24 @@ class PropertyModel(eqx.Module):
         fields = {} if fields is None else fields
         return {name: prop.evaluate(cell_zones, fields) for name, prop in self.properties.items()}
 
+    def with_scaled(self, name: str, factor: float) -> PropertyModel:
+        """Return a copy of the model with the named property's values multiplied by ``factor``.
+
+        The single seam a homotopy uses to rescale a material coefficient (e.g. raising the molecular
+        viscosity to lower the Reynolds number) without touching the other properties or knowing the
+        named property's internal representation — the rescale is delegated to
+        :meth:`~aquaflux.properties.property.Property.scaled`. Requires ``name`` to be present.
+
+        Parameters
+        ----------
+        name : str
+            The property to rescale; must be supplied by the model (else :class:`ValueError`).
+        factor : float
+            The multiplier applied to that property's values.
+        """
+        self.require(name)
+        return PropertyModel({**self.properties, name: self.properties[name].scaled(factor)})
+
     def require(self, *names: str) -> None:
         """Raise ``ValueError`` unless the model supplies every property in ``names``.
 

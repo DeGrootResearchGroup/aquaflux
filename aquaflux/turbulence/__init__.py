@@ -52,6 +52,11 @@ from .preconditioner import (
     scalar_transport_preconditioner,
     scalar_transport_shift_diagonal,
 )
+from .reynolds import (
+    GeometricReynoldsSchedule,
+    ReynoldsSchedule,
+    solve_reynolds_continuation,
+)
 from .sources import (
     KDestruction,
     KProduction,
@@ -71,6 +76,7 @@ __all__ = [
     "CoupledRANSLayout",
     "CoupledShiftPolicy",
     "DirectScalars",
+    "GeometricReynoldsSchedule",
     "KDestruction",
     "KProduction",
     "LiveViscosityVelocityParts",
@@ -79,6 +85,7 @@ __all__ = [
     "OmegaCrossDiffusion",
     "OmegaDestruction",
     "OmegaProduction",
+    "ReynoldsSchedule",
     "SSTClosureFields",
     "SSTModel",
     "SSTTurbulence",
@@ -104,6 +111,7 @@ __all__ = [
     "scalar_transport_preconditioner",
     "scalar_transport_shift_diagonal",
     "solve_coupled",
+    "solve_reynolds_continuation",
     "solve_segregated",
     "strain_rate_magnitude",
     "wall_function_weight",

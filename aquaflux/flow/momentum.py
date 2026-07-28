@@ -267,6 +267,31 @@ class MomentumContinuity(eqx.Module):
             is_leaf=lambda x: x is None,
         )
 
+    def with_scaled_molecular_viscosity(self, factor: float) -> MomentumContinuity:
+        """Return a copy whose molecular viscosity is multiplied by ``factor``.
+
+        Rescales only the fluid's material ``"viscosity"`` (the dynamic ``mu``) in
+        :attr:`properties`; the eddy-viscosity leaves are untouched (they are ``None`` on a freshly
+        built assembler and supplied live by the closure). The seam a Reynolds-number homotopy uses to
+        raise the viscosity of a lower-Re companion problem without restating the case. ``factor`` is a
+        plain multiplier and a tracer flows through it under differentiation.
+
+        Parameters
+        ----------
+        factor : float
+            The multiplier applied to the molecular viscosity.
+
+        Returns
+        -------
+        MomentumContinuity
+            A new assembler at the scaled molecular viscosity; ``self`` is unchanged.
+        """
+        return eqx.tree_at(
+            lambda m: m.properties,
+            self,
+            self.properties.with_scaled("viscosity", factor),
+        )
+
     # --- properties -----------------------------------------------------------
 
     @property

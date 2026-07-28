@@ -47,6 +47,12 @@ applies anywhere you want gradients through a flow solve.
   a block preconditioner for the flow saddle-point, algebraic multigrid, and
   pseudo-transient continuation for high-Reynolds cases (with an optional
   dual-time / backward-Euler march for a larger, still-stable pseudo-timestep).
+- **Reynolds-number continuation** — reach a stiff high-Reynolds root through a
+  homotopy of easier lower-Reynolds solves, each seeded by the previous one. The
+  user chooses a single integer (the number of continuation points);
+  `solve_reynolds_continuation` derives the schedule, warm-starts each stage, and
+  dissolves the continuation at the target, so the root and its exact adjoint are
+  unchanged.
 - **Swappable numerics** — interpolation, gradient reconstruction, and slope
   limiters are first-class strategy objects with a known order of accuracy,
   injected into operators and tested in isolation, so the numerics can be changed

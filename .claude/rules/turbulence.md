@@ -886,6 +886,58 @@ separating pitzDaily case (`validation/pitzdaily_openfoam`) drives the direct `�
 form is validated (channel + tests); efficient convergence on the *full* pitzDaily mesh is the open
 tuning follow-up noted above.
 
+- **`reynolds.py` — Reynolds-number continuation (BUILT).** `solve_reynolds_continuation(coupled,
+  n_points, *, schedule=None, **solve_kwargs)` reaches a high-Re coupled root through a homotopy in
+  Reynolds number: `n_points` lower-Re solves from an easy anchor up to the target, each seeded by the
+  previous converged solution (the lowest self-starts from `hybrid_initialize`, the rest are warm-started).
+  Raising the molecular viscosity weakens the convective nonlinearity — **measured on the 560-cell
+  channel a cold coupled solve takes 8 steps at Re=250 vs 12 at Re=2500, both at α=1** — so the anchor is
+  easy and each up-step is a small jump from a converged neighbour. The **user surface is one integer**
+  (`n_points`); everything else is automatic.
+  - **It is an outer wrapper around `solve_coupled`, agnostic to the per-Re globalization.** Every keyword
+    in `solve_kwargs` is forwarded to each per-Re solve, so the pseudo-transient march, the dual-time
+    march (`inner_steps>1` + `step_control=DualTimeControl()`), the preconditioner options and the
+    observers all compose unchanged — no coupling to which globalization runs.
+  - **The continuation DISSOLVES at the target (binding).** The final solve runs at the case's true
+    viscosity on the **live** `coupled`, so the root and its exact IFT adjoint are identical to a direct
+    `solve_coupled` — the continuation changes only the path. Pinned: `n_points=2` reaches the direct
+    solve's fields to `1e-6`, and `n_points=0` is bit-identical to a direct solve
+    (`tests/integration/test_reynolds_continuation.py`).
+  - **Intermediate points converge LOOSELY (`intermediate_rtol=1e-2` default).** A lower-Re point is
+    only an initial guess for the next Reynolds number, so converging it to the target `rtol` is wasted
+    work — it overrides `rtol` for the lower-Re solves only (the target keeps the caller's `rtol`);
+    `None` disables the loosening. Measured necessary on pitzDaily: the wall-resolved 12k-cell mesh is
+    stiff *independent of Re* (Re continuation removes the convective nonlinearity, not the mesh-induced
+    linear stiffness), so an anchor converged to `1e-6` grinds for many iterations for no benefit to the
+    seed. Pinned by a monkeypatched-`solve_coupled` unit test that the lower-Re points receive
+    `intermediate_rtol` and the target receives `rtol`.
+  - **Schedule is an injected `ReynoldsSchedule` (a `Protocol`), default `GeometricReynoldsSchedule`
+    (one decade per step).** `scales(n_points)` returns the `n_points+1` molecular-viscosity scale
+    factors, descending to `1.0` (the target): `(10^N, …, 10, 1)`. Geometric because the nonlinearity
+    scales multiplicatively with Re and each up-step is seeded by a converged neighbour; `n_points` is
+    the number of decades of continuation (anchor at `Re_target/10^N`). `ratio` is an advanced knob.
+    The schedule is pure (no mesh/state), unit-tested directly.
+  - **Case reconstruction at a scaled ν is `CoupledRANS.with_scaled_molecular_viscosity(factor)` — one
+    home for where ν lives.** The molecular viscosity sits in **two** leaves that must move together —
+    the momentum block's dynamic `μ` (its `PropertyModel` `"viscosity"`) and the turbulence block's
+    kinematic `ν` (`molecular_viscosity`) — and each object scales its own: `MomentumContinuity`/
+    `SSTTurbulence.with_scaled_molecular_viscosity`, composed by the coupled method (density untouched;
+    `μ = ρν` stays consistent because both scale by the same factor). Under it sits the generic
+    `Property.scaled(factor)` / `PropertyModel.with_scaled(name, factor)` primitive (see
+    `.claude/rules/properties.md`). The case is never restated — the assembled objects are scaled.
+  - **Differentiability.** The lower-Re ramp only makes an initial guess: companions are built from a
+    `stop_gradient` copy of `coupled` and each intermediate result is `stop_gradient`-ed before it seeds
+    the next, so the ramp never tapes. The final solve runs on the live `coupled` from a stopped seed, so
+    `jax.grad` through the wrapper is the target solve's IFT adjoint — **exact and `n_points`-independent**
+    (pinned: grad through `n_points=1` equals grad through `n_points=0` and finite differences). Same
+    contract as `solve_coupled`: to differentiate, pass a target-viscosity `continuation` built outside
+    `jax.grad` (used by the final solve only — `continuation`/`reference_state` are dropped from the ramp
+    kwargs, since each lower-Re point builds its own preconditioner at its own viscosity) and no
+    forward-only keywords.
+  - **Failure handling.** A lower-Re point that fails to converge (`EquinoxRuntimeError` from the
+    convergence guard) is re-raised as a `RuntimeError` naming the point and its scale and suggesting a
+    larger `n_points`; the march never continues from a non-root.
+
 ## Binding decisions
 
 - **Segregated forward, coupled adjoint (design note §5 — binding) — BUILT via `solve_coupled`.**
