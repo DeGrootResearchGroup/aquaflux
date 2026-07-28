@@ -37,12 +37,53 @@ if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, MeshGeometry
 
 
+def _transient_diagonal(
+    geometry: MeshGeometry, dt: float | None, rho: jnp.ndarray | None
+) -> jnp.ndarray | None:
+    """The density-weighted transient contribution ``rho V / dt`` to the momentum diagonal.
+
+    ``None`` for a steady solve (``dt is None``). Momentum is conserved as ``rho u``, so the
+    transient term of ``d(rho u)/dt`` weights the volume-over-timestep by the density, matching the
+    ``rho``-weighted convective (mass-flux) and viscous (dynamic-viscosity) terms on the same
+    diagonal; an unweighted ``V / dt`` would be off by a factor of ``rho`` at non-unit density.
+
+    Parameters
+    ----------
+    geometry : MeshGeometry
+        The mesh metrics; reads cell volumes.
+    dt : float or None
+        Timestep; ``None`` for steady flow (returns ``None``).
+    rho : jnp.ndarray or None
+        Per-cell density, shape ``(n_cells,)``. Required whenever ``dt`` is given.
+
+    Returns
+    -------
+    jnp.ndarray or None
+        ``rho V / dt`` per cell, shape ``(n_cells,)``, or ``None`` when ``dt is None``.
+
+    Raises
+    ------
+    ValueError
+        If ``dt`` is given without ``rho`` — the transient term is density-weighted, so the two
+        must be supplied together.
+    """
+    if dt is None:
+        return None
+    if rho is None:
+        raise ValueError(
+            "The transient momentum diagonal is density-weighted (rho V / dt); pass rho whenever dt "
+            "is given."
+        )
+    return rho * geometry.cell.volume / dt
+
+
 def momentum_diagonal(
     face_cells: FaceCellConnectivity,
     geometry: MeshGeometry,
     mu: jnp.ndarray,
     mdot_lagged: jnp.ndarray | None = None,
     dt: float | None = None,
+    rho: jnp.ndarray | None = None,
     boundary_owner_coeff: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Per-cell momentum-matrix diagonal ``a_P`` (viscous + convective + transient central coeff).
@@ -67,7 +108,15 @@ def momentum_diagonal(
         Lagged face mass flux for the convective contribution, shape ``(n_faces,)``; omit for
         Stokes flow (no convection).
     dt : float, optional
-        Timestep for the transient contribution ``V / dt``; omit for steady flow.
+        Timestep for the transient contribution; omit for steady flow. When given, ``rho`` is
+        required and the term is the **density-weighted** ``rho V / dt`` (see ``rho``).
+    rho : jnp.ndarray, optional
+        Per-cell density for the transient term, shape ``(n_cells,)``. Momentum is conserved in
+        the form ``rho u``, so the transient contribution of ``d(rho u)/dt`` to this diagonal is
+        ``rho V / dt`` — density-weighted to match the other terms on the same diagonal, which are
+        both ``rho``-weighted (the convective bucket is the **mass** flux ``Sum_f max(mdot_f, 0)``
+        and the viscous coupling uses the **dynamic** viscosity ``mu = rho(nu + nu_t)``). Required
+        whenever ``dt`` is given; ignored (and unnecessary) for a steady solve.
     boundary_owner_coeff : jnp.ndarray, optional
         Per-face owner diagonal contribution on boundary faces (zero on interior faces), shape
         ``(n_faces,)`` — each patch's :meth:`~aquaflux.flow.boundary.FlowBoundary.momentum_diagonal_coefficient`,
@@ -90,7 +139,7 @@ def momentum_diagonal(
         # The interior-style all-faces form: the isotropic diagonal is exactly the sum of the
         # convective and dissipative buckets (single-homed in momentum_diagonal_parts).
         convective, dissipative = momentum_diagonal_parts(
-            face_cells, geometry, mu, mdot_lagged=mdot_lagged, dt=dt
+            face_cells, geometry, mu, mdot_lagged=mdot_lagged, dt=dt, rho=rho
         )
         a_p_isotropic = convective + dissipative
     else:
@@ -106,8 +155,9 @@ def momentum_diagonal(
         # sum above; the scatter already zeros the neighbour coefficient on boundary faces.
         owner_coeff = jnp.where(face_cells.interior, owner_coeff, boundary_owner_coeff)
         a_p_isotropic = face_cells.scatter(owner_coeff, neighbour_coeff)
-        if dt is not None:
-            a_p_isotropic = a_p_isotropic + geometry.cell.volume / dt
+        transient = _transient_diagonal(geometry, dt, rho)
+        if transient is not None:
+            a_p_isotropic = a_p_isotropic + transient
 
     dim = geometry.face.normal.shape[-1]
     return jnp.broadcast_to(a_p_isotropic[:, None], (*a_p_isotropic.shape, dim))
@@ -119,6 +169,7 @@ def momentum_diagonal_parts(
     mu: jnp.ndarray,
     mdot_lagged: jnp.ndarray | None = None,
     dt: float | None = None,
+    rho: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """The convective and dissipative buckets of the all-faces momentum diagonal ``a_P``, per cell.
 
@@ -129,7 +180,7 @@ def momentum_diagonal_parts(
       (equivalently ``1/2 Sum_f |mdot_f|`` on a divergence-free flux); zero for Stokes flow.
     - ``dissipative`` -- the viscous stiffness ``Sum_f Gamma_f A_f / denom_f`` (the flux-continuous
       conductance, so it equals the diffusion operator's diagonal on graded ``mu``) plus any transient
-      ``V / dt``.
+      ``rho V / dt`` (density-weighted, matching the convective and viscous terms; see ``momentum_diagonal``).
 
     Their sum is the isotropic all-faces ``a_P`` (to rounding), so a shift basis that adds them
     one-to-one reproduces the operator diagonal. Every face -- including boundary faces -- contributes
@@ -139,7 +190,7 @@ def momentum_diagonal_parts(
 
     Parameters
     ----------
-    face_cells, geometry, mu, mdot_lagged, dt
+    face_cells, geometry, mu, mdot_lagged, dt, rho
         As :func:`momentum_diagonal` (the ``boundary_owner_coeff=None`` case).
 
     Returns
@@ -149,8 +200,9 @@ def momentum_diagonal_parts(
     """
     viscous = flux_continuous_conductance(mu, geometry, face_cells)
     dissipative = face_cells.scatter(viscous, viscous)
-    if dt is not None:
-        dissipative = dissipative + geometry.cell.volume / dt
+    transient = _transient_diagonal(geometry, dt, rho)
+    if transient is not None:
+        dissipative = dissipative + transient
     if mdot_lagged is None:
         convective = jnp.zeros_like(dissipative)
     else:  # convective upwind: outflow leaves the owner, inflow leaves the neighbour
