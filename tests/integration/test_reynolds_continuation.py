@@ -19,8 +19,8 @@ from aquaflux.turbulence import solve_reynolds_continuation
 from aquaflux.turbulence.coupled import CoupledRANS, coupled_continuation, solve_coupled
 
 # The 560-cell turbulent channel (Re = U H / nu = 2500) and its constants, reused verbatim so the case
-# is defined once.
-from test_coupled_rans import PRECONDITIONER, _channel
+# is defined once (tests/integration is a package, so this is the package-qualified path).
+from tests.integration.test_coupled_rans import PRECONDITIONER, _channel
 
 MAX_STEPS = 60
 
