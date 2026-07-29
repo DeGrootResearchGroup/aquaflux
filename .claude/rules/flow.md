@@ -448,7 +448,10 @@ Engineering Principles.
   ρV/Δt` (spatial only), not the full `a_P`, or the pressure smoothing (and the `-C` block) vanishes as
   `Δt → 0`, giving checkerboarding *and* a singular SIMPLE Schur in the preconditioner (author's ANSYS
   experience — two `a_P` roles: spatial for Rhie–Chow/`-C`,
-  full for SIMPLE's `diag(F)⁻¹`). `momentum_diagonal` already carries an unused `dt` seam. Then **energy
+  full for SIMPLE's `diag(F)⁻¹`). `momentum_diagonal`/`momentum_diagonal_parts` already carry an unused
+  `dt`+`rho` seam whose transient term is the **density-weighted** `ρV/Δt` (conservative `∂(ρu)/∂t`,
+  matching the ρ-weighted convective mass-flux and dynamic-viscosity terms on the same diagonal; `rho`
+  is required whenever `dt` is given — #153). Then **energy
   coupling** (the scalar transport already exists — couple the temperature field to the flow).
 - **Outer block preconditioner — Stage 2: MESH-INDEPENDENT AMG inner is done; the residual is the Schur
   approximation.** The inner Schur solve is a **smoothed-aggregation multigrid** V-cycle

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
+import pytest
 from aquaflux.flow import interior_mass_flux, momentum_diagonal
+from aquaflux.flow.rhie_chow import momentum_diagonal_parts
 from aquaflux.mesh import (
     CellGeometry,
     FaceCellConnectivity,
@@ -74,3 +76,38 @@ def test_momentum_diagonal_positive_and_scales_with_viscosity() -> None:
     a2 = momentum_diagonal(mesh.face_cells, geom, 2.0 * jnp.ones(mesh.n_cells))
     assert bool(jnp.all(a1 > 0.0))
     assert jnp.allclose(a2, 2.0 * a1)  # viscous diagonal is linear in mu
+
+
+def test_transient_diagonal_is_density_weighted() -> None:
+    """The transient term is ``rho V / dt`` — density-weighted like the convective/viscous terms.
+
+    At ``rho != 1`` an unweighted ``V / dt`` would be off by a factor of ``rho``; every other test
+    runs at ``rho = 1`` and cannot see it. Checked on the isotropic ``a_P`` and both diagonal parts.
+    """
+    mesh = structured_grid_2d(4, 4)
+    geom = mesh.geometry()
+    mu = jnp.ones(mesh.n_cells)
+    rho = 3.0 * jnp.ones(mesh.n_cells)
+    dt = 0.5
+
+    steady = momentum_diagonal(mesh.face_cells, geom, mu)
+    transient = momentum_diagonal(mesh.face_cells, geom, mu, dt=dt, rho=rho)
+    expected = rho * geom.cell.volume / dt
+    assert jnp.allclose(transient[:, 0] - steady[:, 0], expected)
+
+    # The transient contribution lands entirely in the dissipative bucket of the parts split.
+    conv_s, diss_s = momentum_diagonal_parts(mesh.face_cells, geom, mu)
+    conv_t, diss_t = momentum_diagonal_parts(mesh.face_cells, geom, mu, dt=dt, rho=rho)
+    assert jnp.allclose(conv_t, conv_s)
+    assert jnp.allclose(diss_t - diss_s, expected)
+
+
+def test_transient_diagonal_requires_density() -> None:
+    """A timestep without a density is an error: the transient term is density-weighted."""
+    mesh = structured_grid_2d(4, 4)
+    geom = mesh.geometry()
+    mu = jnp.ones(mesh.n_cells)
+    with pytest.raises(ValueError, match="density-weighted"):
+        momentum_diagonal(mesh.face_cells, geom, mu, dt=0.5)
+    with pytest.raises(ValueError, match="density-weighted"):
+        momentum_diagonal_parts(mesh.face_cells, geom, mu, dt=0.5)
