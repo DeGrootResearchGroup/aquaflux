@@ -110,6 +110,49 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     and raises no `NaN`. The stopping test is one helper, `_within_tolerance`, shared by the loop
     `cond` and the guard. A `NaN` mid-iteration is often caught first by `lineax`'s own non-finite
     guard at the next linear solve — both are hard errors, neither is silent.
+- **Monolithic ILUT preconditioner — BUILT (`sparse_jacobian.py` + `ilut_preconditioner.py`).** An
+  incomplete-LU (threshold ILU) factorization of the **assembled coupled Jacobian**, the alternative to
+  the block-triangular SIMPLE preconditioner for the coupled saddle. The block PC approximates the
+  pressure Schur; the ILUT **forms the true Schur coupling `B F⁻¹ G` through its fill** instead — measured
+  on the coupled RANS saddle it reaches the forward tolerance in a handful of GMRES cycles where the block
+  PC needs hundreds (the block PC's wall is the Schur *approximation*, not its inversion — see the Stage-3
+  note in `.claude/rules/flow.md`). Three ingredients are each load-bearing and measured: **enough fill**
+  (zero-fill ILU(0) drops exactly the Schur-forming fill → a singular factor; `drop_tol=1e-6` — not
+  `fill_factor` — is the binding control, keeps it); **symmetric √-diagonal equilibration** (the momentum
+  and continuity rows differ in scale by ~34×, which otherwise gives near-singular pivots); and
+  **cell-major ordering** (interleave `[u,v,p,k,ω]` per cell so the indefinite saddle factors without a
+  zero pressure pivot). The distance-1 *truncation* of the operator is catastrophic — the coupled saddle
+  is intrinsically distance-2 (Rhie–Chow) and the fill is essential, so this is **not** a compact-operator
+  play.
+  - **`sparse_jacobian.py`** materializes the coupled Jacobian from the *same* residual the solver uses
+    (no re-derived assembly): `block_stencil_colouring(owner, nb, n, reach)` (pure NumPy — the cell-block
+    pattern at a stencil `reach` and a collision-free CPR colouring, the conflict graph is the pattern
+    squared) then `materialize_block_jacobian(matvec, colouring, n_fields)` (one `jax.jvp` per
+    colour×field). `jacobian_relative_error` guards that `reach` covers the stencil (coupled RANS reaches
+    distance **3**). Field-major DOF layout `(cell i, field f) = f·n + i`.
+  - **`ilut_preconditioner.py` — `MonolithicIlutPreconditioner`.** Built off the jit path (`scipy.spilu`);
+    a **host** object, so it is **not** an `equinox.Module` — it rides as a static field and is applied
+    inside the jitted Krylov solve through `jax.pure_callback` (`.matvec()` / `.matvec(transpose=True)`).
+    Frozen at a reference state+shift like the AMG blocks; being far stronger it tolerates the freezing at
+    a few extra cycles, and the shift vanishes at the root so it never changes the converged state or its
+    adjoint. `IlutFactors`/`factorize_ilut`/`cell_major_permutation` are the pure host core (testable
+    without JAX); the JAX wrapper is thin.
+  - **Adjoint transpose wiring — `TransposedPreconditioner` (in `implicit.py`, binding).** The generic
+    adjoint machinery `_adjoint_preconditioner` derives `Mᵀ` from the forward `M` with
+    `jax.linear_transpose` — which works for a traceable AMG V-cycle but **cannot transpose a
+    `jax.pure_callback`** (and `jax.custom_transpose` is absent in the pinned JAX). So a preconditioner
+    that supplies its own transpose wraps its `state → Mᵀ` factory in `TransposedPreconditioner`, and
+    `_adjoint_preconditioner` applies it directly rather than transposing. The ILUT's `Mᵀ` is the same
+    factorization with `ilu.solve(trans='T')`. Pinned by the coupled-adjoint FD gate
+    (`tests/integration/test_coupled_ilut.py`); the plain-callable path (every AMG preconditioner) is
+    unchanged.
+  - **Scope / follow-ups (MVP).** The heavy fill (~7–14× the operator's nonzeros) is affordable at 2D /
+    moderate mesh sizes but is the weak point at large 3D — an **ILUT-as-multigrid-smoother** variant is
+    the parked scaling path (the naive monolithic V-cycle's coarse-grid correction destabilizes on the
+    indefinite saddle, so it is real research, not a quick add). No mid-march refresh yet (the factor is
+    a static field; refreshing recompiles), and the coupled builder still assembles the unused block AMG
+    as the `a_P` source — a lightweight shift-diagonal-only policy would remove that. The coupled
+    integration (`coupled_ilut_continuation`) lives in `.claude/rules/turbulence.md`.
 - **Forward globalization is ONE injected strategy — `forward_step: ForwardStep`.** The forward
   Newton loop has a single point of variation: `ImplicitNewtonSolver` takes one `forward_step`
   implementing the `ForwardStep` protocol (`stepper()` → the per-step

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
-from typing import Protocol
+from typing import Any, Protocol
 
 import equinox as eqx
 import jax
@@ -433,6 +433,31 @@ def _implicit_solve_fwd(
     return phi_star, (phi_star, theta)
 
 
+class TransposedPreconditioner:
+    """An adjoint-preconditioner factory whose output is **already** the transpose ``M^T``.
+
+    The generic adjoint machinery derives the transpose preconditioner from the forward one with
+    :func:`jax.linear_transpose`, which works only when the forward preconditioner is a traceable
+    JAX operation (an algebraic-multigrid V-cycle is). A preconditioner applied through a host
+    callback -- the monolithic incomplete-LU factorization, whose triangular solve runs in ``scipy``
+    via :func:`jax.pure_callback` -- cannot be transposed that way; instead it supplies its own
+    transpose directly (the same factorization applied with a transposed triangular solve). Wrapping
+    the factory in this marker tells :func:`_adjoint_preconditioner` to apply its output as-is rather
+    than transpose it.
+
+    Parameters
+    ----------
+    factory : callable
+        The ``state -> M^T`` factory, returning the transpose preconditioner matvec directly.
+    """
+
+    def __init__(self, factory: Callable[[Any], Callable[[Any], Any]]) -> None:
+        self.factory = factory
+
+    def __call__(self, state: Any) -> Callable[[Any], Any]:
+        return self.factory(state)
+
+
 def _adjoint_preconditioner(preconditioner, phi_star, example):
     """Transpose ``M^T`` of the forward preconditioner, as a left preconditioner for the adjoint.
 
@@ -440,10 +465,14 @@ def _adjoint_preconditioner(preconditioner, phi_star, example):
     transpose system ``J^T lambda = v``, whose consistent left preconditioner is ``M^T ~ J^{-T}``,
     obtained by transposing the (linear) preconditioner matvec with :func:`jax.linear_transpose`.
     It is mesh-independent wherever ``M`` is -- the adjoint GMRES iteration count stays flat under
-    refinement instead of growing with the system size. ``None`` in, ``None`` out.
+    refinement instead of growing with the system size. ``None`` in, ``None`` out. A
+    :class:`TransposedPreconditioner` factory already returns ``M^T`` (a callback preconditioner that
+    :func:`jax.linear_transpose` cannot handle), so it is applied directly.
     """
     if preconditioner is None:
         return None
+    if isinstance(preconditioner, TransposedPreconditioner):
+        return preconditioner(phi_star)
     m = preconditioner(phi_star)
     transpose = jax.linear_transpose(m, example)
     return lambda u: transpose(u)[0]

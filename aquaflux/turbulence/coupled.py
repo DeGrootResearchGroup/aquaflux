@@ -58,6 +58,7 @@ from aquaflux.solve import (
     ForwardStep,
     ImplicitNewtonSolver,
     LocalCourantBasis,
+    MonolithicIlutPreconditioner,
     PseudoTransientStep,
     RefreshTrigger,
     ResidualNorm,
@@ -67,7 +68,9 @@ from aquaflux.solve import (
     StepControl,
     StepReport,
     SwitchedEvolutionRelaxation,
+    TransposedPreconditioner,
     VelocityShiftParts,
+    block_stencil_colouring,
     forward_march,
     relative_residual_gmres,
 )
@@ -1198,6 +1201,176 @@ def _is_traced(pytree: object) -> bool:
         ``True`` if at least one leaf is a :class:`jax.core.Tracer`.
     """
     return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(pytree))
+
+
+class MonolithicIlutShiftPolicy(eqx.Module):
+    """A coupled :class:`~aquaflux.solve.ShiftPolicy` that preconditions the whole ``[flow, k, omega]``
+    saddle with one monolithic incomplete-LU factorization, in place of the block-diagonal composition.
+
+    Reuses :class:`CoupledShiftPolicy`'s pseudo-transient shift diagonal -- the physics, the same
+    velocity ``a_P`` and k/omega transport diagonals -- but replaces its block-diagonal preconditioner
+    with a single :class:`~aquaflux.solve.MonolithicIlutPreconditioner`: an incomplete factorization of
+    the assembled coupled Jacobian, which forms the true pressure Schur coupling through its fill rather
+    than approximating it. On a convection-dominated collocated Rhie--Chow RANS saddle it reaches the
+    forward tolerance in a handful of Krylov cycles where the block-triangular preconditioner needs
+    hundreds.
+
+    The factorization is frozen at a reference state and shift (built off the jit path by
+    :func:`coupled_ilut_continuation`). Unlike the block preconditioner's live ``a_P`` rescaling it does
+    not track the developing state; being a far stronger preconditioner it tolerates that freezing at a
+    cost of a few extra cycles, and the shift vanishes at the root so the frozen factorization never
+    changes the converged solution or its adjoint. Because it is a host ``scipy`` object it rides as a
+    **static** field rather than a traced pytree leaf, and is applied inside the jitted Krylov solve
+    through the callback matvec (:meth:`~aquaflux.solve.MonolithicIlutPreconditioner.matvec`).
+
+    Attributes
+    ----------
+    base : CoupledShiftPolicy
+        The block policy supplying the pseudo-transient shift diagonal.
+    preconditioner : MonolithicIlutPreconditioner
+        The frozen coupled ILUT factorization (a static field).
+    """
+
+    base: CoupledShiftPolicy
+    preconditioner: MonolithicIlutPreconditioner = eqx.field(static=True)
+
+    def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
+        """The block policy's shift diagonal, glued to the frozen ILUT preconditioner.
+
+        Parameters
+        ----------
+        phi : jnp.ndarray
+            The flat coupled state ``[flow..., k, omega]``, shape ``((dim + 3) n_cells,)``.
+        """
+        diagonal = self.base.shift_term(phi).diagonal
+        apply = self.preconditioner.matvec()
+        # The factorization is frozen, so the preconditioner does not depend on the shift strength.
+        return ShiftTerm(diagonal, lambda relaxation: apply)
+
+    def adjoint_factory(self) -> TransposedPreconditioner:
+        """The ``state -> M^T`` factory for the adjoint transpose solve.
+
+        The converged-state adjoint preconditions the (unshifted) transposed coupled Jacobian with the
+        frozen factorization's transpose -- the same incomplete factors applied with a transposed
+        triangular solve. Wrapped in a :class:`~aquaflux.solve.TransposedPreconditioner` because it
+        already returns ``M^T``: the generic adjoint machinery derives the transpose with
+        :func:`jax.linear_transpose`, which cannot handle the host-callback factorization, so it is
+        applied directly instead.
+        """
+        transpose = self.preconditioner.matvec(transpose=True)
+        return TransposedPreconditioner(lambda state: transpose)
+
+
+def coupled_ilut_continuation(
+    coupled: CoupledRANS,
+    reference_state: jnp.ndarray,
+    *,
+    ilut_beta: float = 2.0,
+    stencil_reach: int = 3,
+    fill_factor: float = 30.0,
+    drop_tol: float = 1e-6,
+    beta0: float = 2.0,
+    exponent: float = 1.0,
+    beta_floor: float = 0.0,
+    max_escalations: int = 6,
+    escalation_factor: float = 2.0,
+    divergence_cap: float = 10.0,
+    line_search: int = _COUPLED_LINE_SEARCH,
+    forward_solver: lx.AbstractLinearSolver | None = None,
+    block_scaled_norm: bool = False,
+    shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+    residual_norm: ResidualNorm | None = None,
+) -> ForwardStep:
+    """Build a pseudo-transient continuation step preconditioned by a monolithic coupled ILUT.
+
+    The counterpart of :func:`coupled_continuation` that swaps the block-triangular SIMPLE preconditioner
+    for one :class:`~aquaflux.solve.MonolithicIlutPreconditioner`. It materializes the coupled Jacobian at
+    ``reference_state`` from ``coupled.residual`` (compressed graph-coloured probing -- one source of
+    truth, no re-derived assembly), adds the pseudo-transient shift at ``ilut_beta``, and factors the
+    result incompletely, all off the jit path. The resulting step is a drop-in for ``solve_coupled``'s
+    ``continuation`` argument.
+
+    Frozen preconditioner, like the block path: the factorization is built once at ``reference_state`` and
+    does not refresh mid-march. Being a much stronger preconditioner it tolerates the state drift for a
+    few extra cycles, and the shift vanishes at the root so freezing changes neither the converged state
+    nor its adjoint.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled residual assembler.
+    reference_state : jnp.ndarray
+        The coupled state the Jacobian and shift are frozen at, shape ``((dim + 3) n_cells,)``.
+    ilut_beta : float
+        The pseudo-transient shift strength the factorization is built at (the operator it factors is
+        ``J + ilut_beta * d`` for the base shift diagonal ``d``). The march's own ``beta`` varies; the
+        strong factorization tolerates the mismatch. Default matches ``beta0``.
+    stencil_reach : int
+        The cell-graph distance the Jacobian's sparsity is probed to (the coupled RANS Jacobian reaches
+        distance ``3`` -- gradient reconstruction, Rhie--Chow, and the k/omega cross-coupling).
+    fill_factor, drop_tol : float
+        The incomplete-factorization fill controls (see
+        :func:`~aquaflux.solve.ilut_preconditioner.factorize_ilut`). ``drop_tol = 1e-6`` keeps the small
+        fill that forms the Schur coupling.
+    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search
+        The pseudo-transient schedule and guard parameters, as in :func:`coupled_continuation`.
+    forward_solver : lineax.AbstractLinearSolver or None
+        The shifted-solve Krylov solver; ``None`` uses :data:`_COUPLED_FORWARD_SOLVER`.
+    block_scaled_norm : bool
+        Whether the march judges progress by the block-scaled norm (default ``False`` = Euclidean).
+    shift_basis : ShiftBasis
+        How the shift diagonal is built from the operator's convective/dissipative parts.
+    residual_norm : ResidualNorm, optional
+        An explicit progress measure (overrides ``block_scaled_norm``); ``solve_coupled`` passes the
+        march's initial measure here on every refresh.
+
+    Returns
+    -------
+    ForwardStep
+        The :class:`~aquaflux.solve.PseudoTransientStep` to hand ``solve_coupled`` as ``continuation``.
+    """
+    # The base block policy supplies the pseudo-transient shift diagonal (the same velocity a_P + k/omega
+    # transport diagonals); its scalar AMGs are skipped (`method=None`) since the ILUT preconditions every
+    # block. The flow block is still assembled as the a_P source -- a lightweight shift-diagonal-only
+    # policy is a follow-up optimization.
+    base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
+
+    n_cells = coupled.momentum.mesh.n_cells
+    n_fields = coupled.layout.dim + 3
+    owner, nb, _ = coupled.momentum.mesh.face_cells.interior_edges()
+    colouring = block_stencil_colouring(np.asarray(owner), np.asarray(nb), n_cells, stencil_reach)
+    frozen = jax.lax.stop_gradient(reference_state)
+    matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    shift = ilut_beta * jax.lax.stop_gradient(base.shift_term(reference_state).diagonal)
+    preconditioner = MonolithicIlutPreconditioner.build(
+        matvec,
+        colouring,
+        n_fields,
+        np.asarray(shift),
+        fill_factor=fill_factor,
+        drop_tol=drop_tol,
+    )
+    policy = MonolithicIlutShiftPolicy(base, preconditioner)
+
+    if residual_norm is None:
+        residual_norm = (
+            _coupled_residual_norm(coupled, reference_state)
+            if block_scaled_norm
+            else jnp.linalg.norm
+        )
+    schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
+    solver = forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER
+    return PseudoTransientStep(
+        policy,
+        relaxation_schedule=schedule,
+        max_escalations=max_escalations,
+        escalation_factor=escalation_factor,
+        acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        line_search=line_search,
+        forward_solver=solver,
+        residual_norm=residual_norm,
+        adjoint_preconditioner_factory=policy.adjoint_factory(),
+    )
 
 
 def solve_coupled(

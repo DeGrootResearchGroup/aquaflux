@@ -57,7 +57,13 @@ from .continuation import (
     StepAcceptance,
 )
 from .frozen_operator import convection_diffusion_operator, decouple_dof
-from .implicit import DampedNewtonStep, ForwardStep, ImplicitNewtonSolver
+from .ilut_preconditioner import MonolithicIlutPreconditioner
+from .implicit import (
+    DampedNewtonStep,
+    ForwardStep,
+    ImplicitNewtonSolver,
+    TransposedPreconditioner,
+)
 from .line_search_growth import (
     LineSearchGrowth,
     MonotoneLineSearch,
@@ -88,11 +94,18 @@ from .newton import newton_step
 from .norm import BlockScaledNorm, ResidualNorm, RowScaledNorm
 from .relaxation import ConstantRelaxation, RelaxationSchedule, SwitchedEvolutionRelaxation
 from .shift_basis import LocalCourantBasis, ShiftBasis, VelocityShiftParts
+from .sparse_jacobian import (
+    BlockColouring,
+    block_stencil_colouring,
+    jacobian_relative_error,
+    materialize_block_jacobian,
+)
 from .step_control import AlphaTargetingControl, DualTimeControl
 
 __all__ = [
     "AirHierarchy",
     "AlphaTargetingControl",
+    "BlockColouring",
     "BlockScaledNorm",
     "CoefficientDriftTrigger",
     "ConstantRelaxation",
@@ -106,6 +119,7 @@ __all__ = [
     "LineSearchGrowth",
     "LocalCourantBasis",
     "MarchResult",
+    "MonolithicIlutPreconditioner",
     "MonotoneLineSearch",
     "PseudoTransientStep",
     "RefreshTrigger",
@@ -121,8 +135,10 @@ __all__ = [
     "StepControl",
     "StepReport",
     "SwitchedEvolutionRelaxation",
+    "TransposedPreconditioner",
     "VelocityShiftParts",
     "air_multigrid_solve",
+    "block_stencil_colouring",
     "build_air_hierarchy",
     "build_convection_hierarchy",
     "build_smoothed_hierarchy",
@@ -131,6 +147,8 @@ __all__ = [
     "decouple_dof",
     "default_linear_solver",
     "forward_march",
+    "jacobian_relative_error",
+    "materialize_block_jacobian",
     "newton_step",
     "refresh_air_hierarchy",
     "relative_residual_gmres",

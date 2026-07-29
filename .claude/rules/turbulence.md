@@ -734,6 +734,27 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     exception: they do go stale, and refreshing them alone once the flow separates is worth ~2.6× in
     outer cycles** (31 → 12) — the one staleness lever that pays; see the staleness bullet in
     `.claude/rules/solve.md`. Overridable via `preconditioner_kwargs`.
+  - **`coupled_ilut_continuation` — the monolithic-ILUT alternative to the block-triangular PC (BUILT).**
+    A drop-in for `solve_coupled(continuation=…)` that preconditions the whole `[flow, k, ω]` saddle with
+    one incomplete-LU factorization of the assembled coupled Jacobian (`MonolithicIlutPreconditioner`,
+    `.claude/rules/solve.md`) instead of the block-diagonal SIMPLE composition. It **forms the true
+    pressure Schur through the factorization's fill** rather than approximating it — the block PC's
+    measured wall is the Schur *approximation* (the "Stage 3" note above / `.claude/rules/flow.md`), which
+    the ILUT sidesteps: on the coupled RANS saddle it reaches the forward tolerance in ~3–10 GMRES cycles
+    against the block PC's hundreds. `MonolithicIlutShiftPolicy` **reuses `CoupledShiftPolicy`'s
+    pseudo-transient shift diagonal** (the physics — same velocity `a_P` + k/ω transport diagonals) and
+    swaps only the preconditioner; the factorization is a host `scipy` object so it rides as a **static**
+    field and is applied via `jax.pure_callback`, with the adjoint's `Mᵀ` supplied directly through a
+    `TransposedPreconditioner` (the generic `jax.linear_transpose` machinery cannot transpose a callback —
+    `.claude/rules/solve.md`). Verified: `solve_coupled(continuation=coupled_ilut_continuation(...))`
+    converges to the **same fixed point** as the block PC and passes the **coupled-adjoint FD gate**
+    (`tests/integration/test_coupled_ilut.py`). **MVP scope:** the factorization is **frozen at the
+    reference state — no mid-march refresh** (a static-field rebuild recompiles; it is strong enough that
+    state drift costs only a few cycles), and the builder still assembles the (unused) block AMG as the
+    `a_P` source (a lightweight shift-diagonal-only policy is the tracked cleanup). The heavy ILUT fill is
+    the 3D-scalability caveat (parked ILUT-as-smoother variant, `.claude/rules/solve.md`). Prefer it where
+    per-step linear-solve cost dominates a developed coupled solve; it does **not** shorten the
+    reachability crawl (a per-step-cost lever only).
   - **~~Remaining limiter — the k equation drift~~ — RETIRED: the stall no longer reproduces (measured
     2026-07-22).** This bullet used to record that past rel ~0.09 the direct-`k` residual grew (rel 1 →
     ~5×) and re-stalled the march, and named high-Reynolds `k` stability as the open follow-up. **It
