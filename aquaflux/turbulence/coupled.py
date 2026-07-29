@@ -1088,7 +1088,18 @@ def _coupled_shift_policy(
         if reuse is not None
         else BlockPreconditioner.build(
             momentum,
-            **{"velocity": "convection", "schur_scaling": "msimpler", **preconditioner_kwargs},
+            **{
+                "velocity": "convection",
+                "schur_scaling": "msimpler",
+                # Aggregate the velocity/Schur AMGs along strong connections. A no-op on a low-aspect-
+                # ratio mesh (this pitzDaily case), but the fix that keeps the V-cycle contracting once
+                # the near-wall cells are strongly stretched (wall-resolved / skewed meshes), where
+                # isotropic aggregation coarsens across the stiff wall-normal direction and stalls. The
+                # flow block is frozen at the reference state (never refreshed), so the value-dependent
+                # coarsening this turns on carries no refresh cost.
+                "strength_threshold": 0.25,
+                **preconditioner_kwargs,
+            },
         )
     )
 

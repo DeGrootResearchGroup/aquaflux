@@ -159,6 +159,54 @@ def test_smoothed_multigrid_is_linear_in_rhs() -> None:
     assert jnp.allclose(solve(1.5 * r1 - 0.5 * r2), 1.5 * solve(r1) - 0.5 * solve(r2), atol=1e-10)
 
 
+def _anisotropic_poisson(nx: int, ny: int, aspect_ratio: float) -> sp.csr_matrix:
+    """A uniformly-anisotropic Dirichlet Poisson: x-face coefficient ``dy/dx`` and y-face ``dx/dy``, so
+    the strong (y) / weak (x) coefficient ratio is ``(dx/dy)**2 = aspect_ratio``. The canonical operator
+    that defeats isotropic aggregation — which coarsens across the stiff (strongly-coupled) direction."""
+    dx = 1.0 / nx
+    dy = dx / np.sqrt(aspect_ratio)
+    cx, cy = dy / dx, dx / dy
+    owner, nb, coeff = [], [], []
+    bd = np.zeros(nx * ny)
+    for i in range(nx):
+        for j in range(ny):
+            c = i * ny + j
+            if i + 1 < nx:
+                owner.append(c), nb.append(c + ny), coeff.append(cx)
+            if j + 1 < ny:
+                owner.append(c), nb.append(c + 1), coeff.append(cy)
+            if i in (0, nx - 1):
+                bd[c] += 2 * cx
+            if j in (0, ny - 1):
+                bd[c] += 2 * cy
+    return convection_diffusion_operator(
+        np.asarray(owner), np.asarray(nb), np.asarray(coeff, float), nx * ny, boundary_diagonal=bd
+    )
+
+
+def test_strength_of_connection_aggregation_fixes_an_anisotropic_operator() -> None:
+    """On a high-aspect-ratio operator the isotropic aggregation (the default) stalls, while the
+    strength-of-connection aggregation reaches a 1% residual in a few V-cycles — the fix for a
+    wall-resolved / skewed mesh. ``strength_threshold=0`` is exactly the isotropic build."""
+    a = _anisotropic_poisson(48, 48, aspect_ratio=100.0)
+    b = np.asarray(np.random.default_rng(0).standard_normal(a.shape[0]))
+    b_norm = np.linalg.norm(b)
+
+    def relative_after(hierarchy, cycles):
+        x = np.asarray(smoothed_multigrid_solve(hierarchy, jnp.asarray(b), cycles=cycles))
+        return float(np.linalg.norm(a @ x - b) / b_norm)
+
+    plain = build_smoothed_hierarchy(a)  # isotropic aggregation on the full graph
+    soc = build_smoothed_hierarchy(a, strength_threshold=0.25)  # aggregate along strong connections
+    # The default is the isotropic build, bit-for-bit (same coarsening, same result).
+    assert relative_after(plain, 5) == relative_after(
+        build_smoothed_hierarchy(a, strength_threshold=0.0), 5
+    )
+    # Isotropic aggregation has not reached 1% even after 8 V-cycles; SoC reaches it in 3.
+    assert relative_after(plain, 8) > 1e-2
+    assert relative_after(soc, 3) < 1e-2
+
+
 def _chebyshev_propagation_polynomial(eigenvalues, lam_max, degree, lo_frac):
     """Sample the smoother's error-propagation polynomial ``P(mu)`` at the given eigenvalues.
 

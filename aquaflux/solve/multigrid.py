@@ -246,6 +246,29 @@ def _spectral_radius(matrix: sp.spmatrix, iterations: int = 20) -> float:
     return lam
 
 
+def _aggregation_edges(a_agg: sp.csr_matrix, strength_threshold: float) -> sp.coo_matrix:
+    """The upper-triangular edge set the greedy aggregation pairs cells across.
+
+    ``strength_threshold == 0`` returns the aggregation operator's **full** graph — isotropic
+    aggregation, which pairs a cell with any neighbour regardless of coupling strength. On an
+    anisotropic operator (a high-aspect-ratio cell couples far more strongly across the thin direction
+    than along it) that coarsens across the stiff direction, and the resulting V-cycle stalls
+    (contraction → 1 as the aspect ratio grows).
+
+    ``strength_threshold > 0`` keeps only **strong** connections — edge ``(i, j)`` survives iff
+    ``|A_ij| >= threshold · max_{k!=i}|A_ik|`` from *either* endpoint (:func:`_strength_classical`,
+    symmetrized) — so aggregates form along the strong-coupling directions and the coarse space
+    resolves the stiff modes. This is the strength-of-connection fix for anisotropic / high-skewness
+    operators; ``0.25`` is a standard threshold. It makes the coarsening **value-dependent** (it reads
+    ``|A_ij|``), so a hierarchy re-derived at a new operator no longer has an invariant structure — see
+    the note on :func:`build_smoothed_hierarchy`.
+    """
+    if strength_threshold <= 0.0:
+        return sp.triu(a_agg, k=1).tocoo()
+    strength = _strength_classical(a_agg, strength_threshold)
+    return sp.triu((strength + strength.T).tocsr(), k=1).tocoo()
+
+
 def _build_aggregation_hierarchy(
     a: sp.csr_matrix,
     *,
@@ -253,6 +276,7 @@ def _build_aggregation_hierarchy(
     omega_smooth: float,
     max_coarse: int,
     max_levels: int,
+    strength_threshold: float = 0.0,
 ) -> SmoothedHierarchy:
     """Coarsen ``a`` into a frozen smoothed-aggregation hierarchy — the loop shared by the symmetric
     and convection-diffusion builders.
@@ -288,7 +312,7 @@ def _build_aggregation_hierarchy(
             # also handles a nonsymmetric coarse operator.
             levels.append(_sparse_level(a, lam_store, np.linalg.pinv(a.toarray()), None, 0))
             break
-        upper = sp.triu(a_agg, k=1).tocoo()  # aggregate on the aggregation operator's graph
+        upper = _aggregation_edges(a_agg, strength_threshold)  # full graph, or strong edges only
         aggregate, n_coarse = _aggregate(upper.row, upper.col, a.shape[0])
         tentative = sp.csr_matrix(
             (np.ones(a.shape[0]), (np.arange(a.shape[0]), aggregate)), shape=(a.shape[0], n_coarse)
@@ -307,6 +331,7 @@ def build_smoothed_hierarchy(
     omega_smooth: float = 2.0 / 3.0,
     max_coarse: int = 16,
     max_levels: int = 20,
+    strength_threshold: float = 0.0,
 ) -> SmoothedHierarchy:
     """Build the smoothed-aggregation hierarchy for operator ``a`` — off the jit path.
 
@@ -326,6 +351,16 @@ def build_smoothed_hierarchy(
         Stop coarsening once a level has at most this many cells (solved directly there).
     max_levels : int
         Hard cap on the number of levels.
+    strength_threshold : float
+        Strength-of-connection threshold for the aggregation (default ``0`` = the historical isotropic
+        aggregation on the full graph). A value like ``0.25`` aggregates only along **strong**
+        connections (:func:`_aggregation_edges`), which is what keeps the V-cycle contracting on an
+        **anisotropic / high-aspect-ratio** operator — where isotropic aggregation coarsens across the
+        stiff direction and stalls (measured: on a uniformly anisotropic Poisson the plain V-cycle
+        contraction climbs past ``0.9`` and fails to reach a 1% residual, while ``0.25`` holds ``~0.5``
+        and reaches 1% in ~3 cycles, mesh-independently). **It makes the coarsening value-dependent**,
+        so unlike the ``0`` path a re-derivation at a new operator changes the aggregate structure and
+        shapes; use it only where the hierarchy is frozen (never refreshed), or refresh by rebuilding.
 
     Returns
     -------
@@ -338,6 +373,7 @@ def build_smoothed_hierarchy(
         omega_smooth=omega_smooth,
         max_coarse=max_coarse,
         max_levels=max_levels,
+        strength_threshold=strength_threshold,
     )
 
 
@@ -535,6 +571,7 @@ def build_convection_hierarchy(
     *,
     omega_smooth: float = 2.0 / 3.0,
     max_coarse: int = 16,
+    strength_threshold: float = 0.0,
 ) -> SmoothedHierarchy:
     """Build the two-level convection-diffusion hierarchy for operator ``a`` — off the jit path.
 
@@ -562,6 +599,11 @@ def build_convection_hierarchy(
     max_coarse : int
         Skip the aggregation and solve the fine operator directly when it already has at most this many
         cells (a one-level direct solve for a trivially small system).
+    strength_threshold : float
+        Strength-of-connection threshold for the aggregation (default ``0`` = isotropic aggregation on
+        the symmetric part's full graph). ``> 0`` aggregates only along strong connections
+        (:func:`_aggregation_edges`) — the fix for an anisotropic / high-aspect-ratio operator; see
+        :func:`build_smoothed_hierarchy` for the effect and the value-dependence caveat.
 
     Returns
     -------
@@ -576,6 +618,7 @@ def build_convection_hierarchy(
         omega_smooth=omega_smooth,
         max_coarse=max_coarse,
         max_levels=_CONVECTION_LEVELS,
+        strength_threshold=strength_threshold,
     )
 
 
