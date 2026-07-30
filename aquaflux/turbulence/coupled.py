@@ -1424,6 +1424,7 @@ def solve_coupled(
     atol: float = 1e-12,
     refresh_trigger: RefreshTrigger | None = None,
     refresh_limit: int = 1,
+    refresh_builder: Callable[[jnp.ndarray], ForwardStep] | None = None,
     step_control: StepControl | None = None,
     scaled_norm: bool = False,
     grow: int = 0,
@@ -1493,6 +1494,16 @@ def solve_coupled(
         finishing solve compile the step separately, so a refreshed solve pays one compilation more
         than an unrefreshed one over and above the per-refresh rebuild -- the price of leaving the
         convergence guard solely with the solve that produces the result.
+    refresh_builder : callable, optional
+        ``state -> ForwardStep``, a builder that (re)constructs the continuation at a given state. When
+        supplied it replaces the internal block rebuild on both the initial build (if ``continuation``
+        is ``None``) and every refresh, so a preconditioner solve_coupled does not know how to build --
+        a :func:`coupled_ilut_continuation` materialized off the jit path -- can still refresh: the loop
+        calls ``refresh_builder`` at each developed state and re-injects the initial-state progress
+        measure (seam 4). This is what lets the monolithic ILUT re-materialize + re-factor as the flow
+        develops (so its pseudo-timestep can grow past the wall where a frozen factorization goes stale),
+        rather than being pinned at the reference state. Passing it also lifts the "explicit
+        ``continuation`` cannot refresh" restriction, since the builder is how the refresh rebuilds.
     descent_backoff : int
         Lower the shift strength up to this many times, until the shifted correction actually descends
         in the residual measure, before the usual escalation ladder runs. Zero (the default) disables
@@ -1625,22 +1636,29 @@ def solve_coupled(
     # identity for DirectScalars, log for LogScalars) so the Newton march iterates on the right unknown.
     state = coupled.state_from_physical(flow, k, omega)
     if continuation is None:
-        reference = state if reference_state is None else reference_state
-        continuation = coupled_continuation(
-            coupled,
-            reference,
-            method=method,
-            grow=grow,
-            descent_backoff=descent_backoff,
-            descent_test=descent_test,
-            **continuation_kwargs,
-        )
-    elif refreshing:
+        if refresh_builder is not None:
+            # A caller-supplied builder constructs the continuation from the state (e.g. an ILUT
+            # continuation, materialized off the jit path); the refresh loop re-invokes it at each
+            # developed state, so an off-jit preconditioner can refresh without solve_coupled knowing
+            # how it is built.
+            continuation = refresh_builder(state)
+        else:
+            reference = state if reference_state is None else reference_state
+            continuation = coupled_continuation(
+                coupled,
+                reference,
+                method=method,
+                grow=grow,
+                descent_backoff=descent_backoff,
+                descent_test=descent_test,
+                **continuation_kwargs,
+            )
+    elif refreshing and refresh_builder is None:
         raise ValueError(
-            "refresh_trigger needs solve_coupled to build the continuation (it re-freezes the "
-            "preconditioner part way through), but an explicit `continuation` was supplied. Pass the "
-            "schedule via **continuation_kwargs instead, or stage the refresh yourself with "
-            "coupled_continuation(..., reuse=<the old policy>)."
+            "refresh_trigger needs solve_coupled to (re)build the continuation, but an explicit "
+            "`continuation` was supplied with no `refresh_builder`. Pass a `refresh_builder` "
+            "(state -> ForwardStep) that rebuilds it at each developed state, or drop the explicit "
+            "`continuation` so solve_coupled builds it, or stage the refresh yourself."
         )
 
     stage_rtol, stage_atol = rtol, atol
@@ -1701,20 +1719,30 @@ def solve_coupled(
             control_state = result.control_state
             if not result.triggered or segment == refresh_limit:
                 break
-            # Re-freeze at the developed state: the k/omega AMGs are re-derived on their reused
-            # coarsening and the shift's transport time scale is rebuilt, while the flow block and the
-            # shift's coordinate factor are carried over (measured -- see `_coupled_shift_policy`).
-            continuation = coupled_continuation(
-                coupled,
-                jax.lax.stop_gradient(state),
-                method=method,
-                reuse=continuation.shift_policy,
-                residual_norm=base_norm,  # keep the progress measure fixed at the initial state (seam 4)
-                grow=grow,
-                descent_backoff=descent_backoff,
-                descent_test=descent_test,
-                **continuation_kwargs,
-            )
+            if refresh_builder is not None:
+                # Re-freeze at the developed state via the caller's builder (re-materializes an ILUT,
+                # say), then re-inject the initial-state measure so the progress reference stays fixed
+                # across the refresh (seam 4), just as the block path holds `residual_norm=base_norm`.
+                continuation = eqx.tree_at(
+                    lambda c: c.residual_norm,
+                    refresh_builder(jax.lax.stop_gradient(state)),
+                    base_norm,
+                )
+            else:
+                # Re-freeze at the developed state: the k/omega AMGs are re-derived on their reused
+                # coarsening and the shift's transport time scale is rebuilt, while the flow block and
+                # the shift's coordinate factor are carried over (see `_coupled_shift_policy`).
+                continuation = coupled_continuation(
+                    coupled,
+                    jax.lax.stop_gradient(state),
+                    method=method,
+                    reuse=continuation.shift_policy,
+                    residual_norm=base_norm,  # keep the progress measure fixed (seam 4)
+                    grow=grow,
+                    descent_backoff=descent_backoff,
+                    descent_test=descent_test,
+                    **continuation_kwargs,
+                )
         # Hand the finishing solve the *absolute* target measured at the initial state, so a refreshed
         # solve stops exactly where an unrefreshed one would. A relative tolerance would be measured
         # against whatever residual the pre-march reached, silently tightening the solve by that factor
