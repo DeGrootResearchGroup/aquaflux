@@ -717,6 +717,21 @@ _COUPLED_FORWARD_SOLVER = relative_residual_gmres(
     1e-2, restart=120, stagnation_iters=40, max_restarts=15
 )
 
+# The monolithic ILUT preconditions the whole coupled saddle with an incomplete factorization that
+# forms the true Schur coupling through its fill, so the preconditioned operator's spectrum is tightly
+# clustered and the Krylov solve reaches the 1% stop within a handful of vectors -- the large
+# 120-vector subspace the block-triangular preconditioner needs is pure waste here. A restarted GMRES
+# only tests convergence at each restart boundary, so with `restart = 120` it builds ~120 matrix-vector
+# products (each paying the ILUT's triangular back-solve) before it can stop, where ~5--10 already
+# solve it. A small restart lets it stop as soon as it has converged: measured on the backward-facing
+# step the march trajectory (the row-scaled residual reached at every step) is unchanged from
+# `restart = 120`, while the per-step wall drops about ten-fold. `max_restarts` is kept generous so a
+# transiently harder (e.g. drifted-reference) solve still completes before the cycle-count refresh
+# trigger re-freezes the factorization.
+_COUPLED_ILUT_FORWARD_SOLVER = relative_residual_gmres(
+    1e-2, restart=10, stagnation_iters=40, max_restarts=40
+)
+
 # Backtracking rungs for the shifted step. The full coupled Newton step from the hybrid initial
 # condition overshoots violently (the residual blows up many orders of magnitude), so the step length
 # is scaled back along {1, 1/2, ..., 1/2**N} until it descends -- recovering a residual-reducing step
@@ -1334,7 +1349,10 @@ def coupled_ilut_continuation(
         The inner-loop stopping tolerance (fraction of the reference residual), used only when
         ``inner_steps > 1``.
     forward_solver : lineax.AbstractLinearSolver or None
-        The shifted-solve Krylov solver; ``None`` uses :data:`_COUPLED_FORWARD_SOLVER`.
+        The shifted-solve Krylov solver; ``None`` uses :data:`_COUPLED_ILUT_FORWARD_SOLVER`, a
+        small-restart GMRES matched to the ILUT's fast convergence (the solve tests its stop only at
+        each restart boundary, so a large restart would build many more preconditioned matvecs than the
+        incomplete factorization needs -- see that constant's note).
     block_scaled_norm : bool
         Select the coarser per-block :class:`~aquaflux.solve.BlockScaledNorm` instead of the default
         row-equilibrated :class:`~aquaflux.solve.RowScaledNorm` (``False``, the default).
@@ -1382,7 +1400,7 @@ def coupled_ilut_continuation(
             else coupled_scaled_norm(coupled, policy, reference_state)
         )
     schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
-    solver = forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER
+    solver = forward_solver if forward_solver is not None else _COUPLED_ILUT_FORWARD_SOLVER
     if inner_steps > 1:
         # Dual-time (backward-Euler) march preconditioned by the ILUT, mirroring `coupled_continuation`'s
         # dual-time branch: an inner Newton loop per outer pseudo-timestep on the transient residual, so a
