@@ -113,3 +113,46 @@ def test_build_materializes_and_factors_from_a_matvec():
     )
     x = rng.standard_normal(nf * n)
     assert np.linalg.norm(pc.factors.apply(a @ x) - x) / np.linalg.norm(x) < 1e-8
+
+
+def test_refresh_in_place_repreconditions_the_same_compiled_matvec():
+    """`refresh_in_place` re-factors at a new operator and the SAME already-jitted matvec picks it up.
+
+    This is the forward-march cheap refresh: the compiled Krylov solve holds the preconditioner by
+    identity and the callback reads ``self.factors`` at call time, so mutating the factorization
+    re-preconditions the existing compiled matvec with no recompile.
+    """
+    rng = np.random.default_rng(5)
+    n, nf = 12, 3
+    a = _diagonally_dominant_block_matrix(n, nf, rng)
+    b = _diagonally_dominant_block_matrix(
+        n, nf, rng
+    )  # a different operator, same sparsity structure
+    colouring = block_stencil_colouring(np.arange(n - 1), np.arange(1, n), n, reach=1)
+    shift = np.zeros(nf * n)
+    pc = MonolithicIlutPreconditioner.build(
+        lambda v: jnp.asarray(a @ np.asarray(v)),
+        colouring,
+        nf,
+        shift,
+        fill_factor=100.0,
+        drop_tol=1e-12,
+    )
+    jm = jax.jit(pc.matvec())  # compile the matvec ONCE, against A's factorization
+    x = rng.standard_normal(nf * n)
+    # M_A (A x) ~= x
+    assert np.linalg.norm(np.asarray(jm(jnp.asarray(a @ x))) - x) / np.linalg.norm(x) < 1e-8
+
+    pc.refresh_in_place(
+        lambda v: jnp.asarray(b @ np.asarray(v)),
+        colouring,
+        nf,
+        shift,
+        fill_factor=100.0,
+        drop_tol=1e-12,
+    )
+    y = rng.standard_normal(nf * n)
+    # The SAME jitted callable now preconditions B: M_B (B y) ~= y (the refresh is seen without a rebuild)
+    assert np.linalg.norm(np.asarray(jm(jnp.asarray(b @ y))) - y) / np.linalg.norm(y) < 1e-8
+    # ...and the factorization genuinely changed: applying M_B to (A x) does NOT recover x
+    assert np.linalg.norm(np.asarray(jm(jnp.asarray(a @ x))) - x) / np.linalg.norm(x) > 1e-2
