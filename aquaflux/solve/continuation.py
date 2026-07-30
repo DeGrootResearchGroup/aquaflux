@@ -367,9 +367,10 @@ class PseudoTransientStep(eqx.Module):
     def stepper(self) -> _ForwardStep:
         """The accepted shifted-Newton step and its linear solve's cycle count.
 
-        ``(residual_fn, φ, ‖R₀‖, solver) -> (φ_next, cycles, alpha)``. ``cycles`` is the restart-cycle
-        count of the **accepted** attempt's shifted linear solve — the cost of the step that was
-        actually taken, not the sum over rejected escalation attempts; ``alpha`` is that attempt's
+        ``(residual_fn, φ, ‖R₀‖, solver) -> (φ_next, cycles, alpha, inner_iterations)``. ``cycles`` is the
+        raw solver count of the **accepted** attempt's shifted linear solve — the cost of the step that
+        was actually taken, not the sum over rejected escalation attempts; ``inner_iterations`` is ``1``
+        (a single-step attempt has no inner loop); ``alpha`` is that attempt's
         line-search factor (``1`` if the full shifted step descended, smaller if clipped), the
         step-quality signal a :class:`~aquaflux.solve.StepControl` drives the next shift by.
 
@@ -583,7 +584,9 @@ class PseudoTransientStep(eqx.Module):
                 start = fresh(start_relaxation)
 
             _, phi_next, _, _, step_cycles, step_alpha = jax.lax.while_loop(cond, body, start)
-            return phi_next, step_cycles, step_alpha
+            # A single-step pseudo-transient attempt has no inner Newton loop; report 1 inner iteration
+            # so a consumer can offset-correct the raw solver count uniformly with the dual-time path.
+            return phi_next, step_cycles, step_alpha, 1
 
         return step
 
@@ -696,9 +699,10 @@ class DualTimeStep(eqx.Module):
     def stepper(self) -> _ForwardStep:
         """One backward-Euler outer timestep: the inner-converged iterate and its total solve cost.
 
-        ``(residual_fn, φ, ‖R₀‖, solver) -> (φ_next, cycles, alpha)``. The reference ``φⁿ`` is ``φ``;
-        ``cycles`` is the summed restart-cycle count over the inner Newton iterations; ``alpha`` is the
-        **smallest** inner line-search factor (``1`` when every inner step took the full length, smaller
+        ``(residual_fn, φ, ‖R₀‖, solver) -> (φ_next, cycles, alpha, inner_iterations)``. The reference
+        ``φⁿ`` is ``φ``; ``cycles`` is the **summed** raw solver count over the inner Newton iterations
+        and ``inner_iterations`` is that count (so a consumer can recover the per-solve cost); ``alpha``
+        is the **smallest** inner line-search factor (``1`` when every inner step took the full length, smaller
         when the implicit step had to be clipped, and ``0`` if any inner step failed to reduce ``‖G‖`` —
         the line search's non-descent fallback, which a step control must read as "struggling", not as a
         clean full step). It is the step-quality signal a :class:`~aquaflux.solve.StepControl` drives
@@ -763,7 +767,7 @@ class DualTimeStep(eqx.Module):
                     jnp.minimum(min_alpha, jnp.where(descended, alpha, 0.0)),
                 )
 
-            phi_next, _, _, cycles, alpha = jax.lax.while_loop(
+            phi_next, inner_iterations, _, cycles, alpha = jax.lax.while_loop(
                 cond,
                 body,
                 (
@@ -774,6 +778,8 @@ class DualTimeStep(eqx.Module):
                     jnp.asarray(1.0),
                 ),
             )
-            return phi_next, cycles, alpha
+            # `cycles` is the SUM of the inner solves' raw counts; report the inner-iteration count
+            # alongside it so the two costs (nonlinear inner work vs linear solve cost) are not conflated.
+            return phi_next, cycles, alpha, inner_iterations
 
         return step

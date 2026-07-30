@@ -129,8 +129,8 @@ def test_dual_time_inner_loop_iterates_and_sums_cost() -> None:
     def gnorm(p: jnp.ndarray) -> float:
         return float(jnp.linalg.norm(_residual(p, theta) + (p - phi0)))
 
-    phi1, cyc1, _ = run(1)
-    phi4, cyc4, _ = run(4)
+    phi1, cyc1, _, _ = run(1)
+    phi4, cyc4, _, _ = run(4)
     assert gnorm(phi4) < gnorm(phi1)  # more inner iterations converge the implicit step further
     assert int(cyc4) > int(cyc1)  # cycles are summed over the inner iterations, not overwritten
 
@@ -165,8 +165,8 @@ def test_dual_time_one_inner_step_is_a_single_shifted_step() -> None:
     def residual_theta(p: jnp.ndarray) -> jnp.ndarray:
         return _residual(p, theta)
 
-    dual_next, _, _ = dual.stepper()(residual_theta, phi0, r0, dual.default_solver())
-    shifted_next, _, _ = raw_shifted.stepper()(
+    dual_next, _, _, _ = dual.stepper()(residual_theta, phi0, r0, dual.default_solver())
+    shifted_next, _, _, _ = raw_shifted.stepper()(
         residual_theta, phi0, r0, raw_shifted.default_solver()
     )
     assert jnp.allclose(dual_next, shifted_next, atol=1e-10)
