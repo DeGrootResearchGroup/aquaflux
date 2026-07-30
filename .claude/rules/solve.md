@@ -1284,6 +1284,23 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         `(owner, nb, n)`, pure graph topology, so for a fixed mesh the aggregates, `n_coarse` and every
         sparsity pattern are invariant), so only `val`/`diagonal`/`lam_max`/`coarse_inv` change; making
         those traced leaves over a static index structure would turn a refresh into a cache hit.
+      - **The observed march RETURNS ITS OWN CONVERGED STATE — the traced finishing solve is only the
+        not-converged fallback (BUILT).** `solve_coupled`'s observed path (`on_step`/`refresh`/`step_control`)
+        is never differentiated — those cannot run under a JAX transform (guarded), so the converged eager
+        state needs no adjoint. When the eager `forward_march` reaches its stopping tolerance **judged in the
+        measure it steered by** (the per-step-rebuilt `RowScaledNorm` under `scaled_norm`), `solve_coupled`
+        returns that state directly instead of re-marching it through `ImplicitNewtonSolver`. **Why this is
+        required, not just an optimization:** the finishing solve targets the *frozen* base measure (state0
+        row scales), which over-reports a developed state's residual (#156 seam 4), so it does not see the
+        eager convergence — and being traced it cannot refresh or carry the SER step control, so on an
+        aggressive low-shift ILUT dual-time path it leaves the converged state chasing the unreachable frozen
+        target and **diverges to NaN** (measured on the pitzDaily Re/100 anchor: eager converges row-scaled
+        0.009, finishing solve then returns ‖R‖=NaN). Returning the eager state fixes that. The finishing
+        solve still runs when the eager march stops short, and is the plain differentiable path's sole march.
+        **Open (for the target-Re adjoint):** a differentiated target solve still needs the finishing solve
+        to converge deep *in the same row-scaled measure* — restructuring it (Python outer loop so it can
+        carry the measure + step control) is the tracked follow-up; the lower-Re continuation rungs are
+        `stop_gradient`ed seeds and need no adjoint, so the eager path serves them.
       - **Rescaling the MSIMPLER `k` is a ρ mirage — validate on the real march, never on ρ.** Growing `k`
         collapses ρ (34.0 → 9.6) but barely moves the one-shot error (24.1 → 22.6), and the ρ-minimizing
         `k` sits ~40× *above the maximum* of the whole per-cell `ρV/a_P` distribution — i.e. the degenerate

@@ -1539,12 +1539,16 @@ def solve_coupled(
         traced and cannot call back into Python.
 
         **Supplying either one makes the march observed, which changes how ``max_steps`` is spent.**
-        An unobserved solve runs one traced march with the whole ``max_steps`` budget; an observed one
-        runs the eager pre-march to ``max_steps`` and then gives the finishing solve ``max_steps``
-        again. That is more budget in total, but it is *split*, so a solve needing many contiguous
-        steps can exhaust a tight budget in the pre-march and leave the finishing solve unable to
-        reach a root -- which it reports by raising, rather than returning a non-root. Raise
-        ``max_steps`` when instrumenting a solve that was already near its limit.
+        An unobserved solve runs one traced march with the whole ``max_steps`` budget. An observed one
+        runs the eager pre-march to ``max_steps`` and, **if it has reached the stopping tolerance in its
+        own measure, returns that state directly** -- it is forward-only (never differentiated, since the
+        refresh/step control cannot run under a JAX transform), so its converged state needs no adjoint
+        and there is nothing to gain from re-marching it through the traced finishing solve. The finishing
+        solve runs only when the eager march stops *short* of the tolerance, as a fallback that owns the
+        convergence guard, and it is given ``max_steps`` again. So a solve needing many contiguous steps
+        can exhaust a tight budget in the pre-march and leave the finishing-solve fallback unable to reach
+        a root -- which it reports by raising. Raise ``max_steps`` when instrumenting a solve that was
+        already near its limit.
 
         **Why:** the frozen scalar preconditioners go stale as the flow separates. On a separated
         backward-facing-step state, re-freezing them cut the shifted solve from 30 to 13 outer Krylov
@@ -1743,6 +1747,20 @@ def solve_coupled(
                     descent_test=descent_test,
                     **continuation_kwargs,
                 )
+        # The observed march is never differentiated -- the refresh, step control and per-step norm
+        # rebuild cannot run under a JAX transform (guarded above) -- so its converged state needs no
+        # adjoint, and there is no reason to re-march it through the traced finishing solve. When the
+        # eager march has already reached its stopping tolerance, return that state directly. Judge it in
+        # the SAME measure the march steered by (a per-step-rebuilt `RowScaledNorm` under `scaled_norm`),
+        # which is what the march actually converged in; the frozen finishing-solve measure disagrees with
+        # it at a developed state (the state0 row scales over-report the developed residual), so the traced
+        # finishing solve -- which cannot refresh or carry the step control -- would chase an unreachable
+        # target off the converged state and diverge on an aggressive low-shift path. The finishing solve
+        # below then runs only as the not-converged fallback (and is the plain differentiable path's sole
+        # march, unchanged).
+        final_measure = norm_builder(state) if norm_builder is not None else base_norm
+        if float(final_measure(coupled.residual(state))) <= atol + rtol * reference_norm:
+            return coupled.physical_fields(state)
         # Hand the finishing solve the *absolute* target measured at the initial state, so a refreshed
         # solve stops exactly where an unrefreshed one would. A relative tolerance would be measured
         # against whatever residual the pre-march reached, silently tightening the solve by that factor
