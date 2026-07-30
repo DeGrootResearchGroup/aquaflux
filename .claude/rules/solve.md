@@ -865,10 +865,12 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     negative slope. Note ‖δ‖ *decreases* as β is backed off (1049 → 856 → 760 for β = 2 → 1 → 0.5), so
     "α collapsing" is not a large-correction artefact.
   - **⚠️ EXTENDING THE LADDER ABOVE α = 1 (`grow`): inert on the Euclidean measure, live on the
-    equilibrated one — and it exposed a fallback bug (2026-07-27).**
-    - On the **Euclidean** default march, `grow = 2` produced a trajectory **bit-identical** to the
+    equilibrated one — and it exposed a fallback bug (2026-07-27).** (The equilibrated/row-scaled measure
+    is now the *default*, so `grow` is live on the shipped configuration; the Euclidean result below is the
+    now-non-default measure.)
+    - On the **Euclidean** march, `grow = 2` produced a trajectory **bit-identical** to the
       control across 10 steps and both checkpoints: α = 2 is never admissible there, so the extended
-      ladder is inert on the shipped configuration.
+      ladder is inert on that measure.
     - On the **equilibrated** measure it fires: α = 2 was selected at step 1 and was productive. A
       cold-start scan confirms α = 2 sits inside the tolerance (ratio 1.291 against a 2× bound) and
       travels twice as far as the full step.
@@ -1172,12 +1174,17 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       end-to-end it is a net wash: floor 0.0 vs 0.3 reached the same tolerance in the same wall time on
       `solve_coupled`, because the cheaper late solves cancel the extra Newton steps. Wired through
       `coupled_continuation(beta_floor=…)` for further evaluation; not a default because it is a wash.
-    - **The block-scaled per-field residual measure (`block_scaled_norm=True`) — kept off-by-default
-      because it *stalls* the march.** A `BlockScaledNorm` over `[flow, k, ω]` weighs every field rather
-      than the `ω` block that dominates ‖R‖, but the per-block relative norm plateaus long before the
-      fields converge, so `coupled_continuation` defaults to the Euclidean `jnp.linalg.norm` and exposes
-      `block_scaled_norm` (default `False`) to request the block measure for experimentation. The
-      `BlockScaledNorm` class and its `_coupled_residual_norm` builder are kept as that opt-in path.
+    - **The default coupled residual measure is the row-equilibrated `RowScaledNorm`
+      (`coupled_scaled_norm`), NOT the Euclidean ‖R‖.** The Euclidean coupled residual is `ω`-dominated
+      and *mis-ranks* states (a converged field scores worse than a badly wrong one — the warning above);
+      `RowScaledNorm` divides each row by its own diagonal and each block by its field magnitude, so every
+      equation is judged comparably. `coupled_continuation` / `coupled_ilut_continuation` build it by
+      default; `block_scaled_norm=True` selects the coarser one-scale-per-block `BlockScaledNorm`
+      (`_coupled_residual_norm`), and `residual_norm=jnp.linalg.norm` recovers Euclidean.
+      (`mass_flow_coupled_continuation` still defaults to Euclidean pending a constraint-aware variant.)
+      The row-scaled measure does **not** fix the forward stall (globalization-bound; it plateaus under any
+      measure — that plateau is the *honest* signal, where the Euclidean fall was a `β×travel`/`ω`-magnitude
+      artifact); it makes the measure honest and is required to judge this case correctly.
       **The measure must be held FIXED across a refresh (binding, #156 seam 4).** `BlockScaledNorm` is
       self-normalising — at the state its per-block scales were built at it returns `sqrt(n_blocks)` — so
       rebuilding it at each refresh's developed state re-bases every `residual_ratio` back toward one,

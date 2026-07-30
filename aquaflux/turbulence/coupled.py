@@ -739,9 +739,9 @@ def _coupled_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray) -
     switched-evolution-relaxation ramp, the line search, and the outer stopping test all judge every
     field rather than the ``omega`` block that dominates the plain Euclidean norm (``omega`` is
     O(1e5) here, ``k`` O(1e-3)): with the plain norm a step that collapses ``k`` barely moves ‖R‖ and
-    is accepted. It weighs every block, but was found to *stall* the pitzDaily march (the per-block
-    relative norm plateaus long before the fields converge), so the march uses the Euclidean norm by
-    default and this is available only when ``block_scaled_norm=True`` is requested.
+    is accepted. This is the coarser of the two field-aware measures -- one scale per block -- and is
+    the opt-in ``block_scaled_norm=True`` alternative to the default :func:`coupled_scaled_norm`, which
+    additionally equilibrates each row by its own diagonal.
     """
     n = coupled.momentum.mesh.n_cells
     sizes = (coupled.layout.flow_size, n, n)
@@ -928,13 +928,12 @@ def coupled_continuation(
         step is solved to ~1% rather than driven to machine precision by the near-zero-right-hand-side
         wall rows).
     block_scaled_norm : bool
-        Which residual measure the march judges progress by (default ``False`` = the plain Euclidean
-        norm). When ``True`` the march uses a :class:`~aquaflux.solve.BlockScaledNorm` over
-        ``[flow, k, omega]`` (each block divided by its own initial magnitude), so the globalization
-        weighs every field rather than the ``omega`` block that dominates the Euclidean norm. The
-        block-scaled measure was found to *stall* the pitzDaily march (the per-block relative norm stops
-        descending long before the fields converge), so it is available for experimentation but off by
-        default; the Euclidean norm is what the solver uses.
+        Select the coarser :class:`~aquaflux.solve.BlockScaledNorm` (each of ``[flow, k, omega]``
+        divided by its own initial magnitude) instead of the default row-equilibrated
+        :class:`~aquaflux.solve.RowScaledNorm`. Both weigh every field rather than the ``omega`` block
+        that dominates the plain Euclidean norm; the row-scaled default additionally equilibrates each
+        row by its own diagonal, giving a fractional change per equation (see
+        :func:`coupled_scaled_norm`). ``False`` (default) uses the row-scaled measure.
     shift_basis : ShiftBasis
         How the pseudo-time shift diagonal is built from each block's convective/dissipative operator
         parts (velocity, k and omega alike; see :class:`CoupledShiftPolicy`). Defaults to
@@ -949,10 +948,11 @@ def coupled_continuation(
         way through a march, once the flow has developed.
     residual_norm : ResidualNorm, optional
         The progress measure to use, overriding ``block_scaled_norm``. ``solve_coupled`` passes the
-        march's initial measure here on every refresh, so a self-normalising :class:`BlockScaledNorm`
-        keeps its per-block reference magnitudes fixed at the state the global progress reference was
-        measured against, rather than re-basing toward one at each developed refresh state (seam 4).
-        ``None`` (a fresh, non-refresh build) constructs the measure from ``block_scaled_norm``.
+        march's initial measure here on every refresh, so a self-normalising :class:`RowScaledNorm` /
+        :class:`BlockScaledNorm` keeps its per-row/per-block reference scales fixed at the state the
+        global progress reference was measured against, rather than re-basing toward one at each
+        developed refresh state (seam 4). ``None`` (a fresh, non-refresh build) constructs the default
+        row-scaled measure (or the block-scaled one when ``block_scaled_norm``).
     **preconditioner_kwargs
         Forwarded to :meth:`~aquaflux.flow.BlockPreconditioner.build` for the flow block (e.g.
         ``schur_scaling``, ``velocity``). Ignored when ``reuse`` is given, since the flow block is then
@@ -980,10 +980,17 @@ def coupled_continuation(
     # re-base a self-normalising `BlockScaledNorm` back toward one, making the convergence test
     # unreachable and mismatching the finishing solve's absolute target (issue #156, seam 4).
     if residual_norm is None:
+        # The default progress measure is the row-equilibrated norm. The plain Euclidean norm of the
+        # coupled residual is dominated by the omega block (its magnitude dwarfs the flow and k blocks),
+        # so it barely moves while the flow develops and mis-ranks a separating flow -- steering and the
+        # stopping test then judge omega alone. `RowScaledNorm` (:func:`coupled_scaled_norm`) divides
+        # each row by its own diagonal and each block by its field magnitude, reporting a fractional
+        # change per equation, so every block contributes comparably. `block_scaled_norm=True` selects
+        # the coarser per-block variant; pass `residual_norm=jnp.linalg.norm` for the plain Euclidean one.
         residual_norm = (
             _coupled_residual_norm(coupled, reference_state)
             if block_scaled_norm
-            else jnp.linalg.norm
+            else coupled_scaled_norm(coupled, policy, reference_state)
         )
     schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
     solver = forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER
@@ -1317,7 +1324,8 @@ def coupled_ilut_continuation(
     forward_solver : lineax.AbstractLinearSolver or None
         The shifted-solve Krylov solver; ``None`` uses :data:`_COUPLED_FORWARD_SOLVER`.
     block_scaled_norm : bool
-        Whether the march judges progress by the block-scaled norm (default ``False`` = Euclidean).
+        Select the coarser per-block :class:`~aquaflux.solve.BlockScaledNorm` instead of the default
+        row-equilibrated :class:`~aquaflux.solve.RowScaledNorm` (``False``, the default).
     shift_basis : ShiftBasis
         How the shift diagonal is built from the operator's convective/dissipative parts.
     residual_norm : ResidualNorm, optional
@@ -1353,10 +1361,13 @@ def coupled_ilut_continuation(
     policy = MonolithicIlutShiftPolicy(base, preconditioner)
 
     if residual_norm is None:
+        # Row-equilibrated by default, as in `coupled_continuation`: the Euclidean coupled residual is
+        # dominated by the omega block and mis-ranks a separating flow, so steering and the stopping
+        # test would judge omega alone. `block_scaled_norm=True` selects the coarser per-block variant.
         residual_norm = (
             _coupled_residual_norm(coupled, reference_state)
             if block_scaled_norm
-            else jnp.linalg.norm
+            else coupled_scaled_norm(coupled, policy, reference_state)
         )
     schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
     solver = forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER
@@ -1469,19 +1480,14 @@ def solve_coupled(
         the backoff off this surfaces a non-descent direction instead of letting it pass as a step that
         quietly went nowhere.
     scaled_norm : bool
-        Steer the observed march by the **row-equilibrated** measure
-        (:class:`~aquaflux.solve.RowScaledNorm`) instead of the continuation's own, rebuilding it at the
-        start of every outer iteration and holding it fixed across that iteration's line search. Each
-        row is divided by its own diagonal and each block by its field's magnitude, so the measure
-        reports a *fractional change* per equation rather than a raw magnitude -- which the plain
-        Euclidean norm on this system cannot, being ~100 % the ``omega`` block and so blind to
-        flow-block progress. **Experimental and off by default.** Two consequences worth knowing before
-        reading a run: the march's stopping test and switched-evolution shift are then in fractional
-        units (a target like ``1e-6`` is meaningful; the old absolute magnitude is not comparable), and
-        the **finishing solve keeps the continuation's measure regardless** -- it passes its norm
-        through a non-differentiated argument slot that requires a hashable object, which a measure
-        holding per-row arrays is not, so its absolute target is computed in that measure and not this
-        one.
+        **Rebuild** the default row-equilibrated measure (:class:`~aquaflux.solve.RowScaledNorm`) at the
+        start of every outer iteration -- holding it fixed across that iteration's line search -- rather
+        than freezing it once at the initial state as the default does. The scales (each row's own
+        diagonal, each field's magnitude) then track the developing flow instead of the initial
+        condition. Only the observed pre-march is affected; the finishing solve keeps the continuation's
+        initial-state measure, so its absolute stopping target is computed there. Off by default: the
+        frozen row-scaled measure is already the default steering norm (see ``residual_norm``), and the
+        per-iteration rebuild is the finer, more expensive refinement.
     on_step : callable, optional
         Called with each :class:`~aquaflux.solve.StepReport` as the march produces it -- the seam for
         logging a long solve's progress and cost. The refresh trigger reads the same reports.
