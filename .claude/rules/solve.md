@@ -842,6 +842,37 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         a `DualTimeStep` when `inner_steps > 1`, else the unchanged `PseudoTransientStep`) and reachable as
         `solve_coupled(coupled, inner_steps=…, step_control=DualTimeControl())`. **The default path
         (`inner_steps = 1`) is byte-unchanged.**
+      - **`DualTimeControl` RUNS THE TRANSIENT AWAY — it grows Δτ on the inner α alone (inner-loop
+        comfort), which is blind to the *steady* residual.** Measured on the pitzDaily Re/100 anchor
+        (row-scaled steering): the α-control keeps growing Δτ while the steady residual climbs (α stays 1
+        as the flow over-develops), driving x_r/h past the steady state without settling (residual bottoms
+        ~0.05 then rises to 0.1+, x_r/h → 4+ and climbing). The fix is the residual-based control below;
+        `DualTimeControl` is kept as the α-lens variant but is not the one to reach for.
+      - **`ResidualRatioDualTimeControl` (`solve/step_control.py`) is the convergent control — switched
+        evolution relaxation / Kelley–Keyes pseudo-transient continuation.** It ramps Δτ by the steady-
+        residual reduction ratio: `β ← β · (‖Rₙ‖/‖Rₙ₋₁‖)` (residual drop → β down / Δτ up; residual rise →
+        β up / Δτ down), clipped to `[1/max_change, max_change]`, clamped to `[beta_min, beta_max]`, with a
+        hard inner-clip (`α < backoff_below`) safety shrink, and **carrying β across a refresh** (the ramp
+        is continuous, unlike the α-control which resets to `beta_start` each segment because `previous is
+        None` on a segment's first step). A rising residual *automatically* shrinks Δτ, so it cannot run
+        away. Its `next_step` state is `(β, prev ‖R‖)`, not a bare β. Opt-in; unit-tested in
+        `tests/unit/test_step_control.py`.
+      - **THE LOW-β WALL IS THE BLOCK-SIMPLE PRECONDITIONER, AND THE ILUT BREAKS IT.** With
+        `ResidualRatioDualTimeControl` the residual descends cleanly (no runaway) but block-SIMPLE's coupled
+        solve goes **NaN at β ≈ 0.067** — the low-shift conditioning wall (block-SIMPLE cannot solve the
+        near-unshifted saddle; the same limit as its adjoint stagnation). The monolithic ILUT forms the true
+        coupled inverse, so `coupled_ilut_continuation(inner_steps>1)` (a `DualTimeStep` preconditioned by
+        the ILUT — the branch added alongside the single-step one) drives β **monotonically to 0.041 with no
+        NaN, ~6 GMRES cycles flat**, residual 0.65 → 0.043 (row-scaled) on the anchor. So the ILUT is what
+        makes the large-Δτ dual-time march reachable at all.
+      - **Residual FLOOR + over-development past the minimum = loose `inner_tol`, NOT the preconditioner.**
+        Even with the ILUT (cycles flat at 6 — the linear solve is fine), the march bottoms ~0.043 (x_r/h
+        ≈ 2.9) then slowly over-develops. Cause: dual-time's unconditional stability comes from the inner
+        loop driving `G = R + βd(φ−φⁿ)` to zero each step; at `inner_tol = 0.05` the implicit step is only
+        5%-solved, so a large-Δτ backward-Euler step on a half-solved system overshoots. Fix = tighten
+        `inner_tol` (with enough `inner_steps` to reach it) — **affordable precisely because the ILUT makes
+        the low-β inner solves cheap**, where block-SIMPLE could not. ILUT removes the conditioning wall;
+        tight `inner_tol` restores dual-time stability; the two together are what settle the rung.
     - **Lowering β is not the escape, and the reason is specific — state it precisely.** At `β = 0.25`
       the k/ω blocks reach 1e24 / 1e52 at the cold IC and go NaN at step 20, but are **perfectly stable
       at steps 45 and 90** (ratios 0.994–1.046). So the under-damping is an *early-state* property, not

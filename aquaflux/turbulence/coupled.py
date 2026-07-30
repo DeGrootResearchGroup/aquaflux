@@ -1283,6 +1283,8 @@ def coupled_ilut_continuation(
     escalation_factor: float = 2.0,
     divergence_cap: float = 10.0,
     line_search: int = _COUPLED_LINE_SEARCH,
+    inner_steps: int = 1,
+    inner_tol: float = 0.05,
     forward_solver: lx.AbstractLinearSolver | None = None,
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
@@ -1321,6 +1323,15 @@ def coupled_ilut_continuation(
         fill that forms the Schur coupling.
     beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search
         The pseudo-transient schedule and guard parameters, as in :func:`coupled_continuation`.
+    inner_steps : int
+        ``> 1`` builds a :class:`~aquaflux.solve.DualTimeStep` (an inner Newton loop per outer
+        pseudo-timestep on the transient residual) preconditioned by the ILUT, instead of the default
+        single-step :class:`~aquaflux.solve.PseudoTransientStep`; ``1`` (default) is the single-step
+        march. The ILUT's true-inverse conditioning lets the dual-time pseudo-timestep grow well past the
+        low-shift wall where the block-triangular preconditioner's coupled solve breaks down.
+    inner_tol : float
+        The inner-loop stopping tolerance (fraction of the reference residual), used only when
+        ``inner_steps > 1``.
     forward_solver : lineax.AbstractLinearSolver or None
         The shifted-solve Krylov solver; ``None`` uses :data:`_COUPLED_FORWARD_SOLVER`.
     block_scaled_norm : bool
@@ -1371,6 +1382,21 @@ def coupled_ilut_continuation(
         )
     schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
     solver = forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER
+    if inner_steps > 1:
+        # Dual-time (backward-Euler) march preconditioned by the ILUT, mirroring `coupled_continuation`'s
+        # dual-time branch: an inner Newton loop per outer pseudo-timestep on the transient residual, so a
+        # larger pseudo-timestep (smaller beta) stays stable. The inner loop replaces the escalation
+        # ladder, so the escalation/acceptance parameters do not apply.
+        return DualTimeStep(
+            policy,
+            relaxation_schedule=schedule,
+            inner_steps=inner_steps,
+            inner_tol=inner_tol,
+            line_search=line_search,
+            forward_solver=solver,
+            residual_norm=residual_norm,
+            adjoint_preconditioner_factory=policy.adjoint_factory(),
+        )
     return PseudoTransientStep(
         policy,
         relaxation_schedule=schedule,

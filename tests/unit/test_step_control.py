@@ -11,12 +11,14 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax.numpy as jnp
+import pytest
 from aquaflux.solve import (
     AlphaTargetingControl,
     ConstantRelaxation,
     DualTimeControl,
     DualTimeStep,
     PseudoTransientStep,
+    ResidualRatioDualTimeControl,
     ShiftTerm,
     StepReport,
     SwitchedEvolutionRelaxation,
@@ -160,3 +162,85 @@ def test_dual_time_control_step_differs_from_base_only_in_a_dynamic_beta_leaf() 
     assert not jnp.allclose(step_a.relaxation_schedule.beta, step_b.relaxation_schedule.beta)
     # The non-schedule configuration (e.g. inner_steps) is untouched.
     assert step_a.inner_steps == _dual_step().inner_steps
+
+
+def _res_report(alpha: float, residual: float) -> StepReport:
+    return StepReport(
+        step=0, cycles=6, residual_norm=residual, residual_ratio=residual, alpha=alpha
+    )
+
+
+def test_residual_ratio_first_step_uses_beta_start() -> None:
+    """With no state, β is beta_start and the carried state is (beta_start, no residual yet)."""
+    control = ResidualRatioDualTimeControl(beta_start=0.5)
+    step, state = control.next_step(_dual_step(), None, None)
+    assert state == (0.5, None)
+    assert float(step.relaxation_schedule.beta) == 0.5
+
+
+def test_residual_ratio_grows_the_timestep_when_the_residual_falls() -> None:
+    """A residual drop (ratio < 1) lowers β (grows the pseudo-timestep): β ← β·ratio."""
+    control = ResidualRatioDualTimeControl(beta_start=0.5, max_change=2.0, backoff_below=0.0)
+    _, (beta, prev) = control.next_step(
+        _dual_step(), _res_report(alpha=1.0, residual=0.9), (0.5, 1.0)
+    )
+    assert beta == 0.45  # 0.5 * (0.9 / 1.0)
+    assert prev == 0.9
+
+
+def test_residual_ratio_shrinks_the_timestep_when_the_residual_rises() -> None:
+    """A residual rise (ratio > 1) raises β (shrinks the pseudo-timestep) -- the anti-runaway property."""
+    control = ResidualRatioDualTimeControl(beta_start=0.5, max_change=2.0, backoff_below=0.0)
+    _, (beta, _prev) = control.next_step(
+        _dual_step(), _res_report(alpha=1.0, residual=1.2), (0.5, 1.0)
+    )
+    assert beta == pytest.approx(0.6)  # 0.5 * (1.2 / 1.0)
+
+
+def test_residual_ratio_change_is_clipped() -> None:
+    """One anomalous ratio cannot fling the timestep: the change is clipped to [1/max_change, max_change]."""
+    control = ResidualRatioDualTimeControl(
+        beta_start=0.5, max_change=1.3, backoff_below=0.0, beta_max=10.0
+    )
+    _, (beta, _p) = control.next_step(
+        _dual_step(), _res_report(alpha=1.0, residual=5.0), (0.5, 1.0)
+    )
+    assert beta == pytest.approx(0.65)  # clipped to 0.5 * 1.3, not 0.5 * 5
+
+
+def test_residual_ratio_hard_inner_clip_forces_a_shrink() -> None:
+    """An inner-loop clip (α < backoff_below) shrinks the step regardless of the residual ratio."""
+    control = ResidualRatioDualTimeControl(
+        beta_start=0.5, max_change=1.3, backoff=2.0, backoff_below=0.6
+    )
+    # Residual flat (ratio 1) but the inner loop clipped hard -> β multiplied by backoff.
+    _, (beta, _p) = control.next_step(
+        _dual_step(), _res_report(alpha=0.5, residual=1.0), (0.5, 1.0)
+    )
+    assert beta == pytest.approx(1.0)  # 0.5 * 1 (ratio) * 2 (backoff)
+
+
+def test_residual_ratio_holds_beta_across_a_refresh() -> None:
+    """The first step of a refresh segment (previous is None, state carried) holds β, not beta_start."""
+    control = ResidualRatioDualTimeControl(beta_start=0.5)
+    _, (beta, prev) = control.next_step(_dual_step(), None, (0.12, 0.3))
+    assert beta == 0.12  # continues the ramp, does not reset to beta_start
+    assert prev == 0.3
+
+
+def test_residual_ratio_clamps_beta() -> None:
+    """β is clamped to [beta_min, beta_max] after the update."""
+    low = ResidualRatioDualTimeControl(beta_min=0.1, max_change=10.0, backoff_below=0.0)
+    _, (beta, _p) = low.next_step(_dual_step(), _res_report(alpha=1.0, residual=0.01), (0.2, 1.0))
+    assert beta == 0.1  # 0.2 * 0.1 clipped-change would go below beta_min
+
+
+def test_residual_ratio_step_differs_from_base_only_in_a_dynamic_beta_leaf() -> None:
+    """The control replaces just the schedule with ConstantRelaxation(β) on a dynamic leaf."""
+    control = ResidualRatioDualTimeControl()
+    step_a, _ = control.next_step(_dual_step(), _res_report(alpha=1.0, residual=0.9), (0.5, 1.0))
+    step_b, _ = control.next_step(_dual_step(), _res_report(alpha=1.0, residual=1.2), (0.5, 1.0))
+    static_a = eqx.partition(step_a, eqx.is_array)[1]
+    static_b = eqx.partition(step_b, eqx.is_array)[1]
+    assert eqx.tree_equal(static_a, static_b) is True
+    assert not jnp.allclose(step_a.relaxation_schedule.beta, step_b.relaxation_schedule.beta)

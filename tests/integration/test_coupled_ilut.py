@@ -100,6 +100,28 @@ def case():
 
 
 @pytest.mark.slow
+def test_ilut_continuation_inner_steps_builds_a_dual_time_step(case) -> None:
+    """``inner_steps > 1`` swaps the single-step ILUT step for an ILUT-preconditioned dual-time step.
+
+    The dual-time branch mirrors ``coupled_continuation``: an inner Newton loop per outer pseudo-timestep,
+    whose implicit step the ILUT preconditions -- the path whose true-inverse conditioning at low shift is
+    what lets the pseudo-timestep grow past the block preconditioner's wall.
+    """
+    from aquaflux.solve import DualTimeStep, PseudoTransientStep
+
+    coupled = case["coupled"]
+    flow, k, omega = case["start"]
+    reference_state = coupled.pack_state(flow, k, omega)
+
+    single = coupled_ilut_continuation(coupled, reference_state)
+    assert isinstance(single, PseudoTransientStep)
+
+    dual = coupled_ilut_continuation(coupled, reference_state, inner_steps=5, inner_tol=1e-3)
+    assert isinstance(dual, DualTimeStep)
+    assert dual.inner_steps == 5
+
+
+@pytest.mark.slow
 def test_ilut_solve_converges_and_matches_the_block_preconditioned_solve(case) -> None:
     coupled = case["coupled"]
     flow_ws, k_ws, omega_ws = case["start"]
