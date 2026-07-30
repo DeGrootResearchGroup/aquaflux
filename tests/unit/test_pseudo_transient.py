@@ -216,7 +216,7 @@ def test_stepper_returns_the_step_and_its_linear_solve_cycle_count() -> None:
     def residual_fn(phi):
         return _residual(phi, theta)
 
-    phi_next, cycles, alpha = step.stepper()(residual_fn, phi0, residual_norm_0, solver)
+    phi_next, cycles, alpha, _ = step.stepper()(residual_fn, phi0, residual_norm_0, solver)
 
     # A real shifted solve was taken: the iterate moved, and stayed finite. Deliberately not a
     # descent assertion -- the pseudo-transient march is non-monotone (which is why its acceptance
@@ -410,8 +410,8 @@ def test_the_descent_backoff_lowers_the_shift_until_the_correction_descends() ->
     measure = common["residual_norm"]
     r0 = measure(residual_fn(phi))
     solver = without.default_solver()
-    plain, _, _ = without.stepper()(residual_fn, phi, r0, solver)
-    backed, _, _ = with_backoff.stepper()(residual_fn, phi, r0, solver)
+    plain, _, _, _ = without.stepper()(residual_fn, phi, r0, solver)
+    backed, _, _, _ = with_backoff.stepper()(residual_fn, phi, r0, solver)
 
     # Backing the shift off reaches a lower residual than stepping at the non-descent shift strength.
     assert float(measure(residual_fn(backed))) < float(measure(residual_fn(plain)))
@@ -454,8 +454,8 @@ def test_a_descending_probe_is_reused_rather_than_re_solved() -> None:
 
     r0 = common["residual_norm"](residual_fn(phi))
     solver = without.default_solver()
-    plain, plain_cycles, plain_alpha = without.stepper()(residual_fn, phi, r0, solver)
-    reused, reused_cycles, reused_alpha = with_backoff.stepper()(residual_fn, phi, r0, solver)
+    plain, plain_cycles, plain_alpha, _ = without.stepper()(residual_fn, phi, r0, solver)
+    reused, reused_cycles, reused_alpha, _ = with_backoff.stepper()(residual_fn, phi, r0, solver)
 
     assert jnp.allclose(reused, plain, rtol=0, atol=0)
     assert int(reused_cycles) == int(plain_cycles)

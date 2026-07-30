@@ -58,6 +58,7 @@ from aquaflux.solve import (
     ForwardStep,
     ImplicitNewtonSolver,
     LocalCourantBasis,
+    MonolithicIlutPreconditioner,
     PseudoTransientStep,
     RefreshTrigger,
     ResidualNorm,
@@ -67,7 +68,9 @@ from aquaflux.solve import (
     StepControl,
     StepReport,
     SwitchedEvolutionRelaxation,
+    TransposedPreconditioner,
     VelocityShiftParts,
+    block_stencil_colouring,
     forward_march,
     relative_residual_gmres,
 )
@@ -736,9 +739,9 @@ def _coupled_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray) -
     switched-evolution-relaxation ramp, the line search, and the outer stopping test all judge every
     field rather than the ``omega`` block that dominates the plain Euclidean norm (``omega`` is
     O(1e5) here, ``k`` O(1e-3)): with the plain norm a step that collapses ``k`` barely moves ‖R‖ and
-    is accepted. It weighs every block, but was found to *stall* the pitzDaily march (the per-block
-    relative norm plateaus long before the fields converge), so the march uses the Euclidean norm by
-    default and this is available only when ``block_scaled_norm=True`` is requested.
+    is accepted. This is the coarser of the two field-aware measures -- one scale per block -- and is
+    the opt-in ``block_scaled_norm=True`` alternative to the default :func:`coupled_scaled_norm`, which
+    additionally equilibrates each row by its own diagonal.
     """
     n = coupled.momentum.mesh.n_cells
     sizes = (coupled.layout.flow_size, n, n)
@@ -925,13 +928,12 @@ def coupled_continuation(
         step is solved to ~1% rather than driven to machine precision by the near-zero-right-hand-side
         wall rows).
     block_scaled_norm : bool
-        Which residual measure the march judges progress by (default ``False`` = the plain Euclidean
-        norm). When ``True`` the march uses a :class:`~aquaflux.solve.BlockScaledNorm` over
-        ``[flow, k, omega]`` (each block divided by its own initial magnitude), so the globalization
-        weighs every field rather than the ``omega`` block that dominates the Euclidean norm. The
-        block-scaled measure was found to *stall* the pitzDaily march (the per-block relative norm stops
-        descending long before the fields converge), so it is available for experimentation but off by
-        default; the Euclidean norm is what the solver uses.
+        Select the coarser :class:`~aquaflux.solve.BlockScaledNorm` (each of ``[flow, k, omega]``
+        divided by its own initial magnitude) instead of the default row-equilibrated
+        :class:`~aquaflux.solve.RowScaledNorm`. Both weigh every field rather than the ``omega`` block
+        that dominates the plain Euclidean norm; the row-scaled default additionally equilibrates each
+        row by its own diagonal, giving a fractional change per equation (see
+        :func:`coupled_scaled_norm`). ``False`` (default) uses the row-scaled measure.
     shift_basis : ShiftBasis
         How the pseudo-time shift diagonal is built from each block's convective/dissipative operator
         parts (velocity, k and omega alike; see :class:`CoupledShiftPolicy`). Defaults to
@@ -946,10 +948,11 @@ def coupled_continuation(
         way through a march, once the flow has developed.
     residual_norm : ResidualNorm, optional
         The progress measure to use, overriding ``block_scaled_norm``. ``solve_coupled`` passes the
-        march's initial measure here on every refresh, so a self-normalising :class:`BlockScaledNorm`
-        keeps its per-block reference magnitudes fixed at the state the global progress reference was
-        measured against, rather than re-basing toward one at each developed refresh state (seam 4).
-        ``None`` (a fresh, non-refresh build) constructs the measure from ``block_scaled_norm``.
+        march's initial measure here on every refresh, so a self-normalising :class:`RowScaledNorm` /
+        :class:`BlockScaledNorm` keeps its per-row/per-block reference scales fixed at the state the
+        global progress reference was measured against, rather than re-basing toward one at each
+        developed refresh state (seam 4). ``None`` (a fresh, non-refresh build) constructs the default
+        row-scaled measure (or the block-scaled one when ``block_scaled_norm``).
     **preconditioner_kwargs
         Forwarded to :meth:`~aquaflux.flow.BlockPreconditioner.build` for the flow block (e.g.
         ``schur_scaling``, ``velocity``). Ignored when ``reuse`` is given, since the flow block is then
@@ -977,10 +980,17 @@ def coupled_continuation(
     # re-base a self-normalising `BlockScaledNorm` back toward one, making the convergence test
     # unreachable and mismatching the finishing solve's absolute target (issue #156, seam 4).
     if residual_norm is None:
+        # The default progress measure is the row-equilibrated norm. The plain Euclidean norm of the
+        # coupled residual is dominated by the omega block (its magnitude dwarfs the flow and k blocks),
+        # so it barely moves while the flow develops and mis-ranks a separating flow -- steering and the
+        # stopping test then judge omega alone. `RowScaledNorm` (:func:`coupled_scaled_norm`) divides
+        # each row by its own diagonal and each block by its field magnitude, reporting a fractional
+        # change per equation, so every block contributes comparably. `block_scaled_norm=True` selects
+        # the coarser per-block variant; pass `residual_norm=jnp.linalg.norm` for the plain Euclidean one.
         residual_norm = (
             _coupled_residual_norm(coupled, reference_state)
             if block_scaled_norm
-            else jnp.linalg.norm
+            else coupled_scaled_norm(coupled, policy, reference_state)
         )
     schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
     solver = forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER
@@ -1200,6 +1210,206 @@ def _is_traced(pytree: object) -> bool:
     return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(pytree))
 
 
+class MonolithicIlutShiftPolicy(eqx.Module):
+    """A coupled :class:`~aquaflux.solve.ShiftPolicy` that preconditions the whole ``[flow, k, omega]``
+    saddle with one monolithic incomplete-LU factorization, in place of the block-diagonal composition.
+
+    Reuses :class:`CoupledShiftPolicy`'s pseudo-transient shift diagonal -- the physics, the same
+    velocity ``a_P`` and k/omega transport diagonals -- but replaces its block-diagonal preconditioner
+    with a single :class:`~aquaflux.solve.MonolithicIlutPreconditioner`: an incomplete factorization of
+    the assembled coupled Jacobian, which forms the true pressure Schur coupling through its fill rather
+    than approximating it. On a convection-dominated collocated Rhie--Chow RANS saddle it reaches the
+    forward tolerance in a handful of Krylov cycles where the block-triangular preconditioner needs
+    hundreds.
+
+    The factorization is frozen at a reference state and shift (built off the jit path by
+    :func:`coupled_ilut_continuation`). Unlike the block preconditioner's live ``a_P`` rescaling it does
+    not track the developing state; being a far stronger preconditioner it tolerates that freezing at a
+    cost of a few extra cycles, and the shift vanishes at the root so the frozen factorization never
+    changes the converged solution or its adjoint. Because it is a host ``scipy`` object it rides as a
+    **static** field rather than a traced pytree leaf, and is applied inside the jitted Krylov solve
+    through the callback matvec (:meth:`~aquaflux.solve.MonolithicIlutPreconditioner.matvec`).
+
+    Attributes
+    ----------
+    base : CoupledShiftPolicy
+        The block policy supplying the pseudo-transient shift diagonal.
+    preconditioner : MonolithicIlutPreconditioner
+        The frozen coupled ILUT factorization (a static field).
+    """
+
+    base: CoupledShiftPolicy
+    preconditioner: MonolithicIlutPreconditioner = eqx.field(static=True)
+
+    def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
+        """The block policy's shift diagonal, glued to the frozen ILUT preconditioner.
+
+        Parameters
+        ----------
+        phi : jnp.ndarray
+            The flat coupled state ``[flow..., k, omega]``, shape ``((dim + 3) n_cells,)``.
+        """
+        diagonal = self.base.shift_term(phi).diagonal
+        apply = self.preconditioner.matvec()
+        # The factorization is frozen, so the preconditioner does not depend on the shift strength.
+        return ShiftTerm(diagonal, lambda relaxation: apply)
+
+    def adjoint_factory(self) -> TransposedPreconditioner:
+        """The ``state -> M^T`` factory for the adjoint transpose solve.
+
+        The converged-state adjoint preconditions the (unshifted) transposed coupled Jacobian with the
+        frozen factorization's transpose -- the same incomplete factors applied with a transposed
+        triangular solve. Wrapped in a :class:`~aquaflux.solve.TransposedPreconditioner` because it
+        already returns ``M^T``: the generic adjoint machinery derives the transpose with
+        :func:`jax.linear_transpose`, which cannot handle the host-callback factorization, so it is
+        applied directly instead.
+        """
+        transpose = self.preconditioner.matvec(transpose=True)
+        return TransposedPreconditioner(lambda state: transpose)
+
+
+def coupled_ilut_continuation(
+    coupled: CoupledRANS,
+    reference_state: jnp.ndarray,
+    *,
+    ilut_beta: float = 2.0,
+    stencil_reach: int = 3,
+    fill_factor: float = 30.0,
+    drop_tol: float = 1e-6,
+    beta0: float = 2.0,
+    exponent: float = 1.0,
+    beta_floor: float = 0.0,
+    max_escalations: int = 6,
+    escalation_factor: float = 2.0,
+    divergence_cap: float = 10.0,
+    line_search: int = _COUPLED_LINE_SEARCH,
+    inner_steps: int = 1,
+    inner_tol: float = 0.05,
+    forward_solver: lx.AbstractLinearSolver | None = None,
+    block_scaled_norm: bool = False,
+    shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+    residual_norm: ResidualNorm | None = None,
+) -> ForwardStep:
+    """Build a pseudo-transient continuation step preconditioned by a monolithic coupled ILUT.
+
+    The counterpart of :func:`coupled_continuation` that swaps the block-triangular SIMPLE preconditioner
+    for one :class:`~aquaflux.solve.MonolithicIlutPreconditioner`. It materializes the coupled Jacobian at
+    ``reference_state`` from ``coupled.residual`` (compressed graph-coloured probing -- one source of
+    truth, no re-derived assembly), adds the pseudo-transient shift at ``ilut_beta``, and factors the
+    result incompletely, all off the jit path. The resulting step is a drop-in for ``solve_coupled``'s
+    ``continuation`` argument.
+
+    Frozen preconditioner, like the block path: the factorization is built once at ``reference_state`` and
+    does not refresh mid-march. Being a much stronger preconditioner it tolerates the state drift for a
+    few extra cycles, and the shift vanishes at the root so freezing changes neither the converged state
+    nor its adjoint.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled residual assembler.
+    reference_state : jnp.ndarray
+        The coupled state the Jacobian and shift are frozen at, shape ``((dim + 3) n_cells,)``.
+    ilut_beta : float
+        The pseudo-transient shift strength the factorization is built at (the operator it factors is
+        ``J + ilut_beta * d`` for the base shift diagonal ``d``). The march's own ``beta`` varies; the
+        strong factorization tolerates the mismatch. Default matches ``beta0``.
+    stencil_reach : int
+        The cell-graph distance the Jacobian's sparsity is probed to (the coupled RANS Jacobian reaches
+        distance ``3`` -- gradient reconstruction, Rhie--Chow, and the k/omega cross-coupling).
+    fill_factor, drop_tol : float
+        The incomplete-factorization fill controls (see
+        :func:`~aquaflux.solve.ilut_preconditioner.factorize_ilut`). ``drop_tol = 1e-6`` keeps the small
+        fill that forms the Schur coupling.
+    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search
+        The pseudo-transient schedule and guard parameters, as in :func:`coupled_continuation`.
+    inner_steps : int
+        ``> 1`` builds a :class:`~aquaflux.solve.DualTimeStep` (an inner Newton loop per outer
+        pseudo-timestep on the transient residual) preconditioned by the ILUT, instead of the default
+        single-step :class:`~aquaflux.solve.PseudoTransientStep`; ``1`` (default) is the single-step
+        march. The ILUT's true-inverse conditioning lets the dual-time pseudo-timestep grow well past the
+        low-shift wall where the block-triangular preconditioner's coupled solve breaks down.
+    inner_tol : float
+        The inner-loop stopping tolerance (fraction of the reference residual), used only when
+        ``inner_steps > 1``.
+    forward_solver : lineax.AbstractLinearSolver or None
+        The shifted-solve Krylov solver; ``None`` uses :data:`_COUPLED_FORWARD_SOLVER`.
+    block_scaled_norm : bool
+        Select the coarser per-block :class:`~aquaflux.solve.BlockScaledNorm` instead of the default
+        row-equilibrated :class:`~aquaflux.solve.RowScaledNorm` (``False``, the default).
+    shift_basis : ShiftBasis
+        How the shift diagonal is built from the operator's convective/dissipative parts.
+    residual_norm : ResidualNorm, optional
+        An explicit progress measure (overrides ``block_scaled_norm``); ``solve_coupled`` passes the
+        march's initial measure here on every refresh.
+
+    Returns
+    -------
+    ForwardStep
+        The :class:`~aquaflux.solve.PseudoTransientStep` to hand ``solve_coupled`` as ``continuation``.
+    """
+    # The base block policy supplies the pseudo-transient shift diagonal (the same velocity a_P + k/omega
+    # transport diagonals); its scalar AMGs are skipped (`method=None`) since the ILUT preconditions every
+    # block. The flow block is still assembled as the a_P source -- a lightweight shift-diagonal-only
+    # policy is a follow-up optimization.
+    base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
+
+    n_cells = coupled.momentum.mesh.n_cells
+    n_fields = coupled.layout.dim + 3
+    owner, nb, _ = coupled.momentum.mesh.face_cells.interior_edges()
+    colouring = block_stencil_colouring(np.asarray(owner), np.asarray(nb), n_cells, stencil_reach)
+    frozen = jax.lax.stop_gradient(reference_state)
+    matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    shift = ilut_beta * jax.lax.stop_gradient(base.shift_term(reference_state).diagonal)
+    preconditioner = MonolithicIlutPreconditioner.build(
+        matvec,
+        colouring,
+        n_fields,
+        np.asarray(shift),
+        fill_factor=fill_factor,
+        drop_tol=drop_tol,
+    )
+    policy = MonolithicIlutShiftPolicy(base, preconditioner)
+
+    if residual_norm is None:
+        # Row-equilibrated by default, as in `coupled_continuation`: the Euclidean coupled residual is
+        # dominated by the omega block and mis-ranks a separating flow, so steering and the stopping
+        # test would judge omega alone. `block_scaled_norm=True` selects the coarser per-block variant.
+        residual_norm = (
+            _coupled_residual_norm(coupled, reference_state)
+            if block_scaled_norm
+            else coupled_scaled_norm(coupled, policy, reference_state)
+        )
+    schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
+    solver = forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER
+    if inner_steps > 1:
+        # Dual-time (backward-Euler) march preconditioned by the ILUT, mirroring `coupled_continuation`'s
+        # dual-time branch: an inner Newton loop per outer pseudo-timestep on the transient residual, so a
+        # larger pseudo-timestep (smaller beta) stays stable. The inner loop replaces the escalation
+        # ladder, so the escalation/acceptance parameters do not apply.
+        return DualTimeStep(
+            policy,
+            relaxation_schedule=schedule,
+            inner_steps=inner_steps,
+            inner_tol=inner_tol,
+            line_search=line_search,
+            forward_solver=solver,
+            residual_norm=residual_norm,
+            adjoint_preconditioner_factory=policy.adjoint_factory(),
+        )
+    return PseudoTransientStep(
+        policy,
+        relaxation_schedule=schedule,
+        max_escalations=max_escalations,
+        escalation_factor=escalation_factor,
+        acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        line_search=line_search,
+        forward_solver=solver,
+        residual_norm=residual_norm,
+        adjoint_preconditioner_factory=policy.adjoint_factory(),
+    )
+
+
 def solve_coupled(
     coupled: CoupledRANS,
     flow: jnp.ndarray | None = None,
@@ -1214,6 +1424,7 @@ def solve_coupled(
     atol: float = 1e-12,
     refresh_trigger: RefreshTrigger | None = None,
     refresh_limit: int = 1,
+    refresh_builder: Callable[[jnp.ndarray], ForwardStep] | None = None,
     step_control: StepControl | None = None,
     scaled_norm: bool = False,
     grow: int = 0,
@@ -1283,6 +1494,16 @@ def solve_coupled(
         finishing solve compile the step separately, so a refreshed solve pays one compilation more
         than an unrefreshed one over and above the per-refresh rebuild -- the price of leaving the
         convergence guard solely with the solve that produces the result.
+    refresh_builder : callable, optional
+        ``state -> ForwardStep``, a builder that (re)constructs the continuation at a given state. When
+        supplied it replaces the internal block rebuild on both the initial build (if ``continuation``
+        is ``None``) and every refresh, so a preconditioner solve_coupled does not know how to build --
+        a :func:`coupled_ilut_continuation` materialized off the jit path -- can still refresh: the loop
+        calls ``refresh_builder`` at each developed state and re-injects the initial-state progress
+        measure (seam 4). This is what lets the monolithic ILUT re-materialize + re-factor as the flow
+        develops (so its pseudo-timestep can grow past the wall where a frozen factorization goes stale),
+        rather than being pinned at the reference state. Passing it also lifts the "explicit
+        ``continuation`` cannot refresh" restriction, since the builder is how the refresh rebuilds.
     descent_backoff : int
         Lower the shift strength up to this many times, until the shifted correction actually descends
         in the residual measure, before the usual escalation ladder runs. Zero (the default) disables
@@ -1296,19 +1517,14 @@ def solve_coupled(
         the backoff off this surfaces a non-descent direction instead of letting it pass as a step that
         quietly went nowhere.
     scaled_norm : bool
-        Steer the observed march by the **row-equilibrated** measure
-        (:class:`~aquaflux.solve.RowScaledNorm`) instead of the continuation's own, rebuilding it at the
-        start of every outer iteration and holding it fixed across that iteration's line search. Each
-        row is divided by its own diagonal and each block by its field's magnitude, so the measure
-        reports a *fractional change* per equation rather than a raw magnitude -- which the plain
-        Euclidean norm on this system cannot, being ~100 % the ``omega`` block and so blind to
-        flow-block progress. **Experimental and off by default.** Two consequences worth knowing before
-        reading a run: the march's stopping test and switched-evolution shift are then in fractional
-        units (a target like ``1e-6`` is meaningful; the old absolute magnitude is not comparable), and
-        the **finishing solve keeps the continuation's measure regardless** -- it passes its norm
-        through a non-differentiated argument slot that requires a hashable object, which a measure
-        holding per-row arrays is not, so its absolute target is computed in that measure and not this
-        one.
+        **Rebuild** the default row-equilibrated measure (:class:`~aquaflux.solve.RowScaledNorm`) at the
+        start of every outer iteration -- holding it fixed across that iteration's line search -- rather
+        than freezing it once at the initial state as the default does. The scales (each row's own
+        diagonal, each field's magnitude) then track the developing flow instead of the initial
+        condition. Only the observed pre-march is affected; the finishing solve keeps the continuation's
+        initial-state measure, so its absolute stopping target is computed there. Off by default: the
+        frozen row-scaled measure is already the default steering norm (see ``residual_norm``), and the
+        per-iteration rebuild is the finer, more expensive refinement.
     on_step : callable, optional
         Called with each :class:`~aquaflux.solve.StepReport` as the march produces it -- the seam for
         logging a long solve's progress and cost. The refresh trigger reads the same reports.
@@ -1323,12 +1539,16 @@ def solve_coupled(
         traced and cannot call back into Python.
 
         **Supplying either one makes the march observed, which changes how ``max_steps`` is spent.**
-        An unobserved solve runs one traced march with the whole ``max_steps`` budget; an observed one
-        runs the eager pre-march to ``max_steps`` and then gives the finishing solve ``max_steps``
-        again. That is more budget in total, but it is *split*, so a solve needing many contiguous
-        steps can exhaust a tight budget in the pre-march and leave the finishing solve unable to
-        reach a root -- which it reports by raising, rather than returning a non-root. Raise
-        ``max_steps`` when instrumenting a solve that was already near its limit.
+        An unobserved solve runs one traced march with the whole ``max_steps`` budget. An observed one
+        runs the eager pre-march to ``max_steps`` and, **if it has reached the stopping tolerance in its
+        own measure, returns that state directly** -- it is forward-only (never differentiated, since the
+        refresh/step control cannot run under a JAX transform), so its converged state needs no adjoint
+        and there is nothing to gain from re-marching it through the traced finishing solve. The finishing
+        solve runs only when the eager march stops *short* of the tolerance, as a fallback that owns the
+        convergence guard, and it is given ``max_steps`` again. So a solve needing many contiguous steps
+        can exhaust a tight budget in the pre-march and leave the finishing-solve fallback unable to reach
+        a root -- which it reports by raising. Raise ``max_steps`` when instrumenting a solve that was
+        already near its limit.
 
         **Why:** the frozen scalar preconditioners go stale as the flow separates. On a separated
         backward-facing-step state, re-freezing them cut the shifted solve from 30 to 13 outer Krylov
@@ -1420,22 +1640,29 @@ def solve_coupled(
     # identity for DirectScalars, log for LogScalars) so the Newton march iterates on the right unknown.
     state = coupled.state_from_physical(flow, k, omega)
     if continuation is None:
-        reference = state if reference_state is None else reference_state
-        continuation = coupled_continuation(
-            coupled,
-            reference,
-            method=method,
-            grow=grow,
-            descent_backoff=descent_backoff,
-            descent_test=descent_test,
-            **continuation_kwargs,
-        )
-    elif refreshing:
+        if refresh_builder is not None:
+            # A caller-supplied builder constructs the continuation from the state (e.g. an ILUT
+            # continuation, materialized off the jit path); the refresh loop re-invokes it at each
+            # developed state, so an off-jit preconditioner can refresh without solve_coupled knowing
+            # how it is built.
+            continuation = refresh_builder(state)
+        else:
+            reference = state if reference_state is None else reference_state
+            continuation = coupled_continuation(
+                coupled,
+                reference,
+                method=method,
+                grow=grow,
+                descent_backoff=descent_backoff,
+                descent_test=descent_test,
+                **continuation_kwargs,
+            )
+    elif refreshing and refresh_builder is None:
         raise ValueError(
-            "refresh_trigger needs solve_coupled to build the continuation (it re-freezes the "
-            "preconditioner part way through), but an explicit `continuation` was supplied. Pass the "
-            "schedule via **continuation_kwargs instead, or stage the refresh yourself with "
-            "coupled_continuation(..., reuse=<the old policy>)."
+            "refresh_trigger needs solve_coupled to (re)build the continuation, but an explicit "
+            "`continuation` was supplied with no `refresh_builder`. Pass a `refresh_builder` "
+            "(state -> ForwardStep) that rebuilds it at each developed state, or drop the explicit "
+            "`continuation` so solve_coupled builds it, or stage the refresh yourself."
         )
 
     stage_rtol, stage_atol = rtol, atol
@@ -1496,20 +1723,44 @@ def solve_coupled(
             control_state = result.control_state
             if not result.triggered or segment == refresh_limit:
                 break
-            # Re-freeze at the developed state: the k/omega AMGs are re-derived on their reused
-            # coarsening and the shift's transport time scale is rebuilt, while the flow block and the
-            # shift's coordinate factor are carried over (measured -- see `_coupled_shift_policy`).
-            continuation = coupled_continuation(
-                coupled,
-                jax.lax.stop_gradient(state),
-                method=method,
-                reuse=continuation.shift_policy,
-                residual_norm=base_norm,  # keep the progress measure fixed at the initial state (seam 4)
-                grow=grow,
-                descent_backoff=descent_backoff,
-                descent_test=descent_test,
-                **continuation_kwargs,
-            )
+            if refresh_builder is not None:
+                # Re-freeze at the developed state via the caller's builder (re-materializes an ILUT,
+                # say), then re-inject the initial-state measure so the progress reference stays fixed
+                # across the refresh (seam 4), just as the block path holds `residual_norm=base_norm`.
+                continuation = eqx.tree_at(
+                    lambda c: c.residual_norm,
+                    refresh_builder(jax.lax.stop_gradient(state)),
+                    base_norm,
+                )
+            else:
+                # Re-freeze at the developed state: the k/omega AMGs are re-derived on their reused
+                # coarsening and the shift's transport time scale is rebuilt, while the flow block and
+                # the shift's coordinate factor are carried over (see `_coupled_shift_policy`).
+                continuation = coupled_continuation(
+                    coupled,
+                    jax.lax.stop_gradient(state),
+                    method=method,
+                    reuse=continuation.shift_policy,
+                    residual_norm=base_norm,  # keep the progress measure fixed (seam 4)
+                    grow=grow,
+                    descent_backoff=descent_backoff,
+                    descent_test=descent_test,
+                    **continuation_kwargs,
+                )
+        # The observed march is never differentiated -- the refresh, step control and per-step norm
+        # rebuild cannot run under a JAX transform (guarded above) -- so its converged state needs no
+        # adjoint, and there is no reason to re-march it through the traced finishing solve. When the
+        # eager march has already reached its stopping tolerance, return that state directly. Judge it in
+        # the SAME measure the march steered by (a per-step-rebuilt `RowScaledNorm` under `scaled_norm`),
+        # which is what the march actually converged in; the frozen finishing-solve measure disagrees with
+        # it at a developed state (the state0 row scales over-report the developed residual), so the traced
+        # finishing solve -- which cannot refresh or carry the step control -- would chase an unreachable
+        # target off the converged state and diverge on an aggressive low-shift path. The finishing solve
+        # below then runs only as the not-converged fallback (and is the plain differentiable path's sole
+        # march, unchanged).
+        final_measure = norm_builder(state) if norm_builder is not None else base_norm
+        if float(final_measure(coupled.residual(state))) <= atol + rtol * reference_norm:
+            return coupled.physical_fields(state)
         # Hand the finishing solve the *absolute* target measured at the initial state, so a refreshed
         # solve stops exactly where an unrefreshed one would. A relative tolerance would be measured
         # against whatever residual the pre-march reached, silently tightening the solve by that factor

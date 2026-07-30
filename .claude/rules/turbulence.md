@@ -696,19 +696,24 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     fewer matvecs. See the `forward_solver` bullet in `.claude/rules/solve.md` for the mechanism
     (`lineax`'s componentwise stop plus the near-zero-right-hand-side ω wall-fixation rows pinned it to
     the absolute `atol=1e-10` floor, ~9 orders past the requested 1e-3) and the two-arm refutation.
-  - **The march's residual measure is the plain Euclidean ‖R‖ by default; the block-scaled per-field
-    measure is opt-in (`block_scaled_norm=True`).** A `BlockScaledNorm` over `[flow, k, ω]` (each block
-    divided by its own initial magnitude, `_coupled_residual_norm`) was built so the globalization weighs
-    every field rather than the `ω` block that dominates ‖R‖ (`ω` O(1e5), `k` O(1e-3)) — the concern being
-    that a step collapsing `k` barely moves the `ω`-dominated ‖R‖ and is accepted. But **measured, it
-    *stalls* the pitzDaily march**: the per-block relative norm plateaus long before the fields converge,
-    so `coupled_continuation`/`mass_flow_coupled_continuation` default to `jnp.linalg.norm` and expose
-    `block_scaled_norm` (default `False`) to request the block measure for experimentation. The helper and
-    the `BlockScaledNorm` class are kept as that opt-in path, not deleted. **When a march refreshes, the
-    measure is held fixed at the initial state** — `solve_coupled` passes `coupled_continuation(residual_norm=
-    base_norm)` on every refresh rather than letting it rebuild `_coupled_residual_norm` at the developed
-    state, or the self-normalising block scales would re-base and the convergence test become unreachable
-    (#156 seam 4; see `.claude/rules/solve.md`).
+  - **The march's default residual measure is the row-equilibrated `RowScaledNorm` (`coupled_scaled_norm`),
+    NOT the plain Euclidean ‖R‖.** The Euclidean coupled residual is dominated by the `ω` block (`ω` O(1e5),
+    `k` O(1e-3)), so it barely moves while the flow develops and *mis-ranks* states — a converged field can
+    score worse than a badly wrong one, and a step collapsing `k` is accepted (see the mis-ranking warning
+    in `.claude/rules/solve.md`). `RowScaledNorm` divides each row by its own diagonal and each block by its
+    field magnitude, reporting a fractional change per equation, so steering and the stopping test judge
+    every block comparably. `coupled_continuation` / `coupled_ilut_continuation` build it by default;
+    `block_scaled_norm=True` selects the coarser one-scale-per-block `BlockScaledNorm` (`_coupled_residual_norm`),
+    and `residual_norm=jnp.linalg.norm` recovers the plain Euclidean measure. (`mass_flow_coupled_continuation`
+    still defaults to Euclidean — its bordered `[flow, k, ω, β]` state needs a constraint-aware row-scaled
+    variant not yet built; a follow-up.) **This does not *fix* the forward stall** — the pitzDaily march is
+    globalization-bound and plateaus under any measure (the row-scaled measure is the honest signal of that,
+    where the Euclidean fall was a `β×travel` + `ω`-magnitude artifact). It makes the measure honest, and it
+    is REQUIRED for the case to be judged correctly. **When a march refreshes, the measure is held fixed at
+    the initial state** — `solve_coupled` passes `coupled_continuation(residual_norm=base_norm)` on every
+    refresh rather than rebuilding it at the developed state, or the self-normalising scales would re-base and
+    the convergence test become unreachable (#156 seam 4; see `.claude/rules/solve.md`). `scaled_norm=True`
+    opts the *observed* march into rebuilding the row scales per outer step (finer, more expensive).
   - **`beta_floor` (SER lower bound) is available but off by default (a measured wash).** Bounding
     `β = max(beta_floor, β₀(‖R‖/‖R₀‖)^p)` keeps each late shifted solve out of the ill-conditioned low-`β`
     regime (correctness-safe — the floor scales the correction `δ`, which vanishes at the root, so it never
@@ -734,6 +739,27 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     exception: they do go stale, and refreshing them alone once the flow separates is worth ~2.6× in
     outer cycles** (31 → 12) — the one staleness lever that pays; see the staleness bullet in
     `.claude/rules/solve.md`. Overridable via `preconditioner_kwargs`.
+  - **`coupled_ilut_continuation` — the monolithic-ILUT alternative to the block-triangular PC (BUILT).**
+    A drop-in for `solve_coupled(continuation=…)` that preconditions the whole `[flow, k, ω]` saddle with
+    one incomplete-LU factorization of the assembled coupled Jacobian (`MonolithicIlutPreconditioner`,
+    `.claude/rules/solve.md`) instead of the block-diagonal SIMPLE composition. It **forms the true
+    pressure Schur through the factorization's fill** rather than approximating it — the block PC's
+    measured wall is the Schur *approximation* (the "Stage 3" note above / `.claude/rules/flow.md`), which
+    the ILUT sidesteps: on the coupled RANS saddle it reaches the forward tolerance in ~3–10 GMRES cycles
+    against the block PC's hundreds. `MonolithicIlutShiftPolicy` **reuses `CoupledShiftPolicy`'s
+    pseudo-transient shift diagonal** (the physics — same velocity `a_P` + k/ω transport diagonals) and
+    swaps only the preconditioner; the factorization is a host `scipy` object so it rides as a **static**
+    field and is applied via `jax.pure_callback`, with the adjoint's `Mᵀ` supplied directly through a
+    `TransposedPreconditioner` (the generic `jax.linear_transpose` machinery cannot transpose a callback —
+    `.claude/rules/solve.md`). Verified: `solve_coupled(continuation=coupled_ilut_continuation(...))`
+    converges to the **same fixed point** as the block PC and passes the **coupled-adjoint FD gate**
+    (`tests/integration/test_coupled_ilut.py`). **MVP scope:** the factorization is **frozen at the
+    reference state — no mid-march refresh** (a static-field rebuild recompiles; it is strong enough that
+    state drift costs only a few cycles), and the builder still assembles the (unused) block AMG as the
+    `a_P` source (a lightweight shift-diagonal-only policy is the tracked cleanup). The heavy ILUT fill is
+    the 3D-scalability caveat (parked ILUT-as-smoother variant, `.claude/rules/solve.md`). Prefer it where
+    per-step linear-solve cost dominates a developed coupled solve; it does **not** shorten the
+    reachability crawl (a per-step-cost lever only).
   - **~~Remaining limiter — the k equation drift~~ — RETIRED: the stall no longer reproduces (measured
     2026-07-22).** This bullet used to record that past rel ~0.09 the direct-`k` residual grew (rel 1 →
     ~5×) and re-stalled the march, and named high-Reynolds `k` stability as the open follow-up. **It

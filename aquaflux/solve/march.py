@@ -54,10 +54,21 @@ class StepReport(NamedTuple):
     step : int
         The 0-based index of the step within its march segment.
     cycles : int
-        The restart-cycle count of the linear solve behind the accepted step — the step's cost.
-        **``0`` means "no measurement", not "free":** a pseudo-transient step records its count only
-        on acceptance, so a step whose every damping attempt was rejected reports ``0`` despite
-        having burned several solves. A consumer reading this as a cost signal must skip zeros.
+        The **raw** solver iteration count behind the accepted step, summed over the step's inner Newton
+        iterations (:attr:`inner_iterations`). This is lineax's ``num_steps``, which carries a **+2
+        offset and is blind within a restart cycle**: a solve that converges in 1, a few, or up to
+        ``restart`` matvecs all report ``3``, and it only climbs once a solve genuinely spills past a
+        restart cycle. So ``cycles`` is a raw cost primitive, **not** a literal cycle count — read
+        :attr:`restart_cycles` (offset-corrected) for the honest per-step cycle count and
+        :meth:`matvecs` for the matvec estimate. **``0`` means "no measurement", not "free":** a
+        pseudo-transient step records its count only on acceptance, so a step whose every damping
+        attempt was rejected reports ``0`` despite having burned several solves — skip zeros.
+    inner_iterations : int
+        How many inner Newton iterations the step took: the backward-Euler inner-loop count for a
+        :class:`~aquaflux.solve.DualTimeStep` (what the summed :attr:`cycles` is spread over), and ``1``
+        for a single-step (pseudo-transient / damped-Newton) march. Reporting it separately from
+        :attr:`cycles` is what keeps the two costs — nonlinear inner work vs linear solve cost — from
+        being conflated into one misleading number.
     residual_norm : float
         The residual measure at the state the step produced.
     residual_ratio : float
@@ -88,6 +99,25 @@ class StepReport(NamedTuple):
     residual_ratio: float
     alpha: float
     drift: float = 0.0
+    inner_iterations: int = 1
+
+    @property
+    def restart_cycles(self) -> int:
+        """The offset-corrected restart-cycle count.
+
+        ``cycles`` with lineax's +2-per-inner-solve offset removed, so an ideal one-cycle solve reads as
+        ``1`` and a dual-time step as its real total cycles over the inner loop. Clamped at ``0`` (a
+        no-measurement ``cycles = 0`` step stays ``0``).
+        """
+        return max(self.cycles - 2 * self.inner_iterations, 0)
+
+    def matvecs(self, restart: int) -> int:
+        """Upper-bound matvec estimate: :attr:`restart_cycles` times the GMRES ``restart`` length.
+
+        An upper bound because ``num_steps`` is cycle-granular -- blind within the final partial cycle,
+        which holds anywhere from 1 to ``restart`` matvecs.
+        """
+        return self.restart_cycles * restart
 
 
 class MarchResult(NamedTuple):
@@ -336,8 +366,8 @@ def _march_step(
     phi: jnp.ndarray,
     residual_norm_0: jnp.ndarray,
     solver: lx.AbstractLinearSolver,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """One observed step: the next state, its cycle count, line-search factor, and new residual norm.
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """One observed step: the next state, its raw cycle count, line-search factor, inner-iteration count, and new residual norm.
 
     Compiled as a unit, and — this is the load-bearing part — ``forward_step`` and ``residual_fn``
     are **arguments, not captured values**, so repeated steps hit the compilation cache instead of
@@ -353,8 +383,10 @@ def _march_step(
     The next residual norm is returned from inside this same compiled call so the march does not pay
     a second, separate residual evaluation per step.
     """
-    phi_next, cycles, alpha = forward_step.stepper()(residual_fn, phi, residual_norm_0, solver)
-    return phi_next, cycles, alpha, forward_step.norm()(residual_fn(phi_next))
+    phi_next, cycles, alpha, inner = forward_step.stepper()(
+        residual_fn, phi, residual_norm_0, solver
+    )
+    return phi_next, cycles, alpha, inner, forward_step.norm()(residual_fn(phi_next))
 
 
 def forward_march(
@@ -492,7 +524,7 @@ def forward_march(
             active_step, control_state = step_control.next_step(
                 active_step, reports[-1] if reports else None, control_state
             )
-        state, cycles, alpha, residual_norm = _march_step(
+        state, cycles, alpha, inner, residual_norm = _march_step(
             active_step, residual_fn, state, residual_norm_0, solver
         )
         current = float(residual_norm)
@@ -503,6 +535,7 @@ def forward_march(
             residual_ratio=current / reference if reference > 0.0 else 0.0,
             alpha=float(alpha),
             drift=0.0 if drift_measure is None else float(drift_measure(state)),
+            inner_iterations=int(inner),
         )
         reports.append(report)
         if observer is not None:

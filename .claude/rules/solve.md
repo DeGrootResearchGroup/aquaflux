@@ -110,6 +110,49 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     and raises no `NaN`. The stopping test is one helper, `_within_tolerance`, shared by the loop
     `cond` and the guard. A `NaN` mid-iteration is often caught first by `lineax`'s own non-finite
     guard at the next linear solve — both are hard errors, neither is silent.
+- **Monolithic ILUT preconditioner — BUILT (`sparse_jacobian.py` + `ilut_preconditioner.py`).** An
+  incomplete-LU (threshold ILU) factorization of the **assembled coupled Jacobian**, the alternative to
+  the block-triangular SIMPLE preconditioner for the coupled saddle. The block PC approximates the
+  pressure Schur; the ILUT **forms the true Schur coupling `B F⁻¹ G` through its fill** instead — measured
+  on the coupled RANS saddle it reaches the forward tolerance in a handful of GMRES cycles where the block
+  PC needs hundreds (the block PC's wall is the Schur *approximation*, not its inversion — see the Stage-3
+  note in `.claude/rules/flow.md`). Three ingredients are each load-bearing and measured: **enough fill**
+  (zero-fill ILU(0) drops exactly the Schur-forming fill → a singular factor; `drop_tol=1e-6` — not
+  `fill_factor` — is the binding control, keeps it); **symmetric √-diagonal equilibration** (the momentum
+  and continuity rows differ in scale by ~34×, which otherwise gives near-singular pivots); and
+  **cell-major ordering** (interleave `[u,v,p,k,ω]` per cell so the indefinite saddle factors without a
+  zero pressure pivot). The distance-1 *truncation* of the operator is catastrophic — the coupled saddle
+  is intrinsically distance-2 (Rhie–Chow) and the fill is essential, so this is **not** a compact-operator
+  play.
+  - **`sparse_jacobian.py`** materializes the coupled Jacobian from the *same* residual the solver uses
+    (no re-derived assembly): `block_stencil_colouring(owner, nb, n, reach)` (pure NumPy — the cell-block
+    pattern at a stencil `reach` and a collision-free CPR colouring, the conflict graph is the pattern
+    squared) then `materialize_block_jacobian(matvec, colouring, n_fields)` (one `jax.jvp` per
+    colour×field). `jacobian_relative_error` guards that `reach` covers the stencil (coupled RANS reaches
+    distance **3**). Field-major DOF layout `(cell i, field f) = f·n + i`.
+  - **`ilut_preconditioner.py` — `MonolithicIlutPreconditioner`.** Built off the jit path (`scipy.spilu`);
+    a **host** object, so it is **not** an `equinox.Module` — it rides as a static field and is applied
+    inside the jitted Krylov solve through `jax.pure_callback` (`.matvec()` / `.matvec(transpose=True)`).
+    Frozen at a reference state+shift like the AMG blocks; being far stronger it tolerates the freezing at
+    a few extra cycles, and the shift vanishes at the root so it never changes the converged state or its
+    adjoint. `IlutFactors`/`factorize_ilut`/`cell_major_permutation` are the pure host core (testable
+    without JAX); the JAX wrapper is thin.
+  - **Adjoint transpose wiring — `TransposedPreconditioner` (in `implicit.py`, binding).** The generic
+    adjoint machinery `_adjoint_preconditioner` derives `Mᵀ` from the forward `M` with
+    `jax.linear_transpose` — which works for a traceable AMG V-cycle but **cannot transpose a
+    `jax.pure_callback`** (and `jax.custom_transpose` is absent in the pinned JAX). So a preconditioner
+    that supplies its own transpose wraps its `state → Mᵀ` factory in `TransposedPreconditioner`, and
+    `_adjoint_preconditioner` applies it directly rather than transposing. The ILUT's `Mᵀ` is the same
+    factorization with `ilu.solve(trans='T')`. Pinned by the coupled-adjoint FD gate
+    (`tests/integration/test_coupled_ilut.py`); the plain-callable path (every AMG preconditioner) is
+    unchanged.
+  - **Scope / follow-ups (MVP).** The heavy fill (~7–14× the operator's nonzeros) is affordable at 2D /
+    moderate mesh sizes but is the weak point at large 3D — an **ILUT-as-multigrid-smoother** variant is
+    the parked scaling path (the naive monolithic V-cycle's coarse-grid correction destabilizes on the
+    indefinite saddle, so it is real research, not a quick add). No mid-march refresh yet (the factor is
+    a static field; refreshing recompiles), and the coupled builder still assembles the unused block AMG
+    as the `a_P` source — a lightweight shift-diagonal-only policy would remove that. The coupled
+    integration (`coupled_ilut_continuation`) lives in `.claude/rules/turbulence.md`.
 - **Forward globalization is ONE injected strategy — `forward_step: ForwardStep`.** The forward
   Newton loop has a single point of variation: `ImplicitNewtonSolver` takes one `forward_step`
   implementing the `ForwardStep` protocol (`stepper()` → the per-step
@@ -799,6 +842,55 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         a `DualTimeStep` when `inner_steps > 1`, else the unchanged `PseudoTransientStep`) and reachable as
         `solve_coupled(coupled, inner_steps=…, step_control=DualTimeControl())`. **The default path
         (`inner_steps = 1`) is byte-unchanged.**
+      - **`DualTimeControl` RUNS THE TRANSIENT AWAY — it grows Δτ on the inner α alone (inner-loop
+        comfort), which is blind to the *steady* residual.** Measured on the pitzDaily Re/100 anchor
+        (row-scaled steering): the α-control keeps growing Δτ while the steady residual climbs (α stays 1
+        as the flow over-develops), driving x_r/h past the steady state without settling (residual bottoms
+        ~0.05 then rises to 0.1+, x_r/h → 4+ and climbing). The fix is the residual-based control below;
+        `DualTimeControl` is kept as the α-lens variant but is not the one to reach for.
+      - **`ResidualRatioDualTimeControl` (`solve/step_control.py`) is the convergent control — switched
+        evolution relaxation / Kelley–Keyes pseudo-transient continuation.** It ramps Δτ by the steady-
+        residual reduction ratio: `β ← β · (‖Rₙ‖/‖Rₙ₋₁‖)` (residual drop → β down / Δτ up; residual rise →
+        β up / Δτ down), clipped to `[1/max_change, max_change]`, clamped to `[beta_min, beta_max]`, with a
+        hard inner-clip (`α < backoff_below`) safety shrink, and **carrying β across a refresh** (the ramp
+        is continuous, unlike the α-control which resets to `beta_start` each segment because `previous is
+        None` on a segment's first step). A rising residual *automatically* shrinks Δτ, so it cannot run
+        away. Its `next_step` state is `(β, prev ‖R‖)`, not a bare β. Opt-in; unit-tested in
+        `tests/unit/test_step_control.py`.
+      - **THE LOW-β WALL IS THE BLOCK-SIMPLE PRECONDITIONER, AND THE ILUT BREAKS IT.** With
+        `ResidualRatioDualTimeControl` the residual descends cleanly (no runaway) but block-SIMPLE's coupled
+        solve goes **NaN at β ≈ 0.067** — the low-shift conditioning wall (block-SIMPLE cannot solve the
+        near-unshifted saddle; the same limit as its adjoint stagnation). The monolithic ILUT forms the true
+        coupled inverse, so `coupled_ilut_continuation(inner_steps>1)` (a `DualTimeStep` preconditioned by
+        the ILUT — the branch added alongside the single-step one) drives β **monotonically to 0.041 with no
+        NaN, ~6 GMRES cycles flat**, residual 0.65 → 0.043 (row-scaled) on the anchor. So the ILUT is what
+        makes the large-Δτ dual-time march reachable at all.
+      - **Residual FLOOR + over-development past the minimum = loose `inner_tol`, NOT the preconditioner.**
+        Even with the ILUT (cycles flat at 6 — the linear solve is fine), the march bottoms ~0.043 (x_r/h
+        ≈ 2.9) then slowly over-develops. Cause: dual-time's unconditional stability comes from the inner
+        loop driving `G = R + βd(φ−φⁿ)` to zero each step; at `inner_tol = 0.05` the implicit step is only
+        5%-solved, so a large-Δτ backward-Euler step on a half-solved system overshoots. Fix = tighten
+        `inner_tol` (with enough `inner_steps` to reach it) — **affordable precisely because the ILUT makes
+        the low-β inner solves cheap**, where block-SIMPLE could not. ILUT removes the conditioning wall;
+        tight `inner_tol` restores dual-time stability; the two together are what settle the rung.
+      - **⚠️ READING SMALL CYCLE COUNTS (binding — two offsets fooled a whole investigation).** Two things
+        inflate the reported linear-solve cost at the low end, so a "6" is NOT six times a "1":
+        (1) **lineax's `num_steps` has a +2 offset and is blind within a restart cycle.** Calibrated: a
+        system GMRES solves in 1, few, or ~100 matvecs (all inside one 120-restart cycle) ALL report
+        `num_steps = 3` (a dummy r0=0 first pass + deferred breakdown); it only climbs when the solve
+        genuinely spills past a restart cycle. So **`num_steps = 3` means "converged in one cycle" = ideal**,
+        and `solve_linear`'s count cannot distinguish 1 matvec from ~100. (2) **`DualTimeStep` reports the
+        SUM of `num_steps` over its inner Newton iterations** (`stepper` docstring). So a dual-time
+        `cyc = 6` is **~2 inner Newton iterations × an ideal 1-cycle solve**, and `cyc = 9` is ~3 —
+        the inner-iteration count to reach `inner_tol`, NOT a per-solve penalty. **Consequence measured
+        this session:** the coupled ILUT is a NEAR-DIRECT preconditioner — 1 restart cycle (~4 matvecs) per
+        solve at every pitzDaily state, flow-only and full `[u,v,p,k,ω]` alike, fresh or mildly stale
+        (`reference/ILUT_ITERATION_GAP_FINDINGS.md`). The march's "6–9" is the dual-time inner-loop sum, and
+        **β-matching the frozen factorization to the march's β is a no-op on it** (fixed-`ilut_beta` and
+        `ilut_beta`-matched runs gave IDENTICAL `cyc`). The only lever on the "6" is `inner_steps`/`inner_tol`
+        (globalization/accuracy), which is deliberately kept tight for stability — not the preconditioner.
+        The "coupled ≈ 6 vs flow-only ≈ 2 → k/ω degrades the ILUT → build ILUT+AMG" premise is REFUTED; the
+        only live reason for ILUT+AMG is 3D `spilu` fill scalability, which cannot be judged on 2D pitzDaily.
     - **Lowering β is not the escape, and the reason is specific — state it precisely.** At `β = 0.25`
       the k/ω blocks reach 1e24 / 1e52 at the cold IC and go NaN at step 20, but are **perfectly stable
       at steps 45 and 90** (ratios 0.994–1.046). So the under-damping is an *early-state* property, not
@@ -822,10 +914,12 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     negative slope. Note ‖δ‖ *decreases* as β is backed off (1049 → 856 → 760 for β = 2 → 1 → 0.5), so
     "α collapsing" is not a large-correction artefact.
   - **⚠️ EXTENDING THE LADDER ABOVE α = 1 (`grow`): inert on the Euclidean measure, live on the
-    equilibrated one — and it exposed a fallback bug (2026-07-27).**
-    - On the **Euclidean** default march, `grow = 2` produced a trajectory **bit-identical** to the
+    equilibrated one — and it exposed a fallback bug (2026-07-27).** (The equilibrated/row-scaled measure
+    is now the *default*, so `grow` is live on the shipped configuration; the Euclidean result below is the
+    now-non-default measure.)
+    - On the **Euclidean** march, `grow = 2` produced a trajectory **bit-identical** to the
       control across 10 steps and both checkpoints: α = 2 is never admissible there, so the extended
-      ladder is inert on the shipped configuration.
+      ladder is inert on that measure.
     - On the **equilibrated** measure it fires: α = 2 was selected at step 1 and was productive. A
       cold-start scan confirms α = 2 sits inside the tolerance (ratio 1.291 against a 2× bound) and
       travels twice as far as the full step.
@@ -1129,12 +1223,17 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       end-to-end it is a net wash: floor 0.0 vs 0.3 reached the same tolerance in the same wall time on
       `solve_coupled`, because the cheaper late solves cancel the extra Newton steps. Wired through
       `coupled_continuation(beta_floor=…)` for further evaluation; not a default because it is a wash.
-    - **The block-scaled per-field residual measure (`block_scaled_norm=True`) — kept off-by-default
-      because it *stalls* the march.** A `BlockScaledNorm` over `[flow, k, ω]` weighs every field rather
-      than the `ω` block that dominates ‖R‖, but the per-block relative norm plateaus long before the
-      fields converge, so `coupled_continuation` defaults to the Euclidean `jnp.linalg.norm` and exposes
-      `block_scaled_norm` (default `False`) to request the block measure for experimentation. The
-      `BlockScaledNorm` class and its `_coupled_residual_norm` builder are kept as that opt-in path.
+    - **The default coupled residual measure is the row-equilibrated `RowScaledNorm`
+      (`coupled_scaled_norm`), NOT the Euclidean ‖R‖.** The Euclidean coupled residual is `ω`-dominated
+      and *mis-ranks* states (a converged field scores worse than a badly wrong one — the warning above);
+      `RowScaledNorm` divides each row by its own diagonal and each block by its field magnitude, so every
+      equation is judged comparably. `coupled_continuation` / `coupled_ilut_continuation` build it by
+      default; `block_scaled_norm=True` selects the coarser one-scale-per-block `BlockScaledNorm`
+      (`_coupled_residual_norm`), and `residual_norm=jnp.linalg.norm` recovers Euclidean.
+      (`mass_flow_coupled_continuation` still defaults to Euclidean pending a constraint-aware variant.)
+      The row-scaled measure does **not** fix the forward stall (globalization-bound; it plateaus under any
+      measure — that plateau is the *honest* signal, where the Euclidean fall was a `β×travel`/`ω`-magnitude
+      artifact); it makes the measure honest and is required to judge this case correctly.
       **The measure must be held FIXED across a refresh (binding, #156 seam 4).** `BlockScaledNorm` is
       self-normalising — at the state its per-block scales were built at it returns `sqrt(n_blocks)` — so
       rebuilding it at each refresh's developed state re-bases every `residual_ratio` back toward one,
@@ -1203,6 +1302,23 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         `(owner, nb, n)`, pure graph topology, so for a fixed mesh the aggregates, `n_coarse` and every
         sparsity pattern are invariant), so only `val`/`diagonal`/`lam_max`/`coarse_inv` change; making
         those traced leaves over a static index structure would turn a refresh into a cache hit.
+      - **The observed march RETURNS ITS OWN CONVERGED STATE — the traced finishing solve is only the
+        not-converged fallback (BUILT).** `solve_coupled`'s observed path (`on_step`/`refresh`/`step_control`)
+        is never differentiated — those cannot run under a JAX transform (guarded), so the converged eager
+        state needs no adjoint. When the eager `forward_march` reaches its stopping tolerance **judged in the
+        measure it steered by** (the per-step-rebuilt `RowScaledNorm` under `scaled_norm`), `solve_coupled`
+        returns that state directly instead of re-marching it through `ImplicitNewtonSolver`. **Why this is
+        required, not just an optimization:** the finishing solve targets the *frozen* base measure (state0
+        row scales), which over-reports a developed state's residual (#156 seam 4), so it does not see the
+        eager convergence — and being traced it cannot refresh or carry the SER step control, so on an
+        aggressive low-shift ILUT dual-time path it leaves the converged state chasing the unreachable frozen
+        target and **diverges to NaN** (measured on the pitzDaily Re/100 anchor: eager converges row-scaled
+        0.009, finishing solve then returns ‖R‖=NaN). Returning the eager state fixes that. The finishing
+        solve still runs when the eager march stops short, and is the plain differentiable path's sole march.
+        **Open (for the target-Re adjoint):** a differentiated target solve still needs the finishing solve
+        to converge deep *in the same row-scaled measure* — restructuring it (Python outer loop so it can
+        carry the measure + step control) is the tracked follow-up; the lower-Re continuation rungs are
+        `stop_gradient`ed seeds and need no adjoint, so the eager path serves them.
       - **Rescaling the MSIMPLER `k` is a ρ mirage — validate on the real march, never on ρ.** Growing `k`
         collapses ρ (34.0 → 9.6) but barely moves the one-shot error (24.1 → 22.6), and the ρ-minimizing
         `k` sits ~40× *above the maximum* of the whole per-cell `ρV/a_P` distribution — i.e. the degenerate

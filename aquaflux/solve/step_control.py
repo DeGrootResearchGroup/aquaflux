@@ -164,3 +164,94 @@ class DualTimeControl(eqx.Module):
             lambda s: s.relaxation_schedule, base_step, ConstantRelaxation(jnp.asarray(beta))
         )
         return controlled, beta
+
+
+class ResidualRatioDualTimeControl(eqx.Module):
+    """Ramp the dual-time pseudo-timestep by the steady-residual reduction ratio (residual-based PTC).
+
+    The convergent form of pseudo-transient control -- switched evolution relaxation (Mulder & Van Leer
+    1985), with the convergence theory of Kelley & Keyes (1998) and its differential-algebraic extension
+    (Coffey, Kelley & Keyes 2003). The pseudo-timestep grows in proportion to how much the *steady*
+    residual fell over the previous step and shrinks when it rose. In terms of the shift ``β`` -- which
+    is inversely the pseudo-timestep -- the update is
+
+        ``β ← β · (‖R_n‖ / ‖R_{n-1}‖)``
+
+    so a residual drop (ratio ``< 1``) lowers ``β`` and grows the step, while a residual rise
+    (ratio ``> 1``) raises ``β`` and shrinks it.
+
+    **This is what prevents the runaway of :class:`DualTimeControl`.** That control grows the step on the
+    inner line-search factor ``α`` alone -- a proxy for the *inner* solve's comfort at fixed timestep,
+    blind to the *outer* steady residual -- so when the flow over-develops (each inner solve stays
+    comfortable, ``α = 1``, while the steady residual climbs) it keeps growing the step and drives the
+    transient away from the steady manifold. Here growth is **earned** by residual reduction: a rising
+    residual *automatically* shrinks the step, so the ramp cannot run away.
+
+    The per-step change is clipped to ``[1 / max_change, max_change]`` so one anomalous step cannot fling
+    the timestep, and ``β`` is clamped to ``[beta_min, beta_max]``. A hard inner-loop clip
+    (``α < backoff_below``) forces an extra shrink regardless of the ratio -- an inner step that had to be
+    clipped means the implicit step was too large this iteration, whatever the residual did. The shift is
+    **carried across a preconditioner refresh** (the ramp is continuous) rather than resetting to
+    ``beta_start`` at each segment as the α-based control does.
+
+    The residual it reads is whatever measure the march steers by (``previous.residual_norm``); with the
+    default row-equilibrated norm that is a fractional change per equation, so the ratio is a meaningful
+    reduction factor across steps.
+
+    **Experimental, opt-in, never a default.** The finishing solve, running the default schedule, still
+    owns the converged root and the adjoint.
+
+    Attributes
+    ----------
+    beta_start : float
+        The pseudo-transient shift strength for the first step (static).
+    max_change : float
+        The most the pseudo-timestep may grow or shrink in one step, as a factor ``> 1`` bounding the
+        residual-ratio update to ``[1 / max_change, max_change]`` (static).
+    backoff : float
+        Extra factor ``> 1`` the pseudo-timestep is shrunk by (β multiplied by) on a hard inner clip
+        (static).
+    backoff_below : float
+        The α threshold below which the hard inner-clip shrink fires (static).
+    beta_min, beta_max : float
+        Clamps on β (static). ``beta_min`` bounds how large the pseudo-timestep may grow.
+    """
+
+    beta_start: float = eqx.field(static=True, default=0.5)
+    max_change: float = eqx.field(static=True, default=1.3)
+    backoff: float = eqx.field(static=True, default=2.0)
+    backoff_below: float = eqx.field(static=True, default=0.5)
+    beta_min: float = eqx.field(static=True, default=0.02)
+    beta_max: float = eqx.field(static=True, default=4.0)
+
+    def _adapt(self, beta: float, alpha: float, ratio: float) -> float:
+        change = min(max(ratio, 1.0 / self.max_change), self.max_change)
+        beta = beta * change
+        if alpha < self.backoff_below:  # an inner step clipped hard -> implicit step too large
+            beta = beta * self.backoff
+        return float(min(max(beta, self.beta_min), self.beta_max))
+
+    def next_step(
+        self, base_step: ForwardStep, previous: StepReport | None, state: object
+    ) -> tuple[ForwardStep, tuple[float, float | None]]:
+        """The base dual-time step with a constant β, and the ``(β, ‖R‖)`` state to carry.
+
+        ``state`` is the carried ``(β, previous residual norm)`` (``None`` on the very first step). β is
+        updated from the ratio of the *previous* step's residual to the one before it; the first step of
+        a refresh segment (``previous is None`` with a carried ``state``) holds β so the ramp continues
+        across the refresh rather than resetting. ``base_step`` must be a
+        :class:`~aquaflux.solve.DualTimeStep`.
+        """
+        if state is None:
+            beta, prev_residual = self.beta_start, None
+        else:
+            beta, prev_residual = state
+            if previous is not None:
+                if prev_residual is not None and prev_residual > 0.0:
+                    ratio = float(previous.residual_norm) / prev_residual
+                    beta = self._adapt(beta, float(previous.alpha), ratio)
+                prev_residual = float(previous.residual_norm)
+        controlled = eqx.tree_at(
+            lambda s: s.relaxation_schedule, base_step, ConstantRelaxation(jnp.asarray(beta))
+        )
+        return controlled, (beta, prev_residual)

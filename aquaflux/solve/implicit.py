@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
-from typing import Protocol
+from typing import Any, Protocol
 
 import equinox as eqx
 import jax
@@ -42,7 +42,7 @@ from .norm import ResidualNorm
 # the plain Newton loop drops both at the call site.
 _ForwardStep = Callable[
     [Callable[[jnp.ndarray], jnp.ndarray], jnp.ndarray, jnp.ndarray, lx.AbstractLinearSolver],
-    tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+    tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
 ]
 
 
@@ -63,7 +63,7 @@ class ForwardStep(Protocol):
     """
 
     def stepper(self) -> _ForwardStep:
-        """The forward step ``(residual_fn, phi, residual_norm_0, solver) -> (phi_next, cycles, alpha)``.
+        """The forward step ``(residual_fn, phi, residual_norm_0, solver) -> (phi_next, cycles, alpha, inner_iterations)``.
 
         ``cycles`` is the restart-cycle count of the linear solve behind the accepted step (its cost,
         which an observed march reads to detect a stale preconditioner); ``alpha`` is the line-search
@@ -248,9 +248,10 @@ def _damped_newton_step(
     adjoint depends solely on the converged state, so it stays gradient-transparent. ``norm`` is the
     residual measure the search is judged by (default Euclidean).
 
-    Returns ``(phi_next, cycles, alpha)`` — the stepped iterate, the restart-cycle count of the one
-    linear solve behind it, and the line-search factor. The line search itself costs only residual
-    evaluations, so the step's linear-solve cost is exactly that single solve's.
+    Returns ``(phi_next, cycles, alpha, inner_iterations)`` — the stepped iterate, the raw solver count
+    of the one linear solve behind it, the line-search factor, and ``inner_iterations = 1`` (a single
+    Newton step has no inner loop). The line search itself costs only residual evaluations, so the
+    step's linear-solve cost is exactly that single solve's.
     """
     delta, r, cycles = newton_correction(
         residual_fn, phi, solver=solver, preconditioner=preconditioner
@@ -258,7 +259,7 @@ def _damped_newton_step(
     stepped, alpha = backtracking_line_search(
         residual_fn, phi, delta, norm(r), line_search_steps, norm=norm
     )
-    return stepped, cycles, alpha
+    return stepped, cycles, alpha, 1
 
 
 class DampedNewtonStep(eqx.Module):
@@ -299,7 +300,7 @@ class DampedNewtonStep(eqx.Module):
     residual_norm: ResidualNorm = eqx.field(default=jnp.linalg.norm)
 
     def stepper(self) -> _ForwardStep:
-        """The line-searched Newton step ``(residual_fn, phi, ‖R₀‖, solver) -> (phi_next, cycles, alpha)``."""
+        """The line-searched Newton step ``(residual_fn, phi, ‖R₀‖, solver) -> (phi_next, cycles, alpha, inner_iterations)``."""
         preconditioner = self.preconditioner
         line_search = self.line_search
         norm = self.residual_norm
@@ -377,7 +378,7 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
         # choose which step's value survives (last / max / sum), which is a reporting/control policy
         # the Newton solver has no business owning. A march that wants per-step cost or the line-search
         # factor observes them eagerly instead (`forward_march`).
-        phi, _, _ = forward_step_fn(residual_theta, phi, residual_norm_0, solver)
+        phi, _, _, _ = forward_step_fn(residual_theta, phi, residual_norm_0, solver)
         return phi, step + 1, norm_fn(residual_fn(phi, theta))
 
     phi, _, residual_norm = jax.lax.while_loop(cond, body, (phi0, 0, residual_norm_0))
@@ -433,6 +434,31 @@ def _implicit_solve_fwd(
     return phi_star, (phi_star, theta)
 
 
+class TransposedPreconditioner:
+    """An adjoint-preconditioner factory whose output is **already** the transpose ``M^T``.
+
+    The generic adjoint machinery derives the transpose preconditioner from the forward one with
+    :func:`jax.linear_transpose`, which works only when the forward preconditioner is a traceable
+    JAX operation (an algebraic-multigrid V-cycle is). A preconditioner applied through a host
+    callback -- the monolithic incomplete-LU factorization, whose triangular solve runs in ``scipy``
+    via :func:`jax.pure_callback` -- cannot be transposed that way; instead it supplies its own
+    transpose directly (the same factorization applied with a transposed triangular solve). Wrapping
+    the factory in this marker tells :func:`_adjoint_preconditioner` to apply its output as-is rather
+    than transpose it.
+
+    Parameters
+    ----------
+    factory : callable
+        The ``state -> M^T`` factory, returning the transpose preconditioner matvec directly.
+    """
+
+    def __init__(self, factory: Callable[[Any], Callable[[Any], Any]]) -> None:
+        self.factory = factory
+
+    def __call__(self, state: Any) -> Callable[[Any], Any]:
+        return self.factory(state)
+
+
 def _adjoint_preconditioner(preconditioner, phi_star, example):
     """Transpose ``M^T`` of the forward preconditioner, as a left preconditioner for the adjoint.
 
@@ -440,10 +466,14 @@ def _adjoint_preconditioner(preconditioner, phi_star, example):
     transpose system ``J^T lambda = v``, whose consistent left preconditioner is ``M^T ~ J^{-T}``,
     obtained by transposing the (linear) preconditioner matvec with :func:`jax.linear_transpose`.
     It is mesh-independent wherever ``M`` is -- the adjoint GMRES iteration count stays flat under
-    refinement instead of growing with the system size. ``None`` in, ``None`` out.
+    refinement instead of growing with the system size. ``None`` in, ``None`` out. A
+    :class:`TransposedPreconditioner` factory already returns ``M^T`` (a callback preconditioner that
+    :func:`jax.linear_transpose` cannot handle), so it is applied directly.
     """
     if preconditioner is None:
         return None
+    if isinstance(preconditioner, TransposedPreconditioner):
+        return preconditioner(phi_star)
     m = preconditioner(phi_star)
     transpose = jax.linear_transpose(m, example)
     return lambda u: transpose(u)[0]
