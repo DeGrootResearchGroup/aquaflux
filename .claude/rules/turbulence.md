@@ -751,15 +751,32 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     swaps only the preconditioner; the factorization is a host `scipy` object so it rides as a **static**
     field and is applied via `jax.pure_callback`, with the adjoint's `Mᵀ` supplied directly through a
     `TransposedPreconditioner` (the generic `jax.linear_transpose` machinery cannot transpose a callback —
-    `.claude/rules/solve.md`). Verified: `solve_coupled(continuation=coupled_ilut_continuation(...))`
+    `.claude/rules/solve.md`). **Its forward solver is `_COUPLED_ILUT_FORWARD_SOLVER` (restart-10),
+    NOT the block path's restart-120 `_COUPLED_FORWARD_SOLVER`:** the ILUT clusters the preconditioned
+    spectrum so tightly that the 1% stop is reached within ~5–10 vectors, and `lineax` GMRES only tests
+    convergence at each restart boundary (its sole mid-cycle exit is exact Arnoldi breakdown, which does
+    not fire while the residual is merely small), so a 120-vector restart pays ~120 ILUT back-solves per
+    cycle where a small restart stops as soon as it has converged. Measured on pitzDaily: restart-10 gives
+    a **bit-identical march trajectory** to restart-120 at **~10× lower per-step wall** (the ILUT apply is
+    a host `pure_callback` triangular solve, ~23 ms/matvec, so wasted matvecs dominate the step). The two
+    solvers are tuned oppositely on purpose — the block PC genuinely needs a large subspace per cycle, the
+    ILUT needs a small one. Verified: `solve_coupled(continuation=coupled_ilut_continuation(...))`
     converges to the **same fixed point** as the block PC and passes the **coupled-adjoint FD gate**
     (`tests/integration/test_coupled_ilut.py`). **MVP scope:** the factorization is **frozen at the
     reference state — no mid-march refresh** (a static-field rebuild recompiles; it is strong enough that
     state drift costs only a few cycles), and the builder still assembles the (unused) block AMG as the
     `a_P` source (a lightweight shift-diagonal-only policy is the tracked cleanup). The heavy ILUT fill is
-    the 3D-scalability caveat (parked ILUT-as-smoother variant, `.claude/rules/solve.md`). Prefer it where
-    per-step linear-solve cost dominates a developed coupled solve; it does **not** shorten the
-    reachability crawl (a per-step-cost lever only).
+    the 3D-scalability caveat (parked ILUT-as-smoother variant, `.claude/rules/solve.md`). **Per-step wall
+    (restart-10, measured pitzDaily cold march): ~0.9 s/step vs the block PC's ~2.3 s/step — the ILUT is
+    ~2.5× CHEAPER per pseudo-timestep, reverting the earlier "ILUT is more expensive per step" verdict,
+    which was a restart-120 artifact (see the restart note above).** Its build is ~2× the block's (~30 s
+    vs ~15 s: `spilu` dominates), so total wall crosses over at ~11 steps; a cold pitzDaily march is
+    30–60+ steps, so the ILUT wins total forward wall too, and — being the only PC that solves the β=0
+    coupled adjoint at all (`.claude/rules/solve.md`, `ilut-does-not-win-on-main`) — it is the correct
+    default for any *differentiable* coupled solve. It does **not** shorten the reachability crawl (a
+    per-step-cost + adjoint-correctness lever, not a globalization one). NOTE: it is not yet
+    `solve_coupled`'s default — the two continuations have different parameter surfaces, so making it the
+    default needs a selector seam, not a swap (tracked).
   - **~~Remaining limiter — the k equation drift~~ — RETIRED: the stall no longer reproduces (measured
     2026-07-22).** This bullet used to record that past rel ~0.09 the direct-`k` residual grew (rel 1 →
     ~5×) and re-stalled the march, and named high-Reynolds `k` stability as the open follow-up. **It
