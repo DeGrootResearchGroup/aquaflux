@@ -773,10 +773,19 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     solvers are tuned oppositely on purpose — the block PC genuinely needs a large subspace per cycle, the
     ILUT needs a small one. Verified: `solve_coupled(continuation=coupled_ilut_continuation(...))`
     converges to the **same fixed point** as the block PC and passes the **coupled-adjoint FD gate**
-    (`tests/integration/test_coupled_ilut.py`). **MVP scope:** the factorization is **frozen at the
-    reference state — no mid-march refresh** (a static-field rebuild recompiles; it is strong enough that
-    state drift costs only a few cycles), and the builder still assembles the (unused) block AMG as the
-    `a_P` source (a lightweight shift-diagonal-only policy is the tracked cleanup). The heavy ILUT fill is
+    (`tests/integration/test_coupled_ilut.py`). **Cheap in-place mid-march refresh —
+    `coupled_ilut_refreshing_continuation` (BUILT, forward-march only).** For a differentiable solve the
+    factorization is frozen at the reference state (state drift costs only a few cycles, and freezing
+    keeps the adjoint valid). For a long developing march it instead goes stale — on a low-shift dual-time
+    path it can NaN — so `coupled_ilut_refreshing_continuation(coupled, …)` returns a `refresh_builder`
+    for `solve_coupled` that re-factors the ILUT **in place in the SAME continuation object**
+    (`MonolithicIlutPreconditioner.refresh_in_place`), so the jitted march-step is a compilation cache hit
+    (no recompile) — pair it with a `CoefficientDriftTrigger` so the re-factor leads the staleness. This
+    is impure and **forward-march only** (never differentiate through it); see `.claude/rules/solve.md`
+    for the mechanism (static preconditioner field + callback reads `self.factors` at call time) and the
+    cost split (in-place refresh ~44 s vs ~72 s rebuild; the residual is ~88 % `spilu`, a hard floor). The
+    builder still assembles the (unused) block AMG as the `a_P` source (a lightweight shift-diagonal-only
+    policy is the tracked cleanup). The heavy ILUT fill is
     the 3D-scalability caveat (parked ILUT-as-smoother variant, `.claude/rules/solve.md`). **Per-step wall
     (restart-10, measured pitzDaily cold march): ~0.9 s/step vs the block PC's ~2.3 s/step — the ILUT is
     ~2.5× CHEAPER per pseudo-timestep, reverting the earlier "ILUT is more expensive per step" verdict,

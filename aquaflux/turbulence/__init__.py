@@ -41,6 +41,7 @@ from .coupled import (
     ScalarVariableTransform,
     coupled_continuation,
     coupled_ilut_continuation,
+    coupled_ilut_refreshing_continuation,
     eddy_viscosity_drift,
     solve_coupled,
 )
@@ -100,6 +101,7 @@ __all__ = [
     "bulk_velocity",
     "coupled_continuation",
     "coupled_ilut_continuation",
+    "coupled_ilut_refreshing_continuation",
     "eddy_viscosity_drift",
     "equilibrium_k",
     "hybrid_initialize",

@@ -1284,6 +1284,27 @@ class MonolithicIlutShiftPolicy(eqx.Module):
         return TransposedPreconditioner(lambda state: transpose)
 
 
+def _coupled_ilut_colouring(coupled: CoupledRANS, stencil_reach: int):
+    """The block-stencil colouring for materializing the coupled Jacobian (a mesh-fixed quantity).
+
+    Shared by :func:`coupled_ilut_continuation` (the initial factorization) and
+    :func:`coupled_ilut_refreshing_continuation` (each in-place refactor), so both probe the Jacobian
+    with the same colouring.
+    """
+    n_cells = coupled.momentum.mesh.n_cells
+    owner, nb, _ = coupled.momentum.mesh.face_cells.interior_edges()
+    return block_stencil_colouring(np.asarray(owner), np.asarray(nb), n_cells, stencil_reach)
+
+
+def _ilut_shift(base: CoupledShiftPolicy, ilut_beta: float, state: jnp.ndarray) -> np.ndarray:
+    """The frozen pseudo-transient shift diagonal the ILUT is factored against, at ``state``.
+
+    ``ilut_beta`` scales the base policy's shift diagonal; the ``stop_gradient`` keeps the frozen
+    factorization off the differentiation path. Shared by the initial build and every in-place refresh.
+    """
+    return np.asarray(ilut_beta * jax.lax.stop_gradient(base.shift_term(state).diagonal))
+
+
 def coupled_ilut_continuation(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
@@ -1373,18 +1394,15 @@ def coupled_ilut_continuation(
     # policy is a follow-up optimization.
     base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
 
-    n_cells = coupled.momentum.mesh.n_cells
     n_fields = coupled.layout.dim + 3
-    owner, nb, _ = coupled.momentum.mesh.face_cells.interior_edges()
-    colouring = block_stencil_colouring(np.asarray(owner), np.asarray(nb), n_cells, stencil_reach)
+    colouring = _coupled_ilut_colouring(coupled, stencil_reach)
     frozen = jax.lax.stop_gradient(reference_state)
     matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
-    shift = ilut_beta * jax.lax.stop_gradient(base.shift_term(reference_state).diagonal)
     preconditioner = MonolithicIlutPreconditioner.build(
         matvec,
         colouring,
         n_fields,
-        np.asarray(shift),
+        _ilut_shift(base, ilut_beta, reference_state),
         fill_factor=fill_factor,
         drop_tol=drop_tol,
     )
@@ -1463,6 +1481,89 @@ def _default_dual_time_control(
     if step_control is None and observing and isinstance(continuation, DualTimeStep):
         return DualTimeControl()
     return step_control
+
+
+def coupled_ilut_refreshing_continuation(
+    coupled: CoupledRANS,
+    *,
+    ilut_beta: float = 2.0,
+    stencil_reach: int = 3,
+    fill_factor: float = 30.0,
+    drop_tol: float = 1e-6,
+    **continuation_kwargs: object,
+) -> Callable[[jnp.ndarray], ForwardStep]:
+    """A ``refresh_builder`` for :func:`solve_coupled` that keeps the coupled ILUT fresh cheaply.
+
+    As the flow develops, the frozen ILUT goes stale and the shifted solve slows (or, on a low-shift
+    dual-time path, fails). The usual fix -- rebuild the continuation at the developed state -- forces a
+    full recompile of the jitted march-step, because a fresh continuation is a new pytree. This builder
+    instead re-factors the **same** continuation's ILUT in place
+    (:meth:`~aquaflux.solve.MonolithicIlutPreconditioner.refresh_in_place`): the preconditioner is a
+    static field, so its identity is unchanged and the march-step is a **compilation cache hit** -- a
+    refresh then costs only the materialize + factor, not a recompile.
+
+    Returns a callable ``state -> ForwardStep``. The first call builds a
+    :func:`coupled_ilut_continuation` at that state; each later call re-factors that continuation's ILUT
+    at the given state and returns the **same** object. Pass it to :func:`solve_coupled` as both the
+    initial ``continuation`` (via one call) and the ``refresh_builder``::
+
+        rb = coupled_ilut_refreshing_continuation(coupled, inner_steps=10, inner_tol=1e-3, ...)
+        solve_coupled(coupled, f0, k0, o0, continuation=rb(state0), refresh_builder=rb,
+                      refresh_trigger=CoefficientDriftTrigger(threshold=0.1), ...)
+
+    **Forward-march use ONLY.** The in-place refresh is impure (see ``refresh_in_place``) and must never
+    be on a differentiated path; for a differentiated solve use :func:`coupled_ilut_continuation` with no
+    refresh, whose converged root (and its adjoint) is refresh-independent anyway.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled residual assembler.
+    ilut_beta, stencil_reach, fill_factor, drop_tol : float / int
+        As in :func:`coupled_ilut_continuation`. Used for **both** the initial build and every in-place
+        refresh, so the two stay consistent.
+    **continuation_kwargs
+        Forwarded to :func:`coupled_ilut_continuation` for the initial build (``inner_steps``,
+        ``inner_tol``, ``forward_solver``, ``shift_basis``, ``beta0``, ...).
+
+    Returns
+    -------
+    callable
+        ``state -> ForwardStep`` as described.
+    """
+    colouring = _coupled_ilut_colouring(coupled, stencil_reach)
+    n_fields = coupled.layout.dim + 3
+    # `frozen` as a traced argument (not closed over) so this jvp-matvec compiles once and every refresh
+    # reuses it, rather than a fresh lambda recompiling each time.
+    matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    held: dict[str, ForwardStep] = {}
+
+    def builder(state: jnp.ndarray) -> ForwardStep:
+        if "step" not in held:
+            held["step"] = coupled_ilut_continuation(
+                coupled,
+                state,
+                ilut_beta=ilut_beta,
+                stencil_reach=stencil_reach,
+                fill_factor=fill_factor,
+                drop_tol=drop_tol,
+                **continuation_kwargs,
+            )
+            return held["step"]
+        step = held["step"]
+        policy = step.shift_policy
+        frozen = jax.lax.stop_gradient(state)
+        policy.preconditioner.refresh_in_place(
+            lambda v: matvec_at(frozen, v),
+            colouring,
+            n_fields,
+            _ilut_shift(policy.base, ilut_beta, state),
+            fill_factor=fill_factor,
+            drop_tol=drop_tol,
+        )
+        return step
+
+    return builder
 
 
 def solve_coupled(

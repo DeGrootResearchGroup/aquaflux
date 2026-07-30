@@ -28,6 +28,7 @@ from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
     coupled_ilut_continuation,
+    coupled_ilut_refreshing_continuation,
     hybrid_initialize,
     inlet_k,
     inlet_omega,
@@ -119,6 +120,31 @@ def test_ilut_continuation_inner_steps_builds_a_dual_time_step(case) -> None:
     dual = coupled_ilut_continuation(coupled, reference_state, inner_steps=5, inner_tol=1e-3)
     assert isinstance(dual, DualTimeStep)
     assert dual.inner_steps == 5
+
+
+@pytest.mark.slow
+def test_ilut_refreshing_continuation_refreshes_the_same_step_in_place(case) -> None:
+    """The refreshing builder returns a ``refresh_builder`` whose later calls re-factor the SAME
+    continuation in place -- the object identity that makes ``solve_coupled``'s jitted march-step a
+    compilation cache hit, so a mid-march refresh pays only the materialize + factor, not a recompile.
+    """
+    from aquaflux.solve import DualTimeStep
+
+    coupled = case["coupled"]
+    flow, k, omega = case["start"]
+    state0 = coupled.pack_state(flow, k, omega)
+    state1 = state0 * 1.05  # a mildly "developed" state to refresh at
+
+    rb = coupled_ilut_refreshing_continuation(coupled, inner_steps=5, inner_tol=1e-3)
+    step0 = rb(state0)  # first call builds the continuation
+    assert isinstance(step0, DualTimeStep)
+    factors0 = step0.shift_policy.preconditioner.factors
+
+    step1 = rb(state1)  # later call refreshes in place
+    # Same continuation object -> the jitted march-step sees an unchanged pytree (cache hit)...
+    assert step1 is step0
+    # ...but the ILUT was genuinely re-factored at the new state (a fresh factorization object).
+    assert step1.shift_policy.preconditioner.factors is not factors0
 
 
 @pytest.mark.slow

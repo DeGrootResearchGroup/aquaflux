@@ -201,6 +201,34 @@ class MonolithicIlutPreconditioner:
     def __init__(self, factors: IlutFactors) -> None:
         self.factors = factors
 
+    @staticmethod
+    def _factor(
+        matvec: Callable[[jnp.ndarray], jnp.ndarray],
+        colouring,
+        n_fields: int,
+        shift_diagonal: np.ndarray,
+        *,
+        fill_factor: float,
+        drop_tol: float,
+        diag_pivot_thresh: float,
+    ) -> IlutFactors:
+        """Materialize the shifted coupled Jacobian at ``matvec``'s frozen state and factor it.
+
+        The single form-and-factor path shared by :meth:`build` (constructs a new preconditioner) and
+        :meth:`refresh_in_place` (re-factors an existing one).
+        """
+        from .sparse_jacobian import materialize_block_jacobian
+
+        jacobian = materialize_block_jacobian(matvec, colouring, n_fields)
+        shifted = (jacobian + sp.diags(np.asarray(shift_diagonal))).tocsr()
+        return factorize_ilut(
+            shifted,
+            n_fields,
+            fill_factor=fill_factor,
+            drop_tol=drop_tol,
+            diag_pivot_thresh=diag_pivot_thresh,
+        )
+
     @classmethod
     def build(
         cls,
@@ -236,18 +264,52 @@ class MonolithicIlutPreconditioner:
         MonolithicIlutPreconditioner
             The built preconditioner.
         """
-        from .sparse_jacobian import materialize_block_jacobian
+        return cls(
+            cls._factor(
+                matvec,
+                colouring,
+                n_fields,
+                shift_diagonal,
+                fill_factor=fill_factor,
+                drop_tol=drop_tol,
+                diag_pivot_thresh=diag_pivot_thresh,
+            )
+        )
 
-        jacobian = materialize_block_jacobian(matvec, colouring, n_fields)
-        shifted = (jacobian + sp.diags(np.asarray(shift_diagonal))).tocsr()
-        factors = factorize_ilut(
-            shifted,
+    def refresh_in_place(
+        self,
+        matvec: Callable[[jnp.ndarray], jnp.ndarray],
+        colouring,
+        n_fields: int,
+        shift_diagonal: np.ndarray,
+        *,
+        fill_factor: float = 30.0,
+        drop_tol: float = 1e-6,
+        diag_pivot_thresh: float = 0.1,
+    ) -> None:
+        """Re-factor at a developed state and swap the factorization IN PLACE (no new object).
+
+        The arguments are :meth:`build`'s, evaluated at the developed state. Because this preconditioner
+        is held as a **static field** of the shift policy — its identity is part of the jitted solve's
+        pytree structure — and :meth:`matvec` reads ``self.factors`` at call time, mutating the
+        factorization here re-preconditions the **same compiled** Krylov solve: the jitted march-step is
+        a compilation cache hit, so a refresh costs only the materialize + factor, not a recompile.
+
+        **Forward-march use ONLY — the mutation is impure and must never touch a differentiated path.**
+        The adjoint's transpose solve reads the same ``self.factors`` and would be corrupted by a change
+        between its calls; only the eager, non-differentiated march (which returns its own converged
+        state) may refresh. The refresh never moves the converged root regardless — the shift vanishes
+        there — so it changes only the forward Krylov path, exactly as freezing the preconditioner does.
+        """
+        self.factors = self._factor(
+            matvec,
+            colouring,
             n_fields,
+            shift_diagonal,
             fill_factor=fill_factor,
             drop_tol=drop_tol,
             diag_pivot_thresh=diag_pivot_thresh,
         )
-        return cls(factors)
 
     def matvec(self, *, transpose: bool = False) -> Callable[[jnp.ndarray], jnp.ndarray]:
         """The preconditioner as a JAX callable ``residual -> M residual`` (or ``M^T``).
@@ -260,14 +322,20 @@ class MonolithicIlutPreconditioner:
         Returns
         -------
         callable
-            A ``jax.pure_callback`` matvec applying the frozen factorization on the host.
+            A ``jax.pure_callback`` matvec applying the current factorization on the host.
+
+        Notes
+        -----
+        The callback reads ``self.factors`` at call time rather than capturing it, so a
+        :meth:`refresh_in_place` between two calls of the returned matvec is picked up without
+        rebuilding the callback. The number of degrees of freedom is fixed by the mesh, so the output
+        shape is stable across a refresh.
         """
-        factors = self.factors
-        shape = jax.ShapeDtypeStruct((factors.n_dofs,), jnp.float64)
+        shape = jax.ShapeDtypeStruct((self.factors.n_dofs,), jnp.float64)
 
         def apply(residual: jnp.ndarray) -> jnp.ndarray:
             return jax.pure_callback(
-                lambda r: factors.apply(r, transpose=transpose), shape, residual
+                lambda r: self.factors.apply(r, transpose=transpose), shape, residual
             )
 
         return apply
