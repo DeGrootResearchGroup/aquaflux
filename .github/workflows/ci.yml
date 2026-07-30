@@ -183,7 +183,7 @@ jobs:
   # on a PR carrying the `full-ci` label (the opt-in pre-merge check). Sharded
   # `-n 1` for the same accumulated-memory reason as the integration tier.
   slow:
-    name: slow suite (shard ${{ matrix.group }}/2)
+    name: slow suite (shard ${{ matrix.group }}/3)
     if: >-
       github.event_name == 'push'
       || (github.event_name == 'pull_request'
@@ -193,7 +193,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2]
+        group: [1, 2, 3]
     steps:
       - uses: actions/checkout@v6
 
@@ -210,10 +210,13 @@ jobs:
 
       - name: Run slow suite shard
         # `slow and not validation` keeps the tiers disjoint (a test marked both
-        # runs in the validation job, not here).
+        # runs in the validation job, not here). Split across 3 shards (was 2) so
+        # each single-process (`-n 1`) shard runs fewer tests and accumulates less
+        # XLA compilation memory before the runner ceiling -- a 2-shard process
+        # aborted part way through the coupled/segregated solves.
         run: >-
           pytest -m "slow and not validation" -q -n 1
-          --splits 2 --group ${{ matrix.group }}
+          --splits 3 --group ${{ matrix.group }}
           --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
 
   # ---- Validation suite (against analytical/published solutions) --------------
