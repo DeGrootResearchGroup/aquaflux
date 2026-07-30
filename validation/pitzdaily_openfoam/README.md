@@ -93,6 +93,10 @@ latter is dominated by ω's ~1e5 near-wall scale and looks stalled while the flo
   are regenerable and excluded.
 - `compare.py` — imports that mesh into aquaflux, runs the coupled solve on it, compares cell-for-cell,
   and writes `report.md` + `figures/comparison.png`.
+- `compare_reynolds_continuation.py` — the same benchmark solved by **Reynolds-number continuation**
+  (viscosity ramp Re ≈ 250 → 2500 → 25000) with a **dual-time pseudo-timestep march**; reuses
+  `compare.build_case` and the reattachment metric and streams per-step progress. See the variant note
+  below.
 - `report.md`, `figures/` — the tracked deliverables, **produced by running `compare.py`**. They are
   not committed yet: that run is the compute-heavy step (see the status/cost note above). The OpenFOAM
   run tree (`runs/`, `of_case/` time dirs, the generated `polyMesh`) is git-ignored.
@@ -108,6 +112,32 @@ docker run --rm -v "$PWD":/work -w /work/of_case openfoam13:latest bash run_of.s
 cd ../..
 python3 validation/pitzdaily_openfoam/compare.py
 ```
+
+## Reynolds-continuation variant (`compare_reynolds_continuation.py`)
+
+An alternative march for the same benchmark, for studying cold-start reachability. Instead of one
+coupled solve at the target viscosity, it walks a homotopy in Reynolds number — companion solves at
+roughly Re 250 and 2500 (molecular viscosity scaled ×100 and ×10) seeding the true ≈ 25000 — and marches
+each rung in **dual time** (a backward-Euler inner Newton loop) with a Courant-style control that ramps
+the pseudo-timestep up while the inner loop stays comfortable. Raising the viscosity weakens the
+convective nonlinearity, so the anchor develops the recirculation cheaply; the continuation dissolves at
+the target, leaving the root and its adjoint unchanged.
+
+The dual-time control is deliberately **conservative** — it grows the pseudo-timestep only when an inner
+step takes a full length and backs off the moment one clips. The shipped `DualTimeControl` defaults grow
+*through* a clipped step, which drives the timestep past the point where the target-Reynolds coupled solve
+loses diagonal dominance and goes non-finite; the conservative calibration is what keeps the target rung
+stable. It develops the bubble vigorously but still **stalls short of x_r/h ≈ 7.74** on the target rung,
+where the pseudo-timestep meets the low-shift conditioning limit of the coupled saddle — the behaviour
+this case exists to study.
+
+```bash
+# needs the OpenFOAM reference from step 1 above; run from the repo root
+python3 -u validation/pitzdaily_openfoam/compare_reynolds_continuation.py
+```
+
+It streams reattachment length, the pseudo-timestep shift, restart-cycle cost, and residual per step — a
+long, deliberately non-terminating study.
 
 ## Matched discretization
 
