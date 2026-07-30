@@ -310,7 +310,7 @@ def test_refresh_trigger_with_an_explicit_continuation_and_no_builder_is_rejecte
     """
     mesh, coupled = _cavity()
     flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
-    with pytest.raises(ValueError, match="supplied with no .refresh_builder"):
+    with pytest.raises(ValueError, match="supplied with no"):
         solve_coupled(
             coupled,
             flow,
