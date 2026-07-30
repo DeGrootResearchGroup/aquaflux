@@ -836,27 +836,53 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         reported α is the **min** inner line-search factor, and an inner step that fails to reduce ‖G‖
         (the line search's non-descent fallback, which otherwise reports α = 1) is folded to **α = 0** so
         the control reads it as struggling and backs off rather than growing — the α-only `StepReport`
-        signal cannot otherwise distinguish a clean full step from a non-descending fallback. **Opt-in,
-        never a default, placeholder gains** (its calibration is gated on the low-β linear-solve cost the
-        Re continuation removes). Wired through `coupled_continuation(inner_steps=…, inner_tol=…)` (returns
-        a `DualTimeStep` when `inner_steps > 1`, else the unchanged `PseudoTransientStep`) and reachable as
-        `solve_coupled(coupled, inner_steps=…, step_control=DualTimeControl())`. **The default path
-        (`inner_steps = 1`) is byte-unchanged.**
-      - **`DualTimeControl` RUNS THE TRANSIENT AWAY — it grows Δτ on the inner α alone (inner-loop
-        comfort), which is blind to the *steady* residual.** Measured on the pitzDaily Re/100 anchor
-        (row-scaled steering): the α-control keeps growing Δτ while the steady residual climbs (α stays 1
-        as the flow over-develops), driving x_r/h past the steady state without settling (residual bottoms
-        ~0.05 then rises to 0.1+, x_r/h → 4+ and climbing). The fix is the residual-based control below;
-        `DualTimeControl` is kept as the α-lens variant but is not the one to reach for.
-      - **`ResidualRatioDualTimeControl` (`solve/step_control.py`) is the convergent control — switched
+        signal cannot otherwise distinguish a clean full step from a non-descending fallback. Wired
+        through `coupled_continuation(inner_steps=…, inner_tol=…)` (returns a `DualTimeStep` when
+        `inner_steps > 1`, else the unchanged `PseudoTransientStep`) and reachable as
+        `solve_coupled(coupled, inner_steps=…)`. **The default path (`inner_steps = 1`) is byte-unchanged.**
+      - **`DualTimeControl` IS NOW THE DEFAULT for a dual-time observed march, and it CARRIES β across
+        refreshes — this reaches a developed recirculation ~4× faster than the residual-keyed control
+        (measured 2026-07-30, and it SUPERSEDES the "runs the transient away" verdict just below).** The
+        reachability crawl (~75–90 outer steps/rung to develop the pitzDaily bubble) was a **step-control
+        defect**, not a pseudo-time limit. Two defects, both fixed/retired here:
+        - `DualTimeControl` used to **reset β to `beta_start` on the first step of every post-refresh
+          segment** (`previous is None`); with a ~3-step drift refresh β *sawtoothed* `0.5→0.33→0.22→
+          (refresh)→0.5→…` and Δτ never grew — so the α-ramp was byte-identical to the pinned SER control.
+          `next_step` now **carries β** on a segment boundary (`state` present, `previous is None` → hold),
+          exactly as `ResidualRatioDualTimeControl` does. Its carried state is a **bare β** (SER's is
+          `(β, prev ‖R‖)`). Pinned by `test_dual_time_control_holds_beta_across_a_refresh`.
+        - `solve_coupled` **auto-defaults** `step_control=DualTimeControl()` when the march is a
+          `DualTimeStep`, is already observing (a refresh or observer is set), and no control was supplied
+          (`_default_dual_time_control(step_control, observing, continuation)`, unit-tested in
+          `test_coupled_rans.py`). It is injected **only where a control runs** and **never turns
+          observation on**, so the differentiable single-stage solve (guarded `_is_traced`) is untouched;
+          pass an explicit control to override. `solve_reynolds_continuation` inherits it (kwarg forward).
+        Measured on the matched-seed rung-1 testbed: SER ~75 outer steps to `x_r/h≈7.74`; carrying
+        `DualTimeControl` ~22 (β_min 0.02) / ~18 (β_min 0.005), full rtol 1e-6 in 28–51. Full cold ramp
+        (hybrid IC → Re/100 → Re/10 → target Re 25000): **59 total outer steps**, `x_r/h` 8.07 vs OF 7.74
+        (developed). Self-regulating: α clips to 0.25–0.5 in the steepest development, recovers to 1.0, then
+        β falls to the `beta_min` floor and the tail converges near-quadratically. `beta_min` is a
+        speed↔smoothness knob (0.005 fastest but can overshoot the steady bubble on a cold rung with a
+        loose seed + big Re jump, costing a couple of expensive recovery steps; 0.02 = the class default,
+        smoother). Full finding: `reference/REACHABILITY_FINDINGS.md`.
+      - **~~`DualTimeControl` RUNS THE TRANSIENT AWAY~~ — SUPERSEDED (see above).** The original bullet
+        read: the α-control grows Δτ blind to the steady residual, so it drives `x_r/h` past the steady
+        state without settling (residual bottoms ~0.05 then rises to 0.1+). That was measured on the Re/100
+        anchor **before the carry fix and without leaning on the `beta_min` floor**. With β carried and the
+        floor bounding Δτ, the ramp converges standalone (rung-1 to rtol 1e-6; full ramp to target Re) — the
+        "runaway" the residual-keyed control was built to prevent does not block convergence here, and its
+        residual-feedback instead *pins* β on the flat `β×travel` plateau (the slower arm). Do not cite the
+        old verdict as a reason to prefer the residual-keyed control.
+      - **`ResidualRatioDualTimeControl` (`solve/step_control.py`) is now the OPT-IN alternative — switched
         evolution relaxation / Kelley–Keyes pseudo-transient continuation.** It ramps Δτ by the steady-
         residual reduction ratio: `β ← β · (‖Rₙ‖/‖Rₙ₋₁‖)` (residual drop → β down / Δτ up; residual rise →
         β up / Δτ down), clipped to `[1/max_change, max_change]`, clamped to `[beta_min, beta_max]`, with a
-        hard inner-clip (`α < backoff_below`) safety shrink, and **carrying β across a refresh** (the ramp
-        is continuous, unlike the α-control which resets to `beta_start` each segment because `previous is
-        None` on a segment's first step). A rising residual *automatically* shrinks Δτ, so it cannot run
-        away. Its `next_step` state is `(β, prev ‖R‖)`, not a bare β. Opt-in; unit-tested in
-        `tests/unit/test_step_control.py`.
+        hard inner-clip (`α < backoff_below`) safety shrink, and carrying β across a refresh. A rising
+        residual *automatically* shrinks Δτ, so it cannot run away — but on the pitzDaily ramp the row-scaled
+        steady residual is nearly flat while the flow develops (`β×travel`), so it **pins β near `beta_start`
+        and stalls Δτ**, taking ~4× more outer steps than the α-based default. Prefer it only where the steady
+        residual is a reliable monotone progress signal. Its `next_step` state is `(β, prev ‖R‖)`. Unit-tested
+        in `tests/unit/test_step_control.py`.
       - **THE LOW-β WALL IS THE BLOCK-SIMPLE PRECONDITIONER, AND THE ILUT BREAKS IT.** With
         `ResidualRatioDualTimeControl` the residual descends cleanly (no runaway) but block-SIMPLE's coupled
         solve goes **NaN at β ≈ 0.067** — the low-shift conditioning wall (block-SIMPLE cannot solve the
@@ -1574,9 +1600,12 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     segment-local SER `residual_norm_0` and `drift_measure`. Unifying the two into
     one `(rn, rn0, α, state) -> (β, state)` interface was rejected: it would union SER's needs with the
     control's (dead α/state args for SER), drag α onto the differentiable core where the line search
-    cannot even produce it before the step, and risk the byte-identity of the default path. The one
-    concrete `StepControl` is `AlphaTargetingControl` (`solve/step_control.py`) — experimental, opt-in,
-    see the "SER β schedule runs backwards" bullet.
+    cannot even produce it before the step, and risk the byte-identity of the default path. Three concrete
+    `StepControl`s live in `solve/step_control.py`: **`DualTimeControl`** (the Courant β-ramp, now the
+    **default** for a dual-time observed march — carries β across refreshes, see the DualTimeStep bullet
+    above), **`ResidualRatioDualTimeControl`** (the opt-in residual-keyed alternative), and
+    **`AlphaTargetingControl`** (the single-step α-targeter — experimental, opt-in, does not converge
+    standalone; see the "SER β schedule runs backwards" bullet).
 - **Gate C — PASSED (`tests/integration/test_skewed_diffusion.py`).** With
   `CorrectedGreenGauss` injected into the residual on a 25%-skewed mesh, one Newton step
   drives `‖R‖` ~24 → ~1e-12 and reproduces a harmonic linear field to ~5e-13 (linear-exact

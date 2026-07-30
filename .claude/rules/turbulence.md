@@ -152,14 +152,25 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     creeps *upward*. Only the observed segments call back; the finishing solve is traced. See the
     `march.py` bullets in `.claude/rules/solve.md` for why observation is not gated on the trigger and why
     the state rides a separate seam from the report history.
-  - **`solve_coupled(step_control=…)` — opt-in α-targeting β control, composes with `refresh_trigger`
-    (experimental).** A `StepControl` (currently `AlphaTargetingControl`) reshapes the shift strength β
-    each step toward the line-search-factor α=1 boundary, the measured efficiency optimum SER misses.
-    Measured to strictly beat SER on pitzDaily (~2.6× to a given residual, reaching deeper) **when paired
-    with the AMG refresh** — the two are co-designed, not independent (a bolder β stales the frozen PC
-    faster). It is forward-only (raises under `jax.grad`, same guard as the refresh) and does **not**
-    converge standalone (stalls rel ~0.03), so it is opt-in and never a default. Full analysis: the "SER β
-    schedule runs backwards" bullet in `.claude/rules/solve.md`.
+  - **`solve_coupled(step_control=…)` — the dual-time march DEFAULTS to the `DualTimeControl` Courant
+    ramp; other controls are opt-in.** A `StepControl` reshapes the shift strength β each observed step
+    from the previous report; all are forward-only (raise under `jax.grad`, same guard as the refresh).
+    - **Default (`inner_steps > 1`, observing):** `solve_coupled` auto-selects `DualTimeControl` (the
+      α-based Courant ramp) when the march is a `DualTimeStep`, a refresh/observer is active, and no
+      control was supplied (`_default_dual_time_control`, unit-tested in `test_coupled_rans.py`). It grows
+      the pseudo-timestep while the inner loop stays comfortable and **carries β across refreshes**,
+      reaching a developed pitzDaily recirculation in **~4× fewer outer steps** than the residual-keyed
+      control; a full cold ramp to target Re 25000 develops in ~59 outer steps. The injection never turns
+      observation on, so the differentiable single-stage solve is untouched. See the DualTimeStep bullet
+      in `.claude/rules/solve.md` and `reference/REACHABILITY_FINDINGS.md`.
+    - **Opt-in `ResidualRatioDualTimeControl`:** ramps β by the steady-residual ratio; safe when that
+      residual is a reliable progress signal, but it pins β on the flat `β×travel` pitzDaily plateau
+      (the slower arm), so it is not the default.
+    - **Opt-in `AlphaTargetingControl`** (single-step, not dual-time): reshapes β toward the α=1 boundary,
+      the efficiency optimum SER misses (~2.6× to a given residual **when paired with the AMG refresh** —
+      co-designed, a bolder β stales the frozen PC faster). It does **not** converge standalone (stalls rel
+      ~0.03), so it stays opt-in, never a default. Full analysis: the "SER β schedule runs backwards"
+      bullet in `.claude/rules/solve.md`.
   - **`reuse=` refreshes a stale k/ω preconditioner without changing the compilation signature.**
     `scalar_transport_preconditioner(..., reuse=old)` (threaded through
     `SSTTurbulence.k_preconditioner` / `omega_preconditioner`) re-derives the *values* at a new state on
@@ -927,8 +938,8 @@ tuning follow-up noted above.
   (`n_points`); everything else is automatic.
   - **It is an outer wrapper around `solve_coupled`, agnostic to the per-Re globalization.** Every keyword
     in `solve_kwargs` is forwarded to each per-Re solve, so the pseudo-transient march, the dual-time
-    march (`inner_steps>1` + `step_control=DualTimeControl()`), the preconditioner options and the
-    observers all compose unchanged — no coupling to which globalization runs.
+    march (`inner_steps>1`, whose observed rungs default to the `DualTimeControl` Courant ramp), the
+    preconditioner options and the observers all compose unchanged — no coupling to which globalization runs.
   - **The continuation DISSOLVES at the target (binding).** The final solve runs at the case's true
     viscosity on the **live** `coupled`, so the root and its exact IFT adjoint are identical to a direct
     `solve_coupled` — the continuation changes only the path. Pinned: `n_points=2` reaches the direct

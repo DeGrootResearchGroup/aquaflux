@@ -1,20 +1,27 @@
-"""Feedback step controls for the eager march (experimental, forward-only).
+"""Feedback step controls for the eager march (forward-only).
 
 A :class:`~aquaflux.solve.StepControl` reshapes the forward step each iteration from the previous
-step's outcome. Two members drive the pseudo-transient shift strength β from the line-search factor α:
+step's outcome. Three members drive the pseudo-transient shift strength β:
 
-* :class:`AlphaTargetingControl` drives the *single-step* shift toward the boundary where the full
-  shifted step just stops being clipped — the measured efficiency optimum for a stiff coupled solve,
-  which the default switched-evolution-relaxation schedule misses by ramping β the wrong way.
 * :class:`DualTimeControl` ramps the *dual-time* pseudo-timestep by a Courant rule (grow it while the
-  backward-Euler inner loop is comfortable, shrink it when it clips), which lets β be driven well below
-  the single-step divergence floor because the inner loop keeps the larger implicit step stable.
+  backward-Euler inner loop is comfortable, ``α = 1``; shrink it when an inner step clips), which lets β
+  be driven well below the single-step divergence floor because the inner loop keeps the larger implicit
+  step stable. β is **carried across preconditioner refreshes**, so the ramp is continuous. This is the
+  **default control for the dual-time coupled march**: measured on a cold-start pitzDaily
+  Reynolds-continuation ramp it reaches the developed recirculation in ~4× fewer outer steps than the
+  residual-keyed alternative, and it converges standalone (to the requested tolerance, not a short
+  plateau) — the pseudo-timestep is bounded by its ``beta_min`` floor, and the shift vanishes at the
+  root, so the finishing solve owns the converged root and the adjoint regardless.
+* :class:`ResidualRatioDualTimeControl` ramps the same pseudo-timestep by the *steady-residual* reduction
+  ratio instead of α (switched evolution relaxation). Opt-in: it is the safer rule when the steady
+  residual is a reliable progress signal, but on the pitzDaily ramp the row-scaled residual is nearly
+  flat while the flow develops (the ``β × travel`` identity), so it pins β and stalls the pseudo-timestep.
+* :class:`AlphaTargetingControl` drives the *single-step* (non-dual-time) shift toward the α = 1 boundary.
+  Opt-in and, unlike the dual-time controls, does **not** converge standalone (it plateaus short); its
+  numeric gains are hand-set placeholders. Do not promote it to a default.
 
-**Both are experimental, opt-in, never a default.** Each was measured to help a stiff coupled RANS
-march but neither converges to a root by itself (they plateau short), and their numeric gains are
-hand-set placeholders, not calibrated. They are forward-only accelerators on the eager march; the
-finishing solve (running the default schedule) still owns the converged root and the adjoint. Do not
-promote either to a default until it converges standalone.
+All three are forward-only accelerators on the eager march — they read the previous step's report and may
+raise under ``jax.grad`` — so they live here rather than on the differentiable Newton path.
 """
 
 from __future__ import annotations
@@ -112,9 +119,19 @@ class DualTimeControl(eqx.Module):
     Unlike :class:`AlphaTargetingControl` (which drives the *single-step* shift toward the α = 1
     boundary on the steady residual, and plateaus there), this drives the *dual-time* pseudo-timestep,
     and the well-behaved backward-Euler residual is what lets it keep growing the step as the flow
-    develops. **Experimental, opt-in, never a default** — its numeric gains are hand-set placeholders
-    (calibration is the open item, tied to the cost of the low-β linear solves); the finishing solve,
-    running the default schedule, still owns the converged root and the adjoint.
+    develops.
+
+    **β is carried across a preconditioner refresh** (see :meth:`next_step`): the Courant ramp is
+    continuous, so it keeps the pseudo-timestep it earned rather than resetting to :attr:`beta_start` at
+    each refreshed segment. That carry is what makes this the **default step control for the dual-time
+    coupled march** — a refresh (drift-triggered on a developing flow) fires every few steps, and a
+    non-carrying ramp would sawtooth β back to the start each segment and never grow the pseudo-timestep.
+    Measured on a cold-start pitzDaily Reynolds-continuation ramp, the carrying ramp reaches the
+    developed recirculation in **~4× fewer outer steps** than the residual-keyed
+    :class:`ResidualRatioDualTimeControl`, which pins β near its start because the (row-scaled) steady
+    residual is nearly flat while the transient develops. :attr:`beta_min` bounds the pseudo-timestep, so
+    the ramp does not run away; the shift still vanishes at the root, so the finishing solve owns the
+    converged root and the adjoint either way.
 
     Attributes
     ----------
@@ -150,16 +167,22 @@ class DualTimeControl(eqx.Module):
     ) -> tuple[ForwardStep, float]:
         """The base dual-time step with a constant β, and the new β to carry.
 
-        ``state`` is the previous step's β (``None`` on the first step); β for the step about to run is
-        derived from the *previous* step's α (its smallest inner line-search factor). ``base_step`` must
-        be a :class:`~aquaflux.solve.DualTimeStep` (the step whose reported α is an inner-loop factor and
-        whose ``relaxation_schedule`` this replaces).
+        ``state`` is the carried β (``None`` only on the very first step of the whole march); β for the
+        step about to run is derived from the *previous* step's α (its smallest inner line-search factor).
+        The **first step of a refresh segment** (``previous is None`` but ``state`` carried) **holds β** so
+        the Courant ramp continues across the preconditioner refresh rather than resetting to
+        :attr:`beta_start` — without this, a march that refreshes every few steps (the common case, a
+        drift-triggered refresh on a developing flow) sawtooths ``β`` back to the start each segment and
+        the pseudo-timestep never actually grows. ``base_step`` must be a
+        :class:`~aquaflux.solve.DualTimeStep` (the step whose reported α is an inner-loop factor and whose
+        ``relaxation_schedule`` this replaces).
         """
-        beta = (
-            self.beta_start
-            if state is None or previous is None
-            else self._adapt(state, previous.alpha)
-        )
+        if state is None:  # the very first step of the whole march
+            beta = self.beta_start
+        else:  # carried β: adapt within a segment, hold across a refresh boundary (previous is None)
+            beta = state
+            if previous is not None:
+                beta = self._adapt(state, previous.alpha)
         controlled = eqx.tree_at(
             lambda s: s.relaxation_schedule, base_step, ConstantRelaxation(jnp.asarray(beta))
         )
@@ -180,26 +203,32 @@ class ResidualRatioDualTimeControl(eqx.Module):
     so a residual drop (ratio ``< 1``) lowers ``β`` and grows the step, while a residual rise
     (ratio ``> 1``) raises ``β`` and shrinks it.
 
-    **This is what prevents the runaway of :class:`DualTimeControl`.** That control grows the step on the
-    inner line-search factor ``α`` alone -- a proxy for the *inner* solve's comfort at fixed timestep,
-    blind to the *outer* steady residual -- so when the flow over-develops (each inner solve stays
-    comfortable, ``α = 1``, while the steady residual climbs) it keeps growing the step and drives the
-    transient away from the steady manifold. Here growth is **earned** by residual reduction: a rising
-    residual *automatically* shrinks the step, so the ramp cannot run away.
+    **An alternative to the α-based :class:`DualTimeControl`, with a different failure guard.** That
+    control grows the step on the inner line-search factor ``α`` alone -- a proxy for the *inner* solve's
+    comfort at fixed timestep, blind to the *outer* steady residual -- and bounds runaway only with its
+    :attr:`~DualTimeControl.beta_min` floor on the pseudo-timestep. This control instead **earns** growth
+    by residual reduction: a rising residual *automatically* shrinks the step. The trade measured on a
+    cold-start pitzDaily Reynolds-continuation ramp is the reverse of what that guard suggests: because
+    the row-scaled steady residual is nearly flat while the recirculation develops (the shifted step
+    leaves ``R(φ+δ) ≈ −β d δ`` — ``β`` times how far the step travelled, the physical unsteady term, not a
+    distance to the root), this control keeps ``β`` pinned near its start and the pseudo-timestep never
+    grows, so it reaches the developed bubble in **~4× more outer steps** than the α-based ramp. It
+    remains the choice when the steady residual *is* a reliable progress signal (a genuinely
+    monotone-converging transient), where earned growth is the safer rule.
 
     The per-step change is clipped to ``[1 / max_change, max_change]`` so one anomalous step cannot fling
     the timestep, and ``β`` is clamped to ``[beta_min, beta_max]``. A hard inner-loop clip
     (``α < backoff_below``) forces an extra shrink regardless of the ratio -- an inner step that had to be
     clipped means the implicit step was too large this iteration, whatever the residual did. The shift is
     **carried across a preconditioner refresh** (the ramp is continuous) rather than resetting to
-    ``beta_start`` at each segment as the α-based control does.
+    ``beta_start`` at each segment (:class:`DualTimeControl` now carries it the same way).
 
     The residual it reads is whatever measure the march steers by (``previous.residual_norm``); with the
     default row-equilibrated norm that is a fractional change per equation, so the ratio is a meaningful
     reduction factor across steps.
 
-    **Experimental, opt-in, never a default.** The finishing solve, running the default schedule, still
-    owns the converged root and the adjoint.
+    **Opt-in alternative to the default :class:`DualTimeControl`.** The finishing solve, running the
+    default schedule, still owns the converged root and the adjoint.
 
     Attributes
     ----------
