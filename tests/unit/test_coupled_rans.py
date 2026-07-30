@@ -29,11 +29,14 @@ from aquaflux.turbulence import (
     eddy_viscosity_drift,
 )
 from aquaflux.turbulence.coupled import (
+    _COUPLED_FORWARD_SOLVER,
+    _COUPLED_ILUT_FORWARD_SOLVER,
     CoupledRANS,
     CoupledRANSLayout,
     LiveViscosityVelocityParts,
     _row_jacobian_scale,
     coupled_continuation,
+    coupled_ilut_continuation,
     solve_coupled,
 )
 
@@ -100,6 +103,29 @@ def _healthy_state(mesh, coupled, seed=0):
     k = 0.05 + 0.01 * jax.random.uniform(keys[2], (n,))
     omega = 10.0 + jax.random.uniform(keys[3], (n,))
     return coupled.pack_state(flow, k, omega)
+
+
+def test_ilut_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None:
+    """The ILUT continuation defaults to a small-restart GMRES; the block one keeps the large restart.
+
+    A restarted GMRES tests its stop only at each restart boundary, so the restart size should match how
+    many vectors the preconditioner actually needs. The monolithic ILUT clusters the preconditioned
+    spectrum so the 1% stop is reached within a handful of vectors, so it uses a small restart; the
+    block-triangular preconditioner needs a large subspace per cycle. The two must not share a default.
+    """
+    assert _COUPLED_ILUT_FORWARD_SOLVER.restart == 10
+    assert _COUPLED_FORWARD_SOLVER.restart == 120
+
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    ilut_step = coupled_ilut_continuation(coupled, state)
+    block_step = coupled_continuation(coupled, state, method=None)
+    # Each built step carries the solver it will run; the ILUT's is the small-restart one by default.
+    assert ilut_step.forward_solver.restart == 10
+    assert block_step.forward_solver.restart == 120
+    # An explicit forward_solver still overrides the ILUT default.
+    override = coupled_ilut_continuation(coupled, state, forward_solver=_COUPLED_FORWARD_SOLVER)
+    assert override.forward_solver.restart == 120
 
 
 def test_coupled_build_resolves_boundaries_so_the_residual_jits() -> None:
