@@ -873,6 +873,24 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         `inner_tol` (with enough `inner_steps` to reach it) — **affordable precisely because the ILUT makes
         the low-β inner solves cheap**, where block-SIMPLE could not. ILUT removes the conditioning wall;
         tight `inner_tol` restores dual-time stability; the two together are what settle the rung.
+      - **⚠️ READING SMALL CYCLE COUNTS (binding — two offsets fooled a whole investigation).** Two things
+        inflate the reported linear-solve cost at the low end, so a "6" is NOT six times a "1":
+        (1) **lineax's `num_steps` has a +2 offset and is blind within a restart cycle.** Calibrated: a
+        system GMRES solves in 1, few, or ~100 matvecs (all inside one 120-restart cycle) ALL report
+        `num_steps = 3` (a dummy r0=0 first pass + deferred breakdown); it only climbs when the solve
+        genuinely spills past a restart cycle. So **`num_steps = 3` means "converged in one cycle" = ideal**,
+        and `solve_linear`'s count cannot distinguish 1 matvec from ~100. (2) **`DualTimeStep` reports the
+        SUM of `num_steps` over its inner Newton iterations** (`stepper` docstring). So a dual-time
+        `cyc = 6` is **~2 inner Newton iterations × an ideal 1-cycle solve**, and `cyc = 9` is ~3 —
+        the inner-iteration count to reach `inner_tol`, NOT a per-solve penalty. **Consequence measured
+        this session:** the coupled ILUT is a NEAR-DIRECT preconditioner — 1 restart cycle (~4 matvecs) per
+        solve at every pitzDaily state, flow-only and full `[u,v,p,k,ω]` alike, fresh or mildly stale
+        (`reference/ILUT_ITERATION_GAP_FINDINGS.md`). The march's "6–9" is the dual-time inner-loop sum, and
+        **β-matching the frozen factorization to the march's β is a no-op on it** (fixed-`ilut_beta` and
+        `ilut_beta`-matched runs gave IDENTICAL `cyc`). The only lever on the "6" is `inner_steps`/`inner_tol`
+        (globalization/accuracy), which is deliberately kept tight for stability — not the preconditioner.
+        The "coupled ≈ 6 vs flow-only ≈ 2 → k/ω degrades the ILUT → build ILUT+AMG" premise is REFUTED; the
+        only live reason for ILUT+AMG is 3D `spilu` fill scalability, which cannot be judged on 2D pitzDaily.
     - **Lowering β is not the escape, and the reason is specific — state it precisely.** At `β = 0.25`
       the k/ω blocks reach 1e24 / 1e52 at the cold IC and go NaN at step 20, but are **perfectly stable
       at steps 45 and 90** (ratios 0.994–1.046). So the under-damping is an *early-state* property, not
