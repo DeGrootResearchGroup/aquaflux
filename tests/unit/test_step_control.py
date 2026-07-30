@@ -131,6 +131,17 @@ def test_dual_time_control_backs_off_when_clipped() -> None:
     assert jnp.isclose(beta, 1.0)  # 0.5 * 2.0
 
 
+def test_dual_time_control_holds_beta_across_a_refresh() -> None:
+    """The first step of a refresh segment (previous is None, β carried) holds β, not beta_start.
+
+    Without this the Courant ramp would reset to beta_start on every preconditioner refresh -- which
+    fires every few steps on a developing flow -- so the pseudo-timestep would sawtooth and never grow.
+    """
+    control = DualTimeControl(beta_start=2.0)
+    _, beta = control.next_step(_dual_step(), None, 0.12)  # carried β = 0.12, segment boundary
+    assert jnp.isclose(beta, 0.12)  # continues the ramp, does not reset to beta_start
+
+
 def test_dual_time_control_holds_in_the_dead_band() -> None:
     """A moderate clip (backoff_below ≤ α < grow_above) neither grows nor shrinks β."""
     control = DualTimeControl(grow_above=0.5, backoff_below=0.25)

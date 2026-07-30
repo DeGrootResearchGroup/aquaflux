@@ -54,6 +54,7 @@ from aquaflux.flow.mean_velocity import (
 from aquaflux.solve import (
     BlockScaledNorm,
     DivergenceGuard,
+    DualTimeControl,
     DualTimeStep,
     ForwardStep,
     ImplicitNewtonSolver,
@@ -1410,6 +1411,42 @@ def coupled_ilut_continuation(
     )
 
 
+def _default_dual_time_control(
+    step_control: StepControl | None, observing: bool, continuation: ForwardStep
+) -> StepControl | None:
+    """The step control for an observed march: the caller's, or the default Courant ramp for a dual-time
+    march that was given none.
+
+    A **dual-time** march (a :class:`~aquaflux.solve.DualTimeStep`, whose reported ``alpha`` is the
+    backward-Euler inner-loop comfort a Courant ramp reads) that is **already observing** (a
+    ``refresh_trigger`` or observer set ``observing``) but was handed **no** ``step_control`` defaults to
+    :class:`~aquaflux.solve.DualTimeControl`. That ramp grows the pseudo-timestep while the inner loop
+    stays comfortable, reaching a developed recirculation in far fewer outer steps than the residual-keyed
+    schedule (which pins ``beta`` because the row-scaled steady residual is nearly flat while the flow
+    develops). ``step_control`` is returned **unchanged** for a single-step march, a caller-supplied
+    control, or a march that is not observing — so the default is injected only where a control actually
+    runs, and injecting it never turns observation on (which would wrongly make the differentiable
+    single-stage solve raise the forward-only guard).
+
+    Parameters
+    ----------
+    step_control : StepControl or None
+        The caller-supplied control (``None`` if none was given).
+    observing : bool
+        Whether the march runs the observed eager path (a refresh or observer is active).
+    continuation : ForwardStep
+        The globalization step the march applies.
+
+    Returns
+    -------
+    StepControl or None
+        ``DualTimeControl()`` when defaulting applies; ``step_control`` otherwise.
+    """
+    if step_control is None and observing and isinstance(continuation, DualTimeStep):
+        return DualTimeControl()
+    return step_control
+
+
 def solve_coupled(
     coupled: CoupledRANS,
     flow: jnp.ndarray | None = None,
@@ -1598,13 +1635,23 @@ def solve_coupled(
         ``(refresh_limit + 1) * max_steps`` march steps plus the finishing solve's own allowance. The
         budget is deliberately not split: either segment may legitimately need
         the full allowance, and halving it would fail a march that a single-stage solve completes.
+    step_control : StepControl, optional
+        Reshapes the forward step each observed iteration from the previous step's report (forward-only;
+        it raises under ``jax.grad``, and so is consulted only on the observed march, never the
+        differentiable single-stage solve). **A dual-time march** (``inner_steps > 1``, a
+        :class:`~aquaflux.solve.DualTimeStep`) that is already observing — a ``refresh_trigger`` or an
+        observer is set — **defaults to** :class:`~aquaflux.solve.DualTimeControl`, the Courant ramp that
+        grows the pseudo-timestep while the inner loop stays comfortable (measured ~4× fewer outer steps
+        to a developed recirculation on a cold-start pitzDaily ramp than the residual-keyed schedule).
+        Pass an explicit control (e.g. :class:`~aquaflux.solve.ResidualRatioDualTimeControl`) to override,
+        or pass one built with different knobs. The single-step march (``inner_steps = 1``, the default)
+        gets no default control.
     **continuation_kwargs
         Forwarded to :func:`coupled_continuation` when building internally (schedule + preconditioner
         options). Notably ``inner_steps > 1`` selects the **dual-time** (backward-Euler) march
         (:class:`~aquaflux.solve.DualTimeStep`) — an inner Newton loop per outer timestep whose measured
-        steady residual is the honest discrete time derivative rather than ``beta x travel``; pair it
-        with ``step_control=DualTimeControl()`` to ramp the pseudo-timestep by a Courant rule. Both are
-        opt-in accelerators; ``inner_steps = 1`` (default) is the unchanged single-step continuation.
+        steady residual is the honest discrete time derivative rather than ``beta x travel``.
+        ``inner_steps = 1`` (default) is the unchanged single-step continuation.
 
     Returns
     -------
@@ -1664,6 +1711,13 @@ def solve_coupled(
             "(state -> ForwardStep) that rebuilds it at each developed state, or drop the explicit "
             "`continuation` so solve_coupled builds it, or stage the refresh yourself."
         )
+
+    # A dual-time observed march with no caller control defaults to the Courant ramp (see the helper): it
+    # grows the pseudo-timestep while the inner loop stays comfortable, carried across the refreshes
+    # below, reaching a developed recirculation in far fewer outer steps than the residual-keyed schedule.
+    # It is injected only where a control runs and never turns observation on, so the differentiable
+    # single-stage solve (guarded above) is untouched.
+    step_control = _default_dual_time_control(step_control, observing, continuation)
 
     stage_rtol, stage_atol = rtol, atol
     if observing:
