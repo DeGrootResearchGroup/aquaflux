@@ -299,16 +299,18 @@ class _TrivialShiftPolicy(eqx.Module):
         return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _relaxation: None)
 
 
-def test_refresh_trigger_with_an_explicit_continuation_is_rejected() -> None:
-    """A refresh must rebuild the continuation, so it cannot accept a pre-built one.
+def test_refresh_trigger_with_an_explicit_continuation_and_no_builder_is_rejected() -> None:
+    """A refresh must rebuild the continuation, so an explicit one needs a ``refresh_builder``.
 
-    The error names the two supported alternatives rather than silently ignoring either argument.
-    The guard is on the argument combination and fires before the continuation is ever stepped, so a
-    trivial step object is sufficient here -- no preconditioner needs to be built.
+    Without a builder the refresh has no way to re-freeze the preconditioner, so the combination is
+    rejected and the error names the supported alternatives. The guard is on the argument combination
+    and fires before the continuation is ever stepped, so a trivial step object is sufficient here --
+    no preconditioner needs to be built. (Supplying ``refresh_builder`` lifts the restriction, since the
+    builder is how the refresh rebuilds -- exercised by the ILUT refresh integration tests.)
     """
     mesh, coupled = _cavity()
     flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
-    with pytest.raises(ValueError, match="needs solve_coupled to build the continuation"):
+    with pytest.raises(ValueError, match="supplied with no .refresh_builder"):
         solve_coupled(
             coupled,
             flow,
