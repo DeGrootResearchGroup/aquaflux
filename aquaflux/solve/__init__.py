@@ -62,6 +62,7 @@ from .continuation import (
 )
 from .frozen_operator import convection_diffusion_operator, decouple_dof
 from .ilut_preconditioner import MonolithicIlutPreconditioner
+from .lu_preconditioner import MonolithicLuPreconditioner
 from .implicit import (
     DampedNewtonStep,
     ForwardStep,
@@ -124,6 +125,7 @@ __all__ = [
     "LocalCourantBasis",
     "MarchResult",
     "MonolithicIlutPreconditioner",
+    "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
     "PseudoTransientStep",
     "RefreshTrigger",

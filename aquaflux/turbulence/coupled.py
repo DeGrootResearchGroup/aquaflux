@@ -60,6 +60,7 @@ from aquaflux.solve import (
     ImplicitNewtonSolver,
     LocalCourantBasis,
     MonolithicIlutPreconditioner,
+    MonolithicLuPreconditioner,
     PseudoTransientStep,
     RefreshTrigger,
     ResidualNorm,
@@ -1226,39 +1227,45 @@ def _is_traced(pytree: object) -> bool:
     return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(pytree))
 
 
-class MonolithicIlutShiftPolicy(eqx.Module):
+class MonolithicFactorShiftPolicy(eqx.Module):
     """A coupled :class:`~aquaflux.solve.ShiftPolicy` that preconditions the whole ``[flow, k, omega]``
-    saddle with one monolithic incomplete-LU factorization, in place of the block-diagonal composition.
+    saddle with one monolithic factorization of the assembled coupled Jacobian, in place of the
+    block-diagonal composition.
 
     Reuses :class:`CoupledShiftPolicy`'s pseudo-transient shift diagonal -- the physics, the same
     velocity ``a_P`` and k/omega transport diagonals -- but replaces its block-diagonal preconditioner
-    with a single :class:`~aquaflux.solve.MonolithicIlutPreconditioner`: an incomplete factorization of
-    the assembled coupled Jacobian, which forms the true pressure Schur coupling through its fill rather
-    than approximating it. On a convection-dominated collocated Rhie--Chow RANS saddle it reaches the
-    forward tolerance in a handful of Krylov cycles where the block-triangular preconditioner needs
-    hundreds.
+    with a single monolithic factorization of the assembled coupled Jacobian, which forms the true
+    pressure Schur coupling through its fill rather than approximating it. The factorization is either
+    an incomplete threshold-ILU (:class:`~aquaflux.solve.MonolithicIlutPreconditioner`, a handful of
+    Krylov cycles) or a complete LU (:class:`~aquaflux.solve.MonolithicLuPreconditioner`, exact, one
+    cycle) -- this policy is agnostic to which, needing only the shared callback-matvec interface. On a
+    convection-dominated collocated Rhie--Chow RANS saddle either reaches the forward tolerance where the
+    block-triangular preconditioner needs hundreds of cycles.
 
     The factorization is frozen at a reference state and shift (built off the jit path by
-    :func:`coupled_ilut_continuation`). Unlike the block preconditioner's live ``a_P`` rescaling it does
-    not track the developing state; being a far stronger preconditioner it tolerates that freezing at a
-    cost of a few extra cycles, and the shift vanishes at the root so the frozen factorization never
-    changes the converged solution or its adjoint. Because it is a host ``scipy`` object it rides as a
-    **static** field rather than a traced pytree leaf, and is applied inside the jitted Krylov solve
-    through the callback matvec (:meth:`~aquaflux.solve.MonolithicIlutPreconditioner.matvec`).
+    :func:`coupled_ilut_continuation` / :func:`coupled_lu_continuation`). Unlike the block
+    preconditioner's live ``a_P`` rescaling it does not track the developing state; being a far stronger
+    preconditioner it tolerates that freezing at a cost of a few extra cycles, and the shift vanishes at
+    the root so the frozen factorization never changes the converged solution or its adjoint. Because it
+    is a host object (``scipy`` / UMFPACK) it rides as a **static** field rather than a traced pytree
+    leaf, and is applied inside the jitted Krylov solve through the callback matvec.
 
     Attributes
     ----------
     base : CoupledShiftPolicy
         The block policy supplying the pseudo-transient shift diagonal.
-    preconditioner : MonolithicIlutPreconditioner
-        The frozen coupled ILUT factorization (a static field).
+    preconditioner : MonolithicIlutPreconditioner or MonolithicLuPreconditioner
+        The frozen coupled factorization (a static field). Any object exposing the ``matvec`` /
+        ``matvec(transpose=True)`` callback interface works.
     """
 
     base: CoupledShiftPolicy
-    preconditioner: MonolithicIlutPreconditioner = eqx.field(static=True)
+    preconditioner: MonolithicIlutPreconditioner | MonolithicLuPreconditioner = eqx.field(
+        static=True
+    )
 
     def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
-        """The block policy's shift diagonal, glued to the frozen ILUT preconditioner.
+        """The block policy's shift diagonal, glued to the frozen factorization preconditioner.
 
         Parameters
         ----------
@@ -1274,8 +1281,8 @@ class MonolithicIlutShiftPolicy(eqx.Module):
         """The ``state -> M^T`` factory for the adjoint transpose solve.
 
         The converged-state adjoint preconditions the (unshifted) transposed coupled Jacobian with the
-        frozen factorization's transpose -- the same incomplete factors applied with a transposed
-        triangular solve. Wrapped in a :class:`~aquaflux.solve.TransposedPreconditioner` because it
+        frozen factorization's transpose -- the same factors applied with a transposed triangular solve.
+        Wrapped in a :class:`~aquaflux.solve.TransposedPreconditioner` because it
         already returns ``M^T``: the generic adjoint machinery derives the transpose with
         :func:`jax.linear_transpose`, which cannot handle the host-callback factorization, so it is
         applied directly instead.
@@ -1284,7 +1291,7 @@ class MonolithicIlutShiftPolicy(eqx.Module):
         return TransposedPreconditioner(lambda state: transpose)
 
 
-def _coupled_ilut_colouring(coupled: CoupledRANS, stencil_reach: int):
+def _coupled_jacobian_colouring(coupled: CoupledRANS, stencil_reach: int):
     """The block-stencil colouring for materializing the coupled Jacobian (a mesh-fixed quantity).
 
     Shared by :func:`coupled_ilut_continuation` (the initial factorization) and
@@ -1296,13 +1303,80 @@ def _coupled_ilut_colouring(coupled: CoupledRANS, stencil_reach: int):
     return block_stencil_colouring(np.asarray(owner), np.asarray(nb), n_cells, stencil_reach)
 
 
-def _ilut_shift(base: CoupledShiftPolicy, ilut_beta: float, state: jnp.ndarray) -> np.ndarray:
-    """The frozen pseudo-transient shift diagonal the ILUT is factored against, at ``state``.
+def _frozen_shift_diagonal(base: CoupledShiftPolicy, beta: float, state: jnp.ndarray) -> np.ndarray:
+    """The frozen pseudo-transient shift diagonal the factorization is built against, at ``state``.
 
-    ``ilut_beta`` scales the base policy's shift diagonal; the ``stop_gradient`` keeps the frozen
-    factorization off the differentiation path. Shared by the initial build and every in-place refresh.
+    ``beta`` scales the base policy's shift diagonal; the ``stop_gradient`` keeps the frozen
+    factorization off the differentiation path. Shared by the initial build and every in-place refresh,
+    for both the ILUT and complete-LU preconditioners.
     """
-    return np.asarray(ilut_beta * jax.lax.stop_gradient(base.shift_term(state).diagonal))
+    return np.asarray(beta * jax.lax.stop_gradient(base.shift_term(state).diagonal))
+
+
+def _monolithic_factor_step(
+    coupled: CoupledRANS,
+    reference_state: jnp.ndarray,
+    base: CoupledShiftPolicy,
+    preconditioner: MonolithicIlutPreconditioner | MonolithicLuPreconditioner,
+    *,
+    beta0: float,
+    exponent: float,
+    beta_floor: float,
+    max_escalations: int,
+    escalation_factor: float,
+    divergence_cap: float,
+    line_search: int,
+    inner_steps: int,
+    inner_tol: float,
+    forward_solver: lx.AbstractLinearSolver | None,
+    block_scaled_norm: bool,
+    residual_norm: ResidualNorm | None,
+) -> ForwardStep:
+    """Assemble the pseudo-transient / dual-time step around a frozen monolithic factorization.
+
+    The shared tail of :func:`coupled_ilut_continuation` and :func:`coupled_lu_continuation`: it glues the
+    already-built ``preconditioner`` (ILUT or complete-LU) to the block shift ``base`` via a
+    :class:`MonolithicFactorShiftPolicy`, picks the row-equilibrated progress measure, and returns a
+    :class:`~aquaflux.solve.DualTimeStep` (``inner_steps > 1``) or :class:`~aquaflux.solve.PseudoTransientStep`.
+    The two builders differ only in how they construct ``preconditioner``.
+    """
+    policy = MonolithicFactorShiftPolicy(base, preconditioner)
+    if residual_norm is None:
+        # Row-equilibrated by default, as in `coupled_continuation`: the Euclidean coupled residual is
+        # dominated by the omega block and mis-ranks a separating flow, so steering and the stopping test
+        # would judge omega alone. `block_scaled_norm=True` selects the coarser per-block variant.
+        residual_norm = (
+            _coupled_residual_norm(coupled, reference_state)
+            if block_scaled_norm
+            else coupled_scaled_norm(coupled, policy, reference_state)
+        )
+    schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
+    solver = forward_solver if forward_solver is not None else _COUPLED_ILUT_FORWARD_SOLVER
+    if inner_steps > 1:
+        # Dual-time (backward-Euler) march: an inner Newton loop per outer pseudo-timestep on the
+        # transient residual, so a larger pseudo-timestep (smaller beta) stays stable. The inner loop
+        # replaces the escalation ladder, so the escalation/acceptance parameters do not apply.
+        return DualTimeStep(
+            policy,
+            relaxation_schedule=schedule,
+            inner_steps=inner_steps,
+            inner_tol=inner_tol,
+            line_search=line_search,
+            forward_solver=solver,
+            residual_norm=residual_norm,
+            adjoint_preconditioner_factory=policy.adjoint_factory(),
+        )
+    return PseudoTransientStep(
+        policy,
+        relaxation_schedule=schedule,
+        max_escalations=max_escalations,
+        escalation_factor=escalation_factor,
+        acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        line_search=line_search,
+        forward_solver=solver,
+        residual_norm=residual_norm,
+        adjoint_preconditioner_factory=policy.adjoint_factory(),
+    )
 
 
 def coupled_ilut_continuation(
@@ -1393,57 +1467,35 @@ def coupled_ilut_continuation(
     # block. The flow block is still assembled as the a_P source -- a lightweight shift-diagonal-only
     # policy is a follow-up optimization.
     base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
-
     n_fields = coupled.layout.dim + 3
-    colouring = _coupled_ilut_colouring(coupled, stencil_reach)
+    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
     frozen = jax.lax.stop_gradient(reference_state)
     matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
     preconditioner = MonolithicIlutPreconditioner.build(
         matvec,
         colouring,
         n_fields,
-        _ilut_shift(base, ilut_beta, reference_state),
+        _frozen_shift_diagonal(base, ilut_beta, reference_state),
         fill_factor=fill_factor,
         drop_tol=drop_tol,
     )
-    policy = MonolithicIlutShiftPolicy(base, preconditioner)
-
-    if residual_norm is None:
-        # Row-equilibrated by default, as in `coupled_continuation`: the Euclidean coupled residual is
-        # dominated by the omega block and mis-ranks a separating flow, so steering and the stopping
-        # test would judge omega alone. `block_scaled_norm=True` selects the coarser per-block variant.
-        residual_norm = (
-            _coupled_residual_norm(coupled, reference_state)
-            if block_scaled_norm
-            else coupled_scaled_norm(coupled, policy, reference_state)
-        )
-    schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
-    solver = forward_solver if forward_solver is not None else _COUPLED_ILUT_FORWARD_SOLVER
-    if inner_steps > 1:
-        # Dual-time (backward-Euler) march preconditioned by the ILUT, mirroring `coupled_continuation`'s
-        # dual-time branch: an inner Newton loop per outer pseudo-timestep on the transient residual, so a
-        # larger pseudo-timestep (smaller beta) stays stable. The inner loop replaces the escalation
-        # ladder, so the escalation/acceptance parameters do not apply.
-        return DualTimeStep(
-            policy,
-            relaxation_schedule=schedule,
-            inner_steps=inner_steps,
-            inner_tol=inner_tol,
-            line_search=line_search,
-            forward_solver=solver,
-            residual_norm=residual_norm,
-            adjoint_preconditioner_factory=policy.adjoint_factory(),
-        )
-    return PseudoTransientStep(
-        policy,
-        relaxation_schedule=schedule,
+    return _monolithic_factor_step(
+        coupled,
+        reference_state,
+        base,
+        preconditioner,
+        beta0=beta0,
+        exponent=exponent,
+        beta_floor=beta_floor,
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
-        acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        divergence_cap=divergence_cap,
         line_search=line_search,
-        forward_solver=solver,
+        inner_steps=inner_steps,
+        inner_tol=inner_tol,
+        forward_solver=forward_solver,
+        block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
-        adjoint_preconditioner_factory=policy.adjoint_factory(),
     )
 
 
@@ -1531,7 +1583,7 @@ def coupled_ilut_refreshing_continuation(
     callable
         ``state -> ForwardStep`` as described.
     """
-    colouring = _coupled_ilut_colouring(coupled, stencil_reach)
+    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
     n_fields = coupled.layout.dim + 3
     # `frozen` as a traced argument (not closed over) so this jvp-matvec compiles once and every refresh
     # reuses it, rather than a fresh lambda recompiling each time.
@@ -1557,9 +1609,172 @@ def coupled_ilut_refreshing_continuation(
             lambda v: matvec_at(frozen, v),
             colouring,
             n_fields,
-            _ilut_shift(policy.base, ilut_beta, state),
+            _frozen_shift_diagonal(policy.base, ilut_beta, state),
             fill_factor=fill_factor,
             drop_tol=drop_tol,
+        )
+        return step
+
+    return builder
+
+
+def coupled_lu_continuation(
+    coupled: CoupledRANS,
+    reference_state: jnp.ndarray,
+    *,
+    lu_beta: float = 2.0,
+    stencil_reach: int = 3,
+    backend: str = "auto",
+    beta0: float = 2.0,
+    exponent: float = 1.0,
+    beta_floor: float = 0.0,
+    max_escalations: int = 6,
+    escalation_factor: float = 2.0,
+    divergence_cap: float = 10.0,
+    line_search: int = _COUPLED_LINE_SEARCH,
+    inner_steps: int = 1,
+    inner_tol: float = 0.05,
+    forward_solver: lx.AbstractLinearSolver | None = None,
+    block_scaled_norm: bool = False,
+    shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+    residual_norm: ResidualNorm | None = None,
+) -> ForwardStep:
+    """Build a pseudo-transient continuation step preconditioned by a monolithic **complete** coupled LU.
+
+    The complete-LU counterpart of :func:`coupled_ilut_continuation`: it materializes the coupled Jacobian
+    at ``reference_state`` (compressed graph-coloured probing -- one source of truth, no re-derived
+    assembly), adds the pseudo-transient shift at ``lu_beta``, and factors the result **completely** with
+    a :class:`~aquaflux.solve.MonolithicLuPreconditioner`, all off the jit path. Because the factorization
+    is exact, the preconditioned Krylov solve converges in a single iteration; on a moderate
+    two-dimensional mesh a fill-reducing multifrontal LU (UMFPACK) factors the coupled Jacobian roughly an
+    order of magnitude faster than the threshold-ILU, so this is the preferred coupled preconditioner where
+    the mesh is two-dimensional or moderate. On large three-dimensional meshes the complete factorization's
+    fill (memory) becomes the wall and the ILUT / block paths are needed instead (see
+    :class:`~aquaflux.solve.MonolithicLuPreconditioner`).
+
+    A drop-in for ``solve_coupled``'s ``continuation`` argument, and (like the ILUT) reverse-differentiable
+    through the converged state: the frozen factorization is ``stop_gradient``-ed, so the adjoint's
+    transpose solve reuses the same factors and the gradient is the exact coupled implicit-function-theorem
+    sensitivity.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled residual assembler.
+    reference_state : jnp.ndarray
+        The coupled state the Jacobian and shift are frozen at, shape ``((dim + 3) n_cells,)``.
+    lu_beta : float
+        The pseudo-transient shift strength the factorization is built at (the operator it factors is
+        ``J + lu_beta * d`` for the base shift diagonal ``d``). The march's own ``beta`` varies; the exact
+        factorization tolerates the mismatch.
+    stencil_reach : int
+        The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+    backend : {'auto', 'umfpack', 'scipy'}
+        The complete-LU backend (see :func:`~aquaflux.solve.lu_preconditioner.factorize_lu`). ``'auto'``
+        uses UMFPACK (the fast path, via the optional ``petsc`` dependency) when available, else SciPy
+        SuperLU.
+    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search,
+    inner_steps, inner_tol, forward_solver, block_scaled_norm, shift_basis, residual_norm
+        The pseudo-transient schedule, dual-time, guard, and measure parameters, exactly as in
+        :func:`coupled_ilut_continuation`.
+
+    Returns
+    -------
+    ForwardStep
+        The step to hand ``solve_coupled`` as ``continuation``.
+    """
+    base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
+    n_fields = coupled.layout.dim + 3
+    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
+    frozen = jax.lax.stop_gradient(reference_state)
+    matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    preconditioner = MonolithicLuPreconditioner.build(
+        matvec,
+        colouring,
+        n_fields,
+        _frozen_shift_diagonal(base, lu_beta, reference_state),
+        backend=backend,
+    )
+    return _monolithic_factor_step(
+        coupled,
+        reference_state,
+        base,
+        preconditioner,
+        beta0=beta0,
+        exponent=exponent,
+        beta_floor=beta_floor,
+        max_escalations=max_escalations,
+        escalation_factor=escalation_factor,
+        divergence_cap=divergence_cap,
+        line_search=line_search,
+        inner_steps=inner_steps,
+        inner_tol=inner_tol,
+        forward_solver=forward_solver,
+        block_scaled_norm=block_scaled_norm,
+        residual_norm=residual_norm,
+    )
+
+
+def coupled_lu_refreshing_continuation(
+    coupled: CoupledRANS,
+    *,
+    lu_beta: float = 2.0,
+    stencil_reach: int = 3,
+    backend: str = "auto",
+    **continuation_kwargs: object,
+) -> Callable[[jnp.ndarray], ForwardStep]:
+    """A ``refresh_builder`` for :func:`solve_coupled` that keeps the coupled complete-LU fresh cheaply.
+
+    The complete-LU counterpart of :func:`coupled_ilut_refreshing_continuation`. Returns a callable
+    ``state -> ForwardStep``: the first call builds a :func:`coupled_lu_continuation` at that state; each
+    later call re-factors that continuation's LU **in place**
+    (:meth:`~aquaflux.solve.MonolithicLuPreconditioner.refresh_in_place`) at the given state and returns
+    the **same** object, so the jitted march-step is a compilation cache hit. With the UMFPACK backend the
+    refresh reuses the symbolic factorization, so it costs only a cheap numeric refactorization. Pass it to
+    :func:`solve_coupled` as both the initial ``continuation`` (via one call) and the ``refresh_builder``.
+
+    **Forward-march use ONLY** -- the in-place refresh is impure and must never be on a differentiated path
+    (use :func:`coupled_lu_continuation` with no refresh for a differentiated solve; the converged root and
+    its adjoint are refresh-independent anyway).
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled residual assembler.
+    lu_beta, stencil_reach, backend : float / int / str
+        As in :func:`coupled_lu_continuation`. Used for both the initial build and every in-place refresh.
+    **continuation_kwargs
+        Forwarded to :func:`coupled_lu_continuation` for the initial build.
+
+    Returns
+    -------
+    callable
+        ``state -> ForwardStep`` as described.
+    """
+    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
+    n_fields = coupled.layout.dim + 3
+    matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    held: dict[str, ForwardStep] = {}
+
+    def builder(state: jnp.ndarray) -> ForwardStep:
+        if "step" not in held:
+            held["step"] = coupled_lu_continuation(
+                coupled,
+                state,
+                lu_beta=lu_beta,
+                stencil_reach=stencil_reach,
+                backend=backend,
+                **continuation_kwargs,
+            )
+            return held["step"]
+        step = held["step"]
+        policy = step.shift_policy
+        frozen = jax.lax.stop_gradient(state)
+        policy.preconditioner.refresh_in_place(
+            lambda v: matvec_at(frozen, v),
+            colouring,
+            n_fields,
+            _frozen_shift_diagonal(policy.base, lu_beta, state),
         )
         return step
 

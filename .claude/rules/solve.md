@@ -174,6 +174,42 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     indefinite saddle, so it is real research, not a quick add). The coupled builder still assembles the
     unused block AMG as the `a_P` source — a lightweight shift-diagonal-only policy would remove that. The
     coupled integration (`coupled_ilut_continuation`) lives in `.claude/rules/turbulence.md`.
+- **Monolithic COMPLETE-LU preconditioner — BUILT (`lu_preconditioner.py`), the preferred 2D/moderate
+  coupled preconditioner.** The sibling of the ILUT: it factors the assembled coupled Jacobian
+  *completely* (`MonolithicLuPreconditioner`), so it is the operator's **exact** inverse and a Krylov
+  solve converges in **one** iteration. Measured on the developed pitzDaily coupled Jacobian (61k dof):
+  UMFPACK factors it in **~1.2 s vs the ILUT's ~32 s (~26×)**, exact (1 GMRES iter vs 2–4), verified on
+  the real forward operator and the β=0 adjoint (true-residual checked — see
+  `reference/ILU_REFRESH_PROFILING.md`). Because the fill is pattern-determined it is also **state-robust**
+  (no `drop_tol` tail that shifts with the flow). Same interface as the ILUT (`build` / `refresh_in_place`
+  / `matvec`), a host object applied via `pure_callback`, riding as a static field; the adjoint reuses the
+  factorization's transpose. **No equilibration / cell-major reordering** (unlike the ILUT — the complete
+  factorization's own pivoting + fill-reducing ordering handle the indefinite saddle on the raw
+  field-major matrix; equilibrating + cell-major actually *hurt* it, measured).
+  - **Pluggable backend (`factorize_lu(backend=…)`):** `"umfpack"` (SuiteSparse via the optional
+    `petsc4py` dep) is the fast path — a fill-reducing (nested-dissection/AMD) ordering + a multifrontal
+    BLAS-3 numeric kernel, with symbolic reuse across the cheap numeric refactorizations a refresh
+    performs. `"scipy"` (`scipy.sparse.linalg.splu`, SuperLU) is the always-available fallback: exact and
+    correct (what the tests run under) but, lacking nested dissection, no faster to factor than the ILUT.
+    `"auto"` (default) picks UMFPACK when importable, else SciPy. So the module imports with no optional
+    dependency; the 26× is opt-in via `pip install aquaflux[petsc]`.
+  - **SCOPE — a 2D / moderate-mesh tool (binding).** A complete LU's fill is `O(n log n)` in 2D but
+    `O(n^{4/3})` in 3D, so **memory is the wall in 3D** — measured (synthetic block grids): 2D factor time
+    ~`dof^1.37` (comfortable to ~10⁵ cells, seconds, <10 GB), but 3D hit **out-of-memory at ~10⁴ cells**.
+    So this preconditioner is the fast, exact choice for 2D / moderate meshes; large 3D still needs the
+    ILUT / block / (parked) multigrid-smoothed paths, or a **rank-structured direct solver** (MUMPS-BLR /
+    STRUMPACK — the fill-taming way to keep this exact-factor paradigm in 3D, reachable via the same PETSc
+    dep). It does **not** dominate the ILUT everywhere; it is an additional strategy, best at 2D/moderate.
+  - **Why the ILUT's "spilu is a hard floor" is not the whole story (measured, corrected):** the ILUT
+    floor is against reducing *fill* (a sparser threshold stencil saves little) — a different lever than
+    switching to a *complete* factorization with a fill-reducing ordering + fast kernel, which is what
+    breaks the floor here. A separately-tried level-based ILU(k) via PETSc looked faster but was a
+    **preconditioned-norm artifact** (PETSc's KSP converges on ‖Mr‖, not the true ‖Ax−b‖); it is weaker,
+    not stronger — always verify the TRUE residual. Full record: `reference/ILU_REFRESH_PROFILING.md`.
+  - **Coupled builders (`coupled_lu_continuation` / `coupled_lu_refreshing_continuation`) live in
+    `.claude/rules/turbulence.md`;** they share the `MonolithicFactorShiftPolicy` and the
+    `_monolithic_factor_step` builder tail with the ILUT (one implementation, parameterized by the
+    factorization).
 - **Forward globalization is ONE injected strategy — `forward_step: ForwardStep`.** The forward
   Newton loop has a single point of variation: `ImplicitNewtonSolver` takes one `forward_step`
   implementing the `ForwardStep` protocol (`stepper()` → the per-step
