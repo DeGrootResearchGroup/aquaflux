@@ -1781,6 +1781,69 @@ def coupled_lu_refreshing_continuation(
     return builder
 
 
+def lu_beta_tracking_refresh(
+    coupled: CoupledRANS, *, stencil_reach: int = 3
+) -> Callable[[ForwardStep, jnp.ndarray], None]:
+    """A ``precondition_step`` for :func:`solve_coupled` that re-factors the complete LU at the current β.
+
+    The complete-LU preconditioner is the operator's **exact** inverse only for the operator it factored,
+    ``J + β d``. In a dual-time march the shift strength ``β`` ramps (e.g. 0.5 → 0.005), so a factorization
+    frozen at one ``β`` mis-preconditions the operator actually solved and the Krylov solve needs many
+    cycles (measured: a complete LU frozen at ``β = 0.05`` takes ~470 GMRES iterations on the ``β = 2``
+    operator, and can fail outright on a stiff overshot state) -- the opposite of the ILUT, whose
+    *approximate* factorization tolerates the mismatch. Because the complete LU is **cheap** to factor
+    (~1 s at 2D/moderate size), the right treatment is to re-factor it at the current ``(state, β)`` **every
+    step**, so it is exact each step (a single Krylov iteration) and robust through overshoots.
+
+    Returns a ``precondition_step(active_step, state)`` closure: it reads ``β`` from the step's shift
+    schedule (a :class:`~aquaflux.solve.ConstantRelaxation` set by a
+    :class:`~aquaflux.solve.DualTimeControl`) and re-factors the step's :class:`MonolithicFactorShiftPolicy`
+    preconditioner in place at ``J(state) + β·d(state)``. Pass it to ``solve_coupled(precondition_step=…)``
+    with a :func:`coupled_lu_continuation` step and a ``DualTimeControl``.
+
+    **Forward-march use ONLY** -- the re-factor is an impure host mutation and must never be on a
+    differentiated path (``solve_coupled`` guards this, raising under ``jax.grad``). The finishing solve and
+    the adjoint keep the last frozen factorization, which is exact enough at the converged ``β → 0`` root.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled residual assembler (supplies the Jacobian-vector product and the shift diagonal).
+    stencil_reach : int
+        The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+
+    Returns
+    -------
+    callable
+        ``precondition_step(active_step, state) -> None``.
+    """
+    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
+    n_fields = coupled.layout.dim + 3
+    # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
+    # reuses it, rather than a fresh lambda recompiling each step.
+    matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+
+    def precondition_step(active_step: ForwardStep, state: jnp.ndarray) -> None:
+        schedule = active_step.relaxation_schedule
+        beta = getattr(schedule, "beta", None)
+        if beta is None:
+            raise ValueError(
+                "lu_beta_tracking_refresh needs the step's shift strength as a readable constant -- pair "
+                "it with a DualTimeControl (which sets a ConstantRelaxation β), not the default "
+                f"switched-evolution schedule ({type(schedule).__name__})."
+            )
+        policy = active_step.shift_policy
+        frozen = jax.lax.stop_gradient(state)
+        shift = float(beta) * np.asarray(
+            jax.lax.stop_gradient(policy.base.shift_term(state).diagonal)
+        )
+        policy.preconditioner.refresh_in_place(
+            lambda v: matvec_at(frozen, v), colouring, n_fields, shift
+        )
+
+    return precondition_step
+
+
 def solve_coupled(
     coupled: CoupledRANS,
     flow: jnp.ndarray | None = None,
@@ -1803,6 +1866,7 @@ def solve_coupled(
     descent_test: bool = False,
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
+    precondition_step: Callable[[ForwardStep, jnp.ndarray], None] | None = None,
     **continuation_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system ``R(u, p, k, omega) = 0`` by one monolithic Newton solve.
@@ -1980,6 +2044,16 @@ def solve_coupled(
         Pass an explicit control (e.g. :class:`~aquaflux.solve.ResidualRatioDualTimeControl`) to override,
         or pass one built with different knobs. The single-step march (``inner_steps = 1``, the default)
         gets no default control.
+    precondition_step : callable, optional
+        ``(active_step, state) -> None``, called before each observed step to refresh the step's frozen
+        host preconditioner from the current state and shift strength β (forward-only; it raises under
+        ``jax.grad`` like the other observed-march arguments). The use case is
+        :func:`lu_beta_tracking_refresh`, which re-factors a complete-LU preconditioner at the current
+        ``(state, β)`` each step so it stays the *exact* inverse of the operator being solved as the
+        dual-time β ramps -- a frozen LU built at one β mis-preconditions the shifted operator once β
+        moves away from it. Pair it with a :class:`~aquaflux.solve.DualTimeControl` (so β is a readable
+        constant leaf) and a :func:`coupled_lu_continuation` step; the finishing solve and adjoint keep
+        the last frozen factorization (exact enough near the converged β → 0 root).
     **continuation_kwargs
         Forwarded to :func:`coupled_continuation` when building internally (schedule + preconditioner
         options). Notably ``inner_steps > 1`` selects the **dual-time** (backward-Euler) march
@@ -1998,7 +2072,11 @@ def solve_coupled(
     # definition unrefreshed, and it is the longest-running one, so it is the one that most needs to
     # report progress rather than sit silent for hours.
     observing = (
-        refreshing or step_control is not None or on_step is not None or on_checkpoint is not None
+        refreshing
+        or step_control is not None
+        or on_step is not None
+        or on_checkpoint is not None
+        or precondition_step is not None
     )
     if observing and _is_traced((coupled, flow, k, omega)):
         # The refresh re-derives the preconditioner from the mid-march state, which is a tracer when
@@ -2007,8 +2085,8 @@ def solve_coupled(
         # refresh (it forbids an explicit `continuation`), so this cannot be worked around here --
         # raise with the fix rather than letting the leak surface as an opaque UnexpectedTracerError.
         raise ValueError(
-            "refresh_trigger/step_control/on_step/on_checkpoint drive a forward-only eager march and cannot "
-            "be used "
+            "refresh_trigger/step_control/on_step/on_checkpoint/precondition_step drive a forward-only "
+            "eager march and cannot be used "
             "under jax.grad (or any JAX transform): the march steps in Python on concrete residual "
             "norms, and a mid-march preconditioner rebuild would capture the differentiation tracer. "
             "Drop them and differentiate the single-stage solve with a `continuation` "
@@ -2106,6 +2184,7 @@ def solve_coupled(
                 # drift a refresh had just absorbed, and re-fire immediately.
                 drift_measure=eddy_viscosity_drift(coupled, jax.lax.stop_gradient(state)),
                 norm_builder=norm_builder,
+                precondition_step=precondition_step,
             )
             state = result.state
             control_state = result.control_state

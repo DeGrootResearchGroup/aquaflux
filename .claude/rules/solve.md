@@ -209,10 +209,22 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     breaks the floor here. A separately-tried level-based ILU(k) via PETSc looked faster but was a
     **preconditioned-norm artifact** (PETSc's KSP converges on ‖Mr‖, not the true ‖Ax−b‖); it is weaker,
     not stronger — always verify the TRUE residual. Full record: `reference/ILU_REFRESH_PROFILING.md`.
-  - **Coupled builders (`coupled_lu_continuation` / `coupled_lu_refreshing_continuation`) live in
-    `.claude/rules/turbulence.md`;** they share the `MonolithicFactorShiftPolicy` and the
-    `_monolithic_factor_step` builder tail with the ILUT (one implementation, parameterized by the
-    factorization).
+  - **FROZEN is wrong for the β-ramping dual-time march — track β (binding, measured).** A complete LU is
+    *exact* only for the operator it factored, `J + β d`. In a dual-time march β ramps (0.5 → 0.005), so a
+    factorization frozen at one β **mis-preconditions** the operator actually solved — measured on rung2:
+    a LU frozen at β = 0.05 needs 25 / 111 / 217 / **474** GMRES iters at β = 0.1 / 0.5 / 1 / 2 (vs **1**
+    when factored at the matching β), and on a real cold ramp the frozen LU **NaN'd** on the overshot
+    low-β state (215 cycles → failure). This is the *opposite* of the ILUT, whose *approximate*
+    factorization tolerates the β-mismatch at a few extra cycles — so the ILUT's frozen + drift-refresh
+    design does **not** carry over to the exact LU. The fix, because the LU factor is cheap (~1 s), is to
+    **re-factor at the current `(state, β)` every step** (`forward_march`'s `precondition_step` seam +
+    `lu_beta_tracking_refresh`, `.claude/rules/turbulence.md`): exact each step (1 Krylov iter), and robust
+    through overshoots (measured: completes the cold ramp where the frozen LU failed, cyc ≤ 18). The
+    finishing solve and adjoint keep the last frozen factorization (exact enough at the converged β → 0).
+  - **Coupled builders (`coupled_lu_continuation` / `coupled_lu_refreshing_continuation`, and the
+    β-tracking `lu_beta_tracking_refresh`) live in `.claude/rules/turbulence.md`;** they share the
+    `MonolithicFactorShiftPolicy` and the `_monolithic_factor_step` builder tail with the ILUT (one
+    implementation, parameterized by the factorization).
 - **Forward globalization is ONE injected strategy — `forward_step: ForwardStep`.** The forward
   Newton loop has a single point of variation: `ImplicitNewtonSolver` takes one `forward_step`
   implementing the `ForwardStep` protocol (`stepper()` → the per-step
@@ -1644,6 +1656,17 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     The trigger and a future logger consume the identical objects, so there is no second reporting path.
     Per-step observation exists only where the march is eager — the traced `_forward` would need
     `jax.debug.callback`, a separate decision; do not promise per-step reporting on the differentiable path.
+  - **`precondition_step` — per-step refresh of the step's frozen host preconditioner (binding,
+    forward-only).** `forward_march(precondition_step=…)` calls `precondition_step(active_step, state)`
+    before each `_march_step`, *after* the control has set β on `active_step`, to re-derive the step's
+    **static** host preconditioner from the current `(state, β)`. It runs in the eager loop (a host op
+    outside the jitted step) and mutates the preconditioner in place, so `_march_step` stays a
+    compilation-cache hit. The one consumer is `lu_beta_tracking_refresh` (`.claude/rules/turbulence.md`),
+    which re-factors the complete LU at the current `(state, β)` so it stays the exact inverse of the
+    operator solved as β ramps — the fix for the frozen-LU β-mismatch above. Distinct from the trigger's
+    `refresh_builder` (which fires occasionally, restarts a *segment*, and returns a *new* step): this
+    fires every step and mutates in place. Forward-only (impure), folded into the same `observing` gate
+    and `jax.grad` guard as the trigger/control; `None` is byte-identical to before.
   - **`StepControl` — stateful, feedback-driven step reshaping on the eager march only (binding — the
     twin of `RelaxationSchedule`, deliberately NOT one interface).** A `RelaxationSchedule` is memoryless
     and lives on the differentiable step; a `StepControl` reads the *previous* `StepReport` (α, cost) —

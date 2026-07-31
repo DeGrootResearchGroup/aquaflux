@@ -814,6 +814,27 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     stays on the ILUT / block / rank-structured-direct paths (`.claude/rules/solve.md`). Prefer it over the
     ILUT where the mesh is 2D/moderate (faster *and* exact); the ILUT remains for its 3D-fill headroom and
     is still the differentiable default until a selector seam lands.
+  - **`lu_beta_tracking_refresh` — re-factor the LU at the current β EVERY step (the correct LU treatment
+    for a dual-time march; BUILT).** A frozen LU is exact only for the β it was factored at; a dual-time
+    march's β ramps (0.5 → 0.005), so a factorization frozen at `lu_beta` mis-preconditions the operator
+    actually solved — measured: frozen@0.05 needs 25/111/217/**474** GMRES iters at β=0.1/0.5/1/2 (vs
+    **1** matched), and it **NaN'd** on a real cold ramp's overshot low-β state (215 cycles → failure).
+    The ILUT's frozen + drift-refresh design does NOT carry over, because the ILUT is *approximate* (it
+    shrugs off the β-mismatch at a few cycles) while the LU is *exact-and-brittle*. Since the LU factor is
+    cheap (~1 s), the fix is to re-factor at the current `(state, β)` **every step**:
+    `lu_beta_tracking_refresh(coupled)` returns a `precondition_step(active_step, state)` (the
+    `forward_march` seam, `.claude/rules/solve.md`) that reads β from the step's `ConstantRelaxation` (set
+    by a `DualTimeControl`) and `refresh_in_place`s the LU at `J(state)+β·d(state)` — exact each step (1
+    iter), robust through overshoots. Measured: `solve_coupled(continuation=coupled_lu_continuation(...),
+    step_control=DualTimeControl(...), precondition_step=lu_beta_tracking_refresh(coupled))` **completes
+    the cold pitzDaily Reynolds ramp** (rung0 12 + rung1 23 steps to rtol 1e-3) where the **frozen** LU
+    failed at the rung-1 overshoot, cyc ≤ 18 throughout. **Forward-march only** (impure host re-factor;
+    raises under `jax.grad`, same guard as the refresh/control); the finishing solve and adjoint keep the
+    last frozen factorization, exact enough at the converged β → 0 root — so the coupled adjoint is
+    unchanged (still use the plain `coupled_lu_continuation`, no `precondition_step`, for a differentiated
+    solve). Requires a `DualTimeControl` (β must be a readable constant); raises with the fix if paired
+    with the default switched-evolution schedule. Pinned in `tests/integration/test_coupled_lu.py`
+    (exact-at-current-β, cold-march convergence to the block PC's root, grad-guard).
   - **~~Remaining limiter — the k equation drift~~ — RETIRED: the stall no longer reproduces (measured
     2026-07-22).** This bullet used to record that past rel ~0.09 the direct-`k` residual grew (rel 1 →
     ~5×) and re-stalled the march, and named high-Reynolds `k` stability as the open follow-up. **It

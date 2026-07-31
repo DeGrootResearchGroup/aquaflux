@@ -45,6 +45,7 @@ from .coupled import (
     coupled_lu_continuation,
     coupled_lu_refreshing_continuation,
     eddy_viscosity_drift,
+    lu_beta_tracking_refresh,
     solve_coupled,
 )
 from .driver import bulk_velocity, solve_segregated
@@ -113,6 +114,7 @@ __all__ = [
     "inlet_omega",
     "k_wall_production",
     "log_layer_shear_rate",
+    "lu_beta_tracking_refresh",
     "nut_wall",
     "omega_wall",
     "omega_wall_gradient",

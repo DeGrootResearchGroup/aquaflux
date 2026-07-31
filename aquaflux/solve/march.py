@@ -405,6 +405,7 @@ def forward_march(
     checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     drift_measure: Callable[[jnp.ndarray], float] | None = None,
     norm_builder: Callable[[jnp.ndarray], ResidualNorm] | None = None,
+    precondition_step: Callable[[ForwardStep, jnp.ndarray], None] | None = None,
     solver: lx.AbstractLinearSolver | None = None,
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
@@ -477,6 +478,17 @@ def forward_march(
         at — the same discipline as the segment-local damping reference. Measuring drift from a state
         older than the last refresh would report movement that has already been absorbed and refresh
         again immediately.
+    precondition_step : callable, optional
+        ``(active_step, state) -> None``, called before each step (after the control has set the shift
+        strength on ``active_step``) to refresh that step's frozen host preconditioner from the current
+        state and shift. It runs in this eager loop -- a host operation outside the jitted ``_march_step``
+        -- and mutates the step's *static* preconditioner in place, so ``_march_step`` stays a
+        compilation-cache hit. The use case is a **complete-LU preconditioner re-factored at the current
+        ``(state, β)``** so it is the exact inverse of the operator actually solved (a frozen factorization
+        mis-preconditions the shifted operator once the march's β leaves the value it was built at). Like
+        the trigger and the control it is **forward-only** -- an impure mutation that must never be on a
+        differentiated path. ``None`` (the default) leaves the preconditioner untouched, byte-identical to
+        before.
     solver : lineax.AbstractLinearSolver, optional
         The linear solver for each step; defaults to ``forward_step.default_solver()``.
 
@@ -524,6 +536,14 @@ def forward_march(
             active_step, control_state = step_control.next_step(
                 active_step, reports[-1] if reports else None, control_state
             )
+        if precondition_step is not None:
+            # Refresh the step's (frozen, host) preconditioner from the state and shift strength this
+            # step is about to run at -- e.g. re-factoring a complete LU at the current (state, β) so it
+            # is the exact inverse of the operator actually solved. Runs HERE, in the eager loop (a host
+            # op outside the jitted `_march_step`), after the control has set β on `active_step`. It
+            # mutates the step's static preconditioner in place, so `_march_step` stays a compilation
+            # cache hit. Forward-only, like the trigger and the control.
+            precondition_step(active_step, state)
         state, cycles, alpha, inner, residual_norm = _march_step(
             active_step, residual_fn, state, residual_norm_0, solver
         )
