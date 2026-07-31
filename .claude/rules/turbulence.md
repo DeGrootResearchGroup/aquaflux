@@ -797,6 +797,23 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     per-step-cost + adjoint-correctness lever, not a globalization one). NOTE: it is not yet
     `solve_coupled`'s default — the two continuations have different parameter surfaces, so making it the
     default needs a selector seam, not a swap (tracked).
+  - **`coupled_lu_continuation` / `coupled_lu_refreshing_continuation` — the COMPLETE-LU counterpart, the
+    preferred coupled PC on 2D/moderate meshes (BUILT).** Same drop-in as the ILUT builders but factors the
+    coupled Jacobian *completely* (`MonolithicLuPreconditioner`, `.claude/rules/solve.md`), so the
+    preconditioner is exact and the Krylov solve converges in **one** iteration. With the UMFPACK backend
+    (optional `petsc4py` dep, `backend="auto"|"umfpack"|"scipy"`) it factors the developed pitzDaily
+    coupled Jacobian in **~1.2 s vs the ILUT's ~32 s (~26×)**, exact, verified on the real forward operator
+    and the β=0 adjoint (`reference/ILU_REFRESH_PROFILING.md`). It **shares the ILUT's machinery** —
+    `MonolithicFactorShiftPolicy` (generalized from the old `MonolithicIlutShiftPolicy`; agnostic to which
+    factorization) and the `_monolithic_factor_step` builder tail — one implementation, parameterized by
+    the preconditioner. Verified: `solve_coupled(continuation=coupled_lu_continuation(...))` reaches the
+    **same fixed point** as the block/ILUT PCs and passes the **coupled-adjoint FD gate**
+    (`tests/integration/test_coupled_lu.py`, run under the `scipy` backend so CI needs no optional dep —
+    the complete factorization is exact regardless of backend). **SCOPE: a 2D / moderate-mesh tool** — the
+    complete LU's fill (`O(n^{4/3})` in 3D) is a memory wall past ~10⁴ 3D cells (measured), so large 3D
+    stays on the ILUT / block / rank-structured-direct paths (`.claude/rules/solve.md`). Prefer it over the
+    ILUT where the mesh is 2D/moderate (faster *and* exact); the ILUT remains for its 3D-fill headroom and
+    is still the differentiable default until a selector seam lands.
   - **~~Remaining limiter — the k equation drift~~ — RETIRED: the stall no longer reproduces (measured
     2026-07-22).** This bullet used to record that past rel ~0.09 the direct-`k` residual grew (rel 1 →
     ~5×) and re-stalled the march, and named high-Reynolds `k` stability as the open follow-up. **It

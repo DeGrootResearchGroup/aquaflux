@@ -66,6 +66,13 @@ test = [
     "pytest-split>=0.9",
     "pytest-timeout>=2.3",
 ]
+# `petsc` is the optional fast backend for the complete-LU coupled preconditioner
+# (`coupled_lu_continuation`): petsc4py provides UMFPACK (SuiteSparse), which factors the coupled
+# Jacobian roughly an order of magnitude faster than the threshold-ILU on a moderate 2D mesh. Without it,
+# that preconditioner falls back to scipy's SuperLU (exact but not faster to factor), and the ILUT / block
+# preconditioners are unaffected. petsc4py builds PETSc from source; a SuiteSparse-enabled build needs
+# CMake (`PETSC_CONFIGURE_OPTIONS="--download-suitesparse"`).
+petsc = ["petsc4py>=3.20"]
 
 [project.urls]
 Repository = "https://github.com/DeGrootResearchGroup/aquaflux"
