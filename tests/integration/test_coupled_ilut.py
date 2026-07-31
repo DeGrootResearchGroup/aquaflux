@@ -30,6 +30,7 @@ from aquaflux.turbulence import (
     coupled_ilut_continuation,
     coupled_ilut_refreshing_continuation,
     hybrid_initialize,
+    ilut_beta_tracking_refresh,
     inlet_k,
     inlet_omega,
     solve_coupled,
@@ -145,6 +146,86 @@ def test_ilut_refreshing_continuation_refreshes_the_same_step_in_place(case) -> 
     assert step1 is step0
     # ...but the ILUT was genuinely re-factored at the new state (a fresh factorization object).
     assert step1.shift_policy.preconditioner.factors is not factors0
+
+
+def test_staleness_beta_gate_fires_on_first_call_beta_move_and_staleness_cap() -> None:
+    """The β-tracking gate re-factors on the first step, on a β move past the threshold, or at the
+    staleness cap -- and skips otherwise, so the ILUT's expensive re-factor is paid only when it pays off.
+
+    Pure logic, no solver: the gate is the whole novelty of the ILUT β-tracking refresh (the refactor
+    mechanism itself is shared with the drift path), so it earns a fast, isolated test.
+    """
+    from aquaflux.turbulence.coupled import _staleness_beta_gate
+
+    gate = _staleness_beta_gate(refresh_every=3, beta_rel_change=0.25)
+    assert gate(1.0) is True  # first call always fires (nothing factored yet)
+    assert gate(1.1) is False  # +10% < 25%, 1 step since -> reuse
+    assert gate(1.2) is False  # +20% < 25% (vs last-refresh 1.0), 2 steps since -> reuse
+    assert gate(1.0) is True  # 3 steps since -> staleness cap fires (state-development bound)
+    assert (
+        gate(1.4) is True
+    )  # +40% > 25% vs last-refresh 1.0 -> β-move fires (the anti-stall trigger)
+    assert gate(1.4) is False  # unchanged, 1 step since -> reuse
+
+
+@pytest.mark.slow
+def test_ilut_beta_tracking_refresh_gates_the_in_place_refactor(case) -> None:
+    """The precondition_step re-factors the ILUT in place on its first call and skips within the cap.
+
+    Confirms the gate is wired to the real preconditioner: the first call re-factors (a fresh factorization
+    object), a second call at the same β within ``refresh_every`` reuses the standing factorization.
+    """
+    from aquaflux.solve import DualTimeControl
+
+    coupled = case["coupled"]
+    flow, k, omega = case["start"]
+    state = coupled.pack_state(flow, k, omega)
+
+    dual = coupled_ilut_continuation(coupled, state, ilut_beta=0.05, inner_steps=5)
+    active, _ = DualTimeControl(beta_start=0.7).next_step(
+        dual, None, None
+    )  # ConstantRelaxation(β=0.7)
+    precondition_step = ilut_beta_tracking_refresh(coupled, refresh_every=5)
+
+    factors_built = active.shift_policy.preconditioner.factors
+    precondition_step(active, state)  # first call -> gate fires, re-factor at (state, β=0.7)
+    factors_tracked = active.shift_policy.preconditioner.factors
+    assert factors_tracked is not factors_built  # genuinely re-factored at the current β
+
+    precondition_step(
+        active, state
+    )  # same β, 1 step since -> gate skips, reuse the standing factor
+    assert active.shift_policy.preconditioner.factors is factors_tracked
+
+
+@pytest.mark.slow
+def test_ilut_beta_tracking_forward_march_converges_to_the_same_fixed_point(case) -> None:
+    """solve_coupled with the ILUT precondition_step + DualTimeControl reaches the block PC's root."""
+    from aquaflux.solve import DualTimeControl
+
+    coupled = case["coupled"]
+    flow_ws, k_ws, omega_ws = case["start"]
+    reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
+
+    ilut = coupled_ilut_continuation(
+        coupled, reference_state, ilut_beta=0.5, inner_steps=5, inner_tol=1e-3
+    )
+    flow_l, k_l, _ = solve_coupled(
+        coupled,
+        flow_ws,
+        k_ws,
+        omega_ws,
+        continuation=ilut,
+        step_control=DualTimeControl(beta_start=0.5, beta_min=0.02),
+        precondition_step=ilut_beta_tracking_refresh(coupled),
+        scaled_norm=True,
+        max_steps=60,
+    )
+    flow_b, k_b, _ = solve_coupled(
+        coupled, flow_ws, k_ws, omega_ws, method="twolevel", max_steps=40, **PRECONDITIONER
+    )
+    assert float(jnp.linalg.norm(flow_l - flow_b) / jnp.linalg.norm(flow_b)) < 1e-4
+    assert float(jnp.linalg.norm(k_l - k_b) / jnp.linalg.norm(k_b)) < 1e-3
 
 
 @pytest.mark.slow

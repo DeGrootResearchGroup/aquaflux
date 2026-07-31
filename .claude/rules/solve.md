@@ -1661,12 +1661,15 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     before each `_march_step`, *after* the control has set β on `active_step`, to re-derive the step's
     **static** host preconditioner from the current `(state, β)`. It runs in the eager loop (a host op
     outside the jitted step) and mutates the preconditioner in place, so `_march_step` stays a
-    compilation-cache hit. The one consumer is `lu_beta_tracking_refresh` (`.claude/rules/turbulence.md`),
-    which re-factors the complete LU at the current `(state, β)` so it stays the exact inverse of the
-    operator solved as β ramps — the fix for the frozen-LU β-mismatch above. Distinct from the trigger's
-    `refresh_builder` (which fires occasionally, restarts a *segment*, and returns a *new* step): this
-    fires every step and mutates in place. Forward-only (impure), folded into the same `observing` gate
-    and `jax.grad` guard as the trigger/control; `None` is byte-identical to before.
+    compilation-cache hit. Two consumers (`.claude/rules/turbulence.md`), sharing one
+    `_beta_tracking_refresh` skeleton: `lu_beta_tracking_refresh` re-factors the complete LU at the current
+    `(state, β)` **every step** (cheap + exact → 1 Krylov iter), the fix for the frozen-LU β-mismatch above;
+    `ilut_beta_tracking_refresh` does the same for the ILUT but **gated** (β-move OR staleness cap), because
+    the ILUT refactor is expensive (~30–40 s) and approximate — the β-move trigger is what averts the α=0 /
+    no-drift stall a *drift* trigger would hit on an overshoot. Distinct from the trigger's `refresh_builder`
+    (which fires occasionally, restarts a *segment*, and returns a *new* step): this fires every step (the
+    consumer may itself no-op) and mutates in place. Forward-only (impure), folded into the same `observing`
+    gate and `jax.grad` guard as the trigger/control; `None` is byte-identical to before.
   - **`StepControl` — stateful, feedback-driven step reshaping on the eager march only (binding — the
     twin of `RelaxationSchedule`, deliberately NOT one interface).** A `RelaxationSchedule` is memoryless
     and lives on the differentiable step; a `StepControl` reads the *previous* `StepReport` (α, cost) —

@@ -1781,6 +1781,112 @@ def coupled_lu_refreshing_continuation(
     return builder
 
 
+def _staleness_beta_gate(*, refresh_every: int, beta_rel_change: float) -> Callable[[float], bool]:
+    """A stateful predicate for the β-tracking refresh: *when* is a re-factor worth its cost?
+
+    Returns ``should_refresh(beta) -> bool``. It fires on the first call, whenever ``β`` has moved by
+    more than ``beta_rel_change`` (relative to the ``β`` of the last refresh), or after ``refresh_every``
+    steps have passed with no refresh -- otherwise it returns ``False`` and the step reuses the standing
+    factorization.
+
+    The β-move trigger is what catches a shift-strength spike -- a dual-time overshoot (``β`` driven low,
+    the operator stiff) or a rung restart (``β`` jumped back to ``beta_start``). A step-count cap alone
+    would miss it for up to ``refresh_every`` steps, and a *drift* trigger (fired by coefficient change)
+    would miss it entirely in the worst case: a badly mismatched factor stalls the line search (α→0), so
+    the state stops moving, its coefficients stop drifting, and the drift trigger never fires. Keying the
+    refresh on ``β`` itself removes that stall mode. The step-count cap is the complementary staleness
+    bound for *state* development at a near-constant ``β`` (the flow developing during a cruise).
+
+    Parameters
+    ----------
+    refresh_every : int
+        Force a refresh after this many steps without one (the staleness cap for state development).
+    beta_rel_change : float
+        Refresh when ``|β - β_last| > beta_rel_change * |β_last|`` (the shift-mismatch trigger).
+
+    Returns
+    -------
+    callable
+        ``should_refresh(beta: float) -> bool``, carrying its own ``(β_last, steps_since)`` state.
+    """
+    last: dict[str, float | int] = {}
+
+    def should_refresh(beta: float) -> bool:
+        if "beta" not in last:
+            last["beta"], last["since"] = beta, 0
+            return True
+        last["since"] += 1
+        moved = abs(beta - last["beta"]) > beta_rel_change * max(abs(last["beta"]), 1e-30)
+        if moved or last["since"] >= refresh_every:
+            last["beta"], last["since"] = beta, 0
+            return True
+        return False
+
+    return should_refresh
+
+
+def _beta_tracking_refresh(
+    coupled: CoupledRANS,
+    stencil_reach: int,
+    *,
+    gate: Callable[[float], bool] | None = None,
+    refresh_kwargs: dict[str, object] | None = None,
+) -> Callable[[ForwardStep, jnp.ndarray], None]:
+    """Shared skeleton for the β-tracking ``precondition_step`` hooks (complete-LU and ILUT).
+
+    Returns a ``precondition_step(active_step, state)`` that reads ``β`` from the step's
+    :class:`~aquaflux.solve.ConstantRelaxation` schedule and, when ``gate(β)`` allows, re-factors the
+    step's :class:`MonolithicFactorShiftPolicy` preconditioner in place at ``J(state) + β·d(state)`` via
+    ``refresh_in_place(**refresh_kwargs)``. ``gate=None`` refreshes **every** step (the cheap exact-LU
+    cadence); a gate returning ``False`` reuses the standing factorization (the ILUT cadence, whose
+    re-factor is too expensive to pay every step).
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled residual assembler (supplies the Jacobian-vector product and the shift diagonal).
+    stencil_reach : int
+        The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+    gate : callable, optional
+        ``should_refresh(beta: float) -> bool``. ``None`` means always refresh.
+    refresh_kwargs : dict, optional
+        Extra keyword arguments forwarded to the preconditioner's ``refresh_in_place`` (e.g. the ILUT's
+        ``fill_factor`` / ``drop_tol``). ``None`` forwards none (the complete LU takes no extra options).
+
+    Returns
+    -------
+    callable
+        ``precondition_step(active_step, state) -> None``.
+    """
+    refresh_kwargs = {} if refresh_kwargs is None else refresh_kwargs
+    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
+    n_fields = coupled.layout.dim + 3
+    # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
+    # reuses it, rather than a fresh lambda recompiling each step.
+    matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+
+    def precondition_step(active_step: ForwardStep, state: jnp.ndarray) -> None:
+        schedule = active_step.relaxation_schedule
+        beta = getattr(schedule, "beta", None)
+        if beta is None:
+            raise ValueError(
+                "a β-tracking refresh needs the step's shift strength as a readable constant -- pair it "
+                "with a DualTimeControl (which sets a ConstantRelaxation β), not the default "
+                f"switched-evolution schedule ({type(schedule).__name__})."
+            )
+        beta = float(beta)
+        if gate is not None and not gate(beta):
+            return
+        policy = active_step.shift_policy
+        frozen = jax.lax.stop_gradient(state)
+        shift = beta * np.asarray(jax.lax.stop_gradient(policy.base.shift_term(state).diagonal))
+        policy.preconditioner.refresh_in_place(
+            lambda v: matvec_at(frozen, v), colouring, n_fields, shift, **refresh_kwargs
+        )
+
+    return precondition_step
+
+
 def lu_beta_tracking_refresh(
     coupled: CoupledRANS, *, stencil_reach: int = 3
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
@@ -1817,31 +1923,69 @@ def lu_beta_tracking_refresh(
     callable
         ``precondition_step(active_step, state) -> None``.
     """
-    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
-    n_fields = coupled.layout.dim + 3
-    # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
-    # reuses it, rather than a fresh lambda recompiling each step.
-    matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    return _beta_tracking_refresh(coupled, stencil_reach)
 
-    def precondition_step(active_step: ForwardStep, state: jnp.ndarray) -> None:
-        schedule = active_step.relaxation_schedule
-        beta = getattr(schedule, "beta", None)
-        if beta is None:
-            raise ValueError(
-                "lu_beta_tracking_refresh needs the step's shift strength as a readable constant -- pair "
-                "it with a DualTimeControl (which sets a ConstantRelaxation β), not the default "
-                f"switched-evolution schedule ({type(schedule).__name__})."
-            )
-        policy = active_step.shift_policy
-        frozen = jax.lax.stop_gradient(state)
-        shift = float(beta) * np.asarray(
-            jax.lax.stop_gradient(policy.base.shift_term(state).diagonal)
-        )
-        policy.preconditioner.refresh_in_place(
-            lambda v: matvec_at(frozen, v), colouring, n_fields, shift
-        )
 
-    return precondition_step
+def ilut_beta_tracking_refresh(
+    coupled: CoupledRANS,
+    *,
+    stencil_reach: int = 3,
+    fill_factor: float = 30.0,
+    drop_tol: float = 1e-6,
+    refresh_every: int = 5,
+    beta_rel_change: float = 0.25,
+) -> Callable[[ForwardStep, jnp.ndarray], None]:
+    """A ``precondition_step`` for :func:`solve_coupled` that re-factors the ILUT at the current β.
+
+    The ILUT counterpart of :func:`lu_beta_tracking_refresh`. As in a dual-time march the shift strength
+    ``β`` ramps (e.g. 2.0 → 0.02), an ILUT frozen at one ``β`` mis-preconditions the operator actually
+    solved -- mismatched during the low-``β`` cruise, and worst at a rung restart or an overshoot, where a
+    stale factor can drive the Krylov solve to hundreds of cycles or stall the march. Re-factoring at the
+    current ``(state, β)`` removes the mismatch, exactly as the LU hook does.
+
+    Unlike the complete LU, the ILUT's threshold factorization is **expensive** (its fill is
+    value-dependent, so there is no cheap symbolic-reuse refactor) and only **approximate** (a few Krylov
+    iterations even when matched). Re-factoring every step is therefore not worth its cost. This hook
+    instead **gates** the refactor (see :func:`_staleness_beta_gate`): it re-factors when ``β`` has moved
+    by more than ``beta_rel_change`` since the last refresh (the shift-mismatch trigger that catches a
+    rung restart or an overshoot before the line search can stall on it), or after ``refresh_every`` steps
+    (the staleness cap for flow development at a near-constant ``β``). Between refreshes the approximate
+    ILUT tolerates the residual mismatch at a few extra cycles.
+
+    Returns a ``precondition_step(active_step, state)`` closure. Pass it to
+    ``solve_coupled(precondition_step=…)`` with a :func:`coupled_ilut_continuation` step and a
+    ``DualTimeControl`` (which sets a readable :class:`~aquaflux.solve.ConstantRelaxation` β).
+
+    **Forward-march use ONLY** -- the re-factor is an impure host mutation and must never be on a
+    differentiated path (``solve_coupled`` guards this, raising under ``jax.grad``). The finishing solve and
+    the adjoint keep the last frozen factorization, which is exact enough at the converged ``β → 0`` root.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled residual assembler (supplies the Jacobian-vector product and the shift diagonal).
+    stencil_reach : int
+        The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+    fill_factor, drop_tol : float
+        The ILUT factorization controls, used for every in-place refresh (as in
+        :func:`coupled_ilut_continuation`).
+    refresh_every : int
+        Force a refresh after this many steps without one (the staleness cap for flow development).
+    beta_rel_change : float
+        Refresh when ``β`` moves by more than this fraction of the last-refresh ``β`` (the shift-mismatch
+        trigger). Smaller tracks ``β`` more tightly at more refresh cost.
+
+    Returns
+    -------
+    callable
+        ``precondition_step(active_step, state) -> None``.
+    """
+    return _beta_tracking_refresh(
+        coupled,
+        stencil_reach,
+        gate=_staleness_beta_gate(refresh_every=refresh_every, beta_rel_change=beta_rel_change),
+        refresh_kwargs={"fill_factor": fill_factor, "drop_tol": drop_tol},
+    )
 
 
 def solve_coupled(

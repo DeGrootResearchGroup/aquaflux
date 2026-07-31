@@ -835,6 +835,43 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     solve). Requires a `DualTimeControl` (β must be a readable constant); raises with the fix if paired
     with the default switched-evolution schedule. Pinned in `tests/integration/test_coupled_lu.py`
     (exact-at-current-β, cold-march convergence to the block PC's root, grad-guard).
+  - **`ilut_beta_tracking_refresh` — β-track the ILUT refresh instead of freezing it (BUILT; the 3D
+    fallback's globalization robustness).** The frozen `coupled_ilut_refreshing_continuation` above is
+    frozen at ONE `ilut_beta` while the march's β ramps 2.0 → 0.02, so it is mismatched during the low-β
+    cruise and worst at a rung restart or a dual-time overshoot (measured: a stale factor drove the cold
+    pitzDaily ramp's rung-1 overshoot to **cyc 346** and stalled). β-tracking follows the same idea as the
+    LU hook — but the ILUT differs on two axes that shape the design: its threshold factorization is
+    **expensive** (`spilu` ~30–40 s, value-dependent fill so no cheap symbolic-reuse refactor) and only
+    **approximate** (a few Krylov iters even when matched). So it is NOT re-factored every step (the LU's
+    cadence); it is **gated** (`_staleness_beta_gate`): re-factor when β has moved by more than
+    `beta_rel_change` (default 0.25) since the last refresh, OR after `refresh_every` (default 5) steps.
+    The **β-move** trigger is load-bearing — it is what catches an overshoot/rung-restart *before* the
+    line search stalls; a *drift* trigger cannot, because a badly mismatched factor collapses α→0, so the
+    state stops moving, its coefficients stop drifting, and a drift trigger never fires (the α=0 / no-drift
+    stall the LU sidesteps by refreshing every step). The step-count cap is the complementary staleness
+    bound for state development at a near-constant β. `ilut_beta_tracking_refresh(coupled, …)` returns a
+    `precondition_step(active_step, state)` (the same `forward_march` seam as the LU hook); it **shares the
+    `_beta_tracking_refresh` skeleton** with `lu_beta_tracking_refresh` (one β-read + shift + in-place
+    refactor, parameterized by the gate and the `refresh_in_place` kwargs — the LU passes `gate=None` =
+    always). **Forward-march only** (impure host re-factor; raises under `jax.grad`); the finishing solve
+    and adjoint keep the last frozen factorization, exact enough at β → 0 — so for a *differentiable* solve
+    use the plain `coupled_ilut_continuation` (no `precondition_step`), whose root and adjoint are
+    refresh-independent. **Role:** this makes the ILUT *more robust* through a ramping β — but NOT as
+    robust as the exact LU, and NOT *competitive* with it on 2D. Measured on the cold pitzDaily ramp
+    (shipped-default `DualTimeControl`): β-tracking clears rung 0 clean (cyc 2–5) and develops rung 1's
+    recirculation bubble to `x_r/h` 8.7 — well past where the **frozen** ILUT ground at cyc 346 — but it
+    then **NaN'd at the rung-1 overshoot** (step 15, α→0) where the LU completes. Two combined causes: the
+    approximate factorization is less robust through a hard dual-time overshoot than the exact LU (it NaN'd
+    even on the step where the gate had just re-factored), and the overshoot itself is a `DualTimeControl`
+    globalization fragility the LU tolerates *because* it is exact (the control-tuning follow-up owns it).
+    Also secondary: the β-move/step-count gate can skip a refresh exactly at an overshoot (α clipping moves
+    β little), spiking cyc (a 255-cyc step was observed then recovered) — a struggle-triggered refresh
+    (refactor when cyc is high / α clips) is a candidate refinement. Even β-tracked the ILUT's refactor is
+    ~10–40× the LU's and it is approximate, so on 2D/moderate the complete LU wins on both speed *and*
+    robustness. The ILUT's payoff is the **3D fallback**, where the LU's fill is a memory wall and the ILUT
+    is what carries the solve; β-tracking is the forward-march robustness it needs *there*. Pinned in
+    `tests/integration/test_coupled_ilut.py` (the pure gate logic as a fast test; the gated in-place
+    refactor; cold-march convergence to the block PC's root).
   - **~~Remaining limiter — the k equation drift~~ — RETIRED: the stall no longer reproduces (measured
     2026-07-22).** This bullet used to record that past rel ~0.09 the direct-`k` residual grew (rel 1 →
     ~5×) and re-stalled the march, and named high-Reynolds `k` stability as the open follow-up. **It

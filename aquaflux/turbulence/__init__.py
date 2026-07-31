@@ -45,6 +45,7 @@ from .coupled import (
     coupled_lu_continuation,
     coupled_lu_refreshing_continuation,
     eddy_viscosity_drift,
+    ilut_beta_tracking_refresh,
     lu_beta_tracking_refresh,
     solve_coupled,
 )
@@ -110,6 +111,7 @@ __all__ = [
     "eddy_viscosity_drift",
     "equilibrium_k",
     "hybrid_initialize",
+    "ilut_beta_tracking_refresh",
     "inlet_k",
     "inlet_omega",
     "k_wall_production",
