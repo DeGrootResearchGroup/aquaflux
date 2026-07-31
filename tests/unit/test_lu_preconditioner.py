@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
 import numpy as np
+import pytest
 import scipy.sparse as sp
 from aquaflux.solve.lu_preconditioner import _umfpack_available, factorize_lu
 
@@ -100,6 +101,23 @@ def test_monolithic_lu_preconditioner_matvec_and_refresh() -> None:
         float(jnp.linalg.norm(jnp.asarray(2.0 * (a @ np.asarray(x2))) - b) / jnp.linalg.norm(b))
         < 1e-10
     )
+
+
+@pytest.mark.skipif(not _umfpack_available(), reason="UMFPACK (petsc4py) not installed")
+def test_umfpack_refactor_handles_a_GROWN_sparsity_pattern() -> None:
+    """The UMFPACK backend must re-factor across a pattern that GREW, not assume a frozen pattern.
+
+    Regression: the coupled Jacobian's sparsity grows as the flow develops (cross-coupling entries zero at
+    the cold reference become nonzero), so a fixed-pattern numeric-only refactor is both wrong and a shape
+    error. ``refactor`` rebuilds, so a solve after refactoring at a matrix with MORE nonzeros is exact.
+    """
+    a, b = _nonsymmetric_system(n=100, seed=8)
+    factors = factorize_lu(a, backend="umfpack")
+    a2 = (a + sp.random(100, 100, density=0.03, random_state=9)).tocsr()  # a strictly-grown pattern
+    assert a2.nnz > a.nnz
+    factors.backend.refactor(a2)
+    assert np.linalg.norm(a2 @ factors.apply(b) - b) / np.linalg.norm(b) < 1e-10
+    assert np.linalg.norm(a2.T @ factors.apply(b, transpose=True) - b) / np.linalg.norm(b) < 1e-10
 
 
 def test_auto_backend_selects_a_working_factorization() -> None:

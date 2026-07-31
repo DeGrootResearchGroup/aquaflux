@@ -188,8 +188,11 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   field-major matrix; equilibrating + cell-major actually *hurt* it, measured).
   - **Pluggable backend (`factorize_lu(backend=…)`):** `"umfpack"` (SuiteSparse via the optional
     `petsc4py` dep) is the fast path — a fill-reducing (nested-dissection/AMD) ordering + a multifrontal
-    BLAS-3 numeric kernel, with symbolic reuse across the cheap numeric refactorizations a refresh
-    performs. `"scipy"` (`scipy.sparse.linalg.splu`, SuperLU) is the always-available fallback: exact and
+    BLAS-3 numeric kernel. A refresh **re-factors from scratch** (NOT a fixed-pattern numeric-only
+    refactor): the coupled Jacobian's sparsity *grows* as the flow develops — cross-coupling entries that
+    are exactly zero at the cold reference become nonzero — so a frozen-pattern refactor is both wrong and
+    a shape error; the full factor is fast enough (~1 s at 2D/moderate) that re-analysing each refresh is
+    cheap. `"scipy"` (`scipy.sparse.linalg.splu`, SuperLU) is the always-available fallback: exact and
     correct (what the tests run under) but, lacking nested dissection, no faster to factor than the ILUT.
     `"auto"` (default) picks UMFPACK when importable, else SciPy. So the module imports with no optional
     dependency; the 26× is opt-in via `pip install aquaflux[petsc]`.

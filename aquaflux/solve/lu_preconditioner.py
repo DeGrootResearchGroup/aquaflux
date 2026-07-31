@@ -23,9 +23,10 @@ is two-dimensional or moderate.
 reference state and applied inside the jitted Krylov solve through ``jax.pure_callback`` — exactly like
 the ILUT. Two backends implement the same small interface:
 
-* ``"umfpack"`` — UMFPACK (SuiteSparse) via ``petsc4py``, the fast path. Its symbolic factorization is
-  reused across the cheap numeric refactorizations a mid-march refresh performs. Requires the optional
-  ``petsc`` dependency.
+* ``"umfpack"`` — UMFPACK (SuiteSparse) via ``petsc4py``, the fast path. A mid-march refresh rebuilds the
+  factorization from scratch (the coupled Jacobian's sparsity grows as the flow develops, so a
+  fixed-pattern numeric-only refactor would be wrong) -- cheap because the full factorization is fast.
+  Requires the optional ``petsc`` dependency.
 * ``"scipy"`` — ``scipy.sparse.linalg.splu`` (SuperLU), always available. Exact and correct but without a
   fill-reducing nested-dissection ordering it is not faster to factor than the ILUT; it is the fallback
   so the class works with no optional dependency, and it is what the tests run under.
@@ -58,7 +59,7 @@ class _LuBackend:
         raise NotImplementedError
 
     def refactor(self, matrix: sp.spmatrix) -> None:
-        """Refactor at new values on the SAME sparsity pattern (a backend reuses its symbolic analysis)."""
+        """Refactor at the given matrix (a fresh factorization; the coupled Jacobian's pattern may grow)."""
         raise NotImplementedError
 
 
@@ -83,25 +84,38 @@ class _ScipyLuBackend(_LuBackend):
 
 
 class _PetscUmfpackBackend(_LuBackend):
-    """UMFPACK (SuiteSparse) complete LU via ``petsc4py`` — the fast path, with symbolic reuse on refactor.
+    """UMFPACK (SuiteSparse) complete LU via ``petsc4py`` — the fast path.
 
     Holds a PETSc ``Mat`` and a ``KSP`` configured as a direct solve (``preonly`` + ``lu`` +
-    ``umfpack``). :meth:`refactor` overwrites the matrix values on the fixed pattern and re-runs the
-    numeric factorization, reusing UMFPACK's symbolic analysis; :meth:`solve` runs the (transpose)
-    triangular solve.
+    ``umfpack``). :meth:`refactor` rebuilds them at the new matrix and re-runs the analysis + numeric
+    factorization; :meth:`solve` runs the (transpose) triangular solve.
+
+    A refresh rebuilds from scratch rather than reusing UMFPACK's symbolic analysis on a frozen pattern:
+    the coupled Jacobian's sparsity **grows as the flow develops** (cross-coupling entries that are
+    exactly zero at the cold reference become nonzero), so a fixed-pattern numeric refactor would be both
+    wrong (missing the new entries) and a shape error. The full factorization is fast enough (~1 s at
+    moderate 2D size) that re-analysing each refresh is cheap; symbolic reuse would save only a small
+    fraction of that and is not worth the fixed-pattern assumption.
     """
 
     def __init__(self, matrix: sp.spmatrix) -> None:
         from petsc4py import PETSc
 
         self._PETSc = PETSc
+        self.n_dofs = matrix.shape[0]
+        self._factor(matrix)
+
+    def _factor(self, matrix: sp.spmatrix) -> None:
+        PETSc = self._PETSc
         matrix = matrix.tocsr()
         matrix.sort_indices()
-        self.n_dofs = matrix.shape[0]
-        self._indptr = matrix.indptr.astype(np.int32)
-        self._indices = matrix.indices.astype(np.int32)
         self._mat = PETSc.Mat().createAIJ(
-            size=matrix.shape, csr=(self._indptr, self._indices, matrix.data.copy())
+            size=matrix.shape,
+            csr=(
+                matrix.indptr.astype(np.int32),
+                matrix.indices.astype(np.int32),
+                matrix.data.copy(),
+            ),
         )
         self._mat.assemble()
         self._ksp = PETSc.KSP().create()
@@ -110,7 +124,7 @@ class _PetscUmfpackBackend(_LuBackend):
         pc = self._ksp.getPC()
         pc.setType("lu")
         pc.setFactorSolverType("umfpack")
-        pc.setUp()  # symbolic + numeric factorization
+        pc.setUp()  # symbolic analysis + numeric factorization
         self._x = self._mat.createVecLeft()
         self._b = self._mat.createVecRight()
 
@@ -123,13 +137,11 @@ class _PetscUmfpackBackend(_LuBackend):
         return self._x.getArray().copy()
 
     def refactor(self, matrix: sp.spmatrix) -> None:
-        matrix = matrix.tocsr()
-        matrix.sort_indices()
-        # Overwrite values on the fixed pattern; the Mat's state bump makes the next setUp a numeric-only
-        # refactorization that reuses UMFPACK's symbolic analysis.
-        self._mat.setValuesCSR(self._indptr, self._indices, matrix.data)
-        self._mat.assemble()
-        self._ksp.getPC().setUp()
+        # Rebuild at the new matrix (the pattern may have grown as the flow developed), destroying the old
+        # objects so their PETSc memory is released rather than leaked across a long refreshing march.
+        self._ksp.destroy()
+        self._mat.destroy()
+        self._factor(matrix)
 
 
 def _umfpack_available() -> bool:
@@ -305,11 +317,12 @@ class MonolithicLuPreconditioner:
     ) -> None:
         """Re-factor at a developed state and swap the factorization IN PLACE (no new object).
 
-        The arguments are :meth:`build`'s, evaluated at the developed state. The backend reuses its
-        symbolic factorization where it can (UMFPACK), so the refresh costs only a numeric refactorization
-        on the fixed sparsity pattern. Because this preconditioner is held as a **static field** of the
-        shift policy and :meth:`matvec` reads ``self.factors`` at call time, mutating the factorization
-        here re-preconditions the **same compiled** Krylov solve (a compilation cache hit).
+        The arguments are :meth:`build`'s, evaluated at the developed state. The backend re-factors at the
+        new matrix (a fresh factorization -- the coupled Jacobian's sparsity grows as the flow develops,
+        so the pattern is not fixed; the full factorization is fast enough that this is cheap). Because
+        this preconditioner is held as a **static field** of the shift policy and :meth:`matvec` reads
+        ``self.factors`` at call time, mutating the factorization here re-preconditions the **same
+        compiled** Krylov solve (a compilation cache hit -- no recompile).
 
         **Forward-march use ONLY — the mutation is impure and must never touch a differentiated path.**
         The adjoint's transpose solve reads the same factorization and would be corrupted by a change
