@@ -146,13 +146,34 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     factorization with `ilu.solve(trans='T')`. Pinned by the coupled-adjoint FD gate
     (`tests/integration/test_coupled_ilut.py`); the plain-callable path (every AMG preconditioner) is
     unchanged.
+  - **Cheap in-place mid-march refresh — `refresh_in_place` (BUILT; forward-march only).** The frozen
+    ILUT goes stale as the flow develops — the shifted solve slows, and on a low-shift dual-time path it
+    can NaN. `MonolithicIlutPreconditioner.refresh_in_place(matvec, colouring, n_fields, shift_diagonal,
+    …)` re-materializes and re-factors at the developed state and swaps `self.factors` **in place**. Two
+    facts make this a **compilation cache hit** rather than a recompile: the preconditioner is a *static*
+    field of `MonolithicIlutShiftPolicy` (so its identity is the jit treedef, unchanged by mutating its
+    factors), and `matvec()` reads `self.factors` **at callback time** (not captured), so the mutation is
+    seen by the already-compiled solve. `build` and `refresh_in_place` share one form-and-factor path
+    (`_factor`). **This is sound only because the forward march is NEVER differentiated** — the mutation
+    is impure and would corrupt the adjoint's transpose solve (which reads the same `self.factors`), so
+    it is forward-march only; the converged root and its adjoint are refresh-independent anyway (the shift
+    vanishes at the root). Measured on pitzDaily: a rebuild-per-refresh is ~72 s (≈27 s of it the
+    march-step recompile, ≈13 s the base-policy rebuild, ≈5 s a jvp recompile), the in-place refresh
+    ~44 s. The residual ~31 s is the intrinsic materialize + factor, and it splits **materialize (240
+    jvps) ~2.4 s / `spilu` ~17.8 s** — so `spilu` is ~88 % and a sparser (cheaper-materialize) stencil
+    would save almost nothing. `spilu` is a hard floor: a *threshold* ILU's fill pattern is
+    value-dependent, so the symbolic factorization cannot be frozen and re-used (and scipy exposes no
+    symbolic/numeric split), leaving **amortization (refresh less often) as the only cheap lever**. The
+    coupled driver wiring is `coupled_ilut_refreshing_continuation` (a `refresh_builder` for
+    `solve_coupled` — see `.claude/rules/turbulence.md`); it pairs with a `CoefficientDriftTrigger` so the
+    re-factor *leads* the staleness. Pinned by `test_refresh_in_place_repreconditions_the_same_compiled_matvec`
+    (unit) and `test_ilut_refreshing_continuation_refreshes_the_same_step_in_place` (integration).
   - **Scope / follow-ups (MVP).** The heavy fill (~7–14× the operator's nonzeros) is affordable at 2D /
     moderate mesh sizes but is the weak point at large 3D — an **ILUT-as-multigrid-smoother** variant is
     the parked scaling path (the naive monolithic V-cycle's coarse-grid correction destabilizes on the
-    indefinite saddle, so it is real research, not a quick add). No mid-march refresh yet (the factor is
-    a static field; refreshing recompiles), and the coupled builder still assembles the unused block AMG
-    as the `a_P` source — a lightweight shift-diagonal-only policy would remove that. The coupled
-    integration (`coupled_ilut_continuation`) lives in `.claude/rules/turbulence.md`.
+    indefinite saddle, so it is real research, not a quick add). The coupled builder still assembles the
+    unused block AMG as the `a_P` source — a lightweight shift-diagonal-only policy would remove that. The
+    coupled integration (`coupled_ilut_continuation`) lives in `.claude/rules/turbulence.md`.
 - **Forward globalization is ONE injected strategy — `forward_step: ForwardStep`.** The forward
   Newton loop has a single point of variation: `ImplicitNewtonSolver` takes one `forward_step`
   implementing the `ForwardStep` protocol (`stepper()` → the per-step
