@@ -1749,7 +1749,7 @@ def coupled_amg_continuation(
     amg_beta: float = 2.0,
     stencil_reach: int = 3,
     smoother_fill_levels: int = 1,
-    smoother_sweeps: int = 1,
+    smoother_sweeps: int = 2,
     native_forward_solve: bool = False,
     beta0: float = 2.0,
     exponent: float = 1.0,

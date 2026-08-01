@@ -827,8 +827,10 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     its **transpose** V-cycle — verified: reaches the block PC's fixed point AND passes the coupled-adjoint FD
     gate (`tests/integration/test_coupled_amg.py`). **Needs `petsc4py`** (the one builder that does; the module
     raises a clear install hint otherwise). MVP smoother is a stationary ILU(1) (ILU(0) stalls, a Krylov
-    smoother goes nonlinear); the shipped per-step tuning is `smoother_sweeps=1` + restart-15 (~1.5× cheaper
-    per step, convergence bit-identical). A refreshing/β-tracking variant, the experimental native-PETSc
+    smoother goes nonlinear); the shipped per-step tuning is `smoother_sweeps=2` + restart-15 — restart-15
+    stops the forward solve at the ~1% inexact-Newton tolerance, and the second smoother sweep roughly quarters
+    the outer Krylov count on the low-shift operator the march's tail runs at (~2.1× the whole `bfs3d` solve
+    there) for one extra cheap incomplete-LU back-solve (`.claude/rules/solve.md`). A refreshing/β-tracking variant, the experimental native-PETSc
     forward path (`native_forward_solve=True` — a much larger per-step lever that does not yet converge the
     march), and the FGMRES-forward optimization are follow-ups (`.claude/rules/solve.md`). This is the coupled
     preconditioner the first 3D validation case (`validation/bfs3d_openfoam`) runs on.

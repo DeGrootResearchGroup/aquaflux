@@ -254,12 +254,21 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     adjoint path. The MVP forward solver is `_COUPLED_AMG_FORWARD_SOLVER` (restart-15, vs the ILUT's
     restart-10: the V-cycle is a weaker approximate inverse so the loose inexact-Newton solve needs a couple
     dozen vectors, not a handful).
-  - **Per-step cost tuning (measured, bit-identical convergence): `smoother_sweeps=1` default (halved from
-    2) and the forward restart 15 (from 40).** The V-cycle apply is a `pure_callback` into PETSc, so halving
-    the level-smoother sweeps roughly halves the per-apply wall, and a restart-15 forward loop stops as soon
-    as the ~1% inexact-Newton tolerance is met instead of running out a 40-vector subspace. Together ~1.5×
-    cheaper per outer step with the march trajectory unchanged (the `bfs3d` coupled solve reaching ~24–30 min
-    total against OpenFOAM's ~15 min). An **experimental, opt-in native-PETSc forward path**
+  - **Per-step cost tuning (measured): `smoother_sweeps=2` default and the forward restart 15 (from 40).**
+    The restart-15 forward loop stops as soon as the ~1% inexact-Newton tolerance is met instead of running
+    out a 40-vector subspace (the dominant per-step saving). The **smoother-sweeps knob is the second lever,
+    and more is better on this saddle**: the outer Krylov cost is governed by the *smoother work* per V-cycle,
+    and adding a second incomplete-LU Richardson sweep — one extra cheap triangular back-solve — roughly
+    quarters the outer iteration count on the low-shift operator the march's tail runs at (measured on the
+    `bfs3d` coupled Jacobian to a 1% stop: 211→54 outer cycles at a low shift, ~2.1× the whole solve there;
+    ~10% at a high shift, where the operator is already diagonally dominant). Each outer iteration pays a full
+    Jacobian-vector product (and, on the JAX-side `lineax` path, a `pure_callback` into PETSc), so trading one
+    cheap extra sweep for far fewer outer iterations is a large net win — `sweeps=2` is the sweet spot
+    (`sweeps=3` helps a little more at low shift but costs at high shift). Adding *fill* to the smoother
+    (`smoother_fill_levels`) instead would cut iterations too, but it is the expensive incomplete-factorization
+    build the ILUT hits in three dimensions; sweeps add smoother work without that build cost, and the
+    coarsening choice (selective vs smoothed-aggregation) is a minor knob by comparison. The `bfs3d` coupled
+    solve reaches ~24–30 min total against OpenFOAM's ~15 min. An **experimental, opt-in native-PETSc forward path**
     (`coupled_amg_continuation(native_forward_solve=True)`) is a far larger per-step lever — a native KSP
     whose shell matvec calls the eager JAX jvp (true Newton), 1 native GMRES iteration vs the JAX-side
     lineax path's ~90 on the identical system — but it currently under-converges the *march* (the lineax

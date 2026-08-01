@@ -294,7 +294,7 @@ def build_amg_vcycle(
     n_fields: int,
     *,
     smoother_fill_levels: int = 1,
-    smoother_sweeps: int = 1,
+    smoother_sweeps: int = 2,
     native: bool = False,
 ) -> AmgVCycle:
     """Equilibrate + reorder a coupled block matrix and build a multigrid V-cycle preconditioner for it.
@@ -310,7 +310,12 @@ def build_amg_vcycle(
         Incomplete-LU fill levels of the stationary level smoother (``1`` = ILU(1); the indefinite saddle
         stalls at ``0``).
     smoother_sweeps : int
-        Richardson sweeps of the level smoother per V-cycle visit.
+        Richardson sweeps of the level smoother per V-cycle visit. Two is the default: on the
+        low-shift operator the pseudo-transient march spends its tail in, a second smoother sweep
+        roughly quarters the outer Krylov iteration count (measured ~4× on the `bfs3d` coupled
+        Jacobian at a low shift, ~2× the whole solve there), for one extra cheap incomplete-LU
+        back-solve per visit — a large net saving where each outer iteration pays a full
+        Jacobian-vector product.
     native : bool
         Also assemble the native host exact-Jacobian forward solve (:meth:`AmgVCycle.solve_exact`), whose
         operator is a shell over the exact jvp supplied per solve. ``False`` builds the single-V-cycle
@@ -384,7 +389,7 @@ class MonolithicAmgPreconditioner:
         native: bool = False,
         residual_fn: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         smoother_fill_levels: int = 1,
-        smoother_sweeps: int = 1,
+        smoother_sweeps: int = 2,
     ) -> MonolithicAmgPreconditioner:
         """Materialize the shifted coupled Jacobian and build a V-cycle preconditioner for it, off the jit path.
 
@@ -433,7 +438,7 @@ class MonolithicAmgPreconditioner:
         shift_diagonal: np.ndarray,
         *,
         smoother_fill_levels: int = 1,
-        smoother_sweeps: int = 1,
+        smoother_sweeps: int = 2,
     ) -> None:
         """Rebuild the V-cycle at a developed state and swap it IN PLACE (no new object).
 
