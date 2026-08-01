@@ -66,10 +66,12 @@ test = [
     "pytest-split>=0.9",
     "pytest-timeout>=2.3",
 ]
-# `petsc` is the optional fast backend for the complete-LU coupled preconditioner
-# (`coupled_lu_continuation`): petsc4py provides UMFPACK (SuiteSparse), which factors the coupled
-# Jacobian roughly an order of magnitude faster than the threshold-ILU on a moderate 2D mesh. Without it,
-# that preconditioner falls back to scipy's SuperLU (exact but not faster to factor), and the ILUT / block
+# `petsc` (petsc4py) backs two coupled preconditioners. For the complete-LU
+# (`coupled_lu_continuation`) it is the optional fast backend — UMFPACK (SuiteSparse) factors the coupled
+# Jacobian roughly an order of magnitude faster than the threshold-ILU on a moderate 2D mesh; without it
+# that preconditioner falls back to scipy's SuperLU (exact but not faster to factor). For the algebraic
+# multigrid (`coupled_amg_continuation`, the large-3D coupled preconditioner) it is **required** — the
+# V-cycle is built with PETSc's `PCGAMG` and there is no pure-SciPy AMG fallback. The ILUT / block
 # preconditioners are unaffected. petsc4py builds PETSc from source; a SuiteSparse-enabled build needs
 # CMake (`PETSC_CONFIGURE_OPTIONS="--download-suitesparse"`).
 petsc = ["petsc4py>=3.20"]

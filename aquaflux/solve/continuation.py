@@ -92,6 +92,15 @@ def _shifted_solve(residual_fn, phi, rhs, shift, preconditioner, solver):
         The restart-cycle count of the linear solve (int32 scalar).
     """
 
+    # A preconditioner tagged ``is_exact_native`` runs the whole shifted solve natively on the host (PETSc
+    # GMRES + native GAMG, its operator a shell over the exact jvp at ``phi``) -- apply it directly rather
+    # than wrapping the moderate V-cycle in a JAX-side Krylov iteration, which is far slower (the JAX-side
+    # GMRES needs tens of per-matvec callbacks where the native solve reaches the stop in ~1). One "cycle"
+    # by convention, so the staleness signal stays well defined. Forward-only (the adjoint uses the
+    # differentiable single-V-cycle transpose).
+    if getattr(preconditioner, "is_exact_native", False):
+        return preconditioner.exact_solve(phi, -rhs, shift), jnp.asarray(1, dtype=jnp.int32)
+
     def shifted_jacobian(tangent: jnp.ndarray) -> jnp.ndarray:
         return jax.jvp(residual_fn, (phi,), (tangent,))[1] + shift * tangent
 

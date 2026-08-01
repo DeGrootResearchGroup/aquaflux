@@ -1,0 +1,23 @@
+# Regenerable run artifacts; report.md, figures/, and of_case/ (the case template) ARE tracked.
+runs/
+# Streamed solver/run logs (python3 -u > *.log redirects, OpenFOAM run logs).
+*.log
+of_case/0/
+of_case/[1-9]*/
+of_case/log.*
+of_case/postProcessing/
+of_case/processor*/
+__pycache__/
+*.npz
+of_case/constant/polyMesh/
+# The transient reference: mesh/constant/BCs are copied from of_case at run time (one source of
+# truth), so they are regenerated rather than stored twice; solver log + time dirs are regenerable.
+of_transient/system/blockMeshDict
+of_transient/constant/
+of_transient/constant/polyMesh/
+of_transient/0/
+of_transient/[1-9]*/
+of_transient/0.[0-9]*/
+of_transient/log.*
+of_transient/postProcessing/
+of_transient/processor*/

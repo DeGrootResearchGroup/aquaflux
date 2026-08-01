@@ -814,6 +814,24 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     stays on the ILUT / block / rank-structured-direct paths (`.claude/rules/solve.md`). Prefer it over the
     ILUT where the mesh is 2D/moderate (faster *and* exact); the ILUT remains for its 3D-fill headroom and
     is still the differentiable default until a selector seam lands.
+  - **`coupled_amg_continuation` — the ALGEBRAIC-MULTIGRID counterpart, the coupled PC for large 3D
+    (BUILT).** Same drop-in as the ILUT/LU builders but preconditions with one smoothed-aggregation
+    multigrid V-cycle (`MonolithicAmgPreconditioner`, `.claude/rules/solve.md`) instead of a factorization —
+    a **direct-LU coarse solve** keeps the heavy fill on only the small coarsest grid, so it builds in
+    ~seconds with bounded memory where both factorizations hit the 3D wall (the complete LU's fill OOMs; the
+    ILUT's `spilu` on the distance-3 3D Jacobian — measured 38.7M nnz on `bfs3d` — runs >7.5 min). Shares
+    `MonolithicFactorShiftPolicy` + `_monolithic_factor_step`; its forward solver default is
+    `_COUPLED_AMG_FORWARD_SOLVER` (restart-15, since the V-cycle is a weaker approximate inverse than a
+    factorization — ~21 GMRES iters to 1e-8 on `bfs3d` at full accuracy, vs the LU's 1, but the inexact-Newton
+    march stops at ~1%). The V-cycle is a **fixed linear operator** (one apply), so the coupled-adjoint reuses
+    its **transpose** V-cycle — verified: reaches the block PC's fixed point AND passes the coupled-adjoint FD
+    gate (`tests/integration/test_coupled_amg.py`). **Needs `petsc4py`** (the one builder that does; the module
+    raises a clear install hint otherwise). MVP smoother is a stationary ILU(1) (ILU(0) stalls, a Krylov
+    smoother goes nonlinear); the shipped per-step tuning is `smoother_sweeps=1` + restart-15 (~1.5× cheaper
+    per step, convergence bit-identical). A refreshing/β-tracking variant, the experimental native-PETSc
+    forward path (`native_forward_solve=True` — a much larger per-step lever that does not yet converge the
+    march), and the FGMRES-forward optimization are follow-ups (`.claude/rules/solve.md`). This is the coupled
+    preconditioner the first 3D validation case (`validation/bfs3d_openfoam`) runs on.
   - **`lu_beta_tracking_refresh` — re-factor the LU at the current β EVERY step (the correct LU treatment
     for a dual-time march; BUILT).** A frozen LU is exact only for the β it was factored at; a dual-time
     march's β ramps (0.5 → 0.005), so a factorization frozen at `lu_beta` mis-preconditions the operator

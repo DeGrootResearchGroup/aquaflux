@@ -169,9 +169,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     re-factor *leads* the staleness. Pinned by `test_refresh_in_place_repreconditions_the_same_compiled_matvec`
     (unit) and `test_ilut_refreshing_continuation_refreshes_the_same_step_in_place` (integration).
   - **Scope / follow-ups (MVP).** The heavy fill (~7–14× the operator's nonzeros) is affordable at 2D /
-    moderate mesh sizes but is the weak point at large 3D — an **ILUT-as-multigrid-smoother** variant is
-    the parked scaling path (the naive monolithic V-cycle's coarse-grid correction destabilizes on the
-    indefinite saddle, so it is real research, not a quick add). The coupled builder still assembles the
+    moderate mesh sizes but is the weak point at large 3D — the **monolithic AMG V-cycle**
+    (`amg_preconditioner.py`, below) is the built scaling path (its direct-LU coarse solve is what tames the
+    naive monolithic V-cycle's coarse-grid-correction instability on the indefinite saddle). The coupled builder still assembles the
     unused block AMG as the `a_P` source — a lightweight shift-diagonal-only policy would remove that. The
     coupled integration (`coupled_ilut_continuation`) lives in `.claude/rules/turbulence.md`.
 - **Monolithic COMPLETE-LU preconditioner — BUILT (`lu_preconditioner.py`), the preferred 2D/moderate
@@ -225,6 +225,59 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     β-tracking `lu_beta_tracking_refresh`) live in `.claude/rules/turbulence.md`;** they share the
     `MonolithicFactorShiftPolicy` and the `_monolithic_factor_step` builder tail with the ILUT (one
     implementation, parameterized by the factorization).
+- **Monolithic ALGEBRAIC-MULTIGRID preconditioner — BUILT (`amg_preconditioner.py`), the coupled PC for
+  large 3D.** The third member of the family: instead of factoring the assembled coupled Jacobian it applies
+  **one smoothed-aggregation multigrid V-cycle** (`MonolithicAmgPreconditioner`, PETSc `PCGAMG`) whose only
+  exact solve is a **direct LU on the small coarsest grid**, so the heavy fill never lives on the fine grid.
+  This is the answer to both factorizations' 3D wall: the complete LU's fill OOMs (`O(n^{4/3})`), and the
+  threshold-ILU's `spilu` is *prohibitively slow to build* on a distance-3 3D coupled Jacobian — measured on
+  the 23k-cell `bfs3d` case the assembled Jacobian is **38.7M nnz (~280/row)** and a single `spilu` at
+  `fill_factor=30` ran **>7.5 min and never finished** (RSS <2 GB — the 3D wall here is *time*, not memory,
+  and the earlier "~11 min XLA compile" reading was a CPU-contention artifact; on idle CPU the probe compile
+  is fast and `spilu` dominates). The V-cycle instead **builds in ~seconds with bounded memory** and scales.
+  - **The V-cycle is a fixed LINEAR operator (one `pc.apply`, not an inner Krylov solve), so it is a
+    drop-in for the same callback-matvec interface as the ILUT/LU and — being linear and transposable —
+    serves the adjoint's transpose solve through the multigrid's own transpose (`pc.applyTranspose`), with
+    no flexible outer Krylov.** It preconditions the **equilibrated, cell-major** matrix via the shared
+    `equilibrate_cell_major` (extracted from `factorize_ilut` into `ilut_preconditioner.py`, now the one
+    home for the sqrt-diagonal equilibration + cell-major reorder both the ILUT and the V-cycle need); the
+    `Mat` block size is `n_fields` so GAMG aggregates cell-blocks. Host object, applied via `pure_callback`,
+    riding as a static field; `build`/`refresh_in_place`/`matvec` identical to the ILUT/LU, so it plugs into
+    `MonolithicFactorShiftPolicy` unchanged. **It is the one family member that needs `petsc4py`** (no
+    pure-SciPy AMG fallback); the module lazily imports PETSc and raises a clear install hint otherwise.
+  - **The smoother is the research variable, and the measured MVP config is a STATIONARY ILU(1) level
+    smoother (`richardson`) + direct-LU coarse.** Measured on the `bfs3d` shifted coupled Jacobian
+    (true 2-norm residual, `KSP_NORM_UNPRECONDITIONED`, at 2 sweeps): plain GMRES + stationary **ILU(1)**
+    reaches **1e-8 in 21 iterations**; **ILU(0) stalls** ~2e-4 and **SOR diverges**. A Krylov-accelerated
+    (GMRES) smoother is a few iterations *faster* (12–18 via FGMRES) but makes the V-cycle **nonlinear** — it
+    needs flexible GMRES and has no clean transpose, so it is a deferred forward-only optimization, **not** the
+    adjoint path. The MVP forward solver is `_COUPLED_AMG_FORWARD_SOLVER` (restart-15, vs the ILUT's
+    restart-10: the V-cycle is a weaker approximate inverse so the loose inexact-Newton solve needs a couple
+    dozen vectors, not a handful).
+  - **Per-step cost tuning (measured, bit-identical convergence): `smoother_sweeps=1` default (halved from
+    2) and the forward restart 15 (from 40).** The V-cycle apply is a `pure_callback` into PETSc, so halving
+    the level-smoother sweeps roughly halves the per-apply wall, and a restart-15 forward loop stops as soon
+    as the ~1% inexact-Newton tolerance is met instead of running out a 40-vector subspace. Together ~1.5×
+    cheaper per outer step with the march trajectory unchanged (the `bfs3d` coupled solve reaching ~24–30 min
+    total against OpenFOAM's ~15 min). An **experimental, opt-in native-PETSc forward path**
+    (`coupled_amg_continuation(native_forward_solve=True)`) is a far larger per-step lever — a native KSP
+    whose shell matvec calls the eager JAX jvp (true Newton), 1 native GMRES iteration vs the JAX-side
+    lineax path's ~90 on the identical system — but it currently under-converges the *march* (the lineax
+    path over-solves each step to ~machine zero and the pseudo-transient globalization leans on those
+    near-exact steps; the native honest-tolerance step descends slower and overruns the step budget), so it
+    stays off by default. The follow-up to make it the default is a **β-tracking GAMG refresh** (the AMG
+    analogue of `lu_beta_tracking_refresh`), so the frozen V-cycle matches the ramping β and the native
+    solve stays accurate at low β.
+  - **⚠️ TRUE-RESIDUAL TRAP (binding).** PETSc's default convergence norm is the *preconditioned* residual
+    `‖Mr‖`; on this indefinite saddle SOR/Krylov-smoothing report `reason=2` (converged) at a **true**
+    residual of 1.0. Force `KSP_NORM_UNPRECONDITIONED` and always check `‖Ax−b‖` — same lesson as the
+    level-ILU artifact in [[ilu-refresh-cost-levers]].
+  - **Coupled builder `coupled_amg_continuation`** (`.claude/rules/turbulence.md`) shares
+    `MonolithicFactorShiftPolicy` + `_monolithic_factor_step` with the ILUT/LU. Verified: converges to the
+    block PC's fixed point AND passes the **coupled-adjoint FD gate** (the transpose V-cycle serves the
+    gradient), `tests/integration/test_coupled_amg.py`; V-cycle mechanics in `tests/unit/test_amg_preconditioner.py`.
+    Follow-ups: a refreshing/β-tracking variant (the frozen build serves the forward + adjoint; a developing
+    3D march would want the refresh), and the FGMRES forward optimization.
 - **Forward globalization is ONE injected strategy — `forward_step: ForwardStep`.** The forward
   Newton loop has a single point of variation: `ImplicitNewtonSolver` takes one `forward_step`
   implementing the `ForwardStep` protocol (`stepper()` → the per-step

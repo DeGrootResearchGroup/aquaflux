@@ -59,6 +59,7 @@ from aquaflux.solve import (
     ForwardStep,
     ImplicitNewtonSolver,
     LocalCourantBasis,
+    MonolithicAmgPreconditioner,
     MonolithicIlutPreconditioner,
     MonolithicLuPreconditioner,
     PseudoTransientStep,
@@ -733,6 +734,18 @@ _COUPLED_ILUT_FORWARD_SOLVER = relative_residual_gmres(
     1e-2, restart=10, stagnation_iters=40, max_restarts=40
 )
 
+# The monolithic AMG preconditioner is one V-cycle -- a weaker (but far cheaper to build, and
+# memory-bounded) approximate inverse than the factorizations, so the preconditioned Krylov solve needs a
+# few tens of vectors rather than the ILUT's handful to reach the 1% inexact-Newton stop. A restart of 15
+# is the measured sweet spot: it holds enough Arnoldi history for the V-cycle's convergence while checking
+# the stop often enough not to over-solve (a larger restart -- 40, 120 -- reaches the same march
+# trajectory but overshoots the 1% target deep into the next restart cycle, ~2x the matvecs, each of which
+# is an expensive host V-cycle apply). `max_restarts` stays generous so a drifted-reference solve still
+# completes.
+_COUPLED_AMG_FORWARD_SOLVER = relative_residual_gmres(
+    1e-2, restart=15, stagnation_iters=40, max_restarts=60
+)
+
 # Backtracking rungs for the shifted step. The full coupled Newton step from the hybrid initial
 # condition overshoots violently (the residual blows up many orders of magnitude), so the step length
 # is scaled back along {1, 1/2, ..., 1/2**N} until it descends -- recovering a residual-reducing step
@@ -1260,12 +1273,20 @@ class MonolithicFactorShiftPolicy(eqx.Module):
     """
 
     base: CoupledShiftPolicy
-    preconditioner: MonolithicIlutPreconditioner | MonolithicLuPreconditioner = eqx.field(
-        static=True
-    )
+    preconditioner: (
+        MonolithicIlutPreconditioner | MonolithicLuPreconditioner | MonolithicAmgPreconditioner
+    ) = eqx.field(static=True)
 
     def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
         """The block policy's shift diagonal, glued to the frozen factorization preconditioner.
+
+        For a factorization (ILUT/LU) the preconditioner is a single frozen apply and the step solves the
+        shifted system with the JAX-side Krylov. A preconditioner exposing a native full solve (the AMG
+        V-cycle) instead returns a **tagged full-solve** the step applies directly on the host -- the
+        multigrid V-cycle is only a *moderate* inverse, so the JAX-side Krylov with it as a per-matvec
+        callback needs tens of iterations, where PETSc's own GMRES driving the same V-cycle natively
+        reaches the 1% stop in ~1 iteration (measured, ~60x faster per step). The forward-only native solve
+        does not touch the differentiable path: the adjoint uses the single-V-cycle transpose below.
 
         Parameters
         ----------
@@ -1273,6 +1294,10 @@ class MonolithicFactorShiftPolicy(eqx.Module):
             The flat coupled state ``[flow..., k, omega]``, shape ``((dim + 3) n_cells,)``.
         """
         diagonal = self.base.shift_term(phi).diagonal
+        if getattr(self.preconditioner, "is_exact_native", False):
+            # The step applies the native exact-Jacobian full solve directly (see `_shifted_solve`):
+            # `preconditioner.exact_solve(phi, -rhs, shift)`. The shift already carries the relaxation.
+            return ShiftTerm(diagonal, lambda relaxation: self.preconditioner)
         apply = self.preconditioner.matvec()
         # The factorization is frozen, so the preconditioner does not depend on the shift strength.
         return ShiftTerm(diagonal, lambda relaxation: apply)
@@ -1317,7 +1342,9 @@ def _monolithic_factor_step(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
     base: CoupledShiftPolicy,
-    preconditioner: MonolithicIlutPreconditioner | MonolithicLuPreconditioner,
+    preconditioner: (
+        MonolithicIlutPreconditioner | MonolithicLuPreconditioner | MonolithicAmgPreconditioner
+    ),
     *,
     beta0: float,
     exponent: float,
@@ -1710,6 +1737,122 @@ def coupled_lu_continuation(
         inner_steps=inner_steps,
         inner_tol=inner_tol,
         forward_solver=forward_solver,
+        block_scaled_norm=block_scaled_norm,
+        residual_norm=residual_norm,
+    )
+
+
+def coupled_amg_continuation(
+    coupled: CoupledRANS,
+    reference_state: jnp.ndarray,
+    *,
+    amg_beta: float = 2.0,
+    stencil_reach: int = 3,
+    smoother_fill_levels: int = 1,
+    smoother_sweeps: int = 1,
+    native_forward_solve: bool = False,
+    beta0: float = 2.0,
+    exponent: float = 1.0,
+    beta_floor: float = 0.0,
+    max_escalations: int = 6,
+    escalation_factor: float = 2.0,
+    divergence_cap: float = 10.0,
+    line_search: int = _COUPLED_LINE_SEARCH,
+    inner_steps: int = 1,
+    inner_tol: float = 0.05,
+    forward_solver: lx.AbstractLinearSolver | None = None,
+    block_scaled_norm: bool = False,
+    shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+    residual_norm: ResidualNorm | None = None,
+) -> ForwardStep:
+    """Build a pseudo-transient continuation step preconditioned by a monolithic **algebraic-multigrid** V-cycle.
+
+    The multigrid counterpart of :func:`coupled_ilut_continuation` / :func:`coupled_lu_continuation`: it
+    materializes the coupled Jacobian at ``reference_state`` (compressed graph-coloured probing -- one
+    source of truth, no re-derived assembly), adds the pseudo-transient shift at ``amg_beta``, and builds a
+    single smoothed-aggregation V-cycle for it (:class:`~aquaflux.solve.MonolithicAmgPreconditioner`), all
+    off the jit path. Unlike the two factorizations it keeps the heavy fill off the fine grid -- the only
+    exact solve is a direct LU on the small coarsest grid -- so its memory stays bounded and its setup is
+    seconds where the incomplete factorization's ``spilu`` runs for minutes on a distance-3 three-dimensional
+    stencil. It is the coupled preconditioner for **large three-dimensional** meshes, where the complete
+    LU's fill is out of memory and the ILUT's factorization is prohibitively slow to build; the LU / ILUT
+    remain faster (fewer Krylov iterations) at two-dimensional / moderate size.
+
+    A drop-in for ``solve_coupled``'s ``continuation`` argument, and (like the factorizations)
+    reverse-differentiable through the converged state: the frozen V-cycle is ``stop_gradient``-ed, so the
+    adjoint's transpose solve reuses the same (transposed) V-cycle -- the multigrid is a fixed *linear*
+    operator, transposed through the cycle's own transpose, needing no flexible outer Krylov -- and the
+    gradient is the exact coupled implicit-function-theorem sensitivity.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled residual assembler.
+    reference_state : jnp.ndarray
+        The coupled state the Jacobian and shift are frozen at, shape ``((dim + 3) n_cells,)``.
+    amg_beta : float
+        The pseudo-transient shift strength the V-cycle is built at (the operator it preconditions is
+        ``J + amg_beta * d`` for the base shift diagonal ``d``). The march's own ``beta`` varies; the strong
+        V-cycle tolerates the mismatch.
+    stencil_reach : int
+        The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+    smoother_fill_levels : int
+        Incomplete-LU fill levels of the stationary level smoother (``1`` = ILU(1); the indefinite saddle
+        stalls at ``0``, and a Krylov-accelerated smoother would make the V-cycle nonlinear).
+    smoother_sweeps : int
+        Richardson sweeps of the level smoother per V-cycle visit.
+    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search,
+    inner_steps, inner_tol, forward_solver, block_scaled_norm, shift_basis, residual_norm
+        The pseudo-transient schedule, dual-time, guard, and measure parameters, exactly as in
+        :func:`coupled_ilut_continuation`. ``forward_solver`` defaults to a restart-40 GMRES matched to the
+        V-cycle's convergence (a few tens of vectors), rather than the ILUT's restart-10.
+
+    Returns
+    -------
+    ForwardStep
+        The step to hand ``solve_coupled`` as ``continuation``.
+    """
+    base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
+    n_fields = coupled.layout.dim + 3
+    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
+    frozen = jax.lax.stop_gradient(reference_state)
+    matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    # `native_forward_solve` (EXPERIMENTAL, opt-in) runs the forward Krylov natively in PETSc, its operator
+    # a shell over the exact jvp (true Newton, not a frozen Jacobian) -- the native GMRES + GAMG reaches its
+    # stop in ~1 iteration where the JAX-side Krylov with the V-cycle as a per-matvec callback needs ~90
+    # (the JAX-side GMRES is far slower on a well-preconditioned system; measured). The mechanism is
+    # validated (native speed, correct step direction, exact-Newton), but the march currently converges
+    # SLOWER than the default path per step: the default's JAX-side solver over-solves each step to
+    # ~machine zero, and the pseudo-transient globalization implicitly leans on those near-exact steps,
+    # which the native (honest-tolerance) step does not yet match -- a convergence-tuning follow-up. Default
+    # off; the default path applies the frozen V-cycle per-matvec through the JAX-side Krylov.
+    preconditioner = MonolithicAmgPreconditioner.build(
+        matvec,
+        colouring,
+        n_fields,
+        _frozen_shift_diagonal(base, amg_beta, reference_state),
+        native=native_forward_solve,
+        residual_fn=coupled.residual if native_forward_solve else None,
+        smoother_fill_levels=smoother_fill_levels,
+        smoother_sweeps=smoother_sweeps,
+    )
+    return _monolithic_factor_step(
+        coupled,
+        reference_state,
+        base,
+        preconditioner,
+        beta0=beta0,
+        exponent=exponent,
+        beta_floor=beta_floor,
+        max_escalations=max_escalations,
+        escalation_factor=escalation_factor,
+        divergence_cap=divergence_cap,
+        line_search=line_search,
+        inner_steps=inner_steps,
+        inner_tol=inner_tol,
+        forward_solver=forward_solver
+        if forward_solver is not None
+        else _COUPLED_AMG_FORWARD_SOLVER,
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
     )

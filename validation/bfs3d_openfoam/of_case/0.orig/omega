@@ -1,0 +1,51 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      omega;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Inlet omega from k and a length scale L = 0.07 H1 = 7e-4 m:
+// omega = sqrt(k) / (Cmu^0.25 L) = sqrt(0.375) / (0.09^0.25 * 7e-4) ~ 1600.
+dimensions      [0 0 -1 0 0 0 0];
+
+internalField   uniform 1600;
+
+boundaryField
+{
+    inlet
+    {
+        type            fixedValue;
+        value           $internalField;
+    }
+    outlet
+    {
+        type            zeroGradient;
+    }
+    upperWall
+    {
+        type            omegaWallFunction;
+        value           $internalField;
+    }
+    lowerWall
+    {
+        type            omegaWallFunction;
+        value           $internalField;
+    }
+    sideWalls
+    {
+        type            omegaWallFunction;
+        value           $internalField;
+    }
+}
+
+// ************************************************************************* //

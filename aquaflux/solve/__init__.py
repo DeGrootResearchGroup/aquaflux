@@ -61,6 +61,7 @@ from .continuation import (
     StepAcceptance,
 )
 from .frozen_operator import convection_diffusion_operator, decouple_dof
+from .amg_preconditioner import AmgVCycle, MonolithicAmgPreconditioner, build_amg_vcycle
 from .ilut_preconditioner import MonolithicIlutPreconditioner
 from .lu_preconditioner import MonolithicLuPreconditioner
 from .implicit import (
@@ -110,6 +111,7 @@ from .step_control import AlphaTargetingControl, DualTimeControl, ResidualRatioD
 __all__ = [
     "AirHierarchy",
     "AlphaTargetingControl",
+    "AmgVCycle",
     "BlockColouring",
     "BlockScaledNorm",
     "CoefficientDriftTrigger",
@@ -124,6 +126,7 @@ __all__ = [
     "LineSearchGrowth",
     "LocalCourantBasis",
     "MarchResult",
+    "MonolithicAmgPreconditioner",
     "MonolithicIlutPreconditioner",
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
@@ -147,6 +150,7 @@ __all__ = [
     "air_multigrid_solve",
     "block_stencil_colouring",
     "build_air_hierarchy",
+    "build_amg_vcycle",
     "build_convection_hierarchy",
     "build_smoothed_hierarchy",
     "convection_diffusion_operator",
