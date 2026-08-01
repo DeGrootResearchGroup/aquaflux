@@ -23,8 +23,11 @@ import equinox as eqx
 import jax
 
 from .coupled import solve_coupled
+from .initialization import hybrid_initialize
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import jax.numpy as jnp
 
     from .coupled import CoupledRANS
@@ -89,6 +92,7 @@ def solve_reynolds_continuation(
     *,
     schedule: ReynoldsSchedule | None = None,
     intermediate_rtol: float | None = 1e-2,
+    point_setup: Callable[[CoupledRANS, jnp.ndarray], dict] | None = None,
     **solve_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system by Reynolds-number continuation, returning the target-Re root.
@@ -125,6 +129,29 @@ def solve_reynolds_continuation(
         them to the tight target tolerance is wasted work -- a loose value develops the field enough to
         seed the next point at a fraction of the cost. Default ``1e-2``. Pass ``None`` to converge every
         point to the caller's ``rtol`` (no loosening).
+    point_setup : callable, optional
+        ``(companion, seed_state) -> dict``, a **per-Reynolds-point** builder of extra ``solve_coupled``
+        keyword arguments (merged over ``solve_kwargs`` for that point). It exists for a preconditioner that
+        is both **per-companion and per-state** — chiefly the complete-LU β-tracking hook, whose
+        ``continuation`` is frozen at the point's own viscosity *and* seed state and whose
+        ``precondition_step`` closes over the point's own residual — which the single target-specific
+        ``continuation`` cannot express across the whole ramp. It is called for **every** point (lower-Re
+        and target) with that point's companion assembler and its **packed seed coupled state**
+        (:meth:`~aquaflux.turbulence.CoupledRANS.state_from_physical` of the seed fields; the lowest point's
+        seed is materialized from :func:`~aquaflux.turbulence.hybrid_initialize` here, so the built
+        continuation freezes at the same state the solve starts from). Typical use::
+
+            point_setup=lambda comp, state: {
+                "continuation": coupled_lu_continuation(comp, state, inner_steps=..., inner_tol=...),
+                "precondition_step": lu_beta_tracking_refresh(comp),
+            }
+
+        **Forward-only** (the ``precondition_step`` it returns raises under ``jax.grad``, like the other
+        observed-march hooks), so leave it ``None`` when differentiating and use the ``continuation`` path
+        instead. ``None`` (default) leaves the ramp byte-identical: each point builds its own continuation
+        from :func:`~aquaflux.turbulence.solve_coupled`'s defaults, and the seed is passed through as-is
+        (the lowest point self-starts inside ``solve_coupled``). When set, its keys **override** any
+        ``continuation`` / ``reference_state`` in ``solve_kwargs`` (they are mutually exclusive uses).
     **solve_kwargs
         Forwarded to every per-Re :func:`~aquaflux.turbulence.solve_coupled`. ``continuation`` and
         ``reference_state`` are **target-specific** (a preconditioner frozen at the target viscosity),
@@ -154,7 +181,7 @@ def solve_reynolds_continuation(
     function is **identical** to differentiating a direct :func:`~aquaflux.turbulence.solve_coupled` --
     exact and independent of ``n_points``. As with a direct solve, to differentiate, pass a
     ``continuation`` built on concrete parameters outside ``jax.grad`` (used by the final solve) and no
-    forward-only keywords (``refresh_trigger`` / ``on_step`` / ``step_control``).
+    forward-only keywords (``refresh_trigger`` / ``on_step`` / ``step_control`` / ``point_setup``).
     """
     if n_points < 0:
         raise ValueError(f"n_points must be >= 0, got {n_points}")
@@ -176,11 +203,26 @@ def solve_reynolds_continuation(
     if intermediate_rtol is not None:
         ramp_kwargs["rtol"] = intermediate_rtol
 
+    def _point_solve(assembler, seed_fields, base_kwargs):
+        # One Reynolds point. Without `point_setup` this is the plain solve (byte-identical to before,
+        # seed passed through — the lowest point self-starts inside solve_coupled). With it, materialize
+        # the seed (hybrid start for the lowest point) so the per-point continuation freezes at the same
+        # state the solve begins from, then merge the point's own continuation / precondition_step over
+        # the base kwargs.
+        if point_setup is None:
+            return solve_coupled(assembler, *seed_fields, **base_kwargs)
+        if seed_fields[0] is None:
+            seed_fields = hybrid_initialize(assembler.momentum, assembler.turbulence)
+        packed = assembler.state_from_physical(*seed_fields)
+        return solve_coupled(
+            assembler, *seed_fields, **{**base_kwargs, **point_setup(assembler, packed)}
+        )
+
     seed: tuple[jnp.ndarray | None, jnp.ndarray | None, jnp.ndarray | None] = (None, None, None)
     for index, scale in enumerate(scales[:-1]):
         companion = frozen.with_scaled_molecular_viscosity(scale)
         try:
-            flow, k, omega = solve_coupled(companion, *seed, **ramp_kwargs)
+            flow, k, omega = _point_solve(companion, seed, ramp_kwargs)
         except eqx.EquinoxRuntimeError as exc:
             raise RuntimeError(
                 f"Reynolds-continuation point {index + 1} of {n_points} "
@@ -194,4 +236,4 @@ def solve_reynolds_continuation(
 
     # The final point is the true target: the live `coupled` (so its adjoint is the direct solve's),
     # seeded by the last converged lower-Re solution, with the full solve_kwargs.
-    return solve_coupled(coupled, *seed, **solve_kwargs)
+    return _point_solve(coupled, seed, solve_kwargs)

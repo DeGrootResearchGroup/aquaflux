@@ -1069,6 +1069,24 @@ tuning follow-up noted above.
     linear stiffness), so an anchor converged to `1e-6` grinds for many iterations for no benefit to the
     seed. Pinned by a monkeypatched-`solve_coupled` unit test that the lower-Re points receive
     `intermediate_rtol` and the target receives `rtol`.
+  - **`point_setup` — a PER-POINT continuation/precondition seam for a per-companion, per-state
+    preconditioner (BUILT).** The single `continuation`/`reference_state` is dropped for the ramp rungs
+    (target-specific), so it cannot express a preconditioner that must be rebuilt at *each* rung's own
+    viscosity **and** seed state — chiefly the complete-LU β-tracking hook (`coupled_lu_continuation`
+    frozen at the point's `(state, β)` + `lu_beta_tracking_refresh` closing over the point's residual),
+    which is what lets the aggressive Courant control reach the developed pitzDaily root (the block PC
+    stalls/diverges at the overshoot — see the pitzDaily case). `point_setup(companion, seed_state) ->
+    dict` is called for **every** point (lower-Re and target) with that point's companion and its **packed
+    seed coupled state**, and its keys are merged over `solve_kwargs` (overriding any `continuation`/
+    `reference_state`). To give the built continuation the state the solve begins from, the loop
+    **materializes the lowest point's seed** (`hybrid_initialize`) when `point_setup` is set, rather than
+    letting `solve_coupled` self-start internally. **Forward-only** (the `precondition_step` it returns
+    raises under `jax.grad`), so leave it `None` when differentiating. **`None` (default) is
+    byte-identical** — each point self-starts and builds its own default continuation. Pinned by a
+    monkeypatched-`solve_coupled` unit test (called per point, kwargs merged, lowest seed materialized;
+    and `None` reproduces the plain ramp). Used by
+    `validation/pitzdaily_openfoam/compare_reynolds_continuation.py` (the complete-LU + aggressive-control
+    ramp that reaches `x_r/h` ~ 8).
   - **Schedule is an injected `ReynoldsSchedule` (a `Protocol`), default `GeometricReynoldsSchedule`
     (one decade per step).** `scales(n_points)` returns the `n_points+1` molecular-viscosity scale
     factors, descending to `1.0` (the target): `(10^N, …, 10, 1)`. Geometric because the nonlinearity
