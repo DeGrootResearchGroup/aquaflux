@@ -359,6 +359,23 @@ class StepControl(Protocol):
         """
 
 
+def _has_diverged(residual_norm: jnp.ndarray, reference: float, divergence_cap: float) -> bool:
+    """Whether a step's residual norm signals a diverged step the retry should redo.
+
+    True if the norm is non-finite, or -- when a finite ``divergence_cap`` is set -- if it exceeds
+    ``divergence_cap * reference``. A non-finite norm is the load-bearing case (an inexact
+    preconditioner returning a poisoned correction on a stiff operator); the cap is an optional extra
+    for a finite blow-up, and defaults to off (``inf``) so only non-finiteness triggers a retry.
+    """
+    if not bool(jnp.isfinite(residual_norm)):
+        return True
+    return (
+        divergence_cap < float("inf")
+        and reference > 0.0
+        and (float(residual_norm) > divergence_cap * reference)
+    )
+
+
 @eqx.filter_jit
 def _march_step(
     forward_step: ForwardStep,
@@ -407,6 +424,8 @@ def forward_march(
     norm_builder: Callable[[jnp.ndarray], ResidualNorm] | None = None,
     precondition_step: Callable[[ForwardStep, jnp.ndarray], None] | None = None,
     solver: lx.AbstractLinearSolver | None = None,
+    retry_solver: lx.AbstractLinearSolver | None = None,
+    retry_divergence_cap: float = float("inf"),
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
 
@@ -491,6 +510,24 @@ def forward_march(
         before.
     solver : lineax.AbstractLinearSolver, optional
         The linear solver for each step; defaults to ``forward_step.default_solver()``.
+    retry_solver : lineax.AbstractLinearSolver, optional
+        A **tighter** linear solver used to redo a step that diverged (see ``retry_divergence_cap``).
+        An *inexact* preconditioner -- a threshold-incomplete-LU (ILUT) -- can return a correction that
+        goes non-finite on the stiff operator an aggressive Courant overshoot produces, where the *exact*
+        complete-LU factorization returns a finite one; the loose default Krylov tolerance is what leaves
+        that correction too inaccurate. On a diverged step this redoes the **same** step from the **same**
+        pre-step state with ``retry_solver`` -- the preconditioner (the frozen factorization) is unchanged
+        and is *not* re-refreshed, since it is already fresh at this ``(state, β)`` and re-factoring it
+        would be a no-op; only the Krylov solve is tightened, which is what recovers the step while keeping
+        the accepted trajectory. A single retry: if it still diverges, the march breaks as it would have
+        without a retry. Forward-only, like the rest of the observed march. ``None`` (default) never
+        retries, so the loop is byte-identical -- and the exact-LU path, which never diverges, needs none.
+    retry_divergence_cap : float, optional
+        With a ``retry_solver`` set, a step is treated as diverged (and retried) when its residual norm is
+        non-finite **or**, if this cap is finite, exceeds ``retry_divergence_cap * reference``. Defaults to
+        ``inf`` (only non-finiteness triggers a retry), because the load-bearing failure is a poisoned
+        (non-finite) correction, and a residual can legitimately *rise* during development (the
+        ``β × travel`` identity), so a tight cap would false-fire on the reachability descent.
 
     Returns
     -------
@@ -544,9 +581,24 @@ def forward_march(
             # mutates the step's static preconditioner in place, so `_march_step` stays a compilation
             # cache hit. Forward-only, like the trigger and the control.
             precondition_step(active_step, state)
+        prestep_state = state
         state, cycles, alpha, inner, residual_norm = _march_step(
-            active_step, residual_fn, state, residual_norm_0, solver
+            active_step, residual_fn, prestep_state, residual_norm_0, solver
         )
+        # Reactive divergence retry: an inexact preconditioner (a threshold-ILU) can return a
+        # non-finite / diverging correction on the stiff operator an aggressive overshoot produces,
+        # where an exact factorization returns a finite one -- the loose default Krylov tolerance is
+        # what leaves that correction too inaccurate. Redo the SAME step from the SAME pre-step state
+        # with the tighter `retry_solver` (the frozen factors are already fresh at this (state, β), so
+        # re-preconditioning is a no-op; only the Krylov solve is tightened). One retry; a still-diverged
+        # step breaks below exactly as it would without a retry. `retry_solver=None` (default) is
+        # byte-identical, and the exact-LU path never triggers this.
+        if retry_solver is not None and _has_diverged(
+            residual_norm, reference, retry_divergence_cap
+        ):
+            state, cycles, alpha, inner, residual_norm = _march_step(
+                active_step, residual_fn, prestep_state, residual_norm_0, retry_solver
+            )
         current = float(residual_norm)
         report = StepReport(
             step=len(reports),

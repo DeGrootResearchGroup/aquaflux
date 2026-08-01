@@ -2011,6 +2011,8 @@ def solve_coupled(
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     precondition_step: Callable[[ForwardStep, jnp.ndarray], None] | None = None,
+    retry_solver: lx.AbstractLinearSolver | None = None,
+    retry_divergence_cap: float = float("inf"),
     **continuation_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system ``R(u, p, k, omega) = 0`` by one monolithic Newton solve.
@@ -2198,6 +2200,21 @@ def solve_coupled(
         moves away from it. Pair it with a :class:`~aquaflux.solve.DualTimeControl` (so β is a readable
         constant leaf) and a :func:`coupled_lu_continuation` step; the finishing solve and adjoint keep
         the last frozen factorization (exact enough near the converged β → 0 root).
+    retry_solver : lineax.AbstractLinearSolver, optional
+        A **tighter** linear solver used to redo an observed step that diverged (forward-only, same guard).
+        With an *inexact* preconditioner (a threshold-ILU) the loose default Krylov solve can return a
+        non-finite correction on the stiff operator an aggressive Courant overshoot produces, where the
+        *exact* complete LU returns a finite one. On a diverged step the march redoes it from the same
+        state at ``retry_solver`` -- the (β-tracked) factorization is already fresh, so only the Krylov
+        tolerance is tightened -- which recovers the step while keeping the accepted trajectory, and pays
+        the tighter solve only on the few trouble steps rather than every step. The exact-LU path never
+        diverges, so it needs none; ``None`` (default) never retries. See ``retry_divergence_cap`` for the
+        trigger and :func:`aquaflux.solve.forward_march` for the mechanism.
+    retry_divergence_cap : float, optional
+        A step is retried when its residual norm is non-finite **or**, if this cap is finite, exceeds
+        ``retry_divergence_cap * reference``. Defaults to ``inf`` (only non-finiteness triggers), because
+        the residual can legitimately rise during development (the ``β × travel`` identity), so a tight
+        cap would false-fire on the load-bearing reachability descent.
     **continuation_kwargs
         Forwarded to :func:`coupled_continuation` when building internally (schedule + preconditioner
         options). Notably ``inner_steps > 1`` selects the **dual-time** (backward-Euler) march
@@ -2221,6 +2238,7 @@ def solve_coupled(
         or on_step is not None
         or on_checkpoint is not None
         or precondition_step is not None
+        or retry_solver is not None
     )
     if observing and _is_traced((coupled, flow, k, omega)):
         # The refresh re-derives the preconditioner from the mid-march state, which is a tracer when
@@ -2229,8 +2247,8 @@ def solve_coupled(
         # refresh (it forbids an explicit `continuation`), so this cannot be worked around here --
         # raise with the fix rather than letting the leak surface as an opaque UnexpectedTracerError.
         raise ValueError(
-            "refresh_trigger/step_control/on_step/on_checkpoint/precondition_step drive a forward-only "
-            "eager march and cannot be used "
+            "refresh_trigger/step_control/on_step/on_checkpoint/precondition_step/retry_solver drive a "
+            "forward-only eager march and cannot be used "
             "under jax.grad (or any JAX transform): the march steps in Python on concrete residual "
             "norms, and a mid-march preconditioner rebuild would capture the differentiation tracer. "
             "Drop them and differentiate the single-stage solve with a `continuation` "
@@ -2329,6 +2347,8 @@ def solve_coupled(
                 drift_measure=eddy_viscosity_drift(coupled, jax.lax.stop_gradient(state)),
                 norm_builder=norm_builder,
                 precondition_step=precondition_step,
+                retry_solver=retry_solver,
+                retry_divergence_cap=retry_divergence_cap,
             )
             state = result.state
             control_state = result.control_state
