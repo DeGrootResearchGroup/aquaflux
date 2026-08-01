@@ -872,6 +872,21 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     is what carries the solve; β-tracking is the forward-march robustness it needs *there*. Pinned in
     `tests/integration/test_coupled_ilut.py` (the pure gate logic as a fast test; the gated in-place
     refactor; cold-march convergence to the block PC's root).
+    - **The rung-1 overshoot NaN is fixed by a tighter SOLVE, not a refresh — `solve_coupled(retry_solver=…)`
+      (BUILT).** The NaN above is the ILUT's *approximation* at the stiff operator the overshoot creates:
+      it NaN'd *even on the step the gate had just re-factored*, so a "struggle-triggered refresh" (the
+      candidate refinement mused above) cannot help — re-factoring the deterministic ILUT at the same
+      `(state, β)` is a no-op. The failure is an under-converged *Krylov* solve (the loose default
+      tolerance leaves the inexact δ non-finite on the stiff operator, where the exact LU's δ is finite),
+      so the fix is to **redo the diverged step at a tighter linear solve**, same state, same (fresh)
+      factors: `forward_march`/`solve_coupled` take a `retry_solver` that recovers only a non-finite step
+      (see the `retry_solver` bullet in `.claude/rules/solve.md`). Measured: with the loose ILUT default +
+      `retry_solver=relative_residual_gmres(1e-4, restart=40)`, the aggressive-control ramp runs rung-1
+      steps 1–7 on the cheap loose solver and *only* the diverged overshoot step retries tight, recovering
+      to the exact-LU value and tracking the LU on — the state-adaptive alternative to tightening every
+      step. Orthogonal to and composes with the refresh gating. This is the ILUT-side other half of the
+      overshoot robustness the LU gets free from being exact; the `DualTimeControl` overshoot itself is
+      still a globalization fragility (the control-tuning follow-up owns it).
   - **~~Remaining limiter — the k equation drift~~ — RETIRED: the stall no longer reproduces (measured
     2026-07-22).** This bullet used to record that past rel ~0.09 the direct-`k` residual grew (rel 1 →
     ~5×) and re-stalled the march, and named high-Reynolds `k` stability as the open follow-up. **It

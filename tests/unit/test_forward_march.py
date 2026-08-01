@@ -131,6 +131,73 @@ def test_march_without_a_trigger_reaches_the_same_root_as_the_newton_solver() ->
     assert jnp.allclose(marched.state, solved, atol=1e-8)
 
 
+class _PoisonUnlessTight(eqx.Module):
+    """A step that poisons the state (non-finite) unless solved with the ``"tight"`` solver.
+
+    Models an inexact preconditioner whose loose Krylov solve returns a non-finite correction on a
+    stiff operator while a tighter solve recovers it -- so the march's divergence retry is pinned
+    without a real threshold-ILU. The ``solver`` rides through ``filter_jit`` as a static argument, so
+    the branch on it is resolved at trace time (a distinct compilation per solver, as for a real one).
+    """
+
+    def stepper(self):
+        def step(residual_fn, phi, residual_norm_0, solver):
+            if solver == "tight":  # the recovered step lands on the root, at a higher cycle cost
+                return jnp.zeros_like(phi), jnp.asarray(6), jnp.asarray(1.0), jnp.asarray(1)
+            return jnp.full_like(phi, jnp.inf), jnp.asarray(3), jnp.asarray(1.0), jnp.asarray(1)
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def default_solver(self):
+        return "loose"
+
+
+def test_march_retries_a_diverged_step_with_the_tighter_solver() -> None:
+    """A step that diverges under the loose default is redone with ``retry_solver`` and the recovered
+    (finite) step is what the march accepts -- the reactive divergence retry for an inexact PC.
+
+    Without a retry solver the poisoned step breaks the march (the pre-existing behaviour, which lets
+    the finishing solve diagnose the failure); with one, the same step is redone at the tighter solver,
+    lands on the root, and converges -- and the accepted step's reported cost is the tight retry's.
+    """
+    residual = _Cubic(jnp.zeros((1,)))  # root at phi = 0; a finite phi gives a finite residual
+    phi0 = jnp.ones((1,))
+    step = _PoisonUnlessTight()
+
+    poisoned = forward_march(step, residual, phi0, max_steps=5, rtol=1e-10, atol=1e-12)
+    assert not poisoned.converged
+    assert not bool(jnp.isfinite(poisoned.reports[-1].residual_norm))
+
+    recovered = forward_march(
+        step, residual, phi0, max_steps=5, rtol=1e-10, atol=1e-12, retry_solver="tight"
+    )
+    assert recovered.converged
+    assert jnp.allclose(recovered.state, 0.0, atol=1e-8)
+    assert recovered.reports[-1].cycles == 6  # accepted the tight retry, not the loose attempt
+
+
+def test_march_does_not_retry_a_finite_step() -> None:
+    """A retry solver set but never a divergence: the march runs exactly as without one.
+
+    The retry fires only on a diverged step, so on a healthy march ``retry_solver`` is inert -- the
+    same path, the same root, the same reports -- which is what keeps it a safety net rather than an
+    every-step cost.
+    """
+    residual, phi0, root = _march_and_solver_inputs()
+    step = DampedNewtonStep(line_search=10)
+    common = dict(max_steps=50, rtol=1e-10, atol=1e-12)
+
+    plain = forward_march(step, residual, phi0, **common)
+    with_retry = forward_march(step, residual, phi0, retry_solver="tight", **common)
+
+    assert with_retry.converged and plain.converged
+    assert jnp.allclose(with_retry.state, root, atol=1e-8)
+    assert len(with_retry.reports) == len(plain.reports)
+
+
 def test_march_stops_where_the_trigger_says_without_raising() -> None:
     """A triggered march stops short of a root and reports it -- deliberately without raising.
 

@@ -1546,6 +1546,29 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     accelerates. Pinned by a trace-counting test (extra steps add zero traces). Note the residual is
     invoked several times *within one trace* (step, line-search ladder, norm), so trace count ≠ compile
     count — assert that further steps add none, not that the total is 1.
+  - **Reactive divergence retry — `retry_solver` recovers a step an INEXACT preconditioner poisons,
+    without tightening every step (BUILT).** An *inexact* preconditioner (the threshold-ILU) can return a
+    non-finite correction on the stiff operator an aggressive Courant overshoot produces, where the
+    *exact* complete-LU returns a finite one — the loose default Krylov tolerance is what leaves that
+    correction too inaccurate. `forward_march(retry_solver=…, retry_divergence_cap=inf)` redoes a diverged
+    step **from the same pre-step state** at the tighter `retry_solver`; the trigger is
+    `_has_diverged` (non-finite, or `> divergence_cap·reference` — default `inf`, i.e. non-finite only,
+    because the residual legitimately *rises* during development via `β×travel`, so a tight cap would
+    false-fire on the reachability descent). **The preconditioner is NOT re-refreshed on retry** — under a
+    β-tracking refresh (`ilut_beta_tracking_refresh`, `.claude/rules/turbulence.md`) the factor is already
+    fresh at this `(state, β)`, and re-factoring the deterministic factorization at the same point is a
+    no-op; the failure is an under-converged *Krylov* solve, not a stale PC, so only the Krylov tolerance
+    is tightened. This is orthogonal to the refresh *gating*: the retry recovers a diverged step whatever
+    cadence the ILUT was refreshed at. One retry: a still-diverged
+    step breaks as before. Default `retry_solver=None` is **byte-identical**, and the exact-LU path never
+    triggers it. **Why it beats tightening every step:** measured on the aggressive pitzDaily ILUT ramp,
+    rung-1 steps 1–7 ran on the cheap loose solver and *only* the diverged step 8 retried tight —
+    recovering to the exact-LU value (ratio 9.72e-2) and tracking the LU on — instead of paying the tight
+    solve on every step. Threaded through `solve_coupled(retry_solver=…)`; forward-only (raises under
+    `jax.grad`, same guard as the refresh/control). Pinned by `test_forward_march.py`
+    (`test_march_retries_a_diverged_step_with_the_tighter_solver`, `test_march_does_not_retry_a_finite_step`).
+    On 2D the exact LU is cheaper *and* robust for free, so this is really a 3D-readiness lever (where the
+    LU's fill is the wall and the ILUT is the only option).
   - **`CoefficientDriftTrigger` — the PREFERRED staleness trigger: measure the drift, don't infer it
     from cost (binding for new work).** A frozen preconditioner is stale exactly when the operator it
     approximates has moved, so the honest signal is that movement itself. `StepReport.drift` carries a
