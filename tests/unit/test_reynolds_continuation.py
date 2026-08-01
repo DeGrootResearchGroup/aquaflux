@@ -199,3 +199,53 @@ def test_zero_points_calls_solve_once_at_the_target(monkeypatch) -> None:
     solve_reynolds_continuation(_tiny_coupled(), n_points=0, rtol=1e-8)
     assert len(calls) == 1
     assert calls[0]["scale"] == 1.0 and calls[0]["seed_is_none"] and calls[0]["rtol"] == 1e-8
+
+
+def test_point_setup_builds_per_point_kwargs_and_materializes_the_first_seed(monkeypatch) -> None:
+    """``point_setup`` is called for every Reynolds point with that point's companion; its returned
+    kwargs are merged into that point's solve; and the lowest point's seed is materialized (so a
+    per-point continuation can freeze at the same state the solve starts from).
+    """
+    import aquaflux.turbulence.reynolds as reynolds
+
+    coupled = _tiny_coupled()
+    n = coupled.momentum.mesh.n_cells
+    dim = coupled.layout.dim
+    # A correctly-shaped stand-in converged state, so each point's seed packs into the next cleanly.
+    fields = (jnp.zeros((dim + 1) * n), jnp.full(n, 0.5), jnp.full(n, 100.0))
+
+    calls = []
+
+    def fake_solve_coupled(c, flow=None, k=None, omega=None, **kwargs):
+        scale = float(c.momentum.properties.properties["viscosity"].value / (RHO * NU))
+        calls.append({"scale": scale, "seed_is_none": flow is None, "tag": kwargs.get("tag")})
+        return fields
+
+    monkeypatch.setattr(reynolds, "solve_coupled", fake_solve_coupled)
+    # Stub the hybrid start so the test stays structural (no real Laplace solve).
+    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda momentum, turbulence: fields)
+
+    setups = []
+
+    def point_setup(companion, state):
+        scale = float(companion.momentum.properties.properties["viscosity"].value / (RHO * NU))
+        setups.append(scale)
+        return {"tag": scale}  # a marker kwarg proving the merge reaches solve_coupled
+
+    solve_reynolds_continuation(coupled, n_points=2, rtol=1e-10, point_setup=point_setup)
+
+    # Called once per point (lower-Re and target), at each companion's viscosity scale...
+    assert setups == [100.0, 10.0, 1.0]
+    # ...its kwargs are merged into every point's solve...
+    assert [c["tag"] for c in calls] == [100.0, 10.0, 1.0]
+    # ...and the lowest point is now warm-started from the materialized seed too (not solve_coupled's
+    # internal hybrid start), so the built continuation and the solve agree on the starting state.
+    assert [c["seed_is_none"] for c in calls] == [False, False, False]
+
+
+def test_point_setup_none_is_byte_identical_to_the_plain_ramp(monkeypatch) -> None:
+    """Default (``point_setup=None``): the lowest point self-starts inside solve_coupled and no
+    per-point kwargs are added -- the ramp is exactly the pre-existing one."""
+    calls = _record_solves(monkeypatch)
+    solve_reynolds_continuation(_tiny_coupled(), n_points=2, rtol=1e-10)
+    assert [c["seed_is_none"] for c in calls] == [True, False, False]  # first point self-starts

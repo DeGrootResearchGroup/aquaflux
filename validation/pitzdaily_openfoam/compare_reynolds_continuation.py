@@ -23,19 +23,33 @@ target viscosity, this case walks a **homotopy in Reynolds number** and marches 
   ramps the timestep up while the inner loop stays comfortable -- the lever on how many steps it takes to
   develop the bubble.
 
-**The conservative Courant control is load-bearing (binding -- do not restore the defaults).** The shipped
-:class:`~aquaflux.solve.DualTimeControl` defaults (``grow_above = 0.5``, ``backoff_below = 0.25``,
-``grow = 1.5``) grow the pseudo-timestep even when an inner step has *clipped* (line-search factor 0.5),
-which on the stiff target-Reynolds rung drives the timestep past the point where the low-shift coupled
-solve loses diagonal dominance and the step goes non-finite. This case therefore grows the timestep
-**only on a fully comfortable inner step** (``grow_above = 1.0``), backs off the moment one clips
-(``backoff_below = 0.5``), and grows gently (``grow = 1.3``) -- which develops the recirculation
-vigorously and stably. It still **stalls short of the OpenFOAM reattachment** on the target rung, as the
-pseudo-time step meets the low-shift conditioning wall of the coupled saddle at this Reynolds number; that stall is
-the phenomenon this case exists to reproduce and study, not a failure to run.
+**Reaching the developed reattachment needs two things together: the exact complete-LU preconditioner and
+the aggressive Courant control.** They are coupled, and getting either wrong stalls or diverges short of
+the OpenFOAM ``x_r/h`` ~ 7.74:
+
+* **The control must be aggressive** -- the shipped :class:`~aquaflux.solve.DualTimeControl` GROW logic
+  (``grow_above = 0.5``, ``grow = 1.5``), with a small ``beta_start`` and a low ``beta_min``, driving the
+  pseudo-timestep into the large-``dtau`` regime. Developing the recirculation *requires* operating there:
+  the bubble's slow transient is carried by clipped (line-search-factor < 1) steps, so a control that grows
+  only on a fully comfortable step and backs off on any clip refuses exactly those steps and **stalls short
+  of the reattachment** -- it never reaches the developed root. (An earlier version of this case used that
+  conservative control and stalled by design; that was a control defect, not a property of the problem.)
+
+* **The preconditioner must be exact** -- because the aggressive control's large timestep *overshoots* into
+  a stiff, near-singular low-shift coupled saddle where a block-triangular SIMPLE preconditioner loses
+  diagonal dominance and the step goes non-finite. This case therefore preconditions each Reynolds point
+  with a **monolithic complete-LU factorization** (:func:`~aquaflux.turbulence.coupled_lu_continuation`),
+  **re-factored at the current ``(state, beta)`` every step** by
+  :func:`~aquaflux.turbulence.lu_beta_tracking_refresh`, so the shifted solve is exact (a single Krylov
+  iteration) and robust through the overshoots. The per-point continuation is supplied through
+  ``solve_reynolds_continuation``'s ``point_setup`` seam, since each rung's factorization is frozen at its
+  own viscosity and seed state.
+
+With both, the ramp develops the recirculation to ``x_r/h`` ~ 8 -- past the OpenFOAM value (a wall-resolving
+closure on a wall-function mesh runs a little long), matching the direct target solve's root.
 
 Per-step progress (reattachment length, the control's pseudo-timestep shift, restart-cycle cost, residual)
-is streamed as the march runs, because it is a long, deliberately non-terminating study.
+is streamed as the march runs, because it is a long study.
 
 Run (after ``of_case/run_of.sh``, from the repo root)::
 
@@ -54,32 +68,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import aquaflux  # noqa: F401  (enables x64 at import)
 import compare
 import numpy as np
-from aquaflux.solve import CoefficientDriftTrigger, DualTimeControl
-from aquaflux.turbulence import GeometricReynoldsSchedule, solve_reynolds_continuation
+from aquaflux.solve import DualTimeControl
+from aquaflux.turbulence import (
+    GeometricReynoldsSchedule,
+    coupled_lu_continuation,
+    lu_beta_tracking_refresh,
+    solve_reynolds_continuation,
+)
 
 # The Reynolds ramp: 2 lower-Re rungs before the target -> viscosity scales (100, 10, 1) -> Re ~ 250,
 # 2500, 25000. The rest of the march budget is the working configuration for this case.
 N_POINTS = 2
-MAX_STEPS = 80  # per rung and per refreshed segment
-REFRESH_LIMIT = 20  # preconditioner re-freezes allowed per rung (drift-triggered)
-INNER_STEPS = 5  # dual-time inner Newton iterations per outer pseudo-timestep
-INNER_TOL = 0.05  # inner loop stops at this fraction of the anchor residual
-INTERMEDIATE_RTOL = 1e-2  # lower-Re rungs are only seeds -> converge them loosely
-RTOL = 1e-6  # target-rung tolerance
-DRIFT_THRESHOLD = 0.1  # eddy-viscosity drift that re-freezes the frozen preconditioner
-RESTART = 120  # forward-solve GMRES restart; matvecs ~= restart-cycles x RESTART
+MAX_STEPS = 200  # per rung (the complete-LU path re-factors every step, so it needs no refresh segments)
+INNER_STEPS = 10  # dual-time inner Newton iterations per outer pseudo-timestep
+INNER_TOL = 1e-3  # inner loop stops at this fraction of the anchor residual
+INTERMEDIATE_RTOL = 3e-2  # lower-Re rungs are only seeds -> converge them loosely
+RTOL = 1e-3  # target-rung tolerance (the recirculation is developed here)
+LU_BACKEND = "auto"  # complete-LU backend: UMFPACK if available (fast), else SciPy SuperLU
+RESTART = 40  # forward-solve GMRES restart (nominal, for the matvec estimate; the exact LU needs ~1)
 
-# Conservative Courant control (see the module docstring -- the shipped defaults diverge on the target
-# rung): grow the pseudo-timestep only on a fully comfortable inner step, back off on any clip.
-CONTROL = DualTimeControl(
-    beta_start=0.5,
-    grow=1.3,
-    backoff=2.0,
-    grow_above=1.0,
-    backoff_below=0.5,
-    beta_min=0.05,
-    beta_max=4.0,
-)
+# The aggressive Courant control (small beta_start, low beta_min, the shipped default GROW logic that
+# grows the pseudo-timestep whenever an inner step stays reasonably comfortable). It drives beta into the
+# large-timestep regime that develops the recirculation -- which the complete-LU preconditioner below
+# tolerates because it is EXACT, refactored at the current (state, beta) every step (see the module
+# docstring). A grow-only-on-a-full-step control instead STALLS: it refuses the clipped steps that carry
+# the bubble's transient, so it never reaches the developed root.
+CONTROL = DualTimeControl(beta_start=0.5, beta_min=0.005)
 
 
 class _ShiftLoggingControl:
@@ -136,7 +150,7 @@ def solve_aquaflux_continuation(**solve_kwargs: object) -> dict:
         f"[cfg] Reynolds ramp (viscosity scales) = {scales}  ->  Re ~ "
         f"{', '.join(f'{1.0 / s:g}x' for s in scales)} target; "
         f"inner_steps={INNER_STEPS} beta_start={CONTROL.beta_start} beta_min={CONTROL.beta_min} "
-        f"rtol={RTOL} drift={DRIFT_THRESHOLD}",
+        f"rtol={RTOL} preconditioner=complete-LU({LU_BACKEND}) refreshed per step",
         flush=True,
     )
 
@@ -159,17 +173,32 @@ def solve_aquaflux_continuation(**solve_kwargs: object) -> dict:
             flush=True,
         )
 
+    # Each Reynolds point builds its OWN complete-LU continuation, frozen at that point's viscosity and
+    # seed state, plus the beta-tracking refresh that re-factors it at the current (state, beta) every
+    # step -- a per-companion, per-state preconditioner the ramp's single target-frozen ``continuation``
+    # cannot express, so it is supplied through ``point_setup``. The exact factorization is what lets the
+    # aggressive control's large-timestep overshoots stay finite (the block preconditioner cannot).
+    def point_setup(companion, state):
+        return dict(
+            continuation=coupled_lu_continuation(
+                companion,
+                state,
+                lu_beta=CONTROL.beta_start,
+                backend=LU_BACKEND,
+                inner_steps=INNER_STEPS,
+                inner_tol=INNER_TOL,
+            ),
+            precondition_step=lu_beta_tracking_refresh(companion),
+        )
+
     options = (
         dict(
             intermediate_rtol=INTERMEDIATE_RTOL,
-            method="twolevel",
             max_steps=MAX_STEPS,
             rtol=RTOL,
-            inner_steps=INNER_STEPS,
-            inner_tol=INNER_TOL,
             step_control=control,
-            refresh_trigger=CoefficientDriftTrigger(threshold=DRIFT_THRESHOLD),
-            refresh_limit=REFRESH_LIMIT,
+            point_setup=point_setup,
+            scaled_norm=True,
             on_checkpoint=on_checkpoint,
         )
         | solve_kwargs
