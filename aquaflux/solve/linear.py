@@ -1,4 +1,4 @@
-"""Differentiable matrix-free linear solve, with optional left preconditioning.
+"""Differentiable matrix-free linear solve, with optional right preconditioning.
 
 A thin wrapper over ``lineax`` that solves ``A x = b`` given only a matrix-vector product
 ``matvec(x) = A x`` — never a materialized matrix. ``lineax`` differentiates the solve by
@@ -8,10 +8,15 @@ than unrolling the iterative solver onto the tape), so a gradient taken through
 the linear-solve primitive the Newton driver and the gradient schemes build on.
 
 An optional **preconditioner** ``M`` (a matvec approximating ``A^{-1}``) is applied on the
-left: the solver is handed ``M A`` and ``M b`` instead of ``A`` and ``b``. Since the solution
-of ``(M A) x = M b`` is exactly ``A^{-1} b``, and ``M``'s coefficients are treated as constant
-(the caller ``stop_gradient``s them), preconditioning changes only the Krylov convergence, not
-the solution or its gradient — it is implicit-diff-transparent.
+**right**: the solver is handed ``A M`` and ``b``, solves for ``y``, and recovers ``x = M y``.
+The Krylov residual is then ``b - A M y = b - A x`` — the *true* residual — so the stopping test
+stays honest even when ``M`` is a poor inverse (a left preconditioner would instead stop on the
+*preconditioned* residual ``M(A x - b)``, which a weak ``M`` can drive small while the true
+residual is large — the failure mode on the shifted coupled saddle at low pseudo-transient
+shift). Since the solution of ``(A M) y = b`` gives ``x = M y = A^{-1} b``, and ``M``'s
+coefficients are treated as constant (the caller ``stop_gradient``s them), preconditioning
+changes only the Krylov convergence, not the solution or its gradient — it is
+implicit-diff-transparent.
 
 **That transparency is a property of a CONVERGED solve.** At a finite tolerance the returned ``x``
 is whatever the iteration reached, which does depend on ``M``; a caller running a deliberately
@@ -160,9 +165,11 @@ def solve_linear(
     solver : lineax.AbstractLinearSolver, optional
         The linear solver; defaults to :func:`default_linear_solver`.
     preconditioner : callable, optional
-        A left preconditioner ``M`` (a matvec approximating ``A^{-1}``). The solver is handed
-        ``x -> M(A(x))`` and ``M(b)``. ``M``'s internal coefficients must be constant with
-        respect to any outer differentiation (``stop_gradient``-ed by the caller), so that
+        A **right** preconditioner ``M`` (a matvec approximating ``A^{-1}``). The solver is handed
+        ``x -> A(M(x))`` and ``b``, and the solution is recovered as ``M(y)`` — so the Krylov
+        residual is the *true* residual ``b - A x`` and the relative-residual stop stays honest even
+        when ``M`` is a poor inverse (see the body). ``M``'s internal coefficients must be constant
+        with respect to any outer differentiation (``stop_gradient``-ed by the caller), so that
         preconditioning accelerates convergence without perturbing the solution or its gradient.
     throw : bool
         If ``True`` (default), a non-convergent solve raises. If ``False``, it instead returns the
@@ -182,15 +189,27 @@ def solve_linear(
     if solver is None:
         solver = default_linear_solver()
     if preconditioner is None:
-        preconditioned_matvec, rhs = matvec, b
+        preconditioned_matvec, rhs, recover = matvec, b, (lambda y: y)
     else:
-
+        # RIGHT preconditioning: solve ``(A M) y = b`` for ``y`` and recover ``x = M y``. The Krylov
+        # residual is then ``b - A M y = b - A x`` -- the *true* residual -- so the relative-residual
+        # stop is honest even when ``M`` is a poor inverse. Left preconditioning (solving ``M A x = M b``)
+        # instead stops on the *preconditioned* residual ``M(A x - b)``, which a weak ``M`` can drive
+        # small while the true residual is large: on the shifted coupled saddle the single-cycle
+        # multigrid degrades as the pseudo-transient shift ``beta`` falls, so a left-preconditioned solve
+        # reports convergence at low ``beta`` while returning a step that does not solve the system. The
+        # solution ``x`` is identical either way (both solve ``A x = b``); only the honesty of the
+        # stopping test differs. ``M``'s coefficients must be constant w.r.t. any outer differentiation
+        # (``stop_gradient``-ed by the caller) so preconditioning changes only convergence, not the
+        # solution or its gradient.
         def preconditioned_matvec(x):
-            return preconditioner(matvec(x))
+            return matvec(preconditioner(x))
 
-        rhs = preconditioner(b)
+        rhs, recover = b, preconditioner
     operator = lx.FunctionLinearOperator(
         preconditioned_matvec, jax.ShapeDtypeStruct(b.shape, b.dtype)
     )
     solution = lx.linear_solve(operator, rhs, solver=solver, throw=throw)
-    return solution.value, jnp.asarray(solution.stats.get("num_steps", 0), dtype=jnp.int32)
+    return recover(solution.value), jnp.asarray(
+        solution.stats.get("num_steps", 0), dtype=jnp.int32
+    )
