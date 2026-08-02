@@ -2131,6 +2131,53 @@ def ilut_beta_tracking_refresh(
     )
 
 
+def amg_beta_tracking_refresh(
+    coupled: CoupledRANS, *, stencil_reach: int = 3
+) -> Callable[[ForwardStep, jnp.ndarray], None]:
+    """A ``precondition_step`` that rebuilds the AMG V-cycle at the current β, every step.
+
+    The algebraic-multigrid counterpart of :func:`lu_beta_tracking_refresh` /
+    :func:`ilut_beta_tracking_refresh`, and the preconditioner that makes a **dual-time march tractable in
+    three dimensions**, where the complete LU's fill is out of memory and the incomplete-LU's factorization
+    is prohibitively slow to build.
+
+    A dual-time march ramps the pseudo-transient shift ``β`` down to develop the recirculation (e.g.
+    0.5 → 0.02), and a V-cycle frozen at ``amg_beta`` degrades sharply as ``β`` leaves that value: the
+    coarse operators and level smoother approximate ``J + amg_beta·d``, not the ``J + β·d`` actually solved,
+    so the outer Krylov count explodes at low ``β`` (measured on the ``bfs3d`` coupled march: ~20 cycles per
+    solve at ``β ≈ 0.5`` rising to ~250–285 at ``β ≈ 0.07``, with the per-step wall going from ~60 s to
+    ~16–19 min). Rebuilding the V-cycle at the step's ``(state, β)`` restores the matched ~20-cycle solve.
+    The rebuild (~tens of seconds: a graph-coloured Jacobian probe plus the smoothed-aggregation setup) is
+    far cheaper than the hundreds of extra matvecs a stale V-cycle costs at low ``β``, each of which is a
+    full Jacobian-vector product — so it re-factors **every step** (like the cheap complete-LU hook, not the
+    gated incomplete-LU one).
+
+    Reads ``β`` from the step's shift schedule (a :class:`~aquaflux.solve.ConstantRelaxation` set by a
+    :class:`~aquaflux.solve.DualTimeControl`) and rebuilds the step's :class:`MonolithicFactorShiftPolicy`
+    V-cycle in place at ``J(state) + β·d(state)``. Pass it to ``solve_coupled(precondition_step=…)`` (or
+    :func:`solve_reynolds_continuation`'s ``point_setup``) with a :func:`coupled_amg_continuation` step and a
+    ``DualTimeControl``.
+
+    **Forward-march use ONLY** -- the rebuild is an impure host mutation and must never be on a differentiated
+    path (``solve_coupled`` guards this, raising under ``jax.grad``). The finishing solve and the adjoint keep
+    the last V-cycle, applied as the differentiable single-cycle transpose, exact at the converged ``β → 0``
+    root; for a differentiated solve use the plain :func:`coupled_amg_continuation` with no ``precondition_step``.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled residual assembler (supplies the Jacobian-vector product and the shift diagonal).
+    stencil_reach : int
+        The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+
+    Returns
+    -------
+    callable
+        ``precondition_step(active_step, state) -> None``.
+    """
+    return _beta_tracking_refresh(coupled, stencil_reach)
+
+
 def solve_coupled(
     coupled: CoupledRANS,
     flow: jnp.ndarray | None = None,

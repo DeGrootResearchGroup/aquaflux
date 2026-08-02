@@ -830,10 +830,23 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     smoother goes nonlinear); the shipped per-step tuning is `smoother_sweeps=2` + restart-15 — restart-15
     stops the forward solve at the ~1% inexact-Newton tolerance, and the second smoother sweep roughly quarters
     the outer Krylov count on the low-shift operator the march's tail runs at (~2.1× the whole `bfs3d` solve
-    there) for one extra cheap incomplete-LU back-solve (`.claude/rules/solve.md`). A refreshing/β-tracking variant, the experimental native-PETSc
-    forward path (`native_forward_solve=True` — a much larger per-step lever that does not yet converge the
-    march), and the FGMRES-forward optimization are follow-ups (`.claude/rules/solve.md`). This is the coupled
+    there) for one extra cheap incomplete-LU back-solve (`.claude/rules/solve.md`). This is the coupled
     preconditioner the first 3D validation case (`validation/bfs3d_openfoam`) runs on.
+  - **`amg_beta_tracking_refresh` — rebuild the V-cycle at the current β every step, the enabler of the 3D
+    dual-time march (BUILT).** The AMG sibling of `lu_beta_tracking_refresh` / `ilut_beta_tracking_refresh`.
+    A dual-time march ramps β down to develop the recirculation, and a V-cycle frozen at `amg_beta` degrades
+    sharply as β leaves that value (measured on the `bfs3d` cold march: ~11 outer cycles per solve at
+    β≈0.15 rising to ~250–285 at β≈0.07, the per-step wall going ~90 s → ~16–19 min, and the march stalling).
+    Re-materializing the Jacobian and rebuilding the GAMG at the step's `(state, β)` restores the matched
+    ~11-cycle solve — the ~tens-of-seconds rebuild is far cheaper than the hundreds of extra
+    Jacobian-vector-product matvecs a stale V-cycle costs, so (like the cheap complete-LU hook) it re-factors
+    **every step**. This is the only β-tracking that carries the 3D case: the complete LU's factorization is
+    out of memory and the ILUT's `spilu` is prohibitively slow to build there. Same forward-only contract as
+    the LU/ILUT hooks (raises under `jax.grad`); pass it to `solve_coupled(precondition_step=…)` (or a
+    `solve_reynolds_continuation` `point_setup`) with a `coupled_amg_continuation` step and a `DualTimeControl`.
+    Reuse-of-interpolation was measured NOT to cut the rebuild (the setup is not aggregation-dominated, and an
+    in-place value update is prohibitively slow), so the rebuild is a full one. The experimental native-PETSc
+    forward path and the FGMRES-forward optimization remain follow-ups (`.claude/rules/solve.md`).
   - **`lu_beta_tracking_refresh` — re-factor the LU at the current β EVERY step (the correct LU treatment
     for a dual-time march; BUILT).** A frozen LU is exact only for the β it was factored at; a dual-time
     march's β ramps (0.5 → 0.005), so a factorization frozen at `lu_beta` mis-preconditions the operator
