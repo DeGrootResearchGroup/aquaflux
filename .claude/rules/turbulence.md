@@ -844,8 +844,11 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     out of memory and the ILUT's `spilu` is prohibitively slow to build there. Same forward-only contract as
     the LU/ILUT hooks (raises under `jax.grad`); pass it to `solve_coupled(precondition_step=…)` (or a
     `solve_reynolds_continuation` `point_setup`) with a `coupled_amg_continuation` step and a `DualTimeControl`.
-    Reuse-of-interpolation was measured NOT to cut the rebuild (the setup is not aggregation-dominated, and an
-    in-place value update is prohibitively slow), so the rebuild is a full one. The experimental native-PETSc
+    The rebuild REUSES the smoothed-aggregation coarse space (`MonolithicAmgPreconditioner.refactor` overwrites
+    the operator values in place over a persistent CSR array and re-sets-up the PC with
+    `pc_gamg_reuse_interpolation`), since the graph-coloured probe's sparsity is fixed across β; only the
+    Galerkin coarse operators and the incomplete-LU factor values recompute, cutting the multigrid setup
+    ~2.4× (measured ~45 s → ~19 s on `bfs3d`) with the coarse space no worse. The experimental native-PETSc
     forward path and the FGMRES-forward optimization remain follow-ups (`.claude/rules/solve.md`).
   - **`lu_beta_tracking_refresh` — re-factor the LU at the current β EVERY step (the correct LU treatment
     for a dual-time march; BUILT).** A frozen LU is exact only for the β it was factored at; a dual-time

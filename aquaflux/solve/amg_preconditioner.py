@@ -131,13 +131,14 @@ class AmgVCycle:
         PETSc = self._PETSc
         cell_major = cell_major.tocsr()
         cell_major.sort_indices()
-        self._mat = PETSc.Mat().createAIJ(
-            size=cell_major.shape,
-            csr=(
-                cell_major.indptr.astype(PETSc.IntType),
-                cell_major.indices.astype(PETSc.IntType),
-                cell_major.data.astype(PETSc.ScalarType),
-            ),
+        # The Mat wraps a PERSISTENT copy of the CSR arrays: a refresh (:meth:`refactor`) overwrites
+        # ``self._data`` in place (O(nnz) numpy) and re-sets-up the PC, so the aggregation/prolongation
+        # and the smoother's ordering are kept -- only the coarse operators and factor values recompute.
+        self._indptr = cell_major.indptr.astype(PETSc.IntType)
+        self._indices = cell_major.indices.astype(PETSc.IntType)
+        self._data = cell_major.data.astype(PETSc.ScalarType).copy()
+        self._mat = PETSc.Mat().createAIJWithArrays(
+            size=cell_major.shape, csr=(self._indptr, self._indices, self._data)
         )
         self._mat.setBlockSize(
             self._n_fields
@@ -188,6 +189,14 @@ class AmgVCycle:
         for key, value in {
             "pc_type": "gamg",
             "pc_gamg_type": "agg",
+            # Keep the aggregation + prolongation and the level-smoother ordering across a refresh
+            # (:meth:`refactor`): the operator's sparsity graph is fixed (the graph-coloured Jacobian
+            # probe uses a fixed stencil reach; the equilibration and cell-major reorder are value-only),
+            # so the coarse space stays valid as the state and shift drift, and only the coarse operators
+            # and the incomplete-LU factor values are recomputed -- the bulk of the setup cost is skipped.
+            "pc_gamg_reuse_interpolation": True,
+            "mg_levels_pc_factor_reuse_ordering": True,
+            "mg_levels_pc_factor_reuse_fill": True,
             "mg_coarse_ksp_type": "preonly",
             "mg_coarse_pc_type": "lu",
             "mg_levels_ksp_type": "richardson",
@@ -272,21 +281,45 @@ class AmgVCycle:
         return self.scale * out  # P^T D solution -> field-major delta
 
     def refactor(self, cell_major: sp.csr_matrix, scale: np.ndarray, perm: np.ndarray) -> None:
-        """Rebuild the V-cycle at a new (developed-state) matrix, releasing the old PETSc objects.
+        """Refresh the V-cycle at a new (developed-state, new-shift) matrix, reusing the coarse space.
 
-        The coupled Jacobian's sparsity grows as the flow develops, so a fresh assembly + setup is used
-        (not a values-only update on a frozen pattern). The PETSc ``Mat``/``PC`` (and the native-solve
-        ``KSP``/shell) are destroyed first so their memory is released rather than leaked across a long
-        refreshing march.
+        A β-tracking march re-factors every step. Because the graph-coloured Jacobian probe uses a
+        **fixed** stencil reach and the equilibration + cell-major reorder are value-only, the operator's
+        sparsity graph is **identical** across refreshes -- only its values change. So the refresh
+        overwrites the persistent CSR values in place (O(nnz) numpy) and re-sets-up the *same* PC with the
+        ``pc_gamg_reuse_interpolation`` / smoother-``reuse_ordering`` flags (:meth:`_configure`): the
+        aggregation, prolongation and factor orderings are kept, and only the Galerkin coarse operators and
+        the incomplete-LU factor values are recomputed. That is markedly cheaper than rebuilding the whole
+        hierarchy, which dominates the refresh cost.
+
+        If the sparsity pattern ever differs (it should not, given the fixed stencil), it falls back to a
+        full rebuild. The native exact-solve KSP (:attr:`_native`) also takes the full rebuild -- it is the
+        deferred experimental path and shares the ``Mat`` with its shell operator.
         """
-        if self._native:
-            self._ksp.destroy()
-            self._shell.destroy()
-        self._pc.destroy()
-        self._mat.destroy()
         self.scale = scale
         self.perm = perm
-        self._build(cell_major)
+        cell_major = cell_major.tocsr()
+        cell_major.sort_indices()
+        same_pattern = (
+            not self._native
+            and cell_major.data.shape[0] == self._data.shape[0]
+            and np.array_equal(cell_major.indptr, self._indptr)
+            and np.array_equal(cell_major.indices, self._indices)
+        )
+        if not same_pattern:
+            if self._native:
+                self._ksp.destroy()
+                self._shell.destroy()
+            self._pc.destroy()
+            self._mat.destroy()
+            self._build(cell_major)
+            return
+        # In-place value refresh: the Mat wraps ``self._data``, so overwriting it updates the operator
+        # without re-validating the pattern; re-setting-up reuses the aggregation/ordering.
+        self._data[:] = cell_major.data.astype(self._PETSc.ScalarType)
+        self._mat.assemble()
+        self._pc.setOperators(self._mat)
+        self._pc.setUp()
 
 
 def build_amg_vcycle(
