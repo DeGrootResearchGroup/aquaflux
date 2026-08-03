@@ -209,3 +209,54 @@ def test_dual_time_one_inner_step_is_a_single_shifted_step() -> None:
         rtol=1e-10, atol=1e-10, max_steps=200, forward_step=pseudo
     ).solve(_residual, phi0, theta)
     assert jnp.allclose(root_dual, root_pseudo, atol=1e-8)
+
+
+def test_dual_time_cycle_budget_caps_the_inner_loop() -> None:
+    """A ``cycle_budget`` stops the inner loop once its accumulated linear-solve count reaches the budget.
+
+    With ``inner_tol = 0`` the inner target is unreachable, so an unbounded step runs the full
+    ``inner_steps`` and accumulates their summed solve count; the budgeted step instead stops after the
+    first inner iteration that carries the running count to the budget -- the cost bailout that keeps a
+    grinding primary solve from running every inner iteration into the restart cap. ``cycle_budget=None``
+    leaves the step byte-identical.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+
+    def residual_fn(phi: jnp.ndarray) -> jnp.ndarray:
+        return _residual(phi, theta)
+
+    phi0 = jnp.ones_like(theta)
+    r0 = jnp.linalg.norm(residual_fn(phi0))
+    common = dict(
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0), inner_steps=20, inner_tol=0.0
+    )
+    unbounded = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
+    budgeted = DualTimeStep(UniformShiftPolicy(strength=1.0), cycle_budget=5, **common)
+
+    _, cyc_u, _, inner_u = unbounded.stepper()(residual_fn, phi0, r0, unbounded.default_solver())
+    _, cyc_b, _, inner_b = budgeted.stepper()(residual_fn, phi0, r0, budgeted.default_solver())
+
+    assert int(inner_u) == 20  # unreachable target -> ran the full inner budget
+    assert int(cyc_u) > 5  # accumulated more than the budget without a cap (sanity for the test)
+    assert int(inner_b) < int(inner_u)  # the budget cut the loop short
+    # Stops at the first inner iteration whose running total reaches the budget: at most one over-budget
+    # solve's worth beyond it.
+    assert 5 <= int(cyc_b) <= 5 + int(cyc_u) // int(inner_u) + 1
+
+
+def test_dual_time_cycle_budget_none_is_the_unbounded_step() -> None:
+    """The default ``cycle_budget=None`` reproduces the step with no budget field set, bit for bit."""
+    theta = jnp.array([8.0, 27.0, 64.0])
+
+    def residual_fn(phi: jnp.ndarray) -> jnp.ndarray:
+        return _residual(phi, theta)
+
+    phi0 = jnp.ones_like(theta)
+    r0 = jnp.linalg.norm(residual_fn(phi0))
+    common = dict(relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0), inner_steps=6)
+    default = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
+    explicit_none = DualTimeStep(UniformShiftPolicy(strength=1.0), cycle_budget=None, **common)
+
+    a = default.stepper()(residual_fn, phi0, r0, default.default_solver())
+    b = explicit_none.stepper()(residual_fn, phi0, r0, explicit_none.default_solver())
+    assert jnp.allclose(a[0], b[0]) and int(a[1]) == int(b[1]) and int(a[3]) == int(b[3])

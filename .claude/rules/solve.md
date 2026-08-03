@@ -1715,6 +1715,25 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       refresh-invariant), so a predict-then-avoid β-chooser was refuted and detect-then-react is the honest
       design. Refresh for staleness, escalate β for stiffness — a cost spike does not distinguish the two on
       its own, and neither does any static probe of the operator.
+    - **`DualTimeStep(cycle_budget=…)` makes the escalation CHEAP — cap the primary grind, don't run it to
+      completion (BUILT).** The escalation above is reactive-after-the-solve, so its cost is set by how
+      expensive the doomed primary is *before* it returns. The dual-time step runs up to `inner_steps` inner
+      Newton iterations, each a restart-capped GMRES; on a grinding primary every inner ran to the
+      stagnation cap, so the step burned `inner_steps ×` a full stagnation before the escalation could fire
+      (measured ~5× the necessary cost on `bfs3d` — steps 11/25/27 ground ~300 matvecs where one capped
+      inner is ~60). `cycle_budget` stops the inner loop once its *accumulated* Krylov count reaches the
+      budget (`cond` gains `& (cycles < cycle_budget)`, elided at trace time when `None`), so a grinding
+      primary is cut after ~one over-budget inner iteration and the partial iterate is handed to the
+      escalation, which redoes it at a larger β where it converges cheaply. **Pair it with
+      `retry_on_cycles < cycle_budget`** so a capped primary's reported count trips the escalation (else the
+      partial non-converged step would be accepted). Good steps converge well under the budget, so they are
+      byte-identical; only a grinding primary hits it. `cycle_budget=None` (default) is unbounded and
+      byte-identical. Threaded through `coupled_amg_continuation(cycle_budget=…)` (and the shared
+      `_monolithic_factor_step`, so the ILUT/LU steps can take it too); forward-only, like the escalation it
+      feeds. This is Agent C's "small-budget primary + inner abort" realized as an inner-loop cost cap rather
+      than a non-attainment flag threaded through every solve layer — same effect (a doomed primary costs
+      ~`cycle_budget` matvecs, not `inner_steps ×` a stagnation), far smaller blast radius. Pinned by
+      `test_dual_time.py` (`…cycle_budget_caps_the_inner_loop`, `…none_is_the_unbounded_step`).
   - **`CoefficientDriftTrigger` — the PREFERRED staleness trigger: measure the drift, don't infer it
     from cost (binding for new work).** A frozen preconditioner is stale exactly when the operator it
     approximates has moved, so the honest signal is that movement itself. `StepReport.drift` carries a

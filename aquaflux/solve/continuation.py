@@ -681,6 +681,15 @@ class DualTimeStep(eqx.Module):
         inner *count* and the *summed* cycles). Emitted through :func:`jax.debug.callback`, so it is
         forward-only and transform-transparent; ``None`` (default) elides the call entirely, leaving the
         step byte-identical. Do not set it on a differentiated solve.
+    cycle_budget : int or None
+        An optional cap on the inner loop's **accumulated** linear-solve count (static). When set, the
+        inner loop stops as soon as its summed cycle count reaches ``cycle_budget``, so a primary solve
+        grinding on a stiff low-β operator is cut after ~one over-budget inner iteration rather than
+        running the full ``inner_steps`` into the restart cap (~5× the cost on the 3D coupled march). The
+        partial, non-converged iterate it then returns is meant to be discarded by the march's β-escalation
+        (:func:`~aquaflux.solve.forward_march` with ``retry_on_cycles < cycle_budget``), which redoes the
+        step at a larger β where it converges cheaply -- so the two are paired. ``None`` (default) is
+        unbounded and byte-identical. Forward-only, like the escalation it pairs with.
     """
 
     shift_policy: ShiftPolicy
@@ -697,6 +706,7 @@ class DualTimeStep(eqx.Module):
         Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
     ) = eqx.field(static=True, default=None)
     inner_observer: Callable[..., None] | None = eqx.field(static=True, default=None)
+    cycle_budget: int | None = eqx.field(static=True, default=None)
 
     def norm(self) -> ResidualNorm:
         """The residual measure the inner loop and the outer stopping test share (:attr:`residual_norm`)."""
@@ -733,6 +743,7 @@ class DualTimeStep(eqx.Module):
         line_search = self.line_search
         norm = self.residual_norm
         inner_observer = self.inner_observer
+        cycle_budget = self.cycle_budget
 
         def step(
             residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
@@ -758,8 +769,19 @@ class DualTimeStep(eqx.Module):
                 return residual_fn(p) + shift * (p - reference)
 
             def cond(carry: tuple) -> jnp.ndarray:
-                _, inner, gnorm, _, _ = carry
-                return (inner < inner_steps) & (gnorm > target)
+                _, inner, gnorm, cycles, _ = carry
+                keep = (inner < inner_steps) & (gnorm > target)
+                # Cost bailout: stop the inner loop once its accumulated linear-solve count reaches
+                # `cycle_budget`, so a primary solve that is grinding on a stiff low-β operator is cut off
+                # after ~one over-budget inner iteration (~`cycle_budget` matvecs) instead of running the
+                # full `inner_steps` into the restart cap (measured ~5× the cost on the 3D coupled march).
+                # The partial, non-converged iterate this returns is meant to be discarded by the march's
+                # β-escalation (`forward_march(retry_on_cycles<cycle_budget)`), which redoes the step at a
+                # larger β where it converges cheaply -- so pair the two. `cycle_budget=None` (default) is
+                # byte-identical (the budget term is elided at trace time, as `cycle_budget` is static).
+                if cycle_budget is not None:
+                    keep = keep & (cycles < cycle_budget)
+                return keep
 
             def body(carry: tuple) -> tuple:
                 p, inner, gnorm, cycles, min_alpha = carry

@@ -1361,6 +1361,7 @@ def _monolithic_factor_step(
     block_scaled_norm: bool,
     residual_norm: ResidualNorm | None,
     inner_observer: Callable[..., None] | None = None,
+    cycle_budget: int | None = None,
 ) -> ForwardStep:
     """Assemble the pseudo-transient / dual-time step around a frozen monolithic factorization.
 
@@ -1396,6 +1397,7 @@ def _monolithic_factor_step(
             residual_norm=residual_norm,
             adjoint_preconditioner_factory=policy.adjoint_factory(),
             inner_observer=inner_observer,
+            cycle_budget=cycle_budget,
         )
     return PseudoTransientStep(
         policy,
@@ -1774,6 +1776,7 @@ def coupled_amg_continuation(
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     residual_norm: ResidualNorm | None = None,
     inner_observer: Callable[..., None] | None = None,
+    cycle_budget: int | None = None,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **algebraic-multigrid** V-cycle.
 
@@ -1825,6 +1828,13 @@ def coupled_amg_continuation(
         A per-inner-iteration profiling hook forwarded to the built dual-time step (only used when
         ``inner_steps > 1``); see :class:`~aquaflux.solve.DualTimeStep`. ``None`` (default) leaves the step
         byte-identical. Forward-only — do not set it on a differentiated solve.
+    cycle_budget : int or None
+        A cap on the dual-time inner loop's accumulated linear-solve count, forwarded to the built
+        :class:`~aquaflux.solve.DualTimeStep` (only used when ``inner_steps > 1``). It cuts off a primary
+        solve grinding on a stiff low-β operator after ~``cycle_budget`` matvecs instead of the full
+        ``inner_steps`` into the restart cap; pair it with ``solve_coupled``'s β-escalation
+        (``retry_on_cycles < cycle_budget``), which redoes the capped step at a larger β. ``None`` (default)
+        is unbounded and byte-identical. Forward-only.
 
     Returns
     -------
@@ -1876,6 +1886,7 @@ def coupled_amg_continuation(
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
         inner_observer=inner_observer,
+        cycle_budget=cycle_budget,
     )
 
 
