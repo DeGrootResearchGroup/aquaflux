@@ -35,11 +35,24 @@ Governed by the root `CLAUDE.md` Engineering Principles.
 - **`linear.py` — BUILT.** `solve_linear(matvec, b, solver, preconditioner=None)` is a
   matrix-free wrapper over `lineax` (default restarted GMRES); `lineax` supplies the
   **implicit-diff of the linear solve** (the Krylov loop is not taped). This is the load-bearing
-  adjoint primitive. The optional **left preconditioner** `M` (a matvec ≈ `A⁻¹`) hands the solver
-  `M∘A` and `Mb`; since the caller `stop_gradient`s `M`'s coefficients, it changes only Krylov
-  convergence, not the solution or its gradient — **verified transparent** in
-  `test_preconditioning.py` (solution and gradient identical with/without `M`). This is the seam
-  the **outer block preconditioner** (below) attaches to.
+  adjoint primitive. The optional **preconditioner** `M` (a matvec ≈ `A⁻¹`) is applied on a
+  caller-chosen side (`preconditioner_side`, default **right**); since the caller `stop_gradient`s
+  `M`'s coefficients, it changes only Krylov convergence, not the solution or its gradient —
+  **verified transparent** in `test_preconditioning.py` (solution and gradient identical with/without
+  `M`). This is the seam the **outer block preconditioner** (below) attaches to.
+  - **The side is a real numerical choice, and forcing one broke a solve — keep both (binding).**
+    **Right** (`A∘M` and `b`, recover `x = M y`) stops on the **true** residual `‖A x − b‖`, so a
+    **weak** `M` cannot falsely report convergence — the honest stop on the shifted coupled saddle at
+    low pseudo-transient shift (where the single V-cycle degrades as β falls), and the default. **Left**
+    (`M∘A` and `M b`) stops on the **preconditioned** residual `‖M(A x − b)‖`, the right measure when
+    `M` is a **strong** inverse of a well-behaved SPD operator: on a wall-resolved mesh the near-wall
+    anisotropy makes `potential_flow`'s Laplacian condition ~1e6–1e10, where the multigrid drives `‖M r‖`
+    to tolerance but the **true** residual cannot in `max_steps` — so a right-preconditioned solve there
+    exhausts the Krylov budget and raises. Making the solve *universally* right (the honesty fix for the
+    saddle) therefore broke `potential_flow` (its `newton_step` now passes `preconditioner_side="left"`);
+    the converged solution is identical either way — only which regime converges in a bounded step count
+    differs. Threaded `solve_linear` → `newton_correction`/`newton_step`. Pinned by
+    `test_initialization.py::test_potential_flow_survives_a_wall_resolved_aspect_ratio`.
   - **`solve_linear` returns `(x, cycles)` — there is ONE linear-solve entry point, not a counted/
     uncounted pair (binding, do not re-split).** A caller that only wants the answer writes
     `x, _ = solve_linear(...)`. A `solve_linear_counted` sibling existed briefly and was **deleted**: it

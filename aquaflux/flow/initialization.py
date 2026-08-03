@@ -155,9 +155,12 @@ def laplace_field(
     preconditioner = _laplace_preconditioner(mesh, geometry, residual, diffusivity, fixed_cells)
     # Pure diffusion is linear, so one Newton correction is the exact solve. Compiled here because
     # newton_step leaves the jit boundary to its caller; un-jitted, the preconditioned linear solve
-    # would dispatch operation by operation.
+    # would dispatch operation by operation. The multigrid `M` is a strong inverse of this SPD Laplacian,
+    # so precondition on the LEFT: on a wall-resolved mesh the near-wall anisotropy makes the condition
+    # number ~1e6-1e10, where the preconditioned residual `‖M r‖` reaches tolerance but the true residual
+    # (the default right-side stop) cannot in a bounded number of Krylov steps.
     field = eqx.filter_jit(newton_step)(
-        residual, jnp.zeros(mesh.n_cells), preconditioner=preconditioner
+        residual, jnp.zeros(mesh.n_cells), preconditioner=preconditioner, preconditioner_side="left"
     )
     return field, assembler
 
