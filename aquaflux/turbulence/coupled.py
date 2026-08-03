@@ -2000,6 +2000,68 @@ def _staleness_beta_gate(*, refresh_every: int, beta_rel_change: float) -> Calla
     return should_refresh
 
 
+def _materialize_gate(
+    drift_factory: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]],
+    *,
+    materialize_drift: float | None,
+    materialize_every: int | None,
+) -> Callable[[jnp.ndarray], bool]:
+    """A stateful predicate for the β-diagonal split: should this refresh RE-MATERIALIZE the Jacobian
+    (full, ~240 jvps) or only re-add the shift diagonal to the standing one (cheap)?
+
+    Returns ``should_materialize(state) -> bool``. Re-materializing is the dominant refresh cost, so it is
+    reserved for when the frozen Jacobian has actually gone stale -- i.e. when the state it was probed at
+    has moved. The staleness signal is a **coefficient drift** since the last materialize, supplied by
+    ``drift_factory`` (in the coupled march, :func:`eddy_viscosity_drift`: ``ν_t`` is what the operators are
+    assembled from, so its movement is the Jacobian's staleness, and it is cheap -- one jitted evaluation).
+    Fires when that drift exceeds ``materialize_drift``, OR after ``materialize_every`` steps without a
+    materialize (a state-development cap for a near-constant coefficient) -- the drift-move / step-cap pair
+    that mirrors :func:`_staleness_beta_gate`. The reference is re-based at every materialize (so the drift
+    measures movement the last materialize did not absorb) and seeded on the first call from the freshly-built
+    operator (so the first call needs only a shift, not a redundant materialize).
+
+    Parameters
+    ----------
+    drift_factory : callable
+        ``reference_state -> (state -> drift)`` -- builds a drift measure against a reference (a non-negative
+        scalar, zero at the reference). Injected so the gate's decision logic is testable with a synthetic
+        drift; the coupled march passes ``lambda ref: eddy_viscosity_drift(coupled, ref)``.
+    materialize_drift : float or None
+        Re-materialize when the drift since the last materialize exceeds this. ``None`` disables the drift
+        trigger (then only the step cap fires).
+    materialize_every : int or None
+        Force a materialize after this many refreshes without one (the staleness cap). ``None`` disables the
+        cap (then only the drift trigger fires).
+
+    Returns
+    -------
+    callable
+        ``should_materialize(state) -> bool``, carrying its own ``(drift reference, steps_since)`` state.
+    """
+    st: dict[str, object] = {"since": 0, "drift_fn": None}
+
+    def should_materialize(state: jnp.ndarray) -> bool:
+        st["since"] = int(st["since"]) + 1  # type: ignore[arg-type]
+        if materialize_drift is not None and st["drift_fn"] is None:
+            # Seed the drift reference at the freshly-built state; the Jacobian is already current here, so
+            # this first refresh needs only a shift (drift is zero against its own reference).
+            st["drift_fn"] = drift_factory(jax.lax.stop_gradient(state))
+        drift_hit = (
+            materialize_drift is not None
+            and st["drift_fn"] is not None
+            and float(st["drift_fn"](state)) > materialize_drift  # type: ignore[operator]
+        )
+        cap_hit = materialize_every is not None and int(st["since"]) >= materialize_every
+        if drift_hit or cap_hit:
+            st["since"] = 0
+            if materialize_drift is not None:
+                st["drift_fn"] = drift_factory(jax.lax.stop_gradient(state))
+            return True
+        return False
+
+    return should_materialize
+
+
 def _beta_tracking_refresh(
     coupled: CoupledRANS,
     stencil_reach: int,
@@ -2007,6 +2069,7 @@ def _beta_tracking_refresh(
     gate: Callable[[float], bool] | None = None,
     refresh_kwargs: dict[str, object] | None = None,
     materialize_every: int | None = None,
+    materialize_drift: float | None = None,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """Shared skeleton for the β-tracking ``precondition_step`` hooks (complete-LU and ILUT).
 
@@ -2040,9 +2103,18 @@ def _beta_tracking_refresh(
     # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
     # reuses it, rather than a fresh lambda recompiling each step.
     matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
-    since_materialize = {
-        "n": 0
-    }  # steps since the last full Jacobian materialize (β-diagonal split)
+    # The β-diagonal split's materialize gate (built once): decides per refresh whether to re-materialize
+    # the Jacobian or only re-add the shift. `None` when neither trigger is set (then every refresh is a
+    # full materialize, the original behaviour).
+    materialize_gate = (
+        _materialize_gate(
+            lambda ref: eddy_viscosity_drift(coupled, ref),
+            materialize_drift=materialize_drift,
+            materialize_every=materialize_every,
+        )
+        if (materialize_drift is not None or materialize_every is not None)
+        else None
+    )
 
     def precondition_step(active_step: ForwardStep, state: jnp.ndarray) -> None:
         schedule = active_step.relaxation_schedule
@@ -2062,15 +2134,15 @@ def _beta_tracking_refresh(
         pc = policy.preconditioner
         # β-diagonal split: β and the per-cell shift ``d`` touch only the diagonal, so between full
         # (re-materialized) refreshes the shift is tracked by re-adding the new ``β d`` diagonal to the
-        # frozen Jacobian -- skipping the ~240-jvp materialize (the dominant refresh cost). A full
-        # materialize every ``materialize_every`` steps catches the Jacobian's *state* drift. Only the AMG
-        # preconditioner exposes the shift-only path; without it (ILUT/LU) every refresh is full, as before.
-        if materialize_every is not None and hasattr(pc, "refresh_shift_in_place"):
-            since_materialize["n"] += 1
-            if since_materialize["n"] < materialize_every:
+        # frozen Jacobian -- skipping the ~240-jvp materialize (the dominant refresh cost). The materialize
+        # gate reserves the full re-materialize for when the Jacobian has actually gone stale (ν_t drift) or
+        # a step cap is hit; otherwise this is a cheap shift-only refresh. Only the AMG preconditioner
+        # exposes the shift-only path; without it (ILUT/LU) `materialize_gate` is None and every refresh is
+        # full, as before.
+        if materialize_gate is not None and hasattr(pc, "refresh_shift_in_place"):
+            if not materialize_gate(state):
                 pc.refresh_shift_in_place(shift)
                 return
-            since_materialize["n"] = 0
         pc.refresh_in_place(
             lambda v: matvec_at(frozen, v), colouring, n_fields, shift, **refresh_kwargs
         )
@@ -2184,6 +2256,7 @@ def amg_beta_tracking_refresh(
     *,
     stencil_reach: int = 3,
     materialize_every: int | None = None,
+    materialize_drift: float | None = None,
     beta_rel_change: float | None = None,
     refresh_every: int = 8,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
@@ -2228,9 +2301,18 @@ def amg_beta_tracking_refresh(
         tracks the moving shift with a cheap diagonal-only refresh
         (:meth:`~aquaflux.solve.MonolithicAmgPreconditioner.refresh_shift_in_place`) that reuses the frozen
         Jacobian -- since ``β`` and the per-cell shift ``d`` touch only the diagonal, this skips the
-        ~240-jvp materialization (the dominant refresh cost) while keeping the shift matched. The full
-        every-``K``-th materialize catches the Jacobian's slower *state* drift; pair a large ``K`` with a
-        state-staleness trigger for the best cost.
+        ~240-jvp materialization (the dominant refresh cost) while keeping the shift matched. It is the
+        step-count arm of the materialize gate (:func:`_materialize_gate`): a full re-materialize is forced
+        after ``K`` shift-only refreshes as a staleness cap. Prefer ``materialize_drift`` (a state-staleness
+        trigger) as the primary control and keep ``materialize_every`` as a large safety cap.
+    materialize_drift : float or None
+        The **state-staleness** trigger for the full re-materialize (the drift arm of the materialize gate).
+        Re-materializing the Jacobian is the dominant refresh cost, so — rather than a fixed step interval —
+        it fires only when the frozen Jacobian has actually gone stale: when the eddy viscosity ``ν_t``
+        (:func:`eddy_viscosity_drift`, what the operators are assembled from) has drifted by more than this
+        fraction since the last materialize. In between, the shift is tracked by the cheap diagonal-only
+        refresh. Reserve the expensive materialize for when it is needed; pair it with a large
+        ``materialize_every`` as a backstop. ``None`` (default) disables the drift trigger.
     beta_rel_change : float or None
         The **β-mismatch** refresh trigger. ``None`` (default) refreshes every step. When set, the refresh
         is gated (:func:`_staleness_beta_gate`): it fires only when ``β`` has moved by more than this
@@ -2256,7 +2338,11 @@ def amg_beta_tracking_refresh(
         else _staleness_beta_gate(refresh_every=refresh_every, beta_rel_change=beta_rel_change)
     )
     return _beta_tracking_refresh(
-        coupled, stencil_reach, gate=gate, materialize_every=materialize_every
+        coupled,
+        stencil_reach,
+        gate=gate,
+        materialize_every=materialize_every,
+        materialize_drift=materialize_drift,
     )
 
 

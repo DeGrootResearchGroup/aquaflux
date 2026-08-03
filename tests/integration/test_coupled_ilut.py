@@ -168,6 +168,39 @@ def test_staleness_beta_gate_fires_on_first_call_beta_move_and_staleness_cap() -
     assert gate(1.4) is False  # unchanged, 1 step since -> reuse
 
 
+def test_materialize_gate_fires_on_drift_and_the_step_cap() -> None:
+    """The β-diagonal split's materialize gate re-materializes the Jacobian only when the coefficient has
+    drifted past the threshold since the last materialize, or at the step cap -- so the expensive full
+    re-probe is reserved for a genuinely stale Jacobian and the cheap shift-only refresh carries the rest.
+
+    Pure logic with an injected synthetic drift measure (``drift = |state - reference|``): the gate's
+    decision -- first-call seeding without a redundant materialize, drift-move, step-cap, and re-basing the
+    reference at every materialize -- is the whole novelty; the materialize itself is shared machinery.
+    """
+    import jax.numpy as jnp
+    from aquaflux.turbulence.coupled import _materialize_gate
+
+    def drift_factory(reference):
+        ref = float(reference)
+        return lambda state: abs(float(state) - ref)
+
+    # Drift only: seed at the first state (no redundant materialize), then fire on a >0.5 move, re-basing.
+    gate = _materialize_gate(drift_factory, materialize_drift=0.5, materialize_every=None)
+    assert (
+        gate(jnp.asarray(0.0)) is False
+    )  # first call seeds the reference; Jacobian is fresh from build
+    assert gate(jnp.asarray(0.3)) is False  # drift 0.3 < 0.5 -> shift-only
+    assert (
+        gate(jnp.asarray(0.6)) is True
+    )  # drift 0.6 > 0.5 -> materialize, re-base reference to 0.6
+    assert gate(jnp.asarray(0.7)) is False  # drift 0.1 vs 0.6 -> shift-only (re-based, not vs 0.0)
+    assert gate(jnp.asarray(1.2)) is True  # drift 0.6 vs 0.6 -> materialize again
+
+    # Step cap only (no drift trigger): fire every 3rd refresh regardless of state.
+    cap = _materialize_gate(drift_factory, materialize_drift=None, materialize_every=3)
+    assert [cap(jnp.asarray(0.0)) for _ in range(6)] == [False, False, True, False, False, True]
+
+
 @pytest.mark.slow
 def test_ilut_beta_tracking_refresh_gates_the_in_place_refactor(case) -> None:
     """The precondition_step re-factors the ILUT in place on its first call and skips within the cap.
