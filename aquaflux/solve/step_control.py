@@ -193,6 +193,15 @@ class DualTimeControl(eqx.Module):
         )
         return controlled, beta
 
+    def carry_beta(self, state: object, beta: float) -> float:
+        """Seed the carried β with an externally-chosen value (the march's escalated β).
+
+        Called by :func:`~aquaflux.solve.forward_march` after a β-escalation retry, so the ramp continues
+        from the escalation's discovered-safe β instead of the control's own last β -- see the carry note in
+        ``forward_march``. Returns the new carried state (this control carries a bare β).
+        """
+        return float(beta)
+
 
 class ResidualRatioDualTimeControl(eqx.Module):
     """Ramp the dual-time pseudo-timestep by the steady-residual reduction ratio (residual-based PTC).
@@ -289,6 +298,12 @@ class ResidualRatioDualTimeControl(eqx.Module):
             lambda s: s.relaxation_schedule, base_step, ConstantRelaxation(jnp.asarray(beta))
         )
         return controlled, (beta, prev_residual)
+
+    def carry_beta(self, state: object, beta: float) -> tuple[float, float | None]:
+        """Seed the carried β with the march's escalated β, keeping the carried previous residual so the
+        ratio signal is unbroken (see the carry note in :func:`~aquaflux.solve.forward_march`)."""
+        prev = state[1] if isinstance(state, tuple) else None
+        return (float(beta), prev)
 
 
 class CflResidualDualTimeControl(eqx.Module):
@@ -392,3 +407,9 @@ class CflResidualDualTimeControl(eqx.Module):
             lambda s: s.relaxation_schedule, base_step, ConstantRelaxation(jnp.asarray(beta))
         )
         return controlled, (beta, prev_residual)
+
+    def carry_beta(self, state: object, beta: float) -> tuple[float, float | None]:
+        """Seed the carried β with the march's escalated β, keeping the carried previous residual so the
+        ratio signal is unbroken (see the carry note in :func:`~aquaflux.solve.forward_march`)."""
+        prev = state[1] if isinstance(state, tuple) else None
+        return (float(beta), prev)

@@ -661,3 +661,33 @@ def test_march_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergen
     assert (
         result.reports[0].cycles == 6
     )  # escalation exhausted -> fell back to the tight retry (cost 6)
+
+
+def test_march_carries_the_escalated_beta_into_the_control() -> None:
+    """After a β-escalation the control's carried β is SEEDED with the escalated value, so the next step
+    continues from the discovered-safe β instead of re-deriving the control's own (floor-ward) β and
+    re-paying the escalation every step -- the low-β reachability-tail fix that lets a static β floor be
+    dropped (escalation + carry discover how low is safe). Here cyc ≈ 40/β, so β = 1 escalates 1→2→4 to
+    clear the cap of 10, and 4.0 is what the control carries out (a plain reset would carry the control's
+    own β)."""
+    from aquaflux.solve import DualTimeControl
+
+    residual = _Cubic(jnp.zeros((1,)))
+    phi0 = jnp.ones((1,))
+    step = _CyclesFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))
+    control = DualTimeControl(beta_start=1.0, beta_min=0.01)
+    result = forward_march(
+        step,
+        residual,
+        phi0,
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        step_control=control,
+        retry_on_cycles=10,
+        retry_beta_factor=2.0,
+        retry_cycles_limit=3,
+    )
+    assert (
+        float(result.control_state) == 4.0
+    )  # the escalated β, carried; not the control's beta_start

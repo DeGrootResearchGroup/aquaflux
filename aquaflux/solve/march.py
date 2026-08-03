@@ -652,6 +652,24 @@ def forward_march(
             state, cycles, alpha, inner, residual_norm = _march_step(
                 active_step, residual_fn, prestep_state, residual_norm_0, retry_solver
             )
+        # Carry an escalated β forward into the control. The escalation raised β because the control had
+        # driven it too low for this operator; without carrying that back, the next `next_step` recomputes
+        # from the control's own (floor-ward) β and re-pays the escalation every step on a persistently hard
+        # region -- the low-β reachability tail, where β sits at its floor and each step re-escalates. The
+        # escalation IS the feedback for "how low is safe here", so it replaces a static β floor: seeding the
+        # control's carried β with the escalated value lets the control continue from the discovered-safe
+        # level (and adapt on from there), so β_min can be driven toward zero and the *controller* decides how
+        # large a pseudo-timestep is safe. Only when β was actually escalated, and only for a control that
+        # carries β (the dual-time family exposes `carry_beta`); no escalation ⇒ byte-identical.
+        if (
+            retries
+            and step_control is not None
+            and hasattr(step_control, "carry_beta")
+            and hasattr(active_step.relaxation_schedule, "beta")
+        ):
+            control_state = step_control.carry_beta(
+                control_state, float(active_step.relaxation_schedule.beta)
+            )
         current = float(residual_norm)
         report = StepReport(
             step=len(reports),

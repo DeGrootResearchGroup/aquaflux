@@ -361,3 +361,21 @@ def test_step_report_restart_cycles_and_matvecs_correct_the_num_steps_offset() -
 
     rejected = StepReport(step=0, cycles=0, residual_norm=1.0, residual_ratio=1.0, alpha=1.0)
     assert rejected.restart_cycles == 0  # a no-measurement step stays 0, not negative
+
+
+def test_carry_beta_seeds_the_carried_state() -> None:
+    """`carry_beta` replaces the control's carried β with an externally-chosen (escalated) value, keeping
+    any carried residual so the ratio signal is unbroken -- the hook `forward_march` uses to carry an
+    escalated β forward so a persistently hard region is not re-escalated every step."""
+    from aquaflux.solve import (
+        CflResidualDualTimeControl,
+        DualTimeControl,
+        ResidualRatioDualTimeControl,
+    )
+
+    # Bare-β state control.
+    assert DualTimeControl().carry_beta(0.02, 0.16) == 0.16
+    # Tuple (β, previous residual) controls: β replaced, residual preserved.
+    for ctrl in (CflResidualDualTimeControl(), ResidualRatioDualTimeControl()):
+        assert ctrl.carry_beta((0.02, 3.5), 0.16) == (0.16, 3.5)
+        assert ctrl.carry_beta(None, 0.16) == (0.16, None)  # first-step state has no residual yet

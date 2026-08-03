@@ -1734,6 +1734,23 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       than a non-attainment flag threaded through every solve layer — same effect (a doomed primary costs
       ~`cycle_budget` matvecs, not `inner_steps ×` a stagnation), far smaller blast radius. Pinned by
       `test_dual_time.py` (`…cycle_budget_caps_the_inner_loop`, `…none_is_the_unbounded_step`).
+    - **The escalated β is CARRIED into the control — so a static β floor can be dropped and the *controller*
+      decides how low is safe (BUILT).** β is inverse to the pseudo-timestep, so a static `beta_min` is a cap
+      on the *largest* timestep the march may take, applied everywhere — which slows convergence in regions
+      that could safely take a bigger step. The escalation is the per-region feedback for "how low is safe
+      *here*": it fires exactly where β went too low. But without carrying it back, the next outer step's
+      `step_control.next_step` recomputes β from the control's own (floor-ward) trajectory and **re-pays the
+      escalation every step** — the observed low-β tail (β pinned at the floor, each step re-escalating). So
+      after an escalation `forward_march` seeds the control's carried β with the escalated value via
+      `step_control.carry_beta(state, β)` (the dual-time controls implement it: `DualTimeControl` carries a
+      bare β, the `…Residual…` controls carry `(β, prev_residual)` and keep the residual so the ratio signal
+      is unbroken). The control then continues its grow/brake dynamics *from* the discovered-safe β, so
+      `beta_min` can be driven toward zero and the controller — with escalation as the safety net and the
+      carry as the memory — finds how large a timestep each region tolerates, rather than a global floor
+      capping it. Only fires when β was actually escalated and the control exposes `carry_beta`; no
+      escalation ⇒ byte-identical. Pinned by `test_forward_march.py`
+      (`…carries_the_escalated_beta_into_the_control`) and `test_step_control.py`
+      (`test_carry_beta_seeds_the_carried_state`).
   - **`CoefficientDriftTrigger` — the PREFERRED staleness trigger: measure the drift, don't infer it
     from cost (binding for new work).** A frozen preconditioner is stale exactly when the operator it
     approximates has moved, so the honest signal is that movement itself. `StepReport.drift` carries a
