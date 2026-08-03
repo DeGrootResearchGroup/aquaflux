@@ -413,7 +413,7 @@ class MonolithicAmgPreconditioner:
         self.factors = vcycle
         self._residual_fn = residual_fn
         # The materialized jvp Jacobian *without* the pseudo-transient shift, cached so a β-only refresh
-        # (:meth:`refresh_shift_in_place`) can re-add a new ``β d`` diagonal without re-running the ~240 jvps.
+        # (:meth:`refresh_shift_in_place`) can re-add a new ``β d`` diagonal without re-running the coloured jvp probe.
         self._jacobian_no_shift = jacobian_no_shift
         self._n_fields = n_fields
         # A jitted jvp ``(phi, w) -> J(phi) w`` for the native exact solve's shell operator, called eagerly
@@ -426,13 +426,25 @@ class MonolithicAmgPreconditioner:
 
     @staticmethod
     def _materialize_jacobian(
-        matvec: Callable[[jnp.ndarray], jnp.ndarray], colouring, n_fields: int
+        matvec: Callable[[jnp.ndarray], jnp.ndarray],
+        colouring,
+        n_fields: int,
+        batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        probe_batch_size: int | None = None,
     ) -> sp.csr_matrix:
-        """The coupled Jacobian **without** the shift, from the graph-coloured jvp probe (~240 jvps -- the
-        expensive part of a refresh)."""
+        """The coupled Jacobian **without** the shift, from the graph-coloured jvp probe (one jvp per
+        (colour, field) -- the expensive part of a refresh; e.g. ~670 probes on a 23k-cell reach-3 bfs3d
+        mesh). ``batched_matvec`` (built once, reused) runs the probes as a few batched passes rather than a
+        per-probe loop (~1.6x on that mesh); ``probe_batch_size`` chunks the batch for memory."""
         from .sparse_jacobian import materialize_block_jacobian
 
-        return materialize_block_jacobian(matvec, colouring, n_fields).tocsr()
+        return materialize_block_jacobian(
+            matvec,
+            colouring,
+            n_fields,
+            batched_matvec=batched_matvec,
+            probe_batch_size=probe_batch_size,
+        ).tocsr()
 
     @staticmethod
     def _shifted(jacobian_no_shift: sp.csr_matrix, shift_diagonal: np.ndarray) -> sp.csr_matrix:
@@ -452,6 +464,8 @@ class MonolithicAmgPreconditioner:
         smoother_fill_levels: int = 1,
         smoother_sweeps: int = 2,
         coarse_eq_limit: int | None = None,
+        batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        probe_batch_size: int | None = None,
     ) -> MonolithicAmgPreconditioner:
         """Materialize the shifted coupled Jacobian and build a V-cycle preconditioner for it, off the jit path.
 
@@ -476,13 +490,21 @@ class MonolithicAmgPreconditioner:
             The level-smoother controls (see :func:`build_amg_vcycle`).
         coarse_eq_limit : int or None
             The coarse-grid direct-solve size (see :func:`build_amg_vcycle`). ``None`` keeps PETSc's default.
+        batched_matvec : callable, optional
+            A batched form of ``matvec`` (``(k, nf) -> (k, nf)``), built once and reused, so the coloured
+            probes run as a few batched passes instead of a per-probe loop (a pure materialization speedup).
+        probe_batch_size : int or None
+            The batched-probe chunk size (simultaneous tangents), to bound peak memory; ``None`` runs all
+            probes in one batch.
 
         Returns
         -------
         MonolithicAmgPreconditioner
             The built preconditioner.
         """
-        jacobian = cls._materialize_jacobian(matvec, colouring, n_fields)
+        jacobian = cls._materialize_jacobian(
+            matvec, colouring, n_fields, batched_matvec, probe_batch_size
+        )
         matrix = cls._shifted(jacobian, shift_diagonal)
         return cls(
             build_amg_vcycle(
@@ -507,6 +529,8 @@ class MonolithicAmgPreconditioner:
         *,
         smoother_fill_levels: int = 1,
         smoother_sweeps: int = 2,
+        batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        probe_batch_size: int | None = None,
     ) -> None:
         """Rebuild the V-cycle at a developed state and swap it IN PLACE (no new object).
 
@@ -521,7 +545,9 @@ class MonolithicAmgPreconditioner:
         root (the shift vanishes there), so it changes only the forward Krylov path.
         """
         del smoother_fill_levels, smoother_sweeps  # the smoother config is fixed at build
-        self._jacobian_no_shift = self._materialize_jacobian(matvec, colouring, n_fields)
+        self._jacobian_no_shift = self._materialize_jacobian(
+            matvec, colouring, n_fields, batched_matvec, probe_batch_size
+        )
         self._n_fields = n_fields
         matrix = self._shifted(self._jacobian_no_shift, shift_diagonal)
         cell_major, scale, perm = equilibrate_cell_major(matrix, n_fields)
@@ -532,7 +558,7 @@ class MonolithicAmgPreconditioner:
 
         The operator is ``J(φ) + β d``, and the pseudo-transient shift ``β d`` touches only the **diagonal**.
         So tracking a moving ``β`` (and the cheap per-cell shift ``d``) needs only to re-add the new diagonal
-        to the **cached** Jacobian and re-factor — it does **not** need the ~240-jvp materialization of ``J``
+        to the **cached** Jacobian and re-factor — it does **not** need the coloured-probe materialization of ``J``
         that :meth:`refresh_in_place` pays. Measured on the ``bfs3d`` coupled Jacobian the materialize is the
         dominant refresh cost (~40 s of a ~60 s refresh; the smoothed-aggregation re-factor is the rest), so a
         shift-only refresh is several times cheaper. The Jacobian is held frozen at the last full

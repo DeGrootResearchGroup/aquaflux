@@ -147,7 +147,12 @@ def block_stencil_colouring(
 
 
 def materialize_block_jacobian(
-    matvec: Callable[[jnp.ndarray], jnp.ndarray], colouring: BlockColouring, n_fields: int
+    matvec: Callable[[jnp.ndarray], jnp.ndarray],
+    colouring: BlockColouring,
+    n_fields: int,
+    *,
+    batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+    probe_batch_size: int | None = None,
 ) -> sp.csr_matrix:
     """Assemble the field-major block Jacobian of ``matvec`` by compressed probing.
 
@@ -156,15 +161,32 @@ def materialize_block_jacobian(
     ``(row cell, column cell)`` in that colour's share of the sparsity pattern (collision-free by the
     colouring). Degree of freedom ``(cell i, field f)`` is the flat index ``f * n_cells + i``.
 
+    The ``n_colours * n_fields`` probes share the operator's linearization (one fixed state), so they can
+    be evaluated as one batched directional derivative instead of a Python loop of separate calls. Pass
+    ``batched_matvec`` -- a ``(k, nf) -> (k, nf)`` map applying ``matvec`` to ``k`` stacked seeds at once
+    (e.g. ``jax.vmap`` of the jvp, **built once and reused** so it compiles a single time) -- to take that
+    path; the responses are bit-identical to the per-probe loop (the same directional derivative per seed),
+    so it is a pure speedup. ``probe_batch_size`` chunks the batch to bound peak memory (``k`` simultaneous
+    tangents); ``None`` evaluates all probes in one batch. Without ``batched_matvec`` the per-probe loop is
+    used, so any ``matvec`` (including a non-``vmap``-able NumPy one) still works.
+
     Parameters
     ----------
     matvec : callable
         The Jacobian-vector product ``v -> J v`` (e.g. ``lambda v: jax.jvp(residual, (state,), (v,))[1]``
-        at a frozen state), mapping and returning a flat vector of length ``n_fields * n_cells``.
+        at a frozen state), mapping and returning a flat vector of length ``n_fields * n_cells``. Used for
+        the per-probe loop when ``batched_matvec`` is not given.
     colouring : BlockColouring
         The pattern and colouring from :func:`block_stencil_colouring`.
     n_fields : int
         Degrees of freedom per cell (e.g. ``dim + 1`` for a flow saddle, ``dim + 3`` for coupled RANS).
+    batched_matvec : callable, optional
+        A batched form of ``matvec``: ``(k, nf) -> (k, nf)`` applying the same directional derivative to
+        ``k`` stacked seeds at once. When given, probing runs batched (a few fused passes) instead of the
+        per-probe loop. Must be built once and reused by the caller so it compiles a single time.
+    probe_batch_size : int, optional
+        The batched-path chunk size (number of simultaneous tangents), to bound peak memory. ``None``
+        (default) runs all probes in one batch. Ignored on the per-probe loop.
 
     Returns
     -------
@@ -176,21 +198,46 @@ def materialize_block_jacobian(
     rows_i, cols_i = colouring.pattern_rows, colouring.pattern_cols
     groups = [np.where(colouring.colour == c)[0] for c in range(colouring.n_colours)]
 
-    rows_out: list[np.ndarray] = []
-    cols_out: list[np.ndarray] = []
-    vals_out: list[np.ndarray] = []
-    for group in groups:
-        in_group = np.isin(cols_i, group)
-        block_rows = rows_i[in_group]  # row cells of this colour's blocks
-        block_cols = cols_i[in_group]  # column cells (all in `group`)
+    # One seed per (colour, field): a one in field `b` of every cell of the colour. These probes are
+    # independent directional derivatives sharing the fixed linearization, so they can be batched.
+    probes: list[tuple[int, int]] = []  # (group index, field b)
+    seeds: list[np.ndarray] = []
+    for gi, group in enumerate(groups):
         for b in range(n_fields):
             seed = np.zeros(nf)
             seed[b * n + group] = 1.0
-            response = np.asarray(matvec(jnp.asarray(seed)), dtype=np.float64)
-            for a in range(n_fields):
-                rows_out.append(a * n + block_rows)
-                cols_out.append(b * n + block_cols)
-                vals_out.append(response[a * n + block_rows])
+            probes.append((gi, b))
+            seeds.append(seed)
+
+    if batched_matvec is None:
+        responses = [np.asarray(matvec(jnp.asarray(s)), dtype=np.float64) for s in seeds]
+    else:
+        seed_matrix = np.stack(seeds)
+        n_probes = seed_matrix.shape[0]
+        chunk = n_probes if probe_batch_size is None else max(1, probe_batch_size)
+        responses = np.empty((n_probes, nf), dtype=np.float64)
+        for start in range(0, n_probes, chunk):
+            block = seed_matrix[start : start + chunk]
+            m = block.shape[0]
+            if m < chunk:  # pad the final chunk to a uniform shape so the batched map compiles once
+                block = np.vstack([block, np.zeros((chunk - m, nf))])
+            responses[start : start + m] = np.asarray(
+                batched_matvec(jnp.asarray(block)), dtype=np.float64
+            )[:m]
+
+    # De-compress: each probe's response holds column `b` of every block in its colour's share.
+    group_blocks = [
+        (rows_i[np.isin(cols_i, group)], cols_i[np.isin(cols_i, group)]) for group in groups
+    ]
+    rows_out: list[np.ndarray] = []
+    cols_out: list[np.ndarray] = []
+    vals_out: list[np.ndarray] = []
+    for (gi, b), response in zip(probes, responses, strict=True):
+        block_rows, block_cols = group_blocks[gi]
+        for a in range(n_fields):
+            rows_out.append(a * n + block_rows)
+            cols_out.append(b * n + block_cols)
+            vals_out.append(response[a * n + block_rows])
     jacobian = sp.csr_matrix(
         (np.concatenate(vals_out), (np.concatenate(rows_out), np.concatenate(cols_out))),
         shape=(nf, nf),

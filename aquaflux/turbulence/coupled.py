@@ -746,6 +746,11 @@ _COUPLED_AMG_FORWARD_SOLVER = relative_residual_gmres(
     1e-2, restart=15, stagnation_iters=40, max_restarts=60
 )
 
+# How many coloured tangents share one vmapped jvp pass when materializing the AMG Jacobian. Smaller uses
+# less peak memory (fewer simultaneous forward-AD tapes), larger amortizes dispatch over more probes; the
+# ~240 probes run in ceil(240 / this) fused passes instead of a 240-call Python loop.
+_PROBE_BATCH_SIZE = 16
+
 # Backtracking rungs for the shifted step. The full coupled Newton step from the hybrid initial
 # condition overshoots violently (the residual blows up many orders of magnitude), so the step length
 # is scaled back along {1, 1/2, ..., 1/2**N} until it descends -- recovering a residual-reducing step
@@ -1846,6 +1851,8 @@ def coupled_amg_continuation(
     colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
     frozen = jax.lax.stop_gradient(reference_state)
     matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    # Batched jvp so the coloured materialize probes run as a few fused passes, not a per-probe loop.
+    batched_matvec = jax.jit(jax.vmap(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1]))
     # `native_forward_solve` (EXPERIMENTAL, opt-in) runs the forward Krylov natively in PETSc, its operator
     # a shell over the exact jvp (true Newton, not a frozen Jacobian) -- the native GMRES + GAMG reaches its
     # stop in ~1 iteration where the JAX-side Krylov with the V-cycle as a per-matvec callback needs ~90
@@ -1865,6 +1872,8 @@ def coupled_amg_continuation(
         smoother_fill_levels=smoother_fill_levels,
         smoother_sweeps=smoother_sweeps,
         coarse_eq_limit=coarse_eq_limit,
+        batched_matvec=batched_matvec,
+        probe_batch_size=_PROBE_BATCH_SIZE,
     )
     return _monolithic_factor_step(
         coupled,
@@ -2007,7 +2016,7 @@ def _materialize_gate(
     materialize_every: int | None,
 ) -> Callable[[jnp.ndarray], bool]:
     """A stateful predicate for the β-diagonal split: should this refresh RE-MATERIALIZE the Jacobian
-    (full, ~240 jvps) or only re-add the shift diagonal to the standing one (cheap)?
+    (full, the coloured jvp probe) or only re-add the shift diagonal to the standing one (cheap)?
 
     Returns ``should_materialize(state) -> bool``. Re-materializing is the dominant refresh cost, so it is
     reserved for when the frozen Jacobian has actually gone stale -- i.e. when the state it was probed at
@@ -2103,6 +2112,13 @@ def _beta_tracking_refresh(
     # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
     # reuses it, rather than a fresh lambda recompiling each step.
     matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    # Batched form (vmapped over the tangent) so the ~240 coloured probes of a full materialize run as a
+    # few fused passes rather than a Python loop of separate calls. Built once (state-independent, `frozen`
+    # a traced argument) so it compiles a single time and every materialize reuses it. Used only by the AMG
+    # preconditioner's `refresh_in_place`.
+    batched_matvec_at = jax.jit(
+        jax.vmap(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1], in_axes=(None, 0))
+    )
     # The β-diagonal split's materialize gate (built once): decides per refresh whether to re-materialize
     # the Jacobian or only re-add the shift. `None` when neither trigger is set (then every refresh is a
     # full materialize, the original behaviour).
@@ -2134,17 +2150,28 @@ def _beta_tracking_refresh(
         pc = policy.preconditioner
         # β-diagonal split: β and the per-cell shift ``d`` touch only the diagonal, so between full
         # (re-materialized) refreshes the shift is tracked by re-adding the new ``β d`` diagonal to the
-        # frozen Jacobian -- skipping the ~240-jvp materialize (the dominant refresh cost). The materialize
+        # frozen Jacobian -- skipping the coloured-probe materialize (the dominant refresh cost). The materialize
         # gate reserves the full re-materialize for when the Jacobian has actually gone stale (ν_t drift) or
         # a step cap is hit; otherwise this is a cheap shift-only refresh. Only the AMG preconditioner
         # exposes the shift-only path; without it (ILUT/LU) `materialize_gate` is None and every refresh is
         # full, as before.
-        if materialize_gate is not None and hasattr(pc, "refresh_shift_in_place"):
+        is_amg = hasattr(pc, "refresh_shift_in_place")
+        if materialize_gate is not None and is_amg:
             if not materialize_gate(state):
                 pc.refresh_shift_in_place(shift)
                 return
+        # The AMG preconditioner materializes via the coloured probe and takes the batched form; the
+        # factorization preconditioners (LU/ILUT) do not, so pass it only on the AMG path.
+        extra = (
+            {
+                "batched_matvec": lambda seeds: batched_matvec_at(frozen, seeds),
+                "probe_batch_size": _PROBE_BATCH_SIZE,
+            }
+            if is_amg
+            else {}
+        )
         pc.refresh_in_place(
-            lambda v: matvec_at(frozen, v), colouring, n_fields, shift, **refresh_kwargs
+            lambda v: matvec_at(frozen, v), colouring, n_fields, shift, **extra, **refresh_kwargs
         )
 
     return precondition_step
@@ -2301,7 +2328,7 @@ def amg_beta_tracking_refresh(
         tracks the moving shift with a cheap diagonal-only refresh
         (:meth:`~aquaflux.solve.MonolithicAmgPreconditioner.refresh_shift_in_place`) that reuses the frozen
         Jacobian -- since ``β`` and the per-cell shift ``d`` touch only the diagonal, this skips the
-        ~240-jvp materialization (the dominant refresh cost) while keeping the shift matched. It is the
+        coloured-probe materialization (the dominant refresh cost) while keeping the shift matched. It is the
         step-count arm of the materialize gate (:func:`_materialize_gate`): a full re-materialize is forced
         after ``K`` shift-only refreshes as a staleness cap. Prefer ``materialize_drift`` (a state-staleness
         trigger) as the primary control and keep ``materialize_every`` as a large safety cap.

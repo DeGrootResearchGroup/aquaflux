@@ -91,6 +91,30 @@ def test_materialize_recovers_a_known_block_matrix_exactly():
     assert (materialized - k).nnz == 0 or abs(materialized - k).max() < 1e-12
 
 
+def test_batched_probing_matches_the_per_probe_loop():
+    """Batched probing (the coloured probes share one linearization, applied to stacked seeds) recovers
+    exactly the per-probe loop's Jacobian -- it is a pure speedup, not an approximation. Checked both in
+    one batch and chunked (so the final-chunk padding is exercised)."""
+    import jax
+
+    rng = np.random.default_rng(3)
+    n, nvar, reach = 12, 3, 2
+    k, colouring = _random_block_matrix(n, nvar, reach, rng)
+    dense = jnp.asarray(k.toarray())
+
+    def matvec(v):  # pure-jax, so vmap-able (unlike the NumPy `_matvec_of`)
+        return dense @ v
+
+    loop = materialize_block_jacobian(matvec, colouring, nvar)
+    one_batch = materialize_block_jacobian(matvec, colouring, nvar, batched_matvec=jax.vmap(matvec))
+    chunked = materialize_block_jacobian(
+        matvec, colouring, nvar, batched_matvec=jax.vmap(matvec), probe_batch_size=4
+    )
+    assert abs(loop - one_batch).max() < 1e-14  # bit-identical to the loop
+    assert abs(loop - chunked).max() < 1e-14  # chunking + final-chunk padding changes nothing
+    assert abs(loop - k).max() < 1e-12  # and both recover the true matrix
+
+
 def test_jacobian_relative_error_flags_too_small_a_reach():
     rng = np.random.default_rng(2)
     n, nvar = 12, 2
