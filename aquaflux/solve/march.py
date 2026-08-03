@@ -426,6 +426,9 @@ def forward_march(
     solver: lx.AbstractLinearSolver | None = None,
     retry_solver: lx.AbstractLinearSolver | None = None,
     retry_divergence_cap: float = float("inf"),
+    retry_on_cycles: int | None = None,
+    retry_beta_factor: float = 2.0,
+    retry_cycles_limit: int = 2,
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
 
@@ -528,6 +531,18 @@ def forward_march(
         ``inf`` (only non-finiteness triggers a retry), because the load-bearing failure is a poisoned
         (non-finite) correction, and a residual can legitimately *rise* during development (the
         ``β × travel`` identity), so a tight cap would false-fire on the reachability descent.
+    retry_on_cycles : int or None
+        A **cycle-count** bailout: when a step's linear-solve count exceeds this, the step is redone from
+        the pre-step state with ``β`` **escalated** (``β *= retry_beta_factor``). A high count on a matched
+        preconditioner is the hard-operator (stiff low-``β`` saddle) signature, whose fix is more damping,
+        not a re-solve; staleness (the other cause) is meant to be pre-empted proactively by a β-mismatch
+        refresh, so the reactive lever here escalates ``β``. ``None`` (default) disables it (byte-identical).
+        Escalation needs a ``β`` leaf (a step control's ``ConstantRelaxation``); it no-ops otherwise.
+    retry_beta_factor : float
+        The factor ``β`` is multiplied by on each cycle-count retry (default ``2``).
+    retry_cycles_limit : int
+        The maximum number of successive ``β`` escalations for one step (default ``2``). After them the step
+        is accepted whatever its count.
 
     Returns
     -------
@@ -598,6 +613,34 @@ def forward_march(
         ):
             state, cycles, alpha, inner, residual_norm = _march_step(
                 active_step, residual_fn, prestep_state, residual_norm_0, retry_solver
+            )
+        # Reactive cycle-count retry: a solve whose cost spikes past `retry_on_cycles` is the hard-operator
+        # signature -- the stiff low-β overshoot saddle, where even a matched preconditioner needs many
+        # cycles. (Staleness is the other cause of a high count, but a β-mismatch refresh pre-empts that
+        # proactively, so what remains here is the operator.) The fix for a hard operator is not a refresh
+        # but MORE damping: redo the step from the pre-step state with β escalated (`β *= retry_beta_factor`),
+        # a smaller, better-conditioned, safer step, re-matching the frozen preconditioner to the new β via
+        # `precondition_step`. β vanishes at the root, so the escalation reshapes only the forward path (like
+        # the shift itself); the escalated β is not carried into the control, so a persistently hard region
+        # re-triggers each step. `retry_on_cycles=None` (default) is byte-identical. Escalation needs a
+        # readable β leaf (a `ConstantRelaxation` set by a step control); it no-ops on other schedules.
+        retries = 0
+        while (
+            retry_on_cycles is not None
+            and int(cycles) > retry_on_cycles
+            and retries < retry_cycles_limit
+            and not converged_at(float(residual_norm))
+            and hasattr(active_step.relaxation_schedule, "beta")
+        ):
+            retries += 1
+            escalated = float(active_step.relaxation_schedule.beta) * retry_beta_factor
+            active_step = eqx.tree_at(
+                lambda s: s.relaxation_schedule.beta, active_step, jnp.asarray(escalated)
+            )
+            if precondition_step is not None:
+                precondition_step(active_step, prestep_state)  # re-match the PC to the escalated β
+            state, cycles, alpha, inner, residual_norm = _march_step(
+                active_step, residual_fn, prestep_state, residual_norm_0, solver
             )
         current = float(residual_norm)
         report = StepReport(

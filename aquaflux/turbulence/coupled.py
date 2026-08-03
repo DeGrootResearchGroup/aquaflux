@@ -2169,7 +2169,12 @@ def ilut_beta_tracking_refresh(
 
 
 def amg_beta_tracking_refresh(
-    coupled: CoupledRANS, *, stencil_reach: int = 3, materialize_every: int | None = None
+    coupled: CoupledRANS,
+    *,
+    stencil_reach: int = 3,
+    materialize_every: int | None = None,
+    beta_rel_change: float | None = None,
+    refresh_every: int = 8,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """A ``precondition_step`` that rebuilds the AMG V-cycle at the current β, every step.
 
@@ -2215,13 +2220,33 @@ def amg_beta_tracking_refresh(
         ~240-jvp materialization (the dominant refresh cost) while keeping the shift matched. The full
         every-``K``-th materialize catches the Jacobian's slower *state* drift; pair a large ``K`` with a
         state-staleness trigger for the best cost.
+    beta_rel_change : float or None
+        The **β-mismatch** refresh trigger. ``None`` (default) refreshes every step. When set, the refresh
+        is gated (:func:`_staleness_beta_gate`): it fires only when ``β`` has moved by more than this
+        fraction of the ``β`` of the *last refresh* -- keying on the mismatch from the built ``β`` rather
+        than the step-to-step change, so an oscillating control (``β`` swinging up and down around one
+        value) does not trigger a refresh every step. It is the proactive complement to a reactive
+        cycle-count retry: it re-matches the frozen V-cycle *before* a drifted ``β`` inflates the Krylov
+        cost, and it composes with ``materialize_every`` (the gate decides *whether* to refresh; the split
+        decides shift-only vs full).
+    refresh_every : int
+        The staleness-cap backstop when ``beta_rel_change`` is set: force a refresh after this many gated
+        steps with no β-move (state development at a near-constant ``β``). Ignored when ``beta_rel_change``
+        is ``None``.
 
     Returns
     -------
     callable
         ``precondition_step(active_step, state) -> None``.
     """
-    return _beta_tracking_refresh(coupled, stencil_reach, materialize_every=materialize_every)
+    gate = (
+        None
+        if beta_rel_change is None
+        else _staleness_beta_gate(refresh_every=refresh_every, beta_rel_change=beta_rel_change)
+    )
+    return _beta_tracking_refresh(
+        coupled, stencil_reach, gate=gate, materialize_every=materialize_every
+    )
 
 
 def solve_coupled(
@@ -2249,6 +2274,9 @@ def solve_coupled(
     precondition_step: Callable[[ForwardStep, jnp.ndarray], None] | None = None,
     retry_solver: lx.AbstractLinearSolver | None = None,
     retry_divergence_cap: float = float("inf"),
+    retry_on_cycles: int | None = None,
+    retry_beta_factor: float = 2.0,
+    retry_cycles_limit: int = 2,
     **continuation_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system ``R(u, p, k, omega) = 0`` by one monolithic Newton solve.
@@ -2451,6 +2479,15 @@ def solve_coupled(
         ``retry_divergence_cap * reference``. Defaults to ``inf`` (only non-finiteness triggers), because
         the residual can legitimately rise during development (the ``β × travel`` identity), so a tight
         cap would false-fire on the load-bearing reachability descent.
+    retry_on_cycles : int or None
+        A **cycle-count** bailout (:func:`aquaflux.solve.forward_march`): a step whose solve exceeds this
+        count is redone from the pre-step state with ``β`` escalated by ``retry_beta_factor`` -- more
+        damping for the stiff low-``β`` operator, the hard-operator cause of a high count (staleness, the
+        other, is pre-empted by a β-mismatch refresh). Needs a ``β``-carrying step control. ``None``
+        (default) disables it.
+    retry_beta_factor, retry_cycles_limit
+        The ``β`` escalation factor per retry (default ``2``) and the maximum successive escalations for one
+        step (default ``2``); see :func:`aquaflux.solve.forward_march`.
     **continuation_kwargs
         Forwarded to :func:`coupled_continuation` when building internally (schedule + preconditioner
         options). Notably ``inner_steps > 1`` selects the **dual-time** (backward-Euler) march
@@ -2475,6 +2512,7 @@ def solve_coupled(
         or on_checkpoint is not None
         or precondition_step is not None
         or retry_solver is not None
+        or retry_on_cycles is not None
     )
     if observing and _is_traced((coupled, flow, k, omega)):
         # The refresh re-derives the preconditioner from the mid-march state, which is a tracer when
@@ -2585,6 +2623,9 @@ def solve_coupled(
                 precondition_step=precondition_step,
                 retry_solver=retry_solver,
                 retry_divergence_cap=retry_divergence_cap,
+                retry_on_cycles=retry_on_cycles,
+                retry_beta_factor=retry_beta_factor,
+                retry_cycles_limit=retry_cycles_limit,
             )
             state = result.state
             control_state = result.control_state

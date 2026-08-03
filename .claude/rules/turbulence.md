@@ -832,24 +832,48 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     the outer Krylov count on the low-shift operator the march's tail runs at (~2.1× the whole `bfs3d` solve
     there) for one extra cheap incomplete-LU back-solve (`.claude/rules/solve.md`). This is the coupled
     preconditioner the first 3D validation case (`validation/bfs3d_openfoam`) runs on.
-  - **`amg_beta_tracking_refresh` — rebuild the V-cycle at the current β every step, the enabler of the 3D
+  - **`amg_beta_tracking_refresh` — rebuild the V-cycle as β drifts, the enabler of the 3D
     dual-time march (BUILT).** The AMG sibling of `lu_beta_tracking_refresh` / `ilut_beta_tracking_refresh`.
     A dual-time march ramps β down to develop the recirculation, and a V-cycle frozen at `amg_beta` degrades
     sharply as β leaves that value (measured on the `bfs3d` cold march: ~11 outer cycles per solve at
     β≈0.15 rising to ~250–285 at β≈0.07, the per-step wall going ~90 s → ~16–19 min, and the march stalling).
     Re-materializing the Jacobian and rebuilding the GAMG at the step's `(state, β)` restores the matched
     ~11-cycle solve — the ~tens-of-seconds rebuild is far cheaper than the hundreds of extra
-    Jacobian-vector-product matvecs a stale V-cycle costs, so (like the cheap complete-LU hook) it re-factors
-    **every step**. This is the only β-tracking that carries the 3D case: the complete LU's factorization is
-    out of memory and the ILUT's `spilu` is prohibitively slow to build there. Same forward-only contract as
-    the LU/ILUT hooks (raises under `jax.grad`); pass it to `solve_coupled(precondition_step=…)` (or a
-    `solve_reynolds_continuation` `point_setup`) with a `coupled_amg_continuation` step and a `DualTimeControl`.
-    The rebuild REUSES the smoothed-aggregation coarse space (`MonolithicAmgPreconditioner.refactor` overwrites
-    the operator values in place over a persistent CSR array and re-sets-up the PC with
-    `pc_gamg_reuse_interpolation`), since the graph-coloured probe's sparsity is fixed across β; only the
-    Galerkin coarse operators and the incomplete-LU factor values recompute, cutting the multigrid setup
-    ~2.4× (measured ~45 s → ~19 s on `bfs3d`) with the coarse space no worse. The experimental native-PETSc
-    forward path and the FGMRES-forward optimization remain follow-ups (`.claude/rules/solve.md`).
+    Jacobian-vector-product matvecs a stale V-cycle costs. This is the only β-tracking that carries the 3D
+    case: the complete LU's factorization is out of memory and the ILUT's `spilu` is prohibitively slow to
+    build there. Same forward-only contract as the LU/ILUT hooks (raises under `jax.grad`); pass it to
+    `solve_coupled(precondition_step=…)` (or a `solve_reynolds_continuation` `point_setup`) with a
+    `coupled_amg_continuation` step and a `DualTimeControl`.
+    - **The refresh cadence is GATED, not every-step (measured on the developed-low-β tail).** Refreshing
+      unconditionally every step is wasteful once the march has developed and β is nearly constant, and — the
+      failure that motivated the gate — a *fixed step-count* cadence (`refresh_every`) fails at the tail: a
+      long low-β cruise between refreshes lets the V-cycle go stale mid-interval and the count explodes to
+      cyc 250 (17-min steps) before the next scheduled refresh. The honest staleness signal for this hook is
+      **β itself** (a V-cycle's degradation is a function of the β-mismatch, above), so with
+      `beta_rel_change` set the refresh fires when `|β − β_last|/β_last` exceeds it (`_staleness_beta_gate`,
+      shared with the ILUT hook), OR after `refresh_every` steps as a development backstop — the same two-
+      pronged gate as `ilut_beta_tracking_refresh`, and the β-move prong is what catches an overshoot / rung
+      restart before the solve stalls. Default (`beta_rel_change=None`) keeps the every-step behaviour.
+    - **Cheaper refresh — the β-diagonal split (`materialize_every`, measured ~2× on `bfs3d`).** The shifted
+      operator is `J(state) + β·d(state)`; between two refreshes at the same developed state only β (and the
+      shift diagonal) has moved, and re-materializing `J` by graph-coloured probing is ~half the refresh cost
+      (~18–40 s of the ~36–62 s total; the GAMG refactor is the other ~18 s). `MonolithicAmgPreconditioner`
+      therefore caches the un-shifted Jacobian (`_materialize_jacobian` / `_shifted` split) and exposes
+      `refresh_shift_in_place(shift_diagonal)`, which re-forms only `J + β·d` on the cached `J` and re-sets-up
+      the GAMG. With `materialize_every=M`, the hook does the cheap shift-only refresh for `M−1` steps then a
+      full re-materialize on the `M`-th (the operator's own state has moved enough by then to warrant a fresh
+      `J`). `None` (default) re-materializes every refresh. Since gradients are never taken through the
+      forward march, the in-place mutation of the cached `J` is safe (the same impurity licence as the ILUT
+      in-place refresh).
+    - The rebuild REUSES the smoothed-aggregation coarse space (`MonolithicAmgPreconditioner.refactor`
+      overwrites the operator values in place over a persistent CSR array and re-sets-up the PC with
+      `pc_gamg_reuse_interpolation`), since the graph-coloured probe's sparsity is fixed across β; only the
+      Galerkin coarse operators and the incomplete-LU factor values recompute, cutting the multigrid setup
+      ~2.4× (measured ~45 s → ~19 s on `bfs3d`) with the coarse space no worse. `coarse_eq_limit`
+      (`pc_gamg_coarse_eq_limit`, threaded through the `coupled_amg_continuation` builder) sets the direct-LU
+      coarse-grid size; raising it to 2000 cut the outer cycle count ~27× on the hard `bfs3d` state (a bigger
+      coarse solve, fewer levels). The experimental native-PETSc forward path and the FGMRES-forward
+      optimization remain follow-ups (`.claude/rules/solve.md`).
   - **`lu_beta_tracking_refresh` — re-factor the LU at the current β EVERY step (the correct LU treatment
     for a dual-time march; BUILT).** A frozen LU is exact only for the β it was factored at; a dual-time
     march's β ramps (0.5 → 0.005), so a factorization frozen at `lu_beta` mis-preconditions the operator

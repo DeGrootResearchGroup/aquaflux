@@ -18,6 +18,7 @@ import pytest
 from aquaflux.solve import (
     AlphaTargetingControl,
     CoefficientDriftTrigger,
+    ConstantRelaxation,
     CycleGrowthTrigger,
     DampedNewtonStep,
     ImplicitNewtonSolver,
@@ -511,3 +512,67 @@ def test_the_march_rebuilds_the_measure_each_outer_iteration_and_holds_it_within
     # iteration is asked about the march's starting state rather than some trial point.
     assert jnp.allclose(asked[0], phi0)
     assert jnp.allclose(asked[1], phi0)
+
+
+class _CyclesFromBeta(eqx.Module):
+    """A step whose reported solve count is ~``base / β`` and that makes no progress -- a stand-in for the
+    stiff low-β operator the cycle-count bailout escalates β against. It carries a ``ConstantRelaxation``
+    β leaf so the escalation (``eqx.tree_at`` on ``relaxation_schedule.beta``) has something to raise."""
+
+    relaxation_schedule: ConstantRelaxation
+    base: float = eqx.field(static=True, default=40.0)
+
+    def stepper(self):
+        schedule, base = self.relaxation_schedule, self.base
+
+        def step(residual_fn, phi, residual_norm_0, solver):
+            cyc = jnp.round(base / jnp.maximum(schedule.beta, 1e-6)).astype(jnp.int32)
+            return (
+                phi,
+                cyc,
+                jnp.asarray(1.0),
+                jnp.asarray(1, dtype=jnp.int32),
+            )  # phi held: never converges
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def default_solver(self):
+        return None
+
+
+def test_march_escalates_beta_on_a_cycle_count_spike() -> None:
+    """A step whose count exceeds ``retry_on_cycles`` is redone from the pre-step state with β escalated
+    (×``retry_beta_factor``) until the count drops or the limit is hit -- the hard-operator bailout. Here
+    cyc ≈ 40/β, so β = 1 → 40 escalates to β = 4 → 10 over two ×2 escalations."""
+    residual = _Cubic(
+        jnp.zeros((1,))
+    )  # residual(1) = 1: the held phi never converges, so the retry fires
+    phi0 = jnp.ones((1,))
+    step = _CyclesFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))
+    result = forward_march(
+        step,
+        residual,
+        phi0,
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        retry_on_cycles=10,
+        retry_beta_factor=2.0,
+        retry_cycles_limit=2,
+    )
+    assert int(result.reports[0].cycles) == 10  # 40 -> 20 -> 10 over two escalations
+
+
+def test_march_does_not_escalate_below_the_cycle_cap() -> None:
+    """A count under ``retry_on_cycles`` never escalates -- the bailout is inert on a comfortable step,
+    so it is a safety net, not an every-step cost."""
+    residual = _Cubic(jnp.zeros((1,)))
+    phi0 = jnp.ones((1,))
+    step = _CyclesFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))  # cyc = 40
+    result = forward_march(
+        step, residual, phi0, max_steps=1, rtol=1e-10, atol=1e-12, retry_on_cycles=100
+    )
+    assert int(result.reports[0].cycles) == 40  # under the cap -> no escalation

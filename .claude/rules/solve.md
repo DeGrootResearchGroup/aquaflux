@@ -1677,6 +1677,27 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     (`test_march_retries_a_diverged_step_with_the_tighter_solver`, `test_march_does_not_retry_a_finite_step`).
     On 2D the exact LU is cheaper *and* robust for free, so this is really a 3D-readiness lever (where the
     LU's fill is the wall and the ILUT is the only option).
+  - **Reactive cycle-count bailout — `retry_on_cycles` ESCALATES β when a step's solve count spikes on a
+    HARD operator, the complement of the divergence retry (BUILT).** A spike in the linear-solve count has
+    two causes with opposite cures: a **stale preconditioner** (cure: refresh — the β-move / drift refresh
+    gating owns it) or a **hard operator at too-low a shift** (cure: raise β — a stronger pseudo-time shift
+    makes the same frozen preconditioner an M-matrix again). The divergence retry above recovers a
+    *non-finite* step; this recovers a *finite-but-expensive* one. `forward_march(retry_on_cycles=N,
+    retry_beta_factor=2.0, retry_cycles_limit=2)` redoes a step whose reported count exceeds `N` **from the
+    same pre-step state** with β escalated (`×retry_beta_factor`, re-applying `precondition_step` at the new
+    β so a β-tracking refresh re-shifts), up to `retry_cycles_limit` times or until the count drops below
+    `N` or the step converges. It reads β off `active_step.relaxation_schedule.beta` (a `ConstantRelaxation`
+    / `DualTimeStep`), so like the β-tracking refresh it requires a readable β and is inert on the default
+    switched-evolution schedule. `retry_on_cycles=None` (default) is **byte-identical**. Forward-only
+    (raises under `jax.grad`, same guard as the refresh/control); threaded through
+    `solve_coupled(retry_on_cycles=…)`. Pinned by `test_forward_march.py`
+    (`test_march_escalates_beta_on_a_cycle_count_spike`, `test_march_does_not_escalate_below_the_cycle_cap`).
+    It composes with `retry_solver`: the divergence retry fires first on a poisoned step, the cycle bailout
+    on a merely-slow one. **This is the PROACTIVE β-mismatch refresh's reactive twin** — the refresh
+    (`amg_beta_tracking_refresh(beta_rel_change=…)`, `.claude/rules/turbulence.md`) re-freezes the PC
+    *before* a solve when β has drifted, catching the stale-PC cause up front; the cycle bailout catches the
+    hard-operator cause *after* a solve reveals it, by raising β rather than refreshing. Refresh for
+    staleness, escalate β for stiffness — the two causes a cycle spike does not distinguish on its own.
   - **`CoefficientDriftTrigger` — the PREFERRED staleness trigger: measure the drift, don't infer it
     from cost (binding for new work).** A frozen preconditioner is stale exactly when the operator it
     approximates has moved, so the honest signal is that movement itself. `StepReport.drift` carries a
