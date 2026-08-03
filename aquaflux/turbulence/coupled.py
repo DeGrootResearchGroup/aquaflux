@@ -1995,6 +1995,7 @@ def _beta_tracking_refresh(
     *,
     gate: Callable[[float], bool] | None = None,
     refresh_kwargs: dict[str, object] | None = None,
+    materialize_every: int | None = None,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """Shared skeleton for the β-tracking ``precondition_step`` hooks (complete-LU and ILUT).
 
@@ -2028,6 +2029,9 @@ def _beta_tracking_refresh(
     # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
     # reuses it, rather than a fresh lambda recompiling each step.
     matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    since_materialize = {
+        "n": 0
+    }  # steps since the last full Jacobian materialize (β-diagonal split)
 
     def precondition_step(active_step: ForwardStep, state: jnp.ndarray) -> None:
         schedule = active_step.relaxation_schedule
@@ -2044,7 +2048,19 @@ def _beta_tracking_refresh(
         policy = active_step.shift_policy
         frozen = jax.lax.stop_gradient(state)
         shift = beta * np.asarray(jax.lax.stop_gradient(policy.base.shift_term(state).diagonal))
-        policy.preconditioner.refresh_in_place(
+        pc = policy.preconditioner
+        # β-diagonal split: β and the per-cell shift ``d`` touch only the diagonal, so between full
+        # (re-materialized) refreshes the shift is tracked by re-adding the new ``β d`` diagonal to the
+        # frozen Jacobian -- skipping the ~240-jvp materialize (the dominant refresh cost). A full
+        # materialize every ``materialize_every`` steps catches the Jacobian's *state* drift. Only the AMG
+        # preconditioner exposes the shift-only path; without it (ILUT/LU) every refresh is full, as before.
+        if materialize_every is not None and hasattr(pc, "refresh_shift_in_place"):
+            since_materialize["n"] += 1
+            if since_materialize["n"] < materialize_every:
+                pc.refresh_shift_in_place(shift)
+                return
+            since_materialize["n"] = 0
+        pc.refresh_in_place(
             lambda v: matvec_at(frozen, v), colouring, n_fields, shift, **refresh_kwargs
         )
 
@@ -2153,7 +2169,7 @@ def ilut_beta_tracking_refresh(
 
 
 def amg_beta_tracking_refresh(
-    coupled: CoupledRANS, *, stencil_reach: int = 3
+    coupled: CoupledRANS, *, stencil_reach: int = 3, materialize_every: int | None = None
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """A ``precondition_step`` that rebuilds the AMG V-cycle at the current β, every step.
 
@@ -2190,13 +2206,22 @@ def amg_beta_tracking_refresh(
         The coupled residual assembler (supplies the Jacobian-vector product and the shift diagonal).
     stencil_reach : int
         The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+    materialize_every : int or None
+        Enables the **β-diagonal split**. ``None`` (default) re-materializes the Jacobian on every refresh
+        (the original behaviour). A value ``K > 1`` re-materializes only every ``K`` steps and, in between,
+        tracks the moving shift with a cheap diagonal-only refresh
+        (:meth:`~aquaflux.solve.MonolithicAmgPreconditioner.refresh_shift_in_place`) that reuses the frozen
+        Jacobian -- since ``β`` and the per-cell shift ``d`` touch only the diagonal, this skips the
+        ~240-jvp materialization (the dominant refresh cost) while keeping the shift matched. The full
+        every-``K``-th materialize catches the Jacobian's slower *state* drift; pair a large ``K`` with a
+        state-staleness trigger for the best cost.
 
     Returns
     -------
     callable
         ``precondition_step(active_step, state) -> None``.
     """
-    return _beta_tracking_refresh(coupled, stencil_reach)
+    return _beta_tracking_refresh(coupled, stencil_reach, materialize_every=materialize_every)
 
 
 def solve_coupled(

@@ -14,7 +14,7 @@ import scipy.sparse as sp
 
 pytest.importorskip("petsc4py")
 
-from aquaflux.solve import build_amg_vcycle
+from aquaflux.solve import MonolithicAmgPreconditioner, build_amg_vcycle
 from aquaflux.solve.ilut_preconditioner import equilibrate_cell_major
 
 
@@ -77,3 +77,38 @@ def test_amg_vcycle_refactor_rebuilds_at_a_new_matrix() -> None:
     b = rng.standard_normal(a.shape[0])
     x = vcycle.apply(b)
     assert np.linalg.norm(scaled @ x - b) / np.linalg.norm(b) < 0.7
+
+
+def test_amg_refresh_shift_in_place_tracks_the_shift_reusing_the_jacobian() -> None:
+    """A shift-only refresh re-preconditions ``J + new_shift`` by reusing the frozen ``J`` -- it takes only
+    the shift (no matvec/colouring), so it cannot re-materialize, and it must actually re-precondition the
+    NEW operator (the reused-Jacobian trade is real, not a no-op)."""
+    jac = _laplacian_2d(30)  # the frozen SPD Jacobian, no shift
+    n_dof = jac.shape[0]
+    shift0 = np.full(n_dof, 1.0)
+    shift1 = np.full(
+        n_dof, 40.0
+    )  # a very different shift -> the shift0 V-cycle mis-scales the coarse solve
+    vcycle = build_amg_vcycle((jac + sp.diags(shift0)).tocsr(), n_fields=1)
+    pc = MonolithicAmgPreconditioner(vcycle, jacobian_no_shift=jac, n_fields=1)
+
+    rng = np.random.default_rng(0)
+    b = rng.standard_normal(n_dof)
+    a1 = (jac + sp.diags(shift1)).tocsr()
+    x_stale = pc.factors.apply(b)  # V-cycle still built for shift0
+
+    pc.refresh_shift_in_place(shift1)
+    x_fresh = pc.factors.apply(b)
+
+    assert not np.allclose(x_fresh, x_stale)  # the shift refresh changed the preconditioner
+    assert (
+        np.linalg.norm(a1 @ x_fresh - b) / np.linalg.norm(b) < 0.7
+    )  # approx-inverse of J + shift1
+
+
+def test_amg_refresh_shift_in_place_requires_a_cached_jacobian() -> None:
+    """Without a materialized Jacobian (no build/refresh_in_place yet) the shift-only refresh raises."""
+    vcycle = build_amg_vcycle(_laplacian_2d(10), n_fields=1)
+    pc = MonolithicAmgPreconditioner(vcycle)  # no jacobian_no_shift cached
+    with pytest.raises(RuntimeError, match="cached Jacobian"):
+        pc.refresh_shift_in_place(np.ones(100))

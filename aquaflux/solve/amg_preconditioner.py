@@ -404,10 +404,18 @@ class MonolithicAmgPreconditioner:
     """
 
     def __init__(
-        self, vcycle: AmgVCycle, residual_fn: Callable[[jnp.ndarray], jnp.ndarray] | None = None
+        self,
+        vcycle: AmgVCycle,
+        residual_fn: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        jacobian_no_shift: sp.csr_matrix | None = None,
+        n_fields: int | None = None,
     ) -> None:
         self.factors = vcycle
         self._residual_fn = residual_fn
+        # The materialized jvp Jacobian *without* the pseudo-transient shift, cached so a β-only refresh
+        # (:meth:`refresh_shift_in_place`) can re-add a new ``β d`` diagonal without re-running the ~240 jvps.
+        self._jacobian_no_shift = jacobian_no_shift
+        self._n_fields = n_fields
         # A jitted jvp ``(phi, w) -> J(phi) w`` for the native exact solve's shell operator, called eagerly
         # on the host inside the solve's pure_callback (linearizing at the current iterate ``phi``).
         self._jvp = (
@@ -417,16 +425,19 @@ class MonolithicAmgPreconditioner:
         )
 
     @staticmethod
-    def _materialize(
-        matvec: Callable[[jnp.ndarray], jnp.ndarray],
-        colouring,
-        n_fields: int,
-        shift_diagonal: np.ndarray,
-    ) -> sp.spmatrix:
+    def _materialize_jacobian(
+        matvec: Callable[[jnp.ndarray], jnp.ndarray], colouring, n_fields: int
+    ) -> sp.csr_matrix:
+        """The coupled Jacobian **without** the shift, from the graph-coloured jvp probe (~240 jvps -- the
+        expensive part of a refresh)."""
         from .sparse_jacobian import materialize_block_jacobian
 
-        jacobian = materialize_block_jacobian(matvec, colouring, n_fields)
-        return (jacobian + sp.diags(np.asarray(shift_diagonal))).tocsr()
+        return materialize_block_jacobian(matvec, colouring, n_fields).tocsr()
+
+    @staticmethod
+    def _shifted(jacobian_no_shift: sp.csr_matrix, shift_diagonal: np.ndarray) -> sp.csr_matrix:
+        """Add the pseudo-transient shift ``β d`` to the Jacobian's diagonal (cheap -- ``O(nnz)`` numpy)."""
+        return (jacobian_no_shift + sp.diags(np.asarray(shift_diagonal))).tocsr()
 
     @classmethod
     def build(
@@ -471,7 +482,8 @@ class MonolithicAmgPreconditioner:
         MonolithicAmgPreconditioner
             The built preconditioner.
         """
-        matrix = cls._materialize(matvec, colouring, n_fields, shift_diagonal)
+        jacobian = cls._materialize_jacobian(matvec, colouring, n_fields)
+        matrix = cls._shifted(jacobian, shift_diagonal)
         return cls(
             build_amg_vcycle(
                 matrix,
@@ -482,6 +494,8 @@ class MonolithicAmgPreconditioner:
                 native=native,
             ),
             residual_fn=residual_fn,
+            jacobian_no_shift=jacobian,
+            n_fields=n_fields,
         )
 
     def refresh_in_place(
@@ -506,9 +520,41 @@ class MonolithicAmgPreconditioner:
         calls; only the eager, non-differentiated march may refresh. The refresh never moves the converged
         root (the shift vanishes there), so it changes only the forward Krylov path.
         """
-        matrix = self._materialize(matvec, colouring, n_fields, shift_diagonal)
-        cell_major, scale, perm = equilibrate_cell_major(matrix, n_fields)
         del smoother_fill_levels, smoother_sweeps  # the smoother config is fixed at build
+        self._jacobian_no_shift = self._materialize_jacobian(matvec, colouring, n_fields)
+        self._n_fields = n_fields
+        matrix = self._shifted(self._jacobian_no_shift, shift_diagonal)
+        cell_major, scale, perm = equilibrate_cell_major(matrix, n_fields)
+        self.factors.refactor(cell_major, scale, perm)
+
+    def refresh_shift_in_place(self, shift_diagonal: np.ndarray) -> None:
+        """Re-preconditioner at a new shift ``β d`` REUSING the frozen Jacobian — no re-materialization.
+
+        The operator is ``J(φ) + β d``, and the pseudo-transient shift ``β d`` touches only the **diagonal**.
+        So tracking a moving ``β`` (and the cheap per-cell shift ``d``) needs only to re-add the new diagonal
+        to the **cached** Jacobian and re-factor — it does **not** need the ~240-jvp materialization of ``J``
+        that :meth:`refresh_in_place` pays. Measured on the ``bfs3d`` coupled Jacobian the materialize is the
+        dominant refresh cost (~40 s of a ~60 s refresh; the smoothed-aggregation re-factor is the rest), so a
+        shift-only refresh is several times cheaper. The Jacobian is held frozen at the last full
+        :meth:`build` / :meth:`refresh_in_place`, so ``J``'s *state* drift is not tracked here — pair frequent
+        shift-only refreshes with an occasional full refresh (a state-staleness trigger) to catch that.
+
+        **Forward-march use ONLY**, exactly as :meth:`refresh_in_place`: the mutation is impure and must never
+        touch a differentiated path. Raises if no Jacobian has been materialized yet (call :meth:`build` or
+        :meth:`refresh_in_place` first).
+
+        Parameters
+        ----------
+        shift_diagonal : np.ndarray
+            The new pseudo-transient shift ``β d``, shape ``(n_fields * n,)`` — added to the cached Jacobian's
+            diagonal.
+        """
+        if self._jacobian_no_shift is None or self._n_fields is None:
+            raise RuntimeError(
+                "refresh_shift_in_place needs a cached Jacobian; call build() or refresh_in_place() first."
+            )
+        matrix = self._shifted(self._jacobian_no_shift, shift_diagonal)
+        cell_major, scale, perm = equilibrate_cell_major(matrix, self._n_fields)
         self.factors.refactor(cell_major, scale, perm)
 
     @property

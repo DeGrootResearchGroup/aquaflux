@@ -290,6 +290,28 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     stays off by default. The follow-up to make it the default is a **β-tracking GAMG refresh** (the AMG
     analogue of `lu_beta_tracking_refresh`), so the frozen V-cycle matches the ramping β and the native
     solve stays accurate at low β.
+  - **`coarse_eq_limit` — grow the coarsest-grid direct LU (BUILT).** GAMG's default coarsens to a tiny
+    (~50-equation) coarse grid, whose direct LU captures only the crudest global mode; the indefinite
+    saddle's wall is exactly that global pressure coupling. `build_amg_vcycle(coarse_eq_limit=K)` /
+    `coupled_amg_continuation(coarse_eq_limit=K)` (default `None` = PETSc's ~50, byte-identical) stops
+    coarsening at `K` equations so the coarse LU inverts more of the global coupling **exactly** — a
+    stronger V-cycle *and* transpose V-cycle (so the adjoint benefits). Measured on the `bfs3d` hard state
+    (honest right-PC cycles to 1e-6): **baseline ~50 → 652 cycles at β=0.5, `K=2000` → 24 (~27×)**, and it
+    **saturates by ~2000** (`K=8000` identical), at negligible extra build cost (the 2000-eq coarse LU is
+    trivial against the materialize). The `bfs3d` combo-sweep. *(A `cycle_type` V/W knob was tried and
+    **dropped**: the W-cycle came back byte-identical to V — GAMG did not honour `pc_mg_cycle_type` here —
+    and `coarse_eq_limit` dominates regardless.)*
+  - **β-diagonal split — track β without re-materializing the Jacobian (BUILT).** The operator is
+    `J(φ) + β d`, and the shift `β d` touches only the **diagonal**, so a β-tracking refresh does **not**
+    need the ~240-jvp materialization of `J` — the dominant refresh cost.
+    `MonolithicAmgPreconditioner.refresh_shift_in_place(shift)` reuses the **cached** Jacobian (stored at
+    the last `build` / `refresh_in_place`), re-adds the new `β d` diagonal (`O(nnz)` numpy) and re-factors.
+    Measured on the `bfs3d` hard state: **full `refresh_in_place` 36 s vs shift-only 18 s (2×)** — the 18 s
+    saved is the materialize, the remaining 18 s the equilibrate + GAMG refactor. The frozen `J` does not
+    track *state* drift, so `amg_beta_tracking_refresh(materialize_every=K)` does the cheap shift-only
+    refresh in between and a full materialize every `K` steps (default `None` = full every step, unchanged);
+    pair a large `K` with a state-staleness trigger. Forward-march only, like `refresh_in_place`. Pinned by
+    `test_amg_refresh_shift_in_place_*` in `test_amg_preconditioner.py`.
   - **⚠️ TRUE-RESIDUAL TRAP (binding).** PETSc's default convergence norm is the *preconditioned* residual
     `‖Mr‖`; on this indefinite saddle SOR/Krylov-smoothing report `reason=2` (converged) at a **true**
     residual of 1.0. Force `KSP_NORM_UNPRECONDITIONED` and always check `‖Ax−b‖` — same lesson as the
