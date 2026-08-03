@@ -33,8 +33,11 @@ unit tests. The surface is three groups:
   inner comfort alone is blind to the steady residual and can run the transient away.
   `ResidualRatioDualTimeControl` fixes that: it ramps the pseudo-timestep by the steady-residual
   reduction ratio (switched evolution relaxation / Kelley–Keyes pseudo-transient continuation), so a
-  rising residual automatically shrinks the step. All are opt-in and never a default; the finishing
-  solve owns the converged root and the adjoint.
+  rising residual automatically shrinks the step — but keying growth on the residual alone stalls where
+  the residual is flat while the flow develops. `CflResidualDualTimeControl` combines them: it grows on
+  the inner-loop comfort α (fast on the flat-residual development) but brakes on a rising residual (safe
+  on the overshoot), the two signals covering each other's blind spots. All are opt-in and never a
+  default; the finishing solve owns the converged root and the adjoint.
 * **The observed forward march** — `forward_march`, an eager, forward-only march that applies the
   same `ForwardStep` as the Newton driver but reports each step (`StepReport`, `MarchResult`) and
   may stop early. It is what lets a driver rebuild a frozen preconditioner part way through a solve,
@@ -106,7 +109,12 @@ from .sparse_jacobian import (
     jacobian_relative_error,
     materialize_block_jacobian,
 )
-from .step_control import AlphaTargetingControl, DualTimeControl, ResidualRatioDualTimeControl
+from .step_control import (
+    AlphaTargetingControl,
+    CflResidualDualTimeControl,
+    DualTimeControl,
+    ResidualRatioDualTimeControl,
+)
 
 __all__ = [
     "AirHierarchy",
@@ -114,6 +122,7 @@ __all__ = [
     "AmgVCycle",
     "BlockColouring",
     "BlockScaledNorm",
+    "CflResidualDualTimeControl",
     "CoefficientDriftTrigger",
     "ConstantRelaxation",
     "CycleGrowthTrigger",

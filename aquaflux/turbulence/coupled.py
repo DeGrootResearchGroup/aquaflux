@@ -911,6 +911,7 @@ def coupled_continuation(
     velocity_shift_parts: VelocityShiftParts | None = None,
     reuse: CoupledShiftPolicy | None = None,
     residual_norm: ResidualNorm | None = None,
+    inner_observer: Callable[..., None] | None = None,
     **preconditioner_kwargs: object,
 ) -> ForwardStep:
     """Build the pseudo-transient continuation step for the coupled Newton solve.
@@ -1039,6 +1040,7 @@ def coupled_continuation(
             forward_solver=solver,
             residual_norm=residual_norm,
             adjoint_preconditioner_factory=policy.adjoint_factory(),
+            inner_observer=inner_observer,
         )
     return PseudoTransientStep(
         policy,
@@ -1358,6 +1360,7 @@ def _monolithic_factor_step(
     forward_solver: lx.AbstractLinearSolver | None,
     block_scaled_norm: bool,
     residual_norm: ResidualNorm | None,
+    inner_observer: Callable[..., None] | None = None,
 ) -> ForwardStep:
     """Assemble the pseudo-transient / dual-time step around a frozen monolithic factorization.
 
@@ -1392,6 +1395,7 @@ def _monolithic_factor_step(
             forward_solver=solver,
             residual_norm=residual_norm,
             adjoint_preconditioner_factory=policy.adjoint_factory(),
+            inner_observer=inner_observer,
         )
     return PseudoTransientStep(
         policy,
@@ -1427,6 +1431,7 @@ def coupled_ilut_continuation(
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     residual_norm: ResidualNorm | None = None,
+    inner_observer: Callable[..., None] | None = None,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic coupled ILUT.
 
@@ -1523,6 +1528,7 @@ def coupled_ilut_continuation(
         forward_solver=forward_solver,
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
+        inner_observer=inner_observer,
     )
 
 
@@ -1665,6 +1671,7 @@ def coupled_lu_continuation(
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     residual_norm: ResidualNorm | None = None,
+    inner_observer: Callable[..., None] | None = None,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **complete** coupled LU.
 
@@ -1739,6 +1746,7 @@ def coupled_lu_continuation(
         forward_solver=forward_solver,
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
+        inner_observer=inner_observer,
     )
 
 
@@ -1750,6 +1758,7 @@ def coupled_amg_continuation(
     stencil_reach: int = 3,
     smoother_fill_levels: int = 1,
     smoother_sweeps: int = 2,
+    coarse_eq_limit: int | None = None,
     native_forward_solve: bool = False,
     beta0: float = 2.0,
     exponent: float = 1.0,
@@ -1764,6 +1773,7 @@ def coupled_amg_continuation(
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     residual_norm: ResidualNorm | None = None,
+    inner_observer: Callable[..., None] | None = None,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **algebraic-multigrid** V-cycle.
 
@@ -1801,11 +1811,20 @@ def coupled_amg_continuation(
         stalls at ``0``, and a Krylov-accelerated smoother would make the V-cycle nonlinear).
     smoother_sweeps : int
         Richardson sweeps of the level smoother per V-cycle visit.
+    coarse_eq_limit : int or None
+        The equation count at which aggregation stops and the coarsest grid is solved directly by LU. ``None``
+        (default) keeps PETSc's default (~50); a larger value grows the coarse-level direct solve so it
+        inverts more of the saddle's global pressure coupling exactly — a stronger V-cycle (and stronger
+        transpose V-cycle, so it helps the adjoint too) at a bounded, sub-linearly-growing coarse-solve cost.
     beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search,
     inner_steps, inner_tol, forward_solver, block_scaled_norm, shift_basis, residual_norm
         The pseudo-transient schedule, dual-time, guard, and measure parameters, exactly as in
         :func:`coupled_ilut_continuation`. ``forward_solver`` defaults to a restart-40 GMRES matched to the
         V-cycle's convergence (a few tens of vectors), rather than the ILUT's restart-10.
+    inner_observer : callable or None
+        A per-inner-iteration profiling hook forwarded to the built dual-time step (only used when
+        ``inner_steps > 1``); see :class:`~aquaflux.solve.DualTimeStep`. ``None`` (default) leaves the step
+        byte-identical. Forward-only — do not set it on a differentiated solve.
 
     Returns
     -------
@@ -1835,6 +1854,7 @@ def coupled_amg_continuation(
         residual_fn=coupled.residual if native_forward_solve else None,
         smoother_fill_levels=smoother_fill_levels,
         smoother_sweeps=smoother_sweeps,
+        coarse_eq_limit=coarse_eq_limit,
     )
     return _monolithic_factor_step(
         coupled,
@@ -1855,6 +1875,7 @@ def coupled_amg_continuation(
         else _COUPLED_AMG_FORWARD_SOLVER,
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
+        inner_observer=inner_observer,
     )
 
 

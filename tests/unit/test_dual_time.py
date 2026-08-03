@@ -135,6 +135,37 @@ def test_dual_time_inner_loop_iterates_and_sums_cost() -> None:
     assert int(cyc4) > int(cyc1)  # cycles are summed over the inner iterations, not overwritten
 
 
+def test_dual_time_inner_observer_surfaces_the_trajectory_without_changing_the_step() -> None:
+    """The opt-in inner_observer fires once per inner iteration with its G-norm before/after, cycle
+    count and line-search factor -- and setting it leaves the computed step byte-identical."""
+    theta = jnp.array([8.0, 27.0, 64.0])
+    schedule = SwitchedEvolutionRelaxation(beta0=1.0)
+    policy = UniformShiftPolicy(strength=1.0)
+    phi0 = jnp.ones_like(theta)
+    r0 = jnp.linalg.norm(_residual(phi0, theta))
+
+    def residual_theta(p: jnp.ndarray) -> jnp.ndarray:
+        return _residual(p, theta)
+
+    records: list[tuple[int, float, float, int, float]] = []
+
+    def observer(inner, g_before, g_after, cycles, alpha) -> None:
+        records.append((int(inner), float(g_before), float(g_after), int(cycles), float(alpha)))
+
+    observed = DualTimeStep(
+        policy, relaxation_schedule=schedule, inner_steps=4, inner_tol=1e-8, inner_observer=observer
+    )
+    plain = DualTimeStep(policy, relaxation_schedule=schedule, inner_steps=4, inner_tol=1e-8)
+    phi_obs, _, _, n_inner = observed.stepper()(residual_theta, phi0, r0, observed.default_solver())
+    phi_obs.block_until_ready()  # flush the ordered debug callbacks
+    phi_plain, _, _, _ = plain.stepper()(residual_theta, phi0, r0, plain.default_solver())
+
+    assert len(records) == int(n_inner) >= 1  # one record per inner iteration
+    assert [r[0] for r in records] == list(range(len(records)))  # indices 0,1,2,... in order
+    assert records[-1][2] < records[0][1]  # G-norm falls across the inner loop
+    assert jnp.allclose(phi_obs, phi_plain)  # the observer does not perturb the step
+
+
 def test_dual_time_one_inner_step_is_a_single_shifted_step() -> None:
     """With one inner step the dual-time step is exactly one shifted Newton step.
 

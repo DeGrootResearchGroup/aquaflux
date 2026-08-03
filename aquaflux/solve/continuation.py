@@ -673,6 +673,14 @@ class DualTimeStep(eqx.Module):
         The ``state -> M`` factory for the converged transpose (adjoint) solve, or ``None`` (static). At
         ``φ*`` the operator is the unshifted steady Jacobian (``β → 0``), so the ordinary preconditioner
         is the consistent choice.
+    inner_observer : callable or None
+        An optional profiling hook ``(inner_index, g_before, g_after, cycles, alpha) -> None`` called
+        **once per inner Newton iteration** with that iteration's ``‖G‖`` before and after the step, the
+        solver's raw cycle count for its shifted solve, and its line-search factor (static). It surfaces
+        the inner trajectory the outer :class:`~aquaflux.solve.StepReport` only summarizes (it reports the
+        inner *count* and the *summed* cycles). Emitted through :func:`jax.debug.callback`, so it is
+        forward-only and transform-transparent; ``None`` (default) elides the call entirely, leaving the
+        step byte-identical. Do not set it on a differentiated solve.
     """
 
     shift_policy: ShiftPolicy
@@ -688,6 +696,7 @@ class DualTimeStep(eqx.Module):
     adjoint_preconditioner_factory: (
         Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
     ) = eqx.field(static=True, default=None)
+    inner_observer: Callable[..., None] | None = eqx.field(static=True, default=None)
 
     def norm(self) -> ResidualNorm:
         """The residual measure the inner loop and the outer stopping test share (:attr:`residual_norm`)."""
@@ -723,6 +732,7 @@ class DualTimeStep(eqx.Module):
         inner_tol = self.inner_tol
         line_search = self.line_search
         norm = self.residual_norm
+        inner_observer = self.inner_observer
 
         def step(
             residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
@@ -768,6 +778,13 @@ class DualTimeStep(eqx.Module):
                 # pseudo-timestep) rather than "comfortable" (grow it). The monotone search means no
                 # descent ⇔ the fallback fired, so `new_gnorm < gnorm` detects it exactly.
                 descended = new_gnorm < gnorm
+                if inner_observer is not None:
+                    # Surface this inner iteration's trajectory (‖G‖ before/after, its solve's raw cycle
+                    # count, its line-search factor). `jax.debug.callback` fires during execution and is a
+                    # no-op under differentiation; `None` (the default) elides this branch at trace time.
+                    jax.debug.callback(
+                        inner_observer, inner, gnorm, new_gnorm, step_cycles, alpha, ordered=True
+                    )
                 return (
                     candidate,
                     inner + 1,

@@ -978,6 +978,17 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         shifted step (the pseudo-transient attempt, minus the escalation ladder the inner loop replaces).
         β still vanishes at the root, so the IFT adjoint is unchanged — pinned by
         `tests/unit/test_dual_time.py` (converges, exact gradient, **iteration-count-independent**).
+        **Inner-loop observability — `DualTimeStep.inner_observer` (opt-in, shipped).** The outer
+        `StepReport` only summarizes the inner loop (the inner *count* and the *summed* solve cycles),
+        which conflates the two costs and hides the inner `‖G‖` trajectory. `inner_observer` is a
+        `(inner_index, ‖G‖_before, ‖G‖_after, cycles, alpha) -> None` hook called **once per inner
+        iteration** via `jax.debug.callback` — so it surfaces exactly how many inner iterations ran, each
+        inner solve's cycle count, its `‖G‖` reduction and line-search factor. It is forward-only and
+        transform-transparent (a no-op under `jax.grad`); `None` (default) elides the call at trace time,
+        leaving the step **byte-identical** (do not set it on a differentiated solve). Threaded through
+        `coupled_continuation` / `coupled_amg_continuation` / `coupled_ilut_continuation` /
+        `coupled_lu_continuation`, so a profiling march can pass one straight through. Pinned by
+        `test_dual_time_inner_observer_surfaces_the_trajectory_without_changing_the_step`.
         `DualTimeControl` is the Courant β-ramp (grow the pseudo-timestep while the inner α = 1, shrink
         when it clips), a `StepControl` on the eager march, sibling to `AlphaTargetingControl`. The step's
         reported α is the **min** inner line-search factor, and an inner step that fails to reduce ‖G‖
@@ -1784,12 +1795,34 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     segment-local SER `residual_norm_0` and `drift_measure`. Unifying the two into
     one `(rn, rn0, α, state) -> (β, state)` interface was rejected: it would union SER's needs with the
     control's (dead α/state args for SER), drag α onto the differentiable core where the line search
-    cannot even produce it before the step, and risk the byte-identity of the default path. Three concrete
+    cannot even produce it before the step, and risk the byte-identity of the default path. Four concrete
     `StepControl`s live in `solve/step_control.py`: **`DualTimeControl`** (the Courant β-ramp, now the
     **default** for a dual-time observed march — carries β across refreshes, see the DualTimeStep bullet
-    above), **`ResidualRatioDualTimeControl`** (the opt-in residual-keyed alternative), and
-    **`AlphaTargetingControl`** (the single-step α-targeter — experimental, opt-in, does not converge
-    standalone; see the "SER β schedule runs backwards" bullet).
+    above), **`ResidualRatioDualTimeControl`** (the opt-in residual-keyed alternative),
+    **`CflResidualDualTimeControl`** (see the bullet below), and **`AlphaTargetingControl`** (the
+    single-step α-targeter — experimental, opt-in, does not converge standalone; see the "SER β schedule
+    runs backwards" bullet).
+  - **`CflResidualDualTimeControl` — the combined control, grows on α but brakes on a rising residual
+    (built for the 3D inexact-AMG march the α-only control NaNs).** The two single-signal dual-time
+    controls fail in **disjoint** ways: `DualTimeControl` grows Δτ on the inner-loop factor α (fast) but
+    is **blind to the trajectory** — it grows into an overshoot while α = 1, which diverges unless the
+    linear solve is near-exact (measured: on the 3D `bfs3d` Re-continuation the α-control runs `x_r/h`
+    away to 15–19 and NaNs, because the AMG V-cycle is inexact — the same "aggressive control's overshoot
+    is tolerated only by a near-exact solve" rule the 2D complete-LU satisfies); `ResidualRatioDualTimeControl`
+    keys growth on the steady-residual ratio (safe against overshoot) but is **blind to productive
+    development** — on the `β × travel` plateau the residual is flat, so it pins β and crawls (measured:
+    the 3D march *survives* the overshoot with it but takes 4 h against OpenFOAM's ~15 min). The combined
+    control grows **only when both signals are comfortable** (α ≥ `grow_above` **and** the residual ratio
+    ≤ `hold_ratio`) and brakes on **either** wall (α < `backoff_below` **or** ratio > `rise_ratio`), with a
+    hold band between the two ratio thresholds so a noisy plateau does not oscillate — so it grows on α
+    through the flat-residual development (the residual-only rule's stall) yet the residual-rise term brakes
+    the overshoot the α-only rule is blind to. This is the "pair α with a step-productivity signal" lever the
+    `AlphaTargetingControl` non-convergence ceiling flagged, applied to the dual-time controls. State is
+    `(β, previous residual)`, carried across refreshes like `ResidualRatioDualTimeControl`; opt-in via
+    `solve_coupled(step_control=…)`. Unit-tested in `test_step_control.py` (grows on α at a flat residual,
+    brakes on a rising residual at α = 1, brakes on an inner clip, holds in the band, carries β). The ratio
+    thresholds are march-calibrated numbers — set them from a logged march, not intuition (the 3D
+    development overshoot shows ratios ~1.14).
 - **Gate C — PASSED (`tests/integration/test_skewed_diffusion.py`).** With
   `CorrectedGreenGauss` injected into the residual on a 25%-skewed mesh, one Newton step
   drives `‖R‖` ~24 → ~1e-12 and reproduces a harmonic linear field to ~5e-13 (linear-exact

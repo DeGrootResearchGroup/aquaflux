@@ -94,6 +94,7 @@ class AmgVCycle:
         *,
         smoother_fill_levels: int,
         smoother_sweeps: int,
+        coarse_eq_limit: int | None = None,
         native: bool = False,
         solve_rtol: float = 1e-8,
         solve_restart: int = 30,
@@ -104,6 +105,7 @@ class AmgVCycle:
         self._n_fields = n_fields
         self._smoother_fill_levels = smoother_fill_levels
         self._smoother_sweeps = smoother_sweeps
+        self._coarse_eq_limit = coarse_eq_limit
         # When ``native``, an extra PETSc KSP drives the same GAMG V-cycle as a full host solve whose
         # operator is a *shell* over the EXACT Jacobian (:meth:`solve_exact`) -- true Newton at native
         # speed, no per-matvec JAX round-trip. The GAMG hierarchy is still coarsened from the frozen
@@ -205,6 +207,14 @@ class AmgVCycle:
             "mg_levels_pc_factor_levels": self._smoother_fill_levels,
         }.items():
             opts[p + key] = value
+        # The number of equations at which aggregation stops and the coarsest grid is solved directly (by
+        # the ``mg_coarse`` LU above). PETSc's default coarsens to a tiny (~50-equation) coarse grid, whose
+        # direct solve captures only the crudest global mode; raising it grows the coarse-level LU so it
+        # inverts more of the global coupling exactly -- a stronger V-cycle on the saddle's global pressure
+        # mode, at a bounded coarse-solve cost that grows far sub-linearly with the mesh. ``None`` leaves the
+        # PETSc default in place.
+        if self._coarse_eq_limit is not None:
+            opts[p + "pc_gamg_coarse_eq_limit"] = self._coarse_eq_limit
         pc = PETSc.PC().create()
         pc.setOptionsPrefix(p)
         pc.setOperators(self._mat)
@@ -328,6 +338,7 @@ def build_amg_vcycle(
     *,
     smoother_fill_levels: int = 1,
     smoother_sweeps: int = 2,
+    coarse_eq_limit: int | None = None,
     native: bool = False,
 ) -> AmgVCycle:
     """Equilibrate + reorder a coupled block matrix and build a multigrid V-cycle preconditioner for it.
@@ -349,6 +360,11 @@ def build_amg_vcycle(
         Jacobian at a low shift, ~2× the whole solve there), for one extra cheap incomplete-LU
         back-solve per visit — a large net saving where each outer iteration pays a full
         Jacobian-vector product.
+    coarse_eq_limit : int or None
+        The equation count at which aggregation stops and the coarsest grid is solved directly. ``None``
+        (default) keeps PETSc's default (~50), a tiny coarse grid whose direct LU captures only the crudest
+        global mode; a larger value grows the coarse-level LU so it inverts more of the saddle's global
+        pressure coupling exactly — a stronger V-cycle at a bounded coarse-solve cost.
     native : bool
         Also assemble the native host exact-Jacobian forward solve (:meth:`AmgVCycle.solve_exact`), whose
         operator is a shell over the exact jvp supplied per solve. ``False`` builds the single-V-cycle
@@ -367,6 +383,7 @@ def build_amg_vcycle(
         n_fields,
         smoother_fill_levels=smoother_fill_levels,
         smoother_sweeps=smoother_sweeps,
+        coarse_eq_limit=coarse_eq_limit,
         native=native,
     )
 
@@ -423,6 +440,7 @@ class MonolithicAmgPreconditioner:
         residual_fn: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         smoother_fill_levels: int = 1,
         smoother_sweeps: int = 2,
+        coarse_eq_limit: int | None = None,
     ) -> MonolithicAmgPreconditioner:
         """Materialize the shifted coupled Jacobian and build a V-cycle preconditioner for it, off the jit path.
 
@@ -445,6 +463,8 @@ class MonolithicAmgPreconditioner:
             The steady residual ``phi -> R(phi)`` the native solve linearizes for its exact-Jacobian shell.
         smoother_fill_levels, smoother_sweeps : int
             The level-smoother controls (see :func:`build_amg_vcycle`).
+        coarse_eq_limit : int or None
+            The coarse-grid direct-solve size (see :func:`build_amg_vcycle`). ``None`` keeps PETSc's default.
 
         Returns
         -------
@@ -458,6 +478,7 @@ class MonolithicAmgPreconditioner:
                 n_fields,
                 smoother_fill_levels=smoother_fill_levels,
                 smoother_sweeps=smoother_sweeps,
+                coarse_eq_limit=coarse_eq_limit,
                 native=native,
             ),
             residual_fn=residual_fn,

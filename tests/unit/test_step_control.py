@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import pytest
 from aquaflux.solve import (
     AlphaTargetingControl,
+    CflResidualDualTimeControl,
     ConstantRelaxation,
     DualTimeControl,
     DualTimeStep,
@@ -244,6 +245,89 @@ def test_residual_ratio_clamps_beta() -> None:
     low = ResidualRatioDualTimeControl(beta_min=0.1, max_change=10.0, backoff_below=0.0)
     _, (beta, _p) = low.next_step(_dual_step(), _res_report(alpha=1.0, residual=0.01), (0.2, 1.0))
     assert beta == 0.1  # 0.2 * 0.1 clipped-change would go below beta_min
+
+
+def _cfl_res_control(**kwargs: float) -> CflResidualDualTimeControl:
+    base = dict(
+        grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25, hold_ratio=1.05, rise_ratio=1.10
+    )
+    base.update(kwargs)
+    return CflResidualDualTimeControl(**base)
+
+
+def test_cfl_residual_first_step_uses_beta_start() -> None:
+    """With no state, β is beta_start and the carried state is (beta_start, no residual yet)."""
+    control = _cfl_res_control(beta_start=0.5)
+    step, state = control.next_step(_dual_step(), None, None)
+    assert state == (0.5, None)
+    assert float(step.relaxation_schedule.beta) == 0.5
+
+
+def test_cfl_residual_grows_on_alpha_when_the_residual_is_flat() -> None:
+    """The point of the combination: α comfortable + a FLAT residual (ratio ≤ hold_ratio) still grows the
+    step (β ← β/grow), where the residual-only rule would stall on the β×travel plateau."""
+    control = _cfl_res_control(beta_start=0.5)
+    _, (beta, prev) = control.next_step(
+        _dual_step(),
+        _res_report(alpha=1.0, residual=1.0),
+        (0.6, 1.0),  # ratio = 1.0, flat
+    )
+    assert beta == pytest.approx(0.4)  # 0.6 / 1.5, grown on α despite no residual drop
+    assert prev == 1.0
+
+
+def test_cfl_residual_brakes_on_a_rising_residual_even_at_full_alpha() -> None:
+    """The overshoot governor α lacks: a rising residual (ratio > rise_ratio) shrinks the step even when
+    the inner loop is perfectly comfortable (α = 1) -- the case that NaNs the α-only control."""
+    control = _cfl_res_control(beta_start=0.5)
+    _, (beta, _prev) = control.next_step(
+        _dual_step(),
+        _res_report(alpha=1.0, residual=1.2),
+        (0.5, 1.0),  # ratio = 1.2 > rise_ratio
+    )
+    assert beta == pytest.approx(1.0)  # 0.5 * backoff(2.0), braked despite α = 1
+
+
+def test_cfl_residual_brakes_on_an_inner_clip() -> None:
+    """The local wall: a hard inner clip (α < backoff_below) shrinks the step regardless of the residual."""
+    control = _cfl_res_control(beta_start=0.5)
+    _, (beta, _prev) = control.next_step(
+        _dual_step(),
+        _res_report(alpha=0.1, residual=1.0),
+        (0.5, 1.0),  # α clipped, residual flat
+    )
+    assert beta == pytest.approx(1.0)  # 0.5 * backoff(2.0)
+
+
+def test_cfl_residual_holds_in_the_ratio_band() -> None:
+    """Between hold_ratio and rise_ratio the step holds -- the band that keeps a noisy plateau from
+    oscillating between grow and brake."""
+    control = _cfl_res_control(beta_start=0.5)
+    _, (beta, _prev) = control.next_step(
+        _dual_step(),
+        _res_report(alpha=1.0, residual=1.07),
+        (0.5, 1.0),  # 1.05 < 1.07 ≤ 1.10
+    )
+    assert beta == pytest.approx(0.5)  # unchanged
+
+
+def test_cfl_residual_holds_beta_across_a_refresh() -> None:
+    """The first step of a refresh segment (previous is None, state carried) holds β, not beta_start."""
+    control = _cfl_res_control(beta_start=2.0)
+    _, (beta, prev) = control.next_step(_dual_step(), None, (0.12, 0.3))
+    assert beta == 0.12
+    assert prev == 0.3
+
+
+def test_cfl_residual_clamps_beta() -> None:
+    """β is clamped to [beta_min, beta_max] after the update."""
+    control = _cfl_res_control(beta_start=0.5, beta_min=0.1, grow=10.0)
+    _, (beta, _p) = control.next_step(
+        _dual_step(),
+        _res_report(alpha=1.0, residual=1.0),
+        (0.2, 1.0),  # grow would go below beta_min
+    )
+    assert beta == 0.1
 
 
 def test_residual_ratio_step_differs_from_base_only_in_a_dynamic_beta_leaf() -> None:
