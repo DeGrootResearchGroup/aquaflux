@@ -576,3 +576,88 @@ def test_march_does_not_escalate_below_the_cycle_cap() -> None:
         step, residual, phi0, max_steps=1, rtol=1e-10, atol=1e-12, retry_on_cycles=100
     )
     assert int(result.reports[0].cycles) == 40  # under the cap -> no escalation
+
+
+class _NaNUntilDamped(eqx.Module):
+    """A step whose correction is non-finite while β is below ``threshold`` and finite + on-root once β is
+    escalated past it -- the coupled-AMG failure where a NaN'd low-β step recovers at a larger β. If ever
+    handed the tight ``"tight"`` retry solver it returns a distinct marker cost (99), so a test can tell
+    whether the cheap β-escalation recovered the step or the expensive divergence fallback fired."""
+
+    relaxation_schedule: ConstantRelaxation
+    threshold: float = eqx.field(static=True, default=1.0)
+
+    def stepper(self):
+        sched, thr = self.relaxation_schedule, self.threshold
+
+        def step(residual_fn, phi, residual_norm_0, solver):
+            if (
+                solver == "tight"
+            ):  # the divergence fallback -- marked so the test can detect it fired
+                return jnp.zeros_like(phi), jnp.asarray(6), jnp.asarray(1.0), jnp.asarray(1)
+            phi_out = jnp.where(sched.beta >= thr, jnp.zeros_like(phi), jnp.full_like(phi, jnp.inf))
+            return phi_out, jnp.asarray(3), jnp.asarray(1.0), jnp.asarray(1)
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def default_solver(self):
+        return "loose"
+
+
+def test_march_escalates_beta_before_the_tight_divergence_retry() -> None:
+    """A non-finite step that recovers at escalated β is fixed by the CHEAP β-escalation first -- the
+    tight ``retry_solver`` (the expensive fallback) never fires. This is the reorder: on the stiff low-β
+    saddle a NaN is cured by more damping, so grinding the tight Krylov solve before escalating (the old
+    order) was wasted work that the escalation then re-damped away anyway."""
+    residual = _Cubic(
+        jnp.zeros((1,))
+    )  # root at phi = 0; a non-finite phi gives a non-finite residual
+    phi0 = jnp.ones((1,))
+    step = _NaNUntilDamped(relaxation_schedule=ConstantRelaxation(jnp.asarray(0.5)), threshold=1.0)
+    result = forward_march(
+        step,
+        residual,
+        phi0,
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        retry_solver="tight",
+        retry_on_cycles=10,
+        retry_beta_factor=2.0,
+        retry_cycles_limit=2,
+    )
+    assert result.converged
+    assert jnp.allclose(result.state, 0.0, atol=1e-8)
+    assert (
+        result.reports[0].cycles == 3
+    )  # β=0.5 -> 1.0 recovered it (cost 3); the tight retry (99/6) never fired
+
+
+def test_march_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergence() -> None:
+    """If β-escalation does not lift the step out of the non-finite regime -- the inexact-PC failure only a
+    tighter Krylov solve fixes -- the divergence retry still fires as the fallback, so the reorder never
+    loses the ILUT recovery it front-runs."""
+    residual = _Cubic(jnp.zeros((1,)))
+    phi0 = jnp.ones((1,))
+    # threshold unreachable by 0.5 -> 1.0 -> 2.0, so every escalation stays non-finite; only "tight" recovers.
+    step = _NaNUntilDamped(relaxation_schedule=ConstantRelaxation(jnp.asarray(0.5)), threshold=1e9)
+    result = forward_march(
+        step,
+        residual,
+        phi0,
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        retry_solver="tight",
+        retry_on_cycles=10,
+        retry_beta_factor=2.0,
+        retry_cycles_limit=2,
+    )
+    assert result.converged
+    assert jnp.allclose(result.state, 0.0, atol=1e-8)
+    assert (
+        result.reports[0].cycles == 6
+    )  # escalation exhausted -> fell back to the tight retry (cost 6)
