@@ -854,17 +854,24 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       shared with the ILUT hook), OR after `refresh_every` steps as a development backstop — the same two-
       pronged gate as `ilut_beta_tracking_refresh`, and the β-move prong is what catches an overshoot / rung
       restart before the solve stalls. Default (`beta_rel_change=None`) keeps the every-step behaviour.
-    - **Cheaper refresh — the β-diagonal split (`materialize_every`, measured ~2× on `bfs3d`).** The shifted
-      operator is `J(state) + β·d(state)`; between two refreshes at the same developed state only β (and the
-      shift diagonal) has moved, and re-materializing `J` by graph-coloured probing is ~half the refresh cost
-      (~18–40 s of the ~36–62 s total; the GAMG refactor is the other ~18 s). `MonolithicAmgPreconditioner`
+    - **Cheaper refresh — the β-diagonal split, drift-gated (`materialize_drift` / `materialize_every`).** The
+      shifted operator is `J(state) + β·d(state)`; between two refreshes at the same developed state only β (and
+      the shift diagonal) has moved, and re-materializing `J` by graph-coloured probing is ~half the refresh
+      cost (~18–40 s of the ~36–62 s total; the GAMG refactor is the other ~18 s). `MonolithicAmgPreconditioner`
       therefore caches the un-shifted Jacobian (`_materialize_jacobian` / `_shifted` split) and exposes
       `refresh_shift_in_place(shift_diagonal)`, which re-forms only `J + β·d` on the cached `J` and re-sets-up
-      the GAMG. With `materialize_every=M`, the hook does the cheap shift-only refresh for `M−1` steps then a
-      full re-materialize on the `M`-th (the operator's own state has moved enough by then to warrant a fresh
-      `J`). `None` (default) re-materializes every refresh. Since gradients are never taken through the
-      forward march, the in-place mutation of the cached `J` is safe (the same impurity licence as the ILUT
-      in-place refresh).
+      the GAMG. The full re-materialize is **gated** (`_materialize_gate`, the drift/step-cap analogue of
+      `_staleness_beta_gate`): `materialize_drift=τ` fires it when the ν_t drift since the last one exceeds `τ`
+      (`eddy_viscosity_drift`, the honest staleness signal — prefer this), `materialize_every=K` is the
+      step-count safety cap; both `None` (default) re-materialize every refresh. Since gradients are never
+      taken through the forward march, the in-place mutation is safe. **⚠️ Measured: DON'T under-materialize.**
+      On a fast-developing flow a *fresh* `J` cuts the Krylov cycle count (~23 % on `bfs3d` — fewer/cheaper
+      steps) by more than the materialize costs, so a stale frozen `J` is a net loss; the right lever is a
+      *cheaper* materialize, not a rarer one — hence the two `sparse_jacobian` speedups (batched probe +
+      gather de-compression; see the materialize-efficiency bullet in `.claude/rules/solve.md`), which
+      `coupled_amg_continuation` and the refresh wire in (built once, reused). **DON'T lower `stencil_reach`
+      to 2 to cheapen it either** — exact at developed states but it drops the cold-state distance-3
+      couplings and the march sticks in rung 1 (see the reach bullet in `.claude/rules/solve.md`).
     - The rebuild REUSES the smoothed-aggregation coarse space (`MonolithicAmgPreconditioner.refactor`
       overwrites the operator values in place over a persistent CSR array and re-sets-up the PC with
       `pc_gamg_reuse_interpolation`), since the graph-coloured probe's sparsity is fixed across β; only the

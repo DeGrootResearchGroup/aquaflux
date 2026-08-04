@@ -141,8 +141,38 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     (no re-derived assembly): `block_stencil_colouring(owner, nb, n, reach)` (pure NumPy — the cell-block
     pattern at a stencil `reach` and a collision-free CPR colouring, the conflict graph is the pattern
     squared) then `materialize_block_jacobian(matvec, colouring, n_fields)` (one `jax.jvp` per
-    colour×field). `jacobian_relative_error` guards that `reach` covers the stencil (coupled RANS reaches
-    distance **3**). Field-major DOF layout `(cell i, field f) = f·n + i`.
+    colour×field — e.g. 112 colours × 6 fields = **~670 probes** on the 23k-cell reach-3 `bfs3d` mesh, NOT
+    ~240). `jacobian_relative_error` guards that `reach` covers the stencil (coupled RANS reaches distance
+    **3**). Field-major DOF layout `(cell i, field f) = f·n + i`.
+    - **Materialize efficiency — two shipped speedups, both AMG-path-only, bit-identical (BUILT).** The
+      probe dominates a refresh, so `materialize_block_jacobian` takes two optional accelerators the AMG
+      preconditioner passes (LU/ILUT keep the plain loop, which any NumPy matvec supports). **(1) Batched
+      probing** — `batched_matvec` (a `jax.vmap` of the jvp, **built once and reused** so it compiles a
+      single time; `probe_batch_size` chunks it for memory) runs the coloured probes as a few fused passes
+      instead of a Python loop of separate calls. Measured 22.4→14.0 s (~1.6×) on `bfs3d` — modest because
+      CPU forward-AD does not vectorize across the batch like a GPU (the win is dispatch amortization).
+      **(2) Gather de-compression** — `block_stencil_gather_map(colouring, n_fields)` precomputes, once, the
+      **fixed full-pattern** CSR structure + a flat `gather_map`, so de-compression is one vectorized
+      `data = responses.ravel()[gather_map]` (no scatter loop, no per-materialize CSR re-sort) passed as
+      `structure=`. The **full** pattern (no `eliminate_zeros`) is the *union* of the Jacobian's nonzeros
+      over all states, so the structure stays fixed cold→developed and no entry is ever dropped as couplings
+      decay — a guaranteed-fixed structure the in-place GAMG refactor needs. On `bfs3d` the full pattern is
+      47.2M nnz = *exactly* the cold-IC nonzero count; ~8.2M are distance-3 Rhie-Chow / non-orthogonal
+      couplings that decay to ~0 at a developed state and appear there as explicit zeros (harmless to
+      aggregation — strength-of-connection ignores a zero coupling — but they are why an incomplete/complete
+      factorization can't use this path: an explicit zero is fill). De-compression 22.4→11.2 s (2.0× vs
+      loop); full build (materialize + GAMG) only 56.0→54.2 s (**1.03×** — GAMG-dominated), so the gather's
+      real value is the fixed-structure invariant, not the wall-clock.
+    - **Probe REACH is a preconditioner choice — reach-2 is cheaper but NOT a safe drop-in (measured,
+      SHELVED).** The materialized `J` is only the preconditioner's operator (the solve matvec is always the
+      exact matrix-free jvp), so a lower `stencil_reach` gives an approximate PC. On the orthogonal `bfs3d`
+      mesh reach-2 is *exact* at developed states (distance-3 couplings ~1e-15) and ~2.2× cheaper (60 vs 112
+      colours; the whole GAMG on half the nnz → refresh 13 % of wall vs 41 %). BUT it drops the distance-3
+      couplings that are LIVE at cold states (cold-IC reach-3 nnz 47.2M vs 39.0M developed), so the cold-state
+      PC intermittently grinds (cyc≈41, one over `retry_on_cycles=40`) → spurious escalation → β thrash →
+      the march stuck-slow in rung 1. **Do not lower the default reach.** Reviving reach-2's refresh win
+      needs a stronger PC that works at low β (`smoother_sweeps=3`) or a reach schedule (reach-3 cold, reach-2
+      developed), not a carry/inner-solve change — see `bfs3d-doomed-primary-cost-fixes` in memory.
   - **`ilut_preconditioner.py` — `MonolithicIlutPreconditioner`.** Built off the jit path (`scipy.spilu`);
     a **host** object, so it is **not** an `equinox.Module` — it rides as a static field and is applied
     inside the jitted Krylov solve through `jax.pure_callback` (`.matvec()` / `.matvec(transpose=True)`).
@@ -303,15 +333,23 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     and `coarse_eq_limit` dominates regardless.)*
   - **β-diagonal split — track β without re-materializing the Jacobian (BUILT).** The operator is
     `J(φ) + β d`, and the shift `β d` touches only the **diagonal**, so a β-tracking refresh does **not**
-    need the ~240-jvp materialization of `J` — the dominant refresh cost.
+    need the coloured-probe materialization of `J` (the dominant refresh cost — hundreds of jvps).
     `MonolithicAmgPreconditioner.refresh_shift_in_place(shift)` reuses the **cached** Jacobian (stored at
     the last `build` / `refresh_in_place`), re-adds the new `β d` diagonal (`O(nnz)` numpy) and re-factors.
     Measured on the `bfs3d` hard state: **full `refresh_in_place` 36 s vs shift-only 18 s (2×)** — the 18 s
     saved is the materialize, the remaining 18 s the equilibrate + GAMG refactor. The frozen `J` does not
-    track *state* drift, so `amg_beta_tracking_refresh(materialize_every=K)` does the cheap shift-only
-    refresh in between and a full materialize every `K` steps (default `None` = full every step, unchanged);
-    pair a large `K` with a state-staleness trigger. Forward-march only, like `refresh_in_place`. Pinned by
-    `test_amg_refresh_shift_in_place_*` in `test_amg_preconditioner.py`.
+    track *state* drift, so the full materialize is **gated** (`_materialize_gate`, mirroring
+    `_staleness_beta_gate`): `amg_beta_tracking_refresh(materialize_drift=τ, materialize_every=K)` does the
+    cheap shift-only refresh in between and a full materialize when the ν_t drift since the last one exceeds
+    `τ` OR after `K` steps (both `None` = full every refresh, unchanged). Prefer `materialize_drift` (the
+    honest state-staleness signal via `eddy_viscosity_drift`) with a large `K` as the safety cap — the fixed
+    step count was the "fixed cadence" antipattern. **Measured caveat: a *fresh* Jacobian is worth its cost
+    on a fast-developing flow** — driving the materialize *more* often (via a tight `τ`) cut the march's
+    Krylov cycles ~23 % (fewer/cheaper steps) despite more refresh, so under-materializing was costing more
+    in solve than the materialize saves; the lever is a *cheaper* materialize (batched probe + gather
+    de-compression above), not a rarer one. Forward-march only. Pinned by `test_amg_refresh_shift_in_place_*`
+    (`test_amg_preconditioner.py`) and `test_materialize_gate_*` / `test_batched_probing_*` /
+    `test_gather_de_compression_*`.
   - **⚠️ TRUE-RESIDUAL TRAP (binding).** PETSc's default convergence norm is the *preconditioned* residual
     `‖Mr‖`; on this indefinite saddle SOR/Krylov-smoothing report `reason=2` (converged) at a **true**
     residual of 1.0. Force `KSP_NORM_UNPRECONDITIONED` and always check `‖Ax−b‖` — same lesson as the
