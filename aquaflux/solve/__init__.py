@@ -106,6 +106,7 @@ from .shift_basis import LocalCourantBasis, ShiftBasis, VelocityShiftParts
 from .sparse_jacobian import (
     BlockColouring,
     block_stencil_colouring,
+    block_stencil_gather_map,
     jacobian_relative_error,
     materialize_block_jacobian,
 )
@@ -158,6 +159,7 @@ __all__ = [
     "VelocityShiftParts",
     "air_multigrid_solve",
     "block_stencil_colouring",
+    "block_stencil_gather_map",
     "build_air_hierarchy",
     "build_amg_vcycle",
     "build_convection_hierarchy",

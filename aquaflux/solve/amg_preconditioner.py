@@ -431,11 +431,14 @@ class MonolithicAmgPreconditioner:
         n_fields: int,
         batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         probe_batch_size: int | None = None,
+        structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
     ) -> sp.csr_matrix:
         """The coupled Jacobian **without** the shift, from the graph-coloured jvp probe (one jvp per
         (colour, field) -- the expensive part of a refresh; e.g. ~670 probes on a 23k-cell reach-3 bfs3d
         mesh). ``batched_matvec`` (built once, reused) runs the probes as a few batched passes rather than a
-        per-probe loop (~1.6x on that mesh); ``probe_batch_size`` chunks the batch for memory."""
+        per-probe loop (~1.6x on that mesh); ``probe_batch_size`` chunks the batch for memory. ``structure``
+        (from ``block_stencil_gather_map``, built once) de-compresses by a single gather into the fixed
+        full-pattern CSR instead of a scatter loop + re-sort (multigrid-only -- it keeps explicit zeros)."""
         from .sparse_jacobian import materialize_block_jacobian
 
         return materialize_block_jacobian(
@@ -444,6 +447,7 @@ class MonolithicAmgPreconditioner:
             n_fields,
             batched_matvec=batched_matvec,
             probe_batch_size=probe_batch_size,
+            structure=structure,
         ).tocsr()
 
     @staticmethod
@@ -466,6 +470,7 @@ class MonolithicAmgPreconditioner:
         coarse_eq_limit: int | None = None,
         batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         probe_batch_size: int | None = None,
+        structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
     ) -> MonolithicAmgPreconditioner:
         """Materialize the shifted coupled Jacobian and build a V-cycle preconditioner for it, off the jit path.
 
@@ -496,6 +501,10 @@ class MonolithicAmgPreconditioner:
         probe_batch_size : int or None
             The batched-probe chunk size (simultaneous tangents), to bound peak memory; ``None`` runs all
             probes in one batch.
+        structure : tuple of np.ndarray or None
+            A precomputed ``(indptr, indices, gather_map)`` (:func:`~aquaflux.solve.sparse_jacobian.block_stencil_gather_map`)
+            so the materialize de-compresses by one gather into the fixed full-pattern CSR instead of a
+            scatter loop + re-sort. Built once and reused across refreshes.
 
         Returns
         -------
@@ -503,7 +512,7 @@ class MonolithicAmgPreconditioner:
             The built preconditioner.
         """
         jacobian = cls._materialize_jacobian(
-            matvec, colouring, n_fields, batched_matvec, probe_batch_size
+            matvec, colouring, n_fields, batched_matvec, probe_batch_size, structure
         )
         matrix = cls._shifted(jacobian, shift_diagonal)
         return cls(
@@ -531,6 +540,7 @@ class MonolithicAmgPreconditioner:
         smoother_sweeps: int = 2,
         batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         probe_batch_size: int | None = None,
+        structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
     ) -> None:
         """Rebuild the V-cycle at a developed state and swap it IN PLACE (no new object).
 
@@ -546,7 +556,7 @@ class MonolithicAmgPreconditioner:
         """
         del smoother_fill_levels, smoother_sweeps  # the smoother config is fixed at build
         self._jacobian_no_shift = self._materialize_jacobian(
-            matvec, colouring, n_fields, batched_matvec, probe_batch_size
+            matvec, colouring, n_fields, batched_matvec, probe_batch_size, structure
         )
         self._n_fields = n_fields
         matrix = self._shifted(self._jacobian_no_shift, shift_diagonal)

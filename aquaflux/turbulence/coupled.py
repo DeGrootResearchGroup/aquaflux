@@ -74,6 +74,7 @@ from aquaflux.solve import (
     TransposedPreconditioner,
     VelocityShiftParts,
     block_stencil_colouring,
+    block_stencil_gather_map,
     forward_march,
     relative_residual_gmres,
 )
@@ -1849,6 +1850,9 @@ def coupled_amg_continuation(
     base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
     n_fields = coupled.layout.dim + 3
     colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
+    # The fixed CSR structure + gather map (pattern is mesh-fixed), so each materialize de-compresses by one
+    # gather rather than a scatter loop + re-sort. Reused by the β-tracking refresh (built once there too).
+    structure = block_stencil_gather_map(colouring, coupled.layout.dim + 3)
     frozen = jax.lax.stop_gradient(reference_state)
     matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
     # Batched jvp so the coloured materialize probes run as a few fused passes, not a per-probe loop.
@@ -1874,6 +1878,7 @@ def coupled_amg_continuation(
         coarse_eq_limit=coarse_eq_limit,
         batched_matvec=batched_matvec,
         probe_batch_size=_PROBE_BATCH_SIZE,
+        structure=structure,
     )
     return _monolithic_factor_step(
         coupled,
@@ -2109,12 +2114,15 @@ def _beta_tracking_refresh(
     refresh_kwargs = {} if refresh_kwargs is None else refresh_kwargs
     colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
     n_fields = coupled.layout.dim + 3
+    # Fixed CSR structure + gather map for the AMG materialize (mesh-fixed pattern): each materialize
+    # de-compresses by one gather rather than a scatter loop + re-sort. Built once; used only on the AMG path.
+    structure = block_stencil_gather_map(colouring, n_fields)
     # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
     # reuses it, rather than a fresh lambda recompiling each step.
     matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
-    # Batched form (vmapped over the tangent) so the ~240 coloured probes of a full materialize run as a
-    # few fused passes rather than a Python loop of separate calls. Built once (state-independent, `frozen`
-    # a traced argument) so it compiles a single time and every materialize reuses it. Used only by the AMG
+    # Batched form (vmapped over the tangent) so the coloured probes of a full materialize run as a few
+    # fused passes rather than a Python loop of separate calls. Built once (state-independent, `frozen` a
+    # traced argument) so it compiles a single time and every materialize reuses it. Used only by the AMG
     # preconditioner's `refresh_in_place`.
     batched_matvec_at = jax.jit(
         jax.vmap(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1], in_axes=(None, 0))
@@ -2166,6 +2174,7 @@ def _beta_tracking_refresh(
             {
                 "batched_matvec": lambda seeds: batched_matvec_at(frozen, seeds),
                 "probe_batch_size": _PROBE_BATCH_SIZE,
+                "structure": structure,
             }
             if is_amg
             else {}
