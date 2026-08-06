@@ -1929,11 +1929,33 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     is what keeps a `RefreshTrigger` a pure function that can be replayed offline against a logged march
     — put the state on that seam and a trigger could read the physics, and trigger calibration would cost
     one full solve per candidate instead of one logged run for all of them.
-  - **Reporting seam.** `StepReport(step, cycles, residual_norm, residual_ratio, alpha)` + `MarchResult`,
+  - **Reporting seam.** `StepReport(step, cycles, residual_norm, residual_ratio, alpha, drift,
+    inner_iterations, shift, escalations, diverged_retry)` + `MarchResult`,
     plus an optional streaming `observer` (a long march must not withhold all logging until it finishes).
     The trigger and a future logger consume the identical objects, so there is no second reporting path.
     Per-step observation exists only where the march is eager — the traced `_forward` would need
     `jax.debug.callback`, a separate decision; do not promise per-step reporting on the differentiable path.
+  - **`shift` / `escalations` / `diverged_retry` on the report, and `MarchLogger` (`solve/march_log.py`)
+    — the reporting half of the `on_step` seam (BUILT).** Every driver used to write its own
+    `on_step`/`on_checkpoint` formatter, so the copies drifted and a gap fixed in one persisted in the
+    others; `MarchLogger` owns everything derivable from a `StepReport` and takes an injected
+    `metrics: state -> {name: value}` for the case quantities the solver cannot know (a reattachment
+    length — `compare.reattachment_metrics` is the bfs3d one). `note()` writes an arbitrary line to the
+    log's **own** stream (a driver reaching for `print` alongside it splits the run across two
+    destinations, and a file log then loses whichever lines went to stdout); `phase(label, total)`
+    auto-numbers, so a caller keeps no counter.
+    Three report fields exist because the log could not otherwise carry them. **`shift`** is the `beta`
+    the step was taken at — already read at the construction site for `carry_beta`, and otherwise
+    recovered by every driver wrapping the step control. **`escalations` / `diverged_retry`** record
+    whether the step was redone: `cycles` counts only the **accepted** attempt, so a redone step is
+    indistinguishable from a cheap one, **and a retry mechanism left unconfigured never announces its
+    absence** — which is not hypothetical (a bfs3d march ran with `cycle_budget` set but
+    `retry_on_cycles` at its `None` default, so the beta-escalation never fired and nothing in the log
+    said so; the cap exists to trip that trigger).
+    The logger also reports the **reference norm and the stopping target**: the test is
+    `‖R‖ <= atol + rtol·‖R₀‖`, and the march reports `‖R‖` and `‖R‖/‖R₀‖` but not `‖R₀‖`, so the target
+    was invisible. Pinned by `tests/unit/test_march_log.py` (synthetic reports, no solve).
+
   - **`precondition_step` — per-step refresh of the step's frozen host preconditioner (binding,
     forward-only).** `forward_march(precondition_step=…)` calls `precondition_step(active_step, state)`
     before each `_march_step`, *after* the control has set β on `active_step`, to re-derive the step's
