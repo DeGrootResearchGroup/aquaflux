@@ -88,9 +88,9 @@ def test_cumulative_cycles_and_steps_run_across_phases() -> None:
     """A phase (a continuation rung) relabels the log; it does not restart the running totals."""
     logger, buffer = _log()
     logger.on_step(_report(cycles=10))
-    logger.phase("rung 2/3")
+    logger.phase("rung", total=3)
     logger.on_step(_report(cycles=5))
 
     lines = buffer.getvalue().splitlines()
-    assert "[rung 2/3" in lines[1]
+    assert "[rung 1/3" in lines[1]  # numbered automatically; the caller keeps no counter
     assert "step=   2" in lines[2] and "cum=   15" in lines[2]

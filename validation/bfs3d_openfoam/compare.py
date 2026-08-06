@@ -271,6 +271,34 @@ def solve_aquaflux(*, log_path=None, **solve_kwargs):
     )
 
 
+def reattachment_metrics(case):
+    """A ``state -> {"xr/h": ...}`` metrics callable for :class:`~aquaflux.solve.MarchLogger`.
+
+    The march logger reports everything a solver step knows, but the quantity this case is actually
+    steered by -- the reattachment length -- needs the case's own geometry and field layout. This is
+    that seam, so a driver logging the march never re-derives the unpacking.
+
+    Parameters
+    ----------
+    case : dict
+        The assembled benchmark from :func:`build_case`.
+
+    Returns
+    -------
+    callable
+        ``state -> mapping``, mapping a packed coupled state to the reattachment length in step heights.
+    """
+    coupled, momentum, geom = case["coupled"], case["momentum"], case["geom"]
+    centroid = np.asarray(geom.cell.centroid)
+
+    def metrics(state):
+        flow, _k, _omega = coupled.physical_fields(state)
+        velocity, _pressure = momentum.unpack(flow)
+        return {"xr/h": float(reattachment_length(centroid, np.asarray(velocity)[:, 0]))}
+
+    return metrics
+
+
 def reattachment_length(centroid, u_x, z_slab=None):
     """Lower-wall reattachment length x_r/h behind the step (h = step height).
 

@@ -74,16 +74,28 @@ class MarchLogger:
         self._start = self._clock()
         self._cumulative_cycles = 0
         self._steps = 0
+        self._phases = 0
         self._phase = ""
 
-    def phase(self, label: str) -> None:
+    def note(self, text: str) -> None:
+        """Write an arbitrary line (a run header, a configuration echo) to the log's own stream.
+
+        Exists so a driver never reaches for ``print`` alongside the logger: that splits the run across
+        two destinations, and a log written to a file then silently loses whichever lines went to
+        stdout -- including the configuration echo needed to interpret the run.
+        """
+        self._write(text)
+
+    def phase(self, label: str, total: int | None = None) -> None:
         """Start a labelled phase (a continuation rung, a refreshed segment) and write a header.
 
-        The step counter and cumulative cycles keep running across phases, so the log reads as one
-        march; only the label changes.
+        Phases are **numbered automatically** in call order, so a caller does not keep its own counter:
+        ``phase("rung", total=3)`` yields ``rung 1/3``, ``rung 2/3``, ... The step counter and cumulative
+        cycles keep running across phases, so the log still reads as one march.
         """
-        self._phase = label
-        self._write(f"[{label}  t={self._clock() - self._start:.0f}s]")
+        self._phases += 1
+        self._phase = f"{label} {self._phases}" + (f"/{total}" if total is not None else "")
+        self._write(f"[{self._phase}  t={self._clock() - self._start:.0f}s]")
 
     def on_step(self, report: StepReport) -> None:
         """``on_step`` callback: log a step with no case metrics (no state is available here)."""
