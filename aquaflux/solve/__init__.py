@@ -94,6 +94,7 @@ from .march import (
     StepReport,
     forward_march,
 )
+from .march_log import MarchLogger
 from .multigrid import (
     AirHierarchy,
     SmoothedHierarchy,
@@ -141,6 +142,7 @@ __all__ = [
     "ImplicitNewtonSolver",
     "LineSearchGrowth",
     "LocalCourantBasis",
+    "MarchLogger",
     "MarchResult",
     "MonolithicAmgPreconditioner",
     "MonolithicIlutPreconditioner",

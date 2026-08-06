@@ -92,6 +92,7 @@ def solve_reynolds_continuation(
     *,
     schedule: ReynoldsSchedule | None = None,
     intermediate_rtol: float | None = 1e-2,
+    intermediate_atol: float | None = None,
     point_setup: Callable[[CoupledRANS, jnp.ndarray], dict] | None = None,
     **solve_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -129,6 +130,15 @@ def solve_reynolds_continuation(
         them to the tight target tolerance is wasted work -- a loose value develops the field enough to
         seed the next point at a fraction of the cost. Default ``1e-2``. Pass ``None`` to converge every
         point to the caller's ``rtol`` (no loosening).
+    intermediate_atol : float or None
+        The **absolute** residual tolerance for the lower-Re points, overriding ``atol`` for those solves
+        only. The stopping test is ``‖R‖ <= atol + rtol·‖R₀‖``, so pairing this with ``rtol=0`` converges
+        each seed point to a fixed level rather than to a fraction of its own starting residual. Prefer it
+        for a self-normalizing residual measure (the default row-equilibrated one already reports a
+        fractional change per equation): every point re-bases its own ``‖R₀‖``, and a Reynolds jump makes
+        the inherited field a *worse* seed, so a purely relative bar can let a later point stop at a worse
+        absolute residual than an earlier point already reached. ``None`` (default) leaves ``atol``
+        untouched.
     point_setup : callable, optional
         ``(companion, seed_state) -> dict``, a **per-Reynolds-point** builder of extra ``solve_coupled``
         keyword arguments (merged over ``solve_kwargs`` for that point). It exists for a preconditioner that
@@ -202,6 +212,15 @@ def solve_reynolds_continuation(
     # over-converging them to the target tolerance is wasted work.
     if intermediate_rtol is not None:
         ramp_kwargs["rtol"] = intermediate_rtol
+    # The absolute counterpart. The stopping test is ``‖R‖ <= atol + rtol·‖R₀‖``, so a purely ABSOLUTE
+    # target is ``rtol=0`` with ``atol`` the level to reach -- which is the meaningful form for a
+    # self-normalizing residual measure (the default row-equilibrated one already reports a fractional
+    # change per equation, so dividing it again by ‖R₀‖ makes the bar a property of the initial guess).
+    # It matters most here: every point re-bases its own ‖R₀‖, and a Reynolds jump makes the inherited
+    # field a WORSE seed, so a relative bar lets a later point stop at a worse absolute residual than an
+    # earlier one already reached.
+    if intermediate_atol is not None:
+        ramp_kwargs["atol"] = intermediate_atol
 
     def _point_solve(assembler, seed_fields, base_kwargs):
         # One Reynolds point. Without `point_setup` this is the plain solve (byte-identical to before,

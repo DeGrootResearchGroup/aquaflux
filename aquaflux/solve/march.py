@@ -74,6 +74,20 @@ class StepReport(NamedTuple):
     residual_ratio : float
         ``residual_norm`` divided by the march's global reference norm — how far the solve has come,
         on the same scale for every segment.
+    escalations : int
+        How many times the step was redone with ``beta`` escalated before it was accepted (the
+        ``retry_on_cycles`` bailout). ``0`` for a step taken as-is.
+    diverged_retry : bool
+        Whether the step was redone by ``retry_solver`` after diverging. Recorded alongside
+        ``escalations`` because ``cycles`` reports only the **accepted** attempt: without them a redone
+        step is indistinguishable from a cheap one, and a retry mechanism that never fires (because it
+        was left unconfigured) is invisible in the log.
+    shift : float
+        The pseudo-transient shift strength ``beta`` the step was taken at, read from the step's
+        relaxation schedule (``0`` for a schedule that exposes none). Recorded because ``beta`` is what
+        a :class:`StepControl` steers and what a preconditioner's staleness is a function of, so a log
+        or a diagnostic that omits it cannot explain why a step cost what it did -- and every driver
+        that wants it would otherwise wrap the control to capture it.
     alpha : float
         The line-search factor of the accepted step: ``1`` if the full shifted step descended, smaller
         if it was clipped. The step-quality signal a :class:`StepControl` drives the next shift by
@@ -100,6 +114,9 @@ class StepReport(NamedTuple):
     alpha: float
     drift: float = 0.0
     inner_iterations: int = 1
+    shift: float = 0.0
+    escalations: int = 0
+    diverged_retry: bool = False
 
     @property
     def restart_cycles(self) -> int:
@@ -650,9 +667,10 @@ def forward_march(
         # sole and original retry) -- redoing the SAME step from the SAME pre-step state with `retry_solver`.
         # One retry; a still-diverged step breaks below as it would without a retry. `retry_solver=None`
         # (default) is byte-identical, and the exact-LU path never triggers this.
-        if retry_solver is not None and _has_diverged(
+        diverged_retry = retry_solver is not None and _has_diverged(
             residual_norm, reference, retry_divergence_cap
-        ):
+        )
+        if diverged_retry:
             state, cycles, alpha, inner, residual_norm = _march_step(
                 active_step, residual_fn, prestep_state, residual_norm_0, retry_solver
             )
@@ -675,6 +693,9 @@ def forward_march(
                 control_state, float(active_step.relaxation_schedule.beta)
             )
         current = float(residual_norm)
+        # Not every ForwardStep carries a relaxation schedule (a plain damped-Newton step has none), and
+        # a schedule need not expose a readable beta -- report 0 rather than demanding either.
+        step_shift = getattr(getattr(active_step, "relaxation_schedule", None), "beta", None)
         report = StepReport(
             step=len(reports),
             cycles=int(cycles),
@@ -683,6 +704,9 @@ def forward_march(
             alpha=float(alpha),
             drift=0.0 if drift_measure is None else float(drift_measure(state)),
             inner_iterations=int(inner),
+            shift=0.0 if step_shift is None else float(step_shift),
+            escalations=int(retries),
+            diverged_retry=bool(diverged_retry),
         )
         reports.append(report)
         if observer is not None:
