@@ -116,3 +116,48 @@ def test_amg_adjoint_matches_finite_difference(case) -> None:
     eps = 1e-4
     finite_difference = float((objective(1.0 + eps) - objective(1.0 - eps)) / (2 * eps))
     assert abs(analytic - finite_difference) / abs(finite_difference) < 1e-5
+
+
+@pytest.mark.slow
+def test_amg_beta_floor_builds_the_preconditioner_above_the_marchs_own_beta(
+    case, monkeypatch
+) -> None:
+    """``beta_floor`` clamps the PRECONDITIONER's shift while the march keeps solving at its own β.
+
+    As β falls the shift's diagonal dominance vanishes and the frozen V-cycle degrades, but the operator
+    needs the small β to make pseudo-transient progress -- so the floor applies to the preconditioner's
+    copy only. Asserts both halves: the refresh receives ``max(β, beta_floor) · d``, and the step's own
+    relaxation schedule (what the march actually solves) is untouched.
+    """
+    import numpy as np
+    from aquaflux.solve import DualTimeControl
+    from aquaflux.turbulence import amg_beta_tracking_refresh
+
+    coupled = case["coupled"]
+    flow, k, omega = case["start"]
+    state = coupled.pack_state(flow, k, omega)
+
+    beta, floor = 0.01, 0.05  # β well below the floor, so the clamp is active
+    dual = coupled_amg_continuation(coupled, state, inner_steps=5)
+    active, _ = DualTimeControl(beta_start=beta).next_step(dual, None, None)
+
+    seen: dict[str, np.ndarray] = {}
+    pc_type = type(active.shift_policy.preconditioner)
+    monkeypatch.setattr(
+        pc_type,
+        "refresh_shift_in_place",
+        lambda _self, shift: seen.__setitem__("shift", np.asarray(shift)),
+    )
+    monkeypatch.setattr(
+        pc_type,
+        "refresh_in_place",
+        lambda _self, _mv, _col, _nf, shift, **_kw: seen.__setitem__("shift", np.asarray(shift)),
+    )
+
+    amg_beta_tracking_refresh(coupled, beta_floor=floor)(active, state)
+
+    diagonal = np.asarray(active.shift_policy.base.shift_term(state).diagonal)
+    assert np.allclose(seen["shift"], floor * diagonal)  # built at the FLOOR, not at β
+    assert not np.allclose(seen["shift"], beta * diagonal)
+    # ...and the march's own shift strength is untouched: the operator still carries the small β.
+    assert float(active.relaxation_schedule.beta) == pytest.approx(beta)

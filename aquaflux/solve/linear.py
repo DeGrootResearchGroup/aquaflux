@@ -49,7 +49,7 @@ def _global_two_norm(pytree: Any) -> jnp.ndarray:
 
 
 class _RelativeResidualGMRES(lx.GMRES):
-    """GMRES whose stopping test is a *global* 2-norm relative residual, not a componentwise one.
+    """GMRES whose stopping test is a *global* relative residual in an injected norm, not componentwise.
 
     ``lineax``'s stock GMRES applies ``rtol``/``atol`` **componentwise** -- it stops once, for every
     entry ``i``, ``|r_i| <= atol + rtol*|b_i|`` (default ``max_norm``, so the single worst entry
@@ -59,21 +59,26 @@ class _RelativeResidualGMRES(lx.GMRES):
     to ``~atol`` and force it to converge orders of magnitude past the relative tolerance that was
     actually requested.
 
-    This subclass sidesteps that by scaling the system to unit right-hand-side 2-norm inside
+    This subclass sidesteps that by scaling the right-hand side to unit ``self.norm`` inside
     :meth:`compute` and deferring to a stock GMRES configured with ``rtol = 0`` (so the componentwise
-    ``rtol*|b_i|`` term vanishes and the scale is the uniform ``atol``), the 2-norm, and ``atol`` set to
-    the desired relative tolerance. Termination is then exactly ``||r||_2 <= atol * ||b||_2`` -- one
-    global relative test that the near-zero entries cannot dominate. Build it with
-    :func:`relative_residual_gmres`.
+    ``rtol*|b_i|`` term vanishes and the scale is the uniform ``atol``), ``self.norm``, and ``atol`` set
+    to the desired relative tolerance. Termination is then exactly ``norm(r) <= atol * norm(b)`` -- one
+    global relative test in whatever measure ``self.norm`` is, immune to the near-zero entries. The
+    measure is injected (:func:`relative_residual_gmres`): the default ``_global_two_norm`` gives the
+    plain 2-norm stop, and a **row-scaled** measure (:class:`~aquaflux.solve.RowScaledNorm`, the coupled
+    march's own progress measure) gives a stop that weights every field block comparably rather than
+    letting the largest-magnitude block (``omega`` on the coupled saddle) decide alone. Any injected
+    ``norm`` must be positively homogeneous of degree one (``norm(c v) = |c| norm(v)``) so the unit-norm
+    scaling acts as a relative tolerance; the 2-norm and ``RowScaledNorm`` both are.
     """
 
     def compute(
         self, state: Any, vector: Any, options: dict[str, Any]
     ) -> tuple[Any, Any, dict[str, Any]]:
-        # Scale the right-hand side to unit 2-norm so the (absolute) ``atol`` floor acts as a relative
-        # tolerance; undo the scaling on the returned solution (the map ``b -> x`` is linear, so a
-        # constant factor passes straight through). ``jnp.where`` guards a zero right-hand side.
-        scale = _global_two_norm(vector)
+        # Scale the right-hand side to unit ``self.norm`` so the (absolute) ``atol`` floor acts as a
+        # relative tolerance; undo the scaling on the returned solution (the map ``b -> x`` is linear, so
+        # a constant factor passes straight through). ``jnp.where`` guards a zero right-hand side.
+        scale = self.norm(vector)
         scale = jnp.where(scale > 0.0, scale, 1.0)
         scaled = jax.tree_util.tree_map(lambda v: v / scale, vector)
         solution, result, stats = super().compute(state, scaled, options)
@@ -83,22 +88,33 @@ class _RelativeResidualGMRES(lx.GMRES):
 def relative_residual_gmres(
     rtol: float,
     *,
+    norm: Callable[[Any], jnp.ndarray] = _global_two_norm,
     restart: int = 120,
     stagnation_iters: int = 40,
     max_restarts: int | None = None,
 ) -> lx.AbstractLinearSolver:
-    """A GMRES that stops at a **global** 2-norm relative residual ``||Ax - b||_2 <= rtol*||b||_2``.
+    """A GMRES that stops at a **global** relative residual ``norm(Ax - b) <= rtol*norm(b)``.
 
     The robust termination for an inexact-Newton *forward* solve: it stops when the linear residual
-    has fallen by the factor ``rtol`` in the ordinary Euclidean sense, rather than by ``lineax``'s
-    stock componentwise ``max_norm`` test -- which a few near-zero-right-hand-side entries of a coupled
-    saddle system quietly convert into an absolute ``atol`` demand, forcing the solve orders of
-    magnitude past the tolerance asked for (see :class:`_RelativeResidualGMRES`).
+    has fallen by the factor ``rtol`` in ``norm``, rather than by ``lineax``'s stock componentwise
+    ``max_norm`` test -- which a few near-zero-right-hand-side entries of a coupled saddle system
+    quietly convert into an absolute ``atol`` demand, forcing the solve orders of magnitude past the
+    tolerance asked for (see :class:`_RelativeResidualGMRES`).
 
     Parameters
     ----------
     rtol : float
-        The relative-residual target ``||r||_2 / ||b||_2`` at which to stop.
+        The relative-residual target ``norm(r) / norm(b)`` at which to stop.
+    norm : callable
+        The measure the relative stop is taken in, ``v -> scalar``, positively homogeneous of degree one
+        (``norm(c v) = |c| norm(v)``). The default ``_global_two_norm`` gives the plain Euclidean stop.
+        Passing the coupled march's **row-scaled** progress measure
+        (:class:`~aquaflux.solve.RowScaledNorm`) makes the forward solve stop when *every* field block
+        has fallen by ``rtol`` in that measure, rather than when the largest-magnitude block alone has
+        (``omega`` on the coupled saddle, whose residual is orders above the flow) -- so the flow
+        correction is never left blind. Pairing it with a *loose* ``rtol`` gives a cheap yet flow-aware
+        inexact-Newton stop. The measure is a fixed, physically row-scaled one (state row-diagonals),
+        not a per-solve right-hand-side normalization, so the stop is problem-independent.
     restart : int
         The Krylov subspace size before a restart (default ``120``).
     stagnation_iters : int
@@ -110,20 +126,20 @@ def relative_residual_gmres(
     Returns
     -------
     lineax.AbstractLinearSolver
-        A solver realizing the global relative-residual stop, for injection as a forward solver.
+        A solver realizing the relative-residual stop, for injection as a forward solver.
 
     Notes
     -----
     The residual it measures is the **preconditioned** one when the solve is left-preconditioned
     (``solve_linear`` folds the preconditioner into the operator and right-hand side), so the test is
-    ``||M(Ax - b)||_2 <= rtol*||M b||_2``. That is the standard, and adequate, inexact-Newton stopping
+    ``norm(M(Ax - b)) <= rtol*norm(M b)``. That is the standard, and adequate, inexact-Newton stopping
     quantity for a globalized march; the converged root and its adjoint are unaffected either way,
     since the shift vanishes at the root and the adjoint is a separate transpose solve.
     """
     return _RelativeResidualGMRES(
         rtol=0.0,
         atol=rtol,
-        norm=_global_two_norm,
+        norm=norm,
         restart=restart,
         stagnation_iters=stagnation_iters,
         max_steps=max_restarts,

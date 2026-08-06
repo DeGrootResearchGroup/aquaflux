@@ -15,9 +15,11 @@ unit tests. The surface is three groups:
   (one matrix-free correction — exact in one call for a linear residual, and differentiable in both
   modes), `solve_linear` (returns the solution together with the solve's restart-cycle count —
   the staleness signal a mid-march preconditioner refresh triggers on), `default_linear_solver`, and
-  `relative_residual_gmres` (a GMRES that stops on a *global* 2-norm relative residual — the robust
-  inexact-Newton forward stop, immune to the near-zero-right-hand-side rows that make the stock
-  componentwise test over-solve).
+  `relative_residual_gmres` (a GMRES that stops on a *global* relative residual in an injected norm —
+  the robust inexact-Newton forward stop, immune to the near-zero-right-hand-side rows that make the
+  stock componentwise test over-solve; the default is the Euclidean norm, and passing the row-scaled
+  `RowScaledNorm` makes the stop weigh every field block comparably instead of letting the
+  largest-magnitude block — `omega` on the coupled saddle — decide alone).
 * **Forward globalization** — the `ForwardStep` strategies `DampedNewtonStep` and
   `PseudoTransientStep`, with the `ShiftPolicy` / `ShiftTerm` / `StepAcceptance` seams a caller
   implements and the default `DivergenceGuard`, and the injected `ResidualNorm` the strategy judges
@@ -78,7 +80,11 @@ from .line_search_growth import (
     MonotoneLineSearch,
     RelaxedFarFromRoot,
 )
-from .linear import default_linear_solver, relative_residual_gmres, solve_linear
+from .linear import (
+    default_linear_solver,
+    relative_residual_gmres,
+    solve_linear,
+)
 from .march import (
     CoefficientDriftTrigger,
     CycleGrowthTrigger,

@@ -870,8 +870,10 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       *cheaper* materialize, not a rarer one — hence the two `sparse_jacobian` speedups (batched probe +
       gather de-compression; see the materialize-efficiency bullet in `.claude/rules/solve.md`), which
       `coupled_amg_continuation` and the refresh wire in (built once, reused). **DON'T lower `stencil_reach`
-      to 2 to cheapen it either** — exact at developed states but it drops the cold-state distance-3
-      couplings and the march sticks in rung 1 (see the reach bullet in `.claude/rules/solve.md`).
+      to 2 to cheapen it either** — reach-2 is numerically near-exact at *every* state, but GAMG(reach-2)
+      DIVERGES as a preconditioner because the ILU(1) smoother's fill is pattern-dependent (halving the graph
+      makes the incomplete factorization non-convergent on the saddle — the full reach-3 pattern is required;
+      see the reach bullet in `.claude/rules/solve.md`).
     - The rebuild REUSES the smoothed-aggregation coarse space (`MonolithicAmgPreconditioner.refactor`
       overwrites the operator values in place over a persistent CSR array and re-sets-up the PC with
       `pc_gamg_reuse_interpolation`), since the graph-coloured probe's sparsity is fixed across β; only the

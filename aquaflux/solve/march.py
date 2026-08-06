@@ -628,10 +628,14 @@ def forward_march(
             and hasattr(active_step.relaxation_schedule, "beta")
         ):
             retries += 1
-            escalated = float(active_step.relaxation_schedule.beta) * retry_beta_factor
-            active_step = eqx.tree_at(
-                lambda s: s.relaxation_schedule.beta, active_step, jnp.asarray(escalated)
-            )
+            # Escalate by SCALING the existing β leaf, not by rebuilding it from a Python float.
+            # `jnp.asarray(float(...) * factor)` yields a fresh weak-typed float64 array whose abstract
+            # value (dtype and weak_type) need not match the β leaf the step already carries -- and any
+            # mismatch makes the escalated `_march_step` a compilation-cache MISS, recompiling the whole
+            # coupled solve on every retry. Multiplying the leaf in place preserves its dtype and weak_type
+            # exactly, so the escalated step is a cache hit for whatever β dtype the step control set.
+            escalated = active_step.relaxation_schedule.beta * retry_beta_factor
+            active_step = eqx.tree_at(lambda s: s.relaxation_schedule.beta, active_step, escalated)
             if precondition_step is not None:
                 precondition_step(active_step, prestep_state)  # re-match the PC to the escalated β
             state, cycles, alpha, inner, residual_norm = _march_step(

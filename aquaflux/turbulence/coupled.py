@@ -735,22 +735,15 @@ _COUPLED_ILUT_FORWARD_SOLVER = relative_residual_gmres(
     1e-2, restart=10, stagnation_iters=40, max_restarts=40
 )
 
-# The monolithic AMG preconditioner is one V-cycle -- a weaker (but far cheaper to build, and
-# memory-bounded) approximate inverse than the factorizations, so the preconditioned Krylov solve needs a
-# few tens of vectors rather than the ILUT's handful to reach the 1% inexact-Newton stop. A restart of 15
-# is the measured sweet spot: it holds enough Arnoldi history for the V-cycle's convergence while checking
-# the stop often enough not to over-solve (a larger restart -- 40, 120 -- reaches the same march
-# trajectory but overshoots the 1% target deep into the next restart cycle, ~2x the matvecs, each of which
-# is an expensive host V-cycle apply). `max_restarts` stays generous so a drifted-reference solve still
-# completes.
-_COUPLED_AMG_FORWARD_SOLVER = relative_residual_gmres(
-    1e-2, restart=15, stagnation_iters=40, max_restarts=60
-)
 
 # How many coloured tangents share one vmapped jvp pass when materializing the AMG Jacobian. Smaller uses
 # less peak memory (fewer simultaneous forward-AD tapes), larger amortizes dispatch over more probes; the
-# ~240 probes run in ceil(240 / this) fused passes instead of a 240-call Python loop.
-_PROBE_BATCH_SIZE = 16
+# coloured probes run in ceil(n_probes / this) fused passes instead of an n_probes-call Python loop.
+# Measured on the 3D backward-facing step (~670 reach-3 probes): forward-AD does not vectorize across the
+# batch on CPU, so a large batch buys almost nothing in time (16 vs 4: ~33 s vs ~36 s) while costing it in
+# peak memory (16 holds ~2.2 GB of simultaneous tapes vs ~0.7 GB at 4). Four keeps essentially all of the
+# dispatch amortization at a third of the transient peak -- the right default for a memory-bounded solve.
+_PROBE_BATCH_SIZE = 4
 
 # Backtracking rungs for the shifted step. The full coupled Newton step from the hybrid initial
 # condition overshoots violently (the residual blows up many orders of magnitude), so the step length
@@ -1778,6 +1771,7 @@ def coupled_amg_continuation(
     inner_steps: int = 1,
     inner_tol: float = 0.05,
     forward_solver: lx.AbstractLinearSolver | None = None,
+    forward_rtol: float = 0.3,
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     residual_norm: ResidualNorm | None = None,
@@ -1830,6 +1824,16 @@ def coupled_amg_continuation(
         The pseudo-transient schedule, dual-time, guard, and measure parameters, exactly as in
         :func:`coupled_ilut_continuation`. ``forward_solver`` defaults to a restart-40 GMRES matched to the
         V-cycle's convergence (a few tens of vectors), rather than the ILUT's restart-10.
+    forward_rtol : float
+        The relative tolerance for the default **row-scaled** forward-solve stop (default ``0.3``). With no
+        explicit ``forward_solver``, the forward solve stops on the march's own row-scaled progress measure
+        (:func:`coupled_scaled_norm`) rather than a plain global 2-norm — the latter is ~100% ``omega``
+        (whose residual is orders above the flow), so it halts once ``omega`` is resolved while the
+        flow-dominated Newton step is still coarse (measured ~116 % velocity error — effectively blind).
+        The row-scaled stop weighs every field comparably; a *loose* ``forward_rtol`` keeps it cheap.
+        Calibrated on the developed backward-facing step: at ``0.3`` the velocity correction is resolved to
+        ~25 % for ~1.5× the plain-2-norm cycle count; ``0.1`` fully resolves it at ~2.25×. Ignored when an
+        explicit ``forward_solver`` is given.
     inner_observer : callable or None
         A per-inner-iteration profiling hook forwarded to the built dual-time step (only used when
         ``inner_steps > 1``); see :class:`~aquaflux.solve.DualTimeStep`. ``None`` (default) leaves the step
@@ -1849,6 +1853,25 @@ def coupled_amg_continuation(
     """
     base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
     n_fields = coupled.layout.dim + 3
+    # The forward-solve stop. A plain global-2-norm relative stop is ~100% the largest-magnitude field
+    # (``omega``, whose residual is orders above the flow), so a "1%" solve resolves ``omega`` and halts
+    # while the flow-dominated Newton step is still coarse -- leaving the flow correction blind (measured
+    # ~116 % velocity error). The forward solve therefore stops on the march's own row-scaled progress
+    # measure (``coupled_scaled_norm``, a physically row-scaled -- not per-solve -- measure) at a *loose*
+    # ``forward_rtol``: every field block is seen and resolved loosely, so the flow is never left blind
+    # while ``omega`` is not over-resolved. A caller that wants a different stop passes ``forward_solver``.
+    # Restart 15 is the measured sweet spot for the one-V-cycle preconditioner: enough Arnoldi history for
+    # its convergence while checking the stop often enough not to overshoot the loose target deep into the
+    # next cycle (a larger restart costs ~2x the expensive host V-cycle applies for the same trajectory);
+    # ``max_restarts`` stays generous so a drifted-reference solve still completes.
+    if forward_solver is None:
+        forward_solver = relative_residual_gmres(
+            forward_rtol,
+            norm=coupled_scaled_norm(coupled, base, reference_state),
+            restart=15,
+            stagnation_iters=40,
+            max_restarts=60,
+        )
     colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
     # The fixed CSR structure + gather map (pattern is mesh-fixed), so each materialize de-compresses by one
     # gather rather than a scatter loop + re-sort. Reused by the β-tracking refresh (built once there too).
@@ -1894,9 +1917,7 @@ def coupled_amg_continuation(
         line_search=line_search,
         inner_steps=inner_steps,
         inner_tol=inner_tol,
-        forward_solver=forward_solver
-        if forward_solver is not None
-        else _COUPLED_AMG_FORWARD_SOLVER,
+        forward_solver=forward_solver,
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
         inner_observer=inner_observer,
@@ -2084,6 +2105,7 @@ def _beta_tracking_refresh(
     refresh_kwargs: dict[str, object] | None = None,
     materialize_every: int | None = None,
     materialize_drift: float | None = None,
+    beta_floor: float = 0.0,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """Shared skeleton for the β-tracking ``precondition_step`` hooks (complete-LU and ILUT).
 
@@ -2150,11 +2172,20 @@ def _beta_tracking_refresh(
                 f"switched-evolution schedule ({type(schedule).__name__})."
             )
         beta = float(beta)
-        if gate is not None and not gate(beta):
+        # The preconditioner's shift is floored independently of the march's own beta. As beta -> 0 the
+        # shift's diagonal dominance vanishes and the frozen V-cycle degrades, but the OPERATOR must keep
+        # the small beta to make pseudo-transient progress. Flooring only the preconditioner's copy keeps
+        # the V-cycle in a regime it inverts well while the solved system is untouched, so the converged
+        # root and its adjoint are unchanged. The resulting mismatch SATURATES at `beta_floor * d` rather
+        # than growing without bound the way a stale (never-refreshed) preconditioner's does.
+        pc_beta = max(beta, beta_floor)
+        # Gate on the preconditioner's own beta: below the floor its operator no longer moves with the
+        # march, so a beta-move refresh there would rebuild an identical V-cycle.
+        if gate is not None and not gate(pc_beta):
             return
         policy = active_step.shift_policy
         frozen = jax.lax.stop_gradient(state)
-        shift = beta * np.asarray(jax.lax.stop_gradient(policy.base.shift_term(state).diagonal))
+        shift = pc_beta * np.asarray(jax.lax.stop_gradient(policy.base.shift_term(state).diagonal))
         pc = policy.preconditioner
         # β-diagonal split: β and the per-cell shift ``d`` touch only the diagonal, so between full
         # (re-materialized) refreshes the shift is tracked by re-adding the new ``β d`` diagonal to the
@@ -2295,6 +2326,7 @@ def amg_beta_tracking_refresh(
     materialize_drift: float | None = None,
     beta_rel_change: float | None = None,
     refresh_every: int = 8,
+    beta_floor: float = 0.0,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """A ``precondition_step`` that rebuilds the AMG V-cycle at the current β, every step.
 
@@ -2362,6 +2394,14 @@ def amg_beta_tracking_refresh(
         The staleness-cap backstop when ``beta_rel_change`` is set: force a refresh after this many gated
         steps with no β-move (state development at a near-constant ``β``). Ignored when ``beta_rel_change``
         is ``None``.
+    beta_floor : float
+        A lower bound on the shift strength the **preconditioner** is built at: the V-cycle is refreshed at
+        ``max(β, beta_floor)`` while the march keeps solving at its own ``β``. As ``β`` falls the shift's
+        diagonal dominance vanishes and the V-cycle degrades sharply -- but the operator needs the small
+        ``β`` to make pseudo-transient progress, so the two are decoupled here. Because the preconditioner
+        only changes the *path* of a solve and not its solution, this leaves the converged root and its
+        adjoint untouched; the operator/preconditioner mismatch it introduces saturates at
+        ``beta_floor * d`` instead of growing without bound. ``0.0`` (default) tracks ``β`` exactly.
 
     Returns
     -------
@@ -2379,6 +2419,7 @@ def amg_beta_tracking_refresh(
         gate=gate,
         materialize_every=materialize_every,
         materialize_drift=materialize_drift,
+        beta_floor=beta_floor,
     )
 
 

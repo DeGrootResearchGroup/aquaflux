@@ -29,6 +29,29 @@ import numpy as np
 ResidualNorm = Callable[[jnp.ndarray], jnp.ndarray]
 
 
+def block_two_norms(vector: jnp.ndarray, sizes: tuple[int, ...]) -> jnp.ndarray:
+    """The Euclidean norm of each contiguous block of ``vector``.
+
+    Splits ``vector`` into blocks of the given ``sizes`` (in order) and returns their per-block
+    2-norms. The single home for the per-field-block magnitudes, shared by :class:`BlockScaledNorm`
+    and the block-relative forward-solve stop (``block_relative_residual_gmres``).
+
+    Parameters
+    ----------
+    vector : jnp.ndarray
+        A flat vector, shape ``(sum(sizes),)``.
+    sizes : tuple of int
+        Length of each contiguous block, in order; must sum to ``vector.shape[0]``.
+
+    Returns
+    -------
+    jnp.ndarray
+        The per-block Euclidean norms, shape ``(len(sizes),)``.
+    """
+    split_points = tuple(int(p) for p in np.cumsum(sizes)[:-1])
+    return jnp.stack([jnp.linalg.norm(block) for block in jnp.split(vector, split_points)])
+
+
 class BlockScaledNorm(eqx.Module):
     """A residual norm that scales each contiguous block by its own reference magnitude.
 
@@ -59,14 +82,7 @@ class BlockScaledNorm(eqx.Module):
 
     def __call__(self, residual: jnp.ndarray) -> jnp.ndarray:
         """The block-scaled Euclidean norm of ``residual`` (shape ``(sum(sizes),)``)."""
-        split_points = tuple(int(p) for p in np.cumsum(self.sizes)[:-1])
-        blocks = jnp.split(residual, split_points)
-        relative = jnp.stack(
-            [
-                jnp.linalg.norm(block) / scale
-                for block, scale in zip(blocks, self.scales, strict=True)
-            ]
-        )
+        relative = block_two_norms(residual, self.sizes) / jnp.asarray(self.scales)
         return jnp.linalg.norm(relative)
 
 

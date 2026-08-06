@@ -298,12 +298,14 @@ class PseudoTransientStep(eqx.Module):
         search, and the acceptance/divergence guard all use it, and :class:`ImplicitNewtonSolver`
         reads it (via :meth:`norm`) for the outer stopping test, so one measure governs the whole
         solve. A heterogeneous block system (e.g. coupled RANS, where ``omega`` is O(1e5) and ``k``
-        O(1e-3)) *can* pass a :class:`~aquaflux.solve.BlockScaledNorm` so the march *sees* every block
-        — with the plain norm the ‖R‖ is ~100% ``omega`` and the line search neither judges nor
-        protects the ``k`` block. (In practice the block-scaled measure stalled the coupled march, so
-        coupled RANS defaults to the Euclidean norm; the block-scaled option remains for
-        experimentation.) Like the shift, it only reshapes the forward path; the IFT adjoint never
-        forms a norm, so the converged state and its gradient are unchanged.
+        O(1e-3)) needs a scaled measure so the march *sees* every block — with the plain norm the
+        ‖R‖ is ~100% ``omega`` and the line search neither judges nor protects the ``k`` block. The
+        coupled-RANS builders therefore inject a per-state, row-equilibrated
+        :class:`~aquaflux.solve.RowScaledNorm` (``coupled_scaled_norm``, rebuilt each outer iteration
+        and held fixed across a line search), overriding this field's plain-norm class default; the
+        coarser :class:`~aquaflux.solve.BlockScaledNorm` is an off-by-default alternative. Like the
+        shift, it only reshapes the forward path; the IFT adjoint never forms a norm, so the converged
+        state and its gradient are unchanged.
     adjoint_preconditioner_factory : callable or None
         The ``state -> M`` preconditioner factory for the converged transpose (adjoint) solve, or
         ``None`` for an unpreconditioned adjoint (static). At ``φ*`` the operator is the

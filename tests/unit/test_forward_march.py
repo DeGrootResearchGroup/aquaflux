@@ -578,6 +578,55 @@ def test_march_does_not_escalate_below_the_cycle_cap() -> None:
     assert int(result.reports[0].cycles) == 40  # under the cap -> no escalation
 
 
+def test_a_forced_escalation_adds_no_march_step_compilations() -> None:
+    """A β-escalation retry must be a compilation-cache hit, not a recompile of the whole step.
+
+    A retried step redoes ``_march_step`` at an escalated β. The escalation must not change the
+    compiled step's cache key -- else a stiff region that retries every step recompiles the (in the
+    coupled case, minutes-long) solve each time, which was ~half the march wall. Escalating by
+    *scaling* the existing β leaf keeps its abstract value (dtype/weak_type) identical, so the step is
+    a cache hit for whatever β dtype the control set. The sensitive case is a **strong-typed** β leaf:
+    rebuilding β from a Python float (``jnp.asarray(escalated)``) yields a *weak*-typed leaf, a distinct
+    aval that recompiled every escalation. ``_CyclesFromBeta`` never calls the residual, so
+    ``_march_step`` traces it exactly once per compile -- the trace count is the compile count.
+    """
+    # A unique state size, so the escalation's would-be recompile cannot be a cache hit from another
+    # test's compiled step (the compilation cache is process-global).
+    residual = _Cubic(
+        jnp.zeros((13,))
+    )  # residual(1) = 1: the held phi never converges -> retry fires
+    phi0 = jnp.ones((13,))
+    # A strong-typed (non-weak) β leaf -- the case the old `jnp.asarray(float)` escalation recompiled on.
+    step = _CyclesFromBeta(
+        relaxation_schedule=ConstantRelaxation(jnp.array(1.0, dtype=jnp.float64))
+    )
+
+    # One step under the cap compiles `_march_step` once (no escalation).
+    _TRACES.clear()
+    baseline = forward_march(
+        step, residual, phi0, max_steps=1, rtol=1e-10, atol=1e-12, retry_on_cycles=100
+    )
+    compiled = len(_TRACES)
+    assert compiled == 1 and int(baseline.reports[0].cycles) == 40
+
+    # The same step, now escalating β = 1 -> 2 -> 4 (cyc 40 -> 20 -> 10): both escalation `_march_step`
+    # calls must reuse the compiled step -- zero further compilations -- while still recovering the step.
+    _TRACES.clear()
+    escalated = forward_march(
+        step,
+        residual,
+        phi0,
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        retry_on_cycles=10,
+        retry_beta_factor=2.0,
+        retry_cycles_limit=2,
+    )
+    assert len(_TRACES) == 0  # the escalation retries added no recompiles
+    assert int(escalated.reports[0].cycles) == 10  # ...and still escalated β to recover the step
+
+
 class _NaNUntilDamped(eqx.Module):
     """A step whose correction is non-finite while β is below ``threshold`` and finite + on-root once β is
     escalated past it -- the coupled-AMG failure where a NaN'd low-β step recovers at a larger β. If ever

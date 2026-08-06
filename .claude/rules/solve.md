@@ -150,29 +150,49 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       probing** — `batched_matvec` (a `jax.vmap` of the jvp, **built once and reused** so it compiles a
       single time; `probe_batch_size` chunks it for memory) runs the coloured probes as a few fused passes
       instead of a Python loop of separate calls. Measured 22.4→14.0 s (~1.6×) on `bfs3d` — modest because
-      CPU forward-AD does not vectorize across the batch like a GPU (the win is dispatch amortization).
+      CPU forward-AD does not vectorize across the batch like a GPU (the win is dispatch amortization). For
+      the SAME reason the chunk is kept **small** (`_PROBE_BATCH_SIZE = 4`, not 16): a larger batch holds
+      more simultaneous forward-AD tapes for almost no time gain — measured chunk 16 vs 4 was ~33 s vs ~36 s
+      but ~2.2 GB vs ~0.7 GB of transient peak, and on a memory-bounded box (the refresh re-materializes
+      every few steps) that peak is what tips a long march into swap/OOM. Four keeps the dispatch
+      amortization at a third of the peak; the materialize itself frees cleanly (no cross-refresh growth).
       **(2) Gather de-compression** — `block_stencil_gather_map(colouring, n_fields)` precomputes, once, the
       **fixed full-pattern** CSR structure + a flat `gather_map`, so de-compression is one vectorized
       `data = responses.ravel()[gather_map]` (no scatter loop, no per-materialize CSR re-sort) passed as
-      `structure=`. The **full** pattern (no `eliminate_zeros`) is the *union* of the Jacobian's nonzeros
-      over all states, so the structure stays fixed cold→developed and no entry is ever dropped as couplings
-      decay — a guaranteed-fixed structure the in-place GAMG refactor needs. On `bfs3d` the full pattern is
-      47.2M nnz = *exactly* the cold-IC nonzero count; ~8.2M are distance-3 Rhie-Chow / non-orthogonal
-      couplings that decay to ~0 at a developed state and appear there as explicit zeros (harmless to
-      aggregation — strength-of-connection ignores a zero coupling — but they are why an incomplete/complete
-      factorization can't use this path: an explicit zero is fill). De-compression 22.4→11.2 s (2.0× vs
+      `structure=`. The **full** pattern (no `eliminate_zeros`) is the fixed mesh distance-3 colouring graph
+      — a superset of the Jacobian's live nonzeros at *any* state — so the structure stays fixed
+      cold→developed and no entry is ever dropped as values change: a guaranteed-fixed structure the in-place
+      GAMG refactor needs. On `bfs3d` the full pattern is ~47.2M positions, but that is a **structural
+      over-estimate**, mostly explicit zeros at every state — LIVE nnz is ~constant (**38.7M cold / 39.0M
+      developed**; there is *no* cold→developed nnz collapse — an earlier "47.2M cold → 39.0M developed"
+      reading conflated the fixed pattern with live nnz). The explicit zeros are harmless to aggregation —
+      strength-of-connection ignores a zero coupling — but they are why an incomplete/complete factorization
+      can't use this path: an explicit zero is fill. De-compression 22.4→11.2 s (2.0× vs
       loop); full build (materialize + GAMG) only 56.0→54.2 s (**1.03×** — GAMG-dominated), so the gather's
       real value is the fixed-structure invariant, not the wall-clock.
-    - **Probe REACH is a preconditioner choice — reach-2 is cheaper but NOT a safe drop-in (measured,
-      SHELVED).** The materialized `J` is only the preconditioner's operator (the solve matvec is always the
-      exact matrix-free jvp), so a lower `stencil_reach` gives an approximate PC. On the orthogonal `bfs3d`
-      mesh reach-2 is *exact* at developed states (distance-3 couplings ~1e-15) and ~2.2× cheaper (60 vs 112
-      colours; the whole GAMG on half the nnz → refresh 13 % of wall vs 41 %). BUT it drops the distance-3
-      couplings that are LIVE at cold states (cold-IC reach-3 nnz 47.2M vs 39.0M developed), so the cold-state
-      PC intermittently grinds (cyc≈41, one over `retry_on_cycles=40`) → spurious escalation → β thrash →
-      the march stuck-slow in rung 1. **Do not lower the default reach.** Reviving reach-2's refresh win
-      needs a stronger PC that works at low β (`smoother_sweeps=3`) or a reach schedule (reach-3 cold, reach-2
-      developed), not a carry/inner-solve change — see `bfs3d-doomed-primary-cost-fixes` in memory.
+    - **Probe REACH is a preconditioner choice — reach-2 is NOT a safe drop-in (measured, SHELVED — a
+      GENUINE failure, not a build artifact).** The materialized `J` is only the preconditioner's operator
+      (the solve matvec is always the exact matrix-free jvp), so a lower `stencil_reach` gives an approximate
+      PC. On the orthogonal `bfs3d` mesh reach-2 is numerically near-*exact* at *every* state
+      (‖A2−A3‖_F/‖A3‖ = 6e-6 cold, ~1e-15 developed — the dropped distance-3 shell is negligible; swapping
+      Corrected→Compact Green-Gauss leaves it bit-identical, so the non-orthogonal skew correction
+      contributes ~0 here) and ~2.2× cheaper to probe (60 vs 112 colours, ~half the nnz). **Yet GAMG(reach-2)
+      DIVERGES as a preconditioner** (true residual 1e3–1e8) at cold AND developed, on its own operator, with
+      a verified-correct build — so it is genuine, not a build/scaling bug. **The cause is the ILU(1)
+      smoother, whose fill is PATTERN-dependent (a symbolic/graph operation), not value-dependent:** halving
+      the graph gives a structurally weaker incomplete factorization that is non-convergent on the indefinite
+      saddle. The ≤6e-6 magnitude argument bounds only the value-based *aggregation* (consistent
+      reach-2↔reach-3); it does not touch the smoother. Proof: padding reach-2's values onto the reach-3
+      *positions* (distance-3 shell as ~1e-30 explicit zeros) recovers reach-3 convergence **bit-identically**
+      (32 matvecs) — so the distance-3 *positions* are causal, their values are not. **This is why the full
+      reach-3 pattern with explicit zeros is REQUIRED for smoother convergence (not merely a
+      structure-invariance nicety), and why you must not lower the default reach.** Recovery is not cheap:
+      `smoother_sweeps=3` / ILU(2) still diverge *and* erase the setup win; restoring the reach-3 pattern
+      converges but forfeits the GAMG-setup half of the economy (the larger half — refresh is
+      setup-dominated), leaving only the marginal probe-colour saving. The one open lever is a fundamentally
+      different smoother that tolerates the sparser graph (a smoother-design task). On a genuinely SKEWED mesh
+      reach-2 would additionally be *lossy* (the non-orthogonal ring pushes real content to distance-3) — a
+      second reason to keep reach-3. See `bfs3d-doomed-primary-cost-fixes` in memory.
   - **`ilut_preconditioner.py` — `MonolithicIlutPreconditioner`.** Built off the jit path (`scipy.spilu`);
     a **host** object, so it is **not** an `equinox.Module` — it rides as a static field and is applied
     inside the jitted Krylov solve through `jax.pure_callback` (`.matvec()` / `.matvec(transpose=True)`).
@@ -1732,6 +1752,21 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     `test_forward_march.py` (`test_march_escalates_beta_on_a_cycle_count_spike`,
     `…_does_not_escalate_below_the_cycle_cap`, `…_escalates_beta_before_the_tight_divergence_retry`,
     `…_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergence`).
+    - **The escalation must keep `_march_step` a compile-cache HIT (binding — a measured recompile
+      hazard).** The retried step redoes the (coupled, minutes-to-compile) `_march_step` at the escalated
+      β, so a treedef **or aval** change on that step recompiles the whole solve every retry — which on a
+      stiff region that retries most steps is ~half the march wall. β is a dynamic 0-d leaf, so the *value*
+      change is fine; the trap is the leaf's **abstract value**. Escalate by **scaling the existing leaf**
+      (`beta * retry_beta_factor`), never by rebuilding it from a Python float (`jnp.asarray(float(beta) *
+      f)`): the latter yields a *weak*-typed float64 array whose dtype/weak_type need not match the leaf
+      the step control set, and any mismatch is a cache miss. Scaling preserves the aval exactly, so the
+      retried step is a hit for **any** β dtype (weak/strong f64, f32). The shipped controls happen to set
+      weak-f64 (so the old form was accidentally a hit), but that was an unpinned coincidence one JAX
+      weak-type-promotion change from breaking. Pinned by
+      `test_a_forced_escalation_adds_no_march_step_compilations` (a strong-typed β leaf, the case the
+      rebuild recompiled on). Note the `retry_solver` (divergence) fallback is a *separate*, one-off
+      recompile — a distinct solver object (restart-40 vs the forward restart-15) is a genuinely different
+      static key, compiled once and reused; it is not a per-step cost.
     - **Why escalation leads and `retry_solver` is the FALLBACK (the reorder, measured on `bfs3d`).** The
       two retries used to run divergence-first: a NaN'd step ran the tight `retry_solver` (a 1e-4 Krylov
       solve, restart-40) and *then*, seeing its high count, the cycle bailout escalated β. On the 3D march
