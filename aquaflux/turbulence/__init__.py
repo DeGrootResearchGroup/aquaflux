@@ -62,6 +62,7 @@ from .preconditioner import (
     scalar_transport_shift_diagonal,
 )
 from .reynolds import (
+    ReynoldsPoint,
     GeometricReynoldsSchedule,
     ReynoldsSchedule,
     solve_reynolds_continuation,
@@ -95,6 +96,7 @@ __all__ = [
     "OmegaCrossDiffusion",
     "OmegaDestruction",
     "OmegaProduction",
+    "ReynoldsPoint",
     "ReynoldsSchedule",
     "SSTClosureFields",
     "SSTModel",

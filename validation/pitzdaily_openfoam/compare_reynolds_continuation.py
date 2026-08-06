@@ -79,13 +79,17 @@ from aquaflux.turbulence import (
 # The Reynolds ramp: 2 lower-Re rungs before the target -> viscosity scales (100, 10, 1) -> Re ~ 250,
 # 2500, 25000. The rest of the march budget is the working configuration for this case.
 N_POINTS = 2
-MAX_STEPS = 200  # per rung (the complete-LU path re-factors every step, so it needs no refresh segments)
+MAX_STEPS = (
+    200  # per rung (the complete-LU path re-factors every step, so it needs no refresh segments)
+)
 INNER_STEPS = 10  # dual-time inner Newton iterations per outer pseudo-timestep
 INNER_TOL = 1e-3  # inner loop stops at this fraction of the anchor residual
 INTERMEDIATE_RTOL = 3e-2  # lower-Re rungs are only seeds -> converge them loosely
 RTOL = 1e-3  # target-rung tolerance (the recirculation is developed here)
 LU_BACKEND = "auto"  # complete-LU backend: UMFPACK if available (fast), else SciPy SuperLU
-RESTART = 40  # forward-solve GMRES restart (nominal, for the matvec estimate; the exact LU needs ~1)
+RESTART = (
+    40  # forward-solve GMRES restart (nominal, for the matvec estimate; the exact LU needs ~1)
+)
 
 # The aggressive Courant control (small beta_start, low beta_min, the shipped default GROW logic that
 # grows the pseudo-timestep whenever an inner step stays reasonably comfortable). It drives beta into the
@@ -178,7 +182,8 @@ def solve_aquaflux_continuation(**solve_kwargs: object) -> dict:
     # step -- a per-companion, per-state preconditioner the ramp's single target-frozen ``continuation``
     # cannot express, so it is supplied through ``point_setup``. The exact factorization is what lets the
     # aggressive control's large-timestep overshoots stay finite (the block preconditioner cannot).
-    def point_setup(companion, state):
+    def point_setup(companion, state, point):
+        del point  # this case configures every Reynolds point identically
         return dict(
             continuation=coupled_lu_continuation(
                 companion,

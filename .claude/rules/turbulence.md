@@ -1144,9 +1144,11 @@ tuning follow-up noted above.
     viscosity **and** seed state — chiefly the complete-LU β-tracking hook (`coupled_lu_continuation`
     frozen at the point's `(state, β)` + `lu_beta_tracking_refresh` closing over the point's residual),
     which is what lets the aggressive Courant control reach the developed pitzDaily root (the block PC
-    stalls/diverges at the overshoot — see the pitzDaily case). `point_setup(companion, seed_state) ->
-    dict` is called for **every** point (lower-Re and target) with that point's companion and its **packed
-    seed coupled state**, and its keys are merged over `solve_kwargs` (overriding any `continuation`/
+    stalls/diverges at the overshoot — see the pitzDaily case). `point_setup(companion, seed_state, point) ->
+    dict` is called for **every** point (lower-Re and target) with that point's companion, its **packed
+    seed coupled state**, and a `ReynoldsPoint` (1-based `index`, `total`, `viscosity_scale`, plus
+    `is_target` / `label`) telling it where in the ramp it is — so a per-point builder never counts its
+    own invocations to recover the loop's index, and can reach the total and the scaling at all, and its keys are merged over `solve_kwargs` (overriding any `continuation`/
     `reference_state`). To give the built continuation the state the solve begins from, the loop
     **materializes the lowest point's seed** (`hybrid_initialize`) when `point_setup` is set, rather than
     letting `solve_coupled` self-start internally. **Forward-only** (the `precondition_step` it returns

@@ -227,7 +227,7 @@ def test_point_setup_builds_per_point_kwargs_and_materializes_the_first_seed(mon
 
     setups = []
 
-    def point_setup(companion, state):
+    def point_setup(companion, state, point):
         scale = float(companion.momentum.properties.properties["viscosity"].value / (RHO * NU))
         setups.append(scale)
         return {"tag": scale}  # a marker kwarg proving the merge reaches solve_coupled
@@ -249,3 +249,35 @@ def test_point_setup_none_is_byte_identical_to_the_plain_ramp(monkeypatch) -> No
     calls = _record_solves(monkeypatch)
     solve_reynolds_continuation(_tiny_coupled(), n_points=2, rtol=1e-10)
     assert [c["seed_is_none"] for c in calls] == [True, False, False]  # first point self-starts
+
+
+def test_point_setup_receives_the_points_position_in_the_ramp(monkeypatch) -> None:
+    """``point_setup`` is told which point it is configuring, rather than having to count its own calls.
+
+    The index, the total and the viscosity scaling are the continuation's own bookkeeping; a caller
+    tracking its invocations would duplicate the loop counter, and could not know the total or the
+    scaling at all.
+    """
+    import aquaflux.turbulence.reynolds as reynolds
+
+    coupled = _tiny_coupled()
+    n = coupled.momentum.mesh.n_cells
+    dim = coupled.layout.dim
+    fields = (jnp.zeros((dim + 1) * n), jnp.full(n, 0.5), jnp.full(n, 100.0))
+
+    monkeypatch.setattr(reynolds, "solve_coupled", lambda c, *a, **k: fields)
+    monkeypatch.setattr(reynolds, "hybrid_initialize", lambda momentum, turbulence: fields)
+
+    seen = []
+
+    def point_setup(companion, state, point):
+        seen.append(point)
+        return {}
+
+    solve_reynolds_continuation(coupled, n_points=2, rtol=1e-10, point_setup=point_setup)
+
+    assert [p.index for p in seen] == [1, 2, 3]  # 1-based, anchor first
+    assert [p.total for p in seen] == [3, 3, 3]  # n_points + 1, including the target
+    assert [p.viscosity_scale for p in seen] == [100.0, 10.0, 1.0]
+    assert [p.is_target for p in seen] == [False, False, True]  # only the true-viscosity point
+    assert seen[1].label == "point 2/3 (Re/10)"
