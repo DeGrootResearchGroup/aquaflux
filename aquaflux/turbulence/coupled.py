@@ -64,6 +64,7 @@ from aquaflux.solve import (
     MonolithicIlutPreconditioner,
     MonolithicLuPreconditioner,
     PseudoTransientStep,
+    RefreshTiming,
     RefreshTrigger,
     ResidualNorm,
     RowScaledNorm,
@@ -2145,7 +2146,7 @@ def _beta_tracking_refresh(
     materialize_every: int | None = None,
     materialize_drift: float | None = None,
     beta_floor: float = 0.0,
-    observer: Callable[[str, float], None] | None = None,
+    observer: Callable[[RefreshTiming], None] | None = None,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """Shared skeleton for the β-tracking ``precondition_step`` hooks (complete-LU and ILUT).
 
@@ -2202,10 +2203,16 @@ def _beta_tracking_refresh(
         else None
     )
 
-    def _report_refresh(kind: str, started: float) -> None:
-        """Tell an injected observer which branch ran and what it cost (a no-op when unobserved)."""
+    def _report_refresh(
+        kind: str, started: float, phases: tuple[tuple[str, float], ...] | None = None
+    ) -> None:
+        """Tell an injected observer which branch ran and what each part of it cost.
+
+        The total alone cannot be acted on: a refresh dominated by the coloured jvp probe and one
+        dominated by the multigrid setup take the same wall time and call for opposite fixes.
+        """
         if observer is not None:
-            observer(kind, time.perf_counter() - started)
+            observer(RefreshTiming(kind, time.perf_counter() - started, tuple(phases or ())))
 
     def precondition_step(active_step: ForwardStep, state: jnp.ndarray) -> None:
         schedule = active_step.relaxation_schedule
@@ -2376,7 +2383,7 @@ def amg_beta_tracking_refresh(
     beta_rel_change: float | None = None,
     refresh_every: int = 8,
     beta_floor: float = 0.0,
-    observer: Callable[[str, float], None] | None = None,
+    observer: Callable[[RefreshTiming], None] | None = None,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """A ``precondition_step`` that rebuilds the AMG V-cycle at the current β, every step.
 

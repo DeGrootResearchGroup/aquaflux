@@ -67,6 +67,7 @@ from .continuation import (
 )
 from .frozen_operator import convection_diffusion_operator, decouple_dof
 from .amg_preconditioner import AmgVCycle, MonolithicAmgPreconditioner, build_amg_vcycle
+from .refresh_timing import PhaseTimer, RefreshTiming
 from .ilut_preconditioner import MonolithicIlutPreconditioner
 from .lu_preconditioner import MonolithicLuPreconditioner
 from .implicit import (
@@ -153,7 +154,9 @@ __all__ = [
     "MonolithicIlutPreconditioner",
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
+    "PhaseTimer",
     "PseudoTransientStep",
+    "RefreshTiming",
     "RefreshTrigger",
     "RelaxationSchedule",
     "RelaxedFarFromRoot",
