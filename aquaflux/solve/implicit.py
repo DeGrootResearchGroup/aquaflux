@@ -205,7 +205,7 @@ def backtracking_line_search(
     norm=jnp.linalg.norm,
     growth=1.0,
     grow=0,
-    max_alpha=1.0,
+    max_alpha=jnp.inf,
 ):
     """Backtrack the step length: the largest ``alpha`` in ``{1, 1/2, ..., 1/2**steps}`` with
     ``norm(R(phi + alpha delta)) < reference_norm``, falling back to the smallest rung if none reduces
@@ -259,8 +259,13 @@ def backtracking_line_search(
         The seam for a constraint the residual cannot express: a field that must stay positive gives
         the largest fraction that keeps it so (see
         :func:`~aquaflux.solve.positive_block_limit`), and capping is what makes an admissible step
-        *reachable* rather than something the ladder might happen to contain. Default ``1`` -- no cap,
-        byte-identical.
+        *reachable* rather than something the ladder might happen to contain. Default ``inf`` -- no
+        cap, byte-identical.
+
+        **The default must not be ``1``.** The growth rungs deliberately reach ``alpha > 1``, so a cap
+        of one silently disables them; that regression was caught by the growth-rung tests. A real cap
+        *does* apply to the growth rungs, which is correct -- a step four times the full step would
+        violate the constraint by four times as much.
 
         Rejecting violating rungs instead would not be enough: on a measured coupled march the search
         was already at its shortest rung (``alpha = 2**-10``) when a field crossed zero, so there was

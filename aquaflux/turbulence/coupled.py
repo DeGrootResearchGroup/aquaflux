@@ -77,6 +77,7 @@ from aquaflux.solve import (
     block_stencil_colouring,
     block_stencil_gather_map,
     forward_march,
+    positive_block_limit,
     relative_residual_gmres,
 )
 
@@ -791,6 +792,38 @@ def _mass_flow_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray)
     return BlockScaledNorm(sizes, (s_flow, s_k, s_omega, s_flow))
 
 
+def positive_k_limit(coupled: CoupledRANS, tau: float = 0.99):
+    """The step limiter keeping ``k`` strictly positive, or ``None`` when the transform already does.
+
+    ``k`` is solved DIRECTLY (``log k`` is singular at a no-slip wall, where ``k = 0`` is the physical
+    boundary condition), so nothing structurally prevents a Newton step from carrying it negative --
+    and the SST closure's ``sqrt(k)`` turns a single negative cell into NaN across the whole residual.
+    Measured: a march ran 62 healthy steps and died when **two cells out of 23040** reached
+    ``k = -3.3e-4``, with every field still finite and moving by ~1e-4.
+
+    Returns ``None`` when ``k`` is solved in a form that is positive by construction (a log variable),
+    since a cap there would only throttle a step for no benefit.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The assembled case, for its block layout.
+    tau : float
+        Fraction of the distance to the boundary taken (see
+        :func:`~aquaflux.solve.positive_block_limit`).
+
+    Returns
+    -------
+    callable or None
+        ``(phi, delta) -> alpha_max`` for a directly-solved ``k``; ``None`` otherwise.
+    """
+    if not isinstance(coupled.k_transform, DirectScalars):
+        return None
+    layout = coupled.layout
+    n, dim = layout.n_cells, layout.dim
+    return positive_block_limit((dim + 1) * n, (dim + 2) * n, tau)
+
+
 def coupled_scaled_norm(
     coupled: CoupledRANS,
     shift_policy: CoupledShiftPolicy,
@@ -1362,6 +1395,7 @@ def _monolithic_factor_step(
     residual_norm: ResidualNorm | None,
     inner_observer: Callable[..., None] | None = None,
     cycle_budget: int | None = None,
+    step_limit: Callable[..., jnp.ndarray] | None = None,
 ) -> ForwardStep:
     """Assemble the pseudo-transient / dual-time step around a frozen monolithic factorization.
 
@@ -1398,6 +1432,7 @@ def _monolithic_factor_step(
             adjoint_preconditioner_factory=policy.adjoint_factory(),
             inner_observer=inner_observer,
             cycle_budget=cycle_budget,
+            step_limit=step_limit,
         )
     return PseudoTransientStep(
         policy,
@@ -1923,6 +1958,9 @@ def coupled_amg_continuation(
         residual_norm=residual_norm,
         inner_observer=inner_observer,
         cycle_budget=cycle_budget,
+        # Keep `k` off zero: it is solved directly, and one negative cell reaches the closure's
+        # sqrt(k) and NaNs the whole residual. `None` when the transform already guarantees it.
+        step_limit=positive_k_limit(coupled),
     )
 
 

@@ -445,16 +445,21 @@ class MarchLogger:
             Column("flg", 3, "", "<"),
         ]
 
-    def _headings(self, *, compact: bool) -> None:
-        """Emit the step table's headings; ``compact`` gives the label row alone, without rules.
+    def _headings(self) -> None:
+        """Open the step table: a blank line, then a fully ruled heading.
 
-        The compact form is what follows an inner block: the rules would triple the cost of labelling
-        a single row, but without *any* heading that row is a bare line of numbers.
+        Always fully ruled, and always preceded by a blank line. An unruled heading butted straight
+        against the inner block above it reads as debris hanging off that block rather than as the top
+        of a new table -- the grid needs a visible top edge and some air to be legible as a unit.
         """
         if self._step_table is None:
             self._step_table = TextTable(self._step_columns())
-        if not compact:
-            self._write(self._step_table.rule())
+        self._write("")
+        # Titled, like the inner block's own opening rule: with two grids interleaved down the log, an
+        # untitled one leaves the reader working out which table they have landed in. The wording is
+        # deliberately NOT "step ...", which the inner block already uses -- a shared prefix makes the
+        # two indistinguishable to a grep even though a human can tell them apart.
+        self._write(self._step_table.rule("summary stats"))
         self._write(self._step_table.headings())
         self._write(self._step_table.rule())
         self._rows = 0
@@ -488,13 +493,12 @@ class MarchLogger:
             self._close_block()
             self._write("")
             self._write(f"reference |R0| = {reference:.4e}{stop}")
+            self._blank_pending = False
             self._needs_headings = True
 
         # An inner block just closed, so this row would otherwise be unlabelled: re-head compactly.
-        if self._needs_headings or self._rows >= self.HEADINGS_EVERY:
-            self._headings(compact=False)
-        elif self._nested:
-            self._headings(compact=True)
+        if self._needs_headings or self._nested or self._rows >= self.HEADINGS_EVERY:
+            self._headings()
         self._nested = False
         assert self._step_table is not None
 
@@ -519,6 +523,9 @@ class MarchLogger:
         )
         self._rows += 1
 
+        # A rule between the columned row and the free-form lines below it: they share the grid's width
+        # but not its columns, so without a separator the eye tries to read them as more table.
+        self._write(self._step_table.rule())
         # Everything that is not worth a column of its own, on its own full-width line beneath the row.
         aside = []
         if "pc" in self._detail:

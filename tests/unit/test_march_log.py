@@ -361,11 +361,11 @@ def test_the_grid_stays_narrow_whatever_is_switched_on() -> None:
     assert max(len(line) for line in grid) <= 70
 
 
-def test_a_row_following_an_inner_block_is_still_labelled() -> None:
-    """An inner block separates a step row from the last heading, leaving bare numbers.
+def test_a_step_table_following_an_inner_block_is_framed_and_separated() -> None:
+    """An unruled heading butted against the block above reads as debris hanging off it.
 
-    The compact re-heading is one line rather than three, because labelling one row must not cost
-    more than the row.
+    The step grid needs a visible top edge and a blank line, or it does not read as a table of its
+    own -- which is exactly how it looked when the heading was emitted bare.
     """
     logger, buffer = _log(detail=("inner",))
     logger.on_inner(0, 4.0e-2, 1.0e-2, 5, 1.0)
@@ -373,8 +373,14 @@ def test_a_row_following_an_inner_block_is_still_labelled() -> None:
 
     lines = buffer.getvalue().splitlines()
     heading = next(i for i, line in enumerate(lines) if line.startswith("| step"))
-    row = next(i for i, line in enumerate(lines) if line.startswith("|    1 "))
-    assert row - heading == 2  # heading, rule, row -- nothing between them
+    assert lines[heading - 1].startswith(
+        "+- summary stats"
+    )  # a titled top border above the heading
+    assert lines[heading - 2] == ""  # and air between it and the inner block
+    assert lines[heading + 1].startswith("+--")  # closed underneath as usual
+    # The title must not share a prefix with the inner block's "step N": a grep could not tell the
+    # two grids apart, even though a reader can.
+    assert not lines[heading - 1].startswith("+- step")
 
 
 def test_on_retry_explains_why_a_step_is_repeated() -> None:
@@ -425,3 +431,18 @@ def test_a_legend_explains_that_G_and_R_are_different_residuals() -> None:
     text = buffer.getvalue()
     assert text.count("R + beta*d*(phi - phi_n)") == 1  # written once, not per block
     assert text.index("R + beta*d") < text.index("+- step")  # before the first block it explains
+
+
+def test_the_free_form_lines_are_ruled_off_from_the_columned_row() -> None:
+    """The asides share the grid's width but not its columns, so they need a separator.
+
+    Without one the eye carries the column structure down into lines that do not have it.
+    """
+    logger, buffer = _log(metrics=lambda state: {"xr/h": 7.24}, detail=("pc",))
+    logger.on_refresh("full", 21.2)
+    logger.on_checkpoint(_report(), None)
+
+    lines = buffer.getvalue().splitlines()
+    row = next(i for i, line in enumerate(lines) if line.startswith("|    1 "))
+    assert lines[row + 1].startswith("+--")  # ruled off before the free-form lines
+    assert lines[row + 2].startswith("| pc ")
