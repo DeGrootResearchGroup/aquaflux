@@ -271,12 +271,45 @@ def solve_aquaflux(*, log_path=None, **solve_kwargs):
     )
 
 
+def mid_span_slab(centroid, half_width=0.06):
+    """The thin spanwise slab about ``z = W/2`` that the primary reattachment metric is measured in.
+
+    The **full-span** reattachment length is not the primary bubble: the side walls carry their own
+    corner separation that reattaches much further downstream, and because
+    :func:`reattachment_length` takes the *last* reversed wall cell, those corner cells set the
+    full-span number on their own. On the reference field the two outermost spanwise slabs read
+    ``x_r/h = 10.28`` while all six interior slabs read ``7.24`` -- so a full-span number overstates
+    the primary bubble by ~40% while being a perfectly good measurement of something else.
+
+    Parameters
+    ----------
+    centroid : ndarray (n_cells, 3)
+        Cell centroids.
+    half_width : float
+        Half-thickness of the slab as a fraction of the span. Default ``0.06``.
+
+    Returns
+    -------
+    tuple(float, float)
+        The ``(z_lo, z_hi)`` slab, ready for :func:`reattachment_length`'s ``z_slab``.
+    """
+    z = centroid[:, 2]
+    width = z.max() - z.min()
+    centre = z.min() + 0.5 * width
+    return (centre - half_width * width, centre + half_width * width)
+
+
 def reattachment_metrics(case):
-    """A ``state -> {"xr/h": ...}`` metrics callable for :class:`~aquaflux.solve.MarchLogger`.
+    """A ``state -> {"xr/h": ..., "xr/h_full": ...}`` metrics callable for ``MarchLogger``.
 
     The march logger reports everything a solver step knows, but the quantity this case is actually
     steered by -- the reattachment length -- needs the case's own geometry and field layout. This is
     that seam, so a driver logging the march never re-derives the unpacking.
+
+    Reports the **mid-span** length as ``xr/h``, the same measurement the run's final comparison makes,
+    so the number a march is watched by and the number it is judged by cannot diverge. The full-span
+    length rides alongside as ``xr/h_full`` because the gap between them *is* the corner separation
+    (see :func:`mid_span_slab`) -- worth seeing, but not the primary bubble.
 
     Parameters
     ----------
@@ -286,15 +319,20 @@ def reattachment_metrics(case):
     Returns
     -------
     callable
-        ``state -> mapping``, mapping a packed coupled state to the reattachment length in step heights.
+        ``state -> mapping``, mapping a packed coupled state to reattachment lengths in step heights.
     """
     coupled, momentum, geom = case["coupled"], case["momentum"], case["geom"]
     centroid = np.asarray(geom.cell.centroid)
+    slab = mid_span_slab(centroid)
 
     def metrics(state):
         flow, _k, _omega = coupled.physical_fields(state)
         velocity, _pressure = momentum.unpack(flow)
-        return {"xr/h": float(reattachment_length(centroid, np.asarray(velocity)[:, 0]))}
+        u_x = np.asarray(velocity)[:, 0]
+        return {
+            "xr/h": float(reattachment_length(centroid, u_x, z_slab=slab)),
+            "xr/h_full": float(reattachment_length(centroid, u_x)),
+        }
 
     return metrics
 
@@ -375,11 +413,7 @@ def main():
     def rel_l2(a, b, scale):
         return float(np.sqrt(np.mean((a - b) ** 2)) / scale)
 
-    # Mid-span slab (a thin slice about z = W/2) for the primary reattachment metric.
-    zc = aq["centroid"][:, 2]
-    w = zc.max() - zc.min()
-    z_mid = zc.min() + 0.5 * w
-    slab = (z_mid - 0.06 * w, z_mid + 0.06 * w)
+    slab = mid_span_slab(aq["centroid"])
 
     metrics = dict(
         ux=rel_l2(aq["U"][:, 0], of["U"][idx, 0], U_IN),
