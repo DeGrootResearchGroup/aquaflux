@@ -58,15 +58,22 @@ from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, Veloci
 from aquaflux.io import read_openfoam
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
-from aquaflux.solve import relative_residual_gmres
+from aquaflux.solve import (
+    CflResidualDualTimeControl,
+    MarchLogger,
+    StateCheckpointer,
+    combine_observers,
+    relative_residual_gmres,
+)
 from aquaflux.turbulence import (
     CoupledRANS,
     LogScalars,
     SSTModel,
     SSTTurbulence,
+    amg_beta_tracking_refresh,
     coupled_amg_continuation,
-    hybrid_initialize,
-    solve_coupled,
+    coupled_fields,
+    solve_reynolds_continuation,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -82,7 +89,28 @@ H = 0.01  # step height
 WALLS = ["upperWall", "lowerWall", "sideWalls"]
 # The coupled Newton march budget. Stiff, separating, 3D, high-Re case on a wall-function mesh; the cap
 # is generous so the march exits on the tolerance, not the count.
-MAX_STEPS, RTOL = 300, 1e-6
+# --- the solve configuration, each part measured on this case (see the README) -------------------
+MAX_STEPS = 150  # per continuation rung
+# ABSOLUTE stop on the row-scaled residual. That measure is already a fractional change per equation,
+# so dividing it again by |R0| makes the bar a property of the initial guess -- and under continuation
+# every rung re-bases |R0|, which let a later rung stop looser than an earlier one had already reached.
+RTOL, ATOL = 0.0, 1e-5
+N_POINTS = 2  # Reynolds continuation: anchor at Re/100, then Re/10, then the target
+INNER_STEPS, INNER_TOL = 5, 1e-3
+# Preconditioner bundle. ILU(1) DIVERGES at the low shifts this march's tail runs at (ground truth: 303
+# negative pivots at beta = 0.02, zero for ILU(0)); zero fill converges at every shift tested and builds
+# 3-4x faster. ILU(0) is the weaker smoother, so the extra sweeps pay more than they did for ILU(1).
+# coarse=None stalls at every low shift. The beta floor is PRECONDITIONER-ONLY: the V-cycle is built at
+# max(beta, floor) while the march solves at its own beta, so the root and the adjoint are unchanged.
+FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT, PC_BETA_FLOOR = 0, 4, 2000, 0.05
+CYCLE_BUDGET = 42  # summed per step: a cost cap, so summed is what it should cap
+RETRY_ON_CYCLES = (
+    10  # PER SOLVE: a summed trigger is ~6x more sensitive for a 5-inner step than a 1-inner one
+)
+RETRY_BETA_FACTOR = 2.0
+CONTROL = CflResidualDualTimeControl(
+    beta_start=0.5, beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25
+)
 
 
 # --- OpenFOAM ascii internalField parsing (nonuniform scalar / vector list) ---
@@ -203,22 +231,31 @@ def build_case(model=None):
     return dict(coupled=coupled, momentum=momentum, turbulence=turbulence, geom=geom)
 
 
-def solve_aquaflux(*, log_path=None, **solve_kwargs):
+def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
     """Solve the coupled RANS system on the imported OpenFOAM mesh; return fields + geometry.
 
-    Preconditioned by the **monolithic algebraic-multigrid V-cycle** built at the hybrid initial condition
-    -- the 3D coupled path, since the complete LU's fill is a memory wall past ~10^4 3D cells and the
-    threshold-ILU's factorization is prohibitively slow to build on the distance-3 3D coupled Jacobian. A
-    reactive ``retry_solver`` redoes any diverged (non-finite) step at a tighter Krylov solve, since the
-    approximate V-cycle can leave a step non-finite at a stiff overshoot.
+    **This is the full continuation solve the case's published result comes from** -- Reynolds
+    continuation onto the target Reynolds number, the measured preconditioner bundle, the dual-time
+    Courant control, and the beta-tracking refresh. The target Reynolds number is **not reachable
+    without the ramp**: a direct cold start diverges on its first step (the residual grows by ~100
+    orders of magnitude at a line-search factor already clipped to 0.002), so the ramp buys
+    reachability, not merely a better seed.
+
+    Preconditioned by the **monolithic algebraic-multigrid V-cycle** -- the 3D coupled path, since the
+    complete LU's fill is a memory wall past ~10^4 3D cells and the threshold-ILU's factorization is
+    prohibitively slow to build on the distance-3 3D coupled Jacobian. Every non-default setting is a
+    measurement rather than a preference; see the constants above and the README.
 
     Parameters
     ----------
     log_path : str or Path, optional
-        Stream one line per outer Newton step here (step, GMRES cycles, residual, step length) -- the
-        long coupled march must be observable while it runs.
+        Stream the march here, one framed block per step. Pass a path when running interactively -- a
+        march of this length must be readable while it runs, not after it ends.
+    checkpoint_dir : str or Path, optional
+        Write a rolling state checkpoint per step here. Worth setting for any long run: without it a
+        failure at the last step discards every step before it.
     **solve_kwargs
-        Forwarded to :func:`~aquaflux.turbulence.solve_coupled`, overriding the defaults set here.
+        Forwarded to :func:`~aquaflux.turbulence.solve_reynolds_continuation`, overriding the defaults.
     """
     case = build_case()
     coupled, momentum, turbulence, geom = (
@@ -227,34 +264,74 @@ def solve_aquaflux(*, log_path=None, **solve_kwargs):
         case["turbulence"],
         case["geom"],
     )
-    # Hybrid initial condition -> the state the AMG V-cycle is frozen at.
-    flow0, k0, omega0 = hybrid_initialize(momentum, turbulence)
-    reference_state = coupled.state_from_physical(flow0, k0, omega0)
-    continuation = coupled_amg_continuation(coupled, reference_state)
-
     log_file = open(log_path, "w") if log_path is not None else None
+    logger = MarchLogger(
+        log_file,
+        metrics=reattachment_metrics(case),
+        fields=coupled_fields(coupled),
+        detail=("inner", "fields", "pc"),
+        rtol=RTOL,
+        atol=ATOL,
+    )
+    checkpoints = (
+        StateCheckpointer(checkpoint_dir, every=1, keep=3) if checkpoint_dir is not None else None
+    )
+    on_checkpoint = (
+        logger.on_checkpoint
+        if checkpoints is None
+        else combine_observers(logger.on_checkpoint, checkpoints.on_checkpoint)
+    )
 
-    def _on_step(report):
-        if log_file is not None:
-            log_file.write(
-                f"step {report.step:4d}  cyc {report.cycles:4d}  "
-                f"|R| {float(report.residual_norm):.6e}  ratio {float(report.residual_ratio):.4f}  "
-                f"alpha {float(report.alpha):.4f}\n"
-            )
-            log_file.flush()
+    def point_setup(companion, seed_state, point):
+        """Build each rung's preconditioner at ITS OWN viscosity and seed state.
 
-    solve_options = (
+        A single continuation built once cannot serve the ramp: the frozen operator has to be rebuilt
+        per rung, and the beta-tracking refresh has to close over that rung's residual.
+        """
+        logger.note(f"[{point.label}]")
+        return dict(
+            continuation=coupled_amg_continuation(
+                companion,
+                seed_state,
+                inner_steps=INNER_STEPS,
+                inner_tol=INNER_TOL,
+                smoother_fill_levels=FILL_LEVELS,
+                smoother_sweeps=SWEEPS,
+                coarse_eq_limit=COARSE_EQ_LIMIT,
+                cycle_budget=CYCLE_BUDGET,
+                inner_observer=logger.on_inner,
+            ),
+            precondition_step=amg_beta_tracking_refresh(
+                companion,
+                beta_rel_change=0.25,
+                refresh_every=8,
+                materialize_drift=0.05,
+                materialize_every=4,
+                beta_floor=PC_BETA_FLOOR,
+                observer=logger.on_refresh,
+            ),
+        )
+
+    options = (
         dict(
-            continuation=continuation,
             max_steps=MAX_STEPS,
             rtol=RTOL,
+            atol=ATOL,
+            intermediate_rtol=None,  # every rung stops at the same ABSOLUTE bar
+            intermediate_atol=ATOL,
+            step_control=CONTROL,
+            point_setup=point_setup,
+            scaled_norm=True,  # rebuild the row scales each outer step
             retry_solver=relative_residual_gmres(1e-4, restart=40),
-            on_step=_on_step,
+            on_checkpoint=on_checkpoint,
+            on_retry=logger.on_retry,
+            retry_on_cycles=RETRY_ON_CYCLES,
+            retry_beta_factor=RETRY_BETA_FACTOR,
         )
         | solve_kwargs
     )
     try:
-        flow, k, omega = solve_coupled(coupled, flow0, k0, omega0, **solve_options)
+        flow, k, omega = solve_reynolds_continuation(coupled, N_POINTS, **options)
     finally:
         if log_file is not None:
             log_file.close()
@@ -397,7 +474,7 @@ def main():
     )
 
     t0 = time.time()
-    aq = solve_aquaflux(log_path=HERE / "march.log")
+    aq = solve_aquaflux(log_path=HERE / "march.log", checkpoint_dir=HERE / "checkpoints")
     print(
         f"aquaflux coupled solve: {time.time() - t0:.0f}s, "
         f"Ux in [{aq['U'][:, 0].min():.3f}, {aq['U'][:, 0].max():.3f}]",

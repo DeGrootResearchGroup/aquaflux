@@ -8,6 +8,8 @@ of_case/log.*
 of_case/postProcessing/
 of_case/processor*/
 __pycache__/
+# Rolling per-step state checkpoints written by compare.py; regenerable, and large.
+checkpoints/
 *.npz
 of_case/constant/polyMesh/
 # The transient reference: mesh/constant/BCs are copied from of_case at run time (one source of
