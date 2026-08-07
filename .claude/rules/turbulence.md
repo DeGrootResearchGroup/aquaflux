@@ -683,6 +683,18 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   **not** — `k → 0` at a no-slip wall (Dirichlet 0) so `log(k) → −∞` there stalls the near-wall cells (the
   full-log form descends then freezes; measured). FD-verified for both forms: coupled ‖R‖→machine-zero,
   agrees with the segregated fixed point, adjoint matches finite differences.
+    **`k` direct needs a POSITIVITY-PRESERVING LINE SEARCH, not just the shift and the guard (binding —
+    this invariant was stated and was wrong).** Nothing structurally stops a Newton step carrying a
+    directly-solved `k` negative, and the closure's `sqrt(k)` then NaNs the whole residual from a single
+    cell. The divergence guard cannot catch it: it fires on a non-finite residual, which is already the
+    poisoned state. Measured on `bfs3d`: 62 healthy steps, then **two cells of 23040** at
+    `k = -3.3e-4`, every field finite, only the derived `nu_t` NaN.
+    `coupled_amg_continuation` therefore wires `positive_k_limit(coupled)` — the fraction-to-the-boundary
+    cap — automatically for a directly-solved `k`, and passes `None` for a log-solved one, where
+    positivity is already structural and a cap would only throttle. See `.claude/rules/solve.md`.
+    **`log(k+1)` does not fix this**: `k = e^w − 1` bounds `k > −1`, not `k > 0`, so the failure above is
+    still reachable. It is regular at the wall (unlike `log k`) but that solves the other problem, not
+    this one.
   - **The reparametrized block's preconditioner/shift are chain-rule-scaled at the reference (binding).**
     The physics Jacobian w.r.t. `w` picks up `d(φ)/d(w) = jacobian_scale(φ)` (`= φ` for log). `coupled_continuation`
     recovers the physical reference via `physical_fields`, scales each scalar shift diagonal by that factor,

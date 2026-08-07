@@ -2068,6 +2068,76 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     separate methods each returning one line — which is what lets a table appear in a log being tailed.
     An over-wide value **widens its row rather than being truncated**: a cut-off number is a wrong
     number. Pinned by `tests/unit/test_text_table.py`.
+  - **`StepOutcome` — the forward step's return is a record, not a tuple (BUILT).** It grew to six
+    values (`phi, cycles, alpha, inner_iterations, reached_target, max_inner_cycles, binding_limit`),
+    which is the missing-object smell: a positional tuple is where a consumer silently mis-unpacks one
+    field for another, and every growth broke all five test doubles separately. Three of the fields are
+    there because a march could not otherwise act correctly:
+    - **`reached_target`** — did the step run to its OWN stopping criterion, or was it cut short? A
+      cost-only escalation cannot tell an expensive success from a grind and **discards the success**:
+      measured, an inner loop that reached `‖G‖ = 3.0e-6` against a `1.0e-5` target was thrown away for
+      costing 54 raw cycles, wasting the work *and* replacing it with a shorter step. `forward_march`
+      now escalates only when `cycles > retry_on_cycles` **and not** `reached_target`.
+    - **`max_inner_cycles`** — the offset-corrected cost of the step's most expensive SINGLE solve, and
+      what `retry_on_cycles` now triggers on. A **summed** threshold is not a difficulty signal: it
+      grows with how many times the step solved, so at `retry_on_cycles = 40` a 5-inner step trips at 6
+      corrected cycles per solve and a 1-inner step at 38 — a 6× difference in sensitivity decided by a
+      count that says nothing about conditioning. (Measured impact on one 63-step march: the two
+      triggers agree on 62 steps and disagree on one — the expensive step, which per-inner catches and
+      summed misses. The change is correctness, not speed.) **`cycle_budget` stays SUMMED** and should:
+      it is a cost cap, and total cost is exactly what it caps.
+    - **`binding_limit`** — the step cap where it was the *binding* constraint, else 1. A small `alpha`
+      has two opposite causes (the direction overshot; a constraint stopped it being followed further),
+      so `alpha` alone cannot be acted on or reported honestly.
+  - **Positivity is NOT carried by the shift and the divergence guard (binding — a stated invariant that
+    was wrong).** The direct-scalar path documented positivity as following from the pseudo-transient
+    shift plus the guard. It does not: the guard fires on a *non-finite residual*, and by the time
+    `sqrt` of a negative value has produced one, the state is already poisoned. Measured on `bfs3d`: a
+    march ran 62 healthy steps and died because **two cells out of 23040** took `k` to `-3.3e-4` — every
+    field still finite, all of `u, p, k, omega` moving by ~1e-4, only the derived `nu_t` NaN, because
+    the SST closure takes `sqrt(k)`. The line search had crawled along that boundary for four inner
+    iterations (`alpha` halving `0.008 → 0.001`, residual falling under 1% each) with no way to see it.
+    - **`positive_block_limit(start, stop, tau)` COMPUTES the admissible fraction, it does not search
+      for one** — the fraction-to-the-boundary rule, `alpha_max = tau·min(phi_i / −delta_i)` over
+      decreasing entries. Rejecting violating rungs is **not** sufficient: `alpha` was already at the
+      ladder's shortest rung when the field crossed zero, so there was nothing shorter to fall back to.
+      `backtracking_line_search(max_alpha=…)` caps every rung **including the growth rungs**, and its
+      default is `inf`, **not 1** — a default of 1 silently disables the growth rungs, a regression the
+      growth tests caught.
+    - `turbulence.positive_k_limit(coupled)` returns the limiter for a directly-solved `k` and `None`
+      for a log-solved one (positive by construction there, so a cap would only throttle);
+      `coupled_amg_continuation` wires it automatically.
+    - **The cap is GLOBAL, so one entry near zero throttles the whole step** — a real risk on a field
+      spanning `1e-5` to `4.5`. Measured, it does not bite, because the escape is not the cap: the cap
+      forces `alpha → 0`, `CflResidualDualTimeControl` reads that as "shift too weak" and escalates
+      `beta` `0.5 → 1.0 → 2.0`, and at the larger shift the implicit step is short enough to fit inside
+      the constraint — full `alpha = 1`, residual descending. **The two mechanisms compose without
+      having been designed together**, and the march then converged in 20 steps where two previous runs
+      had died. Do not "fix" the throttling without re-measuring; the globalization already handles it.
+    - Why not a log variable for `k`: `k = 0` is the physical no-slip wall condition, so `log k` is
+      singular exactly where the mesh is finest (recorded and measured in `.claude/rules/turbulence.md`
+      — the full-log form descends then freezes). `log(k+1)` is regular there but bounds `k > −1`, not
+      `k > 0`, so it does **not** prevent this failure. `k = w²` would give both properties at the cost
+      of a vanishing Jacobian scale at the wall.
+  - **`StateCheckpointer` (`solve/checkpoint.py`) — rolling state checkpoints (BUILT).** A march that
+    raises at its last step loses everything: the exception propagates out, so a driver saving only on a
+    successful return has nothing for the hours before. It cost one `bfs3d` run its two converged rungs.
+    Plugs into the same `on_checkpoint` seam, `every` steps, keeping `keep` files. Two properties that
+    matter for a job that may be killed: it **writes to a staging name and renames** (a kill mid-write
+    would otherwise leave a truncated file that still reads as a checkpoint — and with a small `keep`,
+    the only one left), and **retention deletes only paths it wrote**, tracked in a deque rather than by
+    globbing, so it cannot remove another run's state. The default serializer hands `numpy` a *file
+    object*, because `np.savez` appends `.npz` to any path lacking it and would otherwise silently write
+    somewhere other than asked. `combine_observers` fans the single `on_checkpoint` out to logger +
+    checkpointer so a driver does not hand-roll a lambda one of them can be dropped from.
+    **Known defect, not yet fixed:** the checkpointer writes whatever the march reports *including the
+    failed step*, so the newest file can be the poisoned state — and a driver calling it "last good
+    state" is then lying. Skip a non-finite report, or do not claim "good".
+  - **`on_retry(reason, attempt, beta)` — say WHY a step is being redone (BUILT).** `forward_march`
+    calls it immediately before a redo with `"cycles"`, `"diverged"` or `"solver"`. Without it a log
+    shows the same step's work two or three times with nothing between the blocks, and the three
+    triggers call for completely different responses. `MarchLogger.on_retry` writes the explanation
+    between the abandoned attempt's block and the retry's, and numbers the attempt.
   - **A self-rescaling measure means two "same" residuals are NOT the same number (binding trap).**
     `forward_march(norm_builder=…)` re-derives the `RowScaledNorm` at the state each outer iteration
     *begins from* and holds it for that whole iteration. So the `R` reported at the end of step N and

@@ -21,3 +21,6 @@ of_transient/0.[0-9]*/
 of_transient/log.*
 of_transient/postProcessing/
 of_transient/processor*/
+# `run_transient.sh --tight` swaps `fvSolution` and restores it via a trap; this is the backup it
+# holds mid-run, so it exists only while the container is running.
+of_transient/system/fvSolution.default
