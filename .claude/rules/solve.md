@@ -1578,7 +1578,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       (`coupled_scaled_norm`), NOT the Euclidean ‖R‖.** The Euclidean coupled residual is `ω`-dominated
       and *mis-ranks* states (a converged field scores worse than a badly wrong one — the warning above);
       `RowScaledNorm` divides each row by its own diagonal and each block by its field magnitude, so every
-      equation is judged comparably. `coupled_continuation` / `coupled_ilut_continuation` build it by
+      equation is judged comparably. **`per_block` is that measure's reporting view and `__call__` is
+      literally `norm(per_block(r))`** — one formula, so the per-equation grid in the march log cannot
+      describe a convergence history the march never had. `coupled_continuation` / `coupled_ilut_continuation` build it by
       default; `block_scaled_norm=True` selects the coarser one-scale-per-block `BlockScaledNorm`
       (`_coupled_residual_norm`), and `residual_norm=jnp.linalg.norm` recovers Euclidean.
       (`mass_flow_coupled_continuation` still defaults to Euclidean pending a constraint-aware variant.)
@@ -2066,6 +2068,14 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     `TextTable`/`Column` is a **root leaf** (no package imports, like `vectors.py`) so any subsystem can
     format a report with it. It is built for streaming — rule, headings, `row` and `spanning` are
     separate methods each returning one line — which is what lets a table appear in a log being tailed.
+    `rule(title=None, *, fill="-", segmented=True)` draws all three kinds the framed step block needs:
+    the light **segmented** rule that divides one grid, the heavy `fill="="` one that **brackets** a
+    block containing several grids, and the `segmented=False` span for the boundary between two grids
+    that share a width but not a column layout — where a segmented rule would appear to belong to
+    whichever grid its ticks happened to line up with. A step therefore renders as **one framed block**:
+    step row, then the per-equation grid, then the asides **one concern per line** (preconditioner /
+    case metrics / `limit` / `cum`). Run together on a single line those three had to be read in full to
+    find any one of them.
     An over-wide value **widens its row rather than being truncated**: a cut-off number is a wrong
     number. Pinned by `tests/unit/test_text_table.py`.
   - **`StepOutcome` — the forward step's return is a record, not a tuple (BUILT).** It grew to six
@@ -2178,7 +2188,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     contradiction. In the inner table **`rate ≥ 1` identifies those iterations exactly**, since the
     search is monotone.
   - **Diagnostics are opt-in through one `detail` argument (BUILT).** `MarchLogger(detail=…)` selects
-    from `{"inner", "fields", "pc"}`; empty (the default) is the plain one-row-per-step log. They are
+    from `{"inner", "fields", "residuals", "pc"}`; empty (the default) is the plain one-row-per-step log. They are
     debugging/profiling instruments — several lines per step — not something a routine run should pay
     for. **Every hook stays safe to wire regardless** and no-ops when its name is absent, so a driver
     connects the instrumentation once and switches verbosity with one argument rather than by rewiring
@@ -2192,9 +2202,34 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       "the metric stopped moving" is partly a statement about the instrument's resolution. The logger
       builds the (stateful) change measure itself so `detail` alone decides whether it runs — it must be
       called once per step in order, and a caller passing it directly would invite calling it from a
-      probe and corrupting the sequence. `coupled_fields` returns pressure **gauge-free** (mean removed;
-      incompressible `p` is defined up to a constant unless a boundary pins it) and includes `ν_t`, which
-      is derived rather than solved but is what the momentum equations actually see.
+      probe and corrupting the sequence. `field_change_metrics` keys its output by the **field's own
+      name** (not a decorated `d<name>/<name>`), so it joins against the per-equation residual below;
+      how a quantity is *labelled* is the report's business, not the measure's. `coupled_fields` returns
+      pressure **gauge-free** (mean removed; incompressible `p` is defined up to a constant unless a
+      boundary pins it), **splits velocity per component** (`u`/`v`/`w`, so each lines up with its own
+      momentum equation — a single vector entry averages them and hides a component that has stopped
+      moving), and includes `ν_t`, which is derived rather than solved but is what the momentum
+      equations actually see.
+    - `"residuals"` — `MarchLogger(residuals=…)` takes a `state -> {equation: residual}` extractor
+      (`turbulence.coupled_residuals`) and reports **the per-equation residual and its step-on-step
+      contraction `rate`** beside each field's relative change, in one grid under the step row. **The
+      scalar residual says the solve stopped improving; only this says which equation stopped it.**
+      The numbers are `RowScaledNorm.per_block` — the very per-block values the march's scalar measure
+      is the Euclidean combination of (`__call__` is now literally `norm(per_block(r))`, one formula),
+      so a row near the total *owns* the residual. Names come from `coupled_equation_names(dim)` —
+      `(u, v, w, p, k, omega)`, the flat layout's block order — the single home shared with
+      `coupled_fields`, so the two grids join. Costs **one extra residual evaluation per logged step**,
+      which is why it is opt-in. **The rows add up to the `R` printed above them, exactly** — pinned at
+      `rel=1e-12`. That requires equilibrating at the **previous** state, not the logged one:
+      `forward_march` re-derives the measure at the state each outer iteration *starts* from and holds
+      it for the whole iteration (every trial step, the acceptance test, and the reported norm), so a
+      step's residual is `norm_at_start(R(state_at_end))`. Scaling at the end state measures the right
+      residual vector in the *wrong* scales and the rows stop adding up. `coupled_residuals` is
+      therefore **stateful and order-dependent** — the same once-per-step-in-order contract
+      `field_change_metrics` already carries — and takes a `reference_state` seed for the first step,
+      which a per-rung reporter must pass (its rung's `seed_state`) or that step alone is scaled at its
+      own end state. `ν_t` has no equation, so it gets a row with `--` in the residual cells rather than
+      an invented number.
     - `"pc"` — `amg_beta_tracking_refresh(observer=…)` reports which branch a refresh took (`full` /
       `shift` / `none`) and its wall time; `MarchLogger.on_refresh` renders it on the step it preceded.
       **This closes a real gap:** which branch ran was previously invisible, so preconditioner behaviour

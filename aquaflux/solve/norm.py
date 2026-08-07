@@ -163,26 +163,28 @@ class RowScaledNorm(eqx.Module):
         jnp.ndarray
             A non-negative scalar: the Euclidean combination of the per-block mean fractional changes.
         """
-        equilibrated = jnp.abs(residual) / self.row_scale
-        split_points = tuple(int(p) for p in np.cumsum(self.sizes)[:-1])
-        blocks = jnp.split(equilibrated, split_points)
-        fractional = jnp.stack(
-            [jnp.mean(block) / scale for block, scale in zip(blocks, self.field_scale, strict=True)]
-        )
-        return jnp.linalg.norm(fractional)
+        return jnp.linalg.norm(self.per_block(residual))
 
     def per_block(self, residual: jnp.ndarray) -> jnp.ndarray:
         """The per-block fractional changes, shape ``(len(sizes),)`` -- the reporting view.
 
-        The solver steers on the single scalar :meth:`__call__` returns; this exposes the individual
-        equations' convergence, which is what a user reads to see *which* equation is limiting and
-        what a march reports per step.
+        The solver steers on the single scalar :meth:`__call__` returns, which is the Euclidean
+        combination of exactly these numbers; this exposes them individually, which is what a user
+        reads to see *which* equation is limiting and what a march reports per step.
+
+        Parameters
+        ----------
+        residual : jnp.ndarray
+            The flat residual, shape ``(sum(sizes),)``.
+
+        Returns
+        -------
+        jnp.ndarray
+            The per-block mean fractional change, shape ``(len(sizes),)``, in block order.
         """
         equilibrated = jnp.abs(residual) / self.row_scale
         split_points = tuple(int(p) for p in np.cumsum(self.sizes)[:-1])
+        blocks = jnp.split(equilibrated, split_points)
         return jnp.stack(
-            [
-                jnp.mean(block) / self.field_scale[i]
-                for i, block in enumerate(jnp.split(equilibrated, split_points))
-            ]
+            [jnp.mean(block) / scale for block, scale in zip(blocks, self.field_scale, strict=True)]
         )

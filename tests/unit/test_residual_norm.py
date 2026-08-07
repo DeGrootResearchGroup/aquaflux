@@ -153,3 +153,16 @@ def test_rebuilding_the_measure_at_a_new_state_is_a_compilation_cache_hit():
     assert traces == after_first, "rebuilding the scales retraced instead of hitting the cache"
     # ...and the rebuild is a real change, not a silently ignored one.
     assert not jnp.allclose(a, b)
+
+
+def test_the_row_scaled_measure_is_the_euclidean_combination_of_its_own_per_block_view():
+    """The reporting view and the number the solver steers on must be the same arithmetic, or a log
+    would explain a convergence history the march never had."""
+    norm = RowScaledNorm(
+        sizes=(2, 2),
+        row_scale=jnp.array([2.0, 2.0, 1.0, 1.0]),
+        field_scale=jnp.array([1.0, 4.0]),
+    )
+    residual = jnp.array([1.0, 3.0, 2.0, 6.0])
+
+    assert float(norm(residual)) == pytest.approx(float(jnp.linalg.norm(norm.per_block(residual))))

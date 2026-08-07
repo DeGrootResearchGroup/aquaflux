@@ -275,7 +275,7 @@ def test_diagnostics_are_off_by_default_even_when_the_hooks_are_wired() -> None:
     text = buffer.getvalue()
     assert "+- step" not in text  # no inner block
     assert "pc " not in text  # no preconditioner reporting
-    assert "rel u" not in text  # no field-change row
+    assert "rel. change" not in text  # no per-equation block
 
 
 def test_each_detail_switches_on_only_its_own_output() -> None:
@@ -285,7 +285,7 @@ def test_each_detail_switches_on_only_its_own_output() -> None:
     logger.on_checkpoint(_report(), [1.0, 2.0])
 
     assert "pc shift 0.4s" in _asides(buffer)[0]
-    assert "rel u" in buffer.getvalue()
+    assert "rel. change" in buffer.getvalue()
     assert "+- step" not in buffer.getvalue()
 
 
@@ -296,9 +296,9 @@ def test_the_preconditioner_column_is_reported_once_for_the_step_it_preceded() -
     logger.on_step(_report())
     logger.on_step(_report())
 
-    first, second = _asides(buffer)
-    assert "pc full 27.0s" in first
-    assert "pc -" in second
+    first, second = [line for line in _asides(buffer) if line.startswith("pc")]
+    assert first == "pc full 27.0s"
+    assert second == "pc -"
 
 
 def test_an_unknown_detail_name_raises_rather_than_being_ignored() -> None:
@@ -320,15 +320,15 @@ def test_field_change_reports_each_fields_relative_movement() -> None:
     metric({"u": [3.0, 4.0], "k": [1.0, 0.0]})  # first call primes the previous iterate
 
     out = metric({"u": [3.0, 4.5], "k": [1.0, 0.0]})
-    assert out["du/u"] == pytest.approx(0.5 / 5.0)  # |(0, 0.5)| / |(3, 4)|
-    assert out["dk/k"] == pytest.approx(0.0)  # k did not move -- reported separately from u
+    assert out["u"] == pytest.approx(0.5 / 5.0)  # |(0, 0.5)| / |(3, 4)|
+    assert out["k"] == pytest.approx(0.0)  # k did not move -- reported separately from u
 
 
 def test_the_first_call_has_nothing_to_compare_against() -> None:
     """`nan`, not 0: a zero would read as "converged" on the very first step of every march."""
     metric = field_change_metrics(lambda s: {"u": np.asarray(s)})
 
-    assert math.isnan(metric([1.0, 2.0])["du/u"])
+    assert math.isnan(metric([1.0, 2.0])["u"])
 
 
 def test_a_field_that_was_identically_zero_reports_nan_rather_than_dividing() -> None:
@@ -336,7 +336,7 @@ def test_a_field_that_was_identically_zero_reports_nan_rather_than_dividing() ->
     metric = field_change_metrics(lambda s: {"k": np.asarray(s)})
     metric([0.0, 0.0])
 
-    assert math.isnan(metric([1.0, 1.0])["dk/k"])
+    assert math.isnan(metric([1.0, 1.0])["k"])
 
 
 def test_the_grid_stays_narrow_whatever_is_switched_on() -> None:
@@ -347,17 +347,18 @@ def test_the_grid_stays_narrow_whatever_is_switched_on() -> None:
     """
     logger, buffer = _log(
         metrics=lambda s: {"xr/h": 7.243, "xr/h_full": 15.17},
-        fields=lambda s: {name: np.asarray([s]) for name in ("u", "p", "k", "w", "nut")},
-        detail=("inner", "fields", "pc"),
+        fields=lambda s: {
+            name: np.asarray([s]) for name in ("u", "v", "w", "p", "k", "omega", "nut")
+        },
+        residuals=lambda s: dict.fromkeys(("u", "v", "w", "p", "k", "omega"), 1.0e-3 * s),
+        detail=("inner", "fields", "residuals", "pc"),
     )
     logger.on_refresh("full", 21.1)
     logger.on_inner(0, 4.0e-2, 1.0e-2, 5, 1.0)
     logger.on_checkpoint(_report(), 1.0)
     logger.on_checkpoint(_report(), 2.0)
 
-    grid = [
-        line for line in buffer.getvalue().splitlines() if line.lstrip().startswith(("|", "+-"))
-    ]
+    grid = [line for line in buffer.getvalue().splitlines() if line.lstrip().startswith(("|", "+"))]
     assert max(len(line) for line in grid) <= 70
 
 
@@ -374,7 +375,7 @@ def test_a_step_table_following_an_inner_block_is_framed_and_separated() -> None
     lines = buffer.getvalue().splitlines()
     heading = next(i for i, line in enumerate(lines) if line.startswith("| step"))
     assert lines[heading - 1].startswith(
-        "+- summary stats"
+        "+= summary stats"
     )  # a titled top border above the heading
     assert lines[heading - 2] == ""  # and air between it and the inner block
     assert lines[heading + 1].startswith("+--")  # closed underneath as usual
@@ -444,7 +445,8 @@ def test_the_free_form_lines_are_ruled_off_from_the_columned_row() -> None:
 
     lines = buffer.getvalue().splitlines()
     row = next(i for i, line in enumerate(lines) if line.startswith("|    1 "))
-    assert lines[row + 1].startswith("+--")  # ruled off before the free-form lines
+    # The heavy rule, not the light one: it closes the columned grid rather than dividing it.
+    assert lines[row + 1].startswith("+==")  # ruled off before the free-form lines
     assert lines[row + 2].startswith("| pc ")
 
 
@@ -463,3 +465,112 @@ def test_a_step_clipped_by_a_constraint_is_distinguished_from_one_that_overshot(
     assert overshot["flg"] == ""
     assert "limit 1.30e-02" in _asides(buffer)[0]
     assert "limit" not in _asides(buffer)[1]
+
+
+def _field_rows(buffer: io.StringIO) -> dict[str, dict[str, str]]:
+    """The per-equation block's rows, as ``{field: {heading: cell}}`` (the last block logged)."""
+    headings, rows = None, {}
+    for line in buffer.getvalue().splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = _cells(line)
+        if cells[:1] == ["field"]:
+            headings = cells
+        elif headings is not None and len(cells) == len(headings):
+            rows[cells[0]] = dict(zip(headings, cells, strict=True))
+    return rows
+
+
+def test_the_per_equation_block_says_which_equation_is_limiting() -> None:
+    """The scalar residual says the solve stopped improving; only this says what stopped it."""
+    logger, buffer = _log(
+        fields=lambda s: {"u": np.asarray([s]), "k": np.asarray([s])},
+        residuals=lambda s: {"u": 1.0e-6, "k": 4.0e-2 * s},
+        detail=("fields", "residuals"),
+    )
+    logger.on_checkpoint(_report(), 1.0)
+    logger.on_checkpoint(_report(), 0.5)
+
+    rows = _field_rows(buffer)
+    assert rows["k"]["resid"] == "2.000e-02"  # 4e-2 * 0.5
+    assert rows["k"]["rate"] == "5.000e-01"  # halved this step -- converging
+    assert rows["u"]["resid"] == "1.000e-06"
+    assert rows["u"]["rate"] == "1.000e+00"  # unmoved: small, but not contracting
+
+
+def test_the_first_step_has_no_previous_residual_to_contract_against() -> None:
+    """A rate of 1 would read as "not converging"; there is simply nothing to divide by yet."""
+    logger, buffer = _log(residuals=lambda s: {"u": 1.0e-3}, detail=("residuals",))
+    logger.on_checkpoint(_report(), 1.0)
+
+    assert _field_rows(buffer)["u"]["rate"] == "--"
+
+
+def test_a_derived_field_with_no_equation_still_gets_a_row() -> None:
+    """``nu_t`` is what the momentum equations actually see, so its drift explains a stalling solve --
+    but it is not solved, so filling in a residual for it would be inventing a number."""
+    logger, buffer = _log(
+        fields=lambda s: {"k": np.asarray([s]), "nut": np.asarray([s])},
+        residuals=lambda s: {"k": 1.0e-3},
+        detail=("fields", "residuals"),
+    )
+    logger.on_checkpoint(_report(), 1.0)
+    logger.on_checkpoint(_report(), 2.0)
+
+    row = _field_rows(buffer)["nut"]
+    assert row["rel. change"] == "1.000e+00"  # it moved, and that is reportable
+    assert (row["resid"], row["rate"]) == ("--", "--")  # it has no equation, and that is not
+
+
+def test_an_equation_with_no_matching_field_still_gets_a_row() -> None:
+    """The two mappings are joined, not required to agree: neither side may silently drop a row."""
+    logger, buffer = _log(
+        fields=lambda s: {"k": np.asarray([s])},
+        residuals=lambda s: {"k": 1.0e-3, "omega": 5.0e-4},
+        detail=("fields", "residuals"),
+    )
+    logger.on_checkpoint(_report(), 1.0)
+
+    assert _field_rows(buffer)["omega"]["resid"] == "5.000e-04"
+
+
+def test_a_diverged_residual_is_shown_rather_than_hidden_as_absent() -> None:
+    """A non-finite residual is the single most important thing a row can say."""
+    logger, buffer = _log(residuals=lambda s: {"u": float("nan")}, detail=("residuals",))
+    logger.on_checkpoint(_report(), 1.0)
+
+    assert _field_rows(buffer)["u"]["resid"] == "nan"
+
+
+def test_every_line_of_a_step_block_is_the_same_width() -> None:
+    """The step row, the per-equation grid and the asides stack inside one frame: a width mismatch
+    renders as a broken box, which reads as a corrupted log rather than as a layout slip."""
+    logger, buffer = _log(
+        metrics=lambda s: {"xr/h": 7.243},
+        fields=lambda s: {"u": np.asarray([s]), "nut": np.asarray([s])},
+        residuals=lambda s: {"u": 1.0e-3},
+        detail=("fields", "residuals", "pc"),
+    )
+    logger.on_refresh("full", 21.8)
+    logger.on_checkpoint(_report(binding_limit=0.243), 1.0)
+
+    grid = [line for line in buffer.getvalue().splitlines() if line.startswith(("|", "+"))]
+    assert len({len(line) for line in grid}) == 1
+
+
+def test_the_per_equation_block_is_opt_in_like_every_other_diagnostic() -> None:
+    """It costs an extra residual evaluation per step, so a routine run must not pay for it."""
+    logger, buffer = _log(residuals=lambda s: {"u": 1.0e-3})  # `detail` omits "residuals"
+    logger.on_checkpoint(_report(), 1.0)
+
+    assert "resid" not in buffer.getvalue()
+
+
+def test_the_aside_puts_one_concern_on_each_line() -> None:
+    """Run together on one line, the preconditioner, the case metrics and the solver's own counters
+    all had to be read to find any one of them."""
+    logger, buffer = _log(metrics=lambda s: {"xr/h": 6.728}, detail=("pc",))
+    logger.on_refresh("full", 21.8)
+    logger.on_checkpoint(_report(binding_limit=0.243), 1.0)
+
+    assert _asides(buffer)[:3] == ["pc full 21.8s", "xr/h 6.728", "limit 2.43e-01"]

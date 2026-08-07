@@ -21,8 +21,10 @@ several times its real cost. This module reports the offset-corrected total, the
 per-inner average together, and :meth:`MarchLogger.on_inner` streams each inner iteration's own solve
 cost and ``‖G‖`` trajectory for the step being studied.
 
-Output is one flushed line per step, so a multi-hour march can be tailed while it runs rather than
-read after it ends.
+Every line is flushed as it is written, so a multi-hour march can be tailed while it runs rather than
+read after it ends. A step reports as one framed block: the columned step row, then -- when the
+per-field diagnostics are on -- a per-equation grid of relative change, residual and contraction, then
+the readings that belong to no column, one per line.
 """
 
 from __future__ import annotations
@@ -81,7 +83,7 @@ def combine_metrics(
 def field_change_metrics(
     fields: Callable[[Any], Mapping[str, Any]],
 ) -> Callable[[Any], Mapping[str, float]]:
-    """Report each named field's **relative change since the previous call**, as ``d<name>/<name>``.
+    """Report each named field's **relative change since the previous call**, under its own name.
 
     A residual norm says how far the equations are from being satisfied; it does not say whether the
     *solution* has stopped changing, nor which field is still moving. This does: for each field it
@@ -107,15 +109,17 @@ def field_change_metrics(
     Returns
     -------
     callable
-        ``state -> {"d<name>/<name>": relative change}``, for :class:`MarchLogger`'s ``metrics``.
+        ``state -> {name: relative change}``, keyed by the **field's own name** so a caller can join
+        it against another per-field measure (a per-equation residual, say) without unpicking a
+        decorated key. How the quantity is labelled is the report's business, not the measure's.
 
     Examples
     --------
     >>> import numpy as np
     >>> metric = field_change_metrics(lambda s: {"u": np.asarray(s)})
-    >>> metric([1.0, 0.0])["du/u"]  # first call has no previous iterate
+    >>> metric([1.0, 0.0])["u"]  # first call has no previous iterate
     nan
-    >>> round(metric([1.1, 0.0])["du/u"], 3)  # |0.1| / |1.0|
+    >>> round(metric([1.1, 0.0])["u"], 3)  # |0.1| / |1.0|
     0.1
     """
     previous: dict[str, Any] = {}
@@ -126,12 +130,12 @@ def field_change_metrics(
         for name, value in current.items():
             before = previous.get(name)
             if before is None:
-                out[f"d{name}/{name}"] = float("nan")
+                out[name] = float("nan")
                 continue
             before, value = np.asarray(before), np.asarray(value)
             scale = float(np.linalg.norm(before.ravel()))
             change = float(np.linalg.norm((value - before).ravel()))
-            out[f"d{name}/{name}"] = change / scale if scale > 0.0 else float("nan")
+            out[name] = change / scale if scale > 0.0 else float("nan")
         previous.update(current)
         return out
 
@@ -155,6 +159,15 @@ class MarchLogger:
     fields : callable, optional
         ``state -> mapping of name to array`` (e.g. :func:`~aquaflux.turbulence.coupled_fields`),
         reported as each field's relative change per step. Requires ``"fields"`` in ``detail``.
+    residuals : callable, optional
+        ``state -> mapping of equation name to float`` (e.g.
+        :func:`~aquaflux.turbulence.coupled_residuals`), reported as the per-equation residual and its
+        step-on-step contraction. Requires ``"residuals"`` in ``detail``.
+
+        This is what turns a stalling march from a mystery into a diagnosis: the scalar residual says
+        the solve has stopped improving, and this says *which equation* stopped it. Names are joined
+        against ``fields`` on the same key, so a field with no equation (a derived ``nu_t``) and an
+        equation with no field both still get a row.
     detail : collection of str, optional
         Which **diagnostic** outputs to emit. Empty (the default) gives the plain one-line-per-step
         log; the rest are opt-in because they are debugging and profiling instruments, not something a
@@ -162,6 +175,9 @@ class MarchLogger:
 
         - ``"inner"`` -- the per-inner-iteration table from :meth:`on_inner`.
         - ``"fields"`` -- per-field relative-change columns, from ``fields``.
+        - ``"residuals"`` -- per-equation residual columns, from ``residuals``. Costs one extra
+          residual evaluation per logged step, which is small beside the step's linear solves but is
+          not free.
         - ``"pc"`` -- what the preconditioner did each step, from :meth:`on_refresh`.
 
         Every hook stays safe to wire regardless, and each no-ops when its name is absent, so a driver
@@ -187,7 +203,23 @@ class MarchLogger:
     """
 
     #: The diagnostics ``detail`` may name.
-    DETAIL = frozenset({"inner", "fields", "pc"})
+    DETAIL = frozenset({"inner", "fields", "residuals", "pc"})
+
+    #: The per-equation block under each step row. Its width matches the step table's, so the two
+    #: stack as one framed block -- pinned by a test, since a mismatch renders as a broken frame.
+    _FIELD_TABLE = TextTable(
+        [
+            Column("field", 11, "", "<"),
+            Column("rel. change", 13),
+            Column("resid", 13),
+            Column("rate", 13),
+        ]
+    )
+
+    #: Printed where a per-field cell has no value: a field with no equation (``nu_t``) has no
+    #: residual, and the first step of a run has nothing to form a change or a rate against. An
+    #: explicit mark rather than a blank, so "not applicable" cannot be misread as "zero".
+    _ABSENT = "--"
 
     #: Re-emit the step table's headings after this many rows, so a long run stays readable in a tail.
     #: Tighter when the inner table is on, since its blocks push the last headings further up-screen.
@@ -216,6 +248,7 @@ class MarchLogger:
         *,
         metrics: Callable[[Any], Mapping[str, float]] | None = None,
         fields: Callable[[Any], Mapping[str, Any]] | None = None,
+        residuals: Callable[[Any], Mapping[str, float]] | None = None,
         detail: Collection[str] = (),
         rtol: float | None = None,
         atol: float | None = None,
@@ -237,6 +270,12 @@ class MarchLogger:
             if fields is not None and "fields" in self._detail
             else None
         )
+        self._residuals = residuals if "residuals" in self._detail else None
+        # The previous step's per-equation residuals, for the step-on-step contraction rate. Held
+        # here rather than by the caller for the same reason `field_change_metrics` is built here:
+        # the rate is only meaningful over consecutive logged steps, so its state belongs to the
+        # thing that is called once per step, in order.
+        self._previous_residuals: dict[str, float] = {}
         self._refresh: tuple[str, float] | None = None
         self._rtol = rtol
         self._atol = atol
@@ -459,7 +498,9 @@ class MarchLogger:
         # untitled one leaves the reader working out which table they have landed in. The wording is
         # deliberately NOT "step ...", which the inner block already uses -- a shared prefix makes the
         # two indistinguishable to a grep even though a human can tell them apart.
-        self._write(self._step_table.rule("summary stats"))
+        # Heavy fill on the outer boundary: a step's report is several stacked grids, so the rule that
+        # opens the whole block has to be distinguishable from the light rules dividing them.
+        self._write(self._step_table.rule("summary stats", fill="="))
         self._write(self._step_table.headings())
         self._write(self._step_table.rule())
         self._rows = 0
@@ -480,6 +521,9 @@ class MarchLogger:
         deltas: dict[str, float] = {}
         if state is not None and self._fields is not None:
             deltas.update(self._fields(state))
+        residuals: dict[str, float] = {}
+        if state is not None and self._residuals is not None:
+            residuals.update(self._residuals(state))
 
         # The stopping test is a constant within a rung, so it belongs in a banner rather than in every
         # row -- repeating `|R0|` and `target` on each line was most of the old line's width.
@@ -526,29 +570,79 @@ class MarchLogger:
             )
         )
         self._rows += 1
-
-        # A rule between the columned row and the free-form lines below it: they share the grid's width
-        # but not its columns, so without a separator the eye tries to read them as more table.
-        self._write(self._step_table.rule())
-        # Everything that is not worth a column of its own, on its own full-width line beneath the row.
-        aside = []
-        if "pc" in self._detail:
-            kind, seconds = self._refresh or ("-", 0.0)
-            aside.append(f"pc {kind}" + ("" if kind == "-" else f" {seconds:.1f}s"))
-            self._refresh = None
-        aside += [f"{name} {value:.4g}" for name, value in columns.items()]
-        if report.binding_limit < 1.0:
-            aside.append(f"limit {report.binding_limit:.2e}")
-        aside.append(f"cum {self._cumulative_cycles}")
-        self._write(self._step_table.spanning("  ".join(aside)))
-        if deltas:
-            changes = " ".join(
-                f"{name.split('/')[0][1:]} {value:.1e}" for name, value in deltas.items()
-            )
-            self._write(self._step_table.spanning("rel " + changes))
-        self._write(self._step_table.rule())
+        self._write_field_table(deltas, residuals)
+        self._write_aside(report, columns)
         # This step is done, so the next block is a fresh step, not another attempt at this one.
         self._attempt = 1
+
+    @classmethod
+    def _cell(cls, value: float | None) -> str:
+        """One per-field cell: the value in exponential form, or :attr:`_ABSENT` when there is none.
+
+        A non-finite *value* is rendered as-is rather than as absent -- on a residual it means the step
+        diverged, which is the single most important thing the row can say.
+        """
+        return cls._ABSENT if value is None else f"{value:.3e}"
+
+    def _write_field_table(
+        self, changes: Mapping[str, float], residuals: Mapping[str, float]
+    ) -> None:
+        """The per-equation grid beneath the step row: relative change, residual, and its contraction rate.
+
+        The three columns answer three different questions, and it is reading them *across* that
+        diagnoses a march: a large residual with a tiny relative change means the step is no longer
+        moving that equation, while a rate at or above one means the equation is not converging at
+        all -- neither of which the scalar residual above can distinguish.
+
+        Rows are the union of the two mappings, ``changes`` first, so a field with no equation (a
+        derived ``nu_t``) and an equation with no field both still appear.
+        """
+        assert self._step_table is not None
+        names = list(changes) + [name for name in residuals if name not in changes]
+        if not names:
+            return
+        self._write(self._step_table.rule(fill="=", segmented=False))
+        self._write(self._FIELD_TABLE.headings())
+        self._write(self._FIELD_TABLE.rule())
+        for name in names:
+            change = changes.get(name)
+            # `field_change_metrics` reports a NaN for "nothing to compare against" (the first step,
+            # or a field that was identically zero), which is an absent cell rather than a value.
+            if change is not None and not np.isfinite(change):
+                change = None
+            resid = residuals.get(name)
+            before = self._previous_residuals.get(name)
+            rate = None if resid is None or not before else resid / before
+            self._write(
+                self._FIELD_TABLE.row(
+                    [name, self._cell(change), self._cell(resid), self._cell(rate)]
+                )
+            )
+        self._previous_residuals.update(residuals)
+
+    def _write_aside(self, report: StepReport, columns: Mapping[str, float]) -> None:
+        """The readings that are not per-column, **one concern per line**, closing the step's block.
+
+        Run together on one line these were unreadable: the preconditioner's activity, the case
+        metrics and the solver's own counters have nothing to do with each other, so a reader looking
+        for one of them had to parse all three. One line each costs vertical space and buys the
+        ability to find a quantity by position.
+        """
+        assert self._step_table is not None
+        self._write(self._step_table.rule(fill="=", segmented=False))
+        lines = []
+        if "pc" in self._detail:
+            kind, seconds = self._refresh or ("-", 0.0)
+            lines.append(f"pc {kind}" + ("" if kind == "-" else f" {seconds:.1f}s"))
+            self._refresh = None
+        if columns:
+            lines.append("  ".join(f"{name} {value:.4g}" for name, value in columns.items()))
+        if report.binding_limit < 1.0:
+            lines.append(f"limit {report.binding_limit:.2e}")
+        lines.append(f"cum {self._cumulative_cycles}")
+        for line in lines:
+            self._write(self._step_table.spanning(line))
+        self._write(self._step_table.rule(fill="=", segmented=False))
 
     @staticmethod
     def _reference_norm(report: StepReport) -> float | None:

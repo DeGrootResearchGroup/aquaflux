@@ -52,3 +52,23 @@ def test_a_row_that_does_not_match_the_columns_raises(table: TextTable) -> None:
 def test_a_table_needs_at_least_one_column() -> None:
     with pytest.raises(ValueError, match="at least one column"):
         TextTable([])
+
+
+def test_a_heavy_rule_brackets_a_block_the_light_rules_divide() -> None:
+    """Several grids stack inside one framed block, so the outer boundary and the inner dividers must
+    be told apart at a glance -- one fill character is what does it."""
+    table = TextTable([Column("a", 4, "d"), Column("b", 6, ".2f")])
+
+    assert table.rule(fill="=") == "+======+========+"
+    assert table.rule("summary", fill="=").startswith("+= summary =")
+    assert len(table.rule(fill="=")) == table.width
+
+
+def test_an_unsegmented_rule_spans_grids_that_share_a_width_but_not_columns() -> None:
+    """A segmented rule between two different grids appears to belong to whichever one its ticks
+    happen to line up with, which is exactly the ambiguity it is there to remove."""
+    table = TextTable([Column("a", 4, "d"), Column("b", 6, ".2f")])
+
+    assert table.rule(segmented=False) == "+---------------+"
+    assert "+" not in table.rule(fill="=", segmented=False)[1:-1]
+    assert len(table.rule(segmented=False)) == table.width

@@ -94,17 +94,28 @@ class TextTable:
         # than the number of columns (the leading and trailing `|`, and one between each pair).
         return sum(column.width + 2 for column in self._columns) + len(self._columns) + 1
 
-    def rule(self, title: str | None = None) -> str:
+    def rule(self, title: str | None = None, *, fill: str = "-", segmented: bool = True) -> str:
         """A horizontal rule, optionally carrying a title.
 
-        The untitled form is segmented at the column boundaries (``+----+------+``), so it reads as
-        part of the grid. The titled form is a single unsegmented span (``+- title ------+``) used to
-        open a block: the title is free text, so aligning it to the columns would be meaningless.
+        The segmented form is broken at the column boundaries (``+----+------+``), so it reads as part
+        of the grid. The unsegmented forms span the whole width unbroken, which is what separates two
+        tables that share a width but not a column layout -- a segmented rule between them would
+        appear to belong to whichever grid its ticks happened to match.
+
+        The titled form is always unsegmented: the title is free text, so aligning it to the columns
+        would be meaningless.
 
         Parameters
         ----------
         title : str or None
-            Text to embed in the rule. ``None`` (default) gives the plain segmented rule.
+            Text to embed in the rule. ``None`` (default) gives an untitled rule.
+        fill : str
+            The single character the rule is drawn with. ``"-"`` (default) for a rule inside one
+            grid; a heavier ``"="`` to bracket a block containing several grids, so the outer and
+            inner boundaries are told apart at a glance.
+        segmented : bool
+            Whether an untitled rule is broken at the column boundaries. ``True`` (default) ties the
+            rule to this table's columns; ``False`` spans it unbroken. Ignored when ``title`` is given.
 
         Returns
         -------
@@ -112,9 +123,11 @@ class TextTable:
             One line of :attr:`width` characters -- longer only if ``title`` does not fit, which
             widens the rule rather than cutting the title.
         """
-        if title is None:
-            return "+" + "+".join("-" * (column.width + 2) for column in self._columns) + "+"
-        return "+" + f"- {title} ".ljust(self.width - 2, "-") + "+"
+        if title is not None:
+            return "+" + f"{fill} {title} ".ljust(self.width - 2, fill) + "+"
+        if not segmented:
+            return "+" + fill * (self.width - 2) + "+"
+        return "+" + "+".join(fill * (column.width + 2) for column in self._columns) + "+"
 
     def spanning(self, text: str) -> str:
         """One row of free text spanning every column, for a note that belongs inside the grid.

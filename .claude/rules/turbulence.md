@@ -1127,6 +1127,28 @@ separating pitzDaily case (`validation/pitzdaily_openfoam`) drives the direct `�
 form is validated (channel + tests); efficient convergence on the *full* pitzDaily mesh is the open
 tuning follow-up noted above.
 
+- **`diagnostics.py` — the march log's per-equation view (BUILT).** Three exports over one set of
+  names, so the two grids under a step row join instead of drifting:
+  - `coupled_equation_names(dim)` → `(u, v, w, p, k, omega)` (`(u, v, p, k, omega)` in 2D) — the flat
+    layout's block order, and the **single home** for these names. Raises above `dim = 3`.
+  - `coupled_fields(coupled)` → named **physical** fields for `field_change_metrics` (each solved
+    scalar mapped back through its variable transform, so the log reads the same whether ω is solved
+    directly or in log form). Velocity is **split per component** so each lines up with its own
+    momentum equation; `p` is gauge-free; `ν_t` rides along (derived, not solved — it is what the
+    momentum equations actually see, and it moves when k and ω move in ways their own norms hide).
+  - `coupled_residuals(coupled, continuation, reference_state=None)` → the **per-equation residual** on
+    the march's own measure, `coupled_scaled_norm(...).per_block(coupled.residual(state))`. Reads
+    `continuation` **late** for its `shift_policy`, so a refreshed segment's rebuilt diagonals are the
+    ones used — the same late-read `norm_builder` does. Under a per-rung setup (`point_setup`) the case
+    *and* its continuation are both rebuilt, so the reporter must be rebuilt with them (the bfs3d driver
+    keeps the current rung's in a list the logger's callable defers to).
+  ⚠️ **Equilibrate at the PREVIOUS state, never the logged one** — this is what makes the per-equation
+  rows add up to the `R` reported beside them (pinned `rel=1e-12`). `forward_march` re-derives the
+  measure at the state each outer iteration *starts* from and holds it for the whole iteration, so a
+  step's residual is `norm_at_start(R(state_at_end))`; scaling at the end state measures the right
+  residual in the wrong scales. Consequences: the reporter is **stateful and order-dependent** (once per
+  step, in order — `field_change_metrics`'s contract), and a reporter built partway through a march
+  **must be seeded** with that segment's `seed_state` or its first step is scaled at its own end state.
 - **`reynolds.py` — Reynolds-number continuation (BUILT).** `solve_reynolds_continuation(coupled,
   n_points, *, schedule=None, **solve_kwargs)` reaches a high-Re coupled root through a homotopy in
   Reynolds number: `n_points` lower-Re solves from an easy anchor up to the target, each seeded by the

@@ -73,6 +73,7 @@ from aquaflux.turbulence import (
     amg_beta_tracking_refresh,
     coupled_amg_continuation,
     coupled_fields,
+    coupled_residuals,
     solve_reynolds_continuation,
 )
 
@@ -265,11 +266,20 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         case["geom"],
     )
     log_file = open(log_path, "w") if log_path is not None else None
+    # Each rung rebuilds both the case (its viscosity is rescaled) and its continuation, so the
+    # per-equation residual reporter has to be rebuilt with them. The logger holds one callable, which
+    # defers to whichever reporter the rung currently being marched installed.
+    rung_residuals: list = []
+
+    def residuals(state):
+        return rung_residuals[-1](state) if rung_residuals else {}
+
     logger = MarchLogger(
         log_file,
         metrics=reattachment_metrics(case),
         fields=coupled_fields(coupled),
-        detail=("inner", "fields", "pc"),
+        residuals=residuals,
+        detail=("inner", "fields", "residuals", "pc"),
         rtol=RTOL,
         atol=ATOL,
     )
@@ -289,18 +299,23 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         per rung, and the beta-tracking refresh has to close over that rung's residual.
         """
         logger.note(f"[{point.label}]")
+        engine = coupled_amg_continuation(
+            companion,
+            seed_state,
+            inner_steps=INNER_STEPS,
+            inner_tol=INNER_TOL,
+            smoother_fill_levels=FILL_LEVELS,
+            smoother_sweeps=SWEEPS,
+            coarse_eq_limit=COARSE_EQ_LIMIT,
+            cycle_budget=CYCLE_BUDGET,
+            inner_observer=logger.on_inner,
+        )
+        # Seeded with this rung's own starting state: the march equilibrates each step at the state it
+        # begins from, so without the seed the rung's first step would be scaled at its end state and
+        # its per-equation rows would not add up to the residual reported beside them.
+        rung_residuals.append(coupled_residuals(companion, engine, seed_state))
         return dict(
-            continuation=coupled_amg_continuation(
-                companion,
-                seed_state,
-                inner_steps=INNER_STEPS,
-                inner_tol=INNER_TOL,
-                smoother_fill_levels=FILL_LEVELS,
-                smoother_sweeps=SWEEPS,
-                coarse_eq_limit=COARSE_EQ_LIMIT,
-                cycle_budget=CYCLE_BUDGET,
-                inner_observer=logger.on_inner,
-            ),
+            continuation=engine,
             precondition_step=amg_beta_tracking_refresh(
                 companion,
                 beta_rel_change=0.25,
