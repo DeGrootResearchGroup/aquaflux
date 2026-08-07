@@ -719,3 +719,63 @@ def test_neither_gate_firing_reuses_the_standing_factorization() -> None:
     from aquaflux.turbulence.coupled import _refresh_branch
 
     assert _refresh_branch(stale_state=False, moved_beta=False, split=True) == "none"
+
+
+_DRIFT_TRACES: list[int] = []
+
+
+class _CountingEddyViscosity(eqx.Module):
+    """A stand-in for the coupled assembler that records each TRACE of its eddy viscosity.
+
+    The body runs at trace time only, so the recorded count is the compilation count -- the repo's
+    trace-counting idiom, used here because ``equinox``'s jit wrapper exposes no cache-clearing handle.
+    """
+
+    gain: jnp.ndarray
+
+    def eddy_viscosity(self, state: jnp.ndarray) -> jnp.ndarray:
+        _DRIFT_TRACES.append(1)
+        return self.gain * state
+
+
+def test_rebasing_the_drift_measure_is_a_compilation_cache_hit() -> None:
+    """Re-basing the staleness reference must change a VALUE, not build a new compiled function.
+
+    ``_materialize_gate`` re-bases this measure at every materialize, so a per-reference compilation is
+    paid on every full preconditioner refresh. Measured on a three-dimensional coupled march before the
+    fix: ~3.8 s each time, ~21 % of the refresh, for a number that is one norm of an already-computed
+    field. The reference therefore rides as an argument to a module-level jitted function rather than as
+    a captured constant of a locally-defined one, which ``filter_jit`` caches per closure.
+    """
+    from aquaflux.turbulence.coupled import _eddy_viscosity_drift
+
+    # A unique size, so a would-be recompile cannot be a cache hit from another test (the cache is
+    # process-global) and a genuine hit cannot be manufactured by one.
+    coupled = _CountingEddyViscosity(gain=jnp.asarray(2.0))
+    state = jnp.linspace(1.0, 2.0, 37)
+    scale = jnp.asarray(1.0)
+    # Every reference is built the SAME way, as production's `coupled.eddy_viscosity(...)` is. Mixing
+    # constructors here would compare two abstract values -- `jnp.zeros(n)` is strongly typed while
+    # `jnp.full(n, 1.0)` is weakly typed -- and a weak/strong mismatch is itself a cache miss, so the
+    # test would fail for a reason that has nothing to do with what it is checking.
+    references = [jnp.linspace(0.0, offset, 37) for offset in (0.5, 1.0, 2.0, 3.0)]
+
+    _DRIFT_TRACES.clear()
+    float(_eddy_viscosity_drift(coupled, state, references[0], scale))
+    compiled = len(_DRIFT_TRACES)
+    assert compiled == 1
+
+    for reference in references[1:]:  # three re-bases, as three materializes would do
+        float(_eddy_viscosity_drift(coupled, state, reference, scale))
+
+    assert len(_DRIFT_TRACES) == compiled
+
+
+def test_the_drift_measure_is_zero_at_its_own_reference() -> None:
+    """A re-based measure reports no movement until the state actually moves -- else it re-fires at once."""
+    from aquaflux.turbulence import eddy_viscosity_drift
+
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled, seed=0)
+
+    assert float(eddy_viscosity_drift(coupled, state)(state)) == pytest.approx(0.0, abs=1e-12)

@@ -419,6 +419,85 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     de-compression above), not a rarer one. Forward-march only. Pinned by `test_amg_refresh_shift_in_place_*`
     (`test_amg_preconditioner.py`) and `test_materialize_gate_*` / `test_batched_probing_*` /
     `test_gather_de_compression_*`.
+    - **⚠️ THE TWO GATES ARE COMBINED, NOT NESTED — the β floor used to make the drift trigger UNREACHABLE
+      (fixed; `_refresh_branch`).** `_beta_tracking_refresh` asked the β gate first and the materialize gate
+      only *inside* it. With a PC-only `beta_floor` the gate's input is `max(β, floor)`, so once the march
+      drops below the floor that input is **pinned** and the β gate answers "no change" on every step
+      forever — taking the drift gate down with it. That is exactly the low-shift tail where the flow
+      develops fastest. Measured on the 3-rung `bfs3d` cold march (56 steps, `beta_floor = 0.05`):
+
+      | | steps | refresh declined | mean cycles |
+      |---|---|---|---|
+      | β ≥ floor | 34 | 12 % | 6.9 |
+      | β < floor | 22 | **91 %** | 7.5 |
+
+      13 steps had >5 % ν_t drift *and* no refresh, and they carried **189 of the march's 399 Krylov
+      cycles (47 %)** — steps 29–31 ran 24/23/34 cycles on a V-cycle nothing was allowed to refresh, and
+      the step after them blew up into a 3-attempt β-escalation retry costing 380 s. The decision is now
+      the total function `_refresh_branch(stale_state, moved_beta, split)`: **state drift ⇒ `full`**
+      whatever β says, β move alone ⇒ `shift`, neither ⇒ `none`. Note the shift branch is real work below
+      the floor too — the shift is `pc_beta · d(state)` and the per-cell `d` tracks the state even where
+      `pc_beta` is clamped, so the old comment's "would rebuild an identical V-cycle" was only true of the
+      β factor. **Consequence to know:** the materialize gate is now consulted every step rather than only
+      on refresh steps, so its `materialize_every` cap counts **steps**, not refreshes.
+      **MEASURED END-TO-END on the 3-rung `bfs3d` cold march, and the trade is strongly favourable:**
+
+      | | before | after |
+      |---|---|---|
+      | outer steps | 69 | **61** |
+      | **Krylov cycles** | **480** | **348 (−27 %)** |
+      | starved steps (>5 % drift, no refresh) | 15, holding 201 cycles (42 %) | **0** |
+      | sub-floor steps declining a refresh | 89 % | **19 %** |
+      | full refreshes | 32 @ 23.1 s | 48 @ **17.3 s** |
+      | refresh total | 803 s (15.7 % of wall) | 865 s (19.1 %) |
+      | β-escalation retry steps | 5, **1745 s** | 2, **655 s** |
+      | final ‖R‖ / mid-span `x_r/h` | 2.65e-6 / 8.36 | 2.42e-6 / **8.36** |
+
+      Read the refresh row correctly: the preconditioner now costs **more** in absolute terms (865 s vs
+      803 s) because it refreshes 50 % more often — that is the trade working, not a regression. It buys
+      132 fewer Krylov cycles and, far larger, removes three of the five retry cascades (−1090 s), which
+      were the single biggest line item in the march. The converged answer is **unchanged** (`x_r/h` 8.36
+      mid-span against OpenFOAM's 7.24, exactly as before), which is the constraint that matters: this is
+      a path change, not a solution change.
+    - **Where a refresh's time now goes (whole-run aggregate, same march): probe 632 s, refactor 195 s,
+      assemble 28 s, other 12 s — the probe is 73 %.** The non-probe tail is close to floor, so any
+      further work on refresh cost has to attack the coloured probe itself (amortizing colours across
+      steps, or a cheaper stencil), not the assembly or the multigrid setup.
+    - **⚠️ Wall-clock from that comparison is a LOWER bound, and the reason is a trap worth naming.** The
+      "after" run was watched by a per-refresh log monitor whose notifications drove the desktop UI to
+      ~70 % CPU against the solve; its first ~20 minutes are inflated (steps 1–3 were *bit-identical* in
+      cycles and residual to the baseline while taking 254 s against 224 s). Cycles, phase times and
+      step/retry counts are unaffected — which is exactly why the cycle count, not the clock, is this
+      project's cost measure. **Do not instrument a long run with a per-step notification stream.**
+    - **Where a refresh's time actually goes — REPORTED, not inferred (`RefreshTiming`, `solve/refresh_timing.py`).**
+      The observer used to receive `(kind, seconds)`, so a breakdown had to be recovered by differencing
+      the `full` and `shift` branches across a run. It now receives a record carrying ordered
+      `(phase, seconds)` pairs — AMG: `probe` / `assemble` / `refactor` — and `MarchLogger` renders them
+      under the `"pc"` detail (`pc full 23.0s (probe 14.6 assemble 3.2 refactor 5.2)`), with any
+      unattributed remainder shown as `other` so a breakdown cannot silently fail to add up. The
+      factorization preconditioners report no phases (empty tuple), which the record documents as valid.
+      Differencing the same 56-step march gave probe ≈ 14.6 s of a 23.0 s `full` (63 %) against 8.4 s for
+      `shift` — consistent with the older ~40-of-60 s reading, and the reason the probe is the lever.
+    - **The per-refresh sparse-matrix work is precomputed (`ShiftedCellMajorOperator`).** The `assemble`
+      phase — add `β d` to the diagonal, symmetrically equilibrate, reorder to cell-major — was a sparse
+      add plus two sparse products plus two fancy-index permutations, each allocating and re-sorting a
+      matrix the size of the coupled Jacobian, **repeated identically every refresh** because for a fixed
+      stencil reach the pattern never changes and only the values do. The class hoists the
+      pattern-dependent part (which base nonzero feeds each output nonzero, where the diagonals sit, the
+      cell-major CSR structure) into a one-time build, leaving one gather + an `O(n_dofs)` diagonal add +
+      a symmetric scale into a **preallocated** buffer. Bit-identical to `equilibrate_cell_major(J +
+      diags(shift))` — pinned by `tests/unit/test_cell_major_operator.py`, which runs without `petsc4py`
+      because the class holds none. Two details worth keeping: the returned matrix **aliases the reused
+      buffer** (consume it immediately; `AmgVCycle._build`/`refactor` both copy), and the symmetric scale
+      is applied **chunked over rows** so it never allocates a second Jacobian-sized temporary — the
+      point of the exercise being to stop allocating those. It engages only when a precomputed
+      `structure` was used, which is precisely the guarantee the pattern is fixed; otherwise the generic
+      path runs unchanged. `AmgVCycle.refactor`'s pattern re-check is likewise memoized on the index
+      arrays' identity, since comparing tens of millions of indices twice per refresh re-confirms
+      something fixed by construction.
+    - **Already done, do not re-propose:** `refactor` reuses the aggregation and prolongation
+      (`pc_gamg_reuse_interpolation` + smoother `reuse_ordering`) and overwrites the operator values in
+      place, so only the Galerkin coarse operators and the incomplete-LU factor values recompute.
   - **⚠️ MEASUREMENT DISCIPLINE FOR PRECONDITIONER PROBES (binding — every one of these produced a wrong
     verdict that had to be retracted).** Judge a candidate preconditioner **only** by running it through
     GMRES and reading the **true** residual `‖Ax−b‖`. Four cheaper-looking gates are all invalid on this

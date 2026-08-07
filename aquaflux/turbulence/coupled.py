@@ -644,12 +644,29 @@ def eddy_viscosity_drift(
     """
     reference = jax.lax.stop_gradient(coupled.eddy_viscosity(reference_state))
     scale = jnp.maximum(jnp.linalg.norm(reference), jnp.finfo(reference.dtype).tiny)
+    # The reference rides as an ARGUMENT to a module-level compiled function, not as a captured
+    # constant of a locally-defined one. `filter_jit` caches per function object, so a closure built
+    # here would be a fresh cache entry every time -- and this measure is deliberately re-based at
+    # every materialize, which made each re-base recompile `eddy_viscosity` from scratch. Measured on a
+    # three-dimensional coupled march that was ~3.8 s on every full refresh, ~21 % of it, for a value
+    # change. Same reason the eager march passes its step and residual to a module-level jitted step.
+    return lambda state: _eddy_viscosity_drift(coupled, state, reference, scale)
 
-    @eqx.filter_jit
-    def drift(state: jnp.ndarray) -> jnp.ndarray:
-        return jnp.linalg.norm(coupled.eddy_viscosity(state) - reference) / scale
 
-    return drift
+@eqx.filter_jit
+def _eddy_viscosity_drift(
+    coupled: CoupledRANS,
+    state: jnp.ndarray,
+    reference: jnp.ndarray,
+    scale: jnp.ndarray,
+) -> jnp.ndarray:
+    """``||nu_t(state) - reference|| / scale`` -- the compiled core of :func:`eddy_viscosity_drift`.
+
+    Module-level and taking everything it needs as arguments, so **one** compilation serves every
+    re-based reference: ``coupled`` is an ``equinox.Module`` whose arrays are traced leaves, and
+    ``reference``/``scale`` are arrays of fixed shape, so a re-base is a cache hit.
+    """
+    return jnp.linalg.norm(coupled.eddy_viscosity(state) - reference) / scale
 
 
 def _row_jacobian_scale(
