@@ -84,6 +84,22 @@ closure.
   and writes `report.md` + `figures/comparison.png`. Reports a **mid-span** reattachment length and the
   **spanwise variation** of it — the 3D structure the 2D case cannot show.
 
+### Reproducing the aquaflux result
+
+`compare.py` runs the **full Reynolds-continuation solve** — it is the driver, not a thin wrapper
+around solver defaults. The target Reynolds number is **not reachable without the ramp**: a direct
+cold start diverges on its first step, growing the residual by ~100 orders of magnitude at a
+line-search factor already clipped to 0.002. Every non-default setting in the constants block is a
+measurement on this case rather than a preference — notably the zero-fill smoother (a level-1 fill
+*diverges* at the low shifts the march's tail runs at) and the absolute row-scaled stopping bar.
+
+```bash
+python3 validation/bfs3d_openfoam/compare.py
+```
+
+writes `march.log` (one framed block per step, readable while it runs), rolling state checkpoints
+under `checkpoints/`, and then `report.md` + `figures/`. Expect hours, not minutes.
+
 ### Putting a convergence bar on the reference
 
 The transient reference stops each timestep's solve at 1% of its own initial residual
