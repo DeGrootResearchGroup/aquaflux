@@ -36,7 +36,7 @@ reported ratio mean the same thing throughout. The first must never be substitut
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import NamedTuple, Protocol
+from typing import Any, NamedTuple, Protocol
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -45,6 +45,42 @@ import lineax as lx
 from .implicit import ForwardStep, _within_tolerance
 from .linear import restart_cycles as _strip_step_offset
 from .norm import ResidualNorm
+
+
+def combine_observers(*callbacks: Callable[..., None]) -> Callable[..., None]:
+    """Fan one march callback out to several observers, called in order with the same arguments.
+
+    ``forward_march`` takes a single ``on_step`` / ``on_checkpoint``, but a run usually wants more than
+    one thing to happen per step -- log it *and* checkpoint it. Composing them here keeps a driver from
+    writing its own lambda, which is where one observer silently gets dropped from a later edit.
+
+    An observer that raises propagates: a checkpoint that cannot be written is a real failure, and
+    swallowing it would leave a run believing it was protected when it was not.
+
+    Parameters
+    ----------
+    *callbacks : callable
+        Each accepting whatever the seam supplies (``(report)`` for ``on_step``, ``(report, state)``
+        for ``on_checkpoint``).
+
+    Returns
+    -------
+    callable
+        One callback invoking each in turn.
+
+    Examples
+    --------
+    >>> seen = []
+    >>> both = combine_observers(lambda r: seen.append(("a", r)), lambda r: seen.append(("b", r)))
+    >>> both(1); seen
+    [('a', 1), ('b', 1)]
+    """
+
+    def combined(*args: Any) -> None:
+        for callback in callbacks:
+            callback(*args)
+
+    return combined
 
 
 class StepReport(NamedTuple):

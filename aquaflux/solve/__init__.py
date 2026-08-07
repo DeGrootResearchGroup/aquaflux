@@ -86,8 +86,10 @@ from .linear import (
     restart_cycles,
     solve_linear,
 )
+from .checkpoint import StateCheckpointer
 from .march import (
     CoefficientDriftTrigger,
+    combine_observers,
     CycleGrowthTrigger,
     MarchResult,
     RefreshTrigger,
@@ -160,6 +162,7 @@ __all__ = [
     "ShiftPolicy",
     "ShiftTerm",
     "SmoothedHierarchy",
+    "StateCheckpointer",
     "StepAcceptance",
     "StepControl",
     "StepReport",
@@ -174,6 +177,7 @@ __all__ = [
     "build_convection_hierarchy",
     "build_smoothed_hierarchy",
     "combine_metrics",
+    "combine_observers",
     "convection_diffusion_operator",
     "convection_multigrid_solve",
     "decouple_dof",
