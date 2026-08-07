@@ -84,6 +84,21 @@ closure.
   and writes `report.md` + `figures/comparison.png`. Reports a **mid-span** reattachment length and the
   **spanwise variation** of it — the 3D structure the 2D case cannot show.
 
+### Putting a convergence bar on the reference
+
+The transient reference stops each timestep's solve at 1% of its own initial residual
+(`relTol 0.01`, two outer correctors). Its per-timestep residuals therefore sit on a **floor** — `p`
+pinned at ~9.7e-3 from `t = 0.1` to `t = 0.5` with no trend — which is the tolerance, not
+unsteadiness: `Ux` decays three decades to ~1e-5 by `t = 0.15` and stays there, so the flow is
+**steady**, and time-averaging from `t = 0.25` averages an already-settled field.
+
+Steady is not the same as tightly converged, though, and a reference converged to ~1% per step is a
+soft baseline for judging a reattachment difference of order 10%. `run_transient.sh --tight` re-runs
+with `system/fvSolution.tight` (final solves at `relTol 0`, four outer correctors, one
+non-orthogonal corrector) into `runs/kwsst_transient_tight`, leaving the reference untouched, so the
+two reattachment lengths can be compared directly. If `x_r/h` moves, part of any discrepancy belongs
+to the reference rather than to the code under test.
+
 ### Why the reattachment length is measured mid-span
 
 `reattachment_length` locates the **last** wall-adjacent cell with reversed streamwise velocity. Measured
