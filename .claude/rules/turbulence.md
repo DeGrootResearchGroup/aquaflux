@@ -133,7 +133,9 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       re-derives the preconditioner from the **mid-march** state, which is a tracer when differentiating;
       the refreshed preconditioner would capture it and escape the converged solve's `custom_vjp` as an
       `UnexpectedTracerError` (the general "build the preconditioner from concrete params *outside*
-      `jax.grad`" footgun — [[precond-outside-grad]]). A refresh also forbids an explicit `continuation`,
+      `jax.grad`" footgun: a `BlockPreconditioner` must be constructed once, from concrete parameter
+      values, *outside* the differentiated region — build it inside and it captures a tracer and leaks).
+      A refresh also forbids an explicit `continuation`,
       so there is **no** concrete-preconditioner path through it — hence the honest behaviour is a clear
       up-front `ValueError`, not a leak. `solve_coupled` guards this with `_is_traced((coupled, flow, k,
       omega))` (reliable because the solve is eager-only — the scalar AMGs are off-jit scipy, so a tracer
@@ -1158,6 +1160,27 @@ tuning follow-up noted above.
     and `None` reproduces the plain ramp). Used by
     `validation/pitzdaily_openfoam/compare_reynolds_continuation.py` (the complete-LU + aggressive-control
     ramp that reaches `x_r/h` ~ 8).
+  - **`intermediate_atol` — stop every rung at one PHYSICAL standard (BUILT), and prefer it over the
+    relative bar on a row-scaled measure.** `intermediate_rtol` sets each rung's bar as a fraction of
+    *that rung's own* starting residual, and under continuation every rung **re-bases `‖R₀‖`** — so a
+    later rung, starting from a better seed, stops at a *looser absolute* residual than an earlier one
+    already achieved. Worse, the row-scaled measure is already a fractional per-equation change, so
+    dividing it again by `‖R₀‖` makes the bar a property of the initial guess rather than of the physics.
+    `intermediate_atol` (with `rtol=0`) gives every rung the same absolute bar.
+    **Measured on the 3D backward-facing step**, where the case metric is the reattachment length:
+    under the relative bar, rung 1 stopped at `‖R‖ = 6.3e-3` with the bubble **still moving**; under an
+    absolute `1e-4` it ran 5 more steps to `6.3e-5` and the bubble was **bit-identical for the last five
+    steps**. Five steps bought a seed that was actually converged rather than a snapshot of a moving
+    field. Full ramp on that bundle: 62 steps / 883 raw cycles / ~77 min for three rungs.
+  - **The nonlinearity, not the shift, is what makes a step expensive — convergence is abrupt once the
+    Newton basin is reached.** Observed on every rung of the 3D march: the last few steps take the last
+    ~20× of the residual drop for a few per cent of the rung's total cycles, and the basin announces
+    itself by **`α → 1.0` and the cycle count collapsing at the same time** — even though `β` is
+    *smaller* there, i.e. the operator is nearer the singular limit that used to break the preconditioner.
+    Near the root the Jacobian is what an algebraic-multigrid V-cycle is good at; far from it the
+    nonlinearity is what makes the shifted operator hard. Practical consequence: **budget a march by how
+    long it takes to *reach* the basin**, not by the residual level it must ultimately hit, and do not
+    read a rising cycle count near the start as a preconditioner failure.
   - **Schedule is an injected `ReynoldsSchedule` (a `Protocol`), default `GeometricReynoldsSchedule`
     (one decade per step).** `scales(n_points)` returns the `n_points+1` molecular-viscosity scale
     factors, descending to `1.0` (the target): `(10^N, …, 10, 1)`. Geometric because the nonlinearity

@@ -192,7 +192,11 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       setup-dominated), leaving only the marginal probe-colour saving. The one open lever is a fundamentally
       different smoother that tolerates the sparser graph (a smoother-design task). On a genuinely SKEWED mesh
       reach-2 would additionally be *lossy* (the non-orthogonal ring pushes real content to distance-3) — a
-      second reason to keep reach-3. See `bfs3d-doomed-primary-cost-fixes` in memory.
+      second reason to keep reach-3.
+      **One correction worth carrying, because it was believed for a while:** an apparent "47.2M → 39M
+      nnz decay" in the pattern was a conflation of a *pattern* count with a *live* count — the live
+      Jacobian holds ~38.7–39.0M nnz throughout, roughly constant. The reach-3 requirement above rests on
+      the padding experiment, which is sound; it does not rest on any decay.
   - **`ilut_preconditioner.py` — `MonolithicIlutPreconditioner`.** Built off the jit path (`scipy.spilu`);
     a **host** object, so it is **not** an `equinox.Module` — it rides as a static field and is applied
     inside the jitted Krylov solve through `jax.pure_callback` (`.matvec()` / `.matvec(transpose=True)`).
@@ -308,7 +312,14 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     riding as a static field; `build`/`refresh_in_place`/`matvec` identical to the ILUT/LU, so it plugs into
     `MonolithicFactorShiftPolicy` unchanged. **It is the one family member that needs `petsc4py`** (no
     pure-SciPy AMG fallback); the module lazily imports PETSc and raises a clear install hint otherwise.
-  - **The smoother is the research variable, and the measured MVP config is a STATIONARY ILU(1) level
+  - **⚠️ SUPERSEDED BELOW — "ILU(0) stalls" is a HIGH-β measurement and does NOT hold at low β.** The
+    original comparison was made near the OpenFOAM-converged state at a *large* shift, where the operator
+    is diagonally dominant and extra fill is harmless. At the low shifts the march's tail actually runs
+    at, the ranking **inverts**: ILU(1) breaks down and ILU(0) is the one that converges. See
+    *"Zero-fill is the low-β smoother"* below, which is the current default-setting evidence. Read the
+    two together: neither is wrong, they are measurements at opposite ends of the β range, and the march
+    lives at the low end.
+  - **The smoother is the research variable, and the first measured MVP config was a STATIONARY ILU(1) level
     smoother (`richardson`) + direct-LU coarse.** Measured on the `bfs3d` shifted coupled Jacobian
     (true 2-norm residual, `KSP_NORM_UNPRECONDITIONED`, at 2 sweeps): plain GMRES + stationary **ILU(1)**
     reaches **1e-8 in 21 iterations**; **ILU(0) stalls** ~2e-4 and **SOR diverges**. A Krylov-accelerated
@@ -351,6 +362,44 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     trivial against the materialize). The `bfs3d` combo-sweep. *(A `cycle_type` V/W knob was tried and
     **dropped**: the W-cycle came back byte-identical to V — GAMG did not honour `pc_mg_cycle_type` here —
     and `coarse_eq_limit` dominates regardless.)*
+  - **Zero-fill is the low-β smoother: ILU(0), 4 sweeps, `coarse_eq_limit=2000`, PC-only `beta_floor`
+    (the validated bundle).** The shifted operator is `J + β d`; as the march's shift falls the diagonal
+    weakens and the factorization, not the coarse space, is what fails first. Measured on the `bfs3d`
+    coupled Jacobian at **adjoint-grade rtol 1e-8 on the TRUE residual**:
+
+    | β | ILU(1) (was default) | ILU(0) |
+    |---|---|---|
+    | 0.10 | converges | 30 its |
+    | 0.05 | converges | 51 its |
+    | 0.02 | **DIVERGES** (534 its, true rel. 3.7) | 97 its |
+
+    **Ground truth, not inference:** a pivot census of both factorizations at β=0.02 found **303 negative
+    pivots in ILU(1)** (min 6.2e-4) and **zero** in ILU(0) (min pivot 0.29–0.36 at every β tested). The
+    *fill* is what destroys the factorization — dropping it is not an approximation here, it is the fix.
+    The worst pivots sit in **velocity rows, not pressure rows**, which is why "the pressure block is the
+    problem" intuitions kept failing. ILU(0) is also **3–4× cheaper to build**. This is consistent with the
+    literature: every saddle-point-AMG ILU smoother in the published work we surveyed is **zero-fill**
+    (ILUC0 / DILU); the ILU(1) default was ours alone.
+
+    The bundle members were each measured alone and then together on the same state:
+    - `smoother_fill_levels=0` — the table above.
+    - `smoother_sweeps=4` — ILU(0) is a *weaker* smoother than ILU(1), so extra sweeps pay more than they
+      did for ILU(1): 390 → 69 its at β=0.01. (This is why the `sweeps=2` sweet spot recorded above does
+      not carry over: it was tuned against ILU(1).)
+    - `coarse_eq_limit=2000` — `None` **stalls at every low β** (552 its, true rel. 1.3–67). Not optional.
+    - **PC-only `beta_floor=0.05`** — the V-cycle is built at `max(β, 0.05)` while the march still solves
+      at its own β: 43/69/95 → 29/45/47 its at β = 0.02/0.01/0.005. The *operator* is untouched, so the
+      converged root and the adjoint are unchanged and the mismatch saturates at `beta_floor·d` rather than
+      growing as β → 0. Flooring the k/ω rows *alone* hurt; flooring all rows was best.
+
+    **`alpha_u` and a velocity-row `beta_floor` are the same knob.** A velocity under-relaxation `α_u=0.95`
+    adds `(1−α_u)/α_u = 0.0526` of the diagonal — a β-equivalent of ~0.05 applied to the velocity rows only.
+    Worth knowing before adding a second spelling of it: prefer the floor, which is explicit about being
+    preconditioner-only.
+
+    **Validated on a real march, not just a frozen state:** the 3-rung Reynolds-continuation `bfs3d` march
+    ran to the target Reynolds number on this bundle — 62 steps, 883 raw cycles, ~77 min, no breakdown,
+    with β reaching **0.0077** at 6–11 cycles per solve, well past the 0.02 where ILU(1) diverged.
   - **β-diagonal split — track β without re-materializing the Jacobian (BUILT).** The operator is
     `J(φ) + β d`, and the shift `β d` touches only the **diagonal**, so a β-tracking refresh does **not**
     need the coloured-probe materialization of `J` (the dominant refresh cost — hundreds of jvps).
@@ -370,10 +419,48 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     de-compression above), not a rarer one. Forward-march only. Pinned by `test_amg_refresh_shift_in_place_*`
     (`test_amg_preconditioner.py`) and `test_materialize_gate_*` / `test_batched_probing_*` /
     `test_gather_de_compression_*`.
-  - **⚠️ TRUE-RESIDUAL TRAP (binding).** PETSc's default convergence norm is the *preconditioned* residual
-    `‖Mr‖`; on this indefinite saddle SOR/Krylov-smoothing report `reason=2` (converged) at a **true**
-    residual of 1.0. Force `KSP_NORM_UNPRECONDITIONED` and always check `‖Ax−b‖` — same lesson as the
-    level-ILU artifact in [[ilu-refresh-cost-levers]].
+  - **⚠️ MEASUREMENT DISCIPLINE FOR PRECONDITIONER PROBES (binding — every one of these produced a wrong
+    verdict that had to be retracted).** Judge a candidate preconditioner **only** by running it through
+    GMRES and reading the **true** residual `‖Ax−b‖`. Four cheaper-looking gates are all invalid on this
+    indefinite saddle:
+    1. **The preconditioned residual `‖Mr‖`.** PETSc's default convergence norm. SOR/Krylov-smoothing
+       report `reason=2` (converged) at a **true** residual of 1.0. Force `KSP_NORM_UNPRECONDITIONED`.
+       A level-ILU "win" was once entirely this artifact.
+    2. **One-apply contraction `‖M A x − x‖ / ‖x‖ < 1`.** Rejected a candidate on this; it is not a
+       convergence criterion for a *Krylov-accelerated* preconditioner. Counter-example from our own
+       data: ILU(0) at β=0.02 has a one-apply contraction of **4.5** and still converges in 97 matvecs.
+    3. **The spectral radius of the iteration operator.** The largest eigenmode of a smoothed operator is
+       the *smooth* mode — which is the coarse grid's job, not the smoother's. A "ρ = 9e4, diverges"
+       reading nearly killed a Vanka smoother that had never actually been run through GMRES.
+    4. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
+       Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
+       `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks
+       plausible — two probes were invalidated this way. (`equilibrate_cell_major` reorders internally, so
+       *after* that reorder `field = row % n_fields`. Know which side of it you are on.)
+  - **⚠️ LOW-β DIRECTIONS ALREADY MEASURED OUT — do not re-litigate without new evidence.** The low-shift
+    wall on the 3D coupled saddle has absorbed a lot of probing. What is settled:
+    - **Turbulence decoupling ("just lag ω") — REFUTED.** A true-residual arm comparison found
+      block-diagonal `(u,v,w,p) ⊕ exact(k,ω)` to be the **worst** arm tested: the flow–turbulence coupling
+      is load-bearing in the preconditioner, not a nuisance to be segregated away.
+    - **A pre-AMG SIMPLE-type transform of the matrix — DEAD.** The published "SIMPLE preconditioning" for
+      monolithic coupled AMG *is* Rhie–Chow interpolation; our residual already assembles that matrix, so
+      there is no transform left to apply. (Established by reading the primary sources in full, not from
+      abstracts.)
+    - **PC-only pressure-Poisson augmentation — NO-GO, triple-confirmed.** The `(p,p)` block is *already*
+      0.71× the SIMPLE-Schur elliptic operator, and the augmentation degraded cycles ~2.7×.
+    - **`coarse_eq_limit` beyond ~2000 — inert.** `K=8000` is identical to `K=2000`.
+    - **Additive Vanka + Richardson — invalid by construction** (Richardson on an indefinite saddle).
+      A *Krylov*-Vanka smoother, which is genuinely strong and stable, still stalls the true residual at
+      5–6e-2 at every β and is insensitive to the inner count (4 vs 8) — which points at the **coarse
+      space**, not the smoother, as the remaining wall. Note the smoother-vs-coarse-space split is only
+      established for the *2-level* GAMG hierarchy we run.
+    - **Where the V-cycle actually under-performs:** per-field, pressure is *well* smoothed and **ω** is
+      the unsmoothed field (by ~700–1300×), then `u`. If a per-field lever is wanted in 3D, ω is it —
+      pressure is not.
+    - **The Jacobian's fill is irreducible.** The coupled `(u,p)` Jacobian is intrinsically **distance-2**
+      (~38 nnz/row) because Rhie–Chow damping couples pressure to the neighbour-of-neighbour ring; the
+      advection scheme is irrelevant to this. A distance-1 preconditioner pattern is not available for a
+      second-order collocated Rhie–Chow discretization, so "make the PC pattern local" is not a lever.
   - **Coupled builder `coupled_amg_continuation`** (`.claude/rules/turbulence.md`) shares
     `MonolithicFactorShiftPolicy` + `_monolithic_factor_step` with the ILUT/LU. Verified: converges to the
     block PC's fixed point AND passes the **coupled-adjoint FD gate** (the transpose V-cycle serves the

@@ -83,6 +83,20 @@ closure.
 - `compare.py` — imports that mesh into aquaflux, runs the coupled AMG solve on it, compares cell-for-cell,
   and writes `report.md` + `figures/comparison.png`. Reports a **mid-span** reattachment length and the
   **spanwise variation** of it — the 3D structure the 2D case cannot show.
+
+### Why the reattachment length is measured mid-span
+
+`reattachment_length` locates the **last** wall-adjacent cell with reversed streamwise velocity. Measured
+across the **full span**, that is whichever cell separates furthest downstream — and in this geometry the
+side walls carry their own corner separation that reattaches well behind the primary bubble. On the
+reference field the two outermost spanwise slabs read `x_r/h = 10.28` while all six interior slabs read
+`7.24`, so a full-span number overstates the primary bubble by ~40%.
+
+The mid-span slab (`mid_span_slab`) is therefore the primary metric, and it is the **same helper** used
+both for the final comparison and for the reattachment length reported live during a solve, so the
+quantity a run is watched by and the one it is judged by cannot drift apart. The full-span value is still
+reported alongside as `xr/h_full`: the gap between the two *is* the corner separation, which is worth
+seeing — it is simply not the primary bubble.
 - `report.md`, `figures/` — the tracked deliverables, produced by running `compare.py`. The OpenFOAM run
   tree (`runs/`, time dirs, generated `polyMesh`) is git-ignored.
 
