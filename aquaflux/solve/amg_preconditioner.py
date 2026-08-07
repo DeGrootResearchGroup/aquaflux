@@ -37,7 +37,12 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .ilut_preconditioner import equilibrate_cell_major
+from .ilut_preconditioner import (
+    cell_major_permutation,
+    equilibrate_cell_major,
+    equilibration_scale,
+)
+from .refresh_timing import PhaseTimer
 
 # A process-unique options prefix per V-cycle, so several preconditioners' PETSc options never collide.
 _prefix_counter = itertools.count()
@@ -139,6 +144,9 @@ class AmgVCycle:
         self._indptr = cell_major.indptr.astype(PETSc.IntType)
         self._indices = cell_major.indices.astype(PETSc.IntType)
         self._data = cell_major.data.astype(PETSc.ScalarType).copy()
+        # The index arrays of the last matrix whose pattern matched, so a repeat refresh from the same
+        # fixed-pattern assembler is settled by identity rather than an O(nnz) comparison.
+        self._pattern_seen: tuple[np.ndarray, np.ndarray] | None = None
         self._mat = PETSc.Mat().createAIJWithArrays(
             size=cell_major.shape, csr=(self._indptr, self._indices, self._data)
         )
@@ -310,13 +318,7 @@ class AmgVCycle:
         self.perm = perm
         cell_major = cell_major.tocsr()
         cell_major.sort_indices()
-        same_pattern = (
-            not self._native
-            and cell_major.data.shape[0] == self._data.shape[0]
-            and np.array_equal(cell_major.indptr, self._indptr)
-            and np.array_equal(cell_major.indices, self._indices)
-        )
-        if not same_pattern:
+        if not self._matches_pattern(cell_major):
             if self._native:
                 self._ksp.destroy()
                 self._shell.destroy()
@@ -330,6 +332,32 @@ class AmgVCycle:
         self._mat.assemble()
         self._pc.setOperators(self._mat)
         self._pc.setUp()
+
+    def _matches_pattern(self, cell_major: sp.csr_matrix) -> bool:
+        """Whether ``cell_major`` has the sparsity the persistent ``Mat`` was built on.
+
+        Comparing the index arrays is ``O(nnz)`` and runs on every refresh, which on a three-dimensional
+        coupled Jacobian is tens of millions of elements compared twice to re-confirm something that is
+        fixed by construction. A caller that assembles through a precomputed fixed-pattern structure hands
+        back the **same** index arrays every time, so their identity settles it; the element-wise
+        comparison stays as the fallback for a caller that does not.
+        """
+        if self._native:
+            return False
+        if (
+            self._pattern_seen is not None
+            and cell_major.indptr is self._pattern_seen[0]
+            and cell_major.indices is self._pattern_seen[1]
+        ):
+            return True
+        matches = (
+            cell_major.data.shape[0] == self._data.shape[0]
+            and np.array_equal(cell_major.indptr, self._indptr)
+            and np.array_equal(cell_major.indices, self._indices)
+        )
+        if matches:
+            self._pattern_seen = (cell_major.indptr, cell_major.indices)
+        return matches
 
 
 def build_amg_vcycle(
@@ -388,6 +416,156 @@ def build_amg_vcycle(
     )
 
 
+class ShiftedCellMajorOperator:
+    """Assemble the equilibrated cell-major operator ``D P (J + diag(shift)) Pᵀ D`` for a FIXED pattern.
+
+    Every refresh of the V-cycle re-forms the same three transforms of the materialized Jacobian: add the
+    pseudo-transient shift to the diagonal, symmetrically equilibrate by the square-root diagonal, and
+    reorder to cell-major. Written with generic sparse operations that is a diagonal add, two sparse
+    products and two fancy-index permutations, each allocating and re-sorting a matrix the size of the
+    coupled Jacobian — work that is repeated identically every refresh, because for a fixed stencil reach
+    the sparsity **pattern never changes** and only the values do.
+
+    This precomputes the pattern-dependent part once — which base nonzero feeds each output nonzero, where
+    the diagonal entries sit, and the cell-major CSR structure — so a refresh is one gather plus an
+    ``O(n_dofs)`` diagonal add plus a symmetric scale, written into a **preallocated** buffer. The scaling
+    rule itself is :func:`~aquaflux.solve.ilut_preconditioner.equilibration_scale`, shared with the generic
+    :func:`~aquaflux.solve.ilut_preconditioner.equilibrate_cell_major` that serves an arbitrary matrix;
+    only the data movement differs, and the two agree to the last bit (pinned by a unit test).
+
+    The scale and permutation are applied to vectors by the V-cycle, so :meth:`assemble` returns them
+    alongside the matrix exactly as ``equilibrate_cell_major`` does.
+
+    .. warning::
+       The returned matrix **aliases a reused buffer** and is overwritten by the next :meth:`assemble`.
+       It is meant to be consumed immediately (handed to a factorization, which takes its own copy), not
+       retained.
+
+    Parameters
+    ----------
+    indptr, indices : np.ndarray
+        The fixed **field-major** CSR structure of the materialized Jacobian, shapes ``(n_dofs + 1,)`` and
+        ``(nnz,)``. Degree of freedom ``(cell i, field f)`` is at ``f * n_cells + i``.
+    n_fields : int
+        Degrees of freedom per cell.
+
+    Raises
+    ------
+    ValueError
+        If the size is not a multiple of ``n_fields``, or the pattern is missing a diagonal entry (the
+        shift has nowhere to go, so the pattern is not the full block-stencil one this needs).
+    """
+
+    def __init__(self, indptr: np.ndarray, indices: np.ndarray, n_fields: int) -> None:
+        n_dofs = int(indptr.shape[0]) - 1
+        if n_dofs % n_fields != 0:
+            raise ValueError(
+                f"ShiftedCellMajorOperator: {n_dofs} degrees of freedom is not a multiple of "
+                f"n_fields={n_fields}."
+            )
+        self._shape = (n_dofs, n_dofs)
+        self._perm = cell_major_permutation(n_dofs // n_fields, n_fields)
+        # perm maps cell-major -> field-major; its inverse relabels a field-major index to cell-major.
+        inverse = np.empty(n_dofs, dtype=np.int64)
+        inverse[self._perm] = np.arange(n_dofs)
+        base_rows = np.repeat(np.arange(n_dofs, dtype=np.int64), np.diff(indptr))
+        rows = inverse[base_rows]
+        cols = inverse[np.asarray(indices, dtype=np.int64)]
+        # Sorting the relabelled coordinates by (row, col) IS the permuted matrix's CSR order, and the
+        # sort permutation is the gather: output position t reads base value `source[t]`.
+        order = np.lexsort((cols, rows))
+        self._source = _smallest_index(order)
+        self._indices = _smallest_index(cols[order])
+        self._indptr = np.concatenate(([0], np.cumsum(np.bincount(rows, minlength=n_dofs)))).astype(
+            self._indices.dtype
+        )
+        # Row counts drive the chunked row scaling below; the full per-nonzero row array would be another
+        # array the size of the Jacobian's values, which is what this class exists to avoid allocating.
+        self._counts = np.diff(self._indptr)
+        self._diagonal = np.flatnonzero(rows[order] == self._indices)
+        if self._diagonal.shape[0] != n_dofs:
+            raise ValueError(
+                "ShiftedCellMajorOperator: the pattern is missing a diagonal entry "
+                f"({self._diagonal.shape[0]} of {n_dofs}); the pseudo-transient shift has nowhere to go."
+            )
+        self._data = np.zeros(order.shape[0], dtype=np.float64)
+        self._matrix = sp.csr_matrix(
+            (self._data, self._indices, self._indptr), shape=self._shape, copy=False
+        )
+        # scipy may re-type the index arrays on construction; keep writing into whatever it actually holds.
+        self._data = self._matrix.data
+        self._matrix.has_sorted_indices = True
+        self._chunks = _row_chunks(self._indptr, _SCALE_CHUNK_NNZ)
+
+    def assemble(
+        self, values: np.ndarray, shift_diagonal: np.ndarray
+    ) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
+        """The equilibrated cell-major matrix, its equilibration factor and its permutation.
+
+        Parameters
+        ----------
+        values : np.ndarray
+            The materialized Jacobian's CSR values in the fixed field-major pattern, shape ``(nnz,)``.
+        shift_diagonal : np.ndarray
+            The pseudo-transient shift ``β d`` in field-major order, shape ``(n_dofs,)``.
+
+        Returns
+        -------
+        matrix : scipy.sparse.csr_matrix
+            The equilibrated cell-major operator. **Reused and overwritten by the next call.**
+        scale : np.ndarray
+            The equilibration ``diag(D)`` in **field-major** order, shape ``(n_dofs,)``.
+        perm : np.ndarray
+            The cell-major permutation, shape ``(n_dofs,)``.
+        """
+        data = self._data
+        np.take(np.asarray(values, dtype=np.float64), self._source, out=data)
+        shift = np.asarray(shift_diagonal, dtype=np.float64)[self._perm]
+        data[self._diagonal] += shift
+        cell_major_scale = equilibration_scale(data[self._diagonal])
+        # D A D, chunked over rows: the row factor needs one entry per nonzero and the column factor a
+        # gather of the same length, so doing it whole would allocate two more Jacobian-sized temporaries.
+        for start, stop in self._chunks:
+            lo, hi = int(self._indptr[start]), int(self._indptr[stop])
+            block = data[lo:hi]
+            block *= np.repeat(cell_major_scale[start:stop], self._counts[start:stop])
+            block *= cell_major_scale[self._indices[lo:hi]]
+        scale = np.empty_like(cell_major_scale)
+        scale[self._perm] = cell_major_scale
+        return self._matrix, scale, self._perm
+
+
+#: Target nonzeros per row-chunk in the symmetric scaling of :meth:`ShiftedCellMajorOperator.assemble`.
+#: Bounds the transient allocation there to a few megabytes rather than the size of the Jacobian's
+#: values; small enough to stay in cache, large enough that the per-chunk NumPy overhead is negligible.
+_SCALE_CHUNK_NNZ = 1 << 20
+
+
+def _smallest_index(values: np.ndarray) -> np.ndarray:
+    """``values`` as the narrowest signed integer type that holds them (32-bit where it fits).
+
+    These index arrays are as long as the Jacobian's nonzeros -- tens of millions on a three-dimensional
+    coupled mesh -- and are held for the life of the preconditioner, so halving their width is worth the
+    check.
+    """
+    values = np.asarray(values)
+    return values.astype(np.int32) if values.size == 0 or values.max() < 2**31 else values
+
+
+def _row_chunks(indptr: np.ndarray, target_nnz: int) -> tuple[tuple[int, int], ...]:
+    """Split ``[0, n_rows)`` into ``(start, stop)`` row ranges of roughly ``target_nnz`` nonzeros each.
+
+    Ranges are cut on row boundaries so each chunk is a contiguous slice of the CSR values, and every row
+    lands in exactly one chunk. A row wider than ``target_nnz`` simply forms its own oversized chunk.
+    """
+    n_rows = int(indptr.shape[0]) - 1
+    if n_rows == 0:
+        return ()
+    edges = np.searchsorted(indptr, np.arange(0, int(indptr[-1]), target_nnz), side="right") - 1
+    bounds = np.unique(np.concatenate(([0], np.maximum(edges, 0), [n_rows])))
+    return tuple((int(a), int(b)) for a, b in itertools.pairwise(bounds) if b > a)
+
+
 class MonolithicAmgPreconditioner:
     """The coupled algebraic-multigrid preconditioner as JAX matvecs, wrapping a frozen :class:`AmgVCycle`.
 
@@ -409,9 +587,14 @@ class MonolithicAmgPreconditioner:
         residual_fn: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         jacobian_no_shift: sp.csr_matrix | None = None,
         n_fields: int | None = None,
+        assembler: ShiftedCellMajorOperator | None = None,
     ) -> None:
         self.factors = vcycle
         self._residual_fn = residual_fn
+        # The fixed-pattern shift/equilibrate/reorder assembler, present exactly when the materialize ran
+        # on a precomputed ``structure`` (which is what guarantees the pattern is the same every refresh).
+        # ``None`` falls back to the generic sparse path, which works for any pattern.
+        self._assembler = assembler
         # The materialized jvp Jacobian *without* the pseudo-transient shift, cached so a β-only refresh
         # (:meth:`refresh_shift_in_place`) can re-add a new ``β d`` diagonal without re-running the coloured jvp probe.
         self._jacobian_no_shift = jacobian_no_shift
@@ -454,6 +637,36 @@ class MonolithicAmgPreconditioner:
     def _shifted(jacobian_no_shift: sp.csr_matrix, shift_diagonal: np.ndarray) -> sp.csr_matrix:
         """Add the pseudo-transient shift ``β d`` to the Jacobian's diagonal (cheap -- ``O(nnz)`` numpy)."""
         return (jacobian_no_shift + sp.diags(np.asarray(shift_diagonal))).tocsr()
+
+    @staticmethod
+    def _assembler_for(
+        structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None, n_fields: int
+    ) -> ShiftedCellMajorOperator | None:
+        """The fixed-pattern assembler for this materialize, or ``None`` for the generic sparse path.
+
+        A precomputed ``structure`` is precisely the guarantee the pattern is identical every refresh
+        (that is what :func:`~aquaflux.solve.sparse_jacobian.block_stencil_gather_map` provides, explicit
+        zeros and all), so it is also the condition under which the pattern-dependent work can be hoisted
+        out of the refresh. Without it the materialize eliminates numerical zeros and the pattern may move
+        with the state, so each refresh must re-derive it.
+        """
+        if structure is None:
+            return None
+        indptr, indices, _ = structure
+        return ShiftedCellMajorOperator(indptr, indices, n_fields)
+
+    def _cell_major(
+        self, jacobian: sp.csr_matrix, shift_diagonal: np.ndarray, n_fields: int
+    ) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
+        """The equilibrated cell-major operator ``D P (J + diag(shift)) Pᵀ D`` the V-cycle is built on.
+
+        Routes to the precomputed :class:`ShiftedCellMajorOperator` when the pattern is fixed, and to the
+        generic diagonal-add + :func:`~aquaflux.solve.ilut_preconditioner.equilibrate_cell_major` otherwise.
+        The two paths agree to the last bit; only how much work is repeated per refresh differs.
+        """
+        if self._assembler is not None:
+            return self._assembler.assemble(jacobian.data, shift_diagonal)
+        return equilibrate_cell_major(self._shifted(jacobian, shift_diagonal), n_fields)
 
     @classmethod
     def build(
@@ -514,6 +727,9 @@ class MonolithicAmgPreconditioner:
         jacobian = cls._materialize_jacobian(
             matvec, colouring, n_fields, batched_matvec, probe_batch_size, structure
         )
+        assembler = cls._assembler_for(structure, n_fields)
+        # `build_amg_vcycle` equilibrates and reorders internally, so the build takes the generic path
+        # regardless; the assembler is constructed here so every later refresh has it.
         matrix = cls._shifted(jacobian, shift_diagonal)
         return cls(
             build_amg_vcycle(
@@ -527,6 +743,7 @@ class MonolithicAmgPreconditioner:
             residual_fn=residual_fn,
             jacobian_no_shift=jacobian,
             n_fields=n_fields,
+            assembler=assembler,
         )
 
     def refresh_in_place(
@@ -541,7 +758,7 @@ class MonolithicAmgPreconditioner:
         batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         probe_batch_size: int | None = None,
         structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
-    ) -> None:
+    ) -> tuple[tuple[str, float], ...]:
         """Rebuild the V-cycle at a developed state and swap it IN PLACE (no new object).
 
         The arguments are :meth:`build`'s, evaluated at the developed state. Because this preconditioner is
@@ -553,25 +770,41 @@ class MonolithicAmgPreconditioner:
         adjoint's transpose solve reads the same V-cycle and would be corrupted by a change between its
         calls; only the eager, non-differentiated march may refresh. The refresh never moves the converged
         root (the shift vanishes there), so it changes only the forward Krylov path.
+
+        Returns
+        -------
+        tuple of (str, float)
+            ``("probe", s), ("assemble", s), ("refactor", s)`` — the coloured jvp probe, the shift +
+            equilibration + cell-major reorder, and the multigrid re-setup. Reported so a march log can
+            say *where* a refresh spent its time; the three call for different fixes and are
+            indistinguishable in an aggregate.
         """
         del smoother_fill_levels, smoother_sweeps  # the smoother config is fixed at build
+        timer = PhaseTimer()
         self._jacobian_no_shift = self._materialize_jacobian(
             matvec, colouring, n_fields, batched_matvec, probe_batch_size, structure
         )
+        timer.lap("probe")
         self._n_fields = n_fields
-        matrix = self._shifted(self._jacobian_no_shift, shift_diagonal)
-        cell_major, scale, perm = equilibrate_cell_major(matrix, n_fields)
+        if self._assembler is None:
+            self._assembler = self._assembler_for(structure, n_fields)
+        cell_major, scale, perm = self._cell_major(
+            self._jacobian_no_shift, shift_diagonal, n_fields
+        )
+        timer.lap("assemble")
         self.factors.refactor(cell_major, scale, perm)
+        timer.lap("refactor")
+        return timer.phases()
 
-    def refresh_shift_in_place(self, shift_diagonal: np.ndarray) -> None:
+    def refresh_shift_in_place(self, shift_diagonal: np.ndarray) -> tuple[tuple[str, float], ...]:
         """Re-preconditioner at a new shift ``β d`` REUSING the frozen Jacobian — no re-materialization.
 
         The operator is ``J(φ) + β d``, and the pseudo-transient shift ``β d`` touches only the **diagonal**.
         So tracking a moving ``β`` (and the cheap per-cell shift ``d``) needs only to re-add the new diagonal
         to the **cached** Jacobian and re-factor — it does **not** need the coloured-probe materialization of ``J``
-        that :meth:`refresh_in_place` pays. Measured on the ``bfs3d`` coupled Jacobian the materialize is the
-        dominant refresh cost (~40 s of a ~60 s refresh; the smoothed-aggregation re-factor is the rest), so a
-        shift-only refresh is several times cheaper. The Jacobian is held frozen at the last full
+        that :meth:`refresh_in_place` pays. The probe is the dominant refresh cost — measured on a
+        three-dimensional coupled march the two branches differ by roughly a factor of three, and that
+        difference *is* the probe — so a shift-only refresh is several times cheaper. The Jacobian is held frozen at the last full
         :meth:`build` / :meth:`refresh_in_place`, so ``J``'s *state* drift is not tracked here — pair frequent
         shift-only refreshes with an occasional full refresh (a state-staleness trigger) to catch that.
 
@@ -584,14 +817,25 @@ class MonolithicAmgPreconditioner:
         shift_diagonal : np.ndarray
             The new pseudo-transient shift ``β d``, shape ``(n_fields * n,)`` — added to the cached Jacobian's
             diagonal.
+
+        Returns
+        -------
+        tuple of (str, float)
+            ``("assemble", s), ("refactor", s)`` — this branch runs no probe, which is exactly what makes
+            it the cheap one.
         """
         if self._jacobian_no_shift is None or self._n_fields is None:
             raise RuntimeError(
                 "refresh_shift_in_place needs a cached Jacobian; call build() or refresh_in_place() first."
             )
-        matrix = self._shifted(self._jacobian_no_shift, shift_diagonal)
-        cell_major, scale, perm = equilibrate_cell_major(matrix, self._n_fields)
+        timer = PhaseTimer()
+        cell_major, scale, perm = self._cell_major(
+            self._jacobian_no_shift, shift_diagonal, self._n_fields
+        )
+        timer.lap("assemble")
         self.factors.refactor(cell_major, scale, perm)
+        timer.lap("refactor")
+        return timer.phases()
 
     @property
     def has_native_solve(self) -> bool:

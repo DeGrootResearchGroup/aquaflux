@@ -122,6 +122,29 @@ class IlutFactors:
         return self.scale * out
 
 
+def equilibration_scale(diagonal: np.ndarray) -> np.ndarray:
+    """The symmetric square-root-diagonal equilibration factor ``diag(D) = 1/sqrt(|diag A|)``.
+
+    The scaling rule behind :func:`equilibrate_cell_major`, on its own so that a caller which already
+    holds the diagonal — and which moves the matrix data itself by a precomputed gather rather than by
+    generic sparse products — applies the identical rule rather than restating it. A zero diagonal
+    entry is treated as one, so a structurally empty row scales by one instead of producing ``inf``.
+
+    Parameters
+    ----------
+    diagonal : np.ndarray
+        The matrix diagonal, shape ``(n_dofs,)``.
+
+    Returns
+    -------
+    np.ndarray
+        The equilibration factor, shape ``(n_dofs,)``.
+    """
+    magnitude = np.abs(np.asarray(diagonal, dtype=np.float64))
+    magnitude[magnitude == 0.0] = 1.0
+    return 1.0 / np.sqrt(magnitude)
+
+
 def equilibrate_cell_major(
     matrix: sp.spmatrix, n_fields: int
 ) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
@@ -168,9 +191,7 @@ def equilibrate_cell_major(
             f"equilibrate_cell_major: matrix size {n_dofs} is not a multiple of n_fields={n_fields}."
         )
     matrix = matrix.tocsr()
-    diagonal = np.abs(matrix.diagonal())
-    diagonal[diagonal == 0.0] = 1.0
-    scale = 1.0 / np.sqrt(diagonal)
+    scale = equilibration_scale(matrix.diagonal())
     equilibrated = (sp.diags(scale) @ matrix @ sp.diags(scale)).tocsr()
     perm = cell_major_permutation(n_dofs // n_fields, n_fields)
     return equilibrated[perm][:, perm].tocsr(), scale, perm
