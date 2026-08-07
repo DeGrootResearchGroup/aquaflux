@@ -8,6 +8,7 @@ import pytest
 import scipy.sparse as sp
 from aquaflux.solve.sparse_jacobian import (
     block_stencil_colouring,
+    block_stencil_gather_map,
     jacobian_relative_error,
     materialize_block_jacobian,
 )
@@ -89,6 +90,64 @@ def test_materialize_recovers_a_known_block_matrix_exactly():
     k, colouring = _random_block_matrix(n, nvar, reach, rng)
     materialized = materialize_block_jacobian(_matvec_of(k), colouring, nvar)
     assert (materialized - k).nnz == 0 or abs(materialized - k).max() < 1e-12
+
+
+def test_batched_probing_matches_the_per_probe_loop():
+    """Batched probing (the coloured probes share one linearization, applied to stacked seeds) recovers
+    exactly the per-probe loop's Jacobian -- it is a pure speedup, not an approximation. Checked both in
+    one batch and chunked (so the final-chunk padding is exercised)."""
+    import jax
+
+    rng = np.random.default_rng(3)
+    n, nvar, reach = 12, 3, 2
+    k, colouring = _random_block_matrix(n, nvar, reach, rng)
+    dense = jnp.asarray(k.toarray())
+
+    def matvec(v):  # pure-jax, so vmap-able (unlike the NumPy `_matvec_of`)
+        return dense @ v
+
+    loop = materialize_block_jacobian(matvec, colouring, nvar)
+    one_batch = materialize_block_jacobian(matvec, colouring, nvar, batched_matvec=jax.vmap(matvec))
+    chunked = materialize_block_jacobian(
+        matvec, colouring, nvar, batched_matvec=jax.vmap(matvec), probe_batch_size=4
+    )
+    assert abs(loop - one_batch).max() < 1e-14  # bit-identical to the loop
+    assert abs(loop - chunked).max() < 1e-14  # chunking + final-chunk padding changes nothing
+    assert abs(loop - k).max() < 1e-12  # and both recover the true matrix
+
+
+def test_gather_de_compression_matches_the_scatter_loop():
+    """The cached-structure gather (one vectorized ``responses.ravel()[gather_map]`` into the fixed
+    full-pattern CSR) recovers the same matrix as the scatter loop, and the map is state-independent -- it
+    depends only on the colouring, so a *different* operator on the same pattern materializes correctly with
+    the same precomputed structure (what makes it reusable across every refresh)."""
+    import jax
+
+    n, nvar, reach = 12, 3, 2
+    k, colouring = _random_block_matrix(n, nvar, reach, np.random.default_rng(4))
+    structure = block_stencil_gather_map(colouring, nvar)
+
+    def matvec_of_dense(dense):
+        d = jnp.asarray(dense)
+        return lambda v: d @ v
+
+    mv = matvec_of_dense(k.toarray())
+    loop = materialize_block_jacobian(mv, colouring, nvar)
+    gathered = materialize_block_jacobian(
+        mv, colouring, nvar, batched_matvec=jax.vmap(mv), structure=structure
+    )
+    assert (
+        abs(loop - gathered).max() < 1e-14
+    )  # same matrix (gather keeps explicit zeros; values identical)
+
+    # State-independent: a DIFFERENT operator on the SAME pattern materializes with the SAME structure/map.
+    k2, _ = _random_block_matrix(n, nvar, reach, np.random.default_rng(5))
+    mv2 = matvec_of_dense(k2.toarray())
+    loop2 = materialize_block_jacobian(mv2, colouring, nvar)
+    gathered2 = materialize_block_jacobian(
+        mv2, colouring, nvar, batched_matvec=jax.vmap(mv2), structure=structure
+    )
+    assert abs(loop2 - gathered2).max() < 1e-14
 
 
 def test_jacobian_relative_error_flags_too_small_a_reach():

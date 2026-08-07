@@ -18,11 +18,13 @@ import pytest
 from aquaflux.solve import (
     AlphaTargetingControl,
     CoefficientDriftTrigger,
+    ConstantRelaxation,
     CycleGrowthTrigger,
     DampedNewtonStep,
     ImplicitNewtonSolver,
     PseudoTransientStep,
     ShiftTerm,
+    StepOutcome,
     StepReport,
     SwitchedEvolutionRelaxation,
     forward_march,
@@ -31,6 +33,28 @@ from aquaflux.solve import (
 # Incremented on every *trace* of the residual below, so a test can assert that repeated steps
 # reuse a compiled march step instead of retracing it.
 _TRACES: list[int] = []
+
+
+def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False):
+    """A `StepOutcome` for a test double, so a fake step matches the real protocol in one place.
+
+    The doubles used to build the tuple inline; when the protocol grew a field every one of them broke
+    separately, which is the argument for a single constructor rather than five literal tuples.
+
+    ``reached`` defaults to **False** because these doubles model steps that do not converge -- which
+    is what makes them useful for testing the escalation, and what the escalation now requires: a step
+    that met its own target is not redone on cost alone.
+    """
+    cycles = jnp.asarray(cycles, dtype=jnp.int32)
+    return StepOutcome(
+        phi,
+        cycles,
+        jnp.asarray(alpha),
+        jnp.asarray(inner, dtype=jnp.int32),
+        jnp.asarray(reached),
+        jnp.maximum(cycles - 2, 0),
+        jnp.asarray(1.0),
+    )
 
 
 class _Cubic(eqx.Module):
@@ -143,8 +167,8 @@ class _PoisonUnlessTight(eqx.Module):
     def stepper(self):
         def step(residual_fn, phi, residual_norm_0, solver):
             if solver == "tight":  # the recovered step lands on the root, at a higher cycle cost
-                return jnp.zeros_like(phi), jnp.asarray(6), jnp.asarray(1.0), jnp.asarray(1)
-            return jnp.full_like(phi, jnp.inf), jnp.asarray(3), jnp.asarray(1.0), jnp.asarray(1)
+                return _outcome(jnp.zeros_like(phi), 6, reached=True)  # lands on the root
+            return _outcome(jnp.full_like(phi, jnp.inf), 3)
 
         return step
 
@@ -511,3 +535,226 @@ def test_the_march_rebuilds_the_measure_each_outer_iteration_and_holds_it_within
     # iteration is asked about the march's starting state rather than some trial point.
     assert jnp.allclose(asked[0], phi0)
     assert jnp.allclose(asked[1], phi0)
+
+
+class _CyclesFromBeta(eqx.Module):
+    """A step whose reported solve count is ~``base / β`` and that makes no progress -- a stand-in for the
+    stiff low-β operator the cycle-count bailout escalates β against. It carries a ``ConstantRelaxation``
+    β leaf so the escalation (``eqx.tree_at`` on ``relaxation_schedule.beta``) has something to raise."""
+
+    relaxation_schedule: ConstantRelaxation
+    base: float = eqx.field(static=True, default=40.0)
+
+    def stepper(self):
+        schedule, base = self.relaxation_schedule, self.base
+
+        def step(residual_fn, phi, residual_norm_0, solver):
+            cyc = jnp.round(base / jnp.maximum(schedule.beta, 1e-6)).astype(jnp.int32)
+            return _outcome(phi, cyc)  # phi held: never converges
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def default_solver(self):
+        return None
+
+
+def test_march_escalates_beta_on_a_cycle_count_spike() -> None:
+    """A step whose count exceeds ``retry_on_cycles`` is redone from the pre-step state with β escalated
+    (×``retry_beta_factor``) until the count drops or the limit is hit -- the hard-operator bailout. Here
+    cyc ≈ 40/β, so β = 1 → 40 escalates to β = 4 → 10 over two ×2 escalations."""
+    residual = _Cubic(
+        jnp.zeros((1,))
+    )  # residual(1) = 1: the held phi never converges, so the retry fires
+    phi0 = jnp.ones((1,))
+    step = _CyclesFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))
+    result = forward_march(
+        step,
+        residual,
+        phi0,
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        retry_on_cycles=10,
+        retry_beta_factor=2.0,
+        retry_cycles_limit=2,
+    )
+    assert int(result.reports[0].cycles) == 10  # 40 -> 20 -> 10 over two escalations
+
+
+def test_march_does_not_escalate_below_the_cycle_cap() -> None:
+    """A count under ``retry_on_cycles`` never escalates -- the bailout is inert on a comfortable step,
+    so it is a safety net, not an every-step cost."""
+    residual = _Cubic(jnp.zeros((1,)))
+    phi0 = jnp.ones((1,))
+    step = _CyclesFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))  # cyc = 40
+    result = forward_march(
+        step, residual, phi0, max_steps=1, rtol=1e-10, atol=1e-12, retry_on_cycles=100
+    )
+    assert int(result.reports[0].cycles) == 40  # under the cap -> no escalation
+
+
+def test_a_forced_escalation_adds_no_march_step_compilations() -> None:
+    """A β-escalation retry must be a compilation-cache hit, not a recompile of the whole step.
+
+    A retried step redoes ``_march_step`` at an escalated β. The escalation must not change the
+    compiled step's cache key -- else a stiff region that retries every step recompiles the (in the
+    coupled case, minutes-long) solve each time, which was ~half the march wall. Escalating by
+    *scaling* the existing β leaf keeps its abstract value (dtype/weak_type) identical, so the step is
+    a cache hit for whatever β dtype the control set. The sensitive case is a **strong-typed** β leaf:
+    rebuilding β from a Python float (``jnp.asarray(escalated)``) yields a *weak*-typed leaf, a distinct
+    aval that recompiled every escalation. ``_CyclesFromBeta`` never calls the residual, so
+    ``_march_step`` traces it exactly once per compile -- the trace count is the compile count.
+    """
+    # A unique state size, so the escalation's would-be recompile cannot be a cache hit from another
+    # test's compiled step (the compilation cache is process-global).
+    residual = _Cubic(
+        jnp.zeros((13,))
+    )  # residual(1) = 1: the held phi never converges -> retry fires
+    phi0 = jnp.ones((13,))
+    # A strong-typed (non-weak) β leaf -- the case the old `jnp.asarray(float)` escalation recompiled on.
+    step = _CyclesFromBeta(
+        relaxation_schedule=ConstantRelaxation(jnp.array(1.0, dtype=jnp.float64))
+    )
+
+    # One step under the cap compiles `_march_step` once (no escalation).
+    _TRACES.clear()
+    baseline = forward_march(
+        step, residual, phi0, max_steps=1, rtol=1e-10, atol=1e-12, retry_on_cycles=100
+    )
+    compiled = len(_TRACES)
+    assert compiled == 1 and int(baseline.reports[0].cycles) == 40
+
+    # The same step, now escalating β = 1 -> 2 -> 4 (cyc 40 -> 20 -> 10): both escalation `_march_step`
+    # calls must reuse the compiled step -- zero further compilations -- while still recovering the step.
+    _TRACES.clear()
+    escalated = forward_march(
+        step,
+        residual,
+        phi0,
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        retry_on_cycles=10,
+        retry_beta_factor=2.0,
+        retry_cycles_limit=2,
+    )
+    assert len(_TRACES) == 0  # the escalation retries added no recompiles
+    assert int(escalated.reports[0].cycles) == 10  # ...and still escalated β to recover the step
+
+
+class _NaNUntilDamped(eqx.Module):
+    """A step whose correction is non-finite while β is below ``threshold`` and finite + on-root once β is
+    escalated past it -- the coupled-AMG failure where a NaN'd low-β step recovers at a larger β. If ever
+    handed the tight ``"tight"`` retry solver it returns a distinct marker cost (99), so a test can tell
+    whether the cheap β-escalation recovered the step or the expensive divergence fallback fired."""
+
+    relaxation_schedule: ConstantRelaxation
+    threshold: float = eqx.field(static=True, default=1.0)
+
+    def stepper(self):
+        sched, thr = self.relaxation_schedule, self.threshold
+
+        def step(residual_fn, phi, residual_norm_0, solver):
+            if (
+                solver == "tight"
+            ):  # the divergence fallback -- marked so the test can detect it fired
+                return _outcome(jnp.zeros_like(phi), 6, reached=True)
+            phi_out = jnp.where(sched.beta >= thr, jnp.zeros_like(phi), jnp.full_like(phi, jnp.inf))
+            return _outcome(phi_out, 3)
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def default_solver(self):
+        return "loose"
+
+
+def test_march_escalates_beta_before_the_tight_divergence_retry() -> None:
+    """A non-finite step that recovers at escalated β is fixed by the CHEAP β-escalation first -- the
+    tight ``retry_solver`` (the expensive fallback) never fires. This is the reorder: on the stiff low-β
+    saddle a NaN is cured by more damping, so grinding the tight Krylov solve before escalating (the old
+    order) was wasted work that the escalation then re-damped away anyway."""
+    residual = _Cubic(
+        jnp.zeros((1,))
+    )  # root at phi = 0; a non-finite phi gives a non-finite residual
+    phi0 = jnp.ones((1,))
+    step = _NaNUntilDamped(relaxation_schedule=ConstantRelaxation(jnp.asarray(0.5)), threshold=1.0)
+    result = forward_march(
+        step,
+        residual,
+        phi0,
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        retry_solver="tight",
+        retry_on_cycles=10,
+        retry_beta_factor=2.0,
+        retry_cycles_limit=2,
+    )
+    assert result.converged
+    assert jnp.allclose(result.state, 0.0, atol=1e-8)
+    assert (
+        result.reports[0].cycles == 3
+    )  # β=0.5 -> 1.0 recovered it (cost 3); the tight retry (99/6) never fired
+
+
+def test_march_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergence() -> None:
+    """If β-escalation does not lift the step out of the non-finite regime -- the inexact-PC failure only a
+    tighter Krylov solve fixes -- the divergence retry still fires as the fallback, so the reorder never
+    loses the ILUT recovery it front-runs."""
+    residual = _Cubic(jnp.zeros((1,)))
+    phi0 = jnp.ones((1,))
+    # threshold unreachable by 0.5 -> 1.0 -> 2.0, so every escalation stays non-finite; only "tight" recovers.
+    step = _NaNUntilDamped(relaxation_schedule=ConstantRelaxation(jnp.asarray(0.5)), threshold=1e9)
+    result = forward_march(
+        step,
+        residual,
+        phi0,
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        retry_solver="tight",
+        retry_on_cycles=10,
+        retry_beta_factor=2.0,
+        retry_cycles_limit=2,
+    )
+    assert result.converged
+    assert jnp.allclose(result.state, 0.0, atol=1e-8)
+    assert (
+        result.reports[0].cycles == 6
+    )  # escalation exhausted -> fell back to the tight retry (cost 6)
+
+
+def test_march_carries_the_escalated_beta_into_the_control() -> None:
+    """After a β-escalation the control's carried β is SEEDED with the escalated value, so the next step
+    continues from the discovered-safe β instead of re-deriving the control's own (floor-ward) β and
+    re-paying the escalation every step -- the low-β reachability-tail fix that lets a static β floor be
+    dropped (escalation + carry discover how low is safe). Here cyc ≈ 40/β, so β = 1 escalates 1→2→4 to
+    clear the cap of 10, and 4.0 is what the control carries out (a plain reset would carry the control's
+    own β)."""
+    from aquaflux.solve import DualTimeControl
+
+    residual = _Cubic(jnp.zeros((1,)))
+    phi0 = jnp.ones((1,))
+    step = _CyclesFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))
+    control = DualTimeControl(beta_start=1.0, beta_min=0.01)
+    result = forward_march(
+        step,
+        residual,
+        phi0,
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        step_control=control,
+        retry_on_cycles=10,
+        retry_beta_factor=2.0,
+        retry_cycles_limit=3,
+    )
+    assert (
+        float(result.control_state) == 4.0
+    )  # the escalated β, carried; not the control's beta_start

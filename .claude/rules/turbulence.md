@@ -133,7 +133,9 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       re-derives the preconditioner from the **mid-march** state, which is a tracer when differentiating;
       the refreshed preconditioner would capture it and escape the converged solve's `custom_vjp` as an
       `UnexpectedTracerError` (the general "build the preconditioner from concrete params *outside*
-      `jax.grad`" footgun — [[precond-outside-grad]]). A refresh also forbids an explicit `continuation`,
+      `jax.grad`" footgun: a `BlockPreconditioner` must be constructed once, from concrete parameter
+      values, *outside* the differentiated region — build it inside and it captures a tracer and leaks).
+      A refresh also forbids an explicit `continuation`,
       so there is **no** concrete-preconditioner path through it — hence the honest behaviour is a clear
       up-front `ValueError`, not a leak. `solve_coupled` guards this with `_is_traced((coupled, flow, k,
       omega))` (reliable because the solve is eager-only — the scalar AMGs are off-jit scipy, so a tracer
@@ -681,6 +683,18 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   **not** — `k → 0` at a no-slip wall (Dirichlet 0) so `log(k) → −∞` there stalls the near-wall cells (the
   full-log form descends then freezes; measured). FD-verified for both forms: coupled ‖R‖→machine-zero,
   agrees with the segregated fixed point, adjoint matches finite differences.
+    **`k` direct needs a POSITIVITY-PRESERVING LINE SEARCH, not just the shift and the guard (binding —
+    this invariant was stated and was wrong).** Nothing structurally stops a Newton step carrying a
+    directly-solved `k` negative, and the closure's `sqrt(k)` then NaNs the whole residual from a single
+    cell. The divergence guard cannot catch it: it fires on a non-finite residual, which is already the
+    poisoned state. Measured on `bfs3d`: 62 healthy steps, then **two cells of 23040** at
+    `k = -3.3e-4`, every field finite, only the derived `nu_t` NaN.
+    `coupled_amg_continuation` therefore wires `positive_k_limit(coupled)` — the fraction-to-the-boundary
+    cap — automatically for a directly-solved `k`, and passes `None` for a log-solved one, where
+    positivity is already structural and a cap would only throttle. See `.claude/rules/solve.md`.
+    **`log(k+1)` does not fix this**: `k = e^w − 1` bounds `k > −1`, not `k > 0`, so the failure above is
+    still reachable. It is regular at the wall (unlike `log k`) but that solves the other problem, not
+    this one.
   - **The reparametrized block's preconditioner/shift are chain-rule-scaled at the reference (binding).**
     The physics Jacobian w.r.t. `w` picks up `d(φ)/d(w) = jacobian_scale(φ)` (`= φ` for log). `coupled_continuation`
     recovers the physical reference via `physical_fields`, scales each scalar shift diagonal by that factor,
@@ -814,6 +828,75 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     stays on the ILUT / block / rank-structured-direct paths (`.claude/rules/solve.md`). Prefer it over the
     ILUT where the mesh is 2D/moderate (faster *and* exact); the ILUT remains for its 3D-fill headroom and
     is still the differentiable default until a selector seam lands.
+  - **`coupled_amg_continuation` — the ALGEBRAIC-MULTIGRID counterpart, the coupled PC for large 3D
+    (BUILT).** Same drop-in as the ILUT/LU builders but preconditions with one smoothed-aggregation
+    multigrid V-cycle (`MonolithicAmgPreconditioner`, `.claude/rules/solve.md`) instead of a factorization —
+    a **direct-LU coarse solve** keeps the heavy fill on only the small coarsest grid, so it builds in
+    ~seconds with bounded memory where both factorizations hit the 3D wall (the complete LU's fill OOMs; the
+    ILUT's `spilu` on the distance-3 3D Jacobian — measured 38.7M nnz on `bfs3d` — runs >7.5 min). Shares
+    `MonolithicFactorShiftPolicy` + `_monolithic_factor_step`; its forward solver default is
+    `_COUPLED_AMG_FORWARD_SOLVER` (restart-15, since the V-cycle is a weaker approximate inverse than a
+    factorization — ~21 GMRES iters to 1e-8 on `bfs3d` at full accuracy, vs the LU's 1, but the inexact-Newton
+    march stops at ~1%). The V-cycle is a **fixed linear operator** (one apply), so the coupled-adjoint reuses
+    its **transpose** V-cycle — verified: reaches the block PC's fixed point AND passes the coupled-adjoint FD
+    gate (`tests/integration/test_coupled_amg.py`). **Needs `petsc4py`** (the one builder that does; the module
+    raises a clear install hint otherwise). MVP smoother is a stationary ILU(1) (ILU(0) stalls, a Krylov
+    smoother goes nonlinear); the shipped per-step tuning is `smoother_sweeps=2` + restart-15 — restart-15
+    stops the forward solve at the ~1% inexact-Newton tolerance, and the second smoother sweep roughly quarters
+    the outer Krylov count on the low-shift operator the march's tail runs at (~2.1× the whole `bfs3d` solve
+    there) for one extra cheap incomplete-LU back-solve (`.claude/rules/solve.md`). This is the coupled
+    preconditioner the first 3D validation case (`validation/bfs3d_openfoam`) runs on.
+  - **`amg_beta_tracking_refresh` — rebuild the V-cycle as β drifts, the enabler of the 3D
+    dual-time march (BUILT).** The AMG sibling of `lu_beta_tracking_refresh` / `ilut_beta_tracking_refresh`.
+    A dual-time march ramps β down to develop the recirculation, and a V-cycle frozen at `amg_beta` degrades
+    sharply as β leaves that value (measured on the `bfs3d` cold march: ~11 outer cycles per solve at
+    β≈0.15 rising to ~250–285 at β≈0.07, the per-step wall going ~90 s → ~16–19 min, and the march stalling).
+    Re-materializing the Jacobian and rebuilding the GAMG at the step's `(state, β)` restores the matched
+    ~11-cycle solve — the ~tens-of-seconds rebuild is far cheaper than the hundreds of extra
+    Jacobian-vector-product matvecs a stale V-cycle costs. This is the only β-tracking that carries the 3D
+    case: the complete LU's factorization is out of memory and the ILUT's `spilu` is prohibitively slow to
+    build there. Same forward-only contract as the LU/ILUT hooks (raises under `jax.grad`); pass it to
+    `solve_coupled(precondition_step=…)` (or a `solve_reynolds_continuation` `point_setup`) with a
+    `coupled_amg_continuation` step and a `DualTimeControl`.
+    - **The refresh cadence is GATED, not every-step (measured on the developed-low-β tail).** Refreshing
+      unconditionally every step is wasteful once the march has developed and β is nearly constant, and — the
+      failure that motivated the gate — a *fixed step-count* cadence (`refresh_every`) fails at the tail: a
+      long low-β cruise between refreshes lets the V-cycle go stale mid-interval and the count explodes to
+      cyc 250 (17-min steps) before the next scheduled refresh. The honest staleness signal for this hook is
+      **β itself** (a V-cycle's degradation is a function of the β-mismatch, above), so with
+      `beta_rel_change` set the refresh fires when `|β − β_last|/β_last` exceeds it (`_staleness_beta_gate`,
+      shared with the ILUT hook), OR after `refresh_every` steps as a development backstop — the same two-
+      pronged gate as `ilut_beta_tracking_refresh`, and the β-move prong is what catches an overshoot / rung
+      restart before the solve stalls. Default (`beta_rel_change=None`) keeps the every-step behaviour.
+    - **Cheaper refresh — the β-diagonal split, drift-gated (`materialize_drift` / `materialize_every`).** The
+      shifted operator is `J(state) + β·d(state)`; between two refreshes at the same developed state only β (and
+      the shift diagonal) has moved, and re-materializing `J` by graph-coloured probing is ~half the refresh
+      cost (~18–40 s of the ~36–62 s total; the GAMG refactor is the other ~18 s). `MonolithicAmgPreconditioner`
+      therefore caches the un-shifted Jacobian (`_materialize_jacobian` / `_shifted` split) and exposes
+      `refresh_shift_in_place(shift_diagonal)`, which re-forms only `J + β·d` on the cached `J` and re-sets-up
+      the GAMG. The full re-materialize is **gated** (`_materialize_gate`, the drift/step-cap analogue of
+      `_staleness_beta_gate`): `materialize_drift=τ` fires it when the ν_t drift since the last one exceeds `τ`
+      (`eddy_viscosity_drift`, the honest staleness signal — prefer this), `materialize_every=K` is the
+      step-count safety cap; both `None` (default) re-materialize every refresh. Since gradients are never
+      taken through the forward march, the in-place mutation is safe. **⚠️ Measured: DON'T under-materialize.**
+      On a fast-developing flow a *fresh* `J` cuts the Krylov cycle count (~23 % on `bfs3d` — fewer/cheaper
+      steps) by more than the materialize costs, so a stale frozen `J` is a net loss; the right lever is a
+      *cheaper* materialize, not a rarer one — hence the two `sparse_jacobian` speedups (batched probe +
+      gather de-compression; see the materialize-efficiency bullet in `.claude/rules/solve.md`), which
+      `coupled_amg_continuation` and the refresh wire in (built once, reused). **DON'T lower `stencil_reach`
+      to 2 to cheapen it either** — reach-2 is numerically near-exact at *every* state, but GAMG(reach-2)
+      DIVERGES as a preconditioner because the ILU(1) smoother's fill is pattern-dependent (halving the graph
+      makes the incomplete factorization non-convergent on the saddle — the full reach-3 pattern is required;
+      see the reach bullet in `.claude/rules/solve.md`).
+    - The rebuild REUSES the smoothed-aggregation coarse space (`MonolithicAmgPreconditioner.refactor`
+      overwrites the operator values in place over a persistent CSR array and re-sets-up the PC with
+      `pc_gamg_reuse_interpolation`), since the graph-coloured probe's sparsity is fixed across β; only the
+      Galerkin coarse operators and the incomplete-LU factor values recompute, cutting the multigrid setup
+      ~2.4× (measured ~45 s → ~19 s on `bfs3d`) with the coarse space no worse. `coarse_eq_limit`
+      (`pc_gamg_coarse_eq_limit`, threaded through the `coupled_amg_continuation` builder) sets the direct-LU
+      coarse-grid size; raising it to 2000 cut the outer cycle count ~27× on the hard `bfs3d` state (a bigger
+      coarse solve, fewer levels). The experimental native-PETSc forward path and the FGMRES-forward
+      optimization remain follow-ups (`.claude/rules/solve.md`).
   - **`lu_beta_tracking_refresh` — re-factor the LU at the current β EVERY step (the correct LU treatment
     for a dual-time march; BUILT).** A frozen LU is exact only for the β it was factored at; a dual-time
     march's β ramps (0.5 → 0.005), so a factorization frozen at `lu_beta` mis-preconditions the operator
@@ -1044,6 +1127,28 @@ separating pitzDaily case (`validation/pitzdaily_openfoam`) drives the direct `�
 form is validated (channel + tests); efficient convergence on the *full* pitzDaily mesh is the open
 tuning follow-up noted above.
 
+- **`diagnostics.py` — the march log's per-equation view (BUILT).** Three exports over one set of
+  names, so the two grids under a step row join instead of drifting:
+  - `coupled_equation_names(dim)` → `(u, v, w, p, k, omega)` (`(u, v, p, k, omega)` in 2D) — the flat
+    layout's block order, and the **single home** for these names. Raises above `dim = 3`.
+  - `coupled_fields(coupled)` → named **physical** fields for `field_change_metrics` (each solved
+    scalar mapped back through its variable transform, so the log reads the same whether ω is solved
+    directly or in log form). Velocity is **split per component** so each lines up with its own
+    momentum equation; `p` is gauge-free; `ν_t` rides along (derived, not solved — it is what the
+    momentum equations actually see, and it moves when k and ω move in ways their own norms hide).
+  - `coupled_residuals(coupled, continuation, reference_state=None)` → the **per-equation residual** on
+    the march's own measure, `coupled_scaled_norm(...).per_block(coupled.residual(state))`. Reads
+    `continuation` **late** for its `shift_policy`, so a refreshed segment's rebuilt diagonals are the
+    ones used — the same late-read `norm_builder` does. Under a per-rung setup (`point_setup`) the case
+    *and* its continuation are both rebuilt, so the reporter must be rebuilt with them (the bfs3d driver
+    keeps the current rung's in a list the logger's callable defers to).
+  ⚠️ **Equilibrate at the PREVIOUS state, never the logged one** — this is what makes the per-equation
+  rows add up to the `R` reported beside them (pinned `rel=1e-12`). `forward_march` re-derives the
+  measure at the state each outer iteration *starts* from and holds it for the whole iteration, so a
+  step's residual is `norm_at_start(R(state_at_end))`; scaling at the end state measures the right
+  residual in the wrong scales. Consequences: the reporter is **stateful and order-dependent** (once per
+  step, in order — `field_change_metrics`'s contract), and a reporter built partway through a march
+  **must be seeded** with that segment's `seed_state` or its first step is scaled at its own end state.
 - **`reynolds.py` — Reynolds-number continuation (BUILT).** `solve_reynolds_continuation(coupled,
   n_points, *, schedule=None, **solve_kwargs)` reaches a high-Re coupled root through a homotopy in
   Reynolds number: `n_points` lower-Re solves from an easy anchor up to the target, each seeded by the
@@ -1075,9 +1180,11 @@ tuning follow-up noted above.
     viscosity **and** seed state — chiefly the complete-LU β-tracking hook (`coupled_lu_continuation`
     frozen at the point's `(state, β)` + `lu_beta_tracking_refresh` closing over the point's residual),
     which is what lets the aggressive Courant control reach the developed pitzDaily root (the block PC
-    stalls/diverges at the overshoot — see the pitzDaily case). `point_setup(companion, seed_state) ->
-    dict` is called for **every** point (lower-Re and target) with that point's companion and its **packed
-    seed coupled state**, and its keys are merged over `solve_kwargs` (overriding any `continuation`/
+    stalls/diverges at the overshoot — see the pitzDaily case). `point_setup(companion, seed_state, point) ->
+    dict` is called for **every** point (lower-Re and target) with that point's companion, its **packed
+    seed coupled state**, and a `ReynoldsPoint` (1-based `index`, `total`, `viscosity_scale`, plus
+    `is_target` / `label`) telling it where in the ramp it is — so a per-point builder never counts its
+    own invocations to recover the loop's index, and can reach the total and the scaling at all, and its keys are merged over `solve_kwargs` (overriding any `continuation`/
     `reference_state`). To give the built continuation the state the solve begins from, the loop
     **materializes the lowest point's seed** (`hybrid_initialize`) when `point_setup` is set, rather than
     letting `solve_coupled` self-start internally. **Forward-only** (the `precondition_step` it returns
@@ -1087,6 +1194,27 @@ tuning follow-up noted above.
     and `None` reproduces the plain ramp). Used by
     `validation/pitzdaily_openfoam/compare_reynolds_continuation.py` (the complete-LU + aggressive-control
     ramp that reaches `x_r/h` ~ 8).
+  - **`intermediate_atol` — stop every rung at one PHYSICAL standard (BUILT), and prefer it over the
+    relative bar on a row-scaled measure.** `intermediate_rtol` sets each rung's bar as a fraction of
+    *that rung's own* starting residual, and under continuation every rung **re-bases `‖R₀‖`** — so a
+    later rung, starting from a better seed, stops at a *looser absolute* residual than an earlier one
+    already achieved. Worse, the row-scaled measure is already a fractional per-equation change, so
+    dividing it again by `‖R₀‖` makes the bar a property of the initial guess rather than of the physics.
+    `intermediate_atol` (with `rtol=0`) gives every rung the same absolute bar.
+    **Measured on the 3D backward-facing step**, where the case metric is the reattachment length:
+    under the relative bar, rung 1 stopped at `‖R‖ = 6.3e-3` with the bubble **still moving**; under an
+    absolute `1e-4` it ran 5 more steps to `6.3e-5` and the bubble was **bit-identical for the last five
+    steps**. Five steps bought a seed that was actually converged rather than a snapshot of a moving
+    field. Full ramp on that bundle: 62 steps / 883 raw cycles / ~77 min for three rungs.
+  - **The nonlinearity, not the shift, is what makes a step expensive — convergence is abrupt once the
+    Newton basin is reached.** Observed on every rung of the 3D march: the last few steps take the last
+    ~20× of the residual drop for a few per cent of the rung's total cycles, and the basin announces
+    itself by **`α → 1.0` and the cycle count collapsing at the same time** — even though `β` is
+    *smaller* there, i.e. the operator is nearer the singular limit that used to break the preconditioner.
+    Near the root the Jacobian is what an algebraic-multigrid V-cycle is good at; far from it the
+    nonlinearity is what makes the shifted operator hard. Practical consequence: **budget a march by how
+    long it takes to *reach* the basin**, not by the residual level it must ultimately hit, and do not
+    read a rising cycle count near the start as a preconditioner failure.
   - **Schedule is an injected `ReynoldsSchedule` (a `Protocol`), default `GeometricReynoldsSchedule`
     (one decade per step).** `scales(n_points)` returns the `n_points+1` molecular-viscosity scale
     factors, descending to `1.0` (the target): `(10^N, …, 10, 1)`. Geometric because the nonlinearity

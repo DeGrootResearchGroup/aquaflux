@@ -26,6 +26,9 @@ from aquaflux.turbulence import (
     LogScalars,
     SSTModel,
     SSTTurbulence,
+    coupled_equation_names,
+    coupled_fields,
+    coupled_residuals,
     eddy_viscosity_drift,
 )
 from aquaflux.turbulence.coupled import (
@@ -37,6 +40,7 @@ from aquaflux.turbulence.coupled import (
     _row_jacobian_scale,
     coupled_continuation,
     coupled_ilut_continuation,
+    coupled_scaled_norm,
     solve_coupled,
 )
 
@@ -597,3 +601,85 @@ def test_a_non_observing_dual_time_march_gets_no_default_control() -> None:
     from aquaflux.turbulence.coupled import _default_dual_time_control
 
     assert _default_dual_time_control(None, observing=False, continuation=_dual_time_step()) is None
+
+
+def test_the_equation_names_follow_the_flat_state_layout() -> None:
+    """One home for these names, so a per-block residual and a per-field change cannot label the same
+    equation differently -- which is exactly how a log stops being joinable."""
+    assert coupled_equation_names(3) == ("u", "v", "w", "p", "k", "omega")
+    assert coupled_equation_names(2) == ("u", "v", "p", "k", "omega")
+    with pytest.raises(ValueError, match="exceeds the named velocity components"):
+        coupled_equation_names(4)
+
+
+def test_coupled_fields_splits_velocity_per_component_and_names_omega() -> None:
+    """A single vector entry averages the components, hiding one that has stopped moving behind two
+    that have not -- and each component has its own momentum equation to line up against."""
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+
+    fields = coupled_fields(coupled)(state)
+
+    assert list(fields) == ["u", "v", "p", "k", "omega", "nut"]
+    assert fields["u"].shape == (mesh.n_cells,)  # a component, not the (n, dim) vector
+    velocity, _ = coupled.momentum.unpack(coupled.physical_fields(state)[0])
+    assert jnp.allclose(fields["v"], velocity[:, 1])
+
+
+def test_the_per_equation_residuals_compose_into_the_march_s_own_measure() -> None:
+    """They are read on the same scale as the scalar residual beside them, which only holds if they
+    are the very numbers that scalar is built from -- not a separately-scaled lookalike."""
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    engine = coupled_continuation(coupled, state, method=None)
+
+    reported = coupled_residuals(coupled, engine)(state)
+
+    assert list(reported) == list(coupled_equation_names(mesh.dim))
+    measure = coupled_scaled_norm(coupled, engine.shift_policy, state)
+    assert float(jnp.linalg.norm(jnp.array(list(reported.values())))) == pytest.approx(
+        float(measure(coupled.residual(state))), rel=1e-10
+    )
+
+
+def test_the_per_equation_rows_add_up_to_the_residual_the_march_reports() -> None:
+    """`forward_march` equilibrates at the state each outer iteration STARTS from and holds that
+    measure for the whole iteration -- so the step it reports is ``norm_at_start(R(state_at_end))``.
+    Scaling at the end state instead would measure the right residual in the wrong scales, and the
+    rows would not add up to the number printed above them.
+    """
+    mesh, coupled = _cavity()
+    start = _healthy_state(mesh, coupled, seed=0)
+    end = _healthy_state(mesh, coupled, seed=1)
+    engine = coupled_continuation(coupled, start, method=None)
+    reported_by_march = float(
+        coupled_scaled_norm(coupled, engine.shift_policy, start)(coupled.residual(end))
+    )
+
+    residuals = coupled_residuals(coupled, engine, start)
+    rows = residuals(end)  # the first observed step: starts at `start`, ends at `end`
+
+    assert float(jnp.linalg.norm(jnp.array(list(rows.values())))) == pytest.approx(
+        reported_by_march, rel=1e-12
+    )
+
+
+def test_each_step_equilibrates_at_the_state_it_started_from() -> None:
+    """The seed covers only the first step; from then on the previous state IS the start state, which
+    is what keeps a whole march's rows consistent rather than just its opening step."""
+    mesh, coupled = _cavity()
+    first = _healthy_state(mesh, coupled, seed=0)
+    second = _healthy_state(mesh, coupled, seed=1)
+    third = _healthy_state(mesh, coupled, seed=2)
+    engine = coupled_continuation(coupled, first, method=None)
+
+    residuals = coupled_residuals(coupled, engine, first)
+    residuals(second)  # step 1 consumes the seed and records `second`
+    rows = residuals(third)  # step 2 must equilibrate at `second`, not at `third`
+
+    expected = float(
+        coupled_scaled_norm(coupled, engine.shift_policy, second)(coupled.residual(third))
+    )
+    assert float(jnp.linalg.norm(jnp.array(list(rows.values())))) == pytest.approx(
+        expected, rel=1e-12
+    )

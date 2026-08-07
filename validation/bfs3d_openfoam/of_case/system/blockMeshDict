@@ -1,0 +1,136 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Finite-width 3D backward-facing step. Step height h = 0.01 m; inlet channel height H1 = h
+// (expansion ratio 2, downstream height 2h); upstream length 3h, downstream length 20h; span
+// W = 4h between two NO-SLIP side walls -- the finite span with viscous side walls is what makes
+// this genuinely three-dimensional (corner/horseshoe vortices, spanwise-varying reattachment),
+// not a 2D extrusion. Every one of the six bounding planes is a named patch (no `empty`), so the
+// mesh stays fully 3D on import.
+
+convertToMeters 1;
+
+h    0.01;    // step height
+Hin  0.01;    // inlet channel height (= h)
+Lup  0.03;    // upstream length (3h)
+Ldn  0.20;    // downstream length (20h)
+W    0.04;    // spanwise width (4h)
+
+// Grid: streamwise clustered toward the step, wall-normal two-sided (shear layer at the lip +
+// both walls), spanwise mildly two-sided (toward the side walls).
+NxUp   10;    // upstream, x in [-Lup, 0]
+NxDn   40;    // downstream, x in [0, Ldn]
+Ny     16;    // per 0.01 m height band
+Nz     16;    // spanwise
+
+// x = -Lup, 0, Ldn ; y = -h, 0, Hin ; z = 0, W
+vertices
+(
+    // z = 0 plane
+    (-0.03  0.00  0.0)   //  0
+    ( 0.00  0.00  0.0)   //  1  (step lip)
+    ( 0.00  0.01  0.0)   //  2
+    (-0.03  0.01  0.0)   //  3
+    ( 0.20  0.00  0.0)   //  4
+    ( 0.20  0.01  0.0)   //  5
+    ( 0.00 -0.01  0.0)   //  6  (step foot)
+    ( 0.20 -0.01  0.0)   //  7
+    // z = W plane
+    (-0.03  0.00  0.04)  //  8
+    ( 0.00  0.00  0.04)  //  9
+    ( 0.00  0.01  0.04)  // 10
+    (-0.03  0.01  0.04)  // 11
+    ( 0.20  0.00  0.04)  // 12
+    ( 0.20  0.01  0.04)  // 13
+    ( 0.00 -0.01  0.04)  // 14
+    ( 0.20 -0.01  0.04)  // 15
+);
+
+// Two-sided wall-normal grading (fine at both ends of each 0.01 m band): fine near the walls and
+// near the y = 0 shear layer shed from the step lip.
+yGrade ((0.5 0.5 4)(0.5 0.5 0.25));
+// Mild two-sided spanwise grading toward the side walls.
+zGrade ((0.5 0.5 2)(0.5 0.5 0.5));
+
+blocks
+(
+    // Block 0 -- inlet channel, x[-Lup,0] y[0,Hin]
+    hex (0 1 2 3 8 9 10 11) ($NxUp $Ny $Nz) simpleGrading (1 $yGrade $zGrade)
+    // Block 1 -- downstream upper, x[0,Ldn] y[0,Hin]; streamwise cells grow away from the step
+    hex (1 4 5 2 9 12 13 10) ($NxDn $Ny $Nz) simpleGrading (8 $yGrade $zGrade)
+    // Block 2 -- downstream lower (below the step), x[0,Ldn] y[-h,0]
+    hex (6 7 4 1 14 15 12 9) ($NxDn $Ny $Nz) simpleGrading (8 $yGrade $zGrade)
+);
+
+edges
+(
+);
+
+boundary
+(
+    inlet
+    {
+        type patch;
+        faces
+        (
+            (0 3 11 8)
+        );
+    }
+    outlet
+    {
+        type patch;
+        faces
+        (
+            (4 5 13 12)   // downstream upper
+            (7 4 12 15)   // downstream lower
+        );
+    }
+    upperWall
+    {
+        type wall;
+        faces
+        (
+            (3 2 10 11)   // inlet block top
+            (2 5 13 10)   // downstream block top
+        );
+    }
+    lowerWall
+    {
+        type wall;
+        faces
+        (
+            (0 1 9 8)     // upstream floor (y = 0)
+            (1 6 14 9)    // vertical step face (x = 0, y[-h,0])
+            (6 7 15 14)   // downstream floor (y = -h)
+        );
+    }
+    sideWalls
+    {
+        type wall;
+        faces
+        (
+            // z = 0 faces
+            (0 1 2 3)     // inlet block
+            (1 4 5 2)     // downstream upper
+            (6 7 4 1)     // downstream lower
+            // z = W faces
+            (8 11 10 9)   // inlet block
+            (9 10 13 12)  // downstream upper
+            (14 9 12 15)  // downstream lower
+        );
+    }
+);
+
+// ************************************************************************* //

@@ -35,11 +35,24 @@ Governed by the root `CLAUDE.md` Engineering Principles.
 - **`linear.py` — BUILT.** `solve_linear(matvec, b, solver, preconditioner=None)` is a
   matrix-free wrapper over `lineax` (default restarted GMRES); `lineax` supplies the
   **implicit-diff of the linear solve** (the Krylov loop is not taped). This is the load-bearing
-  adjoint primitive. The optional **left preconditioner** `M` (a matvec ≈ `A⁻¹`) hands the solver
-  `M∘A` and `Mb`; since the caller `stop_gradient`s `M`'s coefficients, it changes only Krylov
-  convergence, not the solution or its gradient — **verified transparent** in
-  `test_preconditioning.py` (solution and gradient identical with/without `M`). This is the seam
-  the **outer block preconditioner** (below) attaches to.
+  adjoint primitive. The optional **preconditioner** `M` (a matvec ≈ `A⁻¹`) is applied on a
+  caller-chosen side (`preconditioner_side`, default **right**); since the caller `stop_gradient`s
+  `M`'s coefficients, it changes only Krylov convergence, not the solution or its gradient —
+  **verified transparent** in `test_preconditioning.py` (solution and gradient identical with/without
+  `M`). This is the seam the **outer block preconditioner** (below) attaches to.
+  - **The side is a real numerical choice, and forcing one broke a solve — keep both (binding).**
+    **Right** (`A∘M` and `b`, recover `x = M y`) stops on the **true** residual `‖A x − b‖`, so a
+    **weak** `M` cannot falsely report convergence — the honest stop on the shifted coupled saddle at
+    low pseudo-transient shift (where the single V-cycle degrades as β falls), and the default. **Left**
+    (`M∘A` and `M b`) stops on the **preconditioned** residual `‖M(A x − b)‖`, the right measure when
+    `M` is a **strong** inverse of a well-behaved SPD operator: on a wall-resolved mesh the near-wall
+    anisotropy makes `potential_flow`'s Laplacian condition ~1e6–1e10, where the multigrid drives `‖M r‖`
+    to tolerance but the **true** residual cannot in `max_steps` — so a right-preconditioned solve there
+    exhausts the Krylov budget and raises. Making the solve *universally* right (the honesty fix for the
+    saddle) therefore broke `potential_flow` (its `newton_step` now passes `preconditioner_side="left"`);
+    the converged solution is identical either way — only which regime converges in a bounded step count
+    differs. Threaded `solve_linear` → `newton_correction`/`newton_step`. Pinned by
+    `test_initialization.py::test_potential_flow_survives_a_wall_resolved_aspect_ratio`.
   - **`solve_linear` returns `(x, cycles)` — there is ONE linear-solve entry point, not a counted/
     uncounted pair (binding, do not re-split).** A caller that only wants the answer writes
     `x, _ = solve_linear(...)`. A `solve_linear_counted` sibling existed briefly and was **deleted**: it
@@ -128,8 +141,62 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     (no re-derived assembly): `block_stencil_colouring(owner, nb, n, reach)` (pure NumPy — the cell-block
     pattern at a stencil `reach` and a collision-free CPR colouring, the conflict graph is the pattern
     squared) then `materialize_block_jacobian(matvec, colouring, n_fields)` (one `jax.jvp` per
-    colour×field). `jacobian_relative_error` guards that `reach` covers the stencil (coupled RANS reaches
-    distance **3**). Field-major DOF layout `(cell i, field f) = f·n + i`.
+    colour×field — e.g. 112 colours × 6 fields = **~670 probes** on the 23k-cell reach-3 `bfs3d` mesh, NOT
+    ~240). `jacobian_relative_error` guards that `reach` covers the stencil (coupled RANS reaches distance
+    **3**). Field-major DOF layout `(cell i, field f) = f·n + i`.
+    - **Materialize efficiency — two shipped speedups, both AMG-path-only, bit-identical (BUILT).** The
+      probe dominates a refresh, so `materialize_block_jacobian` takes two optional accelerators the AMG
+      preconditioner passes (LU/ILUT keep the plain loop, which any NumPy matvec supports). **(1) Batched
+      probing** — `batched_matvec` (a `jax.vmap` of the jvp, **built once and reused** so it compiles a
+      single time; `probe_batch_size` chunks it for memory) runs the coloured probes as a few fused passes
+      instead of a Python loop of separate calls. Measured 22.4→14.0 s (~1.6×) on `bfs3d` — modest because
+      CPU forward-AD does not vectorize across the batch like a GPU (the win is dispatch amortization). For
+      the SAME reason the chunk is kept **small** (`_PROBE_BATCH_SIZE = 4`, not 16): a larger batch holds
+      more simultaneous forward-AD tapes for almost no time gain — measured chunk 16 vs 4 was ~33 s vs ~36 s
+      but ~2.2 GB vs ~0.7 GB of transient peak, and on a memory-bounded box (the refresh re-materializes
+      every few steps) that peak is what tips a long march into swap/OOM. Four keeps the dispatch
+      amortization at a third of the peak; the materialize itself frees cleanly (no cross-refresh growth).
+      **(2) Gather de-compression** — `block_stencil_gather_map(colouring, n_fields)` precomputes, once, the
+      **fixed full-pattern** CSR structure + a flat `gather_map`, so de-compression is one vectorized
+      `data = responses.ravel()[gather_map]` (no scatter loop, no per-materialize CSR re-sort) passed as
+      `structure=`. The **full** pattern (no `eliminate_zeros`) is the fixed mesh distance-3 colouring graph
+      — a superset of the Jacobian's live nonzeros at *any* state — so the structure stays fixed
+      cold→developed and no entry is ever dropped as values change: a guaranteed-fixed structure the in-place
+      GAMG refactor needs. On `bfs3d` the full pattern is ~47.2M positions, but that is a **structural
+      over-estimate**, mostly explicit zeros at every state — LIVE nnz is ~constant (**38.7M cold / 39.0M
+      developed**; there is *no* cold→developed nnz collapse — an earlier "47.2M cold → 39.0M developed"
+      reading conflated the fixed pattern with live nnz). The explicit zeros are harmless to aggregation —
+      strength-of-connection ignores a zero coupling — but they are why an incomplete/complete factorization
+      can't use this path: an explicit zero is fill. De-compression 22.4→11.2 s (2.0× vs
+      loop); full build (materialize + GAMG) only 56.0→54.2 s (**1.03×** — GAMG-dominated), so the gather's
+      real value is the fixed-structure invariant, not the wall-clock.
+    - **Probe REACH is a preconditioner choice — reach-2 is NOT a safe drop-in (measured, SHELVED — a
+      GENUINE failure, not a build artifact).** The materialized `J` is only the preconditioner's operator
+      (the solve matvec is always the exact matrix-free jvp), so a lower `stencil_reach` gives an approximate
+      PC. On the orthogonal `bfs3d` mesh reach-2 is numerically near-*exact* at *every* state
+      (‖A2−A3‖_F/‖A3‖ = 6e-6 cold, ~1e-15 developed — the dropped distance-3 shell is negligible; swapping
+      Corrected→Compact Green-Gauss leaves it bit-identical, so the non-orthogonal skew correction
+      contributes ~0 here) and ~2.2× cheaper to probe (60 vs 112 colours, ~half the nnz). **Yet GAMG(reach-2)
+      DIVERGES as a preconditioner** (true residual 1e3–1e8) at cold AND developed, on its own operator, with
+      a verified-correct build — so it is genuine, not a build/scaling bug. **The cause is the ILU(1)
+      smoother, whose fill is PATTERN-dependent (a symbolic/graph operation), not value-dependent:** halving
+      the graph gives a structurally weaker incomplete factorization that is non-convergent on the indefinite
+      saddle. The ≤6e-6 magnitude argument bounds only the value-based *aggregation* (consistent
+      reach-2↔reach-3); it does not touch the smoother. Proof: padding reach-2's values onto the reach-3
+      *positions* (distance-3 shell as ~1e-30 explicit zeros) recovers reach-3 convergence **bit-identically**
+      (32 matvecs) — so the distance-3 *positions* are causal, their values are not. **This is why the full
+      reach-3 pattern with explicit zeros is REQUIRED for smoother convergence (not merely a
+      structure-invariance nicety), and why you must not lower the default reach.** Recovery is not cheap:
+      `smoother_sweeps=3` / ILU(2) still diverge *and* erase the setup win; restoring the reach-3 pattern
+      converges but forfeits the GAMG-setup half of the economy (the larger half — refresh is
+      setup-dominated), leaving only the marginal probe-colour saving. The one open lever is a fundamentally
+      different smoother that tolerates the sparser graph (a smoother-design task). On a genuinely SKEWED mesh
+      reach-2 would additionally be *lossy* (the non-orthogonal ring pushes real content to distance-3) — a
+      second reason to keep reach-3.
+      **One correction worth carrying, because it was believed for a while:** an apparent "47.2M → 39M
+      nnz decay" in the pattern was a conflation of a *pattern* count with a *live* count — the live
+      Jacobian holds ~38.7–39.0M nnz throughout, roughly constant. The reach-3 requirement above rests on
+      the padding experiment, which is sound; it does not rest on any decay.
   - **`ilut_preconditioner.py` — `MonolithicIlutPreconditioner`.** Built off the jit path (`scipy.spilu`);
     a **host** object, so it is **not** an `equinox.Module` — it rides as a static field and is applied
     inside the jitted Krylov solve through `jax.pure_callback` (`.matvec()` / `.matvec(transpose=True)`).
@@ -169,9 +236,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     re-factor *leads* the staleness. Pinned by `test_refresh_in_place_repreconditions_the_same_compiled_matvec`
     (unit) and `test_ilut_refreshing_continuation_refreshes_the_same_step_in_place` (integration).
   - **Scope / follow-ups (MVP).** The heavy fill (~7–14× the operator's nonzeros) is affordable at 2D /
-    moderate mesh sizes but is the weak point at large 3D — an **ILUT-as-multigrid-smoother** variant is
-    the parked scaling path (the naive monolithic V-cycle's coarse-grid correction destabilizes on the
-    indefinite saddle, so it is real research, not a quick add). The coupled builder still assembles the
+    moderate mesh sizes but is the weak point at large 3D — the **monolithic AMG V-cycle**
+    (`amg_preconditioner.py`, below) is the built scaling path (its direct-LU coarse solve is what tames the
+    naive monolithic V-cycle's coarse-grid-correction instability on the indefinite saddle). The coupled builder still assembles the
     unused block AMG as the `a_P` source — a lightweight shift-diagonal-only policy would remove that. The
     coupled integration (`coupled_ilut_continuation`) lives in `.claude/rules/turbulence.md`.
 - **Monolithic COMPLETE-LU preconditioner — BUILT (`lu_preconditioner.py`), the preferred 2D/moderate
@@ -225,6 +292,181 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     β-tracking `lu_beta_tracking_refresh`) live in `.claude/rules/turbulence.md`;** they share the
     `MonolithicFactorShiftPolicy` and the `_monolithic_factor_step` builder tail with the ILUT (one
     implementation, parameterized by the factorization).
+- **Monolithic ALGEBRAIC-MULTIGRID preconditioner — BUILT (`amg_preconditioner.py`), the coupled PC for
+  large 3D.** The third member of the family: instead of factoring the assembled coupled Jacobian it applies
+  **one smoothed-aggregation multigrid V-cycle** (`MonolithicAmgPreconditioner`, PETSc `PCGAMG`) whose only
+  exact solve is a **direct LU on the small coarsest grid**, so the heavy fill never lives on the fine grid.
+  This is the answer to both factorizations' 3D wall: the complete LU's fill OOMs (`O(n^{4/3})`), and the
+  threshold-ILU's `spilu` is *prohibitively slow to build* on a distance-3 3D coupled Jacobian — measured on
+  the 23k-cell `bfs3d` case the assembled Jacobian is **38.7M nnz (~280/row)** and a single `spilu` at
+  `fill_factor=30` ran **>7.5 min and never finished** (RSS <2 GB — the 3D wall here is *time*, not memory,
+  and the earlier "~11 min XLA compile" reading was a CPU-contention artifact; on idle CPU the probe compile
+  is fast and `spilu` dominates). The V-cycle instead **builds in ~seconds with bounded memory** and scales.
+  - **The V-cycle is a fixed LINEAR operator (one `pc.apply`, not an inner Krylov solve), so it is a
+    drop-in for the same callback-matvec interface as the ILUT/LU and — being linear and transposable —
+    serves the adjoint's transpose solve through the multigrid's own transpose (`pc.applyTranspose`), with
+    no flexible outer Krylov.** It preconditions the **equilibrated, cell-major** matrix via the shared
+    `equilibrate_cell_major` (extracted from `factorize_ilut` into `ilut_preconditioner.py`, now the one
+    home for the sqrt-diagonal equilibration + cell-major reorder both the ILUT and the V-cycle need); the
+    `Mat` block size is `n_fields` so GAMG aggregates cell-blocks. Host object, applied via `pure_callback`,
+    riding as a static field; `build`/`refresh_in_place`/`matvec` identical to the ILUT/LU, so it plugs into
+    `MonolithicFactorShiftPolicy` unchanged. **It is the one family member that needs `petsc4py`** (no
+    pure-SciPy AMG fallback); the module lazily imports PETSc and raises a clear install hint otherwise.
+  - **⚠️ SUPERSEDED BELOW — "ILU(0) stalls" is a HIGH-β measurement and does NOT hold at low β.** The
+    original comparison was made near the OpenFOAM-converged state at a *large* shift, where the operator
+    is diagonally dominant and extra fill is harmless. At the low shifts the march's tail actually runs
+    at, the ranking **inverts**: ILU(1) breaks down and ILU(0) is the one that converges. See
+    *"Zero-fill is the low-β smoother"* below, which is the current default-setting evidence. Read the
+    two together: neither is wrong, they are measurements at opposite ends of the β range, and the march
+    lives at the low end.
+  - **The smoother is the research variable, and the first measured MVP config was a STATIONARY ILU(1) level
+    smoother (`richardson`) + direct-LU coarse.** Measured on the `bfs3d` shifted coupled Jacobian
+    (true 2-norm residual, `KSP_NORM_UNPRECONDITIONED`, at 2 sweeps): plain GMRES + stationary **ILU(1)**
+    reaches **1e-8 in 21 iterations**; **ILU(0) stalls** ~2e-4 and **SOR diverges**. A Krylov-accelerated
+    (GMRES) smoother is a few iterations *faster* (12–18 via FGMRES) but makes the V-cycle **nonlinear** — it
+    needs flexible GMRES and has no clean transpose, so it is a deferred forward-only optimization, **not** the
+    adjoint path. The MVP forward solver is `_COUPLED_AMG_FORWARD_SOLVER` (restart-15, vs the ILUT's
+    restart-10: the V-cycle is a weaker approximate inverse so the loose inexact-Newton solve needs a couple
+    dozen vectors, not a handful).
+  - **Per-step cost tuning (measured): `smoother_sweeps=2` default and the forward restart 15 (from 40).**
+    The restart-15 forward loop stops as soon as the ~1% inexact-Newton tolerance is met instead of running
+    out a 40-vector subspace (the dominant per-step saving). The **smoother-sweeps knob is the second lever,
+    and more is better on this saddle**: the outer Krylov cost is governed by the *smoother work* per V-cycle,
+    and adding a second incomplete-LU Richardson sweep — one extra cheap triangular back-solve — roughly
+    quarters the outer iteration count on the low-shift operator the march's tail runs at (measured on the
+    `bfs3d` coupled Jacobian to a 1% stop: 211→54 outer cycles at a low shift, ~2.1× the whole solve there;
+    ~10% at a high shift, where the operator is already diagonally dominant). Each outer iteration pays a full
+    Jacobian-vector product (and, on the JAX-side `lineax` path, a `pure_callback` into PETSc), so trading one
+    cheap extra sweep for far fewer outer iterations is a large net win — `sweeps=2` is the sweet spot
+    (`sweeps=3` helps a little more at low shift but costs at high shift). Adding *fill* to the smoother
+    (`smoother_fill_levels`) instead would cut iterations too, but it is the expensive incomplete-factorization
+    build the ILUT hits in three dimensions; sweeps add smoother work without that build cost, and the
+    coarsening choice (selective vs smoothed-aggregation) is a minor knob by comparison. The `bfs3d` coupled
+    solve reaches ~24–30 min total against OpenFOAM's ~15 min. An **experimental, opt-in native-PETSc forward path**
+    (`coupled_amg_continuation(native_forward_solve=True)`) is a far larger per-step lever — a native KSP
+    whose shell matvec calls the eager JAX jvp (true Newton), 1 native GMRES iteration vs the JAX-side
+    lineax path's ~90 on the identical system — but it currently under-converges the *march* (the lineax
+    path over-solves each step to ~machine zero and the pseudo-transient globalization leans on those
+    near-exact steps; the native honest-tolerance step descends slower and overruns the step budget), so it
+    stays off by default. The follow-up to make it the default is a **β-tracking GAMG refresh** (the AMG
+    analogue of `lu_beta_tracking_refresh`), so the frozen V-cycle matches the ramping β and the native
+    solve stays accurate at low β.
+  - **`coarse_eq_limit` — grow the coarsest-grid direct LU (BUILT).** GAMG's default coarsens to a tiny
+    (~50-equation) coarse grid, whose direct LU captures only the crudest global mode; the indefinite
+    saddle's wall is exactly that global pressure coupling. `build_amg_vcycle(coarse_eq_limit=K)` /
+    `coupled_amg_continuation(coarse_eq_limit=K)` (default `None` = PETSc's ~50, byte-identical) stops
+    coarsening at `K` equations so the coarse LU inverts more of the global coupling **exactly** — a
+    stronger V-cycle *and* transpose V-cycle (so the adjoint benefits). Measured on the `bfs3d` hard state
+    (honest right-PC cycles to 1e-6): **baseline ~50 → 652 cycles at β=0.5, `K=2000` → 24 (~27×)**, and it
+    **saturates by ~2000** (`K=8000` identical), at negligible extra build cost (the 2000-eq coarse LU is
+    trivial against the materialize). The `bfs3d` combo-sweep. *(A `cycle_type` V/W knob was tried and
+    **dropped**: the W-cycle came back byte-identical to V — GAMG did not honour `pc_mg_cycle_type` here —
+    and `coarse_eq_limit` dominates regardless.)*
+  - **Zero-fill is the low-β smoother: ILU(0), 4 sweeps, `coarse_eq_limit=2000`, PC-only `beta_floor`
+    (the validated bundle).** The shifted operator is `J + β d`; as the march's shift falls the diagonal
+    weakens and the factorization, not the coarse space, is what fails first. Measured on the `bfs3d`
+    coupled Jacobian at **adjoint-grade rtol 1e-8 on the TRUE residual**:
+
+    | β | ILU(1) (was default) | ILU(0) |
+    |---|---|---|
+    | 0.10 | converges | 30 its |
+    | 0.05 | converges | 51 its |
+    | 0.02 | **DIVERGES** (534 its, true rel. 3.7) | 97 its |
+
+    **Ground truth, not inference:** a pivot census of both factorizations at β=0.02 found **303 negative
+    pivots in ILU(1)** (min 6.2e-4) and **zero** in ILU(0) (min pivot 0.29–0.36 at every β tested). The
+    *fill* is what destroys the factorization — dropping it is not an approximation here, it is the fix.
+    The worst pivots sit in **velocity rows, not pressure rows**, which is why "the pressure block is the
+    problem" intuitions kept failing. ILU(0) is also **3–4× cheaper to build**. This is consistent with the
+    literature: every saddle-point-AMG ILU smoother in the published work we surveyed is **zero-fill**
+    (ILUC0 / DILU); the ILU(1) default was ours alone.
+
+    The bundle members were each measured alone and then together on the same state:
+    - `smoother_fill_levels=0` — the table above.
+    - `smoother_sweeps=4` — ILU(0) is a *weaker* smoother than ILU(1), so extra sweeps pay more than they
+      did for ILU(1): 390 → 69 its at β=0.01. (This is why the `sweeps=2` sweet spot recorded above does
+      not carry over: it was tuned against ILU(1).)
+    - `coarse_eq_limit=2000` — `None` **stalls at every low β** (552 its, true rel. 1.3–67). Not optional.
+    - **PC-only `beta_floor=0.05`** — the V-cycle is built at `max(β, 0.05)` while the march still solves
+      at its own β: 43/69/95 → 29/45/47 its at β = 0.02/0.01/0.005. The *operator* is untouched, so the
+      converged root and the adjoint are unchanged and the mismatch saturates at `beta_floor·d` rather than
+      growing as β → 0. Flooring the k/ω rows *alone* hurt; flooring all rows was best.
+
+    **`alpha_u` and a velocity-row `beta_floor` are the same knob.** A velocity under-relaxation `α_u=0.95`
+    adds `(1−α_u)/α_u = 0.0526` of the diagonal — a β-equivalent of ~0.05 applied to the velocity rows only.
+    Worth knowing before adding a second spelling of it: prefer the floor, which is explicit about being
+    preconditioner-only.
+
+    **Validated on a real march, not just a frozen state:** the 3-rung Reynolds-continuation `bfs3d` march
+    ran to the target Reynolds number on this bundle — 62 steps, 883 raw cycles, ~77 min, no breakdown,
+    with β reaching **0.0077** at 6–11 cycles per solve, well past the 0.02 where ILU(1) diverged.
+  - **β-diagonal split — track β without re-materializing the Jacobian (BUILT).** The operator is
+    `J(φ) + β d`, and the shift `β d` touches only the **diagonal**, so a β-tracking refresh does **not**
+    need the coloured-probe materialization of `J` (the dominant refresh cost — hundreds of jvps).
+    `MonolithicAmgPreconditioner.refresh_shift_in_place(shift)` reuses the **cached** Jacobian (stored at
+    the last `build` / `refresh_in_place`), re-adds the new `β d` diagonal (`O(nnz)` numpy) and re-factors.
+    Measured on the `bfs3d` hard state: **full `refresh_in_place` 36 s vs shift-only 18 s (2×)** — the 18 s
+    saved is the materialize, the remaining 18 s the equilibrate + GAMG refactor. The frozen `J` does not
+    track *state* drift, so the full materialize is **gated** (`_materialize_gate`, mirroring
+    `_staleness_beta_gate`): `amg_beta_tracking_refresh(materialize_drift=τ, materialize_every=K)` does the
+    cheap shift-only refresh in between and a full materialize when the ν_t drift since the last one exceeds
+    `τ` OR after `K` steps (both `None` = full every refresh, unchanged). Prefer `materialize_drift` (the
+    honest state-staleness signal via `eddy_viscosity_drift`) with a large `K` as the safety cap — the fixed
+    step count was the "fixed cadence" antipattern. **Measured caveat: a *fresh* Jacobian is worth its cost
+    on a fast-developing flow** — driving the materialize *more* often (via a tight `τ`) cut the march's
+    Krylov cycles ~23 % (fewer/cheaper steps) despite more refresh, so under-materializing was costing more
+    in solve than the materialize saves; the lever is a *cheaper* materialize (batched probe + gather
+    de-compression above), not a rarer one. Forward-march only. Pinned by `test_amg_refresh_shift_in_place_*`
+    (`test_amg_preconditioner.py`) and `test_materialize_gate_*` / `test_batched_probing_*` /
+    `test_gather_de_compression_*`.
+  - **⚠️ MEASUREMENT DISCIPLINE FOR PRECONDITIONER PROBES (binding — every one of these produced a wrong
+    verdict that had to be retracted).** Judge a candidate preconditioner **only** by running it through
+    GMRES and reading the **true** residual `‖Ax−b‖`. Four cheaper-looking gates are all invalid on this
+    indefinite saddle:
+    1. **The preconditioned residual `‖Mr‖`.** PETSc's default convergence norm. SOR/Krylov-smoothing
+       report `reason=2` (converged) at a **true** residual of 1.0. Force `KSP_NORM_UNPRECONDITIONED`.
+       A level-ILU "win" was once entirely this artifact.
+    2. **One-apply contraction `‖M A x − x‖ / ‖x‖ < 1`.** Rejected a candidate on this; it is not a
+       convergence criterion for a *Krylov-accelerated* preconditioner. Counter-example from our own
+       data: ILU(0) at β=0.02 has a one-apply contraction of **4.5** and still converges in 97 matvecs.
+    3. **The spectral radius of the iteration operator.** The largest eigenmode of a smoothed operator is
+       the *smooth* mode — which is the coarse grid's job, not the smoother's. A "ρ = 9e4, diverges"
+       reading nearly killed a Vanka smoother that had never actually been run through GMRES.
+    4. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
+       Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
+       `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks
+       plausible — two probes were invalidated this way. (`equilibrate_cell_major` reorders internally, so
+       *after* that reorder `field = row % n_fields`. Know which side of it you are on.)
+  - **⚠️ LOW-β DIRECTIONS ALREADY MEASURED OUT — do not re-litigate without new evidence.** The low-shift
+    wall on the 3D coupled saddle has absorbed a lot of probing. What is settled:
+    - **Turbulence decoupling ("just lag ω") — REFUTED.** A true-residual arm comparison found
+      block-diagonal `(u,v,w,p) ⊕ exact(k,ω)` to be the **worst** arm tested: the flow–turbulence coupling
+      is load-bearing in the preconditioner, not a nuisance to be segregated away.
+    - **A pre-AMG SIMPLE-type transform of the matrix — DEAD.** The published "SIMPLE preconditioning" for
+      monolithic coupled AMG *is* Rhie–Chow interpolation; our residual already assembles that matrix, so
+      there is no transform left to apply. (Established by reading the primary sources in full, not from
+      abstracts.)
+    - **PC-only pressure-Poisson augmentation — NO-GO, triple-confirmed.** The `(p,p)` block is *already*
+      0.71× the SIMPLE-Schur elliptic operator, and the augmentation degraded cycles ~2.7×.
+    - **`coarse_eq_limit` beyond ~2000 — inert.** `K=8000` is identical to `K=2000`.
+    - **Additive Vanka + Richardson — invalid by construction** (Richardson on an indefinite saddle).
+      A *Krylov*-Vanka smoother, which is genuinely strong and stable, still stalls the true residual at
+      5–6e-2 at every β and is insensitive to the inner count (4 vs 8) — which points at the **coarse
+      space**, not the smoother, as the remaining wall. Note the smoother-vs-coarse-space split is only
+      established for the *2-level* GAMG hierarchy we run.
+    - **Where the V-cycle actually under-performs:** per-field, pressure is *well* smoothed and **ω** is
+      the unsmoothed field (by ~700–1300×), then `u`. If a per-field lever is wanted in 3D, ω is it —
+      pressure is not.
+    - **The Jacobian's fill is irreducible.** The coupled `(u,p)` Jacobian is intrinsically **distance-2**
+      (~38 nnz/row) because Rhie–Chow damping couples pressure to the neighbour-of-neighbour ring; the
+      advection scheme is irrelevant to this. A distance-1 preconditioner pattern is not available for a
+      second-order collocated Rhie–Chow discretization, so "make the PC pattern local" is not a lever.
+  - **Coupled builder `coupled_amg_continuation`** (`.claude/rules/turbulence.md`) shares
+    `MonolithicFactorShiftPolicy` + `_monolithic_factor_step` with the ILUT/LU. Verified: converges to the
+    block PC's fixed point AND passes the **coupled-adjoint FD gate** (the transpose V-cycle serves the
+    gradient), `tests/integration/test_coupled_amg.py`; V-cycle mechanics in `tests/unit/test_amg_preconditioner.py`.
+    Follow-ups: a refreshing/β-tracking variant (the frozen build serves the forward + adjoint; a developing
+    3D march would want the refresh), and the FGMRES forward optimization.
 - **Forward globalization is ONE injected strategy — `forward_step: ForwardStep`.** The forward
   Newton loop has a single point of variation: `ImplicitNewtonSolver` takes one `forward_step`
   implementing the `ForwardStep` protocol (`stepper()` → the per-step
@@ -903,6 +1145,17 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         shifted step (the pseudo-transient attempt, minus the escalation ladder the inner loop replaces).
         β still vanishes at the root, so the IFT adjoint is unchanged — pinned by
         `tests/unit/test_dual_time.py` (converges, exact gradient, **iteration-count-independent**).
+        **Inner-loop observability — `DualTimeStep.inner_observer` (opt-in, shipped).** The outer
+        `StepReport` only summarizes the inner loop (the inner *count* and the *summed* solve cycles),
+        which conflates the two costs and hides the inner `‖G‖` trajectory. `inner_observer` is a
+        `(inner_index, ‖G‖_before, ‖G‖_after, cycles, alpha) -> None` hook called **once per inner
+        iteration** via `jax.debug.callback` — so it surfaces exactly how many inner iterations ran, each
+        inner solve's cycle count, its `‖G‖` reduction and line-search factor. It is forward-only and
+        transform-transparent (a no-op under `jax.grad`); `None` (default) elides the call at trace time,
+        leaving the step **byte-identical** (do not set it on a differentiated solve). Threaded through
+        `coupled_continuation` / `coupled_amg_continuation` / `coupled_ilut_continuation` /
+        `coupled_lu_continuation`, so a profiling march can pass one straight through. Pinned by
+        `test_dual_time_inner_observer_surfaces_the_trajectory_without_changing_the_step`.
         `DualTimeControl` is the Courant β-ramp (grow the pseudo-timestep while the inner α = 1, shrink
         when it clips), a `StepControl` on the eager march, sibling to `AlphaTargetingControl`. The step's
         reported α is the **min** inner line-search factor, and an inner step that fails to reduce ‖G‖
@@ -1325,7 +1578,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       (`coupled_scaled_norm`), NOT the Euclidean ‖R‖.** The Euclidean coupled residual is `ω`-dominated
       and *mis-ranks* states (a converged field scores worse than a badly wrong one — the warning above);
       `RowScaledNorm` divides each row by its own diagonal and each block by its field magnitude, so every
-      equation is judged comparably. `coupled_continuation` / `coupled_ilut_continuation` build it by
+      equation is judged comparably. **`per_block` is that measure's reporting view and `__call__` is
+      literally `norm(per_block(r))`** — one formula, so the per-equation grid in the march log cannot
+      describe a convergence history the march never had. `coupled_continuation` / `coupled_ilut_continuation` build it by
       default; `block_scaled_norm=True` selects the coarser one-scale-per-block `BlockScaledNorm`
       (`_coupled_residual_norm`), and `residual_norm=jnp.linalg.norm` recovers Euclidean.
       (`mass_flow_coupled_continuation` still defaults to Euclidean pending a constraint-aware variant.)
@@ -1569,6 +1824,95 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     (`test_march_retries_a_diverged_step_with_the_tighter_solver`, `test_march_does_not_retry_a_finite_step`).
     On 2D the exact LU is cheaper *and* robust for free, so this is really a 3D-readiness lever (where the
     LU's fill is the wall and the ILUT is the only option).
+  - **Reactive β-escalation bailout — `retry_on_cycles` ESCALATES β for a bad step, tried BEFORE the tight
+    divergence retry (BUILT).** A step goes bad two ways — a *finite-but-expensive* solve (count `> N`) or a
+    *non-finite* one — and on the stiff low-β saddle **both have the same cheap cure: more damping.** A
+    larger β lifts the correction out of the NaN regime *and* cuts the cycle count (a stronger pseudo-time
+    shift makes the same frozen preconditioner more diagonally dominant), and it is far cheaper than the
+    tight-Krylov divergence retry. So `forward_march(retry_on_cycles=N, retry_beta_factor=2.0,
+    retry_cycles_limit=2)` redoes a step whose count exceeds `N` **or** that diverged (non-finite / over
+    `retry_divergence_cap`) **from the same pre-step state** with β escalated (`×retry_beta_factor`,
+    re-applying `precondition_step` at the new β so a β-tracking refresh re-shifts), up to
+    `retry_cycles_limit` times or until it converges/drops below `N`. It reads β off
+    `active_step.relaxation_schedule.beta` (a `ConstantRelaxation` / `DualTimeStep`), so it requires a
+    readable β and is inert on the default switched-evolution schedule. `retry_on_cycles=None` (default) is
+    **byte-identical** (and a diverged step then falls straight to `retry_solver`, the pre-reorder
+    behaviour). Forward-only; threaded through `solve_coupled(retry_on_cycles=…)`. Pinned by
+    `test_forward_march.py` (`test_march_escalates_beta_on_a_cycle_count_spike`,
+    `…_does_not_escalate_below_the_cycle_cap`, `…_escalates_beta_before_the_tight_divergence_retry`,
+    `…_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergence`).
+    - **The escalation must keep `_march_step` a compile-cache HIT (binding — a measured recompile
+      hazard).** The retried step redoes the (coupled, minutes-to-compile) `_march_step` at the escalated
+      β, so a treedef **or aval** change on that step recompiles the whole solve every retry — which on a
+      stiff region that retries most steps is ~half the march wall. β is a dynamic 0-d leaf, so the *value*
+      change is fine; the trap is the leaf's **abstract value**. Escalate by **scaling the existing leaf**
+      (`beta * retry_beta_factor`), never by rebuilding it from a Python float (`jnp.asarray(float(beta) *
+      f)`): the latter yields a *weak*-typed float64 array whose dtype/weak_type need not match the leaf
+      the step control set, and any mismatch is a cache miss. Scaling preserves the aval exactly, so the
+      retried step is a hit for **any** β dtype (weak/strong f64, f32). The shipped controls happen to set
+      weak-f64 (so the old form was accidentally a hit), but that was an unpinned coincidence one JAX
+      weak-type-promotion change from breaking. Pinned by
+      `test_a_forced_escalation_adds_no_march_step_compilations` (a strong-typed β leaf, the case the
+      rebuild recompiled on). Note the `retry_solver` (divergence) fallback is a *separate*, one-off
+      recompile — a distinct solver object (restart-40 vs the forward restart-15) is a genuinely different
+      static key, compiled once and reused; it is not a per-step cost.
+    - **Why escalation leads and `retry_solver` is the FALLBACK (the reorder, measured on `bfs3d`).** The
+      two retries used to run divergence-first: a NaN'd step ran the tight `retry_solver` (a 1e-4 Krylov
+      solve, restart-40) and *then*, seeing its high count, the cycle bailout escalated β. On the 3D march
+      that order was the single worst cost — measured on the cold `bfs3d` cold-continuation, step 28's
+      primary NaN'd (α collapsed), the tight retry ground ~325 matvecs (~40 min) to recover it to finite,
+      and *then* the β-escalation re-damped the same step to a clean ~5-cycle solve — so the entire tight
+      grind was wasted work the escalation superseded. Reordered, the escalation fires first on the NaN,
+      recovers the step cheaply, and the tight `retry_solver` fires only as a **fallback** for a non-finite
+      step escalation could *not* fix — the genuine inexact-ILUT case (loose Krylov → non-finite δ that a
+      tighter Krylov, not more damping, cures), where `retry_on_cycles` is typically `None` anyway so
+      escalation is absent and the divergence retry is the sole, original mechanism.
+    - **This is the PROACTIVE β-mismatch refresh's reactive twin** — the refresh
+      (`amg_beta_tracking_refresh(beta_rel_change=…)`, `.claude/rules/turbulence.md`) re-freezes the PC
+      *before* a solve when β has drifted (the stale-PC cause of a spike); the bailout escalates β *after* a
+      solve reveals a hard operator. **The bailout is REACTIVE by necessity: a Step-0 diagnostic on `bfs3d`
+      (42-step instrumented capture) showed no cheap STATIC operator property predicts a bad step** — the
+      diagonal-dominance defect of the frozen shifted operator does not separate bad from good (the rung-1
+      trio 10/11/12 have near-identical DD but 302 vs 12 matvecs; the hardness is non-monotone in β and
+      refresh-invariant), so a predict-then-avoid β-chooser was refuted and detect-then-react is the honest
+      design. Refresh for staleness, escalate β for stiffness — a cost spike does not distinguish the two on
+      its own, and neither does any static probe of the operator.
+    - **`DualTimeStep(cycle_budget=…)` makes the escalation CHEAP — cap the primary grind, don't run it to
+      completion (BUILT).** The escalation above is reactive-after-the-solve, so its cost is set by how
+      expensive the doomed primary is *before* it returns. The dual-time step runs up to `inner_steps` inner
+      Newton iterations, each a restart-capped GMRES; on a grinding primary every inner ran to the
+      stagnation cap, so the step burned `inner_steps ×` a full stagnation before the escalation could fire
+      (measured ~5× the necessary cost on `bfs3d` — steps 11/25/27 ground ~300 matvecs where one capped
+      inner is ~60). `cycle_budget` stops the inner loop once its *accumulated* Krylov count reaches the
+      budget (`cond` gains `& (cycles < cycle_budget)`, elided at trace time when `None`), so a grinding
+      primary is cut after ~one over-budget inner iteration and the partial iterate is handed to the
+      escalation, which redoes it at a larger β where it converges cheaply. **Pair it with
+      `retry_on_cycles < cycle_budget`** so a capped primary's reported count trips the escalation (else the
+      partial non-converged step would be accepted). Good steps converge well under the budget, so they are
+      byte-identical; only a grinding primary hits it. `cycle_budget=None` (default) is unbounded and
+      byte-identical. Threaded through `coupled_amg_continuation(cycle_budget=…)` (and the shared
+      `_monolithic_factor_step`, so the ILUT/LU steps can take it too); forward-only, like the escalation it
+      feeds. This is Agent C's "small-budget primary + inner abort" realized as an inner-loop cost cap rather
+      than a non-attainment flag threaded through every solve layer — same effect (a doomed primary costs
+      ~`cycle_budget` matvecs, not `inner_steps ×` a stagnation), far smaller blast radius. Pinned by
+      `test_dual_time.py` (`…cycle_budget_caps_the_inner_loop`, `…none_is_the_unbounded_step`).
+    - **The escalated β is CARRIED into the control — so a static β floor can be dropped and the *controller*
+      decides how low is safe (BUILT).** β is inverse to the pseudo-timestep, so a static `beta_min` is a cap
+      on the *largest* timestep the march may take, applied everywhere — which slows convergence in regions
+      that could safely take a bigger step. The escalation is the per-region feedback for "how low is safe
+      *here*": it fires exactly where β went too low. But without carrying it back, the next outer step's
+      `step_control.next_step` recomputes β from the control's own (floor-ward) trajectory and **re-pays the
+      escalation every step** — the observed low-β tail (β pinned at the floor, each step re-escalating). So
+      after an escalation `forward_march` seeds the control's carried β with the escalated value via
+      `step_control.carry_beta(state, β)` (the dual-time controls implement it: `DualTimeControl` carries a
+      bare β, the `…Residual…` controls carry `(β, prev_residual)` and keep the residual so the ratio signal
+      is unbroken). The control then continues its grow/brake dynamics *from* the discovered-safe β, so
+      `beta_min` can be driven toward zero and the controller — with escalation as the safety net and the
+      carry as the memory — finds how large a timestep each region tolerates, rather than a global floor
+      capping it. Only fires when β was actually escalated and the control exposes `carry_beta`; no
+      escalation ⇒ byte-identical. Pinned by `test_forward_march.py`
+      (`…carries_the_escalated_beta_into_the_control`) and `test_step_control.py`
+      (`test_carry_beta_seeds_the_carried_state`).
   - **`CoefficientDriftTrigger` — the PREFERRED staleness trigger: measure the drift, don't infer it
     from cost (binding for new work).** A frozen preconditioner is stale exactly when the operator it
     approximates has moved, so the honest signal is that movement itself. `StepReport.drift` carries a
@@ -1674,11 +2018,226 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     is what keeps a `RefreshTrigger` a pure function that can be replayed offline against a logged march
     — put the state on that seam and a trigger could read the physics, and trigger calibration would cost
     one full solve per candidate instead of one logged run for all of them.
-  - **Reporting seam.** `StepReport(step, cycles, residual_norm, residual_ratio, alpha)` + `MarchResult`,
+  - **Reporting seam.** `StepReport(step, cycles, residual_norm, residual_ratio, alpha, drift,
+    inner_iterations, shift, escalations, diverged_retry)` + `MarchResult`,
     plus an optional streaming `observer` (a long march must not withhold all logging until it finishes).
     The trigger and a future logger consume the identical objects, so there is no second reporting path.
     Per-step observation exists only where the march is eager — the traced `_forward` would need
     `jax.debug.callback`, a separate decision; do not promise per-step reporting on the differentiable path.
+  - **`shift` / `escalations` / `diverged_retry` on the report, and `MarchLogger` (`solve/march_log.py`)
+    — the reporting half of the `on_step` seam (BUILT).** Every driver used to write its own
+    `on_step`/`on_checkpoint` formatter, so the copies drifted and a gap fixed in one persisted in the
+    others; `MarchLogger` owns everything derivable from a `StepReport` and takes an injected
+    `metrics: state -> {name: value}` for the case quantities the solver cannot know (a reattachment
+    length — `compare.reattachment_metrics` is the bfs3d one). `note()` writes an arbitrary line to the
+    log's **own** stream (a driver reaching for `print` alongside it splits the run across two
+    destinations, and a file log then loses whichever lines went to stdout); `phase(label, total)`
+    auto-numbers, so a caller keeps no counter.
+    Three report fields exist because the log could not otherwise carry them. **`shift`** is the `beta`
+    the step was taken at — already read at the construction site for `carry_beta`, and otherwise
+    recovered by every driver wrapping the step control. **`escalations` / `diverged_retry`** record
+    whether the step was redone: `cycles` counts only the **accepted** attempt, so a redone step is
+    indistinguishable from a cheap one, **and a retry mechanism left unconfigured never announces its
+    absence** — which is not hypothetical (a bfs3d march ran with `cycle_budget` set but
+    `retry_on_cycles` at its `None` default, so the beta-escalation never fired and nothing in the log
+    said so; the cap exists to trip that trigger).
+    The logger also reports the **reference norm and the stopping target**: the test is
+    `‖R‖ <= atol + rtol·‖R₀‖`, and the march reports `‖R‖` and `‖R‖/‖R₀‖` but not `‖R₀‖`, so the target
+    was invisible. Pinned by `tests/unit/test_march_log.py` (synthetic reports, no solve).
+  - **Solve cost is reported offset-corrected, split by inner iteration (BUILT).** The raw count is
+    lineax's `num_steps`, which carries **+2 per solve**, so a two-inner step reporting `cycles = 6` did
+    two ideal single-cycle solves — the raw number is *entirely* offset and overstates the work
+    threefold, worst exactly on the cheap near-root steps where the march's economics are decided.
+    `restart_cycles(raw, solves)` in `solve/linear.py` is the one place that offset is stripped;
+    `StepReport.restart_cycles` and `MarchLogger` both call it (it was previously open-coded as
+    `cycles - 2*inner_iterations` on the report, and the logger printed the raw count instead).
+    The step line reports `in` (inner count), `cyc` (corrected total) and `c/in` together, because one
+    summed number conflates *how many* solves the step needed with how hard each was.
+  - **`MarchLogger.on_inner` + `TextTable` (`aquaflux/text_table.py`) — the per-inner table (BUILT).**
+    `DualTimeStep.inner_observer` already emitted `(index, ‖G‖ before, ‖G‖ after, cycles, alpha)` per
+    inner Newton iteration via `jax.debug.callback`; nothing formatted it. `on_inner` matches that
+    signature (`inner_observer=logger.on_inner`) and renders each iteration as a row — its own solve
+    cost and the inner contraction `rate = ‖G‖out/‖G‖in` — inside a ruled table opened at `index == 0`
+    and closed by the step line.
+    Two ordering consequences, both deliberate: the **summary is a footer, not a header**, because the
+    step's outcome is not known until it returns and buffering the block to lead with it would cost the
+    live progress the rows exist to give (the title carries what *is* known — the step number, the
+    elapsed time, and the residual the step inherits); and a **redone step opens a fresh block per
+    attempt**, so the extra blocks are the record of what a retry cost, while the step line still
+    reports only the accepted attempt.
+    `TextTable`/`Column` is a **root leaf** (no package imports, like `vectors.py`) so any subsystem can
+    format a report with it. It is built for streaming — rule, headings, `row` and `spanning` are
+    separate methods each returning one line — which is what lets a table appear in a log being tailed.
+    `rule(title=None, *, fill="-", segmented=True)` draws all three kinds the framed step block needs:
+    the light **segmented** rule that divides one grid, the heavy `fill="="` one that **brackets** a
+    block containing several grids, and the `segmented=False` span for the boundary between two grids
+    that share a width but not a column layout — where a segmented rule would appear to belong to
+    whichever grid its ticks happened to line up with. A step therefore renders as **one framed block**:
+    step row, then the per-equation grid, then the asides **one concern per line** (preconditioner /
+    case metrics / `limit` / `cum`). Run together on a single line those three had to be read in full to
+    find any one of them.
+    An over-wide value **widens its row rather than being truncated**: a cut-off number is a wrong
+    number. Pinned by `tests/unit/test_text_table.py`.
+  - **`StepOutcome` — the forward step's return is a record, not a tuple (BUILT).** It grew to six
+    values (`phi, cycles, alpha, inner_iterations, reached_target, max_inner_cycles, binding_limit`),
+    which is the missing-object smell: a positional tuple is where a consumer silently mis-unpacks one
+    field for another, and every growth broke all five test doubles separately. Three of the fields are
+    there because a march could not otherwise act correctly:
+    - **`reached_target`** — did the step run to its OWN stopping criterion, or was it cut short? A
+      cost-only escalation cannot tell an expensive success from a grind and **discards the success**:
+      measured, an inner loop that reached `‖G‖ = 3.0e-6` against a `1.0e-5` target was thrown away for
+      costing 54 raw cycles, wasting the work *and* replacing it with a shorter step. `forward_march`
+      now escalates only when `cycles > retry_on_cycles` **and not** `reached_target`.
+    - **`max_inner_cycles`** — the offset-corrected cost of the step's most expensive SINGLE solve, and
+      what `retry_on_cycles` now triggers on. A **summed** threshold is not a difficulty signal: it
+      grows with how many times the step solved, so at `retry_on_cycles = 40` a 5-inner step trips at 6
+      corrected cycles per solve and a 1-inner step at 38 — a 6× difference in sensitivity decided by a
+      count that says nothing about conditioning. (Measured impact on one 63-step march: the two
+      triggers agree on 62 steps and disagree on one — the expensive step, which per-inner catches and
+      summed misses. The change is correctness, not speed.) **`cycle_budget` stays SUMMED** and should:
+      it is a cost cap, and total cost is exactly what it caps.
+    - **`binding_limit`** — the step cap where it was the *binding* constraint, else 1. A small `alpha`
+      has two opposite causes (the direction overshot; a constraint stopped it being followed further),
+      so `alpha` alone cannot be acted on or reported honestly.
+  - **Positivity is NOT carried by the shift and the divergence guard (binding — a stated invariant that
+    was wrong).** The direct-scalar path documented positivity as following from the pseudo-transient
+    shift plus the guard. It does not: the guard fires on a *non-finite residual*, and by the time
+    `sqrt` of a negative value has produced one, the state is already poisoned. Measured on `bfs3d`: a
+    march ran 62 healthy steps and died because **two cells out of 23040** took `k` to `-3.3e-4` — every
+    field still finite, all of `u, p, k, omega` moving by ~1e-4, only the derived `nu_t` NaN, because
+    the SST closure takes `sqrt(k)`. The line search had crawled along that boundary for four inner
+    iterations (`alpha` halving `0.008 → 0.001`, residual falling under 1% each) with no way to see it.
+    - **`positive_block_limit(start, stop, tau)` COMPUTES the admissible fraction, it does not search
+      for one** — the fraction-to-the-boundary rule, `alpha_max = tau·min(phi_i / −delta_i)` over
+      decreasing entries. Rejecting violating rungs is **not** sufficient: `alpha` was already at the
+      ladder's shortest rung when the field crossed zero, so there was nothing shorter to fall back to.
+      `backtracking_line_search(max_alpha=…)` caps every rung **including the growth rungs**, and its
+      default is `inf`, **not 1** — a default of 1 silently disables the growth rungs, a regression the
+      growth tests caught.
+    - `turbulence.positive_k_limit(coupled)` returns the limiter for a directly-solved `k` and `None`
+      for a log-solved one (positive by construction there, so a cap would only throttle);
+      `coupled_amg_continuation` wires it automatically.
+    - **The cap is GLOBAL, so one entry near zero throttles the whole step** — a real risk on a field
+      spanning `1e-5` to `4.5`. Measured, it does not bite, because the escape is not the cap: the cap
+      forces `alpha → 0`, `CflResidualDualTimeControl` reads that as "shift too weak" and escalates
+      `beta` `0.5 → 1.0 → 2.0`, and at the larger shift the implicit step is short enough to fit inside
+      the constraint — full `alpha = 1`, residual descending. **The two mechanisms compose without
+      having been designed together**, and the march then converged in 20 steps where two previous runs
+      had died. Do not "fix" the throttling without re-measuring; the globalization already handles it.
+    - Why not a log variable for `k`: `k = 0` is the physical no-slip wall condition, so `log k` is
+      singular exactly where the mesh is finest (recorded and measured in `.claude/rules/turbulence.md`
+      — the full-log form descends then freezes). `log(k+1)` is regular there but bounds `k > −1`, not
+      `k > 0`, so it does **not** prevent this failure. `k = w²` would give both properties at the cost
+      of a vanishing Jacobian scale at the wall.
+  - **`StateCheckpointer` (`solve/checkpoint.py`) — rolling state checkpoints (BUILT).** A march that
+    raises at its last step loses everything: the exception propagates out, so a driver saving only on a
+    successful return has nothing for the hours before. It cost one `bfs3d` run its two converged rungs.
+    Plugs into the same `on_checkpoint` seam, `every` steps, keeping `keep` files. Two properties that
+    matter for a job that may be killed: it **writes to a staging name and renames** (a kill mid-write
+    would otherwise leave a truncated file that still reads as a checkpoint — and with a small `keep`,
+    the only one left), and **retention deletes only paths it wrote**, tracked in a deque rather than by
+    globbing, so it cannot remove another run's state. The default serializer hands `numpy` a *file
+    object*, because `np.savez` appends `.npz` to any path lacking it and would otherwise silently write
+    somewhere other than asked. `combine_observers` fans the single `on_checkpoint` out to logger +
+    checkpointer so a driver does not hand-roll a lambda one of them can be dropped from.
+    **Known defect, not yet fixed:** the checkpointer writes whatever the march reports *including the
+    failed step*, so the newest file can be the poisoned state — and a driver calling it "last good
+    state" is then lying. Skip a non-finite report, or do not claim "good".
+  - **`on_retry(reason, attempt, beta)` — say WHY a step is being redone (BUILT).** `forward_march`
+    calls it immediately before a redo with `"cycles"`, `"diverged"` or `"solver"`. Without it a log
+    shows the same step's work two or three times with nothing between the blocks, and the three
+    triggers call for completely different responses. `MarchLogger.on_retry` writes the explanation
+    between the abandoned attempt's block and the retry's, and numbers the attempt.
+  - **A self-rescaling measure means two "same" residuals are NOT the same number (binding trap).**
+    `forward_march(norm_builder=…)` re-derives the `RowScaledNorm` at the state each outer iteration
+    *begins from* and holds it for that whole iteration. So the `R` reported at the end of step N and
+    the `‖G‖` entering step N+1 measure the **identical state** in **different scales**. Measured over
+    one 62-step `bfs3d` march: they differed on **every** step — up to 2× early on, converging to 1 as
+    the state settled and the scales stopped moving (the convergence-to-1 is the signature that
+    identifies rescaling rather than a state difference; a rung boundary shows a ~2.8e5 jump, since the
+    Reynolds number changed too). Nothing is wrong here, but **never compare two residuals across an
+    outer-iteration boundary** and never print them adjacent — the march log deliberately dropped a
+    "from |R|=…" field from its inner-block title for exactly this reason.
+  - **The step grid stays NARROW; only scan-down quantities get columns (binding).** The step table is
+    `step, t(s), beta, in, cyc, R, a_min, flg` — fixed, ~61 characters, comparable to the nested inner
+    table so the two read as one document. Everything else — the case metrics, the preconditioner
+    branch, the cumulative cycles, the per-field changes — rides in **spanning rows beneath the row it
+    belongs to**. The first version put them all in columns and reached 112 characters with
+    case-dependent column names; at that width, with the heading several rows up, it stopped being a
+    table and became a line of numbers that could not be paired with their labels. **Do not widen the
+    grid to add a quantity** — add an aside line, or a column only if it is worth scanning down the
+    whole run. A row that follows an inner block is re-headed **compactly** (the label row alone, no
+    rules): labelling one row must not cost three lines.
+  - **The step summary is a table row, and the stopping test is stated once (BUILT).** The step line had
+    grown to ~20 free-text `key=value` fields and ~150 characters — unreadable in a tail, and half of it
+    was `‖R₀‖` and the target repeated on every row when both are **constants within a rung**. They now
+    ride in a banner emitted once (and again whenever a continuation rung re-bases `‖R₀‖`), and the
+    per-step values are a `TextTable` row so a quantity can be scanned *down* the run. Headings re-emit
+    every `HEADINGS_EVERY` rows (fewer when the inner table is on, since its blocks push the last
+    headings further up-screen), and the inner block is **indented** under the step row it belongs to.
+  - **No column heading may contain `|` (binding).** `R`, not `‖R‖`; `G in`, not `‖G‖ in`. A heading
+    carrying the grid delimiter makes the log unparseable by any column-splitting tool — not
+    hypothetical: it forced regex workarounds in the analysis scripts written against the first version
+    of this format. Say what the quantity is in the banner or the docstring, not in a heading that
+    breaks the grid.
+  - **`a_min` (step) vs `alpha` (inner) — different quantities, deliberately named apart.** An inner
+    iteration's `alpha` is its own backtracking factor, and it reads **1.0 even when the line search
+    failed to descend** (the non-descent fallback returns the longest finite trial step). The step
+    reports the **minimum over its iterations with any non-descending one folded in as 0**. So
+    `a_min=0.000` beside `alpha=1.000` is a real state — a full step that did not reduce `‖G‖` — not a
+    contradiction. In the inner table **`rate ≥ 1` identifies those iterations exactly**, since the
+    search is monotone.
+  - **Diagnostics are opt-in through one `detail` argument (BUILT).** `MarchLogger(detail=…)` selects
+    from `{"inner", "fields", "residuals", "pc"}`; empty (the default) is the plain one-row-per-step log. They are
+    debugging/profiling instruments — several lines per step — not something a routine run should pay
+    for. **Every hook stays safe to wire regardless** and no-ops when its name is absent, so a driver
+    connects the instrumentation once and switches verbosity with one argument rather than by rewiring
+    (which is how a driver ends up hand-rolling conditional plumbing). An **unknown name raises**: a
+    silently-ignored typo means losing a diagnostic you believed was enabled.
+    - `"fields"` — `MarchLogger(fields=…)` takes a `state -> named arrays` extractor
+      (`turbulence.coupled_fields`) and reports each field's relative change per step via
+      `field_change_metrics`. **The residual says the equations are unsatisfied; this says whether the
+      *solution* still moves** — which a scalar case metric cannot: a mesh-quantized quantity like a
+      reattachment length can sit perfectly still while the fields behind it drift several per cent, so
+      "the metric stopped moving" is partly a statement about the instrument's resolution. The logger
+      builds the (stateful) change measure itself so `detail` alone decides whether it runs — it must be
+      called once per step in order, and a caller passing it directly would invite calling it from a
+      probe and corrupting the sequence. `field_change_metrics` keys its output by the **field's own
+      name** (not a decorated `d<name>/<name>`), so it joins against the per-equation residual below;
+      how a quantity is *labelled* is the report's business, not the measure's. `coupled_fields` returns
+      pressure **gauge-free** (mean removed; incompressible `p` is defined up to a constant unless a
+      boundary pins it), **splits velocity per component** (`u`/`v`/`w`, so each lines up with its own
+      momentum equation — a single vector entry averages them and hides a component that has stopped
+      moving), and includes `ν_t`, which is derived rather than solved but is what the momentum
+      equations actually see.
+    - `"residuals"` — `MarchLogger(residuals=…)` takes a `state -> {equation: residual}` extractor
+      (`turbulence.coupled_residuals`) and reports **the per-equation residual and its step-on-step
+      contraction `rate`** beside each field's relative change, in one grid under the step row. **The
+      scalar residual says the solve stopped improving; only this says which equation stopped it.**
+      The numbers are `RowScaledNorm.per_block` — the very per-block values the march's scalar measure
+      is the Euclidean combination of (`__call__` is now literally `norm(per_block(r))`, one formula),
+      so a row near the total *owns* the residual. Names come from `coupled_equation_names(dim)` —
+      `(u, v, w, p, k, omega)`, the flat layout's block order — the single home shared with
+      `coupled_fields`, so the two grids join. Costs **one extra residual evaluation per logged step**,
+      which is why it is opt-in. **The rows add up to the `R` printed above them, exactly** — pinned at
+      `rel=1e-12`. That requires equilibrating at the **previous** state, not the logged one:
+      `forward_march` re-derives the measure at the state each outer iteration *starts* from and holds
+      it for the whole iteration (every trial step, the acceptance test, and the reported norm), so a
+      step's residual is `norm_at_start(R(state_at_end))`. Scaling at the end state measures the right
+      residual vector in the *wrong* scales and the rows stop adding up. `coupled_residuals` is
+      therefore **stateful and order-dependent** — the same once-per-step-in-order contract
+      `field_change_metrics` already carries — and takes a `reference_state` seed for the first step,
+      which a per-rung reporter must pass (its rung's `seed_state`) or that step alone is scaled at its
+      own end state. `ν_t` has no equation, so it gets a row with `--` in the residual cells rather than
+      an invented number.
+    - `"pc"` — `amg_beta_tracking_refresh(observer=…)` reports which branch a refresh took (`full` /
+      `shift` / `none`) and its wall time; `MarchLogger.on_refresh` renders it on the step it preceded.
+      **This closes a real gap:** which branch ran was previously invisible, so preconditioner behaviour
+      had to be inferred from wall-clock — and was, wrongly, with an occasional expensive re-materialize
+      read as a fixed per-step overhead.
+    Pinned by `tests/unit/test_march_log.py`, whose assertions read **cells** rather than substrings, so
+    a column reordering is not a false failure while a wrong value still is.
+
   - **`precondition_step` — per-step refresh of the step's frozen host preconditioner (binding,
     forward-only).** `forward_march(precondition_step=…)` calls `precondition_step(active_step, state)`
     before each `_march_step`, *after* the control has set β on `active_step`, to re-derive the step's
@@ -1709,12 +2268,34 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     segment-local SER `residual_norm_0` and `drift_measure`. Unifying the two into
     one `(rn, rn0, α, state) -> (β, state)` interface was rejected: it would union SER's needs with the
     control's (dead α/state args for SER), drag α onto the differentiable core where the line search
-    cannot even produce it before the step, and risk the byte-identity of the default path. Three concrete
+    cannot even produce it before the step, and risk the byte-identity of the default path. Four concrete
     `StepControl`s live in `solve/step_control.py`: **`DualTimeControl`** (the Courant β-ramp, now the
     **default** for a dual-time observed march — carries β across refreshes, see the DualTimeStep bullet
-    above), **`ResidualRatioDualTimeControl`** (the opt-in residual-keyed alternative), and
-    **`AlphaTargetingControl`** (the single-step α-targeter — experimental, opt-in, does not converge
-    standalone; see the "SER β schedule runs backwards" bullet).
+    above), **`ResidualRatioDualTimeControl`** (the opt-in residual-keyed alternative),
+    **`CflResidualDualTimeControl`** (see the bullet below), and **`AlphaTargetingControl`** (the
+    single-step α-targeter — experimental, opt-in, does not converge standalone; see the "SER β schedule
+    runs backwards" bullet).
+  - **`CflResidualDualTimeControl` — the combined control, grows on α but brakes on a rising residual
+    (built for the 3D inexact-AMG march the α-only control NaNs).** The two single-signal dual-time
+    controls fail in **disjoint** ways: `DualTimeControl` grows Δτ on the inner-loop factor α (fast) but
+    is **blind to the trajectory** — it grows into an overshoot while α = 1, which diverges unless the
+    linear solve is near-exact (measured: on the 3D `bfs3d` Re-continuation the α-control runs `x_r/h`
+    away to 15–19 and NaNs, because the AMG V-cycle is inexact — the same "aggressive control's overshoot
+    is tolerated only by a near-exact solve" rule the 2D complete-LU satisfies); `ResidualRatioDualTimeControl`
+    keys growth on the steady-residual ratio (safe against overshoot) but is **blind to productive
+    development** — on the `β × travel` plateau the residual is flat, so it pins β and crawls (measured:
+    the 3D march *survives* the overshoot with it but takes 4 h against OpenFOAM's ~15 min). The combined
+    control grows **only when both signals are comfortable** (α ≥ `grow_above` **and** the residual ratio
+    ≤ `hold_ratio`) and brakes on **either** wall (α < `backoff_below` **or** ratio > `rise_ratio`), with a
+    hold band between the two ratio thresholds so a noisy plateau does not oscillate — so it grows on α
+    through the flat-residual development (the residual-only rule's stall) yet the residual-rise term brakes
+    the overshoot the α-only rule is blind to. This is the "pair α with a step-productivity signal" lever the
+    `AlphaTargetingControl` non-convergence ceiling flagged, applied to the dual-time controls. State is
+    `(β, previous residual)`, carried across refreshes like `ResidualRatioDualTimeControl`; opt-in via
+    `solve_coupled(step_control=…)`. Unit-tested in `test_step_control.py` (grows on α at a flat residual,
+    brakes on a rising residual at α = 1, brakes on an inner clip, holds in the band, carries β). The ratio
+    thresholds are march-calibrated numbers — set them from a logged march, not intuition (the 3D
+    development overshoot shows ratios ~1.14).
 - **Gate C — PASSED (`tests/integration/test_skewed_diffusion.py`).** With
   `CorrectedGreenGauss` injected into the residual on a 25%-skewed mesh, one Newton step
   drives `‖R‖` ~24 → ~1e-12 and reproduces a harmonic linear field to ~5e-13 (linear-exact

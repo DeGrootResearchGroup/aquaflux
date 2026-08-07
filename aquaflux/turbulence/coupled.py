@@ -30,6 +30,7 @@ adjoint sees only the smooth interior physics).
 from __future__ import annotations
 
 import abc
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -59,6 +60,7 @@ from aquaflux.solve import (
     ForwardStep,
     ImplicitNewtonSolver,
     LocalCourantBasis,
+    MonolithicAmgPreconditioner,
     MonolithicIlutPreconditioner,
     MonolithicLuPreconditioner,
     PseudoTransientStep,
@@ -73,7 +75,9 @@ from aquaflux.solve import (
     TransposedPreconditioner,
     VelocityShiftParts,
     block_stencil_colouring,
+    block_stencil_gather_map,
     forward_march,
+    positive_block_limit,
     relative_residual_gmres,
 )
 
@@ -733,6 +737,16 @@ _COUPLED_ILUT_FORWARD_SOLVER = relative_residual_gmres(
     1e-2, restart=10, stagnation_iters=40, max_restarts=40
 )
 
+
+# How many coloured tangents share one vmapped jvp pass when materializing the AMG Jacobian. Smaller uses
+# less peak memory (fewer simultaneous forward-AD tapes), larger amortizes dispatch over more probes; the
+# coloured probes run in ceil(n_probes / this) fused passes instead of an n_probes-call Python loop.
+# Measured on the 3D backward-facing step (~670 reach-3 probes): forward-AD does not vectorize across the
+# batch on CPU, so a large batch buys almost nothing in time (16 vs 4: ~33 s vs ~36 s) while costing it in
+# peak memory (16 holds ~2.2 GB of simultaneous tapes vs ~0.7 GB at 4). Four keeps essentially all of the
+# dispatch amortization at a third of the transient peak -- the right default for a memory-bounded solve.
+_PROBE_BATCH_SIZE = 4
+
 # Backtracking rungs for the shifted step. The full coupled Newton step from the hybrid initial
 # condition overshoots violently (the residual blows up many orders of magnitude), so the step length
 # is scaled back along {1, 1/2, ..., 1/2**N} until it descends -- recovering a residual-reducing step
@@ -776,6 +790,38 @@ def _mass_flow_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray)
     s_flow, s_k, s_omega = _coupled_block_scales(coupled, reference_state)
     sizes = (coupled.layout.flow_size, n, n, 1)
     return BlockScaledNorm(sizes, (s_flow, s_k, s_omega, s_flow))
+
+
+def positive_k_limit(coupled: CoupledRANS, tau: float = 0.99):
+    """The step limiter keeping ``k`` strictly positive, or ``None`` when the transform already does.
+
+    ``k`` is solved DIRECTLY (``log k`` is singular at a no-slip wall, where ``k = 0`` is the physical
+    boundary condition), so nothing structurally prevents a Newton step from carrying it negative --
+    and the SST closure's ``sqrt(k)`` turns a single negative cell into NaN across the whole residual.
+    Measured: a march ran 62 healthy steps and died when **two cells out of 23040** reached
+    ``k = -3.3e-4``, with every field still finite and moving by ~1e-4.
+
+    Returns ``None`` when ``k`` is solved in a form that is positive by construction (a log variable),
+    since a cap there would only throttle a step for no benefit.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The assembled case, for its block layout.
+    tau : float
+        Fraction of the distance to the boundary taken (see
+        :func:`~aquaflux.solve.positive_block_limit`).
+
+    Returns
+    -------
+    callable or None
+        ``(phi, delta) -> alpha_max`` for a directly-solved ``k``; ``None`` otherwise.
+    """
+    if not isinstance(coupled.k_transform, DirectScalars):
+        return None
+    layout = coupled.layout
+    n, dim = layout.n_cells, layout.dim
+    return positive_block_limit((dim + 1) * n, (dim + 2) * n, tau)
 
 
 def coupled_scaled_norm(
@@ -898,6 +944,7 @@ def coupled_continuation(
     velocity_shift_parts: VelocityShiftParts | None = None,
     reuse: CoupledShiftPolicy | None = None,
     residual_norm: ResidualNorm | None = None,
+    inner_observer: Callable[..., None] | None = None,
     **preconditioner_kwargs: object,
 ) -> ForwardStep:
     """Build the pseudo-transient continuation step for the coupled Newton solve.
@@ -1026,6 +1073,7 @@ def coupled_continuation(
             forward_solver=solver,
             residual_norm=residual_norm,
             adjoint_preconditioner_factory=policy.adjoint_factory(),
+            inner_observer=inner_observer,
         )
     return PseudoTransientStep(
         policy,
@@ -1260,12 +1308,20 @@ class MonolithicFactorShiftPolicy(eqx.Module):
     """
 
     base: CoupledShiftPolicy
-    preconditioner: MonolithicIlutPreconditioner | MonolithicLuPreconditioner = eqx.field(
-        static=True
-    )
+    preconditioner: (
+        MonolithicIlutPreconditioner | MonolithicLuPreconditioner | MonolithicAmgPreconditioner
+    ) = eqx.field(static=True)
 
     def shift_term(self, phi: jnp.ndarray) -> ShiftTerm:
         """The block policy's shift diagonal, glued to the frozen factorization preconditioner.
+
+        For a factorization (ILUT/LU) the preconditioner is a single frozen apply and the step solves the
+        shifted system with the JAX-side Krylov. A preconditioner exposing a native full solve (the AMG
+        V-cycle) instead returns a **tagged full-solve** the step applies directly on the host -- the
+        multigrid V-cycle is only a *moderate* inverse, so the JAX-side Krylov with it as a per-matvec
+        callback needs tens of iterations, where PETSc's own GMRES driving the same V-cycle natively
+        reaches the 1% stop in ~1 iteration (measured, ~60x faster per step). The forward-only native solve
+        does not touch the differentiable path: the adjoint uses the single-V-cycle transpose below.
 
         Parameters
         ----------
@@ -1273,6 +1329,10 @@ class MonolithicFactorShiftPolicy(eqx.Module):
             The flat coupled state ``[flow..., k, omega]``, shape ``((dim + 3) n_cells,)``.
         """
         diagonal = self.base.shift_term(phi).diagonal
+        if getattr(self.preconditioner, "is_exact_native", False):
+            # The step applies the native exact-Jacobian full solve directly (see `_shifted_solve`):
+            # `preconditioner.exact_solve(phi, -rhs, shift)`. The shift already carries the relaxation.
+            return ShiftTerm(diagonal, lambda relaxation: self.preconditioner)
         apply = self.preconditioner.matvec()
         # The factorization is frozen, so the preconditioner does not depend on the shift strength.
         return ShiftTerm(diagonal, lambda relaxation: apply)
@@ -1317,7 +1377,9 @@ def _monolithic_factor_step(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
     base: CoupledShiftPolicy,
-    preconditioner: MonolithicIlutPreconditioner | MonolithicLuPreconditioner,
+    preconditioner: (
+        MonolithicIlutPreconditioner | MonolithicLuPreconditioner | MonolithicAmgPreconditioner
+    ),
     *,
     beta0: float,
     exponent: float,
@@ -1331,6 +1393,9 @@ def _monolithic_factor_step(
     forward_solver: lx.AbstractLinearSolver | None,
     block_scaled_norm: bool,
     residual_norm: ResidualNorm | None,
+    inner_observer: Callable[..., None] | None = None,
+    cycle_budget: int | None = None,
+    step_limit: Callable[..., jnp.ndarray] | None = None,
 ) -> ForwardStep:
     """Assemble the pseudo-transient / dual-time step around a frozen monolithic factorization.
 
@@ -1365,6 +1430,9 @@ def _monolithic_factor_step(
             forward_solver=solver,
             residual_norm=residual_norm,
             adjoint_preconditioner_factory=policy.adjoint_factory(),
+            inner_observer=inner_observer,
+            cycle_budget=cycle_budget,
+            step_limit=step_limit,
         )
     return PseudoTransientStep(
         policy,
@@ -1400,6 +1468,7 @@ def coupled_ilut_continuation(
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     residual_norm: ResidualNorm | None = None,
+    inner_observer: Callable[..., None] | None = None,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic coupled ILUT.
 
@@ -1496,6 +1565,7 @@ def coupled_ilut_continuation(
         forward_solver=forward_solver,
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
+        inner_observer=inner_observer,
     )
 
 
@@ -1638,6 +1708,7 @@ def coupled_lu_continuation(
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     residual_norm: ResidualNorm | None = None,
+    inner_observer: Callable[..., None] | None = None,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **complete** coupled LU.
 
@@ -1712,6 +1783,184 @@ def coupled_lu_continuation(
         forward_solver=forward_solver,
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
+        inner_observer=inner_observer,
+    )
+
+
+def coupled_amg_continuation(
+    coupled: CoupledRANS,
+    reference_state: jnp.ndarray,
+    *,
+    amg_beta: float = 2.0,
+    stencil_reach: int = 3,
+    smoother_fill_levels: int = 1,
+    smoother_sweeps: int = 2,
+    coarse_eq_limit: int | None = None,
+    native_forward_solve: bool = False,
+    beta0: float = 2.0,
+    exponent: float = 1.0,
+    beta_floor: float = 0.0,
+    max_escalations: int = 6,
+    escalation_factor: float = 2.0,
+    divergence_cap: float = 10.0,
+    line_search: int = _COUPLED_LINE_SEARCH,
+    inner_steps: int = 1,
+    inner_tol: float = 0.05,
+    forward_solver: lx.AbstractLinearSolver | None = None,
+    forward_rtol: float = 0.3,
+    block_scaled_norm: bool = False,
+    shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+    residual_norm: ResidualNorm | None = None,
+    inner_observer: Callable[..., None] | None = None,
+    cycle_budget: int | None = None,
+) -> ForwardStep:
+    """Build a pseudo-transient continuation step preconditioned by a monolithic **algebraic-multigrid** V-cycle.
+
+    The multigrid counterpart of :func:`coupled_ilut_continuation` / :func:`coupled_lu_continuation`: it
+    materializes the coupled Jacobian at ``reference_state`` (compressed graph-coloured probing -- one
+    source of truth, no re-derived assembly), adds the pseudo-transient shift at ``amg_beta``, and builds a
+    single smoothed-aggregation V-cycle for it (:class:`~aquaflux.solve.MonolithicAmgPreconditioner`), all
+    off the jit path. Unlike the two factorizations it keeps the heavy fill off the fine grid -- the only
+    exact solve is a direct LU on the small coarsest grid -- so its memory stays bounded and its setup is
+    seconds where the incomplete factorization's ``spilu`` runs for minutes on a distance-3 three-dimensional
+    stencil. It is the coupled preconditioner for **large three-dimensional** meshes, where the complete
+    LU's fill is out of memory and the ILUT's factorization is prohibitively slow to build; the LU / ILUT
+    remain faster (fewer Krylov iterations) at two-dimensional / moderate size.
+
+    A drop-in for ``solve_coupled``'s ``continuation`` argument, and (like the factorizations)
+    reverse-differentiable through the converged state: the frozen V-cycle is ``stop_gradient``-ed, so the
+    adjoint's transpose solve reuses the same (transposed) V-cycle -- the multigrid is a fixed *linear*
+    operator, transposed through the cycle's own transpose, needing no flexible outer Krylov -- and the
+    gradient is the exact coupled implicit-function-theorem sensitivity.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled residual assembler.
+    reference_state : jnp.ndarray
+        The coupled state the Jacobian and shift are frozen at, shape ``((dim + 3) n_cells,)``.
+    amg_beta : float
+        The pseudo-transient shift strength the V-cycle is built at (the operator it preconditions is
+        ``J + amg_beta * d`` for the base shift diagonal ``d``). The march's own ``beta`` varies; the strong
+        V-cycle tolerates the mismatch.
+    stencil_reach : int
+        The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+    smoother_fill_levels : int
+        Incomplete-LU fill levels of the stationary level smoother (``1`` = ILU(1); the indefinite saddle
+        stalls at ``0``, and a Krylov-accelerated smoother would make the V-cycle nonlinear).
+    smoother_sweeps : int
+        Richardson sweeps of the level smoother per V-cycle visit.
+    coarse_eq_limit : int or None
+        The equation count at which aggregation stops and the coarsest grid is solved directly by LU. ``None``
+        (default) keeps PETSc's default (~50); a larger value grows the coarse-level direct solve so it
+        inverts more of the saddle's global pressure coupling exactly — a stronger V-cycle (and stronger
+        transpose V-cycle, so it helps the adjoint too) at a bounded, sub-linearly-growing coarse-solve cost.
+    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search,
+    inner_steps, inner_tol, forward_solver, block_scaled_norm, shift_basis, residual_norm
+        The pseudo-transient schedule, dual-time, guard, and measure parameters, exactly as in
+        :func:`coupled_ilut_continuation`. ``forward_solver`` defaults to a restart-40 GMRES matched to the
+        V-cycle's convergence (a few tens of vectors), rather than the ILUT's restart-10.
+    forward_rtol : float
+        The relative tolerance for the default **row-scaled** forward-solve stop (default ``0.3``). With no
+        explicit ``forward_solver``, the forward solve stops on the march's own row-scaled progress measure
+        (:func:`coupled_scaled_norm`) rather than a plain global 2-norm — the latter is ~100% ``omega``
+        (whose residual is orders above the flow), so it halts once ``omega`` is resolved while the
+        flow-dominated Newton step is still coarse (measured ~116 % velocity error — effectively blind).
+        The row-scaled stop weighs every field comparably; a *loose* ``forward_rtol`` keeps it cheap.
+        Calibrated on the developed backward-facing step: at ``0.3`` the velocity correction is resolved to
+        ~25 % for ~1.5× the plain-2-norm cycle count; ``0.1`` fully resolves it at ~2.25×. Ignored when an
+        explicit ``forward_solver`` is given.
+    inner_observer : callable or None
+        A per-inner-iteration profiling hook forwarded to the built dual-time step (only used when
+        ``inner_steps > 1``); see :class:`~aquaflux.solve.DualTimeStep`. ``None`` (default) leaves the step
+        byte-identical. Forward-only — do not set it on a differentiated solve.
+    cycle_budget : int or None
+        A cap on the dual-time inner loop's accumulated linear-solve count, forwarded to the built
+        :class:`~aquaflux.solve.DualTimeStep` (only used when ``inner_steps > 1``). It cuts off a primary
+        solve grinding on a stiff low-β operator after ~``cycle_budget`` matvecs instead of the full
+        ``inner_steps`` into the restart cap; pair it with ``solve_coupled``'s β-escalation
+        (``retry_on_cycles < cycle_budget``), which redoes the capped step at a larger β. ``None`` (default)
+        is unbounded and byte-identical. Forward-only.
+
+    Returns
+    -------
+    ForwardStep
+        The step to hand ``solve_coupled`` as ``continuation``.
+    """
+    base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
+    n_fields = coupled.layout.dim + 3
+    # The forward-solve stop. A plain global-2-norm relative stop is ~100% the largest-magnitude field
+    # (``omega``, whose residual is orders above the flow), so a "1%" solve resolves ``omega`` and halts
+    # while the flow-dominated Newton step is still coarse -- leaving the flow correction blind (measured
+    # ~116 % velocity error). The forward solve therefore stops on the march's own row-scaled progress
+    # measure (``coupled_scaled_norm``, a physically row-scaled -- not per-solve -- measure) at a *loose*
+    # ``forward_rtol``: every field block is seen and resolved loosely, so the flow is never left blind
+    # while ``omega`` is not over-resolved. A caller that wants a different stop passes ``forward_solver``.
+    # Restart 15 is the measured sweet spot for the one-V-cycle preconditioner: enough Arnoldi history for
+    # its convergence while checking the stop often enough not to overshoot the loose target deep into the
+    # next cycle (a larger restart costs ~2x the expensive host V-cycle applies for the same trajectory);
+    # ``max_restarts`` stays generous so a drifted-reference solve still completes.
+    if forward_solver is None:
+        forward_solver = relative_residual_gmres(
+            forward_rtol,
+            norm=coupled_scaled_norm(coupled, base, reference_state),
+            restart=15,
+            stagnation_iters=40,
+            max_restarts=60,
+        )
+    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
+    # The fixed CSR structure + gather map (pattern is mesh-fixed), so each materialize de-compresses by one
+    # gather rather than a scatter loop + re-sort. Reused by the β-tracking refresh (built once there too).
+    structure = block_stencil_gather_map(colouring, coupled.layout.dim + 3)
+    frozen = jax.lax.stop_gradient(reference_state)
+    matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    # Batched jvp so the coloured materialize probes run as a few fused passes, not a per-probe loop.
+    batched_matvec = jax.jit(jax.vmap(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1]))
+    # `native_forward_solve` (EXPERIMENTAL, opt-in) runs the forward Krylov natively in PETSc, its operator
+    # a shell over the exact jvp (true Newton, not a frozen Jacobian) -- the native GMRES + GAMG reaches its
+    # stop in ~1 iteration where the JAX-side Krylov with the V-cycle as a per-matvec callback needs ~90
+    # (the JAX-side GMRES is far slower on a well-preconditioned system; measured). The mechanism is
+    # validated (native speed, correct step direction, exact-Newton), but the march currently converges
+    # SLOWER than the default path per step: the default's JAX-side solver over-solves each step to
+    # ~machine zero, and the pseudo-transient globalization implicitly leans on those near-exact steps,
+    # which the native (honest-tolerance) step does not yet match -- a convergence-tuning follow-up. Default
+    # off; the default path applies the frozen V-cycle per-matvec through the JAX-side Krylov.
+    preconditioner = MonolithicAmgPreconditioner.build(
+        matvec,
+        colouring,
+        n_fields,
+        _frozen_shift_diagonal(base, amg_beta, reference_state),
+        native=native_forward_solve,
+        residual_fn=coupled.residual if native_forward_solve else None,
+        smoother_fill_levels=smoother_fill_levels,
+        smoother_sweeps=smoother_sweeps,
+        coarse_eq_limit=coarse_eq_limit,
+        batched_matvec=batched_matvec,
+        probe_batch_size=_PROBE_BATCH_SIZE,
+        structure=structure,
+    )
+    return _monolithic_factor_step(
+        coupled,
+        reference_state,
+        base,
+        preconditioner,
+        beta0=beta0,
+        exponent=exponent,
+        beta_floor=beta_floor,
+        max_escalations=max_escalations,
+        escalation_factor=escalation_factor,
+        divergence_cap=divergence_cap,
+        line_search=line_search,
+        inner_steps=inner_steps,
+        inner_tol=inner_tol,
+        forward_solver=forward_solver,
+        block_scaled_norm=block_scaled_norm,
+        residual_norm=residual_norm,
+        inner_observer=inner_observer,
+        cycle_budget=cycle_budget,
+        # Keep `k` off zero: it is solved directly, and one negative cell reaches the closure's
+        # sqrt(k) and NaNs the whole residual. `None` when the transform already guarantees it.
+        step_limit=positive_k_limit(coupled),
     )
 
 
@@ -1825,12 +2074,78 @@ def _staleness_beta_gate(*, refresh_every: int, beta_rel_change: float) -> Calla
     return should_refresh
 
 
+def _materialize_gate(
+    drift_factory: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]],
+    *,
+    materialize_drift: float | None,
+    materialize_every: int | None,
+) -> Callable[[jnp.ndarray], bool]:
+    """A stateful predicate for the β-diagonal split: should this refresh RE-MATERIALIZE the Jacobian
+    (full, the coloured jvp probe) or only re-add the shift diagonal to the standing one (cheap)?
+
+    Returns ``should_materialize(state) -> bool``. Re-materializing is the dominant refresh cost, so it is
+    reserved for when the frozen Jacobian has actually gone stale -- i.e. when the state it was probed at
+    has moved. The staleness signal is a **coefficient drift** since the last materialize, supplied by
+    ``drift_factory`` (in the coupled march, :func:`eddy_viscosity_drift`: ``ν_t`` is what the operators are
+    assembled from, so its movement is the Jacobian's staleness, and it is cheap -- one jitted evaluation).
+    Fires when that drift exceeds ``materialize_drift``, OR after ``materialize_every`` steps without a
+    materialize (a state-development cap for a near-constant coefficient) -- the drift-move / step-cap pair
+    that mirrors :func:`_staleness_beta_gate`. The reference is re-based at every materialize (so the drift
+    measures movement the last materialize did not absorb) and seeded on the first call from the freshly-built
+    operator (so the first call needs only a shift, not a redundant materialize).
+
+    Parameters
+    ----------
+    drift_factory : callable
+        ``reference_state -> (state -> drift)`` -- builds a drift measure against a reference (a non-negative
+        scalar, zero at the reference). Injected so the gate's decision logic is testable with a synthetic
+        drift; the coupled march passes ``lambda ref: eddy_viscosity_drift(coupled, ref)``.
+    materialize_drift : float or None
+        Re-materialize when the drift since the last materialize exceeds this. ``None`` disables the drift
+        trigger (then only the step cap fires).
+    materialize_every : int or None
+        Force a materialize after this many refreshes without one (the staleness cap). ``None`` disables the
+        cap (then only the drift trigger fires).
+
+    Returns
+    -------
+    callable
+        ``should_materialize(state) -> bool``, carrying its own ``(drift reference, steps_since)`` state.
+    """
+    st: dict[str, object] = {"since": 0, "drift_fn": None}
+
+    def should_materialize(state: jnp.ndarray) -> bool:
+        st["since"] = int(st["since"]) + 1  # type: ignore[arg-type]
+        if materialize_drift is not None and st["drift_fn"] is None:
+            # Seed the drift reference at the freshly-built state; the Jacobian is already current here, so
+            # this first refresh needs only a shift (drift is zero against its own reference).
+            st["drift_fn"] = drift_factory(jax.lax.stop_gradient(state))
+        drift_hit = (
+            materialize_drift is not None
+            and st["drift_fn"] is not None
+            and float(st["drift_fn"](state)) > materialize_drift  # type: ignore[operator]
+        )
+        cap_hit = materialize_every is not None and int(st["since"]) >= materialize_every
+        if drift_hit or cap_hit:
+            st["since"] = 0
+            if materialize_drift is not None:
+                st["drift_fn"] = drift_factory(jax.lax.stop_gradient(state))
+            return True
+        return False
+
+    return should_materialize
+
+
 def _beta_tracking_refresh(
     coupled: CoupledRANS,
     stencil_reach: int,
     *,
     gate: Callable[[float], bool] | None = None,
     refresh_kwargs: dict[str, object] | None = None,
+    materialize_every: int | None = None,
+    materialize_drift: float | None = None,
+    beta_floor: float = 0.0,
+    observer: Callable[[str, float], None] | None = None,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """Shared skeleton for the β-tracking ``precondition_step`` hooks (complete-LU and ILUT).
 
@@ -1861,9 +2176,36 @@ def _beta_tracking_refresh(
     refresh_kwargs = {} if refresh_kwargs is None else refresh_kwargs
     colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
     n_fields = coupled.layout.dim + 3
+    # Fixed CSR structure + gather map for the AMG materialize (mesh-fixed pattern): each materialize
+    # de-compresses by one gather rather than a scatter loop + re-sort. Built once; used only on the AMG path.
+    structure = block_stencil_gather_map(colouring, n_fields)
     # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
     # reuses it, rather than a fresh lambda recompiling each step.
     matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    # Batched form (vmapped over the tangent) so the coloured probes of a full materialize run as a few
+    # fused passes rather than a Python loop of separate calls. Built once (state-independent, `frozen` a
+    # traced argument) so it compiles a single time and every materialize reuses it. Used only by the AMG
+    # preconditioner's `refresh_in_place`.
+    batched_matvec_at = jax.jit(
+        jax.vmap(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1], in_axes=(None, 0))
+    )
+    # The β-diagonal split's materialize gate (built once): decides per refresh whether to re-materialize
+    # the Jacobian or only re-add the shift. `None` when neither trigger is set (then every refresh is a
+    # full materialize, the original behaviour).
+    materialize_gate = (
+        _materialize_gate(
+            lambda ref: eddy_viscosity_drift(coupled, ref),
+            materialize_drift=materialize_drift,
+            materialize_every=materialize_every,
+        )
+        if (materialize_drift is not None or materialize_every is not None)
+        else None
+    )
+
+    def _report_refresh(kind: str, started: float) -> None:
+        """Tell an injected observer which branch ran and what it cost (a no-op when unobserved)."""
+        if observer is not None:
+            observer(kind, time.perf_counter() - started)
 
     def precondition_step(active_step: ForwardStep, state: jnp.ndarray) -> None:
         schedule = active_step.relaxation_schedule
@@ -1875,14 +2217,51 @@ def _beta_tracking_refresh(
                 f"switched-evolution schedule ({type(schedule).__name__})."
             )
         beta = float(beta)
-        if gate is not None and not gate(beta):
+        started = time.perf_counter()
+        # The preconditioner's shift is floored independently of the march's own beta. As beta -> 0 the
+        # shift's diagonal dominance vanishes and the frozen V-cycle degrades, but the OPERATOR must keep
+        # the small beta to make pseudo-transient progress. Flooring only the preconditioner's copy keeps
+        # the V-cycle in a regime it inverts well while the solved system is untouched, so the converged
+        # root and its adjoint are unchanged. The resulting mismatch SATURATES at `beta_floor * d` rather
+        # than growing without bound the way a stale (never-refreshed) preconditioner's does.
+        pc_beta = max(beta, beta_floor)
+        # Gate on the preconditioner's own beta: below the floor its operator no longer moves with the
+        # march, so a beta-move refresh there would rebuild an identical V-cycle.
+        if gate is not None and not gate(pc_beta):
+            _report_refresh("none", started)
             return
         policy = active_step.shift_policy
         frozen = jax.lax.stop_gradient(state)
-        shift = beta * np.asarray(jax.lax.stop_gradient(policy.base.shift_term(state).diagonal))
-        policy.preconditioner.refresh_in_place(
-            lambda v: matvec_at(frozen, v), colouring, n_fields, shift, **refresh_kwargs
+        shift = pc_beta * np.asarray(jax.lax.stop_gradient(policy.base.shift_term(state).diagonal))
+        pc = policy.preconditioner
+        # β-diagonal split: β and the per-cell shift ``d`` touch only the diagonal, so between full
+        # (re-materialized) refreshes the shift is tracked by re-adding the new ``β d`` diagonal to the
+        # frozen Jacobian -- skipping the coloured-probe materialize (the dominant refresh cost). The materialize
+        # gate reserves the full re-materialize for when the Jacobian has actually gone stale (ν_t drift) or
+        # a step cap is hit; otherwise this is a cheap shift-only refresh. Only the AMG preconditioner
+        # exposes the shift-only path; without it (ILUT/LU) `materialize_gate` is None and every refresh is
+        # full, as before.
+        is_amg = hasattr(pc, "refresh_shift_in_place")
+        if materialize_gate is not None and is_amg:
+            if not materialize_gate(state):
+                pc.refresh_shift_in_place(shift)
+                _report_refresh("shift", started)
+                return
+        # The AMG preconditioner materializes via the coloured probe and takes the batched form; the
+        # factorization preconditioners (LU/ILUT) do not, so pass it only on the AMG path.
+        extra = (
+            {
+                "batched_matvec": lambda seeds: batched_matvec_at(frozen, seeds),
+                "probe_batch_size": _PROBE_BATCH_SIZE,
+                "structure": structure,
+            }
+            if is_amg
+            else {}
         )
+        pc.refresh_in_place(
+            lambda v: matvec_at(frozen, v), colouring, n_fields, shift, **extra, **refresh_kwargs
+        )
+        _report_refresh("full", started)
 
     return precondition_step
 
@@ -1988,6 +2367,121 @@ def ilut_beta_tracking_refresh(
     )
 
 
+def amg_beta_tracking_refresh(
+    coupled: CoupledRANS,
+    *,
+    stencil_reach: int = 3,
+    materialize_every: int | None = None,
+    materialize_drift: float | None = None,
+    beta_rel_change: float | None = None,
+    refresh_every: int = 8,
+    beta_floor: float = 0.0,
+    observer: Callable[[str, float], None] | None = None,
+) -> Callable[[ForwardStep, jnp.ndarray], None]:
+    """A ``precondition_step`` that rebuilds the AMG V-cycle at the current β, every step.
+
+    The algebraic-multigrid counterpart of :func:`lu_beta_tracking_refresh` /
+    :func:`ilut_beta_tracking_refresh`, and the preconditioner that makes a **dual-time march tractable in
+    three dimensions**, where the complete LU's fill is out of memory and the incomplete-LU's factorization
+    is prohibitively slow to build.
+
+    A dual-time march ramps the pseudo-transient shift ``β`` down to develop the recirculation (e.g.
+    0.5 → 0.02), and a V-cycle frozen at ``amg_beta`` degrades sharply as ``β`` leaves that value: the
+    coarse operators and level smoother approximate ``J + amg_beta·d``, not the ``J + β·d`` actually solved,
+    so the outer Krylov count explodes at low ``β`` (measured on the ``bfs3d`` coupled march: ~20 cycles per
+    solve at ``β ≈ 0.5`` rising to ~250–285 at ``β ≈ 0.07``, with the per-step wall going from ~60 s to
+    ~16–19 min). Rebuilding the V-cycle at the step's ``(state, β)`` restores the matched ~20-cycle solve.
+    The rebuild (~tens of seconds: a graph-coloured Jacobian probe plus the smoothed-aggregation setup) is
+    far cheaper than the hundreds of extra matvecs a stale V-cycle costs at low ``β``, each of which is a
+    full Jacobian-vector product — so it re-factors **every step** (like the cheap complete-LU hook, not the
+    gated incomplete-LU one).
+
+    Reads ``β`` from the step's shift schedule (a :class:`~aquaflux.solve.ConstantRelaxation` set by a
+    :class:`~aquaflux.solve.DualTimeControl`) and rebuilds the step's :class:`MonolithicFactorShiftPolicy`
+    V-cycle in place at ``J(state) + β·d(state)``. Pass it to ``solve_coupled(precondition_step=…)`` (or
+    :func:`solve_reynolds_continuation`'s ``point_setup``) with a :func:`coupled_amg_continuation` step and a
+    ``DualTimeControl``.
+
+    **Forward-march use ONLY** -- the rebuild is an impure host mutation and must never be on a differentiated
+    path (``solve_coupled`` guards this, raising under ``jax.grad``). The finishing solve and the adjoint keep
+    the last V-cycle, applied as the differentiable single-cycle transpose, exact at the converged ``β → 0``
+    root; for a differentiated solve use the plain :func:`coupled_amg_continuation` with no ``precondition_step``.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled residual assembler (supplies the Jacobian-vector product and the shift diagonal).
+    stencil_reach : int
+        The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+    materialize_every : int or None
+        Enables the **β-diagonal split**. ``None`` (default) re-materializes the Jacobian on every refresh
+        (the original behaviour). A value ``K > 1`` re-materializes only every ``K`` steps and, in between,
+        tracks the moving shift with a cheap diagonal-only refresh
+        (:meth:`~aquaflux.solve.MonolithicAmgPreconditioner.refresh_shift_in_place`) that reuses the frozen
+        Jacobian -- since ``β`` and the per-cell shift ``d`` touch only the diagonal, this skips the
+        coloured-probe materialization (the dominant refresh cost) while keeping the shift matched. It is the
+        step-count arm of the materialize gate (:func:`_materialize_gate`): a full re-materialize is forced
+        after ``K`` shift-only refreshes as a staleness cap. Prefer ``materialize_drift`` (a state-staleness
+        trigger) as the primary control and keep ``materialize_every`` as a large safety cap.
+    materialize_drift : float or None
+        The **state-staleness** trigger for the full re-materialize (the drift arm of the materialize gate).
+        Re-materializing the Jacobian is the dominant refresh cost, so — rather than a fixed step interval —
+        it fires only when the frozen Jacobian has actually gone stale: when the eddy viscosity ``ν_t``
+        (:func:`eddy_viscosity_drift`, what the operators are assembled from) has drifted by more than this
+        fraction since the last materialize. In between, the shift is tracked by the cheap diagonal-only
+        refresh. Reserve the expensive materialize for when it is needed; pair it with a large
+        ``materialize_every`` as a backstop. ``None`` (default) disables the drift trigger.
+    beta_rel_change : float or None
+        The **β-mismatch** refresh trigger. ``None`` (default) refreshes every step. When set, the refresh
+        is gated (:func:`_staleness_beta_gate`): it fires only when ``β`` has moved by more than this
+        fraction of the ``β`` of the *last refresh* -- keying on the mismatch from the built ``β`` rather
+        than the step-to-step change, so an oscillating control (``β`` swinging up and down around one
+        value) does not trigger a refresh every step. It is the proactive complement to a reactive
+        cycle-count retry: it re-matches the frozen V-cycle *before* a drifted ``β`` inflates the Krylov
+        cost, and it composes with ``materialize_every`` (the gate decides *whether* to refresh; the split
+        decides shift-only vs full).
+    refresh_every : int
+        The staleness-cap backstop when ``beta_rel_change`` is set: force a refresh after this many gated
+        steps with no β-move (state development at a near-constant ``β``). Ignored when ``beta_rel_change``
+        is ``None``.
+    observer : callable, optional
+        ``(kind, seconds) -> None``, called once per step with what this hook actually did --
+        ``"full"`` (re-materialized the Jacobian and re-factored), ``"shift"`` (cheap shift-only
+        refresh) or ``"none"`` (the gate declined; the standing factorization was reused) -- and how
+        long it took. Forward-only instrumentation for a march being profiled: without it, which branch
+        ran is invisible, and a study is left inferring preconditioner behaviour from wall-clock, which
+        is exactly how a per-step refresh cost gets mistaken for a fixed overhead. ``None`` (default)
+        elides the call.
+    beta_floor : float
+        A lower bound on the shift strength the **preconditioner** is built at: the V-cycle is refreshed at
+        ``max(β, beta_floor)`` while the march keeps solving at its own ``β``. As ``β`` falls the shift's
+        diagonal dominance vanishes and the V-cycle degrades sharply -- but the operator needs the small
+        ``β`` to make pseudo-transient progress, so the two are decoupled here. Because the preconditioner
+        only changes the *path* of a solve and not its solution, this leaves the converged root and its
+        adjoint untouched; the operator/preconditioner mismatch it introduces saturates at
+        ``beta_floor * d`` instead of growing without bound. ``0.0`` (default) tracks ``β`` exactly.
+
+    Returns
+    -------
+    callable
+        ``precondition_step(active_step, state) -> None``.
+    """
+    gate = (
+        None
+        if beta_rel_change is None
+        else _staleness_beta_gate(refresh_every=refresh_every, beta_rel_change=beta_rel_change)
+    )
+    return _beta_tracking_refresh(
+        coupled,
+        stencil_reach,
+        gate=gate,
+        materialize_every=materialize_every,
+        materialize_drift=materialize_drift,
+        beta_floor=beta_floor,
+        observer=observer,
+    )
+
+
 def solve_coupled(
     coupled: CoupledRANS,
     flow: jnp.ndarray | None = None,
@@ -2013,6 +2507,10 @@ def solve_coupled(
     precondition_step: Callable[[ForwardStep, jnp.ndarray], None] | None = None,
     retry_solver: lx.AbstractLinearSolver | None = None,
     retry_divergence_cap: float = float("inf"),
+    retry_on_cycles: int | None = None,
+    retry_beta_factor: float = 2.0,
+    on_retry: Callable[[str, int, float], None] | None = None,
+    retry_cycles_limit: int = 2,
     **continuation_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system ``R(u, p, k, omega) = 0`` by one monolithic Newton solve.
@@ -2215,6 +2713,19 @@ def solve_coupled(
         ``retry_divergence_cap * reference``. Defaults to ``inf`` (only non-finiteness triggers), because
         the residual can legitimately rise during development (the ``β × travel`` identity), so a tight
         cap would false-fire on the load-bearing reachability descent.
+    retry_on_cycles : int or None
+        A **cycle-count** bailout (:func:`aquaflux.solve.forward_march`): a step whose solve exceeds this
+        count is redone from the pre-step state with ``β`` escalated by ``retry_beta_factor`` -- more
+        damping for the stiff low-``β`` operator, the hard-operator cause of a high count (staleness, the
+        other, is pre-empted by a β-mismatch refresh). Needs a ``β``-carrying step control. ``None``
+        (default) disables it.
+    on_retry : callable, optional
+        ``(reason, attempt, beta) -> None``, forwarded to
+        :func:`~aquaflux.solve.forward_march`: called before a step is redone, with why. Forward-only
+        reporting; a log without it shows a step's work twice and never says what triggered the redo.
+    retry_beta_factor, retry_cycles_limit
+        The ``β`` escalation factor per retry (default ``2``) and the maximum successive escalations for one
+        step (default ``2``); see :func:`aquaflux.solve.forward_march`.
     **continuation_kwargs
         Forwarded to :func:`coupled_continuation` when building internally (schedule + preconditioner
         options). Notably ``inner_steps > 1`` selects the **dual-time** (backward-Euler) march
@@ -2239,6 +2750,7 @@ def solve_coupled(
         or on_checkpoint is not None
         or precondition_step is not None
         or retry_solver is not None
+        or retry_on_cycles is not None
     )
     if observing and _is_traced((coupled, flow, k, omega)):
         # The refresh re-derives the preconditioner from the mid-march state, which is a tracer when
@@ -2349,6 +2861,10 @@ def solve_coupled(
                 precondition_step=precondition_step,
                 retry_solver=retry_solver,
                 retry_divergence_cap=retry_divergence_cap,
+                retry_on_cycles=retry_on_cycles,
+                retry_beta_factor=retry_beta_factor,
+                on_retry=on_retry,
+                retry_cycles_limit=retry_cycles_limit,
             )
             state = result.state
             control_state = result.control_state

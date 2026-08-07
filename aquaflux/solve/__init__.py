@@ -15,9 +15,11 @@ unit tests. The surface is three groups:
   (one matrix-free correction — exact in one call for a linear residual, and differentiable in both
   modes), `solve_linear` (returns the solution together with the solve's restart-cycle count —
   the staleness signal a mid-march preconditioner refresh triggers on), `default_linear_solver`, and
-  `relative_residual_gmres` (a GMRES that stops on a *global* 2-norm relative residual — the robust
-  inexact-Newton forward stop, immune to the near-zero-right-hand-side rows that make the stock
-  componentwise test over-solve).
+  `relative_residual_gmres` (a GMRES that stops on a *global* relative residual in an injected norm —
+  the robust inexact-Newton forward stop, immune to the near-zero-right-hand-side rows that make the
+  stock componentwise test over-solve; the default is the Euclidean norm, and passing the row-scaled
+  `RowScaledNorm` makes the stop weigh every field block comparably instead of letting the
+  largest-magnitude block — `omega` on the coupled saddle — decide alone).
 * **Forward globalization** — the `ForwardStep` strategies `DampedNewtonStep` and
   `PseudoTransientStep`, with the `ShiftPolicy` / `ShiftTerm` / `StepAcceptance` seams a caller
   implements and the default `DivergenceGuard`, and the injected `ResidualNorm` the strategy judges
@@ -33,8 +35,11 @@ unit tests. The surface is three groups:
   inner comfort alone is blind to the steady residual and can run the transient away.
   `ResidualRatioDualTimeControl` fixes that: it ramps the pseudo-timestep by the steady-residual
   reduction ratio (switched evolution relaxation / Kelley–Keyes pseudo-transient continuation), so a
-  rising residual automatically shrinks the step. All are opt-in and never a default; the finishing
-  solve owns the converged root and the adjoint.
+  rising residual automatically shrinks the step — but keying growth on the residual alone stalls where
+  the residual is flat while the flow develops. `CflResidualDualTimeControl` combines them: it grows on
+  the inner-loop comfort α (fast on the flat-residual development) but brakes on a rising residual (safe
+  on the overshoot), the two signals covering each other's blind spots. All are opt-in and never a
+  default; the finishing solve owns the converged root and the adjoint.
 * **The observed forward march** — `forward_march`, an eager, forward-only march that applies the
   same `ForwardStep` as the Newton driver but reports each step (`StepReport`, `MarchResult`) and
   may stop early. It is what lets a driver rebuild a frozen preconditioner part way through a solve,
@@ -61,22 +66,32 @@ from .continuation import (
     StepAcceptance,
 )
 from .frozen_operator import convection_diffusion_operator, decouple_dof
+from .amg_preconditioner import AmgVCycle, MonolithicAmgPreconditioner, build_amg_vcycle
 from .ilut_preconditioner import MonolithicIlutPreconditioner
 from .lu_preconditioner import MonolithicLuPreconditioner
 from .implicit import (
     DampedNewtonStep,
     ForwardStep,
     ImplicitNewtonSolver,
+    StepOutcome,
     TransposedPreconditioner,
+    positive_block_limit,
 )
 from .line_search_growth import (
     LineSearchGrowth,
     MonotoneLineSearch,
     RelaxedFarFromRoot,
 )
-from .linear import default_linear_solver, relative_residual_gmres, solve_linear
+from .linear import (
+    default_linear_solver,
+    relative_residual_gmres,
+    restart_cycles,
+    solve_linear,
+)
+from .checkpoint import StateCheckpointer
 from .march import (
     CoefficientDriftTrigger,
+    combine_observers,
     CycleGrowthTrigger,
     MarchResult,
     RefreshTrigger,
@@ -84,6 +99,7 @@ from .march import (
     StepReport,
     forward_march,
 )
+from .march_log import MarchLogger, combine_metrics, field_change_metrics
 from .multigrid import (
     AirHierarchy,
     SmoothedHierarchy,
@@ -102,16 +118,24 @@ from .shift_basis import LocalCourantBasis, ShiftBasis, VelocityShiftParts
 from .sparse_jacobian import (
     BlockColouring,
     block_stencil_colouring,
+    block_stencil_gather_map,
     jacobian_relative_error,
     materialize_block_jacobian,
 )
-from .step_control import AlphaTargetingControl, DualTimeControl, ResidualRatioDualTimeControl
+from .step_control import (
+    AlphaTargetingControl,
+    CflResidualDualTimeControl,
+    DualTimeControl,
+    ResidualRatioDualTimeControl,
+)
 
 __all__ = [
     "AirHierarchy",
     "AlphaTargetingControl",
+    "AmgVCycle",
     "BlockColouring",
     "BlockScaledNorm",
+    "CflResidualDualTimeControl",
     "CoefficientDriftTrigger",
     "ConstantRelaxation",
     "CycleGrowthTrigger",
@@ -123,7 +147,9 @@ __all__ = [
     "ImplicitNewtonSolver",
     "LineSearchGrowth",
     "LocalCourantBasis",
+    "MarchLogger",
     "MarchResult",
+    "MonolithicAmgPreconditioner",
     "MonolithicIlutPreconditioner",
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
@@ -138,27 +164,36 @@ __all__ = [
     "ShiftPolicy",
     "ShiftTerm",
     "SmoothedHierarchy",
+    "StateCheckpointer",
     "StepAcceptance",
     "StepControl",
+    "StepOutcome",
     "StepReport",
     "SwitchedEvolutionRelaxation",
     "TransposedPreconditioner",
     "VelocityShiftParts",
     "air_multigrid_solve",
     "block_stencil_colouring",
+    "block_stencil_gather_map",
     "build_air_hierarchy",
+    "build_amg_vcycle",
     "build_convection_hierarchy",
     "build_smoothed_hierarchy",
+    "combine_metrics",
+    "combine_observers",
     "convection_diffusion_operator",
     "convection_multigrid_solve",
     "decouple_dof",
     "default_linear_solver",
+    "field_change_metrics",
     "forward_march",
     "jacobian_relative_error",
     "materialize_block_jacobian",
     "newton_step",
+    "positive_block_limit",
     "refresh_air_hierarchy",
     "relative_residual_gmres",
+    "restart_cycles",
     "smoothed_multigrid_solve",
     "solve_linear",
 ]

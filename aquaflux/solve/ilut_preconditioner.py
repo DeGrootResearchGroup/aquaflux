@@ -122,6 +122,60 @@ class IlutFactors:
         return self.scale * out
 
 
+def equilibrate_cell_major(
+    matrix: sp.spmatrix, n_fields: int
+) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
+    """Symmetrically equilibrate an assembled coupled block matrix and reorder it to cell-major.
+
+    The two conditioning transforms the indefinite Rhie--Chow saddle needs before *any* incomplete
+    factorization or multigrid smoother acts on it, shared by :func:`factorize_ilut` and the multigrid
+    preconditioner so both precondition the identical operator:
+
+    * **Symmetric square-root-diagonal equilibration** ``D A D`` with ``D = diag(1/sqrt(|diag A|))`` — the
+      momentum and continuity rows differ in scale by more than an order of magnitude, and this balances
+      them so the incomplete pivots (or the smoother's) stay well conditioned.
+    * **Cell-major reordering** — interleave the per-cell fields ``[u, v, (w,) p, k, omega]`` (rather than
+      all of one field then the next), which keeps the pressure among the velocity unknowns so the saddle
+      does not present a zero pivot, and groups each cell's degrees of freedom into a contiguous block.
+
+    Parameters
+    ----------
+    matrix : scipy.sparse matrix
+        The assembled **field-major** coupled Jacobian (already shifted), shape ``(n_fields * n, ...)``.
+    n_fields : int
+        Degrees of freedom per cell.
+
+    Returns
+    -------
+    cell_major : scipy.sparse.csr_matrix
+        The equilibrated, cell-major matrix ``(D A D)`` reordered by ``perm``.
+    scale : np.ndarray
+        The equilibration ``diag(D)``, shape ``(n_dofs,)`` — applied to a field-major vector before, and
+        after, the reordered solve/apply.
+    perm : np.ndarray
+        The cell-major permutation, shape ``(n_dofs,)`` (see :func:`cell_major_permutation`).
+
+    Raises
+    ------
+    ValueError
+        If ``matrix`` is not square or its size is not a multiple of ``n_fields``.
+    """
+    if matrix.shape[0] != matrix.shape[1]:
+        raise ValueError(f"equilibrate_cell_major: matrix must be square, got {matrix.shape}.")
+    n_dofs = matrix.shape[0]
+    if n_dofs % n_fields != 0:
+        raise ValueError(
+            f"equilibrate_cell_major: matrix size {n_dofs} is not a multiple of n_fields={n_fields}."
+        )
+    matrix = matrix.tocsr()
+    diagonal = np.abs(matrix.diagonal())
+    diagonal[diagonal == 0.0] = 1.0
+    scale = 1.0 / np.sqrt(diagonal)
+    equilibrated = (sp.diags(scale) @ matrix @ sp.diags(scale)).tocsr()
+    perm = cell_major_permutation(n_dofs // n_fields, n_fields)
+    return equilibrated[perm][:, perm].tocsr(), scale, perm
+
+
 def factorize_ilut(
     matrix: sp.spmatrix,
     n_fields: int,
@@ -162,23 +216,12 @@ def factorize_ilut(
         Propagated from ``scipy.spilu`` if the incomplete factor is singular (too little fill /
         insufficient pivoting).
     """
-    if matrix.shape[0] != matrix.shape[1]:
-        raise ValueError(f"factorize_ilut: matrix must be square, got {matrix.shape}.")
-    n_dofs = matrix.shape[0]
-    if n_dofs % n_fields != 0:
-        raise ValueError(
-            f"factorize_ilut: matrix size {n_dofs} is not a multiple of n_fields={n_fields}."
-        )
-    n_cells = n_dofs // n_fields
-    matrix = matrix.tocsr()
-    diagonal = np.abs(matrix.diagonal())
-    diagonal[diagonal == 0.0] = 1.0
-    scale = 1.0 / np.sqrt(diagonal)
-    equilibrated = (sp.diags(scale) @ matrix @ sp.diags(scale)).tocsr()
-    perm = cell_major_permutation(n_cells, n_fields)
-    cell_major = sp.csc_matrix(equilibrated[perm][:, perm])
+    cell_major, scale, perm = equilibrate_cell_major(matrix, n_fields)
     lu = spla.spilu(
-        cell_major, fill_factor=fill_factor, drop_tol=drop_tol, diag_pivot_thresh=diag_pivot_thresh
+        cell_major.tocsc(),
+        fill_factor=fill_factor,
+        drop_tol=drop_tol,
+        diag_pivot_thresh=diag_pivot_thresh,
     )
     return IlutFactors(lu, scale, perm)
 

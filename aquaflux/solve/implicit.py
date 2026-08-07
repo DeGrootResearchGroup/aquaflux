@@ -23,16 +23,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import lineax as lx
 
+from .linear import corrected_cycles as _corrected
 from .linear import default_linear_solver, solve_linear
 from .newton import newton_correction
 from .norm import ResidualNorm
+
 
 # The step a forward-step strategy supplies: given the (single-argument) residual, the current
 # iterate, the starting residual norm, and the linear solver, return the next iterate, **the
@@ -40,9 +42,59 @@ from .norm import ResidualNorm
 # count and alpha are the step's cost/quality, not part of its result: an observed march watches the
 # count rise to detect a frozen preconditioner going stale and reads alpha to control the shift, while
 # the plain Newton loop drops both at the call site.
+# (superseded by StepOutcome below) The fifth value is `reached_target`: whether the step ran to its OWN stopping criterion rather than
+# being cut short. It exists so an observed march can tell a step that did its job expensively from one
+# that ground and gave up -- a cost-only trigger cannot, and would discard a converged step (measured:
+# an inner loop that reached 3.0e-6 against a 1.0e-5 target was thrown away for costing 54 cycles).
+# A step with no inner loop to cut short always reports True.
+class StepOutcome(NamedTuple):
+    """What one forward step produced, what it cost, and how it ended.
+
+    A record rather than a widening tuple: these six values travel together through every stepper and
+    both consumers, and a positional 6-tuple is where a caller silently mis-unpacks one for another.
+
+    Attributes
+    ----------
+    phi : jnp.ndarray
+        The stepped iterate -- the only part that is the step's *result*; the rest is cost and quality.
+    cycles : jnp.ndarray
+        The **raw** solver count summed over the step's inner iterations (lineax's ``num_steps``, with
+        its per-solve offset still in). Total cost, and what a summed cost cap is measured against.
+    alpha : jnp.ndarray
+        The line-search factor: for an inner loop, the **minimum** over its iterations with any
+        non-descending one folded in as ``0``.
+    inner_iterations : jnp.ndarray
+        How many inner iterations ran. ``1`` for a step with no inner loop.
+    reached_target : jnp.ndarray
+        Whether the step ran to its **own** stopping criterion rather than being cut short. A cost-only
+        trigger cannot tell a step that did its job expensively from one that ground and gave up, and
+        would discard the former -- throwing away a good iterate for a shorter step.
+    max_inner_cycles : jnp.ndarray
+        The **offset-corrected** cost of the step's most expensive single solve. This is the
+        inner-count-invariant difficulty signal: the summed :attr:`cycles` grows with how many times the
+        step solved, so a threshold on it is ~6x more sensitive for a 5-iteration step than a
+        1-iteration one, and the same per-solve difficulty trips it or not depending on a count that
+        says nothing about conditioning.
+    binding_limit : jnp.ndarray
+        The step cap **where it was the binding constraint**, else ``1``. A small ``alpha`` has two
+        completely different causes -- the direction overshot (shorten it, escalate the shift) or a
+        constraint bound (the direction is fine, it just cannot be followed that far) -- and they call
+        for opposite responses, so ``alpha`` alone cannot be acted on. Below ``1`` means an injected
+        limit, not the descent test, decided the step length; the value is how tight it was.
+    """
+
+    phi: jnp.ndarray
+    cycles: jnp.ndarray
+    alpha: jnp.ndarray
+    inner_iterations: jnp.ndarray
+    reached_target: jnp.ndarray
+    max_inner_cycles: jnp.ndarray
+    binding_limit: jnp.ndarray
+
+
 _ForwardStep = Callable[
     [Callable[[jnp.ndarray], jnp.ndarray], jnp.ndarray, jnp.ndarray, lx.AbstractLinearSolver],
-    tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
+    StepOutcome,
 ]
 
 
@@ -101,8 +153,66 @@ class ForwardStep(Protocol):
 _INEXACT_FORWARD_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-3)
 
 
+def positive_block_limit(start: int, stop: int, tau: float = 0.99):
+    """Build ``(phi, delta) -> alpha_max``: the largest step fraction keeping ``phi[start:stop] > 0``.
+
+    The **fraction-to-the-boundary** rule from interior-point methods:
+    ``alpha_max = tau * min over entries with delta < 0 of (phi_i / -delta_i)``, and ``1`` when the
+    step decreases nothing in the block. Because the current iterate is strictly positive, a positive
+    admissible fraction always exists -- positivity becomes a property of the construction rather than
+    something a discrete rung ladder might or might not contain.
+
+    The motivating failure: a coupled RANS march ran 62 healthy steps and then died because **two
+    cells out of 23040** took the turbulent kinetic energy to ``-3.3e-4``. Every field stayed finite;
+    the closure's ``sqrt(k)`` turned those two cells into NaN, which poisoned the whole residual. The
+    line search had been crawling along that boundary for four inner iterations (``alpha`` halving
+    ``0.008 -> 0.001``, the residual falling under 1% per iteration) without any way to see it.
+
+    Positivity cannot be carried by the pseudo-transient shift and the divergence guard alone, which
+    is what the direct-variable path assumes: the guard fires on a non-finite residual, and by the
+    time ``sqrt`` of a negative value has produced one, the state is already poisoned.
+
+    Parameters
+    ----------
+    start, stop : int
+        The half-open slice of the flat state that must stay positive.
+    tau : float
+        Fraction of the distance to the boundary actually taken, in ``(0, 1)``. ``0.99`` (default)
+        stops just short, so the constrained entries stay strictly positive rather than landing on
+        zero -- where ``sqrt`` is defined but its derivative is not.
+
+    Returns
+    -------
+    callable
+        ``(phi, delta) -> alpha_max``, a scalar in ``(0, 1]``, for ``backtracking_line_search``'s
+        ``max_alpha``.
+
+    Notes
+    -----
+    The cap is **global**: one entry near zero throttles the whole step. On a field spanning several
+    orders of magnitude that can trade a failure for a crawl, so a march using this should report the
+    cap and check whether it binds every step or only near the boundary.
+    """
+
+    def limit(phi: jnp.ndarray, delta: jnp.ndarray) -> jnp.ndarray:
+        values, corrections = phi[start:stop], delta[start:stop]
+        # Only decreasing entries can cross zero; the rest are unbounded, hence `inf` so `min` skips them.
+        room = jnp.where(corrections < 0.0, values / jnp.abs(corrections), jnp.inf)
+        return jnp.minimum(jnp.asarray(1.0), tau * jnp.min(room))
+
+    return limit
+
+
 def backtracking_line_search(
-    residual_fn, phi, delta, reference_norm, steps, norm=jnp.linalg.norm, growth=1.0, grow=0
+    residual_fn,
+    phi,
+    delta,
+    reference_norm,
+    steps,
+    norm=jnp.linalg.norm,
+    growth=1.0,
+    grow=0,
+    max_alpha=jnp.inf,
 ):
     """Backtrack the step length: the largest ``alpha`` in ``{1, 1/2, ..., 1/2**steps}`` with
     ``norm(R(phi + alpha delta)) < reference_norm``, falling back to the smallest rung if none reduces
@@ -151,6 +261,22 @@ def backtracking_line_search(
         controlled growth far from the root admits those steps. Near the root the monotone test is
         wanted again, for the terminal quadratic phase -- hence a *schedule* rather than a constant
         (see :class:`~aquaflux.solve.LineSearchGrowth`).
+    max_alpha : float or jnp.ndarray, optional
+        An upper bound on the step fraction, applied to **every** rung including the growth rungs.
+        The seam for a constraint the residual cannot express: a field that must stay positive gives
+        the largest fraction that keeps it so (see
+        :func:`~aquaflux.solve.positive_block_limit`), and capping is what makes an admissible step
+        *reachable* rather than something the ladder might happen to contain. Default ``inf`` -- no
+        cap, byte-identical.
+
+        **The default must not be ``1``.** The growth rungs deliberately reach ``alpha > 1``, so a cap
+        of one silently disables them; that regression was caught by the growth-rung tests. A real cap
+        *does* apply to the growth rungs, which is correct -- a step four times the full step would
+        violate the constraint by four times as much.
+
+        Rejecting violating rungs instead would not be enough: on a measured coupled march the search
+        was already at its shortest rung (``alpha = 2**-10``) when a field crossed zero, so there was
+        no shorter rung left to fall back to.
     norm : callable, optional
         The residual measure ``R -> scalar`` the acceptance is judged by (default the Euclidean
         norm). A heterogeneous block system passes a :class:`~aquaflux.solve.BlockScaledNorm` so the
@@ -169,7 +295,8 @@ def backtracking_line_search(
         full step is taken unconditionally).
     """
     if steps == 0:
-        return phi + delta, jnp.asarray(1.0)
+        alpha = jnp.minimum(jnp.asarray(1.0), max_alpha)
+        return phi + alpha * delta, alpha
 
     # Walk the ladder from the LONGEST step down and keep the first admissible one -- the largest
     # step the acceptance tolerance allows, not the one that minimizes the residual.
@@ -210,7 +337,8 @@ def backtracking_line_search(
 
     def body(carry):
         index, chosen, _, longest_finite, seen_finite = carry
-        alpha = 0.5**index
+        # Capped, not rejected: the cap makes an admissible step reachable by construction.
+        alpha = jnp.minimum(0.5**index, max_alpha)
         value = norm(residual_fn(phi + alpha * delta))
         finite = jnp.isfinite(value)
         accepted = finite & (value < admissible)
@@ -224,7 +352,7 @@ def backtracking_line_search(
             seen_finite | eligible,
         )
 
-    shortest = jnp.asarray(0.5**steps)
+    shortest = jnp.minimum(jnp.asarray(0.5**steps), max_alpha)
     _, chosen, found, longest_finite, _ = jax.lax.while_loop(
         cond,
         body,
@@ -248,7 +376,8 @@ def _damped_newton_step(
     adjoint depends solely on the converged state, so it stays gradient-transparent. ``norm`` is the
     residual measure the search is judged by (default Euclidean).
 
-    Returns ``(phi_next, cycles, alpha, inner_iterations)`` — the stepped iterate, the raw solver count
+    Returns ``(phi_next, cycles, alpha, inner_iterations, reached_target)`` — the stepped iterate,
+    the raw solver count
     of the one linear solve behind it, the line-search factor, and ``inner_iterations = 1`` (a single
     Newton step has no inner loop). The line search itself costs only residual evaluations, so the
     step's linear-solve cost is exactly that single solve's.
@@ -259,7 +388,10 @@ def _damped_newton_step(
     stepped, alpha = backtracking_line_search(
         residual_fn, phi, delta, norm(r), line_search_steps, norm=norm
     )
-    return stepped, cycles, alpha, 1
+    # No inner loop, so nothing could have been cut short and the one solve IS the most expensive one.
+    return StepOutcome(
+        stepped, cycles, alpha, 1, jnp.asarray(True), _corrected(cycles), jnp.asarray(1.0)
+    )
 
 
 class DampedNewtonStep(eqx.Module):
@@ -378,7 +510,7 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
         # choose which step's value survives (last / max / sum), which is a reporting/control policy
         # the Newton solver has no business owning. A march that wants per-step cost or the line-search
         # factor observes them eagerly instead (`forward_march`).
-        phi, _, _, _ = forward_step_fn(residual_theta, phi, residual_norm_0, solver)
+        phi = forward_step_fn(residual_theta, phi, residual_norm_0, solver).phi
         return phi, step + 1, norm_fn(residual_fn(phi, theta))
 
     phi, _, residual_norm = jax.lax.while_loop(cond, body, (phi0, 0, residual_norm_0))

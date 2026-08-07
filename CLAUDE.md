@@ -549,6 +549,37 @@ Concretely:
 This is a first-class rule, not a nicety: knowing what a long run is doing is how you avoid burning
 runtime on a job that was never going to tell you anything.
 
+### One heavy probe at a time (binding)
+
+**A materialized 3D coupled Jacobian is ~2 GB per copy. Running several such probes concurrently
+exhausted physical memory and caused the operating system to suspend every application on the
+machine** — including the session driving the probes, which is a failure mode you cannot debug from
+inside. These jobs are memory-bound, not CPU-bound, so "there are spare cores" is not a reason to
+parallelize them.
+
+Concretely, when a probe materializes a large operator:
+- **Run one at a time.** Do not fan out a sweep over β (or over preconditioner variants) into
+  concurrent processes; loop over them in one process instead.
+- **`del` the big arrays and force a collection between iterations**, so peak usage is one copy rather
+  than one per sweep point.
+- **Load a cached factor/matrix from disk rather than re-materializing it** when the state has not
+  changed — this is faster *and* keeps only one copy live.
+- **Check free memory before launching**, and prefer a slower sequential plan to a faster one that might
+  not fit.
+
+### Measure the quantity you will be judged by (binding)
+
+**The number a run is steered/watched by and the number it is finally judged by must come from one
+definition.** The observed failure: a validation case computed its reattachment length two ways — the
+final comparison used a mid-span slab, while the live progress metric used the full span, which in a
+3D geometry is set by a *side-wall corner separation* rather than the primary feature. Same name, two
+different physical quantities, ~40% apart. An entire run's worth of reasoning was done against the
+wrong one before anyone noticed.
+
+So: when a case exposes a scalar for a solver to be watched by, it must be **the same callable** the
+final report uses — not a convenient approximation of it. If a diagnostic variant is genuinely wanted,
+report it under a **different name**, alongside.
+
 ### Start from an up-to-date main (do this FIRST — binding)
 
 **Before creating a feature branch, putting any change on it, or running the test suite,

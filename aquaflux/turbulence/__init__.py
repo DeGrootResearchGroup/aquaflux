@@ -30,7 +30,9 @@ from .boundary import (
     wall_y_star,
 )
 from .continuation import ScalarShiftPolicy, scalar_pseudo_transient_solve
+from .diagnostics import coupled_equation_names, coupled_fields, coupled_residuals
 from .coupled import (
+    positive_k_limit,
     CoupledRANS,
     CoupledRANSLayout,
     CoupledShiftPolicy,
@@ -39,6 +41,8 @@ from .coupled import (
     LogScalars,
     MonolithicFactorShiftPolicy,
     ScalarVariableTransform,
+    amg_beta_tracking_refresh,
+    coupled_amg_continuation,
     coupled_continuation,
     coupled_ilut_continuation,
     coupled_ilut_refreshing_continuation,
@@ -60,6 +64,7 @@ from .preconditioner import (
     scalar_transport_shift_diagonal,
 )
 from .reynolds import (
+    ReynoldsPoint,
     GeometricReynoldsSchedule,
     ReynoldsSchedule,
     solve_reynolds_continuation,
@@ -93,6 +98,7 @@ __all__ = [
     "OmegaCrossDiffusion",
     "OmegaDestruction",
     "OmegaProduction",
+    "ReynoldsPoint",
     "ReynoldsSchedule",
     "SSTClosureFields",
     "SSTModel",
@@ -102,12 +108,17 @@ __all__ = [
     "ScalarVariableTransform",
     "ScaledScalarPreconditioner",
     "WallFixedResidual",
+    "amg_beta_tracking_refresh",
     "bulk_velocity",
+    "coupled_amg_continuation",
     "coupled_continuation",
+    "coupled_equation_names",
+    "coupled_fields",
     "coupled_ilut_continuation",
     "coupled_ilut_refreshing_continuation",
     "coupled_lu_continuation",
     "coupled_lu_refreshing_continuation",
+    "coupled_residuals",
     "eddy_viscosity_drift",
     "equilibrium_k",
     "hybrid_initialize",
@@ -121,6 +132,7 @@ __all__ = [
     "omega_wall",
     "omega_wall_gradient",
     "omega_wall_value",
+    "positive_k_limit",
     "scalar_pseudo_transient_solve",
     "scalar_transport_preconditioner",
     "scalar_transport_shift_diagonal",

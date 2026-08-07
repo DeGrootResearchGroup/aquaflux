@@ -38,9 +38,9 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
-from .implicit import _ForwardStep, backtracking_line_search
+from .implicit import StepOutcome, _ForwardStep, backtracking_line_search
 from .line_search_growth import LineSearchGrowth, MonotoneLineSearch
-from .linear import solve_linear
+from .linear import corrected_cycles, solve_linear
 from .norm import ResidualNorm
 from .relaxation import RelaxationSchedule, SwitchedEvolutionRelaxation
 
@@ -91,6 +91,15 @@ def _shifted_solve(residual_fn, phi, rhs, shift, preconditioner, solver):
     cycles : jnp.ndarray
         The restart-cycle count of the linear solve (int32 scalar).
     """
+
+    # A preconditioner tagged ``is_exact_native`` runs the whole shifted solve natively on the host (PETSc
+    # GMRES + native GAMG, its operator a shell over the exact jvp at ``phi``) -- apply it directly rather
+    # than wrapping the moderate V-cycle in a JAX-side Krylov iteration, which is far slower (the JAX-side
+    # GMRES needs tens of per-matvec callbacks where the native solve reaches the stop in ~1). One "cycle"
+    # by convention, so the staleness signal stays well defined. Forward-only (the adjoint uses the
+    # differentiable single-V-cycle transpose).
+    if getattr(preconditioner, "is_exact_native", False):
+        return preconditioner.exact_solve(phi, -rhs, shift), jnp.asarray(1, dtype=jnp.int32)
 
     def shifted_jacobian(tangent: jnp.ndarray) -> jnp.ndarray:
         return jax.jvp(residual_fn, (phi,), (tangent,))[1] + shift * tangent
@@ -280,7 +289,7 @@ class PseudoTransientStep(eqx.Module):
         converged state and the IFT adjoint are unchanged.
     forward_solver : lineax.AbstractLinearSolver or None
         The linear solver for the shifted forward solves, overriding the shared
-        :data:`_INEXACT_CONTINUATION_SOLVER` when set (static). A stiff coupled system whose shifted
+        :data:`_INEXACT_CONTINUATION_SOLVER` when set. A stiff coupled system whose shifted
         operator needs a larger Krylov subspace to converge without restarting can pass a
         larger-``restart`` GMRES here; ``None`` uses the shared default.
     residual_norm : ResidualNorm
@@ -289,12 +298,14 @@ class PseudoTransientStep(eqx.Module):
         search, and the acceptance/divergence guard all use it, and :class:`ImplicitNewtonSolver`
         reads it (via :meth:`norm`) for the outer stopping test, so one measure governs the whole
         solve. A heterogeneous block system (e.g. coupled RANS, where ``omega`` is O(1e5) and ``k``
-        O(1e-3)) *can* pass a :class:`~aquaflux.solve.BlockScaledNorm` so the march *sees* every block
-        — with the plain norm the ‖R‖ is ~100% ``omega`` and the line search neither judges nor
-        protects the ``k`` block. (In practice the block-scaled measure stalled the coupled march, so
-        coupled RANS defaults to the Euclidean norm; the block-scaled option remains for
-        experimentation.) Like the shift, it only reshapes the forward path; the IFT adjoint never
-        forms a norm, so the converged state and its gradient are unchanged.
+        O(1e-3)) needs a scaled measure so the march *sees* every block — with the plain norm the
+        ‖R‖ is ~100% ``omega`` and the line search neither judges nor protects the ``k`` block. The
+        coupled-RANS builders therefore inject a per-state, row-equilibrated
+        :class:`~aquaflux.solve.RowScaledNorm` (``coupled_scaled_norm``, rebuilt each outer iteration
+        and held fixed across a line search), overriding this field's plain-norm class default; the
+        coarser :class:`~aquaflux.solve.BlockScaledNorm` is an off-by-default alternative. Like the
+        shift, it only reshapes the forward path; the IFT adjoint never forms a norm, so the converged
+        state and its gradient are unchanged.
     adjoint_preconditioner_factory : callable or None
         The ``state -> M`` preconditioner factory for the converged transpose (adjoint) solve, or
         ``None`` for an unpreconditioned adjoint (static). At ``φ*`` the operator is the
@@ -309,7 +320,14 @@ class PseudoTransientStep(eqx.Module):
     escalation_factor: float = eqx.field(static=True, default=2.0)
     acceptance: StepAcceptance = eqx.field(default_factory=DivergenceGuard)
     line_search: int = eqx.field(static=True, default=0)
-    forward_solver: lx.AbstractLinearSolver | None = eqx.field(static=True, default=None)
+    # Data, not static (the same reasoning as `residual_norm` below): a solver configured with a
+    # row-scaled stopping measure CARRIES that measure's scale arrays, and equinox rightly warns when
+    # arrays are put in a static field -- static leaves take part in the jit cache key by equality, so
+    # array-valued ones make the key ill-defined and, if the scales were ever rebuilt, would retrace
+    # every step. As data the arrays are ordinary traced leaves and the cache key is shape/dtype only.
+    # A solver with no array leaves (the default, and any plain-tolerance GMRES) filters to the static
+    # side regardless, so this changes nothing for those.
+    forward_solver: lx.AbstractLinearSolver | None = None
     # Not a static field: an observed march rebuilds the measure each outer iteration and swaps it in
     # with `tree_at`, and that is only a compilation-cache hit if the measure rides as data. A plain
     # callable (the default) has no array leaves, so it is filtered to the static side anyway and the
@@ -586,7 +604,17 @@ class PseudoTransientStep(eqx.Module):
             _, phi_next, _, _, step_cycles, step_alpha = jax.lax.while_loop(cond, body, start)
             # A single-step pseudo-transient attempt has no inner Newton loop; report 1 inner iteration
             # so a consumer can offset-correct the raw solver count uniformly with the dual-time path.
-            return phi_next, step_cycles, step_alpha, 1
+            # A single damped step has no inner loop, so nothing could have been cut short and the
+            # one solve is trivially the most expensive one.
+            return StepOutcome(
+                phi_next,
+                step_cycles,
+                step_alpha,
+                1,
+                jnp.asarray(True),
+                corrected_cycles(step_cycles),
+                jnp.asarray(1.0),
+            )
 
         return step
 
@@ -654,7 +682,7 @@ class DualTimeStep(eqx.Module):
         Default ``10``.
     forward_solver : lineax.AbstractLinearSolver or None
         The shifted-solve Krylov solver, overriding the shared :data:`_INEXACT_CONTINUATION_SOLVER`
-        when set (static).
+        when set.
     residual_norm : ResidualNorm
         The measure ``R -> scalar`` used for the inner target, the inner line search, and (via
         :meth:`norm`) the outer stopping test — one consistent measure. Defaults to the Euclidean norm;
@@ -664,6 +692,29 @@ class DualTimeStep(eqx.Module):
         The ``state -> M`` factory for the converged transpose (adjoint) solve, or ``None`` (static). At
         ``φ*`` the operator is the unshifted steady Jacobian (``β → 0``), so the ordinary preconditioner
         is the consistent choice.
+    inner_observer : callable or None
+        An optional profiling hook ``(inner_index, g_before, g_after, cycles, alpha) -> None`` called
+        **once per inner Newton iteration** with that iteration's ``‖G‖`` before and after the step, the
+        solver's raw cycle count for its shifted solve, and its line-search factor (static). It surfaces
+        the inner trajectory the outer :class:`~aquaflux.solve.StepReport` only summarizes (it reports the
+        inner *count* and the *summed* cycles). Emitted through :func:`jax.debug.callback`, so it is
+        forward-only and transform-transparent; ``None`` (default) elides the call entirely, leaving the
+        step byte-identical. Do not set it on a differentiated solve.
+    step_limit : callable or None
+        ``(phi, delta) -> alpha_max``, capping every inner line search (static). The seam for a
+        constraint the residual cannot express -- chiefly a field that must stay positive, via
+        :func:`~aquaflux.solve.positive_block_limit`. Without it a direct-variable field can cross
+        zero and reach a ``sqrt`` in the closure, which turns a healthy state into NaN with no warning
+        the guard can act on. ``None`` (default) is byte-identical.
+    cycle_budget : int or None
+        An optional cap on the inner loop's **accumulated** linear-solve count (static). When set, the
+        inner loop stops as soon as its summed cycle count reaches ``cycle_budget``, so a primary solve
+        grinding on a stiff low-β operator is cut after ~one over-budget inner iteration rather than
+        running the full ``inner_steps`` into the restart cap (~5× the cost on the 3D coupled march). The
+        partial, non-converged iterate it then returns is meant to be discarded by the march's β-escalation
+        (:func:`~aquaflux.solve.forward_march` with ``retry_on_cycles < cycle_budget``), which redoes the
+        step at a larger β where it converges cheaply -- so the two are paired. ``None`` (default) is
+        unbounded and byte-identical. Forward-only, like the escalation it pairs with.
     """
 
     shift_policy: ShiftPolicy
@@ -671,7 +722,14 @@ class DualTimeStep(eqx.Module):
     inner_steps: int = eqx.field(static=True, default=5)
     inner_tol: float = eqx.field(static=True, default=0.05)
     line_search: int = eqx.field(static=True, default=10)
-    forward_solver: lx.AbstractLinearSolver | None = eqx.field(static=True, default=None)
+    # Data, not static (the same reasoning as `residual_norm` below): a solver configured with a
+    # row-scaled stopping measure CARRIES that measure's scale arrays, and equinox rightly warns when
+    # arrays are put in a static field -- static leaves take part in the jit cache key by equality, so
+    # array-valued ones make the key ill-defined and, if the scales were ever rebuilt, would retrace
+    # every step. As data the arrays are ordinary traced leaves and the cache key is shape/dtype only.
+    # A solver with no array leaves (the default, and any plain-tolerance GMRES) filters to the static
+    # side regardless, so this changes nothing for those.
+    forward_solver: lx.AbstractLinearSolver | None = None
     # Data, not static (matching PseudoTransientStep): an observed march re-derives the measure each
     # outer iteration and swaps it in with `tree_at`, which needs it to ride as a leaf. The default
     # plain callable has no array leaves, so it filters to the static side and the default is unchanged.
@@ -679,6 +737,11 @@ class DualTimeStep(eqx.Module):
     adjoint_preconditioner_factory: (
         Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
     ) = eqx.field(static=True, default=None)
+    inner_observer: Callable[..., None] | None = eqx.field(static=True, default=None)
+    cycle_budget: int | None = eqx.field(static=True, default=None)
+    step_limit: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
+        static=True, default=None
+    )
 
     def norm(self) -> ResidualNorm:
         """The residual measure the inner loop and the outer stopping test share (:attr:`residual_norm`)."""
@@ -714,6 +777,9 @@ class DualTimeStep(eqx.Module):
         inner_tol = self.inner_tol
         line_search = self.line_search
         norm = self.residual_norm
+        inner_observer = self.inner_observer
+        cycle_budget = self.cycle_budget
+        step_limit = self.step_limit
 
         def step(
             residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
@@ -739,18 +805,32 @@ class DualTimeStep(eqx.Module):
                 return residual_fn(p) + shift * (p - reference)
 
             def cond(carry: tuple) -> jnp.ndarray:
-                _, inner, gnorm, _, _ = carry
-                return (inner < inner_steps) & (gnorm > target)
+                _, inner, gnorm, cycles, _, _, _ = carry
+                keep = (inner < inner_steps) & (gnorm > target)
+                # Cost bailout: stop the inner loop once its accumulated linear-solve count reaches
+                # `cycle_budget`, so a primary solve that is grinding on a stiff low-β operator is cut off
+                # after ~one over-budget inner iteration (~`cycle_budget` matvecs) instead of running the
+                # full `inner_steps` into the restart cap (measured ~5× the cost on the 3D coupled march).
+                # The partial, non-converged iterate this returns is meant to be discarded by the march's
+                # β-escalation (`forward_march(retry_on_cycles<cycle_budget)`), which redoes the step at a
+                # larger β where it converges cheaply -- so pair the two. `cycle_budget=None` (default) is
+                # byte-identical (the budget term is elided at trace time, as `cycle_budget` is static).
+                if cycle_budget is not None:
+                    keep = keep & (cycles < cycle_budget)
+                return keep
 
             def body(carry: tuple) -> tuple:
-                p, inner, gnorm, cycles, min_alpha = carry
+                p, inner, gnorm, cycles, min_alpha, max_inner, binding = carry
                 delta, step_cycles = _shifted_solve(
                     residual_fn, p, transient_residual(p), shift, preconditioner, solver
                 )
                 # Strict-descent (monotone) line search on ‖G‖: G = 0 is a well-posed fixed-φⁿ solve, so
                 # a clipped inner step is a signal the pseudo-timestep is too large, read out via alpha.
+                # Cap the ladder by whatever constraint the residual cannot express (positivity of a
+                # directly-solved field). `None` leaves the cap at 1, i.e. no cap.
+                max_alpha = 1.0 if step_limit is None else step_limit(p, delta)
                 candidate, alpha = backtracking_line_search(
-                    transient_residual, p, delta, gnorm, line_search, norm=norm
+                    transient_residual, p, delta, gnorm, line_search, norm=norm, max_alpha=max_alpha
                 )
                 new_gnorm = norm(transient_residual(candidate))
                 # An inner step that does NOT reduce ‖G‖ took the line search's non-descent fallback,
@@ -759,15 +839,36 @@ class DualTimeStep(eqx.Module):
                 # pseudo-timestep) rather than "comfortable" (grow it). The monotone search means no
                 # descent ⇔ the fallback fired, so `new_gnorm < gnorm` detects it exactly.
                 descended = new_gnorm < gnorm
+                if inner_observer is not None:
+                    # Surface this inner iteration's trajectory (‖G‖ before/after, its solve's raw cycle
+                    # count, its line-search factor). `jax.debug.callback` fires during execution and is a
+                    # no-op under differentiation; `None` (the default) elides this branch at trace time.
+                    jax.debug.callback(
+                        inner_observer, inner, gnorm, new_gnorm, step_cycles, alpha, ordered=True
+                    )
                 return (
                     candidate,
                     inner + 1,
                     new_gnorm,
                     cycles + step_cycles,
                     jnp.minimum(min_alpha, jnp.where(descended, alpha, 0.0)),
+                    # The most expensive SINGLE solve, which is the inner-count-invariant difficulty
+                    # signal: the summed count above also counts how many times the step solved.
+                    jnp.maximum(max_inner, corrected_cycles(step_cycles)),
+                    # The cap only where it was the BINDING constraint: `alpha` reaching it means the
+                    # ladder wanted a longer step and the limit, not the descent test, stopped it.
+                    jnp.minimum(binding, jnp.where(alpha >= max_alpha, max_alpha, 1.0)),
                 )
 
-            phi_next, inner_iterations, _, cycles, alpha = jax.lax.while_loop(
+            (
+                phi_next,
+                inner_iterations,
+                final_gnorm,
+                cycles,
+                alpha,
+                max_inner,
+                binding,
+            ) = jax.lax.while_loop(
                 cond,
                 body,
                 (
@@ -776,10 +877,18 @@ class DualTimeStep(eqx.Module):
                     reference_norm,
                     jnp.asarray(0, dtype=jnp.int32),
                     jnp.asarray(1.0),
+                    jnp.asarray(0, dtype=jnp.int32),
+                    jnp.asarray(1.0),
                 ),
             )
             # `cycles` is the SUM of the inner solves' raw counts; report the inner-iteration count
             # alongside it so the two costs (nonlinear inner work vs linear solve cost) are not conflated.
-            return phi_next, cycles, alpha, inner_iterations
+            # `reached_target` says the loop exited on its OWN tolerance rather than being cut short by
+            # `cycle_budget` or `inner_steps`. Without it a march escalating on cost alone discards a step
+            # that converged expensively, which is pure waste: it throws away a good iterate AND takes a
+            # shorter step than the work already earned.
+            return StepOutcome(
+                phi_next, cycles, alpha, inner_iterations, final_gnorm <= target, max_inner, binding
+            )
 
         return step

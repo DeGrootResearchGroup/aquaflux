@@ -17,6 +17,7 @@ solution seeds the next higher Re), and the final target solve.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 import equinox as eqx
@@ -31,6 +32,42 @@ if TYPE_CHECKING:
     import jax.numpy as jnp
 
     from .coupled import CoupledRANS
+
+
+@dataclass(frozen=True)
+class ReynoldsPoint:
+    """Which continuation point a ``point_setup`` is being asked to configure.
+
+    A per-point builder needs to know *where in the ramp* it is -- to label a log, to pick a tolerance,
+    to vary a preconditioner between the seed rungs and the target. That is the continuation's own
+    bookkeeping, so it is passed rather than re-derived: a caller counting its own invocations would be
+    duplicating the loop's index, and could not know the total or the viscosity scaling at all.
+
+    Attributes
+    ----------
+    index : int
+        Which point this is, **1-based** (``1`` is the lowest-Reynolds anchor).
+    total : int
+        How many points the ramp has, including the target (``n_points + 1``).
+    viscosity_scale : float
+        The factor the molecular viscosity is multiplied by at this point (``1.0`` at the target, larger
+        below it). The Reynolds number is reduced by the same factor.
+    """
+
+    index: int
+    total: int
+    viscosity_scale: float
+
+    @property
+    def is_target(self) -> bool:
+        """Whether this is the final, true-viscosity point (the one whose root is returned)."""
+        return self.viscosity_scale == 1.0
+
+    @property
+    def label(self) -> str:
+        """A short human label, e.g. ``"point 2/3 (Re/10)"`` -- so every driver need not format one."""
+        scaling = "target Re" if self.is_target else f"Re/{self.viscosity_scale:g}"
+        return f"point {self.index}/{self.total} ({scaling})"
 
 
 class ReynoldsSchedule(Protocol):
@@ -92,6 +129,7 @@ def solve_reynolds_continuation(
     *,
     schedule: ReynoldsSchedule | None = None,
     intermediate_rtol: float | None = 1e-2,
+    intermediate_atol: float | None = None,
     point_setup: Callable[[CoupledRANS, jnp.ndarray], dict] | None = None,
     **solve_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -129,8 +167,17 @@ def solve_reynolds_continuation(
         them to the tight target tolerance is wasted work -- a loose value develops the field enough to
         seed the next point at a fraction of the cost. Default ``1e-2``. Pass ``None`` to converge every
         point to the caller's ``rtol`` (no loosening).
+    intermediate_atol : float or None
+        The **absolute** residual tolerance for the lower-Re points, overriding ``atol`` for those solves
+        only. The stopping test is ``‖R‖ <= atol + rtol·‖R₀‖``, so pairing this with ``rtol=0`` converges
+        each seed point to a fixed level rather than to a fraction of its own starting residual. Prefer it
+        for a self-normalizing residual measure (the default row-equilibrated one already reports a
+        fractional change per equation): every point re-bases its own ``‖R₀‖``, and a Reynolds jump makes
+        the inherited field a *worse* seed, so a purely relative bar can let a later point stop at a worse
+        absolute residual than an earlier point already reached. ``None`` (default) leaves ``atol``
+        untouched.
     point_setup : callable, optional
-        ``(companion, seed_state) -> dict``, a **per-Reynolds-point** builder of extra ``solve_coupled``
+        ``(companion, seed_state, point) -> dict``, a **per-Reynolds-point** builder of extra ``solve_coupled``
         keyword arguments (merged over ``solve_kwargs`` for that point). It exists for a preconditioner that
         is both **per-companion and per-state** — chiefly the complete-LU β-tracking hook, whose
         ``continuation`` is frozen at the point's own viscosity *and* seed state and whose
@@ -202,8 +249,17 @@ def solve_reynolds_continuation(
     # over-converging them to the target tolerance is wasted work.
     if intermediate_rtol is not None:
         ramp_kwargs["rtol"] = intermediate_rtol
+    # The absolute counterpart. The stopping test is ``‖R‖ <= atol + rtol·‖R₀‖``, so a purely ABSOLUTE
+    # target is ``rtol=0`` with ``atol`` the level to reach -- which is the meaningful form for a
+    # self-normalizing residual measure (the default row-equilibrated one already reports a fractional
+    # change per equation, so dividing it again by ‖R₀‖ makes the bar a property of the initial guess).
+    # It matters most here: every point re-bases its own ‖R₀‖, and a Reynolds jump makes the inherited
+    # field a WORSE seed, so a relative bar lets a later point stop at a worse absolute residual than an
+    # earlier one already reached.
+    if intermediate_atol is not None:
+        ramp_kwargs["atol"] = intermediate_atol
 
-    def _point_solve(assembler, seed_fields, base_kwargs):
+    def _point_solve(assembler, seed_fields, base_kwargs, point):
         # One Reynolds point. Without `point_setup` this is the plain solve (byte-identical to before,
         # seed passed through — the lowest point self-starts inside solve_coupled). With it, materialize
         # the seed (hybrid start for the lowest point) so the per-point continuation freezes at the same
@@ -215,14 +271,15 @@ def solve_reynolds_continuation(
             seed_fields = hybrid_initialize(assembler.momentum, assembler.turbulence)
         packed = assembler.state_from_physical(*seed_fields)
         return solve_coupled(
-            assembler, *seed_fields, **{**base_kwargs, **point_setup(assembler, packed)}
+            assembler, *seed_fields, **{**base_kwargs, **point_setup(assembler, packed, point)}
         )
 
     seed: tuple[jnp.ndarray | None, jnp.ndarray | None, jnp.ndarray | None] = (None, None, None)
     for index, scale in enumerate(scales[:-1]):
         companion = frozen.with_scaled_molecular_viscosity(scale)
         try:
-            flow, k, omega = _point_solve(companion, seed, ramp_kwargs)
+            point = ReynoldsPoint(index + 1, len(scales), float(scale))
+            flow, k, omega = _point_solve(companion, seed, ramp_kwargs, point)
         except eqx.EquinoxRuntimeError as exc:
             raise RuntimeError(
                 f"Reynolds-continuation point {index + 1} of {n_points} "
@@ -236,4 +293,5 @@ def solve_reynolds_continuation(
 
     # The final point is the true target: the live `coupled` (so its adjoint is the direct solve's),
     # seeded by the last converged lower-Re solution, with the full solve_kwargs.
-    return _point_solve(coupled, seed, solve_kwargs)
+    target = ReynoldsPoint(len(scales), len(scales), float(scales[-1]))
+    return _point_solve(coupled, seed, solve_kwargs, target)

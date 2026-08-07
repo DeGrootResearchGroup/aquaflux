@@ -1,7 +1,7 @@
 """Feedback step controls for the eager march (forward-only).
 
 A :class:`~aquaflux.solve.StepControl` reshapes the forward step each iteration from the previous
-step's outcome. Three members drive the pseudo-transient shift strength β:
+step's outcome. Four members drive the pseudo-transient shift strength β:
 
 * :class:`DualTimeControl` ramps the *dual-time* pseudo-timestep by a Courant rule (grow it while the
   backward-Euler inner loop is comfortable, ``α = 1``; shrink it when an inner step clips), which lets β
@@ -16,11 +16,16 @@ step's outcome. Three members drive the pseudo-transient shift strength β:
   ratio instead of α (switched evolution relaxation). Opt-in: it is the safer rule when the steady
   residual is a reliable progress signal, but on the pitzDaily ramp the row-scaled residual is nearly
   flat while the flow develops (the ``β × travel`` identity), so it pins β and stalls the pseudo-timestep.
+* :class:`CflResidualDualTimeControl` combines the two dual-time rules: it grows the pseudo-timestep on the
+  Courant signal α (:class:`DualTimeControl`'s speed) but brakes it on a rising steady residual
+  (:class:`ResidualRatioDualTimeControl`'s overshoot safety), so it is fast on the flat-residual development
+  where the residual-only rule stalls *and* safe on the overshoot where the α-only rule diverges — the two
+  controls' failure modes are disjoint, and this grows only when both signals are comfortable.
 * :class:`AlphaTargetingControl` drives the *single-step* (non-dual-time) shift toward the α = 1 boundary.
   Opt-in and, unlike the dual-time controls, does **not** converge standalone (it plateaus short); its
   numeric gains are hand-set placeholders. Do not promote it to a default.
 
-All three are forward-only accelerators on the eager march — they read the previous step's report and may
+All four are forward-only accelerators on the eager march — they read the previous step's report and may
 raise under ``jax.grad`` — so they live here rather than on the differentiable Newton path.
 """
 
@@ -188,6 +193,15 @@ class DualTimeControl(eqx.Module):
         )
         return controlled, beta
 
+    def carry_beta(self, state: object, beta: float) -> float:
+        """Seed the carried β with an externally-chosen value (the march's escalated β).
+
+        Called by :func:`~aquaflux.solve.forward_march` after a β-escalation retry, so the ramp continues
+        from the escalation's discovered-safe β instead of the control's own last β -- see the carry note in
+        ``forward_march``. Returns the new carried state (this control carries a bare β).
+        """
+        return float(beta)
+
 
 class ResidualRatioDualTimeControl(eqx.Module):
     """Ramp the dual-time pseudo-timestep by the steady-residual reduction ratio (residual-based PTC).
@@ -284,3 +298,118 @@ class ResidualRatioDualTimeControl(eqx.Module):
             lambda s: s.relaxation_schedule, base_step, ConstantRelaxation(jnp.asarray(beta))
         )
         return controlled, (beta, prev_residual)
+
+    def carry_beta(self, state: object, beta: float) -> tuple[float, float | None]:
+        """Seed the carried β with the march's escalated β, keeping the carried previous residual so the
+        ratio signal is unbroken (see the carry note in :func:`~aquaflux.solve.forward_march`)."""
+        prev = state[1] if isinstance(state, tuple) else None
+        return (float(beta), prev)
+
+
+class CflResidualDualTimeControl(eqx.Module):
+    """Grow the dual-time pseudo-timestep on the Courant signal α, but brake it on a rising residual.
+
+    The two single-signal controls fail in **disjoint** ways, so combining them recovers the strengths of
+    both. :class:`DualTimeControl` grows Δτ on the inner line-search factor α (a *local* step-health signal:
+    is this Δτ small enough for the backward-Euler inner loop to take a full step?) — fast, but **blind to
+    the trajectory**: it happily grows Δτ into an overshoot while the inner loop stays comfortable (α = 1),
+    which then diverges unless the linear solve is near-exact. :class:`ResidualRatioDualTimeControl` grows Δτ
+    on the steady-residual reduction ratio (a *global* trajectory-health signal: is the march converging or
+    diverging?) — safe against overshoot, but **blind to productive development**: while the residual sits on
+    its ``β × travel`` plateau (nearly flat as the slow transient develops) it cannot tell "developing" from
+    "stalled", so it pins β and the pseudo-timestep stalls to a crawl.
+
+    A step can be *locally* healthy (α = 1) yet *globally* diverging (residual rising) — the overshoot — and
+    that is the one regime where both signals are needed at once. This control therefore grows Δτ **only when
+    both are comfortable** and shrinks it when **either** wall is hit ("grow until the first wall"):
+
+    - **α < :attr:`backoff_below` (local wall) or ratio > :attr:`rise_ratio` (global wall):** shrink,
+      ``β ← β · backoff``. The α term catches a Δτ too large for the inner loop; the ratio term is the
+      overshoot governor α lacks — it fires when the steady residual rises even though α is still 1.
+    - **α ≥ :attr:`grow_above` and ratio ≤ :attr:`hold_ratio`:** the step is comfortable *and* the
+      trajectory is not diverging — grow, ``β ← β / grow``. Because the plateau ratio ≈ 1 satisfies
+      ``ratio ≤ hold_ratio``, this grows on α through the flat-residual development where the residual-only
+      rule stalls.
+    - otherwise (``hold_ratio < ratio ≤ rise_ratio``): hold. The band between the two ratio thresholds
+      keeps the mildly-noisy plateau from oscillating between grow and brake.
+
+    So on a case with no dangerous overshoot the residual never crosses ``rise_ratio`` and it grows on α like
+    :class:`DualTimeControl` (its speed); on a case with a sharp overshoot the ratio term brakes right at the
+    excursion where α is blind (:class:`ResidualRatioDualTimeControl`'s safety) — without either control's
+    blind spot. Like both, it **carries ``(β, previous residual)`` across preconditioner refreshes** (holding
+    β on a refresh boundary so the ramp is continuous) and is a forward-only accelerator on the eager march
+    (it reads the previous step's report and may raise under ``jax.grad``); the shift vanishes at the root, so
+    the converged state and the adjoint are unaffected. ``base_step`` must be a
+    :class:`~aquaflux.solve.DualTimeStep`.
+
+    Attributes
+    ----------
+    beta_start : float
+        β for the first step of the whole march (static).
+    grow : float
+        Factor ``> 1`` the pseudo-timestep is grown by (β divided by) on a comfortable, non-diverging step
+        (static).
+    backoff : float
+        Factor ``> 1`` the pseudo-timestep is shrunk by (β multiplied by) on either wall (static).
+    grow_above, backoff_below : float
+        The α thresholds: at or above ``grow_above`` the inner step is comfortable; below ``backoff_below``
+        it clipped hard (static).
+    hold_ratio, rise_ratio : float
+        The steady-residual ratio thresholds, with ``hold_ratio < rise_ratio``: growth is allowed only when
+        ``ratio ≤ hold_ratio`` (residual flat or falling), braking fires when ``ratio > rise_ratio`` (residual
+        rising), and the band between holds β (static).
+    beta_min, beta_max : float
+        Clamps on β. ``beta_min`` bounds how large the pseudo-timestep may grow (static).
+    """
+
+    beta_start: float = eqx.field(static=True, default=2.0)
+    grow: float = eqx.field(static=True, default=1.5)
+    backoff: float = eqx.field(static=True, default=2.0)
+    grow_above: float = eqx.field(static=True, default=0.5)
+    backoff_below: float = eqx.field(static=True, default=0.25)
+    hold_ratio: float = eqx.field(static=True, default=1.05)
+    rise_ratio: float = eqx.field(static=True, default=1.10)
+    beta_min: float = eqx.field(static=True, default=0.02)
+    beta_max: float = eqx.field(static=True, default=4.0)
+
+    def _adapt(self, beta: float, alpha: float, ratio: float) -> float:
+        if alpha < self.backoff_below or ratio > self.rise_ratio:  # either wall -> shrink
+            beta = beta * self.backoff
+        elif alpha >= self.grow_above and ratio <= self.hold_ratio:  # both comfortable -> grow
+            beta = beta / self.grow
+        return float(min(max(beta, self.beta_min), self.beta_max))
+
+    def next_step(
+        self, base_step: ForwardStep, previous: StepReport | None, state: object
+    ) -> tuple[ForwardStep, tuple[float, float | None]]:
+        """The base dual-time step with a constant β, and the ``(β, ‖R‖)`` state to carry.
+
+        ``state`` is the carried ``(β, previous residual norm)`` (``None`` on the very first step). β is
+        updated from the *previous* step's α and its residual ratio to the step before it; the first step of
+        a refresh segment (``previous is None`` with a carried ``state``) holds β so the ramp continues
+        across the refresh. Before a residual ratio is available (the first step after the start, whose
+        ``previous residual`` is ``None``) the ratio defaults to ``1`` so α alone drives that step.
+        ``base_step`` must be a :class:`~aquaflux.solve.DualTimeStep`.
+        """
+        if state is None:
+            beta, prev_residual = self.beta_start, None
+        else:
+            beta, prev_residual = state
+            if previous is not None:
+                ratio = (
+                    float(previous.residual_norm) / prev_residual
+                    if prev_residual is not None and prev_residual > 0.0
+                    else 1.0
+                )
+                beta = self._adapt(beta, float(previous.alpha), ratio)
+                prev_residual = float(previous.residual_norm)
+        controlled = eqx.tree_at(
+            lambda s: s.relaxation_schedule, base_step, ConstantRelaxation(jnp.asarray(beta))
+        )
+        return controlled, (beta, prev_residual)
+
+    def carry_beta(self, state: object, beta: float) -> tuple[float, float | None]:
+        """Seed the carried β with the march's escalated β, keeping the carried previous residual so the
+        ratio signal is unbroken (see the carry note in :func:`~aquaflux.solve.forward_march`)."""
+        prev = state[1] if isinstance(state, tuple) else None
+        return (float(beta), prev)

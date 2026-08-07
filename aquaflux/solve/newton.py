@@ -40,6 +40,7 @@ def newton_step(
     phi: jnp.ndarray,
     solver: lx.AbstractLinearSolver | None = None,
     preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None = None,
+    preconditioner_side: str = "right",
 ) -> jnp.ndarray:
     """One Newton correction ``phi -> phi + delta``, ``J delta = -R(phi)``.
 
@@ -62,11 +63,22 @@ def newton_step(
     solver : lineax.AbstractLinearSolver, optional
         Linear solver for the Newton step; defaults to the package default.
     preconditioner : callable, optional
-        A factory ``phi -> M`` giving the left preconditioner ``M`` (a matvec approximating
-        ``J^{-1}``) for the step's linear solve; built at the current iterate. ``M``'s
-        coefficients must be ``stop_gradient``-ed so preconditioning stays gradient-transparent.
+        A factory ``phi -> M`` giving the preconditioner ``M`` (a matvec approximating ``J^{-1}``) for
+        the step's linear solve; built at the current iterate. ``M``'s coefficients must be
+        ``stop_gradient``-ed so preconditioning stays gradient-transparent.
+    preconditioner_side : str
+        The side ``M`` is applied on, ``"right"`` (default) or ``"left"`` — see
+        :func:`~aquaflux.solve.linear.solve_linear`. Left suits a strong ``M`` on a badly conditioned
+        SPD operator (a multigrid-preconditioned anisotropic Poisson solve), where the true residual
+        cannot reach tolerance in a bounded number of steps but the preconditioned residual can.
     """
-    delta, _, _ = newton_correction(residual_fn, phi, solver=solver, preconditioner=preconditioner)
+    delta, _, _ = newton_correction(
+        residual_fn,
+        phi,
+        solver=solver,
+        preconditioner=preconditioner,
+        preconditioner_side=preconditioner_side,
+    )
     return phi + delta
 
 
@@ -75,6 +87,7 @@ def newton_correction(
     phi: jnp.ndarray,
     solver: lx.AbstractLinearSolver | None = None,
     preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None = None,
+    preconditioner_side: str = "right",
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """The raw Newton correction ``delta`` (solving ``J delta = -R(phi)``), ``R(phi)``, and the cost.
 
@@ -99,6 +112,10 @@ def newton_correction(
 
     preconditioner_matvec = None if preconditioner is None else preconditioner(phi)
     delta, cycles = solve_linear(
-        jacobian_vector_product, -r, solver=solver, preconditioner=preconditioner_matvec
+        jacobian_vector_product,
+        -r,
+        solver=solver,
+        preconditioner=preconditioner_matvec,
+        preconditioner_side=preconditioner_side,
     )
     return delta, r, cycles

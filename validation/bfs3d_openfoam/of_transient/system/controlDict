@@ -1,0 +1,65 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Time-accurate reference: the steady SIMPLE run limit-cycles on the separated 3D flow, so a
+// transient run to a statistically-steady state provides the comparison target (as for the 2D
+// case). Domain flow-through time ~ 0.23 m / 10 m/s ~ 0.023 s; run to 0.5 s (~20 flow-throughs)
+// and time-average from 0.25 s so the average washes out the startup transient.
+
+solver          incompressibleFluid;
+
+startFrom       startTime;
+startTime       0;
+stopAt          endTime;
+endTime         0.5;
+deltaT          1e-5;
+
+writeControl    adjustableRunTime;
+writeInterval   0.05;
+purgeWrite      3;
+
+writeFormat     ascii;
+writePrecision  8;
+timeFormat      general;
+timePrecision   8;
+runTimeModifiable true;
+
+adjustTimeStep  yes;
+maxCo           0.9;
+maxDeltaT       5e-5;
+
+functions
+{
+    #includeFunc residuals(p, U, k, omega)
+
+    fieldAverage
+    {
+        type            fieldAverage;
+        libs            ("libfieldFunctionObjects.so");
+        timeStart       0.25;
+        writeControl    writeTime;
+        fields
+        (
+            U     { mean on; prime2Mean off; base time; }
+            p     { mean on; prime2Mean off; base time; }
+            k     { mean on; prime2Mean off; base time; }
+            omega { mean on; prime2Mean off; base time; }
+            nut   { mean on; prime2Mean off; base time; }
+        );
+    }
+}
+
+// ************************************************************************* //
