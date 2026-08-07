@@ -613,6 +613,7 @@ class PseudoTransientStep(eqx.Module):
                 1,
                 jnp.asarray(True),
                 corrected_cycles(step_cycles),
+                jnp.asarray(1.0),
             )
 
         return step
@@ -804,7 +805,7 @@ class DualTimeStep(eqx.Module):
                 return residual_fn(p) + shift * (p - reference)
 
             def cond(carry: tuple) -> jnp.ndarray:
-                _, inner, gnorm, cycles, _, _ = carry
+                _, inner, gnorm, cycles, _, _, _ = carry
                 keep = (inner < inner_steps) & (gnorm > target)
                 # Cost bailout: stop the inner loop once its accumulated linear-solve count reaches
                 # `cycle_budget`, so a primary solve that is grinding on a stiff low-β operator is cut off
@@ -819,7 +820,7 @@ class DualTimeStep(eqx.Module):
                 return keep
 
             def body(carry: tuple) -> tuple:
-                p, inner, gnorm, cycles, min_alpha, max_inner = carry
+                p, inner, gnorm, cycles, min_alpha, max_inner, binding = carry
                 delta, step_cycles = _shifted_solve(
                     residual_fn, p, transient_residual(p), shift, preconditioner, solver
                 )
@@ -854,9 +855,20 @@ class DualTimeStep(eqx.Module):
                     # The most expensive SINGLE solve, which is the inner-count-invariant difficulty
                     # signal: the summed count above also counts how many times the step solved.
                     jnp.maximum(max_inner, corrected_cycles(step_cycles)),
+                    # The cap only where it was the BINDING constraint: `alpha` reaching it means the
+                    # ladder wanted a longer step and the limit, not the descent test, stopped it.
+                    jnp.minimum(binding, jnp.where(alpha >= max_alpha, max_alpha, 1.0)),
                 )
 
-            phi_next, inner_iterations, final_gnorm, cycles, alpha, max_inner = jax.lax.while_loop(
+            (
+                phi_next,
+                inner_iterations,
+                final_gnorm,
+                cycles,
+                alpha,
+                max_inner,
+                binding,
+            ) = jax.lax.while_loop(
                 cond,
                 body,
                 (
@@ -866,6 +878,7 @@ class DualTimeStep(eqx.Module):
                     jnp.asarray(0, dtype=jnp.int32),
                     jnp.asarray(1.0),
                     jnp.asarray(0, dtype=jnp.int32),
+                    jnp.asarray(1.0),
                 ),
             )
             # `cycles` is the SUM of the inner solves' raw counts; report the inner-iteration count
@@ -875,7 +888,7 @@ class DualTimeStep(eqx.Module):
             # that converged expensively, which is pure waste: it throws away a good iterate AND takes a
             # shorter step than the work already earned.
             return StepOutcome(
-                phi_next, cycles, alpha, inner_iterations, final_gnorm <= target, max_inner
+                phi_next, cycles, alpha, inner_iterations, final_gnorm <= target, max_inner, binding
             )
 
         return step

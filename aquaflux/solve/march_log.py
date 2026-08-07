@@ -503,6 +503,10 @@ class MarchLogger:
         assert self._step_table is not None
 
         marks = ""
+        # `L`: the step length was set by an injected limit (positivity), not by the descent test --
+        # a different diagnosis from a clipped alpha, and one a reader would otherwise have to guess.
+        if report.binding_limit < 1.0:
+            marks += "L"
         if report.escalations:
             marks += f"e{int(report.escalations)}"
         if report.diverged_retry:
@@ -533,6 +537,8 @@ class MarchLogger:
             aside.append(f"pc {kind}" + ("" if kind == "-" else f" {seconds:.1f}s"))
             self._refresh = None
         aside += [f"{name} {value:.4g}" for name, value in columns.items()]
+        if report.binding_limit < 1.0:
+            aside.append(f"limit {report.binding_limit:.2e}")
         aside.append(f"cum {self._cumulative_cycles}")
         self._write(self._step_table.spanning("  ".join(aside)))
         if deltas:

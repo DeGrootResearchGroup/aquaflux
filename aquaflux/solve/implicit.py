@@ -75,6 +75,12 @@ class StepOutcome(NamedTuple):
         step solved, so a threshold on it is ~6x more sensitive for a 5-iteration step than a
         1-iteration one, and the same per-solve difficulty trips it or not depending on a count that
         says nothing about conditioning.
+    binding_limit : jnp.ndarray
+        The step cap **where it was the binding constraint**, else ``1``. A small ``alpha`` has two
+        completely different causes -- the direction overshot (shorten it, escalate the shift) or a
+        constraint bound (the direction is fine, it just cannot be followed that far) -- and they call
+        for opposite responses, so ``alpha`` alone cannot be acted on. Below ``1`` means an injected
+        limit, not the descent test, decided the step length; the value is how tight it was.
     """
 
     phi: jnp.ndarray
@@ -83,6 +89,7 @@ class StepOutcome(NamedTuple):
     inner_iterations: jnp.ndarray
     reached_target: jnp.ndarray
     max_inner_cycles: jnp.ndarray
+    binding_limit: jnp.ndarray
 
 
 _ForwardStep = Callable[
@@ -382,7 +389,9 @@ def _damped_newton_step(
         residual_fn, phi, delta, norm(r), line_search_steps, norm=norm
     )
     # No inner loop, so nothing could have been cut short and the one solve IS the most expensive one.
-    return StepOutcome(stepped, cycles, alpha, 1, jnp.asarray(True), _corrected(cycles))
+    return StepOutcome(
+        stepped, cycles, alpha, 1, jnp.asarray(True), _corrected(cycles), jnp.asarray(1.0)
+    )
 
 
 class DampedNewtonStep(eqx.Module):

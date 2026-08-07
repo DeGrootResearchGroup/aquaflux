@@ -112,6 +112,10 @@ class StepReport(NamedTuple):
         over the inner iterations, so a threshold on it is ~6x more sensitive for a 5-iteration step
         than a 1-iteration one and answers partly a question about nonlinear difficulty rather than
         conditioning. ``0`` when not measured.
+    binding_limit : float
+        The step cap where it was the **binding** constraint, else ``1``. A small ``alpha`` means
+        either that the direction overshot or that a constraint stopped the step being followed
+        further -- opposite diagnoses, so ``alpha`` alone cannot be acted on or reported honestly.
     residual_norm : float
         The residual measure at the state the step produced.
     residual_ratio : float
@@ -158,6 +162,7 @@ class StepReport(NamedTuple):
     drift: float = 0.0
     inner_iterations: int = 1
     max_inner_cycles: int = 0
+    binding_limit: float = 1.0
     shift: float = 0.0
     escalations: int = 0
     diverged_retry: bool = False
@@ -778,6 +783,7 @@ def forward_march(
             drift=0.0 if drift_measure is None else float(drift_measure(state)),
             inner_iterations=int(outcome.inner_iterations),
             max_inner_cycles=int(outcome.max_inner_cycles),
+            binding_limit=float(outcome.binding_limit),
             shift=0.0 if step_shift is None else float(step_shift),
             escalations=int(retries),
             diverged_retry=bool(diverged_retry),

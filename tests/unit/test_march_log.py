@@ -446,3 +446,20 @@ def test_the_free_form_lines_are_ruled_off_from_the_columned_row() -> None:
     row = next(i for i, line in enumerate(lines) if line.startswith("|    1 "))
     assert lines[row + 1].startswith("+--")  # ruled off before the free-form lines
     assert lines[row + 2].startswith("| pc ")
+
+
+def test_a_step_clipped_by_a_constraint_is_distinguished_from_one_that_overshot() -> None:
+    """A small ``a_min`` has two opposite causes, so reporting it alone is not enough.
+
+    Overshoot says shorten the step and escalate the shift; a binding constraint says the direction
+    is fine and simply cannot be followed that far. The flag and the reported limit separate them.
+    """
+    logger, buffer = _log()
+    logger.on_step(_report(alpha=0.013, binding_limit=0.013))  # stopped by the limit
+    logger.on_step(_report(alpha=0.5))  # stopped by the descent test
+
+    limited, overshot = _step_rows(buffer)
+    assert limited["flg"] == "L"
+    assert overshot["flg"] == ""
+    assert "limit 1.30e-02" in _asides(buffer)[0]
+    assert "limit" not in _asides(buffer)[1]
