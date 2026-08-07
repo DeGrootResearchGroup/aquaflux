@@ -14,6 +14,7 @@ from __future__ import annotations
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import pytest
 from aquaflux.solve import (
     DivergenceGuard,
     DualTimeStep,
@@ -21,7 +22,9 @@ from aquaflux.solve import (
     PseudoTransientStep,
     ShiftTerm,
     SwitchedEvolutionRelaxation,
+    positive_block_limit,
 )
+from aquaflux.solve.implicit import backtracking_line_search
 
 
 class UniformShiftPolicy(eqx.Module):
@@ -129,8 +132,8 @@ def test_dual_time_inner_loop_iterates_and_sums_cost() -> None:
     def gnorm(p: jnp.ndarray) -> float:
         return float(jnp.linalg.norm(_residual(p, theta) + (p - phi0)))
 
-    phi1, cyc1, _, _ = run(1)
-    phi4, cyc4, _, _ = run(4)
+    phi1, cyc1 = (lambda o: (o.phi, o.cycles))(run(1))
+    phi4, cyc4 = (lambda o: (o.phi, o.cycles))(run(4))
     assert gnorm(phi4) < gnorm(phi1)  # more inner iterations converge the implicit step further
     assert int(cyc4) > int(cyc1)  # cycles are summed over the inner iterations, not overwritten
 
@@ -156,9 +159,10 @@ def test_dual_time_inner_observer_surfaces_the_trajectory_without_changing_the_s
         policy, relaxation_schedule=schedule, inner_steps=4, inner_tol=1e-8, inner_observer=observer
     )
     plain = DualTimeStep(policy, relaxation_schedule=schedule, inner_steps=4, inner_tol=1e-8)
-    phi_obs, _, _, n_inner = observed.stepper()(residual_theta, phi0, r0, observed.default_solver())
+    outcome = observed.stepper()(residual_theta, phi0, r0, observed.default_solver())
+    phi_obs, n_inner = outcome.phi, outcome.inner_iterations
     phi_obs.block_until_ready()  # flush the ordered debug callbacks
-    phi_plain, _, _, _ = plain.stepper()(residual_theta, phi0, r0, plain.default_solver())
+    phi_plain = plain.stepper()(residual_theta, phi0, r0, plain.default_solver()).phi
 
     assert len(records) == int(n_inner) >= 1  # one record per inner iteration
     assert [r[0] for r in records] == list(range(len(records)))  # indices 0,1,2,... in order
@@ -196,10 +200,8 @@ def test_dual_time_one_inner_step_is_a_single_shifted_step() -> None:
     def residual_theta(p: jnp.ndarray) -> jnp.ndarray:
         return _residual(p, theta)
 
-    dual_next, _, _, _ = dual.stepper()(residual_theta, phi0, r0, dual.default_solver())
-    shifted_next, _, _, _ = raw_shifted.stepper()(
-        residual_theta, phi0, r0, raw_shifted.default_solver()
-    )
+    dual_next = dual.stepper()(residual_theta, phi0, r0, dual.default_solver()).phi
+    shifted_next = raw_shifted.stepper()(residual_theta, phi0, r0, raw_shifted.default_solver()).phi
     assert jnp.allclose(dual_next, shifted_next, atol=1e-10)
 
     # And the full dual-time march reaches the same root as the escalating pseudo-transient march.
@@ -233,8 +235,10 @@ def test_dual_time_cycle_budget_caps_the_inner_loop() -> None:
     unbounded = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
     budgeted = DualTimeStep(UniformShiftPolicy(strength=1.0), cycle_budget=5, **common)
 
-    _, cyc_u, _, inner_u = unbounded.stepper()(residual_fn, phi0, r0, unbounded.default_solver())
-    _, cyc_b, _, inner_b = budgeted.stepper()(residual_fn, phi0, r0, budgeted.default_solver())
+    out_u = unbounded.stepper()(residual_fn, phi0, r0, unbounded.default_solver())
+    out_b = budgeted.stepper()(residual_fn, phi0, r0, budgeted.default_solver())
+    cyc_u, inner_u = out_u.cycles, out_u.inner_iterations
+    cyc_b, inner_b = out_b.cycles, out_b.inner_iterations
 
     assert int(inner_u) == 20  # unreachable target -> ran the full inner budget
     assert int(cyc_u) > 5  # accumulated more than the budget without a cap (sanity for the test)
@@ -260,3 +264,81 @@ def test_dual_time_cycle_budget_none_is_the_unbounded_step() -> None:
     a = default.stepper()(residual_fn, phi0, r0, default.default_solver())
     b = explicit_none.stepper()(residual_fn, phi0, r0, explicit_none.default_solver())
     assert jnp.allclose(a[0], b[0]) and int(a[1]) == int(b[1]) and int(a[3]) == int(b[3])
+
+
+def test_a_cut_short_step_reports_that_it_did_not_reach_its_target() -> None:
+    """A cost-only escalation cannot tell an expensive success from a grind, and would bin the success.
+
+    ``max_inner_cycles`` is reported alongside because the summed count is not an inner-count-invariant
+    difficulty signal: it grows with how many times the step solved.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+
+    def residual_fn(phi: jnp.ndarray) -> jnp.ndarray:
+        return _residual(phi, theta)
+
+    phi0 = jnp.ones_like(theta)
+    r0 = jnp.linalg.norm(residual_fn(phi0))
+    common = dict(relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0), inner_steps=20)
+    cut = DualTimeStep(UniformShiftPolicy(strength=1.0), inner_tol=0.0, cycle_budget=5, **common)
+    met = DualTimeStep(UniformShiftPolicy(strength=1.0), inner_tol=1e-2, **common)
+
+    cut_out = cut.stepper()(residual_fn, phi0, r0, cut.default_solver())
+    met_out = met.stepper()(residual_fn, phi0, r0, met.default_solver())
+
+    assert not bool(cut_out.reached_target)  # an unreachable target, stopped by the budget
+    assert bool(met_out.reached_target)  # a loose target the inner loop actually met
+    assert int(met_out.max_inner_cycles) <= int(met_out.cycles)  # one solve, not their sum
+
+
+def test_positive_block_limit_keeps_a_constrained_field_off_zero() -> None:
+    """Fraction-to-the-boundary: the largest step that keeps the block strictly positive.
+
+    Rejecting violating rungs is not enough -- on the march that motivated this, the search was
+    already at its shortest rung when the field crossed zero, so there was no shorter rung to take.
+    Capping makes an admissible step reachable by construction.
+    """
+    limit = positive_block_limit(2, 5)
+    phi = jnp.array([1.0, 1.0, 1.0e-5, 2.0, 3.0])
+    delta = jnp.array([9.0, 9.0, -1.0e-3, 0.5, -1.0])
+
+    alpha = limit(phi, delta)
+
+    assert float(alpha) == pytest.approx(0.99 * 1.0e-5 / 1.0e-3)  # set by the one near-zero entry
+    assert bool(((phi + alpha * delta)[2:5] > 0).all())
+    # Entries outside the block are unconstrained: the cap ignores them however far they move.
+    assert float(limit(phi, jnp.array([-1e3, 0.0, 1.0, 1.0, 1.0]))) == 1.0
+
+
+def test_a_capped_line_search_never_exceeds_the_cap() -> None:
+    """The cap applies to every rung, including the growth rungs above one."""
+    phi, delta = jnp.array([1.0]), jnp.array([-1.0])
+    stepped, alpha = backtracking_line_search(
+        lambda p: p * 0.0, phi, delta, jnp.asarray(1.0), steps=4, grow=2, max_alpha=0.1
+    )
+
+    assert float(alpha) <= 0.1
+    assert float(stepped[0]) >= 0.9  # phi - alpha, with alpha capped
+
+
+def test_the_inner_line_search_honours_an_injected_step_limit() -> None:
+    """A step that would drive the constrained block negative is shortened, not taken."""
+    theta = jnp.array([8.0, 27.0, 64.0])
+
+    def residual_fn(phi: jnp.ndarray) -> jnp.ndarray:
+        return _residual(phi, theta)
+
+    phi0 = jnp.ones_like(theta)
+    r0 = jnp.linalg.norm(residual_fn(phi0))
+    common = dict(relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0), inner_steps=3)
+    free = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
+    capped = DualTimeStep(
+        UniformShiftPolicy(strength=1.0), step_limit=lambda p, d: jnp.asarray(0.01), **common
+    )
+
+    free_out = free.stepper()(residual_fn, phi0, r0, free.default_solver())
+    capped_out = capped.stepper()(residual_fn, phi0, r0, capped.default_solver())
+
+    assert float(capped_out.alpha) <= 0.01 < float(free_out.alpha)
+    # The capped step still moves -- a cap shortens the step, it does not null it.
+    assert not jnp.allclose(capped_out.phi, phi0)

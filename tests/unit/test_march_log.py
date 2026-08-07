@@ -375,3 +375,53 @@ def test_a_row_following_an_inner_block_is_still_labelled() -> None:
     heading = next(i for i, line in enumerate(lines) if line.startswith("| step"))
     row = next(i for i, line in enumerate(lines) if line.startswith("|    1 "))
     assert row - heading == 2  # heading, rule, row -- nothing between them
+
+
+def test_on_retry_explains_why_a_step_is_repeated() -> None:
+    """Three triggers call for different responses, so "it happened again" is not enough.
+
+    The abandoned attempt's block is closed first, so the explanation sits between the two blocks
+    rather than inside the one it is ending.
+    """
+    logger, buffer = _log(detail=("inner",))
+    logger.on_inner(0, 1.0e-2, 3.3e-3, 5, 1.0)
+    logger.on_retry("cycles", 1, 0.0347)
+    logger.on_inner(0, 1.0e-2, 3.3e-3, 3, 1.0)
+
+    lines = buffer.getvalue().splitlines()
+    explain = next(i for i, line in enumerate(lines) if "redo step" in line)
+    assert lines[explain - 1].lstrip().startswith("+--")  # the abandoned block closed first
+    assert (
+        "cycles" in lines[explain] and "0.0694" in lines[explain]
+    )  # reason and the escalated beta
+    assert "attempt 2" in next(line for line in lines[explain:] if "+- step" in line)
+
+
+def test_the_attempt_counter_resets_between_steps() -> None:
+    """Otherwise every later block reads as a retry of a step that was taken cleanly."""
+    logger, buffer = _log(detail=("inner",))
+    logger.on_retry("cycles", 1, 0.03)
+    logger.on_inner(0, 1.0e-2, 3.3e-3, 3, 1.0)
+    logger.on_step(_report(escalations=1))
+    logger.on_inner(0, 1.0e-2, 3.3e-3, 3, 1.0)
+
+    titles = [line for line in buffer.getvalue().splitlines() if "+- step" in line]
+    assert "attempt" in titles[0]
+    assert "attempt" not in titles[-1]
+
+
+def test_a_legend_explains_that_G_and_R_are_different_residuals() -> None:
+    """Nothing in the table can say that the inner ``G`` and the step's ``R`` are different quantities.
+
+    ``G`` is the implicit timestep's residual and the inner loop drives it to zero; ``R`` is the steady
+    residual and is not driven to zero -- at ``G = 0`` it equals minus the shift term. So the step's
+    ``R`` is never the last ``G out``, which is exactly what a reader expects it to be.
+    """
+    logger, buffer = _log(detail=("inner",))
+    logger.on_inner(0, 1.422e-5, 2.613e-12, 3, 1.0)
+    logger.on_step(_report(residual_norm=4.064e-6))
+    logger.on_inner(0, 4.06e-6, 1.0e-9, 3, 1.0)
+
+    text = buffer.getvalue()
+    assert text.count("R + beta*d*(phi - phi_n)") == 1  # written once, not per block
+    assert text.index("R + beta*d") < text.index("+- step")  # before the first block it explains

@@ -106,6 +106,12 @@ class StepReport(NamedTuple):
         for a single-step (pseudo-transient / damped-Newton) march. Reporting it separately from
         :attr:`cycles` is what keeps the two costs — nonlinear inner work vs linear solve cost — from
         being conflated into one misleading number.
+    max_inner_cycles : int
+        The offset-corrected cost of the step's most expensive **single** solve -- the
+        inner-count-invariant difficulty signal, and what the escalation triggers on. ``cycles`` sums
+        over the inner iterations, so a threshold on it is ~6x more sensitive for a 5-iteration step
+        than a 1-iteration one and answers partly a question about nonlinear difficulty rather than
+        conditioning. ``0`` when not measured.
     residual_norm : float
         The residual measure at the state the step produced.
     residual_ratio : float
@@ -151,6 +157,7 @@ class StepReport(NamedTuple):
     alpha: float
     drift: float = 0.0
     inner_iterations: int = 1
+    max_inner_cycles: int = 0
     shift: float = 0.0
     escalations: int = 0
     diverged_retry: bool = False
@@ -454,10 +461,8 @@ def _march_step(
     The next residual norm is returned from inside this same compiled call so the march does not pay
     a second, separate residual evaluation per step.
     """
-    phi_next, cycles, alpha, inner = forward_step.stepper()(
-        residual_fn, phi, residual_norm_0, solver
-    )
-    return phi_next, cycles, alpha, inner, forward_step.norm()(residual_fn(phi_next))
+    outcome = forward_step.stepper()(residual_fn, phi, residual_norm_0, solver)
+    return outcome, forward_step.norm()(residual_fn(outcome.phi))
 
 
 def forward_march(
@@ -483,6 +488,7 @@ def forward_march(
     retry_on_cycles: int | None = None,
     retry_beta_factor: float = 2.0,
     retry_cycles_limit: int = 2,
+    on_retry: Callable[[str, int, float], None] | None = None,
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
 
@@ -598,6 +604,12 @@ def forward_march(
         otherwise.
     retry_beta_factor : float
         The factor ``β`` is multiplied by on each cycle-count retry (default ``2``).
+    on_retry : callable, optional
+        ``(reason, attempt, beta) -> None``, called immediately before a step is redone. ``reason`` is
+        ``"cycles"`` (the cost trigger, and the step was cut short), ``"diverged"`` (the β-escalation
+        firing on a non-finite or runaway residual) or ``"solver"`` (the tighter-solver fallback).
+        Without it a log shows a step's work twice with nothing saying why, leaving a reader to infer
+        the trigger from the numbers. ``None`` (default) elides the call.
     retry_cycles_limit : int
         The maximum number of successive ``β`` escalations for one step (default ``2``). After them the step
         is accepted whatever its count.
@@ -655,7 +667,7 @@ def forward_march(
             # cache hit. Forward-only, like the trigger and the control.
             precondition_step(active_step, state)
         prestep_state = state
-        state, cycles, alpha, inner, residual_norm = _march_step(
+        outcome, residual_norm = _march_step(
             active_step, residual_fn, prestep_state, residual_norm_0, solver
         )
         # A step can go bad two ways -- a non-finite / diverging correction, or a finite solve whose cost
@@ -676,12 +688,29 @@ def forward_march(
             and retries < retry_cycles_limit
             and not converged_at(float(residual_norm))
             and (
-                int(cycles) > retry_on_cycles
+                # Cost alone is not a reason to redo a step that met its OWN stopping criterion: that
+                # discards a good iterate and replaces it with a SHORTER step than the work already
+                # bought. Escalate on cost only when the step was cut short (measured: an inner loop
+                # reaching 3.0e-6 against a 1.0e-5 target was binned for costing 54 cycles).
+                # Per SOLVE, not summed: a summed threshold is ~6x more sensitive for a 5-iteration
+                # step than a 1-iteration one, so the same per-solve difficulty trips it or not
+                # depending on an inner count that says nothing about conditioning.
+                (
+                    int(outcome.max_inner_cycles) > retry_on_cycles
+                    and not bool(outcome.reached_target)
+                )
                 or _has_diverged(residual_norm, reference, retry_divergence_cap)
             )
             and hasattr(active_step.relaxation_schedule, "beta")
         ):
             retries += 1
+            if on_retry is not None:
+                reason = (
+                    "diverged"
+                    if _has_diverged(residual_norm, reference, retry_divergence_cap)
+                    else "cycles"
+                )
+                on_retry(reason, retries, float(active_step.relaxation_schedule.beta))
             # Escalate by SCALING the existing β leaf, not by rebuilding it from a Python float.
             # `jnp.asarray(float(...) * factor)` yields a fresh weak-typed float64 array whose abstract
             # value (dtype and weak_type) need not match the β leaf the step already carries -- and any
@@ -692,7 +721,7 @@ def forward_march(
             active_step = eqx.tree_at(lambda s: s.relaxation_schedule.beta, active_step, escalated)
             if precondition_step is not None:
                 precondition_step(active_step, prestep_state)  # re-match the PC to the escalated β
-            state, cycles, alpha, inner, residual_norm = _march_step(
+            outcome, residual_norm = _march_step(
                 active_step, residual_fn, prestep_state, residual_norm_0, solver
             )
         # Divergence retry -- the FALLBACK for a non-finite correction β-escalation could not fix. An
@@ -708,7 +737,13 @@ def forward_march(
             residual_norm, reference, retry_divergence_cap
         )
         if diverged_retry:
-            state, cycles, alpha, inner, residual_norm = _march_step(
+            if on_retry is not None:
+                on_retry(
+                    "solver",
+                    retries + 1,
+                    float(getattr(active_step.relaxation_schedule, "beta", 0.0)),
+                )
+            outcome, residual_norm = _march_step(
                 active_step, residual_fn, prestep_state, residual_norm_0, retry_solver
             )
         # Carry an escalated β forward into the control. The escalation raised β because the control had
@@ -729,18 +764,20 @@ def forward_march(
             control_state = step_control.carry_beta(
                 control_state, float(active_step.relaxation_schedule.beta)
             )
+        state = outcome.phi
         current = float(residual_norm)
         # Not every ForwardStep carries a relaxation schedule (a plain damped-Newton step has none), and
         # a schedule need not expose a readable beta -- report 0 rather than demanding either.
         step_shift = getattr(getattr(active_step, "relaxation_schedule", None), "beta", None)
         report = StepReport(
             step=len(reports),
-            cycles=int(cycles),
+            cycles=int(outcome.cycles),
             residual_norm=current,
             residual_ratio=current / reference if reference > 0.0 else 0.0,
-            alpha=float(alpha),
+            alpha=float(outcome.alpha),
             drift=0.0 if drift_measure is None else float(drift_measure(state)),
-            inner_iterations=int(inner),
+            inner_iterations=int(outcome.inner_iterations),
+            max_inner_cycles=int(outcome.max_inner_cycles),
             shift=0.0 if step_shift is None else float(step_shift),
             escalations=int(retries),
             diverged_retry=bool(diverged_retry),

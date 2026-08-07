@@ -49,6 +49,15 @@ def default_linear_solver() -> lx.AbstractLinearSolver:
 _LINEAX_STEP_OFFSET = 2
 
 
+def corrected_cycles(raw_count, solves=1):
+    """The traced counterpart of :func:`restart_cycles`, for use inside a jitted loop.
+
+    Same correction, expressed in ``jax.numpy`` so it can run on a tracer. Kept beside
+    :func:`restart_cycles` so the offset has exactly one definition.
+    """
+    return jnp.maximum(raw_count - _LINEAX_STEP_OFFSET * solves, 0)
+
+
 def restart_cycles(raw_count: int, solves: int = 1) -> int:
     """Strip the fixed per-solve offset from a raw ``lineax`` iteration count.
 

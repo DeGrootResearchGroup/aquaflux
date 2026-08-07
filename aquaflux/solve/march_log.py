@@ -247,6 +247,8 @@ class MarchLogger:
         self._phases = 0
         self._phase = ""
         self._open = False
+        self._attempt = 1
+        self._legend_written = False
         self._step_table: TextTable | None = None
         self._nested = False
         self._needs_headings = True
@@ -355,6 +357,35 @@ class MarchLogger:
         if "pc" in self._detail:
             self._refresh = (str(kind), float(seconds))
 
+    def on_retry(self, reason: str, attempt: int, beta: float) -> None:
+        """``on_retry`` callback: announce that the step about to be repeated is being redone, and why.
+
+        Matches the hook :func:`~aquaflux.solve.forward_march` calls just before a redo
+        (``on_retry=logger.on_retry``). Without it a log shows the same step's work two or three times
+        with nothing between the blocks, leaving a reader to infer the trigger from the numbers -- and
+        the three triggers (a step cut short on cost, a diverged step, a too-loose linear solve) call
+        for completely different responses.
+
+        Written whatever ``detail`` says: a repeated step is not a diagnostic, it is the log failing to
+        explain itself. The attempt number also titles the block that follows.
+        """
+        self._close_block()  # the abandoned attempt's block ends here, before the explanation
+        self._attempt = int(attempt) + 1
+        self._write(
+            f"  -> redo step {self._steps + 1} (attempt {self._attempt}): {reason}, beta -> {beta * 2:.4f}"
+        )
+
+    #: Written once, before the first inner block. `G` and `R` are different residuals and the table
+    #: cannot say so in a column heading; without this a reader reasonably expects the step's `R` to be
+    #: the last `G out`, and it never is.
+    _LEGEND = (
+        "  G is the implicit timestep's own residual, R + beta*d*(phi - phi_n); the inner loop drives",
+        "  it to zero. R is the STEADY residual at the stepped state -- the march's convergence measure.",
+        "  Driving G to zero does not drive R to zero: the two terms cancel there,",
+        "  leaving R = -beta*d*(phi - phi_n). So a step's R is NOT its last 'G out'; it is the residual",
+        "  the next step starts from, and appears there as inner-0's 'G in'.",
+    )
+
     def _open_block(self) -> None:
         """Start an inner-iteration table for the step about to be reported.
 
@@ -368,7 +399,14 @@ class MarchLogger:
         comparison that never holds; ``G in`` at ``inner 0`` is the entering residual, correctly scaled.
         """
         self._close_block()
-        title = f"step {self._steps + 1}"
+        if not self._legend_written:
+            self._legend_written = True
+            self._write("")
+            for line in self._LEGEND:
+                self._write(line)
+        title = f"step {self._steps + 1}" + (
+            f"  attempt {self._attempt}" if self._attempt > 1 else ""
+        )
         self._write("")
         self._write(self._INNER_TABLE.rule(title), indent=self._NEST)
         self._write(self._INNER_TABLE.headings(), indent=self._NEST)
@@ -496,6 +534,8 @@ class MarchLogger:
             )
             self._write(self._step_table.spanning("rel " + changes))
         self._write(self._step_table.rule())
+        # This step is done, so the next block is a fresh step, not another attempt at this one.
+        self._attempt = 1
 
     @staticmethod
     def _reference_norm(report: StepReport) -> float | None:

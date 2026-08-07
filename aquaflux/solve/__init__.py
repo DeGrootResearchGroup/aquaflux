@@ -73,7 +73,9 @@ from .implicit import (
     DampedNewtonStep,
     ForwardStep,
     ImplicitNewtonSolver,
+    StepOutcome,
     TransposedPreconditioner,
+    positive_block_limit,
 )
 from .line_search_growth import (
     LineSearchGrowth,
@@ -165,6 +167,7 @@ __all__ = [
     "StateCheckpointer",
     "StepAcceptance",
     "StepControl",
+    "StepOutcome",
     "StepReport",
     "SwitchedEvolutionRelaxation",
     "TransposedPreconditioner",
@@ -187,6 +190,7 @@ __all__ = [
     "jacobian_relative_error",
     "materialize_block_jacobian",
     "newton_step",
+    "positive_block_limit",
     "refresh_air_hierarchy",
     "relative_residual_gmres",
     "restart_cycles",

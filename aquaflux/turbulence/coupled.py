@@ -2471,6 +2471,7 @@ def solve_coupled(
     retry_divergence_cap: float = float("inf"),
     retry_on_cycles: int | None = None,
     retry_beta_factor: float = 2.0,
+    on_retry: Callable[[str, int, float], None] | None = None,
     retry_cycles_limit: int = 2,
     **continuation_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -2680,6 +2681,10 @@ def solve_coupled(
         damping for the stiff low-``β`` operator, the hard-operator cause of a high count (staleness, the
         other, is pre-empted by a β-mismatch refresh). Needs a ``β``-carrying step control. ``None``
         (default) disables it.
+    on_retry : callable, optional
+        ``(reason, attempt, beta) -> None``, forwarded to
+        :func:`~aquaflux.solve.forward_march`: called before a step is redone, with why. Forward-only
+        reporting; a log without it shows a step's work twice and never says what triggered the redo.
     retry_beta_factor, retry_cycles_limit
         The ``β`` escalation factor per retry (default ``2``) and the maximum successive escalations for one
         step (default ``2``); see :func:`aquaflux.solve.forward_march`.
@@ -2820,6 +2825,7 @@ def solve_coupled(
                 retry_divergence_cap=retry_divergence_cap,
                 retry_on_cycles=retry_on_cycles,
                 retry_beta_factor=retry_beta_factor,
+                on_retry=on_retry,
                 retry_cycles_limit=retry_cycles_limit,
             )
             state = result.state
