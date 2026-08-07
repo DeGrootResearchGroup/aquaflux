@@ -30,6 +30,7 @@ from .boundary import (
     wall_y_star,
 )
 from .continuation import ScalarShiftPolicy, scalar_pseudo_transient_solve
+from .diagnostics import coupled_fields
 from .coupled import (
     CoupledRANS,
     CoupledRANSLayout,
@@ -110,6 +111,7 @@ __all__ = [
     "bulk_velocity",
     "coupled_amg_continuation",
     "coupled_continuation",
+    "coupled_fields",
     "coupled_ilut_continuation",
     "coupled_ilut_refreshing_continuation",
     "coupled_lu_continuation",

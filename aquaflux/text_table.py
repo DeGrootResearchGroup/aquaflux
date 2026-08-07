@@ -17,7 +17,7 @@ Examples
 --------
 >>> table = TextTable([Column("iter", 4, "d"), Column("residual", 10, ".3e")])
 >>> print(table.rule("sweep 1"))
-+- sweep 1 ---------------+
++- sweep 1 ---------+
 >>> print(table.headings())
 | iter |   residual |
 >>> print(table.rule())
@@ -115,6 +115,15 @@ class TextTable:
         if title is None:
             return "+" + "+".join("-" * (column.width + 2) for column in self._columns) + "+"
         return "+" + f"- {title} ".ljust(self.width - 2, "-") + "+"
+
+    def spanning(self, text: str) -> str:
+        """One row of free text spanning every column, for a note that belongs inside the grid.
+
+        Used for values that are *not* per-column -- a set of secondary readings, a status line -- so
+        they sit within the table's borders instead of interrupting it. Over-long text widens the row
+        rather than being cut, for the same reason as :meth:`row`.
+        """
+        return "| " + text.ljust(self.width - 4) + " |"
 
     def headings(self) -> str:
         """The heading row, each label formatted in its own column's width and alignment."""

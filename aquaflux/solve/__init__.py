@@ -95,7 +95,7 @@ from .march import (
     StepReport,
     forward_march,
 )
-from .march_log import MarchLogger
+from .march_log import MarchLogger, combine_metrics, field_change_metrics
 from .multigrid import (
     AirHierarchy,
     SmoothedHierarchy,
@@ -173,10 +173,12 @@ __all__ = [
     "build_amg_vcycle",
     "build_convection_hierarchy",
     "build_smoothed_hierarchy",
+    "combine_metrics",
     "convection_diffusion_operator",
     "convection_multigrid_solve",
     "decouple_dof",
     "default_linear_solver",
+    "field_change_metrics",
     "forward_march",
     "jacobian_relative_error",
     "materialize_block_jacobian",

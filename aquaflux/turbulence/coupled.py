@@ -30,6 +30,7 @@ adjoint sees only the smooth interior physics).
 from __future__ import annotations
 
 import abc
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -2106,6 +2107,7 @@ def _beta_tracking_refresh(
     materialize_every: int | None = None,
     materialize_drift: float | None = None,
     beta_floor: float = 0.0,
+    observer: Callable[[str, float], None] | None = None,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """Shared skeleton for the β-tracking ``precondition_step`` hooks (complete-LU and ILUT).
 
@@ -2162,6 +2164,11 @@ def _beta_tracking_refresh(
         else None
     )
 
+    def _report_refresh(kind: str, started: float) -> None:
+        """Tell an injected observer which branch ran and what it cost (a no-op when unobserved)."""
+        if observer is not None:
+            observer(kind, time.perf_counter() - started)
+
     def precondition_step(active_step: ForwardStep, state: jnp.ndarray) -> None:
         schedule = active_step.relaxation_schedule
         beta = getattr(schedule, "beta", None)
@@ -2172,6 +2179,7 @@ def _beta_tracking_refresh(
                 f"switched-evolution schedule ({type(schedule).__name__})."
             )
         beta = float(beta)
+        started = time.perf_counter()
         # The preconditioner's shift is floored independently of the march's own beta. As beta -> 0 the
         # shift's diagonal dominance vanishes and the frozen V-cycle degrades, but the OPERATOR must keep
         # the small beta to make pseudo-transient progress. Flooring only the preconditioner's copy keeps
@@ -2182,6 +2190,7 @@ def _beta_tracking_refresh(
         # Gate on the preconditioner's own beta: below the floor its operator no longer moves with the
         # march, so a beta-move refresh there would rebuild an identical V-cycle.
         if gate is not None and not gate(pc_beta):
+            _report_refresh("none", started)
             return
         policy = active_step.shift_policy
         frozen = jax.lax.stop_gradient(state)
@@ -2198,6 +2207,7 @@ def _beta_tracking_refresh(
         if materialize_gate is not None and is_amg:
             if not materialize_gate(state):
                 pc.refresh_shift_in_place(shift)
+                _report_refresh("shift", started)
                 return
         # The AMG preconditioner materializes via the coloured probe and takes the batched form; the
         # factorization preconditioners (LU/ILUT) do not, so pass it only on the AMG path.
@@ -2213,6 +2223,7 @@ def _beta_tracking_refresh(
         pc.refresh_in_place(
             lambda v: matvec_at(frozen, v), colouring, n_fields, shift, **extra, **refresh_kwargs
         )
+        _report_refresh("full", started)
 
     return precondition_step
 
@@ -2327,6 +2338,7 @@ def amg_beta_tracking_refresh(
     beta_rel_change: float | None = None,
     refresh_every: int = 8,
     beta_floor: float = 0.0,
+    observer: Callable[[str, float], None] | None = None,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """A ``precondition_step`` that rebuilds the AMG V-cycle at the current β, every step.
 
@@ -2394,6 +2406,14 @@ def amg_beta_tracking_refresh(
         The staleness-cap backstop when ``beta_rel_change`` is set: force a refresh after this many gated
         steps with no β-move (state development at a near-constant ``β``). Ignored when ``beta_rel_change``
         is ``None``.
+    observer : callable, optional
+        ``(kind, seconds) -> None``, called once per step with what this hook actually did --
+        ``"full"`` (re-materialized the Jacobian and re-factored), ``"shift"`` (cheap shift-only
+        refresh) or ``"none"`` (the gate declined; the standing factorization was reused) -- and how
+        long it took. Forward-only instrumentation for a march being profiled: without it, which branch
+        ran is invisible, and a study is left inferring preconditioner behaviour from wall-clock, which
+        is exactly how a per-step refresh cost gets mistaken for a fixed overhead. ``None`` (default)
+        elides the call.
     beta_floor : float
         A lower bound on the shift strength the **preconditioner** is built at: the V-cycle is refreshed at
         ``max(β, beta_floor)`` while the march keeps solving at its own ``β``. As ``β`` falls the shift's
@@ -2420,6 +2440,7 @@ def amg_beta_tracking_refresh(
         materialize_every=materialize_every,
         materialize_drift=materialize_drift,
         beta_floor=beta_floor,
+        observer=observer,
     )
 
 

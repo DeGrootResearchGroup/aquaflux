@@ -2,15 +2,26 @@
 
 Formatting only -- driven by synthetic :class:`~aquaflux.solve.StepReport`s, so no solve is needed and
 the tests stay fast. The point of the class is that a study does not re-derive the formatter, so what
-is pinned here is the contract a study relies on: the derived columns (the reference norm and the
-stopping target), the injected case metrics, and the visibility of a redone step.
+is pinned here is the contract a study relies on: the columns it can scan down, the constants it does
+*not* have to re-read on every row, the opt-in diagnostics, and the visibility of a redone step.
+
+Assertions read **cells**, not substrings, so a column reordering is not a false failure while a wrong
+value still is.
 """
 
 from __future__ import annotations
 
 import io
+import math
 
-from aquaflux.solve import MarchLogger, StepReport
+import numpy as np
+import pytest
+from aquaflux.solve import (
+    MarchLogger,
+    StepReport,
+    combine_metrics,
+    field_change_metrics,
+)
 
 
 def _report(**kwargs) -> StepReport:
@@ -23,22 +34,59 @@ def _log(**kwargs) -> tuple[MarchLogger, io.StringIO]:
     return MarchLogger(buffer, clock=lambda: 0.0, **kwargs), buffer
 
 
-def test_reports_the_reference_norm_and_the_stopping_target() -> None:
-    """The residual alone cannot say how close the solve is to stopping; ``|R0|`` and the target can.
+def _cells(line: str) -> list[str]:
+    """The cells of one grid line, stripped.
 
-    The march reports ``|R|`` and ``|R|/|R0|`` but not ``|R0|``, so the tolerance test
-    ``|R| <= atol + rtol*|R0|`` is invisible without recovering the reference.
+    Column headings deliberately avoid ``|`` (``R``, not ``|R|``) precisely so this split works: a
+    heading carrying the delimiter makes the log unparseable by any column-splitting tool.
+    """
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _step_rows(buffer: io.StringIO) -> list[dict[str, str]]:
+    """Every step row in the log, as ``{heading: cell}`` -- the table's headings carry the meaning."""
+    headings, rows = None, []
+    for line in buffer.getvalue().splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = _cells(line)
+        if cells[:1] == ["step"]:
+            headings = cells
+        elif headings is not None and len(cells) == len(headings):
+            rows.append(dict(zip(headings, cells, strict=True)))
+    return rows
+
+
+def test_the_stopping_test_is_stated_once_rather_than_on_every_row() -> None:
+    """``|R0|`` and the target are constants within a rung, so repeating them per row is pure width.
+
+    The residual alone cannot say how close the solve is to stopping -- the test is
+    ``|R| <= atol + rtol*|R0|`` -- so the reference has to be somewhere; it just does not belong in
+    every line.
     """
     logger, buffer = _log(rtol=1e-3)
     logger.on_step(_report(residual_norm=2.0e-2, residual_ratio=4.0e-2))
+    logger.on_step(_report(residual_norm=1.0e-2, residual_ratio=2.0e-2))
 
-    line = buffer.getvalue()
-    assert "|R0|=5.0000e-01" in line  # 2.0e-2 / 4.0e-2
-    assert "target=5.000e-04" in line  # rtol * |R0|
+    banners = [line for line in buffer.getvalue().splitlines() if line.startswith("reference")]
+    assert len(banners) == 1  # both steps share one |R0|, so it is announced once
+    assert "|R0| = 5.0000e-01" in banners[0]  # 2.0e-2 / 4.0e-2
+    assert "stopping at |R| <= 5.000e-04" in banners[0]  # rtol * |R0|
+
+
+def test_a_new_reference_is_announced_again() -> None:
+    """A continuation rung re-bases ``|R0|``; a stale banner misstates the bar for every row under it."""
+    logger, buffer = _log(rtol=1e-3)
+    logger.on_step(_report(residual_norm=2.0e-2, residual_ratio=4.0e-2))
+    logger.on_step(_report(residual_norm=1.0e-2, residual_ratio=1.0e-1))
+
+    banners = [line for line in buffer.getvalue().splitlines() if line.startswith("reference")]
+    assert len(banners) == 2
+    assert "1.0000e-01" in banners[1]
 
 
 def test_a_diverged_step_reports_no_reference_rather_than_nan() -> None:
-    """A NaN ratio must not print ``|R0|=nan target=nan``.
+    """A NaN ratio must not print ``|R0| = nan``.
 
     Every comparison against NaN is False, so a ``ratio <= 0`` guard would let a diverged step through
     into the division -- and the diverged step is exactly the line a reader is studying.
@@ -46,9 +94,8 @@ def test_a_diverged_step_reports_no_reference_rather_than_nan() -> None:
     logger, buffer = _log(rtol=1e-3)
     logger.on_step(_report(residual_norm=float("nan"), residual_ratio=float("nan")))
 
-    line = buffer.getvalue()
-    assert "|R|=nan" in line and "ratio=nan" in line  # the measured values are reported as they are
-    assert "|R0|" not in line and "target" not in line  # the derived ones are omitted, not faked
+    assert "reference" not in buffer.getvalue()  # not faked
+    assert _step_rows(buffer)[0]["R"] == "nan"  # but the measured value is still reported
 
 
 def test_injected_metrics_become_columns() -> None:
@@ -56,7 +103,7 @@ def test_injected_metrics_become_columns() -> None:
     logger, buffer = _log(metrics=lambda state: {"xr/h": state * 2.0})
     logger.on_checkpoint(_report(), 3.0)
 
-    assert "xr/h=6" in buffer.getvalue()
+    assert _step_rows(buffer)[0]["xr/h"] == "6"
 
 
 def test_on_step_omits_metrics_because_it_has_no_state() -> None:
@@ -67,7 +114,7 @@ def test_on_step_omits_metrics_because_it_has_no_state() -> None:
     assert "xr/h" not in buffer.getvalue()
 
 
-def test_a_redone_step_is_visible() -> None:
+def test_a_redone_step_is_flagged() -> None:
     """``cycles`` counts only the accepted attempt, so a redone step needs its own marker.
 
     Without this a step that escalated twice reads exactly like a cheap one, and a retry mechanism
@@ -78,10 +125,10 @@ def test_a_redone_step_is_visible() -> None:
     logger.on_step(_report(diverged_retry=True))
     logger.on_step(_report())
 
-    escalated, retried, plain = buffer.getvalue().splitlines()
-    assert "<esc=2>" in escalated
-    assert "<RETRY>" in retried
-    assert "<" not in plain
+    escalated, retried, plain = _step_rows(buffer)
+    assert escalated["flag"] == "e2"
+    assert retried["flag"] == "R"
+    assert plain["flag"] == ""
 
 
 def test_cumulative_cycles_and_steps_run_across_phases() -> None:
@@ -91,24 +138,24 @@ def test_cumulative_cycles_and_steps_run_across_phases() -> None:
     logger.phase("rung", total=3)
     logger.on_step(_report(cycles=5))
 
-    lines = buffer.getvalue().splitlines()
-    assert "[rung 1/3" in lines[1]  # numbered automatically; the caller keeps no counter
-    assert "step=   2" in lines[2] and "cum=   11" in lines[2]  # (10-2) + (5-2), offsets stripped
+    assert any("rung 1/3" in line for line in buffer.getvalue().splitlines())
+    second = _step_rows(buffer)[1]
+    assert second["step"] == "2"
+    assert second["cum"] == "11"  # (10-2) + (5-2), offsets stripped
 
 
-def test_solve_cost_is_split_into_inner_count_and_per_inner_cycles() -> None:
+def test_solve_cost_is_split_into_inner_count_and_corrected_cycles() -> None:
     """One summed count conflates *how many* solves a step needed with how hard each one was.
 
     It also overstates the work: the raw count carries lineax's +2 per solve, so this step's ``21``
-    is really 15 cycles over 3 inner iterations -- 5 apiece, not 21.
+    is really 15 cycles over 3 inner iterations, not 21.
     """
     logger, buffer = _log()
     logger.on_step(_report(cycles=21, inner_iterations=3))
 
-    line = buffer.getvalue()
-    assert "in= 3" in line
-    assert "cyc= 15" in line  # 21 - 2*3
-    assert "c/in=  5.0" in line
+    row = _step_rows(buffer)[0]
+    assert row["in"] == "3"
+    assert row["cyc"] == "15"  # 21 - 2*3
 
 
 def test_a_step_whose_count_is_entirely_offset_reads_as_its_real_cost() -> None:
@@ -120,41 +167,60 @@ def test_a_step_whose_count_is_entirely_offset_reads_as_its_real_cost() -> None:
     logger, buffer = _log()
     logger.on_step(_report(cycles=6, inner_iterations=2))
 
-    assert "cyc=  2" in buffer.getvalue()
+    assert _step_rows(buffer)[0]["cyc"] == "2"
 
 
-def test_on_inner_tabulates_each_inner_iteration_with_its_own_cost_and_rate() -> None:
+def test_the_step_row_reports_the_minimum_alpha_not_an_inner_one() -> None:
+    """``a_min`` is named apart from the inner table's ``alpha`` because they differ, confusingly.
+
+    An inner iteration reports ``alpha = 1`` even when its line search failed to descend, while the
+    step folds any such iteration in as ``0`` -- so ``a_min=0.000`` beside ``alpha=1.000`` is a real
+    state (a full step that did not reduce ``|G|``), not a contradiction.
+    """
+    logger, buffer = _log(detail=("inner",))
+    logger.on_inner(0, 4.0e-2, 5.0e-2, 5, 1.0)  # grew: the non-descent fallback, still alpha 1
+    logger.on_step(_report(alpha=0.0))
+
+    inner = next(
+        line for line in buffer.getvalue().splitlines() if line.lstrip().startswith("|     0")
+    )
+    assert inner.rstrip().endswith("| 1.000 |")  # the inner iteration's own factor
+    assert _step_rows(buffer)[0]["a_min"] == "0.000"  # what the step reports
+    assert float(_cells(inner)[4]) >= 1.0  # rate >= 1 identifies the non-descent exactly
+
+
+def test_on_inner_tabulates_each_iteration_with_its_own_cost_and_rate() -> None:
     """The per-inner hook resolves the step summary into per-solve cost and the ``|G|`` trajectory."""
-    logger, buffer = _log()
+    logger, buffer = _log(detail=("inner",))
     logger.on_inner(0, 4.0e-2, 1.0e-2, 5, 1.0)
     logger.on_inner(1, 1.0e-2, 5.0e-3, 9, 0.5)
 
-    headings, first, second = (
-        line for line in buffer.getvalue().splitlines() if line.startswith("| ")
-    )
-    for heading in ("inner", "cyc", "|G| in", "|G| out", "rate", "alpha"):
+    rows = [
+        line.strip() for line in buffer.getvalue().splitlines() if line.lstrip().startswith("| ")
+    ]
+    headings, first, second = rows
+    for heading in ("inner", "cyc", "G in", "G out", "rate", "alpha"):
         assert heading in headings
     # cyc is 5 - 2, this single solve's offset; rate is the inner contraction 1.0e-2 / 4.0e-2.
     assert first == "|     0 |    3 |  4.000e-02 |  1.000e-02 |  0.250 | 1.000 |"
     assert second == "|     1 |    7 |  1.000e-02 |  5.000e-03 |  0.500 | 0.500 |"
 
 
-def test_the_inner_table_opens_on_each_attempt_and_the_step_line_closes_it() -> None:
-    """One step is one block: a retry re-opens at ``inner=0``, and the step line ends the record.
+def test_the_inner_block_opens_on_each_attempt_and_is_nested_under_its_step() -> None:
+    """One step is one block: a retry re-opens at ``inner=0``, and the block is indented as detail.
 
     Without the re-open, a redone step's rows run into the abandoned attempt's and the block stops
     being a record of one step's work -- which is exactly what makes a retry's cost legible.
     """
-    logger, buffer = _log()
+    logger, buffer = _log(detail=("inner",))
     logger.on_inner(0, 4.0e-2, 3.0e-2, 5, 1.0)
     logger.on_inner(0, 4.0e-2, 1.0e-2, 5, 1.0)  # the step redone at an escalated beta
     logger.on_step(_report(escalations=1))
 
-    lines = buffer.getvalue().splitlines()
-    assert lines[0].startswith("+- step 1")  # numbered for the step it precedes, not the last one
-    assert lines[5].startswith("+- step 1")  # the retry gets its own block
-    assert lines[-2].startswith("+--")  # the step line closed the table
-    assert lines[-1].lstrip().startswith("t=") and "<esc=1>" in lines[-1]
+    titles = [line for line in buffer.getvalue().splitlines() if "+- step" in line]
+    assert len(titles) == 2  # the retry gets its own block
+    assert all(line.startswith("    ") for line in titles)  # nested under the step row
+    assert _step_rows(buffer)[0]["flag"] == "e1"
 
 
 def test_a_block_heads_with_the_residual_the_step_inherits() -> None:
@@ -162,9 +228,97 @@ def test_a_block_heads_with_the_residual_the_step_inherits() -> None:
 
     Buffering the block to lead with the outcome would cost the live progress the rows exist to give.
     """
-    logger, buffer = _log()
+    logger, buffer = _log(detail=("inner",))
     logger.on_step(_report(residual_norm=2.0e-2))
     logger.on_inner(0, 2.0e-2, 1.0e-2, 5, 1.0)
 
-    assert "step 2" in buffer.getvalue().splitlines()[1]
-    assert "from |R|=2.0000e-02" in buffer.getvalue().splitlines()[1]
+    title = next(line for line in buffer.getvalue().splitlines() if "+- step" in line)
+    assert "step 2" in title and "from |R|=2.000e-02" in title
+
+
+def test_headings_are_re_emitted_so_a_long_run_stays_readable() -> None:
+    """Scrolling a thousand-line tail back to a single heading row is not reading."""
+    logger, buffer = _log()
+    for _ in range(MarchLogger.HEADINGS_EVERY + 1):
+        logger.on_step(_report())
+
+    headings = [line for line in buffer.getvalue().splitlines() if line.startswith("| step")]
+    assert len(headings) == 2
+
+
+def test_diagnostics_are_off_by_default_even_when_the_hooks_are_wired() -> None:
+    """A routine run should pay no log volume for instruments it did not ask for.
+
+    The hooks stay safe to call regardless, so a driver wires them once and flips ``detail`` -- rather
+    than rewiring, which is how a driver ends up hand-rolling its own conditional plumbing.
+    """
+    logger, buffer = _log(fields=lambda s: {"u": np.asarray(s)})
+    logger.on_inner(0, 4.0e-2, 1.0e-2, 5, 1.0)
+    logger.on_refresh("full", 27.0)
+    logger.on_checkpoint(_report(), [1.0, 2.0])
+
+    text = buffer.getvalue()
+    assert "+- step" not in text  # no inner block
+    assert "pc" not in _step_rows(buffer)[0]  # no preconditioner column
+    assert "du/u" not in text  # no field-change row
+
+
+def test_each_detail_switches_on_only_its_own_output() -> None:
+    logger, buffer = _log(fields=lambda s: {"u": np.asarray(s)}, detail=("pc", "fields"))
+    logger.on_inner(0, 4.0e-2, 1.0e-2, 5, 1.0)  # not requested -- must stay silent
+    logger.on_refresh("shift", 0.4)
+    logger.on_checkpoint(_report(), [1.0, 2.0])
+
+    assert _step_rows(buffer)[0]["pc"] == "shift 0.4s"
+    assert "du/u" in buffer.getvalue()
+    assert "+- step" not in buffer.getvalue()
+
+
+def test_the_preconditioner_column_is_reported_once_for_the_step_it_preceded() -> None:
+    """The refresh happens before the step; it belongs to that step, not to every later one."""
+    logger, buffer = _log(detail=("pc",))
+    logger.on_refresh("full", 27.0)
+    logger.on_step(_report())
+    logger.on_step(_report())
+
+    first, second = _step_rows(buffer)
+    assert first["pc"] == "full 27.0s"
+    assert second["pc"] == "-"
+
+
+def test_an_unknown_detail_name_raises_rather_than_being_ignored() -> None:
+    """A silently-dropped typo means losing a diagnostic you believed you had switched on."""
+    with pytest.raises(ValueError, match="unknown march-log detail"):
+        MarchLogger(detail=("inner", "preconditioner"))
+
+
+def test_combine_metrics_merges_several_metric_callables() -> None:
+    """A run wants a case quantity AND a solver diagnostic, but the logger takes one callable."""
+    combined = combine_metrics(lambda s: {"xr/h": 7.0}, lambda s: {"du/u": 1e-3})
+
+    assert dict(combined(None)) == {"xr/h": 7.0, "du/u": 1e-3}
+
+
+def test_field_change_reports_each_fields_relative_movement() -> None:
+    """The residual says the equations are unsatisfied; this says whether the SOLUTION still moves."""
+    metric = field_change_metrics(lambda s: {"u": np.asarray(s["u"]), "k": np.asarray(s["k"])})
+    metric({"u": [3.0, 4.0], "k": [1.0, 0.0]})  # first call primes the previous iterate
+
+    out = metric({"u": [3.0, 4.5], "k": [1.0, 0.0]})
+    assert out["du/u"] == pytest.approx(0.5 / 5.0)  # |(0, 0.5)| / |(3, 4)|
+    assert out["dk/k"] == pytest.approx(0.0)  # k did not move -- reported separately from u
+
+
+def test_the_first_call_has_nothing_to_compare_against() -> None:
+    """`nan`, not 0: a zero would read as "converged" on the very first step of every march."""
+    metric = field_change_metrics(lambda s: {"u": np.asarray(s)})
+
+    assert math.isnan(metric([1.0, 2.0])["du/u"])
+
+
+def test_a_field_that_was_identically_zero_reports_nan_rather_than_dividing() -> None:
+    """No scale to be relative to -- reporting a number here would be inventing one."""
+    metric = field_change_metrics(lambda s: {"k": np.asarray(s)})
+    metric([0.0, 0.0])
+
+    assert math.isnan(metric([1.0, 1.0])["dk/k"])
