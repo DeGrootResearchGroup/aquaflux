@@ -1,18 +1,9 @@
 /*--------------------------------*- C++ -*----------------------------------*\
-| Tightened solver settings for the convergence-bar check (run_transient.sh --tight).
-|
-| The reference run stops each timestep's solve at 1% of its own initial residual
-| (relTol 0.01) with two outer correctors. Its per-timestep initial residuals then
-| sit on a FLOOR -- p pinned at ~9.7e-3 from t = 0.1 to 0.5 with no trend -- which
-| is the tolerance, not unsteadiness: Ux decays three decades to ~1e-5 by t = 0.15
-| and stays there, so the flow is steady.
-|
-| That makes the reference steady but converged only to ~1% per step, which is not
-| a firm enough baseline to attribute a 15% reattachment difference to physics.
-| Here the FINAL solve of each timestep is driven to its absolute tolerance
-| (relTol 0) and the outer loop is doubled, so the timestep is resolved rather
-| than approximated. If x_r/h moves off 7.24 under this, part of the difference
-| belongs to the reference.
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
 \*---------------------------------------------------------------------------*/
 FoamFile
 {
@@ -21,43 +12,36 @@ FoamFile
     location    "system";
     object      fvSolution;
 }
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
 solvers
 {
-    "(p|pcorr)"
+    "(p|pFinal|pcorr)"
     {
         solver          GAMG;
-        tolerance       1e-8;
+        tolerance       1e-7;
         relTol          0.01;
         smoother        GaussSeidel;
     }
-    pFinal
-    {
-        $p;
-        relTol          0;      // resolve the final pressure solve, not 1% of it
-    }
-    "(U|k|omega)"
+    "(U|k|omega)(Final)?"
     {
         solver          smoothSolver;
         smoother        symGaussSeidel;
-        tolerance       1e-9;
+        tolerance       1e-8;
         relTol          0.01;
-    }
-    "(U|k|omega)Final"
-    {
-        $U;
-        relTol          0;
     }
 }
 
 PIMPLE
 {
-    nOuterCorrectors 4;         // 2 -> 4: let the timestep's nonlinearity converge
+    nOuterCorrectors 2;
     nCorrectors      2;
-    nNonOrthogonalCorrectors 1;
+    nNonOrthogonalCorrectors 0;
 }
 
 relaxationFactors
 {
     equations { ".*" 1; }
 }
+
+// ************************************************************************* //
