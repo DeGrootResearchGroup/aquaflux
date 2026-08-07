@@ -247,7 +247,6 @@ class MarchLogger:
         self._phases = 0
         self._phase = ""
         self._open = False
-        self._previous_norm: float | None = None
         self._step_table: TextTable | None = None
         self._nested = False
         self._needs_headings = True
@@ -357,10 +356,19 @@ class MarchLogger:
             self._refresh = (str(kind), float(seconds))
 
     def _open_block(self) -> None:
-        """Start an inner-iteration table for the step about to be reported."""
+        """Start an inner-iteration table for the step about to be reported.
+
+        The title carries the step number only. It deliberately does **not** repeat the previous step's
+        ``R``, even though that is the residual this step starts from: under a self-rescaling measure
+        the two are not the same number. The march re-derives the row scales at the state each outer
+        iteration begins from, so the previous step's ``R`` measures that state in the *previous*
+        iteration's scales while this block's ``inner 0`` ``G in`` measures it in the current ones.
+        Measured over one march the two differed on **every** step -- by up to 2x early on, converging
+        to 1 as the state settled and the scales stopped moving. Printing both side by side invited a
+        comparison that never holds; ``G in`` at ``inner 0`` is the entering residual, correctly scaled.
+        """
         self._close_block()
-        entering = "" if self._previous_norm is None else f"  from |R|={self._previous_norm:.3e}"
-        title = f"step {self._steps + 1}{entering}"
+        title = f"step {self._steps + 1}"
         self._write("")
         self._write(self._INNER_TABLE.rule(title), indent=self._NEST)
         self._write(self._INNER_TABLE.headings(), indent=self._NEST)
@@ -488,9 +496,6 @@ class MarchLogger:
             )
             self._write(self._step_table.spanning("rel " + changes))
         self._write(self._step_table.rule())
-
-        # Where the NEXT step starts from, so its inner block can head with the residual it inherits.
-        self._previous_norm = float(report.residual_norm)
 
     @staticmethod
     def _reference_norm(report: StepReport) -> float | None:

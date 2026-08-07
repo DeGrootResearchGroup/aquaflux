@@ -235,17 +235,20 @@ def test_the_inner_block_opens_on_each_attempt_and_is_nested_under_its_step() ->
     assert _step_rows(buffer)[0]["flg"] == "e1"
 
 
-def test_a_block_heads_with_the_residual_the_step_inherits() -> None:
-    """The step's outcome cannot head its own block, so the title carries where the step starts from.
+def test_a_block_title_does_not_repeat_the_previous_steps_residual() -> None:
+    """Under a self-rescaling measure the previous step's ``R`` is NOT this step's entering ``G in``.
 
-    Buffering the block to lead with the outcome would cost the live progress the rows exist to give.
+    The march re-derives the row scales at the state each outer iteration begins from, so the two
+    measure the same state in different scales -- over one march they differed on every step. Printing
+    both invites a comparison that never holds; ``inner 0``'s ``G in`` is the entering residual.
     """
     logger, buffer = _log(detail=("inner",))
     logger.on_step(_report(residual_norm=2.0e-2))
-    logger.on_inner(0, 2.0e-2, 1.0e-2, 5, 1.0)
+    logger.on_inner(0, 1.9e-2, 1.0e-2, 5, 1.0)
 
     title = next(line for line in buffer.getvalue().splitlines() if "+- step" in line)
-    assert "step 2" in title and "from |R|=2.000e-02" in title
+    assert "step 2" in title
+    assert "2.000e-02" not in title  # the previous step's R, in the previous step's scales
 
 
 def test_headings_are_re_emitted_so_a_long_run_stays_readable() -> None:

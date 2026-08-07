@@ -2068,6 +2068,16 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     separate methods each returning one line — which is what lets a table appear in a log being tailed.
     An over-wide value **widens its row rather than being truncated**: a cut-off number is a wrong
     number. Pinned by `tests/unit/test_text_table.py`.
+  - **A self-rescaling measure means two "same" residuals are NOT the same number (binding trap).**
+    `forward_march(norm_builder=…)` re-derives the `RowScaledNorm` at the state each outer iteration
+    *begins from* and holds it for that whole iteration. So the `R` reported at the end of step N and
+    the `‖G‖` entering step N+1 measure the **identical state** in **different scales**. Measured over
+    one 62-step `bfs3d` march: they differed on **every** step — up to 2× early on, converging to 1 as
+    the state settled and the scales stopped moving (the convergence-to-1 is the signature that
+    identifies rescaling rather than a state difference; a rung boundary shows a ~2.8e5 jump, since the
+    Reynolds number changed too). Nothing is wrong here, but **never compare two residuals across an
+    outer-iteration boundary** and never print them adjacent — the march log deliberately dropped a
+    "from |R|=…" field from its inner-block title for exactly this reason.
   - **The step grid stays NARROW; only scan-down quantities get columns (binding).** The step table is
     `step, t(s), beta, in, cyc, R, a_min, flg` — fixed, ~61 characters, comparable to the nested inner
     table so the two read as one document. Everything else — the case metrics, the preconditioner
