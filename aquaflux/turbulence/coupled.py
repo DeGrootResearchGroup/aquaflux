@@ -654,6 +654,32 @@ def eddy_viscosity_drift(
 
 
 @eqx.filter_jit
+def _jacobian_matvec(coupled: CoupledRANS, state: jnp.ndarray, tangent: jnp.ndarray) -> jnp.ndarray:
+    """``J(state) @ tangent`` -- the matrix-free coupled Jacobian-vector product, compiled once.
+
+    Everything it needs is an **argument**, including the assembler. A locally-defined ``jax.jit``
+    closure over ``coupled`` is a fresh cache entry per closure, so each Reynolds-continuation rung --
+    which rebuilds the assembler at its own viscosity -- would recompile the probe from scratch, even
+    though a scaled viscosity changes only two leaf *values* and leaves the pytree structure identical.
+    As an argument the assembler's arrays are ordinary traced leaves and every rung is a cache hit.
+    """
+    return jax.jvp(coupled.residual, (state,), (tangent,))[1]
+
+
+@eqx.filter_jit
+def _batched_jacobian_matvec(
+    coupled: CoupledRANS, state: jnp.ndarray, tangents: jnp.ndarray
+) -> jnp.ndarray:
+    """``J(state) @ tangents`` for a stack of tangents -- the batched form the coloured probe uses.
+
+    The same directional derivative as :func:`_jacobian_matvec` applied to each row, so the responses
+    are bit-identical to a per-tangent loop; running them as a few fused passes only amortizes dispatch.
+    Takes the assembler as an argument for the same reason.
+    """
+    return jax.vmap(lambda tangent: jax.jvp(coupled.residual, (state,), (tangent,))[1])(tangents)
+
+
+@eqx.filter_jit
 def _eddy_viscosity_drift(
     coupled: CoupledRANS,
     state: jnp.ndarray,
@@ -1557,7 +1583,10 @@ def coupled_ilut_continuation(
     n_fields = coupled.layout.dim + 3
     colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
     frozen = jax.lax.stop_gradient(reference_state)
-    matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+
+    def matvec(v):
+        return _jacobian_matvec(coupled, frozen, v)
+
     preconditioner = MonolithicIlutPreconditioner.build(
         matvec,
         colouring,
@@ -1673,9 +1702,12 @@ def coupled_ilut_refreshing_continuation(
     """
     colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
     n_fields = coupled.layout.dim + 3
+
     # `frozen` as a traced argument (not closed over) so this jvp-matvec compiles once and every refresh
     # reuses it, rather than a fresh lambda recompiling each time.
-    matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    def matvec_at(frozen, v):
+        return _jacobian_matvec(coupled, frozen, v)
+
     held: dict[str, ForwardStep] = {}
 
     def builder(state: jnp.ndarray) -> ForwardStep:
@@ -1776,7 +1808,10 @@ def coupled_lu_continuation(
     n_fields = coupled.layout.dim + 3
     colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
     frozen = jax.lax.stop_gradient(reference_state)
-    matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+
+    def matvec(v):
+        return _jacobian_matvec(coupled, frozen, v)
+
     preconditioner = MonolithicLuPreconditioner.build(
         matvec,
         colouring,
@@ -1931,9 +1966,14 @@ def coupled_amg_continuation(
     # gather rather than a scatter loop + re-sort. Reused by the β-tracking refresh (built once there too).
     structure = block_stencil_gather_map(colouring, coupled.layout.dim + 3)
     frozen = jax.lax.stop_gradient(reference_state)
-    matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+
+    def matvec(v):
+        return _jacobian_matvec(coupled, frozen, v)
+
     # Batched jvp so the coloured materialize probes run as a few fused passes, not a per-probe loop.
-    batched_matvec = jax.jit(jax.vmap(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1]))
+    def batched_matvec(seeds):
+        return _batched_jacobian_matvec(coupled, frozen, seeds)
+
     # `native_forward_solve` (EXPERIMENTAL, opt-in) runs the forward Krylov natively in PETSc, its operator
     # a shell over the exact jvp (true Newton, not a frozen Jacobian) -- the native GMRES + GAMG reaches its
     # stop in ~1 iteration where the JAX-side Krylov with the V-cycle as a per-matvec callback needs ~90
@@ -2020,7 +2060,10 @@ def coupled_lu_refreshing_continuation(
     """
     colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
     n_fields = coupled.layout.dim + 3
-    matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+
+    def matvec_at(frozen, v):
+        return _jacobian_matvec(coupled, frozen, v)
+
     held: dict[str, ForwardStep] = {}
 
     def builder(state: jnp.ndarray) -> ForwardStep:
@@ -2240,16 +2283,19 @@ def _beta_tracking_refresh(
     # Fixed CSR structure + gather map for the AMG materialize (mesh-fixed pattern): each materialize
     # de-compresses by one gather rather than a scatter loop + re-sort. Built once; used only on the AMG path.
     structure = block_stencil_gather_map(colouring, n_fields)
+
     # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
     # reuses it, rather than a fresh lambda recompiling each step.
-    matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    def matvec_at(frozen, v):
+        return _jacobian_matvec(coupled, frozen, v)
+
     # Batched form (vmapped over the tangent) so the coloured probes of a full materialize run as a few
     # fused passes rather than a Python loop of separate calls. Built once (state-independent, `frozen` a
     # traced argument) so it compiles a single time and every materialize reuses it. Used only by the AMG
     # preconditioner's `refresh_in_place`.
-    batched_matvec_at = jax.jit(
-        jax.vmap(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1], in_axes=(None, 0))
-    )
+    def batched_matvec_at(frozen, seeds):
+        return _batched_jacobian_matvec(coupled, frozen, seeds)
+
     # The β-diagonal split's materialize gate (built once): decides per refresh whether to re-materialize
     # the Jacobian or only re-add the shift. `None` when neither trigger is set (then every refresh is a
     # full materialize, the original behaviour).

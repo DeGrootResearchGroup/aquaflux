@@ -899,6 +899,25 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       The `assemble` half of the refresh is also precomputed now (`ShiftedCellMajorOperator`), and the
       observer receives a `RefreshTiming` with per-phase costs instead of one aggregate — so "the
       materialize is ~half the refresh" is measured per run rather than inferred.
+      **The jitted probes take the assembler as an ARGUMENT, not as a closure capture (binding).**
+      `_jacobian_matvec` / `_batched_jacobian_matvec` are module-level `eqx.filter_jit` functions taking
+      `coupled`; the six call sites bind it in a plain `def`. Written as local `jax.jit` closures over
+      `coupled` — as they were — every Reynolds-continuation rung is a **fresh cache entry**, because
+      `filter_jit` caches per function object. That is pure waste here: scaling the molecular viscosity
+      changes exactly **two leaf values** and leaves the pytree structure identical (pinned by
+      `test_scaling_the_viscosity_leaves_the_pytree_structure_identical`), so every rung *could* be a
+      cache hit. Same defect and same fix as `eddy_viscosity_drift`. Pinned by
+      `test_the_jacobian_probe_is_a_cache_hit_across_reynolds_rungs`.
+      **⚠️ This does NOT remove the whole per-rung recompile — the larger part is still open.** Each
+      rung's first step costs 112/102/145 s more than that rung's median step *at an identical cycle
+      count* (359 s, ~8 % of the march). The probe is one contributor; the dominant one is that
+      `point_setup` rebuilds the engine per rung, and three of `DualTimeStep`'s **static** fields then
+      hold fresh objects — `step_limit` (a new function from `positive_k_limit`), the adjoint
+      preconditioner factory, and the shift policy's `MonolithicAmgPreconditioner` (a non-pytree, hashed
+      by identity). Any one of those is a new `_march_step` cache key, i.e. a full recompile of the
+      coupled solve. Removing it means reusing one engine and one preconditioner across rungs and
+      refreshing in place at each new viscosity — which contradicts the "the frozen operator has to be
+      rebuilt per rung" note above, so that claim must be **re-tested, not assumed**, before building it.
     - The rebuild REUSES the smoothed-aggregation coarse space (`MonolithicAmgPreconditioner.refactor`
       overwrites the operator values in place over a persistent CSR array and re-sets-up the PC with
       `pc_gamg_reuse_interpolation`), since the graph-coloured probe's sparsity is fixed across β; only the

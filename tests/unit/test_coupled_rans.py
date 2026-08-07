@@ -779,3 +779,63 @@ def test_the_drift_measure_is_zero_at_its_own_reference() -> None:
     state = _healthy_state(mesh, coupled, seed=0)
 
     assert float(eddy_viscosity_drift(coupled, state)(state)) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_scaling_the_viscosity_leaves_the_pytree_structure_identical() -> None:
+    """A Reynolds-continuation rung changes leaf VALUES only -- which is what makes a cache hit possible.
+
+    Every jitted quantity derived from the assembler can therefore be shared across the whole ramp, and
+    anything that recompiles per rung is capturing the assembler rather than taking it as an argument.
+    """
+    _, coupled = _cavity()
+    scaled = coupled.with_scaled_molecular_viscosity(0.1)
+
+    assert jax.tree_util.tree_structure(coupled) == jax.tree_util.tree_structure(scaled)
+    before = jax.tree_util.tree_leaves(coupled)
+    after = jax.tree_util.tree_leaves(scaled)
+    assert [jnp.shape(x) for x in before] == [jnp.shape(x) for x in after]
+    assert [jnp.result_type(x) for x in before] == [jnp.result_type(x) for x in after]
+    assert any(not jnp.array_equal(x, y) for x, y in zip(before, after, strict=True))
+
+
+_PROBE_TRACES: list[int] = []
+
+
+class _CountingResidual(eqx.Module):
+    """A stand-in assembler recording each TRACE of its residual, so recompiles are countable."""
+
+    gain: jnp.ndarray
+
+    def residual(self, state: jnp.ndarray) -> jnp.ndarray:
+        _PROBE_TRACES.append(1)
+        return self.gain * state**2
+
+
+def test_the_jacobian_probe_is_a_cache_hit_across_reynolds_rungs() -> None:
+    """The coloured probe must not recompile when the ramp rebuilds the assembler at a new viscosity.
+
+    Each rung's first step was measured at 112/102/145 s more than that rung's median step *at an
+    identical cycle count* -- compilation, repeated per rung. The probe is one contributor: written as a
+    local ``jax.jit`` closure over the assembler it is a fresh cache entry per rung, so it takes the
+    assembler as an argument instead. A rung differs only in leaf values (pinned by the test above), so
+    a probe that takes the assembler as an argument is a hit.
+    """
+    from aquaflux.turbulence.coupled import _batched_jacobian_matvec, _jacobian_matvec
+
+    state = jnp.linspace(1.0, 2.0, 29)  # a unique size; the compilation cache is process-global
+    tangent = jnp.ones_like(state)
+    seeds = jnp.stack([tangent, 0.5 * tangent])
+
+    _PROBE_TRACES.clear()
+    first = _CountingResidual(gain=jnp.asarray(1.0))
+    _jacobian_matvec(first, state, tangent)
+    _batched_jacobian_matvec(first, state, seeds)
+    compiled = len(_PROBE_TRACES)
+    assert compiled > 0  # sanity: the stub really is being traced
+
+    for scale in (0.1, 0.01):  # two further rungs of a Reynolds ramp
+        rung = _CountingResidual(gain=jnp.asarray(scale))
+        _jacobian_matvec(rung, state, tangent)
+        _batched_jacobian_matvec(rung, state, seeds)
+
+    assert len(_PROBE_TRACES) == compiled

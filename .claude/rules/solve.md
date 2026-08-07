@@ -1975,6 +1975,33 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       than a non-attainment flag threaded through every solve layer — same effect (a doomed primary costs
       ~`cycle_budget` matvecs, not `inner_steps ×` a stagnation), far smaller blast radius. Pinned by
       `test_dual_time.py` (`…cycle_budget_caps_the_inner_loop`, `…none_is_the_unbounded_step`).
+      **⚠️ CORRECTION: "a doomed primary costs ~`cycle_budget` matvecs" is MEASURABLY FALSE, because the
+      budget is checked BETWEEN inner iterations.** A single inner solve is bounded only by its own
+      `stagnation_iters=40` / `max_restarts=60`, both ≈ the whole budget, so one solve can blow through
+      it. Measured on the 3-rung `bfs3d` march at `cycle_budget=42`: the three discarded attempts cost
+      **26 / 56 / 59** cycles, entering their last inner having spent only 14 / 17 / 16. The budget did
+      bind — just a whole stagnating solve too late.
+    - **`DualTimeStep(abort_above_inner_cycles=…)` — stop the moment the attempt is KNOWN to be
+      discarded (BUILT).** `retry_on_cycles` is a **per-solve** quantity, so the instant one solve
+      exceeds it with the inner target unmet, `forward_march` is going to bin the whole attempt and redo
+      it at a larger β. Yet the check lived only in `forward_march`, *after* the step returned — so the
+      step kept running inner iterations whose results were already destined for the bin. The same
+      predicate now sits in the inner loop's `cond`, and `forward_march` pushes its own `retry_on_cycles`
+      down via `_with_inner_abort` (using `dataclasses.replace`, not `eqx.tree_at` — the field is static,
+      so it is in the treedef, not among the leaves), so there is **one** number rather than two to keep
+      in step.
+      **It cannot bin an expensive success**, and the ordering is what guarantees that: `cond` tests the
+      convergence target *before* either cost bailout, so a costly solve that brings `‖G‖` under the
+      target exits normally with `reached_target` set and is kept. The empirical backing is strong on
+      this case — across 64 attempts, **no kept attempt ever had a single inner solve above 10 cycles**,
+      while all three discarded ones ran 12/15/43 — so the threshold separates them perfectly and the
+      61 good steps are untouched. Projected saving on those three attempts: **51 cycles** from the
+      abort, plus ~31 more if the per-solve `stagnation_iters`/`max_restarts` are also brought down
+      toward the threshold (still ~4–6× it, which is why one solve can eat the step budget).
+      `None` (default) is byte-identical. Forward-only. Pinned by
+      `test_dual_time.py::test_abort_above_inner_cycles_{stops_a_doomed_attempt_early,
+      never_bins_an_expensive_success, none_is_the_unbounded_step}` and the `_with_inner_abort` plumbing
+      tests beside them.
     - **The escalated β is CARRIED into the control — so a static β floor can be dropped and the *controller*
       decides how low is safe (BUILT).** β is inverse to the pseudo-timestep, so a static `beta_min` is a cap
       on the *largest* timestep the march may take, applied everywhere — which slows convergence in regions
