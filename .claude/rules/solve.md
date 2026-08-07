@@ -2064,10 +2064,54 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     attempt**, so the extra blocks are the record of what a retry cost, while the step line still
     reports only the accepted attempt.
     `TextTable`/`Column` is a **root leaf** (no package imports, like `vectors.py`) so any subsystem can
-    format a report with it. It is built for streaming — rule, headings and row are separate methods
-    each returning one line — which is what lets a table appear in a log being tailed. An over-wide
-    value **widens its row rather than being truncated**: a cut-off number is a wrong number.
-    Pinned by `tests/unit/test_text_table.py`.
+    format a report with it. It is built for streaming — rule, headings, `row` and `spanning` are
+    separate methods each returning one line — which is what lets a table appear in a log being tailed.
+    An over-wide value **widens its row rather than being truncated**: a cut-off number is a wrong
+    number. Pinned by `tests/unit/test_text_table.py`.
+  - **The step summary is a table row, and the stopping test is stated once (BUILT).** The step line had
+    grown to ~20 free-text `key=value` fields and ~150 characters — unreadable in a tail, and half of it
+    was `‖R₀‖` and the target repeated on every row when both are **constants within a rung**. They now
+    ride in a banner emitted once (and again whenever a continuation rung re-bases `‖R₀‖`), and the
+    per-step values are a `TextTable` row so a quantity can be scanned *down* the run. Headings re-emit
+    every `HEADINGS_EVERY` rows (fewer when the inner table is on, since its blocks push the last
+    headings further up-screen), and the inner block is **indented** under the step row it belongs to.
+  - **No column heading may contain `|` (binding).** `R`, not `‖R‖`; `G in`, not `‖G‖ in`. A heading
+    carrying the grid delimiter makes the log unparseable by any column-splitting tool — not
+    hypothetical: it forced regex workarounds in the analysis scripts written against the first version
+    of this format. Say what the quantity is in the banner or the docstring, not in a heading that
+    breaks the grid.
+  - **`a_min` (step) vs `alpha` (inner) — different quantities, deliberately named apart.** An inner
+    iteration's `alpha` is its own backtracking factor, and it reads **1.0 even when the line search
+    failed to descend** (the non-descent fallback returns the longest finite trial step). The step
+    reports the **minimum over its iterations with any non-descending one folded in as 0**. So
+    `a_min=0.000` beside `alpha=1.000` is a real state — a full step that did not reduce `‖G‖` — not a
+    contradiction. In the inner table **`rate ≥ 1` identifies those iterations exactly**, since the
+    search is monotone.
+  - **Diagnostics are opt-in through one `detail` argument (BUILT).** `MarchLogger(detail=…)` selects
+    from `{"inner", "fields", "pc"}`; empty (the default) is the plain one-row-per-step log. They are
+    debugging/profiling instruments — several lines per step — not something a routine run should pay
+    for. **Every hook stays safe to wire regardless** and no-ops when its name is absent, so a driver
+    connects the instrumentation once and switches verbosity with one argument rather than by rewiring
+    (which is how a driver ends up hand-rolling conditional plumbing). An **unknown name raises**: a
+    silently-ignored typo means losing a diagnostic you believed was enabled.
+    - `"fields"` — `MarchLogger(fields=…)` takes a `state -> named arrays` extractor
+      (`turbulence.coupled_fields`) and reports each field's relative change per step via
+      `field_change_metrics`. **The residual says the equations are unsatisfied; this says whether the
+      *solution* still moves** — which a scalar case metric cannot: a mesh-quantized quantity like a
+      reattachment length can sit perfectly still while the fields behind it drift several per cent, so
+      "the metric stopped moving" is partly a statement about the instrument's resolution. The logger
+      builds the (stateful) change measure itself so `detail` alone decides whether it runs — it must be
+      called once per step in order, and a caller passing it directly would invite calling it from a
+      probe and corrupting the sequence. `coupled_fields` returns pressure **gauge-free** (mean removed;
+      incompressible `p` is defined up to a constant unless a boundary pins it) and includes `ν_t`, which
+      is derived rather than solved but is what the momentum equations actually see.
+    - `"pc"` — `amg_beta_tracking_refresh(observer=…)` reports which branch a refresh took (`full` /
+      `shift` / `none`) and its wall time; `MarchLogger.on_refresh` renders it on the step it preceded.
+      **This closes a real gap:** which branch ran was previously invisible, so preconditioner behaviour
+      had to be inferred from wall-clock — and was, wrongly, with an occasional expensive re-materialize
+      read as a fixed per-step overhead.
+    Pinned by `tests/unit/test_march_log.py`, whose assertions read **cells** rather than substrings, so
+    a column reordering is not a false failure while a wrong value still is.
 
   - **`precondition_step` — per-step refresh of the step's frozen host preconditioner (binding,
     forward-only).** `forward_march(precondition_step=…)` calls `precondition_step(active_step, state)`
