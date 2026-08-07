@@ -83,6 +83,7 @@ from .line_search_growth import (
 from .linear import (
     default_linear_solver,
     relative_residual_gmres,
+    restart_cycles,
     solve_linear,
 )
 from .march import (
@@ -182,6 +183,7 @@ __all__ = [
     "newton_step",
     "refresh_air_hierarchy",
     "relative_residual_gmres",
+    "restart_cycles",
     "smoothed_multigrid_solve",
     "solve_linear",
 ]

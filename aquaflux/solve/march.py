@@ -43,6 +43,7 @@ import jax.numpy as jnp
 import lineax as lx
 
 from .implicit import ForwardStep, _within_tolerance
+from .linear import restart_cycles as _strip_step_offset
 from .norm import ResidualNorm
 
 
@@ -126,7 +127,7 @@ class StepReport(NamedTuple):
         ``1`` and a dual-time step as its real total cycles over the inner loop. Clamped at ``0`` (a
         no-measurement ``cycles = 0`` step stays ``0``).
         """
-        return max(self.cycles - 2 * self.inner_iterations, 0)
+        return _strip_step_offset(self.cycles, self.inner_iterations)
 
     def matvecs(self, restart: int) -> int:
         """Upper-bound matvec estimate: :attr:`restart_cycles` times the GMRES ``restart`` length.

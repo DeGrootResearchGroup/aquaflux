@@ -14,6 +14,13 @@ It reports the **reference norm and the stopping target** alongside the residual
 only the residual leaves the reader unable to tell how close the solve is to stopping -- the tolerance
 test is ``‖R‖ <= atol + rtol·‖R₀‖``, so without ``‖R₀‖`` the target is invisible.
 
+Solve cost is reported the same way. An implicit timestep spreads its linear-solve count over several
+inner Newton iterations, so a single summed count conflates *how many* solves the step needed with how
+hard each one was -- and, because the raw count carries a fixed per-solve offset, a cheap step reads as
+several times its real cost. This module reports the offset-corrected total, the inner count, and the
+per-inner average together, and :meth:`MarchLogger.on_inner` streams each inner iteration's own solve
+cost and ``‖G‖`` trajectory for the step being studied.
+
 Output is one flushed line per step, so a multi-hour march can be tailed while it runs rather than
 read after it ends.
 """
@@ -25,6 +32,8 @@ import time
 from collections.abc import Callable, Mapping
 from typing import IO, Any
 
+from ..text_table import Column, TextTable
+from .linear import restart_cycles
 from .march import StepReport
 
 __all__ = ["MarchLogger"]
@@ -57,6 +66,20 @@ class MarchLogger:
     >>> solve_coupled(coupled, on_checkpoint=log.on_checkpoint)  # doctest: +SKIP
     """
 
+    #: The inner-iteration table. ``|G|`` is the implicit timestep's own residual (the one the inner
+    #: Newton loop drives to zero), and ``rate`` its per-iteration contraction ``‖G‖out / ‖G‖in`` --
+    #: the number that says whether the inner loop is converging or merely grinding.
+    _INNER_TABLE = TextTable(
+        [
+            Column("inner", 5, "d"),
+            Column("cyc", 4, "d"),
+            Column("|G| in", 10, ".3e"),
+            Column("|G| out", 10, ".3e"),
+            Column("rate", 6, ".3f"),
+            Column("alpha", 5, ".3f"),
+        ]
+    )
+
     def __init__(
         self,
         stream: IO[str] | None = None,
@@ -76,6 +99,8 @@ class MarchLogger:
         self._steps = 0
         self._phases = 0
         self._phase = ""
+        self._open = False
+        self._previous_norm: float | None = None
 
     def note(self, text: str) -> None:
         """Write an arbitrary line (a run header, a configuration echo) to the log's own stream.
@@ -105,14 +130,89 @@ class MarchLogger:
         """``on_checkpoint`` callback: log a step and append the injected case metrics."""
         self._log(report, state)
 
+    def on_inner(
+        self,
+        index: int,
+        g_before: float,
+        g_after: float,
+        cycles: int,
+        alpha: float,
+    ) -> None:
+        """``inner_observer`` callback: tabulate ONE inner Newton iteration of an implicit timestep.
+
+        Matches the hook signature :class:`~aquaflux.solve.DualTimeStep` calls once per inner iteration,
+        so a driver wires it as ``inner_observer=logger.on_inner``. The step line reports only the inner
+        *count* and the *summed* cost; these rows resolve that summary into each solve's own cycle count
+        and the ``‖G‖`` trajectory, which is what distinguishes a step that took five easy solves from one
+        that took five increasingly hard ones.
+
+        Rows open a table on the step's first inner iteration and the step line closes it, so the block
+        reads as one record. Two things follow from that ordering. The rows are written **as the step
+        runs** while the step line is written once it returns, so the summary is a footer rather than a
+        header: the outcome it reports is not known any earlier, and buffering the block to lead with it
+        would cost exactly the live progress these rows exist to give. And a step that is redone (a
+        ``β`` escalation, a divergence retry) opens a fresh table per attempt while the step line reports
+        only the accepted one -- so the extra blocks are the record of what the retries cost.
+
+        This is a diagnostic for a march being studied, not always-on instrumentation: it writes several
+        lines per step, and the hook it attaches to must not be set on a differentiated solve.
+        """
+        before, after = float(g_before), float(g_after)
+        if int(index) == 0:
+            # A step redone by a retry restarts its inner loop from 0, so this both opens the first
+            # block and closes off the abandoned attempt's block ahead of the retry's.
+            self._open_block()
+        elif not self._open:
+            self._open_block()  # observer attached mid-step: still give the rows a grid to sit in
+        self._write(
+            self._INNER_TABLE.row(
+                (
+                    int(index),
+                    restart_cycles(cycles),
+                    before,
+                    after,
+                    after / before if before > 0.0 else float("nan"),
+                    float(alpha),
+                )
+            )
+        )
+
+    def _open_block(self) -> None:
+        """Start an inner-iteration table for the step about to be reported.
+
+        The title repeats the step number and elapsed time that the closing summary also carries, and
+        deliberately: the two timestamps bracket the step, so their difference is how long it took, and
+        a summary line that stands alone is what makes the log greppable when the table is not enabled.
+        """
+        self._close_block()
+        entering = "" if self._previous_norm is None else f"  from |R|={self._previous_norm:.4e}"
+        title = f"step {self._steps + 1}  t={self._clock() - self._start:.0f}s{entering}"
+        self._write(self._INNER_TABLE.rule(title))
+        self._write(self._INNER_TABLE.headings())
+        self._write(self._INNER_TABLE.rule())
+        self._open = True
+
+    def _close_block(self) -> None:
+        """Close an open inner-iteration table, if any. A no-op when the observer is not wired."""
+        if self._open:
+            self._write(self._INNER_TABLE.rule())
+            self._open = False
+
     def _log(self, report: StepReport, state: Any | None) -> None:
+        self._close_block()
         self._steps += 1
-        self._cumulative_cycles += int(report.cycles)
+        # The offset-corrected count, not the raw one: a two-inner step reporting `cycles = 6` did two
+        # single-cycle solves, so the raw number is entirely offset and overstates the work threefold.
+        cycles = report.restart_cycles
+        inner = max(int(report.inner_iterations), 1)
+        self._cumulative_cycles += cycles
         fields = [
             f"t={self._clock() - self._start:6.0f}s",
             f"step={self._steps:4d}",
             f"beta={report.shift:7.4f}",
-            f"cyc={report.cycles:3d}",
+            f"in={inner:2d}",
+            f"cyc={cycles:3d}",
+            f"c/in={cycles / inner:5.1f}",
             f"cum={self._cumulative_cycles:5d}",
             f"|R|={report.residual_norm:.4e}",
             f"ratio={report.residual_ratio:.3e}",
@@ -138,6 +238,8 @@ class MarchLogger:
         if state is not None and self._metrics is not None:
             fields += [f"{name}={value:.4g}" for name, value in self._metrics(state).items()]
         self._write("  " + " ".join(fields))
+        # Where the NEXT step starts from, so its table can head with the residual it inherits.
+        self._previous_norm = float(report.residual_norm)
 
     @staticmethod
     def _reference_norm(report: StepReport) -> float | None:

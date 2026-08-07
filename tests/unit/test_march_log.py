@@ -93,4 +93,78 @@ def test_cumulative_cycles_and_steps_run_across_phases() -> None:
 
     lines = buffer.getvalue().splitlines()
     assert "[rung 1/3" in lines[1]  # numbered automatically; the caller keeps no counter
-    assert "step=   2" in lines[2] and "cum=   15" in lines[2]
+    assert "step=   2" in lines[2] and "cum=   11" in lines[2]  # (10-2) + (5-2), offsets stripped
+
+
+def test_solve_cost_is_split_into_inner_count_and_per_inner_cycles() -> None:
+    """One summed count conflates *how many* solves a step needed with how hard each one was.
+
+    It also overstates the work: the raw count carries lineax's +2 per solve, so this step's ``21``
+    is really 15 cycles over 3 inner iterations -- 5 apiece, not 21.
+    """
+    logger, buffer = _log()
+    logger.on_step(_report(cycles=21, inner_iterations=3))
+
+    line = buffer.getvalue()
+    assert "in= 3" in line
+    assert "cyc= 15" in line  # 21 - 2*3
+    assert "c/in=  5.0" in line
+
+
+def test_a_step_whose_count_is_entirely_offset_reads_as_its_real_cost() -> None:
+    """Two ideal single-cycle solves report a raw ``6``; reading that as six cycles triples the cost.
+
+    This is the regime the correction matters in -- the cheap steps near the root, where the raw
+    number is dominated by the offset rather than by any real work.
+    """
+    logger, buffer = _log()
+    logger.on_step(_report(cycles=6, inner_iterations=2))
+
+    assert "cyc=  2" in buffer.getvalue()
+
+
+def test_on_inner_tabulates_each_inner_iteration_with_its_own_cost_and_rate() -> None:
+    """The per-inner hook resolves the step summary into per-solve cost and the ``|G|`` trajectory."""
+    logger, buffer = _log()
+    logger.on_inner(0, 4.0e-2, 1.0e-2, 5, 1.0)
+    logger.on_inner(1, 1.0e-2, 5.0e-3, 9, 0.5)
+
+    headings, first, second = (
+        line for line in buffer.getvalue().splitlines() if line.startswith("| ")
+    )
+    for heading in ("inner", "cyc", "|G| in", "|G| out", "rate", "alpha"):
+        assert heading in headings
+    # cyc is 5 - 2, this single solve's offset; rate is the inner contraction 1.0e-2 / 4.0e-2.
+    assert first == "|     0 |    3 |  4.000e-02 |  1.000e-02 |  0.250 | 1.000 |"
+    assert second == "|     1 |    7 |  1.000e-02 |  5.000e-03 |  0.500 | 0.500 |"
+
+
+def test_the_inner_table_opens_on_each_attempt_and_the_step_line_closes_it() -> None:
+    """One step is one block: a retry re-opens at ``inner=0``, and the step line ends the record.
+
+    Without the re-open, a redone step's rows run into the abandoned attempt's and the block stops
+    being a record of one step's work -- which is exactly what makes a retry's cost legible.
+    """
+    logger, buffer = _log()
+    logger.on_inner(0, 4.0e-2, 3.0e-2, 5, 1.0)
+    logger.on_inner(0, 4.0e-2, 1.0e-2, 5, 1.0)  # the step redone at an escalated beta
+    logger.on_step(_report(escalations=1))
+
+    lines = buffer.getvalue().splitlines()
+    assert lines[0].startswith("+- step 1")  # numbered for the step it precedes, not the last one
+    assert lines[5].startswith("+- step 1")  # the retry gets its own block
+    assert lines[-2].startswith("+--")  # the step line closed the table
+    assert lines[-1].lstrip().startswith("t=") and "<esc=1>" in lines[-1]
+
+
+def test_a_block_heads_with_the_residual_the_step_inherits() -> None:
+    """The step's outcome cannot head its own block, so the title carries where the step starts from.
+
+    Buffering the block to lead with the outcome would cost the live progress the rows exist to give.
+    """
+    logger, buffer = _log()
+    logger.on_step(_report(residual_norm=2.0e-2))
+    logger.on_inner(0, 2.0e-2, 1.0e-2, 5, 1.0)
+
+    assert "step 2" in buffer.getvalue().splitlines()[1]
+    assert "from |R|=2.0000e-02" in buffer.getvalue().splitlines()[1]

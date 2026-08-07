@@ -1955,6 +1955,32 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     The logger also reports the **reference norm and the stopping target**: the test is
     `‖R‖ <= atol + rtol·‖R₀‖`, and the march reports `‖R‖` and `‖R‖/‖R₀‖` but not `‖R₀‖`, so the target
     was invisible. Pinned by `tests/unit/test_march_log.py` (synthetic reports, no solve).
+  - **Solve cost is reported offset-corrected, split by inner iteration (BUILT).** The raw count is
+    lineax's `num_steps`, which carries **+2 per solve**, so a two-inner step reporting `cycles = 6` did
+    two ideal single-cycle solves — the raw number is *entirely* offset and overstates the work
+    threefold, worst exactly on the cheap near-root steps where the march's economics are decided.
+    `restart_cycles(raw, solves)` in `solve/linear.py` is the one place that offset is stripped;
+    `StepReport.restart_cycles` and `MarchLogger` both call it (it was previously open-coded as
+    `cycles - 2*inner_iterations` on the report, and the logger printed the raw count instead).
+    The step line reports `in` (inner count), `cyc` (corrected total) and `c/in` together, because one
+    summed number conflates *how many* solves the step needed with how hard each was.
+  - **`MarchLogger.on_inner` + `TextTable` (`aquaflux/text_table.py`) — the per-inner table (BUILT).**
+    `DualTimeStep.inner_observer` already emitted `(index, ‖G‖ before, ‖G‖ after, cycles, alpha)` per
+    inner Newton iteration via `jax.debug.callback`; nothing formatted it. `on_inner` matches that
+    signature (`inner_observer=logger.on_inner`) and renders each iteration as a row — its own solve
+    cost and the inner contraction `rate = ‖G‖out/‖G‖in` — inside a ruled table opened at `index == 0`
+    and closed by the step line.
+    Two ordering consequences, both deliberate: the **summary is a footer, not a header**, because the
+    step's outcome is not known until it returns and buffering the block to lead with it would cost the
+    live progress the rows exist to give (the title carries what *is* known — the step number, the
+    elapsed time, and the residual the step inherits); and a **redone step opens a fresh block per
+    attempt**, so the extra blocks are the record of what a retry cost, while the step line still
+    reports only the accepted attempt.
+    `TextTable`/`Column` is a **root leaf** (no package imports, like `vectors.py`) so any subsystem can
+    format a report with it. It is built for streaming — rule, headings and row are separate methods
+    each returning one line — which is what lets a table appear in a log being tailed. An over-wide
+    value **widens its row rather than being truncated**: a cut-off number is a wrong number.
+    Pinned by `tests/unit/test_text_table.py`.
 
   - **`precondition_step` — per-step refresh of the step's frozen host preconditioner (binding,
     forward-only).** `forward_march(precondition_step=…)` calls `precondition_step(active_step, state)`

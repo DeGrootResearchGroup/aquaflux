@@ -42,6 +42,47 @@ def default_linear_solver() -> lx.AbstractLinearSolver:
     return lx.GMRES(rtol=1e-10, atol=1e-10)
 
 
+# A converged ``lineax`` GMRES reports two `num_steps` beyond the restart cycles it actually ran, so a
+# solve that converged inside a single cycle reads as 3. The offset is per *solve*, which is why a
+# multi-solve step must divide it out by its solve count rather than subtract a flat 2 (see
+# `restart_cycles`).
+_LINEAX_STEP_OFFSET = 2
+
+
+def restart_cycles(raw_count: int, solves: int = 1) -> int:
+    """Strip the fixed per-solve offset from a raw ``lineax`` iteration count.
+
+    :func:`solve_linear` returns ``lineax``'s ``num_steps``, which carries a constant ``+2`` per solve,
+    so an ideal one-cycle solve reports ``3`` rather than ``1``. Correcting it matters most where the
+    count is smallest: at ``num_steps = 6`` over two solves, the raw number is *entirely* offset and the
+    real cost is two single-cycle solves -- reading it as "six cycles" overstates the work threefold.
+
+    Parameters
+    ----------
+    raw_count : int
+        The summed ``num_steps`` reported over ``solves`` solves.
+    solves : int
+        How many separate solves ``raw_count`` covers (e.g. the inner Newton iterations of one implicit
+        timestep). Default ``1``.
+
+    Returns
+    -------
+    int
+        The offset-corrected restart-cycle count, clamped at ``0`` so a ``raw_count`` of ``0`` (the
+        convention for "not measured") stays ``0`` rather than going negative.
+
+    Examples
+    --------
+    >>> restart_cycles(3)
+    1
+    >>> restart_cycles(6, solves=2)
+    2
+    >>> restart_cycles(0, solves=1)
+    0
+    """
+    return max(int(raw_count) - _LINEAX_STEP_OFFSET * int(solves), 0)
+
+
 def _global_two_norm(pytree: Any) -> jnp.ndarray:
     """The Euclidean (2-)norm over *all* leaves of ``pytree`` as one flat vector."""
     leaves = jax.tree_util.tree_leaves(pytree)
