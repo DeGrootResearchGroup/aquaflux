@@ -76,6 +76,7 @@ from .implicit import (
     ImplicitNewtonSolver,
     StepOutcome,
     TransposedPreconditioner,
+    PositiveBlockLimit,
     positive_block_limit,
 )
 from .line_search_growth import (
@@ -155,6 +156,7 @@ __all__ = [
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
     "PhaseTimer",
+    "PositiveBlockLimit",
     "PseudoTransientStep",
     "RefreshTiming",
     "RefreshTrigger",

@@ -26,6 +26,10 @@ from aquaflux.solve import (
 )
 from aquaflux.solve.implicit import backtracking_line_search
 
+#: Incremented on every *trace* of a residual below, so a test can assert that a rebuilt step
+#: reuses the compiled march step instead of retracing it.
+_TRACES: list[int] = []
+
 
 class UniformShiftPolicy(eqx.Module):
     """A minimal non-flow shift policy: a uniform pseudo-time shift on every DOF, unpreconditioned."""
@@ -463,3 +467,43 @@ def test_no_discard_threshold_leaves_the_step_untouched() -> None:
 
     step = DualTimeStep(UniformShiftPolicy(strength=1.0), inner_steps=3)
     assert _with_inner_abort(step, None) is step
+
+
+def test_a_rebuilt_step_limiter_is_a_compilation_cache_hit() -> None:
+    """Two limiters built for the same block must be interchangeable in the compiled step's cache key.
+
+    ``step_limit`` is a STATIC field, so it is part of that key, and static fields are compared by
+    ``__eq__``. A closure compares by identity, so every rebuild was a fresh key and recompiled the
+    whole coupled solve -- measured on a Reynolds ramp, ~100-150 s per rung at an identical cycle count.
+    A value object compares by value, so a rebuild is a hit while a genuinely different block still
+    retraces.
+    """
+    from aquaflux.solve import positive_block_limit
+    from aquaflux.solve.march import _march_step
+
+    assert positive_block_limit(1, 3) == positive_block_limit(1, 3)
+    assert positive_block_limit(1, 3) != positive_block_limit(0, 3)
+
+    # A unique state size, so a would-be recompile cannot be a hit from another test's compiled step.
+    target = jnp.asarray([8.0, 27.0, 64.0, 125.0, 216.0])
+
+    def residual_fn(
+        phi: jnp.ndarray,
+    ) -> jnp.ndarray:  # one stable object: never the thing that differs
+        _TRACES.append(1)
+        return phi**3 - target
+
+    phi0 = jnp.ones(5)
+    policy = UniformShiftPolicy(strength=1.0)
+
+    def run(limit) -> int:
+        step = DualTimeStep(policy, inner_steps=2, inner_tol=1e-3, step_limit=limit)
+        before = len(_TRACES)
+        _march_step(step, residual_fn, phi0, jnp.asarray(1.0), step.default_solver())
+        return len(_TRACES) - before
+
+    _TRACES.clear()
+    assert run(positive_block_limit(1, 3)) > 0  # first build compiles
+    for _ in range(2):  # two further "rungs", each rebuilding an equal limiter
+        assert run(positive_block_limit(1, 3)) == 0
+    assert run(positive_block_limit(0, 3)) > 0  # a genuinely different block must still retrace

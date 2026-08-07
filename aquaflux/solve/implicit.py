@@ -21,6 +21,7 @@ scalar objective through the solver needs.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
 from functools import partial
 from typing import Any, NamedTuple, Protocol
@@ -153,7 +154,41 @@ class ForwardStep(Protocol):
 _INEXACT_FORWARD_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-3)
 
 
-def positive_block_limit(start: int, stop: int, tau: float = 0.99):
+@dataclasses.dataclass(frozen=True)
+class PositiveBlockLimit:
+    """``(phi, delta) -> alpha_max``: the largest step fraction keeping ``phi[start:stop] > 0``.
+
+    Built by :func:`positive_block_limit`, whose docstring carries the rule and the failure it exists
+    to prevent. This is a **value object rather than a closure**, and that is load-bearing: it rides in
+    a forward step's ``step_limit``, which is a *static* field and therefore part of the compiled
+    step's cache key. Static fields are compared by ``__eq__``, so two structurally identical limiters
+    built at different times are interchangeable here and a closure is not -- functions compare by
+    identity, so every rebuild is a fresh key and recompiles the whole coupled solve.
+
+    That is not hypothetical: a Reynolds-continuation ramp rebuilds its engine per rung, and each
+    rung's first step was measured at ~100-150 s more than that rung's median step *at an identical
+    cycle count*. Its three fields are plain numbers, so equality is exact and cheap.
+
+    Attributes
+    ----------
+    start, stop : int
+        The half-open slice of the flat state that must stay positive.
+    tau : float
+        Fraction of the distance to the boundary actually taken, in ``(0, 1)``.
+    """
+
+    start: int
+    stop: int
+    tau: float = 0.99
+
+    def __call__(self, phi: jnp.ndarray, delta: jnp.ndarray) -> jnp.ndarray:
+        values, corrections = phi[self.start : self.stop], delta[self.start : self.stop]
+        # Only decreasing entries can cross zero; the rest are unbounded, hence `inf` so `min` skips them.
+        room = jnp.where(corrections < 0.0, values / jnp.abs(corrections), jnp.inf)
+        return jnp.minimum(jnp.asarray(1.0), self.tau * jnp.min(room))
+
+
+def positive_block_limit(start: int, stop: int, tau: float = 0.99) -> PositiveBlockLimit:
     """Build ``(phi, delta) -> alpha_max``: the largest step fraction keeping ``phi[start:stop] > 0``.
 
     The **fraction-to-the-boundary** rule from interior-point methods:
@@ -183,9 +218,11 @@ def positive_block_limit(start: int, stop: int, tau: float = 0.99):
 
     Returns
     -------
-    callable
-        ``(phi, delta) -> alpha_max``, a scalar in ``(0, 1]``, for ``backtracking_line_search``'s
-        ``max_alpha``.
+    PositiveBlockLimit
+        A callable ``(phi, delta) -> alpha_max``, a scalar in ``(0, 1]``, for
+        ``backtracking_line_search``'s ``max_alpha``. A **value object**, not a closure, so that two
+        limiters built for the same block are equal and a forward step carrying one stays a
+        compilation-cache hit across rebuilds (see :class:`PositiveBlockLimit`).
 
     Notes
     -----
@@ -193,14 +230,7 @@ def positive_block_limit(start: int, stop: int, tau: float = 0.99):
     orders of magnitude that can trade a failure for a crawl, so a march using this should report the
     cap and check whether it binds every step or only near the boundary.
     """
-
-    def limit(phi: jnp.ndarray, delta: jnp.ndarray) -> jnp.ndarray:
-        values, corrections = phi[start:stop], delta[start:stop]
-        # Only decreasing entries can cross zero; the rest are unbounded, hence `inf` so `min` skips them.
-        room = jnp.where(corrections < 0.0, values / jnp.abs(corrections), jnp.inf)
-        return jnp.minimum(jnp.asarray(1.0), tau * jnp.min(room))
-
-    return limit
+    return PositiveBlockLimit(start, stop, tau)
 
 
 def backtracking_line_search(
