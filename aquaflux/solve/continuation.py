@@ -715,6 +715,21 @@ class DualTimeStep(eqx.Module):
         (:func:`~aquaflux.solve.forward_march` with ``retry_on_cycles < cycle_budget``), which redoes the
         step at a larger β where it converges cheaply -- so the two are paired. ``None`` (default) is
         unbounded and byte-identical. Forward-only, like the escalation it pairs with.
+    abort_above_inner_cycles : int or None
+        Stop the inner loop as soon as any **single** solve has cost more than this (static). Set by
+        :func:`~aquaflux.solve.forward_march` from its own ``retry_on_cycles``, so the two are one number
+        rather than two that must be kept in step; a caller driving this class directly may set it itself.
+
+        This is the *same* predicate the march applies after the step returns — cost above the threshold
+        with the target unmet means the whole attempt is discarded and redone at a larger shift. Applied
+        only at the end, every inner iteration after the threshold is crossed is work that is thrown
+        away: measured on a three-dimensional coupled march, three discarded attempts ran 26, 56 and 59
+        cycles where the threshold was crossed at 14, 17 and 16.
+
+        It cannot bin an expensive success. :func:`cond` tests the convergence target first, so a costly
+        solve that *does* bring ``‖G‖`` under the target exits normally with ``reached_target`` set and is
+        kept — exactly as when the march decided this after the fact. ``None`` (default) is
+        byte-identical. Forward-only.
     """
 
     shift_policy: ShiftPolicy
@@ -742,6 +757,7 @@ class DualTimeStep(eqx.Module):
     step_limit: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
         static=True, default=None
     )
+    abort_above_inner_cycles: int | None = eqx.field(static=True, default=None)
 
     def norm(self) -> ResidualNorm:
         """The residual measure the inner loop and the outer stopping test share (:attr:`residual_norm`)."""
@@ -780,6 +796,7 @@ class DualTimeStep(eqx.Module):
         inner_observer = self.inner_observer
         cycle_budget = self.cycle_budget
         step_limit = self.step_limit
+        abort_above = self.abort_above_inner_cycles
 
         def step(
             residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
@@ -805,7 +822,10 @@ class DualTimeStep(eqx.Module):
                 return residual_fn(p) + shift * (p - reference)
 
             def cond(carry: tuple) -> jnp.ndarray:
-                _, inner, gnorm, cycles, _, _, _ = carry
+                _, inner, gnorm, cycles, _, max_inner, _ = carry
+                # The convergence target is tested FIRST, and that ordering is what makes the cost
+                # bailouts below safe: a solve that was expensive but brought ‖G‖ under the target exits
+                # here with `reached_target` set and is kept, never binned for its cost.
                 keep = (inner < inner_steps) & (gnorm > target)
                 # Cost bailout: stop the inner loop once its accumulated linear-solve count reaches
                 # `cycle_budget`, so a primary solve that is grinding on a stiff low-β operator is cut off
@@ -817,6 +837,13 @@ class DualTimeStep(eqx.Module):
                 # byte-identical (the budget term is elided at trace time, as `cycle_budget` is static).
                 if cycle_budget is not None:
                     keep = keep & (cycles < cycle_budget)
+                # Doomed-attempt bailout: one solve has already cost more than the march's discard
+                # threshold, and the target is still unmet (the test above), so this attempt WILL be
+                # thrown away and redone at a larger shift. Every further inner iteration is work that
+                # is discarded. Checking it here rather than after the step is the whole point: the
+                # threshold is a per-solve quantity, so it can be known the moment a solve returns.
+                if abort_above is not None:
+                    keep = keep & (max_inner <= abort_above)
                 return keep
 
             def body(carry: tuple) -> tuple:
