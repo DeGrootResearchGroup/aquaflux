@@ -2068,6 +2068,16 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     separate methods each returning one line — which is what lets a table appear in a log being tailed.
     An over-wide value **widens its row rather than being truncated**: a cut-off number is a wrong
     number. Pinned by `tests/unit/test_text_table.py`.
+  - **The step grid stays NARROW; only scan-down quantities get columns (binding).** The step table is
+    `step, t(s), beta, in, cyc, R, a_min, flg` — fixed, ~61 characters, comparable to the nested inner
+    table so the two read as one document. Everything else — the case metrics, the preconditioner
+    branch, the cumulative cycles, the per-field changes — rides in **spanning rows beneath the row it
+    belongs to**. The first version put them all in columns and reached 112 characters with
+    case-dependent column names; at that width, with the heading several rows up, it stopped being a
+    table and became a line of numbers that could not be paired with their labels. **Do not widen the
+    grid to add a quantity** — add an aside line, or a column only if it is worth scanning down the
+    whole run. A row that follows an inner block is re-headed **compactly** (the label row alone, no
+    rules): labelling one row must not cost three lines.
   - **The step summary is a table row, and the stopping test is stated once (BUILT).** The step line had
     grown to ~20 free-text `key=value` fields and ~150 characters — unreadable in a tail, and half of it
     was `‖R₀‖` and the target repeated on every row when both are **constants within a rung**. They now

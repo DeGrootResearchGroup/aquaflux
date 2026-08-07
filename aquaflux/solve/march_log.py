@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import sys
 import time
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping
 from typing import IO, Any
 
 import numpy as np
@@ -192,7 +192,6 @@ class MarchLogger:
     #: Re-emit the step table's headings after this many rows, so a long run stays readable in a tail.
     #: Tighter when the inner table is on, since its blocks push the last headings further up-screen.
     HEADINGS_EVERY = 25
-    HEADINGS_EVERY_NESTED = 8
 
     #: Indent for the inner-iteration block, marking it as detail belonging to the step row below it.
     _NEST = "    "
@@ -250,13 +249,10 @@ class MarchLogger:
         self._open = False
         self._previous_norm: float | None = None
         self._step_table: TextTable | None = None
-        self._extra: tuple[str, ...] = ()
+        self._nested = False
         self._needs_headings = True
         self._rows = 0
         self._reference: float | None = None
-        self._headings_every = (
-            self.HEADINGS_EVERY_NESTED if "inner" in self._detail else self.HEADINGS_EVERY
-        )
 
     def note(self, text: str) -> None:
         """Write an arbitrary line (a run header, a configuration echo) to the log's own stream.
@@ -381,31 +377,38 @@ class MarchLogger:
         if self._open:
             self._write(self._INNER_TABLE.rule(), indent=self._NEST)
             self._open = False
+            self._nested = True
 
-    def _step_columns(self, extra: Sequence[str]) -> list[Column]:
-        """The step table's columns: the fixed solver ones, then whatever the metrics named."""
-        columns = [
+    def _step_columns(self) -> list[Column]:
+        """The step table's columns.
+
+        Deliberately **narrow and fixed**: only the quantities worth scanning *down* the run live in
+        columns, and the set does not vary with what the metrics happen to be called. Everything else
+        (the case metrics, the preconditioner branch, the field changes) rides in spanning rows below
+        the row it belongs to. A table wide enough to hold all of it stops reading as a table -- it
+        becomes a line of numbers whose heading is too far away to pair them with.
+        """
+        return [
             Column("step", 4, "d"),
             Column("t(s)", 6, ".0f"),
-            Column("beta", 7, ".4f"),
+            Column("beta", 6, ".4f"),
             Column("in", 2, "d"),
-            Column("cyc", 4, "d"),
-            Column("cum", 6, "d"),
+            Column("cyc", 3, "d"),
             Column("R", 9, ".3e"),
             Column("a_min", 5, ".3f"),
+            Column("flg", 3, "", "<"),
         ]
-        if "pc" in self._detail:
-            columns.append(Column("pc", 11, "", "<"))
-        columns += [Column(name, max(len(name), 8), "", ">") for name in extra]
-        columns.append(Column("flag", 4, "", "<"))
-        return columns
 
-    def _headings(self, extra: Sequence[str]) -> None:
-        """(Re)build the step table when its columns change, and emit its heading rows."""
-        if self._step_table is None or tuple(extra) != self._extra:
-            self._extra = tuple(extra)
-            self._step_table = TextTable(self._step_columns(extra))
-        self._write(self._step_table.rule())
+    def _headings(self, *, compact: bool) -> None:
+        """Emit the step table's headings; ``compact`` gives the label row alone, without rules.
+
+        The compact form is what follows an inner block: the rules would triple the cost of labelling
+        a single row, but without *any* heading that row is a bare line of numbers.
+        """
+        if self._step_table is None:
+            self._step_table = TextTable(self._step_columns())
+        if not compact:
+            self._write(self._step_table.rule())
         self._write(self._step_table.headings())
         self._write(self._step_table.rule())
         self._rows = 0
@@ -441,42 +444,51 @@ class MarchLogger:
             self._write(f"reference |R0| = {reference:.4e}{stop}")
             self._needs_headings = True
 
-        if self._needs_headings or self._rows >= self._headings_every:
-            self._headings(list(columns))
+        # An inner block just closed, so this row would otherwise be unlabelled: re-head compactly.
+        if self._needs_headings or self._rows >= self.HEADINGS_EVERY:
+            self._headings(compact=False)
+        elif self._nested:
+            self._headings(compact=True)
+        self._nested = False
         assert self._step_table is not None
 
-        values: list[Any] = [
-            self._steps,
-            self._clock() - self._start,
-            report.shift,
-            inner,
-            cycles,
-            self._cumulative_cycles,
-            report.residual_norm,
-            report.alpha,
-        ]
-        if "pc" in self._detail:
-            kind, seconds = self._refresh or ("-", 0.0)
-            values.append("-" if kind == "-" else f"{kind} {seconds:.1f}s")
-            self._refresh = None
-        values += [f"{columns[name]:.4g}" for name in self._extra]
-        # `cycles` counts only the ACCEPTED attempt, so a redone step is otherwise indistinguishable
-        # from a cheap one -- and a retry mechanism left unconfigured never announces its absence.
         marks = ""
         if report.escalations:
             marks += f"e{int(report.escalations)}"
         if report.diverged_retry:
             marks += "R"
-        values.append(marks)
-
-        self._write(self._step_table.row(values))
-        self._rows += 1
-        if deltas:
-            self._write(
-                self._step_table.spanning(
-                    "  " + "  ".join(f"{name}={value:.2e}" for name, value in deltas.items())
-                )
+        self._write(
+            self._step_table.row(
+                [
+                    self._steps,
+                    self._clock() - self._start,
+                    report.shift,
+                    inner,
+                    cycles,
+                    report.residual_norm,
+                    report.alpha,
+                    marks,
+                ]
             )
+        )
+        self._rows += 1
+
+        # Everything that is not worth a column of its own, on its own full-width line beneath the row.
+        aside = []
+        if "pc" in self._detail:
+            kind, seconds = self._refresh or ("-", 0.0)
+            aside.append(f"pc {kind}" + ("" if kind == "-" else f" {seconds:.1f}s"))
+            self._refresh = None
+        aside += [f"{name} {value:.4g}" for name, value in columns.items()]
+        aside.append(f"cum {self._cumulative_cycles}")
+        self._write(self._step_table.spanning("  ".join(aside)))
+        if deltas:
+            changes = " ".join(
+                f"{name.split('/')[0][1:]} {value:.1e}" for name, value in deltas.items()
+            )
+            self._write(self._step_table.spanning("rel " + changes))
+        self._write(self._step_table.rule())
+
         # Where the NEXT step starts from, so its inner block can head with the residual it inherits.
         self._previous_norm = float(report.residual_norm)
 

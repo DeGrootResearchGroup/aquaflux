@@ -43,6 +43,15 @@ def _cells(line: str) -> list[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
+def _asides(buffer: io.StringIO) -> list[str]:
+    """The full-width lines beneath each step row -- where everything that is not a column lives."""
+    return [
+        line.strip("| ").strip()
+        for line in buffer.getvalue().splitlines()
+        if line.startswith("| ") and "|" not in line.strip("| ")
+    ]
+
+
 def _step_rows(buffer: io.StringIO) -> list[dict[str, str]]:
     """Every step row in the log, as ``{heading: cell}`` -- the table's headings carry the meaning."""
     headings, rows = None, []
@@ -98,12 +107,16 @@ def test_a_diverged_step_reports_no_reference_rather_than_nan() -> None:
     assert _step_rows(buffer)[0]["R"] == "nan"  # but the measured value is still reported
 
 
-def test_injected_metrics_become_columns() -> None:
-    """Case-specific quantities the solver cannot know ride on an injected callable."""
+def test_injected_metrics_are_reported_beneath_the_row() -> None:
+    """Case-specific quantities the solver cannot know ride on an injected callable.
+
+    They sit in the aside rather than in columns: their names and count vary by case, and widening
+    the grid per case is what stops it reading as a table.
+    """
     logger, buffer = _log(metrics=lambda state: {"xr/h": state * 2.0})
     logger.on_checkpoint(_report(), 3.0)
 
-    assert _step_rows(buffer)[0]["xr/h"] == "6"
+    assert "xr/h 6" in _asides(buffer)[0]
 
 
 def test_on_step_omits_metrics_because_it_has_no_state() -> None:
@@ -126,9 +139,9 @@ def test_a_redone_step_is_flagged() -> None:
     logger.on_step(_report())
 
     escalated, retried, plain = _step_rows(buffer)
-    assert escalated["flag"] == "e2"
-    assert retried["flag"] == "R"
-    assert plain["flag"] == ""
+    assert escalated["flg"] == "e2"
+    assert retried["flg"] == "R"
+    assert plain["flg"] == ""
 
 
 def test_cumulative_cycles_and_steps_run_across_phases() -> None:
@@ -139,9 +152,8 @@ def test_cumulative_cycles_and_steps_run_across_phases() -> None:
     logger.on_step(_report(cycles=5))
 
     assert any("rung 1/3" in line for line in buffer.getvalue().splitlines())
-    second = _step_rows(buffer)[1]
-    assert second["step"] == "2"
-    assert second["cum"] == "11"  # (10-2) + (5-2), offsets stripped
+    assert _step_rows(buffer)[1]["step"] == "2"
+    assert "cum 11" in _asides(buffer)[1]  # (10-2) + (5-2), offsets stripped
 
 
 def test_solve_cost_is_split_into_inner_count_and_corrected_cycles() -> None:
@@ -219,8 +231,8 @@ def test_the_inner_block_opens_on_each_attempt_and_is_nested_under_its_step() ->
 
     titles = [line for line in buffer.getvalue().splitlines() if "+- step" in line]
     assert len(titles) == 2  # the retry gets its own block
-    assert all(line.startswith("    ") for line in titles)  # nested under the step row
-    assert _step_rows(buffer)[0]["flag"] == "e1"
+    assert all(line.startswith("    ") for line in titles)  # indented as detail of the step row
+    assert _step_rows(buffer)[0]["flg"] == "e1"
 
 
 def test_a_block_heads_with_the_residual_the_step_inherits() -> None:
@@ -259,8 +271,8 @@ def test_diagnostics_are_off_by_default_even_when_the_hooks_are_wired() -> None:
 
     text = buffer.getvalue()
     assert "+- step" not in text  # no inner block
-    assert "pc" not in _step_rows(buffer)[0]  # no preconditioner column
-    assert "du/u" not in text  # no field-change row
+    assert "pc " not in text  # no preconditioner reporting
+    assert "rel u" not in text  # no field-change row
 
 
 def test_each_detail_switches_on_only_its_own_output() -> None:
@@ -269,8 +281,8 @@ def test_each_detail_switches_on_only_its_own_output() -> None:
     logger.on_refresh("shift", 0.4)
     logger.on_checkpoint(_report(), [1.0, 2.0])
 
-    assert _step_rows(buffer)[0]["pc"] == "shift 0.4s"
-    assert "du/u" in buffer.getvalue()
+    assert "pc shift 0.4s" in _asides(buffer)[0]
+    assert "rel u" in buffer.getvalue()
     assert "+- step" not in buffer.getvalue()
 
 
@@ -281,9 +293,9 @@ def test_the_preconditioner_column_is_reported_once_for_the_step_it_preceded() -
     logger.on_step(_report())
     logger.on_step(_report())
 
-    first, second = _step_rows(buffer)
-    assert first["pc"] == "full 27.0s"
-    assert second["pc"] == "-"
+    first, second = _asides(buffer)
+    assert "pc full 27.0s" in first
+    assert "pc -" in second
 
 
 def test_an_unknown_detail_name_raises_rather_than_being_ignored() -> None:
@@ -322,3 +334,41 @@ def test_a_field_that_was_identically_zero_reports_nan_rather_than_dividing() ->
     metric([0.0, 0.0])
 
     assert math.isnan(metric([1.0, 1.0])["dk/k"])
+
+
+def test_the_grid_stays_narrow_whatever_is_switched_on() -> None:
+    """Width is the whole point: a table wide enough for every diagnostic stops reading as one.
+
+    The step grid must stay comparable to the nested inner table, so the two read as one document and
+    a row is never so far from its heading that the numbers are unpairable.
+    """
+    logger, buffer = _log(
+        metrics=lambda s: {"xr/h": 7.243, "xr/h_full": 15.17},
+        fields=lambda s: {name: np.asarray([s]) for name in ("u", "p", "k", "w", "nut")},
+        detail=("inner", "fields", "pc"),
+    )
+    logger.on_refresh("full", 21.1)
+    logger.on_inner(0, 4.0e-2, 1.0e-2, 5, 1.0)
+    logger.on_checkpoint(_report(), 1.0)
+    logger.on_checkpoint(_report(), 2.0)
+
+    grid = [
+        line for line in buffer.getvalue().splitlines() if line.lstrip().startswith(("|", "+-"))
+    ]
+    assert max(len(line) for line in grid) <= 70
+
+
+def test_a_row_following_an_inner_block_is_still_labelled() -> None:
+    """An inner block separates a step row from the last heading, leaving bare numbers.
+
+    The compact re-heading is one line rather than three, because labelling one row must not cost
+    more than the row.
+    """
+    logger, buffer = _log(detail=("inner",))
+    logger.on_inner(0, 4.0e-2, 1.0e-2, 5, 1.0)
+    logger.on_step(_report())
+
+    lines = buffer.getvalue().splitlines()
+    heading = next(i for i, line in enumerate(lines) if line.startswith("| step"))
+    row = next(i for i, line in enumerate(lines) if line.startswith("|    1 "))
+    assert row - heading == 2  # heading, rule, row -- nothing between them
