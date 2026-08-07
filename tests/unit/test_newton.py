@@ -26,7 +26,7 @@ def test_linear_residual_solved_in_one_step() -> None:
 
 
 def test_damped_newton_stepper_reports_its_linear_solve_cost() -> None:
-    """``DampedNewtonStep.stepper()`` returns ``(phi_next, cycles, alpha, inner_iterations)`` like every forward step.
+    """``DampedNewtonStep.stepper()`` returns a ``StepOutcome`` like every forward step.
 
     The line search itself costs only residual evaluations, so a step's reported cost is the single
     linear solve behind it. Nothing consumes the line-searched path's count or α today; they are
@@ -37,7 +37,7 @@ def test_damped_newton_stepper_reports_its_linear_solve_cost() -> None:
     step = DampedNewtonStep(line_search=0).stepper()
     phi0 = jnp.array([9.0, -9.0])
     residual_fn = lambda x: A @ x - B  # noqa: E731
-    phi_next, cycles, alpha, inner = step(
+    phi_next, cycles, alpha, inner, *_ = step(
         residual_fn, phi0, jnp.linalg.norm(residual_fn(phi0)), None
     )
     assert int(inner) == 1  # a single Newton step has no inner loop

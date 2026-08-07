@@ -24,6 +24,7 @@ from aquaflux.solve import (
     ImplicitNewtonSolver,
     PseudoTransientStep,
     ShiftTerm,
+    StepOutcome,
     StepReport,
     SwitchedEvolutionRelaxation,
     forward_march,
@@ -32,6 +33,28 @@ from aquaflux.solve import (
 # Incremented on every *trace* of the residual below, so a test can assert that repeated steps
 # reuse a compiled march step instead of retracing it.
 _TRACES: list[int] = []
+
+
+def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False):
+    """A `StepOutcome` for a test double, so a fake step matches the real protocol in one place.
+
+    The doubles used to build the tuple inline; when the protocol grew a field every one of them broke
+    separately, which is the argument for a single constructor rather than five literal tuples.
+
+    ``reached`` defaults to **False** because these doubles model steps that do not converge -- which
+    is what makes them useful for testing the escalation, and what the escalation now requires: a step
+    that met its own target is not redone on cost alone.
+    """
+    cycles = jnp.asarray(cycles, dtype=jnp.int32)
+    return StepOutcome(
+        phi,
+        cycles,
+        jnp.asarray(alpha),
+        jnp.asarray(inner, dtype=jnp.int32),
+        jnp.asarray(reached),
+        jnp.maximum(cycles - 2, 0),
+        jnp.asarray(1.0),
+    )
 
 
 class _Cubic(eqx.Module):
@@ -144,8 +167,8 @@ class _PoisonUnlessTight(eqx.Module):
     def stepper(self):
         def step(residual_fn, phi, residual_norm_0, solver):
             if solver == "tight":  # the recovered step lands on the root, at a higher cycle cost
-                return jnp.zeros_like(phi), jnp.asarray(6), jnp.asarray(1.0), jnp.asarray(1)
-            return jnp.full_like(phi, jnp.inf), jnp.asarray(3), jnp.asarray(1.0), jnp.asarray(1)
+                return _outcome(jnp.zeros_like(phi), 6, reached=True)  # lands on the root
+            return _outcome(jnp.full_like(phi, jnp.inf), 3)
 
         return step
 
@@ -527,12 +550,7 @@ class _CyclesFromBeta(eqx.Module):
 
         def step(residual_fn, phi, residual_norm_0, solver):
             cyc = jnp.round(base / jnp.maximum(schedule.beta, 1e-6)).astype(jnp.int32)
-            return (
-                phi,
-                cyc,
-                jnp.asarray(1.0),
-                jnp.asarray(1, dtype=jnp.int32),
-            )  # phi held: never converges
+            return _outcome(phi, cyc)  # phi held: never converges
 
         return step
 
@@ -643,9 +661,9 @@ class _NaNUntilDamped(eqx.Module):
             if (
                 solver == "tight"
             ):  # the divergence fallback -- marked so the test can detect it fired
-                return jnp.zeros_like(phi), jnp.asarray(6), jnp.asarray(1.0), jnp.asarray(1)
+                return _outcome(jnp.zeros_like(phi), 6, reached=True)
             phi_out = jnp.where(sched.beta >= thr, jnp.zeros_like(phi), jnp.full_like(phi, jnp.inf))
-            return phi_out, jnp.asarray(3), jnp.asarray(1.0), jnp.asarray(1)
+            return _outcome(phi_out, 3)
 
         return step
 
