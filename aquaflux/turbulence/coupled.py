@@ -2137,6 +2137,49 @@ def _materialize_gate(
     return should_materialize
 
 
+def _refresh_branch(*, stale_state: bool, moved_beta: bool, split: bool) -> str:
+    """Which branch a β-tracking refresh should take: ``"full"``, ``"shift"`` or ``"none"``.
+
+    The two staleness signals are **independent questions about different things**, and the whole point
+    of this function is that they are combined rather than nested:
+
+    * ``stale_state`` — the frozen Jacobian no longer matches the flow (the eddy viscosity has drifted).
+      Only a re-probe fixes that, so it forces a ``"full"``.
+    * ``moved_beta`` — the shift the V-cycle was built at no longer matches the one being solved. Only
+      the diagonal is wrong, so a ``"shift"`` fixes it where that cheap branch exists.
+
+    ``split`` says whether the cheap branch exists at all (an algebraic-multigrid preconditioner with a
+    materialize gate configured). Without it there is one branch, and any trigger means ``"full"``.
+
+    **Why this is a function and not three nested ``if``s at the call site.** It used to be nested — the
+    state question asked *only* when the β question had already said yes — and that made state drift
+    unable to trigger anything at all below the preconditioner's shift floor, where the clamped β never
+    moves so the β question answers "no" forever. That is precisely the low-shift tail where the flow
+    develops fastest. Measured on a three-dimensional cold march: below the floor 91 % of steps refreshed
+    nothing while the eddy viscosity drifted ~20 % per step, and those steps carried ~47 % of the whole
+    march's Krylov cost. The decision is small, total, and worth being able to read and test on its own.
+
+    Parameters
+    ----------
+    stale_state : bool
+        The state-drift gate fired (the Jacobian needs re-probing).
+    moved_beta : bool
+        The β-mismatch gate fired (the shift needs re-adding).
+    split : bool
+        Whether the cheap shift-only branch is available.
+
+    Returns
+    -------
+    str
+        ``"full"``, ``"shift"`` or ``"none"``.
+    """
+    if stale_state:
+        return "full"
+    if not moved_beta:
+        return "none"
+    return "shift" if split else "full"
+
+
 def _beta_tracking_refresh(
     coupled: CoupledRANS,
     stencil_reach: int,
@@ -2232,28 +2275,29 @@ def _beta_tracking_refresh(
         # root and its adjoint are unchanged. The resulting mismatch SATURATES at `beta_floor * d` rather
         # than growing without bound the way a stale (never-refreshed) preconditioner's does.
         pc_beta = max(beta, beta_floor)
-        # Gate on the preconditioner's own beta: below the floor its operator no longer moves with the
-        # march, so a beta-move refresh there would rebuild an identical V-cycle.
-        if gate is not None and not gate(pc_beta):
-            _report_refresh("none", started)
-            return
         policy = active_step.shift_policy
-        frozen = jax.lax.stop_gradient(state)
-        shift = pc_beta * np.asarray(jax.lax.stop_gradient(policy.base.shift_term(state).diagonal))
         pc = policy.preconditioner
         # β-diagonal split: β and the per-cell shift ``d`` touch only the diagonal, so between full
         # (re-materialized) refreshes the shift is tracked by re-adding the new ``β d`` diagonal to the
-        # frozen Jacobian -- skipping the coloured-probe materialize (the dominant refresh cost). The materialize
-        # gate reserves the full re-materialize for when the Jacobian has actually gone stale (ν_t drift) or
-        # a step cap is hit; otherwise this is a cheap shift-only refresh. Only the AMG preconditioner
-        # exposes the shift-only path; without it (ILUT/LU) `materialize_gate` is None and every refresh is
-        # full, as before.
+        # frozen Jacobian -- skipping the coloured-probe materialize (the dominant refresh cost). Only the
+        # AMG preconditioner exposes that shift-only path; without it (ILUT/LU) every refresh is full.
         is_amg = hasattr(pc, "refresh_shift_in_place")
-        if materialize_gate is not None and is_amg:
-            if not materialize_gate(state):
-                pc.refresh_shift_in_place(shift)
-                _report_refresh("shift", started)
-                return
+        split = materialize_gate is not None and is_amg
+        # Both gates are stateful, so each must be called EXACTLY ONCE per step -- no short-circuiting.
+        stale_state = bool(split and materialize_gate(state))
+        moved_beta = gate is None or bool(gate(pc_beta))
+        branch = _refresh_branch(stale_state=stale_state, moved_beta=moved_beta, split=split)
+        if branch == "none":
+            _report_refresh("none", started)
+            return
+        frozen = jax.lax.stop_gradient(state)
+        shift = pc_beta * np.asarray(jax.lax.stop_gradient(policy.base.shift_term(state).diagonal))
+        if branch == "shift":
+            # The Jacobian still matches the flow, so only the shift needs re-adding. Note the shift is
+            # `pc_beta * d(state)` and the per-cell `d` tracks the state even where `pc_beta` is pinned,
+            # so this is real work below the floor, not a rebuild of an identical operator.
+            _report_refresh("shift", started, pc.refresh_shift_in_place(shift))
+            return
         # The AMG preconditioner materializes via the coloured probe and takes the batched form; the
         # factorization preconditioners (LU/ILUT) do not, so pass it only on the AMG path.
         extra = (
@@ -2265,10 +2309,10 @@ def _beta_tracking_refresh(
             if is_amg
             else {}
         )
-        pc.refresh_in_place(
+        phases = pc.refresh_in_place(
             lambda v: matvec_at(frozen, v), colouring, n_fields, shift, **extra, **refresh_kwargs
         )
-        _report_refresh("full", started)
+        _report_refresh("full", started, phases or ())
 
     return precondition_step
 

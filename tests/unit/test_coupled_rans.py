@@ -683,3 +683,39 @@ def test_each_step_equilibrates_at_the_state_it_started_from() -> None:
     assert float(jnp.linalg.norm(jnp.array(list(rows.values())))) == pytest.approx(
         expected, rel=1e-12
     )
+
+
+def test_state_drift_forces_a_full_refresh_whatever_the_beta_gate_says() -> None:
+    """The two staleness gates are combined, NOT nested -- the regression this function was extracted for.
+
+    Below the preconditioner's shift floor the clamped β never moves, so the β gate answers "no change"
+    on every step forever. When the state gate was asked only *after* the β gate had already said yes,
+    that made eddy-viscosity drift unable to trigger anything at all in exactly the low-shift tail where
+    the flow develops fastest.
+    """
+    from aquaflux.turbulence.coupled import _refresh_branch
+
+    assert _refresh_branch(stale_state=True, moved_beta=False, split=True) == "full"
+    assert _refresh_branch(stale_state=True, moved_beta=True, split=True) == "full"
+
+
+def test_a_moved_beta_alone_takes_the_cheap_shift_branch() -> None:
+    """A matching Jacobian with a mismatched shift needs only the diagonal re-added, not a re-probe."""
+    from aquaflux.turbulence.coupled import _refresh_branch
+
+    assert _refresh_branch(stale_state=False, moved_beta=True, split=True) == "shift"
+
+
+def test_without_the_split_any_trigger_is_a_full_refresh() -> None:
+    """A preconditioner with no shift-only path (the factorization ones) has a single branch."""
+    from aquaflux.turbulence.coupled import _refresh_branch
+
+    assert _refresh_branch(stale_state=False, moved_beta=True, split=False) == "full"
+    assert _refresh_branch(stale_state=False, moved_beta=False, split=False) == "none"
+
+
+def test_neither_gate_firing_reuses_the_standing_factorization() -> None:
+    """The gates exist to skip work; both quiet must still mean no refresh."""
+    from aquaflux.turbulence.coupled import _refresh_branch
+
+    assert _refresh_branch(stale_state=False, moved_beta=False, split=True) == "none"
