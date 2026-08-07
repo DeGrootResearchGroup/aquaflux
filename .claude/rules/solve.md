@@ -1994,10 +1994,27 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       convergence target *before* either cost bailout, so a costly solve that brings `‖G‖` under the
       target exits normally with `reached_target` set and is kept. The empirical backing is strong on
       this case — across 64 attempts, **no kept attempt ever had a single inner solve above 10 cycles**,
-      while all three discarded ones ran 12/15/43 — so the threshold separates them perfectly and the
-      61 good steps are untouched. Projected saving on those three attempts: **51 cycles** from the
-      abort, plus ~31 more if the per-solve `stagnation_iters`/`max_restarts` are also brought down
-      toward the threshold (still ~4–6× it, which is why one solve can eat the step budget).
+      while all three discarded ones ran 12/15/43 — so the threshold separates them perfectly.
+      **MEASURED on the next march, and the prediction held where it applied:**
+
+      | step | discarded attempt before | after | cycles saved |
+      |---|---|---|---|
+      | 48 | `[2, 9, 5, 43]` | unchanged | 0 (predicted 0 — the trip is on the last inner) |
+      | 51 | `[2, 12, 4, 4, 4]` | `[2, 12]` | 12 (predicted 12) |
+      | 52 | `[2, 15, 39]` | `[2, 19]` | 35 (predicted 39) |
+
+      Discarded-attempt cycles 141 → 107 (a new retry at step 53 cost 13 of the 47 saved), and the
+      retry region's wall fell **250 s** (step 51 −77 s, step 52 −165 s).
+      **⚠️ MEASURE IT IN WALL, NOT IN THE CYCLE TOTAL.** The march's reported `cyc` is the **accepted**
+      attempt's count only, so discarded work was never in it: total cycles moved 348 → 347 while a real
+      250 s came out. A prediction phrased against the cycle total would read as a total miss.
+      **⚠️ It is NOT purely a cost change.** `precondition_step` runs per *attempt*, so truncating a
+      discarded attempt changes the refresh sequence and hence the V-cycle the next step sees: the two
+      marches agree step-for-step through 52 and then diverge (61 vs 62 steps, same `x_r/h` 8.36, both
+      converged). Benign here, but do not describe the abort as trajectory-neutral.
+      A further ~31 cycles are available if the per-solve `stagnation_iters`/`max_restarts` are brought
+      down toward the threshold (still ~4–6× it, which is why one solve can eat the step budget); step 48
+      is the case that needs it, since its trip lands on the last inner where the abort cannot help.
       `None` (default) is byte-identical. Forward-only. Pinned by
       `test_dual_time.py::test_abort_above_inner_cycles_{stops_a_doomed_attempt_early,
       never_bins_an_expensive_success, none_is_the_unbounded_step}` and the `_with_inner_abort` plumbing

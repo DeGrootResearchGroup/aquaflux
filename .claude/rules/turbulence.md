@@ -908,9 +908,10 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       `test_scaling_the_viscosity_leaves_the_pytree_structure_identical`), so every rung *could* be a
       cache hit. Same defect and same fix as `eddy_viscosity_drift`. Pinned by
       `test_the_jacobian_probe_is_a_cache_hit_across_reynolds_rungs`.
-      **⚠️ This does NOT remove the whole per-rung recompile — the larger part is still open.** Each
-      rung's first step costs 112/102/145 s more than that rung's median step *at an identical cycle
-      count* (359 s, ~8 % of the march). The probe is one contributor; the dominant one is that
+      **⚠️ This does NOT remove the whole per-rung recompile — MEASURED, it is 20 % of it.** The excess
+      of each rung's first step over that rung's median step, at identical cycle counts, went **377 s →
+      302 s** (rung 1 118→104, rung 2 108→89, rung 3 151→109). The probe is a minority contributor; the
+      dominant one is that
       `point_setup` rebuilds the engine per rung, and three of `DualTimeStep`'s **static** fields then
       hold fresh objects — `step_limit` (a new function from `positive_k_limit`), the adjoint
       preconditioner factory, and the shift policy's `MonolithicAmgPreconditioner` (a non-pytree, hashed
