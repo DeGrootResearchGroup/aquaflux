@@ -138,6 +138,38 @@ class AmgVCycle:
         """Whether the native host exact-Jacobian forward solve (:meth:`solve_exact`) is available."""
         return self._native
 
+    @property
+    def levels(self) -> int:
+        """Grids in the multigrid hierarchy, counting the fine grid and the direct coarse solve."""
+        return int(self._pc.getMGLevels())
+
+    @property
+    def coarse_size(self) -> int:
+        """Equations on the coarsest grid — the size of the direct solve at the bottom of the cycle.
+
+        Worth reporting alongside :attr:`levels` whenever an aggregation option is being varied,
+        because it says whether the option changed the hierarchy at all. Raising
+        ``pc_gamg_coarse_eq_limit`` above a coarse grid that is already smaller than the old limit,
+        for instance, produces an identical hierarchy — and without this number that no-op is
+        indistinguishable from a real setting that happened to make no difference.
+        """
+        return int(self._pc.getMGCoarseSolve().getOperators()[0].getSize()[0])
+
+    def destroy(self) -> None:
+        """Release the PETSc objects (hierarchy, factors, matrix) this V-cycle holds.
+
+        Garbage collection reaches them eventually, but a caller that builds several V-cycles in a
+        loop — a preconditioner study, say — cannot afford to wait: each holds a copy of a
+        three-dimensional coupled operator and its factors, and two live at once is enough to exhaust
+        a workstation. Calling this makes the release the caller's decision rather than the
+        collector's. The object must not be used afterwards.
+        """
+        if self._native:
+            self._ksp.destroy()
+            self._shell.destroy()
+        self._pc.destroy()
+        self._mat.destroy()
+
     def _build(self, cell_major: sp.csr_matrix) -> None:
         """Assemble the PETSc ``Mat`` and set up the ``PCGAMG`` V-cycle at ``cell_major``."""
         PETSc = self._PETSc
@@ -345,11 +377,7 @@ class AmgVCycle:
         cell_major = cell_major.tocsr()
         cell_major.sort_indices()
         if not self._matches_pattern(cell_major):
-            if self._native:
-                self._ksp.destroy()
-                self._shell.destroy()
-            self._pc.destroy()
-            self._mat.destroy()
+            self.destroy()
             self._build(cell_major)
             return
         # In-place value refresh: the Mat wraps ``self._data``, so overwriting it updates the operator
@@ -871,6 +899,11 @@ class MonolithicAmgPreconditioner:
     def has_native_solve(self) -> bool:
         """Whether the native host exact-Jacobian forward solve is available (built with ``native=True``)."""
         return self.factors.has_native_solve and self._jvp is not None
+
+    def destroy(self) -> None:
+        """Release the V-cycle's PETSc objects and the cached Jacobian (see :meth:`AmgVCycle.destroy`)."""
+        self.factors.destroy()
+        self._jacobian_no_shift = None
 
     @property
     def is_exact_native(self) -> bool:
