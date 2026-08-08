@@ -36,6 +36,7 @@ Jacobian and the coupled adjoint are untouched; only the preconditioner is split
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 
 import numpy as np
 import scipy.sparse as sp
@@ -276,6 +277,8 @@ def build_block_triangular_field_split(
     coarse_eq_limit: int | None = 2000,
     leading_options: dict | None = None,
     trailing_options: dict | None = None,
+    leading_inverse: Callable[[sp.csr_matrix, int], object] | None = None,
+    trailing_inverse: Callable[[sp.csr_matrix, int], object] | None = None,
 ) -> BlockTriangularFieldSplit:
     """Build a block-triangular field split with a multigrid V-cycle on each diagonal block.
 
@@ -283,6 +286,12 @@ def build_block_triangular_field_split(
     reordered cell-major within its own group and aggregated at its own block size — the point of the
     exercise, since a four-field saddle and a two-field transport pair coarsen differently. The retained
     off-diagonal block is taken from ``matrix`` unmodified.
+
+    Either block's inverse can be replaced wholesale by ``leading_inverse`` / ``trailing_inverse``, which
+    is the seam for giving a group something other than a multigrid V-cycle over its sub-matrix — a
+    reduction-based hierarchy for the transported scalars, say, or an inverse written in a framework that
+    can run on an accelerator. Whatever is supplied need only expose the same ``n_dofs`` and
+    ``apply(residual, *, transpose=...)`` an :class:`~aquaflux.solve.AmgVCycle` does.
 
     Parameters
     ----------
@@ -301,7 +310,11 @@ def build_block_triangular_field_split(
         pseudo-transient shift falls), four sweeps of it, and a coarse grid large enough that its direct
         solve captures the global coupling.
     leading_options, trailing_options
-        Extra multigrid options for one block only, so the two can be tuned apart.
+        Extra multigrid options for one block only, so the two can be tuned apart. Ignored for a block
+        whose inverse is supplied directly.
+    leading_inverse, trailing_inverse
+        ``(sub_matrix, n_fields_in_group) -> inverse`` replacing that block's V-cycle entirely. The
+        returned object must expose ``n_dofs`` and ``apply(residual, *, transpose=...)``.
 
     Returns
     -------
@@ -314,11 +327,19 @@ def build_block_triangular_field_split(
         "smoother_sweeps": smoother_sweeps,
         "coarse_eq_limit": coarse_eq_limit,
     }
-    leading = build_amg_vcycle(
-        leading_block, groups.n_leading_fields, extra_options=leading_options, **common
+    leading = (
+        leading_inverse(leading_block, groups.n_leading_fields)
+        if leading_inverse is not None
+        else build_amg_vcycle(
+            leading_block, groups.n_leading_fields, extra_options=leading_options, **common
+        )
     )
-    trailing = build_amg_vcycle(
-        trailing_block, groups.n_trailing_fields, extra_options=trailing_options, **common
+    trailing = (
+        trailing_inverse(trailing_block, groups.n_trailing_fields)
+        if trailing_inverse is not None
+        else build_amg_vcycle(
+            trailing_block, groups.n_trailing_fields, extra_options=trailing_options, **common
+        )
     )
     if flow_first:
         return BlockTriangularFieldSplit(leading, trailing, trailing_by_leading, groups)

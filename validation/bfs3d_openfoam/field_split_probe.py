@@ -104,14 +104,19 @@ sys.path.insert(0, str(ROOT))  # import aquaflux from the working tree, as compa
 sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
+import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     FieldGroups,
     MonolithicAmgPreconditioner,
+    air_multigrid_solve,
     block_stencil_gather_map,
+    build_air_hierarchy,
     build_amg_vcycle,
     build_block_triangular_field_split,
+    build_convection_hierarchy,
+    convection_multigrid_solve,
     relative_residual_gmres,
     solve_linear,
 )
@@ -274,6 +279,62 @@ def monolithic(shifted, groups, n_fields, smoother):
     )
 
 
+class JaxNativeBlockInverse:
+    """A JAX-native fixed-cycle multigrid, wearing the host ``apply(residual, transpose=...)`` interface.
+
+    The hierarchies in :mod:`aquaflux.solve.multigrid` are written in JAX and are the ones this package
+    could run on an accelerator without PETSc. They are also a fixed number of cycles with fixed smoothing
+    and a direct coarse solve, so ``b -> x`` is a constant linear map -- which is what lets the transpose
+    come from :func:`jax.linear_transpose` rather than from a hand-written transposed cycle, and what
+    makes it legal for the adjoint at all.
+
+    The conversion at each boundary is real work, so this is a study adapter: a production JAX-native
+    split would keep the whole application on the traced side instead of crossing back to numpy per apply.
+    """
+
+    def __init__(self, cycle, n_dofs: int) -> None:
+        self._cycle = cycle
+        self._n_dofs = n_dofs
+        self._transpose = jax.linear_transpose(cycle, jnp.zeros(n_dofs, dtype=jnp.float64))
+
+    @property
+    def n_dofs(self) -> int:
+        return self._n_dofs
+
+    def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
+        vector = jnp.asarray(residual, dtype=jnp.float64)
+        out = self._transpose(vector)[0] if transpose else self._cycle(vector)
+        return np.asarray(out, dtype=np.float64)
+
+    def destroy(self) -> None:
+        """Nothing to release -- the hierarchy is plain arrays, not a host solver's handles."""
+
+
+def _trailing_inverse(spec):
+    """The trailing block's inverse factory: a PETSc V-cycle by smoother name, or a JAX-native cycle."""
+    if spec in SMOOTHERS:
+        return None  # the builder's own V-cycle, configured through `trailing_options`
+    if spec == "air":
+
+        def build(block, n_group_fields):
+            hierarchy = build_air_hierarchy(block.tocsr())
+            return JaxNativeBlockInverse(
+                lambda b: air_multigrid_solve(hierarchy, b), block.shape[0]
+            )
+
+        return build
+    if spec == "twolevel":
+
+        def build(block, n_group_fields):
+            hierarchy = build_convection_hierarchy(block.tocsr())
+            return JaxNativeBlockInverse(
+                lambda b: convection_multigrid_solve(hierarchy, b), block.shape[0]
+            )
+
+        return build
+    raise ValueError(f"unknown trailing inverse {spec!r}")
+
+
 def field_split(shifted, groups, n_fields, flow_smoother, turbulence_smoother, *, flow_first):
     """A hierarchy per field group, retaining one triangle of the coupling between them."""
     return MonolithicAmgPreconditioner(
@@ -285,7 +346,8 @@ def field_split(shifted, groups, n_fields, flow_smoother, turbulence_smoother, *
             smoother_sweeps=compare.SWEEPS,
             coarse_eq_limit=compare.COARSE_EQ_LIMIT,
             leading_options=SMOOTHERS[flow_smoother] or None,
-            trailing_options=SMOOTHERS[turbulence_smoother] or None,
+            trailing_options=SMOOTHERS.get(turbulence_smoother) or None,
+            trailing_inverse=_trailing_inverse(turbulence_smoother),
         )
     )
 
@@ -325,6 +387,21 @@ ARMS = (
         "split flow-first, damped Jacobi on k-omega",
         lambda m, g, n: field_split(m, g, n, "ilu0", "jacobi", flow_first=True),
     ),
+    # The turbulence block on a JAX-NATIVE hierarchy instead of a PETSc V-cycle -- an independent knob
+    # from the flow smoother, and the one that would actually remove PETSc from this half of the
+    # preconditioner. lAIR is reduction-based coarsening built for nonsymmetric advection-dominated
+    # transport, which is what [k, omega] is; "twolevel" is the cheaper aggregation sibling. Both are the
+    # hierarchies `scalar_transport_preconditioner` already uses for the segregated k and omega solves.
+    (
+        "split ilu0/air",
+        "split flow-first, lAIR on k-omega",
+        lambda m, g, n: field_split(m, g, n, "ilu0", "air", flow_first=True),
+    ),
+    (
+        "split ilu0/2lvl",
+        "split flow-first, twolevel AMG on k-omega",
+        lambda m, g, n: field_split(m, g, n, "ilu0", "twolevel", flow_first=True),
+    ),
     # Vanka on the four-field saddle. Chebyshev fails there because a saddle has no bounded positive real
     # spectrum; a patch method has no such assumption, and the omega weakness that condemned patches on
     # the six-field block is exactly what the split takes away. Additive Vanka is also a batch of small
@@ -344,6 +421,13 @@ ARMS = (
         "split vankamult/ilu0",
         "split flow-first, multiplicative Vanka on flow",
         lambda m, g, n: field_split(m, g, n, "vanka-mult", "ilu0", flow_first=True),
+    ),
+    # The corner of the grid with no PETSc-only component left: a patch smoother on the saddle (a batch
+    # of independent small dense inverses) and a JAX-native hierarchy on the scalars.
+    (
+        "split vanka/air",
+        "split flow-first, Vanka flow + lAIR k-omega",
+        lambda m, g, n: field_split(m, g, n, "vanka", "air", flow_first=True),
     ),
     # The GPU question: a Jacobi-class smoother on the FOUR-field saddle, with the scalars kept on
     # incomplete-LU, then on both. If the four-field block is smoothable where six is not, these work.
