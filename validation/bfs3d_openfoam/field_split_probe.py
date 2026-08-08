@@ -42,6 +42,14 @@ A Chebyshev arm that fails on the four-field block as badly as on the six-field 
 indefiniteness and closes the route; one that succeeds on four where it failed on six indicts ``omega``
 and opens it.
 
+**And the converse arm, which is the one a split is really for.** Removing the incomplete-LU sweep
+*everywhere* is the ambitious prize; **confining** it to the saddle is the reachable one. The
+``[k, omega]`` block is not a saddle -- it is a two-field advection-diffusion-reaction pair with a genuine
+diagonal -- so a Jacobi-class smoother ought to serve it, and if it does, the sequential triangular solve
+is needed on four fields instead of six and the scalars could run on a multigrid this package can write
+itself. Hence the asymmetric arms: keep ILU(0) where it is known to be needed, relax it only where the
+operator should not need it.
+
 **Method** -- each of these has produced a verdict on this case that had to be retracted:
 
 * the TRUE residual through GMRES, never a preconditioned norm, a one-apply contraction, or a spectral
@@ -280,6 +288,22 @@ ARMS = (
         "split turbulence-first, ILU(0) both",
         lambda m, g, n: field_split(m, g, n, "ilu0", "ilu0", flow_first=False),
     ),
+    # The asymmetric arms, and the ones a split is really FOR: keep the incomplete-LU sweep on the saddle,
+    # where it is known to be needed, and relax the smoother only on the transported scalars. That block
+    # is not a saddle -- it is a two-field advection-diffusion-reaction pair with a genuine diagonal -- so
+    # a Jacobi-class smoother ought to serve it, and if it does the sequential triangular solve is confined
+    # to four fields instead of six. This is the configuration that decides whether the incomplete-LU
+    # requirement can be LOCALIZED, which is a weaker but far more reachable prize than removing it.
+    (
+        "split ilu0/cheb",
+        "split flow-first, Chebyshev on k-omega",
+        lambda m, g, n: field_split(m, g, n, "ilu0", "chebyshev", flow_first=True),
+    ),
+    (
+        "split ilu0/jac",
+        "split flow-first, damped Jacobi on k-omega",
+        lambda m, g, n: field_split(m, g, n, "ilu0", "jacobi", flow_first=True),
+    ),
     # The GPU question: a Jacobi-class smoother on the FOUR-field saddle, with the scalars kept on
     # incomplete-LU, then on both. If the four-field block is smoothable where six is not, these work.
     (
@@ -397,20 +421,35 @@ def self_check(name, recorded, shifted, groups, n_fields, coupled, state, rhs, o
     )
 
 
-def study(coupled, state, rhs, shifted, op_shift, groups, n_fields):
-    """Every arm at this state's pairing, at the study's own tight stop so the arms separate."""
+def study(coupled, state, rhs, shifted, op_shift, groups, n_fields, only=None):
+    """Every arm at this state's pairing, at the study's own tight stop so the arms separate.
+
+    ``only`` restricts to a subset of arm keys. Re-running the whole ladder to add one arm costs several
+    minutes of arms whose answer is already on the log -- and the arms that FAIL are the expensive ones,
+    since running to the restart cap is what failing means here. The control is always kept, because a
+    subset without it cannot be compared against anything.
+    """
+    missing = set(only or ()) - {key for key, _, _ in ARMS}
+    if missing:
+        raise SystemExit(f"unknown arm(s) {sorted(missing)}; known: {[key for key, _, _ in ARMS]}")
+    selected = [a for a in ARMS if only is None or a[0] == ARMS[0][0] or a[0] in only]
     print(f"\n  -- study arms, GMRES to rtol {RTOL:.0e} on the TRUE residual", flush=True)
     return {
         key: one_arm(label, build, shifted, groups, n_fields, coupled, state, rhs, op_shift, SOLVER)
-        for key, label, build in ARMS
+        for key, label, build in selected
     }
 
 
 def main():
-    if not 2 <= len(sys.argv) <= 3 or sys.argv[1] not in STATES:
+    argv = [a for a in sys.argv[1:] if not a.startswith("--arms=")]
+    chosen = [a for a in sys.argv[1:] if a.startswith("--arms=")]
+    only = tuple(chosen[-1].split("=", 1)[1].split(",")) if chosen else None
+    if not 1 <= len(argv) <= 2 or argv[0] not in STATES:
         raise SystemExit(
-            f"usage: {Path(sys.argv[0]).name} <{' | '.join(STATES)}> [preconditioner state]"
+            f"usage: {Path(sys.argv[0]).name} <{' | '.join(STATES)}> [preconditioner state] "
+            "[--arms=key,key]"
         )
+    sys.argv = [sys.argv[0], *argv]
     name = sys.argv[1]
     march_beta, recorded, description = STATES[name]
     # An optional SECOND state builds the preconditioner, while the operator and right-hand side stay at
@@ -488,7 +527,7 @@ def main():
         op_shift,
         march_solver(coupled, base, state),
     )
-    study(coupled, state, rhs, shifted, op_shift, groups, n_fields)
+    study(coupled, state, rhs, shifted, op_shift, groups, n_fields, only=only)
 
 
 if __name__ == "__main__":
