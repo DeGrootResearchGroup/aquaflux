@@ -595,6 +595,16 @@ cannot be relied on, and they cannot be cheaply re-adjudicated either, because t
 scratchpad-only and are gone. They are not wrong — they are unfalsifiable, which is worse, because a
 wrong finding gets corrected and an unfalsifiable one gets cited.
 
+**Two of the three have since been re-adjudicated (2026-08-08), and how they came out is instructive.**
+The **Vanka** one was re-measured under the current bundle and does not survive: the smoother does not
+"still stall" against a working coarse space — it stagnates on its own, at a state where the shipped
+incomplete-LU converges in two cycles, so the coarse-space inference it carried has no support. The **ω**
+one was corroborated *by a different measurement entirely* — the near-null direction of the operator's
+worst per-cell blocks is pure ω — so the **field** is now on two independent legs while its **number**
+(~700–1300×) remains unverified. Note what made re-adjudication possible in both cases and impossible
+before: a harness kept in the repository rather than in a scratch directory. Keeping the probe is the
+difference between a finding that can be re-asked and one that can only be cited.
+
 Concretely, when you write a measurement down:
 
 - **Name the defaults in force.** "21 iterations" is worthless; "21 iterations at ILU(1), 2 sweeps,
