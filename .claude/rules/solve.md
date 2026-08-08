@@ -817,12 +817,26 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         the slice carries the distance-3 coupled fill at **91 nnz/row** where the frozen transport stencil
         is ~7 (the leading block's slice is 227), and lAIR's local approximate-ideal-restriction solves run
         over a degree-2 F-neighbourhood whose size grows roughly with the square of the row density.
-      **Neither is a verdict on the method.** Both builders assume an M-matrix-like operator, and
-      `scalar_transport_preconditioner` never hands them one that isn't: `_scalar_operator_pieces` **clamps
-      its reaction diagonal non-negative** for exactly this reason (an anti-diffusive source would make the
-      operator indefinite and its V-cycle diverge). The Jacobian slice is the unclamped truth, so it is
-      simply not in these builders' domain. PETSc GAMG with an ILU(0) or Jacobi smoother is untroubled
-      because it assumes none of this.
+      **Neither is a verdict on the method, and this is MEASURED rather than argued.** Both builders assume
+      an M-matrix-like operator, and `scalar_transport_preconditioner` never hands them one that isn't:
+      `_scalar_operator_pieces` **clamps its reaction diagonal non-negative** for exactly this reason (an
+      anti-diffusive source would make the operator indefinite and its V-cycle diverge). The Jacobian slice
+      is the unclamped truth, so it is simply not in these builders' domain. PETSc GAMG with an ILU(0) or
+      Jacobi smoother is untroubled because it assumes none of this. Built on the **transport** operator
+      instead, at the same state on the same mesh, both are perfectly healthy:
+
+      | hierarchy on the transport operator (`bfs3d`, 23040 cells, `state-00069`) | k | ω |
+      |---|---|---|
+      | `twolevel` (the shipped scalar default) | 5.0 s | 44.3 s |
+      | `air` (lAIR) | 80.0 s | 79.8 s |
+
+      So lAIR builds in ~80 s where it did not finish in 50 minutes on the slice — a ≥40× gap on the same
+      mesh — and is ~3.2× the shipped aggregation's combined build (1.8× on ω alone), which matches the
+      independent recollection that production lAIR on the 2D case worked and was only somewhat slower.
+      **Do not read the slice failures as anything about lAIR's cost in normal use.**
+      **Note also that row density was only part of the story and was the weaker part.** The decisive fact
+      is the **negative diagonal**, which is a property of the true Jacobian block whatever its sparsity;
+      the 91-vs-7 nnz/row gap explains lAIR's *time* but not aggregation's outright refusal.
       **So the correct arm builds the hierarchy on the TRANSPORT operator** —
       `SSTTurbulence.k_preconditioner` / `omega_preconditioner`, which is what the segregated scalar path
       already does — accepting that it then approximates a *different* matrix from `A_tt` (no k↔ω coupling,
