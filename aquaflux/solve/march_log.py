@@ -339,6 +339,7 @@ class MarchLogger:
         g_after: float,
         cycles: int,
         alpha: float,
+        iterate: object = None,
     ) -> None:
         """``inner_observer`` callback: tabulate ONE inner Newton iteration of an implicit timestep.
 
@@ -363,9 +364,13 @@ class MarchLogger:
         redone (a ``β`` escalation, a divergence retry) opens a fresh block per attempt while the step
         row reports only the accepted one -- so the extra blocks are the record of what the retries cost.
 
+        The ``iterate`` the hook also carries is the inner state itself, which a log has no use for;
+        it is accepted and ignored so this stays a drop-in for the hook a probe uses to capture it.
+
         No-ops unless ``"inner"`` is in ``detail``: it writes several lines per step, and the hook it
         attaches to must not be set on a differentiated solve.
         """
+        del iterate
         if "inner" not in self._detail:
             return
         before, after = float(g_before), float(g_after)

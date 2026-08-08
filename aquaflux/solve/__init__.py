@@ -90,7 +90,7 @@ from .linear import (
     restart_cycles,
     solve_linear,
 )
-from .checkpoint import StateCheckpointer
+from .checkpoint import InnerIterateCheckpointer, StateCheckpointer
 from .march import (
     CoefficientDriftTrigger,
     combine_observers,
@@ -147,6 +147,7 @@ __all__ = [
     "DualTimeStep",
     "ForwardStep",
     "ImplicitNewtonSolver",
+    "InnerIterateCheckpointer",
     "LineSearchGrowth",
     "LocalCourantBasis",
     "MarchLogger",

@@ -108,3 +108,37 @@ def test_logging_and_checkpointing_share_the_one_callback(tmp_path) -> None:
 
     assert logged == [7]
     assert checkpoints.latest is not None
+
+
+def test_inner_iterate_checkpointer_keeps_only_the_expensive_iterations(tmp_path):
+    """A march that behaves should cost nothing; only the solves worth probing get written."""
+    from aquaflux.solve import InnerIterateCheckpointer
+
+    keeper = InnerIterateCheckpointer(tmp_path, above=5)
+    # restart_cycles strips a +2 offset per solve, so raw 3 is one cycle and raw 17 is fifteen.
+    keeper.on_inner(0, 1.0, 0.5, 3, 1.0, np.array([1.0, 2.0]))
+    keeper.on_inner(1, 0.5, 0.4, 17, 0.01, np.array([3.0, 4.0]))
+    assert len(keeper.written) == 1
+    saved = np.load(keeper.written[0])
+    assert saved["cycles"] == 15
+    assert saved["inner"] == 1
+    np.testing.assert_array_equal(saved["state"], [3.0, 4.0])
+
+
+def test_inner_iterate_checkpointer_numbers_retry_attempts_apart(tmp_path):
+    """A redone step restarts its inner loop, and the REJECTED attempt is usually the hard one."""
+    from aquaflux.solve import InnerIterateCheckpointer
+
+    keeper = InnerIterateCheckpointer(tmp_path, above=1)
+    keeper.on_inner(0, 1.0, 1.0, 17, 0.0, np.array([1.0]))  # attempt 1, then the step is redone
+    keeper.on_inner(0, 1.0, 0.2, 17, 1.0, np.array([2.0]))  # attempt 2 from the same step
+    attempts = [int(np.load(path)["attempt"]) for path in keeper.written]
+    assert attempts == [1, 2]
+    assert len({path.name for path in keeper.written}) == 2  # distinct files, neither overwritten
+
+
+def test_inner_iterate_checkpointer_rejects_a_meaningless_threshold(tmp_path):
+    from aquaflux.solve import InnerIterateCheckpointer
+
+    with pytest.raises(ValueError, match="above"):
+        InnerIterateCheckpointer(tmp_path, above=0)

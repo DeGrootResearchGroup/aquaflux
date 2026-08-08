@@ -1466,6 +1466,8 @@ def _monolithic_factor_step(
     block_scaled_norm: bool,
     residual_norm: ResidualNorm | None,
     inner_observer: Callable[..., None] | None = None,
+    refresh_on_cycles: int | None = None,
+    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     cycle_budget: int | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
 ) -> ForwardStep:
@@ -1503,6 +1505,8 @@ def _monolithic_factor_step(
             residual_norm=residual_norm,
             adjoint_preconditioner_factory=policy.adjoint_factory(),
             inner_observer=inner_observer,
+            refresh_on_cycles=refresh_on_cycles,
+            inner_refresh=inner_refresh,
             cycle_budget=cycle_budget,
             step_limit=step_limit,
         )
@@ -1889,10 +1893,13 @@ def coupled_amg_continuation(
     inner_tol: float = 0.05,
     forward_solver: lx.AbstractLinearSolver | None = None,
     forward_rtol: float = 0.3,
+    forward_restart: int = 15,
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     residual_norm: ResidualNorm | None = None,
     inner_observer: Callable[..., None] | None = None,
+    refresh_on_cycles: int | None = None,
+    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     cycle_budget: int | None = None,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **algebraic-multigrid** V-cycle.
@@ -1951,6 +1958,14 @@ def coupled_amg_continuation(
         Calibrated on the developed backward-facing step: at ``0.3`` the velocity correction is resolved to
         ~25 % for ~1.5× the plain-2-norm cycle count; ``0.1`` fully resolves it at ~2.25×. Ignored when an
         explicit ``forward_solver`` is given.
+    forward_restart : int
+        Arnoldi restart length of that default solver (``15``). Exposed on its own rather than left to a
+        caller-built ``forward_solver``, because building one to change the restart also silently drops
+        the row-scaled stop described above — a far larger change than intended. Worth varying because a
+        restarted GMRES tests convergence only at restart boundaries: against a tolerance as loose as
+        ``forward_rtol`` a solve can reach its target early in a cycle and go on building vectors, and a
+        restart-*cycle* count cannot see that, since such a solve reports one cycle at any length. Ignored
+        when an explicit ``forward_solver`` is given.
     inner_observer : callable or None
         A per-inner-iteration profiling hook forwarded to the built dual-time step (only used when
         ``inner_steps > 1``); see :class:`~aquaflux.solve.DualTimeStep`. ``None`` (default) leaves the step
@@ -1979,12 +1994,14 @@ def coupled_amg_continuation(
     # Restart 15 is the measured sweet spot for the one-V-cycle preconditioner: enough Arnoldi history for
     # its convergence while checking the stop often enough not to overshoot the loose target deep into the
     # next cycle (a larger restart costs ~2x the expensive host V-cycle applies for the same trajectory);
-    # ``max_restarts`` stays generous so a drifted-reference solve still completes.
+    # ``max_restarts`` stays generous so a drifted-reference solve still completes. ``forward_restart``
+    # exists so that length can be varied on its own -- passing a whole ``forward_solver`` to do it would
+    # also drop the loose row-scaled stop above, which is a much larger change than the one intended.
     if forward_solver is None:
         forward_solver = relative_residual_gmres(
             forward_rtol,
             norm=coupled_scaled_norm(coupled, base, reference_state),
-            restart=15,
+            restart=forward_restart,
             stagnation_iters=40,
             max_restarts=60,
         )
@@ -2042,6 +2059,8 @@ def coupled_amg_continuation(
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
         inner_observer=inner_observer,
+        refresh_on_cycles=refresh_on_cycles,
+        inner_refresh=inner_refresh,
         cycle_budget=cycle_budget,
         # Keep `k` off zero: it is solved directly, and one negative cell reaches the closure's
         # sqrt(k) and NaNs the whole residual. `None` when the transform already guarantees it.
@@ -2347,7 +2366,15 @@ def _beta_tracking_refresh(
         if observer is not None:
             observer(RefreshTiming(kind, time.perf_counter() - started, tuple(phases or ())))
 
+    # Which step the inner-loop hook is refreshing, kept current by `precondition_step` below.
+    bound_step: dict[str, ForwardStep] = {}
+
     def precondition_step(active_step: ForwardStep, state: jnp.ndarray) -> None:
+        # The march calls this immediately before every step and again on every retry, always with the
+        # CURRENT step -- so this is also where the inner-loop hook learns which step it is refreshing.
+        # Binding once at construction cannot work: the step the builder returns still carries the
+        # default schedule, and the march replaces it each iteration with one the control has set β on.
+        bound_step["step"] = active_step
         schedule = active_step.relaxation_schedule
         beta = getattr(schedule, "beta", None)
         if beta is None:
@@ -2388,8 +2415,14 @@ def _beta_tracking_refresh(
             # so this is real work below the floor, not a rebuild of an identical operator.
             _report_refresh("shift", started, pc.refresh_shift_in_place(shift))
             return
-        # The AMG preconditioner materializes via the coloured probe and takes the batched form; the
-        # factorization preconditioners (LU/ILUT) do not, so pass it only on the AMG path.
+        _report_refresh("full", started, _materialize_at(pc, is_amg, frozen, shift))
+
+    def _materialize_at(pc, is_amg, frozen, shift) -> tuple[tuple[str, float], ...]:
+        """Re-materialize the preconditioner at ``frozen`` with shift diagonal ``shift``.
+
+        The AMG preconditioner materializes via the coloured probe and takes the batched form; the
+        factorization preconditioners (LU/ILUT) do not, so pass it only on the AMG path.
+        """
         extra = (
             {
                 "batched_matvec": lambda seeds: batched_matvec_at(frozen, seeds),
@@ -2399,11 +2432,54 @@ def _beta_tracking_refresh(
             if is_amg
             else {}
         )
-        phases = pc.refresh_in_place(
-            lambda v: matvec_at(frozen, v), colouring, n_fields, shift, **extra, **refresh_kwargs
+        return (
+            pc.refresh_in_place(
+                lambda v: matvec_at(frozen, v),
+                colouring,
+                n_fields,
+                shift,
+                **extra,
+                **refresh_kwargs,
+            )
+            or ()
         )
-        _report_refresh("full", started, phases or ())
 
+    def refresh_at(iterate) -> None:
+        """``inner_refresh`` hook: rebuild the preconditioner at this mid-step iterate.
+
+        *When* to fire is decided by the dual-time loop (``DualTimeStep.refresh_on_cycles``), not here,
+        so that the rule which triggers the refresh is the same one that forgives the abort it would
+        otherwise be discarded by.
+
+        The march's expensive inner solves are **stale-preconditioner** effects, not hard operators: at
+        the hardest solve of a three-dimensional coupled march a preconditioner rebuilt at that very
+        iterate converged in **one** cycle where the march's own took fifteen. Refreshing here — between
+        inner iterations, after the line search and before the next solve — keeps the step's progress,
+        where the alternative reaction (abort the step and escalate β) discards both the work and the
+        pseudo-timestep.
+
+        Costs are what make this worth doing as a *replacement* for a scheduled refresh rather than an
+        addition to one: on that march the schedule spent 21 % of the wall keeping a preconditioner fresh
+        that 83 % of solves did not need, and the right interval is regime-dependent in a way no fixed
+        cadence can track (one step of staleness is free at a large shift and triples the cost at a small
+        one).
+        """
+        if "step" not in bound_step:
+            return
+        started = time.perf_counter()
+        pc = bound_step["step"].shift_policy.preconditioner
+        beta = max(float(bound_step["step"].relaxation_schedule.beta), beta_floor)
+        frozen = jax.lax.stop_gradient(jnp.asarray(iterate))
+        shift = beta * np.asarray(
+            jax.lax.stop_gradient(bound_step["step"].shift_policy.base.shift_term(frozen).diagonal)
+        )
+        _report_refresh(
+            "inner",
+            started,
+            _materialize_at(pc, hasattr(pc, "refresh_shift_in_place"), frozen, shift),
+        )
+
+    precondition_step.refresh_at = refresh_at
     return precondition_step
 
 
@@ -2593,6 +2669,7 @@ def amg_beta_tracking_refresh(
         ran is invisible, and a study is left inferring preconditioner behaviour from wall-clock, which
         is exactly how a per-step refresh cost gets mistaken for a fixed overhead. ``None`` (default)
         elides the call.
+    beta_floor : float
     beta_floor : float
         A lower bound on the shift strength the **preconditioner** is built at: the V-cycle is refreshed at
         ``max(β, beta_floor)`` while the march keeps solving at its own ``β``. As ``β`` falls the shift's

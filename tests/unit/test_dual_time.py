@@ -155,9 +155,11 @@ def test_dual_time_inner_observer_surfaces_the_trajectory_without_changing_the_s
         return _residual(p, theta)
 
     records: list[tuple[int, float, float, int, float]] = []
+    iterates: list[jnp.ndarray] = []
 
-    def observer(inner, g_before, g_after, cycles, alpha) -> None:
+    def observer(inner, g_before, g_after, cycles, alpha, iterate) -> None:
         records.append((int(inner), float(g_before), float(g_after), int(cycles), float(alpha)))
+        iterates.append(jnp.asarray(iterate))
 
     observed = DualTimeStep(
         policy, relaxation_schedule=schedule, inner_steps=4, inner_tol=1e-8, inner_observer=observer
@@ -172,6 +174,10 @@ def test_dual_time_inner_observer_surfaces_the_trajectory_without_changing_the_s
     assert [r[0] for r in records] == list(range(len(records)))  # indices 0,1,2,... in order
     assert records[-1][2] < records[0][1]  # G-norm falls across the inner loop
     assert jnp.allclose(phi_obs, phi_plain)  # the observer does not perturb the step
+    # The hook also carries each inner ITERATE, which is the only way to reach the states where a
+    # march's expensive solves happen -- a checkpoint is written at the end of a step, after them.
+    assert len(iterates) == len(records)
+    assert jnp.allclose(iterates[-1], phi_obs)  # the last inner iterate IS the step's result
 
 
 def test_dual_time_one_inner_step_is_a_single_shifted_step() -> None:
@@ -507,3 +513,43 @@ def test_a_rebuilt_step_limiter_is_a_compilation_cache_hit() -> None:
     for _ in range(2):  # two further "rungs", each rebuilding an equal limiter
         assert run(positive_block_limit(1, 3)) == 0
     assert run(positive_block_limit(0, 3)) > 0  # a genuinely different block must still retrace
+
+
+def test_a_mid_step_refresh_buys_the_attempt_another_solve_before_the_abort() -> None:
+    """Refreshing must FORGIVE the abort, or the rebuild is paid for and then thrown away with the step.
+
+    ``abort_above_inner_cycles`` and the refresh trigger both fire after the same expensive solve, so
+    without this the attempt aborts anyway and the march escalates the shift -- discarding the inner
+    loop's progress *and* the pseudo-timestep, which is the cascade the refresh exists to prevent. So the
+    abort counts cycles since the last refresh rather than since the step began, and the rebuilt
+    preconditioner is judged on a solve of its own. A second expensive solve after it means the operator
+    really is hard, and the abort then does its job.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+    phi0 = jnp.ones_like(theta)
+    r0 = jnp.linalg.norm(_residual(phi0, theta))
+
+    def residual_theta(p: jnp.ndarray) -> jnp.ndarray:
+        return _residual(p, theta)
+
+    def build(**extra):
+        return DualTimeStep(
+            UniformShiftPolicy(strength=1.0),
+            relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
+            inner_steps=6,
+            inner_tol=1e-14,  # never met, so only the cost bailouts can end the loop
+            abort_above_inner_cycles=0,  # every solve looks over budget
+            **extra,
+        )
+
+    refreshed: list[int] = []
+    without = build()
+    with_refresh = build(refresh_on_cycles=0, inner_refresh=lambda _it: refreshed.append(1))
+    bare = without.stepper()(residual_theta, phi0, r0, without.default_solver())
+    bare.phi.block_until_ready()
+    forgiven = with_refresh.stepper()(residual_theta, phi0, r0, with_refresh.default_solver())
+    forgiven.phi.block_until_ready()
+
+    assert refreshed, "the refresh never fired"
+    # The bare step is cut at its first over-budget solve; the refreshed one is given another.
+    assert int(forgiven.inner_iterations) > int(bare.inner_iterations)
