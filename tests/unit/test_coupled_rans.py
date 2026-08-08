@@ -683,3 +683,206 @@ def test_each_step_equilibrates_at_the_state_it_started_from() -> None:
     assert float(jnp.linalg.norm(jnp.array(list(rows.values())))) == pytest.approx(
         expected, rel=1e-12
     )
+
+
+def test_state_drift_forces_a_full_refresh_whatever_the_beta_gate_says() -> None:
+    """The two staleness gates are combined, NOT nested -- the regression this function was extracted for.
+
+    Below the preconditioner's shift floor the clamped β never moves, so the β gate answers "no change"
+    on every step forever. When the state gate was asked only *after* the β gate had already said yes,
+    that made eddy-viscosity drift unable to trigger anything at all in exactly the low-shift tail where
+    the flow develops fastest.
+    """
+    from aquaflux.turbulence.coupled import _refresh_branch
+
+    assert _refresh_branch(stale_state=True, moved_beta=False, split=True) == "full"
+    assert _refresh_branch(stale_state=True, moved_beta=True, split=True) == "full"
+
+
+def test_a_moved_beta_alone_takes_the_cheap_shift_branch() -> None:
+    """A matching Jacobian with a mismatched shift needs only the diagonal re-added, not a re-probe."""
+    from aquaflux.turbulence.coupled import _refresh_branch
+
+    assert _refresh_branch(stale_state=False, moved_beta=True, split=True) == "shift"
+
+
+def test_without_the_split_any_trigger_is_a_full_refresh() -> None:
+    """A preconditioner with no shift-only path (the factorization ones) has a single branch."""
+    from aquaflux.turbulence.coupled import _refresh_branch
+
+    assert _refresh_branch(stale_state=False, moved_beta=True, split=False) == "full"
+    assert _refresh_branch(stale_state=False, moved_beta=False, split=False) == "none"
+
+
+def test_neither_gate_firing_reuses_the_standing_factorization() -> None:
+    """The gates exist to skip work; both quiet must still mean no refresh."""
+    from aquaflux.turbulence.coupled import _refresh_branch
+
+    assert _refresh_branch(stale_state=False, moved_beta=False, split=True) == "none"
+
+
+_DRIFT_TRACES: list[int] = []
+
+
+class _CountingEddyViscosity(eqx.Module):
+    """A stand-in for the coupled assembler that records each TRACE of its eddy viscosity.
+
+    The body runs at trace time only, so the recorded count is the compilation count -- the repo's
+    trace-counting idiom, used here because ``equinox``'s jit wrapper exposes no cache-clearing handle.
+    """
+
+    gain: jnp.ndarray
+
+    def eddy_viscosity(self, state: jnp.ndarray) -> jnp.ndarray:
+        _DRIFT_TRACES.append(1)
+        return self.gain * state
+
+
+def test_rebasing_the_drift_measure_is_a_compilation_cache_hit() -> None:
+    """Re-basing the staleness reference must change a VALUE, not build a new compiled function.
+
+    ``_materialize_gate`` re-bases this measure at every materialize, so a per-reference compilation is
+    paid on every full preconditioner refresh. Measured on a three-dimensional coupled march before the
+    fix: ~3.8 s each time, ~21 % of the refresh, for a number that is one norm of an already-computed
+    field. The reference therefore rides as an argument to a module-level jitted function rather than as
+    a captured constant of a locally-defined one, which ``filter_jit`` caches per closure.
+    """
+    from aquaflux.turbulence.coupled import _eddy_viscosity_drift
+
+    # A unique size, so a would-be recompile cannot be a cache hit from another test (the cache is
+    # process-global) and a genuine hit cannot be manufactured by one.
+    coupled = _CountingEddyViscosity(gain=jnp.asarray(2.0))
+    state = jnp.linspace(1.0, 2.0, 37)
+    scale = jnp.asarray(1.0)
+    # Every reference is built the SAME way, as production's `coupled.eddy_viscosity(...)` is. Mixing
+    # constructors here would compare two abstract values -- `jnp.zeros(n)` is strongly typed while
+    # `jnp.full(n, 1.0)` is weakly typed -- and a weak/strong mismatch is itself a cache miss, so the
+    # test would fail for a reason that has nothing to do with what it is checking.
+    references = [jnp.linspace(0.0, offset, 37) for offset in (0.5, 1.0, 2.0, 3.0)]
+
+    _DRIFT_TRACES.clear()
+    float(_eddy_viscosity_drift(coupled, state, references[0], scale))
+    compiled = len(_DRIFT_TRACES)
+    assert compiled == 1
+
+    for reference in references[1:]:  # three re-bases, as three materializes would do
+        float(_eddy_viscosity_drift(coupled, state, reference, scale))
+
+    assert len(_DRIFT_TRACES) == compiled
+
+
+def test_the_drift_measure_is_zero_at_its_own_reference() -> None:
+    """A re-based measure reports no movement until the state actually moves -- else it re-fires at once."""
+    from aquaflux.turbulence import eddy_viscosity_drift
+
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled, seed=0)
+
+    assert float(eddy_viscosity_drift(coupled, state)(state)) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_scaling_the_viscosity_leaves_the_pytree_structure_identical() -> None:
+    """A Reynolds-continuation rung changes leaf VALUES only -- which is what makes a cache hit possible.
+
+    Every jitted quantity derived from the assembler can therefore be shared across the whole ramp, and
+    anything that recompiles per rung is capturing the assembler rather than taking it as an argument.
+    """
+    _, coupled = _cavity()
+    scaled = coupled.with_scaled_molecular_viscosity(0.1)
+
+    assert jax.tree_util.tree_structure(coupled) == jax.tree_util.tree_structure(scaled)
+    before = jax.tree_util.tree_leaves(coupled)
+    after = jax.tree_util.tree_leaves(scaled)
+    assert [jnp.shape(x) for x in before] == [jnp.shape(x) for x in after]
+    assert [jnp.result_type(x) for x in before] == [jnp.result_type(x) for x in after]
+    assert any(not jnp.array_equal(x, y) for x, y in zip(before, after, strict=True))
+
+
+_PROBE_TRACES: list[int] = []
+
+
+class _CountingResidual(eqx.Module):
+    """A stand-in assembler recording each TRACE of its residual, so recompiles are countable."""
+
+    gain: jnp.ndarray
+
+    def residual(self, state: jnp.ndarray) -> jnp.ndarray:
+        _PROBE_TRACES.append(1)
+        return self.gain * state**2
+
+
+def test_the_jacobian_probe_is_a_cache_hit_across_reynolds_rungs() -> None:
+    """The coloured probe must not recompile when the ramp rebuilds the assembler at a new viscosity.
+
+    Each rung's first step was measured at 112/102/145 s more than that rung's median step *at an
+    identical cycle count* -- compilation, repeated per rung. The probe is one contributor: written as a
+    local ``jax.jit`` closure over the assembler it is a fresh cache entry per rung, so it takes the
+    assembler as an argument instead. A rung differs only in leaf values (pinned by the test above), so
+    a probe that takes the assembler as an argument is a hit.
+    """
+    from aquaflux.turbulence.coupled import _batched_jacobian_matvec, _jacobian_matvec
+
+    state = jnp.linspace(1.0, 2.0, 29)  # a unique size; the compilation cache is process-global
+    tangent = jnp.ones_like(state)
+    seeds = jnp.stack([tangent, 0.5 * tangent])
+
+    _PROBE_TRACES.clear()
+    first = _CountingResidual(gain=jnp.asarray(1.0))
+    _jacobian_matvec(first, state, tangent)
+    _batched_jacobian_matvec(first, state, seeds)
+    compiled = len(_PROBE_TRACES)
+    assert compiled > 0  # sanity: the stub really is being traced
+
+    for scale in (0.1, 0.01):  # two further rungs of a Reynolds ramp
+        rung = _CountingResidual(gain=jnp.asarray(scale))
+        _jacobian_matvec(rung, state, tangent)
+        _batched_jacobian_matvec(rung, state, seeds)
+
+    assert len(_PROBE_TRACES) == compiled
+
+
+def test_the_adjoint_transpose_factory_compares_by_the_preconditioner_it_wraps() -> None:
+    """Two engines sharing one preconditioner must produce EQUAL adjoint factories.
+
+    The factory rides in the forward step's ``adjoint_preconditioner_factory``, a static field and so
+    part of the compiled step's cache key. As a lambda it compared by identity, which meant a rung that
+    rebuilt its engine recompiled the whole coupled solve even when it was reusing the very same
+    preconditioner -- defeating the point of reusing it.
+    """
+    from aquaflux.solve import TransposedPreconditioner
+    from aquaflux.turbulence.coupled import FrozenTransposeFactory
+
+    class _Pc:
+        def matvec(self, *, transpose: bool = False):
+            return lambda v: v
+
+    first, second = _Pc(), _Pc()
+    assert FrozenTransposeFactory(first) == FrozenTransposeFactory(first)
+    assert FrozenTransposeFactory(first) != FrozenTransposeFactory(second)
+    # ...and the wrapper must not throw that equality away again.
+    assert TransposedPreconditioner(FrozenTransposeFactory(first)) == TransposedPreconditioner(
+        FrozenTransposeFactory(first)
+    )
+    assert TransposedPreconditioner(FrozenTransposeFactory(first)) != TransposedPreconditioner(
+        FrozenTransposeFactory(second)
+    )
+
+
+def test_the_frozen_transpose_factory_ignores_the_state_it_is_given() -> None:
+    """The factorization is frozen, so the same transpose serves every state -- which is what lets this
+    be a value object at all."""
+    from aquaflux.turbulence.coupled import FrozenTransposeFactory
+
+    class _Pc:
+        def __init__(self):
+            self.calls = 0
+
+        def matvec(self, *, transpose: bool = False):
+            self.calls += 1
+            assert transpose
+            return lambda v: 2.0 * v
+
+    pc = _Pc()
+    factory = FrozenTransposeFactory(pc)
+    assert float(factory(jnp.ones(3))(jnp.ones(3))[0]) == 2.0
+    assert float(factory(jnp.zeros(3))(jnp.ones(3))[0]) == 2.0

@@ -888,6 +888,37 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       DIVERGES as a preconditioner because the ILU(1) smoother's fill is pattern-dependent (halving the graph
       makes the incomplete factorization non-convergent on the saddle — the full reach-3 pattern is required;
       see the reach bullet in `.claude/rules/solve.md`).
+      **⚠️ THE DRIFT GATE MUST NOT BE NESTED INSIDE THE β GATE — it was, and a PC-only `beta_floor` then
+      made it unreachable.** The β gate sees `max(β, beta_floor)`, so below the floor its input is pinned
+      and it answers "no change" forever; asking the drift gate only inside it therefore froze the
+      Jacobian through the entire low-shift tail — 91 % of sub-floor steps refreshed nothing while ν_t
+      drifted ~20 % per step, and those steps carried 47 % of the march's Krylov cost. The decision is now
+      the pure `_refresh_branch(stale_state, moved_beta, split)`: drift ⇒ `full` regardless of β, β move
+      alone ⇒ `shift`, neither ⇒ `none`. Because the materialize gate is now consulted **every step**,
+      `materialize_every` counts steps rather than refreshes. Full data in `.claude/rules/solve.md`.
+      The `assemble` half of the refresh is also precomputed now (`ShiftedCellMajorOperator`), and the
+      observer receives a `RefreshTiming` with per-phase costs instead of one aggregate — so "the
+      materialize is ~half the refresh" is measured per run rather than inferred.
+      **The jitted probes take the assembler as an ARGUMENT, not as a closure capture (binding).**
+      `_jacobian_matvec` / `_batched_jacobian_matvec` are module-level `eqx.filter_jit` functions taking
+      `coupled`; the six call sites bind it in a plain `def`. Written as local `jax.jit` closures over
+      `coupled` — as they were — every Reynolds-continuation rung is a **fresh cache entry**, because
+      `filter_jit` caches per function object. That is pure waste here: scaling the molecular viscosity
+      changes exactly **two leaf values** and leaves the pytree structure identical (pinned by
+      `test_scaling_the_viscosity_leaves_the_pytree_structure_identical`), so every rung *could* be a
+      cache hit. Same defect and same fix as `eddy_viscosity_drift`. Pinned by
+      `test_the_jacobian_probe_is_a_cache_hit_across_reynolds_rungs`.
+      **⚠️ This does NOT remove the whole per-rung recompile — MEASURED, it is 20 % of it.** The excess
+      of each rung's first step over that rung's median step, at identical cycle counts, went **377 s →
+      302 s** (rung 1 118→104, rung 2 108→89, rung 3 151→109). The probe is a minority contributor; the
+      dominant one is that
+      `point_setup` rebuilds the engine per rung, and three of `DualTimeStep`'s **static** fields then
+      hold fresh objects — `step_limit` (a new function from `positive_k_limit`), the adjoint
+      preconditioner factory, and the shift policy's `MonolithicAmgPreconditioner` (a non-pytree, hashed
+      by identity). Any one of those is a new `_march_step` cache key, i.e. a full recompile of the
+      coupled solve. Removing it means reusing one engine and one preconditioner across rungs and
+      refreshing in place at each new viscosity — which contradicts the "the frozen operator has to be
+      rebuilt per rung" note above, so that claim must be **re-tested, not assumed**, before building it.
     - The rebuild REUSES the smoothed-aggregation coarse space (`MonolithicAmgPreconditioner.refactor`
       overwrites the operator values in place over a persistent CSR array and re-sets-up the PC with
       `pc_gamg_reuse_interpolation`), since the graph-coloured probe's sparsity is fixed across β; only the

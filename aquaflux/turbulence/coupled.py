@@ -30,6 +30,7 @@ adjoint sees only the smooth interior physics).
 from __future__ import annotations
 
 import abc
+import dataclasses
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -64,6 +65,7 @@ from aquaflux.solve import (
     MonolithicIlutPreconditioner,
     MonolithicLuPreconditioner,
     PseudoTransientStep,
+    RefreshTiming,
     RefreshTrigger,
     ResidualNorm,
     RowScaledNorm,
@@ -643,12 +645,55 @@ def eddy_viscosity_drift(
     """
     reference = jax.lax.stop_gradient(coupled.eddy_viscosity(reference_state))
     scale = jnp.maximum(jnp.linalg.norm(reference), jnp.finfo(reference.dtype).tiny)
+    # The reference rides as an ARGUMENT to a module-level compiled function, not as a captured
+    # constant of a locally-defined one. `filter_jit` caches per function object, so a closure built
+    # here would be a fresh cache entry every time -- and this measure is deliberately re-based at
+    # every materialize, which made each re-base recompile `eddy_viscosity` from scratch. Measured on a
+    # three-dimensional coupled march that was ~3.8 s on every full refresh, ~21 % of it, for a value
+    # change. Same reason the eager march passes its step and residual to a module-level jitted step.
+    return lambda state: _eddy_viscosity_drift(coupled, state, reference, scale)
 
-    @eqx.filter_jit
-    def drift(state: jnp.ndarray) -> jnp.ndarray:
-        return jnp.linalg.norm(coupled.eddy_viscosity(state) - reference) / scale
 
-    return drift
+@eqx.filter_jit
+def _jacobian_matvec(coupled: CoupledRANS, state: jnp.ndarray, tangent: jnp.ndarray) -> jnp.ndarray:
+    """``J(state) @ tangent`` -- the matrix-free coupled Jacobian-vector product, compiled once.
+
+    Everything it needs is an **argument**, including the assembler. A locally-defined ``jax.jit``
+    closure over ``coupled`` is a fresh cache entry per closure, so each Reynolds-continuation rung --
+    which rebuilds the assembler at its own viscosity -- would recompile the probe from scratch, even
+    though a scaled viscosity changes only two leaf *values* and leaves the pytree structure identical.
+    As an argument the assembler's arrays are ordinary traced leaves and every rung is a cache hit.
+    """
+    return jax.jvp(coupled.residual, (state,), (tangent,))[1]
+
+
+@eqx.filter_jit
+def _batched_jacobian_matvec(
+    coupled: CoupledRANS, state: jnp.ndarray, tangents: jnp.ndarray
+) -> jnp.ndarray:
+    """``J(state) @ tangents`` for a stack of tangents -- the batched form the coloured probe uses.
+
+    The same directional derivative as :func:`_jacobian_matvec` applied to each row, so the responses
+    are bit-identical to a per-tangent loop; running them as a few fused passes only amortizes dispatch.
+    Takes the assembler as an argument for the same reason.
+    """
+    return jax.vmap(lambda tangent: jax.jvp(coupled.residual, (state,), (tangent,))[1])(tangents)
+
+
+@eqx.filter_jit
+def _eddy_viscosity_drift(
+    coupled: CoupledRANS,
+    state: jnp.ndarray,
+    reference: jnp.ndarray,
+    scale: jnp.ndarray,
+) -> jnp.ndarray:
+    """``||nu_t(state) - reference|| / scale`` -- the compiled core of :func:`eddy_viscosity_drift`.
+
+    Module-level and taking everything it needs as arguments, so **one** compilation serves every
+    re-based reference: ``coupled`` is an ``equinox.Module`` whose arrays are traced leaves, and
+    ``reference``/``scale`` are arrays of fixed shape, so a re-base is a cache hit.
+    """
+    return jnp.linalg.norm(coupled.eddy_viscosity(state) - reference) / scale
 
 
 def _row_jacobian_scale(
@@ -1347,8 +1392,35 @@ class MonolithicFactorShiftPolicy(eqx.Module):
         :func:`jax.linear_transpose`, which cannot handle the host-callback factorization, so it is
         applied directly instead.
         """
-        transpose = self.preconditioner.matvec(transpose=True)
-        return TransposedPreconditioner(lambda state: transpose)
+        return TransposedPreconditioner(FrozenTransposeFactory(self.preconditioner))
+
+
+@dataclasses.dataclass(frozen=True)
+class FrozenTransposeFactory:
+    """``state -> M^T`` for a frozen monolithic factorization, as a value object rather than a closure.
+
+    The transpose is state-independent -- the factorization is frozen, so the same ``M^T`` serves every
+    state -- which is exactly why this can be a value whose equality is the preconditioner's identity.
+
+    That matters because it ends up in a forward step's ``adjoint_preconditioner_factory``, a *static*
+    field and hence part of the compiled step's cache key. As a lambda it compared by identity, so a
+    Reynolds-continuation rung that rebuilt its engine got a fresh key and recompiled the coupled solve
+    even when it was reusing the very same preconditioner. As a value object, two engines sharing one
+    preconditioner produce equal factories and the rebuild is a cache hit.
+
+    Attributes
+    ----------
+    preconditioner : object
+        The frozen factorization, supplying ``matvec(transpose=True)``. Compared by identity, which is
+        the intended meaning: the same preconditioner object *is* the same operator, and two distinct
+        objects generally are not.
+    """
+
+    preconditioner: object
+
+    def __call__(self, state: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
+        del state  # frozen: the transpose does not depend on where the adjoint is taken
+        return self.preconditioner.matvec(transpose=True)
 
 
 def _coupled_jacobian_colouring(coupled: CoupledRANS, stencil_reach: int):
@@ -1539,7 +1611,10 @@ def coupled_ilut_continuation(
     n_fields = coupled.layout.dim + 3
     colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
     frozen = jax.lax.stop_gradient(reference_state)
-    matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+
+    def matvec(v):
+        return _jacobian_matvec(coupled, frozen, v)
+
     preconditioner = MonolithicIlutPreconditioner.build(
         matvec,
         colouring,
@@ -1655,9 +1730,12 @@ def coupled_ilut_refreshing_continuation(
     """
     colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
     n_fields = coupled.layout.dim + 3
+
     # `frozen` as a traced argument (not closed over) so this jvp-matvec compiles once and every refresh
     # reuses it, rather than a fresh lambda recompiling each time.
-    matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    def matvec_at(frozen, v):
+        return _jacobian_matvec(coupled, frozen, v)
+
     held: dict[str, ForwardStep] = {}
 
     def builder(state: jnp.ndarray) -> ForwardStep:
@@ -1758,7 +1836,10 @@ def coupled_lu_continuation(
     n_fields = coupled.layout.dim + 3
     colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
     frozen = jax.lax.stop_gradient(reference_state)
-    matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+
+    def matvec(v):
+        return _jacobian_matvec(coupled, frozen, v)
+
     preconditioner = MonolithicLuPreconditioner.build(
         matvec,
         colouring,
@@ -1881,7 +1962,6 @@ def coupled_amg_continuation(
         ``inner_steps`` into the restart cap; pair it with ``solve_coupled``'s β-escalation
         (``retry_on_cycles < cycle_budget``), which redoes the capped step at a larger β. ``None`` (default)
         is unbounded and byte-identical. Forward-only.
-
     Returns
     -------
     ForwardStep
@@ -1913,9 +1993,14 @@ def coupled_amg_continuation(
     # gather rather than a scatter loop + re-sort. Reused by the β-tracking refresh (built once there too).
     structure = block_stencil_gather_map(colouring, coupled.layout.dim + 3)
     frozen = jax.lax.stop_gradient(reference_state)
-    matvec = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+
+    def matvec(v):
+        return _jacobian_matvec(coupled, frozen, v)
+
     # Batched jvp so the coloured materialize probes run as a few fused passes, not a per-probe loop.
-    batched_matvec = jax.jit(jax.vmap(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1]))
+    def batched_matvec(seeds):
+        return _batched_jacobian_matvec(coupled, frozen, seeds)
+
     # `native_forward_solve` (EXPERIMENTAL, opt-in) runs the forward Krylov natively in PETSc, its operator
     # a shell over the exact jvp (true Newton, not a frozen Jacobian) -- the native GMRES + GAMG reaches its
     # stop in ~1 iteration where the JAX-side Krylov with the V-cycle as a per-matvec callback needs ~90
@@ -2002,7 +2087,10 @@ def coupled_lu_refreshing_continuation(
     """
     colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
     n_fields = coupled.layout.dim + 3
-    matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+
+    def matvec_at(frozen, v):
+        return _jacobian_matvec(coupled, frozen, v)
+
     held: dict[str, ForwardStep] = {}
 
     def builder(state: jnp.ndarray) -> ForwardStep:
@@ -2136,6 +2224,49 @@ def _materialize_gate(
     return should_materialize
 
 
+def _refresh_branch(*, stale_state: bool, moved_beta: bool, split: bool) -> str:
+    """Which branch a β-tracking refresh should take: ``"full"``, ``"shift"`` or ``"none"``.
+
+    The two staleness signals are **independent questions about different things**, and the whole point
+    of this function is that they are combined rather than nested:
+
+    * ``stale_state`` — the frozen Jacobian no longer matches the flow (the eddy viscosity has drifted).
+      Only a re-probe fixes that, so it forces a ``"full"``.
+    * ``moved_beta`` — the shift the V-cycle was built at no longer matches the one being solved. Only
+      the diagonal is wrong, so a ``"shift"`` fixes it where that cheap branch exists.
+
+    ``split`` says whether the cheap branch exists at all (an algebraic-multigrid preconditioner with a
+    materialize gate configured). Without it there is one branch, and any trigger means ``"full"``.
+
+    **Why this is a function and not three nested ``if``s at the call site.** It used to be nested — the
+    state question asked *only* when the β question had already said yes — and that made state drift
+    unable to trigger anything at all below the preconditioner's shift floor, where the clamped β never
+    moves so the β question answers "no" forever. That is precisely the low-shift tail where the flow
+    develops fastest. Measured on a three-dimensional cold march: below the floor 91 % of steps refreshed
+    nothing while the eddy viscosity drifted ~20 % per step, and those steps carried ~47 % of the whole
+    march's Krylov cost. The decision is small, total, and worth being able to read and test on its own.
+
+    Parameters
+    ----------
+    stale_state : bool
+        The state-drift gate fired (the Jacobian needs re-probing).
+    moved_beta : bool
+        The β-mismatch gate fired (the shift needs re-adding).
+    split : bool
+        Whether the cheap shift-only branch is available.
+
+    Returns
+    -------
+    str
+        ``"full"``, ``"shift"`` or ``"none"``.
+    """
+    if stale_state:
+        return "full"
+    if not moved_beta:
+        return "none"
+    return "shift" if split else "full"
+
+
 def _beta_tracking_refresh(
     coupled: CoupledRANS,
     stencil_reach: int,
@@ -2145,7 +2276,7 @@ def _beta_tracking_refresh(
     materialize_every: int | None = None,
     materialize_drift: float | None = None,
     beta_floor: float = 0.0,
-    observer: Callable[[str, float], None] | None = None,
+    observer: Callable[[RefreshTiming], None] | None = None,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """Shared skeleton for the β-tracking ``precondition_step`` hooks (complete-LU and ILUT).
 
@@ -2179,16 +2310,19 @@ def _beta_tracking_refresh(
     # Fixed CSR structure + gather map for the AMG materialize (mesh-fixed pattern): each materialize
     # de-compresses by one gather rather than a scatter loop + re-sort. Built once; used only on the AMG path.
     structure = block_stencil_gather_map(colouring, n_fields)
+
     # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
     # reuses it, rather than a fresh lambda recompiling each step.
-    matvec_at = jax.jit(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
+    def matvec_at(frozen, v):
+        return _jacobian_matvec(coupled, frozen, v)
+
     # Batched form (vmapped over the tangent) so the coloured probes of a full materialize run as a few
     # fused passes rather than a Python loop of separate calls. Built once (state-independent, `frozen` a
     # traced argument) so it compiles a single time and every materialize reuses it. Used only by the AMG
     # preconditioner's `refresh_in_place`.
-    batched_matvec_at = jax.jit(
-        jax.vmap(lambda frozen, v: jax.jvp(coupled.residual, (frozen,), (v,))[1], in_axes=(None, 0))
-    )
+    def batched_matvec_at(frozen, seeds):
+        return _batched_jacobian_matvec(coupled, frozen, seeds)
+
     # The β-diagonal split's materialize gate (built once): decides per refresh whether to re-materialize
     # the Jacobian or only re-add the shift. `None` when neither trigger is set (then every refresh is a
     # full materialize, the original behaviour).
@@ -2202,10 +2336,16 @@ def _beta_tracking_refresh(
         else None
     )
 
-    def _report_refresh(kind: str, started: float) -> None:
-        """Tell an injected observer which branch ran and what it cost (a no-op when unobserved)."""
+    def _report_refresh(
+        kind: str, started: float, phases: tuple[tuple[str, float], ...] | None = None
+    ) -> None:
+        """Tell an injected observer which branch ran and what each part of it cost.
+
+        The total alone cannot be acted on: a refresh dominated by the coloured jvp probe and one
+        dominated by the multigrid setup take the same wall time and call for opposite fixes.
+        """
         if observer is not None:
-            observer(kind, time.perf_counter() - started)
+            observer(RefreshTiming(kind, time.perf_counter() - started, tuple(phases or ())))
 
     def precondition_step(active_step: ForwardStep, state: jnp.ndarray) -> None:
         schedule = active_step.relaxation_schedule
@@ -2225,28 +2365,29 @@ def _beta_tracking_refresh(
         # root and its adjoint are unchanged. The resulting mismatch SATURATES at `beta_floor * d` rather
         # than growing without bound the way a stale (never-refreshed) preconditioner's does.
         pc_beta = max(beta, beta_floor)
-        # Gate on the preconditioner's own beta: below the floor its operator no longer moves with the
-        # march, so a beta-move refresh there would rebuild an identical V-cycle.
-        if gate is not None and not gate(pc_beta):
-            _report_refresh("none", started)
-            return
         policy = active_step.shift_policy
-        frozen = jax.lax.stop_gradient(state)
-        shift = pc_beta * np.asarray(jax.lax.stop_gradient(policy.base.shift_term(state).diagonal))
         pc = policy.preconditioner
         # β-diagonal split: β and the per-cell shift ``d`` touch only the diagonal, so between full
         # (re-materialized) refreshes the shift is tracked by re-adding the new ``β d`` diagonal to the
-        # frozen Jacobian -- skipping the coloured-probe materialize (the dominant refresh cost). The materialize
-        # gate reserves the full re-materialize for when the Jacobian has actually gone stale (ν_t drift) or
-        # a step cap is hit; otherwise this is a cheap shift-only refresh. Only the AMG preconditioner
-        # exposes the shift-only path; without it (ILUT/LU) `materialize_gate` is None and every refresh is
-        # full, as before.
+        # frozen Jacobian -- skipping the coloured-probe materialize (the dominant refresh cost). Only the
+        # AMG preconditioner exposes that shift-only path; without it (ILUT/LU) every refresh is full.
         is_amg = hasattr(pc, "refresh_shift_in_place")
-        if materialize_gate is not None and is_amg:
-            if not materialize_gate(state):
-                pc.refresh_shift_in_place(shift)
-                _report_refresh("shift", started)
-                return
+        split = materialize_gate is not None and is_amg
+        # Both gates are stateful, so each must be called EXACTLY ONCE per step -- no short-circuiting.
+        stale_state = bool(split and materialize_gate(state))
+        moved_beta = gate is None or bool(gate(pc_beta))
+        branch = _refresh_branch(stale_state=stale_state, moved_beta=moved_beta, split=split)
+        if branch == "none":
+            _report_refresh("none", started)
+            return
+        frozen = jax.lax.stop_gradient(state)
+        shift = pc_beta * np.asarray(jax.lax.stop_gradient(policy.base.shift_term(state).diagonal))
+        if branch == "shift":
+            # The Jacobian still matches the flow, so only the shift needs re-adding. Note the shift is
+            # `pc_beta * d(state)` and the per-cell `d` tracks the state even where `pc_beta` is pinned,
+            # so this is real work below the floor, not a rebuild of an identical operator.
+            _report_refresh("shift", started, pc.refresh_shift_in_place(shift))
+            return
         # The AMG preconditioner materializes via the coloured probe and takes the batched form; the
         # factorization preconditioners (LU/ILUT) do not, so pass it only on the AMG path.
         extra = (
@@ -2258,10 +2399,10 @@ def _beta_tracking_refresh(
             if is_amg
             else {}
         )
-        pc.refresh_in_place(
+        phases = pc.refresh_in_place(
             lambda v: matvec_at(frozen, v), colouring, n_fields, shift, **extra, **refresh_kwargs
         )
-        _report_refresh("full", started)
+        _report_refresh("full", started, phases or ())
 
     return precondition_step
 
@@ -2376,7 +2517,7 @@ def amg_beta_tracking_refresh(
     beta_rel_change: float | None = None,
     refresh_every: int = 8,
     beta_floor: float = 0.0,
-    observer: Callable[[str, float], None] | None = None,
+    observer: Callable[[RefreshTiming], None] | None = None,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """A ``precondition_step`` that rebuilds the AMG V-cycle at the current β, every step.
 

@@ -45,6 +45,7 @@ Run (after both OpenFOAM runs) from the repo root:
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from pathlib import Path
@@ -109,6 +110,12 @@ RETRY_ON_CYCLES = (
     10  # PER SOLVE: a summed trigger is ~6x more sensitive for a 5-inner step than a 1-inner one
 )
 RETRY_BETA_FACTOR = 2.0
+# How many per-step states to retain. Three is enough to restart from, which is all a normal run needs.
+# A PRECONDITIONER STUDY needs more: an easy operator does not discriminate between preconditioners, so a
+# sweep has to run at the march's own HARD states (highest cycle count, clipped a_min, a retry flag) and
+# those are mid-march. Set `BFS3D_CHECKPOINT_KEEP` high enough to cover the run (~1.1 MB per step) and the
+# whole trajectory is kept: `BFS3D_CHECKPOINT_KEEP=80 python3 validation/bfs3d_openfoam/compare.py`.
+CHECKPOINT_KEEP = int(os.environ.get("BFS3D_CHECKPOINT_KEEP", "3"))
 CONTROL = CflResidualDualTimeControl(
     beta_start=0.5, beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25
 )
@@ -284,7 +291,9 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         atol=ATOL,
     )
     checkpoints = (
-        StateCheckpointer(checkpoint_dir, every=1, keep=3) if checkpoint_dir is not None else None
+        StateCheckpointer(checkpoint_dir, every=1, keep=CHECKPOINT_KEEP)
+        if checkpoint_dir is not None
+        else None
     )
     on_checkpoint = (
         logger.on_checkpoint

@@ -26,6 +26,10 @@ from aquaflux.solve import (
 )
 from aquaflux.solve.implicit import backtracking_line_search
 
+#: Incremented on every *trace* of a residual below, so a test can assert that a rebuilt step
+#: reuses the compiled march step instead of retracing it.
+_TRACES: list[int] = []
+
 
 class UniformShiftPolicy(eqx.Module):
     """A minimal non-flow shift policy: a uniform pseudo-time shift on every DOF, unpreconditioned."""
@@ -342,3 +346,164 @@ def test_the_inner_line_search_honours_an_injected_step_limit() -> None:
     assert float(capped_out.alpha) <= 0.01 < float(free_out.alpha)
     # The capped step still moves -- a cap shortens the step, it does not null it.
     assert not jnp.allclose(capped_out.phi, phi0)
+
+
+def test_abort_above_inner_cycles_stops_a_doomed_attempt_early() -> None:
+    """A solve costing more than the march's discard threshold ends the attempt there and then.
+
+    ``retry_on_cycles`` is a PER-SOLVE quantity, so the moment one solve crosses it -- with the inner
+    target still unmet -- the march is going to throw this attempt away and redo it at a larger shift.
+    Every inner iteration after that point is work that is discarded. Measured on a three-dimensional
+    coupled march, three such attempts ran 26, 56 and 59 cycles where the threshold was crossed at 14,
+    17 and 16.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+
+    def residual_fn(phi: jnp.ndarray) -> jnp.ndarray:
+        return _residual(phi, theta)
+
+    phi0 = jnp.ones_like(theta)
+    r0 = jnp.linalg.norm(residual_fn(phi0))
+    common = dict(
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0), inner_steps=20, inner_tol=0.0
+    )
+    unbounded = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
+    # A threshold of 0 makes every solve "expensive", so the first one trips it.
+    aborting = DualTimeStep(UniformShiftPolicy(strength=1.0), abort_above_inner_cycles=0, **common)
+
+    out_u = unbounded.stepper()(residual_fn, phi0, r0, unbounded.default_solver())
+    out_a = aborting.stepper()(residual_fn, phi0, r0, aborting.default_solver())
+
+    assert int(out_u.inner_iterations) == 20  # unreachable target -> the full inner budget
+    assert int(out_a.inner_iterations) == 1  # stopped as soon as one solve crossed the threshold
+    assert int(out_a.cycles) < int(out_u.cycles)
+    # Cut short, so the march must still see it as not having met its own criterion and escalate.
+    assert not bool(out_a.reached_target)
+
+
+def test_abort_above_inner_cycles_never_bins_an_expensive_success() -> None:
+    """A costly solve that DOES reach the inner target exits normally and is kept.
+
+    The loop tests the convergence target before the cost bailouts, so cost can only end an attempt
+    that was going to be discarded anyway. Without this ordering the bailout would throw away a good
+    iterate and replace it with a shorter step than the work already bought.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+
+    def residual_fn(phi: jnp.ndarray) -> jnp.ndarray:
+        return _residual(phi, theta)
+
+    phi0 = jnp.ones_like(theta)
+    r0 = jnp.linalg.norm(residual_fn(phi0))
+    # A target the FIRST inner iteration already meets, with a threshold of 0 so that same solve
+    # also counts as over-cost -- the two conditions the ordering has to arbitrate between.
+    common = dict(
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0), inner_steps=20, inner_tol=0.99
+    )
+    plain = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
+    aborting = DualTimeStep(UniformShiftPolicy(strength=1.0), abort_above_inner_cycles=0, **common)
+
+    out_p = plain.stepper()(residual_fn, phi0, r0, plain.default_solver())
+    out_a = aborting.stepper()(residual_fn, phi0, r0, aborting.default_solver())
+
+    assert bool(out_p.reached_target)  # the target is reachable (sanity for the test)
+    assert bool(out_a.reached_target)  # ...and the cost bailout did not prevent reaching it
+    assert jnp.allclose(out_a.phi, out_p.phi)
+
+
+def test_abort_above_inner_cycles_none_is_the_unbounded_step() -> None:
+    """The default leaves the step byte-identical, so an unconfigured march is unchanged."""
+    theta = jnp.array([8.0, 27.0, 64.0])
+
+    def residual_fn(phi: jnp.ndarray) -> jnp.ndarray:
+        return _residual(phi, theta)
+
+    phi0 = jnp.ones_like(theta)
+    r0 = jnp.linalg.norm(residual_fn(phi0))
+    common = dict(
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0), inner_steps=6, inner_tol=1e-3
+    )
+    default = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
+    explicit = DualTimeStep(
+        UniformShiftPolicy(strength=1.0), abort_above_inner_cycles=None, **common
+    )
+
+    out_d = default.stepper()(residual_fn, phi0, r0, default.default_solver())
+    out_e = explicit.stepper()(residual_fn, phi0, r0, explicit.default_solver())
+    assert jnp.array_equal(out_d.phi, out_e.phi)
+    assert int(out_d.cycles) == int(out_e.cycles)
+
+
+def test_the_march_pushes_its_discard_threshold_into_the_step() -> None:
+    """``retry_on_cycles`` reaches the inner loop, so a doomed attempt can stop where it is detected.
+
+    The threshold is a per-solve quantity and the march evaluates it only after the whole step returns,
+    which means inner iterations keep running after the attempt is already destined to be discarded.
+    Handing the number to the step lets it stop there. It must stay ONE number -- a step configured with
+    its own copy would be a second spelling to keep in step with this one.
+    """
+    from aquaflux.solve.march import _with_inner_abort
+
+    step = DualTimeStep(UniformShiftPolicy(strength=1.0), inner_steps=3)
+    assert step.abort_above_inner_cycles is None
+
+    armed = _with_inner_abort(step, 10)
+    assert armed.abort_above_inner_cycles == 10
+    assert step.abort_above_inner_cycles is None  # the original is untouched
+
+
+def test_a_step_with_no_inner_loop_is_returned_unchanged() -> None:
+    """Only a step that runs inner solves has anything to abort; the rest must pass through untouched."""
+    from aquaflux.solve.march import _with_inner_abort
+
+    step = PseudoTransientStep(UniformShiftPolicy(strength=1.0))
+    assert _with_inner_abort(step, 10) is step
+    assert _with_inner_abort(step, None) is step
+
+
+def test_no_discard_threshold_leaves_the_step_untouched() -> None:
+    """``retry_on_cycles=None`` is the default, and must stay byte-identical."""
+    from aquaflux.solve.march import _with_inner_abort
+
+    step = DualTimeStep(UniformShiftPolicy(strength=1.0), inner_steps=3)
+    assert _with_inner_abort(step, None) is step
+
+
+def test_a_rebuilt_step_limiter_is_a_compilation_cache_hit() -> None:
+    """Two limiters built for the same block must be interchangeable in the compiled step's cache key.
+
+    ``step_limit`` is a STATIC field, so it is part of that key, and static fields are compared by
+    ``__eq__``. A closure compares by identity, so every rebuild was a fresh key and recompiled the
+    whole coupled solve -- measured on a Reynolds ramp, ~100-150 s per rung at an identical cycle count.
+    A value object compares by value, so a rebuild is a hit while a genuinely different block still
+    retraces.
+    """
+    from aquaflux.solve import positive_block_limit
+    from aquaflux.solve.march import _march_step
+
+    assert positive_block_limit(1, 3) == positive_block_limit(1, 3)
+    assert positive_block_limit(1, 3) != positive_block_limit(0, 3)
+
+    # A unique state size, so a would-be recompile cannot be a hit from another test's compiled step.
+    target = jnp.asarray([8.0, 27.0, 64.0, 125.0, 216.0])
+
+    def residual_fn(
+        phi: jnp.ndarray,
+    ) -> jnp.ndarray:  # one stable object: never the thing that differs
+        _TRACES.append(1)
+        return phi**3 - target
+
+    phi0 = jnp.ones(5)
+    policy = UniformShiftPolicy(strength=1.0)
+
+    def run(limit) -> int:
+        step = DualTimeStep(policy, inner_steps=2, inner_tol=1e-3, step_limit=limit)
+        before = len(_TRACES)
+        _march_step(step, residual_fn, phi0, jnp.asarray(1.0), step.default_solver())
+        return len(_TRACES) - before
+
+    _TRACES.clear()
+    assert run(positive_block_limit(1, 3)) > 0  # first build compiles
+    for _ in range(2):  # two further "rungs", each rebuilding an equal limiter
+        assert run(positive_block_limit(1, 3)) == 0
+    assert run(positive_block_limit(0, 3)) > 0  # a genuinely different block must still retrace

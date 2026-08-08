@@ -397,6 +397,39 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     Worth knowing before adding a second spelling of it: prefer the floor, which is explicit about being
     preconditioner-only.
 
+    **PLAIN aggregation, not smoothed — `pc_gamg_agg_nsmooths = 0` (measured, and the largest
+    preconditioner win found on this case).** Smoothing the tentative prolongator with a Jacobi step is
+    GAMG's default and is right for an M-matrix-like operator; on a strongly indefinite saddle it
+    degrades the coarse correction. Measured with the march's **own** states, right-hand sides
+    (`-R(state)`) and shift pairing (operator at the march's β, V-cycle at `max(β, floor)`):
+
+    | state | smoothed (was) | plain (now) |
+    |---|---|---|
+    | entering a step below the shift floor (β 0.0154, α clipped to 0.200) | 22 cyc, 3.2e-8 | **9 cyc, 4.7e-10** |
+    | entering the retried step (α → 0) | 4 cyc, 1.2e-12 | **3 cyc, 5.7e-14** |
+    | the converged tail | 6 cyc | 6 cyc |
+
+    **The tie at the converged tail is the methodological point:** an easy operator does not discriminate
+    between preconditioners, so the first sweep — taken there — reported no difference on any arm and
+    nearly closed the question. Sweep preconditioners at the march's *hard* states, which the checkpoints
+    identify by cycle count and clipped α. Plain aggregation is also marginally cheaper to set up.
+    **It is also what makes a DEEP hierarchy usable:** with smoothing ON, adding levels via
+    `pc_gamg_threshold` gives dense coarse operators, builds of 96–1224 s, and a V-cycle returning
+    **NaN** at every threshold tried (0.01/0.05/0.1/0.25); with it OFF, `threshold=0.05` builds a
+    **5-level** hierarchy in 26 s at the same cycle count. That matters for scaling — the shipped
+    2-level design leans on a direct LU at `coarse_eq_limit` equations to carry the global modes, which
+    is cheap at 23k cells and will not be at 10× — so the threshold is left OFF as the default (it buys
+    nothing on *this* mesh) while being known to work.
+    **Corollary worth keeping: the NaN is the smoothing/threshold INTERACTION, not the threshold.** Do
+    not re-refute strength-of-connection on the smoothed-aggregation evidence.
+    **VALIDATED ON THE FULL 3-RUNG MARCH** — 4050 s / 62 steps / **347 cycles** / 3 retry cascades →
+    3474 s / 69 steps / **290 cycles** / **1** cascade, converging deeper (2.6e-6 vs 8.9e-6) with the
+    answer unchanged (mid-span `x_r/h` 8.36). Per rung the effect lands exactly where the sweep said:
+    rung 1 (the easy high-β anchor) **37 → 37, identical**, rung 2 110 → 75, rung 3 200 → 178. Note the
+    march takes *more* steps (62 → 69): cheaper solves hold α higher, so the Courant control grows β
+    differently and the trajectory diverges from step 24 — this is a whole-march total, not a per-step
+    improvement, and part of the wall saving is the two retry cascades that stop happening.
+
     **Validated on a real march, not just a frozen state:** the 3-rung Reynolds-continuation `bfs3d` march
     ran to the target Reynolds number on this bundle — 62 steps, 883 raw cycles, ~77 min, no breakdown,
     with β reaching **0.0077** at 6–11 cycles per solve, well past the 0.02 where ILU(1) diverged.
@@ -419,10 +452,89 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     de-compression above), not a rarer one. Forward-march only. Pinned by `test_amg_refresh_shift_in_place_*`
     (`test_amg_preconditioner.py`) and `test_materialize_gate_*` / `test_batched_probing_*` /
     `test_gather_de_compression_*`.
+    - **⚠️ THE TWO GATES ARE COMBINED, NOT NESTED — the β floor used to make the drift trigger UNREACHABLE
+      (fixed; `_refresh_branch`).** `_beta_tracking_refresh` asked the β gate first and the materialize gate
+      only *inside* it. With a PC-only `beta_floor` the gate's input is `max(β, floor)`, so once the march
+      drops below the floor that input is **pinned** and the β gate answers "no change" on every step
+      forever — taking the drift gate down with it. That is exactly the low-shift tail where the flow
+      develops fastest. Measured on the 3-rung `bfs3d` cold march (56 steps, `beta_floor = 0.05`):
+
+      | | steps | refresh declined | mean cycles |
+      |---|---|---|---|
+      | β ≥ floor | 34 | 12 % | 6.9 |
+      | β < floor | 22 | **91 %** | 7.5 |
+
+      13 steps had >5 % ν_t drift *and* no refresh, and they carried **189 of the march's 399 Krylov
+      cycles (47 %)** — steps 29–31 ran 24/23/34 cycles on a V-cycle nothing was allowed to refresh, and
+      the step after them blew up into a 3-attempt β-escalation retry costing 380 s. The decision is now
+      the total function `_refresh_branch(stale_state, moved_beta, split)`: **state drift ⇒ `full`**
+      whatever β says, β move alone ⇒ `shift`, neither ⇒ `none`. Note the shift branch is real work below
+      the floor too — the shift is `pc_beta · d(state)` and the per-cell `d` tracks the state even where
+      `pc_beta` is clamped, so the old comment's "would rebuild an identical V-cycle" was only true of the
+      β factor. **Consequence to know:** the materialize gate is now consulted every step rather than only
+      on refresh steps, so its `materialize_every` cap counts **steps**, not refreshes.
+      **MEASURED END-TO-END on the 3-rung `bfs3d` cold march, and the trade is strongly favourable:**
+
+      | | before | after |
+      |---|---|---|
+      | outer steps | 69 | **61** |
+      | **Krylov cycles** | **480** | **348 (−27 %)** |
+      | starved steps (>5 % drift, no refresh) | 15, holding 201 cycles (42 %) | **0** |
+      | sub-floor steps declining a refresh | 89 % | **19 %** |
+      | full refreshes | 32 @ 23.1 s | 48 @ **17.3 s** |
+      | refresh total | 803 s (15.7 % of wall) | 865 s (19.1 %) |
+      | β-escalation retry steps | 5, **1745 s** | 2, **655 s** |
+      | final ‖R‖ / mid-span `x_r/h` | 2.65e-6 / 8.36 | 2.42e-6 / **8.36** |
+
+      Read the refresh row correctly: the preconditioner now costs **more** in absolute terms (865 s vs
+      803 s) because it refreshes 50 % more often — that is the trade working, not a regression. It buys
+      132 fewer Krylov cycles and, far larger, removes three of the five retry cascades (−1090 s), which
+      were the single biggest line item in the march. The converged answer is **unchanged** (`x_r/h` 8.36
+      mid-span against OpenFOAM's 7.24, exactly as before), which is the constraint that matters: this is
+      a path change, not a solution change.
+    - **Where a refresh's time now goes (whole-run aggregate, same march): probe 632 s, refactor 195 s,
+      assemble 28 s, other 12 s — the probe is 73 %.** The non-probe tail is close to floor, so any
+      further work on refresh cost has to attack the coloured probe itself (amortizing colours across
+      steps, or a cheaper stencil), not the assembly or the multigrid setup.
+    - **⚠️ Wall-clock from that comparison is a LOWER bound, and the reason is a trap worth naming.** The
+      "after" run was watched by a per-refresh log monitor whose notifications drove the desktop UI to
+      ~70 % CPU against the solve; its first ~20 minutes are inflated (steps 1–3 were *bit-identical* in
+      cycles and residual to the baseline while taking 254 s against 224 s). Cycles, phase times and
+      step/retry counts are unaffected — which is exactly why the cycle count, not the clock, is this
+      project's cost measure. **Do not instrument a long run with a per-step notification stream.**
+    - **Where a refresh's time actually goes — REPORTED, not inferred (`RefreshTiming`, `solve/refresh_timing.py`).**
+      The observer used to receive `(kind, seconds)`, so a breakdown had to be recovered by differencing
+      the `full` and `shift` branches across a run. It now receives a record carrying ordered
+      `(phase, seconds)` pairs — AMG: `probe` / `assemble` / `refactor` — and `MarchLogger` renders them
+      under the `"pc"` detail (`pc full 23.0s (probe 14.6 assemble 3.2 refactor 5.2)`), with any
+      unattributed remainder shown as `other` so a breakdown cannot silently fail to add up. The
+      factorization preconditioners report no phases (empty tuple), which the record documents as valid.
+      Differencing the same 56-step march gave probe ≈ 14.6 s of a 23.0 s `full` (63 %) against 8.4 s for
+      `shift` — consistent with the older ~40-of-60 s reading, and the reason the probe is the lever.
+    - **The per-refresh sparse-matrix work is precomputed (`ShiftedCellMajorOperator`).** The `assemble`
+      phase — add `β d` to the diagonal, symmetrically equilibrate, reorder to cell-major — was a sparse
+      add plus two sparse products plus two fancy-index permutations, each allocating and re-sorting a
+      matrix the size of the coupled Jacobian, **repeated identically every refresh** because for a fixed
+      stencil reach the pattern never changes and only the values do. The class hoists the
+      pattern-dependent part (which base nonzero feeds each output nonzero, where the diagonals sit, the
+      cell-major CSR structure) into a one-time build, leaving one gather + an `O(n_dofs)` diagonal add +
+      a symmetric scale into a **preallocated** buffer. Bit-identical to `equilibrate_cell_major(J +
+      diags(shift))` — pinned by `tests/unit/test_cell_major_operator.py`, which runs without `petsc4py`
+      because the class holds none. Two details worth keeping: the returned matrix **aliases the reused
+      buffer** (consume it immediately; `AmgVCycle._build`/`refactor` both copy), and the symmetric scale
+      is applied **chunked over rows** so it never allocates a second Jacobian-sized temporary — the
+      point of the exercise being to stop allocating those. It engages only when a precomputed
+      `structure` was used, which is precisely the guarantee the pattern is fixed; otherwise the generic
+      path runs unchanged. `AmgVCycle.refactor`'s pattern re-check is likewise memoized on the index
+      arrays' identity, since comparing tens of millions of indices twice per refresh re-confirms
+      something fixed by construction.
+    - **Already done, do not re-propose:** `refactor` reuses the aggregation and prolongation
+      (`pc_gamg_reuse_interpolation` + smoother `reuse_ordering`) and overwrites the operator values in
+      place, so only the Galerkin coarse operators and the incomplete-LU factor values recompute.
   - **⚠️ MEASUREMENT DISCIPLINE FOR PRECONDITIONER PROBES (binding — every one of these produced a wrong
     verdict that had to be retracted).** Judge a candidate preconditioner **only** by running it through
-    GMRES and reading the **true** residual `‖Ax−b‖`. Four cheaper-looking gates are all invalid on this
-    indefinite saddle:
+    GMRES and reading the **true** residual `‖Ax−b‖`, **at a state and shift pairing where the operator
+    is actually hard**. Five cheaper-looking shortcuts are all invalid on this indefinite saddle:
     1. **The preconditioned residual `‖Mr‖`.** PETSc's default convergence norm. SOR/Krylov-smoothing
        report `reason=2` (converged) at a **true** residual of 1.0. Force `KSP_NORM_UNPRECONDITIONED`.
        A level-ILU "win" was once entirely this artifact.
@@ -432,7 +544,23 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     3. **The spectral radius of the iteration operator.** The largest eigenmode of a smoothed operator is
        the *smooth* mode — which is the coarse grid's job, not the smoother's. A "ρ = 9e4, diverges"
        reading nearly killed a Vanka smoother that had never actually been run through GMRES.
-    4. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
+    4. **A probe at a BENIGN operating point — an easy operator cannot discriminate between
+       preconditioners.** This is the one that nearly buried the largest preconditioner win found on this
+       case. A GAMG aggregation sweep run at the march's *converged tail* returned **6 cycles for every
+       arm** — shipped, plain aggregation, and two strength thresholds all identical — and the honest
+       reading of that sweep was "no difference, close the question". Re-run at the march's own **hard**
+       states, the same arms separated **22 → 9 cycles** (2.4×, and 66× lower true residual). Where the
+       operator is well conditioned, every candidate looks the same, so a null result there is *no
+       information*, not evidence of no effect.
+       **Pick the hard states from the march's own log, not by intuition:** the checkpoints plus the step
+       table identify them directly — highest cycle count, clipped `a_min`, and any step carrying a retry
+       flag. Probe the state *entering* such a step (the checkpoint written after the previous one).
+       The same caution applies to the *pairing*: use the operator at the march's own β with the V-cycle
+       at `max(β, beta_floor)`, because that mismatch is the shipped configuration. A probe that builds
+       the V-cycle at the march's raw β instead measures a configuration the floor exists to prevent —
+       it reported "the V-cycle does not converge at all in the tail" (true residual 1.0), where the real
+       pairing takes **6 cycles to 1.5e-10**.
+    5. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
        Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
        `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks
        plausible — two probes were invalidated this way. (`equilibrate_cell_major` reorders internally, so
@@ -457,6 +585,30 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     - **Where the V-cycle actually under-performs:** per-field, pressure is *well* smoothed and **ω** is
       the unsmoothed field (by ~700–1300×), then `u`. If a per-field lever is wanted in 3D, ω is it —
       pressure is not.
+      **⚠️ NEITHER THIS NOR THE VANKA BULLET RECORDS WHICH SMOOTHER OR AGGREGATION IT WAS MEASURED
+      WITH, so neither can be relied on now.** The smoother default has since moved ILU(1) → ILU(0) and
+      the aggregation smoothed → plain, and *both* of those changes have inverted a conclusion on this
+      case. Concretely, the Vanka bullet's inference — "a strong smoother still stalls, therefore the
+      **coarse space** is the wall" — is valid but **under-determined**: "the coarse space" could mean
+      the space is intrinsically inadequate (needing inf-sup-aware coarsening, a research problem) or
+      that the coarse *correction* was corrupted by prolongator smoothing (a setting, now changed). A
+      stall at 5–6e-2 fits both, so that experiment never distinguished them. Re-measure before building
+      on either, and **record the smoother and aggregation** in any replacement.
+      **The second reading is now measured, not speculative.** Prolongator smoothing *was* degrading the
+      coarse correction on this operator: turning it off (`pc_gamg_agg_nsmooths = 0`) is worth
+      **22 → 9 cycles** at a hard state and ~16 % of the whole march's Krylov cost. Every arm in that
+      Vanka campaign was judged against a coarse correction built with smoothing **on**, so a *smoother*
+      arm failing to rescue it is what you would see whether or not the smoother was any good — which
+      also explains why the campaign kept concluding "the smoother is not the lever" whichever smoother
+      it tried. **Do not treat "the coarse space is the wall" as settled.**
+      **How to re-run it** (harness: `validation/bfs3d_openfoam/preconditioner_sweep.py`): add a Vanka
+      arm as a *level smoother* — PETSc `PCPATCH` with `pc_patch_construct_type = vanka`, reachable
+      through the `extra_options` seam, though it may want a `DM` the plain AIJ path does not supply —
+      and compare against the shipped bundle at the march's hard states. The discriminating question is
+      narrow: **with plain aggregation, does a Vanka smoother still stall?** If yes, the coarse space
+      really is the wall and the inf-sup / block-Schur direction is justified. If no, the original
+      verdict was an artifact of the aggregation default and the smoother direction reopens. Record the
+      smoother, aggregation, state and shift pairing alongside whichever answer comes out.
     - **The Jacobian's fill is irreducible.** The coupled `(u,p)` Jacobian is intrinsically **distance-2**
       (~38 nnz/row) because Rhie–Chow damping couples pressure to the neighbour-of-neighbour ring; the
       advection scheme is irrelevant to this. A distance-1 preconditioner pattern is not available for a
@@ -1896,6 +2048,50 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       than a non-attainment flag threaded through every solve layer — same effect (a doomed primary costs
       ~`cycle_budget` matvecs, not `inner_steps ×` a stagnation), far smaller blast radius. Pinned by
       `test_dual_time.py` (`…cycle_budget_caps_the_inner_loop`, `…none_is_the_unbounded_step`).
+      **⚠️ CORRECTION: "a doomed primary costs ~`cycle_budget` matvecs" is MEASURABLY FALSE, because the
+      budget is checked BETWEEN inner iterations.** A single inner solve is bounded only by its own
+      `stagnation_iters=40` / `max_restarts=60`, both ≈ the whole budget, so one solve can blow through
+      it. Measured on the 3-rung `bfs3d` march at `cycle_budget=42`: the three discarded attempts cost
+      **26 / 56 / 59** cycles, entering their last inner having spent only 14 / 17 / 16. The budget did
+      bind — just a whole stagnating solve too late.
+    - **`DualTimeStep(abort_above_inner_cycles=…)` — stop the moment the attempt is KNOWN to be
+      discarded (BUILT).** `retry_on_cycles` is a **per-solve** quantity, so the instant one solve
+      exceeds it with the inner target unmet, `forward_march` is going to bin the whole attempt and redo
+      it at a larger β. Yet the check lived only in `forward_march`, *after* the step returned — so the
+      step kept running inner iterations whose results were already destined for the bin. The same
+      predicate now sits in the inner loop's `cond`, and `forward_march` pushes its own `retry_on_cycles`
+      down via `_with_inner_abort` (using `dataclasses.replace`, not `eqx.tree_at` — the field is static,
+      so it is in the treedef, not among the leaves), so there is **one** number rather than two to keep
+      in step.
+      **It cannot bin an expensive success**, and the ordering is what guarantees that: `cond` tests the
+      convergence target *before* either cost bailout, so a costly solve that brings `‖G‖` under the
+      target exits normally with `reached_target` set and is kept. The empirical backing is strong on
+      this case — across 64 attempts, **no kept attempt ever had a single inner solve above 10 cycles**,
+      while all three discarded ones ran 12/15/43 — so the threshold separates them perfectly.
+      **MEASURED on the next march, and the prediction held where it applied:**
+
+      | step | discarded attempt before | after | cycles saved |
+      |---|---|---|---|
+      | 48 | `[2, 9, 5, 43]` | unchanged | 0 (predicted 0 — the trip is on the last inner) |
+      | 51 | `[2, 12, 4, 4, 4]` | `[2, 12]` | 12 (predicted 12) |
+      | 52 | `[2, 15, 39]` | `[2, 19]` | 35 (predicted 39) |
+
+      Discarded-attempt cycles 141 → 107 (a new retry at step 53 cost 13 of the 47 saved), and the
+      retry region's wall fell **250 s** (step 51 −77 s, step 52 −165 s).
+      **⚠️ MEASURE IT IN WALL, NOT IN THE CYCLE TOTAL.** The march's reported `cyc` is the **accepted**
+      attempt's count only, so discarded work was never in it: total cycles moved 348 → 347 while a real
+      250 s came out. A prediction phrased against the cycle total would read as a total miss.
+      **⚠️ It is NOT purely a cost change.** `precondition_step` runs per *attempt*, so truncating a
+      discarded attempt changes the refresh sequence and hence the V-cycle the next step sees: the two
+      marches agree step-for-step through 52 and then diverge (61 vs 62 steps, same `x_r/h` 8.36, both
+      converged). Benign here, but do not describe the abort as trajectory-neutral.
+      A further ~31 cycles are available if the per-solve `stagnation_iters`/`max_restarts` are brought
+      down toward the threshold (still ~4–6× it, which is why one solve can eat the step budget); step 48
+      is the case that needs it, since its trip lands on the last inner where the abort cannot help.
+      `None` (default) is byte-identical. Forward-only. Pinned by
+      `test_dual_time.py::test_abort_above_inner_cycles_{stops_a_doomed_attempt_early,
+      never_bins_an_expensive_success, none_is_the_unbounded_step}` and the `_with_inner_abort` plumbing
+      tests beside them.
     - **The escalated β is CARRIED into the control — so a static β floor can be dropped and the *controller*
       decides how low is safe (BUILT).** β is inverse to the pseudo-timestep, so a static `beta_min` is a cap
       on the *largest* timestep the march may take, applied everywhere — which slows convergence in regions
