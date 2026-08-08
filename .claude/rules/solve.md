@@ -769,6 +769,56 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       - **Untested, and the honest caveat on the refuted half:** PETSc estimates Chebyshev's eigenvalue
         bounds with a few GMRES iterations, which is meaningless on an indefinite operator. A hand-bounded
         polynomial, or one designed for a complex spectrum, is not covered by these arms.
+    - **✅ VANKA RE-OPENED ON THE FOUR-FIELD BLOCK, AND RE-CLOSED — but the ω half of the old mechanism is
+      now CONFIRMED, quantitatively.** The standing verdict ("cell-centred patch relaxation is the wrong
+      shape; do not re-open it with another patch variant") was measured on the **six-field** cell block,
+      and its stated mechanism was that the block is weakly coupled in ω *everywhere*. A field split
+      removes ω from the patch by construction, leaving the classical velocity-pressure patch the entire
+      Vanka literature is built on — so that verdict does not transfer, and this is the new evidence its
+      "do not re-litigate without new evidence" clause asks for. Same configuration as the table above,
+      `state-00069`, β = 0, `vanka_centre_field = 3` (**mandatory** — the default is three fields from the
+      end, which finds `p` in `[u,v,w,p,k,ω]` and would silently centre patches on `v` in a four-field
+      block), patch width 22 = centre `[u,v,w,p]` + 6 neighbours × `[u,v,w]`:
+
+      | arm | cycles | TRUE rel | worst patch gain |
+      |---|---|---|---|
+      | split, ILU(0) / ILU(0) | 11 | 3.7e-11 | — |
+      | split, **Vanka** flow / ILU(0) | 58 cap | 2.9e-03 | **12.8** |
+      | split, Vanka flow / damped Jacobi | 58 cap | 1.4e-01 | 12.8 |
+      | split, **multiplicative** Vanka flow / ILU(0) | 40 | **1.55** (worse than the initial guess), 994 s | 12.8 |
+
+      - **ω WAS the cause of the catastrophic patch conditioning — measured from the opposite direction.**
+        The six-field campaign found the worst patch gain **flat at ~3e3 across every patch width**, which
+        was the evidence that widening cannot help. On the four-field patch it is **12.8**, ~235× better,
+        with **zero** patches dropped. The classical velocity-pressure patch is well conditioned on this
+        operator. That is a clean confirmation of the ω-locality finding, obtained by *removing* ω rather
+        than by inferring it from a singular-value decomposition.
+      - **But patch conditioning was never the binding constraint, and this settles it.** A perfectly
+        conditioned classical patch **still fails to converge** (stalls at 2.9e-03). The earlier campaign
+        reached the same conclusion by *dropping* the near-singular patches, which was a confounded arm
+        (it measured coverage); this reaches it by removing the ill-conditioning at the source, which is
+        not confounded. Removing ω does help a great deal in absolute terms — the six-field Vanka stalled
+        at 0.24–0.78, a 1.3–4× reduction, against 340× here — so the split genuinely strengthens the
+        smoother, just nowhere near ILU(0)'s 11 cycles.
+      - **Multiplicative is worse on the four-field block too, and hugely more expensive** (true residual
+        1.55, 994 s vs 176 s, 17 colours). The six-field finding that sequencing costs rather than helps
+        survives the split. Treat patch relaxation as closed on this operator, now for a *measured*
+        reason rather than an inferred one.
+      - **Two weak smoothers compound**: Vanka flow + Jacobi k/ω is 1.4e-01, far worse than either
+        weakness alone. The two blocks' smoothers are independent *settings* but not independent in effect.
+    - **⚠️ AN lAIR ARM ON THE TRAILING BLOCK WAS RUN AND IS INVALID — it was given the wrong operator.**
+      Building `build_air_hierarchy` on the `[k,ω]` slice of the coupled Jacobian ran **~50 minutes without
+      finishing** and was killed. That is **not** a measurement of lAIR: the slice carries the distance-3
+      coupled fill at **91 nnz/row**, where `scalar_transport_preconditioner` builds lAIR on the frozen
+      **7-point** convection-diffusion stencil (~7 nnz/row). lAIR's local approximate-ideal-restriction
+      solves run over a degree-2 F-neighbourhood, whose size grows roughly with the square of the row
+      density, so a 13× denser graph is catastrophic for setup. (For scale, the leading block's slice is
+      227 nnz/row.) **The correct arm builds the hierarchy on the transport operator** —
+      `SSTTurbulence.k_preconditioner` / `omega_preconditioner`, which is what the segregated scalar path
+      already does — accepting that it then approximates a *different* matrix from `A_tt` (no k↔ω coupling,
+      no reach-3 fill), which is the same approximation the block-preconditioner family already makes. That
+      arm is **not yet built**: it needs `mdot` and the closure at the state, a `k ⊕ ω` block-diagonal
+      composition, and the log-ω chain-rule scaling.
     - **NOT YET BUILT: the production wiring.** There is no `coupled_field_split_continuation` / shift
       policy, deliberately — the forward march is where a continuation builder would be used and the split
       *loses* there. What the measurement argues for is a **`β = 0` adjoint-only** preconditioner seam
