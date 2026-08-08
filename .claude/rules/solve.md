@@ -675,6 +675,38 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     march's cost is no longer preconditioner-bound (~65 % Krylov, largely fixed per-step matvec rather
     than cycles; 21 % refresh; the rest globalization). The upside on *this* case is bounded, and the
     test needs the hard inner iterates.
+    - **✅ THE SPLIT IS BUILT — `solve/field_split.py` (`FieldGroups`,
+      `BlockTriangularFieldSplit`, `build_block_triangular_field_split`).** Three facts worth keeping,
+      independent of whether it ever wins:
+      - **The partition is free, because the coupled state is FIELD-major.** Degree of freedom
+        `(cell i, field f)` sits at `f·n_cells + i`, so a split on a *field* boundary is a split into two
+        **contiguous ranges**: `[u,v,w,p]` is `[0, (dim+1)·n)` and `[k,ω]` the rest. Vectors are sliced,
+        not gathered, and the four blocks are contiguous submatrices. `FieldGroups` owns that arithmetic
+        so no consumer re-derives `f·n_cells + i` inline; `tests/integration/test_coupled_field_split.py`
+        pins the partition against `CoupledRANSLayout.unpack`, which is the one thing that would be
+        silently wrong rather than loudly wrong — a partition off by one field still preconditions, it
+        just preconditions a mislabelled operator.
+      - **It needs no JAX wrapper of its own.** `MonolithicAmgPreconditioner.matvec()` reads only
+        `factors.n_dofs` and `factors.apply(r, transpose=…)`, both of which the split has, so it rides the
+        existing `pure_callback` path unchanged. Each diagonal block is an ordinary `AmgVCycle`
+        (`build_amg_vcycle` on the sub-block), which equilibrates and reorders *within its own group* and
+        aggregates at its own block size — the whole point, since a four-field saddle and a two-field
+        transport pair coarsen differently. `AmgVCycle.apply` returns the inverse in the **original**
+        (unequilibrated, field-major) space, so the retained coupling block is applied raw between the two
+        block solves, with no scaling bookkeeping.
+      - **The transpose is closed-form, so the adjoint is served.** The transpose of a
+        block-lower-triangular inverse is the block-upper-triangular one over the transposed blocks, so
+        `apply(transpose=True)` reverses the two block solves and uses `Cᵀ` — pinned both as an exact dense
+        transpose (unit) and as `⟨y, Mx⟩ = ⟨Mᵀy, x⟩` over real V-cycles on the real coupled Jacobian
+        (integration).
+      **⚠️ A ONE-APPLICATION CONTRACTION RANKED THE TWO ORDERINGS AND WAS WRONG — invalid shortcut 2, in
+      miniature, caught in a test rather than a write-up.** On the small coupled channel one application of
+      the turbulence-first split leaves ~3× the input residual where flow-first leaves ~0.3×, which reads as
+      a large quality gap. Through **GMRES on the true residual the two are indistinguishable**: both reach
+      ~1e-14 inside one restart cycle, as does the monolithic control. Two lessons, and the second is the
+      one that keeps costing time: a contraction ratio is not a convergence criterion for a
+      Krylov-accelerated preconditioner; and *that state cannot rank the orderings at all*, because an
+      operator every candidate solves in one cycle discriminates between none of them.
   - **⚠️ LOW-β DIRECTIONS ALREADY MEASURED OUT — do not re-litigate without new evidence.** The low-shift
     wall on the 3D coupled saddle has absorbed a lot of probing. What is settled:
     - **Turbulence decoupling ("just lag ω") — REFUTED.** A true-residual arm comparison found
