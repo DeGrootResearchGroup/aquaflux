@@ -169,6 +169,27 @@ SMOOTHERS = {
         "mg_levels_ksp_richardson_scale": 0.7,
         "mg_levels_pc_type": "jacobi",
     },
+    # A Vanka patch relaxation on the FOUR-field saddle block. Two things make this a different
+    # experiment from the one that condemned cell-centred patch relaxation on the six-field block:
+    # that verdict's mechanism was that the cell block is weakly coupled in omega *everywhere*, which a
+    # split removes by construction; and what remains -- the indefiniteness of the saddle -- is the one
+    # thing a patch method is actually designed for, where Chebyshev is not.
+    #
+    # `vanka_centre_field` MUST be given here. Its default is three fields from the end, which finds the
+    # pressure in the six-field layout [u,v,w,p,k,omega] and would silently pick `v` in a four-field
+    # block -- an arm that centres its patches on a velocity component measures nothing about Vanka.
+    # With the centre at 3, `before_centre` takes the neighbours' [u,v,w], which is the classical patch.
+    "vanka": {
+        "mg_levels_pc_type": "python",
+        "mg_levels_pc_python_type": "aquaflux.solve.vanka.VankaPC",
+        "mg_levels_vanka_centre_field": 3,
+    },
+    "vanka-mult": {
+        "mg_levels_pc_type": "python",
+        "mg_levels_pc_python_type": "aquaflux.solve.vanka.VankaPC",
+        "mg_levels_vanka_centre_field": 3,
+        "mg_levels_vanka_multiplicative": True,
+    },
 }
 
 FLOOR = (
@@ -303,6 +324,26 @@ ARMS = (
         "split ilu0/jac",
         "split flow-first, damped Jacobi on k-omega",
         lambda m, g, n: field_split(m, g, n, "ilu0", "jacobi", flow_first=True),
+    ),
+    # Vanka on the four-field saddle. Chebyshev fails there because a saddle has no bounded positive real
+    # spectrum; a patch method has no such assumption, and the omega weakness that condemned patches on
+    # the six-field block is exactly what the split takes away. Additive Vanka is also a batch of small
+    # independent dense inverses -- no sequential triangular solve -- so if it works it is the
+    # parallelizable smoother the saddle block otherwise lacks.
+    (
+        "split vanka/ilu0",
+        "split flow-first, Vanka on flow",
+        lambda m, g, n: field_split(m, g, n, "vanka", "ilu0", flow_first=True),
+    ),
+    (
+        "split vanka/jac",
+        "split flow-first, Vanka flow + Jacobi k-omega",
+        lambda m, g, n: field_split(m, g, n, "vanka", "jacobi", flow_first=True),
+    ),
+    (
+        "split vankamult/ilu0",
+        "split flow-first, multiplicative Vanka on flow",
+        lambda m, g, n: field_split(m, g, n, "vanka-mult", "ilu0", flow_first=True),
     ),
     # The GPU question: a Jacobi-class smoother on the FOUR-field saddle, with the scalars kept on
     # incomplete-LU, then on both. If the four-field block is smoothable where six is not, these work.
