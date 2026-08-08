@@ -87,9 +87,7 @@ def test_the_transpose_is_the_adjoint_of_the_forward_apply(groups, operator, flo
     )
     rng = np.random.default_rng(1)
     x, y = rng.standard_normal((2, groups.n_dofs))
-    np.testing.assert_allclose(
-        y @ split.apply(x), split.apply(y, transpose=True) @ x, rtol=1e-10
-    )
+    np.testing.assert_allclose(y @ split.apply(x), split.apply(y, transpose=True) @ x, rtol=1e-10)
     split.destroy()
 
 
