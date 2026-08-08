@@ -806,19 +806,31 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         reason rather than an inferred one.
       - **Two weak smoothers compound**: Vanka flow + Jacobi k/ω is 1.4e-01, far worse than either
         weakness alone. The two blocks' smoothers are independent *settings* but not independent in effect.
-    - **⚠️ AN lAIR ARM ON THE TRAILING BLOCK WAS RUN AND IS INVALID — it was given the wrong operator.**
-      Building `build_air_hierarchy` on the `[k,ω]` slice of the coupled Jacobian ran **~50 minutes without
-      finishing** and was killed. That is **not** a measurement of lAIR: the slice carries the distance-3
-      coupled fill at **91 nnz/row**, where `scalar_transport_preconditioner` builds lAIR on the frozen
-      **7-point** convection-diffusion stencil (~7 nnz/row). lAIR's local approximate-ideal-restriction
-      solves run over a degree-2 F-neighbourhood, whose size grows roughly with the square of the row
-      density, so a 13× denser graph is catastrophic for setup. (For scale, the leading block's slice is
-      227 nnz/row.) **The correct arm builds the hierarchy on the transport operator** —
+    - **⚠️ THE JAX-NATIVE HIERARCHIES CANNOT BE BUILT ON THE `[k,ω]` JACOBIAN SLICE AT ALL — and the
+      reason is structural, not a cost.** Both were tried as the trailing block's inverse and both failed,
+      for **one shared cause** rather than two incidental ones:
+      - `build_convection_hierarchy` (aggregation) **refuses**: *"operator diagonal must be finite and
+        strictly positive, but its minimum is −2.129e+06"*. The true `[k,ω]` Jacobian block has **negative
+        diagonal entries**, because it carries the live source-term linearizations — production and
+        destruction, with ω in a log variable.
+      - `build_air_hierarchy` (lAIR) ran **~50 minutes without finishing** and was killed. Contributing:
+        the slice carries the distance-3 coupled fill at **91 nnz/row** where the frozen transport stencil
+        is ~7 (the leading block's slice is 227), and lAIR's local approximate-ideal-restriction solves run
+        over a degree-2 F-neighbourhood whose size grows roughly with the square of the row density.
+      **Neither is a verdict on the method.** Both builders assume an M-matrix-like operator, and
+      `scalar_transport_preconditioner` never hands them one that isn't: `_scalar_operator_pieces` **clamps
+      its reaction diagonal non-negative** for exactly this reason (an anti-diffusive source would make the
+      operator indefinite and its V-cycle diverge). The Jacobian slice is the unclamped truth, so it is
+      simply not in these builders' domain. PETSc GAMG with an ILU(0) or Jacobi smoother is untroubled
+      because it assumes none of this.
+      **So the correct arm builds the hierarchy on the TRANSPORT operator** —
       `SSTTurbulence.k_preconditioner` / `omega_preconditioner`, which is what the segregated scalar path
       already does — accepting that it then approximates a *different* matrix from `A_tt` (no k↔ω coupling,
-      no reach-3 fill), which is the same approximation the block-preconditioner family already makes. That
-      arm is **not yet built**: it needs `mdot` and the closure at the state, a `k ⊕ ω` block-diagonal
-      composition, and the log-ω chain-rule scaling.
+      no reach-3 fill, clamped diagonal), the same approximation the block-preconditioner family already
+      makes. That arm is **not yet built**: it needs `mdot` and the closure at the state, a `k ⊕ ω`
+      block-diagonal composition, and the log-ω chain-rule scaling (`ScaledScalarPreconditioner`) — the
+      last of which is a known trap, since a rescale that ignores the wall-fixation rows' own derivative
+      cost 27× on the linear residual once already.
     - **NOT YET BUILT: the production wiring.** There is no `coupled_field_split_continuation` / shift
       policy, deliberately — the forward march is where a continuation builder would be used and the split
       *loses* there. What the measurement argues for is a **`β = 0` adjoint-only** preconditioner seam
