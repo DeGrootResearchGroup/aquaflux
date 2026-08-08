@@ -46,13 +46,23 @@ and opens it.
 
 * the TRUE residual through GMRES, never a preconditioned norm, a one-apply contraction, or a spectral
   radius;
-* a REAL right-hand side, the march's own ``-R(state)`` at the captured iterate;
+* a REAL right-hand side, the steady residual ``-R(state)``, never a random vector;
 * the REAL shift diagonal ``beta * d``, not a uniform stand-in;
 * one materialization per state, shared by every arm, so two arms can never differ for any reason but the
   options under test -- and so only one copy of a multi-gigabyte Jacobian is ever live;
-* a **faithfulness gate**: the shipped monolithic arm must reproduce the cycle count already recorded for
-  it at this iterate, or the run refuses to report. The captured iterates predate the current march log,
-  so this replaces the usual join against it.
+* a **faithfulness gate**: the shipped monolithic arm must reproduce the restart-cycle count already
+  recorded for it at this state, or the run refuses to report. The captured iterates predate the current
+  march log, so this replaces the usual join against it.
+
+**The one way this departs from the march, stated because it cannot be removed.** A dual-time step solves
+for its own residual ``G = R + beta d (phi - phi_n)``, not for ``R``. At inner iteration 0 the two are
+identical (``phi = phi_n``), which is why a sweep over end-of-step checkpoints is right to use ``R``; at a
+captured inner iterate they are not, and on the hardest one they differ by a factor of some 200 (``|G|``
+3.8e-03 against ``|R|`` 8.3e-01). Recovering ``G`` needs ``phi_n``, which the observer does not record. So
+the operator, the state and the shift here are the march's and the right-hand side is not: the cycle count
+is comparable to the record and is gated on, the achieved residual is not and is only reported. Since every
+arm sees the identical right-hand side, the comparison *between* arms -- the point of the probe -- is
+unaffected.
 
 **Usage** -- one state per run, since each materializes a Jacobian of some gigabytes::
 
@@ -329,11 +339,24 @@ def one_arm(label, build, shifted, groups, n_fields, coupled, state, rhs, op_shi
 
 
 def self_check(name, recorded, shifted, groups, n_fields, coupled, state, rhs, op_shift, solver):
-    """Reproduce the recorded control measurement, and refuse to go on if it cannot be reproduced.
+    """Reproduce the recorded control measurement, and refuse to go on if the CYCLE COUNT disagrees.
 
     Run at the **march's own** solver, because that is the configuration the recorded numbers were taken
     under: judging them against this study's far tighter stop would fail a faithful harness, since a solve
-    that reaches 6.6e-06 in one cycle keeps going when asked for 1e-08.
+    that reaches 1e-07 in one cycle keeps going when asked for 1e-08.
+
+    **Only the cycle count is gated, and the reason is a real difference this probe cannot remove.** The
+    recorded numbers come from driving an actual dual-time step, whose right-hand side is the step's own
+    residual ``G = R + beta d (phi - phi_n)``; this probe uses the steady residual ``R``. At inner
+    iteration 0 the two coincide exactly (``phi = phi_n``), which is why a checkpoint-based sweep is right
+    to use ``R`` -- but a captured inner iterate is precisely where they part, and on the hardest one they
+    differ by a factor of some 200 (``|G|`` 3.8e-03 against ``|R|`` 8.3e-01). Reconstructing ``G`` would
+    need ``phi_n``, the state the outer step began from, which the observer does not record.
+
+    So the operator, state and shift are the march's; the right-hand side is not. The cycle count is
+    comparable and is gated; the achieved residual is not comparable and is reported for the record
+    rather than asserted against. Every arm sees the identical right-hand side, so the comparison
+    *between* arms -- which is what this probe exists for -- is unaffected.
     """
     print("\n  -- self-check: the shipped preconditioner at the march's own solver", flush=True)
     measured = one_arm(
@@ -348,26 +371,30 @@ def self_check(name, recorded, shifted, groups, n_fields, coupled, state, rhs, o
         op_shift,
         solver,
     )
+    if measured is None:
+        raise SystemExit(f"SELF-CHECK FAILED for {name}: the control arm did not run at all.")
+    cycles, true = measured
     if recorded is None:
-        if measured is None or not np.isfinite(measured[1]) or measured[1] > 1e-3:
+        if not np.isfinite(true) or true > 1e-3:
             raise SystemExit(
-                f"SELF-CHECK FAILED for {name}: the control did not converge, so nothing else measured "
-                "here can be trusted."
+                f"SELF-CHECK FAILED for {name}: the control did not converge (true relative residual "
+                f"{true:.3e}), so nothing else measured here can be trusted."
             )
         print("    [no recorded value for this state; control converges, continuing]", flush=True)
         return
     expected_cycles, expected_true = recorded
-    if measured is None:
-        raise SystemExit(f"SELF-CHECK FAILED for {name}: the control arm did not run at all.")
-    cycles, true = measured
-    if cycles != expected_cycles or not (expected_true / 10 <= true <= expected_true * 10):
+    if cycles != expected_cycles:
         raise SystemExit(
-            f"SELF-CHECK FAILED for {name}: the shipped preconditioner gave {cycles} cycles at a true "
-            f"relative residual of {true:.3e}, where {expected_cycles} cycles at ~{expected_true:.1e} is "
-            "on record for this state and pairing. The harness is not solving the system the record "
-            "describes; fix that before reading any other row."
+            f"SELF-CHECK FAILED for {name}: the shipped preconditioner took {cycles} restart cycles "
+            f"where {expected_cycles} is on record for this state and pairing. The harness is not "
+            "solving the operator the record describes; fix that before reading any other row."
         )
-    print(f"    [self-check passed: reproduces the recorded {expected_cycles} cycles]", flush=True)
+    print(
+        f"    [self-check passed on CYCLES: {cycles}, as recorded. The true residual reads {true:.3e} "
+        f"against the recorded {expected_true:.1e}; these are not comparable, because the recorded run's "
+        "right-hand side was the step's dual-time residual G and this one's is the steady residual R.]",
+        flush=True,
+    )
 
 
 def study(coupled, state, rhs, shifted, op_shift, groups, n_fields):
@@ -425,6 +452,10 @@ def main():
     base = _coupled_shift_policy(coupled, state, "twolevel")
     rhs = -coupled.residual(state)
     op_shift = _frozen_shift_diagonal(base, march_beta, state) if march_beta > 0 else 0.0
+    # Report both norms, so the run records the one way it departs from the march: the march solved for
+    # the step's dual-time residual G, this solves for the steady residual R, and on an inner iterate
+    # those are different right-hand sides over the same operator.
+    print(f"  right-hand side |R| {float(jnp.linalg.norm(rhs)):.4e}", flush=True)
 
     # The preconditioner is assembled at its own state, which is the same one unless a stale pairing was
     # asked for. Only one Jacobian is ever live: the operator side is applied matrix-free, by the exact
