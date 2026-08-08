@@ -594,6 +594,21 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       that the coarse *correction* was corrupted by prolongator smoothing (a setting, now changed). A
       stall at 5–6e-2 fits both, so that experiment never distinguished them. Re-measure before building
       on either, and **record the smoother and aggregation** in any replacement.
+      **The second reading is now measured, not speculative.** Prolongator smoothing *was* degrading the
+      coarse correction on this operator: turning it off (`pc_gamg_agg_nsmooths = 0`) is worth
+      **22 → 9 cycles** at a hard state and ~16 % of the whole march's Krylov cost. Every arm in that
+      Vanka campaign was judged against a coarse correction built with smoothing **on**, so a *smoother*
+      arm failing to rescue it is what you would see whether or not the smoother was any good — which
+      also explains why the campaign kept concluding "the smoother is not the lever" whichever smoother
+      it tried. **Do not treat "the coarse space is the wall" as settled.**
+      **How to re-run it** (harness: `validation/bfs3d_openfoam/preconditioner_sweep.py`): add a Vanka
+      arm as a *level smoother* — PETSc `PCPATCH` with `pc_patch_construct_type = vanka`, reachable
+      through the `extra_options` seam, though it may want a `DM` the plain AIJ path does not supply —
+      and compare against the shipped bundle at the march's hard states. The discriminating question is
+      narrow: **with plain aggregation, does a Vanka smoother still stall?** If yes, the coarse space
+      really is the wall and the inf-sup / block-Schur direction is justified. If no, the original
+      verdict was an artifact of the aggregation default and the smoother direction reopens. Record the
+      smoother, aggregation, state and shift pairing alongside whichever answer comes out.
     - **The Jacobian's fill is irreducible.** The coupled `(u,p)` Jacobian is intrinsically **distance-2**
       (~38 nnz/row) because Rhie–Chow damping couples pressure to the neighbour-of-neighbour ring; the
       advection scheme is irrelevant to this. A distance-1 preconditioner pattern is not available for a
