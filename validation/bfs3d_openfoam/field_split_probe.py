@@ -58,6 +58,14 @@ and opens it.
 
     python3 -u validation/bfs3d_openfoam/field_split_probe.py inner-00050-03 > field_split.log 2>&1
 
+A second argument builds the preconditioner at a **different** state from the operator, which is the third
+pairing worth measuring: the march freezes its preconditioner for a whole inner loop, and its expensive
+solves are measured to be that staleness rather than hard operators. Two consecutive inner iterates of one
+attempt reproduce exactly one iteration of it, and whether a field split decays more gracefully under
+staleness matters more on this case than whether it is better when matched::
+
+    python3 -u validation/bfs3d_openfoam/field_split_probe.py inner-00050-03 inner-00050-02
+
 Every smoother named here is a **fixed linear operator**, which the adjoint's transpose solve requires: a
 Chebyshev smoother is a fixed polynomial once its eigenvalue bounds are estimated during setup, unlike a
 GMRES-accelerated smoother, whose polynomial depends on the right-hand side.
@@ -124,6 +132,11 @@ STATES = {
         "the march's hardest solve: 15 cycles, line search collapsed to alpha 0",
     ),
     "inner-00040-03": (0.3333, (1, 1.7e-10), "8 cycles at a healthy alpha = 1"),
+    "inner-00050-02": (
+        0.0293,
+        None,
+        "the iteration before the hardest one -- the stale side of a one-iteration pairing",
+    ),
     "state-00069": (0.0, None, "the converged state -- the ADJOINT's operator, at zero shift"),
 }
 
@@ -367,10 +380,23 @@ def study(coupled, state, rhs, shifted, op_shift, groups, n_fields):
 
 
 def main():
-    if len(sys.argv) != 2 or sys.argv[1] not in STATES:
-        raise SystemExit(f"usage: {Path(sys.argv[0]).name} <{' | '.join(STATES)}>")
+    if not 2 <= len(sys.argv) <= 3 or sys.argv[1] not in STATES:
+        raise SystemExit(
+            f"usage: {Path(sys.argv[0]).name} <{' | '.join(STATES)}> [preconditioner state]"
+        )
     name = sys.argv[1]
     march_beta, recorded, description = STATES[name]
+    # An optional SECOND state builds the preconditioner, while the operator and right-hand side stay at
+    # the first. That is what the march actually does -- it freezes the preconditioner for a whole inner
+    # loop -- and its expensive solves are measured to be this staleness rather than hard operators (15
+    # cycles against 1 when matched), so it is the pairing with real headroom on this case. Passing two
+    # consecutive inner iterates of one attempt reproduces exactly one inner iteration of staleness.
+    pc_state_name = sys.argv[2] if len(sys.argv) == 3 else name
+    if pc_state_name not in STATES:
+        raise SystemExit(f"unknown preconditioner state {pc_state_name!r}")
+    stale = pc_state_name != name
+    if stale:
+        recorded = None  # nothing is on record for a deliberately mismatched pairing
     # The V-cycle is built at the floor while the operator keeps the march's own beta -- the shipped
     # mismatch. At the converged state's zero shift there is no floor: the adjoint has none, and flooring
     # it here would measure a preconditioner the gradient path never uses.
@@ -398,10 +424,22 @@ def main():
     structure = block_stencil_gather_map(colouring, n_fields)
     base = _coupled_shift_policy(coupled, state, "twolevel")
     rhs = -coupled.residual(state)
-    jacobian = materialize(coupled, state, colouring, structure, n_fields)
     op_shift = _frozen_shift_diagonal(base, march_beta, state) if march_beta > 0 else 0.0
+
+    # The preconditioner is assembled at its own state, which is the same one unless a stale pairing was
+    # asked for. Only one Jacobian is ever live: the operator side is applied matrix-free, by the exact
+    # jvp at `state`, so the materialization is needed only for the preconditioner.
+    if stale:
+        print("  preconditioner built at a DIFFERENT state:", flush=True)
+        pc_state = load_state(pc_state_name)
+        pc_base = _coupled_shift_policy(coupled, pc_state, "twolevel")
+    else:
+        pc_state, pc_base = state, base
+    jacobian = materialize(coupled, pc_state, colouring, structure, n_fields)
     pc_shift = (
-        _frozen_shift_diagonal(base, pc_beta, state) if pc_beta > 0 else np.zeros(groups.n_dofs)
+        _frozen_shift_diagonal(pc_base, pc_beta, pc_state)
+        if pc_beta > 0
+        else np.zeros(groups.n_dofs)
     )
     shifted = MonolithicAmgPreconditioner._shifted(jacobian, pc_shift)
     del jacobian
