@@ -7,15 +7,19 @@ better. It is **not** the block-*diagonal* arrangement that was tried and refute
 coupling, and the coupling is load-bearing. A triangle keeps half of it exactly.
 
 **Where the headroom is, and is not.** At the states the march visits, a preconditioner rebuilt at the
-iterate solves the forward system in one restart cycle, so the shipped forward pairing cannot separate two
-candidates -- an easy operator is not a test, and a tie there is no information. Two operating points on the
-same captured iterates do have room, and both are operationally real:
+iterate solves the forward system in one restart cycle *at the march's own loose stop*, so that pairing
+cannot separate two candidates -- an easy operator is not a test, and a tie there is no information. Two
+states restore the discrimination, and both are configurations something really solves:
 
-* **forward pairing at adjoint-grade tolerance** -- the same operator and shift the march solved, driven
-  far past the march's own loose stop so the arms separate instead of all stopping at one cycle.
-* **zero shift** -- the operator every gradient's transpose solve meets. Removing the pseudo-transient
-  shift is what makes this operator hard, and no preconditioner floor rescues it, so this is where a
-  better preconditioner has something to win. It is a real configuration, not a contrived one.
+* a **captured hard inner iterate**, at the shift the march solved it under, driven far past the march's
+  own stop so the arms separate instead of all stopping at one cycle. The march's expensive solves are
+  measured to be staleness rather than hard operators, so this is a comparison of quality at a matched
+  preconditioner, not a reproduction of the march's cost.
+* the **converged state at zero shift** -- the operator every gradient's transpose solve meets. Removing
+  the pseudo-transient shift is what makes this operator hard, and the adjoint has no preconditioner floor
+  to soften it, so this is where a better preconditioner has something real to win. Note it must be the
+  *converged* state: stripping the shift off a mid-march iterate would measure an operator that nothing,
+  forward or adjoint, ever solves.
 
 **The second question, which the same arms answer.** Every smoother the JAX-native multigrid in this
 package has is Jacobi-class; the one thing PETSc supplies that it does not is the incomplete-LU sweep the
@@ -93,6 +97,7 @@ from aquaflux.turbulence.coupled import (  # noqa: E402
     _coupled_shift_policy,
     _frozen_shift_diagonal,
     _jacobian_matvec,
+    coupled_scaled_norm,
 )
 
 #: Adjoint-grade, far past the march's own 30 % inexact-Newton stop, so arms separate rather than tie.
@@ -101,21 +106,26 @@ RTOL = 1e-8
 #: products costs more than every healthy arm together.
 SOLVER = relative_residual_gmres(RTOL, restart=15, stagnation_iters=40, max_restarts=60)
 
-#: ``name -> (operator beta, description)`` for the captured inner iterates. The shift is not in the file
-#: -- the observer that wrote it is not told the shift -- and the march log that recorded it has since been
-#: overwritten, so these are the two whose pairing is on record.
-ITERATES = {
+#: The states this runs on, as ``name -> (operator beta, recorded self-check, description)``.
+#:
+#: The two ``inner-`` entries are captured mid-inner-loop iterates: their shift is not in the file (the
+#: observer that writes them is not told it) and the march log that recorded it has since been overwritten,
+#: so these are the two whose pairing is on record. Their ``recorded`` entry is what the shipped monolithic
+#: preconditioner is already documented as achieving there, and it gates the run.
+#:
+#: ``state-00069`` is the converged end of that same march (``|R|`` 2.64e-06). It carries the **zero-shift**
+#: operator, which is the one every gradient's transpose solve meets -- and the reason to measure there
+#: rather than to strip the shift off a mid-march iterate, which would be a configuration nothing solves.
+#: Nothing is on record for it, so it is self-checked only for the control converging at all.
+STATES = {
     "inner-00050-03": (
         0.0293,
+        (1, 6.6e-06),
         "the march's hardest solve: 15 cycles, line search collapsed to alpha 0",
     ),
-    "inner-00040-03": (0.3333, "8 cycles at a healthy alpha = 1"),
+    "inner-00040-03": (0.3333, (1, 1.7e-10), "8 cycles at a healthy alpha = 1"),
+    "state-00069": (0.0, None, "the converged state -- the ADJOINT's operator, at zero shift"),
 }
-
-#: What the shipped monolithic preconditioner is already recorded as doing at each iterate under the
-#: forward pairing, used to gate the run. Cycles must match and the true residual must be within an order
-#: of magnitude; a harness that cannot reproduce a recorded measurement is measuring something else.
-RECORDED_FORWARD = {"inner-00050-03": (1, 6.6e-06), "inner-00040-03": (1, 1.7e-10)}
 
 #: Level-smoother recipes, as PETSc options layered over the shipped bundle. ``ilu0`` is the shipped
 #: default (an empty override). The other two are the Jacobi-class candidates a JAX-native multigrid could
@@ -135,16 +145,44 @@ FLOOR = (
 )  # 0.05 -- the forward V-cycle is built here, the operator keeps its own beta
 
 
-def load_iterate(name: str) -> jnp.ndarray:
-    """The captured iterate, reporting what it was so the run records its own inputs."""
+def load_state(name: str) -> jnp.ndarray:
+    """The captured state, reporting what it was so the run records its own inputs.
+
+    The two checkpoint kinds carry different metadata -- an inner iterate knows its attempt and how its
+    own solve went, an end-of-step checkpoint knows the step and its residual -- so each is reported on
+    its own terms rather than through a lowest common denominator that would name neither.
+    """
     data = np.load(CASE / "checkpoints" / f"{name}.npz")
-    print(
-        f"{name}: attempt {int(data['attempt'])} inner {int(data['inner'])}, the march took "
-        f"{int(data['cycles'])} cycles at alpha {float(data['alpha']):.2e}, "
-        f"|G| {float(data['g_before']):.4e} -> {float(data['g_after']):.4e}",
-        flush=True,
-    )
+    if "attempt" in data:
+        detail = (
+            f"attempt {int(data['attempt'])} inner {int(data['inner'])}, the march took "
+            f"{int(data['cycles'])} cycles at alpha {float(data['alpha']):.2e}, "
+            f"|G| {float(data['g_before']):.4e} -> {float(data['g_after']):.4e}"
+        )
+    else:
+        detail = (
+            f"end of step {int(data['step'])}, |R| {float(data['residual_norm']):.4e}, "
+            f"march shift {float(data['shift']):.4f}"
+        )
+    print(f"{name}: {detail}", flush=True)
     return jnp.asarray(data["state"])
+
+
+def march_solver(coupled, policy, state):
+    """The forward solver the coupled multigrid march actually runs, for the self-check arm.
+
+    Not the coupled incomplete-LU path's solver, which is a different object -- 1 % in a plain 2-norm at
+    restart 10 against this one's 30 % in a row-scaled norm at restart 15. Reaching for the wrong one is
+    easy and it does not announce itself: at a state where both converge in a single cycle the check still
+    passes and reports a validation it never performed.
+    """
+    return relative_residual_gmres(
+        0.3,
+        norm=coupled_scaled_norm(coupled, policy, state),
+        restart=15,
+        stagnation_iters=40,
+        max_restarts=60,
+    )
 
 
 def materialize(coupled, state, colouring, structure, n_fields) -> sp.csr_matrix:
@@ -234,7 +272,7 @@ ARMS = (
 )
 
 
-def run_arm(label, preconditioner, built, coupled, state, rhs, op_shift):
+def run_arm(label, preconditioner, built, coupled, state, rhs, op_shift, solver):
     """Solve the REAL system with one already-built preconditioner; report cycles and the TRUE residual."""
 
     def operator(v):
@@ -242,7 +280,7 @@ def run_arm(label, preconditioner, built, coupled, state, rhs, op_shift):
 
     solving = time.time()
     solution, raw = solve_linear(
-        operator, rhs, SOLVER, preconditioner=preconditioner.matvec(), throw=False
+        operator, rhs, solver, preconditioner=preconditioner.matvec(), throw=False
     )
     true = float(jnp.linalg.norm(operator(solution) - rhs) / jnp.linalg.norm(rhs))
     cycles = restart_cycles(int(raw))
@@ -254,60 +292,89 @@ def run_arm(label, preconditioner, built, coupled, state, rhs, op_shift):
     return cycles, true
 
 
-def operating_point(name, coupled, state, rhs, jacobian, op_shift, pc_shift, groups, n_fields):
-    """Every arm at one (operator shift, preconditioner shift) pairing, off the shared materialization."""
-    print(f"\n  -- {name}", flush=True)
-    shifted = MonolithicAmgPreconditioner._shifted(jacobian, pc_shift)
-    results = {}
-    for key, label, build in ARMS:
-        preconditioner = None
-        # A raise in one arm -- a singular coarse solve, a zero pivot, a failed eigenvalue estimate --
-        # must not take the arms queued behind it, which by then represent most of the run's elapsed time.
-        try:
-            started = time.time()
-            preconditioner = build(shifted, groups, n_fields)
-            results[key] = run_arm(
-                label, preconditioner, time.time() - started, coupled, state, rhs, op_shift
-            )
-        except Exception as failure:
-            print(f"    {label:<36} FAILED  {type(failure).__name__}: {failure}", flush=True)
-            results[key] = None
-        finally:
-            if preconditioner is not None:
-                preconditioner.factors.destroy()
-            del preconditioner
-            gc.collect()
-    del shifted
-    gc.collect()
-    return results
+def one_arm(label, build, shifted, groups, n_fields, coupled, state, rhs, op_shift, solver):
+    """Build and run a single arm, surviving a failure so the arms queued behind it still run.
 
-
-def gate(name, measured):
-    """Refuse to report if the control does not reproduce what is already recorded for it."""
-    expected_cycles, expected_true = RECORDED_FORWARD[name]
-    if measured is None:
-        raise SystemExit(
-            f"FAITHFULNESS GATE FAILED for {name}: the control arm did not run at all."
+    A raise here -- a singular coarse solve, a zero pivot, a failed Chebyshev eigenvalue estimate -- is a
+    result about that arm, and by the time it happens the remaining arms represent most of the run.
+    """
+    preconditioner = None
+    try:
+        started = time.time()
+        preconditioner = build(shifted, groups, n_fields)
+        return run_arm(
+            label, preconditioner, time.time() - started, coupled, state, rhs, op_shift, solver
         )
+    except Exception as failure:
+        print(f"    {label:<36} FAILED  {type(failure).__name__}: {failure}", flush=True)
+        return None
+    finally:
+        if preconditioner is not None:
+            preconditioner.factors.destroy()
+        del preconditioner
+        gc.collect()
+
+
+def self_check(name, recorded, shifted, groups, n_fields, coupled, state, rhs, op_shift, solver):
+    """Reproduce the recorded control measurement, and refuse to go on if it cannot be reproduced.
+
+    Run at the **march's own** solver, because that is the configuration the recorded numbers were taken
+    under: judging them against this study's far tighter stop would fail a faithful harness, since a solve
+    that reaches 6.6e-06 in one cycle keeps going when asked for 1e-08.
+    """
+    print("\n  -- self-check: the shipped preconditioner at the march's own solver", flush=True)
+    measured = one_arm(
+        "monolithic, ILU(0), march solver",
+        ARMS[0][2],
+        shifted,
+        groups,
+        n_fields,
+        coupled,
+        state,
+        rhs,
+        op_shift,
+        solver,
+    )
+    if recorded is None:
+        if measured is None or not np.isfinite(measured[1]) or measured[1] > 1e-3:
+            raise SystemExit(
+                f"SELF-CHECK FAILED for {name}: the control did not converge, so nothing else measured "
+                "here can be trusted."
+            )
+        print("    [no recorded value for this state; control converges, continuing]", flush=True)
+        return
+    expected_cycles, expected_true = recorded
+    if measured is None:
+        raise SystemExit(f"SELF-CHECK FAILED for {name}: the control arm did not run at all.")
     cycles, true = measured
     if cycles != expected_cycles or not (expected_true / 10 <= true <= expected_true * 10):
         raise SystemExit(
-            f"FAITHFULNESS GATE FAILED for {name}: the shipped monolithic arm gave {cycles} cycles at a "
-            f"true relative residual of {true:.3e}, where {expected_cycles} cycles at ~{expected_true:.1e} "
-            "is on record for this iterate and pairing. The harness is not solving the system the record "
+            f"SELF-CHECK FAILED for {name}: the shipped preconditioner gave {cycles} cycles at a true "
+            f"relative residual of {true:.3e}, where {expected_cycles} cycles at ~{expected_true:.1e} is "
+            "on record for this state and pairing. The harness is not solving the system the record "
             "describes; fix that before reading any other row."
         )
-    print(
-        f"    [gate passed: the control reproduces the recorded {expected_cycles} cycles]",
-        flush=True,
-    )
+    print(f"    [self-check passed: reproduces the recorded {expected_cycles} cycles]", flush=True)
+
+
+def study(coupled, state, rhs, shifted, op_shift, groups, n_fields):
+    """Every arm at this state's pairing, at the study's own tight stop so the arms separate."""
+    print(f"\n  -- study arms, GMRES to rtol {RTOL:.0e} on the TRUE residual", flush=True)
+    return {
+        key: one_arm(label, build, shifted, groups, n_fields, coupled, state, rhs, op_shift, SOLVER)
+        for key, label, build in ARMS
+    }
 
 
 def main():
-    if len(sys.argv) != 2 or sys.argv[1] not in ITERATES:
-        raise SystemExit(f"usage: {Path(sys.argv[0]).name} <{' | '.join(ITERATES)}>")
+    if len(sys.argv) != 2 or sys.argv[1] not in STATES:
+        raise SystemExit(f"usage: {Path(sys.argv[0]).name} <{' | '.join(STATES)}>")
     name = sys.argv[1]
-    march_beta, description = ITERATES[name]
+    march_beta, recorded, description = STATES[name]
+    # The V-cycle is built at the floor while the operator keeps the march's own beta -- the shipped
+    # mismatch. At the converged state's zero shift there is no floor: the adjoint has none, and flooring
+    # it here would measure a preconditioner the gradient path never uses.
+    pc_beta = max(march_beta, FLOOR) if march_beta > 0 else 0.0
 
     coupled = compare.build_case()["coupled"]
     n_fields = coupled.layout.dim + 3
@@ -320,10 +387,11 @@ def main():
         f"{'=' * 100}\nfield split: {groups.n_leading_fields} leading + {groups.n_trailing_fields} "
         f"trailing fields over {groups.n_cells} cells\nbundle: plain aggregation, "
         f"ILU({compare.FILL_LEVELS}) x{compare.SWEEPS} where not overridden, coarse_eq_limit "
-        f"{compare.COARSE_EQ_LIMIT}, stencil reach 3, GMRES restart 15 to rtol {RTOL:.0e}\n{'=' * 100}",
+        f"{compare.COARSE_EQ_LIMIT}, stencil reach 3, GMRES restart 15\n"
+        f"operator beta {march_beta}, preconditioner beta {pc_beta}\n{'=' * 100}",
         flush=True,
     )
-    state = load_iterate(name)
+    state = load_state(name)
     print(f"  {description}", flush=True)
 
     colouring = _coupled_jacobian_colouring(coupled, 3)
@@ -331,35 +399,27 @@ def main():
     base = _coupled_shift_policy(coupled, state, "twolevel")
     rhs = -coupled.residual(state)
     jacobian = materialize(coupled, state, colouring, structure, n_fields)
+    op_shift = _frozen_shift_diagonal(base, march_beta, state) if march_beta > 0 else 0.0
+    pc_shift = (
+        _frozen_shift_diagonal(base, pc_beta, state) if pc_beta > 0 else np.zeros(groups.n_dofs)
+    )
+    shifted = MonolithicAmgPreconditioner._shifted(jacobian, pc_shift)
+    del jacobian
+    gc.collect()
 
-    # The shipped forward pairing, at adjoint-grade tolerance so the arms are not all tied at one cycle.
-    # This is the pairing the faithfulness gate is recorded against.
-    forward = operating_point(
-        f"forward pairing: operator beta {march_beta}, V-cycle beta {max(march_beta, FLOOR)}",
+    self_check(
+        name,
+        recorded,
+        shifted,
+        groups,
+        n_fields,
         coupled,
         state,
         rhs,
-        jacobian,
-        _frozen_shift_diagonal(base, march_beta, state),
-        _frozen_shift_diagonal(base, max(march_beta, FLOOR), state),
-        groups,
-        n_fields,
+        op_shift,
+        march_solver(coupled, base, state),
     )
-    gate(name, forward["mono/ilu0"])
-
-    # Zero shift: the operator every gradient's transpose solve meets, and the one place on this case with
-    # genuine headroom left. No floor -- the adjoint has none.
-    operating_point(
-        "adjoint pairing: operator beta 0, V-cycle beta 0",
-        coupled,
-        state,
-        rhs,
-        jacobian,
-        np.zeros(groups.n_dofs),
-        np.zeros(groups.n_dofs),
-        groups,
-        n_fields,
-    )
+    study(coupled, state, rhs, shifted, op_shift, groups, n_fields)
 
 
 if __name__ == "__main__":
