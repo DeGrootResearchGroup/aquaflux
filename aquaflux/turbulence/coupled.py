@@ -30,6 +30,7 @@ adjoint sees only the smooth interior physics).
 from __future__ import annotations
 
 import abc
+import dataclasses
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -1391,8 +1392,35 @@ class MonolithicFactorShiftPolicy(eqx.Module):
         :func:`jax.linear_transpose`, which cannot handle the host-callback factorization, so it is
         applied directly instead.
         """
-        transpose = self.preconditioner.matvec(transpose=True)
-        return TransposedPreconditioner(lambda state: transpose)
+        return TransposedPreconditioner(FrozenTransposeFactory(self.preconditioner))
+
+
+@dataclasses.dataclass(frozen=True)
+class FrozenTransposeFactory:
+    """``state -> M^T`` for a frozen monolithic factorization, as a value object rather than a closure.
+
+    The transpose is state-independent -- the factorization is frozen, so the same ``M^T`` serves every
+    state -- which is exactly why this can be a value whose equality is the preconditioner's identity.
+
+    That matters because it ends up in a forward step's ``adjoint_preconditioner_factory``, a *static*
+    field and hence part of the compiled step's cache key. As a lambda it compared by identity, so a
+    Reynolds-continuation rung that rebuilt its engine got a fresh key and recompiled the coupled solve
+    even when it was reusing the very same preconditioner. As a value object, two engines sharing one
+    preconditioner produce equal factories and the rebuild is a cache hit.
+
+    Attributes
+    ----------
+    preconditioner : object
+        The frozen factorization, supplying ``matvec(transpose=True)``. Compared by identity, which is
+        the intended meaning: the same preconditioner object *is* the same operator, and two distinct
+        objects generally are not.
+    """
+
+    preconditioner: object
+
+    def __call__(self, state: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
+        del state  # frozen: the transpose does not depend on where the adjoint is taken
+        return self.preconditioner.matvec(transpose=True)
 
 
 def _coupled_jacobian_colouring(coupled: CoupledRANS, stencil_reach: int):
@@ -1934,7 +1962,6 @@ def coupled_amg_continuation(
         ``inner_steps`` into the restart cap; pair it with ``solve_coupled``'s β-escalation
         (``retry_on_cycles < cycle_budget``), which redoes the capped step at a larger β. ``None`` (default)
         is unbounded and byte-identical. Forward-only.
-
     Returns
     -------
     ForwardStep

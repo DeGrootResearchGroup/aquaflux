@@ -839,3 +839,50 @@ def test_the_jacobian_probe_is_a_cache_hit_across_reynolds_rungs() -> None:
         _batched_jacobian_matvec(rung, state, seeds)
 
     assert len(_PROBE_TRACES) == compiled
+
+
+def test_the_adjoint_transpose_factory_compares_by_the_preconditioner_it_wraps() -> None:
+    """Two engines sharing one preconditioner must produce EQUAL adjoint factories.
+
+    The factory rides in the forward step's ``adjoint_preconditioner_factory``, a static field and so
+    part of the compiled step's cache key. As a lambda it compared by identity, which meant a rung that
+    rebuilt its engine recompiled the whole coupled solve even when it was reusing the very same
+    preconditioner -- defeating the point of reusing it.
+    """
+    from aquaflux.solve import TransposedPreconditioner
+    from aquaflux.turbulence.coupled import FrozenTransposeFactory
+
+    class _Pc:
+        def matvec(self, *, transpose: bool = False):
+            return lambda v: v
+
+    first, second = _Pc(), _Pc()
+    assert FrozenTransposeFactory(first) == FrozenTransposeFactory(first)
+    assert FrozenTransposeFactory(first) != FrozenTransposeFactory(second)
+    # ...and the wrapper must not throw that equality away again.
+    assert TransposedPreconditioner(FrozenTransposeFactory(first)) == TransposedPreconditioner(
+        FrozenTransposeFactory(first)
+    )
+    assert TransposedPreconditioner(FrozenTransposeFactory(first)) != TransposedPreconditioner(
+        FrozenTransposeFactory(second)
+    )
+
+
+def test_the_frozen_transpose_factory_ignores_the_state_it_is_given() -> None:
+    """The factorization is frozen, so the same transpose serves every state -- which is what lets this
+    be a value object at all."""
+    from aquaflux.turbulence.coupled import FrozenTransposeFactory
+
+    class _Pc:
+        def __init__(self):
+            self.calls = 0
+
+        def matvec(self, *, transpose: bool = False):
+            self.calls += 1
+            assert transpose
+            return lambda v: 2.0 * v
+
+    pc = _Pc()
+    factory = FrozenTransposeFactory(pc)
+    assert float(factory(jnp.ones(3))(jnp.ones(3))[0]) == 2.0
+    assert float(factory(jnp.zeros(3))(jnp.ones(3))[0]) == 2.0

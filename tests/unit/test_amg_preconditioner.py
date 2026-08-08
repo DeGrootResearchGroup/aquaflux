@@ -112,3 +112,44 @@ def test_amg_refresh_shift_in_place_requires_a_cached_jacobian() -> None:
     pc = MonolithicAmgPreconditioner(vcycle)  # no jacobian_no_shift cached
     with pytest.raises(RuntimeError, match="cached Jacobian"):
         pc.refresh_shift_in_place(np.ones(100))
+
+
+def test_extra_options_reach_petsc_under_the_v_cycle_own_prefix() -> None:
+    """The tuning seam delivers caller options to GAMG, and they win over the shipped defaults.
+
+    The shipped bundle (zero-fill smoother, 4 sweeps, a 2000-equation direct coarse solve) is measured,
+    but several standard aggregation options have never been swept on the coupled saddle. This is the
+    seam a study varies them through, rather than editing the defaults or writing into the global PETSc
+    options database behind the preconditioner's back -- which would leak across every other V-cycle in
+    the process, since each carries its own prefix precisely to stay isolated.
+    """
+    from petsc4py import PETSc
+
+    matrix = sp.diags([-1.0, 2.0, -1.0], [-1, 0, 1], shape=(240, 240), format="csr")
+    tuned = build_amg_vcycle(
+        matrix,
+        1,
+        smoother_fill_levels=0,
+        smoother_sweeps=2,
+        coarse_eq_limit=20,
+        extra_options={"pc_gamg_threshold": 0.5, "pc_gamg_agg_nsmooths": 0},
+    )
+    prefix = tuned._pc.getOptionsPrefix()
+    opts = PETSc.Options()
+    assert opts[prefix + "pc_gamg_threshold"] == "0.5"
+    assert opts[prefix + "pc_gamg_agg_nsmooths"] == "0"
+    # ...and an option the caller did NOT set keeps the shipped value.
+    assert opts[prefix + "mg_levels_ksp_type"] == "richardson"
+
+
+def test_no_extra_options_is_the_shipped_configuration() -> None:
+    """``None`` (the default) must leave the measured bundle exactly as it is."""
+    matrix = sp.diags([-1.0, 2.0, -1.0], [-1, 0, 1], shape=(120, 120), format="csr")
+    plain = build_amg_vcycle(
+        matrix, 1, smoother_fill_levels=0, smoother_sweeps=2, coarse_eq_limit=20
+    )
+    explicit = build_amg_vcycle(
+        matrix, 1, smoother_fill_levels=0, smoother_sweeps=2, coarse_eq_limit=20, extra_options=None
+    )
+    rhs = np.ones(120)
+    np.testing.assert_allclose(plain.apply(rhs), explicit.apply(rhs), rtol=0, atol=0)

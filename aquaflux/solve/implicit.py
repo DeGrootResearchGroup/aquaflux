@@ -596,6 +596,7 @@ def _implicit_solve_fwd(
     return phi_star, (phi_star, theta)
 
 
+@dataclasses.dataclass(frozen=True)
 class TransposedPreconditioner:
     """An adjoint-preconditioner factory whose output is **already** the transpose ``M^T``.
 
@@ -612,10 +613,17 @@ class TransposedPreconditioner:
     ----------
     factory : callable
         The ``state -> M^T`` factory, returning the transpose preconditioner matvec directly.
+
+    Notes
+    -----
+    A **frozen dataclass**, so two wrappers around the same factory compare equal. This rides in a
+    forward step's ``adjoint_preconditioner_factory``, a *static* field and therefore part of the
+    compiled step's cache key; identity comparison there means every rebuild recompiles the whole
+    coupled solve. Equality is only as good as the wrapped factory's -- pass a value object, not a
+    lambda (see :class:`~aquaflux.turbulence.coupled.FrozenTransposeFactory`).
     """
 
-    def __init__(self, factory: Callable[[Any], Callable[[Any], Any]]) -> None:
-        self.factory = factory
+    factory: Callable[[Any], Callable[[Any], Any]]
 
     def __call__(self, state: Any) -> Callable[[Any], Any]:
         return self.factory(state)

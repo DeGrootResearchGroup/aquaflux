@@ -103,8 +103,10 @@ class AmgVCycle:
         native: bool = False,
         solve_rtol: float = 1e-8,
         solve_restart: int = 30,
+        extra_options: dict | None = None,
     ) -> None:
         self._PETSc = _petsc()
+        self._extra_options = extra_options
         self.scale = scale
         self.perm = perm
         self._n_fields = n_fields
@@ -223,6 +225,11 @@ class AmgVCycle:
         # PETSc default in place.
         if self._coarse_eq_limit is not None:
             opts[p + "pc_gamg_coarse_eq_limit"] = self._coarse_eq_limit
+        # Caller overrides last, so a study can vary an aggregation or smoother option without editing
+        # the defaults. The defaults above are the measured bundle; this is the seam for the ones that
+        # have never been swept on this operator (strength-of-connection, prolongator smoothing).
+        for key, value in (self._extra_options or {}).items():
+            opts[p + key] = value
         pc = PETSc.PC().create()
         pc.setOptionsPrefix(p)
         pc.setOperators(self._mat)
@@ -368,6 +375,7 @@ def build_amg_vcycle(
     smoother_sweeps: int = 2,
     coarse_eq_limit: int | None = None,
     native: bool = False,
+    extra_options: dict | None = None,
 ) -> AmgVCycle:
     """Equilibrate + reorder a coupled block matrix and build a multigrid V-cycle preconditioner for it.
 
@@ -413,6 +421,7 @@ def build_amg_vcycle(
         smoother_sweeps=smoother_sweeps,
         coarse_eq_limit=coarse_eq_limit,
         native=native,
+        extra_options=extra_options,
     )
 
 
@@ -684,6 +693,7 @@ class MonolithicAmgPreconditioner:
         batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         probe_batch_size: int | None = None,
         structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+        extra_options: dict | None = None,
     ) -> MonolithicAmgPreconditioner:
         """Materialize the shifted coupled Jacobian and build a V-cycle preconditioner for it, off the jit path.
 
@@ -739,6 +749,7 @@ class MonolithicAmgPreconditioner:
                 smoother_sweeps=smoother_sweeps,
                 coarse_eq_limit=coarse_eq_limit,
                 native=native,
+                extra_options=extra_options,
             ),
             residual_fn=residual_fn,
             jacobian_no_shift=jacobian,
