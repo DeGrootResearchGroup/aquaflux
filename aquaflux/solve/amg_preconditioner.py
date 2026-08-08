@@ -18,10 +18,13 @@ conditioning transform the ILUT uses, :func:`~aquaflux.solve.ilut_preconditioner
 which balances the momentum/continuity row scales and interleaves the pressure among the velocity unknowns
 so the aggregation and the level smoother see a well-scaled block operator.
 
-The V-cycle is built with PETSc's smoothed-aggregation multigrid (``PCGAMG``): a **direct LU coarse solve**
-and a **stationary incomplete-LU level smoother** (one level of fill — a plain zero-fill smoother stalls on
-the indefinite saddle, while a Krylov-accelerated smoother would make the operator nonlinear and is
-therefore avoided here). It is a host object, built once off the jit path at a reference state and shift and
+The V-cycle is built with PETSc's aggregation multigrid (``PCGAMG``): a **direct LU coarse solve** and a
+**stationary zero-fill incomplete-LU level smoother**, over **plain (unsmoothed) aggregation**. Each of
+those three is a measured choice against this indefinite saddle rather than a default — fill in the
+smoother produces negative pivots as the pseudo-transient shift falls, smoothing the prolongator degrades
+the coarse correction (both measured on the coupled backward-facing step), and a Krylov-accelerated
+smoother would make the operator nonlinear, which the outer Krylov solve and the adjoint transpose cannot
+use. It is a host object, built once off the jit path at a reference state and shift and
 applied inside the jitted Krylov solve through ``jax.pure_callback`` — exactly like the ILUT and LU. Because
 PETSc supplies the multigrid it is the one member of the family that requires the optional ``petsc``
 dependency; there is no pure-SciPy algebraic-multigrid fallback.
@@ -201,6 +204,22 @@ class AmgVCycle:
         for key, value in {
             "pc_type": "gamg",
             "pc_gamg_type": "agg",
+            # PLAIN aggregation, not smoothed. Smoothing the tentative prolongator with a Jacobi step
+            # improves interpolation for an M-matrix-like operator and degrades it for a strongly
+            # indefinite one, which is what this saddle is. Measured on the coupled backward-facing step
+            # with the march's own states, right-hand sides and shift pairing:
+            #
+            #   state                          smoothed   plain
+            #   below the shift floor           22 cyc     9 cyc     (2.4x, and 66x lower true residual)
+            #   a step whose line search died    4 cyc     3 cyc
+            #   the converged tail               6 cyc     6 cyc     <- ties, which is why it hid
+            #
+            # The tie at the converged state is the reason this went unnoticed: an easy operator does not
+            # discriminate between preconditioners, so a probe taken there reports no difference. Plain
+            # aggregation is also marginally cheaper to set up, and it is what makes a DEEP hierarchy
+            # usable at all -- with smoothing on, adding levels (via a strength threshold) produces dense
+            # coarse operators and a V-cycle that returns NaN.
+            "pc_gamg_agg_nsmooths": 0,
             # Keep the aggregation + prolongation and the level-smoother ordering across a refresh
             # (:meth:`refactor`): the operator's sparsity graph is fixed (the graph-coloured Jacobian
             # probe uses a fixed stencil reach; the equilibration and cell-major reorder are value-only),

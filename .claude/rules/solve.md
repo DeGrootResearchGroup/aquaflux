@@ -397,6 +397,39 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     Worth knowing before adding a second spelling of it: prefer the floor, which is explicit about being
     preconditioner-only.
 
+    **PLAIN aggregation, not smoothed — `pc_gamg_agg_nsmooths = 0` (measured, and the largest
+    preconditioner win found on this case).** Smoothing the tentative prolongator with a Jacobi step is
+    GAMG's default and is right for an M-matrix-like operator; on a strongly indefinite saddle it
+    degrades the coarse correction. Measured with the march's **own** states, right-hand sides
+    (`-R(state)`) and shift pairing (operator at the march's β, V-cycle at `max(β, floor)`):
+
+    | state | smoothed (was) | plain (now) |
+    |---|---|---|
+    | entering a step below the shift floor (β 0.0154, α clipped to 0.200) | 22 cyc, 3.2e-8 | **9 cyc, 4.7e-10** |
+    | entering the retried step (α → 0) | 4 cyc, 1.2e-12 | **3 cyc, 5.7e-14** |
+    | the converged tail | 6 cyc | 6 cyc |
+
+    **The tie at the converged tail is the methodological point:** an easy operator does not discriminate
+    between preconditioners, so the first sweep — taken there — reported no difference on any arm and
+    nearly closed the question. Sweep preconditioners at the march's *hard* states, which the checkpoints
+    identify by cycle count and clipped α. Plain aggregation is also marginally cheaper to set up.
+    **It is also what makes a DEEP hierarchy usable:** with smoothing ON, adding levels via
+    `pc_gamg_threshold` gives dense coarse operators, builds of 96–1224 s, and a V-cycle returning
+    **NaN** at every threshold tried (0.01/0.05/0.1/0.25); with it OFF, `threshold=0.05` builds a
+    **5-level** hierarchy in 26 s at the same cycle count. That matters for scaling — the shipped
+    2-level design leans on a direct LU at `coarse_eq_limit` equations to carry the global modes, which
+    is cheap at 23k cells and will not be at 10× — so the threshold is left OFF as the default (it buys
+    nothing on *this* mesh) while being known to work.
+    **Corollary worth keeping: the NaN is the smoothing/threshold INTERACTION, not the threshold.** Do
+    not re-refute strength-of-connection on the smoothed-aggregation evidence.
+    **VALIDATED ON THE FULL 3-RUNG MARCH** — 4050 s / 62 steps / **347 cycles** / 3 retry cascades →
+    3474 s / 69 steps / **290 cycles** / **1** cascade, converging deeper (2.6e-6 vs 8.9e-6) with the
+    answer unchanged (mid-span `x_r/h` 8.36). Per rung the effect lands exactly where the sweep said:
+    rung 1 (the easy high-β anchor) **37 → 37, identical**, rung 2 110 → 75, rung 3 200 → 178. Note the
+    march takes *more* steps (62 → 69): cheaper solves hold α higher, so the Courant control grows β
+    differently and the trajectory diverges from step 24 — this is a whole-march total, not a per-step
+    improvement, and part of the wall saving is the two retry cascades that stop happening.
+
     **Validated on a real march, not just a frozen state:** the 3-rung Reynolds-continuation `bfs3d` march
     ran to the target Reynolds number on this bundle — 62 steps, 883 raw cycles, ~77 min, no breakdown,
     with β reaching **0.0077** at 6–11 cycles per solve, well past the 0.02 where ILU(1) diverged.
@@ -500,8 +533,8 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       place, so only the Galerkin coarse operators and the incomplete-LU factor values recompute.
   - **⚠️ MEASUREMENT DISCIPLINE FOR PRECONDITIONER PROBES (binding — every one of these produced a wrong
     verdict that had to be retracted).** Judge a candidate preconditioner **only** by running it through
-    GMRES and reading the **true** residual `‖Ax−b‖`. Four cheaper-looking gates are all invalid on this
-    indefinite saddle:
+    GMRES and reading the **true** residual `‖Ax−b‖`, **at a state and shift pairing where the operator
+    is actually hard**. Five cheaper-looking shortcuts are all invalid on this indefinite saddle:
     1. **The preconditioned residual `‖Mr‖`.** PETSc's default convergence norm. SOR/Krylov-smoothing
        report `reason=2` (converged) at a **true** residual of 1.0. Force `KSP_NORM_UNPRECONDITIONED`.
        A level-ILU "win" was once entirely this artifact.
@@ -511,7 +544,23 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     3. **The spectral radius of the iteration operator.** The largest eigenmode of a smoothed operator is
        the *smooth* mode — which is the coarse grid's job, not the smoother's. A "ρ = 9e4, diverges"
        reading nearly killed a Vanka smoother that had never actually been run through GMRES.
-    4. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
+    4. **A probe at a BENIGN operating point — an easy operator cannot discriminate between
+       preconditioners.** This is the one that nearly buried the largest preconditioner win found on this
+       case. A GAMG aggregation sweep run at the march's *converged tail* returned **6 cycles for every
+       arm** — shipped, plain aggregation, and two strength thresholds all identical — and the honest
+       reading of that sweep was "no difference, close the question". Re-run at the march's own **hard**
+       states, the same arms separated **22 → 9 cycles** (2.4×, and 66× lower true residual). Where the
+       operator is well conditioned, every candidate looks the same, so a null result there is *no
+       information*, not evidence of no effect.
+       **Pick the hard states from the march's own log, not by intuition:** the checkpoints plus the step
+       table identify them directly — highest cycle count, clipped `a_min`, and any step carrying a retry
+       flag. Probe the state *entering* such a step (the checkpoint written after the previous one).
+       The same caution applies to the *pairing*: use the operator at the march's own β with the V-cycle
+       at `max(β, beta_floor)`, because that mismatch is the shipped configuration. A probe that builds
+       the V-cycle at the march's raw β instead measures a configuration the floor exists to prevent —
+       it reported "the V-cycle does not converge at all in the tail" (true residual 1.0), where the real
+       pairing takes **6 cycles to 1.5e-10**.
+    5. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
        Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
        `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks
        plausible — two probes were invalidated this way. (`equilibrate_cell_major` reorders internally, so
@@ -536,6 +585,15 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     - **Where the V-cycle actually under-performs:** per-field, pressure is *well* smoothed and **ω** is
       the unsmoothed field (by ~700–1300×), then `u`. If a per-field lever is wanted in 3D, ω is it —
       pressure is not.
+      **⚠️ NEITHER THIS NOR THE VANKA BULLET RECORDS WHICH SMOOTHER OR AGGREGATION IT WAS MEASURED
+      WITH, so neither can be relied on now.** The smoother default has since moved ILU(1) → ILU(0) and
+      the aggregation smoothed → plain, and *both* of those changes have inverted a conclusion on this
+      case. Concretely, the Vanka bullet's inference — "a strong smoother still stalls, therefore the
+      **coarse space** is the wall" — is valid but **under-determined**: "the coarse space" could mean
+      the space is intrinsically inadequate (needing inf-sup-aware coarsening, a research problem) or
+      that the coarse *correction* was corrupted by prolongator smoothing (a setting, now changed). A
+      stall at 5–6e-2 fits both, so that experiment never distinguished them. Re-measure before building
+      on either, and **record the smoother and aggregation** in any replacement.
     - **The Jacobian's fill is irreducible.** The coupled `(u,p)` Jacobian is intrinsically **distance-2**
       (~38 nnz/row) because Rhie–Chow damping couples pressure to the neighbour-of-neighbour ring; the
       advection scheme is irrelevant to this. A distance-1 preconditioner pattern is not available for a

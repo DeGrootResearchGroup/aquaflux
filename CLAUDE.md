@@ -580,6 +580,33 @@ So: when a case exposes a scalar for a solver to be watched by, it must be **the
 final report uses — not a convenient approximation of it. If a diagnostic variant is genuinely wanted,
 report it under a **different name**, alongside.
 
+### Record what a measurement was taken under (binding)
+
+**A measured finding written into these files must name the configuration it was measured with — the
+defaults that were active, the state, and the operating point. A number without its configuration
+expires silently the moment any of them changes, and you cannot tell that it has.**
+
+This is not hypothetical bookkeeping. Three separate findings in `.claude/rules/solve.md` — "ω is the
+unsmoothed field (~700–1300×)", the Vanka "a strong smoother still stalls, so the coarse space is the
+wall", and a monolithic-AMG probe's "block-ILU(0) smoother diverges" — record no smoother and no
+aggregation. Both of those defaults have since moved (ILU(1) → ILU(0), smoothed → plain aggregation),
+and **each move has already inverted a conclusion on that case.** So all three are now unusable: they
+cannot be relied on, and they cannot be cheaply re-adjudicated either, because the harnesses were
+scratchpad-only and are gone. They are not wrong — they are unfalsifiable, which is worse, because a
+wrong finding gets corrected and an unfalsifiable one gets cited.
+
+Concretely, when you write a measurement down:
+
+- **Name the defaults in force.** "21 iterations" is worthless; "21 iterations at ILU(1), 2 sweeps,
+  smoothed aggregation, 2 levels" survives a default change because a reader can see it no longer applies.
+- **Name the state and the operating point** — which case, which step or checkpoint, which shift, and
+  whether the state was converged or mid-march. The same arm can measure 6 cycles at one and 22 at another.
+- **Say what an inference does NOT distinguish.** The Vanka bullet's reasoning is valid but
+  under-determined between two different meanings of "the coarse space", and nothing recorded that, so it
+  was read as the expensive one for months.
+- **When a default changes, grep the rules for findings measured under the old one** and mark them, in the
+  same change. That is part of the Post-Change Checklist's Documentation-sync item, not a follow-up.
+
 ### Start from an up-to-date main (do this FIRST — binding)
 
 **Before creating a feature branch, putting any change on it, or running the test suite,
