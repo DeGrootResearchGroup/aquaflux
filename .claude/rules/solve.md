@@ -707,6 +707,73 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       one that keeps costing time: a contraction ratio is not a convergence criterion for a
       Krylov-accelerated preconditioner; and *that state cannot rank the orderings at all*, because an
       operator every candidate solves in one cycle discriminates between none of them.
+    - **✅ MEASURED ON `bfs3d` (2026-08-08) — the split loses on the forward operator and WINS on the
+      adjoint's, and the adjoint is the one that matters.** Harness
+      `validation/bfs3d_openfoam/field_split_probe.py`. **Configuration, in full:** 3-rung cold march's
+      own states; plain aggregation, **ILU(0) ×4** where not overridden, `coarse_eq_limit` 2000, stencil
+      reach 3, block sizes 4 and 2; GMRES restart 15 to **rtol 1e-8 on the TRUE residual**; right-hand
+      side the steady residual `−R(state)`; one materialization per state shared by every arm.
+
+      | arm (flow / turbulence smoother) | hard iterate, β=0.0293, PC 0.05 | converged, **β=0** |
+      |---|---|---|
+      | monolithic ILU(0) — control | **3** (1.2e-12) | **16** (1.8e-11) |
+      | split flow-first, ILU(0) / ILU(0) | 4 (1.3e-13) | **11** (3.7e-11) |
+      | split turbulence-first, ILU(0) / ILU(0) | 4 (5.2e-14) | 13 (1.3e-10) |
+      | split flow-first, ILU(0) / **damped Jacobi** | 6 (2.8e-12) | 16 (5.2e-10) |
+      | split flow-first, ILU(0) / Chebyshev | 58 cap (3.3e-01) | 58 cap (2.6e-01) |
+      | split flow-first, Chebyshev / ILU(0) | 58 cap (3.4e-02) | 58 cap (3.8e-03) |
+      | split flow-first, Chebyshev / Chebyshev | 58 cap (9.97e-01) | 58 cap (9.5e-01) |
+      | monolithic Chebyshev | 58 cap (9.9e-01) | 58 cap (5.4e-01) |
+      | monolithic damped Jacobi | 58 cap (6.0e-01) | 58 cap (2.8e-01) |
+
+      - **Forward: a small loss (4 vs 3), so do not adopt it for the march.** Both orderings tie there.
+      - **Adjoint (`β = 0`, converged state): 11 vs 16, a 1.45× reduction** — and flow-first genuinely beats
+        turbulence-first (11 vs 13), so the ordering *does* matter once the operator is hard enough to
+        discriminate. This is the operator behind every `jax.grad` through a converged coupled solve, and
+        it is the same place the monolithic ILUT's value turned out to lie. **Measure a coupled
+        preconditioner at `β = 0`, not only on the march.**
+      - **⚠️ `β = 0` must be taken at the CONVERGED state.** Stripping the shift off a mid-march iterate
+        gives an operator neither the forward march nor the adjoint ever solves.
+      - **⚠️ The probe's right-hand side is `−R`, and a dual-time step's is `−G = −(R + βd(φ−φₙ))`.** They
+        coincide only at inner 0 (`φ = φₙ`) — which is why a sweep over end-of-step *checkpoints* is right
+        to use `−R` — and on the hardest captured **inner** iterate they differ by ~200× (`|G|` 3.8e-03 vs
+        `|R|` 8.3e-01). `φₙ` is not recorded by the inner observer, so `G` cannot be reconstructed. The
+        self-check therefore gates on the **cycle count** (which reproduced the recorded 1) and reports the
+        achieved residual without asserting it. Every arm sees the identical right-hand side, so the
+        between-arm comparison is unaffected — but do not compare an absolute residual across the two.
+    - **✅ THE INCOMPLETE-LU SWEEP CAN BE CONFINED TO THE SADDLE — the reachable half of the GPU prize.**
+      Every smoother `solve/multigrid.py` has is Jacobi-class; the only thing PETSc supplies that it does
+      not is the incomplete-LU sweep, which is also the least parallelizable piece (a sequential triangular
+      solve). Two claims must be separated, because they have opposite answers:
+      - **Remove it everywhere — REFUTED.** A Jacobi-class smoother on the four-field `[u,v,w,p]` block
+        fails as badly as on the six-field block (both run to the restart cap). Taking ω out of the
+        Chebyshev-smoothed block *helps a great deal* — 9.9e-01 → 3.4e-02 at the hard iterate, 5.4e-01 →
+        3.8e-03 at `β=0`, one to two orders — so **ω-locality is real and is part of the obstruction**, as
+        the cell-block singular-value decomposition predicted. But it never converges: the `[u,v,w,p]`
+        block **is the saddle**, and a field split does not make it definite. Removing ω is necessary and
+        not sufficient.
+      - **Confine it to the saddle — SUPPORTED.** `[k,ω]` is not a saddle but a two-field
+        advection-diffusion-reaction pair with a genuine diagonal, and **damped Jacobi on it converges** at
+        both states (6 cycles / 2.8e-12 forward, 16 / 5.2e-10 at `β=0`), for a consistent ~1.5× cycle cost
+        against ILU(0) on both blocks. At `β=0` it *ties the shipped monolithic* (16) while taking the
+        incomplete factorization off two of six fields. So the k/ω hierarchy could be JAX-native, with
+        PETSc confined to the four-field saddle.
+      - **The Chebyshev-vs-Jacobi asymmetry on the SAME block is the mechanistic tell, and it is why
+        "Jacobi-class" must not be treated as one arm.** Chebyshev **fails** on `[k,ω]` (58 cap, 2.6e-01 at
+        `β=0`) where damped Jacobi converges. Chebyshev's polynomial is built for a bounded positive
+        **real** spectrum; the transport pair is advection-dominated and strongly nonsymmetric, so its
+        spectrum is complex and the real-interval polynomial is the wrong instrument. Damped Jacobi assumes
+        only diagonal dominance, which first-order-upwind advection-diffusion-reaction has. So Chebyshev
+        fails on both blocks for **two different reasons** — indefiniteness on the saddle, nonsymmetry on
+        the scalars — and only the second is cured by dropping to Jacobi.
+      - **Untested, and the honest caveat on the refuted half:** PETSc estimates Chebyshev's eigenvalue
+        bounds with a few GMRES iterations, which is meaningless on an indefinite operator. A hand-bounded
+        polynomial, or one designed for a complex spectrum, is not covered by these arms.
+    - **NOT YET BUILT: the production wiring.** There is no `coupled_field_split_continuation` / shift
+      policy, deliberately — the forward march is where a continuation builder would be used and the split
+      *loses* there. What the measurement argues for is a **`β = 0` adjoint-only** preconditioner seam
+      (`ForwardStep.adjoint_preconditioner()` already exists as the natural home), plus the JAX-native k/ω
+      hierarchy the damped-Jacobi result unlocks. Both are unbuilt.
   - **⚠️ LOW-β DIRECTIONS ALREADY MEASURED OUT — do not re-litigate without new evidence.** The low-shift
     wall on the 3D coupled saddle has absorbed a lot of probing. What is settled:
     - **Turbulence decoupling ("just lag ω") — REFUTED.** A true-residual arm comparison found
