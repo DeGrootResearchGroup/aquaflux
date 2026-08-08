@@ -108,23 +108,29 @@ def _gmres_matvecs(shifted, preconditioner, b, *, rtol=1e-8):
     return restart_cycles(int(raw)), true
 
 
-def test_the_split_preconditions_the_real_coupled_saddle(case):
-    """Flow-first converges the assembled coupled system through GMRES, on the true residual.
+@pytest.mark.parametrize("flow_first", [True, False])
+def test_the_split_preconditions_the_real_coupled_saddle(case, flow_first):
+    """Both orderings converge the assembled coupled system through GMRES, on the true residual.
 
-    The ordering matters and is not a relabelling: solving the transported scalars *first* and correcting
-    the flow with them is a different preconditioner, and on this operator it is a much weaker one. That
-    asymmetry is a measurement rather than a defect -- the algebra of both orderings is pinned exactly in
-    the unit tests -- so only the ordering that works is asserted here, and the comparison between them
-    belongs to the case study.
+    Worth recording why this is *not* asserted as a difference between the two orderings. One application
+    of the turbulence-first split leaves a residual some three times the input where flow-first leaves a
+    third of it, which reads as one ordering being far weaker -- and through GMRES on this operator the two
+    are indistinguishable, both reaching machine precision inside a single restart cycle. A one-application
+    contraction is not a convergence criterion for a Krylov-accelerated preconditioner, and this is that
+    trap in miniature.
+
+    Which also means this state cannot rank the orderings at all: an operator every candidate solves in one
+    cycle discriminates between none of them. That comparison needs a state where the operator is hard, and
+    belongs to the case study rather than to a fast test.
     """
     groups, shifted = case["groups"], case["shifted"]
-    split = build_block_triangular_field_split(shifted, groups, coarse_eq_limit=200)
+    split = build_block_triangular_field_split(
+        shifted, groups, flow_first=flow_first, coarse_eq_limit=200
+    )
     rng = np.random.default_rng(1)
     b = rng.standard_normal(groups.n_dofs)
     cycles, true = _gmres_matvecs(shifted, split, b)
-    assert true < 1e-7, (
-        f"flow-first left a true relative residual of {true:.3e} after {cycles} cycles"
-    )
+    assert true < 1e-7, f"left a true relative residual of {true:.3e} after {cycles} cycles"
     split.destroy()
 
 
