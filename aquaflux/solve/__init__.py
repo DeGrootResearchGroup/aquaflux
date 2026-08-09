@@ -70,6 +70,7 @@ from .amg_preconditioner import AmgVCycle, MonolithicAmgPreconditioner, build_am
 from .field_split import (
     BlockTriangularFieldSplit,
     FieldGroups,
+    FieldSplitAmgPreconditioner,
     build_block_triangular_field_split,
 )
 from .refresh_timing import PhaseTimer, RefreshTiming
@@ -152,6 +153,7 @@ __all__ = [
     "DualTimeControl",
     "DualTimeStep",
     "FieldGroups",
+    "FieldSplitAmgPreconditioner",
     "ForwardStep",
     "ImplicitNewtonSolver",
     "InnerIterateCheckpointer",

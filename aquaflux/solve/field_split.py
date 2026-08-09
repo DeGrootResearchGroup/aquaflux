@@ -41,11 +41,14 @@ from collections.abc import Callable
 import numpy as np
 import scipy.sparse as sp
 
-from .amg_preconditioner import build_amg_vcycle
+from .amg_preconditioner import MonolithicAmgPreconditioner, build_amg_vcycle
+from .ilut_preconditioner import equilibrate_cell_major
+from .refresh_timing import PhaseTimer
 
 __all__ = [
     "BlockTriangularFieldSplit",
     "FieldGroups",
+    "FieldSplitAmgPreconditioner",
     "build_block_triangular_field_split",
 ]
 
@@ -259,6 +262,50 @@ class BlockTriangularFieldSplit:
         out[trail] = y_trailing
         return out
 
+    def _select_coupling(
+        self, blocks: tuple[sp.csr_matrix, sp.csr_matrix, sp.csr_matrix, sp.csr_matrix]
+    ) -> sp.csr_matrix:
+        """Which off-diagonal block this ordering retains, given :meth:`FieldGroups.blocks`' four.
+
+        Solving the leading group first means correcting the trailing equations, so the retained block is
+        trailing-by-leading. The other ordering overrides this rather than branching in :meth:`refactor`.
+        """
+        return blocks[2]
+
+    def refactor(self, matrix: sp.spmatrix) -> None:
+        """Re-fit both blocks and the retained coupling to a new operator, IN PLACE.
+
+        The counterpart of :meth:`~aquaflux.solve.AmgVCycle.refactor` for a split, and used for the same
+        reason: a march's mid-run refresh must re-preconditioner the **same** compiled Krylov solve, which
+        means mutating this object rather than replacing it. Each block re-fits through its own
+        ``refactor``, so each keeps its own aggregation and re-computes only the coarse operators and the
+        smoother's factor values — the economy the monolithic refresh relies on, preserved per block.
+
+        Parameters
+        ----------
+        matrix : scipy.sparse matrix
+            The new assembled field-major operator, already shifted, of this partition's shape.
+
+        Raises
+        ------
+        AttributeError
+            If a block inverse cannot re-fit in place (an injected inverse need not provide ``refactor``).
+        """
+        blocks = self._groups.blocks(matrix)
+        leading_block, trailing_block = blocks[0], blocks[3]
+        for inverse, block, n_group_fields in (
+            (self._leading, leading_block, self._groups.n_leading_fields),
+            (self._trailing, trailing_block, self._groups.n_trailing_fields),
+        ):
+            if not hasattr(inverse, "refactor"):
+                raise AttributeError(
+                    f"{type(inverse).__name__} cannot refactor in place, so this split cannot be "
+                    "refreshed mid-march; rebuild it instead, or inject an inverse that can."
+                )
+            inverse.refactor(*equilibrate_cell_major(block, n_group_fields))
+        self._coupling = sp.csr_matrix(self._select_coupling(blocks))
+        self._coupling_transpose = sp.csr_matrix(self._coupling.transpose())
+
     def destroy(self) -> None:
         """Release both block inverses' resources, if they hold any."""
         for block in (self._leading, self._trailing):
@@ -376,6 +423,10 @@ class _TrailingFirstFieldSplit(BlockTriangularFieldSplit):
         self._coupling_transpose = sp.csr_matrix(self._coupling.transpose())
         self._groups = groups
 
+    def _select_coupling(self, blocks):
+        """Trailing-first retains the leading-equations-by-trailing-unknowns block instead."""
+        return blocks[1]
+
     def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
         """Apply ``M`` (or ``M^T``), solving the trailing group first.
 
@@ -405,3 +456,139 @@ class _TrailingFirstFieldSplit(BlockTriangularFieldSplit):
         out[lead] = y_leading
         out[trail] = y_trailing
         return out
+
+
+class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
+    """The field split as JAX matvecs, with the same lifecycle as the monolithic V-cycle it replaces.
+
+    A subclass rather than a sibling because everything outside the preconditioner's *construction* is
+    genuinely shared: the coloured jvp probe that materializes the coupled Jacobian, the
+    ``jax.pure_callback`` matvec that reads ``self.factors`` at call time (so an in-place refresh
+    re-preconditions the same compiled solve), and the teardown. Only how the frozen inverse is fitted to
+    the matrix differs, so only that is overridden — which is what lets a march swap between the two by
+    changing one construction line and keep the shift policy, forward solver, step tail and refresh hooks
+    common.
+
+    The monolithic path equilibrates and reorders the **whole** matrix to cell-major before handing it to
+    one V-cycle; a split does that **per block**, inside each block's own ``build_amg_vcycle``, because the
+    two groups have different field counts and different scales. That is why the shift/equilibrate/reorder
+    assembler the monolithic refresh precomputes has no counterpart here.
+
+    .. warning::
+       ``refresh_in_place`` is forward-march only, for the same reason as its base: the mutation is impure
+       and would corrupt an adjoint transpose solve that read the inverse between its own calls.
+    """
+
+    def __init__(
+        self,
+        split: BlockTriangularFieldSplit,
+        groups: FieldGroups,
+        jacobian_no_shift: sp.csr_matrix | None = None,
+        n_fields: int | None = None,
+    ) -> None:
+        super().__init__(split, jacobian_no_shift=jacobian_no_shift, n_fields=n_fields)
+        self._groups = groups
+
+    @property
+    def groups(self) -> FieldGroups:
+        """The field partition the preconditioner is built over."""
+        return self._groups
+
+    @classmethod
+    def build(
+        cls,
+        matvec: Callable,
+        colouring,
+        n_fields: int,
+        shift_diagonal: np.ndarray,
+        groups: FieldGroups,
+        *,
+        smoother_fill_levels: int = 0,
+        smoother_sweeps: int = 4,
+        coarse_eq_limit: int | None = 2000,
+        leading_options: dict | None = None,
+        trailing_options: dict | None = None,
+        batched_matvec: Callable | None = None,
+        probe_batch_size: int | None = None,
+        structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+    ) -> FieldSplitAmgPreconditioner:
+        """Materialize the coupled Jacobian, shift it, and fit a split to it.
+
+        Parameters
+        ----------
+        matvec, colouring, n_fields, batched_matvec, probe_batch_size, structure
+            The coloured-probe materialization, exactly as the monolithic build takes them.
+        shift_diagonal : np.ndarray
+            The pseudo-transient shift ``beta d`` added to the diagonal, shape ``(n_dofs,)``.
+        groups : FieldGroups
+            The partition to split on.
+        smoother_fill_levels, smoother_sweeps, coarse_eq_limit, leading_options, trailing_options
+            Passed through to each block's V-cycle.
+
+        Returns
+        -------
+        FieldSplitAmgPreconditioner
+            The frozen preconditioner.
+        """
+        jacobian = cls._materialize_jacobian(
+            matvec, colouring, n_fields, batched_matvec, probe_batch_size, structure
+        )
+        split = build_block_triangular_field_split(
+            cls._shifted(jacobian, shift_diagonal),
+            groups,
+            smoother_fill_levels=smoother_fill_levels,
+            smoother_sweeps=smoother_sweeps,
+            coarse_eq_limit=coarse_eq_limit,
+            leading_options=leading_options,
+            trailing_options=trailing_options,
+        )
+        return cls(split, groups, jacobian_no_shift=jacobian, n_fields=n_fields)
+
+    def refresh_in_place(
+        self,
+        matvec: Callable,
+        colouring,
+        n_fields: int,
+        shift_diagonal: np.ndarray,
+        *,
+        smoother_fill_levels: int = 0,
+        smoother_sweeps: int = 4,
+        batched_matvec: Callable | None = None,
+        probe_batch_size: int | None = None,
+        structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+    ) -> tuple[tuple[str, float], ...]:
+        """Re-materialize at the developed state and re-fit both blocks IN PLACE.
+
+        Returns the same ``("probe", s), ("assemble", s), ("refactor", s)`` breakdown the monolithic
+        refresh reports, so a march log reads identically for either preconditioner. Here "assemble" is
+        only the diagonal shift — the per-block equilibration is inside the refactor.
+        """
+        del smoother_fill_levels, smoother_sweeps  # the smoother config is fixed at build
+        timer = PhaseTimer()
+        self._jacobian_no_shift = self._materialize_jacobian(
+            matvec, colouring, n_fields, batched_matvec, probe_batch_size, structure
+        )
+        timer.lap("probe")
+        self._n_fields = n_fields
+        shifted = self._shifted(self._jacobian_no_shift, shift_diagonal)
+        timer.lap("assemble")
+        self.factors.refactor(shifted)
+        timer.lap("refactor")
+        return timer.phases()
+
+    def refresh_shift_in_place(self, shift_diagonal: np.ndarray) -> tuple[tuple[str, float], ...]:
+        """Re-fit at a new shift REUSING the cached Jacobian — no re-materialization.
+
+        The cheap branch of the refresh, for when only ``beta`` has moved. Raises if no Jacobian was
+        cached, rather than silently rebuilding from nothing.
+        """
+        if self._jacobian_no_shift is None:
+            raise RuntimeError(
+                "refresh_shift_in_place needs the Jacobian cached by build/refresh_in_place."
+            )
+        timer = PhaseTimer()
+        shifted = self._shifted(self._jacobian_no_shift, shift_diagonal)
+        timer.lap("assemble")
+        self.factors.refactor(shifted)
+        timer.lap("refactor")
+        return timer.phases()

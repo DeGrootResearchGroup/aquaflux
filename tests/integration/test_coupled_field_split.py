@@ -165,3 +165,86 @@ def test_it_drops_into_the_jax_callback_wrapper_unchanged(case):
         assert bool(jnp.all(jnp.isfinite(applied)))
     split.destroy()
     monolithic.destroy()
+
+
+@pytest.mark.slow
+def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
+    """`field_split=True` is a drop-in: same solver, same root, only the frozen inverse differs.
+
+    The point of routing it through `coupled_amg_continuation` rather than a parallel builder is that the
+    shift policy, forward solver, step tail and refresh hooks stay shared -- so this asserts the thing that
+    would break if they had quietly diverged: both reach the same converged state.
+    """
+    from aquaflux.turbulence import coupled_amg_continuation, solve_coupled
+
+    from tests.integration.test_coupled_ilut import _channel
+
+    momentum, turbulence = _channel()
+    coupled = CoupledRANS.build(momentum, turbulence)
+    flow, k, omega = hybrid_initialize(momentum, turbulence)
+    reference = coupled.pack_state(flow, k, omega)
+
+    split = coupled_amg_continuation(coupled, reference, field_split=True)
+    flow_s, k_s, omega_s = solve_coupled(coupled, flow, k, omega, continuation=split, max_steps=40)
+    assert float(jnp.linalg.norm(coupled.residual(coupled.pack_state(flow_s, k_s, omega_s)))) < 1e-8
+
+    mono = coupled_amg_continuation(coupled, reference)
+    flow_m, k_m, omega_m = solve_coupled(coupled, flow, k, omega, continuation=mono, max_steps=40)
+    assert float(jnp.linalg.norm(flow_s - flow_m) / jnp.linalg.norm(flow_m)) < 1e-4
+    assert float(jnp.linalg.norm(k_s - k_m) / jnp.linalg.norm(k_m)) < 1e-3
+    assert float(jnp.linalg.norm(omega_s - omega_m) / jnp.linalg.norm(omega_m)) < 1e-4
+
+
+def test_the_split_refreshes_in_place_onto_the_same_object(case):
+    """A mid-march refresh must MUTATE the preconditioner, not replace it.
+
+    The march holds it as a static field and the callback reads `factors` at call time, so a refresh that
+    returned a new object would silently keep preconditioning with the stale one -- and would still
+    converge, just slower, which is exactly the kind of bug a march hides.
+    """
+    from aquaflux.solve import FieldSplitAmgPreconditioner
+
+    groups, n_fields = case["groups"], case["n_fields"]
+    coupled, state = case["coupled"], case["state"]
+    colouring = _coupled_jacobian_colouring(coupled, 3)
+
+    def matvec(v):
+        return _jacobian_matvec(coupled, state, v)
+
+    shift = np.full(groups.n_dofs, 0.5)
+    pc = FieldSplitAmgPreconditioner.build(
+        matvec, colouring, n_fields, shift, groups, coarse_eq_limit=200
+    )
+    split_before = pc.factors
+    rng = np.random.default_rng(4)
+    b = rng.standard_normal(groups.n_dofs)
+    before = pc.factors.apply(b).copy()
+
+    phases = pc.refresh_in_place(matvec, colouring, n_fields, shift * 4.0)
+
+    assert pc.factors is split_before, "the refresh replaced the object instead of mutating it"
+    assert [name for name, _ in phases] == ["probe", "assemble", "refactor"]
+    assert not np.allclose(before, pc.factors.apply(b)), (
+        "a 4x shift change left the inverse unchanged"
+    )
+    pc.destroy()
+
+
+def test_the_split_shift_refresh_reuses_the_cached_jacobian(case):
+    """The cheap branch: re-fit at a new shift without re-running the coloured probe."""
+    from aquaflux.solve import FieldSplitAmgPreconditioner
+
+    groups, n_fields = case["groups"], case["n_fields"]
+    coupled, state = case["coupled"], case["state"]
+    colouring = _coupled_jacobian_colouring(coupled, 3)
+
+    def matvec(v):
+        return _jacobian_matvec(coupled, state, v)
+
+    pc = FieldSplitAmgPreconditioner.build(
+        matvec, colouring, n_fields, np.full(groups.n_dofs, 0.5), groups, coarse_eq_limit=200
+    )
+    phases = pc.refresh_shift_in_place(np.full(groups.n_dofs, 2.0))
+    # No probe phase at all -- that absence IS the saving this branch exists for.
+    assert [name for name, _ in phases] == ["assemble", "refactor"]
+    pc.destroy()
