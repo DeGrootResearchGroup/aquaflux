@@ -321,6 +321,7 @@ def build_block_triangular_field_split(
     flow_first: bool = True,
     smoother_fill_levels: int = 0,
     smoother_sweeps: int = 4,
+    trailing_smoother_sweeps: int = 1,
     coarse_eq_limit: int | None = 2000,
     leading_options: dict | None = None,
     trailing_options: dict | None = None,
@@ -351,11 +352,30 @@ def build_block_triangular_field_split(
         Solve the leading group first and correct the trailing group (retaining the trailing-by-leading
         coupling). ``False`` reverses both, retaining the leading-by-trailing coupling instead. The name
         reflects the usual field order, in which the flow fields lead.
-    smoother_fill_levels, smoother_sweeps, coarse_eq_limit
-        Passed to both blocks' V-cycles. The defaults are the bundle measured for the monolithic V-cycle
-        on this operator: a zero-fill incomplete-LU smoother (fill produces negative pivots as the
-        pseudo-transient shift falls), four sweeps of it, and a coarse grid large enough that its direct
-        solve captures the global coupling.
+    smoother_fill_levels, coarse_eq_limit
+        Passed to both blocks' V-cycles. The defaults are the bundle measured for the monolithic V-cycle:
+        a zero-fill incomplete-LU smoother (fill produces negative pivots as the pseudo-transient shift
+        falls) and a coarse grid large enough that its direct solve captures the global coupling.
+    smoother_sweeps : int
+        Level-smoother sweeps on the **leading** block. Four is the measured default for a
+        pressure-velocity saddle, where the sweeps are load-bearing: Jacobi-class smoothers do not
+        converge on that block at all, so it is the half that needs the incomplete-LU work.
+    trailing_smoother_sweeps : int
+        Level-smoother sweeps on the **trailing** block, defaulting to **one** rather than four. The two
+        halves are not the same kind of equation and do not want the same amount of smoothing: the
+        trailing group is a transported-scalar pair with a genuine diagonal, a far easier operator than
+        the saddle, and the extra sweeps buy nothing on it. Measured on a three-dimensional
+        backward-facing step at ``Re_h = 10000``, four sweeps against one over a whole
+        Reynolds-continuation march: **1959 s against 1636 s (−16.5 %)**, with the two marches following
+        the same trajectory step for step — same shift, same per-step restart-cycle counts, same
+        residuals to four figures, same single line-search escalation — and reaching the same
+        reattachment length. So the sweeps were pure cost there rather than a quality/cost trade. Raise
+        it if a case shows the trailing block genuinely needing more; the knob is here because that is a
+        per-case question, not a universal constant.
+
+        Note the *cycle* count rose slightly (277 → 282) while the wall fell 16.5 %: a restart-cycle
+        count is only a cost proxy between candidates that share a per-application price, and changing
+        the smoother is exactly what breaks that.
     leading_options, trailing_options
         Extra multigrid options for one block only, so the two can be tuned apart. Ignored for a block
         whose inverse is supplied directly.
@@ -371,21 +391,28 @@ def build_block_triangular_field_split(
     leading_block, leading_by_trailing, trailing_by_leading, trailing_block = groups.blocks(matrix)
     common = {
         "smoother_fill_levels": smoother_fill_levels,
-        "smoother_sweeps": smoother_sweeps,
         "coarse_eq_limit": coarse_eq_limit,
     }
     leading = (
         leading_inverse(leading_block, groups.n_leading_fields)
         if leading_inverse is not None
         else build_amg_vcycle(
-            leading_block, groups.n_leading_fields, extra_options=leading_options, **common
+            leading_block,
+            groups.n_leading_fields,
+            smoother_sweeps=smoother_sweeps,
+            extra_options=leading_options,
+            **common,
         )
     )
     trailing = (
         trailing_inverse(trailing_block, groups.n_trailing_fields)
         if trailing_inverse is not None
         else build_amg_vcycle(
-            trailing_block, groups.n_trailing_fields, extra_options=trailing_options, **common
+            trailing_block,
+            groups.n_trailing_fields,
+            smoother_sweeps=trailing_smoother_sweeps,
+            extra_options=trailing_options,
+            **common,
         )
     )
     if flow_first:
@@ -505,6 +532,7 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
         *,
         smoother_fill_levels: int = 0,
         smoother_sweeps: int = 4,
+        trailing_smoother_sweeps: int = 1,
         coarse_eq_limit: int | None = 2000,
         leading_options: dict | None = None,
         trailing_options: dict | None = None,
@@ -522,8 +550,11 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
             The pseudo-transient shift ``beta d`` added to the diagonal, shape ``(n_dofs,)``.
         groups : FieldGroups
             The partition to split on.
-        smoother_fill_levels, smoother_sweeps, coarse_eq_limit, leading_options, trailing_options
-            Passed through to each block's V-cycle.
+        smoother_fill_levels, smoother_sweeps, trailing_smoother_sweeps, coarse_eq_limit,
+        leading_options, trailing_options
+            Passed through to each block's V-cycle. ``smoother_sweeps`` is the leading (saddle) block's
+            and ``trailing_smoother_sweeps`` the trailing (transported-scalar) block's; they differ by
+            default because the two halves want different amounts of smoothing.
 
         Returns
         -------
@@ -538,6 +569,7 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
             groups,
             smoother_fill_levels=smoother_fill_levels,
             smoother_sweeps=smoother_sweeps,
+            trailing_smoother_sweeps=trailing_smoother_sweeps,
             coarse_eq_limit=coarse_eq_limit,
             leading_options=leading_options,
             trailing_options=trailing_options,
