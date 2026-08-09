@@ -1113,12 +1113,30 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         work and the pseudo-timestep). Capped at **one refresh per step**, without which a genuinely hard
         operator would refresh on every inner iteration; a new inner loop re-arms it. Off by default
         (`None`), so a march that does not opt in is byte-identical. Pinned by
-        `test_inner_refresh_fires_on_an_expensive_solve_at_that_iterate_and_once_per_step`. **Do not read
-        the arithmetic below as an open proposal — it is the justification for what is now shipped**, and
-        the equilibrium firing rate is still the unknown it names (removing the schedule shifts the
-        distribution up, so the trigger fires more often than the counts predict).
-        The cost arithmetic that motivated it: measured on the 3501 s
-        march, scheduled refreshes are 50 full + 12 shift = **742 s, 21 % of the wall**. A refresh fired
+        `test_inner_refresh_fires_on_an_expensive_solve_at_that_iterate_and_once_per_step`.
+
+        **Measured end to end on the 3D coupled backward-facing step, against the scheduled cadence:**
+
+        | | scheduled | on cost |
+        |---|---|---|
+        | wall | 3632 s | **3140 s (−14 %)** |
+        | refresh | 758 s | **310 s (−59 %)**, 62 refreshes → **19** |
+        | Krylov cycles | 290 | 293 (**unchanged**) |
+        | steps with α = 0 | 5 | **0** |
+        | `x_r/h` | 8.361 | 8.361 (unchanged) |
+
+        **Read the cycle row: this is not a better-conditioned solve.** Cycles are flat, so the whole
+        saving is refresh no longer spent maintaining freshness nothing consumed, plus the elimination of
+        five dead steps — those where the line search collapsed, the residual froze or rose, and the shift
+        escalated twenty-fold before recovering. That the *same* change removes both is the point: an
+        inaccurate direction from a stale preconditioner is what α → 0 was, so the retries were downstream
+        of the refresh cadence rather than a separate globalization problem.
+
+        **Do not read the arithmetic below as an open proposal — it is the projection this shipped
+        against**, and it came out close on the total (−492 s measured vs −515 s predicted) while missing
+        the mechanism: it predicted the saving would come from refresh alone, and half of it came from the
+        dead steps. The cost arithmetic, measured on the earlier 3501 s
+        march: scheduled refreshes are 50 full + 12 shift = **742 s, 21 % of the wall**. A refresh fired
         only when a solve reaches ≥3 cycles would fire **16** times (227 s, **−515 s**); at ≥4, **7**
         times (99 s, **−643 s**) — a 15–18 % whole-march saving, against a ~8 % ceiling for a *perfect*
         preconditioner. Read as an *addition* to the schedule the trigger looks break-even; as a
