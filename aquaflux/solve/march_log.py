@@ -39,6 +39,11 @@ import numpy as np
 from ..text_table import Column, TextTable
 from .linear import restart_cycles
 from .march import StepReport
+from .refresh_timing import RefreshTiming
+
+#: Below this many seconds an unattributed remainder is measurement noise, not a missing phase, and
+#: reporting it would only add a column of zeros to every refresh line.
+_UNATTRIBUTED_FLOOR = 0.05
 
 __all__ = ["MarchLogger", "combine_metrics", "field_change_metrics"]
 
@@ -276,7 +281,7 @@ class MarchLogger:
         # the rate is only meaningful over consecutive logged steps, so its state belongs to the
         # thing that is called once per step, in order.
         self._previous_residuals: dict[str, float] = {}
-        self._refresh: tuple[str, float] | None = None
+        self._refresh: RefreshTiming | None = None
         self._rtol = rtol
         self._atol = atol
         self._clock = time.monotonic if clock is None else clock
@@ -334,6 +339,7 @@ class MarchLogger:
         g_after: float,
         cycles: int,
         alpha: float,
+        iterate: object = None,
     ) -> None:
         """``inner_observer`` callback: tabulate ONE inner Newton iteration of an implicit timestep.
 
@@ -358,9 +364,13 @@ class MarchLogger:
         redone (a ``β`` escalation, a divergence retry) opens a fresh block per attempt while the step
         row reports only the accepted one -- so the extra blocks are the record of what the retries cost.
 
+        The ``iterate`` the hook also carries is the inner state itself, which a log has no use for;
+        it is accepted and ignored so this stays a drop-in for the hook a probe uses to capture it.
+
         No-ops unless ``"inner"`` is in ``detail``: it writes several lines per step, and the hook it
         attaches to must not be set on a differentiated solve.
         """
+        del iterate
         if "inner" not in self._detail:
             return
         before, after = float(g_before), float(g_after)
@@ -382,19 +392,23 @@ class MarchLogger:
             indent=self._NEST,
         )
 
-    def on_refresh(self, kind: str, seconds: float) -> None:
+    def on_refresh(self, timing: RefreshTiming) -> None:
         """``observer`` callback for a β-tracking preconditioner refresh: record what it did.
 
         Matches the hook :func:`~aquaflux.turbulence.amg_beta_tracking_refresh` calls once per step
-        (``observer=logger.on_refresh``). ``kind`` is ``"full"``, ``"shift"`` or ``"none"``; the value
-        rides on the *next* step row, since that is the step it was built for.
+        (``observer=logger.on_refresh``). The record names the branch — ``"full"``, ``"shift"`` or
+        ``"none"`` — its total, and each part's own cost; it rides on the *next* step row, since that is
+        the step it was built for.
 
         Without this the log records only how long a step took, and which branch ran has to be guessed
         from wall-clock -- which is how a cost that is really an occasional expensive re-materialize
-        gets mistaken for a fixed per-step overhead. No-ops unless ``"pc"`` is in ``detail``.
+        gets mistaken for a fixed per-step overhead. **The phase breakdown is the same argument one level
+        down:** two refreshes of equal length, one spent re-probing the Jacobian and one spent rebuilding
+        the multigrid, call for entirely different fixes and are indistinguishable in the total.
+        No-ops unless ``"pc"`` is in ``detail``.
         """
         if "pc" in self._detail:
-            self._refresh = (str(kind), float(seconds))
+            self._refresh = timing
 
     def on_retry(self, reason: str, attempt: int, beta: float) -> None:
         """``on_retry`` callback: announce that the step about to be repeated is being redone, and why.
@@ -632,8 +646,7 @@ class MarchLogger:
         self._write(self._step_table.rule(fill="=", segmented=False))
         lines = []
         if "pc" in self._detail:
-            kind, seconds = self._refresh or ("-", 0.0)
-            lines.append(f"pc {kind}" + ("" if kind == "-" else f" {seconds:.1f}s"))
+            lines.append(self._refresh_line(self._refresh))
             self._refresh = None
         if columns:
             lines.append("  ".join(f"{name} {value:.4g}" for name, value in columns.items()))
@@ -643,6 +656,25 @@ class MarchLogger:
         for line in lines:
             self._write(self._step_table.spanning(line))
         self._write(self._step_table.rule(fill="=", segmented=False))
+
+    @staticmethod
+    def _refresh_line(timing: RefreshTiming | None) -> str:
+        """The preconditioner aside: which branch ran, its total, and where the total went.
+
+        A refresh that reports phases renders them in the order they ran, so the expensive part is read
+        off directly rather than inferred by differencing two runs. Any wall time the phases do not
+        account for is shown as ``other``, since a breakdown that silently fails to add up is worse than
+        no breakdown -- it reads as complete.
+        """
+        if timing is None:
+            return "pc -"
+        line = f"pc {timing.kind} {timing.seconds:.1f}s"
+        if not timing.phases:
+            return line
+        parts = [f"{name} {seconds:.1f}" for name, seconds in timing.phases]
+        if timing.unattributed >= _UNATTRIBUTED_FLOOR:
+            parts.append(f"other {timing.unattributed:.1f}")
+        return f"{line} ({' '.join(parts)})"
 
     @staticmethod
     def _reference_norm(report: StepReport) -> float | None:

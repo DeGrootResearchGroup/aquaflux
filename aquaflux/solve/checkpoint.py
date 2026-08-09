@@ -29,9 +29,10 @@ from typing import Any
 
 import numpy as np
 
+from .linear import restart_cycles
 from .march import StepReport
 
-__all__ = ["StateCheckpointer"]
+__all__ = ["InnerIterateCheckpointer", "StateCheckpointer"]
 
 
 def _save_array(path: Path, state: Any, report: StepReport) -> None:
@@ -39,6 +40,14 @@ def _save_array(path: Path, state: Any, report: StepReport) -> None:
 
     The metadata is what makes a checkpoint self-describing -- a bare array file cannot say which step
     it came from or how converged it was, so a directory of them is unusable without the log.
+
+    Both cycle counts are written, because they answer different questions and using the wrong one is
+    a real mistake rather than a rounding difference. ``cycles`` is the step's whole cost, summed over
+    the dual-time inner loop; ``max_inner_cycles`` is the most any **single** linear solve took, which
+    is the inner-count-invariant measure of how hard the *operator* was. A step with many easy inner
+    solves outranks a step with one hard one on the first and not on the second -- so a study looking
+    for a discriminating operating point wants the second, and reading the first instead selects
+    benign states that make every preconditioner look alike.
     """
     # A file object, not the path: `np.savez` APPENDS ".npz" to any path that lacks it, which would
     # silently write somewhere other than where it was asked to -- and the staging name below does not
@@ -53,6 +62,8 @@ def _save_array(path: Path, state: Any, report: StepReport) -> None:
             shift=report.shift,
             alpha=report.alpha,
             cycles=report.cycles,
+            max_inner_cycles=report.max_inner_cycles,
+            inner_iterations=report.inner_iterations,
         )
 
 
@@ -142,3 +153,99 @@ class StateCheckpointer:
         self._written.append(path)
         if evicted is not None and evicted != path:
             evicted.unlink(missing_ok=True)
+
+
+class InnerIterateCheckpointer:
+    """Save the inner iterates whose linear solve was expensive.
+
+    A :class:`StateCheckpointer` writes at the *end* of a step, so it records the state the next step
+    begins from — and a step's first solve is its easy one, taken from a settled state with a freshly
+    rebuilt preconditioner. On the three-dimensional coupled march this was written against, **every one
+    of the 70 step-initial solves cost at most 2 restart cycles while solves later in the inner loop
+    reached 15**, so nothing a checkpoint holds is a hard linear system. A preconditioner study run off
+    checkpoints therefore compares its candidates on operators none of them find difficult and concludes
+    they all perform identically.
+
+    Nor can the interesting iterates be recovered afterwards by replaying a step: a march's per-step
+    configuration is path-dependent — the preconditioner is rebuilt repeatedly en route while the shift
+    policy dates from further back — so it is not reconstructible from a checkpoint. They have to be
+    caught as they happen, which is what this does.
+
+    Wire it to :class:`~aquaflux.solve.DualTimeStep`'s ``inner_observer`` (with
+    :func:`~aquaflux.solve.combine_observers` if something is already logging there). It writes only the
+    iterations whose solve reached ``above`` restart cycles, so a march that is behaving costs nothing
+    but the comparison.
+
+    .. warning::
+       The observer hook is forward-only and must not be set on a differentiated solve.
+
+    Parameters
+    ----------
+    directory : str or os.PathLike
+        Where to write; created if missing.
+    above : int
+        Save an iteration when its solve took at least this many restart cycles (offset-corrected, so
+        it matches what a march log prints). Must be at least 1.
+    prefix : str
+        Filename stem; files are ``<prefix>-<attempt>-<inner>.npz``.
+
+    Raises
+    ------
+    ValueError
+        If ``above`` is less than 1.
+
+    Notes
+    -----
+    Files are named by **attempt**, not by the step index a march log shows: a step redone at an
+    escalated shift restarts its inner loop, and it is usually the *rejected* attempt that met the hard
+    operator, so attempts are what needs distinguishing. Each file also carries the ``‖G‖`` before and
+    after, which is what identifies the iteration in the log — and from there the shift it ran at, which
+    a probe needs and this hook is not given.
+    """
+
+    def __init__(
+        self,
+        directory: str | os.PathLike[str],
+        *,
+        above: int,
+        prefix: str = "inner",
+    ) -> None:
+        if above < 1:
+            raise ValueError(f"above must be at least 1, got {above}")
+        self._directory = Path(directory)
+        self._directory.mkdir(parents=True, exist_ok=True)
+        self._above = above
+        self._prefix = prefix
+        self._attempt = 0
+        self.written: list[Path] = []
+
+    def on_inner(
+        self,
+        index: int,
+        g_before: float,
+        g_after: float,
+        cycles: int,
+        alpha: float,
+        iterate: Any,
+    ) -> None:
+        """``inner_observer`` callback: keep this iterate if its solve was an expensive one."""
+        if int(index) == 0:
+            self._attempt += 1  # a fresh inner loop: a new step, or a retry of the one before
+        corrected = restart_cycles(int(cycles))
+        if corrected < self._above:
+            return
+        path = self._directory / f"{self._prefix}-{self._attempt:05d}-{int(index):02d}.npz"
+        staging = path.with_suffix(".npz.partial")
+        with open(staging, "wb") as handle:
+            np.savez(
+                handle,
+                state=np.asarray(iterate),
+                attempt=self._attempt,
+                inner=int(index),
+                cycles=corrected,
+                alpha=float(alpha),
+                g_before=float(g_before),
+                g_after=float(g_after),
+            )
+        os.replace(staging, path)
+        self.written.append(path)

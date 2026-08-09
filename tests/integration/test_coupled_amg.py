@@ -161,3 +161,42 @@ def test_amg_beta_floor_builds_the_preconditioner_above_the_marchs_own_beta(
     assert not np.allclose(seen["shift"], beta * diagonal)
     # ...and the march's own shift strength is untouched: the operator still carries the small β.
     assert float(active.relaxation_schedule.beta) == pytest.approx(beta)
+
+
+def test_inner_refresh_rebuilds_at_the_iterate_it_is_handed(case, monkeypatch) -> None:
+    """The mid-step hook materializes where the inner loop actually got to, not at the step's start.
+
+    That is the point of refreshing inside a step at all: the march's expensive inner solves are
+    stale-preconditioner effects, and rebuilding at the step's start would reproduce the staleness it is
+    meant to remove. *When* it fires is the dual-time loop's decision (``refresh_on_cycles``), so that
+    one rule both triggers the refresh and forgives the abort; this asserts only where it builds.
+    """
+    import numpy as np
+    from aquaflux.solve import DualTimeControl
+    from aquaflux.turbulence import amg_beta_tracking_refresh
+
+    coupled = case["coupled"]
+    flow, k, omega = case["start"]
+    state = coupled.pack_state(flow, k, omega)
+    dual = coupled_amg_continuation(coupled, state, inner_steps=5)
+    active, _ = DualTimeControl(beta_start=0.5).next_step(dual, None, None)
+
+    built_at: list[np.ndarray] = []
+    monkeypatch.setattr(
+        type(active.shift_policy.preconditioner),
+        "refresh_in_place",
+        lambda _self, _mv, _col, _nf, shift, **_kw: built_at.append(np.asarray(shift)),
+    )
+    refresh = amg_beta_tracking_refresh(coupled)
+    refresh(active, state)  # the march calls this before each step; it is what binds the hook
+    built_at.clear()  # that binding call also does the step's own refresh, which is not under test
+
+    iterate = state * 1.05  # somewhere the inner loop has moved to, away from the step's start
+    refresh.refresh_at(iterate)
+    assert len(built_at) == 1
+    assert np.allclose(
+        built_at[0], 0.5 * np.asarray(active.shift_policy.base.shift_term(iterate).diagonal)
+    )
+    assert not np.allclose(
+        built_at[0], 0.5 * np.asarray(active.shift_policy.base.shift_term(state).diagonal)
+    )

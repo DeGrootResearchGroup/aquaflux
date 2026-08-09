@@ -45,6 +45,7 @@ Run (after both OpenFOAM runs) from the repo root:
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from pathlib import Path
@@ -60,6 +61,7 @@ from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
 from aquaflux.solve import (
     CflResidualDualTimeControl,
+    InnerIterateCheckpointer,
     MarchLogger,
     StateCheckpointer,
     combine_observers,
@@ -108,7 +110,47 @@ CYCLE_BUDGET = 42  # summed per step: a cost cap, so summed is what it should ca
 RETRY_ON_CYCLES = (
     10  # PER SOLVE: a summed trigger is ~6x more sensitive for a 5-inner step than a 1-inner one
 )
+# The forward GMRES restart length, and the reason it is worth varying: a restarted GMRES tests
+# convergence only at restart boundaries, so a solve that needs three matrix-vector products still pays
+# a full restart's worth. Cycle counts cannot see that -- such a solve reports one cycle either way --
+# so shortening the restart reduces seconds per cycle while leaving every cycle-based measurement
+# unchanged. `BFS3D_FORWARD_RESTART=4 ...` to try it.
+#
+# BOTH cost thresholds above are denominated in CYCLES, so they must scale with the restart or the
+# experiment changes the march's control behaviour rather than just its cost: at a restart of 5 an
+# unscaled `retry_on_cycles = 10` would fire after 50 matrix-vector products where it used to take 150.
+# Scaling by the ratio keeps every bailout at the same matvec count, so the only variable is how much
+# over-solving happens inside a cycle. Vary the restart through the builder's own `forward_restart`, NOT
+# by passing a whole `forward_solver`: the builder's default also carries a loose row-scaled stop that a
+# hand-built solver would silently replace, which measures something else entirely.
+BASELINE_RESTART = 15  # the coupled AMG builder's own default
+FORWARD_RESTART = int(os.environ.get("BFS3D_FORWARD_RESTART", str(BASELINE_RESTART)))
+_RESTART_SCALE = BASELINE_RESTART / FORWARD_RESTART
 RETRY_BETA_FACTOR = 2.0
+# How many per-step states to retain. Three is enough to restart from, which is all a normal run needs.
+# A PRECONDITIONER STUDY needs more: an easy operator does not discriminate between preconditioners, so a
+# sweep has to run at the march's own HARD states (highest cycle count, clipped a_min, a retry flag) and
+# those are mid-march. Set `BFS3D_CHECKPOINT_KEEP` high enough to cover the run (~1.1 MB per step) and the
+# whole trajectory is kept: `BFS3D_CHECKPOINT_KEEP=80 python3 validation/bfs3d_openfoam/compare.py`.
+CHECKPOINT_KEEP = int(os.environ.get("BFS3D_CHECKPOINT_KEEP", "3"))
+# Save the INNER iterates whose linear solve reached this many restart cycles. Off by default (0), and
+# the march is byte-identical with it off. It exists because a checkpoint is written at the END of a
+# step, so it holds the state the next step begins from -- and this march's step-initial solves all cost
+# at most 2 cycles while solves later in the inner loop reach 15. The hard operators are only reachable
+# here: they cannot be replayed from a checkpoint afterwards, because a step's preconditioner and shift
+# are a product of the refresh history rather than of the state.
+INNER_DUMP_ABOVE = int(os.environ.get("BFS3D_INNER_DUMP_ABOVE", "0"))
+# Refresh the preconditioner MID-STEP as soon as one solve reaches this many restart cycles, and switch
+# the scheduled refreshes off. Off by default (0), which keeps the shipped schedule.
+#
+# The point is the swap, not the addition. Measured on the 3501 s march: the scheduled refreshes cost
+# 742 s -- 21 % of the wall -- while 193 of 232 solves already took a single cycle, so most of that is
+# maintaining a freshness nothing consumes. And no fixed cadence can be right, because the interval that
+# matters is regime-dependent: one step of staleness is free at beta 0.333 and triples the cost at 0.029.
+# Reacting to the cost itself adapts; a schedule cannot. Refreshing mid-step (rather than at the next
+# step boundary) also keeps the inner loop's progress, where the current reaction -- abort and escalate
+# beta -- throws away the work and the pseudo-timestep together.
+REFRESH_ON_CYCLES = int(os.environ.get("BFS3D_REFRESH_ON_CYCLES", "0"))
 CONTROL = CflResidualDualTimeControl(
     beta_start=0.5, beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25
 )
@@ -284,12 +326,19 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         atol=ATOL,
     )
     checkpoints = (
-        StateCheckpointer(checkpoint_dir, every=1, keep=3) if checkpoint_dir is not None else None
+        StateCheckpointer(checkpoint_dir, every=1, keep=CHECKPOINT_KEEP)
+        if checkpoint_dir is not None
+        else None
     )
     on_checkpoint = (
         logger.on_checkpoint
         if checkpoints is None
         else combine_observers(logger.on_checkpoint, checkpoints.on_checkpoint)
+    )
+    inner_dump = (
+        InnerIterateCheckpointer(checkpoint_dir, above=INNER_DUMP_ABOVE)
+        if INNER_DUMP_ABOVE and checkpoint_dir is not None
+        else None
     )
 
     def point_setup(companion, seed_state, point):
@@ -299,6 +348,22 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         per rung, and the beta-tracking refresh has to close over that rung's residual.
         """
         logger.note(f"[{point.label}]")
+        # With the cycle trigger on, the scheduled cadences are switched OFF so it REPLACES them: as an
+        # addition it is break-even, as a replacement it is the largest saving measured on this march.
+        # CAREFUL: `beta_rel_change=None` does NOT switch the schedule off -- it removes the gate, and a
+        # missing gate means "refresh every step". Switching it off means a gate that exists and never
+        # fires again after its first (initialising) call, plus no materialize gates, so the refresh
+        # branch resolves to `none`.
+        scheduled = not REFRESH_ON_CYCLES
+        refresh = amg_beta_tracking_refresh(
+            companion,
+            beta_rel_change=0.25 if scheduled else float("inf"),
+            refresh_every=8 if scheduled else 10**9,
+            materialize_drift=0.05 if scheduled else None,
+            materialize_every=4 if scheduled else None,
+            beta_floor=PC_BETA_FLOOR,
+            observer=logger.on_refresh,
+        )
         engine = coupled_amg_continuation(
             companion,
             seed_state,
@@ -307,8 +372,14 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             smoother_fill_levels=FILL_LEVELS,
             smoother_sweeps=SWEEPS,
             coarse_eq_limit=COARSE_EQ_LIMIT,
-            cycle_budget=CYCLE_BUDGET,
-            inner_observer=logger.on_inner,
+            cycle_budget=round(CYCLE_BUDGET * _RESTART_SCALE),
+            forward_restart=FORWARD_RESTART,
+            inner_observer=combine_observers(
+                logger.on_inner,
+                *([inner_dump.on_inner] if inner_dump is not None else []),
+            ),
+            refresh_on_cycles=REFRESH_ON_CYCLES or None,
+            inner_refresh=refresh.refresh_at if REFRESH_ON_CYCLES else None,
         )
         # Seeded with this rung's own starting state: the march equilibrates each step at the state it
         # begins from, so without the seed the rung's first step would be scaled at its end state and
@@ -316,15 +387,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         rung_residuals.append(coupled_residuals(companion, engine, seed_state))
         return dict(
             continuation=engine,
-            precondition_step=amg_beta_tracking_refresh(
-                companion,
-                beta_rel_change=0.25,
-                refresh_every=8,
-                materialize_drift=0.05,
-                materialize_every=4,
-                beta_floor=PC_BETA_FLOOR,
-                observer=logger.on_refresh,
-            ),
+            precondition_step=refresh,
         )
 
     options = (
@@ -340,7 +403,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             retry_solver=relative_residual_gmres(1e-4, restart=40),
             on_checkpoint=on_checkpoint,
             on_retry=logger.on_retry,
-            retry_on_cycles=RETRY_ON_CYCLES,
+            retry_on_cycles=round(RETRY_ON_CYCLES * _RESTART_SCALE),
             retry_beta_factor=RETRY_BETA_FACTOR,
         )
         | solve_kwargs

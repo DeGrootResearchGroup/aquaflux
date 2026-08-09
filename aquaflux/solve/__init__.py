@@ -67,6 +67,7 @@ from .continuation import (
 )
 from .frozen_operator import convection_diffusion_operator, decouple_dof
 from .amg_preconditioner import AmgVCycle, MonolithicAmgPreconditioner, build_amg_vcycle
+from .refresh_timing import PhaseTimer, RefreshTiming
 from .ilut_preconditioner import MonolithicIlutPreconditioner
 from .lu_preconditioner import MonolithicLuPreconditioner
 from .implicit import (
@@ -75,6 +76,7 @@ from .implicit import (
     ImplicitNewtonSolver,
     StepOutcome,
     TransposedPreconditioner,
+    PositiveBlockLimit,
     positive_block_limit,
 )
 from .line_search_growth import (
@@ -88,7 +90,7 @@ from .linear import (
     restart_cycles,
     solve_linear,
 )
-from .checkpoint import StateCheckpointer
+from .checkpoint import InnerIterateCheckpointer, StateCheckpointer
 from .march import (
     CoefficientDriftTrigger,
     combine_observers,
@@ -145,6 +147,7 @@ __all__ = [
     "DualTimeStep",
     "ForwardStep",
     "ImplicitNewtonSolver",
+    "InnerIterateCheckpointer",
     "LineSearchGrowth",
     "LocalCourantBasis",
     "MarchLogger",
@@ -153,7 +156,10 @@ __all__ = [
     "MonolithicIlutPreconditioner",
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
+    "PhaseTimer",
+    "PositiveBlockLimit",
     "PseudoTransientStep",
+    "RefreshTiming",
     "RefreshTrigger",
     "RelaxationSchedule",
     "RelaxedFarFromRoot",

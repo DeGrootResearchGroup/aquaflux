@@ -693,19 +693,46 @@ class DualTimeStep(eqx.Module):
         ``φ*`` the operator is the unshifted steady Jacobian (``β → 0``), so the ordinary preconditioner
         is the consistent choice.
     inner_observer : callable or None
-        An optional profiling hook ``(inner_index, g_before, g_after, cycles, alpha) -> None`` called
-        **once per inner Newton iteration** with that iteration's ``‖G‖`` before and after the step, the
-        solver's raw cycle count for its shifted solve, and its line-search factor (static). It surfaces
-        the inner trajectory the outer :class:`~aquaflux.solve.StepReport` only summarizes (it reports the
-        inner *count* and the *summed* cycles). Emitted through :func:`jax.debug.callback`, so it is
-        forward-only and transform-transparent; ``None`` (default) elides the call entirely, leaving the
-        step byte-identical. Do not set it on a differentiated solve.
+        An optional profiling hook ``(inner_index, g_before, g_after, cycles, alpha, iterate) -> None``
+        called **once per inner Newton iteration** with that iteration's ``‖G‖`` before and after the
+        step, the solver's raw cycle count for its shifted solve, its line-search factor, and the
+        iterate it reached (static). It surfaces the inner trajectory the outer
+        :class:`~aquaflux.solve.StepReport` only summarizes (it reports the inner *count* and the
+        *summed* cycles).
+
+        The **iterate** is there because the inner loop is where a march's expensive linear solves
+        actually live, and nothing else exposes the state at which one happened. A checkpoint is written
+        at the end of a step, so it holds the state the *next* step starts from — and a step's first
+        solve is the easy one, taken from a settled state with a freshly rebuilt preconditioner. On the
+        three-dimensional coupled march every one of the 70 step-initial solves cost at most 2 restart
+        cycles while solves later in the inner loop reached 15, so a study that probes checkpoints alone
+        sees none of the hard operators and reports that every preconditioner performs identically.
+
+        Emitted through :func:`jax.debug.callback`, so it is forward-only and transform-transparent;
+        ``None`` (default) elides the call entirely, leaving the step byte-identical. Do not set it on a
+        differentiated solve.
     step_limit : callable or None
         ``(phi, delta) -> alpha_max``, capping every inner line search (static). The seam for a
         constraint the residual cannot express -- chiefly a field that must stay positive, via
         :func:`~aquaflux.solve.positive_block_limit`. Without it a direct-variable field can cross
         zero and reach a ``sqrt`` in the closure, which turns a healthy state into NaN with no warning
         the guard can act on. ``None`` (default) is byte-identical.
+    refresh_on_cycles : int or None
+        Refresh the preconditioner **inside** the step once a single solve reaches this many restart
+        cycles, by calling :attr:`inner_refresh` at the iterate it reached (static). ``None`` (default)
+        never refreshes mid-step and is byte-identical.
+
+        This is a *control* seam, not the profiling :attr:`inner_observer`, and the decision is taken in
+        the loop rather than by the hook so that one rule both fires the refresh and forgives the abort.
+        The pairing is the point: a march's expensive inner solves are stale-preconditioner effects
+        rather than hard operators — measured on a three-dimensional coupled march, a preconditioner
+        rebuilt at the very iterate of the hardest solve converged in **one** cycle where the march's own
+        took fifteen — so a refresh here can rescue an attempt that :attr:`abort_above_inner_cycles`
+        would otherwise discard along with its pseudo-timestep. Only one refresh fires per step; a second
+        expensive solve after it means the operator really is hard, and the abort then does its job.
+    inner_refresh : callable or None
+        ``(iterate) -> None``, rebuilding the step's frozen preconditioner at that iterate (static).
+        Impure and forward-only — it mutates host state, so never set it on a differentiated solve.
     cycle_budget : int or None
         An optional cap on the inner loop's **accumulated** linear-solve count (static). When set, the
         inner loop stops as soon as its summed cycle count reaches ``cycle_budget``, so a primary solve
@@ -715,6 +742,21 @@ class DualTimeStep(eqx.Module):
         (:func:`~aquaflux.solve.forward_march` with ``retry_on_cycles < cycle_budget``), which redoes the
         step at a larger β where it converges cheaply -- so the two are paired. ``None`` (default) is
         unbounded and byte-identical. Forward-only, like the escalation it pairs with.
+    abort_above_inner_cycles : int or None
+        Stop the inner loop as soon as any **single** solve has cost more than this (static). Set by
+        :func:`~aquaflux.solve.forward_march` from its own ``retry_on_cycles``, so the two are one number
+        rather than two that must be kept in step; a caller driving this class directly may set it itself.
+
+        This is the *same* predicate the march applies after the step returns — cost above the threshold
+        with the target unmet means the whole attempt is discarded and redone at a larger shift. Applied
+        only at the end, every inner iteration after the threshold is crossed is work that is thrown
+        away: measured on a three-dimensional coupled march, three discarded attempts ran 26, 56 and 59
+        cycles where the threshold was crossed at 14, 17 and 16.
+
+        It cannot bin an expensive success. :func:`cond` tests the convergence target first, so a costly
+        solve that *does* bring ``‖G‖`` under the target exits normally with ``reached_target`` set and is
+        kept — exactly as when the march decided this after the fact. ``None`` (default) is
+        byte-identical. Forward-only.
     """
 
     shift_policy: ShiftPolicy
@@ -738,10 +780,13 @@ class DualTimeStep(eqx.Module):
         Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
     ) = eqx.field(static=True, default=None)
     inner_observer: Callable[..., None] | None = eqx.field(static=True, default=None)
+    refresh_on_cycles: int | None = eqx.field(static=True, default=None)
+    inner_refresh: Callable[[jnp.ndarray], None] | None = eqx.field(static=True, default=None)
     cycle_budget: int | None = eqx.field(static=True, default=None)
     step_limit: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
         static=True, default=None
     )
+    abort_above_inner_cycles: int | None = eqx.field(static=True, default=None)
 
     def norm(self) -> ResidualNorm:
         """The residual measure the inner loop and the outer stopping test share (:attr:`residual_norm`)."""
@@ -778,8 +823,17 @@ class DualTimeStep(eqx.Module):
         line_search = self.line_search
         norm = self.residual_norm
         inner_observer = self.inner_observer
+        refresh_on_cycles = self.refresh_on_cycles
+        inner_refresh = self.inner_refresh
         cycle_budget = self.cycle_budget
+
+        def _refresh_if_due(due, iterate) -> None:
+            """Host side of the mid-step refresh: the loop has already decided, this just obeys."""
+            if bool(due):
+                inner_refresh(iterate)
+
         step_limit = self.step_limit
+        abort_above = self.abort_above_inner_cycles
 
         def step(
             residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
@@ -805,7 +859,10 @@ class DualTimeStep(eqx.Module):
                 return residual_fn(p) + shift * (p - reference)
 
             def cond(carry: tuple) -> jnp.ndarray:
-                _, inner, gnorm, cycles, _, _, _ = carry
+                _, inner, gnorm, cycles, _, _, since_refresh, _, _ = carry
+                # The convergence target is tested FIRST, and that ordering is what makes the cost
+                # bailouts below safe: a solve that was expensive but brought ‖G‖ under the target exits
+                # here with `reached_target` set and is kept, never binned for its cost.
                 keep = (inner < inner_steps) & (gnorm > target)
                 # Cost bailout: stop the inner loop once its accumulated linear-solve count reaches
                 # `cycle_budget`, so a primary solve that is grinding on a stiff low-β operator is cut off
@@ -817,10 +874,24 @@ class DualTimeStep(eqx.Module):
                 # byte-identical (the budget term is elided at trace time, as `cycle_budget` is static).
                 if cycle_budget is not None:
                     keep = keep & (cycles < cycle_budget)
+                # Doomed-attempt bailout: one solve has already cost more than the march's discard
+                # threshold, and the target is still unmet (the test above), so this attempt WILL be
+                # thrown away and redone at a larger shift. Every further inner iteration is work that
+                # is discarded. Checking it here rather than after the step is the whole point: the
+                # threshold is a per-solve quantity, so it can be known the moment a solve returns.
+                # Measured on cycles since the LAST REFRESH, not since the step began. The march's
+                # expensive inner solves are stale-preconditioner effects rather than hard operators, so
+                # when `inner_refresh` has just rebuilt at this iterate the attempt deserves one more
+                # solve before being written off -- otherwise the refresh is paid for and then discarded
+                # along with the step, which is what happened before this counter was split out. With no
+                # refresh hook the two counters are identical and this is byte-identical to testing the
+                # step's maximum.
+                if abort_above is not None:
+                    keep = keep & (since_refresh <= abort_above)
                 return keep
 
             def body(carry: tuple) -> tuple:
-                p, inner, gnorm, cycles, min_alpha, max_inner, binding = carry
+                p, inner, gnorm, cycles, min_alpha, max_inner, since_refresh, spent, binding = carry
                 delta, step_cycles = _shifted_solve(
                     residual_fn, p, transient_residual(p), shift, preconditioner, solver
                 )
@@ -841,11 +912,29 @@ class DualTimeStep(eqx.Module):
                 descended = new_gnorm < gnorm
                 if inner_observer is not None:
                     # Surface this inner iteration's trajectory (‖G‖ before/after, its solve's raw cycle
-                    # count, its line-search factor). `jax.debug.callback` fires during execution and is a
-                    # no-op under differentiation; `None` (the default) elides this branch at trace time.
+                    # count, its line-search factor) *and the iterate it reached*. `jax.debug.callback`
+                    # fires during execution and is a no-op under differentiation; `None` (the default)
+                    # elides this branch at trace time.
                     jax.debug.callback(
-                        inner_observer, inner, gnorm, new_gnorm, step_cycles, alpha, ordered=True
+                        inner_observer,
+                        inner,
+                        gnorm,
+                        new_gnorm,
+                        step_cycles,
+                        alpha,
+                        candidate,
+                        ordered=True,
                     )
+                corrected = corrected_cycles(step_cycles)
+                # Refresh the preconditioner mid-step once a solve gets expensive, and give the rebuilt
+                # one a fair hearing by restarting the abort's counter. The decision is made HERE, in the
+                # traced loop, and handed to the host hook -- so the rule that fires the refresh and the
+                # rule that forgives the abort are one rule, not two that can drift apart.
+                if refresh_on_cycles is not None and inner_refresh is not None:
+                    due = (corrected >= refresh_on_cycles) & jnp.logical_not(spent)
+                    jax.debug.callback(_refresh_if_due, due, candidate, ordered=True)
+                else:
+                    due = jnp.asarray(False)
                 return (
                     candidate,
                     inner + 1,
@@ -853,8 +942,15 @@ class DualTimeStep(eqx.Module):
                     cycles + step_cycles,
                     jnp.minimum(min_alpha, jnp.where(descended, alpha, 0.0)),
                     # The most expensive SINGLE solve, which is the inner-count-invariant difficulty
-                    # signal: the summed count above also counts how many times the step solved.
-                    jnp.maximum(max_inner, corrected_cycles(step_cycles)),
+                    # signal: the summed count above also counts how many times the step solved. Kept
+                    # un-reset by a refresh, so the step still REPORTS how hard it really was -- that is
+                    # the signal a study picks its probe states by, and hiding a refresh in it would make
+                    # the hardest steps look benign.
+                    jnp.maximum(max_inner, corrected),
+                    # ...whereas the abort's counter restarts, so the refreshed preconditioner is judged
+                    # on its own solve rather than on the one that provoked it.
+                    jnp.where(due, 0, jnp.maximum(since_refresh, corrected)),
+                    spent | due,
                     # The cap only where it was the BINDING constraint: `alpha` reaching it means the
                     # ladder wanted a longer step and the limit, not the descent test, stopped it.
                     jnp.minimum(binding, jnp.where(alpha >= max_alpha, max_alpha, 1.0)),
@@ -867,6 +963,8 @@ class DualTimeStep(eqx.Module):
                 cycles,
                 alpha,
                 max_inner,
+                _,
+                _,
                 binding,
             ) = jax.lax.while_loop(
                 cond,
@@ -878,6 +976,8 @@ class DualTimeStep(eqx.Module):
                     jnp.asarray(0, dtype=jnp.int32),
                     jnp.asarray(1.0),
                     jnp.asarray(0, dtype=jnp.int32),
+                    jnp.asarray(0, dtype=jnp.int32),
+                    jnp.asarray(False),
                     jnp.asarray(1.0),
                 ),
             )

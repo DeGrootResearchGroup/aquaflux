@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 from aquaflux.solve import (
     MarchLogger,
+    RefreshTiming,
     StepReport,
     combine_metrics,
     field_change_metrics,
@@ -269,7 +270,7 @@ def test_diagnostics_are_off_by_default_even_when_the_hooks_are_wired() -> None:
     """
     logger, buffer = _log(fields=lambda s: {"u": np.asarray(s)})
     logger.on_inner(0, 4.0e-2, 1.0e-2, 5, 1.0)
-    logger.on_refresh("full", 27.0)
+    logger.on_refresh(RefreshTiming("full", 27.0))
     logger.on_checkpoint(_report(), [1.0, 2.0])
 
     text = buffer.getvalue()
@@ -281,7 +282,7 @@ def test_diagnostics_are_off_by_default_even_when_the_hooks_are_wired() -> None:
 def test_each_detail_switches_on_only_its_own_output() -> None:
     logger, buffer = _log(fields=lambda s: {"u": np.asarray(s)}, detail=("pc", "fields"))
     logger.on_inner(0, 4.0e-2, 1.0e-2, 5, 1.0)  # not requested -- must stay silent
-    logger.on_refresh("shift", 0.4)
+    logger.on_refresh(RefreshTiming("shift", 0.4))
     logger.on_checkpoint(_report(), [1.0, 2.0])
 
     assert "pc shift 0.4s" in _asides(buffer)[0]
@@ -292,13 +293,47 @@ def test_each_detail_switches_on_only_its_own_output() -> None:
 def test_the_preconditioner_column_is_reported_once_for_the_step_it_preceded() -> None:
     """The refresh happens before the step; it belongs to that step, not to every later one."""
     logger, buffer = _log(detail=("pc",))
-    logger.on_refresh("full", 27.0)
+    logger.on_refresh(RefreshTiming("full", 27.0))
     logger.on_step(_report())
     logger.on_step(_report())
 
     first, second = [line for line in _asides(buffer) if line.startswith("pc")]
     assert first == "pc full 27.0s"
     assert second == "pc -"
+
+
+def test_the_refresh_line_breaks_the_cost_down_by_phase() -> None:
+    """Two refreshes of equal length can have opposite causes; the total alone cannot say which.
+
+    A re-probe of the Jacobian and a rebuild of the multigrid call for entirely different fixes, so the
+    parts are reported in the order they ran rather than left to be inferred by differencing two runs.
+    """
+    logger, buffer = _log(detail=("pc",))
+    logger.on_refresh(
+        RefreshTiming("full", 23.0, (("probe", 14.6), ("assemble", 3.2), ("refactor", 5.2)))
+    )
+    logger.on_step(_report())
+
+    line = next(line for line in _asides(buffer) if line.startswith("pc"))
+    assert line == "pc full 23.0s (probe 14.6 assemble 3.2 refactor 5.2)"
+
+
+def test_wall_time_the_phases_do_not_account_for_is_shown() -> None:
+    """A breakdown that silently fails to add up reads as complete, which is worse than none at all."""
+    logger, buffer = _log(detail=("pc",))
+    logger.on_refresh(RefreshTiming("full", 23.0, (("probe", 14.6),)))
+    logger.on_step(_report())
+
+    assert "other 8.4" in next(line for line in _asides(buffer) if line.startswith("pc"))
+
+
+def test_a_refresh_reporting_no_phases_still_reports_its_total() -> None:
+    """The factorization preconditioners do not instrument themselves; the branch and total still log."""
+    logger, buffer = _log(detail=("pc",))
+    logger.on_refresh(RefreshTiming("shift", 8.4))
+    logger.on_step(_report())
+
+    assert next(line for line in _asides(buffer) if line.startswith("pc")) == "pc shift 8.4s"
 
 
 def test_an_unknown_detail_name_raises_rather_than_being_ignored() -> None:
@@ -353,7 +388,7 @@ def test_the_grid_stays_narrow_whatever_is_switched_on() -> None:
         residuals=lambda s: dict.fromkeys(("u", "v", "w", "p", "k", "omega"), 1.0e-3 * s),
         detail=("inner", "fields", "residuals", "pc"),
     )
-    logger.on_refresh("full", 21.1)
+    logger.on_refresh(RefreshTiming("full", 21.1))
     logger.on_inner(0, 4.0e-2, 1.0e-2, 5, 1.0)
     logger.on_checkpoint(_report(), 1.0)
     logger.on_checkpoint(_report(), 2.0)
@@ -440,7 +475,7 @@ def test_the_free_form_lines_are_ruled_off_from_the_columned_row() -> None:
     Without one the eye carries the column structure down into lines that do not have it.
     """
     logger, buffer = _log(metrics=lambda state: {"xr/h": 7.24}, detail=("pc",))
-    logger.on_refresh("full", 21.2)
+    logger.on_refresh(RefreshTiming("full", 21.2))
     logger.on_checkpoint(_report(), None)
 
     lines = buffer.getvalue().splitlines()
@@ -551,7 +586,7 @@ def test_every_line_of_a_step_block_is_the_same_width() -> None:
         residuals=lambda s: {"u": 1.0e-3},
         detail=("fields", "residuals", "pc"),
     )
-    logger.on_refresh("full", 21.8)
+    logger.on_refresh(RefreshTiming("full", 21.8))
     logger.on_checkpoint(_report(binding_limit=0.243), 1.0)
 
     grid = [line for line in buffer.getvalue().splitlines() if line.startswith(("|", "+"))]
@@ -570,7 +605,7 @@ def test_the_aside_puts_one_concern_on_each_line() -> None:
     """Run together on one line, the preconditioner, the case metrics and the solver's own counters
     all had to be read to find any one of them."""
     logger, buffer = _log(metrics=lambda s: {"xr/h": 6.728}, detail=("pc",))
-    logger.on_refresh("full", 21.8)
+    logger.on_refresh(RefreshTiming("full", 21.8))
     logger.on_checkpoint(_report(binding_limit=0.243), 1.0)
 
     assert _asides(buffer)[:3] == ["pc full 21.8s", "xr/h 6.728", "limit 2.43e-01"]

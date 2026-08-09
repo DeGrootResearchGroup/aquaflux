@@ -397,6 +397,39 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     Worth knowing before adding a second spelling of it: prefer the floor, which is explicit about being
     preconditioner-only.
 
+    **PLAIN aggregation, not smoothed — `pc_gamg_agg_nsmooths = 0` (measured, and the largest
+    preconditioner win found on this case).** Smoothing the tentative prolongator with a Jacobi step is
+    GAMG's default and is right for an M-matrix-like operator; on a strongly indefinite saddle it
+    degrades the coarse correction. Measured with the march's **own** states, right-hand sides
+    (`-R(state)`) and shift pairing (operator at the march's β, V-cycle at `max(β, floor)`):
+
+    | state | smoothed (was) | plain (now) |
+    |---|---|---|
+    | entering a step below the shift floor (β 0.0154, α clipped to 0.200) | 22 cyc, 3.2e-8 | **9 cyc, 4.7e-10** |
+    | entering the retried step (α → 0) | 4 cyc, 1.2e-12 | **3 cyc, 5.7e-14** |
+    | the converged tail | 6 cyc | 6 cyc |
+
+    **The tie at the converged tail is the methodological point:** an easy operator does not discriminate
+    between preconditioners, so the first sweep — taken there — reported no difference on any arm and
+    nearly closed the question. Sweep preconditioners at the march's *hard* states, which the checkpoints
+    identify by cycle count and clipped α. Plain aggregation is also marginally cheaper to set up.
+    **It is also what makes a DEEP hierarchy usable:** with smoothing ON, adding levels via
+    `pc_gamg_threshold` gives dense coarse operators, builds of 96–1224 s, and a V-cycle returning
+    **NaN** at every threshold tried (0.01/0.05/0.1/0.25); with it OFF, `threshold=0.05` builds a
+    **5-level** hierarchy in 26 s at the same cycle count. That matters for scaling — the shipped
+    2-level design leans on a direct LU at `coarse_eq_limit` equations to carry the global modes, which
+    is cheap at 23k cells and will not be at 10× — so the threshold is left OFF as the default (it buys
+    nothing on *this* mesh) while being known to work.
+    **Corollary worth keeping: the NaN is the smoothing/threshold INTERACTION, not the threshold.** Do
+    not re-refute strength-of-connection on the smoothed-aggregation evidence.
+    **VALIDATED ON THE FULL 3-RUNG MARCH** — 4050 s / 62 steps / **347 cycles** / 3 retry cascades →
+    3474 s / 69 steps / **290 cycles** / **1** cascade, converging deeper (2.6e-6 vs 8.9e-6) with the
+    answer unchanged (mid-span `x_r/h` 8.36). Per rung the effect lands exactly where the sweep said:
+    rung 1 (the easy high-β anchor) **37 → 37, identical**, rung 2 110 → 75, rung 3 200 → 178. Note the
+    march takes *more* steps (62 → 69): cheaper solves hold α higher, so the Courant control grows β
+    differently and the trajectory diverges from step 24 — this is a whole-march total, not a per-step
+    improvement, and part of the wall saving is the two retry cascades that stop happening.
+
     **Validated on a real march, not just a frozen state:** the 3-rung Reynolds-continuation `bfs3d` march
     ran to the target Reynolds number on this bundle — 62 steps, 883 raw cycles, ~77 min, no breakdown,
     with β reaching **0.0077** at 6–11 cycles per solve, well past the 0.02 where ILU(1) diverged.
@@ -419,10 +452,141 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     de-compression above), not a rarer one. Forward-march only. Pinned by `test_amg_refresh_shift_in_place_*`
     (`test_amg_preconditioner.py`) and `test_materialize_gate_*` / `test_batched_probing_*` /
     `test_gather_de_compression_*`.
+    - **⚠️ THE TWO GATES ARE COMBINED, NOT NESTED — the β floor used to make the drift trigger UNREACHABLE
+      (fixed; `_refresh_branch`).** `_beta_tracking_refresh` asked the β gate first and the materialize gate
+      only *inside* it. With a PC-only `beta_floor` the gate's input is `max(β, floor)`, so once the march
+      drops below the floor that input is **pinned** and the β gate answers "no change" on every step
+      forever — taking the drift gate down with it. That is exactly the low-shift tail where the flow
+      develops fastest. Measured on the 3-rung `bfs3d` cold march (56 steps, `beta_floor = 0.05`):
+
+      | | steps | refresh declined | mean cycles |
+      |---|---|---|---|
+      | β ≥ floor | 34 | 12 % | 6.9 |
+      | β < floor | 22 | **91 %** | 7.5 |
+
+      13 steps had >5 % ν_t drift *and* no refresh, and they carried **189 of the march's 399 Krylov
+      cycles (47 %)** — steps 29–31 ran 24/23/34 cycles on a V-cycle nothing was allowed to refresh, and
+      the step after them blew up into a 3-attempt β-escalation retry costing 380 s. The decision is now
+      the total function `_refresh_branch(stale_state, moved_beta, split)`: **state drift ⇒ `full`**
+      whatever β says, β move alone ⇒ `shift`, neither ⇒ `none`. Note the shift branch is real work below
+      the floor too — the shift is `pc_beta · d(state)` and the per-cell `d` tracks the state even where
+      `pc_beta` is clamped, so the old comment's "would rebuild an identical V-cycle" was only true of the
+      β factor. **Consequence to know:** the materialize gate is now consulted every step rather than only
+      on refresh steps, so its `materialize_every` cap counts **steps**, not refreshes.
+      **MEASURED END-TO-END on the 3-rung `bfs3d` cold march, and the trade is strongly favourable:**
+
+      | | before | after |
+      |---|---|---|
+      | outer steps | 69 | **61** |
+      | **Krylov cycles** | **480** | **348 (−27 %)** |
+      | starved steps (>5 % drift, no refresh) | 15, holding 201 cycles (42 %) | **0** |
+      | sub-floor steps declining a refresh | 89 % | **19 %** |
+      | full refreshes | 32 @ 23.1 s | 48 @ **17.3 s** |
+      | refresh total | 803 s (15.7 % of wall) | 865 s (19.1 %) |
+      | β-escalation retry steps | 5, **1745 s** | 2, **655 s** |
+      | final ‖R‖ / mid-span `x_r/h` | 2.65e-6 / 8.36 | 2.42e-6 / **8.36** |
+
+      Read the refresh row correctly: the preconditioner now costs **more** in absolute terms (865 s vs
+      803 s) because it refreshes 50 % more often — that is the trade working, not a regression. It buys
+      132 fewer Krylov cycles and, far larger, removes three of the five retry cascades (−1090 s), which
+      were the single biggest line item in the march. The converged answer is **unchanged** (`x_r/h` 8.36
+      mid-span against OpenFOAM's 7.24, exactly as before), which is the constraint that matters: this is
+      a path change, not a solution change.
+    - **Where a refresh's time now goes (whole-run aggregate, same march): probe 632 s, refactor 195 s,
+      assemble 28 s, other 12 s — the probe is 73 %.** The non-probe tail is close to floor, so any
+      further work on refresh cost has to attack the coloured probe itself (amortizing colours across
+      steps, or a cheaper stencil), not the assembly or the multigrid setup.
+    - **⚠️ Wall-clock from that comparison is a LOWER bound, and the reason is a trap worth naming.** The
+      "after" run was watched by a per-refresh log monitor whose notifications drove the desktop UI to
+      ~70 % CPU against the solve; its first ~20 minutes are inflated (steps 1–3 were *bit-identical* in
+      cycles and residual to the baseline while taking 254 s against 224 s). Cycles, phase times and
+      step/retry counts are unaffected — which is exactly why the cycle count, not the clock, is this
+      project's cost measure. **Do not instrument a long run with a per-step notification stream.**
+    - **Where a refresh's time actually goes — REPORTED, not inferred (`RefreshTiming`, `solve/refresh_timing.py`).**
+      The observer used to receive `(kind, seconds)`, so a breakdown had to be recovered by differencing
+      the `full` and `shift` branches across a run. It now receives a record carrying ordered
+      `(phase, seconds)` pairs — AMG: `probe` / `assemble` / `refactor` — and `MarchLogger` renders them
+      under the `"pc"` detail (`pc full 23.0s (probe 14.6 assemble 3.2 refactor 5.2)`), with any
+      unattributed remainder shown as `other` so a breakdown cannot silently fail to add up. The
+      factorization preconditioners report no phases (empty tuple), which the record documents as valid.
+      Differencing the same 56-step march gave probe ≈ 14.6 s of a 23.0 s `full` (63 %) against 8.4 s for
+      `shift` — consistent with the older ~40-of-60 s reading, and the reason the probe is the lever.
+    - **The per-refresh sparse-matrix work is precomputed (`ShiftedCellMajorOperator`).** The `assemble`
+      phase — add `β d` to the diagonal, symmetrically equilibrate, reorder to cell-major — was a sparse
+      add plus two sparse products plus two fancy-index permutations, each allocating and re-sorting a
+      matrix the size of the coupled Jacobian, **repeated identically every refresh** because for a fixed
+      stencil reach the pattern never changes and only the values do. The class hoists the
+      pattern-dependent part (which base nonzero feeds each output nonzero, where the diagonals sit, the
+      cell-major CSR structure) into a one-time build, leaving one gather + an `O(n_dofs)` diagonal add +
+      a symmetric scale into a **preallocated** buffer. Bit-identical to `equilibrate_cell_major(J +
+      diags(shift))` — pinned by `tests/unit/test_cell_major_operator.py`, which runs without `petsc4py`
+      because the class holds none. Two details worth keeping: the returned matrix **aliases the reused
+      buffer** (consume it immediately; `AmgVCycle._build`/`refactor` both copy), and the symmetric scale
+      is applied **chunked over rows** so it never allocates a second Jacobian-sized temporary — the
+      point of the exercise being to stop allocating those. It engages only when a precomputed
+      `structure` was used, which is precisely the guarantee the pattern is fixed; otherwise the generic
+      path runs unchanged. `AmgVCycle.refactor`'s pattern re-check is likewise memoized on the index
+      arrays' identity, since comparing tens of millions of indices twice per refresh re-confirms
+      something fixed by construction.
+    - **Already done, do not re-propose:** `refactor` reuses the aggregation and prolongation
+      (`pc_gamg_reuse_interpolation` + smoother `reuse_ordering`) and overwrites the operator values in
+      place, so only the Galerkin coarse operators and the incomplete-LU factor values recompute.
+    - **A Vanka patch smoother is BUILT and installable as a level smoother — `aquaflux/solve/vanka.py`.**
+      Not shipped as a default and **not exported from `aquaflux.solve`**: it exists so the recorded
+      "the coarse space is the wall" verdict can be re-adjudicated (see the low-β bullet below), and it
+      earns a place in the tree only if it wins. Three facts to keep:
+      - **Route: PETSc's *shell* preconditioner, not `PCPATCH`.** `PCPATCH` with
+        `pc_patch_construct_type = vanka` needs a `DM` the plain-AIJ path does not supply, which is why
+        the earlier plan flagged it as a risk. `pc_type python` + `pc_python_type
+        aquaflux.solve.vanka.VankaPC` needs **nothing but the assembled matrix** — verified on a plain
+        `createAIJWithArrays` matrix with no `DM`, and it reaches every level (block size propagates to
+        the Galerkin operators, so the coarse levels are configurable too). Reached through the
+        `extra_options` seam, so no change to `AmgVCycle` was needed. Options carry the level prefix:
+        `mg_levels_pc_type python`, `mg_levels_vanka_neighbours`, `vanka_neighbour_fields`
+        (`before_centre`|`all`), `vanka_centre_field`, `vanka_damping`. On the shipped 2-level hierarchy
+        `mg_levels_` *is* the fine level (level 0 is `mg_coarse_`), so no level-index bookkeeping.
+      - **The patch is chosen ALGEBRAICALLY, by coupling strength, and it has to be.** The classical
+        collocated Vanka patch is "the cell plus the cells its continuity row couples to" — but this
+        Jacobian's stencil is distance-3, ~47 cells per row, so that patch would be a 280-unknown dense
+        solve. `CellStarPatches` instead ranks the pressure row's cell-collapsed `Σ|a_ij|` and keeps the
+        `n_neighbours` strongest. That also keeps the module mesh-free (`numpy`/`scipy` only, no `jax`),
+        so it unit-tests on a three-cell matrix. **The strength is summed only over the fields the patch
+        will actually contain** — with `before_centre` (the classical choice: the neighbours contribute
+        velocities, each neighbour's pressure staying in its own patch) that is the divergence entries
+        alone. Ranking on the whole row instead lets the collocated pressure-pressure damping term pick
+        the patch's cells, which are not the cells the patch exists to invert.
+      - **Additive with overlap averaging, deliberately — the recombination is the part that failed
+        before.** The recorded "additive Vanka + Richardson diverges (ρ 9e4)" arm was an *unweighted*
+        additive sum, which over-corrects every unknown that several patches share; the undamped
+        block-ILU/inexact-Uzawa arm ("1-apply reduction 5.10") amplified for the same reason. The weight
+        is `W^½ (Σ RᵀA_pp⁻¹R) W^½` with `W` the reciprocal coverage — split symmetrically across
+        restriction and prolongation, which is the normalization Schöberl–Zulehner (2003) use and what
+        Metsch's algebraic Vanka (dissertation §4.6) implements. It is a partition of unity, so on
+        non-overlapping patches the smoother is exactly the block inverse (pinned by a unit test), and
+        one application is a **bounded, fixed linear** operator — which is what the non-flexible outer
+        GMRES and the adjoint's transpose both require, and what an inner-Krylov ("Krylov-Vanka")
+        smoother is not.
+        **Two deviations to state with any result, both making this weaker than the textbook smoother:**
+        the classical Vanka sweep is *multiplicative* (patches solved in sequence against a residual
+        updated as it goes) and this is additive; and the patch is truncated by strength rather than
+        taking the whole continuity row. A null result from it is therefore *not* on its own evidence
+        that patch relaxation cannot help — which is why the harness also runs a sweeps ladder on the
+        Vanka arm, not only on the incomplete-LU one.
+        `VankaSmoother.worst_patch_gain` (max `|A_p⁻¹|`) is printed at setup, because a near-singular
+        patch produces an enormous additive correction and looks from the outside exactly like "patch
+        relaxation does not work here". Cost at the `bfs3d` shape (23k cells, 6 fields, 280 nnz/row),
+        extrapolated from a 5k-cell synthetic of the same density: patch selection ~0.1 s, factorization
+        0.5–3 s, one apply 7–110 ms, and the stored inverses 0.1–1.1 GB depending on patch width — which
+        is why the harness's widest arm is 12 velocity neighbours (~325 MB) and not 12 full cells.
+    - **`AmgVCycle.destroy()` / `.levels`.** The V-cycle owns several PETSc objects and a factored
+      hierarchy; `destroy()` releases them on the caller's schedule rather than the collector's, which a
+      loop that builds one preconditioner per arm needs (two live copies of a 3D coupled operator plus
+      factors is enough to exhaust a workstation — the standing "one heavy probe at a time" rule).
+      `refactor`'s rebuild branch calls it too, so the teardown has one home.
   - **⚠️ MEASUREMENT DISCIPLINE FOR PRECONDITIONER PROBES (binding — every one of these produced a wrong
     verdict that had to be retracted).** Judge a candidate preconditioner **only** by running it through
-    GMRES and reading the **true** residual `‖Ax−b‖`. Four cheaper-looking gates are all invalid on this
-    indefinite saddle:
+    GMRES and reading the **true** residual `‖Ax−b‖`, **at a state and shift pairing where the operator
+    is actually hard**. Six cheaper-looking shortcuts are all invalid on this indefinite saddle:
     1. **The preconditioned residual `‖Mr‖`.** PETSc's default convergence norm. SOR/Krylov-smoothing
        report `reason=2` (converged) at a **true** residual of 1.0. Force `KSP_NORM_UNPRECONDITIONED`.
        A level-ILU "win" was once entirely this artifact.
@@ -432,11 +596,85 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     3. **The spectral radius of the iteration operator.** The largest eigenmode of a smoothed operator is
        the *smooth* mode — which is the coarse grid's job, not the smoother's. A "ρ = 9e4, diverges"
        reading nearly killed a Vanka smoother that had never actually been run through GMRES.
-    4. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
+    4. **A probe at a BENIGN operating point — an easy operator cannot discriminate between
+       preconditioners.** This is the one that nearly buried the largest preconditioner win found on this
+       case. A GAMG aggregation sweep run at the march's *converged tail* returned **6 cycles for every
+       arm** — shipped, plain aggregation, and two strength thresholds all identical — and the honest
+       reading of that sweep was "no difference, close the question". Re-run at the march's own **hard**
+       states, the same arms separated **22 → 9 cycles** (2.4×, and 66× lower true residual). Where the
+       operator is well conditioned, every candidate looks the same, so a null result there is *no
+       information*, not evidence of no effect.
+       **Pick the hard states from the march's own log, not by intuition:** the checkpoints plus the step
+       table identify them directly — highest cycle count, clipped `a_min`, and any step carrying a retry
+       flag. Probe the state *entering* such a step (the checkpoint written after the previous one).
+       The same caution applies to the *pairing*: use the operator at the march's own β with the V-cycle
+       at `max(β, beta_floor)`, because that mismatch is the shipped configuration. A probe that builds
+       the V-cycle at the march's raw β instead measures a configuration the floor exists to prevent —
+       it reported "the V-cycle does not converge at all in the tail" (true residual 1.0), where the real
+       pairing takes **6 cycles to 1.5e-10**.
+       **Two traps in "highest cycle count", both of which pick a BENIGN state if you get them wrong:**
+       - **Rank on the hardest SINGLE solve, never on the step's summed cycles.** The sum rewards a step
+         that took many easy inner iterations over one that took a single hard solve, and on a real march
+         the two orderings disagree outright: on the 3-rung `bfs3d` cold march the summed count picks a
+         step whose hardest solve is **6** cycles over one whose hardest is **15**. `StepReport` has
+         `max_inner_cycles` for exactly this, and `StateCheckpointer` now serializes it (with
+         `inner_iterations`) so a later study can rank without re-parsing the log.
+       - **A step's record describes only its ACCEPTED attempt, and the hardest operators live in the
+         REJECTED ones.** A solve that blows past `retry_on_cycles` gets the step redone at an escalated
+         β, and the retry then succeeds easily — so the record shows the *easy* attempt. Same march: step
+         50's hardest solve is **15 cycles at β = 0.0293** with α collapsing to 0, in attempt 1; the step
+         reports **3 cycles at β = 0.0585**. That is also why the escalated attempts are where the
+         *sub-floor* operators are — the escalation is what lifts β back above the floor. Until the
+         rejected attempts are recorded, read them out of `march.log` (`redo step N (attempt 2): …` plus
+         the per-inner table above it) and name the state and β explicitly.
+    5. **A probe driven by the WRONG "march" solver — there are two, and they look interchangeable.**
+       `_COUPLED_ILUT_FORWARD_SOLVER` is 1 % in a plain 2-norm at restart 10; the coupled **AMG** builder's
+       default (what `bfs3d` actually runs) is `forward_rtol` = **0.3** in the **row-scaled**
+       `coupled_scaled_norm` at restart **15**. Reaching for the first while believing it is the second was
+       done twice in one session — once in a sweep's self-check arm, once when adding a `forward_solver`
+       seam, where it would have replaced a loose row-scaled stop with a tight Euclidean one and reported
+       the difference as a restart-length effect. **It does not announce itself:** at a state where both
+       converge in one cycle the self-check still passes and reports a validation it never performed.
+       Build the solver from the same pieces the builder does, or take the restart through
+       `coupled_amg_continuation(forward_restart=...)` rather than by supplying a whole solver.
+       Note also what `forward_rtol = 0.3` *is*: an inexact-Newton forcing term on the **linear** residual
+       per inner solve, not a solution tolerance — accuracy comes from the inner loop iterating. And the
+       **achieved** reduction is routinely tighter than the requested one, because a restarted GMRES tests
+       the stop only at restart boundaries, so a solve that would cross 30 % after three matrix-vector
+       products still builds fifteen.
+    6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
        Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
        `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks
        plausible — two probes were invalidated this way. (`equilibrate_cell_major` reorders internally, so
        *after* that reorder `field = row % n_fields`. Know which side of it you are on.)
+  - **⚠️ WE ARE NOT SOLVING A SADDLE-POINT PROBLEM — we are solving a saddle point PLUS two
+    advection-dominated transported scalars, and that is probably why the saddle-point literature keeps
+    not transferring.** Worth stating plainly because a long run of failures is explained by it:
+    - **Every published method tried here targets a 2-field `(u,p)` system** — Vanka, Webster's
+      stabilization, Metsch's algebraic Vanka, the SIMPLE pre-transform, monolithic saddle-AMG. Our block
+      is **six** fields, two of them transported scalars, one solved in a log variable.
+    - **The closest published work to this discretization segregates the turbulence.** Uroić–Jasak match
+      us on every axis that usually matters (collocated Rhie–Chow finite volume, k–ω SST, backward-facing
+      step, monolithic coupled AMG) and still put only `(u,p)` in the coupled block, solving k/ω
+      separately with BiCGStab + ILU(0). Their papers contain **zero coverage** of turbulence-in-the-block.
+      There is no published precedent for the 6-field monolithic block, so importing a fix from that
+      literature is importing it across a regime boundary.
+    - **The measured failure is not a saddle pathology.** The near-null direction of the degenerate cell
+      blocks is **pure ω** — nothing on `u,v,w,p,k` — and per-field V-cycle smoothing has pressure *well*
+      handled with ω the outlier. The saddle part of our operator is not what is hurting.
+    **The direction this points at is a FIELD SPLIT that keeps the coupling** — a block-triangular
+    preconditioner with the `(u,p)` saddle handled as now and k/ω preconditioned by something suited to
+    transport (`scalar_transport_preconditioner` already exists and already serves those blocks in the
+    block-preconditioner family). Note this is **not** the refuted arm below: that one was
+    block-*diagonal*, i.e. the coupling **dropped**, and it established that the coupling is load-bearing
+    — not that ω has to live in the same multigrid hierarchy. Architecturally the split is free: the
+    operator stays monolithic, so the AD Jacobian and the coupled adjoint are untouched, and a
+    block-triangular preconditioner is a fixed linear operator and therefore transposable.
+    **Before building it, get an operator that can show a difference.** At the states currently reachable
+    the monolithic ILU(0) V-cycle converges in **2 cycles to 1.3e-14**, so every candidate ties; and the
+    march's cost is no longer preconditioner-bound (~65 % Krylov, largely fixed per-step matvec rather
+    than cycles; 21 % refresh; the rest globalization). The upside on *this* case is bounded, and the
+    test needs the hard inner iterates.
   - **⚠️ LOW-β DIRECTIONS ALREADY MEASURED OUT — do not re-litigate without new evidence.** The low-shift
     wall on the 3D coupled saddle has absorbed a lot of probing. What is settled:
     - **Turbulence decoupling ("just lag ω") — REFUTED.** A true-residual arm comparison found
@@ -448,7 +686,18 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       abstracts.)
     - **PC-only pressure-Poisson augmentation — NO-GO, triple-confirmed.** The `(p,p)` block is *already*
       0.71× the SIMPLE-Schur elliptic operator, and the augmentation degraded cycles ~2.7×.
-    - **`coarse_eq_limit` beyond ~2000 — inert.** `K=8000` is identical to `K=2000`.
+    - **`coarse_eq_limit` beyond ~2000 — inert, but read this correctly: the ARM was a no-op, which is
+      not the same as a null result.** GAMG stops coarsening as soon as the grid falls below the limit,
+      and this hierarchy is already **2 levels** — its single aggregation step has landed under 2000
+      already, so a *larger* limit cannot make it stop any sooner and produces a bit-identical
+      hierarchy. `K=8000 ≡ K=2000` is therefore arithmetic, not evidence, and it says nothing about
+      whether the coarse space matters. **To probe the coarse space, degrade it instead**
+      (`mg_coarse_pc_type: jacobi` in place of the direct LU) — that reads in both directions, and it
+      is the control that decides what a *smoother* plateau means: if degrading the coarse solve barely
+      moves the cycle count then the coarse correction is not load-bearing, and a smoother plateau
+      cannot be attributed to the coarse space at all. Always print the coarse grid's equation count
+      (`AmgVCycle.coarse_size`) beside the level count, so an arm that changed nothing is
+      distinguishable from a setting that made no difference.
     - **Additive Vanka + Richardson — invalid by construction** (Richardson on an indefinite saddle).
       A *Krylov*-Vanka smoother, which is genuinely strong and stable, still stalls the true residual at
       5–6e-2 at every β and is insensitive to the inner count (4 vs 8) — which points at the **coarse
@@ -457,6 +706,299 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     - **Where the V-cycle actually under-performs:** per-field, pressure is *well* smoothed and **ω** is
       the unsmoothed field (by ~700–1300×), then `u`. If a per-field lever is wanted in 3D, ω is it —
       pressure is not.
+      **⚠️ PARTLY REHABILITATED (2026-08-08): a second, independent measurement puts ω in the same
+      place.** The cell-block singular-value decomposition above finds the near-null direction of the
+      worst diagonal blocks to be **pure ω**, in 353 of 23040 cells, under the *current* bundle. That is
+      local block conditioning, not per-field V-cycle smoothing rates — a different quantity by a
+      different route — so "ω is the 3D per-field lever, not pressure" now rests on two legs instead of
+      one unfalsifiable one. The specific *number* below (~700–1300×) is still unverified and still
+      carries no configuration; treat the **field** as corroborated and the **factor** as not.
+      **⚠️ NEITHER THIS NOR THE VANKA BULLET RECORDS WHICH SMOOTHER OR AGGREGATION IT WAS MEASURED
+      WITH, so neither can be relied on now.** The smoother default has since moved ILU(1) → ILU(0) and
+      the aggregation smoothed → plain, and *both* of those changes have inverted a conclusion on this
+      case. Concretely, the Vanka bullet's inference — "a strong smoother still stalls, therefore the
+      **coarse space** is the wall" — is valid but **under-determined**: "the coarse space" could mean
+      the space is intrinsically inadequate (needing inf-sup-aware coarsening, a research problem) or
+      that the coarse *correction* was corrupted by prolongator smoothing (a setting, now changed). A
+      stall at 5–6e-2 fits both, so that experiment never distinguished them. Re-measure before building
+      on either, and **record the smoother and aggregation** in any replacement.
+      **The second reading is now measured, not speculative.** Prolongator smoothing *was* degrading the
+      coarse correction on this operator: turning it off (`pc_gamg_agg_nsmooths = 0`) is worth
+      **22 → 9 cycles** at a hard state and ~16 % of the whole march's Krylov cost. Every arm in that
+      Vanka campaign was judged against a coarse correction built with smoothing **on**, so a *smoother*
+      arm failing to rescue it is what you would see whether or not the smoother was any good — which
+      also explains why the campaign kept concluding "the smoother is not the lever" whichever smoother
+      it tried. **Do not treat "the coarse space is the wall" as settled.**
+      **⚠️ FIRST MEASUREMENT UNDER THE CURRENT BUNDLE (2026-08-08) — and it moved the question.**
+      Configuration, in full, because that is the point: 3-rung `bfs3d` cold march to ‖R‖ = 2.64e-6 (69
+      steps, 60.5 min); state `state-00049` (rung 3, the target Reynolds number); operator β = 0.0293
+      with the V-cycle at the floor 0.05; **plain aggregation, ILU(0), 4 sweeps, `coarse_eq_limit` 2000
+      → 2 levels with 1296 coarse equations**; real right-hand side `−R(state)`, judged on the true
+      residual through GMRES at rtol 1e-6 (restart 15).
+
+      | arm | patch width | worst `\|A_p⁻¹\|` | restart cycles | true relative residual |
+      |---|---|---|---|---|
+      | self-check, the march's own solver | — | — | 1 | 2.0e-06 |
+      | shipped (ILU(0) ×4) | — | — | **2** | 1.3e-14 |
+      | ILU(0) ×8 | — | — | 1 | 1.4e-14 |
+      | ILU(0) ×16 | — | — | 1 | 1.4e-14 |
+      | coarse solve degraded to Jacobi | — | — | 2 | 1.3e-14 |
+      | Vanka, 0 neighbours (the cell block) | 6 | 3.011e3 | 58 (cap) | 7.8e-01 |
+      | Vanka, 6 velocity neighbours | 24 | 3.006e3 | 58 (cap) | 3.6e-01 |
+      | Vanka, 6 neighbours, all fields | 42 | 3.242e3 | 58 (cap) | 2.4e-01 |
+      | Vanka, 6 velocity neighbours, damped 0.3 | 24 | 3.006e3 | 58 (cap) | 4.1e-01 |
+
+      Two things follow, and the second is the bigger one.
+      - **Vanka does not stall here — it fails outright, at a state where the operator is easy**, and it
+        fails for a reason that has nothing to do with the coarse space. It cannot be excused by a hard
+        operator: ILU(0) solves the same system to 1.3e-14 in two cycles. Every patch width runs to the
+        restart cap; widening helps monotonically (0.78 → 0.36 → 0.24) but nowhere near enough, and
+        **the worst patch gain is flat at ~3e3 across all three widths** — on an operator equilibrated
+        to unit diagonals, i.e. a local singular value four to five orders down. Flat under widening is
+        the informative part: no amount of surrounding a cell repairs it, so the degeneracy is in a row
+        of the **centre block** that stays degenerate however large the patch. (Adding the neighbours'
+        `k` and `ω` — the "all fields" arm — did not reduce it either; it rose slightly.)
+        That the *narrowest* arm is plain point-block Jacobi also settles the "is the implementation
+        wrong" question the right way: block-Jacobi failing on a saddle point is textbook, and is
+        precisely why patch smoothers exist. **Why ILU(0) succeeds where every patch method fails:** in
+        cell-major ordering it is a *global* forward/backward sweep and never inverts a cell block in
+        isolation, which is exactly what a patch method is obliged to do.
+        **⚠️ It STAGNATES, it does not amplify — and that distinction is not decoration, it points at a
+        different cause.** Every arm stops at a finite true residual and runs to the restart cap; none
+        diverges. Under-relaxing (damping 0.3), which is what tames an over-correcting smoother, made it
+        **worse** (0.36 → 0.41), as it would for a smoother that is too *weak* rather than explosive.
+        So the large patch gain is at present a **correlation with the failure, not a demonstrated
+        cause** — do not write it up as the mechanism. Two explanations survive the data equally well:
+        1. a few near-singular cell blocks poison the recombination; or
+        2. the **additive** form is simply too weak here. Weighted-additive Schwarz is block-Jacobi-like
+           and needs a relaxation that may not exist for this operator, which predicts exactly what is
+           seen: monotone gains with patch width, stagnation at every width, no help from damping. The
+           classical Vanka sweep is *multiplicative* and remains **untested**.
+
+        **WHICH row is degenerate — measured, and it is ω.** A batched singular-value decomposition of
+        all 23040 diagonal 6×6 blocks of the equilibrated cell-major operator at the same state:
+        `σ_min` median 2.87e-2, 1st percentile 8.42e-4, minimum 3.21e-4, with **353 cells below 1e-3**
+        and condition numbers there of 5e6–9e6. In every one of the twenty worst blocks the near-null
+        right singular vector is **pure ω** — `(u,v,w,p,k,ω) = (0,0,0,0,0,1)` to three decimals. So it
+        is the ω *column* that is nearly empty: perturbing ω in such a cell barely changes any of that
+        cell's own six equations, because ω's influence there is carried almost entirely by neighbour
+        transport rather than locally. That is exactly the quantity a cell-centred patch must invert and
+        a global cell-major incomplete-LU sweep never does, which is the cleanest available explanation
+        for why every patch smoother fails on this operator while ILU(0) is untroubled. The affected
+        cells sit in low-`k` regions (median `k` 0.122 against 0.655 over the mesh) and occur in exact
+        spanwise-symmetric pairs, so they are a coherent region of the flow, not scattered noise.
+        **⚠️ BUT THE SHIFT DOES NOT CONTROL IT, so this does NOT explain the low-β wall.** Sweeping the
+        shift over a 500× range at the same state (one materialization; the Jacobian does not depend on
+        β, only the added diagonal does):
+
+        | shift | median `σ_min` | min | cells below 1e-3 |
+        |---|---|---|---|
+        | 0.5 | 3.450e-2 | 3.929e-4 | 204 |
+        | 0.05 (the floor) | 2.873e-2 | 3.214e-4 | 353 |
+        | 0.005 | 2.807e-2 | 3.133e-4 | 367 |
+        | 0 (unshifted) | 2.799e-2 | 3.124e-4 | 369 |
+
+        Over the range the march's tail actually occupies (0.05 → 0.005) the near-singular count moves
+        **4 %**. The degeneracy is a fixed property of the discretization and state, not something β
+        governs — so the low-shift conditioning wall is *something else*, and this is not the mechanistic
+        account of it that it first looked like.
+        **It also kills the obvious lever before anyone builds it.** An ω-only, preconditioner-only shift
+        boost cannot work, because the shift is `β·d` and for ω that `d` **is the weak transport coupling
+        that is the problem** — scaling a near-zero diagonal by β leaves it near-zero at any β. Anything
+        along these lines would have to be an *absolute* floor on the preconditioner's ω diagonal rather
+        than a multiple of `d`, which is untested speculation and has no headroom to be demonstrated at a
+        state where ILU(0) already converges in two cycles.
+        **What the ω finding does license** is narrow and solid: it explains why *cell-local*
+        preconditioners fail here, and it gives a two-minute screen for the next one.
+
+        **It also independently corroborates the ω bullet below**, which was recorded without its
+        configuration and marked unusable: a completely different measurement — local block
+        conditioning rather than per-field V-cycle smoothing rates — lands on the same field. Two
+        unrelated routes to "ω is the 3D preconditioner lever" is much better evidence than either
+        alone, and it also suggests a concrete arm: **leave ω out of the patch**, since a local solve
+        cannot resolve a direction the local block does not see.
+
+        **RESOLVED, and (1) IS REFUTED — the near-singular blocks are NOT the mechanism.** The test was
+        pre-registered (`VankaSmoother(max_patch_gain=...)`: converges ⇒ (1), stagnates ⇒ (2)) and the
+        answer is unambiguous, because dropping precisely the near-singular patches made the solve
+        **worse**, not merely no better. The whole family of drop-arms is monotone in *coverage* and in
+        nothing else:
+
+        | patches dropped | fraction of the mesh | true relative residual |
+        |---|---|---|
+        | 0 | — | **0.360** |
+        | 337 (gain > 1e3 — the σ_min < 1e-3 set) | 1.5 % | 0.737 |
+        | 1925 (gain > 3e2) | 8.4 % | 0.9975 |
+        | 6044 (gain > 1e2) | 26 % | 0.9995 |
+
+        Strictly monotone in how much of the mesh still gets relaxed, which is the tell: these arms
+        measure **coverage** and nothing else.
+
+        Those 337 patches were doing *useful* work; removing them leaves their degrees of freedom
+        unrelaxed and costs more than their ill-conditioning ever did. So the large patch gains are a
+        real property of this operator — and worth knowing, since two independent measurements agree on
+        the set (337 patches by inverse gain, 353 cells by block `σ_min`) — but they are **not** why the
+        smoother fails. **Explanation (2) is what survives: the ADDITIVE recombination is the limit.** It
+        smooths usefully but insufficiently *everywhere* rather than being poisoned anywhere, which is
+        also what the width ladder and the damping arm independently say.
+        **MULTIPLICATIVE IS NOW TESTED TOO, AND IT IS WORSE — so (2) falls as well.** Compared
+        sweep-for-sweep, which is the only fair way to ask whether *sequencing* helps (one multiplicative
+        sweep against four additive ones confounds recombination with sweep count): **additive ×1 →
+        0.497, multiplicative ×1 → 0.855.** Sequencing the patches does not rescue this smoother; it
+        costs. Built as `VankaSmoother(multiplicative=True)`, 16 colours on this mesh, ~33× the additive
+        apply cost.
+
+        **So neither hypothesis stands, and what is left is the one fact that survived every arm: the
+        cell block is weakly coupled in ω EVERYWHERE, and the 353 near-singular cells are only its tail.**
+        Median `σ_min` is 2.9e-2 on an operator equilibrated to unit diagonals — some 34× down — so
+        *every* cell-local solve mishandles ω, not just the extremes. That single fact accounts for the
+        whole ladder: widening the patch adds neighbour velocities and cannot help ω; dropping the worst
+        patches removes useful work without touching the general weakness; damping and sequencing change
+        only how corrections are combined, and no recombination repairs a local solve that cannot see the
+        field. It equally explains why ILU(0) is untroubled — a global cell-major sweep propagates ω along
+        the transport direction, which is where ω's coupling actually lives.
+
+        **Verdict: cell-centred patch relaxation is the wrong shape for this operator, and the reason is
+        structural rather than tunable.** Do not re-open it with another patch variant. `VankaSmoother`
+        stays in the tree as the evidence and as a testbed; `validation/bfs3d_openfoam/cell_block_conditioning.py`
+        screens any future cell-local proposal in ~2 minutes, which is what this campaign cost hours to
+        learn.
+
+        **Choose that cap from the gain distribution, not from the maximum**, or the arm measures the
+        wrong thing. Measured over the 23040 width-24 patches at this state: gain above **1e1 in 96.6 %**
+        of them (22251), above **1e2 in 26.2 %** (6044), maximum 3.0e3. A gain of order ten to a hundred
+        is therefore *ordinary* here — it is what `1/σ_min` gives for the median block (`σ_min` ≈ 2.9e-2)
+        — and only the ~1.5 % above 1e3 are the near-singular ω blocks the hypothesis is about. Capping
+        at 1e2 drops a quarter of the mesh and the true residual goes to **0.9995**, i.e. no reduction at
+        all: with that many patches gone, any degree of freedom covered only by them has weight zero and
+        is never relaxed. That number says the smoother was gutted, and nothing whatever about whether
+        near-singular patches caused the original failure — a confounded arm, not a null result.
+
+        Related and worth keeping either way: this is the same *family* of failure as the two earlier
+        patch-smoother attempts (unweighted additive Vanka, "ρ = 9e4"; undamped block-ILU/inexact Uzawa,
+        "1-apply reduction 5.10"), and the overlap weighting that was supposed to fix it does not. Note
+        also that the published algebraic Vanka does *not* solve the patch exactly: Metsch's (§4.6) local
+        solve is an inexact-Uzawa form built on a diagonal `Â > A` with a scaling `β` chosen so
+        `Ŝ > C + BÂ⁻¹Bᵀ`, provably convergent precisely because it never inverts a near-singular local
+        saddle. The exact patch solve chosen here as the *stronger* option may be the thing that breaks.
+      - **⚠️ THE STATE-SELECTION PREMISE IS BROKEN FOR A DUAL-TIME MARCH, and this invalidates the
+        comparison above as a test of the *coarse-space* question.** A checkpoint is written at the end
+        of a step, so it holds the state the *next* step starts from — and a step's first solve is its
+        easy one, from a settled state with a freshly rebuilt preconditioner. Across the whole march:
+        **all 70 step-initial solves cost ≤ 2 restart cycles, while solves at inner > 0 reached 15.**
+        No checkpointed state in this march poses a hard linear system, so every arm ties there and the
+        sweep says nothing about smoother-versus-coarse-space. (It still says plenty about Vanka, which
+        *failed* at an easy state — a positive result needs a hard state, a failure does not.) The fix
+        is `DualTimeStep.inner_observer`, which now also carries the **iterate**.
+        **⚠️ But a march step CANNOT be reconstructed from a checkpoint — its configuration is
+        path-dependent.** `validation/bfs3d_openfoam/inner_iterate_probe.py` tried, driving one step from
+        the checkpoint, and both plausible arrangements bracket the march without reaching it. At
+        `state-00049`, β = 0.0293, where the march's first inner solve costs **1 cycle at α = 0.500**:
+
+        | how the engine was built | inner-0 cycles | ‖G‖ |
+        |---|---|---|
+        | at the probed state (self-consistent) | 7 | descends cleanly, α = 1 |
+        | at the Reynolds rung's seed, 11 steps back | **39** | **no descent at all** |
+
+        The march is outside both because `amg_beta_tracking_refresh` rebuilds the preconditioner
+        repeatedly on the way to the step, so by then it is recent, while the shift policy dates from the
+        seed with its transport part rebuilt at each refresh — a product of the refresh *history* that no
+        checkpoint records. **The route to the hard iterates is therefore to capture them DURING a
+        march**, via the observer, not to replay a step afterwards.
+        **✅ DONE, and it settles the question: the march's expensive solves are STALENESS, not hard
+        operators.** `InnerIterateCheckpointer` (`solve/checkpoint.py`, wired in the case behind
+        `BFS3D_INNER_DUMP_ABOVE`) caught the seven solves that reached ≥4 restart cycles on an otherwise
+        byte-identical march (`x_r/h` 8.361, 290 cycles, unchanged). Note the replay problem does **not**
+        apply once you hold the iterate: the state is on disk, so the operator can be rebuilt around it
+        directly. At the march's single hardest solve — attempt 50 inner 3, β = 0.0293, where the march
+        took **15 cycles** and the line search collapsed to α = 0:
+
+        | iterate | β | the march | one step stale | matched at the iterate |
+        |---|---|---|---|---|
+        | attempt 50 inner 3, α → 0 | 0.0293 | **15** | 3 (5.9e-02) | **1 (6.6e-06)** |
+        | attempt 40 inner 3, α = 1 | 0.3333 | **8** | 1 (9.9e-05) | 1 (1.7e-10) |
+
+        Read the two rows together: at β = 0.33 even a stale preconditioner is already optimal, so
+        **staleness only bites at low β** — and there it bites hard. Note also that both march counts far
+        exceed what *one* step of staleness costs (15 against 3, 8 against 1), so the march's real
+        staleness — up to four steps in `J` — is worth several times a single step.
+
+        **That operator is easy.** One cycle to 6.6e-06 with a matched preconditioner, and a single step
+        of staleness already triples the cost and gives up four orders of accuracy. So there is **no
+        preconditioner headroom left on this case at any state the march visits** — which is the
+        retrospective explanation for why every arm in the Vanka campaign tied or lost, and why the
+        aggregation sweep only separated at all under the *older*, weaker bundle. The lever here is
+        **refresh cadence** (`refresh_every=8`, `materialize_every=4`, `beta_rel_change=0.25` are lax
+        around the hard steps), consistent with the earlier gate fix, which bought 132 fewer cycles and
+        removed three of five retry cascades by refreshing ~50 % more often — the same mechanism found
+        from the other end.
+        **The cost arithmetic says REPLACE THE SCHEDULE WITH A TRIGGER — and this is the largest
+        remaining lever on the march, bigger than any preconditioner change.** Measured on the 3501 s
+        march: scheduled refreshes are 50 full + 12 shift = **742 s, 21 % of the wall**. A refresh fired
+        only when a solve reaches ≥3 cycles would fire **16** times (227 s, **−515 s**); at ≥4, **7**
+        times (99 s, **−643 s**) — a 15–18 % whole-march saving, against a ~8 % ceiling for a *perfect*
+        preconditioner. Read as an *addition* to the schedule the trigger looks break-even; as a
+        **replacement** it is the biggest win on the table, and conflating the two is easy to do.
+        **Why no schedule can work here:** 193 of the 232 solves already take 1 cycle, so most scheduled
+        refreshes maintain a freshness nothing consumes — and the right interval is regime-dependent (at
+        β = 0.333 a one-step-stale preconditioner still gives 1 cycle; at β = 0.029 it gives 3), so a
+        fixed cadence necessarily over-refreshes in the easy regime and under-refreshes in the hard one.
+        Targeting cannot be predictive either — the Step-0 diagnostic refuted every static signal — which
+        leaves reacting to the cost itself.
+        **Two things to get right.** The counts above come from a march that *had* the schedule keeping it
+        fresh, so removing it shifts the distribution up and the trigger fires more often; the equilibrium
+        rate is a feedback loop (staleness → cycles → trigger → freshness) and is unknown until it is run.
+        And it needs a **cap of one refresh per step**: with it the worst case is 69 × 14.2 = 980 s against
+        today's 742 s, a bounded +238 s downside for a ~515 s upside; without it, a refresh per inner
+        iteration is unbounded. `abort_above_inner_cycles` already detects the condition inside the inner
+        loop, so the change is to the *reaction* — refresh and continue, keeping β escalation as the
+        fallback, which also makes the refresh a diagnostic: if it does not help, the operator really is
+        hard.
+        **The probe is 79 % of a refresh, and the obvious way to halve it — stencil reach 3 → 2 — is
+        MEASURED AND FAILS.** The saving is real (112 → 60 colours, build 30 s → 12 s) but the V-cycle is
+        not: at `state-00062`, β = 0.0072 against the 0.05 floor, reach-2 gives **41 cycles at a true
+        relative residual of 1.9** — worse than the initial guess — where the shipped reach-3 arm reaches
+        1.5e-10 in six. A failure at a *benign* state is conclusive: it cannot be excused by a hard
+        operator. Note this also disposes of an appealing argument that does **not** work: the older
+        refutation blamed "the pattern-dependent ILU(1) smoother", and at ILU(0) there is no fill to be
+        pattern-dependent about — yet reach-2 still fails at ILU(0), so the conclusion outlived the
+        mechanism that was offered for it. **Retested under plain aggregation too — it still fails, so the lever is
+        CLOSED.** At `state-00049`, β = 0.0293 (where reach-3 does 2 cycles to 1.3e-14): reach-2 plain
+        gives **58 cycles at 1.7e-01**, and doubling the smoother sweeps barely moves it (1.4e-01, still
+        at the restart cap). Note what that rules out: it is not a smoothing deficit. And the hierarchy
+        itself changes — reach-2 yields **3 levels / 480 coarse equations** against reach-3's 2 / 1296 —
+        so the dropped couplings are load-bearing for the *coarse space*, not merely for the smoother's
+        fill. Reach 3 is required, now measured across both aggregations at ILU(0). **There is no cheap
+        way to shrink the probe**, which leaves refreshing *less often* as the only open axis on refresh
+        cost — see the refresh-trigger note below.
+        **A trap: the cheap `refresh_shift_in_place` branch does NOT help within a step.** The shift is
+        formed once per step at the reference state and held fixed across the inner loop, so what drifts
+        inside a step is `J(p)`. The shift-only branch only helps *across* steps, where β moves.
+        **Untested but cheap and worth doing: whether staleness also drives the GLOBALIZATION cost.** A
+        stale preconditioner returns a less accurate Newton direction (5.9e-02 against 6.6e-06 here), and
+        an inaccurate direction can fail to descend — which is what α → 0 means. If so, the retries and
+        line-search collapses are downstream of the same cause, not a separate problem. The captured
+        iterate is all that is needed to check it. Two details worth keeping from the
+        attempt: the builder's `amg_beta` defaults to **2.0**, which at a sub-floor β is a two-orders
+        mismatch that alone turns a 1-cycle solve into 7 (pass `max(β, beta_floor)`); and a
+        preconditioner frozen 11 steps back yields **no descent whatsoever** — α reads 1.000 because
+        that is the line search's non-descent fallback, with ‖G‖ flat — which is independent evidence
+        that the refresh is load-bearing.
+
+        The probe now **validates itself against `march.log`** (inner-0 cycles and α) and refuses to
+        report if it disagrees, which is how both errors above were caught rather than written up. Hold
+        any future march-reproduction harness to the same gate.
+
+      **How to re-run it — the smoother and the harness are BUILT (`aquaflux/solve/vanka.py`,
+      `validation/bfs3d_openfoam/preconditioner_sweep.py`); what is missing is the measurement.** The
+      discriminating question is narrow: **with plain aggregation, does a Vanka smoother still stall?**
+      If yes, the coarse space really is the wall and the inf-sup / block-Schur direction is justified.
+      If no, the original verdict was an artifact of the aggregation default and the smoother direction
+      reopens. Record the smoother, aggregation, state and shift pairing alongside whichever answer
+      comes out. The `ARMS` ladder in the harness reads the question two independent ways — a **sweeps**
+      ladder on the *shipped* smoother (if cycles keep falling as sweeps rise the smoother is not
+      saturated and cannot be the binding constraint; if they plateau, what survives is in the coarse
+      space's blind spot) and the **Vanka** arms themselves, the widest deliberately over-strong.
     - **The Jacobian's fill is irreducible.** The coupled `(u,p)` Jacobian is intrinsically **distance-2**
       (~38 nnz/row) because Rhie–Chow damping couples pressure to the neighbour-of-neighbour ring; the
       advection scheme is irrelevant to this. A distance-1 preconditioner pattern is not available for a
@@ -1896,6 +2438,50 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       than a non-attainment flag threaded through every solve layer — same effect (a doomed primary costs
       ~`cycle_budget` matvecs, not `inner_steps ×` a stagnation), far smaller blast radius. Pinned by
       `test_dual_time.py` (`…cycle_budget_caps_the_inner_loop`, `…none_is_the_unbounded_step`).
+      **⚠️ CORRECTION: "a doomed primary costs ~`cycle_budget` matvecs" is MEASURABLY FALSE, because the
+      budget is checked BETWEEN inner iterations.** A single inner solve is bounded only by its own
+      `stagnation_iters=40` / `max_restarts=60`, both ≈ the whole budget, so one solve can blow through
+      it. Measured on the 3-rung `bfs3d` march at `cycle_budget=42`: the three discarded attempts cost
+      **26 / 56 / 59** cycles, entering their last inner having spent only 14 / 17 / 16. The budget did
+      bind — just a whole stagnating solve too late.
+    - **`DualTimeStep(abort_above_inner_cycles=…)` — stop the moment the attempt is KNOWN to be
+      discarded (BUILT).** `retry_on_cycles` is a **per-solve** quantity, so the instant one solve
+      exceeds it with the inner target unmet, `forward_march` is going to bin the whole attempt and redo
+      it at a larger β. Yet the check lived only in `forward_march`, *after* the step returned — so the
+      step kept running inner iterations whose results were already destined for the bin. The same
+      predicate now sits in the inner loop's `cond`, and `forward_march` pushes its own `retry_on_cycles`
+      down via `_with_inner_abort` (using `dataclasses.replace`, not `eqx.tree_at` — the field is static,
+      so it is in the treedef, not among the leaves), so there is **one** number rather than two to keep
+      in step.
+      **It cannot bin an expensive success**, and the ordering is what guarantees that: `cond` tests the
+      convergence target *before* either cost bailout, so a costly solve that brings `‖G‖` under the
+      target exits normally with `reached_target` set and is kept. The empirical backing is strong on
+      this case — across 64 attempts, **no kept attempt ever had a single inner solve above 10 cycles**,
+      while all three discarded ones ran 12/15/43 — so the threshold separates them perfectly.
+      **MEASURED on the next march, and the prediction held where it applied:**
+
+      | step | discarded attempt before | after | cycles saved |
+      |---|---|---|---|
+      | 48 | `[2, 9, 5, 43]` | unchanged | 0 (predicted 0 — the trip is on the last inner) |
+      | 51 | `[2, 12, 4, 4, 4]` | `[2, 12]` | 12 (predicted 12) |
+      | 52 | `[2, 15, 39]` | `[2, 19]` | 35 (predicted 39) |
+
+      Discarded-attempt cycles 141 → 107 (a new retry at step 53 cost 13 of the 47 saved), and the
+      retry region's wall fell **250 s** (step 51 −77 s, step 52 −165 s).
+      **⚠️ MEASURE IT IN WALL, NOT IN THE CYCLE TOTAL.** The march's reported `cyc` is the **accepted**
+      attempt's count only, so discarded work was never in it: total cycles moved 348 → 347 while a real
+      250 s came out. A prediction phrased against the cycle total would read as a total miss.
+      **⚠️ It is NOT purely a cost change.** `precondition_step` runs per *attempt*, so truncating a
+      discarded attempt changes the refresh sequence and hence the V-cycle the next step sees: the two
+      marches agree step-for-step through 52 and then diverge (61 vs 62 steps, same `x_r/h` 8.36, both
+      converged). Benign here, but do not describe the abort as trajectory-neutral.
+      A further ~31 cycles are available if the per-solve `stagnation_iters`/`max_restarts` are brought
+      down toward the threshold (still ~4–6× it, which is why one solve can eat the step budget); step 48
+      is the case that needs it, since its trip lands on the last inner where the abort cannot help.
+      `None` (default) is byte-identical. Forward-only. Pinned by
+      `test_dual_time.py::test_abort_above_inner_cycles_{stops_a_doomed_attempt_early,
+      never_bins_an_expensive_success, none_is_the_unbounded_step}` and the `_with_inner_abort` plumbing
+      tests beside them.
     - **The escalated β is CARRIED into the control — so a static β floor can be dropped and the *controller*
       decides how low is safe (BUILT).** β is inverse to the pseudo-timestep, so a static `beta_min` is a cap
       on the *largest* timestep the march may take, applied everywhere — which slows convergence in regions

@@ -35,6 +35,7 @@ reported ratio mean the same thing throughout. The first must never be substitut
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Sequence
 from typing import Any, NamedTuple, Protocol
 
@@ -425,6 +426,24 @@ class StepControl(Protocol):
         """
 
 
+def _with_inner_abort(forward_step: ForwardStep, retry_on_cycles: int | None) -> ForwardStep:
+    """Give ``forward_step`` the march's per-solve discard threshold, if it can act on one.
+
+    A step that runs an inner loop (:class:`~aquaflux.solve.DualTimeStep`) can stop the moment one of
+    its solves crosses the threshold, because crossing it with the target unmet is exactly what makes
+    this march discard the attempt. A step with no inner loop has nothing to stop, and is returned
+    unchanged -- as is any step when no threshold is set, so the default path is byte-identical.
+
+    Set once per march rather than per iteration: it is constant for the segment, and a step whose
+    static fields are rewritten every iteration would be a fresh compilation key each time.
+    """
+    if retry_on_cycles is None or not hasattr(forward_step, "abort_above_inner_cycles"):
+        return forward_step
+    # `dataclasses.replace`, not `eqx.tree_at`: the threshold is a STATIC field, so it lives in the
+    # treedef rather than among the leaves and `tree_at` (which addresses leaves) cannot reach it.
+    return dataclasses.replace(forward_step, abort_above_inner_cycles=retry_on_cycles)
+
+
 def _has_diverged(residual_norm: jnp.ndarray, reference: float, divergence_cap: float) -> bool:
     """Whether a step's residual norm signals a diverged step the retry should redo.
 
@@ -636,6 +655,13 @@ def forward_march(
     # starting strength and freezing the march.
     residual_norm_0 = jnp.asarray(norm(residual_fn(phi0)))
     reference = float(residual_norm_0) if reference_norm is None else float(reference_norm)
+
+    # `retry_on_cycles` is a PER-SOLVE threshold, so a step can know it has crossed it the moment a
+    # solve returns -- but the reaction below only runs once the whole step is back. Push the number
+    # down to the step so it can stop there and then, rather than finishing inner iterations whose
+    # results this loop is about to discard. One number, set in one place: a step that took its own
+    # copy would be a second spelling that has to be kept in step with this one.
+    forward_step = _with_inner_abort(forward_step, retry_on_cycles)
 
     state = phi0
     current = float(residual_norm_0)
