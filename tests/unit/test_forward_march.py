@@ -758,3 +758,139 @@ def test_march_carries_the_escalated_beta_into_the_control() -> None:
     assert (
         float(result.control_state) == 4.0
     )  # the escalated β, carried; not the control's beta_start
+
+
+class _AlphaFromBeta(eqx.Module):
+    """A step whose line-search factor collapses until β is large enough, making no progress meanwhile.
+
+    The stand-in for the failure the cycle count cannot see: the solves are *cheap* (a fixed small
+    count) and the step still achieves nothing, because the correction cannot be followed. ``alpha``
+    is 0 below ``beta_needed`` and 1 at or above it, which is the shape the real march shows -- a
+    positivity cap or a non-descending direction that a larger shift steps short enough to satisfy.
+    """
+
+    relaxation_schedule: ConstantRelaxation
+    beta_needed: float = eqx.field(static=True, default=4.0)
+
+    def stepper(self):
+        schedule, needed = self.relaxation_schedule, self.beta_needed
+
+        def step(residual_fn, phi, residual_norm_0, solver):
+            alpha = jnp.where(schedule.beta >= needed, 1.0, 0.0)
+            return _outcome(phi, 3, alpha=alpha)  # cheap every time; phi held, so never converges
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def default_solver(self):
+        return None
+
+
+def test_march_escalates_beta_on_a_collapsed_step_length() -> None:
+    """A step whose line-search factor collapsed is redone at a larger β, though its solves were cheap.
+
+    This is the trigger's whole point: the cost bailout cannot see this failure, because 3 cycles is
+    under any sane threshold. Here α = 0 until β reaches 4, so β = 1 escalates twice (×2) to 4.
+    """
+    residual = _Cubic(jnp.zeros((1,)))
+    phi0 = jnp.ones((1,))
+    step = _AlphaFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))
+    result = forward_march(
+        step,
+        residual,
+        phi0,
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        retry_on_alpha=0.0,
+        retry_on_cycles=1000,  # far above the step's 3 cycles: only the α trigger can fire
+        retry_beta_factor=2.0,
+        retry_cycles_limit=2,
+    )
+    assert int(result.reports[0].escalations) == 2
+    assert float(result.reports[0].alpha) == 1.0
+
+
+def test_march_does_not_escalate_on_a_healthy_step_length() -> None:
+    """A step taking its full length never escalates -- the trigger is a safety net, not a per-step cost."""
+    residual = _Cubic(jnp.zeros((1,)))
+    phi0 = jnp.ones((1,))
+    # beta_needed = 0 => alpha is 1 from the start.
+    step = _AlphaFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)), beta_needed=0.0)
+    result = forward_march(
+        step, residual, phi0, max_steps=1, rtol=1e-10, atol=1e-12, retry_on_alpha=0.5
+    )
+    assert int(result.reports[0].escalations) == 0
+
+
+def test_the_alpha_trigger_reports_its_own_reason() -> None:
+    """``on_retry`` must say ``"alpha"``, not ``"cycles"`` -- the two call for different responses, and a
+    log that cannot tell them apart is why the reason is reported at all."""
+    reasons: list[str] = []
+    residual = _Cubic(jnp.zeros((1,)))
+    step = _AlphaFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))
+    forward_march(
+        step,
+        residual,
+        jnp.ones((1,)),
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        retry_on_alpha=0.0,
+        retry_on_cycles=1000,
+        retry_cycles_limit=2,
+        on_retry=lambda reason, attempt, beta: reasons.append(reason),
+    )
+    assert reasons == ["alpha", "alpha"]
+
+
+def test_the_alpha_trigger_never_bins_a_step_that_reached_its_target() -> None:
+    """A collapsed α on a step that met its own stopping criterion is NOT a reason to redo it.
+
+    Same guard the cost trigger carries: redoing a step that converged discards a good iterate and
+    replaces it with a shorter one. Only a step that was cut short is escalated.
+    """
+    from aquaflux.solve.march import _escalation_reason
+
+    converged = _outcome(jnp.zeros((1,)), 3, alpha=0.0, reached=True)
+    cut_short = _outcome(jnp.zeros((1,)), 3, alpha=0.0, reached=False)
+    kwargs = dict(retry_on_cycles=None, retry_on_alpha=0.0, divergence_cap=float("inf"))
+    assert _escalation_reason(converged, jnp.asarray(1.0), 1.0, **kwargs) is None
+    assert _escalation_reason(cut_short, jnp.asarray(1.0), 1.0, **kwargs) == "alpha"
+
+
+def test_a_diverged_step_outranks_the_other_escalation_reasons() -> None:
+    """Divergence is reported first, and unlike the other two it fires whatever the step's target says --
+    a non-finite residual is not a result to be kept because the loop happened to meet its tolerance."""
+    from aquaflux.solve.march import _escalation_reason
+
+    outcome = _outcome(jnp.zeros((1,)), 3, alpha=0.0, reached=True)
+    reason = _escalation_reason(
+        outcome,
+        jnp.asarray(jnp.nan),
+        1.0,
+        retry_on_cycles=1,
+        retry_on_alpha=0.0,
+        divergence_cap=float("inf"),
+    )
+    assert reason == "diverged"
+
+
+def test_no_escalation_reason_when_neither_threshold_is_set() -> None:
+    """Both thresholds ``None`` disables escalation entirely -- the default path, byte-identical."""
+    from aquaflux.solve.march import _escalation_reason
+
+    outcome = _outcome(jnp.zeros((1,)), 10_000, alpha=0.0, reached=False)
+    assert (
+        _escalation_reason(
+            outcome,
+            jnp.asarray(jnp.nan),
+            1.0,
+            retry_on_cycles=None,
+            retry_on_alpha=None,
+            divergence_cap=float("inf"),
+        )
+        is None
+    )

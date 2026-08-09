@@ -104,7 +104,31 @@ MAX_STEPS = 150  # per continuation rung
 # so dividing it again by |R0| makes the bar a property of the initial guess -- and under continuation
 # every rung re-bases |R0|, which let a later rung stop looser than an earlier one had already reached.
 RTOL, ATOL = 0.0, 1e-5
-N_POINTS = 2  # Reynolds continuation: anchor at Re/100, then Re/10, then the target
+# Reynolds continuation: `n` lower-Re points one decade apart, anchored at Re/10**n, then the target.
+# A direct solve (0) does NOT converge here, so some continuation is required. Whether the Re/100 anchor
+# earns its keep was measured rather than assumed, and the answer is genuinely mixed -- read both halves
+# before changing it.
+#
+#                       2 rungs   1 rung
+#     wall               1959 s   2007 s
+#     steps                  58       43
+#     Krylov cycles         277      264
+#     mid-span x_r/h      8.361    8.361
+#
+# AGAINST the anchor: it is not needed for reachability (the cold start converges at Re/10 to the same
+# root, in two independent runs), and reaching a converged Re/10 costs 800 s from cold against 1027 s by
+# way of the anchor -- so as a route to Re/10 the extra rung is ~227 s of net cost.
+#
+# FOR keeping it: the total still comes out ahead, and one rung takes longer despite reaching Re/10
+# cheaper, because it pays the difference back with interest in the target rung (932 s against 1207 s).
+#
+# Neither margin is decisive -- both are ~2%, both are single runs, and the target-rung spread (+-275 s,
+# driven by how many beta escalations each ladder needs at the low-shift wall) is larger than the ladder
+# effect itself; an earlier pair of runs ordered the totals the other way round. So this stays at 2: the
+# measured total favours it, nothing measured argues for changing it, and the anchor is cheap insurance
+# at a higher Reynolds number where the cold Re/10 solve may stop converging. `BFS3D_N_POINTS=1 ...`
+# runs the one-rung ladder.
+N_POINTS = int(os.environ.get("BFS3D_N_POINTS", "2"))
 INNER_STEPS, INNER_TOL = 5, 1e-3
 # Preconditioner bundle. ILU(1) DIVERGES at the low shifts this march's tail runs at (ground truth: 303
 # negative pivots at beta = 0.02, zero for ILU(0)); zero fill converges at every shift tested and builds
@@ -135,6 +159,27 @@ CYCLE_BUDGET = 42  # summed per step: a cost cap, so summed is what it should ca
 RETRY_ON_CYCLES = (
     10  # PER SOLVE: a summed trigger is ~6x more sensitive for a 5-inner step than a 1-inner one
 )
+# The step-length bailout, which catches the failure the cycle count cannot see: solves that stay CHEAP
+# while the step achieves nothing, because a positivity cap or a non-descending direction leaves almost
+# none of the correction followable. On the march this replaced, four consecutive steps ran a full inner
+# loop each at 5-12 cycles, moved the residual not at all, and escaped only once the step control's own
+# backoff had doubled beta four times -- one whole step per doubling.
+#
+# Calibrated from that march's own step table rather than chosen: no productive step went below
+# a_min 0.191, while all four dead ones reported 0.000 (their inner collapses reaching 0.001 and 0.003).
+# 0.01 sits an order of magnitude clear of both. Unlike the cycle thresholds below it is dimensionless,
+# so it does NOT scale with the restart length. Measured end to end at the identical configuration:
+#
+#                       off        on
+#     wall            2161 s    1959 s   (-9.3%)
+#     steps               66        58
+#     Krylov cycles      324       277   (-15%)
+#     mid-span x_r/h   8.361     8.361   (identical)
+#
+# It fires ONCE in the whole march, and the two lower rungs come out identical to the cycle -- the
+# trigger is inert wherever the line search is healthy, so the entire saving is the target rung
+# (29 steps / 1131 s -> 21 / 932). `BFS3D_RETRY_ON_ALPHA=0 ...` disables it.
+RETRY_ON_ALPHA = float(os.environ.get("BFS3D_RETRY_ON_ALPHA", "0.01")) or None
 # The forward GMRES restart length, and the reason it is worth varying: a restarted GMRES tests
 # convergence only at restart boundaries, so a solve that needs three matrix-vector products still pays
 # a full restart's worth. Cycle counts cannot see that -- such a solve reports one cycle either way --
@@ -430,6 +475,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             on_checkpoint=on_checkpoint,
             on_retry=logger.on_retry,
             retry_on_cycles=round(RETRY_ON_CYCLES * _RESTART_SCALE),
+            retry_on_alpha=RETRY_ON_ALPHA,
             retry_beta_factor=RETRY_BETA_FACTOR,
         )
         | solve_kwargs

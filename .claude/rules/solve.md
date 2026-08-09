@@ -2724,6 +2724,68 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       `test_dual_time.py::test_abort_above_inner_cycles_{stops_a_doomed_attempt_early,
       never_bins_an_expensive_success, none_is_the_unbounded_step}` and the `_with_inner_abort` plumbing
       tests beside them.
+    - **A COLLAPSED STEP LENGTH is the third way a step dies, and neither the cost bailout nor the
+      escalation could see it — `retry_on_alpha` / `abort_below_alpha` (BUILT 2026-08-08).** The
+      escalation's two triggers are cost-with-the-target-unmet and divergence. A step whose *solves are
+      cheap* and whose *residual is finite* but whose **line search cannot move** is neither, so it was
+      accepted as taken, and the only thing raising β was the step control's own backoff — **one doubling
+      per outer step, each doubling paying a full step to discover it was not enough.**
+      Caught on the shipped 3D `bfs3d` field-split march (`refresh_on_cycles=3`, ILU(0)×4, plain
+      aggregation, `coarse_eq_limit` 2000, `N_POINTS=2`), target rung, four consecutive steps 51–54:
+
+      | step | β | cyc | R | a_min | flg |
+      |---|---|---|---|---|---|
+      | 51 | 0.0390 | 12 | 7.061e-03 | 0.000 | L |
+      | 52 | 0.0780 | 10 | 6.409e-03 | 0.000 | L |
+      | 53 | 0.1561 | 7 | 8.224e-03 | 0.000 | L |
+      | 54 | 0.3121 | 9 | 6.365e-03 | 0.000 | L |
+      | 55 | 0.6243 | 5 | 5.530e-03 | **1.000** | |
+
+      Step 51's inner table shows what the step row cannot: inner 0 descends (α 0.974, rate 0.779), then
+      **inners 1–4 all report rate 1.000 at α 0.000** — four re-solves from an unchanged iterate,
+      returning it unchanged — with `limit 4.37e-10`, i.e. the **positivity cap**, not the descent test,
+      is what admits nothing. The four steps cost ~233 s to cross half a decade.
+      Both halves are now built and are the same predicate in two places, as the cost bailout already is:
+      **`forward_march(retry_on_alpha=α)`** escalates β (reason `"alpha"` on `on_retry`), and it is pushed
+      into **`DualTimeStep.abort_below_alpha`** by `_with_inner_abort` so the inner loop exits at the
+      collapse instead of iterating on. `_escalation_reason` now owns which of the three reasons applies,
+      so the decision and the string reported for it cannot disagree.
+      **Both cost and step-length reasons require the target unmet; divergence does not** — a non-finite
+      residual is not a result to keep because the loop happened to meet its tolerance. Both `None`
+      (default) is byte-identical.
+      **MEASURED END TO END, and ONE retry is worth 8 steps and 199 s.** Same case and configuration as
+      the baseline above (field split, `refresh_on_cycles=3`, ILU(0)×4, plain aggregation,
+      `coarse_eq_limit` 2000, `N_POINTS=2`), `retry_on_alpha = 0.01`:
+
+      | | baseline | with the trigger | |
+      |---|---|---|---|
+      | **wall** | 2161 s | **1959 s** | **−9.3%** |
+      | steps | 66 | 58 | −8 |
+      | Krylov cycles | 324 | 277 | −15% |
+      | mid-span `x_r/h` | 8.361 | **8.361** | identical |
+
+      **The run is its own control, which is what makes the attribution safe:** the two lower rungs come
+      out *identical to the cycle* — Re/100 14 steps / 359 s / 45 cycles in both, Re/10 23 steps / 99
+      cycles, 668 s against 671 s — because the trigger is inert wherever the line search is healthy. The
+      whole difference is the target rung, 29 steps / 1131 s / 180 cycles → **21 / 932 / 133**. The
+      trigger fired **once in the entire march** (step 51, `alpha`, β 0.0390 → 0.0780), and the inner
+      abort cut that attempt from 5 inner iterations / 12 cycles to 2 / 6.
+      **Note the cycle count DOES show this one, unlike the cost abort** — there the wasted work sat in
+      *discarded* attempts, which the total never counted (348 → 347 cycles while 250 s came out); here
+      it sat in **accepted** steps, so both measures agree. Which measure can see a saving depends on
+      whether the work being removed was accepted or discarded, so decide that before quoting either.
+      **The threshold was calibrated from the baseline's own step table, not chosen:** no productive step
+      went below `a_min` 0.191, all four dead ones reported 0.000 (inner collapses at 0.001 and 0.003),
+      so 0.01 sits an order of magnitude clear of both. Recalibrate on another case rather than porting
+      the number.
+      **Known waste left on the table (deliberate, not yet fixed):** the mid-step cost refresh fires in
+      the *same* body call as the collapse, so a doomed attempt still pays it (~14.7 s) and the escalated
+      retry then re-matches the preconditioner anyway. Suppressing it would need to distinguish a
+      constraint-bound step (`binding_limit < 1`, where no preconditioner can help) from a non-descending
+      one (where a refresh might be exactly the cure) — `binding_limit` exists for precisely that
+      distinction. Measured evidence that the refresh cannot rescue a constraint-bound step: at baseline
+      step 51 the mid-step refresh fired at inner 1 and took the following solves from 5 cycles to 2,
+      while α stayed 0.000 and `‖G‖` did not move for three more iterations.
     - **The escalated β is CARRIED into the control — so a static β floor can be dropped and the *controller*
       decides how low is safe (BUILT).** β is inverse to the pseudo-timestep, so a static `beta_min` is a cap
       on the *largest* timestep the march may take, applied everywhere — which slows convergence in regions

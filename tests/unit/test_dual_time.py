@@ -553,3 +553,110 @@ def test_a_mid_step_refresh_buys_the_attempt_another_solve_before_the_abort() ->
     assert refreshed, "the refresh never fired"
     # The bare step is cut at its first over-budget solve; the refreshed one is given another.
     assert int(forgiven.inner_iterations) > int(bare.inner_iterations)
+
+
+def test_abort_below_alpha_stops_an_attempt_that_can_no_longer_move() -> None:
+    """A step length capped at essentially nothing ends the attempt, instead of iterating on in place.
+
+    The failure this catches is invisible to the cost bailout, because the solves stay *cheap*: the
+    correction simply cannot be followed. Here an injected limit admits 1e-12 of every step, which is
+    the shape a positivity cap takes when a cell sits on the boundary -- measured on a three-dimensional
+    coupled march at a limit of 4.4e-10, where four consecutive inner iterations moved ``‖G‖`` from
+    4.442e-03 to 4.440e-03 and the loop ran to the end of its budget regardless.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+
+    def residual_fn(phi: jnp.ndarray) -> jnp.ndarray:
+        return _residual(phi, theta)
+
+    phi0 = jnp.ones_like(theta)
+    r0 = jnp.linalg.norm(residual_fn(phi0))
+    common = dict(
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
+        inner_steps=20,
+        inner_tol=0.0,
+        # Admit almost none of any correction, so the ladder cannot move the iterate.
+        step_limit=lambda p, d: jnp.asarray(1e-12),
+    )
+    unbounded = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
+    aborting = DualTimeStep(UniformShiftPolicy(strength=1.0), abort_below_alpha=1e-6, **common)
+
+    out_u = unbounded.stepper()(residual_fn, phi0, r0, unbounded.default_solver())
+    out_a = aborting.stepper()(residual_fn, phi0, r0, aborting.default_solver())
+
+    assert int(out_u.inner_iterations) == 20  # runs the full budget going nowhere
+    assert int(out_a.inner_iterations) == 1  # stops as soon as the length collapses
+    assert int(out_a.cycles) < int(out_u.cycles)
+    # Cut short, so the march must still read it as not having met its own criterion and escalate.
+    assert not bool(out_a.reached_target)
+
+
+def test_abort_below_alpha_never_bins_a_step_that_reaches_its_target() -> None:
+    """A clipped step that still brings ``‖G‖`` under the target exits normally and is kept.
+
+    The loop tests convergence before either bailout, so a collapsed length can only end an attempt
+    that was going to be discarded anyway.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+
+    def residual_fn(phi: jnp.ndarray) -> jnp.ndarray:
+        return _residual(phi, theta)
+
+    phi0 = jnp.ones_like(theta)
+    r0 = jnp.linalg.norm(residual_fn(phi0))
+    # inner_tol = 1.0 is met at the anchor itself, so the loop exits before any bailout can look.
+    step = DualTimeStep(
+        UniformShiftPolicy(strength=1.0),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
+        inner_steps=20,
+        inner_tol=1.0,
+        abort_below_alpha=1.0,  # would abort immediately if it were consulted first
+    )
+    out = step.stepper()(residual_fn, phi0, r0, step.default_solver())
+    assert bool(out.reached_target)
+
+
+def test_abort_below_alpha_none_is_the_unbounded_step() -> None:
+    """The default leaves the step byte-identical -- the bailout is opt-in, like its cost sibling."""
+    theta = jnp.array([8.0, 27.0, 64.0])
+
+    def residual_fn(phi: jnp.ndarray) -> jnp.ndarray:
+        return _residual(phi, theta)
+
+    phi0 = jnp.ones_like(theta)
+    r0 = jnp.linalg.norm(residual_fn(phi0))
+    common = dict(
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0), inner_steps=6, inner_tol=1e-10
+    )
+    default = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
+    explicit = DualTimeStep(UniformShiftPolicy(strength=1.0), abort_below_alpha=None, **common)
+
+    out_d = default.stepper()(residual_fn, phi0, r0, default.default_solver())
+    out_e = explicit.stepper()(residual_fn, phi0, r0, explicit.default_solver())
+    assert jnp.array_equal(out_d.phi, out_e.phi)
+    assert int(out_d.inner_iterations) == int(out_e.inner_iterations)
+
+
+def test_the_march_pushes_both_discard_thresholds_into_the_step() -> None:
+    """Cost and step-length thresholds both travel down to the inner loop, and stay ONE number each.
+
+    Each is knowable inside the step -- a cost the moment a solve returns, a collapse the moment the
+    ladder gives up -- while the march evaluates both only after the whole step is back. A step
+    configured with its own copy of either would be a second spelling to keep in step with the march's.
+    """
+    from aquaflux.solve.march import _with_inner_abort
+
+    step = DualTimeStep(UniformShiftPolicy(strength=1.0), inner_steps=3)
+    assert step.abort_below_alpha is None
+
+    armed = _with_inner_abort(step, 10, 0.01)
+    assert armed.abort_above_inner_cycles == 10
+    assert armed.abort_below_alpha == 0.01
+    assert step.abort_below_alpha is None  # the original is untouched
+
+    # Either alone arms only its own threshold.
+    assert _with_inner_abort(step, None, 0.01).abort_above_inner_cycles is None
+    assert _with_inner_abort(step, None, 0.01).abort_below_alpha == 0.01
+    assert _with_inner_abort(step, 10).abort_below_alpha is None
+    # Neither leaves the step untouched.
+    assert _with_inner_abort(step, None, None) is step
