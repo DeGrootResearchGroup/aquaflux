@@ -757,6 +757,23 @@ class DualTimeStep(eqx.Module):
         solve that *does* bring ``‖G‖`` under the target exits normally with ``reached_target`` set and is
         kept — exactly as when the march decided this after the fact. ``None`` (default) is
         byte-identical. Forward-only.
+    abort_below_alpha : float or None
+        Stop the inner loop once the running minimum line-search factor has fallen to this or below
+        (static). The cost sibling of ``abort_above_inner_cycles``, for the *other* way an attempt is
+        known to be doomed: a step length of essentially zero.
+
+        Once the ladder cannot move — because the correction does not descend, or because a constraint
+        the residual cannot express (positivity of a directly-solved field) caps the admissible length
+        at nearly nothing — every further inner iteration re-solves from an unchanged iterate and
+        returns the same unchanged iterate. Measured on a three-dimensional coupled march: with the
+        admissible length capped at 4.4e-10, four consecutive inner iterations moved ``‖G‖`` from
+        4.442e-03 to 4.440e-03 for eleven restart cycles, and the outer control then had to spend a
+        whole further step per doubling of the shift to escape. The cure for both causes is the same
+        one the march's escalation applies — a larger shift, which shortens the implicit step until it
+        fits — so the loop exits and hands the attempt back to be redone.
+
+        Like the cost bailout it cannot bin a success: :func:`cond` tests the convergence target first.
+        ``None`` (default) is byte-identical. Forward-only.
     """
 
     shift_policy: ShiftPolicy
@@ -787,6 +804,7 @@ class DualTimeStep(eqx.Module):
         static=True, default=None
     )
     abort_above_inner_cycles: int | None = eqx.field(static=True, default=None)
+    abort_below_alpha: float | None = eqx.field(static=True, default=None)
 
     def norm(self) -> ResidualNorm:
         """The residual measure the inner loop and the outer stopping test share (:attr:`residual_norm`)."""
@@ -834,6 +852,7 @@ class DualTimeStep(eqx.Module):
 
         step_limit = self.step_limit
         abort_above = self.abort_above_inner_cycles
+        abort_below = self.abort_below_alpha
 
         def step(
             residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
@@ -859,7 +878,7 @@ class DualTimeStep(eqx.Module):
                 return residual_fn(p) + shift * (p - reference)
 
             def cond(carry: tuple) -> jnp.ndarray:
-                _, inner, gnorm, cycles, _, _, since_refresh, _, _ = carry
+                _, inner, gnorm, cycles, min_alpha, _, since_refresh, _, _ = carry
                 # The convergence target is tested FIRST, and that ordering is what makes the cost
                 # bailouts below safe: a solve that was expensive but brought ‖G‖ under the target exits
                 # here with `reached_target` set and is kept, never binned for its cost.
@@ -888,6 +907,14 @@ class DualTimeStep(eqx.Module):
                 # step's maximum.
                 if abort_above is not None:
                     keep = keep & (since_refresh <= abort_above)
+                # Doomed-attempt bailout, the other way an attempt dies: the ladder can no longer move.
+                # `min_alpha` is zero when an iteration failed to descend and tiny when a positivity cap
+                # bound the length, and neither recovers within the step -- the iterate is unchanged, so
+                # the next solve re-derives the same correction and the same cap. Every further iteration
+                # is therefore a re-solve that returns where it started. The march redoes the attempt at a
+                # larger shift, which is the cure for both causes.
+                if abort_below is not None:
+                    keep = keep & (min_alpha > abort_below)
                 return keep
 
             def body(carry: tuple) -> tuple:

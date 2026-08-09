@@ -2757,6 +2757,7 @@ def solve_coupled(
     retry_solver: lx.AbstractLinearSolver | None = None,
     retry_divergence_cap: float = float("inf"),
     retry_on_cycles: int | None = None,
+    retry_on_alpha: float | None = None,
     retry_beta_factor: float = 2.0,
     on_retry: Callable[[str, int, float], None] | None = None,
     retry_cycles_limit: int = 2,
@@ -2968,6 +2969,13 @@ def solve_coupled(
         damping for the stiff low-``β`` operator, the hard-operator cause of a high count (staleness, the
         other, is pre-empted by a β-mismatch refresh). Needs a ``β``-carrying step control. ``None``
         (default) disables it.
+    retry_on_alpha : float or None
+        A **step-length** bailout (:func:`aquaflux.solve.forward_march`): a step whose line-search factor
+        falls to this or below, without reaching its stopping criterion, is redone with ``β`` escalated
+        the same way. It catches the failure the cycle count cannot see -- cheap solves whose correction
+        cannot be followed, because it does not descend or because a positivity cap admits almost none of
+        it -- where the step otherwise makes no progress and escapes only via the step control's
+        one-doubling-per-step backoff. Needs a ``β``-carrying step control. ``None`` (default) disables it.
     on_retry : callable, optional
         ``(reason, attempt, beta) -> None``, forwarded to
         :func:`~aquaflux.solve.forward_march`: called before a step is redone, with why. Forward-only
@@ -3000,6 +3008,7 @@ def solve_coupled(
         or precondition_step is not None
         or retry_solver is not None
         or retry_on_cycles is not None
+        or retry_on_alpha is not None
     )
     if observing and _is_traced((coupled, flow, k, omega)):
         # The refresh re-derives the preconditioner from the mid-march state, which is a tracer when
@@ -3111,6 +3120,7 @@ def solve_coupled(
                 retry_solver=retry_solver,
                 retry_divergence_cap=retry_divergence_cap,
                 retry_on_cycles=retry_on_cycles,
+                retry_on_alpha=retry_on_alpha,
                 retry_beta_factor=retry_beta_factor,
                 on_retry=on_retry,
                 retry_cycles_limit=retry_cycles_limit,

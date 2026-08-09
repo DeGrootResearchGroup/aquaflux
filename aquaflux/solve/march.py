@@ -43,7 +43,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import lineax as lx
 
-from .implicit import ForwardStep, _within_tolerance
+from .implicit import ForwardStep, StepOutcome, _within_tolerance
 from .linear import restart_cycles as _strip_step_offset
 from .norm import ResidualNorm
 
@@ -426,22 +426,31 @@ class StepControl(Protocol):
         """
 
 
-def _with_inner_abort(forward_step: ForwardStep, retry_on_cycles: int | None) -> ForwardStep:
-    """Give ``forward_step`` the march's per-solve discard threshold, if it can act on one.
+def _with_inner_abort(
+    forward_step: ForwardStep,
+    retry_on_cycles: int | None,
+    retry_on_alpha: float | None = None,
+) -> ForwardStep:
+    """Give ``forward_step`` the march's discard thresholds, if it can act on them.
 
-    A step that runs an inner loop (:class:`~aquaflux.solve.DualTimeStep`) can stop the moment one of
-    its solves crosses the threshold, because crossing it with the target unmet is exactly what makes
-    this march discard the attempt. A step with no inner loop has nothing to stop, and is returned
-    unchanged -- as is any step when no threshold is set, so the default path is byte-identical.
+    A step that runs an inner loop (:class:`~aquaflux.solve.DualTimeStep`) can stop the moment it
+    crosses one of them, because crossing either with the target unmet is exactly what makes this
+    march discard the attempt: a solve costing more than ``retry_on_cycles``, or a step length fallen
+    to ``retry_on_alpha``. Pushing them down is what keeps each threshold ONE number rather than two
+    that must be kept in step. A step with no inner loop has nothing to stop, and is returned
+    unchanged -- as is any step when neither threshold is set, so the default path is byte-identical.
 
-    Set once per march rather than per iteration: it is constant for the segment, and a step whose
+    Set once per march rather than per iteration: they are constant for the segment, and a step whose
     static fields are rewritten every iteration would be a fresh compilation key each time.
     """
-    if retry_on_cycles is None or not hasattr(forward_step, "abort_above_inner_cycles"):
-        return forward_step
-    # `dataclasses.replace`, not `eqx.tree_at`: the threshold is a STATIC field, so it lives in the
-    # treedef rather than among the leaves and `tree_at` (which addresses leaves) cannot reach it.
-    return dataclasses.replace(forward_step, abort_above_inner_cycles=retry_on_cycles)
+    # `dataclasses.replace`, not `eqx.tree_at`: the thresholds are STATIC fields, so they live in the
+    # treedef rather than among the leaves and `tree_at` (which addresses leaves) cannot reach them.
+    fields = {}
+    if retry_on_cycles is not None and hasattr(forward_step, "abort_above_inner_cycles"):
+        fields["abort_above_inner_cycles"] = retry_on_cycles
+    if retry_on_alpha is not None and hasattr(forward_step, "abort_below_alpha"):
+        fields["abort_below_alpha"] = retry_on_alpha
+    return dataclasses.replace(forward_step, **fields) if fields else forward_step
 
 
 def _has_diverged(residual_norm: jnp.ndarray, reference: float, divergence_cap: float) -> bool:
@@ -459,6 +468,67 @@ def _has_diverged(residual_norm: jnp.ndarray, reference: float, divergence_cap: 
         and reference > 0.0
         and (float(residual_norm) > divergence_cap * reference)
     )
+
+
+def _escalation_reason(
+    outcome: StepOutcome,
+    residual_norm: jnp.ndarray,
+    reference: float,
+    *,
+    retry_on_cycles: int | None,
+    retry_on_alpha: float | None,
+    divergence_cap: float,
+) -> str | None:
+    """Why this step should be redone at a larger shift, or ``None`` to accept it as taken.
+
+    The three ways a step goes bad, and the reason they share one response: a **diverged** correction
+    (non-finite, or past ``divergence_cap``), a **costly** solve that did not reach its target, and a
+    **collapsed** step length. All three are cured by more damping -- a larger shift lifts the
+    correction out of the non-finite regime, cuts the cycle count, and shortens the implicit step until
+    it fits inside whatever bound was clipping it.
+
+    Cost and step length are only reasons when the step **missed its own stopping criterion**. Redoing
+    a step that met it discards a good iterate and replaces it with a shorter one, whatever it cost and
+    however hard the ladder had to work to get there.
+
+    Returns the reason as a short string (for the march's ``on_retry`` seam), so the decision and its
+    explanation cannot disagree. ``None`` from both thresholds disables escalation entirely, which is
+    the default and leaves a diverged step to the tight-Krylov retry as before.
+
+    Parameters
+    ----------
+    outcome : StepOutcome
+        The attempt's record; reads ``max_inner_cycles``, ``reached_target`` and ``alpha``.
+    residual_norm : jnp.ndarray
+        The residual measure at the state the attempt produced, a scalar.
+    reference : float
+        The march's global reference norm, for the divergence cap.
+    retry_on_cycles : int or None
+        Per-solve cycle threshold; ``None`` disables the cost reason.
+    retry_on_alpha : float or None
+        Step-length threshold; ``None`` disables the collapse reason.
+    divergence_cap : float
+        Multiple of ``reference`` above which a finite residual counts as diverged.
+
+    Returns
+    -------
+    str or None
+        ``"diverged"``, ``"cycles"``, ``"alpha"``, or ``None`` to keep the step.
+    """
+    if retry_on_cycles is None and retry_on_alpha is None:
+        return None
+    if _has_diverged(residual_norm, reference, divergence_cap):
+        return "diverged"
+    if bool(outcome.reached_target):
+        return None
+    # Per SOLVE, not summed: a summed threshold is ~6x more sensitive for a 5-iteration step than a
+    # 1-iteration one, so the same per-solve difficulty trips it or not depending on an inner count that
+    # says nothing about conditioning.
+    if retry_on_cycles is not None and int(outcome.max_inner_cycles) > retry_on_cycles:
+        return "cycles"
+    if retry_on_alpha is not None and float(outcome.alpha) <= retry_on_alpha:
+        return "alpha"
+    return None
 
 
 @eqx.filter_jit
@@ -510,6 +580,7 @@ def forward_march(
     retry_solver: lx.AbstractLinearSolver | None = None,
     retry_divergence_cap: float = float("inf"),
     retry_on_cycles: int | None = None,
+    retry_on_alpha: float | None = None,
     retry_beta_factor: float = 2.0,
     retry_cycles_limit: int = 2,
     on_retry: Callable[[str, int, float], None] | None = None,
@@ -626,12 +697,28 @@ def forward_march(
         ``None`` (default) disables escalation (byte-identical) and a diverged step falls straight to
         ``retry_solver``. Escalation needs a ``β`` leaf (a step control's ``ConstantRelaxation``); it no-ops
         otherwise.
+    retry_on_alpha : float or None
+        The third escalation trigger, beside cost and divergence: redo the step when its line-search
+        factor has fallen to this or below **and** it did not reach its stopping criterion.
+
+        A step length of essentially zero is as dead as an expensive one and is invisible to the cost
+        trigger, because the solves are *cheap* -- the correction simply cannot be followed, either
+        because it does not descend or because a positivity cap admits almost none of it. Measured on a
+        three-dimensional coupled march: four consecutive steps took a full inner loop each at 5-12
+        cycles, moved the residual not at all, and escaped only when the step control's own backoff had
+        doubled ``β`` four times, one step per doubling. Escalating instead does those doublings as
+        discarded attempts of one step. Also pushed into a
+        :class:`~aquaflux.solve.DualTimeStep`'s inner loop (as ``abort_below_alpha``), so the attempt
+        exits at the collapse rather than iterating on to the end of a loop that cannot move.
+
+        ``None`` (default) disables it, byte-identical. Like the cost trigger it needs a ``β`` leaf.
     retry_beta_factor : float
-        The factor ``β`` is multiplied by on each cycle-count retry (default ``2``).
+        The factor ``β`` is multiplied by on each escalation retry (default ``2``).
     on_retry : callable, optional
         ``(reason, attempt, beta) -> None``, called immediately before a step is redone. ``reason`` is
-        ``"cycles"`` (the cost trigger, and the step was cut short), ``"diverged"`` (the β-escalation
-        firing on a non-finite or runaway residual) or ``"solver"`` (the tighter-solver fallback).
+        ``"cycles"`` (the cost trigger, and the step was cut short), ``"alpha"`` (the step-length
+        trigger, likewise cut short), ``"diverged"`` (the β-escalation firing on a non-finite or runaway
+        residual) or ``"solver"`` (the tighter-solver fallback).
         Without it a log shows a step's work twice with nothing saying why, leaving a reader to infer
         the trigger from the numbers. ``None`` (default) elides the call.
     retry_cycles_limit : int
@@ -656,12 +743,12 @@ def forward_march(
     residual_norm_0 = jnp.asarray(norm(residual_fn(phi0)))
     reference = float(residual_norm_0) if reference_norm is None else float(reference_norm)
 
-    # `retry_on_cycles` is a PER-SOLVE threshold, so a step can know it has crossed it the moment a
-    # solve returns -- but the reaction below only runs once the whole step is back. Push the number
-    # down to the step so it can stop there and then, rather than finishing inner iterations whose
-    # results this loop is about to discard. One number, set in one place: a step that took its own
-    # copy would be a second spelling that has to be kept in step with this one.
-    forward_step = _with_inner_abort(forward_step, retry_on_cycles)
+    # Both thresholds are knowable INSIDE a step -- `retry_on_cycles` the moment a solve returns,
+    # `retry_on_alpha` the moment a line search collapses -- but the reaction below only runs once the
+    # whole step is back. Push them down to the step so it can stop there and then, rather than
+    # finishing inner iterations whose results this loop is about to discard. One number each, set in
+    # one place: a step that took its own copy would be a second spelling to keep in step with this one.
+    forward_step = _with_inner_abort(forward_step, retry_on_cycles, retry_on_alpha)
 
     state = phi0
     current = float(residual_norm_0)
@@ -701,46 +788,39 @@ def forward_march(
         outcome, residual_norm = _march_step(
             active_step, residual_fn, prestep_state, residual_norm_0, solver
         )
-        # A step can go bad two ways -- a non-finite / diverging correction, or a finite solve whose cost
-        # spikes past `retry_on_cycles` -- and on the stiff low-β saddle BOTH have the same cheap cure:
-        # MORE damping. Escalate β FIRST (redo from the pre-step state at `β *= retry_beta_factor`,
-        # re-matching the frozen preconditioner via `precondition_step`), because a larger β both lifts the
-        # correction out of the non-finite regime AND cuts the cycle count, and it is far cheaper than the
-        # tight-Krylov divergence retry below -- on the coupled AMG march a NaN'd low-β step recovers in a
-        # handful of cycles at 2β, where the tight retry would grind hundreds of matvecs to recover the same
-        # step the escalation then re-damps anyway. β vanishes at the root, so the escalation reshapes only
-        # the forward path; it is not carried into the control, so a persistently hard region re-triggers
-        # each step. Needs a readable β leaf (a `ConstantRelaxation` set by a step control) and
-        # `retry_on_cycles is not None`; otherwise it no-ops and a diverged step falls straight through to
-        # the divergence retry. `retry_on_cycles=None` (default) is byte-identical.
+        # A step can go bad three ways -- a non-finite / diverging correction, a finite solve whose cost
+        # spikes past `retry_on_cycles`, or a step length collapsed to `retry_on_alpha` -- and on the
+        # stiff low-β saddle ALL THREE have the same cheap cure: MORE damping. `_escalation_reason` owns
+        # which of them applies. Escalate β FIRST (redo from the pre-step state at `β *= retry_beta_factor`,
+        # re-matching the frozen preconditioner via `precondition_step`), because a larger β lifts the
+        # correction out of the non-finite regime, cuts the cycle count AND shortens the implicit step until
+        # it fits inside whatever was clipping it, and it is far cheaper than the tight-Krylov divergence
+        # retry below -- on the coupled AMG march a NaN'd low-β step recovers in a handful of cycles at 2β,
+        # where the tight retry would grind hundreds of matvecs to recover the same step the escalation then
+        # re-damps anyway. β vanishes at the root, so the escalation reshapes only the forward path; it is
+        # not carried into the control, so a persistently hard region re-triggers each step. Needs a
+        # readable β leaf (a `ConstantRelaxation` set by a step control) and at least one threshold set;
+        # otherwise it no-ops and a diverged step falls straight through to the divergence retry. Both
+        # thresholds `None` (the default) is byte-identical.
         retries = 0
         while (
-            retry_on_cycles is not None
+            (
+                reason := _escalation_reason(
+                    outcome,
+                    residual_norm,
+                    reference,
+                    retry_on_cycles=retry_on_cycles,
+                    retry_on_alpha=retry_on_alpha,
+                    divergence_cap=retry_divergence_cap,
+                )
+            )
+            is not None
             and retries < retry_cycles_limit
             and not converged_at(float(residual_norm))
-            and (
-                # Cost alone is not a reason to redo a step that met its OWN stopping criterion: that
-                # discards a good iterate and replaces it with a SHORTER step than the work already
-                # bought. Escalate on cost only when the step was cut short (measured: an inner loop
-                # reaching 3.0e-6 against a 1.0e-5 target was binned for costing 54 cycles).
-                # Per SOLVE, not summed: a summed threshold is ~6x more sensitive for a 5-iteration
-                # step than a 1-iteration one, so the same per-solve difficulty trips it or not
-                # depending on an inner count that says nothing about conditioning.
-                (
-                    int(outcome.max_inner_cycles) > retry_on_cycles
-                    and not bool(outcome.reached_target)
-                )
-                or _has_diverged(residual_norm, reference, retry_divergence_cap)
-            )
             and hasattr(active_step.relaxation_schedule, "beta")
         ):
             retries += 1
             if on_retry is not None:
-                reason = (
-                    "diverged"
-                    if _has_diverged(residual_norm, reference, retry_divergence_cap)
-                    else "cycles"
-                )
                 on_retry(reason, retries, float(active_step.relaxation_schedule.beta))
             # Escalate by SCALING the existing β leaf, not by rebuilding it from a Python float.
             # `jnp.asarray(float(...) * factor)` yields a fresh weak-typed float64 array whose abstract
