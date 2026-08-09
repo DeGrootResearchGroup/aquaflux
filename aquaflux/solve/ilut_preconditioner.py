@@ -194,7 +194,16 @@ def equilibrate_cell_major(
     scale = equilibration_scale(matrix.diagonal())
     equilibrated = (sp.diags(scale) @ matrix @ sp.diags(scale)).tocsr()
     perm = cell_major_permutation(n_dofs // n_fields, n_fields)
-    return equilibrated[perm][:, perm].tocsr(), scale, perm
+    reordered = equilibrated[perm][:, perm].tocsr()
+    # Canonical form, because the permutation above leaves each row's column indices OUT OF ORDER and a
+    # consumer that assumes ascending indices then reads the wrong entries. PETSc's AIJ format is exactly
+    # such a consumer: handed this matrix unsorted, a point-block-Jacobi preconditioner returns NaN in
+    # most entries while a point-Jacobi one is unaffected -- a diagonal scan does not care about column
+    # order, a block extraction does. That asymmetry looks precisely like a broken block method and is
+    # not, so the ordering is established here rather than left to each caller to remember. `sort_indices`
+    # is a no-op on an already-canonical matrix, so callers that sort defensively cost nothing.
+    reordered.sort_indices()
+    return reordered, scale, perm
 
 
 def factorize_ilut(
