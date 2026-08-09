@@ -519,8 +519,22 @@ def _trailing_inverse(spec):
     raise ValueError(f"unknown trailing inverse {spec!r}")
 
 
-def field_split(shifted, groups, n_fields, flow_smoother, turbulence_smoother, *, flow_first):
-    """A hierarchy per field group, retaining one triangle of the coupling between them."""
+def field_split(
+    shifted,
+    groups,
+    n_fields,
+    flow_smoother,
+    turbulence_smoother,
+    *,
+    flow_first,
+    trailing_inverse=None,
+):
+    """A hierarchy per field group, retaining one triangle of the coupling between them.
+
+    ``trailing_inverse`` overrides the trailing half wholesale. It is threaded rather than resolved from
+    the arm name because the interesting override -- the JAX-native scalar hierarchies -- has to be built
+    from the coupled system and its state, which the name alone cannot supply.
+    """
     return MonolithicAmgPreconditioner(
         build_block_triangular_field_split(
             shifted,
@@ -531,7 +545,11 @@ def field_split(shifted, groups, n_fields, flow_smoother, turbulence_smoother, *
             coarse_eq_limit=compare.COARSE_EQ_LIMIT,
             leading_options=SMOOTHERS[flow_smoother] or None,
             trailing_options=SMOOTHERS.get(turbulence_smoother) or None,
-            trailing_inverse=_trailing_inverse(turbulence_smoother),
+            trailing_inverse=(
+                trailing_inverse
+                if trailing_inverse is not None
+                else _trailing_inverse(turbulence_smoother)
+            ),
         )
     )
 

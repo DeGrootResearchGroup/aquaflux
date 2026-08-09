@@ -850,9 +850,35 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       reason is structural, not a cost.** Both were tried as the trailing block's inverse and both failed,
       for **one shared cause** rather than two incidental ones:
       - `build_convection_hierarchy` (aggregation) **refuses**: *"operator diagonal must be finite and
-        strictly positive, but its minimum is −2.129e+06"*. The true `[k,ω]` Jacobian block has **negative
-        diagonal entries**, because it carries the live source-term linearizations — production and
-        destruction, with ω in a log variable.
+        strictly positive, but its minimum is −2.129e+06"*. ~~The true `[k,ω]` Jacobian block has negative
+        diagonal entries, because it carries the live source-term linearizations — production and
+        destruction, with ω in a log variable.~~
+        **⚠️ THAT EXPLANATION IS WRONG, AND THE ERROR MESSAGE ITSELF SAYS SO — corrected 2026-08-09.**
+        The refusal names **`level 1`**, a *coarse* operator. The fine slice is clean: measured on `bfs3d`
+        `state-00057`, **0 of 23040 cells** have a non-positive diagonal, at β = 0, at the march's shift
+        and at the preconditioner floor alike (`validation/bfs3d_openfoam/trailing_block_conditioning.py`).
+        The negative diagonal is *manufactured by the aggregation*, in the Galerkin `R A P` row — which is
+        one of the three causes the guard's own docstring lists.
+        **The real cause is that `_aggregate` is FIELD-BLIND.** It takes a bare matrix with no block size,
+        so on a multi-field block it can merge a `k` degree of freedom with an `ω` one from a *different*
+        cell into a single aggregate, and on a strongly nonsymmetric operator that produces a degenerate
+        coarse row. PETSc GAMG does not hit this because it is told `setBlockSize(n_fields)` and coarsens
+        whole **cells**. So the obstruction is the coarsening's blindness to fields, not the fine
+        operator, not the source linearizations, and not the sign of anything the caller supplies.
+        **Consequence: one hierarchy PER FIELD works, on the REAL Jacobian sub-blocks.** An aggregate
+        cannot mix fields when there is only one, and `build_convection_hierarchy` accepts `A_kk`
+        (diagonal 1.16e-06 … 2.66e-04, 57 nnz/row) and `A_ωω` (3.03e-03 … 1.0, 49 nnz/row) at every
+        shift. That keeps the full stencil fill and the true source linearizations, and needs **no**
+        reparametrization scaling, because the Jacobian is already in the solved variable — the log-ω
+        chain factor and its wall-fixation trap simply do not arise. Built as
+        `solve/field_split.PerFieldNativeInverse` / `native_per_field_inverse`, with the two fields
+        composed block-triangularly (k leading).
+        **This corrected a real cost: the wrong explanation was taken as an accepted blocker and sent the
+        first implementation down a transport-operator detour** — a 13×-sparser, source-clamped, per-field
+        stand-in needing the closure, the mass flux and the reparametrization scale — which measured 5
+        cycles against the true sub-blocks' 1 on the channel and was deleted. The generalisable lesson:
+        the record quoted an error verbatim and stapled an *inference* to it, and only the quotation was
+        ever verified. The word `level 1` was in the quotation the whole time.
       - `build_air_hierarchy` (lAIR) ran **~50 minutes without finishing** and was killed. Contributing:
         the slice carries the distance-3 coupled fill at **91 nnz/row** where the frozen transport stencil
         is ~7 (the leading block's slice is 227), and lAIR's local approximate-ideal-restriction solves run
@@ -885,6 +911,36 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       block-diagonal composition, and the log-ω chain-rule scaling (`ScaledScalarPreconditioner`) — the
       last of which is a known trap, since a rescale that ignores the wall-fixation rows' own derivative
       cost 27× on the linear residual once already.
+    - **⚠️ TAKING PETSc OFF THE TRAILING HALF IS NOT A WIN, AND THE TWO BLOCKERS ARE NOW SPECIFIC
+      (measured 2026-08-09, `bfs3d`, three states, arms `native`/`native2` in
+      `turbulence_smoother_sweep.py`).** With the per-field hierarchies above wired in as the trailing
+      inverse, against the shipped PETSc V-cycle at `ilu0` on both halves, `refresh_on_cycles` 3, plain
+      aggregation, `coarse_eq_limit` 2000, reach 3, restart 15:
+
+      | trailing inverse | 00057 | 00058 | hard | blended | apply |
+      |---|---|---|---|---|---|
+      | PETSc V-cycle (shipped) | 8.66 | 8.83 | 8.88 | **8.76** | 102.0 ms |
+      | native, 1 V-cycle/field | 13.09 | 13.22 | 13.23 | 13.16 (**1.50×**) | 144.3 ms |
+      | native, 2 V-cycles/field | 16.50 | 17.03 | 12.94 | 16.34 (1.87×) | 204.0 ms |
+
+      Uniformly 1.50× (spread 1.49–1.51) with apply flat to 0.3 % — a low-variance loss, unlike the
+      block-Jacobi arm's. The second row shows the two deficits are separable and neither is free: more
+      V-cycles close the **quality** gap (tight cycles 8 → 5 against ILU's 4) and double the **cost**.
+      **The apply gap decomposes, and a traced-side port would NOT rescue it.** Timed on the same block:
+      the two JAX hierarchies jitted, `jnp` in and out, cost **32.6 ms**; through the study adapter's
+      numpy↔jnp marshalling, **53.8 ms**; the PETSc V-cycle they replace, **~11.7 ms** (by difference
+      against the shipped split's 102.0 ms total, the flow half being identical). So marshalling is only
+      ~half the gap and **the JAX V-cycle is ~2.8× more expensive than GAMG on the identical operator**.
+      Removing the callback would take 144 → 123 ms, still 20 % above the incumbent and still weaker.
+      (If anything 32.6 ms flatters it: XLA constant-folded the frozen hierarchy arrays into the jit.)
+      **So the next attempt starts from "the V-cycle must get ~3× faster and learn a block size", not
+      from "remove the callback".** The second half is a defined enhancement rather than a research
+      problem — teach `_aggregate` a block size so it coarsens *cells* as GAMG does, which would let one
+      two-field native hierarchy replace the per-field pair and close the quality gap without doubling
+      the cycles. It does nothing about the 2.8×. `PerFieldNativeInverse` is kept in the tree because it
+      is tested, transposable, adjoint-legal, and is what a block-aware aggregation would slot into — it
+      is **not** wired into the production builder.
+
     - **NOT YET BUILT: the production wiring.** There is no `coupled_field_split_continuation` / shift
       policy, deliberately — the forward march is where a continuation builder would be used and the split
       *loses* there. What the measurement argues for is a **`β = 0` adjoint-only** preconditioner seam

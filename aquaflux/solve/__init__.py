@@ -68,10 +68,12 @@ from .continuation import (
 from .frozen_operator import convection_diffusion_operator, decouple_dof
 from .amg_preconditioner import AmgVCycle, MonolithicAmgPreconditioner, build_amg_vcycle
 from .field_split import (
+    PerFieldNativeInverse,
     BlockTriangularFieldSplit,
     FieldGroups,
     FieldSplitAmgPreconditioner,
     build_block_triangular_field_split,
+    native_per_field_inverse,
 )
 from .refresh_timing import PhaseTimer, RefreshTiming
 from .ilut_preconditioner import MonolithicIlutPreconditioner
@@ -165,6 +167,7 @@ __all__ = [
     "MonolithicIlutPreconditioner",
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
+    "PerFieldNativeInverse",
     "PhaseTimer",
     "PositiveBlockLimit",
     "PseudoTransientStep",
@@ -205,6 +208,7 @@ __all__ = [
     "forward_march",
     "jacobian_relative_error",
     "materialize_block_jacobian",
+    "native_per_field_inverse",
     "newton_step",
     "positive_block_limit",
     "refresh_air_hierarchy",

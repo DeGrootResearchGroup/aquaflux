@@ -74,6 +74,7 @@ from aquaflux.solve import (  # noqa: E402
     MonolithicAmgPreconditioner,
     block_stencil_gather_map,
     build_amg_vcycle,
+    native_per_field_inverse,
     relative_residual_gmres,
     solve_linear,
 )
@@ -96,13 +97,24 @@ from field_split_probe import (  # noqa: E402
 )
 
 
+def _is_native(arm: str) -> bool:
+    """Does this arm build the trailing half from the JAX-native scalar hierarchies?"""
+    return arm.startswith("native")
+
+
 def _replaces_hierarchy(arm: str) -> bool:
     """Does this arm supply a WHOLE block inverse rather than a smoother inside a V-cycle?
 
     The two kinds are measured differently: a smoother's setup cost is a hierarchy build, while a
     whole-block inverse has no hierarchy to build at all -- which is most of what makes it interesting.
+    The native arms are neither: they DO build hierarchies, just not PETSc's.
     """
-    return arm not in SMOOTHERS
+    return arm not in SMOOTHERS and not _is_native(arm)
+
+
+def _known_arm(arm: str) -> bool:
+    """The three families this harness can build: a PETSc smoother, a block inverse, or native."""
+    return arm in SMOOTHERS or _is_native(arm) or arm.startswith("blockjacobi")
 
 
 #: The leading half is held at the shipped incomplete-LU sweep for every arm, so a difference between
@@ -194,15 +206,25 @@ def time_solve(preconditioner, coupled, state, rhs, op_shift, solver, repeats: i
     return best, restart_cycles(int(raw)), true
 
 
-def trailing_setup(shifted, groups, arm: str) -> float:
+def trailing_setup(shifted, groups, arm: str, coupled=None, state=None) -> float:
     """Seconds to build the trailing hierarchy ALONE, so the shared leading half does not mask it.
 
     The full split's build is dominated by the four-field saddle, which every arm shares; a difference of
     a few seconds in the two-field block would be invisible inside it. This is the part a refresh would
     actually save.
+
+    A native arm is handed the coupled system rather than a prebuilt factory, and builds its hierarchies
+    INSIDE the timer. Reusing one built earlier reports 0.0 s, which is not merely imprecise but the
+    wrong sign of wrong: two scalar hierarchy builds are the largest cost this arm carries and the one
+    most likely to decide it, so hiding them would flatter it exactly where it is weakest.
     """
     block = shifted[groups.trailing, :][:, groups.trailing]
     started = time.perf_counter()
+    if _is_native(arm):
+        inverse = _native_factory(arm)(block, groups.n_trailing_fields)
+        elapsed = time.perf_counter() - started
+        inverse.destroy()
+        return elapsed
     if _replaces_hierarchy(arm):
         # No hierarchy to build at all -- this is the setup the arm exists to avoid paying.
         inverse = _trailing_inverse(arm)(block, groups.n_trailing_fields)
@@ -220,14 +242,39 @@ def trailing_setup(shifted, groups, arm: str) -> float:
     return elapsed
 
 
+def _native_factory(arm: str, coupled=None, state=None):
+    """The JAX-native trailing inverse for a ``native`` arm, or ``None`` for a PETSc-smoother arm.
+
+    ``nativeN`` builds one JAX-native hierarchy PER FIELD over that field's own diagonal sub-block of
+    the real Jacobian, composed block-triangularly, at ``N`` V-cycles each (default 1). No host solver
+    and no callback out of the traced solve on this half.
+
+    The per-field split is not a simplification but the thing that makes it buildable: the native
+    aggregation takes a bare matrix with no block size, so on a two-field block it merges different
+    fields of different cells into one aggregate and manufactures a degenerate coarse row. One field per
+    hierarchy removes that, and the coupling comes back exactly through the block-triangular composition.
+    """
+    if not _is_native(arm):
+        return None
+    return native_per_field_inverse(cycles=int(arm.removeprefix("native") or 1))
+
+
 def run(arm, shifted, groups, n_fields, coupled, state, rhs, op_shift, loose, generator):
     """Build one arm and report it, surviving a failure so the arms queued behind it still run."""
     preconditioner = None
     try:
         started = time.perf_counter()
-        preconditioner = field_split(shifted, groups, n_fields, FLOW_SMOOTHER, arm, flow_first=True)
+        preconditioner = field_split(
+            shifted,
+            groups,
+            n_fields,
+            FLOW_SMOOTHER,
+            arm,
+            flow_first=True,
+            trailing_inverse=_native_factory(arm),
+        )
         setup = time.perf_counter() - started
-        alone = trailing_setup(shifted, groups, arm)
+        alone = trailing_setup(shifted, groups, arm, coupled, state)
         apply_s = time_apply(preconditioner, groups.n_dofs, generator)
         march_s, march_cyc, march_true = time_solve(
             preconditioner, coupled, state, rhs, op_shift, loose, SOLVE_REPEATS
@@ -401,13 +448,13 @@ def main() -> None:
             "Give at least one step-initial state (the ranking) and one inner iterate (the screen)."
         )
     only = set(chosen[-1].split("=", 1)[1].split(",")) if chosen else None
-    # An arm is either a smoother recipe (a V-cycle configured by PETSc options) or a whole-block
-    # inverse that REPLACES the hierarchy, which the trailing-inverse seam resolves by name.
-    unknown = {a for a in (only or set()) if a not in SMOOTHERS and not _replaces_hierarchy(a)}
+    unknown = sorted(a for a in (only or set()) if not _known_arm(a))
     if unknown:
         raise SystemExit(
-            f"unknown arm(s) {sorted(unknown)}; smoothers: {sorted(SMOOTHERS)}, "
-            "or blockjacobi<N> to replace the hierarchy entirely"
+            f"unknown arm(s) {unknown}\n"
+            f"  smoothers (a V-cycle configured by PETSc options): {sorted(SMOOTHERS)}\n"
+            "  blockjacobi<N>: N block-Jacobi sweeps INSTEAD of a hierarchy\n"
+            "  native / native-air: the JAX-native scalar hierarchies, no host solver"
         )
     selected = tuple(a for a in ARMS if only is None or a == ARMS[0] or a in only)
     # An arm named on the command line but absent from ARMS is still a legitimate request -- ARMS is a
