@@ -67,6 +67,12 @@ from .continuation import (
 )
 from .frozen_operator import convection_diffusion_operator, decouple_dof
 from .amg_preconditioner import AmgVCycle, MonolithicAmgPreconditioner, build_amg_vcycle
+from .field_split import (
+    BlockTriangularFieldSplit,
+    FieldGroups,
+    FieldSplitAmgPreconditioner,
+    build_block_triangular_field_split,
+)
 from .refresh_timing import PhaseTimer, RefreshTiming
 from .ilut_preconditioner import MonolithicIlutPreconditioner
 from .lu_preconditioner import MonolithicLuPreconditioner
@@ -137,6 +143,7 @@ __all__ = [
     "AmgVCycle",
     "BlockColouring",
     "BlockScaledNorm",
+    "BlockTriangularFieldSplit",
     "CflResidualDualTimeControl",
     "CoefficientDriftTrigger",
     "ConstantRelaxation",
@@ -145,6 +152,8 @@ __all__ = [
     "DivergenceGuard",
     "DualTimeControl",
     "DualTimeStep",
+    "FieldGroups",
+    "FieldSplitAmgPreconditioner",
     "ForwardStep",
     "ImplicitNewtonSolver",
     "InnerIterateCheckpointer",
@@ -183,6 +192,7 @@ __all__ = [
     "block_stencil_gather_map",
     "build_air_hierarchy",
     "build_amg_vcycle",
+    "build_block_triangular_field_split",
     "build_convection_hierarchy",
     "build_smoothed_hierarchy",
     "combine_metrics",

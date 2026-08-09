@@ -31,10 +31,31 @@ collapse to the 2D problem; the viscous side walls are what make this a three-di
 - **aquaflux**: the **coupled** RANS solver (`solve_coupled` — one monolithic Newton on `R(u, p, k, ω)`)
   with **hybrid initialization**, **second-order upwind** momentum advection (Venkatakrishnan-limited
   `LimitedUpwind`), **corrected Green-Gauss** gradients, and **log-variable ω** (`omega_transform=LogScalars()`),
-  on the imported mesh at the same operating point. The coupled Jacobian is preconditioned by a **monolithic
-  algebraic-multigrid V-cycle** (`coupled_amg_continuation`) — see below.
+  on the imported mesh at the same operating point. The coupled Jacobian is preconditioned by a
+  **field-split algebraic-multigrid V-cycle** (`coupled_amg_continuation(field_split=True)`) — see below.
 
 ## The preconditioner is the point of this case
+
+### The hierarchy is split by field
+
+The six coupled fields are not one kind of equation: `[u, v, w, p]` is a pressure–velocity saddle, while
+`k` and `ω` are advection-dominated transported scalars. They are given **separate multigrid
+hierarchies**, with one triangle of the coupling between them retained exactly from the assembled
+Jacobian (not dropped — dropping it is a weaker preconditioner, and the coupling is load-bearing).
+Measured on this case against the otherwise-identical monolithic V-cycle:
+
+| | monolithic | field split |
+|---|---|---|
+| wall | 3140 s | **2161 s** (−31%) |
+| steps | 58 | 66 |
+| Krylov cycles | 293 | 324 (+11%) |
+| mid-span `x_r/h` | 8.361 | 8.361 |
+
+**Note the cycle count moves the wrong way and the solve is still much faster.** Two smaller V-cycles
+plus one sparse coupling product apply far more cheaply than one six-field V-cycle, so the split buys
+more cycles at a lower price per cycle. A cycle count is only a fair proxy for cost between candidates
+that share a per-application cost; once the preconditioner's shape changes it stops being one. Set
+`BFS3D_FIELD_SPLIT=0` to run the monolithic arm.
 
 The 2D cases run on a factorization of the coupled Jacobian; in 3D that factorization is the wall. On this
 mesh the assembled coupled Jacobian has ≈ 38.7 million nonzeros (≈ 280 per row), and a single incomplete-LU

@@ -58,6 +58,8 @@ from aquaflux.solve import (
     DivergenceGuard,
     DualTimeControl,
     DualTimeStep,
+    FieldGroups,
+    FieldSplitAmgPreconditioner,
     ForwardStep,
     ImplicitNewtonSolver,
     LocalCourantBasis,
@@ -1901,6 +1903,7 @@ def coupled_amg_continuation(
     refresh_on_cycles: int | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     cycle_budget: int | None = None,
+    field_split: bool = False,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **algebraic-multigrid** V-cycle.
 
@@ -2027,20 +2030,48 @@ def coupled_amg_continuation(
     # ~machine zero, and the pseudo-transient globalization implicitly leans on those near-exact steps,
     # which the native (honest-tolerance) step does not yet match -- a convergence-tuning follow-up. Default
     # off; the default path applies the frozen V-cycle per-matvec through the JAX-side Krylov.
-    preconditioner = MonolithicAmgPreconditioner.build(
-        matvec,
-        colouring,
-        n_fields,
-        _frozen_shift_diagonal(base, amg_beta, reference_state),
-        native=native_forward_solve,
-        residual_fn=coupled.residual if native_forward_solve else None,
-        smoother_fill_levels=smoother_fill_levels,
-        smoother_sweeps=smoother_sweeps,
-        coarse_eq_limit=coarse_eq_limit,
-        batched_matvec=batched_matvec,
-        probe_batch_size=_PROBE_BATCH_SIZE,
-        structure=structure,
-    )
+    # `field_split` swaps ONLY which frozen inverse is fitted to the same materialized Jacobian: the flow
+    # saddle and the two transported scalars get separate hierarchies, with one triangle of the coupling
+    # between them retained exactly. Everything downstream -- the shift policy, the forward solver, the
+    # step tail, the refresh hooks -- is shared, which is the point: it makes the two comparable on a
+    # march by changing one construction, not by maintaining a second solver.
+    shift = _frozen_shift_diagonal(base, amg_beta, reference_state)
+    common = {
+        "smoother_fill_levels": smoother_fill_levels,
+        "smoother_sweeps": smoother_sweeps,
+        "coarse_eq_limit": coarse_eq_limit,
+        "batched_matvec": batched_matvec,
+        "probe_batch_size": _PROBE_BATCH_SIZE,
+        "structure": structure,
+    }
+    if field_split:
+        if native_forward_solve:
+            raise ValueError(
+                "native_forward_solve builds a PETSc KSP around a single monolithic V-cycle and has no "
+                "field-split counterpart; use one or the other."
+            )
+        preconditioner = FieldSplitAmgPreconditioner.build(
+            matvec,
+            colouring,
+            n_fields,
+            shift,
+            FieldGroups(
+                n_cells=coupled.layout.n_cells,
+                n_leading_fields=coupled.layout.dim + 1,  # u, v, w, p -- the saddle
+                n_trailing_fields=2,  # k, omega -- the transported scalars
+            ),
+            **common,
+        )
+    else:
+        preconditioner = MonolithicAmgPreconditioner.build(
+            matvec,
+            colouring,
+            n_fields,
+            shift,
+            native=native_forward_solve,
+            residual_fn=coupled.residual if native_forward_solve else None,
+            **common,
+        )
     return _monolithic_factor_step(
         coupled,
         reference_state,

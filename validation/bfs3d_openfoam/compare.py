@@ -25,13 +25,19 @@ aquaflux setup, mirroring the 2D case:
   e^w`` stays strictly positive under any Newton step, the fix for a direct-omega step driving omega
   negative once recirculation forms.
 
-**Preconditioner (the point of a 3D case):** the coupled Jacobian is preconditioned by a **monolithic
-algebraic-multigrid V-cycle** (:func:`aquaflux.turbulence.coupled_amg_continuation`), not by a
+**Preconditioner (the point of a 3D case):** the coupled Jacobian is preconditioned by an
+**algebraic-multigrid V-cycle** (:func:`aquaflux.turbulence.coupled_amg_continuation`), not by a
 factorization. The complete LU is exact but its fill is a memory wall in 3D (``O(n^{4/3})``), and even the
 threshold-ILU's factorization of the distance-3 3D coupled Jacobian (hundreds of nonzeros per row) is
 prohibitively slow to build; the V-cycle keeps the heavy fill on only the small coarsest grid (a direct-LU
 coarse solve), so its memory stays bounded and its setup is seconds. This 3D case is the first exercise of
 that scaling path.
+
+The V-cycle is **field-split** (``field_split=True``): the ``[u, v, w, p]`` saddle and the ``[k, omega]``
+transported scalars get their own hierarchies, with one triangle of the coupling between them retained
+exactly from the assembled Jacobian rather than dropped. Measured 31% faster end to end here, to the same
+reattachment length -- see :data:`FIELD_SPLIT`, which also records why the *cycle* count moves the other
+way.
 
 **Reference caveat (binding -- do not skip):** the OpenFOAM *steady* (SIMPLE) run does **not** fully
 converge this case -- it limit-cycles at ~1e-3 residual on the separated 3D flow (though, unlike the 2D
@@ -106,6 +112,25 @@ INNER_STEPS, INNER_TOL = 5, 1e-3
 # coarse=None stalls at every low shift. The beta floor is PRECONDITIONER-ONLY: the V-cycle is built at
 # max(beta, floor) while the march solves at its own beta, so the root and the adjoint are unchanged.
 FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT, PC_BETA_FLOOR = 0, 4, 2000, 0.05
+# Split the preconditioner's hierarchy in two -- the [u,v,w,p] saddle and the [k,omega] transported
+# scalars each get their own, with one triangle of the coupling between them retained exactly -- rather
+# than putting all six fields through one hierarchy with one smoother. ON, because it is measured 31%
+# faster end to end on this case at the identical configuration:
+#
+#                       monolithic     split
+#     wall                  3140 s    2161 s   (-31%)
+#     steps                     58        66
+#     Krylov cycles            293       324   (+11%)
+#     refresh          19 / 310 s   23 / 352 s
+#     mid-span x_r/h         8.361     8.361   (identical)
+#
+# Read the cycle row before concluding anything from a cycle count: the split takes MORE cycles and is
+# far faster, because two smaller V-cycles plus one sparse coupling product apply much more cheaply than
+# one six-field V-cycle. Its mean cycles per inner solve is actually lower (1.49 vs 1.68) -- the higher
+# total comes from more, cheaper steps. It also triggers ~4 more cost-driven refreshes (9.7% of inner
+# solves cross the threshold against 9.0%), which hands back ~42 s of the ~980 s saved.
+# `BFS3D_FIELD_SPLIT=0` restores the monolithic V-cycle for an A/B.
+FIELD_SPLIT = os.environ.get("BFS3D_FIELD_SPLIT", "1") not in ("", "0")
 CYCLE_BUDGET = 42  # summed per step: a cost cap, so summed is what it should cap
 RETRY_ON_CYCLES = (
     10  # PER SOLVE: a summed trigger is ~6x more sensitive for a 5-inner step than a 1-inner one
@@ -284,7 +309,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
     orders of magnitude at a line-search factor already clipped to 0.002), so the ramp buys
     reachability, not merely a better seed.
 
-    Preconditioned by the **monolithic algebraic-multigrid V-cycle** -- the 3D coupled path, since the
+    Preconditioned by the **field-split algebraic-multigrid V-cycle** -- the 3D coupled path, since the
     complete LU's fill is a memory wall past ~10^4 3D cells and the threshold-ILU's factorization is
     prohibitively slow to build on the distance-3 3D coupled Jacobian. Every non-default setting is a
     measurement rather than a preference; see the constants above and the README.
@@ -380,6 +405,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             ),
             refresh_on_cycles=REFRESH_ON_CYCLES or None,
             inner_refresh=refresh.refresh_at if REFRESH_ON_CYCLES else None,
+            field_split=FIELD_SPLIT,
         )
         # Seeded with this rung's own starting state: the march equilibrates each step at the state it
         # begins from, so without the seed the rung's first step would be scaled at its end state and
@@ -645,8 +671,8 @@ def _report(m, aq_span, of_span):
         "A finite-width 3D backward-facing step (step height h = 0.01 m, expansion ratio 2, span 4h",
         "between no-slip side walls), solved by OpenFOAM `incompressibleFluid` (kOmegaSST) and, on the",
         "**same imported mesh**, by aquaflux's coupled RANS solver (hybrid initialization, second-order",
-        "upwind momentum advection, corrected Green-Gauss gradients, log-omega, monolithic algebraic-",
-        "multigrid preconditioner). U_in = 10 m/s, nu = 1e-5 -> Re_h = 10000.",
+        "upwind momentum advection, corrected Green-Gauss gradients, log-omega, field-split",
+        "algebraic-multigrid preconditioner). U_in = 10 m/s, nu = 1e-5 -> Re_h = 10000.",
         "",
         "## Results",
         "",

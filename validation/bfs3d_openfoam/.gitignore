@@ -1,5 +1,7 @@
 # Regenerable run artifacts; report.md, figures/, and of_case/ (the case template) ARE tracked.
-runs/
+# No trailing slash: in a git worktree `runs` is often a symlink to a shared run directory, and
+# git treats a symlink as a file, so a `runs/` rule would not match it and it would get staged.
+runs
 # Streamed solver/run logs (python3 -u > *.log redirects, OpenFOAM run logs).
 *.log
 of_case/0/
