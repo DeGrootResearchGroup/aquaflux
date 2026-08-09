@@ -1192,6 +1192,38 @@ tuning follow-up noted above.
     in `solve_kwargs` is forwarded to each per-Re solve, so the pseudo-transient march, the dual-time
     march (`inner_steps>1`, whose observed rungs default to the `DualTimeControl` Courant ramp), the
     preconditioner options and the observers all compose unchanged — no coupling to which globalization runs.
+  - **HOW MANY rungs: `bfs3d` keeps TWO, but the Re/100 anchor is a closer call than it looks
+    (measured 2026-08-09).** Configuration for both numbers: field-split AMG preconditioner,
+    `refresh_on_cycles=3`, `retry_on_alpha=0.01`, ILU(0)×4, plain aggregation, `coarse_eq_limit` 2000,
+    cold hybrid initialization, `Re_h` 10000.
+
+    | | 2 rungs | 1 rung |
+    |---|---|---|
+    | wall | **1959 s** | 2007 s |
+    | steps | 58 | **43** |
+    | Krylov cycles | 277 | **264** |
+    | mid-span `x_r/h` | 8.361 | 8.361 |
+
+    - **The anchor is NOT needed for reachability.** The cold initialization converges at **Re/10** to
+      the same root, in two independent runs. Only `n_points = 0` fails. Do not justify the anchor on
+      reachability grounds — that was the standing assumption and it is false at this Reynolds number.
+    - **As a route to Re/10 it costs more than it saves:** a converged Re/10 costs **800 s from cold**
+      against **1027 s** via the anchor (359 s of anchor plus 668 s of a better-seeded Re/10) — ~227 s
+      of net cost that the improved seed does not return.
+    - **Yet the total still favours two**, because the one-rung ladder repays that saving with interest
+      in the **target rung**: 932 s against **1207 s**, the two ladders arriving at the low-β wall in
+      different states and needing one β escalation against three.
+    - **Neither margin decides it.** Both are ~2% on single runs, the target-rung spread (±275 s) is
+      larger than the ladder effect it would have to be smaller than, and an earlier pair of runs
+      (before the α-collapse escalation existed) ordered the totals the *other* way by a similar margin.
+      Two rungs is kept because the measured total favours it and nothing measured argues for moving —
+      not because the anchor was shown to be necessary.
+    - **Method note worth carrying to the next ladder question:** two attempts at this measurement were
+      confounded by the same thing, the second time even after the first confound was fixed. A
+      single-event cost (one stall, one escalation cascade) that varies by arm will swamp a structural
+      difference of a few per cent, and equalizing the *response* to that event does not equalize its
+      *cost* — the arms still meet it in different states. Compare **per-rung** costs, which reproduced
+      to within 2 s across runs, rather than totals, which flipped sign.
   - **The continuation DISSOLVES at the target (binding).** The final solve runs at the case's true
     viscosity on the **live** `coupled`, so the root and its exact IFT adjoint are identical to a direct
     `solve_coupled` — the continuation changes only the path. Pinned: `n_points=2` reaches the direct
