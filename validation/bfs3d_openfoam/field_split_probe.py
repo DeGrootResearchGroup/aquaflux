@@ -161,6 +161,22 @@ STATES = {
         "the iteration before the hardest one -- the stale side of a one-iteration pairing",
     ),
     "state-00069": (0.0, None, "the converged state -- the ADJOINT's operator, at zero shift"),
+    # STEP-INITIAL states, and they are here because the hard iterates above are NOT what a march mostly
+    # pays for. A checkpoint is written at the end of a step, so it holds the state the next step begins
+    # from -- a settled state met with a freshly refreshed preconditioner, which is the cheap first solve
+    # of a step. On the shipped march 139 of 194 inner solves cost one restart cycle and only 7 exceeded
+    # three, so this class is the bulk of the cost and the hard iterates are the tail. A candidate has to
+    # be measured on both: the tail says whether it survives, the bulk says what it costs.
+    "state-00064": (
+        0.0162,
+        None,
+        "step 26 of the target rung, step-initial -- the CHEAP solve that is most of the march",
+    ),
+    "state-00057": (
+        0.0103,
+        None,
+        "step 19 of the middle rung, step-initial -- a second cheap solve, lower shift",
+    ),
 }
 
 #: Level-smoother recipes, as PETSc options layered over the shipped bundle. ``ilu0`` is the shipped
@@ -173,6 +189,62 @@ SMOOTHERS = {
         "mg_levels_ksp_type": "richardson",
         "mg_levels_ksp_richardson_scale": 0.7,
         "mg_levels_pc_type": "jacobi",
+    },
+    # Sweep-count variants of the shipped smoother. The four sweeps in the shipped bundle were tuned
+    # against the SIX-field block; the transported scalars are a much easier operator than the saddle
+    # they were tuned on, so the same count may simply be more work than that block needs. `ksp_max_it`
+    # is where the sweep count lands (the builder sets it from `smoother_sweeps`), and caller overrides
+    # are applied last, so naming it here replaces it for this block alone.
+    "ilu0x2": {"mg_levels_ksp_max_it": 2},
+    "ilu0x1": {"mg_levels_ksp_max_it": 1},
+    # Point-block Jacobi: invert each cell's own dense 2x2 [k, omega] block, nothing else. The Mat
+    # carries a block size of the group's field count, so PETSc reads the blocks straight off it. This is
+    # the natural smoother for the measured shape of this block -- the k/omega coupling is almost
+    # entirely a same-cell algebraic term (the destruction pair and the production limiter), which a
+    # per-cell block inverse captures exactly while a point method sees only the diagonal. It is also a
+    # batch of independent 2x2 solves, so unlike the incomplete-LU sweep it carries no sequential
+    # dependency and maps onto an accelerator directly.
+    "pbjacobi": {
+        "mg_levels_ksp_type": "richardson",
+        "mg_levels_ksp_richardson_scale": 0.7,
+        "mg_levels_pc_type": "pbjacobi",
+    },
+    # Successive over-relaxation: still a sequential sweep, but a much cheaper one than an incomplete
+    # factorization -- no factor to form or store, and nothing to re-form when the operator changes, so
+    # it would also cut the setup half of a refresh. Included because a transported-scalar pair with a
+    # genuine diagonal is the operator SOR is actually designed for; it diverged on the six-field block,
+    # which is a statement about the saddle rather than about these two equations.
+    "sor": {"mg_levels_ksp_type": "richardson", "mg_levels_pc_type": "sor"},
+    # The damped-Jacobi sweep ladder. This family matters out of proportion to its cycle count: a
+    # diagonal scaling is a sparse matrix-vector product and nothing else, so unlike every incomplete-LU
+    # or Gauss-Seidel variant it carries no sequential dependency and needs no factorization to store or
+    # re-form. If it is adequate on this block, the block can leave a host solver entirely.
+    "jacobix8": {
+        "mg_levels_ksp_type": "richardson",
+        "mg_levels_ksp_richardson_scale": 0.7,
+        "mg_levels_pc_type": "jacobi",
+        "mg_levels_ksp_max_it": 8,
+    },
+    "jacobix2": {
+        "mg_levels_ksp_type": "richardson",
+        "mg_levels_ksp_richardson_scale": 0.7,
+        "mg_levels_pc_type": "jacobi",
+        "mg_levels_ksp_max_it": 2,
+    },
+    "jacobix1": {
+        "mg_levels_ksp_type": "richardson",
+        "mg_levels_ksp_richardson_scale": 0.7,
+        "mg_levels_pc_type": "jacobi",
+        "mg_levels_ksp_max_it": 1,
+    },
+    # Point-block Jacobi at two sweeps. At four it bought an extra restart cycle, which cost more than
+    # its cheaper application saved; halving the sweeps asks whether that was the sweep count or the
+    # method.
+    "pbjacobix2": {
+        "mg_levels_ksp_type": "richardson",
+        "mg_levels_ksp_richardson_scale": 0.7,
+        "mg_levels_pc_type": "pbjacobi",
+        "mg_levels_ksp_max_it": 2,
     },
     # A Vanka patch relaxation on the FOUR-field saddle block. Two things make this a different
     # experiment from the one that condemned cell-centred patch relaxation on the six-field block:
