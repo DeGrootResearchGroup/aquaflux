@@ -1107,9 +1107,18 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         around the hard steps), consistent with the earlier gate fix, which bought 132 fewer cycles and
         removed three of five retry cascades by refreshing ~50 % more often — the same mechanism found
         from the other end.
-        **The cost arithmetic says REPLACE THE SCHEDULE WITH A TRIGGER — and this is the largest
-        remaining lever on the march, bigger than any preconditioner change.** Measured on the 3501 s
-        march: scheduled refreshes are 50 full + 12 shift = **742 s, 21 % of the wall**. A refresh fired
+        **✅ THE COST TRIGGER IS BUILT — `amg_beta_tracking_refresh(refresh_on_cycles=N)`.** A solve that
+        reaches `N` restart cycles refreshes the preconditioner **at the iterate it was handed** and the
+        inner loop carries on, rather than aborting the step and escalating β (which discards both the
+        work and the pseudo-timestep). Capped at **one refresh per step**, without which a genuinely hard
+        operator would refresh on every inner iteration; a new inner loop re-arms it. Off by default
+        (`None`), so a march that does not opt in is byte-identical. Pinned by
+        `test_inner_refresh_fires_on_an_expensive_solve_at_that_iterate_and_once_per_step`. **Do not read
+        the arithmetic below as an open proposal — it is the justification for what is now shipped**, and
+        the equilibrium firing rate is still the unknown it names (removing the schedule shifts the
+        distribution up, so the trigger fires more often than the counts predict).
+        The cost arithmetic that motivated it: measured on the 3501 s
+        march, scheduled refreshes are 50 full + 12 shift = **742 s, 21 % of the wall**. A refresh fired
         only when a solve reaches ≥3 cycles would fire **16** times (227 s, **−515 s**); at ≥4, **7**
         times (99 s, **−643 s**) — a 15–18 % whole-march saving, against a ~8 % ceiling for a *perfect*
         preconditioner. Read as an *addition* to the schedule the trigger looks break-even; as a
