@@ -586,7 +586,25 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   - **⚠️ MEASUREMENT DISCIPLINE FOR PRECONDITIONER PROBES (binding — every one of these produced a wrong
     verdict that had to be retracted).** Judge a candidate preconditioner **only** by running it through
     GMRES and reading the **true** residual `‖Ax−b‖`, **at a state and shift pairing where the operator
-    is actually hard**. Six cheaper-looking shortcuts are all invalid on this indefinite saddle:
+    is actually hard**. Seven cheaper-looking shortcuts are all invalid on this indefinite saddle:
+
+    **Shortcut 0, and the most expensive one found so far: judging a preconditioner by its CYCLE COUNT
+    rather than by the march's WALL CLOCK.** Every other entry here is about measuring the residual
+    honestly; this one is about measuring the wrong *quantity* honestly, which is harder to notice. The
+    field split was measured at a captured hard iterate to cost a cycle (4 against the monolithic's 3) and
+    was very nearly abandoned on that basis. Run end to end at the identical configuration it is **31%
+    faster** (2161 s against 3140 s) to the identical reattachment length — **while taking 11% MORE
+    cycles** (324 against 293) and triggering 21% more refreshes. A cycle is not a unit of cost: two
+    smaller V-cycles plus one sparse coupling product apply far more cheaply than one six-field V-cycle,
+    so the split buys more cycles at a lower price. **A cycle count is only a valid proxy when the
+    candidates share a per-application cost** — true when comparing smoother sweeps or aggregation
+    settings on one hierarchy, false the moment the preconditioner's *shape* changes. When the shape
+    changes, the only honest measure is wall clock over a whole march, and a single-state probe cannot
+    give it. (Two corollaries worth keeping: the same run's mean cycles per inner solve was *lower* for
+    the split, 1.49 against 1.68 — the higher total came from more, cheaper steps, so even the direction
+    of the cycle difference depends on whether you count per solve or per march; and the monolithic run
+    contained a single 40-cycle solve where the split's worst was 8, which no average shows.)
+
     1. **The preconditioned residual `‖Mr‖`.** PETSc's default convergence norm. SOR/Krylov-smoothing
        report `reason=2` (converged) at a **true** residual of 1.0. Force `KSP_NORM_UNPRECONDITIONED`.
        A level-ILU "win" was once entirely this artifact.
@@ -707,8 +725,30 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       one that keeps costing time: a contraction ratio is not a convergence criterion for a
       Krylov-accelerated preconditioner; and *that state cannot rank the orderings at all*, because an
       operator every candidate solves in one cycle discriminates between none of them.
-    - **✅ MEASURED ON `bfs3d` (2026-08-08) — the split loses on the forward operator and WINS on the
-      adjoint's, and the adjoint is the one that matters.** Harness
+    - **✅ SHIPPED ON `bfs3d` — 31% FASTER END TO END, and the single-state probe below got the sign
+      wrong.** A full 3-rung cold march at the identical configuration (`refresh_on_cycles=3`, ILU(0)×4,
+      plain aggregation, `coarse_eq_limit` 2000, reach 3, restart 15), `field_split=True` against the
+      shipped monolithic:
+
+      | | monolithic | field split | |
+      |---|---|---|---|
+      | **wall** | 3140 s | **2161 s** | **−31%** |
+      | steps | 58 | 66 | +14% |
+      | Krylov cycles | 293 | 324 | **+11%** |
+      | refresh | 19 events / 310 s | 23 / 352 s | +42 s |
+      | mid-span `x_r/h` | 8.361 | **8.361** | identical |
+
+      **The cycle row is the point.** The split is much faster *while doing more cycles*, because two
+      smaller V-cycles plus one sparse coupling product apply far more cheaply than one six-field V-cycle
+      — the coupling never enters a factorization or a coarse hierarchy. Per matched step at equal cycle
+      counts the split's steps ran ~38–40% faster. Its mean cycles per **inner solve** is *lower* (1.49 vs
+      1.68); the higher total is more, cheaper steps. It also crosses the refresh trigger slightly more
+      often (9.7% of inner solves vs 9.0%), costing ~42 s of the ~980 s saved — the feedback loop is real
+      and small. Refresh cost **per event** is unchanged (~14 s), so an earlier claim that the split
+      refreshes more cheaply was wrong: it compared against the *scheduled* run's average.
+      **Machine-load control:** the coloured jvp probe is identical work in both runs and took 11.3–14.6 s
+      (monolithic) vs 11.7–15.1 s (split), so the faster run was not the quieter machine.
+    - **⚠️ THE SINGLE-STATE PROBE BELOW SAID THE OPPOSITE — read it as a lesson, not as a result.** Harness
       `validation/bfs3d_openfoam/field_split_probe.py`. **Configuration, in full:** 3-rung cold march's
       own states; plain aggregation, **ILU(0) ×4** where not overridden, `coarse_eq_limit` 2000, stencil
       reach 3, block sizes 4 and 2; GMRES restart 15 to **rtol 1e-8 on the TRUE residual**; right-hand
