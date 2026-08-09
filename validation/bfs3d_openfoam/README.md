@@ -57,13 +57,43 @@ more cycles at a lower price per cycle. A cycle count is only a fair proxy for c
 that share a per-application cost; once the preconditioner's shape changes it stops being one. Set
 `BFS3D_FIELD_SPLIT=0` to run the monolithic arm.
 
+### …and the two halves are smoothed differently
+
+Splitting the hierarchies is only half the point: the halves can then be *tuned* apart, and they want
+different things. The saddle needs its four incomplete-LU sweeps — Jacobi-class smoothers do not
+converge on it at all — while `[k, ω]` is a transported-scalar pair with a genuine diagonal, a far
+easier operator, and it does not. Dropping the trailing half from four sweeps to **one**:
+
+| | four sweeps | one sweep |
+|---|---|---|
+| wall | 1959 s | **1636 s** (−16.5%) |
+| steps | 58 | 58 |
+| refresh | 21 events / 318 s | 19 / 286 s |
+| Krylov cycles | 277 | 282 (+1.8%) |
+| mid-span `x_r/h` | 8.361 | 8.361 |
+
+The two marches follow the **same trajectory step for step** — same shift, same per-step cycle counts,
+same residuals to four figures, and the single line-search escalation fires at the same step to the same
+shift — so the 323 s is the identical path at a lower price per matrix-vector product, not a different
+path taken faster. That makes it a much stronger single-run result than a bare 16.5% would be. One sweep
+is now the library default (`coupled_amg_continuation(trailing_smoother_sweeps=…)`); vary it here with
+`BFS3D_TRAILING_SWEEPS`, and the smoother *method* with `BFS3D_TURBULENCE_SMOOTHER`.
+
+Two cautions carried from the screening that chose it. The cycle count rose while the wall fell, again.
+And a candidate needs three things, not two — cheap per application, convergent on a hard operator, and
+**not materially weaker than what it replaces**: the arms that were markedly weaker (point-block and
+plain Jacobi at low sweep counts) rank well on per-solve cost and are not settled on a march, so cost
+ranking alone does not select a smoother.
+
 The 2D cases run on a factorization of the coupled Jacobian; in 3D that factorization is the wall. On this
 mesh the assembled coupled Jacobian has ≈ 38.7 million nonzeros (≈ 280 per row), and a single incomplete-LU
 factorization at the usual fill runs for many minutes. The **algebraic-multigrid V-cycle** instead keeps the
 heavy fill on only the small coarsest grid — a **direct-LU coarse solve** — so its memory stays bounded and
 its setup is a matter of seconds. It is one V-cycle (a fixed linear operator), applied inside the coupled
-Newton's Krylov solve; a stationary ILU(1) level smoother reaches the solve tolerance on the indefinite
-saddle where a plain zero-fill smoother stalls. Because it is a fixed linear operator it is also
+Newton's Krylov solve; a stationary **zero-fill** incomplete-LU level smoother reaches the solve
+tolerance on the indefinite saddle, where adding fill is what fails — a level-1 factorization develops
+negative pivots as the pseudo-transient shift falls and diverges at the low shifts this march's tail
+runs at. Because it is a fixed linear operator it is also
 transposable, so the exact coupled adjoint (the point of a differentiable solver) reuses its transpose
 V-cycle — verified against finite differences on a channel case
 (`tests/integration/test_coupled_amg.py`). It needs the optional `petsc` dependency (`pip install aquaflux[petsc]`).

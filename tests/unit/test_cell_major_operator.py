@@ -126,3 +126,36 @@ def test_row_chunks_cover_every_row_exactly_once(target: int) -> None:
 def test_row_chunks_of_an_empty_matrix_is_empty() -> None:
     """No rows means no work, not a one-element chunk of nothing."""
     assert _row_chunks(np.array([0]), 4) == ()
+
+
+def test_equilibrate_cell_major_returns_canonical_csr():
+    """The cell-major reorder must leave each row's column indices ASCENDING.
+
+    The permutation that produces cell-major order does not preserve column order, and a consumer that
+    assumes ascending indices then reads the wrong entries. PETSc's AIJ format is exactly such a
+    consumer, and it fails ASYMMETRICALLY: handed this matrix unsorted, a point-block-Jacobi
+    preconditioner returns NaN in most entries while point Jacobi and incomplete-LU are unaffected,
+    because a diagonal scan does not care about column order and a block extraction does. That looks
+    precisely like a broken block method, which is how it was first (mis)diagnosed -- so the ordering is
+    established at the source and pinned here.
+    """
+    import numpy as np
+    import scipy.sparse as sp
+    from aquaflux.solve.ilut_preconditioner import equilibrate_cell_major
+
+    # Dense-ish so the permutation genuinely scrambles the column order within each row.
+    rng = np.random.default_rng(5)
+    n_cells, n_fields = 6, 3
+    n = n_cells * n_fields
+    dense = rng.standard_normal((n, n))
+    dense += np.diag(np.abs(dense).sum(axis=1) + 1.0)  # keep the diagonal safely nonzero
+    reordered, _, _ = equilibrate_cell_major(sp.csr_matrix(dense), n_fields)
+
+    assert reordered.has_sorted_indices
+    for row in range(n):
+        cols = reordered.indices[reordered.indptr[row] : reordered.indptr[row + 1]]
+        assert np.all(np.diff(cols) > 0), f"row {row} column indices are not ascending: {cols}"
+    # Sorting must not have changed the matrix, only its storage order.
+    check = reordered.copy()
+    check.sort_indices()
+    assert abs(reordered - check).nnz == 0

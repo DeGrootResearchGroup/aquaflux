@@ -248,3 +248,89 @@ def test_the_split_shift_refresh_reuses_the_cached_jacobian(case):
     # No probe phase at all -- that absence IS the saving this branch exists for.
     assert [name for name, _ in phases] == ["assemble", "refactor"]
     pc.destroy()
+
+
+def test_per_block_smoother_options_reach_the_trailing_hierarchy(case):
+    """The two halves must be tunable APART, and the setting must survive a refresh.
+
+    The saddle needs its incomplete-LU sweep; the transported scalars are a much easier operator and are
+    served by cheaper relaxations, so a split that could not smooth them differently would be giving up
+    most of what splitting is for. The refresh half matters just as much: the march re-fits the
+    preconditioner repeatedly, and a per-block option honoured only at build would silently revert to
+    the default part-way through a run -- a bug that shows up as an unexplained slowdown, not a failure.
+    """
+    groups, shifted = case["groups"], case["shifted"]
+    # A single Jacobi sweep against the shipped four sweeps of incomplete LU: different enough that a
+    # hierarchy built with it cannot coincidentally match one built without.
+    cheap = {
+        "mg_levels_ksp_type": "richardson",
+        "mg_levels_ksp_richardson_scale": 0.7,
+        "mg_levels_pc_type": "jacobi",
+        "mg_levels_ksp_max_it": 1,
+    }
+    shipped = build_block_triangular_field_split(shifted, groups)
+    tuned = build_block_triangular_field_split(shifted, groups, trailing_options=cheap)
+    rng = np.random.default_rng(11)
+    b = rng.standard_normal(groups.n_dofs)
+    baseline, altered = shipped.apply(b), tuned.apply(b)
+    assert np.all(np.isfinite(altered))
+    # The LEADING half is untouched, so its part of the answer must be identical; only the trailing
+    # half may move. Checking both halves is what distinguishes "the option was applied to the right
+    # block" from "the option was applied somewhere".
+    assert np.allclose(baseline[groups.leading], altered[groups.leading], rtol=0, atol=0)
+    assert not np.allclose(baseline[groups.trailing], altered[groups.trailing])
+
+    # ... and it must still be the cheap smoother after a refresh re-fits the same objects in place.
+    refitted = tuned.apply(b)
+    tuned.refactor(shifted)
+    assert np.allclose(refitted, tuned.apply(b), rtol=1e-10, atol=0)
+    shipped.destroy()
+    tuned.destroy()
+
+
+def test_per_block_options_are_rejected_without_a_field_split(case):
+    """Passing them to the monolithic path would silently do nothing, so it raises instead.
+
+    There is one hierarchy without a split, so there is no "trailing half" to tune. Failing loudly is
+    the difference between a typo that costs a run and a typo that costs a run AND is reported as a
+    measurement of the smoother it never applied. It raises before the coloured probe, so the cost of
+    finding out is nothing.
+    """
+    from aquaflux.turbulence import coupled_amg_continuation
+
+    with pytest.raises(ValueError, match="field_split=True"):
+        coupled_amg_continuation(
+            case["coupled"], case["state"], trailing_options={"mg_levels_ksp_max_it": 1}
+        )
+
+
+def test_the_trailing_block_defaults_to_fewer_sweeps_and_the_count_is_tunable(case):
+    """The two halves default to DIFFERENT smoothing, and the trailing count is a real parameter.
+
+    The saddle needs its four incomplete-LU sweeps -- Jacobi-class smoothers do not converge on it at
+    all -- while the transported-scalar pair does not, and on a three-dimensional march three of those
+    four sweeps were pure cost (1959 s -> 1636 s on a step-for-step identical trajectory). That makes
+    the asymmetry a default worth pinning: a refactor that quietly re-unified the two counts would give
+    back the saving with nothing failing.
+
+    The count is asserted through BEHAVIOUR rather than by reading the options dict back, because what
+    matters is that the number reaches the hierarchy PETSc actually builds.
+    """
+    groups, shifted = case["groups"], case["shifted"]
+    rng = np.random.default_rng(17)
+    b = rng.standard_normal(groups.n_dofs)
+
+    default = build_block_triangular_field_split(shifted, groups)
+    matched = build_block_triangular_field_split(shifted, groups, trailing_smoother_sweeps=4)
+    # Same sweeps on both halves is a different preconditioner from the shipped asymmetric default...
+    assert not np.allclose(default.apply(b)[groups.trailing], matched.apply(b)[groups.trailing])
+    # ...and the LEADING half is untouched by the trailing count, which is what makes it a per-block
+    # knob rather than a global one.
+    assert np.allclose(
+        default.apply(b)[groups.leading], matched.apply(b)[groups.leading], rtol=0, atol=0
+    )
+    # Asking for the default explicitly must reproduce it exactly.
+    explicit = build_block_triangular_field_split(shifted, groups, trailing_smoother_sweeps=1)
+    assert np.allclose(default.apply(b), explicit.apply(b), rtol=0, atol=0)
+    for pc in (default, matched, explicit):
+        pc.destroy()

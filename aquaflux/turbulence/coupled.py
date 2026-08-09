@@ -1904,6 +1904,9 @@ def coupled_amg_continuation(
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     cycle_budget: int | None = None,
     field_split: bool = False,
+    trailing_smoother_sweeps: int = 1,
+    leading_options: dict | None = None,
+    trailing_options: dict | None = None,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **algebraic-multigrid** V-cycle.
 
@@ -1980,11 +1983,46 @@ def coupled_amg_continuation(
         ``inner_steps`` into the restart cap; pair it with ``solve_coupled``'s β-escalation
         (``retry_on_cycles < cycle_budget``), which redoes the capped step at a larger β. ``None`` (default)
         is unbounded and byte-identical. Forward-only.
+    field_split : bool
+        Precondition with a **block-triangular field split** — separate multigrid hierarchies for the
+        ``[u, v, w, p]`` saddle and the ``[k, ω]`` transported scalars, retaining one triangle of the
+        coupling between them exactly — instead of one hierarchy over all six fields. Only which frozen
+        inverse is fitted changes; the operator stays monolithic, so the differentiated Jacobian and the
+        coupled adjoint are untouched. Incompatible with ``native_forward_solve``.
+    trailing_smoother_sweeps : int
+        Level-smoother sweeps on the ``[k, omega]`` half of the split, **one** by default against
+        ``smoother_sweeps``' four on the saddle. The transported scalars are a much easier operator than
+        the pressure-velocity block and do not need the same smoothing: measured over a whole
+        Reynolds-continuation march on a three-dimensional backward-facing step, dropping four sweeps to
+        one took 1959 s to 1636 s on an otherwise step-for-step identical trajectory, to the same
+        reattachment length. Requires ``field_split=True``.
+    leading_options, trailing_options : dict or None
+        Extra multigrid options for one half of the split only, so the saddle and the scalars can be
+        smoothed differently. The two halves are not the same kind of equation, and the shipped defaults
+        were tuned against the six-field block: the saddle needs the incomplete-LU sweep (Jacobi-class
+        smoothers do not converge on it), while the transported scalars have a genuine diagonal and are
+        served by much cheaper relaxations. Keys are PETSc options without the instance prefix, e.g.
+        ``{"mg_levels_ksp_max_it": 1}`` for a single smoother sweep. Both require ``field_split=True``;
+        passing either without it raises, since there would be only one hierarchy to apply them to.
     Returns
     -------
     ForwardStep
         The step to hand ``solve_coupled`` as ``continuation``.
     """
+    # Validate the preconditioner arrangement BEFORE anything expensive. Everything below materializes a
+    # coupled Jacobian by coloured probing, which is hundreds of matrix-vector products; a configuration
+    # that cannot be honoured should say so immediately rather than after that.
+    if field_split and native_forward_solve:
+        raise ValueError(
+            "native_forward_solve builds a PETSc KSP around a single monolithic V-cycle and has no "
+            "field-split counterpart; use one or the other."
+        )
+    if not field_split and (leading_options is not None or trailing_options is not None):
+        raise ValueError(
+            "leading_options / trailing_options tune the two halves of a field split apart, and there "
+            "is only one hierarchy without field_split=True. Passing them here would silently do "
+            "nothing."
+        )
     base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
     n_fields = coupled.layout.dim + 3
     # The forward-solve stop. A plain global-2-norm relative stop is ~100% the largest-magnitude field
@@ -2045,11 +2083,6 @@ def coupled_amg_continuation(
         "structure": structure,
     }
     if field_split:
-        if native_forward_solve:
-            raise ValueError(
-                "native_forward_solve builds a PETSc KSP around a single monolithic V-cycle and has no "
-                "field-split counterpart; use one or the other."
-            )
         preconditioner = FieldSplitAmgPreconditioner.build(
             matvec,
             colouring,
@@ -2060,6 +2093,9 @@ def coupled_amg_continuation(
                 n_leading_fields=coupled.layout.dim + 1,  # u, v, w, p -- the saddle
                 n_trailing_fields=2,  # k, omega -- the transported scalars
             ),
+            trailing_smoother_sweeps=trailing_smoother_sweeps,
+            leading_options=leading_options,
+            trailing_options=trailing_options,
             **common,
         )
     else:

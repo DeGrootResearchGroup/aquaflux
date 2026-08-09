@@ -890,6 +890,144 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       *loses* there. What the measurement argues for is a **`β = 0` adjoint-only** preconditioner seam
       (`ForwardStep.adjoint_preconditioner()` already exists as the natural home), plus the JAX-native k/ω
       hierarchy the damped-Jacobi result unlocks. Both are unbuilt.
+    - **✅ THE TWO HALVES ARE NOW SMOOTHED APART, AND THE TRAILING DEFAULT IS ONE SWEEP —
+      `trailing_smoother_sweeps=1` (BUILT, SHIPPED, 2026-08-09).** Splitting the hierarchies is only half
+      the value; the other half is that they can then be *tuned* apart, which the shipped bundle was not
+      doing — both halves inherited the four incomplete-LU sweeps tuned against the **six-field**
+      monolithic block. The saddle needs them (Jacobi-class smoothers do not converge on it at all); the
+      transported-scalar pair does not. `build_block_triangular_field_split` /
+      `FieldSplitAmgPreconditioner.build` / `coupled_amg_continuation` all carry
+      `smoother_sweeps` (leading) and `trailing_smoother_sweeps` (trailing, default **1**) as separate
+      parameters, plus `leading_options` / `trailing_options` as the raw-PETSc escape hatch. Measured on
+      the full 3-point `bfs3d` Reynolds-continuation march (field split, `retry_on_alpha` 0.01,
+      `refresh_on_cycles` 3, ILU(0), plain aggregation, `coarse_eq_limit` 2000, reach 3, restart 15):
+
+      | | 4 sweeps | 1 sweep |
+      |---|---|---|
+      | wall | 1959 s | **1636 s (−16.5 %)** |
+      | steps | 58 | 58 |
+      | refresh | 21 events / 318 s | 19 / 286 s |
+      | Krylov cycles | 277 | **282 (+1.8 %)** |
+      | final ‖R‖ | 9.589e-06 | 9.588e-06 |
+      | mid-span `x_r/h` | 8.361 | 8.361 |
+
+      **The two marches follow the same trajectory step for step** — identical β, identical per-step
+      cycle counts, identical residuals to four figures, and the single α-collapse escalation fires at
+      the same step for the same reason to the same β. So this is the *same* path at a lower price per
+      matrix-vector product, which is a far stronger single-run result than a 16.5 % margin would
+      normally be (this case's ordinary run-to-run noise is ~2 %). Note again that **cycles rose while
+      wall fell**.
+    - **⚠️ HOW THAT SMOOTHER WAS CHOSEN, AND THE TWO WAYS THE SCREEN NEARLY GOT IT WRONG
+      (`validation/bfs3d_openfoam/turbulence_smoother_sweep.py`).** The screen holds the leading half at
+      ILU(0) and varies only the trailing one, ranking on **wall time** at real march states rather than
+      on cycles. Two failures are worth carrying, because both produced a wrong answer first:
+      - **A HARD state cannot rank candidates — it can only screen them.** The standing caution is about
+        *benign* states not discriminating; the complement is equally real and was not written down. On
+        the shipped march **139 of 194 inner solves cost one restart cycle and only 7 exceeded three**,
+        so the worst iterate is not what a march pays for. Point-block Jacobi buys an extra cycle *only*
+        where the operator is hard: it ranks **1.15× (worst of ten)** on the hard iterate and **0.94×**
+        over the march's real mix. Rank on step-initial states, screen on the hard one, and weight the
+        blend by the march's own solve distribution.
+      - **A cost screen is blind to the DIRECTION a preconditioner returns, and a march is not.** The
+        forward solve stops at `forward_rtol = 0.3`; a strong preconditioner overshoots that by orders of
+        magnitude inside one restart cycle while a weak one lands near it, and **both report one cycle**.
+        Since the march takes an inexact-Newton step from whatever comes back, a materially weaker arm
+        hands back a worse direction, the line search clips and the step control escalates — none of
+        which a timing screen registers. The usable proxy is the screen's **tight** cycle count read as a
+        *magnitude*, not as a pass/fail gate: shipped 3/3/4 (two step-initial states, then the hard one),
+        `ilu0x1` 3/4/5 — about the same strength, and it reproduced the baseline trajectory exactly —
+        against `jacobix2` 5/7/7 and `jacobix1` 8/10/13. **A candidate needs three things: cheap per
+        application, convergent at all, and not materially weaker than the incumbent.**
+      - **THE `[k, ω]` CELL BLOCK IS TRIANGULAR, AND THAT EXPLAINS THE WHOLE SMOOTHER RANKING ON THIS
+        BLOCK.** Equilibrated, each cell's 2×2 is **lower-triangular with unit diagonal and a subdiagonal
+        of order 100–340**, every determinant exactly 1.0, and the k↔ω coupling is **~100 % same-cell**
+        (‖∂R_ω/∂k‖ splits 2.14e3 same-cell against 23.9 neighbour on the channel;
+        `validation/bfs3d_openfoam/field_coupling.py` finds the same asymmetry on `bfs3d` — ∂R_ω/∂k at
+        121× the diagonal blocks, ∂R_k/∂ω at 0.19 % of them). ω depends enormously on same-cell k through
+        the production limiter and the βkω destruction pair; k barely depends on ω, because wherever the
+        SST limiter is active `ν_t = a₁k/max(a₁ω, S F₂)` is **ω-independent**. Consequences:
+        - **ILU(0) in cell-major order already captures it exactly** — the forward/backward pair is a
+          complete factorization of a 2×2 with one off-diagonal (no fill), so the subdiagonal costs it
+          nothing. That is why one sweep is nearly as good as four here (tight cycles 3/4/5 against
+          3/3/4) and why `sor`, also a sweep in the favourable order, matches ILU(0)×4 at 3/3/4.
+        - **Point Jacobi discards the entire subdiagonal**, which is precisely the term the others get.
+        - **Point-block Jacobi recovers it, and measurably does**: split by field, a `pbjacobi`-smoothed
+          V-cycle lands **10× closer to an ILU-smoothed one than point Jacobi does in the ω rows**
+          (1.48e-4 against 1.49e-3). The end-to-end near-tie is real all the same — the V-cycle output is
+          ω-dominated (‖ω‖ 2318 vs ‖k‖ 29.7), all three get the bulk right, and the coarse correction
+          plus outer Krylov absorb the rest.
+        - **Re-ordering the fields does NOT help.** A symmetric permutation to `(ω, k)` makes the block
+          upper-triangular; Jacobi and block-Jacobi are permutation-invariant, ILU holds both triangles
+          either way, and a *forward* sweep (SOR/Gauss-Seidel) is made strictly worse — the current order
+          lets it solve k first and use the fresh value in ω. The shipped order is already the good one.
+        - **For a JAX-native smoother this is the cheap prize:** with the equilibrated unit diagonal the
+          block solve is one fused multiply-add per cell (`x_ω -= c·x_k`), fully parallel across cells,
+          no factorization and no sequential dependency.
+      - **⚠️ BLOCK JACOBI CANNOT REPLACE THE TRAILING HIERARCHY — measured, and the reason is
+        ROBUSTNESS rather than reduction.** The `[k, ω]` block is strongly *block*-diagonally dominant
+        (neighbour coupling ~12 % of same-cell for the diagonal fields, 1.1 % for `∂R_ω/∂k`), and block
+        Jacobi's error operator is exactly that neighbour part — so it looks as though a coarse grid has
+        nothing to do here, and on a synthetic operator at that neighbour weight it contracts ~10× per
+        sweep. It does not carry over. Measured as the **whole** trailing inverse (a native batched 2×2
+        solve, no hierarchy at all) against the shipped V-cycle, on two step-initial states and the hard
+        iterate, blended by the march's own solve mix:
+
+        | trailing inverse | 00057 | 00058 | hard | blended |
+        |---|---|---|---|---|
+        | `ilu0` V-cycle (shipped) | 8.68 | 8.74 | 8.72 | **8.71** |
+        | block Jacobi ×4 | **8.63** | 10.94 | 11.17 | 9.94 (1.14×) |
+        | block Jacobi ×8 | 9.09 | 11.32 | 9.29 | 10.10 (1.16×) |
+        | block Jacobi ×2 | 10.40 | 10.47 | 10.88 | 10.48 (1.20×) |
+        | block Jacobi ×1 | 13.72 | 14.09 | 14.29 | 13.95 (1.60×) |
+
+        **What the coarse grid buys is variance, not average.** The V-cycle is 8.68/8.74/8.72 — flat to
+        under 1 % across all three states. Block Jacobi ×4 swings 8.63 → 10.94 between *adjacent steps of
+        the same rung*, because it sits on the edge of converging inside one restart cycle and small
+        state changes flip it to two. And more sweeps cannot buy the edge back: by 8 sweeps its apply
+        cost (109 ms) exceeds the V-cycle's (102 ms), so it has spent the whole cost advantage
+        recovering what the coarse grid gave for free.
+        **This does NOT refute block Jacobi as a SMOOTHER inside a JAX-native hierarchy**, which is the
+        actual route for taking PETSc off this block and is untested. The implementation
+        (`BlockJacobiInverse` in `validation/bfs3d_openfoam/field_split_probe.py`) is verified exact on a
+        block-diagonal operator in one sweep, transposable in closed form (⟨y,Mx⟩ = ⟨Mᵀy,x⟩ to 1e-15, so
+        adjoint-legal) and a fixed **linear** operator (1e-16, so the non-flexible outer Krylov is
+        legal) — it is the smoother such a hierarchy would need.
+        **Methodological note, because it went wrong twice in one session:** the first easy state alone
+        showed a tie and was reported as a result. The second easy state, same class and adjacent step,
+        was 25 % worse. **Hold a screen's conclusion until every state has landed** — the per-class
+        spread is itself the finding here.
+      - **⚠️ CHECKPOINT NAMES ARE REUSED ACROSS MARCHES, so a probe can silently run at a state that is
+        not the one its table documents.** `StateCheckpointer` keeps only the last few files
+        (`BFS3D_CHECKPOINT_KEEP`, default 3) and numbers them from a counter that restarts each run, so a
+        later march *replaces* `state-000NN` with a different state under the same name. Observed: a name
+        documented as the converged zero-shift adjoint operator came back holding a mid-march iterate at
+        shift 0.98 from an abandoned run — a probe would have paired an operator built at the documented
+        shift with a state that never had it and reported it as a measurement at that operating point.
+        `field_split_probe.load_state` now checks the checkpoint's recorded shift against its `STATES`
+        entry and refuses on a mismatch (loosely, at 2 %: the table stores ~4 figures, and what this must
+        catch differs by orders of magnitude). Raise the keep count for a study that needs a trajectory.
+      - **⚠️ `equilibrate_cell_major` RETURNS UNSORTED COLUMN INDICES, and PETSc's AIJ format requires
+        them ascending.** `AmgVCycle._build` and `refactor` both `sort_indices()` before wrapping the
+        matrix, and `ShiftedCellMajorOperator` genuinely produces sorted output (its
+        `has_sorted_indices = True` is honest, verified), so **every shipped path is correct**. But a
+        probe that calls `equilibrate_cell_major` directly and feeds `createAIJWithArrays` gets **NaN in
+        most entries from `pbjacobi`**, while `jacobi` and `ilu` survive it — a diagonal scan does not
+        care about column order and a block extraction does. That asymmetry reads exactly like "PETSc's
+        point-block Jacobi is broken on this operator", which was written up and had to be retracted.
+        **Check `has_sorted_indices` before concluding anything about a block method.**
+      - **⚠️ TWO MARCH ARMS WERE RUN AT THE WRONG REFRESH TRIGGER AND ARE VOID** — launched without
+        `BFS3D_REFRESH_ON_CYCLES=3` when that variable still defaulted to `0` (the *scheduled* cadence,
+        measured at 3632 s against 1959 s). Both "results" were the refresh trigger, not the smoother.
+        The trap was already written down in bold and that did not prevent it, so the fix was made
+        structural: **the case default is now 3**, and every run writes its full configuration into its
+        own `march.log` header before any result. A default nobody wants is a trap, not a setting.
+      - **Still unsolved, and it bites any future arm comparison:** `refresh_on_cycles` and
+        `cycle_budget` are denominated in **cycles**, so a preconditioner that shifts the cycle
+        distribution changes the *effective* trigger point — penalizing a weaker arm twice, once in
+        cycles and again in the refreshes those cycles provoke. (Same argument as the case's
+        `_RESTART_SCALE`.) Report the refresh **count** beside the wall in every arm comparison; it came
+        out level for `ilu0x1` (21 vs 19 events), which is what licensed attributing its saving to the
+        smoother.
   - **⚠️ LOW-β DIRECTIONS ALREADY MEASURED OUT — do not re-litigate without new evidence.** The low-shift
     wall on the 3D coupled saddle has absorbed a lot of probing. What is settled:
     - **Turbulence decoupling ("just lag ω") — REFUTED.** A true-residual arm comparison found

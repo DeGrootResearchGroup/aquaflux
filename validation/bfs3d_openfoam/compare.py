@@ -53,8 +53,15 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import time
 from pathlib import Path
+
+# Running a script puts the SCRIPT's directory on `sys.path`, not the working directory, so
+# `python3 validation/bfs3d_openfoam/compare.py` from the repo root cannot find `aquaflux` unless it is
+# separately installed. Add the repo root explicitly so the documented invocation works against a plain
+# checkout, as the sibling harnesses in this directory already do.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
@@ -155,6 +162,97 @@ FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT, PC_BETA_FLOOR = 0, 4, 2000, 0.05
 # solves cross the threshold against 9.0%), which hands back ~42 s of the ~980 s saved.
 # `BFS3D_FIELD_SPLIT=0` restores the monolithic V-cycle for an A/B.
 FIELD_SPLIT = os.environ.get("BFS3D_FIELD_SPLIT", "1") not in ("", "0")
+# The smoother on the TURBULENCE half of the split, which need not be the one the saddle needs. The
+# shipped four sweeps of a zero-fill incomplete LU were tuned against the six-field block; `[k, omega]`
+# is not a saddle but a two-field advection-diffusion-reaction pair with a genuine diagonal, and it is
+# both easier and cheaper to precondition. Measured across two step-initial states and the march's
+# hardest iterate, weighted by how often each class of solve occurs (139 of 194 inner solves take one
+# restart cycle), as expected seconds per solve against the shipped smoother:
+#
+#     ilu0 x1        0.89x     pbjacobi x2    0.90x     jacobi x2      0.91x
+#     ilu0 x2        0.92x     jacobi x4      0.93x     pbjacobi x4    0.94x
+#     ilu0 x4 (shipped)  --    sor x4         1.01x     jacobi x1      1.07x
+#
+# The ranking is state-dependent in a way a single probe inverts: point-block Jacobi buys an extra
+# restart cycle only where the operator is hard, so it is the WORST arm on the hardest iterate (1.15x)
+# and a win over the march's real mix (0.94x). Rank on the states a march actually repeats; screen on
+# the hard one.
+#
+# ⚠️ NO ARM HAS BEEN SETTLED ON A MARCH YET, and the first two attempts do NOT count. Both were launched
+# without `BFS3D_REFRESH_ON_CYCLES=3`, which at the time defaulted to the scheduled cadence -- a
+# configuration measured at 3632 s against 1959 s for the otherwise identical arm. So both ran a
+# different refresh trigger from the archived baseline they were compared against, and the difference
+# they showed is not attributable to the smoother. (`pbjacobix2` looked catastrophic and `ilu0x1` looked
+# 20% slow; neither reading survives.) The default is now 3 so this cannot recur silently.
+#
+# A SECOND fairness problem is live even with the trigger set correctly, and it has not been solved:
+# `refresh_on_cycles` and `cycle_budget` are denominated in CYCLES, so a preconditioner that shifts the
+# cycle distribution changes the EFFECTIVE trigger point rather than leaving it fixed. A weaker smoother
+# is then penalized twice -- more cycles, and more refreshes because those cycles cross a threshold
+# calibrated for a stronger one. This is the same argument that makes `_RESTART_SCALE` necessary above.
+# Comparing arms fairly needs the refresh COUNT reported alongside the wall, and a scaled trigger if the
+# counts diverge.
+#
+# What the screen does support, and what it does not: it ranks per-solve COST honestly, and it measures
+# each arm's STRENGTH as the cycles to a tight stop -- shipped 3/3/4 across the two step-initial states
+# and the hard iterate, `ilu0x1` 3/4/5, `jacobix4` 4/5/6, `pbjacobix2` 5/6/7, `jacobix1` 8/10/13. What
+# it cannot see is the quality of the correction an arm returns at the march's own LOOSE stop
+# (`forward_rtol = 0.3`): a strong preconditioner overshoots that target by orders of magnitude inside
+# one restart cycle, while a weak one lands near it, and both report "1 cycle". If that gap matters, a
+# weaker arm hands back a worse Newton direction, the line search clips and the step control escalates
+# -- none of which a timing screen registers. That is a live hypothesis, NOT a measured result; the
+# achieved residual at the loose stop is what would test it.
+#
+# The two knobs are separate on purpose, because they answer separate questions: HOW MANY sweeps of the
+# trailing smoother, and WHICH smoother. Sweeps is the one that paid, and it is now a first-class solver
+# parameter (`coupled_amg_continuation(trailing_smoother_sweeps=...)`) rather than a raw options string,
+# so `BFS3D_TRAILING_SWEEPS` just forwards it. The library default is 1 -- the measurement above.
+TRAILING_SWEEPS = int(os.environ.get("BFS3D_TRAILING_SWEEPS", "1"))
+# The smoother METHOD on the trailing half. Empty (default) is the zero-fill incomplete LU the saddle
+# also uses. The Jacobi-class alternatives are here because they are the ones that could run on an
+# accelerator without a host solver: a diagonal scaling (`jacobi`) or a batch of independent per-cell
+# dense inverses (`pbjacobi`) is a matrix-vector product with no factorization to store and no
+# sequential triangular solve. Neither pins a sweep count -- they inherit `TRAILING_SWEEPS`, so the two
+# knobs compose instead of one silently overriding the other.
+_TURBULENCE_SMOOTHERS = {
+    "": None,
+    "jacobi": {
+        "mg_levels_ksp_type": "richardson",
+        "mg_levels_ksp_richardson_scale": 0.7,
+        "mg_levels_pc_type": "jacobi",
+    },
+    # `pbjacobi` inverts each cell's own dense 2x2 [k, omega] block instead of just its two diagonal
+    # entries, which on this operator is the difference that should matter: the equilibrated cell blocks
+    # are lower-triangular with unit diagonal and a subdiagonal of order 100-340 (omega depends
+    # enormously on same-cell k through the production limiter and the destruction pair, while k barely
+    # depends on omega), and the coupling is ~100 % same-cell. A point method discards all of it; a block
+    # solve is a two-line forward substitution, perfectly conditioned and nearly free.
+    #
+    # Measured, it does capture that: split by field, a pbjacobi-smoothed V-cycle lands 10x closer to an
+    # incomplete-LU-smoothed one than a point-Jacobi one does in the omega rows (1.5e-04 against
+    # 1.5e-03). The end-to-end gain is nonetheless small -- the coarse correction and the outer Krylov
+    # absorb most of it -- which is why it screens as a near-tie with plain Jacobi rather than a rout.
+    #
+    # ⚠️ It needs SORTED column indices, and `equilibrate_cell_major` does not produce them. The
+    # `AmgVCycle` build path sorts before wrapping the matrix for PETSc, so this option is correct here;
+    # a probe that skips that path and hands PETSc the raw cell-major output gets NaN in most entries,
+    # while `jacobi` and `ilu` survive it (a linear diagonal scan does not care about order). If a
+    # point-block arm ever reports NaN, check the index order before concluding anything about the
+    # method.
+    "pbjacobi": {
+        "mg_levels_ksp_type": "richardson",
+        "mg_levels_ksp_richardson_scale": 0.7,
+        "mg_levels_pc_type": "pbjacobi",
+    },
+    "sor": {"mg_levels_ksp_type": "richardson", "mg_levels_pc_type": "sor"},
+}
+_TURBULENCE_SMOOTHER = os.environ.get("BFS3D_TURBULENCE_SMOOTHER", "")
+if _TURBULENCE_SMOOTHER not in _TURBULENCE_SMOOTHERS:
+    raise SystemExit(
+        f"BFS3D_TURBULENCE_SMOOTHER={_TURBULENCE_SMOOTHER!r} is not one of "
+        f"{sorted(k for k in _TURBULENCE_SMOOTHERS if k)}"
+    )
+TRAILING_OPTIONS = _TURBULENCE_SMOOTHERS[_TURBULENCE_SMOOTHER]
 CYCLE_BUDGET = 42  # summed per step: a cost cap, so summed is what it should cap
 RETRY_ON_CYCLES = (
     10  # PER SOLVE: a summed trigger is ~6x more sensitive for a 5-inner step than a 1-inner one
@@ -211,7 +309,7 @@ CHECKPOINT_KEEP = int(os.environ.get("BFS3D_CHECKPOINT_KEEP", "3"))
 # are a product of the refresh history rather than of the state.
 INNER_DUMP_ABOVE = int(os.environ.get("BFS3D_INNER_DUMP_ABOVE", "0"))
 # Refresh the preconditioner MID-STEP as soon as one solve reaches this many restart cycles, and switch
-# the scheduled refreshes off. Off by default (0), which keeps the shipped schedule.
+# the scheduled refreshes off. `0` selects the scheduled cadence instead.
 #
 # The point is the swap, not the addition. Measured on the 3501 s march: the scheduled refreshes cost
 # 742 s -- 21 % of the wall -- while 193 of 232 solves already took a single cycle, so most of that is
@@ -220,7 +318,16 @@ INNER_DUMP_ABOVE = int(os.environ.get("BFS3D_INNER_DUMP_ABOVE", "0"))
 # Reacting to the cost itself adapts; a schedule cannot. Refreshing mid-step (rather than at the next
 # step boundary) also keeps the inner loop's progress, where the current reaction -- abort and escalate
 # beta -- throws away the work and the pseudo-timestep together.
-REFRESH_ON_CYCLES = int(os.environ.get("BFS3D_REFRESH_ON_CYCLES", "0"))
+#
+# ⚠️ THE DEFAULT IS 3, AND IT USED TO BE 0. Every recorded measurement on this case was taken
+# cost-triggered at 3; the scheduled cadence is measured at 3632 s against 1959 s for the otherwise
+# identical arm, so `0` selected a configuration that is 1.85x slower and that nothing uses. Leaving it
+# as the default meant every A/B launched without the environment variable silently measured the refresh
+# TRIGGER instead of the thing under test -- which happened, to two preconditioner arms in one session,
+# despite the trap being written down. A default nobody wants is a trap, not a setting: the fix is the
+# default, not another warning. `BFS3D_REFRESH_ON_CYCLES=0` still selects the scheduled cadence for an
+# A/B of the trigger itself.
+REFRESH_ON_CYCLES = int(os.environ.get("BFS3D_REFRESH_ON_CYCLES", "3"))
 CONTROL = CflResidualDualTimeControl(
     beta_start=0.5, beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25
 )
@@ -395,6 +502,30 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         rtol=RTOL,
         atol=ATOL,
     )
+    # Every run states the configuration it was taken under, in its own log, before any result. A march
+    # log is compared against archived ones months later, and a number whose configuration is not written
+    # beside it cannot be trusted OR cheaply re-adjudicated -- it is unfalsifiable, which is worse than
+    # wrong, because a wrong finding gets corrected and an unfalsifiable one gets cited. This is not
+    # hypothetical bookkeeping: two preconditioner arms were compared against an archived baseline whose
+    # refresh trigger differed from theirs, and the resulting "the smoother is 1.85x slower" reading was
+    # entirely the trigger. Neither log said what it had been run with, so nothing caught it until the
+    # per-step refresh counts were dug out by hand.
+    logger.note("[configuration]")
+    for name, value in (
+        ("field split", FIELD_SPLIT),
+        ("turbulence smoother", _TURBULENCE_SMOOTHER or "ilu0 (shipped)"),
+        ("turbulence smoother sweeps", TRAILING_SWEEPS),
+        ("refresh on cycles", REFRESH_ON_CYCLES or "scheduled cadence"),
+        ("Reynolds continuation points", N_POINTS),
+        ("forward restart", FORWARD_RESTART),
+        ("retry on cycles / alpha", f"{RETRY_ON_CYCLES} / {RETRY_ON_ALPHA}"),
+        ("cycle budget", CYCLE_BUDGET),
+        ("smoother fill / sweeps / coarse limit", f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"),
+        ("preconditioner beta floor", PC_BETA_FLOOR),
+        ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
+    ):
+        logger.note(f"  {name}: {value}")
+
     checkpoints = (
         StateCheckpointer(checkpoint_dir, every=1, keep=CHECKPOINT_KEEP)
         if checkpoint_dir is not None
@@ -451,6 +582,8 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             refresh_on_cycles=REFRESH_ON_CYCLES or None,
             inner_refresh=refresh.refresh_at if REFRESH_ON_CYCLES else None,
             field_split=FIELD_SPLIT,
+            trailing_smoother_sweeps=TRAILING_SWEEPS,
+            trailing_options=TRAILING_OPTIONS if FIELD_SPLIT else None,
         )
         # Seeded with this rung's own starting state: the march equilibrates each step at the state it
         # begins from, so without the seed the rung's first step would be scaled at its end state and
