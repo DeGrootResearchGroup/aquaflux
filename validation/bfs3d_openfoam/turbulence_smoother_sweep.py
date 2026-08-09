@@ -88,11 +88,22 @@ from field_split_probe import (  # noqa: E402
     FLOOR,
     SMOOTHERS,
     STATES,
+    _trailing_inverse,
     field_split,
     load_state,
     march_solver,
     materialize,
 )
+
+
+def _replaces_hierarchy(arm: str) -> bool:
+    """Does this arm supply a WHOLE block inverse rather than a smoother inside a V-cycle?
+
+    The two kinds are measured differently: a smoother's setup cost is a hierarchy build, while a
+    whole-block inverse has no hierarchy to build at all -- which is most of what makes it interesting.
+    """
+    return arm not in SMOOTHERS
+
 
 #: The leading half is held at the shipped incomplete-LU sweep for every arm, so a difference between
 #: rows is attributable to the trailing half and nothing else.
@@ -192,16 +203,20 @@ def trailing_setup(shifted, groups, arm: str) -> float:
     """
     block = shifted[groups.trailing, :][:, groups.trailing]
     started = time.perf_counter()
-    vcycle = build_amg_vcycle(
-        block,
-        groups.n_trailing_fields,
-        smoother_fill_levels=compare.FILL_LEVELS,
-        smoother_sweeps=compare.SWEEPS,
-        coarse_eq_limit=compare.COARSE_EQ_LIMIT,
-        extra_options=SMOOTHERS[arm] or None,
-    )
+    if _replaces_hierarchy(arm):
+        # No hierarchy to build at all -- this is the setup the arm exists to avoid paying.
+        inverse = _trailing_inverse(arm)(block, groups.n_trailing_fields)
+    else:
+        inverse = build_amg_vcycle(
+            block,
+            groups.n_trailing_fields,
+            smoother_fill_levels=compare.FILL_LEVELS,
+            smoother_sweeps=compare.SWEEPS,
+            coarse_eq_limit=compare.COARSE_EQ_LIMIT,
+            extra_options=SMOOTHERS[arm] or None,
+        )
     elapsed = time.perf_counter() - started
-    vcycle.destroy()
+    inverse.destroy()
     return elapsed
 
 
@@ -386,9 +401,14 @@ def main() -> None:
             "Give at least one step-initial state (the ranking) and one inner iterate (the screen)."
         )
     only = set(chosen[-1].split("=", 1)[1].split(",")) if chosen else None
-    unknown = (only or set()) - set(SMOOTHERS)
+    # An arm is either a smoother recipe (a V-cycle configured by PETSc options) or a whole-block
+    # inverse that REPLACES the hierarchy, which the trailing-inverse seam resolves by name.
+    unknown = {a for a in (only or set()) if a not in SMOOTHERS and not _replaces_hierarchy(a)}
     if unknown:
-        raise SystemExit(f"unknown arm(s) {sorted(unknown)}; known: {sorted(SMOOTHERS)}")
+        raise SystemExit(
+            f"unknown arm(s) {sorted(unknown)}; smoothers: {sorted(SMOOTHERS)}, "
+            "or blockjacobi<N> to replace the hierarchy entirely"
+        )
     selected = tuple(a for a in ARMS if only is None or a == ARMS[0] or a in only)
     # An arm named on the command line but absent from ARMS is still a legitimate request -- ARMS is a
     # default ladder, not the set of things that exist.

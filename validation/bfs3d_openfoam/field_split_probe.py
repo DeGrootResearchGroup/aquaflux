@@ -167,15 +167,15 @@ STATES = {
     # of a step. On the shipped march 139 of 194 inner solves cost one restart cycle and only 7 exceeded
     # three, so this class is the bulk of the cost and the hard iterates are the tail. A candidate has to
     # be measured on both: the tail says whether it survives, the bulk says what it costs.
-    "state-00064": (
-        0.0162,
-        None,
-        "step 26 of the target rung, step-initial -- the CHEAP solve that is most of the march",
-    ),
     "state-00057": (
         0.0103,
         None,
-        "step 19 of the middle rung, step-initial -- a second cheap solve, lower shift",
+        "step 19 of the middle rung, step-initial -- the CHEAP solve that is most of the march",
+    ),
+    "state-00058": (
+        0.0069,
+        None,
+        "step 20 of the middle rung, step-initial -- a second cheap solve, lower shift",
     ),
 }
 
@@ -275,13 +275,30 @@ FLOOR = (
 
 
 def load_state(name: str) -> jnp.ndarray:
-    """The captured state, reporting what it was so the run records its own inputs.
+    """The captured state, reporting what it was and REFUSING one that is not what :data:`STATES` says.
 
     The two checkpoint kinds carry different metadata -- an inner iterate knows its attempt and how its
     own solve went, an end-of-step checkpoint knows the step and its residual -- so each is reported on
     its own terms rather than through a lowest common denominator that would name neither.
+
+    **The shift check is not defensive programming, it is the fix for a real silent failure.** The
+    checkpointer keeps only the last few files and numbers them from a counter that restarts with each
+    march, so a later run REPLACES ``state-000NN`` with a completely different state under the same name.
+    That happened: a name documented here as the converged zero-shift state came back holding a mid-march
+    iterate at shift 0.98 from an abandoned run. Nothing would have complained -- the probe would have
+    paired an operator built at this table's shift with a state that never had it, and reported the
+    result as a measurement at the documented operating point. Every step checkpoint records the shift it
+    was written at, so the mismatch is free to detect; refuse rather than measure.
     """
-    data = np.load(CASE / "checkpoints" / f"{name}.npz")
+    path = CASE / "checkpoints" / f"{name}.npz"
+    if not path.exists():
+        raise SystemExit(
+            f"{name}: no such checkpoint. These are a rolling buffer (`BFS3D_CHECKPOINT_KEEP`, default "
+            f"3) and a later march will have rotated it away -- re-run the case to regenerate, raising "
+            f"the keep count if a study needs the whole trajectory.\n  present: "
+            f"{sorted(p.stem for p in path.parent.glob('*.npz'))}"
+        )
+    data = np.load(path)
     if "attempt" in data:
         detail = (
             f"attempt {int(data['attempt'])} inner {int(data['inner'])}, the march took "
@@ -289,9 +306,24 @@ def load_state(name: str) -> jnp.ndarray:
             f"|G| {float(data['g_before']):.4e} -> {float(data['g_after']):.4e}"
         )
     else:
+        recorded = float(data["shift"])
+        expected = STATES[name][0] if name in STATES else recorded
+        # An inner iterate carries no shift of its own (the observer is not told it), so only the
+        # step checkpoints can be checked -- which is exactly the kind that gets rotated and reused.
+        # Loose on purpose: the table records the shift to about four figures, so an exact comparison
+        # rejects a matching state. What this has to catch is a REPLACED state, which differs by orders
+        # of magnitude (0.98 where 0.0064 was documented), not by rounding.
+        if not np.isclose(recorded, expected, rtol=0.02, atol=1e-9):
+            raise SystemExit(
+                f"{name}: this checkpoint was written at shift {recorded:.6g}, but the STATES table "
+                f"describes it as {expected:.6g}. The file has been overwritten by a later march "
+                "(the names come from a per-run counter over a rolling buffer), so it is NOT the state "
+                "this entry documents. Re-run the case to regenerate it, or point the entry at a "
+                "checkpoint that still matches."
+            )
         detail = (
             f"end of step {int(data['step'])}, |R| {float(data['residual_norm']):.4e}, "
-            f"march shift {float(data['shift']):.4f}"
+            f"march shift {recorded:.4f}"
         )
     print(f"{name}: {detail}", flush=True)
     return jnp.asarray(data["state"])
@@ -382,10 +414,90 @@ class JaxNativeBlockInverse:
         """Nothing to release -- the hierarchy is plain arrays, not a host solver's handles."""
 
 
+class BlockJacobiInverse:
+    """A fixed number of block-Jacobi sweeps as a WHOLE block inverse -- no multigrid, no host solver.
+
+    Not a smoother inside a V-cycle: this replaces the hierarchy. That is worth trying on the ``[k, ω]``
+    block specifically because the block is strongly **block**-diagonally dominant -- the neighbour
+    coupling is ~12 % of the same-cell coupling for the diagonal fields and ~1 % for ``∂R_ω/∂k`` -- and
+    the error operator of block Jacobi is exactly that neighbour part. A hierarchy exists to move
+    information globally; where the operator is this local there may be nothing for it to do.
+
+    Each sweep is ``x += D_blk⁻¹ (r − A x)`` with ``D_blk`` the per-cell dense block. Two properties make
+    it usable where a general iterative inverse would not be: a **fixed** sweep count keeps ``b -> x`` a
+    constant linear map, which the non-flexible outer Krylov and the adjoint both require; and the
+    transpose is the same iteration over ``Aᵀ`` with the transposed blocks, so it is available in closed
+    form rather than numerically.
+
+    It is also the shape an accelerator wants: the per-cell solves are independent (a batched tiny solve,
+    not a sequential triangular sweep), and the residual is one sparse matrix-vector product. On this
+    block the cell matrices are lower-triangular with unit diagonal after equilibration, so the block
+    solve degenerates to a single fused multiply-add per cell -- but this keeps the general dense solve,
+    since the point here is to measure the method rather than to hand-fuse one operator's structure.
+
+    Parameters
+    ----------
+    matrix : scipy.sparse matrix
+        The block to invert, **field-major** within the group: degree of freedom ``(cell i, field f)``
+        sits at ``f * n_cells + i``.
+    n_fields : int
+        Fields in the group, so ``n_cells = matrix.shape[0] // n_fields``.
+    sweeps : int
+        Iterations. Fixed, not a tolerance -- see above.
+    """
+
+    def __init__(self, matrix: sp.spmatrix, n_fields: int, sweeps: int) -> None:
+        self._a = sp.csr_matrix(matrix)
+        self._at = sp.csr_matrix(self._a.transpose())
+        self._sweeps = sweeps
+        self._n_dofs = self._a.shape[0]
+        n_cells = self._n_dofs // n_fields
+        self._shape = (n_fields, n_cells)
+        # Gather the per-cell dense blocks. Field-major means a cell's degrees of freedom are strided by
+        # n_cells, so the blocks are NOT contiguous and have to be picked out by index.
+        rows = np.arange(n_cells)
+        blocks = np.empty((n_cells, n_fields, n_fields))
+        for f in range(n_fields):
+            for gcol in range(n_fields):
+                blocks[:, f, gcol] = np.asarray(
+                    self._a[f * n_cells + rows, gcol * n_cells + rows]
+                ).ravel()
+        self._inverse = np.linalg.inv(blocks)
+        self._inverse_t = np.transpose(self._inverse, (0, 2, 1))
+
+    @property
+    def n_dofs(self) -> int:
+        return self._n_dofs
+
+    def _precondition(self, vector: np.ndarray, inverse: np.ndarray) -> np.ndarray:
+        """Apply the block-diagonal inverse: reshape to (field, cell), contract per cell, flatten."""
+        per_cell = vector.reshape(self._shape).T  # (n_cells, n_fields)
+        return np.einsum("cij,cj->ci", inverse, per_cell).T.ravel()
+
+    def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
+        operator = self._at if transpose else self._a
+        inverse = self._inverse_t if transpose else self._inverse
+        x = self._precondition(residual, inverse)
+        for _ in range(self._sweeps - 1):
+            x = x + self._precondition(residual - operator @ x, inverse)
+        return x
+
+    def destroy(self) -> None:
+        """Nothing to release -- plain numpy arrays, no host solver handles."""
+
+
 def _trailing_inverse(spec):
     """The trailing block's inverse factory: a PETSc V-cycle by smoother name, or a JAX-native cycle."""
     if spec in SMOOTHERS:
         return None  # the builder's own V-cycle, configured through `trailing_options`
+    if spec.startswith("blockjacobi"):
+        # `blockjacobi` or `blockjacobiN` for N sweeps.
+        sweeps = int(spec.removeprefix("blockjacobi") or 1)
+
+        def build(block, n_group_fields):
+            return BlockJacobiInverse(block, n_group_fields, sweeps)
+
+        return build
     if spec == "air":
 
         def build(block, n_group_fields):

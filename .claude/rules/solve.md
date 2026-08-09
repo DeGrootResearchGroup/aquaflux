@@ -963,6 +963,49 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         - **For a JAX-native smoother this is the cheap prize:** with the equilibrated unit diagonal the
           block solve is one fused multiply-add per cell (`x_ω -= c·x_k`), fully parallel across cells,
           no factorization and no sequential dependency.
+      - **⚠️ BLOCK JACOBI CANNOT REPLACE THE TRAILING HIERARCHY — measured, and the reason is
+        ROBUSTNESS rather than reduction.** The `[k, ω]` block is strongly *block*-diagonally dominant
+        (neighbour coupling ~12 % of same-cell for the diagonal fields, 1.1 % for `∂R_ω/∂k`), and block
+        Jacobi's error operator is exactly that neighbour part — so it looks as though a coarse grid has
+        nothing to do here, and on a synthetic operator at that neighbour weight it contracts ~10× per
+        sweep. It does not carry over. Measured as the **whole** trailing inverse (a native batched 2×2
+        solve, no hierarchy at all) against the shipped V-cycle, on two step-initial states and the hard
+        iterate, blended by the march's own solve mix:
+
+        | trailing inverse | 00057 | 00058 | hard | blended |
+        |---|---|---|---|---|
+        | `ilu0` V-cycle (shipped) | 8.68 | 8.74 | 8.72 | **8.71** |
+        | block Jacobi ×4 | **8.63** | 10.94 | 11.17 | 9.94 (1.14×) |
+        | block Jacobi ×8 | 9.09 | 11.32 | 9.29 | 10.10 (1.16×) |
+        | block Jacobi ×2 | 10.40 | 10.47 | 10.88 | 10.48 (1.20×) |
+        | block Jacobi ×1 | 13.72 | 14.09 | 14.29 | 13.95 (1.60×) |
+
+        **What the coarse grid buys is variance, not average.** The V-cycle is 8.68/8.74/8.72 — flat to
+        under 1 % across all three states. Block Jacobi ×4 swings 8.63 → 10.94 between *adjacent steps of
+        the same rung*, because it sits on the edge of converging inside one restart cycle and small
+        state changes flip it to two. And more sweeps cannot buy the edge back: by 8 sweeps its apply
+        cost (109 ms) exceeds the V-cycle's (102 ms), so it has spent the whole cost advantage
+        recovering what the coarse grid gave for free.
+        **This does NOT refute block Jacobi as a SMOOTHER inside a JAX-native hierarchy**, which is the
+        actual route for taking PETSc off this block and is untested. The implementation
+        (`BlockJacobiInverse` in `validation/bfs3d_openfoam/field_split_probe.py`) is verified exact on a
+        block-diagonal operator in one sweep, transposable in closed form (⟨y,Mx⟩ = ⟨Mᵀy,x⟩ to 1e-15, so
+        adjoint-legal) and a fixed **linear** operator (1e-16, so the non-flexible outer Krylov is
+        legal) — it is the smoother such a hierarchy would need.
+        **Methodological note, because it went wrong twice in one session:** the first easy state alone
+        showed a tie and was reported as a result. The second easy state, same class and adjacent step,
+        was 25 % worse. **Hold a screen's conclusion until every state has landed** — the per-class
+        spread is itself the finding here.
+      - **⚠️ CHECKPOINT NAMES ARE REUSED ACROSS MARCHES, so a probe can silently run at a state that is
+        not the one its table documents.** `StateCheckpointer` keeps only the last few files
+        (`BFS3D_CHECKPOINT_KEEP`, default 3) and numbers them from a counter that restarts each run, so a
+        later march *replaces* `state-000NN` with a different state under the same name. Observed: a name
+        documented as the converged zero-shift adjoint operator came back holding a mid-march iterate at
+        shift 0.98 from an abandoned run — a probe would have paired an operator built at the documented
+        shift with a state that never had it and reported it as a measurement at that operating point.
+        `field_split_probe.load_state` now checks the checkpoint's recorded shift against its `STATES`
+        entry and refuses on a mismatch (loosely, at 2 %: the table stores ~4 figures, and what this must
+        catch differs by orders of magnitude). Raise the keep count for a study that needs a trajectory.
       - **⚠️ `equilibrate_cell_major` RETURNS UNSORTED COLUMN INDICES, and PETSc's AIJ format requires
         them ascending.** `AmgVCycle._build` and `refactor` both `sort_indices()` before wrapping the
         matrix, and `ShiftedCellMajorOperator` genuinely produces sorted output (its
