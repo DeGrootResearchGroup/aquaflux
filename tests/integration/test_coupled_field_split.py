@@ -24,8 +24,10 @@ import pytest
 pytest.importorskip("petsc4py")
 
 from aquaflux.solve import (
+    BlockTriangularFieldSplit,
     FieldGroups,
     MonolithicAmgPreconditioner,
+    PerFieldNativeInverse,
     build_amg_vcycle,
     build_block_triangular_field_split,
     relative_residual_gmres,
@@ -334,3 +336,87 @@ def test_the_trailing_block_defaults_to_fewer_sweeps_and_the_count_is_tunable(ca
     assert np.allclose(default.apply(b), explicit.apply(b), rtol=0, atol=0)
     for pc in (default, matched, explicit):
         pc.destroy()
+
+
+def test_per_field_native_inverse_is_transposable_and_linear(case):
+    """The JAX-native block inverse must be a fixed LINEAR map with a closed-form transpose.
+
+    Both properties are load-bearing rather than tidy. The outer Krylov is non-flexible, so a
+    preconditioner whose action depends on its right-hand side would silently invalidate it; and the
+    implicitly-differentiated adjoint solves the transposed system, so a block inverse that cannot be
+    transposed cannot serve a gradient. A fixed cycle count is what buys both -- which is precisely why
+    the cycle count is a constructor argument and not a tolerance.
+    """
+    from aquaflux.solve import PerFieldNativeInverse
+
+    groups, shifted = case["groups"], case["shifted"]
+    block = shifted[groups.trailing, :][:, groups.trailing]
+    inverse = PerFieldNativeInverse(block, groups.n_trailing_fields)
+    rng = np.random.default_rng(23)
+    n = inverse.n_dofs
+    x, y = rng.standard_normal(n), rng.standard_normal(n)
+
+    assert np.all(np.isfinite(inverse.apply(x)))
+    # <y, Mx> == <M^T y, x>
+    assert np.isclose(y @ inverse.apply(x), inverse.apply(y, transpose=True) @ x, rtol=1e-9)
+    # M(a*x + y) == a*M(x) + M(y)
+    combined = inverse.apply(2.5 * x + y)
+    assert np.allclose(combined, 2.5 * inverse.apply(x) + inverse.apply(y), rtol=1e-9)
+    inverse.destroy()
+
+
+def test_the_native_inverse_builds_on_the_REAL_per_field_sub_blocks(case):
+    """One hierarchy per field, over the true Jacobian sub-blocks -- not a re-assembled stand-in.
+
+    The native aggregation takes a bare matrix with no block size, so on a multi-field block it can
+    merge two different fields of two different cells into one aggregate and produce a degenerate
+    coarse row -- which is what makes it refuse the two-field slice, and what was long misread as the
+    fine operator having a negative diagonal. One field per hierarchy removes the cause, so the REAL
+    sub-blocks are admissible and no separately assembled transport operator is needed. This pins that:
+    a per-field build must succeed where the whole block is refused.
+    """
+    import scipy.sparse as sp
+    from aquaflux.solve import PerFieldNativeInverse, build_convection_hierarchy
+
+    groups, shifted = case["groups"], case["shifted"]
+    block = sp.csr_matrix(shifted[groups.trailing, :][:, groups.trailing])
+    n_cells = groups.n_cells
+    # Every per-field sub-block is admissible...
+    for field in range(groups.n_trailing_fields):
+        sub = sp.csr_matrix(
+            block[field * n_cells : (field + 1) * n_cells, :][
+                :, field * n_cells : (field + 1) * n_cells
+            ]
+        )
+        assert sub.diagonal().min() > 0.0
+        build_convection_hierarchy(sub)  # must not raise
+    # ...and the composed inverse is built from exactly those, so it builds too.
+    PerFieldNativeInverse(block, groups.n_trailing_fields).destroy()
+
+
+def test_the_native_factory_keeps_the_coupling_for_a_two_field_group(case):
+    """A two-field group is composed block-TRIANGULARLY, not block-diagonally.
+
+    Per-field hierarchies see no cross-field coupling at all, and on the turbulence pair that coupling
+    is the largest off-diagonal block in the operator. Ordering it costs one sparse product and recovers
+    nearly all of it, so a factory that quietly returned the block-diagonal composition would be
+    throwing away the dominant term while still converging -- slower, with nothing failing.
+    """
+    from aquaflux.solve import native_per_field_inverse
+
+    groups, shifted = case["groups"], case["shifted"]
+    block = shifted[groups.trailing, :][:, groups.trailing]
+    composed = native_per_field_inverse()(block, groups.n_trailing_fields)
+    assert isinstance(composed, BlockTriangularFieldSplit)
+
+    rng = np.random.default_rng(31)
+    b = rng.standard_normal(
+        groups.n_trailing_dofs if hasattr(groups, "n_trailing_dofs") else block.shape[0]
+    )
+    triangular = composed.apply(b)
+    assert np.all(np.isfinite(triangular))
+    # The retained triangle must actually change the answer, or it is a block-diagonal split in disguise.
+    diagonal_only = PerFieldNativeInverse(block, groups.n_trailing_fields)
+    assert not np.allclose(triangular, diagonal_only.apply(b))
+    diagonal_only.destroy()
+    composed.destroy()
