@@ -114,6 +114,14 @@ line-search factor already clipped to 0.002. Every non-default setting in the co
 measurement on this case rather than a preference — notably the zero-fill smoother (a level-1 fill
 *diverges* at the low shifts the march's tail runs at) and the absolute row-scaled stopping bar.
 
+**The ramp uses two lower-Reynolds rungs** — `Re/100`, then `Re/10`, then the target. Whether the
+`Re/100` anchor earns its place was measured, and it is a close call worth knowing about: the cold
+start reaches `Re/10` unaided, and reaching a converged `Re/10` costs ~800 s directly against ~1027 s
+by way of the anchor — yet the one-rung ladder still finishes slower overall (2007 s against 1959 s),
+because it repays the saving in the target rung. Both margins are ~2% on single runs, so neither is
+decisive; two rungs is kept because the measured total favours it and the anchor is cheap insurance at
+a higher Reynolds number. `BFS3D_N_POINTS=1` runs the one-rung ladder.
+
 ```bash
 python3 validation/bfs3d_openfoam/compare.py
 ```

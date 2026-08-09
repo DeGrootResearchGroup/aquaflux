@@ -3,8 +3,8 @@
 A finite-width 3D backward-facing step (step height h = 0.01 m, expansion ratio 2, span 4h
 between no-slip side walls), solved by OpenFOAM `incompressibleFluid` (kOmegaSST) and, on the
 **same imported mesh**, by aquaflux's coupled RANS solver (hybrid initialization, second-order
-upwind momentum advection, corrected Green-Gauss gradients, log-omega, monolithic algebraic-
-multigrid preconditioner). U_in = 10 m/s, nu = 1e-5 -> Re_h = 10000.
+upwind momentum advection, corrected Green-Gauss gradients, log-omega, field-split
+algebraic-multigrid preconditioner). U_in = 10 m/s, nu = 1e-5 -> Re_h = 10000.
 
 ## Results
 
