@@ -911,9 +911,22 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       block-diagonal composition, and the log-ω chain-rule scaling (`ScaledScalarPreconditioner`) — the
       last of which is a known trap, since a rescale that ignores the wall-fixation rows' own derivative
       cost 27× on the linear residual once already.
-    - **⚠️ TAKING PETSc OFF THE TRAILING HALF IS NOT A WIN, AND THE TWO BLOCKERS ARE NOW SPECIFIC
-      (measured 2026-08-09, `bfs3d`, three states, arms `native`/`native2` in
-      `turbulence_smoother_sweep.py`).** With the per-field hierarchies above wired in as the trailing
+    - **⚠️⚠️ SUPERSEDED (2026-08-10) — EVERY COST NUMBER IN THIS BULLET IS VOID, AND ITS CONCLUSION IS
+      REVERSED. The native trailing inverse is now AT PARITY: 13.3 ms against PETSc's 12.6 ms per apply,
+      and 2 restart cycles against 2.** Both stated blockers are gone. The "~2.8× more expensive"
+      figure was the **COO `segment_sum`** matvec, not anything intrinsic to a framework-native
+      V-cycle — a CSR operator took the apply from 117.8 ms to 13.3 ms (8.8×), and the level operator
+      is applied ~10× per cycle so that was essentially all of it. The "learn a block size" half was
+      built and is what closed the *quality* gap. Read the 2026-08-10 section at the top of this
+      IN-PROGRESS group; what remains open there is the positivity limiter, not the preconditioner.
+      **The bullet is kept, unedited below, for two reasons that are worth more than the numbers:** it
+      records that `PerFieldNativeInverse` (two per-field hierarchies) is a different and weaker object
+      than the single nodal one now used, so its measurements never transferred; and it is the clearest
+      instance in this file of a *cost* attributed to a method when it belonged to a data structure.
+
+      **⚠️ HISTORICAL — measured 2026-08-09, void since:** taking PETSc off the trailing half is not a
+      win, and the two blockers are now specific (`bfs3d`, three states, arms `native`/`native2` in
+      `turbulence_smoother_sweep.py`). With the per-field hierarchies above wired in as the trailing
       inverse, against the shipped PETSc V-cycle at `ilu0` on both halves, `refresh_on_cycles` 3, plain
       aggregation, `coarse_eq_limit` 2000, reach 3, restart 15:
 
