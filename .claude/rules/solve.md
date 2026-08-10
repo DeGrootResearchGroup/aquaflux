@@ -1499,11 +1499,20 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     Neither is built.
 
     **✅ GATES GREEN on all of the above** (CSR level operator, native trailing inverse, and both march
-    changes): fast gate **967 passed / 1 skipped** (899 unit `-n auto`, 68 integration `-n 1`), and the
-    coupled tier — `test_coupled_rans`, `test_coupled_amg`, `test_coupled_field_split`,
-    `test_reynolds_continuation`, 33 tests of which 18 are `slow` — **33 passed**. The coupled tier is
-    the one that matters for `stop_on_limit_stall`, since it is the only place a default-on march guard
-    could end a segment that used to run on.
+    changes), with the tiers named because a default-on march guard reaches further than the fast gate:
+    - fast gate **967 passed / 1 skipped** (899 unit `-n auto`, 68 integration `-n 1`);
+    - `test_coupled_rans` + `test_coupled_amg` + `test_coupled_field_split` + `test_reynolds_continuation`
+      — 33 tests, 18 of them `slow` — **33 passed**;
+    - `test_coupled_lu` + `test_coupled_ilut` — **15 passed**. These two matter and were nearly missed:
+      they drive `forward_march` with `step_control` + `precondition_step`, so they pick up
+      `stop_on_limit_stall` exactly as the four above do, and they are in neither the fast gate nor the
+      list a first pass would think to run;
+    - **`-m validation` — 18 passed.**
+
+    **The trap, recorded because it nearly landed:** a default-on guard on a *shared* seam is not covered
+    by "the tests for the subsystem I changed". `forward_march` has one production caller, but everything
+    that reaches `solve_coupled` with an observer picks the new default up. Enumerate by **who calls the
+    seam**, not by which file the change is in.
 
   - **⚠️ (2026-08-09): making the JAX-native multigrid a FAITHFUL smoothed aggregation, so a
     comparison against PETSc GAMG means something. Uncommitted work sits on `claude/block-aware-aggregation`.**
