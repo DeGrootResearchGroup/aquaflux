@@ -51,6 +51,7 @@ Run (after both OpenFOAM runs) from the repo root:
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import os
 import re
@@ -65,6 +66,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import aquaflux  # noqa: F401  (enables x64)
+import jax
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
@@ -420,6 +422,22 @@ CHECKPOINT_KEEP = int(os.environ.get("BFS3D_CHECKPOINT_KEEP", "3"))
 # here: they cannot be replayed from a checkpoint afterwards, because a step's preconditioner and shift
 # are a product of the refresh history rather than of the state.
 INNER_DUMP_ABOVE = int(os.environ.get("BFS3D_INNER_DUMP_ABOVE", "0"))
+# Save the (iterate, correction) pair whenever the k-positivity cap comes out below this fraction. Off
+# by default (0), and the march is byte-identical with it off.
+#
+# It exists because the cap is the only quantity in the step table that CANNOT be reconstructed after
+# the fact: it is a property of the correction `delta`, and no checkpoint holds one. A step checkpoint
+# holds the state a step ended at, and the inner-iterate dump holds the iterate an inner iteration
+# reached -- neither carries the direction, so "which cells is the cap binding on" is unanswerable from
+# either. Capturing it at the call site is the only honest answer; dividing an iterate difference by the
+# reported alpha would recover the direction only up to whatever the line search did to it.
+#
+# The threshold is `RETRY_ON_ALPHA` by default, i.e. exactly the caps the march reacts to. Dumps STOP
+# after `DUMP_STEP_LIMIT_KEEP` of them rather than wrapping, so the FIRST binding events survive -- the
+# escalation ladder that follows one drives the cap two orders of magnitude further down, and a rolling
+# buffer would keep only that tail and throw away the step that started it.
+DUMP_STEP_LIMIT = float(os.environ.get("BFS3D_DUMP_STEP_LIMIT", "0") or 0.0)
+DUMP_STEP_LIMIT_KEEP = int(os.environ.get("BFS3D_DUMP_STEP_LIMIT_KEEP", "12"))
 # Refresh the preconditioner MID-STEP as soon as one solve reaches this many restart cycles, and switch
 # the scheduled refreshes off. `0` selects the scheduled cadence instead.
 #
@@ -443,6 +461,41 @@ REFRESH_ON_CYCLES = int(os.environ.get("BFS3D_REFRESH_ON_CYCLES", "3"))
 CONTROL = CflResidualDualTimeControl(
     beta_start=0.5, beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25
 )
+
+_STEP_LIMIT_DUMPS = 0
+
+
+def _save_step_limit(cap, phi, delta):
+    """Write one ``(cap, iterate, correction)`` triple, if the cap is tight and the budget is unspent."""
+    global _STEP_LIMIT_DUMPS
+    cap = float(cap)
+    if cap >= DUMP_STEP_LIMIT or _STEP_LIMIT_DUMPS >= DUMP_STEP_LIMIT_KEEP:
+        return
+    path = HERE / "checkpoints" / f"step-limit-{_STEP_LIMIT_DUMPS:02d}.npz"
+    np.savez(path, cap=cap, state=np.asarray(phi), delta=np.asarray(delta))
+    _STEP_LIMIT_DUMPS += 1
+    print(f"[step-limit] cap {cap:.3e} -> {path.name}", flush=True)
+
+
+@dataclasses.dataclass(frozen=True)
+class _DumpingStepLimit:
+    """A step limiter that saves the pair it was called on whenever it comes out tight.
+
+    Wraps the real limiter and returns its cap unchanged, so the march it instruments takes exactly the
+    steps it would have taken without it. A **frozen dataclass around the real limiter**, not a closure,
+    for the reason the limiter itself is one: it rides in a static field of the compiled step, which is
+    compared by ``__eq__``, and a function compares by identity -- so a closure here would make every
+    rebuilt step a fresh compilation key and retrace the whole coupled solve.
+    """
+
+    inner: object
+
+    def __call__(self, phi, delta):
+        cap = self.inner(phi, delta)
+        # Fires during execution (this runs inside the inner loop's `while_loop`) and is a no-op under
+        # differentiation; the host side decides whether the cap is worth a file.
+        jax.debug.callback(_save_step_limit, cap, phi, delta, ordered=True)
+        return cap
 
 
 # --- OpenFOAM ascii internalField parsing (nonuniform scalar / vector list) ---
@@ -647,6 +700,11 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("smoother fill / sweeps / coarse limit", f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"),
         ("preconditioner beta floor", PC_BETA_FLOOR),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
+        *(
+            [("step-limit dump below / keep", f"{DUMP_STEP_LIMIT} / {DUMP_STEP_LIMIT_KEEP}")]
+            if DUMP_STEP_LIMIT
+            else []
+        ),
     ):
         logger.note(f"  {name}: {value}")
 
@@ -710,6 +768,10 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             trailing_options=TRAILING_OPTIONS if FIELD_SPLIT else None,
             trailing_inverse=TRAILING_INVERSE if FIELD_SPLIT else None,
         )
+        if DUMP_STEP_LIMIT and engine.step_limit is not None:
+            # `dataclasses.replace`, not `eqx.tree_at`: the limiter is a STATIC field, so it lives in the
+            # treedef rather than among the leaves and `tree_at` (which addresses leaves) cannot reach it.
+            engine = dataclasses.replace(engine, step_limit=_DumpingStepLimit(engine.step_limit))
         # Seeded with this rung's own starting state: the march equilibrates each step at the state it
         # begins from, so without the seed the rung's first step would be scaled at its end state and
         # its per-equation rows would not add up to the residual reported beside them.

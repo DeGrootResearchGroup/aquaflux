@@ -24,6 +24,7 @@ Usage::
 
 from __future__ import annotations
 
+import dataclasses
 import gc
 import sys
 from pathlib import Path
@@ -68,18 +69,64 @@ def cell_blocks(a: sp.csr_matrix, block_size: int) -> np.ndarray:
     return blocks
 
 
-def report(label: str, blocks: np.ndarray) -> None:
-    """Per-cell conditioning of a set of blocks, and the size of the inverse they produce."""
+@dataclasses.dataclass(frozen=True)
+class BlockDiagnostics:
+    """Everything a set of per-cell blocks says about itself, one entry per cell.
+
+    The four quantities travel together everywhere they are used -- reported as a distribution here,
+    and read per cell where the question is which cells are the bad ones -- so they are one record
+    rather than four loose arrays.
+
+    Attributes
+    ----------
+    determinant : ndarray (n_cells,)
+        ``|det|`` of each block.
+    singular : ndarray (n_cells,) of bool
+        The block's own scale-free singularity test, so these are the cells a build would refuse on.
+    condition : ndarray (n_cells,)
+        Ratio of largest to smallest singular value; ``inf`` for a numerically singular block.
+    inverse_norm : ndarray (n_cells,)
+        ``1 / sigma_min`` -- the size of the inverse, which is what a block smoother actually applies
+        and therefore the quantity that blows up. ``inf`` where the block is singular.
+    """
+
+    determinant: np.ndarray
+    singular: np.ndarray
+    condition: np.ndarray
+    inverse_norm: np.ndarray
+
+
+def block_diagnostics(blocks: np.ndarray) -> BlockDiagnostics:
+    """Per-cell conditioning of a set of blocks, and the size of the inverse they produce.
+
+    Parameters
+    ----------
+    blocks : ndarray (n_cells, b, b)
+        Every cell's own dense block, as :func:`cell_blocks` returns them.
+
+    Returns
+    -------
+    BlockDiagnostics
+        The per-cell determinant, singularity flag, condition number and inverse norm.
+    """
     singular_values = np.linalg.svd(blocks, compute_uv=False)
     largest, smallest = singular_values[:, 0], singular_values[:, -1]
     # The build's own scale-free singularity test, so the counts here are the ones it acts on.
     scale = np.linalg.norm(blocks, axis=(1, 2)) ** blocks.shape[1]
-    singular = np.abs(np.linalg.det(blocks)) < 1e-12 * np.maximum(scale, np.finfo(float).tiny)
+    determinant = np.abs(np.linalg.det(blocks))
+    singular = determinant < 1e-12 * np.maximum(scale, np.finfo(float).tiny)
     condition = np.where(smallest > 0, largest / np.maximum(smallest, np.finfo(float).tiny), np.inf)
-    # What the smoother applies is the INVERSE, so its norm is the quantity that actually blows up.
-    healthy = ~singular
     inverse_norm = np.full(blocks.shape[0], np.inf)
-    inverse_norm[healthy] = 1.0 / smallest[healthy]
+    inverse_norm[~singular] = 1.0 / smallest[~singular]
+    return BlockDiagnostics(determinant, singular, condition, inverse_norm)
+
+
+def report(label: str, blocks: np.ndarray) -> None:
+    """Print the distribution of :func:`block_diagnostics` over a set of blocks."""
+    diagnostics = block_diagnostics(blocks)
+    singular, condition = diagnostics.singular, diagnostics.condition
+    healthy = ~singular
+    inverse_norm = diagnostics.inverse_norm
 
     print(f"  {label}")
     print(f"    singular blocks                {int(singular.sum())} of {blocks.shape[0]}")

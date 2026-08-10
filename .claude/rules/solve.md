@@ -1147,6 +1147,64 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       collapsed α without asking whether `binding_limit < 1`**, which is exactly the distinction
       `binding_limit` was added to make. A constraint-bound step should stop escalating.
 
+    **⚠️ (2026-08-10, LATER) THE RUNG-2 DEATH IS A FRACTION-TO-THE-BOUNDARY LOCK-UP, AND β ESCALATION
+    IS A SYMPTOM RATHER THAN THE CAUSE.** Read this before acting on the two bullets above; it does not
+    contradict them but it re-ranks them, and the "~100 dead steps" is now measured rather than
+    estimated. Taken from the archived `march.log` of the native run (banner: `turbulence inverse:
+    native`, `equilibrate=True`, `sweeps=4`, `aggressive_levels=1`, `spectral_damping=False`,
+    `refresh on cycles 3`, `retry on cycles / alpha 10 / 0.01`, `pc beta floor 0.05`, rung 2 of 3):
+
+    | step | β | cyc | ‖R‖ | a_min | `limit` |
+    |---|---|---|---|---|---|
+    | 24 | 0.1756 | 5 | 1.123e-01 | 0.694 | 6.94e-01 |
+    | 25 | 0.4682 | 2 | 7.567e-02 | 0.004 | 3.76e-03 |
+    | 26 | 3.7458 | 0 | 7.316e-02 | 0.000 | 1.00e-05 |
+    | 27 | 16.0000 | 0 | 7.316e-02 | 0.000 | 1.95e-06 |
+    | 28 | 16.0000 | 0 | 7.316e-02 | 0.000 | 1.95e-08 |
+    | … | 16.0000 | 0 | 7.316e-02 | 0.000 | ÷100 every step |
+    | 122 | 16.0000 | 0 | 7.316e-02 | 0.000 | 1.95e-196 |
+
+    **The 100× per step IS the rule, not a coincidence.** Taking `α = τ·room` with `τ = 0.99` leaves the
+    binding cell at 1% of its `k`, so the next step's room is a hundredth of this one's — forever, for
+    as long as the direction keeps pointing at the boundary there. Ninety-six consecutive steps, residual
+    frozen to every reported digit, **zero** Krylov cycles, β pinned at its 16.0 ceiling. So:
+    - **β is irrelevant from step 27 on.** It is at the cap and the retries cost nothing; the wall was the
+      ~96 null steps until `MAX_STEPS`. Suppressing the escalation is right but does **not** unblock the
+      march on its own.
+    - **Nothing in the ordinary stopping tests can see this.** The state is finite, the residual is finite,
+      and the tolerance is simply never reached — so the segment spends its whole budget.
+    - **⚠️ Extracting this from a march log needs per-step BLOCKS, not two independent `findall`s.** The
+      `limit` line is written only when `binding_limit < 1`, so there are fewer of them than steps (105
+      against 108 here) and zipping the two lists silently misaligns them. The first pass at this table
+      read step 25's cap as 1.95e-08 instead of 3.76e-03 — a three-step shift, invisible because the
+      shifted table is just as smooth. Split on the summary-block delimiter and parse within each block.
+
+    **SHIPPED in response (both agreed with the user before the change):**
+    1. `_escalation_reason` no longer returns `"alpha"` when `binding_limit < 1` — only a step length the
+       **descent test** collapsed is escalated.
+    2. `forward_march(stop_on_limit_stall=3)` (**a new default-on guard**) ends the segment after three
+       consecutive steps that are constraint-bound, non-widening, and not reducing the residual
+       (`_limit_collapsing`). All three conditions are load-bearing: at rung-2 steps 16→17 the cap was in
+       play and the residual rose, so a residual-only rule fires on an ordinary non-monotone pair; the
+       cap *narrowing* is what separates a lock-up from a march working productively along a constraint.
+       The observed false-positive run length is 2, hence 3. `None` disables it.
+
+    The march now fails fast and honestly instead of grinding; **what drives `k` to the boundary in those
+    cells is still open**, and the global-scalar-cap design (one cell throttling all 23040) is the thing
+    to reconsider.
+
+    **Capturing the step DIRECTION, which no checkpoint holds.** The cap is a property of `delta`, so
+    "which cells does it bind on" cannot be answered from a state — a step checkpoint holds where a step
+    ended and the inner-iterate dump holds where an inner iteration reached, and neither carries a
+    direction. `compare.py` gained `BFS3D_DUMP_STEP_LIMIT=<cap>` (with `BFS3D_DUMP_STEP_LIMIT_KEEP`),
+    which wraps the engine's `step_limit` in a `_DumpingStepLimit` — a **frozen dataclass**, not a
+    closure, because the limiter rides in a *static* field compared by `__eq__` and a closure there
+    recompiles the whole coupled solve on every rebuild. It returns the real cap unchanged, so the march
+    it instruments is the march that would have run. Dumps **stop** after `KEEP` rather than wrapping, so
+    the first binding event survives the escalation ladder that follows it. `singular_cell_probe.py`
+    reads such a dump and reports the exact per-cell room, the binding set, and the binding cells'
+    conditioning against the **base rate** for the mesh.
+
     **Equilibration: KEEP it, for conditioning, and stop expecting it to fix anything else.**
     - It improves per-cell block conditioning **~1600×** (median cond 2.84e3 → 1.74, median ‖A_cell⁻¹‖
       4.51e4 → 1.32, cells above cond 1e3 93.6% → 19.7%).
@@ -1195,10 +1253,10 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     4. **A block-alone probe ties where a march separates.** Raw and equilibrated are both 2 cycles on
        the block and behave differently in a march.
 
-    **NEXT, in order:** (a) find which cells the positivity limiter binds on at rung-2 step 25 and
-    whether they are the ill-conditioned ones — needs the direction δ, so capture it; (b) stop
-    `retry_on_alpha` escalating when `binding_limit < 1`; (c) run the fast gate and the coupled slow
-    tier, neither of which has run since the CSR change.
+    **NEXT:** find which cells the positivity limiter binds on at rung-2 step 25 and whether they are
+    the ill-conditioned ones, then decide what replaces the global scalar cap. (Stopping the escalation
+    is done — see the lock-up section above. The fast gate and the coupled slow tier still have to be
+    run against the CSR change and the two march changes.)
 
   - **⚠️ (2026-08-09): making the JAX-native multigrid a FAITHFUL smoothed aggregation, so a
     comparison against PETSc GAMG means something. Uncommitted work sits on `claude/block-aware-aggregation`.**

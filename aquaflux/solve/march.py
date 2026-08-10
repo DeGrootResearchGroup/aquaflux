@@ -483,13 +483,16 @@ def _escalation_reason(
 
     The three ways a step goes bad, and the reason they share one response: a **diverged** correction
     (non-finite, or past ``divergence_cap``), a **costly** solve that did not reach its target, and a
-    **collapsed** step length. All three are cured by more damping -- a larger shift lifts the
-    correction out of the non-finite regime, cuts the cycle count, and shortens the implicit step until
-    it fits inside whatever bound was clipping it.
+    step length **collapsed by the descent test**. All three are cured by more damping -- a larger shift
+    lifts the correction out of the non-finite regime, cuts the cycle count, and shortens the implicit
+    step until it fits inside whatever bound was clipping it.
 
     Cost and step length are only reasons when the step **missed its own stopping criterion**. Redoing
     a step that met it discards a good iterate and replaces it with a shorter one, whatever it cost and
     however hard the ladder had to work to get there.
+
+    A step length collapsed by an injected **constraint** is not one of the three, and reading it as one
+    is worse than useless -- see the ``binding_limit`` test below.
 
     Returns the reason as a short string (for the march's ``on_retry`` seam), so the decision and its
     explanation cannot disagree. ``None`` from both thresholds disables escalation entirely, which is
@@ -526,9 +529,51 @@ def _escalation_reason(
     # says nothing about conditioning.
     if retry_on_cycles is not None and int(outcome.max_inner_cycles) > retry_on_cycles:
         return "cycles"
-    if retry_on_alpha is not None and float(outcome.alpha) <= retry_on_alpha:
+    # ...and step length is a reason only when the DESCENT TEST is what collapsed it. `binding_limit`
+    # below one means an injected constraint, not the search, decided the length -- the direction is
+    # fine and simply cannot be followed that far. More damping does not relieve a constraint; it
+    # shortens the step, which is what the cap already did. Measured on a coupled RANS march whose
+    # k-positivity cap had bound: escalating drove beta 0.47 -> 1.87 -> 16.0 (its ceiling) while the cap
+    # went 3.76e-03 -> 1.00e-05, so every doubling made the admissible step SHORTER. Telling those two
+    # causes apart is the whole reason `binding_limit` is carried out of a step.
+    if (
+        retry_on_alpha is not None
+        and float(outcome.alpha) <= retry_on_alpha
+        and float(outcome.binding_limit) >= 1.0
+    ):
         return "alpha"
     return None
+
+
+def _limit_collapsing(previous: StepReport | None, report: StepReport) -> bool:
+    """Whether this step continues a constraint-bound sequence that is buying nothing.
+
+    True when the step's length was decided by an injected constraint (``binding_limit < 1``), the cap
+    is no wider than the step before it, and the residual did not fall. One such step is ordinary -- a
+    capped step is a legitimate short step, and a pseudo-transient path is allowed to be non-monotone --
+    so this is a per-step predicate that a caller counts, never a verdict on its own.
+
+    **The failure it names.** A fraction-to-the-boundary rule takes ``tau`` of the distance to the
+    constraint, so a step that runs into it leaves the binding entry at ``1 - tau`` of its value: at
+    ``tau = 0.99`` the next step's room is a hundredth of this one's, whether or not anything else
+    changed. Once the direction keeps pointing at the boundary in that entry, the cap collapses
+    geometrically and every step is arithmetically a no-op. Measured on a coupled RANS march: the cap
+    fell by exactly 100x per step from 1.95e-06 to 1.95e-196 over ninety-six consecutive steps, with the
+    residual frozen to every reported digit and the linear solve costing nothing, because there was no
+    step left to take. Nothing in the ordinary stopping tests sees that -- the state is finite, the
+    residual is finite, and the tolerance is simply never reached -- so the march runs its whole budget.
+
+    All three conditions are needed. The residual test alone fires on an ordinary non-monotone pair of
+    steps, and the cap test alone fires wherever a step is legitimately short; the collapse is the
+    conjunction, and requiring the cap to be *narrowing* is what separates it from a march that is
+    working along a constraint and making progress.
+    """
+    return (
+        previous is not None
+        and report.binding_limit < 1.0
+        and report.binding_limit <= previous.binding_limit
+        and report.residual_norm >= previous.residual_norm
+    )
 
 
 @eqx.filter_jit
@@ -583,6 +628,7 @@ def forward_march(
     retry_on_alpha: float | None = None,
     retry_beta_factor: float = 2.0,
     retry_cycles_limit: int = 2,
+    stop_on_limit_stall: int | None = 3,
     on_retry: Callable[[str, int, float], None] | None = None,
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
@@ -724,6 +770,15 @@ def forward_march(
     retry_cycles_limit : int
         The maximum number of successive ``β`` escalations for one step (default ``2``). After them the step
         is accepted whatever its count.
+    stop_on_limit_stall : int or None
+        End the segment after this many **consecutive** steps that are constraint-bound, narrowing, and
+        not reducing the residual (see :func:`_limit_collapsing`), default ``3``. That pattern is a
+        fraction-to-the-boundary lock-up, and it does not recover on its own: the cap shrinks by a fixed
+        factor per step for as long as the march is allowed to run, so without this the segment spends
+        its entire ``max_steps`` budget taking arithmetically null steps. Ending it hands the caller a
+        state that is honestly unconverged instead, which the finishing solve reports. ``None`` disables
+        the test. The count is deliberately not ``1``: an isolated capped step is an ordinary short step,
+        and a pseudo-transient path is allowed to be non-monotone.
 
     Returns
     -------
@@ -754,6 +809,7 @@ def forward_march(
     current = float(residual_norm_0)
     reports: list[StepReport] = []
     triggered = False
+    stalled = 0
     # `control_state` is a parameter (the initial state), threaded and returned so a multi-segment
     # driver can continue a stateful control across a refresh instead of restarting it.
 
@@ -894,6 +950,7 @@ def forward_march(
             escalations=int(retries),
             diverged_retry=bool(diverged_retry),
         )
+        stalled = stalled + 1 if _limit_collapsing(reports[-1] if reports else None, report) else 0
         reports.append(report)
         if observer is not None:
             observer(report)
@@ -903,6 +960,11 @@ def forward_march(
         # would spend its whole budget stepping a poisoned state. Stop and let the finishing solve
         # report the failure, which is where non-convergence is diagnosed.
         if not jnp.isfinite(residual_norm):
+            break
+        # The same argument for a step that is finite but null: a collapsing constraint cap can never
+        # satisfy the tolerance test either, and unlike a stiff region it does not recover, so the rest
+        # of the budget is spent on steps that move nothing. Stop on the same terms.
+        if stop_on_limit_stall is not None and stalled >= stop_on_limit_stall:
             break
         if trigger is not None and not converged_at(current):
             triggered = trigger.should_refresh(reports)
