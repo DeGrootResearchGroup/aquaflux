@@ -1312,10 +1312,29 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     - **`k` there ratchets by exactly 100× per step** — 3.08e-16 → 3.08e-18 → 3.08e-20 → 3.08e-22 — which
       is `1 − τ` at `τ = 0.99`, the same factor the cap collapses by. Against a mesh median `k` of
       **2.97e-02**, so the binding cell's `k` is ~20 orders below typical. It is not small; it is zero.
-    - **`dk` stays ~1e-13 throughout while `k` collapses.** The Newton direction is not converging toward
-      the boundary — it keeps demanding a `k` change ten orders larger than `k` itself. **The cell's
-      `k` equation has no root at `k ≥ 0`**, so the constraint is permanently active and the
-      interior-point rule ratchets forever. That is the mechanism, and no step-length policy fixes it.
+    - **`dk` stays ~1e-13 throughout while `k` collapses.** ⚠️ **The inference drawn from this — "the
+      cell's `k` equation has no root at `k ≥ 0`" — is WRONG, and was refuted the same day by direct
+      measurement. It is the opposite.** Holding every other field at the `step-limit-11` iterate and
+      scanning `R_k[12800]` over `k_P` gives a straight line to seven digits,
+      `R_k = A·k − b` with `A = 2.8740e-06`, `b = 5.7236e-20`, so the **root is `k* = +1.99e-14`,
+      strictly positive** — and the iterate sits **eight decades BELOW its own root**. Newton should be
+      pushing `k` *up*.
+
+      The `k` system in that corner is **homogeneous and an M-matrix**: production, destruction and the
+      `Dirichlet(0)` wall term all vanish linearly at `k = 0`, so `k = 0` solves it exactly whenever the
+      neighbours are 0, and there is no negative root to reach. What kills the march is that
+      `R_k[12800] = −5.72e-20` against a residual vector whose largest entry is **1.71e+01** — the row is
+      at the **roundoff floor**, so the returned `dk = −2.90e-13` is solver noise, wrong in sign and 14×
+      larger than the exact local step. `positive_block_limit` then computes a purely **relative** room
+      `0.99·k/|dk|` and lets that one noise-driven cell veto the global step.
+
+      **The ratchet is proved by the mantissa.** `k[12800]` reads `3.0816e-22` at `step-limit-11` and
+      `3.0816e-208 / e-210 / e-212` at checkpoints 120 / 121 / 122 — **the same five digits, 190 decades
+      apart**, i.e. ninety-five successive ×0.01 cuts, while `u/v/w/p` report a relative change of
+      exactly 0.
+    - **It is not one cell, either: 1876 of 23040 cells sit below `k = 1e-6`** at this state, against an
+      OpenFOAM global minimum of 1.672e-6 on the same mesh. A large part of the near-wall field has
+      fallen onto a laminar branch; cell 12800 is only the deepest point of it.
     - **Geometry: it is a step-corner cell, and its mirror is the runner-up.** 12800 sits at
       `(0.0007, −0.0099, 0.0009)` and 22400 at `(0.0007, −0.0099, 0.0391)` — bottom wall (`y ≈ −h`),
       immediately behind the step (`x ≈ 0`), against each side wall (span `4h = 0.04`). The stagnant
@@ -1352,9 +1371,32 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       `state-00057` under *symmetric equilibration*, and this is a different state, raw — so this
       refutes the coincidence at this state rather than retiring the 1e12 finding.
 
-    **So the lever is not the step-length policy and not the preconditioner — it is that one corner
-    cell's `k` equation, and OpenFOAM's answer to the same situation is instructive: it does not require
-    the equation to have a non-negative root.** `kOmegaSSTBase.C` ends every `k` solve with
+    **⚠️ THE LEVER, CORRECTED. Since the root IS positive, no projection is needed and the whole
+    "project vs constrain" question is largely moot.** Two defects remain, and they are different from
+    each other:
+    1. **`positive_block_limit` is a purely RELATIVE rule** — `room = tau·k/|dk|` — applied to a field
+       whose physical floor is 0. A relative rule has no lower bound, so a roundoff-level `dk` in an
+       already-collapsed cell produces an arbitrarily small cap. An **absolute floor**
+       (`room = tau·(k + k_abs)/|dk|`) fixes it, is pure globalization, sits off the IFT path entirely,
+       and changes nothing at the solution.
+    2. **A large part of the near-wall field has laminarized** (1876 cells below 1e-6). That is the real
+       physics defect and the absolute floor does not address it. The candidate is a **sustaining /
+       ambient source** `+β* k_amb ω` (Spalart–Rumsey 2007): a strictly positive constant, so `R(0) < 0`
+       unconditionally; it adds nothing to the Jacobian diagonal, so the M-matrix property survives; it
+       is `C^∞`, with no `y*` switch and no `sqrt(k)`; and being a smooth term of the converged residual
+       it is exact under the IFT adjoint. **Risk: it is a LEVEL fix, not a BRANCH fix** — it pins
+       `k ≥ k_amb` but does not establish that the corner climbs back onto the turbulent branch, and it
+       is a new tunable that would mask a genuine collapse elsewhere. Unbuilt and unmeasured.
+
+    Two further leads found while measuring this, both unverified: `ω[12800] = 4.0091e5` is **exactly
+    10×** the `omega_wall` value `6ν/(β₁d²)` its own residual imposes, which is the `60ν` initialization
+    value never relaxed (so this state's `ω` rows are unconverged too); and `SSTModel.f1`/`.f2`
+    (`sst.py:136,178`) use **plain unclamped `jnp.sqrt(k)`** where every closure in `boundary.py` uses
+    `safe_sqrt(jnp.maximum(k, 0.0))` — clamping those two would make a transiently negative `k`
+    survivable, which is what an absolute-floor cap needs.
+
+    **The rest of this paragraph is the superseded framing, kept because the OpenFOAM comparison in it
+    still stands on its own:** `kOmegaSSTBase.C` ends every `k` solve with
     `bound(k_, kMin_)`, and `bound` replaces a negative cell by the **average of its neighbours** before
     flooring at `kMin` (`isf = max(max(isf, fvc::average(max(vsf,min))*pos0(-isf)), min)`). It also
     *replaces* the `ω` row in wall cells (`matrix.setValues`) and lags `G`, so its wall-cell `k` equation

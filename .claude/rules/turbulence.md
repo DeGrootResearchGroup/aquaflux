@@ -612,8 +612,22 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
        despite the wall stress itself being right (first-cell `U+` 13.6 vs log-law 13.9). With it, the
        profile tracks the log law and the gap closes to −2%.
 
-    **⚠️ OPEN, and the first thing to test on this closure (2026-08-10): a cell with THREE wall faces
-    appears to have no non-negative root for `k`.** On the 3D backward-facing step the coupled march is
+    **⚠️ (2026-08-10) A cell with three wall faces DOES have a non-negative root — the alarm below is
+    withdrawn, but read it: the near-wall `k` collapse it describes is real and unexplained.**
+    Measured directly: holding every other field fixed, `R_k` at the worst cell is linear to seven digits
+    with root `k* = +1.99e-14`, strictly positive, and the iterate sits eight decades *below* it. The
+    corner `k` system is homogeneous and an M-matrix — production, destruction and the `Dirichlet(0)` wall
+    term all vanish linearly at `k = 0` — so `k = 0` solves it exactly when the neighbours are 0 and no
+    negative root exists. What remains true and unexplained is that **1876 of 23040 cells are below
+    `k = 1e-6`** at that state, against an OpenFOAM global minimum of 1.672e-6 on the same mesh: a large
+    part of the near-wall field has laminarized. The candidate fix is a sustaining/ambient source
+    `+β* k_amb ω` (Spalart–Rumsey 2007) — see `.claude/rules/solve.md`. **Two defects found while
+    measuring, both real:** `SSTModel.f1`/`.f2` (`sst.py:136,178`) use plain unclamped `jnp.sqrt(k)`
+    where every closure here uses `safe_sqrt(jnp.maximum(k, 0.0))`; and at that state `ω` in the worst
+    cell is exactly 10× the `omega_wall` value its own residual imposes, i.e. still at its `60ν`
+    initialization.
+
+    The original alarm, now known to be a wrong inference from a right observation: On the 3D backward-facing step the coupled march is
     killed by the `k`-positivity limiter binding on a single cell of 23040, and the two cells that own
     the cap are the mirror pair of **trihedral wall corners** behind the step — `lowerWall` twice (the
     floor plus the vertical step face) and `sideWalls` once, so half of every face is no-slip. Across the
