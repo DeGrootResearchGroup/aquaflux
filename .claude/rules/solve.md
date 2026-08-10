@@ -1335,9 +1335,14 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       wall, the two `lowerWall` faces being the floor and the vertical step face. **Hypothesis, not yet
       measured:** the near-wall `k` closure is per-wall-cell, and its production is area-averaged over a
       cell's wall faces while the destruction `β*kω_wall` is not obviously averaged the same way — so a
-      three-wall-face cell could take up to 3× the destruction against one cell's worth of production,
-      which would put the root at `k < 0` exactly here. The wall-face-count ordering is the measured
-      part; the mechanism is the thing to test next.
+      three-wall-face cell could take up to 3× the destruction against one cell's worth of production.
+      **❌ REFUTED the same day by reading both sources** — our reduction is already OpenFOAM's:
+      `wall_cells` is a `jnp.unique`, so a cell appears once however many wall faces it has, and
+      `wall_shear_rate` area-averages `Σ|S_f|r_f / Σ|S_f|` over them, which is exactly
+      `patchFieldsToWallCellField` in OpenFOAM 13's `wallCellWallFunctionFvPatchScalarField`. Nothing is
+      summed per face. The ranking most likely reads **stagnation** — three wall faces means the deepest
+      dead zone and so the least production — not double counting. See `.claude/rules/turbulence.md` for
+      the two differences that are real, of which one bears directly on the lever below.
     - **NOT the ill-conditioned cells — the standing hypothesis is refuted at this state.** **Zero**
       singular blocks at every β from 0 to 0.4. The binding cells run cond 3.6e5 … 2.9e7, ranks
       1088–2165 of 23040, and **none** of them is among the twelve worst-conditioned. `cond > 1e6`
@@ -1348,9 +1353,18 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       refutes the coincidence at this state rather than retiring the 1e12 finding.
 
     **So the lever is not the step-length policy and not the preconditioner — it is that one corner
-    cell's `k` equation.** Two candidates, in this order: the near-wall `k` closure in a cell with three
-    wall faces (see the ranking above), and whether a single cell should be able to cap a global step at
-    all. Neither is built; the second is a design question for the limiter, the first a possible defect.
+    cell's `k` equation, and OpenFOAM's answer to the same situation is instructive: it does not require
+    the equation to have a non-negative root.** `kOmegaSSTBase.C` ends every `k` solve with
+    `bound(k_, kMin_)`, and `bound` replaces a negative cell by the **average of its neighbours** before
+    flooring at `kMin` (`isf = max(max(isf, fvc::average(max(vsf,min))*pos0(-isf)), min)`). It also
+    *replaces* the `ω` row in wall cells (`matrix.setValues`) and lags `G`, so its wall-cell `k` equation
+    is linear with a non-negative source. We do the opposite on both counts: both terms stay live
+    functions of `k` in one Newton residual (deliberately — a frozen `ω` degenerates the row), and we
+    constrain the **step** rather than projecting the state. Constraining the step is what locks up; a
+    projection cannot. That reframes the choice, and it is the one to make with the user:
+    a positivity **projection** after the step (OpenFOAM's answer, and it changes the forward path but
+    not the root provided the floor is inactive there) against keeping the step constraint and finding
+    why the root is negative. Neither is built.
 
     **✅ GATES GREEN on all of the above** (CSR level operator, native trailing inverse, and both march
     changes): fast gate **967 passed / 1 skipped** (899 unit `-n auto`, 68 integration `-n 1`), and the

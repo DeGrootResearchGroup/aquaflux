@@ -622,13 +622,43 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     against a mesh median of 2.97e-02 — so the root is at `k < 0` and the constraint is permanently
     active. (Full measurement, and the step-length lock-up it causes, in `.claude/rules/solve.md`.)
 
-    The suspicion this raises about the four pieces above: piece 1's production carries the wall shear
-    **area-averaged over each wall cell's faces**, while piece 3's destruction substitutes `omega_wall(k)`
-    in the wall cells. If those two are not reduced over a cell's wall faces in the *same* way, a
-    three-wall-face cell takes several times the destruction against one cell's worth of production — and
-    a stagnant corner, where the wall shear and hence the production are ~0, is exactly where that would
-    show first. **The geometry and the ranking are measured; the mechanism is NOT.** Check the two terms'
-    per-face reduction against each other before anything else.
+    **❌ The first suspicion — that a three-wall-face cell takes several times the destruction against
+    one cell's worth of production, because the two terms are reduced over a cell's wall faces
+    differently — is REFUTED. Our multi-wall reduction is already the same one OpenFOAM uses.**
+    - `wall_cells = jnp.unique(mesh.face_cells.owner[wall_faces])`, so a cell appears **once** however
+      many wall faces it has, and `NearWallKClosure` writes with `.at[cells].set(...)` on those unique
+      indices. Nothing is summed per face.
+    - `SSTTurbulence.wall_shear_rate` reduces to `Σ_f |S_f| r_f / Σ_f |S_f|` over the cell's wall faces
+      — an **area-weighted average**, which is exactly OpenFOAM's `patchFieldsToWallCellField`
+      (`wallCellWallFunctionFvPatchScalarField.C`: `Σ|Sf|·φ / max(Σ|Sf|, vSmall)`, accumulated over
+      *all* wall-function patches so a corner cell spanning two patches is still one cell).
+
+      OpenFOAM adds two mechanisms we do not have, neither of which is a reduction: a **master patch**
+      elected across every wall-function patch on the field, so the correction is computed once per wall
+      *cell* rather than once per patch; and `wallCellFraction`, the ratio of finite-volume to polyhedral
+      wall area with `tol_ = 1e-1`, which is 1 on a conformal mesh like this one.
+
+    **What the two codes DO differ by, read from the OpenFOAM 13 sources, and neither difference is
+    about corners:**
+    1. **OpenFOAM does not solve `ω` in a wall cell, and its `G` is a lagged constant.**
+       `omegaWallFunctionFvPatchScalarField::manipulateMatrixMaster` calls
+       `matrix.setValues(wallCells, wallCellOmega, wallCellFraction)` — the row is *replaced* — and
+       `updateCoeffsMaster` overwrites `G` in those cells with the wall-function value computed from the
+       **previous iterate's** `k`. So its wall-cell `k` equation is linear in `k` with a lagged,
+       non-negative source and a fixed positive destruction coefficient. Ours keeps both live functions
+       of `k` inside one Newton residual, which is deliberate (see pieces 1 and 3: against a *frozen* `ω`
+       the row degenerates and the solve runs away) — but it is what makes a negative root reachable.
+    2. **OpenFOAM does not rely on the `k` equation having a non-negative root at all; it PROJECTS.**
+       `kOmegaSSTBase.C` ends every `k` solve with `solve(kEqn); fvConstraints.constrain(k_);
+       bound(k_, kMin_)`. And `bound` is not a plain clip — where the field went negative it takes the
+       **average of the neighbouring cells**, then floors at `kMin`:
+       `isf = max(max(isf, fvc::average(max(vsf,min))*pos0(-isf)), min)`. A cell whose `k` equation has
+       no non-negative root is therefore a non-event in OpenFOAM: it is overwritten each iteration.
+       We instead constrain the *step*, which is what locks the march up.
+
+    So the wall-face-count ranking (3/3/2/1) is most likely reading **stagnation** rather than any
+    double counting — three wall faces means the deepest dead zone, hence the least production — and the
+    open question is the one in item 1, not a corner-specific defect in the reduction.
 
     **Known residual — the buffer layer.** A wall-function mesh landing at `y+ ≈ 11–16` (the crossover
     itself) is the worst case for any wall function, and the blend smooths it without making it exact:
