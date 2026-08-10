@@ -57,6 +57,7 @@ Usage -- states are measured one at a time, since each materializes a Jacobian o
 from __future__ import annotations
 
 import gc
+import re
 import sys
 import time
 from pathlib import Path
@@ -74,6 +75,7 @@ from aquaflux.solve import (  # noqa: E402
     MonolithicAmgPreconditioner,
     block_stencil_gather_map,
     build_amg_vcycle,
+    native_nodal_inverse,
     native_per_field_inverse,
     relative_residual_gmres,
     solve_linear,
@@ -98,8 +100,8 @@ from field_split_probe import (  # noqa: E402
 
 
 def _is_native(arm: str) -> bool:
-    """Does this arm build the trailing half from the JAX-native scalar hierarchies?"""
-    return arm.startswith("native")
+    """Does this arm build the trailing half from the JAX-native multigrid rather than PETSc?"""
+    return arm.startswith(("native", "nodal"))
 
 
 def _replaces_hierarchy(arm: str) -> bool:
@@ -256,6 +258,17 @@ def _native_factory(arm: str, coupled=None, state=None):
     """
     if not _is_native(arm):
         return None
+    # `nodal[N][cM]` is ONE hierarchy over the whole group, coarsening cells with a block smoother:
+    # `N` V-cycles per apply (default 1) and a coarse grid of `M` equations (default the builder's own).
+    # `nativeN` is the older one-hierarchy-per-field arrangement it supersedes where it works.
+    if arm.startswith("nodal"):
+        spec = re.fullmatch(r"nodal(\d*)(?:c(\d+))?", arm)
+        if spec is None:
+            raise SystemExit(f"cannot parse the nodal arm {arm!r}; expected nodal[N][cM]")
+        cycles, coarse = spec.groups()
+        return native_nodal_inverse(
+            cycles=int(cycles or 1), **({} if coarse is None else {"max_coarse": int(coarse)})
+        )
     return native_per_field_inverse(cycles=int(arm.removeprefix("native") or 1))
 
 

@@ -52,8 +52,10 @@ __all__ = [
     "BlockTriangularFieldSplit",
     "FieldGroups",
     "FieldSplitAmgPreconditioner",
+    "NodalNativeInverse",
     "PerFieldNativeInverse",
     "build_block_triangular_field_split",
+    "native_nodal_inverse",
     "native_per_field_inverse",
 ]
 
@@ -722,6 +724,84 @@ class PerFieldNativeInverse:
 
     def destroy(self) -> None:
         """Nothing to release — the hierarchies are plain arrays, not a host solver's handles."""
+
+
+class NodalNativeInverse:
+    """A block inverse from ONE JAX-native hierarchy over the whole group, coarsening cells.
+
+    The sibling of :class:`PerFieldNativeInverse`, and what supersedes it wherever it works. That class
+    exists because the aggregation used to be field-blind and could only be handed one field at a time;
+    given a block size it coarsens **cells**, so a single hierarchy spans the group and the cross-field
+    coupling is inside the operator being coarsened rather than approximated away outside it.
+
+    Two things have to change together and neither suffices alone — measured, both refused otherwise:
+    the aggregation must coarsen cells, and the level smoother must invert each cell's dense block
+    rather than the scalar diagonal. On a multi-field operator whose within-cell coupling exceeds its
+    diagonal, a point smoother discards the dominant term and the sweep does not contract.
+
+    Host in, host out, like its sibling: the field split is numpy and the hierarchy is JAX, so each
+    application crosses the boundary. A production native split would keep the whole thing traced.
+
+    Parameters
+    ----------
+    block : scipy.sparse matrix
+        The group's diagonal block, **field-major**: ``(cell i, field f)`` at ``f * n_cells + i``.
+    n_fields : int
+        Fields per cell, passed to the aggregation as the block size.
+    cycles : int
+        V-cycles per application. Fixed, so ``b -> x`` stays a linear map — required by the
+        non-flexible outer Krylov and by the transposed adjoint solve.
+    """
+
+    def __init__(
+        self, block: sp.spmatrix, n_fields: int, *, cycles: int = 1, max_coarse: int = 16
+    ) -> None:
+        matrix = sp.csr_matrix(block)
+        self._n_dofs = matrix.shape[0]
+        self._cycles = cycles
+        self._hierarchy = build_convection_hierarchy(
+            matrix, block_size=n_fields, max_coarse=max_coarse
+        )
+        # JIT, because this is applied once per Krylov matrix-vector product and an un-jitted V-cycle
+        # dispatches every operation in it separately -- pure overhead that has nothing to do with the
+        # method. The hierarchy is captured as a constant, which is correct here precisely because it
+        # is frozen.
+        self._solve = jax.jit(
+            lambda r: convection_multigrid_solve(self._hierarchy, r, cycles=self._cycles)
+        )
+        self._transpose = jax.jit(
+            jax.linear_transpose(self._solve, jnp.zeros(self._n_dofs, dtype=jnp.float64))
+        )
+
+    @property
+    def n_dofs(self) -> int:
+        """Degrees of freedom in this block."""
+        return self._n_dofs
+
+    def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
+        """Approximate ``A^-1 r`` (or ``A^-T r``) with one hierarchy over the whole group."""
+        vector = jnp.asarray(residual, dtype=jnp.float64)
+        out = self._transpose(vector)[0] if transpose else self._solve(vector)
+        return np.asarray(out, dtype=np.float64)
+
+    def destroy(self) -> None:
+        """Nothing to release — plain arrays, not a host solver's handles."""
+
+
+def native_nodal_inverse(
+    *, cycles: int = 1, max_coarse: int = 16
+) -> Callable[[sp.spmatrix, int], object]:
+    """A ``leading_inverse``/``trailing_inverse`` factory using :class:`NodalNativeInverse`.
+
+    ``max_coarse`` is the coarse-grid size the hierarchy stops at and solves directly. The default is
+    small; a coarse grid large enough to invert the global coupling exactly is measured to be worth a
+    great deal on this operator, so it is exposed rather than buried.
+    """
+
+    def build(block: sp.spmatrix, n_group_fields: int) -> object:
+        return NodalNativeInverse(block, n_group_fields, cycles=cycles, max_coarse=max_coarse)
+
+    return build
 
 
 def native_per_field_inverse(*, cycles: int = 1) -> Callable[[sp.spmatrix, int], object]:

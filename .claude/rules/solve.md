@@ -1084,6 +1084,92 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         `_RESTART_SCALE`.) Report the refresh **count** beside the wall in every arm comparison; it came
         out level for `ilu0x1` (21 vs 19 events), which is what licensed attributing its saving to the
         smoother.
+  - **⚠️ IN PROGRESS (2026-08-09): making the JAX-native multigrid a FAITHFUL smoothed aggregation, so a
+    comparison against PETSc GAMG means something. Uncommitted work sits on `claude/block-aware-aggregation`.**
+    Read this before touching `solve/multigrid.py`'s aggregation path.
+
+    **THE HEADLINE PROBLEM, and it invalidates every ours-vs-PETSc number taken before it was found:
+    the two are not built on the same matrix.** `AmgVCycle` calls `equilibrate_cell_major` before handing
+    the operator to PETSc, so GAMG coarsens a **unit-diagonal** matrix. `build_convection_hierarchy` does
+    **no equilibration**, so ours coarsens the raw block — on `bfs3d`'s `[k, ω]` slice the diagonal spans
+    **7.96e5×** (1.26e-06 … 1.0). Everything in a multigrid setup reads `D`: the prolongator smoothing,
+    the smoother damping, and both eigenvalue estimates. Consequence measured directly:
+    `σ_max(D⁻¹A)` is **4.37** on the raw block and **2.83e3** on the equilibrated one, so the standard
+    prolongator step `α = 1.4/σ_max` is ~0.32 for us and ~5e-4 for PETSc — i.e. *for PETSc the
+    prolongator smoothing is very nearly a no-op on this operator*, which is consistent with the shipped
+    bundle running `pc_gamg_agg_nsmooths = 0` and with plain aggregation measuring best here.
+    **Fix first, before anything else: equilibrate inside `build_convection_hierarchy`.**
+
+    **Reference numbers** — `bfs3d` `state-00057`, PC β 0.05, the `[k, ω]` block ALONE, GMRES to rtol
+    1e-8 on the TRUE residual, random right-hand side:
+
+    | preconditioner | cycles |
+    |---|---|
+    | PETSc GAMG + ILU(0) ×1 | **2** |
+    | PETSc GAMG + block Jacobi ×1 / ×2 / ×4 | 51 (fails) / 24 / **3** |
+    | ours, legacy aggregation, ×2 / ×4 / ×8 sweeps | 56 (fails) / 8 / **2** |
+    | ours, **MIS aggregation**, ×4 | **5** |
+    | ours, MIS + squared graph, ×4 | 10 |
+    | ours, MIS + "faithful" prolongator, ×4 / ×8 | 43 / 58 — **VOID**, see above |
+
+    **What is BUILT and measured good (keep):**
+    - **Nodal (block-aware) aggregation** — `_cell_graph` collapses the dof graph to cell connectivity
+      (exact, since field-major means `index % n_cells` *is* the cell) and `_block_tentative` gives each
+      field its own coarse unknown. With a **block smoother** (`_cell_block_inverse`,
+      `_block_diagonal_inverse_operator`) this makes the two-field slice buildable and convergent.
+      **All three are required; no pair suffices** (measured 2×2).
+    - **MIS aggregation** (`_mis_aggregate`) — greedy maximal independent set over a **randomized** visit
+      order, single sweep, selector-claims-neighbours, faithful to `MatCoarsenApply_MISK_private`. Worth
+      **8 → 5 cycles** over the two-pass RCM scheme. The old scheme only seeded from a fully-free
+      neighbourhood, so it seeded few aggregates and left most vertices to a ragged cleanup pass.
+    - `jax.jit` on the native applies (they were dispatching eagerly, ~18 % of apply cost) and
+      `indices_are_sorted=True` in `_coo_apply` (CSR→COO is row-sorted by construction).
+    - `PerFieldNativeInverse` / `NodalNativeInverse` in `solve/field_split.py`, both transposable in
+      closed form and fixed linear operators, so adjoint-legal. Neither is wired into production.
+
+    **What is BUILT and measured BAD (revert or gate):**
+    - The **prolongator branch** under `mis_aggregation` — void, calibrated for an equilibrated operator
+      and applied to a raw one. Revert it or gate it behind equilibration.
+    - **Graph squaring** (`_square_graph`, `G·G`) — 5 → 10 cycles at this size. It exists to bound the
+      LEVEL COUNT on large meshes, not to improve quality; at 23k cells the plain graph already coarsens
+      77×, and squaring over-coarsens to 106×. Make it conditional on mesh size, as GAMG does.
+
+    **Two corrections to older entries in this file, both of which cost real time:**
+    - The recorded *"the builders refuse the `[k,ω]` slice because its diagonal is negative from the live
+      source linearizations"* is **wrong**. The fine slice is clean — **0 of 23040** cells non-positive at
+      β = 0, at the march shift, and at the floor. The refusal names `level 1`, a **coarse** operator, and
+      is manufactured by **field-blind aggregation** merging a k-dof with an ω-dof of another cell. The
+      error text said `level 1` all along; an inference was stapled to a verbatim quote and only the quote
+      was ever checked.
+    - **A field split HIDES the quality of its trailing half.** That half is ~11 % of the nonzeros, so the
+      flow block carries the solve: a trailing inverse that does not converge *at all* in isolation still
+      produced a plausible 1.36× blended march estimate. **Measure a block's preconditioner on the block
+      alone first**, then in situ.
+
+    **Also established:** block Jacobi is a perfectly good smoother class here given enough sweeps (PETSc
+    ×4 = 3 cycles against ILU ×1's 2), and on CPU the two cost the *same* per apply (102 vs 101 ms) — so
+    the penalty for a GPU-friendly smoother is quality, buyable with sweeps, not cost. The remaining
+    question is a GPU one and **cannot be measured in the current environment** (CPU-only JAX).
+
+    **NEXT STEPS, in order:**
+    1. **Equilibrate in `build_convection_hierarchy`** so ours and PETSc's coarsen the same matrix. Until
+       this lands no ours-vs-PETSc number is meaningful.
+    2. Re-measure MIS with and without prolongator smoothing on the equilibrated operator.
+    3. Then, if still short: sparse-LU coarse solve (ours is a dense `pinv`), Chebyshev with the SA-cached
+       eigenvalue bounds, and mesh-size-conditional graph squaring.
+    4. **Scalability, independent of all the above and unaddressed:** the convection hierarchy is capped
+       at 2 levels (`_CONVECTION_LEVELS`) with a **dense `pinv`** coarse solve. At a 77× ratio that is
+       ~26k coarse dofs and a 5.4 GB pinv at 1M cells — infeasible. Depth now *builds* (3 levels, no
+       refusal) via the new `max_levels` argument, so the fix is cheap once the method itself works.
+       PETSc reaches only 2 levels here because it coarsens until under `coarse_eq_limit`; our
+       `max_coarse` is NOT the equivalent knob and has no effect at 2 levels.
+
+    **Local PETSc source** for continuing the port (shallow sparse clone, may need re-cloning):
+    `src/ksp/pc/impls/gamg/{agg,gamg}.c` and `src/mat/graphops/coarsen/impls/misk/misk.c` — note
+    `coarsen` moved under `graphops` in current PETSc. GAMG-AGG defaults: `nsmooths 1`,
+    `aggressive_coarsening_levels 1`, `use_aggressive_square_graph TRUE`,
+    `use_minimum_degree_ordering FALSE` (so: random order), `aggressive_mis_k 2`, `graph_symmetrize TRUE`.
+
   - **⚠️ LOW-β DIRECTIONS ALREADY MEASURED OUT — do not re-litigate without new evidence.** The low-shift
     wall on the 3D coupled saddle has absorbed a lot of probing. What is settled:
     - **Turbulence decoupling ("just lag ω") — REFUTED.** A true-residual arm comparison found
