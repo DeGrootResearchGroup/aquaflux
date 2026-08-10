@@ -633,8 +633,8 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     floor plus the vertical step face) and `sideWalls` once, so half of every face is no-slip. Across the
     four tightest cells the ranking is exactly the wall-face count, 3 / 3 / 2 / 1. There the Newton
     direction keeps demanding a `k` change of ~1e-13 while `k` itself has been ratcheted down to 1e-22
-    against a mesh median of 2.97e-02 — so the root is at `k < 0` and the constraint is permanently
-    active. (Full measurement, and the step-length lock-up it causes, in `.claude/rules/solve.md`.)
+    against a mesh median of 2.97e-02 — ~~so the root is at `k < 0` and the constraint is permanently
+    active~~ (**struck: the root is +1.99e-14, see above**). (Full measurement, and the step-length lock-up it causes, in `.claude/rules/solve.md`.)
 
     **❌ The first suspicion — that a three-wall-face cell takes several times the destruction against
     one cell's worth of production, because the two terms are reduced over a cell's wall faces

@@ -527,15 +527,17 @@ def _escalation_reason(
     if retry_on_cycles is not None and int(outcome.max_inner_cycles) > retry_on_cycles:
         return "cycles"
     # ...and step length is a reason WHATEVER collapsed it, including an injected constraint. That is
-    # not an oversight, and gating it on `binding_limit == 1` would be a regression: more damping
-    # shrinks the correction, so it *widens* a fraction-to-the-boundary cap rather than tightening it.
-    # Measured -- the one escalation of an entire coupled RANS march fired at a step whose cap was
-    # 4.37e-10, and doubling the shift there was worth 8 steps and 199 s end to end.
+    # not an oversight: gating it on `binding_limit == 1` was tried and is a regression. MEASURED --
+    # the one escalation of an entire coupled RANS march fired at a step whose cap was 4.37e-10, and
+    # suppressing it cost 8 steps and 199 s end to end. (The mechanism usually offered for the gate,
+    # that more damping tightens such a cap, is not measurable from a march log at all: only the
+    # accepted attempt's cap is recorded, so per-attempt caps are never observed. Rest the decision on
+    # the A/B above, not on a mechanism.)
     #
-    # What damping cannot do is un-pin a cell that is already ON the boundary: once the constrained
-    # entry has been driven to (almost) zero, the cap is small however small the correction gets, and
-    # the fraction-to-the-boundary rule then shrinks it by a fixed factor per step forever. That
-    # failure is not this predicate's to catch -- see `_limit_collapsing`, which ends the segment.
+    # What damping cannot do is un-pin a cell already ON the boundary: once the constrained entry has
+    # been driven to (almost) zero, the cap is small however small the correction gets, and the
+    # fraction-to-the-boundary rule then shrinks it by a fixed factor per step. That failure is not
+    # this predicate's to catch -- see `_limit_collapsing`, which ends the segment.
     if retry_on_alpha is not None and float(outcome.alpha) <= retry_on_alpha:
         return "alpha"
     return None
@@ -573,9 +575,9 @@ def _limit_collapsing(
       march that had otherwise reproduced the lock-up step for step.
     * *Not* "did not fall by ``progress``" either. That still admits a residual that **rose**, and a
       rising residual is the signature of a healthy pseudo-transient excursion rather than a stall. On
-      a march that converges, three consecutive steps ran caps of 0.983, 0.928, 0.253 while the residual
-      climbed 1.293e-01 → 1.489e-01, and then recovered to 9.241e-02 and converged: a one-sided test
-      ends that rung at its worst moment.
+      a march that converges, three consecutive steps ran caps of 0.983, 0.928, 0.253 at residuals
+      1.310e-01, 1.335e-01, 1.489e-01 -- climbing from the 1.293e-01 the run of three began at -- and
+      then recovered to 9.241e-02 and converged: a one-sided test ends that rung at its worst moment.
 
     The failure is a step that changes **nothing**, so the test is two-sided. The two populations sit
     orders apart: null steps move the residual by ~1e-6 relative, productive ones by percents.

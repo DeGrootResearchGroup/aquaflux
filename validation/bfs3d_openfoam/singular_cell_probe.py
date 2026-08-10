@@ -1,17 +1,17 @@
 """Which cells have a singular ``[k, omega]`` block, and are they the cells bounded by positivity?
 
 The framework-native block smoother inverts each cell's own 2x2, so it refuses to build when any of
-them is singular -- and on a developed state of this case a handful are, which stops a march at a
-mid-march refresh. The question this answers is whether those cells are *special* in a way that
-explains them, and specifically whether they coincide with the cells where the positivity limiter is
-capping the Newton step.
+them is singular. **That refusal turned out to be a defect in the test rather than a property of the
+blocks** -- it compared the determinant against a Frobenius-scaled bar, which a row imbalance of 1e8
+makes meaningless; on the row-norm bound the same blocks are eight orders clear, and this probe now
+measures **zero** singular blocks at every shift from 0 to 0.4. What it is still for is the second
+question it was built to ask, which is open: **which cells the positivity limiter caps the Newton step
+on**, and whether they are special in any way that explains them.
 
-That link is worth testing rather than assuming, and it is plausible in both directions: a cell whose
-``k`` is being driven toward zero is a cell whose ``k`` row loses what makes it invertible, so the
-degenerate blocks and the step-length cap could be one phenomenon observed twice. If they coincide,
-anything that discards the local correction in those cells -- truncating the block inverse, say --
-removes it exactly where the solve is already struggling, and that has a bearing on how the build's
-refusal should be handled.
+That link was worth testing rather than assuming, and the answer is **no**: with zero singular blocks
+and the binding cells ranking 1088-2165 of 23040 in condition number, the degenerate blocks and the
+step-length cap are not one phenomenon observed twice. The conditioning columns stay because ruling the
+coincidence out is what they are for, and because the next reader will wonder the same thing.
 
 Takes a checkpoint path directly rather than a name from a curated table, because the states that
 exhibit this are whatever the march happened to reach when it failed.

@@ -1098,7 +1098,10 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         out level for `ilu0x1` (21 vs 19 events), which is what licensed attributing its saving to the
         smoother.
   - **⚠️ IN PROGRESS (2026-08-10): the native trailing V-cycle now MATCHES PETSc on quality AND cost;
-    what blocks it is the POSITIVITY LIMITER, not the preconditioner.** Read this before the
+    what blocks it is the POSITIVITY LIMITER — read that as the PROXIMATE failure, not the cause.**
+    ⚠️ The same limiter, defaults and case run fine under the PETSc ILU(0) control (58 steps to 9.588e-06,
+    recorded below), so the limiter is necessary and not sufficient: the native arm dies at a state the
+    control never reaches, and what drives that arm's direction into the boundary is **unexplained**. Read this before the
     2026-08-09 section below, which it supersedes in several places.
 
     **Where it stands.** On the `bfs3d` `[k, ω]` block alone the JAX-native nodal hierarchy reaches
@@ -1180,9 +1183,12 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     as long as the direction keeps pointing at the boundary there. Ninety-six consecutive steps, residual
     frozen to every reported digit, **zero** Krylov cycles, β pinned at its 16.0 ceiling. So:
     - **β is irrelevant from step 27 on, and that is a statement about a PINNED cell, not about damping.**
-      Damping widens a fraction-to-the-boundary cap (a smaller correction means more room) — visible even
-      here, in that the cap falls only 5.1× across 26→27 while β is still climbing, against the τ rule's
-      100× once β sits at its ceiling. What it cannot do is recover a cell whose `k` is already ~0: the
+      Damping is *argued* to widen a fraction-to-the-boundary cap (a smaller correction means more room),
+      and that argument is **not measured and cannot be from a log** — only the accepted attempt's cap is
+      recorded. ⚠️ An earlier version of this bullet offered "the cap falls only 5.1× across 26→27" as
+      evidence; that is the **same cross-step comparison withdrawn above**, used to argue the opposite
+      conclusion, and it is struck. The decision rests on the A/B alone. What damping cannot do is recover
+      a cell whose `k` is already ~0: the
       room is then small however small the correction gets. **Do not read this as "stop escalating on a
       constraint-bound step"** — that was tried, and it deletes the one escalation on this case that is
       measured to pay (step 51, cap 4.37e-10, 8 steps and 199 s).
@@ -1269,8 +1275,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
 
     **The tree is verified NEUTRAL on the shipped path.** A control march (PETSc ILU(0)×1) on all of
     this measured **58 steps / 282 cycles / final ‖R‖ 9.588e-06 / mid-span `x_r/h` 8.36** — identical
-    in every reported digit to the recorded baseline. Wall was 1809 s against 1636 s, which is machine
-    state, not work: the cycle count is why this project measures in cycles.
+    in every reported digit to the recorded baseline. Wall was 1809 s against 1636 s — **10.6%, unexplained**, and
+    larger than this case's stated ~2% run-to-run spread, on one run each. The neutrality conclusion rests
+    on the cycle count and the reported digits, not on the wall.
 
     **Harnesses kept (all in `validation/bfs3d_openfoam/`):** `trailing_hierarchy_sweep.py` (the block
     alone, every arm), `cell_block_scaling.py` (per-cell conditioning, raw vs equilibrated),
@@ -1309,7 +1316,8 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     - **One cell out of 23040 throttles the whole march,** and it is not a crowd: at dump 04 exactly
       **one** cell sits within 100× of the tightest room, the runner-up 68× behind; by dump 11 the gap is
       **eight orders**. Cell 12800 owns ten of the twelve dumps and every one from step 25 on.
-    - **`k` there ratchets by exactly 100× per step** — 3.08e-16 → 3.08e-18 → 3.08e-20 → 3.08e-22 — which
+    - **`k` there ratchets by exactly 100× per step** (the per-step evidence is the checkpoint mantissa
+      below; these dumps are non-consecutive) — 3.08e-16 → 3.08e-18 → 3.08e-20 → 3.08e-22 — which
       is `1 − τ` at `τ = 0.99`, the same factor the cap collapses by. Against a mesh median `k` of
       **2.97e-02**, so the binding cell's `k` is ~20 orders below typical. It is not small; it is zero.
     - **`dk` stays ~1e-13 throughout while `k` collapses.** ⚠️ **The inference drawn from this — "the
@@ -1333,15 +1341,20 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       apart**, i.e. ninety-five successive ×0.01 cuts, while `u/v/w/p` report a relative change of
       exactly 0.
     - **It is not one cell, either: 1876 of 23040 cells sit below `k = 1e-6`** at this state, against an
-      OpenFOAM global minimum of 1.672e-6 on the same mesh. A large part of the near-wall field has
-      fallen onto a laminar branch; cell 12800 is only the deepest point of it.
+      OpenFOAM global minimum of 1.672e-6 on the same mesh. ⚠️ **Do not read this as "laminarization" —
+      that is a bistability claim and it was not measured.** The comparison is a locked-up, mid-rung-2,
+      **unconverged** iterate against a **converged** reference, and this state's ω is still at its `60ν`
+      initialization (below) — in a wall cell whose ω row is a fixation, so that row carries a large
+      residual and the state is definitively not at a root. A 10× ω multiplies the `β*kω` destruction and
+      is on its own a sufficient explanation for small `k`, with no second branch involved. The count and
+      the contrast are measured; the cause is open.
     - **Geometry: it is a step-corner cell, and its mirror is the runner-up.** 12800 sits at
       `(0.0007, −0.0099, 0.0009)` and 22400 at `(0.0007, −0.0099, 0.0391)` — bottom wall (`y ≈ −h`),
       immediately behind the step (`x ≈ 0`), against each side wall (span `4h = 0.04`). The stagnant
       bottom/side-wall corner, i.e. the same corner-separation region that makes the full-span
       reattachment (16.14 here) disagree with the mid-span one (5.34). ω there is 4.01e+05, a wall value.
-    - **⚠️ THE TIGHTNESS RANKING IS THE WALL-FACE COUNT, EXACTLY.** Counted off `face_patches`, the four
-      tightest cells carry **3, 3, 2, 1** no-slip faces out of six:
+    - **The tightness ranking tracks the wall-face count — on n = 4 cells, one dump, one state.** Counted
+      off `face_patches`, the four tightest cells carry **3, 3, 2, 1** no-slip faces out of six:
 
       | cell | room (dump 04) | boundary faces |
       |---|---|---|
@@ -1371,22 +1384,45 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       `state-00057` under *symmetric equilibration*, and this is a different state, raw — so this
       refutes the coincidence at this state rather than retiring the 1e12 finding.
 
-    **⚠️ THE LEVER, CORRECTED. Since the root IS positive, no projection is needed and the whole
-    "project vs constrain" question is largely moot.** Two defects remain, and they are different from
+    **⚠️ THE LEVER, CORRECTED — with the scan's reach stated.** The measurement below is a **1-D scan of
+    one row at one iterate with every other field frozen**. It establishes a strictly positive root of cell
+    12800's frozen-field `k` row, which removes the motivation for a projection *at this state*. It does
+    **not** establish the sign of the coupled Newton direction, nor anything about the other 1875 collapsed
+    cells, nor that no state has a negative root. Two defects remain, and they are different from
     each other:
     1. **`positive_block_limit` is a purely RELATIVE rule** — `room = tau·k/|dk|` — applied to a field
        whose physical floor is 0. A relative rule has no lower bound, so a roundoff-level `dk` in an
        already-collapsed cell produces an arbitrarily small cap. An **absolute floor**
        (`room = tau·(k + k_abs)/|dk|`) fixes it, is pure globalization, sits off the IFT path entirely,
-       and changes nothing at the solution.
+       and — *provided the cap is inactive at the converged state* — changes nothing at the solution.
+       Scale `k_abs` off the block (`eps·max(k)`), not a constant, so it carries `k`'s units.
+       **⚠️ IT IS NOT SAFE ALONE — clamping `k` in the closure is a PREREQUISITE, in the same change.**
+       Relaxing the cap lets `k` go slightly negative, and two sites then misbehave badly (verified):
+       `SSTModel.f1`/`.f2` (`sst.py:136,178`) take a raw `jnp.sqrt(k)` and NaN the whole residual, where
+       every closure in `boundary.py` uses `safe_sqrt(jnp.maximum(k, 0.0))`; and `OmegaProduction`
+       (`sources.py:288-294`) divides by `jnp.maximum(nu_t, 1e-30)`, so a negative `ν_t` selects the floor
+       and the cap becomes ~**−1e23** at the measured corner values. `KProduction`'s cap
+       (`sources.py:209`) also flips sign, turning production into a sink. **Unbuilt and unmeasured.**
     2. **A large part of the near-wall field has laminarized** (1876 cells below 1e-6). That is the real
        physics defect and the absolute floor does not address it. The candidate is a **sustaining /
-       ambient source** `+β* k_amb ω` (Spalart–Rumsey 2007): a strictly positive constant, so `R(0) < 0`
-       unconditionally; it adds nothing to the Jacobian diagonal, so the M-matrix property survives; it
-       is `C^∞`, with no `y*` switch and no `sqrt(k)`; and being a smooth term of the converged residual
-       it is exact under the IFT adjoint. **Risk: it is a LEVEL fix, not a BRANCH fix** — it pins
-       `k ≥ k_amb` but does not establish that the corner climbs back onto the turbulent branch, and it
-       is a new tunable that would mask a genuine collapse elsewhere. Unbuilt and unmeasured.
+       ambient source**. ⚠️ **Both the form and the citation first recorded here were WRONG; corrected:**
+       - The literature terms are **constant**, and there are **two** of them, one per equation:
+         `k: + β* ω_amb k_amb` and `ω: + β ω_amb²`, where `ω_amb` is an **ambient constant, not the local
+         ω**. Source: **Rumsey & Spalart, AIAA J. 47(4), 2009, 982–993** (NASA calls it `SST-sust`).
+         **Spalart & Rumsey 2007** — cited here originally — proposes *floor values*, not source terms.
+       - The form written here first, `+β* k_amb ω` with the **local** ω, is a different term: it makes
+         the destruction `−β* ω (k − k_amb)`, pinning `k ≥ k_amb` *uniformly including deep in the
+         boundary layer* where ω is O(1e5). At the `bfs3d` corner that is ~80× the literature term and
+         would override the `Dirichlet(0)` wall condition the case sets — which is exactly what Rumsey &
+         Spalart warn against. It also is **not** diagonal-free: `∂R_k/∂ω = −β* k_amb` is an off-diagonal
+         the frozen AMG operator would not see. The literature (constant) form does have both properties.
+       - **Motivating evidence is weak.** The `k` deficit is measured at an *unconverged* state whose ω
+         rows have not moved off initialization, and OpenFOAM reaches min `k` 1.672e-6 on this mesh with
+         **no** sustaining term at all. It would also make two existing assertions tautological
+         (`test_coupled_mass_flow.py:138`, `test_coupled_periodic_channel.py:124`, both of which assert
+         `min(k) > 1e-6` and document themselves as *non*-tautological).
+       - **Order of work: do the step-limiter fix first and re-measure.** If the march then converges with
+         `min(k)` near OpenFOAM's, this has no motivating evidence left. Unbuilt and unmeasured.
 
     Two further leads found while measuring this, both unverified: `ω[12800] = 4.0091e5` is **exactly
     10×** the `omega_wall` value `6ν/(β₁d²)` its own residual imposes, which is the `60ν` initialization
@@ -1406,7 +1442,8 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     projection cannot. That reframes the choice, and it is the one to make with the user:
     a positivity **projection** after the step (OpenFOAM's answer, and it changes the forward path but
     not the root provided the floor is inactive there) against keeping the step constraint and finding
-    why the root is negative. Neither is built.
+    ~~why the root is negative~~ (**struck — the root is positive; see the corrected lever above**).
+    Neither is built.
 
     **✅ GATES GREEN on all of the above** (CSR level operator, native trailing inverse, and both march
     changes): fast gate **967 passed / 1 skipped** (899 unit `-n auto`, 68 integration `-n 1`), and the
