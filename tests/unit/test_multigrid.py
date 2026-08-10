@@ -17,10 +17,14 @@ import scipy.sparse as sp
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.solve.frozen_operator import convection_diffusion_operator, decouple_dof
 from aquaflux.solve.multigrid import (
+    _cell_graph,
     _chebyshev_smooth,
+    _CsrOperator,
     _jacobi_smooth,
     _lair_restriction,
+    _mis_aggregate,
     _one_point_interpolation,
+    _reattach_to_adjacent_root,
     _rs_split,
     _SparseLevel,
     _strength_classical,
@@ -215,12 +219,9 @@ def _chebyshev_propagation_polynomial(eigenvalues, lam_max, degree, lo_frac):
     ``0`` and ``x`` after smoothing equals ``P(mu)`` mode by mode). Returns ``P`` at each eigenvalue.
     """
     n = len(eigenvalues)
-    index = jnp.arange(n)
     level = _SparseLevel(
         n=n,
-        row=index,
-        col=index,
-        val=jnp.asarray(eigenvalues),
+        operator=_CsrOperator.from_scipy(sp.diags(np.asarray(eigenvalues)).tocsr()),
         diagonal=jnp.ones(n),
         lam_max=float(lam_max),
         coarse_inv=None,
@@ -662,12 +663,14 @@ def test_aggregation_hierarchy_structure_is_value_independent() -> None:
     assert len(cold.levels) == len(developed.levels)
     for lo, hi in zip(cold.levels, developed.levels, strict=True):
         assert (lo.n, lo.n_coarse) == (hi.n, hi.n_coarse)  # static metadata
-        assert lo.val.shape == hi.val.shape  # operator sparsity
+        assert lo.operator.data.shape == hi.operator.data.shape  # operator sparsity
         assert lo.diagonal.shape == hi.diagonal.shape
         if lo.p_val is not None:
             assert lo.p_val.shape == hi.p_val.shape  # prolongation sparsity
     # ...and the values really do differ, so the invariance above is not a trivial no-op.
-    assert not np.allclose(np.asarray(cold.levels[0].val), np.asarray(developed.levels[0].val))
+    assert not np.allclose(
+        np.asarray(cold.levels[0].operator.data), np.asarray(developed.levels[0].operator.data)
+    )
 
 
 def test_refreshing_a_hierarchy_is_a_compilation_cache_hit() -> None:
@@ -718,8 +721,8 @@ def test_lair_structure_is_value_dependent_unlike_aggregation() -> None:
     cold = build_air_hierarchy(_chain_operator(n, 0.01, np.ones(n - 1)))
     developed = build_air_hierarchy(_chain_operator(n, 50.0, np.linspace(1.0, 1000.0, n - 1)))
 
-    shapes = [(lv.n, lv.n_coarse, lv.val.shape) for lv in cold.levels]
-    developed_shapes = [(lv.n, lv.n_coarse, lv.val.shape) for lv in developed.levels]
+    shapes = [(lv.n, lv.n_coarse, lv.operator.data.shape) for lv in cold.levels]
+    developed_shapes = [(lv.n, lv.n_coarse, lv.operator.data.shape) for lv in developed.levels]
     assert shapes != developed_shapes, (
         "lAIR coarsening happened to be shape-stable here; the refresh-by-reusing-the-split "
         "requirement is justified by its value dependence, so re-check _strength_classical"
@@ -743,9 +746,11 @@ def test_refresh_air_hierarchy_keeps_the_structure_and_is_a_cache_hit() -> None:
     assert len(refreshed.levels) == len(cold.levels)
     for old, new in zip(cold.levels, refreshed.levels, strict=True):
         assert (old.n, old.n_coarse) == (new.n, new.n_coarse)
-        assert old.val.shape == new.val.shape
+        assert old.operator.data.shape == new.operator.data.shape
     # ...but the values genuinely moved to the new operator.
-    assert not np.allclose(np.asarray(cold.levels[0].val), np.asarray(refreshed.levels[0].val))
+    assert not np.allclose(
+        np.asarray(cold.levels[0].operator.data), np.asarray(refreshed.levels[0].operator.data)
+    )
 
     traces = []
 
@@ -952,3 +957,142 @@ def test_undamped_smoothing_relaxes_further_than_the_spectral_default() -> None:
         spectral_damping=False,
     )
     assert np.allclose(np.asarray(damped), np.asarray(restated))
+
+
+def test_the_coarsening_graph_takes_magnitudes_before_symmetrizing() -> None:
+    """An antisymmetric coupling must not cancel itself out of the aggregation graph.
+
+    Building the graph from the symmetric part ``(A + A^T)/2`` and taking the magnitude afterwards
+    loses any edge with ``A_ij ~ -A_ji`` entirely, so two strongly coupled cells end up with nothing
+    to aggregate across. Taking the magnitude first cannot do that. The check is on `_cell_graph`,
+    which is where the block collapse and the magnitude both happen.
+    """
+    # Two cells, one field, coupled antisymmetrically: the symmetric part is exactly zero off-diagonal.
+    a = sp.csr_matrix(np.array([[4.0, 3.0], [-3.0, 4.0]]))
+    symmetric_part = (0.5 * (a + a.T)).tocsr()
+
+    assert _cell_graph(symmetric_part, 1)[0, 1] == 0.0  # the edge vanishes — the old behaviour
+    assert _cell_graph(a, 1)[0, 1] == 3.0  # ...and survives on the true operator
+
+
+def test_magnitude_order_changes_weights_but_not_the_pattern_on_an_m_matrix() -> None:
+    """On a frozen upwind transport operator the two orders give the same GRAPH, at different weights.
+
+    Its off-diagonals all share a sign, so nothing can cancel and the sparsity is identical — which is
+    what makes the change free wherever only the pattern is read, i.e. at ``strength_threshold = 0``,
+    the default and what every scalar hierarchy uses. The *weights* do differ (``|A_ij|`` against
+    ``|A_ij + A_ji| / 2``), so a hierarchy built with a strength threshold — the coupled flow block
+    runs at 0.25 — genuinely sees a different strong-connection set. Both halves are asserted, because
+    reporting only the first would make the change look inert where it is not.
+    """
+    n = 200
+    a = _chain_operator(n, 2.0, np.linspace(1.0, 5.0, n - 1))
+    from_true = _cell_graph(a, 1)
+    from_symmetric_part = _cell_graph((0.5 * (a + a.T)).tocsr(), 1)
+
+    assert (from_true != 0).nnz == (from_symmetric_part != 0).nnz
+    assert np.array_equal(from_true.indices, from_symmetric_part.indices)
+    assert not np.allclose(from_true.data, from_symmetric_part.data)
+
+
+def test_reattaching_gives_every_member_a_root_it_touches() -> None:
+    """After a squared-graph aggregation, the repair leaves no member two hops from its own root.
+
+    Aggregating the squared graph is what buys a shallow hierarchy, and the cost is that an aggregate
+    can reach a cell its root does not couple to — a poor support for a piecewise-constant coarse
+    basis function.
+
+    **The guarantee is conditional, and stating it as absolute would over-claim.** A member whose
+    every neighbour is itself a member has no adjacent root to move to and keeps its distant one; only
+    members that *have* an adjacent root are repaired. That is the reference's behaviour too, so the
+    test asserts exactly it, plus the two invariants the repair must not break: no aggregate is
+    emptied, and no root is ever stolen.
+    """
+    n = 60
+    graph = sp.diags([np.ones(n - 1), np.ones(n - 1)], [-1, 1], format="csr")  # a path
+    squared = (graph @ graph).tocsr()
+    squared.setdiag(0)
+    squared.eliminate_zeros()
+
+    aggregate, roots, count = _mis_aggregate(squared, seed=0)
+    repaired = _reattach_to_adjacent_root(aggregate, roots, graph)
+
+    assert len(np.unique(repaired)) == count  # no aggregate emptied
+    assert np.all(repaired[roots] == aggregate[roots])  # roots keep their own aggregates
+
+    adjacency = graph.toarray() != 0
+    members = [v for v in range(n) if v not in set(roots.tolist())]
+    repairable = [v for v in members if any(adjacency[v, r] for r in roots)]
+    for vertex in repairable:
+        assert adjacency[vertex, roots[repaired[vertex]]], (
+            f"cell {vertex} has an adjacent root but was left on a distant one"
+        )
+
+    # ...and the repair was not vacuous: the squared aggregation really did leave members stranded.
+    stranded = sum(not adjacency[v, roots[aggregate[v]]] for v in repairable)
+    assert stranded > 0
+
+
+def test_a_degenerate_cell_block_is_refused_by_name() -> None:
+    """A singular cell block raises, naming how many — it does not silently return something usable.
+
+    This is a real state, not a defensive check: on the coupled turbulence pair a few cells out of tens
+    of thousands go degenerate as the flow develops, so the refusal is what a march actually meets, and
+    it must say so rather than bake an ``inf`` into a frozen preconditioner. A pseudo-inverse that
+    truncates the null direction is a plausible alternative and is deliberately NOT the behaviour here;
+    if it is ever adopted it needs its own opt-in and its own evidence.
+    """
+    from aquaflux.solve.multigrid import _cell_block_inverse
+
+    # Two cells, two fields, field-major. Cell 0 is ordinary; cell 1's block [[1,1],[1,1]] is singular.
+    dense = np.zeros((4, 4))
+    dense[0, 0], dense[2, 2] = 2.0, 4.0
+    dense[1, 1], dense[1, 3], dense[3, 1], dense[3, 3] = 1.0, 1.0, 1.0, 1.0
+
+    with pytest.raises(ValueError, match="1 of 2 are singular"):
+        _cell_block_inverse(sp.csr_matrix(dense), 2)
+
+    # ...and it says WHICH operator, because the caller coarsens and runs this on every level. A bare
+    # count is not diagnosable: it sent three capture attempts after a fine-grid state that was never
+    # degenerate, when the refusal was coming from a Galerkin coarse operator.
+    with pytest.raises(ValueError, match=r"level 1 \(coarse\): block smoothing"):
+        _cell_block_inverse(sp.csr_matrix(dense), 2, "level 1 (coarse)")
+
+    # A small but well-conditioned block is NOT degenerate: the test is scale-free.
+    tiny = sp.csr_matrix(np.diag([1e-9, 1e-9, 2e-9, 2e-9]))
+    assert np.all(np.isfinite(_cell_block_inverse(tiny, 2)))
+
+    # A structurally empty row IS degenerate, and must be named rather than slipping through: it makes
+    # the Hadamard bound zero, against which no determinant compares as smaller.
+    empty = np.zeros((4, 4))
+    empty[0, 0], empty[2, 2], empty[3, 3] = 1.0, 1.0, 1.0  # cell 1's k row is entirely absent
+    with pytest.raises(ValueError, match="1 of 2 are singular"):
+        _cell_block_inverse(sp.csr_matrix(empty), 2)
+
+
+def test_a_badly_scaled_block_is_not_mistaken_for_a_singular_one() -> None:
+    """A block whose rows differ by orders of magnitude must be judged on the right scale.
+
+    These are the real numbers from a coupled turbulence cell that a Frobenius-normalized test refused
+    mid-march: rows differing by 1.5e8, a determinant of 1.35e-06 against a Frobenius-squared norm of
+    1.6e+06, so the bar landed just above the determinant. On the row-norm (Hadamard) bound the same
+    block scores 1.2e-04 -- eight orders clear of degenerate -- and it is genuinely invertible.
+
+    The block is still nastily conditioned, around 1e12, and the assertion on the inverse says so:
+    this guard's job is invertibility, not conditioning, and conflating the two is what produced a
+    false refusal.
+    """
+    from aquaflux.solve.multigrid import _cell_block_inverse
+
+    dense = np.zeros((4, 4))
+    dense[0, 0], dense[2, 2] = 1.0, 1.0  # cell 0: an ordinary, well-scaled block
+    dense[1, 1], dense[1, 3] = 8.816352e-06, 1.694848e-12  # cell 1: the captured pathological one
+    dense[3, 1], dense[3, 3] = -1.284523e03, 1.526684e-01
+
+    inverses = _cell_block_inverse(sp.csr_matrix(dense), 2)  # must not raise
+
+    block = np.array([[8.816352e-06, 1.694848e-12], [-1.284523e03, 1.526684e-01]])
+    assert np.linalg.cond(block) > 1e11  # the fixture really is the hard case, not a benign one
+    assert np.allclose(
+        inverses[1] @ block, np.eye(2), atol=1e-6
+    )  # ...and inverting it is meaningful

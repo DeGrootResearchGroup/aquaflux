@@ -145,6 +145,8 @@ def native_cycle(
     sweeps: int,
     aggressive: int = 0,
     undamped: bool = False,
+    max_coarse: int = 16,
+    max_levels: int = 2,
 ):
     """One JAX-native nodal V-cycle over the block.
 
@@ -159,6 +161,8 @@ def native_cycle(
         prolongation_smoothing=smoothing,
         equilibrate=equilibrate,
         aggressive_levels=aggressive,
+        max_coarse=max_coarse,
+        max_levels=max_levels,
     )
     coarse = hierarchy.levels[-1].n
 
@@ -173,6 +177,12 @@ def native_cycle(
         )
 
     return apply, None, f"{len(hierarchy.levels)} lv, {coarse} coarse eq"
+
+
+def matched(**overrides):
+    """The arm that reproduces PETSc: aggressive level, plain prolongation, undamped smoother."""
+    base = dict(mis=True, smoothing="none", equilibrate=False, aggressive=1, undamped=True)
+    return lambda b: native_cycle(b, **(base | overrides))
 
 
 #: ``key -> (label, build)``.
@@ -301,10 +311,31 @@ ARMS = (
     (
         "matched-x4",
         "ours MATCHED (aggressive / plain / undamped) x4",
-        lambda b: native_cycle(
-            b, mis=True, smoothing="none", equilibrate=False, sweeps=4, aggressive=1, undamped=True
-        ),
+        matched(sweeps=4),
     ),
+    # PETSc stops coarsening on the COARSE SIZE; we stop on the level count, and at 2 levels our
+    # `max_coarse` can never fire. This is that rule, not a deeper hierarchy for its own sake.
+    (
+        "matched-x4-coarsesize",
+        "ours MATCHED x4, coarse-size stop (2000)",
+        matched(sweeps=4, max_coarse=2000, max_levels=20),
+    ),
+    (
+        "matched-x2-coarsesize",
+        "ours MATCHED x2, coarse-size stop (2000)",
+        matched(sweeps=2, max_coarse=2000, max_levels=20),
+    ),
+    (
+        "matched-x1-coarsesize",
+        "ours MATCHED x1, coarse-size stop (2000)",
+        matched(sweeps=1, max_coarse=2000, max_levels=20),
+    ),
+    # Equilibrated. Measured worse on the DAMPED, non-aggressive arm, and never tried on the matched
+    # one -- where it is also the only thing that makes the per-cell block solve SAFE: rescaled, each
+    # 2x2 is unit-triangular with determinant exactly 1 and cannot be singular, while a raw one can and
+    # on a developed state four of 23040 are.
+    ("matched-x4-eq", "ours MATCHED x4, EQUILIBRATED", matched(sweeps=4, equilibrate=True)),
+    ("matched-x2-eq", "ours MATCHED x2, EQUILIBRATED", matched(sweeps=2, equilibrate=True)),
 )
 
 

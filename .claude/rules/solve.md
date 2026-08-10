@@ -1084,7 +1084,110 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         `_RESTART_SCALE`.) Report the refresh **count** beside the wall in every arm comparison; it came
         out level for `ilu0x1` (21 vs 19 events), which is what licensed attributing its saving to the
         smoother.
-  - **⚠️ IN PROGRESS (2026-08-09): making the JAX-native multigrid a FAITHFUL smoothed aggregation, so a
+  - **⚠️ IN PROGRESS (2026-08-10): the native trailing V-cycle now MATCHES PETSc on quality AND cost;
+    what blocks it is the POSITIVITY LIMITER, not the preconditioner.** Read this before the
+    2026-08-09 section below, which it supersedes in several places.
+
+    **Where it stands.** On the `bfs3d` `[k, ω]` block alone the JAX-native nodal hierarchy reaches
+    **2 restart cycles against PETSc GAMG's 2**, on a 438-equation coarse space against 432, and
+    applies in **13.3 ms against 12.6 ms**. Quality and cost parity, on CPU. The full march converges
+    rung 1 (14 steps, 43 cycles, 304 s against the PETSc control's 14 / 45 / 359) and then dies on
+    rung 2.
+
+    **Four things closed the gap, and each was found by reading the reference rather than tuning:**
+    1. **The aggressive first level.** `build_amg_vcycle` never sets `pc_gamg_aggressive_coarsening`,
+       so GAMG applies its default of one aggressive level over the SQUARED graph. Ours had none:
+       21× coarsening against GAMG's 107×, the whole 5× coarse-space difference. (`use_aggressive_
+       square_graph` and `aggressive_mis_k` are ALTERNATIVES; at the default the coarsener is plain
+       MIS at distance 1 on the squared graph.)
+    2. **PETSc's level smoother is UNDAMPED** — `richardson` at its default scale of 1. Ours relaxed
+       by `omega/lam_max`, and `D⁻¹A` has a unit diagonal so `lam_max ≥ 1` always: the spectral factor
+       can only ever under-relax. Worth **10 → 2 cycles**. Reachable as `spectral_damping=False`.
+    3. **A CSR matvec instead of the COO `segment_sum`.** A scatter-add collides on output rows; a CSR
+       row walk does not. Measured on the 4.2M-nnz block: `segment_sum` 13.3 ms, `BCOO @ x` 13.4 ms,
+       scipy CSR on the host 2.6 ms, **`BCSR @ x` 1.4 ms**. The level operator is applied ~10× per
+       V-cycle, so this alone took the apply from **117.8 ms to 13.3 ms (8.8×)**. Landed as
+       `_CsrOperator`, which owns its matvec and replaced the loose `row`/`col`/`val`. **Not** a jit
+       or marshalling problem — both were measured out (1 trace everywhere; a numpy↔jnp round trip is
+       0.02 ms), which also retires the older claim that "marshalling is ~half the gap".
+    4. **The singularity guard was WRONG, and it was aborting the march.** `_cell_block_inverse`
+       tested `|det| < 1e-12 · ‖B‖_F^b`. On the coupled turbulence pair a cell reads
+       `[[8.8e-06, 1.7e-12], [-1.3e+03, 1.5e-01]]` — rows differing by **1.5e8** — so `‖B‖_F²` ≈ 1.6e6
+       is set entirely by the ω row and the bar lands at 1.6e-06, just above the determinant of
+       1.35e-06. The block is **not singular**: on the row-norm (Hadamard) bound `|det| ≤ ∏‖rowᵢ‖` it
+       scores **1.2e-04**, eight orders clear. Now tested that way, which is invariant under rescaling
+       any row or column where the Frobenius form is not. A structurally empty row is named
+       explicitly, since it makes the bound zero and no determinant compares below it.
+
+    **⚠️ THE α COLLAPSE IN THESE MARCHES IS THE POSITIVITY LIMITER, AND THE STEP TABLE SAYS SO — READ
+    `limit` BEFORE ATTRIBUTING ANYTHING TO THE PRECONDITIONER.** `a_min` and the `limit` aside are the
+    **same number** wherever both appear (0.579/5.79e-01, 0.651/6.51e-01, 0.004/3.76e-03, …). Those
+    steps are not failing to descend; they are being allowed almost no movement because `k` would go
+    negative. Two consequences, both of which cost hours today:
+    - **A capped step is not a bad step.** Raw and equilibrated arms differed in α at rung-2 step 16
+      (1.000 against 0.579) and reached an **identical** residual, 1.271e-01. Attributing the α
+      difference to preconditioner quality was wrong.
+    - **β escalation cannot fix a constraint-bound step, and makes it worse.** Across the escalation
+      ladder at step 25 the limit went **3.76e-03 → 1.00e-05** as β went 0.47 → 1.87 → 16.0 (the cap).
+      More damping shortens the step without moving `k` off the boundary. The march then grinds at the
+      cap indefinitely — ~100 dead steps before it was killed. **`retry_on_alpha` escalates on a
+      collapsed α without asking whether `binding_limit < 1`**, which is exactly the distinction
+      `binding_limit` was added to make. A constraint-bound step should stop escalating.
+
+    **Equilibration: KEEP it, for conditioning, and stop expecting it to fix anything else.**
+    - It improves per-cell block conditioning **~1600×** (median cond 2.84e3 → 1.74, median ‖A_cell⁻¹‖
+      4.51e4 → 1.32, cells above cond 1e3 93.6% → 19.7%).
+    - It **cannot** change whether a cell block is singular. `det B̂ = det B / |b₁₁b₂₂|`, so
+      `det B̂ = 0 ⟺ det B = 0`, and the coupling ratio `|a_kω a_ωk| / |a_kk a_ωω|` measures **identical**
+      raw and rescaled (7.369e-04 both). Using it as the fix for the guard was wrong from the start;
+      the "4 singular → 2 singular" reading that seemed to support it compared *different states*.
+    - It does **not** help the worst cells: symmetric `D B D` leaves cond at 1.22e12 because it moves
+      the imbalance from the rows into the subdiagonal (`[[1, 1.5e-9], [-1.1e6, 1]]`).
+    - **Independent row/column scaling would**: row-equilibrating the cell block gives cond 1.68e4,
+      two-sided gives **2.41**, and both are *exact* rebracketings of `B⁻¹`. Unnecessary at float64
+      and 2×2 (relative error is already 2.5e-16), but it becomes mandatory in **float32** — which is
+      the GPU case this whole exercise is for.
+    - The deeper issue is upstream: the k row has norm 8.8e-06 and the ω row 1.4e+03, so the
+      **equations** are eight orders apart before any preconditioner sees them. That is what
+      `RowScaledNorm` already recognizes in the convergence measure. Fixing the residual's row scaling
+      would help the smoother, the coarsening and any factorization at once.
+
+    **`‖B⁻¹‖ = 9.5e8` is not an error and no rescaling removes it.** The block is essentially
+    lower-triangular (`∂R_k/∂ω ≈ 1.7e-12`), so ω is slaved to k there and a k correction legitimately
+    produces one ~1e9 times larger in ω. Whether a *cell-local* smoother should apply that is the real
+    open question, and it is the same "ω is not locally determined" theme as the Vanka campaign.
+
+    **The tree is verified NEUTRAL on the shipped path.** A control march (PETSc ILU(0)×1) on all of
+    this measured **58 steps / 282 cycles / final ‖R‖ 9.588e-06 / mid-span `x_r/h` 8.36** — identical
+    in every reported digit to the recorded baseline. Wall was 1809 s against 1636 s, which is machine
+    state, not work: the cycle count is why this project measures in cycles.
+
+    **Harnesses kept (all in `validation/bfs3d_openfoam/`):** `trailing_hierarchy_sweep.py` (the block
+    alone, every arm), `cell_block_scaling.py` (per-cell conditioning, raw vs equilibrated),
+    `singular_cell_probe.py` (which cells, from a checkpoint **or** a dumped block).
+    `compare.py` gained `BFS3D_TURBULENCE_INVERSE`, `BFS3D_NATIVE_EQUILIBRATE`,
+    `BFS3D_DUMP_TRAILING_BLOCK`, a `pbjacobi1` (undamped) smoother arm, march-log **archival**, and a
+    banner that records the inverse and all its settings.
+
+    **⚠️ FOUR METHODOLOGICAL TRAPS, each of which produced a wrong write-up today:**
+    1. **Probe the state the failure happens at.** The refusal fires from a *mid-step* refresh; step
+       checkpoints and the inner-iterate dump both miss it (the inner observer writes only after an
+       iteration succeeds). Three capture runs were wasted before dumping the operator *before* the
+       build, which needs no state and no shift pairing — and even that missed twice, first by
+       wrapping only the factory when the refresh goes through `refactor_block`.
+    2. **Pair the operator with the right β.** Probing state-N with state-N's β when the failing
+       refresh uses state-N+1's is the recorded trap; sweep β instead.
+    3. **Never quote an arm at one smoother-sweep count.** The standard prolongator was recorded as
+       "void" from its 4-sweep numbers; at 8 it is the best native arm.
+    4. **A block-alone probe ties where a march separates.** Raw and equilibrated are both 2 cycles on
+       the block and behave differently in a march.
+
+    **NEXT, in order:** (a) find which cells the positivity limiter binds on at rung-2 step 25 and
+    whether they are the ill-conditioned ones — needs the direction δ, so capture it; (b) stop
+    `retry_on_alpha` escalating when `binding_limit < 1`; (c) run the fast gate and the coupled slow
+    tier, neither of which has run since the CSR change.
+
+  - **⚠️ (2026-08-09): making the JAX-native multigrid a FAITHFUL smoothed aggregation, so a
     comparison against PETSc GAMG means something. Uncommitted work sits on `claude/block-aware-aggregation`.**
     Read this before touching `solve/multigrid.py`'s aggregation path.
 
@@ -1167,19 +1270,38 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     measurement and wrong as a diagnosis: it described a hierarchy that was simply not running the
     same algorithm.
 
-    **Still different, verified by reading the source, and NOT yet measured (ranked):**
-    - **PETSc's aggressive coarsening has a fix-up pass we lack.** After the squared-graph MIS,
-      `fixAggregatesWithSquare` (`agg.c:1032-1075`) walks each selected root and steals back every
-      distance-1 neighbour in the *unsquared* graph, so a member two hops from its root is re-attached
-      to one it actually couples to. Aggregate count unchanged, aggregate *shape* repaired. This is
-      the most likely remaining quality difference.
-    - **Graph construction order.** PETSc takes `|A_ij|` and *then* symmetrizes (`G + Gᵀ`, then
-      `D^{-1/2} G D^{-1/2}`); we take the symmetric part `(A + Aᵀ)/2` and then `abs`. On a strongly
-      nonsymmetric operator an edge with `A_ij ≈ −A_ij` **cancels and disappears from our graph
-      entirely**, which cannot happen in PETSc — a pattern difference, not just a weight one.
-    - **The stopping rule is a different quantity.** PETSc coarsens until the grid is under
-      `coarse_eq_limit`; we stop at `max_levels` (2), at which point `max_coarse` can never fire. So
-      the two knobs are *not* equivalents and must not be quoted as matched.
+    **The three remaining differences, now BUILT and measured (same block, same state, matched arm):**
+
+    | arm | coarse eq | ×1 | ×2 | ×4 |
+    |---|---|---|---|---|
+    | matched, before | 436 | 58 | 11 | **2** |
+    | + fix-up pass + magnitude-first graph | 438 | 52 | 10 | **2** |
+    | + coarse-size stopping rule | 438 | 52 | 10 | **2** |
+
+    - **The fix-up pass — BUILT, `_reattach_to_adjacent_root`.** PETSc's `fixAggregatesWithSquare`
+      (`agg.c:1032-1075`): after the squared-graph MIS, each selected root **in ascending index
+      order** steals every distance-1 neighbour in the *unsquared* graph that belongs to another
+      aggregate. Only members move, never roots, so the count is unchanged and no aggregate empties.
+      **Its guarantee is conditional and must not be stated as absolute** — a member whose neighbours
+      are all themselves members has no adjacent root to move to and keeps its distant one. Worth a
+      cycle at ×2 and six at ×1; nothing at ×4, where the arm was already at PETSc's 2.
+    - **Magnitude before symmetrization — BUILT.** PETSc block-sums `|A_ij|` and *then* symmetrizes;
+      we took the symmetric part first, so an edge with `A_ij ≈ −A_ji` **cancelled out of the graph
+      entirely**. On an M-matrix (every frozen upwind transport operator) the sparsity is identical
+      either way, so at `strength_threshold = 0` — the default, and what every scalar hierarchy runs —
+      this is a no-op. **It is NOT a no-op at a threshold**, because the weights differ (`|A_ij|`
+      against `|A_ij + A_ji|/2`) and the strong-connection set is chosen from them: the coupled flow
+      block runs at **0.25** (`turbulence/coupled.py`), so its hierarchy genuinely moves. Do not quote
+      the M-matrix equivalence without that caveat — it is a statement about the pattern only.
+    - **The stopping rule — measured INERT here, and that is a real result rather than a null one.**
+      PETSc coarsens until the grid is under `coarse_eq_limit`; we stop at `max_levels`, at which
+      point `max_coarse` can never fire. Setting `max_coarse=2000, max_levels=20` gives a
+      **bit-identical** hierarchy on this block, because one aggregation already lands at 438 < 2000
+      and both rules then stop. So it changes nothing *at this size* and remains the correct rule for
+      a mesh where it would bind. The two knobs are still not equivalents and must not be quoted as
+      matched.
+
+    **Still different, verified by reading the source, and NOT measured:**
     - **Strength-of-connection semantics differ** — PETSc thresholds absolutely on the
       diagonally-scaled graph (Vanek), we use the row-max-relative classical criterion. Inert at
       threshold 0, so it affects no measurement here, but the recorded threshold arms on the two sides
@@ -1219,6 +1341,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       smoother sweeps. `"symmetric-part"` (default, the historical formula), `"standard"` (the textbook
       σ_max form on the true operator and scalar diagonal), `"none"` (plain aggregation, what the
       shipped PETSc bundle runs). An unknown value raises.
+    - **`_mis_aggregate` returns its ROOTS**, not just the aggregate index per vertex — the fix-up pass
+      cannot be written without knowing which vertex seeded each aggregate, and re-deriving it
+      afterwards is not possible (an aggregate's root is not recoverable from the labelling).
 
     **What is BUILT and measured BAD (revert or gate):**
     - The **standard prolongator at 4 sweeps** fails outright (44 cycles, true rel 1.0) — raw *and*
@@ -1277,14 +1402,15 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     line by line, which is exactly the claim that was wrong here.
 
     **NEXT STEPS, in order:**
-    1. **Port `fixAggregatesWithSquare`** (`agg.c:1032-1075`) — the remaining known aggregation
-       difference, and the one aimed at coarse-space quality rather than size.
-    2. **Fix the graph construction order** to `abs`-then-symmetrize, so a nonsymmetric edge cannot
-       cancel itself out of the coarsening graph.
-    3. **Make the stopping rule a coarse-size limit**, as GAMG's is, rather than a level cap.
-    4. Then, if still short: sparse-LU coarse solve (ours is a dense `pinv`), QR-orthonormalized
+    1. **Decide whether the matched configuration becomes the DEFAULT, and for which consumers.**
+       Nothing shipped has moved: `aggressive_levels` and `spectral_damping` both default to the old
+       behaviour, and no production preconditioner passes either. The measurement says the matched
+       bundle is 5 → 2 cycles on the turbulence block; whether that transfers to the scalar transport
+       and velocity blocks is unmeasured, and flipping a default is a march-level decision, not a
+       block-probe one.
+    2. Then, if still short: sparse-LU coarse solve (ours is a dense `pinv`), QR-orthonormalized
        tentative columns (inert at 2 levels, not deeper), and Chebyshev with the SA-cached bounds.
-    5. **Scalability, independent of all the above and unaddressed:** the convection hierarchy is capped
+    3. **Scalability, independent of all the above and unaddressed:** the convection hierarchy is capped
        at 2 levels (`_CONVECTION_LEVELS`) with a **dense `pinv`** coarse solve. At a 77× ratio that is
        ~26k coarse dofs and a 5.4 GB pinv at 1M cells — infeasible. Depth now *builds* (3 levels, no
        refusal) via the new `max_levels` argument, so the fix is cheap once the method itself works.

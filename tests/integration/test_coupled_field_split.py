@@ -420,3 +420,35 @@ def test_the_native_factory_keeps_the_coupling_for_a_two_field_group(case):
     assert not np.allclose(triangular, diagonal_only.apply(b))
     diagonal_only.destroy()
     composed.destroy()
+
+
+def test_the_nodal_native_inverse_is_a_fixed_linear_map_that_transposes(case):
+    """The two properties the coupled solve requires of any block inverse, on the real trailing block.
+
+    Both are structural preconditions rather than quality measures, and both fail silently: a
+    preconditioner that is not a fixed *linear* map makes the non-flexible outer GMRES invalid, and one
+    whose transpose is not exact corrupts every gradient taken through a converged solve while the
+    forward march looks perfectly healthy. This runs on the real ``[k, omega]`` block because that is
+    what it will precondition, and its aggregation and smoother settings are chosen to reproduce a host
+    GAMG V-cycle rather than to be conservative.
+    """
+    import numpy as np
+    import scipy.sparse as sp
+    from aquaflux.solve import NodalNativeInverse
+
+    groups, shifted = case["groups"], case["shifted"]
+    block = sp.csr_matrix(shifted[groups.trailing, :][:, groups.trailing])
+    inverse = NodalNativeInverse(block, groups.n_trailing_fields)
+    try:
+        rng = np.random.default_rng(0)
+        u, v = (rng.standard_normal(inverse.n_dofs) for _ in range(2))
+
+        combined = inverse.apply(2.0 * u - 3.0 * v)
+        separately = 2.0 * inverse.apply(u) - 3.0 * inverse.apply(v)
+        assert np.allclose(combined, separately, rtol=1e-10, atol=1e-12)
+
+        assert np.isclose(
+            v @ inverse.apply(u), inverse.apply(v, transpose=True) @ u, rtol=1e-10, atol=1e-12
+        )
+    finally:
+        inverse.destroy()

@@ -49,6 +49,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
+from jax.experimental.sparse import BCSR
 from jax.ops import segment_sum
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 
@@ -113,7 +114,7 @@ def _rcm_order(owner: np.ndarray, nb: np.ndarray, n: int) -> np.ndarray:
     return reverse_cuthill_mckee(symmetric, symmetric_mode=True)
 
 
-def _cell_graph(a_agg: sp.csr_matrix, block_size: int) -> sp.csr_matrix:
+def _cell_graph(a: sp.csr_matrix, block_size: int) -> sp.csr_matrix:
     """Collapse a block operator's degree-of-freedom graph onto its **cell** connectivity.
 
     Aggregation on the degree-of-freedom graph is field-blind: with several fields per cell it can put
@@ -130,8 +131,10 @@ def _cell_graph(a_agg: sp.csr_matrix, block_size: int) -> sp.csr_matrix:
 
     Parameters
     ----------
-    a_agg : scipy.sparse matrix
-        The aggregation operator, shape ``(block_size * n_cells,) * 2``, field-major.
+    a : scipy.sparse matrix
+        The operator to coarsen, shape ``(block_size * n_cells,) * 2``, field-major. Pass the true
+        operator, not its symmetric part: the magnitude is taken per entry here, so symmetrizing
+        first would let an antisymmetric coupling cancel itself out of the graph.
     block_size : int
         Fields per cell.
 
@@ -140,8 +143,8 @@ def _cell_graph(a_agg: sp.csr_matrix, block_size: int) -> sp.csr_matrix:
     scipy.sparse.csr_matrix
         The cell graph, shape ``(n_cells, n_cells)``, with non-negative weights.
     """
-    n_cells = a_agg.shape[0] // block_size
-    entries = sp.coo_matrix(abs(a_agg))
+    n_cells = a.shape[0] // block_size
+    entries = sp.coo_matrix(abs(a))
     # `coo_matrix` sums duplicate (row, col) pairs on conversion, which is exactly the block sum.
     return sp.coo_matrix(
         (entries.data, (entries.row % n_cells, entries.col % n_cells)),
@@ -182,7 +185,7 @@ def _block_tentative(aggregate: np.ndarray, n_coarse_cells: int, block_size: int
     )
 
 
-def _cell_block_inverse(a: sp.csr_matrix, block_size: int) -> np.ndarray:
+def _cell_block_inverse(a: sp.csr_matrix, block_size: int, where: str = "operator") -> np.ndarray:
     """The inverse of each cell's own dense ``block_size × block_size`` block, shape ``(n_cells, b, b)``.
 
     What a **block** smoother inverts, in place of the scalar diagonal a point smoother uses. The
@@ -196,11 +199,46 @@ def _cell_block_inverse(a: sp.csr_matrix, block_size: int) -> np.ndarray:
 
     Field-major, so a cell's degrees of freedom are strided by ``n_cells`` rather than contiguous.
 
+    **Singularity is judged against the product of the block's ROW NORMS, not against its Frobenius
+    norm — and the difference is not pedantry.** Hadamard's inequality bounds ``|det| <= prod ||row_i||``
+    with equality when the rows are orthogonal, so that ratio is how close a block is to rank-deficient
+    *given the size of its rows*, and it is invariant under rescaling either a row or a column. A
+    ``||B||_F ** b`` denominator is only equivalent when the rows have comparable magnitude, and it is
+    dominated by the largest of them when they do not.
+
+    On the coupled turbulence pair they do not. A degenerate-looking cell there reads
+
+        [[ 8.8e-06,  1.7e-12],        row norms 8.8e-06 and 1.4e+03,
+         [-1.3e+03,  1.5e-01]]        a ratio of 1.5e+08
+
+    whose determinant is 1.35e-06 against a Frobenius-squared norm of 1.6e+06 — so the older test put
+    the bar at 1.6e-06, just above the determinant, and **refused a block that is not singular at all**:
+    the same block scores 1.2e-04 on the row-norm bound, eight orders clear. That false refusal aborted
+    a march at a mid-march refresh, and rescaling does not avoid it (equilibration moves the imbalance
+    from the rows into the subdiagonal and the Frobenius test misfires identically).
+
+    Note the block is genuinely **ill conditioned** — around 1e12 here, so its inverse is large — and
+    that is a real question about whether a cell-local method should invert it exactly. It is a
+    different question from whether the block is invertible, which it is, and it is not this guard's to
+    answer.
+
+    Parameters
+    ----------
+    a : scipy.sparse matrix
+        The operator whose cell blocks to invert, shape ``(block_size * n_cells,) * 2``, field-major.
+    block_size : int
+        Degrees of freedom per cell.
+    where : str
+        What to name in the refusal below. **A count alone is not diagnosable**: the caller coarsens,
+        so this runs on the fine operator and on every Galerkin coarse one, and "4 of 23040 are
+        singular" sent three separate attempts hunting a fine-grid state that was never degenerate.
+        Say which level.
+
     Raises
     ------
     ValueError
-        If any cell block is singular, naming how many — a genuinely degenerate operator, as distinct
-        from a merely indefinite one, and not something a different smoother would rescue.
+        If any cell block is singular, naming where and how many — a genuinely degenerate operator, as
+        distinct from a merely indefinite one, and not something a different smoother would rescue.
     """
     n_cells = a.shape[0] // block_size
     rows = np.arange(n_cells)
@@ -208,20 +246,24 @@ def _cell_block_inverse(a: sp.csr_matrix, block_size: int) -> np.ndarray:
     for f in range(block_size):
         for g in range(block_size):
             blocks[:, f, g] = np.asarray(a[f * n_cells + rows, g * n_cells + rows]).ravel()
-    # Scale-free: a determinant is only small RELATIVE to the entries it is built from, so an operator
-    # row scaled by 1e-6 must not be called degenerate.
-    scale = np.linalg.norm(blocks, axis=(1, 2)) ** block_size
-    singular = np.abs(np.linalg.det(blocks)) < 1e-12 * np.maximum(scale, np.finfo(float).tiny)
+    # Hadamard: |det| <= prod ||row_i||, so the ratio is how near rank-deficiency the block is given
+    # its own row sizes -- invariant under rescaling any row or column, which the Frobenius form is not.
+    # A structurally empty row makes the bound zero, and the comparison below can then never fire, so
+    # that case is named rather than left to arithmetic.
+    bound = np.prod(np.linalg.norm(blocks, axis=2), axis=1)
+    singular = (bound == 0.0) | (np.abs(np.linalg.det(blocks)) < 1e-12 * bound)
     if singular.any():
         raise ValueError(
-            f"block smoothing needs every cell block invertible, but {int(singular.sum())} of "
-            f"{n_cells} are singular. Unlike a non-positive scalar diagonal — which a block smoother "
+            f"{where}: block smoothing needs every cell block invertible, but {int(singular.sum())} "
+            f"of {n_cells} are singular. Unlike a non-positive scalar diagonal — which a block smoother "
             "tolerates — this is a genuinely degenerate operator that no smoother choice repairs."
         )
     return np.linalg.inv(blocks)
 
 
-def _block_diagonal_inverse_operator(a: sp.csr_matrix, block_size: int) -> sp.csr_matrix:
+def _block_diagonal_inverse_operator(
+    a: sp.csr_matrix, block_size: int, where: str = "operator"
+) -> sp.csr_matrix:
     """The block-diagonal inverse as a sparse operator, for the build-time spectral estimate.
 
     The runtime smoother applies :func:`_cell_block_inverse` as a batched contraction; the *build* needs
@@ -233,7 +275,7 @@ def _block_diagonal_inverse_operator(a: sp.csr_matrix, block_size: int) -> sp.cs
     Field-major, so cell ``i``'s degrees of freedom are ``{f * n_cells + i}`` and the assembled operator
     is block-diagonal in the *cell* sense while being scattered in index space.
     """
-    inverse = _cell_block_inverse(a, block_size)
+    inverse = _cell_block_inverse(a, block_size, where)
     n_cells = inverse.shape[0]
     cells = np.arange(n_cells)
     rows = np.concatenate(
@@ -293,24 +335,68 @@ def _mis_aggregate(graph: sp.csr_matrix, seed: int = 0) -> tuple[np.ndarray, int
     Returns
     -------
     tuple
-        ``(aggregate, n_aggregates)`` — the aggregate index of every vertex.
+        ``(aggregate, roots, n_aggregates)`` — the aggregate index of every vertex, and the vertex
+        that seeded each aggregate. The roots are returned because a caller coarsening a *squared*
+        graph needs them to repair the result (:func:`_reattach_to_adjacent_root`).
     """
     n = graph.shape[0]
     indptr, indices = graph.indptr, graph.indices
     aggregate = np.full(n, -1, dtype=np.int64)
-    count = 0
+    roots: list[int] = []
     for i in np.random.default_rng(seed).permutation(n):
         if aggregate[i] != -1:
             continue
         neighbours = indices[indptr[i] : indptr[i + 1]]
         # A true singleton (no neighbour but itself) is left for the sweep to pick up as its own
         # aggregate rather than being attached to something it does not touch.
-        aggregate[i] = count
+        aggregate[i] = len(roots)
         for j in neighbours:
             if aggregate[j] == -1:
-                aggregate[j] = count
-        count += 1
-    return aggregate, count
+                aggregate[j] = len(roots)
+        roots.append(int(i))
+    return aggregate, np.asarray(roots, dtype=np.int64), len(roots)
+
+
+def _reattach_to_adjacent_root(
+    aggregate: np.ndarray, roots: np.ndarray, graph: sp.csr_matrix
+) -> np.ndarray:
+    """Repair a squared-graph aggregation: give every member a root it is genuinely adjacent to.
+
+    Aggregating the squared graph is what makes a hierarchy coarsen fast enough to stay shallow, but
+    it buys that by letting an aggregate reach two hops: a member can be assigned to a root it has no
+    direct coupling to at all, which is a poor thing for a piecewise-constant coarse basis function to
+    be supported on. This walks each root in ascending index order and claims every **distance-1**
+    neighbour — in the *unsquared* graph — that currently belongs to some other aggregate.
+
+    Only members move; a root is never stolen from, so no aggregate is emptied and the count is
+    unchanged. What changes is aggregate *shape*. Later roots override earlier ones, so a member
+    adjacent to several roots ends up with the highest-indexed of them — arbitrary, but the tie has to
+    break somehow and matching the reference's order keeps the two comparable.
+
+    Parameters
+    ----------
+    aggregate : np.ndarray
+        Aggregate index per vertex, shape ``(n,)``, from coarsening the squared graph.
+    roots : np.ndarray
+        The seeding vertex of each aggregate, shape ``(n_aggregates,)``.
+    graph : scipy.sparse matrix
+        The **unsquared** symmetric connectivity, shape ``(n, n)``. Only its sparsity is read.
+
+    Returns
+    -------
+    np.ndarray
+        The repaired aggregate index per vertex, shape ``(n,)``.
+    """
+    aggregate = aggregate.copy()
+    indptr, indices = graph.indptr, graph.indices
+    is_root = np.zeros(aggregate.shape[0], dtype=bool)
+    is_root[roots] = True
+    for root in np.sort(roots):
+        target = aggregate[root]
+        for j in indices[indptr[root] : indptr[root + 1]]:
+            if not is_root[j] and aggregate[j] != target:
+                aggregate[j] = target
+    return aggregate
 
 
 def _aggregate(owner: np.ndarray, nb: np.ndarray, n: int) -> tuple[np.ndarray, int]:
@@ -386,9 +472,7 @@ class _SparseLevel(eqx.Module):
     """
 
     n: int = eqx.field(static=True)  # cells at this level (sizes the matvec output)
-    row: jnp.ndarray  # (nnz,) COO row of the level operator A
-    col: jnp.ndarray  # (nnz,) COO col
-    val: jnp.ndarray  # (nnz,) COO value
+    operator: _CsrOperator  # the level operator A, in CSR form and owning its matvec
     diagonal: jnp.ndarray  # (n,) diagonal of A
     lam_max: jnp.ndarray  # 0-d: largest eigenvalue of D^-1 A, for the smoother damping
     coarse_inv: jnp.ndarray | None  # dense pseudo-inverse (coarsest level only); None otherwise
@@ -458,7 +542,6 @@ def _sparse_level(
     block_size: int = 1,
 ) -> _SparseLevel:
     """Freeze a scipy sparse operator (+ optional prolongation / coarse inverse) into JAX arrays."""
-    a_coo = a.tocoo()
     p_frow = p_ccol = p_val = None
     if prolongation is not None:
         p_frow = jnp.asarray(prolongation.row)
@@ -466,9 +549,7 @@ def _sparse_level(
         p_val = jnp.asarray(prolongation.data)
     return _SparseLevel(
         n=a.shape[0],
-        row=jnp.asarray(a_coo.row),
-        col=jnp.asarray(a_coo.col),
-        val=jnp.asarray(a_coo.data),
+        operator=_CsrOperator.from_scipy(a),
         diagonal=jnp.asarray(a.diagonal()),
         lam_max=jnp.asarray(float(lam_max)),
         coarse_inv=None if coarse_inv is None else jnp.asarray(coarse_inv),
@@ -613,7 +694,9 @@ def _build_aggregation_hierarchy(
             )
             d_inv = sp.diags(1.0 / a.diagonal())
         else:
-            d_inv = _block_diagonal_inverse_operator(a, block_size)
+            d_inv = _block_diagonal_inverse_operator(
+                a, block_size, f"_build_aggregation_hierarchy (level {len(levels)})"
+            )
         lam_smooth = _spectral_radius(d_inv @ a_agg)  # prolongation-smoothing damping
         lam_store = (
             lam_smooth if a_agg is a else _spectral_radius(d_inv @ a)
@@ -630,15 +713,25 @@ def _build_aggregation_hierarchy(
         # aggregation graph is collapsed onto cell connectivity and the prolongation carries each field
         # on its own coarse unknown, so the coarse operator keeps the same block size and the recursion
         # stays nodal all the way down. At `block_size == 1` both reduce to the scalar path exactly.
-        graph = _cell_graph(a_agg, block_size) if block_size > 1 else a_agg
+        # Take the magnitude BEFORE symmetrizing, never after. On a nonsymmetric operator an edge
+        # with `A_ij ~ -A_ji` cancels in the symmetric part and vanishes from the graph entirely, so
+        # two strongly coupled cells can end up with no edge between them to aggregate across. On an
+        # M-matrix (every frozen upwind transport operator) the off-diagonals share a sign and the two
+        # orders coincide exactly, which is why this costs the shipped hierarchies nothing.
+        graph = _cell_graph(a, block_size) if block_size > 1 else abs(a).tocsr()
         if mis_aggregation:
-            # Aggressive coarsening on the first level(s): aggregate over distance-2 connectivity, so
-            # the hierarchy coarsens fast enough to stay shallow as the mesh grows.
             connectivity = sp.csr_matrix(abs(_aggregation_edges(graph, strength_threshold)))
             connectivity = (connectivity + connectivity.T).tocsr()
             if len(levels) < aggressive_levels:
-                connectivity = _square_graph(connectivity)
-            aggregate, n_coarse_cells = _mis_aggregate(connectivity, seed=len(levels))
+                # Aggressive coarsening: aggregate over distance-2 connectivity so the hierarchy
+                # coarsens fast enough to stay shallow as the mesh grows, then repair the reach it
+                # buys by re-attaching each member to a root it actually touches.
+                aggregate, roots, n_coarse_cells = _mis_aggregate(
+                    _square_graph(connectivity), seed=len(levels)
+                )
+                aggregate = _reattach_to_adjacent_root(aggregate, roots, connectivity)
+            else:
+                aggregate, _, n_coarse_cells = _mis_aggregate(connectivity, seed=len(levels))
         else:
             upper = _aggregation_edges(
                 graph, strength_threshold
@@ -734,6 +827,60 @@ def build_smoothed_hierarchy(
     )
 
 
+class _CsrOperator(eqx.Module):
+    """A frozen level operator in compressed-sparse-row (CSR) form, owning its own matvec.
+
+    **Why CSR and not the coordinate (COO) form the rest of this module uses.** A COO matvec is a
+    scatter-add: it computes every ``val * x[col]`` and then reduces them onto output rows that several
+    entries share. A CSR matvec instead walks one row at a time and accumulates into a single output
+    element, so nothing collides and the reduction is a contiguous scan. Measured on the coupled
+    turbulence block (46080 rows, 4.2M nonzeros), that is worth **9.5x** — 13.3 ms for the scatter-add
+    against 1.4 ms here, which also beats a host ``scipy`` CSR matvec at 2.6 ms. The level operator is
+    applied about ten times per V-cycle, so this is most of what the cycle costs.
+
+    Kept as its own object rather than three loose arrays on each level because both level kinds carry
+    one and both apply it the same way; the arrays never travel without each other.
+
+    The three arrays are all **traced** leaves and only ``shape`` is static, so re-deriving a hierarchy
+    at a new operator on the same graph leaves every shape untouched — the compiled V-cycle is a cache
+    hit rather than a retrace, which is what makes a mid-march preconditioner refresh affordable.
+    """
+
+    indptr: jnp.ndarray  # (n_rows + 1,) row start offsets
+    indices: jnp.ndarray  # (nnz,) column index of each entry
+    data: jnp.ndarray  # (nnz,) the entries themselves
+    shape: tuple[int, int] = eqx.field(static=True)
+
+    @classmethod
+    def from_scipy(cls, a: sp.csr_matrix) -> _CsrOperator:
+        """Freeze an assembled ``scipy`` matrix, in canonical (sorted-column) CSR form."""
+        a = a.tocsr()
+        a.sort_indices()
+        return cls(
+            indptr=jnp.asarray(a.indptr),
+            indices=jnp.asarray(a.indices),
+            data=jnp.asarray(a.data),
+            shape=a.shape,
+        )
+
+    def apply(self, x: jnp.ndarray) -> jnp.ndarray:
+        """``A x``. Linear and transposable, so the adjoint's transpose solve goes through it."""
+        return BCSR((self.data, self.indices, self.indptr), shape=self.shape) @ x
+
+    @property
+    def diagonal(self) -> jnp.ndarray:
+        """The operator's diagonal, read off the CSR structure."""
+        rows = jnp.repeat(
+            jnp.arange(self.shape[0]), jnp.diff(self.indptr), total_repeat_length=self.data.shape[0]
+        )
+        return segment_sum(
+            jnp.where(rows == self.indices, self.data, 0.0),
+            rows,
+            self.shape[0],
+            indices_are_sorted=True,
+        )
+
+
 def _coo_apply(row, col, val, x: jnp.ndarray, n_out: int) -> jnp.ndarray:
     """General sparse matvec ``M x`` for a COO operator: ``segment_sum(val * x[col], row, n_out)``.
 
@@ -749,9 +896,9 @@ def _coo_apply(row, col, val, x: jnp.ndarray, n_out: int) -> jnp.ndarray:
 
 
 def _operator_matvec(level: _SparseLevel | _AirLevel, x: jnp.ndarray) -> jnp.ndarray:
-    """Apply a frozen level's operator ``A x``. Works for any COO level type — ``_SparseLevel`` and
-    ``_AirLevel`` both carry the operator as ``row`` / ``col`` / ``val`` over ``n`` rows."""
-    return _coo_apply(level.row, level.col, level.val, x, level.n)
+    """Apply a frozen level's operator ``A x``. Works for either level kind — ``_SparseLevel`` and
+    ``_AirLevel`` both carry the operator as a :class:`_CsrOperator`."""
+    return level.operator.apply(x)
 
 
 def _chebyshev_smooth(
@@ -1162,9 +1309,7 @@ class _AirLevel(eqx.Module):
     """
 
     n: int = eqx.field(static=True)  # cells at this level (sizes the matvec output)
-    row: jnp.ndarray  # (nnz,) COO row of the level operator A
-    col: jnp.ndarray  # (nnz,) COO col
-    val: jnp.ndarray  # (nnz,) COO value
+    operator: _CsrOperator  # the level operator A, in CSR form and owning its matvec
     diagonal: jnp.ndarray  # (n,) diagonal of A
     f_mask: jnp.ndarray  # (n,) 1.0 on fine points, else 0.0
     c_mask: jnp.ndarray  # (n,) 1.0 on coarse points, else 0.0
@@ -1331,15 +1476,12 @@ def _lair_restriction(a: sp.csr_matrix, split: np.ndarray, degree: int) -> sp.cs
 
 def _air_level(a: sp.csr_matrix, split: np.ndarray, restriction, prolongation) -> _AirLevel:
     """Freeze a scipy operator, its C/F masks, and (optional) restriction/prolongation into JAX arrays."""
-    a_coo = a.tocoo()
     coarsest = restriction is None
     r = None if coarsest else restriction.tocoo()
     p = None if coarsest else prolongation.tocoo()
     return _AirLevel(
         n=a.shape[0],
-        row=jnp.asarray(a_coo.row),
-        col=jnp.asarray(a_coo.col),
-        val=jnp.asarray(a_coo.data),
+        operator=_CsrOperator.from_scipy(a),
         diagonal=jnp.asarray(a.diagonal()),
         f_mask=jnp.asarray((split == 0).astype(np.float64)),
         c_mask=jnp.asarray((split == 1).astype(np.float64)),
@@ -1438,11 +1580,14 @@ def _require_matching_structure(original, refreshed, where: str) -> None:
             "hierarchy was built from (same mesh graph), and `degree` must match the build."
         )
     for i, (old, new) in enumerate(zip(original.levels, refreshed.levels, strict=True)):
-        if (old.n, old.n_coarse) != (new.n, new.n_coarse) or old.val.shape != new.val.shape:
+        if (old.n, old.n_coarse) != (
+            new.n,
+            new.n_coarse,
+        ) or old.operator.data.shape != new.operator.data.shape:
             raise ValueError(
                 f"{where}: level {i} changed shape — (n, n_coarse, nnz) "
-                f"{(old.n, old.n_coarse, old.val.shape[0])} -> "
-                f"{(new.n, new.n_coarse, new.val.shape[0])}. The refreshed values would be a new "
+                f"{(old.n, old.n_coarse, old.operator.data.shape[0])} -> "
+                f"{(new.n, new.n_coarse, new.operator.data.shape[0])}. The refreshed values would be a new "
                 "compilation signature, defeating the purpose; check that `a` has the same sparsity "
                 "pattern and that `degree` matches the build."
             )

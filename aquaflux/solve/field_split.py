@@ -293,10 +293,17 @@ class BlockTriangularFieldSplit:
         matrix : scipy.sparse matrix
             The new assembled field-major operator, already shifted, of this partition's shape.
 
+        An inverse may take the new operator in either of **two forms**, and the distinction is real
+        rather than two spellings of one thing. A host solver wants it already put into the shape it
+        factors — equilibrated and reordered cell-major — so it re-fits without redoing that work, and
+        takes ``refactor(cell_major, scale, perm)``. A hierarchy built on the raw field-major block
+        cannot use that shape at all: a nodal coarsening recovers each cell as ``index % n_cells``,
+        which only holds field-major. Such an inverse takes ``refactor_block(block)`` instead.
+
         Raises
         ------
         AttributeError
-            If a block inverse cannot re-fit in place (an injected inverse need not provide ``refactor``).
+            If a block inverse offers neither (an injected inverse need not be refreshable at all).
         """
         blocks = self._groups.blocks(matrix)
         leading_block, trailing_block = blocks[0], blocks[3]
@@ -304,12 +311,15 @@ class BlockTriangularFieldSplit:
             (self._leading, leading_block, self._groups.n_leading_fields),
             (self._trailing, trailing_block, self._groups.n_trailing_fields),
         ):
-            if not hasattr(inverse, "refactor"):
+            if (refit := getattr(inverse, "refactor_block", None)) is not None:
+                refit(block)
+            elif hasattr(inverse, "refactor"):
+                inverse.refactor(*equilibrate_cell_major(block, n_group_fields))
+            else:
                 raise AttributeError(
                     f"{type(inverse).__name__} cannot refactor in place, so this split cannot be "
                     "refreshed mid-march; rebuild it instead, or inject an inverse that can."
                 )
-            inverse.refactor(*equilibrate_cell_major(block, n_group_fields))
         self._coupling = sp.csr_matrix(self._select_coupling(blocks))
         self._coupling_transpose = sp.csr_matrix(self._coupling.transpose())
 
@@ -543,6 +553,7 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
         coarse_eq_limit: int | None = 2000,
         leading_options: dict | None = None,
         trailing_options: dict | None = None,
+        trailing_inverse: Callable[[sp.csr_matrix, int], object] | None = None,
         batched_matvec: Callable | None = None,
         probe_batch_size: int | None = None,
         structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
@@ -562,6 +573,10 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
             Passed through to each block's V-cycle. ``smoother_sweeps`` is the leading (saddle) block's
             and ``trailing_smoother_sweeps`` the trailing (transported-scalar) block's; they differ by
             default because the two halves want different amounts of smoothing.
+        trailing_inverse : callable or None
+            ``(sub_matrix, n_fields_in_group) -> inverse`` replacing the trailing block's V-cycle
+            entirely — the seam for preconditioning the transported scalars with something that is not
+            a host solver's V-cycle. When set, the trailing smoother settings above do not apply to it.
 
         Returns
         -------
@@ -580,6 +595,7 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
             coarse_eq_limit=coarse_eq_limit,
             leading_options=leading_options,
             trailing_options=trailing_options,
+            trailing_inverse=trailing_inverse,
         )
         return cls(split, groups, jacobian_no_shift=jacobian, n_fields=n_fields)
 
@@ -751,32 +767,112 @@ class NodalNativeInverse:
     cycles : int
         V-cycles per application. Fixed, so ``b -> x`` stays a linear map — required by the
         non-flexible outer Krylov and by the transposed adjoint solve.
+    sweeps : int
+        Smoother sweeps per level.
+
+    Notes
+    -----
+    **The defaults here are the settings measured to reproduce a PETSc GAMG V-cycle on this operator,
+    and they are not the multigrid builder's own defaults.** Three of them together took the coupled
+    turbulence block from 5 restart cycles to 2, matching an equivalently-configured GAMG on a coarse
+    space of the same size: one aggressive (squared-graph) coarsening level, an unsmoothed tentative
+    prolongation, and an **undamped** smoother. The last is the one that looks wrong and is not —
+    ``D^-1 A`` has a unit diagonal, so scaling the relaxation by ``1 / lambda_max`` can only ever
+    under-relax, and it was costing a factor of five in sweeps.
+
+    **``equilibrate`` is on because the per-cell block solve is not otherwise safe.** Rescaled to a
+    unit-magnitude diagonal, each cell block is triangular with a unit diagonal and a determinant of
+    exactly one, so it cannot be singular; raw, it can be, and on a developed state of the coupled
+    turbulence block four of 23040 are -- which aborts the build mid-march, at a refresh, hours in. It
+    is free at these settings (measured: same 2 restart cycles, marginally faster), and it is also what
+    the host V-cycle this reproduces is handed.
     """
 
     def __init__(
-        self, block: sp.spmatrix, n_fields: int, *, cycles: int = 1, max_coarse: int = 16
+        self,
+        block: sp.spmatrix,
+        n_fields: int,
+        *,
+        cycles: int = 1,
+        sweeps: int = 4,
+        max_coarse: int = 16,
+        aggressive_levels: int = 1,
+        prolongation_smoothing: str = "none",
+        spectral_damping: bool = False,
+        equilibrate: bool = True,
     ) -> None:
         matrix = sp.csr_matrix(block)
         self._n_dofs = matrix.shape[0]
         self._cycles = cycles
-        self._hierarchy = build_convection_hierarchy(
-            matrix, block_size=n_fields, max_coarse=max_coarse
-        )
+        # Kept so a refresh re-derives the hierarchy at exactly the settings it was built at, rather
+        # than at whatever the builder's defaults happen to be.
+        self._build_settings = {
+            "block_size": n_fields,
+            "max_coarse": max_coarse,
+            "mis_aggregation": True,
+            "aggressive_levels": aggressive_levels,
+            "prolongation_smoothing": prolongation_smoothing,
+            "equilibrate": equilibrate,
+        }
+        self._hierarchy = build_convection_hierarchy(matrix, **self._build_settings)
         # JIT, because this is applied once per Krylov matrix-vector product and an un-jitted V-cycle
         # dispatches every operation in it separately -- pure overhead that has nothing to do with the
         # method. The hierarchy is captured as a constant, which is correct here precisely because it
         # is frozen.
-        self._solve = jax.jit(
-            lambda r: convection_multigrid_solve(self._hierarchy, r, cycles=self._cycles)
+        cycle = jax.jit(
+            lambda hierarchy, r: convection_multigrid_solve(
+                hierarchy,
+                r,
+                cycles=self._cycles,
+                sweeps=sweeps,
+                omega=1.0 if not spectral_damping else 0.8,
+                spectral_damping=spectral_damping,
+            )
         )
-        self._transpose = jax.jit(
-            jax.linear_transpose(self._solve, jnp.zeros(self._n_dofs, dtype=jnp.float64))
-        )
+        # The hierarchy rides as a jit ARGUMENT, not a captured constant, so a refresh swaps its values
+        # into the SAME compiled cycle: only the level sizes are static, and the coarsening is a pure
+        # function of the (fixed) sparsity pattern, so a re-derived hierarchy has identical metadata.
+        # Captured, every refresh would retrace -- which on this operator costs more than the refresh.
+        self._solve = lambda r: cycle(self._hierarchy, r)
+        self._transpose = lambda r: jax.linear_transpose(
+            lambda v: cycle(self._hierarchy, v), jnp.zeros(self._n_dofs, dtype=jnp.float64)
+        )(r)
 
     @property
     def n_dofs(self) -> int:
         """Degrees of freedom in this block."""
         return self._n_dofs
+
+    def refactor_block(self, block: sp.spmatrix) -> None:
+        """Re-fit to a new operator on the same graph, in place, without recompiling the apply.
+
+        The march refreshes its frozen preconditioner as the flow develops, so an inverse that cannot
+        do this cannot be used in one. Re-deriving the hierarchy is cheap and, more importantly,
+        **structure-preserving**: the aggregation reads only the sparsity pattern, which is fixed for a
+        fixed stencil, so every array keeps its shape and the jitted V-cycle stays a compilation-cache
+        hit rather than retracing on each refresh.
+
+        Takes the **raw field-major** block rather than the equilibrated cell-major form a host solver
+        would want, because the nodal coarsening recovers each cell as ``index % n_cells`` and that
+        only holds field-major.
+
+        Parameters
+        ----------
+        block : scipy.sparse matrix
+            The group's new diagonal block, field-major, of the shape this was built at.
+
+        Raises
+        ------
+        ValueError
+            If the new block's shape differs from the built one — silently re-fitting to a different
+            operator would give a preconditioner for a system nothing is solving.
+        """
+        matrix = sp.csr_matrix(block)
+        if matrix.shape != (self._n_dofs, self._n_dofs):
+            raise ValueError(
+                f"cannot refactor a {self._n_dofs}-dof inverse onto a {matrix.shape[0]}-dof block."
+            )
+        self._hierarchy = build_convection_hierarchy(matrix, **self._build_settings)
 
     def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
         """Approximate ``A^-1 r`` (or ``A^-T r``) with one hierarchy over the whole group."""
@@ -788,18 +884,17 @@ class NodalNativeInverse:
         """Nothing to release — plain arrays, not a host solver's handles."""
 
 
-def native_nodal_inverse(
-    *, cycles: int = 1, max_coarse: int = 16
-) -> Callable[[sp.spmatrix, int], object]:
+def native_nodal_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
     """A ``leading_inverse``/``trailing_inverse`` factory using :class:`NodalNativeInverse`.
 
-    ``max_coarse`` is the coarse-grid size the hierarchy stops at and solves directly. The default is
-    small; a coarse grid large enough to invert the global coupling exactly is measured to be worth a
-    great deal on this operator, so it is exposed rather than buried.
+    Every keyword is forwarded, so the defaults — and the reasoning behind them — live on the class
+    rather than being restated here. ``max_coarse`` is worth knowing about: it is the coarse-grid size
+    the hierarchy stops at and solves directly, and a coarse grid large enough to invert the global
+    coupling exactly is measured to be worth a great deal on this operator.
     """
 
     def build(block: sp.spmatrix, n_group_fields: int) -> object:
-        return NodalNativeInverse(block, n_group_fields, cycles=cycles, max_coarse=max_coarse)
+        return NodalNativeInverse(block, n_group_fields, **settings)
 
     return build
 

@@ -51,6 +51,7 @@ Run (after both OpenFOAM runs) from the repo root:
 
 from __future__ import annotations
 
+import inspect
 import os
 import re
 import sys
@@ -78,6 +79,7 @@ from aquaflux.solve import (
     MarchLogger,
     StateCheckpointer,
     combine_observers,
+    native_nodal_inverse,
     relative_residual_gmres,
 )
 from aquaflux.turbulence import (
@@ -244,6 +246,17 @@ _TURBULENCE_SMOOTHERS = {
         "mg_levels_ksp_richardson_scale": 0.7,
         "mg_levels_pc_type": "pbjacobi",
     },
+    # The SAME smoother undamped, which is PETSc's own default Richardson scale and a materially
+    # different arm -- the damped one above relaxes by 0.7 of every correction. Kept apart rather than
+    # folded together because the recorded screen of the arm above was taken at 0.7, and because the
+    # undamped form is the one the framework-native block-Jacobi hierarchy is built to reproduce: an
+    # end-to-end comparison against the damped variant would understate the host solver and would not
+    # be the like-for-like run it appeared to be.
+    "pbjacobi1": {
+        "mg_levels_ksp_type": "richardson",
+        "mg_levels_ksp_richardson_scale": 1.0,
+        "mg_levels_pc_type": "pbjacobi",
+    },
     "sor": {"mg_levels_ksp_type": "richardson", "mg_levels_pc_type": "sor"},
 }
 _TURBULENCE_SMOOTHER = os.environ.get("BFS3D_TURBULENCE_SMOOTHER", "")
@@ -253,6 +266,105 @@ if _TURBULENCE_SMOOTHER not in _TURBULENCE_SMOOTHERS:
         f"{sorted(k for k in _TURBULENCE_SMOOTHERS if k)}"
     )
 TRAILING_OPTIONS = _TURBULENCE_SMOOTHERS[_TURBULENCE_SMOOTHER]
+
+# Which preconditioner the trailing [k, omega] block gets. "petsc" (default) is the host GAMG V-cycle
+# the case has always run; "native" swaps in the differentiable-framework nodal hierarchy, whose
+# aggregation and smoother are configured to reproduce that V-cycle -- matched, it reaches the same
+# 2 restart cycles on the same-sized coarse space when measured on the block alone. The point of the
+# swap is not cycles but the host callback: the native inverse is plain array work, so it is the half
+# of the preconditioner that could run on an accelerator.
+_TURBULENCE_INVERSES = ("petsc", "native")
+TURBULENCE_INVERSE = os.environ.get("BFS3D_TURBULENCE_INVERSE", "petsc")
+if TURBULENCE_INVERSE not in _TURBULENCE_INVERSES:
+    raise SystemExit(
+        f"BFS3D_TURBULENCE_INVERSE={TURBULENCE_INVERSE!r} is not one of {list(_TURBULENCE_INVERSES)}"
+    )
+#: The native inverse's own settings, kept here rather than left to the class defaults so the banner can
+#: print them and a later reader can tell two runs apart. `max_coarse` is the one deliberate departure
+#: from the class default: the coarse grid is grown to match the host V-cycle's own coarse-equation
+#: limit, since a coarse grid big enough to invert the global coupling exactly is worth a great deal on
+#: this operator.
+NATIVE_TRAILING = {
+    "max_coarse": COARSE_EQ_LIMIT,
+    # Exposed because it is under investigation, not because it is a tuning knob. Rescaling improves
+    # the per-cell block conditioning by ~1600x, yet the one march run with it on lost its line-search
+    # factor on the middle rung where the unscaled build had tracked the host solver step for step.
+    # Those two facts are not reconciled, so both arms need to be runnable.
+    "equilibrate": os.environ.get("BFS3D_NATIVE_EQUILIBRATE", "1") not in ("", "0"),
+}
+#: Write every trailing sub-block to disk just BEFORE its inverse is built, keeping only the last.
+#: The build refuses a singular cell block, and that refusal fires from a mid-step refresh whose
+#: iterate no observer records -- the inner-iterate dump happens after an iteration succeeds, so the
+#: one that fails is precisely the one never written. Dumping before the build inverts that: whatever
+#: happens, the last file on disk is the operator that failed, with no state to reload and no shift to
+#: pair correctly. Off by default; it costs a ~35 MB write per refresh.
+DUMP_TRAILING_BLOCK = os.environ.get("BFS3D_DUMP_TRAILING_BLOCK", "") not in ("", "0")
+
+
+def _dumping(factory):
+    """Wrap a trailing inverse so every block it is about to consume is saved first.
+
+    Both entry points have to be covered, and missing one wasted three capture runs: the factory is
+    called once when the split is first built, but a mid-march refresh re-fits the **existing** inverse
+    through ``refactor_block`` and never goes near the factory. The refusal happens on a refresh, so
+    wrapping only the factory dumps every block except the one that matters.
+    """
+    import scipy.sparse as _sp
+
+    def save(block):
+        _sp.save_npz(HERE / "checkpoints" / "trailing-block.npz", _sp.csr_matrix(block))
+
+    class Dumping:
+        """Forwards the inverse's interface, saving the operator ahead of any (re)build."""
+
+        def __init__(self, inverse):
+            self._inverse = inverse
+
+        @property
+        def n_dofs(self):
+            return self._inverse.n_dofs
+
+        def apply(self, residual, *, transpose=False):
+            return self._inverse.apply(residual, transpose=transpose)
+
+        def refactor_block(self, block):
+            save(block)
+            return self._inverse.refactor_block(block)
+
+        def destroy(self):
+            self._inverse.destroy()
+
+    def build(block, n_group_fields):
+        save(block)
+        return Dumping(factory(block, n_group_fields))
+
+    return build
+
+
+TRAILING_INVERSE = (
+    native_nodal_inverse(**NATIVE_TRAILING) if TURBULENCE_INVERSE == "native" else None
+)
+if TRAILING_INVERSE is not None and DUMP_TRAILING_BLOCK:
+    TRAILING_INVERSE = _dumping(TRAILING_INVERSE)
+
+
+def _native_trailing_description() -> str:
+    """Every setting the native trailing hierarchy is actually built with, defaults included.
+
+    Reads them off the class signature rather than restating them, so a changed default cannot make the
+    banner lie -- which is the one failure a configuration banner must not have.
+    """
+    from aquaflux.solve import NodalNativeInverse
+
+    settings = {
+        name: parameter.default
+        for name, parameter in inspect.signature(NodalNativeInverse).parameters.items()
+        if parameter.default is not inspect.Parameter.empty
+    }
+    settings.update(NATIVE_TRAILING)
+    return ", ".join(f"{k}={v}" for k, v in settings.items())
+
+
 CYCLE_BUDGET = 42  # summed per step: a cost cap, so summed is what it should cap
 RETRY_ON_CYCLES = (
     10  # PER SOLVE: a summed trigger is ~6x more sensitive for a 5-inner step than a 1-inner one
@@ -513,8 +625,20 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
     logger.note("[configuration]")
     for name, value in (
         ("field split", FIELD_SPLIT),
+        # WHICH INVERSE the trailing block gets, before how it is smoothed -- a setting that once cost
+        # a finding. Two runs differing only in this wrote banners identical to the character, so
+        # afterwards the only way to tell them apart was the launch order and the text of the exception
+        # each happened to die on. One of them had quietly reproduced the reference trajectory for four
+        # steps and that went unnoticed. A configuration line is worth nothing if it omits the variable
+        # under test.
+        ("turbulence inverse", TURBULENCE_INVERSE),
         ("turbulence smoother", _TURBULENCE_SMOOTHER or "ilu0 (shipped)"),
         ("turbulence smoother sweeps", TRAILING_SWEEPS),
+        *(
+            [("native trailing settings", _native_trailing_description())]
+            if TURBULENCE_INVERSE == "native"
+            else []
+        ),
         ("refresh on cycles", REFRESH_ON_CYCLES or "scheduled cadence"),
         ("Reynolds continuation points", N_POINTS),
         ("forward restart", FORWARD_RESTART),
@@ -584,6 +708,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             field_split=FIELD_SPLIT,
             trailing_smoother_sweeps=TRAILING_SWEEPS,
             trailing_options=TRAILING_OPTIONS if FIELD_SPLIT else None,
+            trailing_inverse=TRAILING_INVERSE if FIELD_SPLIT else None,
         )
         # Seeded with this rung's own starting state: the march equilibrates each step at the state it
         # begins from, so without the seed the rung's first step would be scaled at its end state and
@@ -741,6 +866,26 @@ def spanwise_reattachment(centroid, u_x, n_bins=8):
     return out
 
 
+def _fresh_log(path: Path) -> Path:
+    """Move any existing march log aside, so a new run cannot destroy the one it is compared against.
+
+    The log is the only per-step record a run leaves -- cycle counts, betas, retries, the per-equation
+    residual grid -- and every arm comparison this case exists for is a comparison of two of them. It
+    used to be written to one fixed path, so starting a run silently deleted the baseline: a
+    native-preconditioner arm was measured against aggregates alone for exactly this reason, and the
+    step-by-step comparison that would have been most informative could not be made at all.
+
+    The previous log is renamed with the modification time it already carried, not the current time, so
+    the archived name says when that run happened rather than when it was displaced.
+    """
+    if path.exists():
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(path.stat().st_mtime))
+        archived = path.with_name(f"{path.stem}-{stamp}{path.suffix}")
+        path.rename(archived)
+        print(f"archived the previous march log to {archived.name}", flush=True)
+    return path
+
+
 def main():
     if not (RUNS / "polyMesh").exists():
         raise SystemExit(f"OpenFOAM mesh not found in {RUNS}; run of_case/run_of.sh first.")
@@ -757,7 +902,9 @@ def main():
     )
 
     t0 = time.time()
-    aq = solve_aquaflux(log_path=HERE / "march.log", checkpoint_dir=HERE / "checkpoints")
+    aq = solve_aquaflux(
+        log_path=_fresh_log(HERE / "march.log"), checkpoint_dir=HERE / "checkpoints"
+    )
     print(
         f"aquaflux coupled solve: {time.time() - t0:.0f}s, "
         f"Ux in [{aq['U'][:, 0].min():.3f}, {aq['U'][:, 0].max():.3f}]",

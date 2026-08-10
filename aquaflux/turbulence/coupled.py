@@ -1907,6 +1907,7 @@ def coupled_amg_continuation(
     trailing_smoother_sweeps: int = 1,
     leading_options: dict | None = None,
     trailing_options: dict | None = None,
+    trailing_inverse: Callable | None = None,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **algebraic-multigrid** V-cycle.
 
@@ -2004,6 +2005,14 @@ def coupled_amg_continuation(
         served by much cheaper relaxations. Keys are PETSc options without the instance prefix, e.g.
         ``{"mg_levels_ksp_max_it": 1}`` for a single smoother sweep. Both require ``field_split=True``;
         passing either without it raises, since there would be only one hierarchy to apply them to.
+    trailing_inverse : callable or None
+        ``(sub_matrix, n_fields_in_group) -> inverse`` replacing the trailing block's V-cycle outright,
+        so the transported scalars can be preconditioned by something that is not a host solver's
+        V-cycle — :func:`~aquaflux.solve.native_nodal_inverse` supplies the differentiable-framework
+        one. Whatever is passed must expose ``n_dofs`` and ``apply(residual, transpose=...)``, be a
+        fixed *linear* map (the outer Krylov is not flexible) and transpose exactly (the adjoint's
+        solve uses it). The trailing smoother settings above then do not apply. Requires
+        ``field_split=True``.
     Returns
     -------
     ForwardStep
@@ -2016,6 +2025,11 @@ def coupled_amg_continuation(
         raise ValueError(
             "native_forward_solve builds a PETSc KSP around a single monolithic V-cycle and has no "
             "field-split counterpart; use one or the other."
+        )
+    if not field_split and trailing_inverse is not None:
+        raise ValueError(
+            "trailing_inverse replaces the trailing block's inverse, and there is no trailing block "
+            "without field_split=True."
         )
     if not field_split and (leading_options is not None or trailing_options is not None):
         raise ValueError(
@@ -2096,6 +2110,7 @@ def coupled_amg_continuation(
             trailing_smoother_sweeps=trailing_smoother_sweeps,
             leading_options=leading_options,
             trailing_options=trailing_options,
+            trailing_inverse=trailing_inverse,
             **common,
         )
     else:
