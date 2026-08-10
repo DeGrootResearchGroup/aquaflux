@@ -463,18 +463,54 @@ CONTROL = CflResidualDualTimeControl(
 )
 
 _STEP_LIMIT_DUMPS = 0
+#: The shift and the anchor of the step currently being taken. The limiter is called with only
+#: ``(phi, delta)``, so without these a dump cannot be paired with the linear system that produced it --
+#: and that is exactly what a reader needs to re-solve it. Captured from ``precondition_step``, which the
+#: march calls once per attempt with the step (carrying its beta) and the state the attempt starts from.
+_STEP_BETA, _STEP_ANCHOR = float("nan"), None
+
+
+def _recording_precondition(refresh):
+    """Wrap the preconditioner refresh so each attempt's shift and anchor are recorded for the dumps.
+
+    The march calls ``precondition_step(step, state)`` once per attempt, after the control has set beta
+    and before the step runs -- so it is the one place where both are in hand together. Delegates
+    unchanged; only used when the step-limit dump is switched on.
+    """
+
+    def precondition(step, state):
+        global _STEP_BETA, _STEP_ANCHOR
+        _STEP_BETA = float(getattr(step.relaxation_schedule, "beta", float("nan")))
+        _STEP_ANCHOR = np.asarray(state)
+        return refresh(step, state)
+
+    return precondition
 
 
 def _save_step_limit(cap, phi, delta):
-    """Write one ``(cap, iterate, correction)`` triple, if the cap is tight and the budget is unspent."""
+    """Write one ``(cap, iterate, correction)`` triple, if the cap is tight and the budget is unspent.
+
+    Records the attempt's ``beta`` and ``anchor`` alongside, so the dump identifies the shifted system
+    ``(J + beta*d) delta = -G(phi; anchor)`` rather than just its solution. Without them a reader can
+    reproduce the *residual* at the iterate but not the *correction*, which is the half that matters --
+    an attempt to identify beta by least squares from the dump alone was inconsistent across blocks
+    (beta ~2.7 fitted on the k rows against ~130 on the omega rows, 52% residual).
+    """
     global _STEP_LIMIT_DUMPS
     cap = float(cap)
     if cap >= DUMP_STEP_LIMIT or _STEP_LIMIT_DUMPS >= DUMP_STEP_LIMIT_KEEP:
         return
     path = HERE / "checkpoints" / f"step-limit-{_STEP_LIMIT_DUMPS:02d}.npz"
-    np.savez(path, cap=cap, state=np.asarray(phi), delta=np.asarray(delta))
+    np.savez(
+        path,
+        cap=cap,
+        state=np.asarray(phi),
+        delta=np.asarray(delta),
+        beta=_STEP_BETA,
+        anchor=_STEP_ANCHOR if _STEP_ANCHOR is not None else np.asarray(phi),
+    )
     _STEP_LIMIT_DUMPS += 1
-    print(f"[step-limit] cap {cap:.3e} -> {path.name}", flush=True)
+    print(f"[step-limit] cap {cap:.3e} beta {_STEP_BETA:.4g} -> {path.name}", flush=True)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -778,7 +814,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         rung_residuals.append(coupled_residuals(companion, engine, seed_state))
         return dict(
             continuation=engine,
-            precondition_step=refresh,
+            precondition_step=_recording_precondition(refresh) if DUMP_STEP_LIMIT else refresh,
         )
 
     options = (

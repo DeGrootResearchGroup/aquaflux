@@ -1328,13 +1328,36 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       strictly positive** — and the iterate sits **eight decades BELOW its own root**. Newton should be
       pushing `k` *up*.
 
-      The `k` system in that corner is **homogeneous and an M-matrix**: production, destruction and the
-      `Dirichlet(0)` wall term all vanish linearly at `k = 0`, so `k = 0` solves it exactly whenever the
-      neighbours are 0, and there is no negative root to reach. What kills the march is that
-      `R_k[12800] = −5.72e-20` against a residual vector whose largest entry is **1.71e+01** — the row is
-      at the **roundoff floor**, so the returned `dk = −2.90e-13` is solver noise, wrong in sign and 14×
-      larger than the exact local step. `positive_block_limit` then computes a purely **relative** room
-      `0.99·k/|dk|` and lets that one noise-driven cell veto the global step.
+      Production, destruction and the `Dirichlet(0)` wall term all vanish linearly at `k = 0`, so `k = 0`
+      solves the row exactly when the neighbours are 0. (⚠️ An earlier version called the corner `k` system
+      "**homogeneous and an M-matrix**" — the M-matrix half is **false**: `A_kk` carries **14 non-positive
+      diagonals**, min −9.03e-07.)
+
+      **Why the returned correction is wrong there, corrected — it is Krylov truncation, NOT roundoff.**
+      An adversarial re-derivation (independent colour-recovery of `A_kk`, verified row-wise against a
+      `jax.vjp` to 5e-16) settles the mechanism:
+      - `R_k[12800] = −5.72e-20` is **deterministic and 13 orders ABOVE its own row's floating-point
+        floor** (~1.3e-33). "Roundoff floor" was the wrong description.
+      - What is true is stronger: `|R_row| / ‖R_k‖₂ = 2.94e-16 ≈ machine epsilon`, and
+        `|R_row| / ‖R‖₂ = 2.15e-22`. **Any Krylov solve stopping on a relative-residual test would need
+        ~1e-22 relative accuracy in float64 to resolve this row — unreachable in principle, not merely
+        under-solved.** Measured: `‖A_kk·dk − rhs_k‖/‖rhs_k‖ = 1.0055`, i.e. the returned correction does
+        not reduce the k-block linear residual at all, and dumps 08/09/10 sit at a **bit-identical state**
+        yet return `dk[12800]` of −2.901e-13, −8.825e-14, −1.567e-14, an **18× spread**.
+      - The returned `dk` also provably violates its own row for *every* admissible shift: the row demands
+        `βD·(k_ref + 2.901e-13) = −3.958e-19`, and the left side is ≥ 0 while the right is < 0.
+      - ⚠️ **"14× larger than the exact local step" was wrong** — that froze the neighbours. Given the
+        dumped neighbours the row-consistent `dk` is −1.52e-13, still negative; it is the **exact k-BLOCK
+        solve** that comes out positive, at `+3.90e-10` (β = 0) through `+1.90e-15` (β = 10), i.e.
+        **positive at every β from 0 to 10** while the dumped value is negative and 3–5 orders off.
+
+      `positive_block_limit` then computes a purely **relative** room `0.99·k/|dk|` and lets that cell veto
+      the global step.
+      - **⚠️ THE MOST USEFUL LEAD OF THE LOT: at β ≥ 0.5 an exact k-block solve produces NO binding cell at
+        all (cap = 1.0).** Only at β ≤ 0.05 does an exact solve give a tight cap, and then on a *different*
+        cell (7.6e-14 at cell 2679). So the cap is **not intrinsic to the `k` equations at a healthy
+        shift** — it is a low-β-plus-inexact-solve artifact, which points back at the low-β conditioning
+        wall rather than at the closure.
 
       **The ratchet is proved by the mantissa.** `k[12800]` reads `3.0816e-22` at `step-limit-11` and
       `3.0816e-208 / e-210 / e-212` at checkpoints 120 / 121 / 122 — **the same five digits, 190 decades
