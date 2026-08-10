@@ -1352,8 +1352,12 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     wall faces (see the ranking above), and whether a single cell should be able to cap a global step at
     all. Neither is built; the second is a design question for the limiter, the first a possible defect.
 
-    **STILL TO RUN:** the fast gate and the coupled slow tier, against the CSR change and the march
-    changes.
+    **✅ GATES GREEN on all of the above** (CSR level operator, native trailing inverse, and both march
+    changes): fast gate **967 passed / 1 skipped** (899 unit `-n auto`, 68 integration `-n 1`), and the
+    coupled tier — `test_coupled_rans`, `test_coupled_amg`, `test_coupled_field_split`,
+    `test_reynolds_continuation`, 33 tests of which 18 are `slow` — **33 passed**. The coupled tier is
+    the one that matters for `stop_on_limit_stall`, since it is the only place a default-on march guard
+    could end a segment that used to run on.
 
   - **⚠️ (2026-08-09): making the JAX-native multigrid a FAITHFUL smoothed aggregation, so a
     comparison against PETSc GAMG means something. Uncommitted work sits on `claude/block-aware-aggregation`.**
