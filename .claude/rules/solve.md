@@ -1088,29 +1088,114 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     comparison against PETSc GAMG means something. Uncommitted work sits on `claude/block-aware-aggregation`.**
     Read this before touching `solve/multigrid.py`'s aggregation path.
 
-    **THE HEADLINE PROBLEM, and it invalidates every ours-vs-PETSc number taken before it was found:
-    the two are not built on the same matrix.** `AmgVCycle` calls `equilibrate_cell_major` before handing
-    the operator to PETSc, so GAMG coarsens a **unit-diagonal** matrix. `build_convection_hierarchy` does
-    **no equilibration**, so ours coarsens the raw block — on `bfs3d`'s `[k, ω]` slice the diagonal spans
-    **7.96e5×** (1.26e-06 … 1.0). Everything in a multigrid setup reads `D`: the prolongator smoothing,
-    the smoother damping, and both eigenvalue estimates. Consequence measured directly:
-    `σ_max(D⁻¹A)` is **4.37** on the raw block and **2.83e3** on the equilibrated one, so the standard
-    prolongator step `α = 1.4/σ_max` is ~0.32 for us and ~5e-4 for PETSc — i.e. *for PETSc the
-    prolongator smoothing is very nearly a no-op on this operator*, which is consistent with the shipped
-    bundle running `pc_gamg_agg_nsmooths = 0` and with plain aggregation measuring best here.
-    **Fix first, before anything else: equilibrate inside `build_convection_hierarchy`.**
+    **⚠️ THE EQUILIBRATION HYPOTHESIS WAS WRONG, AND MEASURING IT IS WHAT SETTLED THE COMPARISON
+    (2026-08-09).** The suspicion recorded here was that ours and PETSc's were not built on the same
+    matrix — `AmgVCycle` calls `equilibrate_cell_major` before handing the operator to PETSc, so GAMG
+    coarsens a **unit-diagonal** matrix, while `build_convection_hierarchy` coarsened the raw block,
+    whose diagonal on `bfs3d`'s `[k, ω]` slice spans **7.96e5×** (1.26e-06 … 1.0). That description of
+    the code is accurate, and the σ_max figures reproduce exactly (**4.365** raw against **2.832e3**
+    equilibrated, so the standard prolongator step `1.4/σ_max` is ~0.32 for us and ~5e-4 for PETSc).
+    The **inference** from it — that no ours-vs-PETSc number meant anything until it was fixed — does
+    not survive. `equilibrate=True` is now built and measured, and it makes our hierarchy **worse**:
+    8 → 11 cycles on the RCM arm, 5 → 10 on the plain-aggregation MIS arm.
 
-    **Reference numbers** — `bfs3d` `state-00057`, PC β 0.05, the `[k, ω]` block ALONE, GMRES to rtol
-    1e-8 on the TRUE residual, random right-hand side:
+    **Why it barely matters, and this is the part worth carrying: a symmetric equilibration is a
+    SIMILARITY TRANSFORM, so almost the whole setup is invariant under it.** `D̂⁻¹Â = S⁻¹(D⁻¹A)S`, so
+    both spectral estimates are unchanged; the damped-Jacobi smoother `x += (ω/λ)D⁻¹r` is unchanged
+    with them; and at `strength_threshold = 0` the aggregation reads only the sparsity pattern.
+    Measured on a badly scaled chain: the **fine** level's `lam_max` is 1.966 raw against 1.976
+    equilibrated (equal to power-iteration accuracy) while the **coarse** level's is 1.81 against
+    15.3. The one non-equivariant object is the **tentative prolongation** — a fixed 0/1 aggregate
+    indicator, which does not transform with the operator — so the coarse operator it builds is the
+    only thing rescaling actually changes. Everything the original note listed as reading `D` does
+    read `D`, but reads it in a way that cancels.
 
-    | preconditioner | cycles |
-    |---|---|
-    | PETSc GAMG + ILU(0) ×1 | **2** |
-    | PETSc GAMG + block Jacobi ×1 / ×2 / ×4 | 51 (fails) / 24 / **3** |
-    | ours, legacy aggregation, ×2 / ×4 / ×8 sweeps | 56 (fails) / 8 / **2** |
-    | ours, **MIS aggregation**, ×4 | **5** |
-    | ours, MIS + squared graph, ×4 | 10 |
-    | ours, MIS + "faithful" prolongator, ×4 / ×8 | 43 / 58 — **VOID**, see above |
+    **Reference numbers, re-measured on the current code** — `bfs3d` `state-00057`, PC β 0.05, the
+    `[k, ω]` block **ALONE** (46080 dofs, 4.20M nnz, 91/row), GMRES restart 15 to rtol 1e-8 on the
+    TRUE residual, random right-hand side; harness
+    `validation/bfs3d_openfoam/trailing_hierarchy_sweep.py`:
+
+    | preconditioner | coarse eq | cycles |
+    |---|---|---|
+    | PETSc GAMG, plain aggregation, ILU(0) ×4 | 432 | **1** |
+    | PETSc GAMG, plain aggregation, ILU(0) ×1 | 432 | **2** |
+    | **PETSc GAMG, plain aggregation, point-block Jacobi ×4** | **432** | **2** |
+    | ours, MIS, standard prolongator, ×8, EQUILIBRATED | 2150 | 4 |
+    | ours, MIS, plain, ×4, raw | 2150 | 5 |
+    | ours, RCM, symmetric-part prolongator, ×4, raw | 598 | 8 |
+    | ours, MIS, plain, ×4, EQUILIBRATED | 2150 | 10 |
+    | ours, RCM, symmetric-part prolongator, ×4, EQUILIBRATED | 598 | 11 |
+    | ours, MIS, standard prolongator, ×4, raw / EQUILIBRATED | 2150 | 44 / 44 — both fail (true rel 1.0) |
+
+    **Read the THIRD row, not the first — the like-for-like arm.** Comparing our Jacobi-class smoother
+    against PETSc's incomplete-LU measures the smoother, not the hierarchy, and an ILU sweep is a much
+    stronger and much less parallel unit of work.
+
+    **✅ THE GAP IS CLOSED: matched to PETSc's algorithm, our V-cycle equals it — 2 cycles against 2,
+    on a 436-equation coarse space against 432.** Two differences accounted for the whole of it, and
+    neither was scaling. Both were found by reading `agg.c`/`misk.c`/`rich.c` against our code rather
+    than by tuning:
+
+    | arm, `[k, ω]` block alone, matched smoother class | coarse eq | cycles |
+    |---|---|---|
+    | PETSc GAMG, plain aggregation, point-block Jacobi ×4 | 432 | **2** |
+    | ours, MIS ×4, damped, no aggressive level | 2150 | 5 |
+    | ours + **aggressive level** ×4, damped | **436** | 10 |
+    | ours + aggressive level ×8, damped | 436 | 3 |
+    | ours + aggressive level + **undamped** ×2 | 436 | 11 |
+    | **ours + aggressive level + undamped ×4** | **436** | **2** |
+
+    1. **The aggressive first level, which PETSc applies BY DEFAULT and we did not.**
+       `build_amg_vcycle` never sets `pc_gamg_aggressive_coarsening`, and GAMG's default is
+       `aggressive_coarsening_levels 1` with `use_aggressive_square_graph` — so on level 0 it coarsens
+       the **squared** graph. That is the entire 5× coarse-space difference: ours coarsened 21×, GAMG
+       107×, and with `aggressive_levels=1` ours lands at 436 equations against PETSc's 432.
+       **Note `use_aggressive_square_graph` and `aggressive_mis_k` are ALTERNATIVES, not a pair** —
+       `mis_k` is read only in the non-squared branch (`agg.c:1314`), so at the default the coarsener
+       is plain MIS at distance **1** on the squared graph.
+    2. **PETSc's level smoother is UNDAMPED.** `mg_levels_ksp_type richardson` at its default
+       `scale = 1.0` (`rich.c:277`) is `x += D⁻¹(b − Ax)`, while ours relaxed by `omega/lam_max` with
+       `omega = 0.8`. That is never a *smaller* factor than 0.8 and usually much smaller: `D⁻¹A` has
+       unit diagonal blocks, so its eigenvalues average one and `lam_max ≥ 1` always. Dividing by it
+       under-relaxes every mode except the extreme one. Worth **10 → 2 cycles** at four sweeps.
+       Reachable as `convection_multigrid_solve(..., omega=1.0, spectral_damping=False)`; the
+       spectral default is unchanged, because an undamped sweep is not a contraction standing alone —
+       it does not need to be under a coarse correction and an outer Krylov.
+
+    **Equilibration is NOT among the causes**, and the two that are were invisible until the sources
+    were read side by side. The earlier "ours is behind on both axes" reading was correct as a
+    measurement and wrong as a diagnosis: it described a hierarchy that was simply not running the
+    same algorithm.
+
+    **Still different, verified by reading the source, and NOT yet measured (ranked):**
+    - **PETSc's aggressive coarsening has a fix-up pass we lack.** After the squared-graph MIS,
+      `fixAggregatesWithSquare` (`agg.c:1032-1075`) walks each selected root and steals back every
+      distance-1 neighbour in the *unsquared* graph, so a member two hops from its root is re-attached
+      to one it actually couples to. Aggregate count unchanged, aggregate *shape* repaired. This is
+      the most likely remaining quality difference.
+    - **Graph construction order.** PETSc takes `|A_ij|` and *then* symmetrizes (`G + Gᵀ`, then
+      `D^{-1/2} G D^{-1/2}`); we take the symmetric part `(A + Aᵀ)/2` and then `abs`. On a strongly
+      nonsymmetric operator an edge with `A_ij ≈ −A_ij` **cancels and disappears from our graph
+      entirely**, which cannot happen in PETSc — a pattern difference, not just a weight one.
+    - **The stopping rule is a different quantity.** PETSc coarsens until the grid is under
+      `coarse_eq_limit`; we stop at `max_levels` (2), at which point `max_coarse` can never fire. So
+      the two knobs are *not* equivalents and must not be quoted as matched.
+    - **Strength-of-connection semantics differ** — PETSc thresholds absolutely on the
+      diagonally-scaled graph (Vanek), we use the row-max-relative classical criterion. Inert at
+      threshold 0, so it affects no measurement here, but the recorded threshold arms on the two sides
+      are not comparable.
+    - **Tentative prolongation.** PETSc orthonormalizes each aggregate's block by QR (`agg.c:690-714`),
+      giving unit-2-norm columns where ours are 0/1 — i.e. `P_ours = P_petsc · diag(√|agg|)`. For a
+      2-level cycle with an exact coarse solve this is **provably inert**: `P A_c⁻¹ Pᵀ` is invariant
+      under a column rescaling. It starts to matter with inexact or deeper coarse levels, and for the
+      conditioning of our dense `pinv` coarse solve.
+    - **Singletons.** PETSc drops a neighbourless vertex from the coarse space entirely (zero row in
+      `P`, left to the smoother); we give it its own aggregate.
+
+    **What equilibration IS worth (keep it, default off):** the coarse solve is a dense pseudo-inverse,
+    and its singular-value truncation is what a badly scaled operator defeats first — on the chain
+    fixture the one-level direct solve goes from a 1e-9 true residual to 1e-13. That is a real second
+    benefit, pinned by a unit test, and unrelated to the coarsening.
 
     **What is BUILT and measured good (keep):**
     - **Nodal (block-aware) aggregation** — `_cell_graph` collapses the dof graph to cell connectivity
@@ -1127,12 +1212,28 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     - `PerFieldNativeInverse` / `NodalNativeInverse` in `solve/field_split.py`, both transposable in
       closed form and fixed linear operators, so adjoint-legal. Neither is wired into production.
 
+    - **`prolongation_smoothing` is its own parameter, no longer welded to `mis_aggregation`.** The old
+      flag chose the aggregation *and* the prolongator formula together, so "MIS with and without
+      prolongator smoothing" was not expressible and the two effects could not be separated — which is
+      how the smoothed prolongator came to be recorded as void when what it actually needs is more
+      smoother sweeps. `"symmetric-part"` (default, the historical formula), `"standard"` (the textbook
+      σ_max form on the true operator and scalar diagonal), `"none"` (plain aggregation, what the
+      shipped PETSc bundle runs). An unknown value raises.
+
     **What is BUILT and measured BAD (revert or gate):**
-    - The **prolongator branch** under `mis_aggregation` — void, calibrated for an equilibrated operator
-      and applied to a raw one. Revert it or gate it behind equilibration.
-    - **Graph squaring** (`_square_graph`, `G·G`) — 5 → 10 cycles at this size. It exists to bound the
-      LEVEL COUNT on large meshes, not to improve quality; at 23k cells the plain graph already coarsens
-      77×, and squaring over-coarsens to 106×. Make it conditional on mesh size, as GAMG does.
+    - The **standard prolongator at 4 sweeps** fails outright (44 cycles, true rel 1.0) — raw *and*
+      equilibrated, so this is not the scaling. At **8 sweeps equilibrated it is the best native arm
+      (4 cycles)**, so it is under-smoothed rather than wrong: the earlier "VOID / much worse" reading
+      conflated a smoothing deficit with a broken formula. Treat sweeps as part of that arm's
+      specification, never quote it at a single sweep count.
+    - ~~**Graph squaring** — 5 → 10 cycles, "exists to bound the level count, not to improve
+      quality; squaring *over*-coarsens".~~ **WRONG on every count, and it was the single thing
+      holding the comparison open.** Squaring the graph on the first level is not a size knob, it is
+      GAMG's *default coarsening* (`aggressive_coarsening_levels 1`), and its 106× ratio is not
+      over-coarsening — it is PETSc's 107×, i.e. the target. The 5 → 10 reading is real but was taken
+      with the damped smoother; at the matched undamped smoother the same arm is **2 cycles**. A knob
+      measured harmful in one configuration was recorded as harmful in general, and that closed off
+      the one change that mattered.
 
     **Two corrections to older entries in this file, both of which cost real time:**
     - The recorded *"the builders refuse the `[k,ω]` slice because its diagonal is negative from the live
@@ -1146,18 +1247,44 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       produced a plausible 1.36× blended march estimate. **Measure a block's preconditioner on the block
       alone first**, then in situ.
 
+    - **A THIRD correction, from this round: an arm quoted at one smoother-sweep count is not a
+      result about the method.** The standard prolongator was written down as "much worse" from its
+      4-sweep numbers; at 8 it is the best native arm. Two of the three wrong conclusions in this
+      section came from holding one axis fixed while attributing the outcome to another.
+
     **Also established:** block Jacobi is a perfectly good smoother class here given enough sweeps (PETSc
-    ×4 = 3 cycles against ILU ×1's 2), and on CPU the two cost the *same* per apply (102 vs 101 ms) — so
+    ×4 = 2 cycles against ILU ×1's 2), and on CPU the two cost the *same* per apply (102 vs 101 ms) — so
     the penalty for a GPU-friendly smoother is quality, buyable with sweeps, not cost. The remaining
     question is a GPU one and **cannot be measured in the current environment** (CPU-only JAX).
 
+    **⚠️ COMPARE LIKE WITH LIKE, or the arm measures the smoother and gets attributed to the hierarchy
+    (binding for this campaign).** Our multigrid has only Jacobi-class smoothers; PETSc's default here
+    is an incomplete-LU sweep, which is both far stronger and the least parallelizable piece in it. An
+    ours-vs-PETSc table whose PETSc row is ILU therefore cannot say anything about the *coarsening*,
+    which is the thing under development. Every such table must carry a **matched-smoother** row —
+    PETSc `pbjacobi` against our block Jacobi, at the same sweep count and the same aggregation — and
+    that row is the one to quote. The ILU rows stay as the incumbent's absolute bar, not as the
+    comparison.
+
+    **⚠️ HOW THE GAP WAS ACTUALLY FOUND, because the method generalizes and the alternative cost
+    days.** Three rounds of tuning our own knobs (equilibration, prolongator variants, sweep ladders)
+    moved nothing and produced two wrong write-ups. What worked was **an independent agent reading
+    `agg.c` / `misk.c` / `rich.c` against `multigrid.py` and reporting differences with citations on
+    both sides** — it found the undamped Richardson scale, the default aggressive level, and the
+    fix-up pass in one pass, none of which was visible from any measurement we had. When a
+    reimplementation of a *published, available* algorithm underperforms it, read the source before
+    running another sweep; and do not describe a port as faithful until something has checked it
+    line by line, which is exactly the claim that was wrong here.
+
     **NEXT STEPS, in order:**
-    1. **Equilibrate in `build_convection_hierarchy`** so ours and PETSc's coarsen the same matrix. Until
-       this lands no ours-vs-PETSc number is meaningful.
-    2. Re-measure MIS with and without prolongator smoothing on the equilibrated operator.
-    3. Then, if still short: sparse-LU coarse solve (ours is a dense `pinv`), Chebyshev with the SA-cached
-       eigenvalue bounds, and mesh-size-conditional graph squaring.
-    4. **Scalability, independent of all the above and unaddressed:** the convection hierarchy is capped
+    1. **Port `fixAggregatesWithSquare`** (`agg.c:1032-1075`) — the remaining known aggregation
+       difference, and the one aimed at coarse-space quality rather than size.
+    2. **Fix the graph construction order** to `abs`-then-symmetrize, so a nonsymmetric edge cannot
+       cancel itself out of the coarsening graph.
+    3. **Make the stopping rule a coarse-size limit**, as GAMG's is, rather than a level cap.
+    4. Then, if still short: sparse-LU coarse solve (ours is a dense `pinv`), QR-orthonormalized
+       tentative columns (inert at 2 levels, not deeper), and Chebyshev with the SA-cached bounds.
+    5. **Scalability, independent of all the above and unaddressed:** the convection hierarchy is capped
        at 2 levels (`_CONVECTION_LEVELS`) with a **dense `pinv`** coarse solve. At a 77× ratio that is
        ~26k coarse dofs and a 5.4 GB pinv at 1M cells — infeasible. Depth now *builds* (3 levels, no
        refusal) via the new `max_levels` argument, so the fix is cheap once the method itself works.

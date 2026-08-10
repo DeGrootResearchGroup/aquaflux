@@ -794,3 +794,161 @@ def test_refresh_air_hierarchy_rejects_a_mismatched_operator() -> None:
     cold = build_air_hierarchy(_chain_operator(600, 0.01, np.ones(599)))
     with pytest.raises(ValueError, match="refresh_air_hierarchy"):
         refresh_air_hierarchy(cold, _chain_operator(400, 0.01, np.ones(399)))
+
+
+def _badly_scaled_chain(n: int) -> sp.csr_matrix:
+    """A chain convection-diffusion operator whose diagonal spans several orders of magnitude.
+
+    The scale comes from a symmetric row/column weighting, so the *conditioning of the underlying
+    problem* is untouched and only the scale it is presented in changes — which is exactly the
+    situation equilibration exists for, and is what the coupled turbulence block looks like.
+    """
+    boundary = np.zeros(n)
+    boundary[0] = boundary[-1] = 1.0  # both ends pinned: a chain with no boundary term is singular
+    # Moderate cell Peclet, so the Galerkin coarse operator stays positive-diagonal and these tests
+    # measure the rescaling rather than the separate two-level convection limit.
+    base = convection_diffusion_operator(
+        np.arange(n - 1),
+        np.arange(1, n),
+        2.0,
+        n,
+        flux=np.linspace(1.0, 5.0, n - 1),
+        boundary_diagonal=boundary,
+    )
+    weight = sp.diags(np.exp(np.linspace(-4.0, 4.0, n)))
+    return (weight @ base @ weight).tocsr()
+
+
+def test_equilibration_is_off_by_default_and_carries_no_factor() -> None:
+    """The default build is the unscaled one, and says so rather than carrying an identity factor.
+
+    A hierarchy that always carried a factor would make ``equilibration is None`` untestable and would
+    silently add two vector multiplies to every shipped V-cycle apply.
+    """
+    hierarchy = build_convection_hierarchy(_badly_scaled_chain(200))
+    assert hierarchy.equilibration is None
+
+
+def test_equilibration_rescales_the_coarsened_operator_to_a_unit_diagonal() -> None:
+    """The levels really are built on ``D A D``: the fine diagonal comes out unit-magnitude.
+
+    This is the whole point of the option — every spectral estimate, the smoother damping and the
+    prolongation smoothing read that diagonal — so it is asserted on the level rather than inferred
+    from the solve.
+    """
+    a = _badly_scaled_chain(200)
+    span = np.abs(a.diagonal()).max() / np.abs(a.diagonal()).min()
+    assert span > 1e5, f"the fixture must be badly scaled to test anything, span {span:.2e}"
+
+    hierarchy = build_convection_hierarchy(a, equilibrate=True)
+    assert hierarchy.equilibration is not None
+    assert np.allclose(np.abs(np.asarray(hierarchy.levels[0].diagonal)), 1.0)
+
+
+def test_equilibration_solves_the_original_operator_only_more_accurately() -> None:
+    """``x = D M(D b)`` inverts ``A`` itself, and on a badly scaled operator it inverts it *better*.
+
+    The rescaling is a similarity transform rather than an approximation, so where the hierarchy is
+    exact — ``max_coarse`` above the problem size makes level 0 a direct solve — both paths must
+    reproduce ``A x = b``. That is what licenses treating the factor as bookkeeping the hierarchy owns
+    rather than a change of preconditioner.
+
+    The accuracy gap is asserted too, because it is a second reason to rescale that has nothing to do
+    with the coarsening: the direct coarse solve is a dense pseudo-inverse, and its singular-value
+    truncation is what a badly scaled operator defeats first.
+    """
+    n = 60
+    a = _badly_scaled_chain(n)
+    b = jnp.asarray(np.random.default_rng(0).normal(size=n))
+
+    def residual(equilibrate):
+        hierarchy = build_convection_hierarchy(a, equilibrate=equilibrate, max_coarse=n)
+        assert len(hierarchy.levels) == 1  # a single direct level, so the cycle is an exact solve
+        x = np.asarray(convection_multigrid_solve(hierarchy, b, cycles=1))
+        return np.linalg.norm(a @ x - np.asarray(b)) / np.linalg.norm(np.asarray(b))
+
+    raw, scaled = residual(False), residual(True)
+    assert raw < 1e-6, f"the unscaled direct solve should still invert A, got {raw:.3e}"
+    assert scaled < 1e-10, f"the scaled direct solve should be near-exact, got {scaled:.3e}"
+    assert scaled < raw
+
+
+def test_an_equilibrated_cycle_is_a_fixed_linear_operator_and_transposes() -> None:
+    """The scaled apply stays linear and transposable — the adjoint and the outer Krylov both need it.
+
+    Scaling composes two fixed diagonal maps with the V-cycle, so neither property should be at risk;
+    both are asserted because losing either would invalidate every gradient taken through a solve this
+    preconditions, silently.
+    """
+    n = 120
+    hierarchy = build_convection_hierarchy(_badly_scaled_chain(n), equilibrate=True)
+
+    def cycle(b):
+        return convection_multigrid_solve(hierarchy, b, cycles=2)
+
+    rng = np.random.default_rng(0)
+    u, v = (jnp.asarray(rng.normal(size=n)) for _ in range(2))
+    assert np.allclose(
+        np.asarray(cycle(2.0 * u + 3.0 * v)), np.asarray(2.0 * cycle(u) + 3.0 * cycle(v))
+    )
+
+    transpose = jax.linear_transpose(cycle, jnp.zeros(n, dtype=jnp.float64))
+    assert np.isclose(float(v @ cycle(u)), float(transpose(v)[0] @ u))
+
+
+def test_plain_prolongation_keeps_the_tentative_injection() -> None:
+    """``prolongation_smoothing="none"`` freezes the piecewise-constant prolongation unsmoothed.
+
+    Plain aggregation is a real choice, not a degenerate one — it is what the shipped PETSc bundle runs
+    on this saddle — so the unsmoothed branch is pinned by the property that identifies it: every
+    prolongation entry is exactly one, where a smoothed operator spreads them.
+    """
+    a = _chain_operator(200, 0.5, np.ones(199))
+    plain = build_convection_hierarchy(a, mis_aggregation=True, prolongation_smoothing="none")
+    smoothed = build_convection_hierarchy(
+        a, mis_aggregation=True, prolongation_smoothing="standard"
+    )
+
+    assert np.allclose(np.asarray(plain.levels[0].p_val), 1.0)
+    assert not np.allclose(np.asarray(smoothed.levels[0].p_val), 1.0)
+
+
+def test_an_unknown_prolongation_smoothing_is_refused() -> None:
+    """A misspelled strategy must raise, not silently fall through to a default nobody chose."""
+    with pytest.raises(ValueError, match="prolongation_smoothing"):
+        build_convection_hierarchy(
+            _chain_operator(50, 0.5, np.ones(49)), prolongation_smoothing="smoothed"
+        )
+
+
+def test_undamped_smoothing_relaxes_further_than_the_spectral_default() -> None:
+    """``spectral_damping=False`` makes ``omega`` the absolute relaxation, and that is the stronger one.
+
+    ``D^-1 A`` has a unit diagonal, so its eigenvalues average one and ``lambda_max >= 1`` always —
+    the spectral default therefore never relaxes by more than ``omega`` and usually by far less. The
+    undamped sweep is what an equivalently-configured PETSc GAMG runs (``richardson`` at its default
+    scale of 1), and matching it is what closed the measured gap on the coupled turbulence block, so
+    the distinction is pinned rather than left to the two docstrings to agree about.
+    """
+    n = 400
+    hierarchy = build_convection_hierarchy(_badly_scaled_chain(n))
+    assert float(hierarchy.levels[0].lam_max) >= 1.0
+
+    b = jnp.asarray(np.random.default_rng(0).normal(size=n))
+    damped = convection_multigrid_solve(hierarchy, b, cycles=1, sweeps=4)
+    undamped = convection_multigrid_solve(
+        hierarchy, b, cycles=1, sweeps=4, omega=1.0, spectral_damping=False
+    )
+    assert not np.allclose(np.asarray(damped), np.asarray(undamped))
+
+    # The default is recovered exactly by asking for the same factor the other way round, which is
+    # what makes `spectral_damping` a change of units rather than a change of smoother.
+    restated = convection_multigrid_solve(
+        hierarchy,
+        b,
+        cycles=1,
+        sweeps=4,
+        omega=0.8 / float(hierarchy.levels[0].lam_max),
+        spectral_damping=False,
+    )
+    assert np.allclose(np.asarray(damped), np.asarray(restated))

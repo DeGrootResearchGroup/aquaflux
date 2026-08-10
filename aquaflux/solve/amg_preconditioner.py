@@ -40,11 +40,8 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .ilut_preconditioner import (
-    cell_major_permutation,
-    equilibrate_cell_major,
-    equilibration_scale,
-)
+from .frozen_operator import equilibration_scale
+from .ilut_preconditioner import cell_major_permutation, equilibrate_cell_major
 from .refresh_timing import PhaseTimer
 
 # A process-unique options prefix per V-cycle, so several preconditioners' PETSc options never collide.
@@ -485,7 +482,7 @@ class ShiftedCellMajorOperator:
     This precomputes the pattern-dependent part once — which base nonzero feeds each output nonzero, where
     the diagonal entries sit, and the cell-major CSR structure — so a refresh is one gather plus an
     ``O(n_dofs)`` diagonal add plus a symmetric scale, written into a **preallocated** buffer. The scaling
-    rule itself is :func:`~aquaflux.solve.ilut_preconditioner.equilibration_scale`, shared with the generic
+    rule itself is :func:`~aquaflux.solve.frozen_operator.equilibration_scale`, shared with the generic
     :func:`~aquaflux.solve.ilut_preconditioner.equilibrate_cell_major` that serves an arbitrary matrix;
     only the data movement differs, and the two agree to the last bit (pinned by a unit test).
 

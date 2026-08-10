@@ -49,7 +49,8 @@ unit tests. The surface is three groups:
   cost. It is an accelerator, not a solver: a real `ImplicitNewtonSolver` solve still produces the
   result.
 * **Frozen algebraic multigrid** — the operator assembler `convection_diffusion_operator` (plus
-  `decouple_dof` for a closed-domain pressure pin), the hierarchy builders
+  `decouple_dof` for a closed-domain pressure pin and `symmetrically_equilibrate` for the
+  square-root-diagonal rescaling a factorization or a coarsening may want), the hierarchy builders
   `build_smoothed_hierarchy` / `build_convection_hierarchy` / `build_air_hierarchy`, and their
   matching fixed-cycle applies. Callers assemble an operator, build a hierarchy once off the jit
   path, and apply it as a frozen matrix-free V-cycle preconditioner.
@@ -65,7 +66,11 @@ from .continuation import (
     ShiftTerm,
     StepAcceptance,
 )
-from .frozen_operator import convection_diffusion_operator, decouple_dof
+from .frozen_operator import (
+    convection_diffusion_operator,
+    decouple_dof,
+    symmetrically_equilibrate,
+)
 from .amg_preconditioner import AmgVCycle, MonolithicAmgPreconditioner, build_amg_vcycle
 from .field_split import (
     NodalNativeInverse,
@@ -220,4 +225,5 @@ __all__ = [
     "restart_cycles",
     "smoothed_multigrid_solve",
     "solve_linear",
+    "symmetrically_equilibrate",
 ]
