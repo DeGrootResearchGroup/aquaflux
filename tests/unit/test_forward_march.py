@@ -10,6 +10,8 @@ hit (the property without which an eager march would recompile its linear solve 
 
 from __future__ import annotations
 
+import itertools
+
 import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax
@@ -913,6 +915,69 @@ def test_the_alpha_trigger_fires_whatever_collapsed_the_step_length() -> None:
     capped = _outcome(jnp.zeros((1,)), 3, alpha=0.001, binding=0.001)  # the cap chose it
     assert _escalation_reason(search, jnp.asarray(1.0), 1.0, **kwargs) == "alpha"
     assert _escalation_reason(capped, jnp.asarray(1.0), 1.0, **kwargs) == "alpha"
+
+
+def _recorded(rows):
+    """Step reports from ``(step, residual_norm, binding_limit)`` triples off a real march log."""
+    return [
+        StepReport(
+            step=n, cycles=0, residual_norm=r, residual_ratio=0.0, alpha=0.0, binding_limit=cap
+        )
+        for n, r, cap in rows
+    ]
+
+
+def _first_bailout(history, stall_limit=3):
+    """The step a march with ``stop_on_limit_stall=stall_limit`` would end on, or ``None``."""
+    from aquaflux.solve.march import _limit_collapsing
+
+    run = 0
+    for previous, report in itertools.pairwise(history):
+        run = run + 1 if _limit_collapsing(previous, report) else 0
+        if run >= stall_limit:
+            return report.step
+    return None
+
+
+def test_the_stall_bailout_fires_on_a_recorded_lock_up() -> None:
+    """The rung this guard exists for: a cap collapsing 100x per step at a frozen residual.
+
+    Verbatim from a coupled RANS march (`bfs3d`, native trailing inverse, rung 2), which then ran
+    ninety-six more steps exactly like the last one before its budget ended it.
+    """
+    history = _recorded(
+        [
+            (24, 1.123e-01, 6.94e-01),
+            (25, 7.567e-02, 3.76e-03),
+            (26, 7.316e-02, 1.00e-05),
+            (27, 7.316e-02, 1.95e-06),
+            (28, 7.316e-02, 1.95e-08),
+            (29, 7.316e-02, 1.95e-10),
+            (30, 7.316e-02, 1.95e-12),
+        ]
+    )
+    assert _first_bailout(history) == 29
+
+
+def test_the_stall_bailout_spares_a_recorded_excursion_that_recovers() -> None:
+    """The false positive that a one-sided "made no progress" rule fires on, and must not.
+
+    Verbatim from a march whose rung went on to converge to 4.994e-06: three consecutive constraint-bound
+    steps with a narrowing cap and a *rising* residual. A rising residual means the step did something --
+    a pseudo-transient path is a march in pseudo-time, not a descent method -- and the recovery at step
+    22 is what it was doing. Only a step that changes nothing is a stall.
+    """
+    history = _recorded(
+        [
+            (18, 1.293e-01, 1.0),
+            (19, 1.310e-01, 9.83e-01),
+            (20, 1.335e-01, 9.28e-01),
+            (21, 1.489e-01, 2.53e-01),
+            (22, 9.241e-02, 9.80e-01),
+            (23, 8.230e-02, 8.42e-01),
+        ]
+    )
+    assert _first_bailout(history) is None
 
 
 def test_a_constraint_bound_step_is_only_a_stall_when_it_narrows_and_gains_nothing() -> None:

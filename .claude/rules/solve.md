@@ -1200,11 +1200,33 @@ Governed by the root `CLAUDE.md` Engineering Principles.
        escalation stays as it was. `_escalation_reason` now carries a comment saying why the gate is not
        there, so the next reader does not re-derive it.
     2. `forward_march(stop_on_limit_stall=3)` (**a new default-on guard**) ends the segment after three
-       consecutive steps that are constraint-bound, non-widening, and not reducing the residual
-       (`_limit_collapsing`). All three conditions are load-bearing: at rung-2 steps 16→17 the cap was in
-       play and the residual rose, so a residual-only rule fires on an ordinary non-monotone pair; the
-       cap *narrowing* is what separates a lock-up from a march working productively along a constraint.
-       The observed false-positive run length is 2, hence 3. `None` disables it.
+       consecutive steps that are constraint-bound, non-widening, and **changed the residual by less
+       than 1e-3 relative, in either direction** (`_limit_collapsing`).
+
+       **⚠️ The residual half of that predicate was wrong twice, and the fix for the first attempt caused
+       the second. Do not re-derive it from the failing run alone.**
+       - *"the residual did not fall"* — **never fires.** A locked-up step is not a bit-exact no-op: it
+         still moves the state by `α·δ`, so at a cap of ~1e-6 the residual genuinely falls, by ~1e-6
+         relative, and the counter resets every step. Shipped, and observed doing nothing on a march that
+         had otherwise reproduced the lock-up step for step (it reached step 31 and was still going).
+       - *"the residual did not fall by 0.1%"* — **fires on a converging rung.** `march-20260810-094635`
+         rung 2 steps 19–21 ran caps 0.983 → 0.928 → 0.253 with the residual climbing
+         1.293e-01 → 1.335e-01 → 1.489e-01, then recovered to 9.241e-02 and converged to 4.994e-06. A
+         *rising* residual means the step did something; a pseudo-transient path is a march in pseudo-time,
+         not a descent method. A one-sided rule ends that rung at its worst moment.
+       - **The failure is a step that changes NOTHING, so the test is two-sided.** The two populations sit
+         orders apart: null steps move the residual by ~1e-6 relative, productive ones by percents.
+
+       **Validated by replaying the predicate over every march log on disk** — `march_stall_replay.py`,
+       kept in `validation/bfs3d_openfoam/`, because a march that recovers looks exactly like one that does
+       not until it does, so a candidate rule cannot be judged on the run that motivated it. Across 11 logs
+       / 22 rungs it fires on exactly the three locked-up rungs (090711 rung 2 at step 21, cutting a
+       73-step stall; 130032 rung 2 at step 29, cutting 96) and on **nothing** that went on to converge —
+       including the shipped `x_r/h` 8.36 baseline rung. Both cases are pinned as unit tests with the real
+       recorded numbers inlined, since the logs themselves are not tracked.
+
+       The cap *narrowing* is the third condition and is what separates a lock-up from a march working
+       productively along a constraint. `None` disables the guard.
 
     The march now fails fast and honestly instead of grinding; **what drives `k` to the boundary in those
     cells is still open**, and the global-scalar-cap design (one cell throttling all 23040) is the thing
