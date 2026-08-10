@@ -1140,12 +1140,23 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     - **A capped step is not a bad step.** Raw and equilibrated arms differed in α at rung-2 step 16
       (1.000 against 0.579) and reached an **identical** residual, 1.271e-01. Attributing the α
       difference to preconditioner quality was wrong.
-    - **β escalation cannot fix a constraint-bound step, and makes it worse.** Across the escalation
-      ladder at step 25 the limit went **3.76e-03 → 1.00e-05** as β went 0.47 → 1.87 → 16.0 (the cap).
-      More damping shortens the step without moving `k` off the boundary. The march then grinds at the
-      cap indefinitely — ~100 dead steps before it was killed. **`retry_on_alpha` escalates on a
-      collapsed α without asking whether `binding_limit < 1`**, which is exactly the distinction
-      `binding_limit` was added to make. A constraint-bound step should stop escalating.
+    - **~~β escalation cannot fix a constraint-bound step, and makes it worse.~~ ⚠️ WITHDRAWN
+      2026-08-10 — this bullet was wrong twice over, and acting on it would have caused a regression.**
+      It read "across the escalation ladder at step 25 the limit went 3.76e-03 → 1.00e-05 as β went
+      0.47 → 1.87 → 16.0", and concluded that a constraint-bound step should stop escalating. Both
+      halves fail:
+      1. **The numbers are not a ladder.** 0.47/3.76e-03 is step **25**'s accepted attempt; 1.87 and
+         16.0 with 1.00e-05 are steps **26** and **27**. The per-attempt caps *within* a step are never
+         written to the log (only the accepted attempt's `limit` is), so the log cannot show what
+         escalation does to a cap, and this compared three different steps as though it did.
+      2. **The mechanism runs the other way.** More damping shrinks the correction, so it *widens*
+         `room = k/|dk|`. The measured evidence is already in this file: the single escalation of an
+         entire `bfs3d` march fired at step 51, whose cap was **4.37e-10** — constraint-bound — and it
+         was worth **8 steps and 199 s** end to end. Gating `retry_on_alpha` on `binding_limit == 1`
+         would have suppressed exactly that one useful escalation.
+
+      **What damping genuinely cannot do is un-pin a cell already ON the boundary**, and that is the
+      real rung-2 failure — see the lock-up section immediately below, which is what replaced this.
 
     **⚠️ (2026-08-10, LATER) THE RUNG-2 DEATH IS A FRACTION-TO-THE-BOUNDARY LOCK-UP, AND β ESCALATION
     IS A SYMPTOM RATHER THAN THE CAUSE.** Read this before acting on the two bullets above; it does not
@@ -1168,9 +1179,13 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     binding cell at 1% of its `k`, so the next step's room is a hundredth of this one's — forever, for
     as long as the direction keeps pointing at the boundary there. Ninety-six consecutive steps, residual
     frozen to every reported digit, **zero** Krylov cycles, β pinned at its 16.0 ceiling. So:
-    - **β is irrelevant from step 27 on.** It is at the cap and the retries cost nothing; the wall was the
-      ~96 null steps until `MAX_STEPS`. Suppressing the escalation is right but does **not** unblock the
-      march on its own.
+    - **β is irrelevant from step 27 on, and that is a statement about a PINNED cell, not about damping.**
+      Damping widens a fraction-to-the-boundary cap (a smaller correction means more room) — visible even
+      here, in that the cap falls only 5.1× across 26→27 while β is still climbing, against the τ rule's
+      100× once β sits at its ceiling. What it cannot do is recover a cell whose `k` is already ~0: the
+      room is then small however small the correction gets. **Do not read this as "stop escalating on a
+      constraint-bound step"** — that was tried, and it deletes the one escalation on this case that is
+      measured to pay (step 51, cap 4.37e-10, 8 steps and 199 s).
     - **Nothing in the ordinary stopping tests can see this.** The state is finite, the residual is finite,
       and the tolerance is simply never reached — so the segment spends its whole budget.
     - **⚠️ Extracting this from a march log needs per-step BLOCKS, not two independent `findall`s.** The
@@ -1179,9 +1194,11 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       read step 25's cap as 1.95e-08 instead of 3.76e-03 — a three-step shift, invisible because the
       shifted table is just as smooth. Split on the summary-block delimiter and parse within each block.
 
-    **SHIPPED in response (both agreed with the user before the change):**
-    1. `_escalation_reason` no longer returns `"alpha"` when `binding_limit < 1` — only a step length the
-       **descent test** collapsed is escalated.
+    **SHIPPED in response:**
+    1. ~~`_escalation_reason` no longer returns `"alpha"` when `binding_limit < 1`.~~ **Built, then
+       REVERTED the same day** — it is a regression, for the reason in the withdrawn bullet above. The
+       escalation stays as it was. `_escalation_reason` now carries a comment saying why the gate is not
+       there, so the next reader does not re-derive it.
     2. `forward_march(stop_on_limit_stall=3)` (**a new default-on guard**) ends the segment after three
        consecutive steps that are constraint-bound, non-widening, and not reducing the residual
        (`_limit_collapsing`). All three conditions are load-bearing: at rung-2 steps 16→17 the cap was in

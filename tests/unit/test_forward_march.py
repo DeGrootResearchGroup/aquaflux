@@ -897,13 +897,14 @@ def test_no_escalation_reason_when_neither_threshold_is_set() -> None:
     )
 
 
-def test_the_alpha_trigger_ignores_a_constraint_bound_step() -> None:
-    """A collapsed α that an injected cap decided is NOT an escalation reason.
+def test_the_alpha_trigger_fires_whatever_collapsed_the_step_length() -> None:
+    """A constraint-bound collapse escalates too -- gating this on ``binding_limit`` is a regression.
 
-    The two causes of a small α call for opposite responses, which is why ``binding_limit`` is carried
-    out of a step at all. More damping cannot relieve a positivity cap -- measured on a coupled RANS
-    march, escalating drove β to its ceiling while the cap fell two further orders of magnitude, so
-    every doubling made the admissible step shorter. Only the descent-test collapse is escalated.
+    Tempting and wrong: more damping shrinks the correction, so it *widens* a fraction-to-the-boundary
+    cap rather than tightening it. The one escalation of an entire coupled RANS march fired at a step
+    whose cap was 4.37e-10, and doubling the shift there was worth 8 steps and 199 s end to end. The
+    failure damping cannot fix is a cell already pinned on the boundary, and that is caught by the
+    stall bailout below, not here.
     """
     from aquaflux.solve.march import _escalation_reason
 
@@ -911,7 +912,7 @@ def test_the_alpha_trigger_ignores_a_constraint_bound_step() -> None:
     search = _outcome(jnp.zeros((1,)), 3, alpha=0.001)  # binding 1.0: the ladder chose this length
     capped = _outcome(jnp.zeros((1,)), 3, alpha=0.001, binding=0.001)  # the cap chose it
     assert _escalation_reason(search, jnp.asarray(1.0), 1.0, **kwargs) == "alpha"
-    assert _escalation_reason(capped, jnp.asarray(1.0), 1.0, **kwargs) is None
+    assert _escalation_reason(capped, jnp.asarray(1.0), 1.0, **kwargs) == "alpha"
 
 
 def test_a_constraint_bound_step_is_only_a_stall_when_it_narrows_and_gains_nothing() -> None:

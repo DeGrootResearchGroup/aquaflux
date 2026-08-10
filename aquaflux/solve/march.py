@@ -491,9 +491,6 @@ def _escalation_reason(
     a step that met it discards a good iterate and replaces it with a shorter one, whatever it cost and
     however hard the ladder had to work to get there.
 
-    A step length collapsed by an injected **constraint** is not one of the three, and reading it as one
-    is worse than useless -- see the ``binding_limit`` test below.
-
     Returns the reason as a short string (for the march's ``on_retry`` seam), so the decision and its
     explanation cannot disagree. ``None`` from both thresholds disables escalation entirely, which is
     the default and leaves a diverged step to the tight-Krylov retry as before.
@@ -529,18 +526,17 @@ def _escalation_reason(
     # says nothing about conditioning.
     if retry_on_cycles is not None and int(outcome.max_inner_cycles) > retry_on_cycles:
         return "cycles"
-    # ...and step length is a reason only when the DESCENT TEST is what collapsed it. `binding_limit`
-    # below one means an injected constraint, not the search, decided the length -- the direction is
-    # fine and simply cannot be followed that far. More damping does not relieve a constraint; it
-    # shortens the step, which is what the cap already did. Measured on a coupled RANS march whose
-    # k-positivity cap had bound: escalating drove beta 0.47 -> 1.87 -> 16.0 (its ceiling) while the cap
-    # went 3.76e-03 -> 1.00e-05, so every doubling made the admissible step SHORTER. Telling those two
-    # causes apart is the whole reason `binding_limit` is carried out of a step.
-    if (
-        retry_on_alpha is not None
-        and float(outcome.alpha) <= retry_on_alpha
-        and float(outcome.binding_limit) >= 1.0
-    ):
+    # ...and step length is a reason WHATEVER collapsed it, including an injected constraint. That is
+    # not an oversight, and gating it on `binding_limit == 1` would be a regression: more damping
+    # shrinks the correction, so it *widens* a fraction-to-the-boundary cap rather than tightening it.
+    # Measured -- the one escalation of an entire coupled RANS march fired at a step whose cap was
+    # 4.37e-10, and doubling the shift there was worth 8 steps and 199 s end to end.
+    #
+    # What damping cannot do is un-pin a cell that is already ON the boundary: once the constrained
+    # entry has been driven to (almost) zero, the cap is small however small the correction gets, and
+    # the fraction-to-the-boundary rule then shrinks it by a fixed factor per step forever. That
+    # failure is not this predicate's to catch -- see `_limit_collapsing`, which ends the segment.
+    if retry_on_alpha is not None and float(outcome.alpha) <= retry_on_alpha:
         return "alpha"
     return None
 
