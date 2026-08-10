@@ -1321,6 +1321,23 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       immediately behind the step (`x ≈ 0`), against each side wall (span `4h = 0.04`). The stagnant
       bottom/side-wall corner, i.e. the same corner-separation region that makes the full-span
       reattachment (16.14 here) disagree with the mid-span one (5.34). ω there is 4.01e+05, a wall value.
+    - **⚠️ THE TIGHTNESS RANKING IS THE WALL-FACE COUNT, EXACTLY.** Counted off `face_patches`, the four
+      tightest cells carry **3, 3, 2, 1** no-slip faces out of six:
+
+      | cell | room (dump 04) | boundary faces |
+      |---|---|---|
+      | 12800 | 3.80e-03 | `lowerWall`, `lowerWall`, `sideWalls` |
+      | 22400 | 2.60e-01 | `lowerWall`, `lowerWall`, `sideWalls` |
+      | 12840 | 1.38e+00 | `lowerWall`, `sideWalls` |
+      | 13129 | 2.17e+00 | `sideWalls` |
+
+      The two cells that own the cap are **trihedral wall corners** — half of every face is a no-slip
+      wall, the two `lowerWall` faces being the floor and the vertical step face. **Hypothesis, not yet
+      measured:** the near-wall `k` closure is per-wall-cell, and its production is area-averaged over a
+      cell's wall faces while the destruction `β*kω_wall` is not obviously averaged the same way — so a
+      three-wall-face cell could take up to 3× the destruction against one cell's worth of production,
+      which would put the root at `k < 0` exactly here. The wall-face-count ordering is the measured
+      part; the mechanism is the thing to test next.
     - **NOT the ill-conditioned cells — the standing hypothesis is refuted at this state.** **Zero**
       singular blocks at every β from 0 to 0.4. The binding cells run cond 3.6e5 … 2.9e7, ranks
       1088–2165 of 23040, and **none** of them is among the twelve worst-conditioned. `cond > 1e6`
@@ -1331,9 +1348,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       refutes the coincidence at this state rather than retiring the 1e12 finding.
 
     **So the lever is not the step-length policy and not the preconditioner — it is that one corner
-    cell's `k` equation.** The open question is why it has no non-negative root there, and the candidates
-    are the near-wall closure in a two-wall corner, and whether one cell should be able to cap a global
-    step at all.
+    cell's `k` equation.** Two candidates, in this order: the near-wall `k` closure in a cell with three
+    wall faces (see the ranking above), and whether a single cell should be able to cap a global step at
+    all. Neither is built; the second is a design question for the limiter, the first a possible defect.
 
     **STILL TO RUN:** the fast gate and the coupled slow tier, against the CSR change and the march
     changes.

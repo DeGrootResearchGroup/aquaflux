@@ -611,6 +611,25 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
        jumping **6.6** across the first cell spacing where the log law gives 2.7, and `u_τ` still **−12%**
        despite the wall stress itself being right (first-cell `U+` 13.6 vs log-law 13.9). With it, the
        profile tracks the log law and the gap closes to −2%.
+
+    **⚠️ OPEN, and the first thing to test on this closure (2026-08-10): a cell with THREE wall faces
+    appears to have no non-negative root for `k`.** On the 3D backward-facing step the coupled march is
+    killed by the `k`-positivity limiter binding on a single cell of 23040, and the two cells that own
+    the cap are the mirror pair of **trihedral wall corners** behind the step — `lowerWall` twice (the
+    floor plus the vertical step face) and `sideWalls` once, so half of every face is no-slip. Across the
+    four tightest cells the ranking is exactly the wall-face count, 3 / 3 / 2 / 1. There the Newton
+    direction keeps demanding a `k` change of ~1e-13 while `k` itself has been ratcheted down to 1e-22
+    against a mesh median of 2.97e-02 — so the root is at `k < 0` and the constraint is permanently
+    active. (Full measurement, and the step-length lock-up it causes, in `.claude/rules/solve.md`.)
+
+    The suspicion this raises about the four pieces above: piece 1's production carries the wall shear
+    **area-averaged over each wall cell's faces**, while piece 3's destruction substitutes `omega_wall(k)`
+    in the wall cells. If those two are not reduced over a cell's wall faces in the *same* way, a
+    three-wall-face cell takes several times the destruction against one cell's worth of production — and
+    a stagnant corner, where the wall shear and hence the production are ~0, is exactly where that would
+    show first. **The geometry and the ranking are measured; the mechanism is NOT.** Check the two terms'
+    per-face reduction against each other before anything else.
+
     **Known residual — the buffer layer.** A wall-function mesh landing at `y+ ≈ 11–16` (the crossover
     itself) is the worst case for any wall function, and the blend smooths it without making it exact:
     measured `u_τ` error on the channel is **−0.6% at y+≈68, −2.0% at y+≈33, −6.9% at y+≈16, −5.0% at
