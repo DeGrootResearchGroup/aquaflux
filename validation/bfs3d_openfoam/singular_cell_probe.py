@@ -116,9 +116,51 @@ def binding_cells(k: np.ndarray, dk: np.ndarray, tau: float) -> tuple[np.ndarray
     return room, np.argsort(room)
 
 
+def survey(paths: list[Path], layout) -> None:
+    """Across several step-limit dumps: which cell owns the cap each time, and by how far.
+
+    Costs nothing -- the cap is a function of the state and the correction alone, so this needs neither
+    the Jacobian nor the conditioning, and several dumps can be walked in seconds where materializing
+    one operator takes minutes and gigabytes. It answers the question a single dump cannot: whether the
+    cap is set by a *different* cell each step (a march working along a moving constraint) or by the
+    **same** cell being ratcheted (a lock-up). Reporting the runner-up beside the winner is what makes
+    that readable -- a gap of orders means one cell is throttling the whole mesh.
+
+    Parameters
+    ----------
+    paths : list of Path
+        The step-limit dumps, in the order written.
+    layout
+        The coupled block layout, for its ``k`` slice.
+    """
+    print(f"{'=' * 108}\nwhich cell owns the cap, across {len(paths)} dumps\n{'=' * 108}")
+    print(
+        f"  {'dump':<20}{'cap':>12}{'cell':>8}{'room':>12}{'k':>12}{'dk':>13}"
+        f"{'next cell':>11}{'next room':>12}{'k median':>12}"
+    )
+    for path in paths:
+        stored = np.load(path)
+        _, k, _ = layout.unpack(jnp.asarray(stored["state"]))
+        _, dk, _ = layout.unpack(jnp.asarray(stored["delta"]))
+        k, dk = np.asarray(k), np.asarray(dk)
+        room, order = binding_cells(k, dk, 1.0)
+        first, second = order[0], order[1]
+        print(
+            f"  {path.name:<20}{float(stored['cap']):>12.4e}{first:>8}{room[first]:>12.4e}"
+            f"{k[first]:>12.4e}{dk[first]:>13.4e}{second:>11}{room[second]:>12.4e}"
+            f"{np.median(k):>12.4e}",
+            flush=True,
+        )
+
+
 def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit(f"usage: {Path(sys.argv[0]).name} <checkpoint.npz>")
+    if len(sys.argv) < 2:
+        raise SystemExit(f"usage: {Path(sys.argv[0]).name} <checkpoint.npz> [more-dumps.npz ...]")
+    if len(sys.argv) > 2:
+        # Several dumps: run the cheap cross-dump survey rather than materializing one operator per
+        # file, which would cost minutes and gigabytes each for a question that needs neither.
+        survey([Path(p) for p in sys.argv[1:]], compare.build_case()["coupled"].layout)
+        return
     path = Path(sys.argv[1])
     stored = np.load(path)
     state = jnp.asarray(stored["state"])
@@ -206,7 +248,7 @@ def main() -> None:
     _flow, k_solved, omega_solved = coupled.layout.unpack(state)
     k = np.asarray(coupled.k_transform.to_physical(k_solved))
     omega = np.asarray(coupled.omega_transform.to_physical(omega_solved))
-    centroids = np.asarray(case["mesh"].cell_geometry.centroid)
+    centroids = np.asarray(case["geom"].cell.centroid)
 
     if cells.size:
         print("  the singular cells:")

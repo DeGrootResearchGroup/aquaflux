@@ -1292,10 +1292,51 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     4. **A block-alone probe ties where a march separates.** Raw and equilibrated are both 2 cycles on
        the block and behave differently in a march.
 
-    **NEXT:** find which cells the positivity limiter binds on at rung-2 step 25 and whether they are
-    the ill-conditioned ones, then decide what replaces the global scalar cap. (Stopping the escalation
-    is done — see the lock-up section above. The fast gate and the coupled slow tier still have to be
-    run against the CSR change and the two march changes.)
+    **✅ ANSWERED: the cap binds on ONE cell, it is a step-corner cell whose `k` is already numerically
+    zero, and it is NOT one of the ill-conditioned ones.** Measured from twelve `BFS3D_DUMP_STEP_LIMIT`
+    dumps taken on the native march at rung 2 (`equilibrate=True`, `sweeps=4`, `aggressive_levels=1`,
+    `spectral_damping=False`, `refresh on cycles 3`, `retry on cycles / alpha 10 / 0.01`, PC β floor
+    0.05), the operator swept over β 0 … 0.4. The probe reproduces the recorded cap exactly
+    (3.761982e-03 both ways), so the capture is reading the quantity the march acted on.
+
+    | dump | cap | cell | room | `k` | `dk` | next cell | next room |
+    |---|---|---|---|---|---|---|---|
+    | 04 | 3.7620e-03 | **12800** | 3.80e-03 | 3.08e-16 | −8.11e-14 | 22400 | 2.60e-01 |
+    | 05 | 1.4517e-04 | **12800** | 1.47e-04 | 3.08e-18 | −2.10e-14 | 12840 | 2.09e+00 |
+    | 08 | 1.0516e-07 | **12800** | 1.06e-07 | 3.08e-20 | −2.90e-13 | 12840 | 1.12e-01 |
+    | 11 | 1.0516e-09 | **12800** | 1.06e-09 | 3.08e-22 | −2.90e-13 | 12840 | 1.12e-01 |
+
+    - **One cell out of 23040 throttles the whole march,** and it is not a crowd: at dump 04 exactly
+      **one** cell sits within 100× of the tightest room, the runner-up 68× behind; by dump 11 the gap is
+      **eight orders**. Cell 12800 owns ten of the twelve dumps and every one from step 25 on.
+    - **`k` there ratchets by exactly 100× per step** — 3.08e-16 → 3.08e-18 → 3.08e-20 → 3.08e-22 — which
+      is `1 − τ` at `τ = 0.99`, the same factor the cap collapses by. Against a mesh median `k` of
+      **2.97e-02**, so the binding cell's `k` is ~20 orders below typical. It is not small; it is zero.
+    - **`dk` stays ~1e-13 throughout while `k` collapses.** The Newton direction is not converging toward
+      the boundary — it keeps demanding a `k` change ten orders larger than `k` itself. **The cell's
+      `k` equation has no root at `k ≥ 0`**, so the constraint is permanently active and the
+      interior-point rule ratchets forever. That is the mechanism, and no step-length policy fixes it.
+    - **Geometry: it is a step-corner cell, and its mirror is the runner-up.** 12800 sits at
+      `(0.0007, −0.0099, 0.0009)` and 22400 at `(0.0007, −0.0099, 0.0391)` — bottom wall (`y ≈ −h`),
+      immediately behind the step (`x ≈ 0`), against each side wall (span `4h = 0.04`). The stagnant
+      bottom/side-wall corner, i.e. the same corner-separation region that makes the full-span
+      reattachment (16.14 here) disagree with the mid-span one (5.34). ω there is 4.01e+05, a wall value.
+    - **NOT the ill-conditioned cells — the standing hypothesis is refuted at this state.** **Zero**
+      singular blocks at every β from 0 to 0.4. The binding cells run cond 3.6e5 … 2.9e7, ranks
+      1088–2165 of 23040, and **none** of them is among the twelve worst-conditioned. `cond > 1e6`
+      catches 50% of them against an 8.7% base rate — mildly enriched — but `cond > 1e9` catches none,
+      and the separately characterised cond ~1e12 / ‖B⁻¹‖ ~9.5e8 cells are absent entirely (the worst
+      here is 2.9e7 / 6.6e6). **Caveat on comparing those two numbers:** the 1e12 figure was measured on
+      `state-00057` under *symmetric equilibration*, and this is a different state, raw — so this
+      refutes the coincidence at this state rather than retiring the 1e12 finding.
+
+    **So the lever is not the step-length policy and not the preconditioner — it is that one corner
+    cell's `k` equation.** The open question is why it has no non-negative root there, and the candidates
+    are the near-wall closure in a two-wall corner, and whether one cell should be able to cap a global
+    step at all.
+
+    **STILL TO RUN:** the fast gate and the coupled slow tier, against the CSR change and the march
+    changes.
 
   - **⚠️ (2026-08-09): making the JAX-native multigrid a FAITHFUL smoothed aggregation, so a
     comparison against PETSc GAMG means something. Uncommitted work sits on `claude/block-aware-aggregation`.**
