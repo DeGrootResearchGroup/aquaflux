@@ -1364,13 +1364,8 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       apart**, i.e. ninety-five successive ×0.01 cuts, while `u/v/w/p` report a relative change of
       exactly 0.
     - **It is not one cell, either: 1876 of 23040 cells sit below `k = 1e-6`** at this state, against an
-      OpenFOAM global minimum of 1.672e-6 on the same mesh. ⚠️ **Do not read this as "laminarization" —
-      that is a bistability claim and it was not measured.** The comparison is a locked-up, mid-rung-2,
-      **unconverged** iterate against a **converged** reference, and this state's ω is still at its `60ν`
-      initialization (below) — in a wall cell whose ω row is a fixation, so that row carries a large
-      residual and the state is definitively not at a root. A 10× ω multiplies the `β*kω` destruction and
-      is on its own a sufficient explanation for small `k`, with no second branch involved. The count and
-      the contrast are measured; the cause is open.
+      OpenFOAM global minimum of 1.672e-6. ⚠️ **BOTH HALVES OF THAT COMPARISON WERE WRONG, AND THE
+      CONVERGED ROOT HAS NO SUCH DEFICIT — see the resolution below.**
     - **Geometry: it is a step-corner cell, and its mirror is the runner-up.** 12800 sits at
       `(0.0007, −0.0099, 0.0009)` and 22400 at `(0.0007, −0.0099, 0.0391)` — bottom wall (`y ≈ −h`),
       immediately behind the step (`x ≈ 0`), against each side wall (span `4h = 0.04`). The stagnant
@@ -1407,7 +1402,42 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       `state-00057` under *symmetric equilibration*, and this is a different state, raw — so this
       refutes the coincidence at this state rather than retiring the 1e12 finding.
 
-    **⚠️ THE LEVER, CORRECTED — with the scan's reach stated.** The measurement below is a **1-D scan of
+    **✅ RESOLVED (2026-08-10, by re-running the shipped march end to end): the `k` trough is a REYNOLDS-
+    CONTINUATION TRANSIENT, and the converged root does not have it.** At the converged target-Re root
+    (step 58, `R` 9.588e-06, `x_r/h` 8.36) there are **ZERO** cells below `k = 1e-6`: `k_min` 1.2997e-05,
+    median 0.7017 against OpenFOAM's 0.7468, a ratio of **0.98**. Cells below 1e-6 go 190 (step 37) → 130
+    → **0** (step 46) → 0 at convergence.
+    - **Both halves of the "1876 vs 1.672e-6" comparison were wrong.** It is **cross-Reynolds** —
+      `state-00122` is rung 2 (ν = 1e-4), the OpenFOAM field is target Re — and 1.672e-6 is the **steady**
+      OpenFOAM run's minimum, the run this case's own docstring rules out as a reference. The valid
+      transient reference has `k_min` **6.2247e-03**.
+    - **The mechanism is the continuation's own doing.** `y* = β*^0.25 √k d/ν` scales as **1/ν**, so at the
+      Re/100 anchor `wall_function_weight = tanh((y*/y*_lam)⁴)` is ~1e-7 — **the log-layer wall production
+      is switched off even at fully turbulent `k`** — while `ω_wall = 6ν/(β₁d²)` is **100×** larger, so
+      `β*kω` destruction is 100× the target's. Homogeneous, linear, destruction-dominated ⇒ `k` decays.
+      Raising Re reverses both: the weight median goes 5.6e-20 (rung-1 root) → 1.9e-10 → **1.000** (target).
+    - The rung-1 root is **correctly** laminar (`ν_t/ν` median 1.7e-5 at `Re_h = 100`), and **1732 of the
+      1876 cells (92%) are inherited from it**.
+    - **Population is pre-stall, depth is stall-caused**: `#k<1e-6` is 1876 by dump 04 and frozen there for
+      all 97 remaining steps, while `k[12800]` falls 3.08e-16 → 3.08e-212 over the same span.
+    - **The stalled arm is `BFS3D_TURBULENCE_INVERSE=native`; the default `petsc` arm walks the same trough
+      and recovers** — agreeing with the exact-solve finding that at β ≥ 0.5 there is no binding cell.
+    - ❌ **REFUTED — the initialization.** `hybrid_initialize` gives a **uniform** `k = 0.2489585`, zero
+      cells below 1e-6.
+    - ❌ **REFUTED — the "ω is exactly 10×, still at its 60ν seed" lead.** `ω[12800] = 400910.4` **is**
+      `6ν/(β₁d²)` at **rung 2's own** ν = 1e-4 to 16 digits (all 4490 wall cells within 4.8e-5). The three
+      rungs give 4.0091e6 / 4.0091e5 / 4.0091e4 — the "10×" compared a rung-2 state against the
+      **target-Re** formula. Those rows are converged; the `60ν` seed was replaced by `omega_wall` in
+      `c324021` (2026-07-23), well before these checkpoints.
+    - **The sustaining/ambient source has no motivating evidence left**: it targets a defect absent from
+      the converged root. The defensible levers are the absolute floor in the limiter, and not anchoring
+      the ladder below the Reynolds number at which the wall function turns itself on.
+    - **Genuinely open, and now the real physics question:** at the converged root the first-wall-layer `k`
+      median is **0.0754 against OpenFOAM's 0.164 (0.46×)**, 196 cells below the reference minimum.
+      Leftover of the trough, or an independent wall-treatment difference? Untested, and it plausibly
+      bears on `x_r/h` 8.36 against 7.24.
+
+    **⚠️ THE LEVER, as corrected earlier — with the scan's reach stated.** The measurement below is a **1-D scan of
     one row at one iterate with every other field frozen**. It establishes a strictly positive root of cell
     12800's frozen-field `k` row, which removes the motivation for a projection *at this state*. It does
     **not** establish the sign of the coupled Newton direction, nor anything about the other 1875 collapsed

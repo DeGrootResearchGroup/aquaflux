@@ -618,14 +618,28 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     with root `k* = +1.99e-14`, strictly positive, and the iterate sits eight decades *below* it. The
     corner `k` system is homogeneous and an M-matrix — production, destruction and the `Dirichlet(0)` wall
     term all vanish linearly at `k = 0` — so `k = 0` solves it exactly when the neighbours are 0 and no
-    negative root exists. What remains true and unexplained is that **1876 of 23040 cells are below
-    `k = 1e-6`** at that state, against an OpenFOAM global minimum of 1.672e-6 on the same mesh: a large
-    part of the near-wall field has laminarized. The candidate fix is a sustaining/ambient source
-    `+β* k_amb ω` (Spalart–Rumsey 2007) — see `.claude/rules/solve.md`. **Two defects found while
-    measuring, both real:** `SSTModel.f1`/`.f2` (`sst.py:136,178`) use plain unclamped `jnp.sqrt(k)`
-    where every closure here uses `safe_sqrt(jnp.maximum(k, 0.0))`; and at that state `ω` in the worst
-    cell is exactly 10× the `omega_wall` value its own residual imposes, i.e. still at its `60ν`
-    initialization.
+    negative root exists. The near-wall `k` trough seen at that state is a **Reynolds-
+    continuation transient, not a defect in this closure** — the converged target-Re root has **zero**
+    cells below `k = 1e-6` (`k_min` 1.30e-05, median 0.7017 against OpenFOAM's 0.7468).
+
+    **⚠️ BUT THE CAUSE IS THIS BLEND, USED OUTSIDE ITS RANGE, AND THAT IS WORTH KNOWING WHEN CHOOSING A
+    CONTINUATION LADDER.** `y* = β*^0.25 √k d/ν` scales as **1/ν**, so at a Re/100 anchor
+    `wall_function_weight = tanh((y*/y*_lam)⁴)` is ~1e-7 and the **log-layer production is switched off
+    even at fully turbulent `k`**, while `ω_wall = 6ν/(β₁d²)` is simultaneously 100× larger. Destruction
+    then dominates a homogeneous linear row and `k` decays; raising Re reverses both (weight median
+    5.6e-20 → 1.9e-10 → 1.000 across the three rungs). **Anchoring a ladder below the Reynolds number at
+    which the wall function turns itself on manufactures a near-wall `k` trough.** Full account in
+    `.claude/rules/solve.md`.
+
+    ❌ **REFUTED — the "ω is exactly 10×, i.e. still at its 60ν seed" lead.** That ω is `6ν/(β₁d²)` at the
+    *rung's own* viscosity to 16 digits; the 10× compared a rung-2 state against the target-Re formula.
+    **One real defect does survive:** `SSTModel.f1`/`.f2` (`sst.py:136,178`) use plain unclamped
+    `jnp.sqrt(k)` where every closure here uses `safe_sqrt(jnp.maximum(k, 0.0))`.
+
+    **Open, and now the real physics question:** at the converged root the first-wall-layer `k` median is
+    **0.0754 against OpenFOAM's 0.164 (0.46×)**, 196 cells below the reference minimum. Leftover of the
+    trough, or an independent wall-treatment difference? Untested, and it plausibly bears on `x_r/h` 8.36
+    against 7.24.
 
     The original alarm, now known to be a wrong inference from a right observation: On the 3D backward-facing step the coupled march is
     killed by the `k`-positivity limiter binding on a single cell of 23040, and the two cells that own
