@@ -247,7 +247,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   solve converges in **one** iteration. Measured on the developed pitzDaily coupled Jacobian (61k dof):
   UMFPACK factors it in **~1.2 s vs the ILUT's ~32 s (~26×)**, exact (1 GMRES iter vs 2–4), verified on
   the real forward operator and the β=0 adjoint (true-residual checked — see
-  `reference/ILU_REFRESH_PROFILING.md`). Because the fill is pattern-determined it is also **state-robust**
+  ). Because the fill is pattern-determined it is also **state-robust**
   (no `drop_tol` tail that shifts with the flow). Same interface as the ILUT (`build` / `refresh_in_place`
   / `matvec`), a host object applied via `pure_callback`, riding as a static field; the adjoint reuses the
   factorization's transpose. **No equilibration / cell-major reordering** (unlike the ILUT — the complete
@@ -275,7 +275,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     switching to a *complete* factorization with a fill-reducing ordering + fast kernel, which is what
     breaks the floor here. A separately-tried level-based ILU(k) via PETSc looked faster but was a
     **preconditioned-norm artifact** (PETSc's KSP converges on ‖Mr‖, not the true ‖Ax−b‖); it is weaker,
-    not stronger — always verify the TRUE residual. Full record: `reference/ILU_REFRESH_PROFILING.md`.
+    not stronger — always verify the TRUE residual.
   - **FROZEN is wrong for the β-ramping dual-time march — track β (binding, measured).** A complete LU is
     *exact* only for the operator it factored, `J + β d`. In a dual-time march β ramps (0.5 → 0.005), so a
     factorization frozen at one β **mis-preconditions** the operator actually solved — measured on rung2:
@@ -852,10 +852,10 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       reason is structural, not a cost.** Both were tried as the trailing block's inverse and both failed,
       for **one shared cause** rather than two incidental ones:
       - `build_convection_hierarchy` (aggregation) **refuses**: *"operator diagonal must be finite and
-        strictly positive, but its minimum is −2.129e+06"*. ~~The true `[k,ω]` Jacobian block has negative
-        diagonal entries, because it carries the live source-term linearizations — production and
-        destruction, with ω in a log variable.~~
-        **⚠️ THAT EXPLANATION IS WRONG, AND THE ERROR MESSAGE ITSELF SAYS SO — corrected 2026-08-09.**
+        strictly positive, but its minimum is −2.129e+06"*.
+        **⚠️ THE OBVIOUS EXPLANATION — that the true `[k,ω]` block carries negative diagonals from its
+        live source linearizations — IS WRONG, AND THE ERROR MESSAGE ITSELF SAYS SO (corrected
+        2026-08-09).**
         The refusal names **`level 1`**, a *coarse* operator. The fine slice is clean: measured on `bfs3d`
         `state-00057`, **0 of 23040 cells** have a non-positive diagonal, at β = 0, at the march's shift
         and at the preconditioner floor alike (`validation/bfs3d_openfoam/trailing_block_conditioning.py`).
@@ -1145,17 +1145,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     - **A capped step is not a bad step.** Raw and equilibrated arms differed in α at rung-2 step 16
       (1.000 against 0.579) and reached an **identical** residual, 1.271e-01. Attributing the α
       difference to preconditioner quality was wrong.
-    - **~~β escalation cannot fix a constraint-bound step, and makes it worse.~~ ⚠️ WITHDRAWN
-      2026-08-10 — this bullet was wrong twice over, and acting on it would have caused a regression.**
-      It read "across the escalation ladder at step 25 the limit went 3.76e-03 → 1.00e-05 as β went
-      0.47 → 1.87 → 16.0", and concluded that a constraint-bound step should stop escalating. Both
-      halves fail:
-      1. **The numbers are not a ladder.** 0.47/3.76e-03 is step **25**'s accepted attempt; 1.87 and
-         16.0 with 1.00e-05 are steps **26** and **27**. The per-attempt caps *within* a step are never
-         written to the log (only the accepted attempt's `limit` is), so the log cannot show what
-         escalation does to a cap, and this compared three different steps as though it did.
-      2. **The mechanism runs the other way.** More damping shrinks the correction, so it *widens*
-         `room = k/|dk|`. The measured evidence is already in this file: the single escalation of an
+    - **⚠️ DO NOT GATE `retry_on_alpha` ON `binding_limit == 1`. It was proposed, built and reverted
+      the same day (2026-08-10).** More damping shrinks the correction, so it *widens*
+      `room = k/|dk|`. The measured evidence is already in this file: the single escalation of an
          entire `bfs3d` march fired at step 51, whose cap was **4.37e-10** — constraint-bound — and it
          was worth **8 steps and 199 s** end to end. Gating `retry_on_alpha` on `binding_limit == 1`
          would have suppressed exactly that one useful escalation.
@@ -1203,11 +1195,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       shifted table is just as smooth. Split on the summary-block delimiter and parse within each block.
 
     **SHIPPED in response:**
-    1. ~~`_escalation_reason` no longer returns `"alpha"` when `binding_limit < 1`.~~ **Built, then
-       REVERTED the same day** — it is a regression, for the reason in the withdrawn bullet above. The
-       escalation stays as it was. `_escalation_reason` now carries a comment saying why the gate is not
-       there, so the next reader does not re-derive it.
-    2. `forward_march(stop_on_limit_stall=3)` (**a new default-on guard**) ends the segment after three
+    1. `forward_march(stop_on_limit_stall=3)` (**a new default-on guard**) ends the segment after three
        consecutive steps that are constraint-bound, non-widening, and **changed the residual by less
        than 1e-3 relative, in either direction** (`_limit_collapsing`).
 
@@ -1548,8 +1536,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     projection cannot. That reframes the choice, and it is the one to make with the user:
     a positivity **projection** after the step (OpenFOAM's answer, and it changes the forward path but
     not the root provided the floor is inactive there) against keeping the step constraint and finding
-    ~~why the root is negative~~ (**struck — the root is positive; see the corrected lever above**).
-    Neither is built.
+    why that cell's row is hard to satisfy (its root is **positive**, at `+1.99e-14`). Neither is built.
 
     **⚠️ (2026-08-10, LATER STILL) THE `k` WALL BC A/B, RUN AS A CONTROLLED PAIR — and the crash is NOT
     fixed by any of it.** Two full 3-rung marches from the initial state, `BFS3D_TURBULENCE_INVERSE=native`,
@@ -1767,9 +1754,8 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       (4 cycles)**, so it is under-smoothed rather than wrong: the earlier "VOID / much worse" reading
       conflated a smoothing deficit with a broken formula. Treat sweeps as part of that arm's
       specification, never quote it at a single sweep count.
-    - ~~**Graph squaring** — 5 → 10 cycles, "exists to bound the level count, not to improve
-      quality; squaring *over*-coarsens".~~ **WRONG on every count, and it was the single thing
-      holding the comparison open.** Squaring the graph on the first level is not a size knob, it is
+    - **⚠️ GRAPH SQUARING ON THE FIRST LEVEL IS GAMG'S DEFAULT COARSENING, NOT A SIZE KNOB — and
+      recording it as harmful was the single thing holding the comparison open.** Squaring the graph on the first level is not a size knob, it is
       GAMG's *default coarsening* (`aggressive_coarsening_levels 1`), and its 106× ratio is not
       over-coarsening — it is PETSc's 107×, i.e. the target. The 5 → 10 reading is real but was taken
       with the damped smoother; at the matched undamped smoother the same arm is **2 cycles**. A knob
@@ -2514,7 +2500,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         which bounds the "de-emphasize ω in the measure" target above (#24/#29): worth it for readable
         per-block reporting, **not** as the reachability fix it was framed as.
       - **WHAT LIMITS `Δτ`: the cold-start β floor is a NONLINEARITY, and diffusion continuation lifts it
-        — measured 2026-07-27 (`scratchpad/nut_floor_probe.py`, `re_continuation_probe.py`).** A single
+        — measured 2026-07-27. *(harness not in the repository — this finding cannot be re-adjudicated as recorded)*** A single
         shifted cold step at the target Re = 25000 is stable at β = 2 (α = 1, ‖R‖ ×0.49) and β = 0.5
         (α = 0.5) but **blows up at β = 0.25** (ω → 5.6e32, no reducing rung) — the recorded floor. Raising
         the molecular viscosity (a clean Reynolds continuation, self-consistent seed, no state
@@ -2781,7 +2767,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       `R(φ+δ) = −βDδ + O(‖δ‖²)`, the equilibrated row is exactly `β|δᵢ|`. Continuity carries `D_c = 0`
       (the shift packs `jnp.zeros(n_cells)` on pressure), so it is **annihilated to first order**
       whatever the physics does. Measured against real shifted solves at real march checkpoints
-      (`scratchpad/measure_is_travel.py`), actual ÷ predicted `βDδ` floor:
+      (harness not in the repository), actual ÷ predicted `βDδ` floor:
 
       | state | β = 2 | β = 1 | β = 0.25 |
       |---|---|---|---|
@@ -2828,7 +2814,8 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       `G = R + (ρV/Δτ)(φ − φ⁰)`, scaled by `a_P + ρV/Δτ`; inner-iterate `G → 0`; advance `φ⁰`; judge on
       the initial residual per outer step). Then the measure behaves exactly as in the reference — and it
       is the same change the pseudo-time finding calls for, so the two motivate one build.
-    - **PROTOTYPE VALIDATED (2026-07-27, `scratchpad/pseudotime/dualtime.py`) — the diagnosis holds, and
+    - **PROTOTYPE VALIDATED (2026-07-27; prototype not in the repository, superseded by the shipped
+      `DualTimeStep`) — the diagnosis holds, and
       the fix is a per-timestep inner loop, not a norm change.**
       - **Confirmed current PTC = dual-time with K = 1.** At β = 2 the inner Newton converges
         `G = R + βd(φ − φⁿ)` in a **single** step (`‖G‖` 2.2e-2 → 6e-4, quadratic — it *is* the shifted
@@ -2847,7 +2834,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         inner-line-search-on-`G` tolerating a larger Δτ than one shifted step. Reachability still needs the
         Δτ ramp **and** the cold-start diffusion/Re continuation (they compose: dual-time is the honest
         gauge + robust per-step solve, continuation lowers the cold stiffness so Δτ can grow early).
-      - **CFL-ramp A/B (2026-07-27, `scratchpad/pseudotime/dualtime_march.py`) — the hypothesis holds, the
+      - **CFL-ramp A/B (2026-07-27; prototype not in the repository) — the hypothesis holds, the
         gate is now the low-β linear-solve cost.** A `DualTimeStep` + `CflController` (grow Δτ / drop β
         when the inner loop meets η within ≤ 3 steps with α ≥ 0.5; back off otherwise), cold start:
 
@@ -2924,11 +2911,11 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         β falls to the `beta_min` floor and the tail converges near-quadratically. `beta_min` is a
         speed↔smoothness knob (0.005 fastest but can overshoot the steady bubble on a cold rung with a
         loose seed + big Re jump, costing a couple of expensive recovery steps; 0.02 = the class default,
-        smoother). Full finding: `reference/REACHABILITY_FINDINGS.md`.
-      - **~~`DualTimeControl` RUNS THE TRANSIENT AWAY~~ — SUPERSEDED (see above).** The original bullet
-        read: the α-control grows Δτ blind to the steady residual, so it drives `x_r/h` past the steady
-        state without settling (residual bottoms ~0.05 then rises to 0.1+). That was measured on the Re/100
-        anchor **before the carry fix and without leaning on the `beta_min` floor**. With β carried and the
+        smoother).
+      - **⚠️ THE "`DualTimeControl` RUNS THE TRANSIENT AWAY" VERDICT IS SUPERSEDED — do not cite it.**
+        It held that the α-control grows Δτ blind to the steady residual and drives `x_r/h` past the
+        steady state without settling, and was measured on the Re/100 anchor **before the β-carry fix and
+        without the `beta_min` floor**. With β carried and the
         floor bounding Δτ, the ramp converges standalone (rung-1 to rtol 1e-6; full ramp to target Re) — the
         "runaway" the residual-keyed control was built to prevent does not block convergence here, and its
         residual-feedback instead *pins* β on the flat `β×travel` plateau (the slower arm). Do not cite the
@@ -2971,7 +2958,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         the inner-iteration count to reach `inner_tol`, NOT a per-solve penalty. **Consequence measured
         this session:** the coupled ILUT is a NEAR-DIRECT preconditioner — 1 restart cycle (~4 matvecs) per
         solve at every pitzDaily state, flow-only and full `[u,v,p,k,ω]` alike, fresh or mildly stale
-        (`reference/ILUT_ITERATION_GAP_FINDINGS.md`). The march's "6–9" is the dual-time inner-loop sum, and
+        (record not in the repository). The march's "6–9" is the dual-time inner-loop sum, and
         **β-matching the frozen factorization to the march's β is a no-op on it** (fixed-`ilut_beta` and
         `ilut_beta`-matched runs gave IDENTICAL `cyc`). The only lever on the "6" is `inner_steps`/`inner_tol`
         (globalization/accuracy), which is deliberately kept tight for stability — not the preconditioner.

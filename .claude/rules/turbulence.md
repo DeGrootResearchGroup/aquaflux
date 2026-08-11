@@ -164,7 +164,7 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       reaching a developed pitzDaily recirculation in **~4× fewer outer steps** than the residual-keyed
       control; a full cold ramp to target Re 25000 develops in ~59 outer steps. The injection never turns
       observation on, so the differentiable single-stage solve is untouched. See the DualTimeStep bullet
-      in `.claude/rules/solve.md` and `reference/REACHABILITY_FINDINGS.md`.
+      in `.claude/rules/solve.md`.
     - **Opt-in `ResidualRatioDualTimeControl`:** ramps β by the steady-residual ratio; safe when that
       residual is a reliable progress signal, but it pins β on the flat `β×travel` pitzDaily plateau
       (the slower arm), so it is not the default.
@@ -656,8 +656,9 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     floor plus the vertical step face) and `sideWalls` once, so half of every face is no-slip. Across the
     four tightest cells the ranking is exactly the wall-face count, 3 / 3 / 2 / 1. There the Newton
     direction keeps demanding a `k` change of ~1e-13 while `k` itself has been ratcheted down to 1e-22
-    against a mesh median of 2.97e-02 — ~~so the root is at `k < 0` and the constraint is permanently
-    active~~ (**struck: the root is +1.99e-14, see above**). (Full measurement, and the step-length lock-up it causes, in `.claude/rules/solve.md`.)
+    against a mesh median of 2.97e-02. **The root there is `+1.99e-14` — positive**; the constraint is
+    active because the iterate sits eight decades below its own root, not because no root exists. (Full
+    measurement, and the step-length lock-up it causes, in `.claude/rules/solve.md`.)
 
     **❌ The first suspicion — that a three-wall-face cell takes several times the destruction against
     one cell's worth of production, because the two terms are reduced over a cell's wall faces
@@ -1091,7 +1092,7 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
       step. Orthogonal to and composes with the refresh gating. This is the ILUT-side other half of the
       overshoot robustness the LU gets free from being exact; the `DualTimeControl` overshoot itself is
       still a globalization fragility (the control-tuning follow-up owns it).
-  - **~~Remaining limiter — the k equation drift~~ — RETIRED: the stall no longer reproduces (measured
+  - **RETIRED — "the k equation drift is the remaining limiter": the stall no longer reproduces (measured
     2026-07-22).** This bullet used to record that past rel ~0.09 the direct-`k` residual grew (rel 1 →
     ~5×) and re-stalled the march, and named high-Reynolds `k` stability as the open follow-up. **It
     does not happen on the current code.** Re-measured on the full ~12k-cell pitzDaily from the cold
