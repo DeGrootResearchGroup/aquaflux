@@ -100,8 +100,12 @@ V-cycle — verified against finite differences on a channel case
 
 ## Near-wall caveat
 
-This is a **wall-function** mesh (first-cell `y+` above the viscous sublayer), while aquaflux's SST is
-**wall-resolving** (it fixes the analytical sublayer `ω` at the wall-adjacent cell). The comparison
+This mesh **straddles** the sublayer/log crossover rather than sitting cleanly on one side, and that is
+the awkward regime for any near-wall treatment. Measured from the reference `k` at the converged state
+(`wall_layer_comparison.py`), the wall-adjacent `y*` median is **2.1 on the floor behind the step** and
+**2.5–3.0 on the lower wall** — the viscous sublayer, entirely below the `y* = 11.53` crossover — while
+the **upper wall sits at 11.1**, on the crossover itself, and the **side walls at 34**, fully in the log
+layer. So the three walls are in three different regimes at once. The comparison
 therefore focuses on the **outer** flow — the shear-layer growth, the recirculation bubble, and the
 reattachment length — where the near-wall treatment matters least, and reports the near-wall fields as the
 expected point of departure. This mirrors the 2D case.

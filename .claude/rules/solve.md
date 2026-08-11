@@ -1432,10 +1432,40 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     - **The sustaining/ambient source has no motivating evidence left**: it targets a defect absent from
       the converged root. The defensible levers are the absolute floor in the limiter, and not anchoring
       the ladder below the Reynolds number at which the wall function turns itself on.
-    - **Genuinely open, and now the real physics question:** at the converged root the first-wall-layer `k`
-      median is **0.0754 against OpenFOAM's 0.164 (0.46×)**, 196 cells below the reference minimum.
-      Leftover of the trough, or an independent wall-treatment difference? Untested, and it plausibly
-      bears on `x_r/h` 8.36 against 7.24.
+    - **Genuinely open, and now the real physics question — but BOTH numbers needed a definition before
+      they meant anything (harness: `validation/bfs3d_openfoam/wall_layer_comparison.py`).**
+      - "**First wall layer**" spans a 4× range of defensible meanings, and the choice matters more than
+        the discrepancy: **all wall-adjacent (4490 cells) is 1.054**, the **finest layer (1600) is 0.459**,
+        the **floor behind the step (640) is 0.342**. The recorded 0.164/0.46× is the *finest layer*. Side
+        walls, 64% of wall-adjacent cells, agree at **1.113** and do not participate.
+      - `x_r/h` **7.24 and 8.36 are both grid stations, two apart.** The floor's stations near
+        reattachment are `… 6.728, 7.243, 7.787, 8.361, 8.966 …`, local spacing **0.375–0.749 h**, so the
+        metric's resolution is about half a step height and "15%" is a two-cell offset. A sub-cell
+        interpolated crossing puts the reference at **~7.6**, i.e. the quoted 7.24 carries a systematic
+        −0.36 h truncation, and the interior spanwise columns scatter by **sd 0.13 h**. A defensible
+        reference is **x_r/h ≈ 7.6 ± 0.3**; the gap survives it (~1.0 h, ~13%) but is smaller than quoted.
+      - **The wall closure is NOT the cause.** The `Dirichlet(0)` vs `kqRWallFunction` (zero-gradient)
+        difference is real but worth only ~7.4% of local destruction (k ×0.93–0.98); `nut_wall` is
+        *algebraically identical* to `nutkWallFunction`; every verified wall-closure difference multiplies
+        to **~0.87–0.93, not 0.46**. The wall-cell `k` budget is **transport-dominated**
+        (|transport|/production ≈ 1.16), so that `k` is inherited, not locally made.
+      - **Where it is inherited from, and this is the causally clean part:** the deficit is already there
+        **upstream of the step** (x/h −2.85 … −0.15, no recirculation), first-cell `k` **0.54–0.68×** with
+        the channel core at parity (0.987), and the lip-shed rows carry the same ratios. In wall units
+        `k⁺` ≈ 1.3–2.4 against OpenFOAM's 2.4–4.0, DNS channel ≈3.9–4.4, and the SST log-layer equilibrium
+        `1/√Cμ` = 3.33 — **low against both references**, which is what makes it a defect rather than a
+        difference. It seeds a shear layer carrying 20–25% less `ν_t` through x/h 0.3–2.
+      - ❌ **Exonerated with evidence:** the momentum scheme (aquaflux is *more* dissipative yet its shear
+        layer is *thinner* — wrong sign); the SST shear limiter (identical branch in both); the mesh
+        (cell-for-cell identical, max centroid distance 4.7e-9 m); and first-order upwind on k/ω (false
+        diffusion ~5% of `ν_t S²` at x/h 0.4, <1% beyond — an order of magnitude too small).
+      - ⚠️ **"SST is a known under-predictor of BFS reattachment" is NOT support for our number.** On
+        Driver & Seegmiller (1985) NASA's own turbulence-model resource puts SST at x/H ≈ 6.50 against the
+        experiment's 6.26 ± 0.10 — a 4% **over**-prediction. The classic 15–25% under-prediction is a k-ε
+        result. And no published case adjudicates this one: ER = 2 and span/h = 4 with viscous side walls
+        sit outside every canonical dataset (de Brederode & Bradshaw 1972 require span/h > 10 for side
+        walls to be negligible at the centreline), and the two departures push opposite ways.
+      - **Untested and the largest remaining unknown: grid convergence.** One mesh exists.
 
     **⚠️ THE LEVER, as corrected earlier — with the scan's reach stated.** The measurement below is a **1-D scan of
     one row at one iterate with every other field frozen**. It establishes a strictly positive root of cell
