@@ -458,6 +458,33 @@ DUMP_STEP_LIMIT_KEEP = int(os.environ.get("BFS3D_DUMP_STEP_LIMIT_KEEP", "12"))
 # default, not another warning. `BFS3D_REFRESH_ON_CYCLES=0` still selects the scheduled cadence for an
 # A/B of the trigger itself.
 REFRESH_ON_CYCLES = int(os.environ.get("BFS3D_REFRESH_ON_CYCLES", "3"))
+#: The wall boundary condition on `k`, as an A/B. `Dirichlet(0)` (default) is the resolved-wall
+#: condition -- turbulent fluctuations vanish at a no-slip wall, so `k -> 0`. `BFS3D_K_WALL=zerogradient`
+#: selects the wall-function condition instead.
+#:
+#: **Both are defensible, and the established codes SPLIT on it** -- so this is a knob, not a fix:
+#: OpenFOAM's `kqRWallFunction` is zero-gradient unconditionally; SU2 pins `k = 0` at the wall node
+#: (`solution[0] = 0.0` plus `SetSolution_Old` / `LinSysRes.SetBlock_Zero` / `Jacobian.DeleteValsRowi`)
+#: and switches to an algebraic `k = omega nu_t / rho` only when wall functions are enabled.
+#:
+#: The reason to try zero-gradient here is an INTERNAL INCONSISTENCY rather than either authority. The
+#: wall-face `k` diffusivity is already faded to `(1 - f) gamma`, so on a wall-function cell the flux is
+#: zero -- but the Dirichlet face value still enters the GRADIENT reconstruction (`grad_k` feeds `F1`'s
+#: cross-diffusion, `omega_wall_gradient` and `OmegaCrossDiffusion`), which is not faded. So the model
+#: says "no turbulent-energy flux to the wall" while the gradient says `k` falls to zero across half a
+#: cell. Zero-gradient removes that disagreement, and unlike the deleted blended face value `f k_P` it
+#: carries `d(phi_ip)/d(k_P) = 1` exactly, so it cannot become the `k`-amplifying wall face that failed
+#: to converge.
+#:
+#: In the continuum the two conditions do NOT conflict: `u' ~ y`, `w' ~ y`, `v' ~ y**2` give `k ~ y**2`,
+#: so `k -> 0` AND `dk/dy -> 0` at the wall, and the true diffusive wall flux is zero in both regimes.
+#: The conflict is purely discrete -- a linear face reconstruction cannot satisfy both on one cell.
+_K_WALL_BCS = {"dirichlet": Dirichlet(0.0), "zerogradient": ZeroGradient()}
+K_WALL = os.environ.get("BFS3D_K_WALL", "dirichlet")
+if K_WALL not in _K_WALL_BCS:
+    raise SystemExit(f"BFS3D_K_WALL={K_WALL!r} is not one of {sorted(_K_WALL_BCS)}")
+K_WALL_BC = _K_WALL_BCS[K_WALL]
+
 CONTROL = CflResidualDualTimeControl(
     beta_start=0.5, beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25
 )
@@ -631,9 +658,7 @@ def build_case(model=None):
             {
                 "inlet": Dirichlet(K_IN),
                 "outlet": ZeroGradient(),
-                "upperWall": Dirichlet(0.0),
-                "lowerWall": Dirichlet(0.0),
-                "sideWalls": Dirichlet(0.0),
+                **dict.fromkeys(WALLS, K_WALL_BC),
             }
         ),
         omega_boundary=BoundaryConditions(
@@ -736,6 +761,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("smoother fill / sweeps / coarse limit", f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"),
         ("preconditioner beta floor", PC_BETA_FLOOR),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
+        ("k wall BC", K_WALL),
         *(
             [("step-limit dump below / keep", f"{DUMP_STEP_LIMIT} / {DUMP_STEP_LIMIT_KEEP}")]
             if DUMP_STEP_LIMIT
