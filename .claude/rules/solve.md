@@ -1459,12 +1459,33 @@ Governed by the root `CLAUDE.md` Engineering Principles.
         layer is *thinner* — wrong sign); the SST shear limiter (identical branch in both); the mesh
         (cell-for-cell identical, max centroid distance 4.7e-9 m); and first-order upwind on k/ω (false
         diffusion ~5% of `ν_t S²` at x/h 0.4, <1% beyond — an order of magnitude too small).
-      - ⚠️ **"SST is a known under-predictor of BFS reattachment" is NOT support for our number.** On
-        Driver & Seegmiller (1985) NASA's own turbulence-model resource puts SST at x/H ≈ 6.50 against the
-        experiment's 6.26 ± 0.10 — a 4% **over**-prediction. The classic 15–25% under-prediction is a k-ε
-        result. And no published case adjudicates this one: ER = 2 and span/h = 4 with viscous side walls
-        sit outside every canonical dataset (de Brederode & Bradshaw 1972 require span/h > 10 for side
-        walls to be negligible at the centreline), and the two departures push opposite ways.
+      - ⚠️ **THE EXPANSION RATIO CHANGES WHICH NUMBER LOOKS WRONG, AND NEITHER OF US HAD ACCOUNTED FOR
+        IT.** The famous benchmarks are ER 1.125–1.2 (Driver & Seegmiller 1985: 6.26 ± 0.10; Le, Moin &
+        Kim 1997 DNS: 6.28) and **must not be used as the target here — this case is ER = 2**, and the
+        published trend is that larger ER *lengthens* the normalized bubble (Armaly et al. 1983, quoting
+        Durst & Tropea 1981). **At ER = 2 the 2D references cluster at 8.0–8.8**: Pont-Vílchez, Trias,
+        Gorobets & Oliva (2019, *JFM* 863) DNS gives **X_r = 8.8h** at Re_τ = 395 (verified independently
+        of the agent that reported it — a later LES cites it as its reference, calling its own 8.15h a
+        7.3% under-estimate); Durst & Tropea (1981) 8.5 at Re_H 1.5e4; Rothe & Johnston (1975) 7.8.
+        **So aquaflux's 8.36 sits INSIDE the ER = 2 band and OpenFOAM's 7.24 sits below it** — the
+        opposite of the "aquaflux over-predicts by 15%" framing this section started from.
+      - ⚠️ **"SST is a known under-predictor" is also wrong.** On Driver & Seegmiller, NASA's turbulence-
+        model resource puts SST at x/H ≈ **6.50** against 6.26 ± 0.10 — a 4% **over**-prediction,
+        reproduced across four codes; Menter (1994) reports 6.5 himself. The classic under-prediction is
+        **k-ε** (Menter's Jones–Launder 5.5), and even the widely-repeated "20–25%" is disowned by
+        Thangam & Speziale (ICASE 91-23) as a resolution artifact.
+      - **What is genuinely unresolved is the FINITE SPAN.** span/h = 4 is 2.5× below the span/h > 10
+        that de Brederode & Bradshaw (1972) require for two-dimensionality at the centreline (quoted
+        verbatim in Jovic & Driver 1994, NASA TM 108807). Lower aspect ratio **shortens** reattachment —
+        direction unanimous across every source found — which would pull both codes below the 2D band.
+        **No open-access `x_r`-vs-aspect-ratio numbers exist**, so the magnitude is unknown and neither
+        7.24 nor 8.36 can be called correct.
+      - ⚠️ **One anomaly worth chasing: our spanwise profile has the WRONG SIGN against the literature.**
+        Both codes here reattach *later* at the outer slabs (10.28) than in the interior (7.24), but the
+        two published spanwise measurements go the other way — Sugiyama et al. (2013) find near-side-wall
+        reattachment ~60% of the centreline value at AR 16, and Armaly, Li & Nie (2003) find a *minimum*
+        near the side wall. Both are laminar/transitional, so the transfer is uncertain, but this is the
+        one place our result contradicts published structure rather than merely differing in magnitude.
       - **Untested and the largest remaining unknown: grid convergence.** One mesh exists.
 
     **⚠️ THE LEVER, as corrected earlier — with the scan's reach stated.** The measurement below is a **1-D scan of
