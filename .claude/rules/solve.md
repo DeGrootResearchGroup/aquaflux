@@ -31,7 +31,56 @@ Governed by the root `CLAUDE.md` Engineering Principles.
 - Milestone 0: a single scalar diffusion system; the plumbing must generalize to the
   coupled p–U block later without redesign.
 
-## Status — BUILT (Stage A, linear)
+## How to read this file (read this before grepping it)
+
+This file is long and accumulates. Three rules make a `grep` hit trustworthy:
+
+1. **Every entry sits under a `##` section** — scan up to the nearest one to see what a hit is about.
+   The sections are topical, not chronological; a 2026-07 and a 2026-08 finding on the same subject
+   sit together.
+2. **A superseded entry is DELETED, never struck through and never annotated in place.** `~~tildes~~`
+   are invisible to `grep`, and "SUPERSEDED — see below" expresses supersession by *adjacency*, which
+   a hit does not carry. Where a dead finding taught a trap, one line states the trap and the body is
+   gone. If you find a strikethrough here, it is a bug — delete it.
+3. **A measurement without its configuration is unfalsifiable, and worse than a wrong one** — a wrong
+   number gets corrected, an unanchored one gets cited. Every number should name the case, the state,
+   the preconditioner bundle and the shift it was taken at. Some older entries do not; they are marked.
+
+**Before quoting any symbol, default or tolerance from this file, check it against the source.** Three
+wrong facts were lifted from here by `grep` and asserted as current in a single session — a march
+solver that had been replaced, a tolerance that had moved, and a preconditioning side that had been
+deliberately reversed. See `CLAUDE.md` → **Stale-Record Check**.
+
+## Current configuration (check here FIRST — the library and the case deliberately differ)
+
+**The library defaults and the validated `bfs3d` case bundle are not the same, and conflating them is a
+recorded error.** A default here that disagrees with the code is a defect — fix it in the same change.
+
+| | library default | validated `bfs3d` bundle | where |
+|---|---|---|---|
+| smoother fill | `smoother_fill_levels=1` (ILU(1)) | **0** (ILU(0)) | `coupled_amg_continuation` / `compare.py` |
+| smoother sweeps | `smoother_sweeps=2` | **4** | same |
+| coarse-eq limit | `coarse_eq_limit=None` (~50) | **2000** | same |
+| PC shift floor | `beta_floor=0.0` | **0.05** | same |
+| aggregation | plain (`pc_gamg_agg_nsmooths=0`) | plain | `amg_preconditioner.py` |
+| field split | `field_split=False` | **True** | `compare.py` |
+| stencil reach | `stencil_reach=3` | 3 | — |
+
+**The three coupled forward solvers — always name which path you mean.** There is no
+`_COUPLED_AMG_FORWARD_SOLVER` symbol.
+
+| path | stop | norm | restart |
+|---|---|---|---|
+| `coupled_amg_continuation` (3D `bfs3d`) | `forward_rtol = 0.3` | **row-scaled** `coupled_scaled_norm` | 15 |
+| `_COUPLED_FORWARD_SOLVER` (block-SIMPLE 2D) | `1e-2` | global 2-norm | 120 |
+| `_COUPLED_ILUT_FORWARD_SOLVER` (2D ILUT) | `1e-2` | global 2-norm | 10 |
+
+**Preconditioning side: RIGHT** (`solve_linear`'s default, taken by `_shifted_solve`), so the Krylov
+residual is the **true** residual `b − Ax`. No solution-accuracy bound follows from the stop. `left` is
+used only by `potential_flow`, where `M` is strong and the operator well-behaved.
+
+## Contracts — the API boundary
+
 - **`linear.py` — BUILT.** `solve_linear(matvec, b, solver, preconditioner=None)` is a
   matrix-free wrapper over `lineax` (default restarted GMRES); `lineax` supplies the
   **implicit-diff of the linear solve** (the Krylov loop is not taped). This is the load-bearing
@@ -123,6 +172,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     and raises no `NaN`. The stopping test is one helper, `_within_tolerance`, shared by the loop
     `cond` and the guard. A `NaN` mid-iteration is often caught first by `lineax`'s own non-finite
     guard at the next linear solve — both are hard errors, neither is silent.
+
+## Preconditioner — monolithic ILUT
+
 - **Monolithic ILUT preconditioner — BUILT (`sparse_jacobian.py` + `ilut_preconditioner.py`).** An
   incomplete-LU (threshold ILU) factorization of the **assembled coupled Jacobian**, the alternative to
   the block-triangular SIMPLE preconditioner for the coupled saddle. The block PC approximates the
@@ -241,6 +293,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     naive monolithic V-cycle's coarse-grid-correction instability on the indefinite saddle). The coupled builder still assembles the
     unused block AMG as the `a_P` source — a lightweight shift-diagonal-only policy would remove that. The
     coupled integration (`coupled_ilut_continuation`) lives in `.claude/rules/turbulence.md`.
+
+## Preconditioner — monolithic complete-LU
+
 - **Monolithic COMPLETE-LU preconditioner — BUILT (`lu_preconditioner.py`), the preferred 2D/moderate
   coupled preconditioner.** The sibling of the ILUT: it factors the assembled coupled Jacobian
   *completely* (`MonolithicLuPreconditioner`), so it is the operator's **exact** inverse and a Krylov
@@ -292,6 +347,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     β-tracking `lu_beta_tracking_refresh`) live in `.claude/rules/turbulence.md`;** they share the
     `MonolithicFactorShiftPolicy` and the `_monolithic_factor_step` builder tail with the ILUT (one
     implementation, parameterized by the factorization).
+
+## Preconditioner — monolithic AMG (the coupled PC)
+
 - **Monolithic ALGEBRAIC-MULTIGRID preconditioner — BUILT (`amg_preconditioner.py`), the coupled PC for
   large 3D.** The third member of the family: instead of factoring the assembled coupled Jacobian it applies
   **one smoothed-aggregation multigrid V-cycle** (`MonolithicAmgPreconditioner`, PETSc `PCGAMG`) whose only
@@ -585,1609 +643,1630 @@ Governed by the root `CLAUDE.md` Engineering Principles.
       loop that builds one preconditioner per arm needs (two live copies of a 3D coupled operator plus
       factors is enough to exhaust a workstation — the standing "one heavy probe at a time" rule).
       `refactor`'s rebuild branch calls it too, so the teardown has one home.
-  - **⚠️ MEASUREMENT DISCIPLINE FOR PRECONDITIONER PROBES (binding — every one of these produced a wrong
-    verdict that had to be retracted).** Judge a candidate preconditioner **only** by running it through
-    GMRES and reading the **true** residual `‖Ax−b‖`, **at a state and shift pairing where the operator
-    is actually hard**. Seven cheaper-looking shortcuts are all invalid on this indefinite saddle:
 
-    **Shortcut 0, and the most expensive one found so far: judging a preconditioner by its CYCLE COUNT
-    rather than by the march's WALL CLOCK.** Every other entry here is about measuring the residual
-    honestly; this one is about measuring the wrong *quantity* honestly, which is harder to notice. The
-    field split was measured at a captured hard iterate to cost a cycle (4 against the monolithic's 3) and
-    was very nearly abandoned on that basis. Run end to end at the identical configuration it is **31%
-    faster** (2161 s against 3140 s) to the identical reattachment length — **while taking 11% MORE
-    cycles** (324 against 293) and triggering 21% more refreshes. A cycle is not a unit of cost: two
-    smaller V-cycles plus one sparse coupling product apply far more cheaply than one six-field V-cycle,
-    so the split buys more cycles at a lower price. **A cycle count is only a valid proxy when the
-    candidates share a per-application cost** — true when comparing smoother sweeps or aggregation
-    settings on one hierarchy, false the moment the preconditioner's *shape* changes. When the shape
-    changes, the only honest measure is wall clock over a whole march, and a single-state probe cannot
-    give it. (Two corollaries worth keeping: the same run's mean cycles per inner solve was *lower* for
-    the split, 1.49 against 1.68 — the higher total came from more, cheaper steps, so even the direction
-    of the cycle difference depends on whether you count per solve or per march; and the monolithic run
-    contained a single 40-cycle solve where the split's worst was 8, which no average shows.)
+## Measurement discipline for preconditioner probes (BINDING)
 
-    1. **The preconditioned residual `‖Mr‖`.** PETSc's default convergence norm. SOR/Krylov-smoothing
-       report `reason=2` (converged) at a **true** residual of 1.0. Force `KSP_NORM_UNPRECONDITIONED`.
-       A level-ILU "win" was once entirely this artifact.
-    2. **One-apply contraction `‖M A x − x‖ / ‖x‖ < 1`.** Rejected a candidate on this; it is not a
-       convergence criterion for a *Krylov-accelerated* preconditioner. Counter-example from our own
-       data: ILU(0) at β=0.02 has a one-apply contraction of **4.5** and still converges in 97 matvecs.
-    3. **The spectral radius of the iteration operator.** The largest eigenmode of a smoothed operator is
-       the *smooth* mode — which is the coarse grid's job, not the smoother's. A "ρ = 9e4, diverges"
-       reading nearly killed a Vanka smoother that had never actually been run through GMRES.
-    4. **A probe at a BENIGN operating point — an easy operator cannot discriminate between
-       preconditioners.** This is the one that nearly buried the largest preconditioner win found on this
-       case. A GAMG aggregation sweep run at the march's *converged tail* returned **6 cycles for every
-       arm** — shipped, plain aggregation, and two strength thresholds all identical — and the honest
-       reading of that sweep was "no difference, close the question". Re-run at the march's own **hard**
-       states, the same arms separated **22 → 9 cycles** (2.4×, and 66× lower true residual). Where the
-       operator is well conditioned, every candidate looks the same, so a null result there is *no
-       information*, not evidence of no effect.
-       **Pick the hard states from the march's own log, not by intuition:** the checkpoints plus the step
-       table identify them directly — highest cycle count, clipped `a_min`, and any step carrying a retry
-       flag. Probe the state *entering* such a step (the checkpoint written after the previous one).
-       The same caution applies to the *pairing*: use the operator at the march's own β with the V-cycle
-       at `max(β, beta_floor)`, because that mismatch is the shipped configuration. A probe that builds
-       the V-cycle at the march's raw β instead measures a configuration the floor exists to prevent —
-       it reported "the V-cycle does not converge at all in the tail" (true residual 1.0), where the real
-       pairing takes **6 cycles to 1.5e-10**.
-       **Two traps in "highest cycle count", both of which pick a BENIGN state if you get them wrong:**
-       - **Rank on the hardest SINGLE solve, never on the step's summed cycles.** The sum rewards a step
-         that took many easy inner iterations over one that took a single hard solve, and on a real march
-         the two orderings disagree outright: on the 3-rung `bfs3d` cold march the summed count picks a
-         step whose hardest solve is **6** cycles over one whose hardest is **15**. `StepReport` has
-         `max_inner_cycles` for exactly this, and `StateCheckpointer` now serializes it (with
-         `inner_iterations`) so a later study can rank without re-parsing the log.
-       - **A step's record describes only its ACCEPTED attempt, and the hardest operators live in the
-         REJECTED ones.** A solve that blows past `retry_on_cycles` gets the step redone at an escalated
-         β, and the retry then succeeds easily — so the record shows the *easy* attempt. Same march: step
-         50's hardest solve is **15 cycles at β = 0.0293** with α collapsing to 0, in attempt 1; the step
-         reports **3 cycles at β = 0.0585**. That is also why the escalated attempts are where the
-         *sub-floor* operators are — the escalation is what lifts β back above the floor. Until the
-         rejected attempts are recorded, read them out of `march.log` (`redo step N (attempt 2): …` plus
-         the per-inner table above it) and name the state and β explicitly.
-    5. **A probe driven by the WRONG "march" solver — there are two, and they look interchangeable.**
-       `_COUPLED_ILUT_FORWARD_SOLVER` is 1 % in a plain 2-norm at restart 10; the coupled **AMG** builder's
-       default (what `bfs3d` actually runs) is `forward_rtol` = **0.3** in the **row-scaled**
-       `coupled_scaled_norm` at restart **15**. Reaching for the first while believing it is the second was
-       done twice in one session — once in a sweep's self-check arm, once when adding a `forward_solver`
-       seam, where it would have replaced a loose row-scaled stop with a tight Euclidean one and reported
-       the difference as a restart-length effect. **It does not announce itself:** at a state where both
-       converge in one cycle the self-check still passes and reports a validation it never performed.
-       Build the solver from the same pieces the builder does, or take the restart through
-       `coupled_amg_continuation(forward_restart=...)` rather than by supplying a whole solver.
-       Note also what `forward_rtol = 0.3` *is*: an inexact-Newton forcing term on the **linear** residual
-       per inner solve, not a solution tolerance — accuracy comes from the inner loop iterating. And the
-       **achieved** reduction is routinely tighter than the requested one, because a restarted GMRES tests
-       the stop only at restart boundaries, so a solve that would cross 30 % after three matrix-vector
-       products still builds fifteen.
-    6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
-       Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
-       `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks
-       plausible — two probes were invalidated this way. (`equilibrate_cell_major` reorders internally, so
-       *after* that reorder `field = row % n_fields`. Know which side of it you are on.)
-  - **⚠️ WE ARE NOT SOLVING A SADDLE-POINT PROBLEM — we are solving a saddle point PLUS two
-    advection-dominated transported scalars, and that is probably why the saddle-point literature keeps
-    not transferring.** Worth stating plainly because a long run of failures is explained by it:
-    - **Every published method tried here targets a 2-field `(u,p)` system** — Vanka, Webster's
-      stabilization, Metsch's algebraic Vanka, the SIMPLE pre-transform, monolithic saddle-AMG. Our block
-      is **six** fields, two of them transported scalars, one solved in a log variable.
-    - **The closest published work to this discretization segregates the turbulence.** Uroić–Jasak match
-      us on every axis that usually matters (collocated Rhie–Chow finite volume, k–ω SST, backward-facing
-      step, monolithic coupled AMG) and still put only `(u,p)` in the coupled block, solving k/ω
-      separately with BiCGStab + ILU(0). Their papers contain **zero coverage** of turbulence-in-the-block.
-      There is no published precedent for the 6-field monolithic block, so importing a fix from that
-      literature is importing it across a regime boundary.
-    - **The measured failure is not a saddle pathology.** The near-null direction of the degenerate cell
-      blocks is **pure ω** — nothing on `u,v,w,p,k` — and per-field V-cycle smoothing has pressure *well*
-      handled with ω the outlier. The saddle part of our operator is not what is hurting.
-    **The direction this points at is a FIELD SPLIT that keeps the coupling** — a block-triangular
-    preconditioner with the `(u,p)` saddle handled as now and k/ω preconditioned by something suited to
-    transport (`scalar_transport_preconditioner` already exists and already serves those blocks in the
-    block-preconditioner family). Note this is **not** the refuted arm below: that one was
-    block-*diagonal*, i.e. the coupling **dropped**, and it established that the coupling is load-bearing
-    — not that ω has to live in the same multigrid hierarchy. Architecturally the split is free: the
-    operator stays monolithic, so the AD Jacobian and the coupled adjoint are untouched, and a
-    block-triangular preconditioner is a fixed linear operator and therefore transposable.
-    **Before building it, get an operator that can show a difference.** At the states currently reachable
-    the monolithic ILU(0) V-cycle converges in **2 cycles to 1.3e-14**, so every candidate ties; and the
-    march's cost is no longer preconditioner-bound (~65 % Krylov, largely fixed per-step matvec rather
-    than cycles; 21 % refresh; the rest globalization). The upside on *this* case is bounded, and the
-    test needs the hard inner iterates.
-    - **✅ THE SPLIT IS BUILT — `solve/field_split.py` (`FieldGroups`,
-      `BlockTriangularFieldSplit`, `build_block_triangular_field_split`).** Three facts worth keeping,
-      independent of whether it ever wins:
-      - **The partition is free, because the coupled state is FIELD-major.** Degree of freedom
-        `(cell i, field f)` sits at `f·n_cells + i`, so a split on a *field* boundary is a split into two
-        **contiguous ranges**: `[u,v,w,p]` is `[0, (dim+1)·n)` and `[k,ω]` the rest. Vectors are sliced,
-        not gathered, and the four blocks are contiguous submatrices. `FieldGroups` owns that arithmetic
-        so no consumer re-derives `f·n_cells + i` inline; `tests/integration/test_coupled_field_split.py`
-        pins the partition against `CoupledRANSLayout.unpack`, which is the one thing that would be
-        silently wrong rather than loudly wrong — a partition off by one field still preconditions, it
-        just preconditions a mislabelled operator.
-      - **It needs no JAX wrapper of its own.** `MonolithicAmgPreconditioner.matvec()` reads only
-        `factors.n_dofs` and `factors.apply(r, transpose=…)`, both of which the split has, so it rides the
-        existing `pure_callback` path unchanged. Each diagonal block is an ordinary `AmgVCycle`
-        (`build_amg_vcycle` on the sub-block), which equilibrates and reorders *within its own group* and
-        aggregates at its own block size — the whole point, since a four-field saddle and a two-field
-        transport pair coarsen differently. `AmgVCycle.apply` returns the inverse in the **original**
-        (unequilibrated, field-major) space, so the retained coupling block is applied raw between the two
-        block solves, with no scaling bookkeeping.
-      - **The transpose is closed-form, so the adjoint is served.** The transpose of a
-        block-lower-triangular inverse is the block-upper-triangular one over the transposed blocks, so
-        `apply(transpose=True)` reverses the two block solves and uses `Cᵀ` — pinned both as an exact dense
-        transpose (unit) and as `⟨y, Mx⟩ = ⟨Mᵀy, x⟩` over real V-cycles on the real coupled Jacobian
-        (integration).
-      **⚠️ A ONE-APPLICATION CONTRACTION RANKED THE TWO ORDERINGS AND WAS WRONG — invalid shortcut 2, in
-      miniature, caught in a test rather than a write-up.** On the small coupled channel one application of
-      the turbulence-first split leaves ~3× the input residual where flow-first leaves ~0.3×, which reads as
-      a large quality gap. Through **GMRES on the true residual the two are indistinguishable**: both reach
-      ~1e-14 inside one restart cycle, as does the monolithic control. Two lessons, and the second is the
-      one that keeps costing time: a contraction ratio is not a convergence criterion for a
-      Krylov-accelerated preconditioner; and *that state cannot rank the orderings at all*, because an
-      operator every candidate solves in one cycle discriminates between none of them.
-    - **✅ SHIPPED ON `bfs3d` — 31% FASTER END TO END, and the single-state probe below got the sign
-      wrong.** A full 3-rung cold march at the identical configuration (`refresh_on_cycles=3`, ILU(0)×4,
-      plain aggregation, `coarse_eq_limit` 2000, reach 3, restart 15), `field_split=True` against the
-      shipped monolithic:
+- **⚠️ MEASUREMENT DISCIPLINE FOR PRECONDITIONER PROBES (binding — every one of these produced a wrong
+  verdict that had to be retracted).** Judge a candidate preconditioner **only** by running it through
+  GMRES and reading the **true** residual `‖Ax−b‖`, **at a state and shift pairing where the operator
+  is actually hard**. Seven cheaper-looking shortcuts are all invalid on this indefinite saddle:
 
-      | | monolithic | field split | |
-      |---|---|---|---|
-      | **wall** | 3140 s | **2161 s** | **−31%** |
-      | steps | 58 | 66 | +14% |
-      | Krylov cycles | 293 | 324 | **+11%** |
-      | refresh | 19 events / 310 s | 23 / 352 s | +42 s |
-      | mid-span `x_r/h` | 8.361 | **8.361** | identical |
+  **Shortcut 0, and the most expensive one found so far: judging a preconditioner by its CYCLE COUNT
+  rather than by the march's WALL CLOCK.** Every other entry here is about measuring the residual
+  honestly; this one is about measuring the wrong *quantity* honestly, which is harder to notice. The
+  field split was measured at a captured hard iterate to cost a cycle (4 against the monolithic's 3) and
+  was very nearly abandoned on that basis. Run end to end at the identical configuration it is **31%
+  faster** (2161 s against 3140 s) to the identical reattachment length — **while taking 11% MORE
+  cycles** (324 against 293) and triggering 21% more refreshes. A cycle is not a unit of cost: two
+  smaller V-cycles plus one sparse coupling product apply far more cheaply than one six-field V-cycle,
+  so the split buys more cycles at a lower price. **A cycle count is only a valid proxy when the
+  candidates share a per-application cost** — true when comparing smoother sweeps or aggregation
+  settings on one hierarchy, false the moment the preconditioner's *shape* changes. When the shape
+  changes, the only honest measure is wall clock over a whole march, and a single-state probe cannot
+  give it. (Two corollaries worth keeping: the same run's mean cycles per inner solve was *lower* for
+  the split, 1.49 against 1.68 — the higher total came from more, cheaper steps, so even the direction
+  of the cycle difference depends on whether you count per solve or per march; and the monolithic run
+  contained a single 40-cycle solve where the split's worst was 8, which no average shows.)
 
-      **The cycle row is the point.** The split is much faster *while doing more cycles*, because two
-      smaller V-cycles plus one sparse coupling product apply far more cheaply than one six-field V-cycle
-      — the coupling never enters a factorization or a coarse hierarchy. Per matched step at equal cycle
-      counts the split's steps ran ~38–40% faster. Its mean cycles per **inner solve** is *lower* (1.49 vs
-      1.68); the higher total is more, cheaper steps. It also crosses the refresh trigger slightly more
-      often (9.7% of inner solves vs 9.0%), costing ~42 s of the ~980 s saved — the feedback loop is real
-      and small. Refresh cost **per event** is unchanged (~14 s), so an earlier claim that the split
-      refreshes more cheaply was wrong: it compared against the *scheduled* run's average.
-      **Machine-load control:** the coloured jvp probe is identical work in both runs and took 11.3–14.6 s
-      (monolithic) vs 11.7–15.1 s (split), so the faster run was not the quieter machine.
-    - **⚠️ THE SINGLE-STATE PROBE BELOW SAID THE OPPOSITE — read it as a lesson, not as a result.** Harness
-      `validation/bfs3d_openfoam/field_split_probe.py`. **Configuration, in full:** 3-rung cold march's
-      own states; plain aggregation, **ILU(0) ×4** where not overridden, `coarse_eq_limit` 2000, stencil
-      reach 3, block sizes 4 and 2; GMRES restart 15 to **rtol 1e-8 on the TRUE residual**; right-hand
-      side the steady residual `−R(state)`; one materialization per state shared by every arm.
+  1. **The preconditioned residual `‖Mr‖`.** PETSc's default convergence norm. SOR/Krylov-smoothing
+     report `reason=2` (converged) at a **true** residual of 1.0. Force `KSP_NORM_UNPRECONDITIONED`.
+     A level-ILU "win" was once entirely this artifact.
+  2. **One-apply contraction `‖M A x − x‖ / ‖x‖ < 1`.** Rejected a candidate on this; it is not a
+     convergence criterion for a *Krylov-accelerated* preconditioner. Counter-example from our own
+     data: ILU(0) at β=0.02 has a one-apply contraction of **4.5** and still converges in 97 matvecs.
+  3. **The spectral radius of the iteration operator.** The largest eigenmode of a smoothed operator is
+     the *smooth* mode — which is the coarse grid's job, not the smoother's. A "ρ = 9e4, diverges"
+     reading nearly killed a Vanka smoother that had never actually been run through GMRES.
+  4. **A probe at a BENIGN operating point — an easy operator cannot discriminate between
+     preconditioners.** This is the one that nearly buried the largest preconditioner win found on this
+     case. A GAMG aggregation sweep run at the march's *converged tail* returned **6 cycles for every
+     arm** — shipped, plain aggregation, and two strength thresholds all identical — and the honest
+     reading of that sweep was "no difference, close the question". Re-run at the march's own **hard**
+     states, the same arms separated **22 → 9 cycles** (2.4×, and 66× lower true residual). Where the
+     operator is well conditioned, every candidate looks the same, so a null result there is *no
+     information*, not evidence of no effect.
+     **Pick the hard states from the march's own log, not by intuition:** the checkpoints plus the step
+     table identify them directly — highest cycle count, clipped `a_min`, and any step carrying a retry
+     flag. Probe the state *entering* such a step (the checkpoint written after the previous one).
+     The same caution applies to the *pairing*: use the operator at the march's own β with the V-cycle
+     at `max(β, beta_floor)`, because that mismatch is the shipped configuration. A probe that builds
+     the V-cycle at the march's raw β instead measures a configuration the floor exists to prevent —
+     it reported "the V-cycle does not converge at all in the tail" (true residual 1.0), where the real
+     pairing takes **6 cycles to 1.5e-10**.
+     **Two traps in "highest cycle count", both of which pick a BENIGN state if you get them wrong:**
+     - **Rank on the hardest SINGLE solve, never on the step's summed cycles.** The sum rewards a step
+       that took many easy inner iterations over one that took a single hard solve, and on a real march
+       the two orderings disagree outright: on the 3-rung `bfs3d` cold march the summed count picks a
+       step whose hardest solve is **6** cycles over one whose hardest is **15**. `StepReport` has
+       `max_inner_cycles` for exactly this, and `StateCheckpointer` now serializes it (with
+       `inner_iterations`) so a later study can rank without re-parsing the log.
+     - **A step's record describes only its ACCEPTED attempt, and the hardest operators live in the
+       REJECTED ones.** A solve that blows past `retry_on_cycles` gets the step redone at an escalated
+       β, and the retry then succeeds easily — so the record shows the *easy* attempt. Same march: step
+       50's hardest solve is **15 cycles at β = 0.0293** with α collapsing to 0, in attempt 1; the step
+       reports **3 cycles at β = 0.0585**. That is also why the escalated attempts are where the
+       *sub-floor* operators are — the escalation is what lifts β back above the floor. Until the
+       rejected attempts are recorded, read them out of `march.log` (`redo step N (attempt 2): …` plus
+       the per-inner table above it) and name the state and β explicitly.
+  5. **A probe driven by the WRONG "march" solver — there are two, and they look interchangeable.**
+     `_COUPLED_ILUT_FORWARD_SOLVER` is 1 % in a plain 2-norm at restart 10; the coupled **AMG** builder's
+     default (what `bfs3d` actually runs) is `forward_rtol` = **0.3** in the **row-scaled**
+     `coupled_scaled_norm` at restart **15**. Reaching for the first while believing it is the second was
+     done twice in one session — once in a sweep's self-check arm, once when adding a `forward_solver`
+     seam, where it would have replaced a loose row-scaled stop with a tight Euclidean one and reported
+     the difference as a restart-length effect. **It does not announce itself:** at a state where both
+     converge in one cycle the self-check still passes and reports a validation it never performed.
+     Build the solver from the same pieces the builder does, or take the restart through
+     `coupled_amg_continuation(forward_restart=...)` rather than by supplying a whole solver.
+     Note also what `forward_rtol = 0.3` *is*: an inexact-Newton forcing term on the **linear** residual
+     per inner solve, not a solution tolerance — accuracy comes from the inner loop iterating. And the
+     **achieved** reduction is routinely tighter than the requested one, because a restarted GMRES tests
+     the stop only at restart boundaries, so a solve that would cross 30 % after three matrix-vector
+     products still builds fifteen.
+  6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
+     Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
+     `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks
+     plausible — two probes were invalidated this way. (`equilibrate_cell_major` reorders internally, so
+     *after* that reorder `field = row % n_fields`. Know which side of it you are on.)
 
-      | arm (flow / turbulence smoother) | hard iterate, β=0.0293, PC 0.05 | converged, **β=0** |
-      |---|---|---|
-      | monolithic ILU(0) — control | **3** (1.2e-12) | **16** (1.8e-11) |
-      | split flow-first, ILU(0) / ILU(0) | 4 (1.3e-13) | **11** (3.7e-11) |
-      | split turbulence-first, ILU(0) / ILU(0) | 4 (5.2e-14) | 13 (1.3e-10) |
-      | split flow-first, ILU(0) / **damped Jacobi** | 6 (2.8e-12) | 16 (5.2e-10) |
-      | split flow-first, ILU(0) / Chebyshev | 58 cap (3.3e-01) | 58 cap (2.6e-01) |
-      | split flow-first, Chebyshev / ILU(0) | 58 cap (3.4e-02) | 58 cap (3.8e-03) |
-      | split flow-first, Chebyshev / Chebyshev | 58 cap (9.97e-01) | 58 cap (9.5e-01) |
-      | monolithic Chebyshev | 58 cap (9.9e-01) | 58 cap (5.4e-01) |
-      | monolithic damped Jacobi | 58 cap (6.0e-01) | 58 cap (2.8e-01) |
+## The field split — a saddle plus two transported scalars
 
-      - **Forward: a small loss (4 vs 3), so do not adopt it for the march.** Both orderings tie there.
-      - **Adjoint (`β = 0`, converged state): 11 vs 16, a 1.45× reduction** — and flow-first genuinely beats
-        turbulence-first (11 vs 13), so the ordering *does* matter once the operator is hard enough to
-        discriminate. This is the operator behind every `jax.grad` through a converged coupled solve, and
-        it is the same place the monolithic ILUT's value turned out to lie. **Measure a coupled
-        preconditioner at `β = 0`, not only on the march.**
-      - **⚠️ `β = 0` must be taken at the CONVERGED state.** Stripping the shift off a mid-march iterate
-        gives an operator neither the forward march nor the adjoint ever solves.
-      - **⚠️ The probe's right-hand side is `−R`, and a dual-time step's is `−G = −(R + βd(φ−φₙ))`.** They
-        coincide only at inner 0 (`φ = φₙ`) — which is why a sweep over end-of-step *checkpoints* is right
-        to use `−R` — and on the hardest captured **inner** iterate they differ by ~200× (`|G|` 3.8e-03 vs
-        `|R|` 8.3e-01). `φₙ` is not recorded by the inner observer, so `G` cannot be reconstructed. The
-        self-check therefore gates on the **cycle count** (which reproduced the recorded 1) and reports the
-        achieved residual without asserting it. Every arm sees the identical right-hand side, so the
-        between-arm comparison is unaffected — but do not compare an absolute residual across the two.
-    - **✅ THE INCOMPLETE-LU SWEEP CAN BE CONFINED TO THE SADDLE — the reachable half of the GPU prize.**
-      Every smoother `solve/multigrid.py` has is Jacobi-class; the only thing PETSc supplies that it does
-      not is the incomplete-LU sweep, which is also the least parallelizable piece (a sequential triangular
-      solve). Two claims must be separated, because they have opposite answers:
-      - **Remove it everywhere — REFUTED.** A Jacobi-class smoother on the four-field `[u,v,w,p]` block
-        fails as badly as on the six-field block (both run to the restart cap). Taking ω out of the
-        Chebyshev-smoothed block *helps a great deal* — 9.9e-01 → 3.4e-02 at the hard iterate, 5.4e-01 →
-        3.8e-03 at `β=0`, one to two orders — so **ω-locality is real and is part of the obstruction**, as
-        the cell-block singular-value decomposition predicted. But it never converges: the `[u,v,w,p]`
-        block **is the saddle**, and a field split does not make it definite. Removing ω is necessary and
-        not sufficient.
-      - **Confine it to the saddle — SUPPORTED.** `[k,ω]` is not a saddle but a two-field
-        advection-diffusion-reaction pair with a genuine diagonal, and **damped Jacobi on it converges** at
-        both states (6 cycles / 2.8e-12 forward, 16 / 5.2e-10 at `β=0`), for a consistent ~1.5× cycle cost
-        against ILU(0) on both blocks. At `β=0` it *ties the shipped monolithic* (16) while taking the
-        incomplete factorization off two of six fields. So the k/ω hierarchy could be JAX-native, with
-        PETSc confined to the four-field saddle.
-      - **The Chebyshev-vs-Jacobi asymmetry on the SAME block is the mechanistic tell, and it is why
-        "Jacobi-class" must not be treated as one arm.** Chebyshev **fails** on `[k,ω]` (58 cap, 2.6e-01 at
-        `β=0`) where damped Jacobi converges. Chebyshev's polynomial is built for a bounded positive
-        **real** spectrum; the transport pair is advection-dominated and strongly nonsymmetric, so its
-        spectrum is complex and the real-interval polynomial is the wrong instrument. Damped Jacobi assumes
-        only diagonal dominance, which first-order-upwind advection-diffusion-reaction has. So Chebyshev
-        fails on both blocks for **two different reasons** — indefiniteness on the saddle, nonsymmetry on
-        the scalars — and only the second is cured by dropping to Jacobi.
-      - **Untested, and the honest caveat on the refuted half:** PETSc estimates Chebyshev's eigenvalue
-        bounds with a few GMRES iterations, which is meaningless on an indefinite operator. A hand-bounded
-        polynomial, or one designed for a complex spectrum, is not covered by these arms.
-    - **✅ VANKA RE-OPENED ON THE FOUR-FIELD BLOCK, AND RE-CLOSED — but the ω half of the old mechanism is
-      now CONFIRMED, quantitatively.** The standing verdict ("cell-centred patch relaxation is the wrong
-      shape; do not re-open it with another patch variant") was measured on the **six-field** cell block,
-      and its stated mechanism was that the block is weakly coupled in ω *everywhere*. A field split
-      removes ω from the patch by construction, leaving the classical velocity-pressure patch the entire
-      Vanka literature is built on — so that verdict does not transfer, and this is the new evidence its
-      "do not re-litigate without new evidence" clause asks for. Same configuration as the table above,
-      `state-00069`, β = 0, `vanka_centre_field = 3` (**mandatory** — the default is three fields from the
-      end, which finds `p` in `[u,v,w,p,k,ω]` and would silently centre patches on `v` in a four-field
-      block), patch width 22 = centre `[u,v,w,p]` + 6 neighbours × `[u,v,w]`:
+- **⚠️ WE ARE NOT SOLVING A SADDLE-POINT PROBLEM — we are solving a saddle point PLUS two
+  advection-dominated transported scalars, and that is probably why the saddle-point literature keeps
+  not transferring.** Worth stating plainly because a long run of failures is explained by it:
+  - **Every published method tried here targets a 2-field `(u,p)` system** — Vanka, Webster's
+    stabilization, Metsch's algebraic Vanka, the SIMPLE pre-transform, monolithic saddle-AMG. Our block
+    is **six** fields, two of them transported scalars, one solved in a log variable.
+  - **The closest published work to this discretization segregates the turbulence.** Uroić–Jasak match
+    us on every axis that usually matters (collocated Rhie–Chow finite volume, k–ω SST, backward-facing
+    step, monolithic coupled AMG) and still put only `(u,p)` in the coupled block, solving k/ω
+    separately with BiCGStab + ILU(0). Their papers contain **zero coverage** of turbulence-in-the-block.
+    There is no published precedent for the 6-field monolithic block, so importing a fix from that
+    literature is importing it across a regime boundary.
+  - **The measured failure is not a saddle pathology.** The near-null direction of the degenerate cell
+    blocks is **pure ω** — nothing on `u,v,w,p,k` — and per-field V-cycle smoothing has pressure *well*
+    handled with ω the outlier. The saddle part of our operator is not what is hurting.
+  **The direction this points at is a FIELD SPLIT that keeps the coupling** — a block-triangular
+  preconditioner with the `(u,p)` saddle handled as now and k/ω preconditioned by something suited to
+  transport (`scalar_transport_preconditioner` already exists and already serves those blocks in the
+  block-preconditioner family). Note this is **not** the refuted arm below: that one was
+  block-*diagonal*, i.e. the coupling **dropped**, and it established that the coupling is load-bearing
+  — not that ω has to live in the same multigrid hierarchy. Architecturally the split is free: the
+  operator stays monolithic, so the AD Jacobian and the coupled adjoint are untouched, and a
+  block-triangular preconditioner is a fixed linear operator and therefore transposable.
+  **Before building it, get an operator that can show a difference.** At the states currently reachable
+  the monolithic ILU(0) V-cycle converges in **2 cycles to 1.3e-14**, so every candidate ties; and the
+  march's cost is no longer preconditioner-bound (~65 % Krylov, largely fixed per-step matvec rather
+  than cycles; 21 % refresh; the rest globalization). The upside on *this* case is bounded, and the
+  test needs the hard inner iterates.
+  - **✅ THE SPLIT IS BUILT — `solve/field_split.py` (`FieldGroups`,
+    `BlockTriangularFieldSplit`, `build_block_triangular_field_split`).** Three facts worth keeping,
+    independent of whether it ever wins:
+    - **The partition is free, because the coupled state is FIELD-major.** Degree of freedom
+      `(cell i, field f)` sits at `f·n_cells + i`, so a split on a *field* boundary is a split into two
+      **contiguous ranges**: `[u,v,w,p]` is `[0, (dim+1)·n)` and `[k,ω]` the rest. Vectors are sliced,
+      not gathered, and the four blocks are contiguous submatrices. `FieldGroups` owns that arithmetic
+      so no consumer re-derives `f·n_cells + i` inline; `tests/integration/test_coupled_field_split.py`
+      pins the partition against `CoupledRANSLayout.unpack`, which is the one thing that would be
+      silently wrong rather than loudly wrong — a partition off by one field still preconditions, it
+      just preconditions a mislabelled operator.
+    - **It needs no JAX wrapper of its own.** `MonolithicAmgPreconditioner.matvec()` reads only
+      `factors.n_dofs` and `factors.apply(r, transpose=…)`, both of which the split has, so it rides the
+      existing `pure_callback` path unchanged. Each diagonal block is an ordinary `AmgVCycle`
+      (`build_amg_vcycle` on the sub-block), which equilibrates and reorders *within its own group* and
+      aggregates at its own block size — the whole point, since a four-field saddle and a two-field
+      transport pair coarsen differently. `AmgVCycle.apply` returns the inverse in the **original**
+      (unequilibrated, field-major) space, so the retained coupling block is applied raw between the two
+      block solves, with no scaling bookkeeping.
+    - **The transpose is closed-form, so the adjoint is served.** The transpose of a
+      block-lower-triangular inverse is the block-upper-triangular one over the transposed blocks, so
+      `apply(transpose=True)` reverses the two block solves and uses `Cᵀ` — pinned both as an exact dense
+      transpose (unit) and as `⟨y, Mx⟩ = ⟨Mᵀy, x⟩` over real V-cycles on the real coupled Jacobian
+      (integration).
+    **⚠️ A ONE-APPLICATION CONTRACTION RANKED THE TWO ORDERINGS AND WAS WRONG — invalid shortcut 2, in
+    miniature, caught in a test rather than a write-up.** On the small coupled channel one application of
+    the turbulence-first split leaves ~3× the input residual where flow-first leaves ~0.3×, which reads as
+    a large quality gap. Through **GMRES on the true residual the two are indistinguishable**: both reach
+    ~1e-14 inside one restart cycle, as does the monolithic control. Two lessons, and the second is the
+    one that keeps costing time: a contraction ratio is not a convergence criterion for a
+    Krylov-accelerated preconditioner; and *that state cannot rank the orderings at all*, because an
+    operator every candidate solves in one cycle discriminates between none of them.
+  - **✅ SHIPPED ON `bfs3d` — 31% FASTER END TO END, and the single-state probe below got the sign
+    wrong.** A full 3-rung cold march at the identical configuration (`refresh_on_cycles=3`, ILU(0)×4,
+    plain aggregation, `coarse_eq_limit` 2000, reach 3, restart 15), `field_split=True` against the
+    shipped monolithic:
 
-      | arm | cycles | TRUE rel | worst patch gain |
-      |---|---|---|---|
-      | split, ILU(0) / ILU(0) | 11 | 3.7e-11 | — |
-      | split, **Vanka** flow / ILU(0) | 58 cap | 2.9e-03 | **12.8** |
-      | split, Vanka flow / damped Jacobi | 58 cap | 1.4e-01 | 12.8 |
-      | split, **multiplicative** Vanka flow / ILU(0) | 40 | **1.55** (worse than the initial guess), 994 s | 12.8 |
+    | | monolithic | field split | |
+    |---|---|---|---|
+    | **wall** | 3140 s | **2161 s** | **−31%** |
+    | steps | 58 | 66 | +14% |
+    | Krylov cycles | 293 | 324 | **+11%** |
+    | refresh | 19 events / 310 s | 23 / 352 s | +42 s |
+    | mid-span `x_r/h` | 8.361 | **8.361** | identical |
 
-      - **ω WAS the cause of the catastrophic patch conditioning — measured from the opposite direction.**
-        The six-field campaign found the worst patch gain **flat at ~3e3 across every patch width**, which
-        was the evidence that widening cannot help. On the four-field patch it is **12.8**, ~235× better,
-        with **zero** patches dropped. The classical velocity-pressure patch is well conditioned on this
-        operator. That is a clean confirmation of the ω-locality finding, obtained by *removing* ω rather
-        than by inferring it from a singular-value decomposition.
-      - **But patch conditioning was never the binding constraint, and this settles it.** A perfectly
-        conditioned classical patch **still fails to converge** (stalls at 2.9e-03). The earlier campaign
-        reached the same conclusion by *dropping* the near-singular patches, which was a confounded arm
-        (it measured coverage); this reaches it by removing the ill-conditioning at the source, which is
-        not confounded. Removing ω does help a great deal in absolute terms — the six-field Vanka stalled
-        at 0.24–0.78, a 1.3–4× reduction, against 340× here — so the split genuinely strengthens the
-        smoother, just nowhere near ILU(0)'s 11 cycles.
-      - **Multiplicative is worse on the four-field block too, and hugely more expensive** (true residual
-        1.55, 994 s vs 176 s, 17 colours). The six-field finding that sequencing costs rather than helps
-        survives the split. Treat patch relaxation as closed on this operator, now for a *measured*
-        reason rather than an inferred one.
-      - **Two weak smoothers compound**: Vanka flow + Jacobi k/ω is 1.4e-01, far worse than either
-        weakness alone. The two blocks' smoothers are independent *settings* but not independent in effect.
-    - **⚠️ THE JAX-NATIVE HIERARCHIES CANNOT BE BUILT ON THE `[k,ω]` JACOBIAN SLICE AT ALL — and the
-      reason is structural, not a cost.** Both were tried as the trailing block's inverse and both failed,
-      for **one shared cause** rather than two incidental ones:
-      - `build_convection_hierarchy` (aggregation) **refuses**: *"operator diagonal must be finite and
-        strictly positive, but its minimum is −2.129e+06"*.
-        **⚠️ THE OBVIOUS EXPLANATION — that the true `[k,ω]` block carries negative diagonals from its
-        live source linearizations — IS WRONG, AND THE ERROR MESSAGE ITSELF SAYS SO (corrected
-        2026-08-09).**
-        The refusal names **`level 1`**, a *coarse* operator. The fine slice is clean: measured on `bfs3d`
-        `state-00057`, **0 of 23040 cells** have a non-positive diagonal, at β = 0, at the march's shift
-        and at the preconditioner floor alike (`validation/bfs3d_openfoam/trailing_block_conditioning.py`).
-        The negative diagonal is *manufactured by the aggregation*, in the Galerkin `R A P` row — which is
-        one of the three causes the guard's own docstring lists.
-        **The real cause is that `_aggregate` is FIELD-BLIND.** It takes a bare matrix with no block size,
-        so on a multi-field block it can merge a `k` degree of freedom with an `ω` one from a *different*
-        cell into a single aggregate, and on a strongly nonsymmetric operator that produces a degenerate
-        coarse row. PETSc GAMG does not hit this because it is told `setBlockSize(n_fields)` and coarsens
-        whole **cells**. So the obstruction is the coarsening's blindness to fields, not the fine
-        operator, not the source linearizations, and not the sign of anything the caller supplies.
-        **Consequence: one hierarchy PER FIELD works, on the REAL Jacobian sub-blocks.** An aggregate
-        cannot mix fields when there is only one, and `build_convection_hierarchy` accepts `A_kk`
-        (diagonal 1.16e-06 … 2.66e-04, 57 nnz/row) and `A_ωω` (3.03e-03 … 1.0, 49 nnz/row) at every
-        shift. That keeps the full stencil fill and the true source linearizations, and needs **no**
-        reparametrization scaling, because the Jacobian is already in the solved variable — the log-ω
-        chain factor and its wall-fixation trap simply do not arise. Built as
-        `solve/field_split.PerFieldNativeInverse` / `native_per_field_inverse`, with the two fields
-        composed block-triangularly (k leading).
-        **This corrected a real cost: the wrong explanation was taken as an accepted blocker and sent the
-        first implementation down a transport-operator detour** — a 13×-sparser, source-clamped, per-field
-        stand-in needing the closure, the mass flux and the reparametrization scale — which measured 5
-        cycles against the true sub-blocks' 1 on the channel and was deleted. The generalisable lesson:
-        the record quoted an error verbatim and stapled an *inference* to it, and only the quotation was
-        ever verified. The word `level 1` was in the quotation the whole time.
-      - `build_air_hierarchy` (lAIR) ran **~50 minutes without finishing** and was killed. Contributing:
-        the slice carries the distance-3 coupled fill at **91 nnz/row** where the frozen transport stencil
-        is ~7 (the leading block's slice is 227), and lAIR's local approximate-ideal-restriction solves run
-        over a degree-2 F-neighbourhood whose size grows roughly with the square of the row density.
-      **Neither is a verdict on the method, and this is MEASURED rather than argued.** Both builders assume
-      an M-matrix-like operator, and `scalar_transport_preconditioner` never hands them one that isn't:
-      `_scalar_operator_pieces` **clamps its reaction diagonal non-negative** for exactly this reason (an
-      anti-diffusive source would make the operator indefinite and its V-cycle diverge). The Jacobian slice
-      is the unclamped truth, so it is simply not in these builders' domain. PETSc GAMG with an ILU(0) or
-      Jacobi smoother is untroubled because it assumes none of this. Built on the **transport** operator
-      instead, at the same state on the same mesh, both are perfectly healthy:
+    **The cycle row is the point.** The split is much faster *while doing more cycles*, because two
+    smaller V-cycles plus one sparse coupling product apply far more cheaply than one six-field V-cycle
+    — the coupling never enters a factorization or a coarse hierarchy. Per matched step at equal cycle
+    counts the split's steps ran ~38–40% faster. Its mean cycles per **inner solve** is *lower* (1.49 vs
+    1.68); the higher total is more, cheaper steps. It also crosses the refresh trigger slightly more
+    often (9.7% of inner solves vs 9.0%), costing ~42 s of the ~980 s saved — the feedback loop is real
+    and small. Refresh cost **per event** is unchanged (~14 s), so an earlier claim that the split
+    refreshes more cheaply was wrong: it compared against the *scheduled* run's average.
+    **Machine-load control:** the coloured jvp probe is identical work in both runs and took 11.3–14.6 s
+    (monolithic) vs 11.7–15.1 s (split), so the faster run was not the quieter machine.
+  - **⚠️ THE SINGLE-STATE PROBE BELOW SAID THE OPPOSITE — read it as a lesson, not as a result.** Harness
+    `validation/bfs3d_openfoam/field_split_probe.py`. **Configuration, in full:** 3-rung cold march's
+    own states; plain aggregation, **ILU(0) ×4** where not overridden, `coarse_eq_limit` 2000, stencil
+    reach 3, block sizes 4 and 2; GMRES restart 15 to **rtol 1e-8 on the TRUE residual**; right-hand
+    side the steady residual `−R(state)`; one materialization per state shared by every arm.
 
-      | hierarchy on the transport operator (`bfs3d`, 23040 cells, `state-00069`) | k | ω |
-      |---|---|---|
-      | `twolevel` (the shipped scalar default) | 5.0 s | 44.3 s |
-      | `air` (lAIR) | 80.0 s | 79.8 s |
+    | arm (flow / turbulence smoother) | hard iterate, β=0.0293, PC 0.05 | converged, **β=0** |
+    |---|---|---|
+    | monolithic ILU(0) — control | **3** (1.2e-12) | **16** (1.8e-11) |
+    | split flow-first, ILU(0) / ILU(0) | 4 (1.3e-13) | **11** (3.7e-11) |
+    | split turbulence-first, ILU(0) / ILU(0) | 4 (5.2e-14) | 13 (1.3e-10) |
+    | split flow-first, ILU(0) / **damped Jacobi** | 6 (2.8e-12) | 16 (5.2e-10) |
+    | split flow-first, ILU(0) / Chebyshev | 58 cap (3.3e-01) | 58 cap (2.6e-01) |
+    | split flow-first, Chebyshev / ILU(0) | 58 cap (3.4e-02) | 58 cap (3.8e-03) |
+    | split flow-first, Chebyshev / Chebyshev | 58 cap (9.97e-01) | 58 cap (9.5e-01) |
+    | monolithic Chebyshev | 58 cap (9.9e-01) | 58 cap (5.4e-01) |
+    | monolithic damped Jacobi | 58 cap (6.0e-01) | 58 cap (2.8e-01) |
 
-      So lAIR builds in ~80 s where it did not finish in 50 minutes on the slice — a ≥40× gap on the same
-      mesh — and is ~3.2× the shipped aggregation's combined build (1.8× on ω alone), which matches the
-      independent recollection that production lAIR on the 2D case worked and was only somewhat slower.
-      **Do not read the slice failures as anything about lAIR's cost in normal use.**
-      **Note also that row density was only part of the story and was the weaker part.** The decisive fact
-      is the **negative diagonal**, which is a property of the true Jacobian block whatever its sparsity;
-      the 91-vs-7 nnz/row gap explains lAIR's *time* but not aggregation's outright refusal.
-      **So the correct arm builds the hierarchy on the TRANSPORT operator** —
-      `SSTTurbulence.k_preconditioner` / `omega_preconditioner`, which is what the segregated scalar path
-      already does — accepting that it then approximates a *different* matrix from `A_tt` (no k↔ω coupling,
-      no reach-3 fill, clamped diagonal), the same approximation the block-preconditioner family already
-      makes. That arm is **not yet built**: it needs `mdot` and the closure at the state, a `k ⊕ ω`
-      block-diagonal composition, and the log-ω chain-rule scaling (`ScaledScalarPreconditioner`) — the
-      last of which is a known trap, since a rescale that ignores the wall-fixation rows' own derivative
-      cost 27× on the linear residual once already.
-    - **⚠️⚠️ SUPERSEDED (2026-08-10) — EVERY COST NUMBER IN THIS BULLET IS VOID, AND ITS CONCLUSION IS
-      REVERSED. The native trailing inverse is now AT PARITY: 13.3 ms against PETSc's 12.6 ms per apply,
-      and 2 restart cycles against 2.** Both stated blockers are gone. The "~2.8× more expensive"
-      figure was the **COO `segment_sum`** matvec, not anything intrinsic to a framework-native
-      V-cycle — a CSR operator took the apply from 117.8 ms to 13.3 ms (8.8×), and the level operator
-      is applied ~10× per cycle so that was essentially all of it. The "learn a block size" half was
-      built and is what closed the *quality* gap. Read the 2026-08-10 section at the top of this
-      IN-PROGRESS group; what remains open there is the positivity limiter, not the preconditioner.
-      **The bullet is kept, unedited below, for two reasons that are worth more than the numbers:** it
-      records that `PerFieldNativeInverse` (two per-field hierarchies) is a different and weaker object
-      than the single nodal one now used, so its measurements never transferred; and it is the clearest
-      instance in this file of a *cost* attributed to a method when it belonged to a data structure.
+    - **Forward: a small loss (4 vs 3), so do not adopt it for the march.** Both orderings tie there.
+    - **Adjoint (`β = 0`, converged state): 11 vs 16, a 1.45× reduction** — and flow-first genuinely beats
+      turbulence-first (11 vs 13), so the ordering *does* matter once the operator is hard enough to
+      discriminate. This is the operator behind every `jax.grad` through a converged coupled solve, and
+      it is the same place the monolithic ILUT's value turned out to lie. **Measure a coupled
+      preconditioner at `β = 0`, not only on the march.**
+    - **⚠️ `β = 0` must be taken at the CONVERGED state.** Stripping the shift off a mid-march iterate
+      gives an operator neither the forward march nor the adjoint ever solves.
+    - **⚠️ The probe's right-hand side is `−R`, and a dual-time step's is `−G = −(R + βd(φ−φₙ))`.** They
+      coincide only at inner 0 (`φ = φₙ`) — which is why a sweep over end-of-step *checkpoints* is right
+      to use `−R` — and on the hardest captured **inner** iterate they differ by ~200× (`|G|` 3.8e-03 vs
+      `|R|` 8.3e-01). `φₙ` is not recorded by the inner observer, so `G` cannot be reconstructed. The
+      self-check therefore gates on the **cycle count** (which reproduced the recorded 1) and reports the
+      achieved residual without asserting it. Every arm sees the identical right-hand side, so the
+      between-arm comparison is unaffected — but do not compare an absolute residual across the two.
+  - **✅ THE INCOMPLETE-LU SWEEP CAN BE CONFINED TO THE SADDLE — the reachable half of the GPU prize.**
+    Every smoother `solve/multigrid.py` has is Jacobi-class; the only thing PETSc supplies that it does
+    not is the incomplete-LU sweep, which is also the least parallelizable piece (a sequential triangular
+    solve). Two claims must be separated, because they have opposite answers:
+    - **Remove it everywhere — REFUTED.** A Jacobi-class smoother on the four-field `[u,v,w,p]` block
+      fails as badly as on the six-field block (both run to the restart cap). Taking ω out of the
+      Chebyshev-smoothed block *helps a great deal* — 9.9e-01 → 3.4e-02 at the hard iterate, 5.4e-01 →
+      3.8e-03 at `β=0`, one to two orders — so **ω-locality is real and is part of the obstruction**, as
+      the cell-block singular-value decomposition predicted. But it never converges: the `[u,v,w,p]`
+      block **is the saddle**, and a field split does not make it definite. Removing ω is necessary and
+      not sufficient.
+    - **Confine it to the saddle — SUPPORTED.** `[k,ω]` is not a saddle but a two-field
+      advection-diffusion-reaction pair with a genuine diagonal, and **damped Jacobi on it converges** at
+      both states (6 cycles / 2.8e-12 forward, 16 / 5.2e-10 at `β=0`), for a consistent ~1.5× cycle cost
+      against ILU(0) on both blocks. At `β=0` it *ties the shipped monolithic* (16) while taking the
+      incomplete factorization off two of six fields. So the k/ω hierarchy could be JAX-native, with
+      PETSc confined to the four-field saddle.
+    - **The Chebyshev-vs-Jacobi asymmetry on the SAME block is the mechanistic tell, and it is why
+      "Jacobi-class" must not be treated as one arm.** Chebyshev **fails** on `[k,ω]` (58 cap, 2.6e-01 at
+      `β=0`) where damped Jacobi converges. Chebyshev's polynomial is built for a bounded positive
+      **real** spectrum; the transport pair is advection-dominated and strongly nonsymmetric, so its
+      spectrum is complex and the real-interval polynomial is the wrong instrument. Damped Jacobi assumes
+      only diagonal dominance, which first-order-upwind advection-diffusion-reaction has. So Chebyshev
+      fails on both blocks for **two different reasons** — indefiniteness on the saddle, nonsymmetry on
+      the scalars — and only the second is cured by dropping to Jacobi.
+    - **Untested, and the honest caveat on the refuted half:** PETSc estimates Chebyshev's eigenvalue
+      bounds with a few GMRES iterations, which is meaningless on an indefinite operator. A hand-bounded
+      polynomial, or one designed for a complex spectrum, is not covered by these arms.
+  - **✅ VANKA RE-OPENED ON THE FOUR-FIELD BLOCK, AND RE-CLOSED — but the ω half of the old mechanism is
+    now CONFIRMED, quantitatively.** The standing verdict ("cell-centred patch relaxation is the wrong
+    shape; do not re-open it with another patch variant") was measured on the **six-field** cell block,
+    and its stated mechanism was that the block is weakly coupled in ω *everywhere*. A field split
+    removes ω from the patch by construction, leaving the classical velocity-pressure patch the entire
+    Vanka literature is built on — so that verdict does not transfer, and this is the new evidence its
+    "do not re-litigate without new evidence" clause asks for. Same configuration as the table above,
+    `state-00069`, β = 0, `vanka_centre_field = 3` (**mandatory** — the default is three fields from the
+    end, which finds `p` in `[u,v,w,p,k,ω]` and would silently centre patches on `v` in a four-field
+    block), patch width 22 = centre `[u,v,w,p]` + 6 neighbours × `[u,v,w]`:
 
-      **⚠️ HISTORICAL — measured 2026-08-09, void since:** taking PETSc off the trailing half is not a
-      win, and the two blockers are now specific (`bfs3d`, three states, arms `native`/`native2` in
-      `turbulence_smoother_sweep.py`). With the per-field hierarchies above wired in as the trailing
-      inverse, against the shipped PETSc V-cycle at `ilu0` on both halves, `refresh_on_cycles` 3, plain
-      aggregation, `coarse_eq_limit` 2000, reach 3, restart 15:
+    | arm | cycles | TRUE rel | worst patch gain |
+    |---|---|---|---|
+    | split, ILU(0) / ILU(0) | 11 | 3.7e-11 | — |
+    | split, **Vanka** flow / ILU(0) | 58 cap | 2.9e-03 | **12.8** |
+    | split, Vanka flow / damped Jacobi | 58 cap | 1.4e-01 | 12.8 |
+    | split, **multiplicative** Vanka flow / ILU(0) | 40 | **1.55** (worse than the initial guess), 994 s | 12.8 |
 
-      | trailing inverse | 00057 | 00058 | hard | blended | apply |
-      |---|---|---|---|---|---|
-      | PETSc V-cycle (shipped) | 8.66 | 8.83 | 8.88 | **8.76** | 102.0 ms |
-      | native, 1 V-cycle/field | 13.09 | 13.22 | 13.23 | 13.16 (**1.50×**) | 144.3 ms |
-      | native, 2 V-cycles/field | 16.50 | 17.03 | 12.94 | 16.34 (1.87×) | 204.0 ms |
+    - **ω WAS the cause of the catastrophic patch conditioning — measured from the opposite direction.**
+      The six-field campaign found the worst patch gain **flat at ~3e3 across every patch width**, which
+      was the evidence that widening cannot help. On the four-field patch it is **12.8**, ~235× better,
+      with **zero** patches dropped. The classical velocity-pressure patch is well conditioned on this
+      operator. That is a clean confirmation of the ω-locality finding, obtained by *removing* ω rather
+      than by inferring it from a singular-value decomposition.
+    - **But patch conditioning was never the binding constraint, and this settles it.** A perfectly
+      conditioned classical patch **still fails to converge** (stalls at 2.9e-03). The earlier campaign
+      reached the same conclusion by *dropping* the near-singular patches, which was a confounded arm
+      (it measured coverage); this reaches it by removing the ill-conditioning at the source, which is
+      not confounded. Removing ω does help a great deal in absolute terms — the six-field Vanka stalled
+      at 0.24–0.78, a 1.3–4× reduction, against 340× here — so the split genuinely strengthens the
+      smoother, just nowhere near ILU(0)'s 11 cycles.
+    - **Multiplicative is worse on the four-field block too, and hugely more expensive** (true residual
+      1.55, 994 s vs 176 s, 17 colours). The six-field finding that sequencing costs rather than helps
+      survives the split. Treat patch relaxation as closed on this operator, now for a *measured*
+      reason rather than an inferred one.
+    - **Two weak smoothers compound**: Vanka flow + Jacobi k/ω is 1.4e-01, far worse than either
+      weakness alone. The two blocks' smoothers are independent *settings* but not independent in effect.
+  - **⚠️ THE JAX-NATIVE HIERARCHIES CANNOT BE BUILT ON THE `[k,ω]` JACOBIAN SLICE AT ALL — and the
+    reason is structural, not a cost.** Both were tried as the trailing block's inverse and both failed,
+    for **one shared cause** rather than two incidental ones:
+    - `build_convection_hierarchy` (aggregation) **refuses**: *"operator diagonal must be finite and
+      strictly positive, but its minimum is −2.129e+06"*.
+      **⚠️ THE OBVIOUS EXPLANATION — that the true `[k,ω]` block carries negative diagonals from its
+      live source linearizations — IS WRONG, AND THE ERROR MESSAGE ITSELF SAYS SO (corrected
+      2026-08-09).**
+      The refusal names **`level 1`**, a *coarse* operator. The fine slice is clean: measured on `bfs3d`
+      `state-00057`, **0 of 23040 cells** have a non-positive diagonal, at β = 0, at the march's shift
+      and at the preconditioner floor alike (`validation/bfs3d_openfoam/trailing_block_conditioning.py`).
+      The negative diagonal is *manufactured by the aggregation*, in the Galerkin `R A P` row — which is
+      one of the three causes the guard's own docstring lists.
+      **The real cause is that `_aggregate` is FIELD-BLIND.** It takes a bare matrix with no block size,
+      so on a multi-field block it can merge a `k` degree of freedom with an `ω` one from a *different*
+      cell into a single aggregate, and on a strongly nonsymmetric operator that produces a degenerate
+      coarse row. PETSc GAMG does not hit this because it is told `setBlockSize(n_fields)` and coarsens
+      whole **cells**. So the obstruction is the coarsening's blindness to fields, not the fine
+      operator, not the source linearizations, and not the sign of anything the caller supplies.
+      **Consequence: one hierarchy PER FIELD works, on the REAL Jacobian sub-blocks.** An aggregate
+      cannot mix fields when there is only one, and `build_convection_hierarchy` accepts `A_kk`
+      (diagonal 1.16e-06 … 2.66e-04, 57 nnz/row) and `A_ωω` (3.03e-03 … 1.0, 49 nnz/row) at every
+      shift. That keeps the full stencil fill and the true source linearizations, and needs **no**
+      reparametrization scaling, because the Jacobian is already in the solved variable — the log-ω
+      chain factor and its wall-fixation trap simply do not arise. Built as
+      `solve/field_split.PerFieldNativeInverse` / `native_per_field_inverse`, with the two fields
+      composed block-triangularly (k leading).
+      **This corrected a real cost: the wrong explanation was taken as an accepted blocker and sent the
+      first implementation down a transport-operator detour** — a 13×-sparser, source-clamped, per-field
+      stand-in needing the closure, the mass flux and the reparametrization scale — which measured 5
+      cycles against the true sub-blocks' 1 on the channel and was deleted. The generalisable lesson:
+      the record quoted an error verbatim and stapled an *inference* to it, and only the quotation was
+      ever verified. The word `level 1` was in the quotation the whole time.
+    - `build_air_hierarchy` (lAIR) ran **~50 minutes without finishing** and was killed. Contributing:
+      the slice carries the distance-3 coupled fill at **91 nnz/row** where the frozen transport stencil
+      is ~7 (the leading block's slice is 227), and lAIR's local approximate-ideal-restriction solves run
+      over a degree-2 F-neighbourhood whose size grows roughly with the square of the row density.
+    **Neither is a verdict on the method, and this is MEASURED rather than argued.** Both builders assume
+    an M-matrix-like operator, and `scalar_transport_preconditioner` never hands them one that isn't:
+    `_scalar_operator_pieces` **clamps its reaction diagonal non-negative** for exactly this reason (an
+    anti-diffusive source would make the operator indefinite and its V-cycle diverge). The Jacobian slice
+    is the unclamped truth, so it is simply not in these builders' domain. PETSc GAMG with an ILU(0) or
+    Jacobi smoother is untroubled because it assumes none of this. Built on the **transport** operator
+    instead, at the same state on the same mesh, both are perfectly healthy:
 
-      Uniformly 1.50× (spread 1.49–1.51) with apply flat to 0.3 % — a low-variance loss, unlike the
-      block-Jacobi arm's. The second row shows the two deficits are separable and neither is free: more
-      V-cycles close the **quality** gap (tight cycles 8 → 5 against ILU's 4) and double the **cost**.
-      **The apply gap decomposes, and a traced-side port would NOT rescue it.** Timed on the same block:
-      the two JAX hierarchies jitted, `jnp` in and out, cost **32.6 ms**; through the study adapter's
-      numpy↔jnp marshalling, **53.8 ms**; the PETSc V-cycle they replace, **~11.7 ms** (by difference
-      against the shipped split's 102.0 ms total, the flow half being identical). So marshalling is only
-      ~half the gap and **the JAX V-cycle is ~2.8× more expensive than GAMG on the identical operator**.
-      Removing the callback would take 144 → 123 ms, still 20 % above the incumbent and still weaker.
-      (If anything 32.6 ms flatters it: XLA constant-folded the frozen hierarchy arrays into the jit.)
-      **So the next attempt starts from "the V-cycle must get ~3× faster and learn a block size", not
-      from "remove the callback".** The second half is a defined enhancement rather than a research
-      problem — teach `_aggregate` a block size so it coarsens *cells* as GAMG does, which would let one
-      two-field native hierarchy replace the per-field pair and close the quality gap without doubling
-      the cycles. It does nothing about the 2.8×. `PerFieldNativeInverse` is kept in the tree because it
-      is tested, transposable, adjoint-legal, and is what a block-aware aggregation would slot into — it
-      is **not** wired into the production builder.
+    | hierarchy on the transport operator (`bfs3d`, 23040 cells, `state-00069`) | k | ω |
+    |---|---|---|
+    | `twolevel` (the shipped scalar default) | 5.0 s | 44.3 s |
+    | `air` (lAIR) | 80.0 s | 79.8 s |
 
-    - **NOT YET BUILT: the production wiring.** There is no `coupled_field_split_continuation` / shift
-      policy, deliberately — the forward march is where a continuation builder would be used and the split
-      *loses* there. What the measurement argues for is a **`β = 0` adjoint-only** preconditioner seam
-      (`ForwardStep.adjoint_preconditioner()` already exists as the natural home), plus the JAX-native k/ω
-      hierarchy the damped-Jacobi result unlocks. Both are unbuilt.
-    - **✅ THE TWO HALVES ARE NOW SMOOTHED APART, AND THE TRAILING DEFAULT IS ONE SWEEP —
-      `trailing_smoother_sweeps=1` (BUILT, SHIPPED, 2026-08-09).** Splitting the hierarchies is only half
-      the value; the other half is that they can then be *tuned* apart, which the shipped bundle was not
-      doing — both halves inherited the four incomplete-LU sweeps tuned against the **six-field**
-      monolithic block. The saddle needs them (Jacobi-class smoothers do not converge on it at all); the
-      transported-scalar pair does not. `build_block_triangular_field_split` /
-      `FieldSplitAmgPreconditioner.build` / `coupled_amg_continuation` all carry
-      `smoother_sweeps` (leading) and `trailing_smoother_sweeps` (trailing, default **1**) as separate
-      parameters, plus `leading_options` / `trailing_options` as the raw-PETSc escape hatch. Measured on
-      the full 3-point `bfs3d` Reynolds-continuation march (field split, `retry_on_alpha` 0.01,
-      `refresh_on_cycles` 3, ILU(0), plain aggregation, `coarse_eq_limit` 2000, reach 3, restart 15):
+    So lAIR builds in ~80 s where it did not finish in 50 minutes on the slice — a ≥40× gap on the same
+    mesh — and is ~3.2× the shipped aggregation's combined build (1.8× on ω alone), which matches the
+    independent recollection that production lAIR on the 2D case worked and was only somewhat slower.
+    **Do not read the slice failures as anything about lAIR's cost in normal use.**
+    **Note also that row density was only part of the story and was the weaker part.** The decisive fact
+    is the **negative diagonal**, which is a property of the true Jacobian block whatever its sparsity;
+    the 91-vs-7 nnz/row gap explains lAIR's *time* but not aggregation's outright refusal.
+    **So the correct arm builds the hierarchy on the TRANSPORT operator** —
+    `SSTTurbulence.k_preconditioner` / `omega_preconditioner`, which is what the segregated scalar path
+    already does — accepting that it then approximates a *different* matrix from `A_tt` (no k↔ω coupling,
+    no reach-3 fill, clamped diagonal), the same approximation the block-preconditioner family already
+    makes. That arm is **not yet built**: it needs `mdot` and the closure at the state, a `k ⊕ ω`
+    block-diagonal composition, and the log-ω chain-rule scaling (`ScaledScalarPreconditioner`) — the
+    last of which is a known trap, since a rescale that ignores the wall-fixation rows' own derivative
+    cost 27× on the linear residual once already.
+  - **⚠️⚠️ SUPERSEDED (2026-08-10) — EVERY COST NUMBER IN THIS BULLET IS VOID, AND ITS CONCLUSION IS
+    REVERSED. The native trailing inverse is now AT PARITY: 13.3 ms against PETSc's 12.6 ms per apply,
+    and 2 restart cycles against 2.** Both stated blockers are gone. The "~2.8× more expensive"
+    figure was the **COO `segment_sum`** matvec, not anything intrinsic to a framework-native
+    V-cycle — a CSR operator took the apply from 117.8 ms to 13.3 ms (8.8×), and the level operator
+    is applied ~10× per cycle so that was essentially all of it. The "learn a block size" half was
+    built and is what closed the *quality* gap. Read the 2026-08-10 section at the top of this
+    IN-PROGRESS group; what remains open there is the positivity limiter, not the preconditioner.
+    **The bullet is kept, unedited below, for two reasons that are worth more than the numbers:** it
+    records that `PerFieldNativeInverse` (two per-field hierarchies) is a different and weaker object
+    than the single nodal one now used, so its measurements never transferred; and it is the clearest
+    instance in this file of a *cost* attributed to a method when it belonged to a data structure.
 
-      | | 4 sweeps | 1 sweep |
-      |---|---|---|
-      | wall | 1959 s | **1636 s (−16.5 %)** |
-      | steps | 58 | 58 |
-      | refresh | 21 events / 318 s | 19 / 286 s |
-      | Krylov cycles | 277 | **282 (+1.8 %)** |
-      | final ‖R‖ | 9.589e-06 | 9.588e-06 |
-      | mid-span `x_r/h` | 8.361 | 8.361 |
+    **⚠️ HISTORICAL — measured 2026-08-09, void since:** taking PETSc off the trailing half is not a
+    win, and the two blockers are now specific (`bfs3d`, three states, arms `native`/`native2` in
+    `turbulence_smoother_sweep.py`). With the per-field hierarchies above wired in as the trailing
+    inverse, against the shipped PETSc V-cycle at `ilu0` on both halves, `refresh_on_cycles` 3, plain
+    aggregation, `coarse_eq_limit` 2000, reach 3, restart 15:
 
-      **The two marches follow the same trajectory step for step** — identical β, identical per-step
-      cycle counts, identical residuals to four figures, and the single α-collapse escalation fires at
-      the same step for the same reason to the same β. So this is the *same* path at a lower price per
-      matrix-vector product, which is a far stronger single-run result than a 16.5 % margin would
-      normally be (this case's ordinary run-to-run noise is ~2 %). Note again that **cycles rose while
-      wall fell**.
-    - **⚠️ HOW THAT SMOOTHER WAS CHOSEN, AND THE TWO WAYS THE SCREEN NEARLY GOT IT WRONG
-      (`validation/bfs3d_openfoam/turbulence_smoother_sweep.py`).** The screen holds the leading half at
-      ILU(0) and varies only the trailing one, ranking on **wall time** at real march states rather than
-      on cycles. Two failures are worth carrying, because both produced a wrong answer first:
-      - **A HARD state cannot rank candidates — it can only screen them.** The standing caution is about
-        *benign* states not discriminating; the complement is equally real and was not written down. On
-        the shipped march **139 of 194 inner solves cost one restart cycle and only 7 exceeded three**,
-        so the worst iterate is not what a march pays for. Point-block Jacobi buys an extra cycle *only*
-        where the operator is hard: it ranks **1.15× (worst of ten)** on the hard iterate and **0.94×**
-        over the march's real mix. Rank on step-initial states, screen on the hard one, and weight the
-        blend by the march's own solve distribution.
-      - **A cost screen is blind to the DIRECTION a preconditioner returns, and a march is not.** The
-        forward solve stops at `forward_rtol = 0.3`; a strong preconditioner overshoots that by orders of
-        magnitude inside one restart cycle while a weak one lands near it, and **both report one cycle**.
-        Since the march takes an inexact-Newton step from whatever comes back, a materially weaker arm
-        hands back a worse direction, the line search clips and the step control escalates — none of
-        which a timing screen registers. The usable proxy is the screen's **tight** cycle count read as a
-        *magnitude*, not as a pass/fail gate: shipped 3/3/4 (two step-initial states, then the hard one),
-        `ilu0x1` 3/4/5 — about the same strength, and it reproduced the baseline trajectory exactly —
-        against `jacobix2` 5/7/7 and `jacobix1` 8/10/13. **A candidate needs three things: cheap per
-        application, convergent at all, and not materially weaker than the incumbent.**
-      - **THE `[k, ω]` CELL BLOCK IS TRIANGULAR, AND THAT EXPLAINS THE WHOLE SMOOTHER RANKING ON THIS
-        BLOCK.** Equilibrated, each cell's 2×2 is **lower-triangular with unit diagonal and a subdiagonal
-        of order 100–340**, every determinant exactly 1.0, and the k↔ω coupling is **~100 % same-cell**
-        (‖∂R_ω/∂k‖ splits 2.14e3 same-cell against 23.9 neighbour on the channel;
-        `validation/bfs3d_openfoam/field_coupling.py` finds the same asymmetry on `bfs3d` — ∂R_ω/∂k at
-        121× the diagonal blocks, ∂R_k/∂ω at 0.19 % of them). ω depends enormously on same-cell k through
-        the production limiter and the βkω destruction pair; k barely depends on ω, because wherever the
-        SST limiter is active `ν_t = a₁k/max(a₁ω, S F₂)` is **ω-independent**. Consequences:
-        - **ILU(0) in cell-major order already captures it exactly** — the forward/backward pair is a
-          complete factorization of a 2×2 with one off-diagonal (no fill), so the subdiagonal costs it
-          nothing. That is why one sweep is nearly as good as four here (tight cycles 3/4/5 against
-          3/3/4) and why `sor`, also a sweep in the favourable order, matches ILU(0)×4 at 3/3/4.
-        - **Point Jacobi discards the entire subdiagonal**, which is precisely the term the others get.
-        - **Point-block Jacobi recovers it, and measurably does**: split by field, a `pbjacobi`-smoothed
-          V-cycle lands **10× closer to an ILU-smoothed one than point Jacobi does in the ω rows**
-          (1.48e-4 against 1.49e-3). The end-to-end near-tie is real all the same — the V-cycle output is
-          ω-dominated (‖ω‖ 2318 vs ‖k‖ 29.7), all three get the bulk right, and the coarse correction
-          plus outer Krylov absorb the rest.
-        - **Re-ordering the fields does NOT help.** A symmetric permutation to `(ω, k)` makes the block
-          upper-triangular; Jacobi and block-Jacobi are permutation-invariant, ILU holds both triangles
-          either way, and a *forward* sweep (SOR/Gauss-Seidel) is made strictly worse — the current order
-          lets it solve k first and use the fresh value in ω. The shipped order is already the good one.
-        - **For a JAX-native smoother this is the cheap prize:** with the equilibrated unit diagonal the
-          block solve is one fused multiply-add per cell (`x_ω -= c·x_k`), fully parallel across cells,
-          no factorization and no sequential dependency.
-      - **⚠️ BLOCK JACOBI CANNOT REPLACE THE TRAILING HIERARCHY — measured, and the reason is
-        ROBUSTNESS rather than reduction.** The `[k, ω]` block is strongly *block*-diagonally dominant
-        (neighbour coupling ~12 % of same-cell for the diagonal fields, 1.1 % for `∂R_ω/∂k`), and block
-        Jacobi's error operator is exactly that neighbour part — so it looks as though a coarse grid has
-        nothing to do here, and on a synthetic operator at that neighbour weight it contracts ~10× per
-        sweep. It does not carry over. Measured as the **whole** trailing inverse (a native batched 2×2
-        solve, no hierarchy at all) against the shipped V-cycle, on two step-initial states and the hard
-        iterate, blended by the march's own solve mix:
-
-        | trailing inverse | 00057 | 00058 | hard | blended |
-        |---|---|---|---|---|
-        | `ilu0` V-cycle (shipped) | 8.68 | 8.74 | 8.72 | **8.71** |
-        | block Jacobi ×4 | **8.63** | 10.94 | 11.17 | 9.94 (1.14×) |
-        | block Jacobi ×8 | 9.09 | 11.32 | 9.29 | 10.10 (1.16×) |
-        | block Jacobi ×2 | 10.40 | 10.47 | 10.88 | 10.48 (1.20×) |
-        | block Jacobi ×1 | 13.72 | 14.09 | 14.29 | 13.95 (1.60×) |
-
-        **What the coarse grid buys is variance, not average.** The V-cycle is 8.68/8.74/8.72 — flat to
-        under 1 % across all three states. Block Jacobi ×4 swings 8.63 → 10.94 between *adjacent steps of
-        the same rung*, because it sits on the edge of converging inside one restart cycle and small
-        state changes flip it to two. And more sweeps cannot buy the edge back: by 8 sweeps its apply
-        cost (109 ms) exceeds the V-cycle's (102 ms), so it has spent the whole cost advantage
-        recovering what the coarse grid gave for free.
-        **This does NOT refute block Jacobi as a SMOOTHER inside a JAX-native hierarchy**, which is the
-        actual route for taking PETSc off this block and is untested. The implementation
-        (`BlockJacobiInverse` in `validation/bfs3d_openfoam/field_split_probe.py`) is verified exact on a
-        block-diagonal operator in one sweep, transposable in closed form (⟨y,Mx⟩ = ⟨Mᵀy,x⟩ to 1e-15, so
-        adjoint-legal) and a fixed **linear** operator (1e-16, so the non-flexible outer Krylov is
-        legal) — it is the smoother such a hierarchy would need.
-        **Methodological note, because it went wrong twice in one session:** the first easy state alone
-        showed a tie and was reported as a result. The second easy state, same class and adjacent step,
-        was 25 % worse. **Hold a screen's conclusion until every state has landed** — the per-class
-        spread is itself the finding here.
-      - **⚠️ CHECKPOINT NAMES ARE REUSED ACROSS MARCHES, so a probe can silently run at a state that is
-        not the one its table documents.** `StateCheckpointer` keeps only the last few files
-        (`BFS3D_CHECKPOINT_KEEP`, default 3) and numbers them from a counter that restarts each run, so a
-        later march *replaces* `state-000NN` with a different state under the same name. Observed: a name
-        documented as the converged zero-shift adjoint operator came back holding a mid-march iterate at
-        shift 0.98 from an abandoned run — a probe would have paired an operator built at the documented
-        shift with a state that never had it and reported it as a measurement at that operating point.
-        `field_split_probe.load_state` now checks the checkpoint's recorded shift against its `STATES`
-        entry and refuses on a mismatch (loosely, at 2 %: the table stores ~4 figures, and what this must
-        catch differs by orders of magnitude). Raise the keep count for a study that needs a trajectory.
-      - **⚠️ `equilibrate_cell_major` RETURNS UNSORTED COLUMN INDICES, and PETSc's AIJ format requires
-        them ascending.** `AmgVCycle._build` and `refactor` both `sort_indices()` before wrapping the
-        matrix, and `ShiftedCellMajorOperator` genuinely produces sorted output (its
-        `has_sorted_indices = True` is honest, verified), so **every shipped path is correct**. But a
-        probe that calls `equilibrate_cell_major` directly and feeds `createAIJWithArrays` gets **NaN in
-        most entries from `pbjacobi`**, while `jacobi` and `ilu` survive it — a diagonal scan does not
-        care about column order and a block extraction does. That asymmetry reads exactly like "PETSc's
-        point-block Jacobi is broken on this operator", which was written up and had to be retracted.
-        **Check `has_sorted_indices` before concluding anything about a block method.**
-      - **⚠️ TWO MARCH ARMS WERE RUN AT THE WRONG REFRESH TRIGGER AND ARE VOID** — launched without
-        `BFS3D_REFRESH_ON_CYCLES=3` when that variable still defaulted to `0` (the *scheduled* cadence,
-        measured at 3632 s against 1959 s). Both "results" were the refresh trigger, not the smoother.
-        The trap was already written down in bold and that did not prevent it, so the fix was made
-        structural: **the case default is now 3**, and every run writes its full configuration into its
-        own `march.log` header before any result. A default nobody wants is a trap, not a setting.
-      - **Still unsolved, and it bites any future arm comparison:** `refresh_on_cycles` and
-        `cycle_budget` are denominated in **cycles**, so a preconditioner that shifts the cycle
-        distribution changes the *effective* trigger point — penalizing a weaker arm twice, once in
-        cycles and again in the refreshes those cycles provoke. (Same argument as the case's
-        `_RESTART_SCALE`.) Report the refresh **count** beside the wall in every arm comparison; it came
-        out level for `ilu0x1` (21 vs 19 events), which is what licensed attributing its saving to the
-        smoother.
-  - **⚠️ IN PROGRESS (2026-08-10): the native trailing V-cycle now MATCHES PETSc on quality AND cost;
-    what blocks it is the POSITIVITY LIMITER — read that as the PROXIMATE failure, not the cause.**
-    ⚠️ The same limiter, defaults and case run fine under the PETSc ILU(0) control (58 steps to 9.588e-06,
-    recorded below), so the limiter is necessary and not sufficient: the native arm dies at a state the
-    control never reaches, and what drives that arm's direction into the boundary is **unexplained**. Read this before the
-    2026-08-09 section below, which it supersedes in several places.
-
-    **Where it stands.** On the `bfs3d` `[k, ω]` block alone the JAX-native nodal hierarchy reaches
-    **2 restart cycles against PETSc GAMG's 2**, on a 438-equation coarse space against 432, and
-    applies in **13.3 ms against 12.6 ms**. Quality and cost parity, on CPU. The full march converges
-    rung 1 (14 steps, 43 cycles, 304 s against the PETSc control's 14 / 45 / 359) and then dies on
-    rung 2.
-
-    **Four things closed the gap, and each was found by reading the reference rather than tuning:**
-    1. **The aggressive first level.** `build_amg_vcycle` never sets `pc_gamg_aggressive_coarsening`,
-       so GAMG applies its default of one aggressive level over the SQUARED graph. Ours had none:
-       21× coarsening against GAMG's 107×, the whole 5× coarse-space difference. (`use_aggressive_
-       square_graph` and `aggressive_mis_k` are ALTERNATIVES; at the default the coarsener is plain
-       MIS at distance 1 on the squared graph.)
-    2. **PETSc's level smoother is UNDAMPED** — `richardson` at its default scale of 1. Ours relaxed
-       by `omega/lam_max`, and `D⁻¹A` has a unit diagonal so `lam_max ≥ 1` always: the spectral factor
-       can only ever under-relax. Worth **10 → 2 cycles**. Reachable as `spectral_damping=False`.
-    3. **A CSR matvec instead of the COO `segment_sum`.** A scatter-add collides on output rows; a CSR
-       row walk does not. Measured on the 4.2M-nnz block: `segment_sum` 13.3 ms, `BCOO @ x` 13.4 ms,
-       scipy CSR on the host 2.6 ms, **`BCSR @ x` 1.4 ms**. The level operator is applied ~10× per
-       V-cycle, so this alone took the apply from **117.8 ms to 13.3 ms (8.8×)**. Landed as
-       `_CsrOperator`, which owns its matvec and replaced the loose `row`/`col`/`val`. **Not** a jit
-       or marshalling problem — both were measured out (1 trace everywhere; a numpy↔jnp round trip is
-       0.02 ms), which also retires the older claim that "marshalling is ~half the gap".
-    4. **The singularity guard was WRONG, and it was aborting the march.** `_cell_block_inverse`
-       tested `|det| < 1e-12 · ‖B‖_F^b`. On the coupled turbulence pair a cell reads
-       `[[8.8e-06, 1.7e-12], [-1.3e+03, 1.5e-01]]` — rows differing by **1.5e8** — so `‖B‖_F²` ≈ 1.6e6
-       is set entirely by the ω row and the bar lands at 1.6e-06, just above the determinant of
-       1.35e-06. The block is **not singular**: on the row-norm (Hadamard) bound `|det| ≤ ∏‖rowᵢ‖` it
-       scores **1.2e-04**, eight orders clear. Now tested that way, which is invariant under rescaling
-       any row or column where the Frobenius form is not. A structurally empty row is named
-       explicitly, since it makes the bound zero and no determinant compares below it.
-
-    **⚠️ THE α COLLAPSE IN THESE MARCHES IS THE POSITIVITY LIMITER, AND THE STEP TABLE SAYS SO — READ
-    `limit` BEFORE ATTRIBUTING ANYTHING TO THE PRECONDITIONER.** `a_min` and the `limit` aside are the
-    **same number** wherever both appear (0.579/5.79e-01, 0.651/6.51e-01, 0.004/3.76e-03, …). Those
-    steps are not failing to descend; they are being allowed almost no movement because `k` would go
-    negative. Two consequences, both of which cost hours today:
-    - **A capped step is not a bad step.** Raw and equilibrated arms differed in α at rung-2 step 16
-      (1.000 against 0.579) and reached an **identical** residual, 1.271e-01. Attributing the α
-      difference to preconditioner quality was wrong.
-    - **⚠️ DO NOT GATE `retry_on_alpha` ON `binding_limit == 1`. It was proposed, built and reverted
-      the same day (2026-08-10).** More damping shrinks the correction, so it *widens*
-      `room = k/|dk|`. The measured evidence is already in this file: the single escalation of an
-         entire `bfs3d` march fired at step 51, whose cap was **4.37e-10** — constraint-bound — and it
-         was worth **8 steps and 199 s** end to end. Gating `retry_on_alpha` on `binding_limit == 1`
-         would have suppressed exactly that one useful escalation.
-
-      **What damping genuinely cannot do is un-pin a cell already ON the boundary**, and that is the
-      real rung-2 failure — see the lock-up section immediately below, which is what replaced this.
-
-    **⚠️ (2026-08-10, LATER) THE RUNG-2 DEATH IS A FRACTION-TO-THE-BOUNDARY LOCK-UP, AND β ESCALATION
-    IS A SYMPTOM RATHER THAN THE CAUSE.** Read this before acting on the two bullets above; it does not
-    contradict them but it re-ranks them, and the "~100 dead steps" is now measured rather than
-    estimated. Taken from the archived `march.log` of the native run (banner: `turbulence inverse:
-    native`, `equilibrate=True`, `sweeps=4`, `aggressive_levels=1`, `spectral_damping=False`,
-    `refresh on cycles 3`, `retry on cycles / alpha 10 / 0.01`, `pc beta floor 0.05`, rung 2 of 3):
-
-    | step | β | cyc | ‖R‖ | a_min | `limit` |
+    | trailing inverse | 00057 | 00058 | hard | blended | apply |
     |---|---|---|---|---|---|
-    | 24 | 0.1756 | 5 | 1.123e-01 | 0.694 | 6.94e-01 |
-    | 25 | 0.4682 | 2 | 7.567e-02 | 0.004 | 3.76e-03 |
-    | 26 | 3.7458 | 0 | 7.316e-02 | 0.000 | 1.00e-05 |
-    | 27 | 16.0000 | 0 | 7.316e-02 | 0.000 | 1.95e-06 |
-    | 28 | 16.0000 | 0 | 7.316e-02 | 0.000 | 1.95e-08 |
-    | … | 16.0000 | 0 | 7.316e-02 | 0.000 | ÷100 every step |
-    | 122 | 16.0000 | 0 | 7.316e-02 | 0.000 | 1.95e-196 |
+    | PETSc V-cycle (shipped) | 8.66 | 8.83 | 8.88 | **8.76** | 102.0 ms |
+    | native, 1 V-cycle/field | 13.09 | 13.22 | 13.23 | 13.16 (**1.50×**) | 144.3 ms |
+    | native, 2 V-cycles/field | 16.50 | 17.03 | 12.94 | 16.34 (1.87×) | 204.0 ms |
 
-    **The 100× per step IS the rule, not a coincidence.** Taking `α = τ·room` with `τ = 0.99` leaves the
-    binding cell at 1% of its `k`, so the next step's room is a hundredth of this one's — forever, for
-    as long as the direction keeps pointing at the boundary there. Ninety-six consecutive steps, residual
-    frozen to every reported digit, **zero** Krylov cycles, β pinned at its 16.0 ceiling. So:
-    - **β is irrelevant from step 27 on, and that is a statement about a PINNED cell, not about damping.**
-      Damping is *argued* to widen a fraction-to-the-boundary cap (a smaller correction means more room),
-      and that argument is **not measured and cannot be from a log** — only the accepted attempt's cap is
-      recorded. ⚠️ An earlier version of this bullet offered "the cap falls only 5.1× across 26→27" as
-      evidence; that is the **same cross-step comparison withdrawn above**, used to argue the opposite
-      conclusion, and it is struck. The decision rests on the A/B alone. What damping cannot do is recover
-      a cell whose `k` is already ~0: the
-      room is then small however small the correction gets. **Do not read this as "stop escalating on a
-      constraint-bound step"** — that was tried, and it deletes the one escalation on this case that is
-      measured to pay (step 51, cap 4.37e-10, 8 steps and 199 s).
-    - **Nothing in the ordinary stopping tests can see this.** The state is finite, the residual is finite,
-      and the tolerance is simply never reached — so the segment spends its whole budget.
-    - **⚠️ Extracting this from a march log needs per-step BLOCKS, not two independent `findall`s.** The
-      `limit` line is written only when `binding_limit < 1`, so there are fewer of them than steps (105
-      against 108 here) and zipping the two lists silently misaligns them. The first pass at this table
-      read step 25's cap as 1.95e-08 instead of 3.76e-03 — a three-step shift, invisible because the
-      shifted table is just as smooth. Split on the summary-block delimiter and parse within each block.
+    Uniformly 1.50× (spread 1.49–1.51) with apply flat to 0.3 % — a low-variance loss, unlike the
+    block-Jacobi arm's. The second row shows the two deficits are separable and neither is free: more
+    V-cycles close the **quality** gap (tight cycles 8 → 5 against ILU's 4) and double the **cost**.
+    **The apply gap decomposes, and a traced-side port would NOT rescue it.** Timed on the same block:
+    the two JAX hierarchies jitted, `jnp` in and out, cost **32.6 ms**; through the study adapter's
+    numpy↔jnp marshalling, **53.8 ms**; the PETSc V-cycle they replace, **~11.7 ms** (by difference
+    against the shipped split's 102.0 ms total, the flow half being identical). So marshalling is only
+    ~half the gap and **the JAX V-cycle is ~2.8× more expensive than GAMG on the identical operator**.
+    Removing the callback would take 144 → 123 ms, still 20 % above the incumbent and still weaker.
+    (If anything 32.6 ms flatters it: XLA constant-folded the frozen hierarchy arrays into the jit.)
+    **So the next attempt starts from "the V-cycle must get ~3× faster and learn a block size", not
+    from "remove the callback".** The second half is a defined enhancement rather than a research
+    problem — teach `_aggregate` a block size so it coarsens *cells* as GAMG does, which would let one
+    two-field native hierarchy replace the per-field pair and close the quality gap without doubling
+    the cycles. It does nothing about the 2.8×. `PerFieldNativeInverse` is kept in the tree because it
+    is tested, transposable, adjoint-legal, and is what a block-aware aggregation would slot into — it
+    is **not** wired into the production builder.
 
-    **SHIPPED in response:**
-    1. `forward_march(stop_on_limit_stall=3)` (**a new default-on guard**) ends the segment after three
-       consecutive steps that are constraint-bound, non-widening, and **changed the residual by less
-       than 1e-3 relative, in either direction** (`_limit_collapsing`).
+  - **NOT YET BUILT: the production wiring.** There is no `coupled_field_split_continuation` / shift
+    policy, deliberately — the forward march is where a continuation builder would be used and the split
+    *loses* there. What the measurement argues for is a **`β = 0` adjoint-only** preconditioner seam
+    (`ForwardStep.adjoint_preconditioner()` already exists as the natural home), plus the JAX-native k/ω
+    hierarchy the damped-Jacobi result unlocks. Both are unbuilt.
+  - **✅ THE TWO HALVES ARE NOW SMOOTHED APART, AND THE TRAILING DEFAULT IS ONE SWEEP —
+    `trailing_smoother_sweeps=1` (BUILT, SHIPPED, 2026-08-09).** Splitting the hierarchies is only half
+    the value; the other half is that they can then be *tuned* apart, which the shipped bundle was not
+    doing — both halves inherited the four incomplete-LU sweeps tuned against the **six-field**
+    monolithic block. The saddle needs them (Jacobi-class smoothers do not converge on it at all); the
+    transported-scalar pair does not. `build_block_triangular_field_split` /
+    `FieldSplitAmgPreconditioner.build` / `coupled_amg_continuation` all carry
+    `smoother_sweeps` (leading) and `trailing_smoother_sweeps` (trailing, default **1**) as separate
+    parameters, plus `leading_options` / `trailing_options` as the raw-PETSc escape hatch. Measured on
+    the full 3-point `bfs3d` Reynolds-continuation march (field split, `retry_on_alpha` 0.01,
+    `refresh_on_cycles` 3, ILU(0), plain aggregation, `coarse_eq_limit` 2000, reach 3, restart 15):
 
-       **⚠️ The residual half of that predicate was wrong twice, and the fix for the first attempt caused
-       the second. Do not re-derive it from the failing run alone.**
-       - *"the residual did not fall"* — **never fires.** A locked-up step is not a bit-exact no-op: it
-         still moves the state by `α·δ`, so at a cap of ~1e-6 the residual genuinely falls, by ~1e-6
-         relative, and the counter resets every step. Shipped, and observed doing nothing on a march that
-         had otherwise reproduced the lock-up step for step (it reached step 31 and was still going).
-       - *"the residual did not fall by 0.1%"* — **fires on a converging rung.** `march-20260810-094635`
-         rung 2 steps 19–21 ran caps 0.983 → 0.928 → 0.253 with the residual climbing
-         1.293e-01 → 1.335e-01 → 1.489e-01, then recovered to 9.241e-02 and converged to 4.994e-06. A
-         *rising* residual means the step did something; a pseudo-transient path is a march in pseudo-time,
-         not a descent method. A one-sided rule ends that rung at its worst moment.
-       - **The failure is a step that changes NOTHING, so the test is two-sided.** The two populations sit
-         orders apart: null steps move the residual by ~1e-6 relative, productive ones by percents.
-
-       **Validated by replaying the predicate over every march log on disk** — `march_stall_replay.py`,
-       kept in `validation/bfs3d_openfoam/`, because a march that recovers looks exactly like one that does
-       not until it does, so a candidate rule cannot be judged on the run that motivated it. Across 11 logs
-       / 22 rungs it fires on exactly the three locked-up rungs (090711 rung 2 at step 21, cutting a
-       73-step stall; 130032 rung 2 at step 29, cutting 96) and on **nothing** that went on to converge —
-       including the shipped `x_r/h` 8.36 baseline rung. Both cases are pinned as unit tests with the real
-       recorded numbers inlined, since the logs themselves are not tracked.
-
-       The cap *narrowing* is the third condition and is what separates a lock-up from a march working
-       productively along a constraint. `None` disables the guard.
-
-    The march now fails fast and honestly instead of grinding; **what drives `k` to the boundary in those
-    cells is still open**, and the global-scalar-cap design (one cell throttling all 23040) is the thing
-    to reconsider.
-
-    **Capturing the step DIRECTION, which no checkpoint holds.** The cap is a property of `delta`, so
-    "which cells does it bind on" cannot be answered from a state — a step checkpoint holds where a step
-    ended and the inner-iterate dump holds where an inner iteration reached, and neither carries a
-    direction. `compare.py` gained `BFS3D_DUMP_STEP_LIMIT=<cap>` (with `BFS3D_DUMP_STEP_LIMIT_KEEP`),
-    which wraps the engine's `step_limit` in a `_DumpingStepLimit` — a **frozen dataclass**, not a
-    closure, because the limiter rides in a *static* field compared by `__eq__` and a closure there
-    recompiles the whole coupled solve on every rebuild. It returns the real cap unchanged, so the march
-    it instruments is the march that would have run. Dumps **stop** after `KEEP` rather than wrapping, so
-    the first binding event survives the escalation ladder that follows it. `singular_cell_probe.py`
-    reads such a dump and reports the exact per-cell room, the binding set, and the binding cells'
-    conditioning against the **base rate** for the mesh.
-
-    **Equilibration: KEEP it, for conditioning, and stop expecting it to fix anything else.**
-    - It improves per-cell block conditioning **~1600×** (median cond 2.84e3 → 1.74, median ‖A_cell⁻¹‖
-      4.51e4 → 1.32, cells above cond 1e3 93.6% → 19.7%).
-    - It **cannot** change whether a cell block is singular. `det B̂ = det B / |b₁₁b₂₂|`, so
-      `det B̂ = 0 ⟺ det B = 0`, and the coupling ratio `|a_kω a_ωk| / |a_kk a_ωω|` measures **identical**
-      raw and rescaled (7.369e-04 both). Using it as the fix for the guard was wrong from the start;
-      the "4 singular → 2 singular" reading that seemed to support it compared *different states*.
-    - It does **not** help the worst cells: symmetric `D B D` leaves cond at 1.22e12 because it moves
-      the imbalance from the rows into the subdiagonal (`[[1, 1.5e-9], [-1.1e6, 1]]`).
-    - **Independent row/column scaling would**: row-equilibrating the cell block gives cond 1.68e4,
-      two-sided gives **2.41**, and both are *exact* rebracketings of `B⁻¹`. Unnecessary at float64
-      and 2×2 (relative error is already 2.5e-16), but it becomes mandatory in **float32** — which is
-      the GPU case this whole exercise is for.
-    - The deeper issue is upstream: the k row has norm 8.8e-06 and the ω row 1.4e+03, so the
-      **equations** are eight orders apart before any preconditioner sees them. That is what
-      `RowScaledNorm` already recognizes in the convergence measure. Fixing the residual's row scaling
-      would help the smoother, the coarsening and any factorization at once.
-
-    **`‖B⁻¹‖ = 9.5e8` is not an error and no rescaling removes it.** The block is essentially
-    lower-triangular (`∂R_k/∂ω ≈ 1.7e-12`), so ω is slaved to k there and a k correction legitimately
-    produces one ~1e9 times larger in ω. Whether a *cell-local* smoother should apply that is the real
-    open question, and it is the same "ω is not locally determined" theme as the Vanka campaign.
-
-    **The tree is verified NEUTRAL on the shipped path.** A control march (PETSc ILU(0)×1) on all of
-    this measured **58 steps / 282 cycles / final ‖R‖ 9.588e-06 / mid-span `x_r/h` 8.36** — identical
-    in every reported digit to the recorded baseline. Wall was 1809 s against 1636 s — **10.6%, unexplained**, and
-    larger than this case's stated ~2% run-to-run spread, on one run each. The neutrality conclusion rests
-    on the cycle count and the reported digits, not on the wall.
-
-    **Harnesses kept (all in `validation/bfs3d_openfoam/`):** `trailing_hierarchy_sweep.py` (the block
-    alone, every arm), `cell_block_scaling.py` (per-cell conditioning, raw vs equilibrated),
-    `singular_cell_probe.py` (which cells, from a checkpoint **or** a dumped block).
-    `compare.py` gained `BFS3D_TURBULENCE_INVERSE`, `BFS3D_NATIVE_EQUILIBRATE`,
-    `BFS3D_DUMP_TRAILING_BLOCK`, a `pbjacobi1` (undamped) smoother arm, march-log **archival**, and a
-    banner that records the inverse and all its settings.
-
-    **⚠️ FOUR METHODOLOGICAL TRAPS, each of which produced a wrong write-up today:**
-    1. **Probe the state the failure happens at.** The refusal fires from a *mid-step* refresh; step
-       checkpoints and the inner-iterate dump both miss it (the inner observer writes only after an
-       iteration succeeds). Three capture runs were wasted before dumping the operator *before* the
-       build, which needs no state and no shift pairing — and even that missed twice, first by
-       wrapping only the factory when the refresh goes through `refactor_block`.
-    2. **Pair the operator with the right β.** Probing state-N with state-N's β when the failing
-       refresh uses state-N+1's is the recorded trap; sweep β instead.
-    3. **Never quote an arm at one smoother-sweep count.** The standard prolongator was recorded as
-       "void" from its 4-sweep numbers; at 8 it is the best native arm.
-    4. **A block-alone probe ties where a march separates.** Raw and equilibrated are both 2 cycles on
-       the block and behave differently in a march.
-
-    **✅ ANSWERED: the cap binds on ONE cell, it is a step-corner cell whose `k` is already numerically
-    zero, and it is NOT one of the ill-conditioned ones.** Measured from twelve `BFS3D_DUMP_STEP_LIMIT`
-    dumps taken on the native march at rung 2 (`equilibrate=True`, `sweeps=4`, `aggressive_levels=1`,
-    `spectral_damping=False`, `refresh on cycles 3`, `retry on cycles / alpha 10 / 0.01`, PC β floor
-    0.05), the operator swept over β 0 … 0.4. The probe reproduces the recorded cap exactly
-    (3.761982e-03 both ways), so the capture is reading the quantity the march acted on.
-
-    | dump | cap | cell | room | `k` | `dk` | next cell | next room |
-    |---|---|---|---|---|---|---|---|
-    | 04 | 3.7620e-03 | **12800** | 3.80e-03 | 3.08e-16 | −8.11e-14 | 22400 | 2.60e-01 |
-    | 05 | 1.4517e-04 | **12800** | 1.47e-04 | 3.08e-18 | −2.10e-14 | 12840 | 2.09e+00 |
-    | 08 | 1.0516e-07 | **12800** | 1.06e-07 | 3.08e-20 | −2.90e-13 | 12840 | 1.12e-01 |
-    | 11 | 1.0516e-09 | **12800** | 1.06e-09 | 3.08e-22 | −2.90e-13 | 12840 | 1.12e-01 |
-
-    - **One cell out of 23040 throttles the whole march,** and it is not a crowd: at dump 04 exactly
-      **one** cell sits within 100× of the tightest room, the runner-up 68× behind; by dump 11 the gap is
-      **eight orders**. Cell 12800 owns ten of the twelve dumps and every one from step 25 on.
-    - **`k` there ratchets by exactly 100× per step** (the per-step evidence is the checkpoint mantissa
-      below; these dumps are non-consecutive) — 3.08e-16 → 3.08e-18 → 3.08e-20 → 3.08e-22 — which
-      is `1 − τ` at `τ = 0.99`, the same factor the cap collapses by. Against a mesh median `k` of
-      **2.97e-02**, so the binding cell's `k` is ~20 orders below typical. It is not small; it is zero.
-    - **`dk` stays ~1e-13 throughout while `k` collapses.** ⚠️ **The inference drawn from this — "the
-      cell's `k` equation has no root at `k ≥ 0`" — is WRONG, and was refuted the same day by direct
-      measurement. It is the opposite.** Holding every other field at the `step-limit-11` iterate and
-      scanning `R_k[12800]` over `k_P` gives a straight line to seven digits,
-      `R_k = A·k − b` with `A = 2.8740e-06`, `b = 5.7236e-20`, so the **root is `k* = +1.99e-14`,
-      strictly positive** — and the iterate sits **eight decades BELOW its own root**. Newton should be
-      pushing `k` *up*.
-
-      Production, destruction and the `Dirichlet(0)` wall term all vanish linearly at `k = 0`, so `k = 0`
-      solves the row exactly when the neighbours are 0. (⚠️ An earlier version called the corner `k` system
-      "**homogeneous and an M-matrix**" — the M-matrix half is **false**: `A_kk` carries **14 non-positive
-      diagonals**, min −9.03e-07.)
-
-      **Why the returned correction is wrong there, corrected — it is Krylov truncation, NOT roundoff.**
-      An adversarial re-derivation (independent colour-recovery of `A_kk`, verified row-wise against a
-      `jax.vjp` to 5e-16) settles the mechanism:
-      - `R_k[12800] = −5.72e-20` is **deterministic and 13 orders ABOVE its own row's floating-point
-        floor** (~1.3e-33). "Roundoff floor" was the wrong description.
-      - What is true is stronger: `|R_row| / ‖R_k‖₂ = 2.94e-16 ≈ machine epsilon`, and
-        `|R_row| / ‖R‖₂ = 2.15e-22`. **Any Krylov solve stopping on a relative-residual test would need
-        ~1e-22 relative accuracy in float64 to resolve this row — unreachable in principle, not merely
-        under-solved.** Measured: `‖A_kk·dk − rhs_k‖/‖rhs_k‖ = 1.0055`, i.e. the returned correction does
-        not reduce the k-block linear residual at all, and dumps 08/09/10 sit at a **bit-identical state**
-        yet return `dk[12800]` of −2.901e-13, −8.825e-14, −1.567e-14, an **18× spread**.
-      - The returned `dk` also provably violates its own row for *every* admissible shift: the row demands
-        `βD·(k_ref + 2.901e-13) = −3.958e-19`, and the left side is ≥ 0 while the right is < 0.
-      - ⚠️ **"14× larger than the exact local step" was wrong** — that froze the neighbours. Given the
-        dumped neighbours the row-consistent `dk` is −1.52e-13, still negative; it is the **exact k-BLOCK
-        solve** that comes out positive, at `+3.90e-10` (β = 0) through `+1.90e-15` (β = 10), i.e.
-        **positive at every β from 0 to 10** while the dumped value is negative and 3–5 orders off.
-
-      `positive_block_limit` then computes a purely **relative** room `0.99·k/|dk|` and lets that cell veto
-      the global step.
-      - **⚠️ THE MOST USEFUL LEAD OF THE LOT: at β ≥ 0.5 an exact k-block solve produces NO binding cell at
-        all (cap = 1.0).** Only at β ≤ 0.05 does an exact solve give a tight cap, and then on a *different*
-        cell (7.6e-14 at cell 2679). So the cap is **not intrinsic to the `k` equations at a healthy
-        shift** — it is a low-β-plus-inexact-solve artifact, which points back at the low-β conditioning
-        wall rather than at the closure.
-
-      **The ratchet is proved by the mantissa.** `k[12800]` reads `3.0816e-22` at `step-limit-11` and
-      `3.0816e-208 / e-210 / e-212` at checkpoints 120 / 121 / 122 — **the same five digits, 190 decades
-      apart**, i.e. ninety-five successive ×0.01 cuts, while `u/v/w/p` report a relative change of
-      exactly 0.
-    - **It is not one cell, either: 1876 of 23040 cells sit below `k = 1e-6`** at this state, against an
-      OpenFOAM global minimum of 1.672e-6. ⚠️ **BOTH HALVES OF THAT COMPARISON WERE WRONG, AND THE
-      CONVERGED ROOT HAS NO SUCH DEFICIT — see the resolution below.**
-    - **Geometry: it is a step-corner cell, and its mirror is the runner-up.** 12800 sits at
-      `(0.0007, −0.0099, 0.0009)` and 22400 at `(0.0007, −0.0099, 0.0391)` — bottom wall (`y ≈ −h`),
-      immediately behind the step (`x ≈ 0`), against each side wall (span `4h = 0.04`). The stagnant
-      bottom/side-wall corner, i.e. the same corner-separation region that makes the full-span
-      reattachment (16.14 here) disagree with the mid-span one (5.34). ω there is 4.01e+05, a wall value.
-    - **The tightness ranking tracks the wall-face count — on n = 4 cells, one dump, one state.** Counted
-      off `face_patches`, the four tightest cells carry **3, 3, 2, 1** no-slip faces out of six:
-
-      | cell | room (dump 04) | boundary faces |
-      |---|---|---|
-      | 12800 | 3.80e-03 | `lowerWall`, `lowerWall`, `sideWalls` |
-      | 22400 | 2.60e-01 | `lowerWall`, `lowerWall`, `sideWalls` |
-      | 12840 | 1.38e+00 | `lowerWall`, `sideWalls` |
-      | 13129 | 2.17e+00 | `sideWalls` |
-
-      The two cells that own the cap are **trihedral wall corners** — half of every face is a no-slip
-      wall, the two `lowerWall` faces being the floor and the vertical step face. **Hypothesis, not yet
-      measured:** the near-wall `k` closure is per-wall-cell, and its production is area-averaged over a
-      cell's wall faces while the destruction `β*kω_wall` is not obviously averaged the same way — so a
-      three-wall-face cell could take up to 3× the destruction against one cell's worth of production.
-      **❌ REFUTED the same day by reading both sources** — our reduction is already OpenFOAM's:
-      `wall_cells` is a `jnp.unique`, so a cell appears once however many wall faces it has, and
-      `wall_shear_rate` area-averages `Σ|S_f|r_f / Σ|S_f|` over them, which is exactly
-      `patchFieldsToWallCellField` in OpenFOAM 13's `wallCellWallFunctionFvPatchScalarField`. Nothing is
-      summed per face. The ranking most likely reads **stagnation** — three wall faces means the deepest
-      dead zone and so the least production — not double counting. See `.claude/rules/turbulence.md` for
-      the two differences that are real, of which one bears directly on the lever below.
-    - **NOT the ill-conditioned cells — the standing hypothesis is refuted at this state.** **Zero**
-      singular blocks at every β from 0 to 0.4. The binding cells run cond 3.6e5 … 2.9e7, ranks
-      1088–2165 of 23040, and **none** of them is among the twelve worst-conditioned. `cond > 1e6`
-      catches 50% of them against an 8.7% base rate — mildly enriched — but `cond > 1e9` catches none,
-      and the separately characterised cond ~1e12 / ‖B⁻¹‖ ~9.5e8 cells are absent entirely (the worst
-      here is 2.9e7 / 6.6e6). **Caveat on comparing those two numbers:** the 1e12 figure was measured on
-      `state-00057` under *symmetric equilibration*, and this is a different state, raw — so this
-      refutes the coincidence at this state rather than retiring the 1e12 finding.
-
-    **✅ RESOLVED (2026-08-10, by re-running the shipped march end to end): the `k` trough is a REYNOLDS-
-    CONTINUATION TRANSIENT, and the converged root does not have it.** At the converged target-Re root
-    (step 58, `R` 9.588e-06, `x_r/h` 8.36) there are **ZERO** cells below `k = 1e-6`: `k_min` 1.2997e-05,
-    median 0.7017 against OpenFOAM's 0.7468, a ratio of **0.98**. Cells below 1e-6 go 190 (step 37) → 130
-    → **0** (step 46) → 0 at convergence.
-    - **Both halves of the "1876 vs 1.672e-6" comparison were wrong.** It is **cross-Reynolds** —
-      `state-00122` is rung 2 (ν = 1e-4), the OpenFOAM field is target Re — and 1.672e-6 is the **steady**
-      OpenFOAM run's minimum, the run this case's own docstring rules out as a reference. The valid
-      transient reference has `k_min` **6.2247e-03**.
-    - **The mechanism is the continuation's own doing.** `y* = β*^0.25 √k d/ν` scales as **1/ν**, so at the
-      Re/100 anchor `wall_function_weight = tanh((y*/y*_lam)⁴)` is ~1e-7 — **the log-layer wall production
-      is switched off even at fully turbulent `k`** — while `ω_wall = 6ν/(β₁d²)` is **100×** larger, so
-      `β*kω` destruction is 100× the target's. Homogeneous, linear, destruction-dominated ⇒ `k` decays.
-      Raising Re reverses both: the weight median goes 5.6e-20 (rung-1 root) → 1.9e-10 → **1.000** (target).
-    - The rung-1 root is **correctly** laminar (`ν_t/ν` median 1.7e-5 at `Re_h = 100`), and **1732 of the
-      1876 cells (92%) are inherited from it**.
-    - **Population is pre-stall, depth is stall-caused**: `#k<1e-6` is 1876 by dump 04 and frozen there for
-      all 97 remaining steps, while `k[12800]` falls 3.08e-16 → 3.08e-212 over the same span.
-    - **The stalled arm is `BFS3D_TURBULENCE_INVERSE=native`; the default `petsc` arm walks the same trough
-      and recovers** — agreeing with the exact-solve finding that at β ≥ 0.5 there is no binding cell.
-    - ❌ **REFUTED — the initialization.** `hybrid_initialize` gives a **uniform** `k = 0.2489585`, zero
-      cells below 1e-6.
-    - ❌ **REFUTED — the "ω is exactly 10×, still at its 60ν seed" lead.** `ω[12800] = 400910.4` **is**
-      `6ν/(β₁d²)` at **rung 2's own** ν = 1e-4 to 16 digits (all 4490 wall cells within 4.8e-5). The three
-      rungs give 4.0091e6 / 4.0091e5 / 4.0091e4 — the "10×" compared a rung-2 state against the
-      **target-Re** formula. Those rows are converged; the `60ν` seed was replaced by `omega_wall` in
-      `c324021` (2026-07-23), well before these checkpoints.
-    - **The sustaining/ambient source has no motivating evidence left**: it targets a defect absent from
-      the converged root. The defensible levers are the absolute floor in the limiter, and not anchoring
-      the ladder below the Reynolds number at which the wall function turns itself on.
-    - **Genuinely open, and now the real physics question — but BOTH numbers needed a definition before
-      they meant anything (harness: `validation/bfs3d_openfoam/wall_layer_comparison.py`).**
-      - "**First wall layer**" spans a 4× range of defensible meanings, and the choice matters more than
-        the discrepancy: **all wall-adjacent (4490 cells) is 1.054**, the **finest layer (1600) is 0.459**,
-        the **floor behind the step (640) is 0.342**. The recorded 0.164/0.46× is the *finest layer*. Side
-        walls, 64% of wall-adjacent cells, agree at **1.113** and do not participate.
-      - `x_r/h` **7.24 and 8.36 are both grid stations, two apart.** The floor's stations near
-        reattachment are `… 6.728, 7.243, 7.787, 8.361, 8.966 …`, local spacing **0.375–0.749 h**, so the
-        metric's resolution is about half a step height and "15%" is a two-cell offset. A sub-cell
-        interpolated crossing puts the reference at **~7.6**, i.e. the quoted 7.24 carries a systematic
-        −0.36 h truncation, and the interior spanwise columns scatter by **sd 0.13 h**. A defensible
-        reference is **x_r/h ≈ 7.6 ± 0.3**; the gap survives it (~1.0 h, ~13%) but is smaller than quoted.
-      - **The wall closure is NOT the cause.** The `Dirichlet(0)` vs `kqRWallFunction` (zero-gradient)
-        difference is real but worth only ~7.4% of local destruction (k ×0.93–0.98); `nut_wall` is
-        *algebraically identical* to `nutkWallFunction`; every verified wall-closure difference multiplies
-        to **~0.87–0.93, not 0.46**. The wall-cell `k` budget is **transport-dominated**
-        (|transport|/production ≈ 1.16), so that `k` is inherited, not locally made.
-      - **Where it is inherited from, and this is the causally clean part:** the deficit is already there
-        **upstream of the step** (x/h −2.85 … −0.15, no recirculation), first-cell `k` **0.54–0.68×** with
-        the channel core at parity (0.987), and the lip-shed rows carry the same ratios. In wall units
-        `k⁺` ≈ 1.3–2.4 against OpenFOAM's 2.4–4.0, DNS channel ≈3.9–4.4, and the SST log-layer equilibrium
-        `1/√Cμ` = 3.33 — **low against both references**, which is what makes it a defect rather than a
-        difference. It seeds a shear layer carrying 20–25% less `ν_t` through x/h 0.3–2.
-      - ❌ **Exonerated with evidence:** the momentum scheme (aquaflux is *more* dissipative yet its shear
-        layer is *thinner* — wrong sign); the SST shear limiter (identical branch in both); the mesh
-        (cell-for-cell identical, max centroid distance 4.7e-9 m); and first-order upwind on k/ω (false
-        diffusion ~5% of `ν_t S²` at x/h 0.4, <1% beyond — an order of magnitude too small).
-      - ⚠️ **THE EXPANSION RATIO CHANGES WHICH NUMBER LOOKS WRONG, AND NEITHER OF US HAD ACCOUNTED FOR
-        IT.** The famous benchmarks are ER 1.125–1.2 (Driver & Seegmiller 1985: 6.26 ± 0.10; Le, Moin &
-        Kim 1997 DNS: 6.28) and **must not be used as the target here — this case is ER = 2**, and the
-        published trend is that larger ER *lengthens* the normalized bubble (Armaly et al. 1983, quoting
-        Durst & Tropea 1981). **At ER = 2 the 2D references cluster at 8.0–8.8**: Pont-Vílchez, Trias,
-        Gorobets & Oliva (2019, *JFM* 863) DNS gives **X_r = 8.8h** at Re_τ = 395 (verified independently
-        of the agent that reported it — a later LES cites it as its reference, calling its own 8.15h a
-        7.3% under-estimate); Durst & Tropea (1981) 8.5 at Re_H 1.5e4; Rothe & Johnston (1975) 7.8.
-        **So aquaflux's 8.36 sits INSIDE the ER = 2 band and OpenFOAM's 7.24 sits below it** — the
-        opposite of the "aquaflux over-predicts by 15%" framing this section started from.
-      - ⚠️ **"SST is a known under-predictor" is also wrong.** On Driver & Seegmiller, NASA's turbulence-
-        model resource puts SST at x/H ≈ **6.50** against 6.26 ± 0.10 — a 4% **over**-prediction,
-        reproduced across four codes; Menter (1994) reports 6.5 himself. The classic under-prediction is
-        **k-ε** (Menter's Jones–Launder 5.5), and even the widely-repeated "20–25%" is disowned by
-        Thangam & Speziale (ICASE 91-23) as a resolution artifact.
-      - **What is genuinely unresolved is the FINITE SPAN.** span/h = 4 is 2.5× below the span/h > 10
-        that de Brederode & Bradshaw (1972) require for two-dimensionality at the centreline (quoted
-        verbatim in Jovic & Driver 1994, NASA TM 108807). Lower aspect ratio **shortens** reattachment —
-        direction unanimous across every source found — which would pull both codes below the 2D band.
-        **No open-access `x_r`-vs-aspect-ratio numbers exist**, so the magnitude is unknown and neither
-        7.24 nor 8.36 can be called correct.
-      - ⚠️ **One anomaly worth chasing: our spanwise profile has the WRONG SIGN against the literature.**
-        Both codes here reattach *later* at the outer slabs (10.28) than in the interior (7.24), but the
-        two published spanwise measurements go the other way — Sugiyama et al. (2013) find near-side-wall
-        reattachment ~60% of the centreline value at AR 16, and Armaly, Li & Nie (2003) find a *minimum*
-        near the side wall. Both are laminar/transitional, so the transfer is uncertain, but this is the
-        one place our result contradicts published structure rather than merely differing in magnitude.
-      - **Untested and the largest remaining unknown: grid convergence.** One mesh exists.
-
-    **⚠️ THE LEVER, as corrected earlier — with the scan's reach stated.** The measurement below is a **1-D scan of
-    one row at one iterate with every other field frozen**. It establishes a strictly positive root of cell
-    12800's frozen-field `k` row, which removes the motivation for a projection *at this state*. It does
-    **not** establish the sign of the coupled Newton direction, nor anything about the other 1875 collapsed
-    cells, nor that no state has a negative root. Two defects remain, and they are different from
-    each other:
-    1. **`positive_block_limit` is a purely RELATIVE rule** — `room = tau·k/|dk|` — applied to a field
-       whose physical floor is 0. A relative rule has no lower bound, so a roundoff-level `dk` in an
-       already-collapsed cell produces an arbitrarily small cap. An **absolute floor**
-       (`room = tau·(k + k_abs)/|dk|`) fixes it, is pure globalization, sits off the IFT path entirely,
-       and — *provided the cap is inactive at the converged state* — changes nothing at the solution.
-       Scale `k_abs` off the block (`eps·max(k)`), not a constant, so it carries `k`'s units.
-       **⚠️ IT IS NOT SAFE ALONE — clamping `k` in the closure is a PREREQUISITE, in the same change.**
-       Relaxing the cap lets `k` go slightly negative, and two sites then misbehave badly (verified):
-       `SSTModel.f1`/`.f2` (`sst.py:136,178`) take a raw `jnp.sqrt(k)` and NaN the whole residual, where
-       every closure in `boundary.py` uses `safe_sqrt(jnp.maximum(k, 0.0))`; and `OmegaProduction`
-       (`sources.py:288-294`) divides by `jnp.maximum(nu_t, 1e-30)`, so a negative `ν_t` selects the floor
-       and the cap becomes ~**−1e23** at the measured corner values. `KProduction`'s cap
-       (`sources.py:209`) also flips sign, turning production into a sink. **Unbuilt and unmeasured.**
-    2. **A large part of the near-wall field has laminarized** (1876 cells below 1e-6). That is the real
-       physics defect and the absolute floor does not address it. The candidate is a **sustaining /
-       ambient source**. ⚠️ **Both the form and the citation first recorded here were WRONG; corrected:**
-       - The literature terms are **constant**, and there are **two** of them, one per equation:
-         `k: + β* ω_amb k_amb` and `ω: + β ω_amb²`, where `ω_amb` is an **ambient constant, not the local
-         ω**. Source: **Rumsey & Spalart, AIAA J. 47(4), 2009, 982–993** (NASA calls it `SST-sust`).
-         **Spalart & Rumsey 2007** — cited here originally — proposes *floor values*, not source terms.
-       - The form written here first, `+β* k_amb ω` with the **local** ω, is a different term: it makes
-         the destruction `−β* ω (k − k_amb)`, pinning `k ≥ k_amb` *uniformly including deep in the
-         boundary layer* where ω is O(1e5). At the `bfs3d` corner that is ~80× the literature term and
-         would override the `Dirichlet(0)` wall condition the case sets — which is exactly what Rumsey &
-         Spalart warn against. It also is **not** diagonal-free: `∂R_k/∂ω = −β* k_amb` is an off-diagonal
-         the frozen AMG operator would not see. The literature (constant) form does have both properties.
-       - **Motivating evidence is weak.** The `k` deficit is measured at an *unconverged* state whose ω
-         rows have not moved off initialization, and OpenFOAM reaches min `k` 1.672e-6 on this mesh with
-         **no** sustaining term at all. It would also make two existing assertions tautological
-         (`test_coupled_mass_flow.py:138`, `test_coupled_periodic_channel.py:124`, both of which assert
-         `min(k) > 1e-6` and document themselves as *non*-tautological).
-       - **Order of work: do the step-limiter fix first and re-measure.** If the march then converges with
-         `min(k)` near OpenFOAM's, this has no motivating evidence left. Unbuilt and unmeasured.
-
-    Two further leads found while measuring this, both unverified: `ω[12800] = 4.0091e5` is **exactly
-    10×** the `omega_wall` value `6ν/(β₁d²)` its own residual imposes, which is the `60ν` initialization
-    value never relaxed (so this state's `ω` rows are unconverged too); and `SSTModel.f1`/`.f2`
-    (`sst.py:136,178`) use **plain unclamped `jnp.sqrt(k)`** where every closure in `boundary.py` uses
-    `safe_sqrt(jnp.maximum(k, 0.0))` — clamping those two would make a transiently negative `k`
-    survivable, which is what an absolute-floor cap needs.
-
-    **The rest of this paragraph is the superseded framing, kept because the OpenFOAM comparison in it
-    still stands on its own:** `kOmegaSSTBase.C` ends every `k` solve with
-    `bound(k_, kMin_)`, and `bound` replaces a negative cell by the **average of its neighbours** before
-    flooring at `kMin` (`isf = max(max(isf, fvc::average(max(vsf,min))*pos0(-isf)), min)`). It also
-    *replaces* the `ω` row in wall cells (`matrix.setValues`) and lags `G`, so its wall-cell `k` equation
-    is linear with a non-negative source. We do the opposite on both counts: both terms stay live
-    functions of `k` in one Newton residual (deliberately — a frozen `ω` degenerates the row), and we
-    constrain the **step** rather than projecting the state. Constraining the step is what locks up; a
-    projection cannot. That reframes the choice, and it is the one to make with the user:
-    a positivity **projection** after the step (OpenFOAM's answer, and it changes the forward path but
-    not the root provided the floor is inactive there) against keeping the step constraint and finding
-    why that cell's row is hard to satisfy (its root is **positive**, at `+1.99e-14`). Neither is built.
-
-    **⚠️ (2026-08-10, LATER STILL) THE `k` WALL BC A/B, RUN AS A CONTROLLED PAIR — and the crash is NOT
-    fixed by any of it.** Two full 3-rung marches from the initial state, `BFS3D_TURBULENCE_INVERSE=native`,
-    everything identical but `BFS3D_K_WALL`, both carrying the four negative-`k` clamps and
-    `stop_on_limit_stall=3`:
-
-    | | `dirichlet` (control) | `zerogradient` |
+    | | 4 sweeps | 1 sweep |
     |---|---|---|
-    | rung 1 | 14 steps, 43 cycles, ‖R‖ 5.882e-06 | 14 steps, 45 cycles, ‖R‖ 7.821e-06 |
-    | rung-2 step it locks at | **25** | **35** |
-    | rung-2 ‖R‖ at lock | **7.316e-02** | **1.257e-02** |
-    | rung-2 steps before the guard ends it | 15 | 24 |
-    | outcome | `RuntimeError` from `solve_reynolds_continuation` | same |
+    | wall | 1959 s | **1636 s (−16.5 %)** |
+    | steps | 58 | 58 |
+    | refresh | 21 events / 318 s | 19 / 286 s |
+    | Krylov cycles | 277 | **282 (+1.8 %)** |
+    | final ‖R‖ | 9.589e-06 | 9.588e-06 |
+    | mid-span `x_r/h` | 8.361 | 8.361 |
 
-    - **❌ Zero-gradient does NOT cure the lock-up.** The same fraction-to-the-boundary ratchet appears,
-      same β ceiling of 16.0, same ~100×-per-step cap collapse — just later. Consistent with the
-      term-by-term account that put the whole wall closure at ~0.87–0.93.
-    - **✅ But it is worth keeping on the evidence: a 5.8× lower residual and 10 more steps of rung 2**,
-      and the attribution is clean because the clamps are verified neutral (below) and both arms had the
-      guard. It also produced five consecutive *uncapped* full steps in rung 2, which the control never
-      does.
-    - **✅ THE CLAMPS ARE EXACTLY NEUTRAL, end to end.** The control's rung 1 is **14 steps / 43 cycles /
-      5.882e-06 / ‖R₀‖ 3.3078e-01 — identical in every digit to the pre-clamp recorded baseline** — and its
-      rung-2 steps 25–29 reproduce that baseline's trajectory exactly (step 25 β 0.4682, ‖R‖ 7.567e-02,
-      `a_min` 0.004, cap 3.76e-03; then 1.00e-05 → 1.95e-06 → 1.95e-08 → 1.95e-10). The per-guard
-      `array_equal` unit tests said this; a real coupled march now confirms it.
-    - **✅ `stop_on_limit_stall` works, on two independent arms.** The control's rung 2 ends at **15 steps
-      instead of the recorded 108**; the zero-gradient arm's at 24. ~90 dead steps saved each time, and the
-      run now fails with a `RuntimeError` naming the rung instead of grinding out `MAX_STEPS`.
-    - **⚠️ THE DEAD GRIND MOVED RATHER THAN VANISHED — a real coverage gap.** Once the guard ends the
-      segment, `solve_coupled` falls through to the finishing solve (`ImplicitNewtonSolver`), which has **no
-      equivalent guard**, and that grinds at α 0.000 / 0 cycles with the residual frozen until `max_steps`.
-      `stop_on_limit_stall` covers `forward_march` only. Fixing that is the next march-level item.
-    - The step-limit dumps now carry **β and the anchor** (`cap 2.2923e-06 beta 1.754 anchor yes`), so the
-      falsifier named against the earlier diagnosis is closed: these dumps can be paired with the linear
-      system that produced them.
+    **The two marches follow the same trajectory step for step** — identical β, identical per-step
+    cycle counts, identical residuals to four figures, and the single α-collapse escalation fires at
+    the same step for the same reason to the same β. So this is the *same* path at a lower price per
+    matrix-vector product, which is a far stronger single-run result than a 16.5 % margin would
+    normally be (this case's ordinary run-to-run noise is ~2 %). Note again that **cycles rose while
+    wall fell**.
+  - **⚠️ HOW THAT SMOOTHER WAS CHOSEN, AND THE TWO WAYS THE SCREEN NEARLY GOT IT WRONG
+    (`validation/bfs3d_openfoam/turbulence_smoother_sweep.py`).** The screen holds the leading half at
+    ILU(0) and varies only the trailing one, ranking on **wall time** at real march states rather than
+    on cycles. Two failures are worth carrying, because both produced a wrong answer first:
+    - **A HARD state cannot rank candidates — it can only screen them.** The standing caution is about
+      *benign* states not discriminating; the complement is equally real and was not written down. On
+      the shipped march **139 of 194 inner solves cost one restart cycle and only 7 exceeded three**,
+      so the worst iterate is not what a march pays for. Point-block Jacobi buys an extra cycle *only*
+      where the operator is hard: it ranks **1.15× (worst of ten)** on the hard iterate and **0.94×**
+      over the march's real mix. Rank on step-initial states, screen on the hard one, and weight the
+      blend by the march's own solve distribution.
+    - **A cost screen is blind to the DIRECTION a preconditioner returns, and a march is not.** The
+      forward solve stops at `forward_rtol = 0.3`; a strong preconditioner overshoots that by orders of
+      magnitude inside one restart cycle while a weak one lands near it, and **both report one cycle**.
+      Since the march takes an inexact-Newton step from whatever comes back, a materially weaker arm
+      hands back a worse direction, the line search clips and the step control escalates — none of
+      which a timing screen registers. The usable proxy is the screen's **tight** cycle count read as a
+      *magnitude*, not as a pass/fail gate: shipped 3/3/4 (two step-initial states, then the hard one),
+      `ilu0x1` 3/4/5 — about the same strength, and it reproduced the baseline trajectory exactly —
+      against `jacobix2` 5/7/7 and `jacobix1` 8/10/13. **A candidate needs three things: cheap per
+      application, convergent at all, and not materially weaker than the incumbent.**
+    - **THE `[k, ω]` CELL BLOCK IS TRIANGULAR, AND THAT EXPLAINS THE WHOLE SMOOTHER RANKING ON THIS
+      BLOCK.** Equilibrated, each cell's 2×2 is **lower-triangular with unit diagonal and a subdiagonal
+      of order 100–340**, every determinant exactly 1.0, and the k↔ω coupling is **~100 % same-cell**
+      (‖∂R_ω/∂k‖ splits 2.14e3 same-cell against 23.9 neighbour on the channel;
+      `validation/bfs3d_openfoam/field_coupling.py` finds the same asymmetry on `bfs3d` — ∂R_ω/∂k at
+      121× the diagonal blocks, ∂R_k/∂ω at 0.19 % of them). ω depends enormously on same-cell k through
+      the production limiter and the βkω destruction pair; k barely depends on ω, because wherever the
+      SST limiter is active `ν_t = a₁k/max(a₁ω, S F₂)` is **ω-independent**. Consequences:
+      - **ILU(0) in cell-major order already captures it exactly** — the forward/backward pair is a
+        complete factorization of a 2×2 with one off-diagonal (no fill), so the subdiagonal costs it
+        nothing. That is why one sweep is nearly as good as four here (tight cycles 3/4/5 against
+        3/3/4) and why `sor`, also a sweep in the favourable order, matches ILU(0)×4 at 3/3/4.
+      - **Point Jacobi discards the entire subdiagonal**, which is precisely the term the others get.
+      - **Point-block Jacobi recovers it, and measurably does**: split by field, a `pbjacobi`-smoothed
+        V-cycle lands **10× closer to an ILU-smoothed one than point Jacobi does in the ω rows**
+        (1.48e-4 against 1.49e-3). The end-to-end near-tie is real all the same — the V-cycle output is
+        ω-dominated (‖ω‖ 2318 vs ‖k‖ 29.7), all three get the bulk right, and the coarse correction
+        plus outer Krylov absorb the rest.
+      - **Re-ordering the fields does NOT help.** A symmetric permutation to `(ω, k)` makes the block
+        upper-triangular; Jacobi and block-Jacobi are permutation-invariant, ILU holds both triangles
+        either way, and a *forward* sweep (SOR/Gauss-Seidel) is made strictly worse — the current order
+        lets it solve k first and use the fresh value in ω. The shipped order is already the good one.
+      - **For a JAX-native smoother this is the cheap prize:** with the equilibrated unit diagonal the
+        block solve is one fused multiply-add per cell (`x_ω -= c·x_k`), fully parallel across cells,
+        no factorization and no sequential dependency.
+    - **⚠️ BLOCK JACOBI CANNOT REPLACE THE TRAILING HIERARCHY — measured, and the reason is
+      ROBUSTNESS rather than reduction.** The `[k, ω]` block is strongly *block*-diagonally dominant
+      (neighbour coupling ~12 % of same-cell for the diagonal fields, 1.1 % for `∂R_ω/∂k`), and block
+      Jacobi's error operator is exactly that neighbour part — so it looks as though a coarse grid has
+      nothing to do here, and on a synthetic operator at that neighbour weight it contracts ~10× per
+      sweep. It does not carry over. Measured as the **whole** trailing inverse (a native batched 2×2
+      solve, no hierarchy at all) against the shipped V-cycle, on two step-initial states and the hard
+      iterate, blended by the march's own solve mix:
 
-    **✅ GATES GREEN on all of the above** (CSR level operator, native trailing inverse, and both march
-    changes), with the tiers named because a default-on march guard reaches further than the fast gate:
-    - fast gate **967 passed / 1 skipped** (899 unit `-n auto`, 68 integration `-n 1`);
-    - `test_coupled_rans` + `test_coupled_amg` + `test_coupled_field_split` + `test_reynolds_continuation`
-      — 33 tests, 18 of them `slow` — **33 passed**;
-    - `test_coupled_lu` + `test_coupled_ilut` — **15 passed**. These two matter and were nearly missed:
-      they drive `forward_march` with `step_control` + `precondition_step`, so they pick up
-      `stop_on_limit_stall` exactly as the four above do, and they are in neither the fast gate nor the
-      list a first pass would think to run;
-    - **`-m validation` — 18 passed.**
-
-    **The trap, recorded because it nearly landed:** a default-on guard on a *shared* seam is not covered
-    by "the tests for the subsystem I changed". `forward_march` has one production caller, but everything
-    that reaches `solve_coupled` with an observer picks the new default up. Enumerate by **who calls the
-    seam**, not by which file the change is in.
-
-  - **⚠️ (2026-08-09): making the JAX-native multigrid a FAITHFUL smoothed aggregation, so a
-    comparison against PETSc GAMG means something. Uncommitted work sits on `claude/block-aware-aggregation`.**
-    Read this before touching `solve/multigrid.py`'s aggregation path.
-
-    **⚠️ THE EQUILIBRATION HYPOTHESIS WAS WRONG, AND MEASURING IT IS WHAT SETTLED THE COMPARISON
-    (2026-08-09).** The suspicion recorded here was that ours and PETSc's were not built on the same
-    matrix — `AmgVCycle` calls `equilibrate_cell_major` before handing the operator to PETSc, so GAMG
-    coarsens a **unit-diagonal** matrix, while `build_convection_hierarchy` coarsened the raw block,
-    whose diagonal on `bfs3d`'s `[k, ω]` slice spans **7.96e5×** (1.26e-06 … 1.0). That description of
-    the code is accurate, and the σ_max figures reproduce exactly (**4.365** raw against **2.832e3**
-    equilibrated, so the standard prolongator step `1.4/σ_max` is ~0.32 for us and ~5e-4 for PETSc).
-    The **inference** from it — that no ours-vs-PETSc number meant anything until it was fixed — does
-    not survive. `equilibrate=True` is now built and measured, and it makes our hierarchy **worse**:
-    8 → 11 cycles on the RCM arm, 5 → 10 on the plain-aggregation MIS arm.
-
-    **Why it barely matters, and this is the part worth carrying: a symmetric equilibration is a
-    SIMILARITY TRANSFORM, so almost the whole setup is invariant under it.** `D̂⁻¹Â = S⁻¹(D⁻¹A)S`, so
-    both spectral estimates are unchanged; the damped-Jacobi smoother `x += (ω/λ)D⁻¹r` is unchanged
-    with them; and at `strength_threshold = 0` the aggregation reads only the sparsity pattern.
-    Measured on a badly scaled chain: the **fine** level's `lam_max` is 1.966 raw against 1.976
-    equilibrated (equal to power-iteration accuracy) while the **coarse** level's is 1.81 against
-    15.3. The one non-equivariant object is the **tentative prolongation** — a fixed 0/1 aggregate
-    indicator, which does not transform with the operator — so the coarse operator it builds is the
-    only thing rescaling actually changes. Everything the original note listed as reading `D` does
-    read `D`, but reads it in a way that cancels.
-
-    **Reference numbers, re-measured on the current code** — `bfs3d` `state-00057`, PC β 0.05, the
-    `[k, ω]` block **ALONE** (46080 dofs, 4.20M nnz, 91/row), GMRES restart 15 to rtol 1e-8 on the
-    TRUE residual, random right-hand side; harness
-    `validation/bfs3d_openfoam/trailing_hierarchy_sweep.py`:
-
-    | preconditioner | coarse eq | cycles |
-    |---|---|---|
-    | PETSc GAMG, plain aggregation, ILU(0) ×4 | 432 | **1** |
-    | PETSc GAMG, plain aggregation, ILU(0) ×1 | 432 | **2** |
-    | **PETSc GAMG, plain aggregation, point-block Jacobi ×4** | **432** | **2** |
-    | ours, MIS, standard prolongator, ×8, EQUILIBRATED | 2150 | 4 |
-    | ours, MIS, plain, ×4, raw | 2150 | 5 |
-    | ours, RCM, symmetric-part prolongator, ×4, raw | 598 | 8 |
-    | ours, MIS, plain, ×4, EQUILIBRATED | 2150 | 10 |
-    | ours, RCM, symmetric-part prolongator, ×4, EQUILIBRATED | 598 | 11 |
-    | ours, MIS, standard prolongator, ×4, raw / EQUILIBRATED | 2150 | 44 / 44 — both fail (true rel 1.0) |
-
-    **Read the THIRD row, not the first — the like-for-like arm.** Comparing our Jacobi-class smoother
-    against PETSc's incomplete-LU measures the smoother, not the hierarchy, and an ILU sweep is a much
-    stronger and much less parallel unit of work.
-
-    **✅ THE GAP IS CLOSED: matched to PETSc's algorithm, our V-cycle equals it — 2 cycles against 2,
-    on a 436-equation coarse space against 432.** Two differences accounted for the whole of it, and
-    neither was scaling. Both were found by reading `agg.c`/`misk.c`/`rich.c` against our code rather
-    than by tuning:
-
-    | arm, `[k, ω]` block alone, matched smoother class | coarse eq | cycles |
-    |---|---|---|
-    | PETSc GAMG, plain aggregation, point-block Jacobi ×4 | 432 | **2** |
-    | ours, MIS ×4, damped, no aggressive level | 2150 | 5 |
-    | ours + **aggressive level** ×4, damped | **436** | 10 |
-    | ours + aggressive level ×8, damped | 436 | 3 |
-    | ours + aggressive level + **undamped** ×2 | 436 | 11 |
-    | **ours + aggressive level + undamped ×4** | **436** | **2** |
-
-    1. **The aggressive first level, which PETSc applies BY DEFAULT and we did not.**
-       `build_amg_vcycle` never sets `pc_gamg_aggressive_coarsening`, and GAMG's default is
-       `aggressive_coarsening_levels 1` with `use_aggressive_square_graph` — so on level 0 it coarsens
-       the **squared** graph. That is the entire 5× coarse-space difference: ours coarsened 21×, GAMG
-       107×, and with `aggressive_levels=1` ours lands at 436 equations against PETSc's 432.
-       **Note `use_aggressive_square_graph` and `aggressive_mis_k` are ALTERNATIVES, not a pair** —
-       `mis_k` is read only in the non-squared branch (`agg.c:1314`), so at the default the coarsener
-       is plain MIS at distance **1** on the squared graph.
-    2. **PETSc's level smoother is UNDAMPED.** `mg_levels_ksp_type richardson` at its default
-       `scale = 1.0` (`rich.c:277`) is `x += D⁻¹(b − Ax)`, while ours relaxed by `omega/lam_max` with
-       `omega = 0.8`. That is never a *smaller* factor than 0.8 and usually much smaller: `D⁻¹A` has
-       unit diagonal blocks, so its eigenvalues average one and `lam_max ≥ 1` always. Dividing by it
-       under-relaxes every mode except the extreme one. Worth **10 → 2 cycles** at four sweeps.
-       Reachable as `convection_multigrid_solve(..., omega=1.0, spectral_damping=False)`; the
-       spectral default is unchanged, because an undamped sweep is not a contraction standing alone —
-       it does not need to be under a coarse correction and an outer Krylov.
-
-    **Equilibration is NOT among the causes**, and the two that are were invisible until the sources
-    were read side by side. The earlier "ours is behind on both axes" reading was correct as a
-    measurement and wrong as a diagnosis: it described a hierarchy that was simply not running the
-    same algorithm.
-
-    **The three remaining differences, now BUILT and measured (same block, same state, matched arm):**
-
-    | arm | coarse eq | ×1 | ×2 | ×4 |
-    |---|---|---|---|---|
-    | matched, before | 436 | 58 | 11 | **2** |
-    | + fix-up pass + magnitude-first graph | 438 | 52 | 10 | **2** |
-    | + coarse-size stopping rule | 438 | 52 | 10 | **2** |
-
-    - **The fix-up pass — BUILT, `_reattach_to_adjacent_root`.** PETSc's `fixAggregatesWithSquare`
-      (`agg.c:1032-1075`): after the squared-graph MIS, each selected root **in ascending index
-      order** steals every distance-1 neighbour in the *unsquared* graph that belongs to another
-      aggregate. Only members move, never roots, so the count is unchanged and no aggregate empties.
-      **Its guarantee is conditional and must not be stated as absolute** — a member whose neighbours
-      are all themselves members has no adjacent root to move to and keeps its distant one. Worth a
-      cycle at ×2 and six at ×1; nothing at ×4, where the arm was already at PETSc's 2.
-    - **Magnitude before symmetrization — BUILT.** PETSc block-sums `|A_ij|` and *then* symmetrizes;
-      we took the symmetric part first, so an edge with `A_ij ≈ −A_ji` **cancelled out of the graph
-      entirely**. On an M-matrix (every frozen upwind transport operator) the sparsity is identical
-      either way, so at `strength_threshold = 0` — the default, and what every scalar hierarchy runs —
-      this is a no-op. **It is NOT a no-op at a threshold**, because the weights differ (`|A_ij|`
-      against `|A_ij + A_ji|/2`) and the strong-connection set is chosen from them: the coupled flow
-      block runs at **0.25** (`turbulence/coupled.py`), so its hierarchy genuinely moves. Do not quote
-      the M-matrix equivalence without that caveat — it is a statement about the pattern only.
-    - **The stopping rule — measured INERT here, and that is a real result rather than a null one.**
-      PETSc coarsens until the grid is under `coarse_eq_limit`; we stop at `max_levels`, at which
-      point `max_coarse` can never fire. Setting `max_coarse=2000, max_levels=20` gives a
-      **bit-identical** hierarchy on this block, because one aggregation already lands at 438 < 2000
-      and both rules then stop. So it changes nothing *at this size* and remains the correct rule for
-      a mesh where it would bind. The two knobs are still not equivalents and must not be quoted as
-      matched.
-
-    **Still different, verified by reading the source, and NOT measured:**
-    - **Strength-of-connection semantics differ** — PETSc thresholds absolutely on the
-      diagonally-scaled graph (Vanek), we use the row-max-relative classical criterion. Inert at
-      threshold 0, so it affects no measurement here, but the recorded threshold arms on the two sides
-      are not comparable.
-    - **Tentative prolongation.** PETSc orthonormalizes each aggregate's block by QR (`agg.c:690-714`),
-      giving unit-2-norm columns where ours are 0/1 — i.e. `P_ours = P_petsc · diag(√|agg|)`. For a
-      2-level cycle with an exact coarse solve this is **provably inert**: `P A_c⁻¹ Pᵀ` is invariant
-      under a column rescaling. It starts to matter with inexact or deeper coarse levels, and for the
-      conditioning of our dense `pinv` coarse solve.
-    - **Singletons.** PETSc drops a neighbourless vertex from the coarse space entirely (zero row in
-      `P`, left to the smoother); we give it its own aggregate.
-
-    **What equilibration IS worth (keep it, default off):** the coarse solve is a dense pseudo-inverse,
-    and its singular-value truncation is what a badly scaled operator defeats first — on the chain
-    fixture the one-level direct solve goes from a 1e-9 true residual to 1e-13. That is a real second
-    benefit, pinned by a unit test, and unrelated to the coarsening.
-
-    **What is BUILT and measured good (keep):**
-    - **Nodal (block-aware) aggregation** — `_cell_graph` collapses the dof graph to cell connectivity
-      (exact, since field-major means `index % n_cells` *is* the cell) and `_block_tentative` gives each
-      field its own coarse unknown. With a **block smoother** (`_cell_block_inverse`,
-      `_block_diagonal_inverse_operator`) this makes the two-field slice buildable and convergent.
-      **All three are required; no pair suffices** (measured 2×2).
-    - **MIS aggregation** (`_mis_aggregate`) — greedy maximal independent set over a **randomized** visit
-      order, single sweep, selector-claims-neighbours, faithful to `MatCoarsenApply_MISK_private`. Worth
-      **8 → 5 cycles** over the two-pass RCM scheme. The old scheme only seeded from a fully-free
-      neighbourhood, so it seeded few aggregates and left most vertices to a ragged cleanup pass.
-    - `jax.jit` on the native applies (they were dispatching eagerly, ~18 % of apply cost) and
-      `indices_are_sorted=True` in `_coo_apply` (CSR→COO is row-sorted by construction).
-    - `PerFieldNativeInverse` / `NodalNativeInverse` in `solve/field_split.py`, both transposable in
-      closed form and fixed linear operators, so adjoint-legal. Neither is wired into production.
-
-    - **`prolongation_smoothing` is its own parameter, no longer welded to `mis_aggregation`.** The old
-      flag chose the aggregation *and* the prolongator formula together, so "MIS with and without
-      prolongator smoothing" was not expressible and the two effects could not be separated — which is
-      how the smoothed prolongator came to be recorded as void when what it actually needs is more
-      smoother sweeps. `"symmetric-part"` (default, the historical formula), `"standard"` (the textbook
-      σ_max form on the true operator and scalar diagonal), `"none"` (plain aggregation, what the
-      shipped PETSc bundle runs). An unknown value raises.
-    - **`_mis_aggregate` returns its ROOTS**, not just the aggregate index per vertex — the fix-up pass
-      cannot be written without knowing which vertex seeded each aggregate, and re-deriving it
-      afterwards is not possible (an aggregate's root is not recoverable from the labelling).
-
-    **What is BUILT and measured BAD (revert or gate):**
-    - The **standard prolongator at 4 sweeps** fails outright (44 cycles, true rel 1.0) — raw *and*
-      equilibrated, so this is not the scaling. At **8 sweeps equilibrated it is the best native arm
-      (4 cycles)**, so it is under-smoothed rather than wrong: the earlier "VOID / much worse" reading
-      conflated a smoothing deficit with a broken formula. Treat sweeps as part of that arm's
-      specification, never quote it at a single sweep count.
-    - **⚠️ GRAPH SQUARING ON THE FIRST LEVEL IS GAMG'S DEFAULT COARSENING, NOT A SIZE KNOB — and
-      recording it as harmful was the single thing holding the comparison open.** Squaring the graph on the first level is not a size knob, it is
-      GAMG's *default coarsening* (`aggressive_coarsening_levels 1`), and its 106× ratio is not
-      over-coarsening — it is PETSc's 107×, i.e. the target. The 5 → 10 reading is real but was taken
-      with the damped smoother; at the matched undamped smoother the same arm is **2 cycles**. A knob
-      measured harmful in one configuration was recorded as harmful in general, and that closed off
-      the one change that mattered.
-
-    **Two corrections to older entries in this file, both of which cost real time:**
-    - The recorded *"the builders refuse the `[k,ω]` slice because its diagonal is negative from the live
-      source linearizations"* is **wrong**. The fine slice is clean — **0 of 23040** cells non-positive at
-      β = 0, at the march shift, and at the floor. The refusal names `level 1`, a **coarse** operator, and
-      is manufactured by **field-blind aggregation** merging a k-dof with an ω-dof of another cell. The
-      error text said `level 1` all along; an inference was stapled to a verbatim quote and only the quote
-      was ever checked.
-    - **A field split HIDES the quality of its trailing half.** That half is ~11 % of the nonzeros, so the
-      flow block carries the solve: a trailing inverse that does not converge *at all* in isolation still
-      produced a plausible 1.36× blended march estimate. **Measure a block's preconditioner on the block
-      alone first**, then in situ.
-
-    - **A THIRD correction, from this round: an arm quoted at one smoother-sweep count is not a
-      result about the method.** The standard prolongator was written down as "much worse" from its
-      4-sweep numbers; at 8 it is the best native arm. Two of the three wrong conclusions in this
-      section came from holding one axis fixed while attributing the outcome to another.
-
-    **Also established:** block Jacobi is a perfectly good smoother class here given enough sweeps (PETSc
-    ×4 = 2 cycles against ILU ×1's 2), and on CPU the two cost the *same* per apply (102 vs 101 ms) — so
-    the penalty for a GPU-friendly smoother is quality, buyable with sweeps, not cost. The remaining
-    question is a GPU one and **cannot be measured in the current environment** (CPU-only JAX).
-
-    **⚠️ COMPARE LIKE WITH LIKE, or the arm measures the smoother and gets attributed to the hierarchy
-    (binding for this campaign).** Our multigrid has only Jacobi-class smoothers; PETSc's default here
-    is an incomplete-LU sweep, which is both far stronger and the least parallelizable piece in it. An
-    ours-vs-PETSc table whose PETSc row is ILU therefore cannot say anything about the *coarsening*,
-    which is the thing under development. Every such table must carry a **matched-smoother** row —
-    PETSc `pbjacobi` against our block Jacobi, at the same sweep count and the same aggregation — and
-    that row is the one to quote. The ILU rows stay as the incumbent's absolute bar, not as the
-    comparison.
-
-    **⚠️ HOW THE GAP WAS ACTUALLY FOUND, because the method generalizes and the alternative cost
-    days.** Three rounds of tuning our own knobs (equilibration, prolongator variants, sweep ladders)
-    moved nothing and produced two wrong write-ups. What worked was **an independent agent reading
-    `agg.c` / `misk.c` / `rich.c` against `multigrid.py` and reporting differences with citations on
-    both sides** — it found the undamped Richardson scale, the default aggressive level, and the
-    fix-up pass in one pass, none of which was visible from any measurement we had. When a
-    reimplementation of a *published, available* algorithm underperforms it, read the source before
-    running another sweep; and do not describe a port as faithful until something has checked it
-    line by line, which is exactly the claim that was wrong here.
-
-    **NEXT STEPS, in order:**
-    1. **Decide whether the matched configuration becomes the DEFAULT, and for which consumers.**
-       ⚠️ **This shipped: `NodalNativeInverse` now defaults to the whole matched bundle**
-       (`aggressive_levels=1`, `prolongation_smoothing="none"`, `spectral_damping=False`,
-       `equilibrate=True`) and is the `BFS3D_TURBULENCE_INVERSE=native` arm. The open part is whether it
-       transfers to other consumers; the library `build_amg_vcycle` defaults are untouched. The measurement says the matched
-       bundle is 5 → 2 cycles on the turbulence block; whether that transfers to the scalar transport
-       and velocity blocks is unmeasured, and flipping a default is a march-level decision, not a
-       block-probe one.
-    2. Then, if still short: sparse-LU coarse solve (ours is a dense `pinv`), QR-orthonormalized
-       tentative columns (inert at 2 levels, not deeper), and Chebyshev with the SA-cached bounds.
-    3. **Scalability, independent of all the above and unaddressed:** the convection hierarchy is capped
-       at 2 levels (`_CONVECTION_LEVELS`) with a **dense `pinv`** coarse solve. At a 77× ratio that is
-       ~26k coarse dofs and a 5.4 GB pinv at 1M cells — infeasible. Depth now *builds* (3 levels, no
-       refusal) via the new `max_levels` argument, so the fix is cheap once the method itself works.
-       PETSc reaches only 2 levels here because it coarsens until under `coarse_eq_limit`; our
-       `max_coarse` is NOT the equivalent knob and has no effect at 2 levels.
-
-    **Local PETSc source** for continuing the port (shallow sparse clone, may need re-cloning):
-    `src/ksp/pc/impls/gamg/{agg,gamg}.c` and `src/mat/graphops/coarsen/impls/misk/misk.c` — note
-    `coarsen` moved under `graphops` in current PETSc. GAMG-AGG defaults: `nsmooths 1`,
-    `aggressive_coarsening_levels 1`, `use_aggressive_square_graph TRUE`,
-    `use_minimum_degree_ordering FALSE` (so: random order), `aggressive_mis_k 2`, `graph_symmetrize TRUE`.
-
-  - **⚠️ LOW-β DIRECTIONS ALREADY MEASURED OUT — do not re-litigate without new evidence.** The low-shift
-    wall on the 3D coupled saddle has absorbed a lot of probing. What is settled:
-    - **Turbulence decoupling ("just lag ω") — REFUTED.** A true-residual arm comparison found
-      block-diagonal `(u,v,w,p) ⊕ exact(k,ω)` to be the **worst** arm tested: the flow–turbulence coupling
-      is load-bearing in the preconditioner, not a nuisance to be segregated away.
-    - **A pre-AMG SIMPLE-type transform of the matrix — DEAD.** The published "SIMPLE preconditioning" for
-      monolithic coupled AMG *is* Rhie–Chow interpolation; our residual already assembles that matrix, so
-      there is no transform left to apply. (Established by reading the primary sources in full, not from
-      abstracts.)
-    - **PC-only pressure-Poisson augmentation — NO-GO, triple-confirmed.** The `(p,p)` block is *already*
-      0.71× the SIMPLE-Schur elliptic operator, and the augmentation degraded cycles ~2.7×.
-    - **`coarse_eq_limit` beyond ~2000 — inert, but read this correctly: the ARM was a no-op, which is
-      not the same as a null result.** GAMG stops coarsening as soon as the grid falls below the limit,
-      and this hierarchy is already **2 levels** — its single aggregation step has landed under 2000
-      already, so a *larger* limit cannot make it stop any sooner and produces a bit-identical
-      hierarchy. `K=8000 ≡ K=2000` is therefore arithmetic, not evidence, and it says nothing about
-      whether the coarse space matters. **To probe the coarse space, degrade it instead**
-      (`mg_coarse_pc_type: jacobi` in place of the direct LU) — that reads in both directions, and it
-      is the control that decides what a *smoother* plateau means: if degrading the coarse solve barely
-      moves the cycle count then the coarse correction is not load-bearing, and a smoother plateau
-      cannot be attributed to the coarse space at all. Always print the coarse grid's equation count
-      (`AmgVCycle.coarse_size`) beside the level count, so an arm that changed nothing is
-      distinguishable from a setting that made no difference.
-    - **Additive Vanka + Richardson — invalid by construction** (Richardson on an indefinite saddle).
-      A *Krylov*-Vanka smoother, which is genuinely strong and stable, still stalls the true residual at
-      5–6e-2 at every β and is insensitive to the inner count (4 vs 8) — which points at the **coarse
-      space**, not the smoother, as the remaining wall. Note the smoother-vs-coarse-space split is only
-      established for the *2-level* GAMG hierarchy we run.
-    - **Where the V-cycle actually under-performs:** per-field, pressure is *well* smoothed and **ω** is
-      the unsmoothed field (by ~700–1300×), then `u`. If a per-field lever is wanted in 3D, ω is it —
-      pressure is not.
-      **⚠️ PARTLY REHABILITATED (2026-08-08): a second, independent measurement puts ω in the same
-      place.** The cell-block singular-value decomposition above finds the near-null direction of the
-      worst diagonal blocks to be **pure ω**, in 353 of 23040 cells, under the *current* bundle. That is
-      local block conditioning, not per-field V-cycle smoothing rates — a different quantity by a
-      different route — so "ω is the 3D per-field lever, not pressure" now rests on two legs instead of
-      one unfalsifiable one. The specific *number* below (~700–1300×) is still unverified and still
-      carries no configuration; treat the **field** as corroborated and the **factor** as not.
-      **⚠️ NEITHER THIS NOR THE VANKA BULLET RECORDS WHICH SMOOTHER OR AGGREGATION IT WAS MEASURED
-      WITH, so neither can be relied on now.** The smoother default has since moved ILU(1) → ILU(0) and
-      the aggregation smoothed → plain, and *both* of those changes have inverted a conclusion on this
-      case. Concretely, the Vanka bullet's inference — "a strong smoother still stalls, therefore the
-      **coarse space** is the wall" — is valid but **under-determined**: "the coarse space" could mean
-      the space is intrinsically inadequate (needing inf-sup-aware coarsening, a research problem) or
-      that the coarse *correction* was corrupted by prolongator smoothing (a setting, now changed). A
-      stall at 5–6e-2 fits both, so that experiment never distinguished them. Re-measure before building
-      on either, and **record the smoother and aggregation** in any replacement.
-      **The second reading is now measured, not speculative.** Prolongator smoothing *was* degrading the
-      coarse correction on this operator: turning it off (`pc_gamg_agg_nsmooths = 0`) is worth
-      **22 → 9 cycles** at a hard state and ~16 % of the whole march's Krylov cost. Every arm in that
-      Vanka campaign was judged against a coarse correction built with smoothing **on**, so a *smoother*
-      arm failing to rescue it is what you would see whether or not the smoother was any good — which
-      also explains why the campaign kept concluding "the smoother is not the lever" whichever smoother
-      it tried. **Do not treat "the coarse space is the wall" as settled.**
-      **⚠️ FIRST MEASUREMENT UNDER THE CURRENT BUNDLE (2026-08-08) — and it moved the question.**
-      Configuration, in full, because that is the point: 3-rung `bfs3d` cold march to ‖R‖ = 2.64e-6 (69
-      steps, 60.5 min); state `state-00049` (rung 3, the target Reynolds number); operator β = 0.0293
-      with the V-cycle at the floor 0.05; **plain aggregation, ILU(0), 4 sweeps, `coarse_eq_limit` 2000
-      → 2 levels with 1296 coarse equations**; real right-hand side `−R(state)`, judged on the true
-      residual through GMRES at rtol 1e-6 (restart 15).
-
-      | arm | patch width | worst `\|A_p⁻¹\|` | restart cycles | true relative residual |
+      | trailing inverse | 00057 | 00058 | hard | blended |
       |---|---|---|---|---|
-      | self-check, the march's own solver | — | — | 1 | 2.0e-06 |
-      | shipped (ILU(0) ×4) | — | — | **2** | 1.3e-14 |
-      | ILU(0) ×8 | — | — | 1 | 1.4e-14 |
-      | ILU(0) ×16 | — | — | 1 | 1.4e-14 |
-      | coarse solve degraded to Jacobi | — | — | 2 | 1.3e-14 |
-      | Vanka, 0 neighbours (the cell block) | 6 | 3.011e3 | 58 (cap) | 7.8e-01 |
-      | Vanka, 6 velocity neighbours | 24 | 3.006e3 | 58 (cap) | 3.6e-01 |
-      | Vanka, 6 neighbours, all fields | 42 | 3.242e3 | 58 (cap) | 2.4e-01 |
-      | Vanka, 6 velocity neighbours, damped 0.3 | 24 | 3.006e3 | 58 (cap) | 4.1e-01 |
+      | `ilu0` V-cycle (shipped) | 8.68 | 8.74 | 8.72 | **8.71** |
+      | block Jacobi ×4 | **8.63** | 10.94 | 11.17 | 9.94 (1.14×) |
+      | block Jacobi ×8 | 9.09 | 11.32 | 9.29 | 10.10 (1.16×) |
+      | block Jacobi ×2 | 10.40 | 10.47 | 10.88 | 10.48 (1.20×) |
+      | block Jacobi ×1 | 13.72 | 14.09 | 14.29 | 13.95 (1.60×) |
 
-      Two things follow, and the second is the bigger one.
-      - **Vanka does not stall here — it fails outright, at a state where the operator is easy**, and it
-        fails for a reason that has nothing to do with the coarse space. It cannot be excused by a hard
-        operator: ILU(0) solves the same system to 1.3e-14 in two cycles. Every patch width runs to the
-        restart cap; widening helps monotonically (0.78 → 0.36 → 0.24) but nowhere near enough, and
-        **the worst patch gain is flat at ~3e3 across all three widths** — on an operator equilibrated
-        to unit diagonals, i.e. a local singular value four to five orders down. Flat under widening is
-        the informative part: no amount of surrounding a cell repairs it, so the degeneracy is in a row
-        of the **centre block** that stays degenerate however large the patch. (Adding the neighbours'
-        `k` and `ω` — the "all fields" arm — did not reduce it either; it rose slightly.)
-        That the *narrowest* arm is plain point-block Jacobi also settles the "is the implementation
-        wrong" question the right way: block-Jacobi failing on a saddle point is textbook, and is
-        precisely why patch smoothers exist. **Why ILU(0) succeeds where every patch method fails:** in
-        cell-major ordering it is a *global* forward/backward sweep and never inverts a cell block in
-        isolation, which is exactly what a patch method is obliged to do.
-        **⚠️ It STAGNATES, it does not amplify — and that distinction is not decoration, it points at a
-        different cause.** Every arm stops at a finite true residual and runs to the restart cap; none
-        diverges. Under-relaxing (damping 0.3), which is what tames an over-correcting smoother, made it
-        **worse** (0.36 → 0.41), as it would for a smoother that is too *weak* rather than explosive.
-        So the large patch gain is at present a **correlation with the failure, not a demonstrated
-        cause** — do not write it up as the mechanism. Two explanations survive the data equally well:
-        1. a few near-singular cell blocks poison the recombination; or
-        2. the **additive** form is simply too weak here. Weighted-additive Schwarz is block-Jacobi-like
-           and needs a relaxation that may not exist for this operator, which predicts exactly what is
-           seen: monotone gains with patch width, stagnation at every width, no help from damping. The
-           classical Vanka sweep is *multiplicative* and remains **untested**.
+      **What the coarse grid buys is variance, not average.** The V-cycle is 8.68/8.74/8.72 — flat to
+      under 1 % across all three states. Block Jacobi ×4 swings 8.63 → 10.94 between *adjacent steps of
+      the same rung*, because it sits on the edge of converging inside one restart cycle and small
+      state changes flip it to two. And more sweeps cannot buy the edge back: by 8 sweeps its apply
+      cost (109 ms) exceeds the V-cycle's (102 ms), so it has spent the whole cost advantage
+      recovering what the coarse grid gave for free.
+      **This does NOT refute block Jacobi as a SMOOTHER inside a JAX-native hierarchy**, which is the
+      actual route for taking PETSc off this block and is untested. The implementation
+      (`BlockJacobiInverse` in `validation/bfs3d_openfoam/field_split_probe.py`) is verified exact on a
+      block-diagonal operator in one sweep, transposable in closed form (⟨y,Mx⟩ = ⟨Mᵀy,x⟩ to 1e-15, so
+      adjoint-legal) and a fixed **linear** operator (1e-16, so the non-flexible outer Krylov is
+      legal) — it is the smoother such a hierarchy would need.
+      **Methodological note, because it went wrong twice in one session:** the first easy state alone
+      showed a tie and was reported as a result. The second easy state, same class and adjacent step,
+      was 25 % worse. **Hold a screen's conclusion until every state has landed** — the per-class
+      spread is itself the finding here.
+    - **⚠️ CHECKPOINT NAMES ARE REUSED ACROSS MARCHES, so a probe can silently run at a state that is
+      not the one its table documents.** `StateCheckpointer` keeps only the last few files
+      (`BFS3D_CHECKPOINT_KEEP`, default 3) and numbers them from a counter that restarts each run, so a
+      later march *replaces* `state-000NN` with a different state under the same name. Observed: a name
+      documented as the converged zero-shift adjoint operator came back holding a mid-march iterate at
+      shift 0.98 from an abandoned run — a probe would have paired an operator built at the documented
+      shift with a state that never had it and reported it as a measurement at that operating point.
+      `field_split_probe.load_state` now checks the checkpoint's recorded shift against its `STATES`
+      entry and refuses on a mismatch (loosely, at 2 %: the table stores ~4 figures, and what this must
+      catch differs by orders of magnitude). Raise the keep count for a study that needs a trajectory.
+    - **⚠️ `equilibrate_cell_major` RETURNS UNSORTED COLUMN INDICES, and PETSc's AIJ format requires
+      them ascending.** `AmgVCycle._build` and `refactor` both `sort_indices()` before wrapping the
+      matrix, and `ShiftedCellMajorOperator` genuinely produces sorted output (its
+      `has_sorted_indices = True` is honest, verified), so **every shipped path is correct**. But a
+      probe that calls `equilibrate_cell_major` directly and feeds `createAIJWithArrays` gets **NaN in
+      most entries from `pbjacobi`**, while `jacobi` and `ilu` survive it — a diagonal scan does not
+      care about column order and a block extraction does. That asymmetry reads exactly like "PETSc's
+      point-block Jacobi is broken on this operator", which was written up and had to be retracted.
+      **Check `has_sorted_indices` before concluding anything about a block method.**
+    - **⚠️ TWO MARCH ARMS WERE RUN AT THE WRONG REFRESH TRIGGER AND ARE VOID** — launched without
+      `BFS3D_REFRESH_ON_CYCLES=3` when that variable still defaulted to `0` (the *scheduled* cadence,
+      measured at 3632 s against 1959 s). Both "results" were the refresh trigger, not the smoother.
+      The trap was already written down in bold and that did not prevent it, so the fix was made
+      structural: **the case default is now 3**, and every run writes its full configuration into its
+      own `march.log` header before any result. A default nobody wants is a trap, not a setting.
+    - **Still unsolved, and it bites any future arm comparison:** `refresh_on_cycles` and
+      `cycle_budget` are denominated in **cycles**, so a preconditioner that shifts the cycle
+      distribution changes the *effective* trigger point — penalizing a weaker arm twice, once in
+      cycles and again in the refreshes those cycles provoke. (Same argument as the case's
+      `_RESTART_SCALE`.) Report the refresh **count** beside the wall in every arm comparison; it came
+      out level for `ilu0x1` (21 vs 19 events), which is what licensed attributing its saving to the
+      smoother.
 
-        **WHICH row is degenerate — measured, and it is ω.** A batched singular-value decomposition of
-        all 23040 diagonal 6×6 blocks of the equilibrated cell-major operator at the same state:
-        `σ_min` median 2.87e-2, 1st percentile 8.42e-4, minimum 3.21e-4, with **353 cells below 1e-3**
-        and condition numbers there of 5e6–9e6. In every one of the twenty worst blocks the near-null
-        right singular vector is **pure ω** — `(u,v,w,p,k,ω) = (0,0,0,0,0,1)` to three decimals. So it
-        is the ω *column* that is nearly empty: perturbing ω in such a cell barely changes any of that
-        cell's own six equations, because ω's influence there is carried almost entirely by neighbour
-        transport rather than locally. That is exactly the quantity a cell-centred patch must invert and
-        a global cell-major incomplete-LU sweep never does, which is the cleanest available explanation
-        for why every patch smoother fails on this operator while ILU(0) is untroubled. The affected
-        cells sit in low-`k` regions (median `k` 0.122 against 0.655 over the mesh) and occur in exact
-        spanwise-symmetric pairs, so they are a coherent region of the flow, not scattered noise.
-        **⚠️ BUT THE SHIFT DOES NOT CONTROL IT, so this does NOT explain the low-β wall.** Sweeping the
-        shift over a 500× range at the same state (one materialization; the Jacobian does not depend on
-        β, only the added diagonal does):
+## The JAX-native multigrid — in progress
 
-        | shift | median `σ_min` | min | cells below 1e-3 |
-        |---|---|---|---|
-        | 0.5 | 3.450e-2 | 3.929e-4 | 204 |
-        | 0.05 (the floor) | 2.873e-2 | 3.214e-4 | 353 |
-        | 0.005 | 2.807e-2 | 3.133e-4 | 367 |
-        | 0 (unshifted) | 2.799e-2 | 3.124e-4 | 369 |
+- **⚠️ IN PROGRESS (2026-08-10): the native trailing V-cycle now MATCHES PETSc on quality AND cost;
+  what blocks it is the POSITIVITY LIMITER — read that as the PROXIMATE failure, not the cause.**
+  ⚠️ The same limiter, defaults and case run fine under the PETSc ILU(0) control (58 steps to 9.588e-06,
+  recorded below), so the limiter is necessary and not sufficient: the native arm dies at a state the
+  control never reaches, and what drives that arm's direction into the boundary is **unexplained**. Read this before the
+  2026-08-09 section below, which it supersedes in several places.
 
-        Over the range the march's tail actually occupies (0.05 → 0.005) the near-singular count moves
-        **4 %**. The degeneracy is a fixed property of the discretization and state, not something β
-        governs — so the low-shift conditioning wall is *something else*, and this is not the mechanistic
-        account of it that it first looked like.
-        **It also kills the obvious lever before anyone builds it.** An ω-only, preconditioner-only shift
-        boost cannot work, because the shift is `β·d` and for ω that `d` **is the weak transport coupling
-        that is the problem** — scaling a near-zero diagonal by β leaves it near-zero at any β. Anything
-        along these lines would have to be an *absolute* floor on the preconditioner's ω diagonal rather
-        than a multiple of `d`, which is untested speculation and has no headroom to be demonstrated at a
-        state where ILU(0) already converges in two cycles.
-        **What the ω finding does license** is narrow and solid: it explains why *cell-local*
-        preconditioners fail here, and it gives a two-minute screen for the next one.
+  **Where it stands.** On the `bfs3d` `[k, ω]` block alone the JAX-native nodal hierarchy reaches
+  **2 restart cycles against PETSc GAMG's 2**, on a 438-equation coarse space against 432, and
+  applies in **13.3 ms against 12.6 ms**. Quality and cost parity, on CPU. The full march converges
+  rung 1 (14 steps, 43 cycles, 304 s against the PETSc control's 14 / 45 / 359) and then dies on
+  rung 2.
 
-        **It also independently corroborates the ω bullet below**, which was recorded without its
-        configuration and marked unusable: a completely different measurement — local block
-        conditioning rather than per-field V-cycle smoothing rates — lands on the same field. Two
-        unrelated routes to "ω is the 3D preconditioner lever" is much better evidence than either
-        alone, and it also suggests a concrete arm: **leave ω out of the patch**, since a local solve
-        cannot resolve a direction the local block does not see.
+  **Four things closed the gap, and each was found by reading the reference rather than tuning:**
+  1. **The aggressive first level.** `build_amg_vcycle` never sets `pc_gamg_aggressive_coarsening`,
+     so GAMG applies its default of one aggressive level over the SQUARED graph. Ours had none:
+     21× coarsening against GAMG's 107×, the whole 5× coarse-space difference. (`use_aggressive_
+     square_graph` and `aggressive_mis_k` are ALTERNATIVES; at the default the coarsener is plain
+     MIS at distance 1 on the squared graph.)
+  2. **PETSc's level smoother is UNDAMPED** — `richardson` at its default scale of 1. Ours relaxed
+     by `omega/lam_max`, and `D⁻¹A` has a unit diagonal so `lam_max ≥ 1` always: the spectral factor
+     can only ever under-relax. Worth **10 → 2 cycles**. Reachable as `spectral_damping=False`.
+  3. **A CSR matvec instead of the COO `segment_sum`.** A scatter-add collides on output rows; a CSR
+     row walk does not. Measured on the 4.2M-nnz block: `segment_sum` 13.3 ms, `BCOO @ x` 13.4 ms,
+     scipy CSR on the host 2.6 ms, **`BCSR @ x` 1.4 ms**. The level operator is applied ~10× per
+     V-cycle, so this alone took the apply from **117.8 ms to 13.3 ms (8.8×)**. Landed as
+     `_CsrOperator`, which owns its matvec and replaced the loose `row`/`col`/`val`. **Not** a jit
+     or marshalling problem — both were measured out (1 trace everywhere; a numpy↔jnp round trip is
+     0.02 ms), which also retires the older claim that "marshalling is ~half the gap".
+  4. **The singularity guard was WRONG, and it was aborting the march.** `_cell_block_inverse`
+     tested `|det| < 1e-12 · ‖B‖_F^b`. On the coupled turbulence pair a cell reads
+     `[[8.8e-06, 1.7e-12], [-1.3e+03, 1.5e-01]]` — rows differing by **1.5e8** — so `‖B‖_F²` ≈ 1.6e6
+     is set entirely by the ω row and the bar lands at 1.6e-06, just above the determinant of
+     1.35e-06. The block is **not singular**: on the row-norm (Hadamard) bound `|det| ≤ ∏‖rowᵢ‖` it
+     scores **1.2e-04**, eight orders clear. Now tested that way, which is invariant under rescaling
+     any row or column where the Frobenius form is not. A structurally empty row is named
+     explicitly, since it makes the bound zero and no determinant compares below it.
 
-        **RESOLVED, and (1) IS REFUTED — the near-singular blocks are NOT the mechanism.** The test was
-        pre-registered (`VankaSmoother(max_patch_gain=...)`: converges ⇒ (1), stagnates ⇒ (2)) and the
-        answer is unambiguous, because dropping precisely the near-singular patches made the solve
-        **worse**, not merely no better. The whole family of drop-arms is monotone in *coverage* and in
-        nothing else:
+  **⚠️ THE α COLLAPSE IN THESE MARCHES IS THE POSITIVITY LIMITER, AND THE STEP TABLE SAYS SO — READ
+  `limit` BEFORE ATTRIBUTING ANYTHING TO THE PRECONDITIONER.** `a_min` and the `limit` aside are the
+  **same number** wherever both appear (0.579/5.79e-01, 0.651/6.51e-01, 0.004/3.76e-03, …). Those
+  steps are not failing to descend; they are being allowed almost no movement because `k` would go
+  negative. Two consequences, both of which cost hours today:
+  - **A capped step is not a bad step.** Raw and equilibrated arms differed in α at rung-2 step 16
+    (1.000 against 0.579) and reached an **identical** residual, 1.271e-01. Attributing the α
+    difference to preconditioner quality was wrong.
+  - **⚠️ DO NOT GATE `retry_on_alpha` ON `binding_limit == 1`. It was proposed, built and reverted
+    the same day (2026-08-10).** More damping shrinks the correction, so it *widens*
+    `room = k/|dk|`. The measured evidence is already in this file: the single escalation of an
+       entire `bfs3d` march fired at step 51, whose cap was **4.37e-10** — constraint-bound — and it
+       was worth **8 steps and 199 s** end to end. Gating `retry_on_alpha` on `binding_limit == 1`
+       would have suppressed exactly that one useful escalation.
 
-        | patches dropped | fraction of the mesh | true relative residual |
-        |---|---|---|
-        | 0 | — | **0.360** |
-        | 337 (gain > 1e3 — the σ_min < 1e-3 set) | 1.5 % | 0.737 |
-        | 1925 (gain > 3e2) | 8.4 % | 0.9975 |
-        | 6044 (gain > 1e2) | 26 % | 0.9995 |
+    **What damping genuinely cannot do is un-pin a cell already ON the boundary**, and that is the
+    real rung-2 failure — see the lock-up section immediately below, which is what replaced this.
 
-        Strictly monotone in how much of the mesh still gets relaxed, which is the tell: these arms
-        measure **coverage** and nothing else.
+  **⚠️ (2026-08-10, LATER) THE RUNG-2 DEATH IS A FRACTION-TO-THE-BOUNDARY LOCK-UP, AND β ESCALATION
+  IS A SYMPTOM RATHER THAN THE CAUSE.** Read this before acting on the two bullets above; it does not
+  contradict them but it re-ranks them, and the "~100 dead steps" is now measured rather than
+  estimated. Taken from the archived `march.log` of the native run (banner: `turbulence inverse:
+  native`, `equilibrate=True`, `sweeps=4`, `aggressive_levels=1`, `spectral_damping=False`,
+  `refresh on cycles 3`, `retry on cycles / alpha 10 / 0.01`, `pc beta floor 0.05`, rung 2 of 3):
 
-        Those 337 patches were doing *useful* work; removing them leaves their degrees of freedom
-        unrelaxed and costs more than their ill-conditioning ever did. So the large patch gains are a
-        real property of this operator — and worth knowing, since two independent measurements agree on
-        the set (337 patches by inverse gain, 353 cells by block `σ_min`) — but they are **not** why the
-        smoother fails. **Explanation (2) is what survives: the ADDITIVE recombination is the limit.** It
-        smooths usefully but insufficiently *everywhere* rather than being poisoned anywhere, which is
-        also what the width ladder and the damping arm independently say.
-        **MULTIPLICATIVE IS NOW TESTED TOO, AND IT IS WORSE — so (2) falls as well.** Compared
-        sweep-for-sweep, which is the only fair way to ask whether *sequencing* helps (one multiplicative
-        sweep against four additive ones confounds recombination with sweep count): **additive ×1 →
-        0.497, multiplicative ×1 → 0.855.** Sequencing the patches does not rescue this smoother; it
-        costs. Built as `VankaSmoother(multiplicative=True)`, 16 colours on this mesh, ~33× the additive
-        apply cost.
+  | step | β | cyc | ‖R‖ | a_min | `limit` |
+  |---|---|---|---|---|---|
+  | 24 | 0.1756 | 5 | 1.123e-01 | 0.694 | 6.94e-01 |
+  | 25 | 0.4682 | 2 | 7.567e-02 | 0.004 | 3.76e-03 |
+  | 26 | 3.7458 | 0 | 7.316e-02 | 0.000 | 1.00e-05 |
+  | 27 | 16.0000 | 0 | 7.316e-02 | 0.000 | 1.95e-06 |
+  | 28 | 16.0000 | 0 | 7.316e-02 | 0.000 | 1.95e-08 |
+  | … | 16.0000 | 0 | 7.316e-02 | 0.000 | ÷100 every step |
+  | 122 | 16.0000 | 0 | 7.316e-02 | 0.000 | 1.95e-196 |
 
-        **So neither hypothesis stands, and what is left is the one fact that survived every arm: the
-        cell block is weakly coupled in ω EVERYWHERE, and the 353 near-singular cells are only its tail.**
-        Median `σ_min` is 2.9e-2 on an operator equilibrated to unit diagonals — some 34× down — so
-        *every* cell-local solve mishandles ω, not just the extremes. That single fact accounts for the
-        whole ladder: widening the patch adds neighbour velocities and cannot help ω; dropping the worst
-        patches removes useful work without touching the general weakness; damping and sequencing change
-        only how corrections are combined, and no recombination repairs a local solve that cannot see the
-        field. It equally explains why ILU(0) is untroubled — a global cell-major sweep propagates ω along
-        the transport direction, which is where ω's coupling actually lives.
+  **The 100× per step IS the rule, not a coincidence.** Taking `α = τ·room` with `τ = 0.99` leaves the
+  binding cell at 1% of its `k`, so the next step's room is a hundredth of this one's — forever, for
+  as long as the direction keeps pointing at the boundary there. Ninety-six consecutive steps, residual
+  frozen to every reported digit, **zero** Krylov cycles, β pinned at its 16.0 ceiling. So:
+  - **β is irrelevant from step 27 on, and that is a statement about a PINNED cell, not about damping.**
+    Damping is *argued* to widen a fraction-to-the-boundary cap (a smaller correction means more room),
+    and that argument is **not measured and cannot be from a log** — only the accepted attempt's cap is
+    recorded. ⚠️ An earlier version of this bullet offered "the cap falls only 5.1× across 26→27" as
+    evidence; that is the **same cross-step comparison withdrawn above**, used to argue the opposite
+    conclusion, and it is struck. The decision rests on the A/B alone. What damping cannot do is recover
+    a cell whose `k` is already ~0: the
+    room is then small however small the correction gets. **Do not read this as "stop escalating on a
+    constraint-bound step"** — that was tried, and it deletes the one escalation on this case that is
+    measured to pay (step 51, cap 4.37e-10, 8 steps and 199 s).
+  - **Nothing in the ordinary stopping tests can see this.** The state is finite, the residual is finite,
+    and the tolerance is simply never reached — so the segment spends its whole budget.
+  - **⚠️ Extracting this from a march log needs per-step BLOCKS, not two independent `findall`s.** The
+    `limit` line is written only when `binding_limit < 1`, so there are fewer of them than steps (105
+    against 108 here) and zipping the two lists silently misaligns them. The first pass at this table
+    read step 25's cap as 1.95e-08 instead of 3.76e-03 — a three-step shift, invisible because the
+    shifted table is just as smooth. Split on the summary-block delimiter and parse within each block.
 
-        **Verdict: cell-centred patch relaxation is the wrong shape for this operator, and the reason is
-        structural rather than tunable.** Do not re-open it with another patch variant. `VankaSmoother`
-        stays in the tree as the evidence and as a testbed; `validation/bfs3d_openfoam/cell_block_conditioning.py`
-        screens any future cell-local proposal in ~2 minutes, which is what this campaign cost hours to
-        learn.
+  **SHIPPED in response:**
+  1. `forward_march(stop_on_limit_stall=3)` (**a new default-on guard**) ends the segment after three
+     consecutive steps that are constraint-bound, non-widening, and **changed the residual by less
+     than 1e-3 relative, in either direction** (`_limit_collapsing`).
 
-        **Choose that cap from the gain distribution, not from the maximum**, or the arm measures the
-        wrong thing. Measured over the 23040 width-24 patches at this state: gain above **1e1 in 96.6 %**
-        of them (22251), above **1e2 in 26.2 %** (6044), maximum 3.0e3. A gain of order ten to a hundred
-        is therefore *ordinary* here — it is what `1/σ_min` gives for the median block (`σ_min` ≈ 2.9e-2)
-        — and only the ~1.5 % above 1e3 are the near-singular ω blocks the hypothesis is about. Capping
-        at 1e2 drops a quarter of the mesh and the true residual goes to **0.9995**, i.e. no reduction at
-        all: with that many patches gone, any degree of freedom covered only by them has weight zero and
-        is never relaxed. That number says the smoother was gutted, and nothing whatever about whether
-        near-singular patches caused the original failure — a confounded arm, not a null result.
+     **⚠️ The residual half of that predicate was wrong twice, and the fix for the first attempt caused
+     the second. Do not re-derive it from the failing run alone.**
+     - *"the residual did not fall"* — **never fires.** A locked-up step is not a bit-exact no-op: it
+       still moves the state by `α·δ`, so at a cap of ~1e-6 the residual genuinely falls, by ~1e-6
+       relative, and the counter resets every step. Shipped, and observed doing nothing on a march that
+       had otherwise reproduced the lock-up step for step (it reached step 31 and was still going).
+     - *"the residual did not fall by 0.1%"* — **fires on a converging rung.** `march-20260810-094635`
+       rung 2 steps 19–21 ran caps 0.983 → 0.928 → 0.253 with the residual climbing
+       1.293e-01 → 1.335e-01 → 1.489e-01, then recovered to 9.241e-02 and converged to 4.994e-06. A
+       *rising* residual means the step did something; a pseudo-transient path is a march in pseudo-time,
+       not a descent method. A one-sided rule ends that rung at its worst moment.
+     - **The failure is a step that changes NOTHING, so the test is two-sided.** The two populations sit
+       orders apart: null steps move the residual by ~1e-6 relative, productive ones by percents.
 
-        Related and worth keeping either way: this is the same *family* of failure as the two earlier
-        patch-smoother attempts (unweighted additive Vanka, "ρ = 9e4"; undamped block-ILU/inexact Uzawa,
-        "1-apply reduction 5.10"), and the overlap weighting that was supposed to fix it does not. Note
-        also that the published algebraic Vanka does *not* solve the patch exactly: Metsch's (§4.6) local
-        solve is an inexact-Uzawa form built on a diagonal `Â > A` with a scaling `β` chosen so
-        `Ŝ > C + BÂ⁻¹Bᵀ`, provably convergent precisely because it never inverts a near-singular local
-        saddle. The exact patch solve chosen here as the *stronger* option may be the thing that breaks.
-      - **⚠️ THE STATE-SELECTION PREMISE IS BROKEN FOR A DUAL-TIME MARCH, and this invalidates the
-        comparison above as a test of the *coarse-space* question.** A checkpoint is written at the end
-        of a step, so it holds the state the *next* step starts from — and a step's first solve is its
-        easy one, from a settled state with a freshly rebuilt preconditioner. Across the whole march:
-        **all 70 step-initial solves cost ≤ 2 restart cycles, while solves at inner > 0 reached 15.**
-        No checkpointed state in this march poses a hard linear system, so every arm ties there and the
-        sweep says nothing about smoother-versus-coarse-space. (It still says plenty about Vanka, which
-        *failed* at an easy state — a positive result needs a hard state, a failure does not.) The fix
-        is `DualTimeStep.inner_observer`, which now also carries the **iterate**.
-        **⚠️ But a march step CANNOT be reconstructed from a checkpoint — its configuration is
-        path-dependent.** `validation/bfs3d_openfoam/inner_iterate_probe.py` tried, driving one step from
-        the checkpoint, and both plausible arrangements bracket the march without reaching it. At
-        `state-00049`, β = 0.0293, where the march's first inner solve costs **1 cycle at α = 0.500**:
+     **Validated by replaying the predicate over every march log on disk** — `march_stall_replay.py`,
+     kept in `validation/bfs3d_openfoam/`, because a march that recovers looks exactly like one that does
+     not until it does, so a candidate rule cannot be judged on the run that motivated it. Across 11 logs
+     / 22 rungs it fires on exactly the three locked-up rungs (090711 rung 2 at step 21, cutting a
+     73-step stall; 130032 rung 2 at step 29, cutting 96) and on **nothing** that went on to converge —
+     including the shipped `x_r/h` 8.36 baseline rung. Both cases are pinned as unit tests with the real
+     recorded numbers inlined, since the logs themselves are not tracked.
 
-        | how the engine was built | inner-0 cycles | ‖G‖ |
-        |---|---|---|
-        | at the probed state (self-consistent) | 7 | descends cleanly, α = 1 |
-        | at the Reynolds rung's seed, 11 steps back | **39** | **no descent at all** |
+     The cap *narrowing* is the third condition and is what separates a lock-up from a march working
+     productively along a constraint. `None` disables the guard.
 
-        The march is outside both because `amg_beta_tracking_refresh` rebuilds the preconditioner
-        repeatedly on the way to the step, so by then it is recent, while the shift policy dates from the
-        seed with its transport part rebuilt at each refresh — a product of the refresh *history* that no
-        checkpoint records. **The route to the hard iterates is therefore to capture them DURING a
-        march**, via the observer, not to replay a step afterwards.
-        **✅ DONE, and it settles the question: the march's expensive solves are STALENESS, not hard
-        operators.** `InnerIterateCheckpointer` (`solve/checkpoint.py`, wired in the case behind
-        `BFS3D_INNER_DUMP_ABOVE`) caught the seven solves that reached ≥4 restart cycles on an otherwise
-        byte-identical march (`x_r/h` 8.361, 290 cycles, unchanged). Note the replay problem does **not**
-        apply once you hold the iterate: the state is on disk, so the operator can be rebuilt around it
-        directly. At the march's single hardest solve — attempt 50 inner 3, β = 0.0293, where the march
-        took **15 cycles** and the line search collapsed to α = 0:
+  The march now fails fast and honestly instead of grinding; **what drives `k` to the boundary in those
+  cells is still open**, and the global-scalar-cap design (one cell throttling all 23040) is the thing
+  to reconsider.
 
-        | iterate | β | the march | one step stale | matched at the iterate |
-        |---|---|---|---|---|
-        | attempt 50 inner 3, α → 0 | 0.0293 | **15** | 3 (5.9e-02) | **1 (6.6e-06)** |
-        | attempt 40 inner 3, α = 1 | 0.3333 | **8** | 1 (9.9e-05) | 1 (1.7e-10) |
+  **Capturing the step DIRECTION, which no checkpoint holds.** The cap is a property of `delta`, so
+  "which cells does it bind on" cannot be answered from a state — a step checkpoint holds where a step
+  ended and the inner-iterate dump holds where an inner iteration reached, and neither carries a
+  direction. `compare.py` gained `BFS3D_DUMP_STEP_LIMIT=<cap>` (with `BFS3D_DUMP_STEP_LIMIT_KEEP`),
+  which wraps the engine's `step_limit` in a `_DumpingStepLimit` — a **frozen dataclass**, not a
+  closure, because the limiter rides in a *static* field compared by `__eq__` and a closure there
+  recompiles the whole coupled solve on every rebuild. It returns the real cap unchanged, so the march
+  it instruments is the march that would have run. Dumps **stop** after `KEEP` rather than wrapping, so
+  the first binding event survives the escalation ladder that follows it. `singular_cell_probe.py`
+  reads such a dump and reports the exact per-cell room, the binding set, and the binding cells'
+  conditioning against the **base rate** for the mesh.
 
-        Read the two rows together: at β = 0.33 even a stale preconditioner is already optimal, so
-        **staleness only bites at low β** — and there it bites hard. Note also that both march counts far
-        exceed what *one* step of staleness costs (15 against 3, 8 against 1), so the march's real
-        staleness — up to four steps in `J` — is worth several times a single step.
+  **Equilibration: KEEP it, for conditioning, and stop expecting it to fix anything else.**
+  - It improves per-cell block conditioning **~1600×** (median cond 2.84e3 → 1.74, median ‖A_cell⁻¹‖
+    4.51e4 → 1.32, cells above cond 1e3 93.6% → 19.7%).
+  - It **cannot** change whether a cell block is singular. `det B̂ = det B / |b₁₁b₂₂|`, so
+    `det B̂ = 0 ⟺ det B = 0`, and the coupling ratio `|a_kω a_ωk| / |a_kk a_ωω|` measures **identical**
+    raw and rescaled (7.369e-04 both). Using it as the fix for the guard was wrong from the start;
+    the "4 singular → 2 singular" reading that seemed to support it compared *different states*.
+  - It does **not** help the worst cells: symmetric `D B D` leaves cond at 1.22e12 because it moves
+    the imbalance from the rows into the subdiagonal (`[[1, 1.5e-9], [-1.1e6, 1]]`).
+  - **Independent row/column scaling would**: row-equilibrating the cell block gives cond 1.68e4,
+    two-sided gives **2.41**, and both are *exact* rebracketings of `B⁻¹`. Unnecessary at float64
+    and 2×2 (relative error is already 2.5e-16), but it becomes mandatory in **float32** — which is
+    the GPU case this whole exercise is for.
+  - The deeper issue is upstream: the k row has norm 8.8e-06 and the ω row 1.4e+03, so the
+    **equations** are eight orders apart before any preconditioner sees them. That is what
+    `RowScaledNorm` already recognizes in the convergence measure. Fixing the residual's row scaling
+    would help the smoother, the coarsening and any factorization at once.
 
-        **That operator is easy.** One cycle to 6.6e-06 with a matched preconditioner, and a single step
-        of staleness already triples the cost and gives up four orders of accuracy. So there is **no
-        preconditioner headroom left on this case at any state the march visits** — which is the
-        retrospective explanation for why every arm in the Vanka campaign tied or lost, and why the
-        aggregation sweep only separated at all under the *older*, weaker bundle. The lever here is
-        **refresh cadence** (`refresh_every=8`, `materialize_every=4`, `beta_rel_change=0.25` are lax
-        around the hard steps), consistent with the earlier gate fix, which bought 132 fewer cycles and
-        removed three of five retry cascades by refreshing ~50 % more often — the same mechanism found
-        from the other end.
-        **✅ THE COST TRIGGER IS BUILT — `amg_beta_tracking_refresh(refresh_on_cycles=N)`.** A solve that
-        reaches `N` restart cycles refreshes the preconditioner **at the iterate it was handed** and the
-        inner loop carries on, rather than aborting the step and escalating β (which discards both the
-        work and the pseudo-timestep). Capped at **one refresh per step**, without which a genuinely hard
-        operator would refresh on every inner iteration; a new inner loop re-arms it. Off by default
-        (`None`), so a march that does not opt in is byte-identical. Pinned by
-        `test_inner_refresh_fires_on_an_expensive_solve_at_that_iterate_and_once_per_step`.
+  **`‖B⁻¹‖ = 9.5e8` is not an error and no rescaling removes it.** The block is essentially
+  lower-triangular (`∂R_k/∂ω ≈ 1.7e-12`), so ω is slaved to k there and a k correction legitimately
+  produces one ~1e9 times larger in ω. Whether a *cell-local* smoother should apply that is the real
+  open question, and it is the same "ω is not locally determined" theme as the Vanka campaign.
 
-        **Measured end to end on the 3D coupled backward-facing step, against the scheduled cadence:**
+  **The tree is verified NEUTRAL on the shipped path.** A control march (PETSc ILU(0)×1) on all of
+  this measured **58 steps / 282 cycles / final ‖R‖ 9.588e-06 / mid-span `x_r/h` 8.36** — identical
+  in every reported digit to the recorded baseline. Wall was 1809 s against 1636 s — **10.6%, unexplained**, and
+  larger than this case's stated ~2% run-to-run spread, on one run each. The neutrality conclusion rests
+  on the cycle count and the reported digits, not on the wall.
 
-        | | scheduled | on cost |
-        |---|---|---|
-        | wall | 3632 s | **3140 s (−14 %)** |
-        | refresh | 758 s | **310 s (−59 %)**, 62 refreshes → **19** |
-        | Krylov cycles | 290 | 293 (**unchanged**) |
-        | steps with α = 0 | 5 | **0** |
-        | `x_r/h` | 8.361 | 8.361 (unchanged) |
+  **Harnesses kept (all in `validation/bfs3d_openfoam/`):** `trailing_hierarchy_sweep.py` (the block
+  alone, every arm), `cell_block_scaling.py` (per-cell conditioning, raw vs equilibrated),
+  `singular_cell_probe.py` (which cells, from a checkpoint **or** a dumped block).
+  `compare.py` gained `BFS3D_TURBULENCE_INVERSE`, `BFS3D_NATIVE_EQUILIBRATE`,
+  `BFS3D_DUMP_TRAILING_BLOCK`, a `pbjacobi1` (undamped) smoother arm, march-log **archival**, and a
+  banner that records the inverse and all its settings.
 
-        **Read the cycle row: this is not a better-conditioned solve.** Cycles are flat, so the whole
-        saving is refresh no longer spent maintaining freshness nothing consumed, plus the elimination of
-        five dead steps — those where the line search collapsed, the residual froze or rose, and the shift
-        escalated twenty-fold before recovering. That the *same* change removes both is the point: an
-        inaccurate direction from a stale preconditioner is what α → 0 was, so the retries were downstream
-        of the refresh cadence rather than a separate globalization problem.
+  **⚠️ FOUR METHODOLOGICAL TRAPS, each of which produced a wrong write-up today:**
+  1. **Probe the state the failure happens at.** The refusal fires from a *mid-step* refresh; step
+     checkpoints and the inner-iterate dump both miss it (the inner observer writes only after an
+     iteration succeeds). Three capture runs were wasted before dumping the operator *before* the
+     build, which needs no state and no shift pairing — and even that missed twice, first by
+     wrapping only the factory when the refresh goes through `refactor_block`.
+  2. **Pair the operator with the right β.** Probing state-N with state-N's β when the failing
+     refresh uses state-N+1's is the recorded trap; sweep β instead.
+  3. **Never quote an arm at one smoother-sweep count.** The standard prolongator was recorded as
+     "void" from its 4-sweep numbers; at 8 it is the best native arm.
+  4. **A block-alone probe ties where a march separates.** Raw and equilibrated are both 2 cycles on
+     the block and behave differently in a march.
 
-        **Do not read the arithmetic below as an open proposal — it is the projection this shipped
-        against**, and it came out close on the total (−492 s measured vs −515 s predicted) while missing
-        the mechanism: it predicted the saving would come from refresh alone, and half of it came from the
-        dead steps. The cost arithmetic, measured on the earlier 3501 s
-        march: scheduled refreshes are 50 full + 12 shift = **742 s, 21 % of the wall**. A refresh fired
-        only when a solve reaches ≥3 cycles would fire **16** times (227 s, **−515 s**); at ≥4, **7**
-        times (99 s, **−643 s**) — a 15–18 % whole-march saving, against a ~8 % ceiling for a *perfect*
-        preconditioner. Read as an *addition* to the schedule the trigger looks break-even; as a
-        **replacement** it is the biggest win on the table, and conflating the two is easy to do.
-        **Why no schedule can work here:** 193 of the 232 solves already take 1 cycle, so most scheduled
-        refreshes maintain a freshness nothing consumes — and the right interval is regime-dependent (at
-        β = 0.333 a one-step-stale preconditioner still gives 1 cycle; at β = 0.029 it gives 3), so a
-        fixed cadence necessarily over-refreshes in the easy regime and under-refreshes in the hard one.
-        Targeting cannot be predictive either — the Step-0 diagnostic refuted every static signal — which
-        leaves reacting to the cost itself.
-        **Two things to get right.** The counts above come from a march that *had* the schedule keeping it
-        fresh, so removing it shifts the distribution up and the trigger fires more often; the equilibrium
-        rate is a feedback loop (staleness → cycles → trigger → freshness) and is unknown until it is run.
-        And it needs a **cap of one refresh per step**: with it the worst case is 69 × 14.2 = 980 s against
-        today's 742 s, a bounded +238 s downside for a ~515 s upside; without it, a refresh per inner
-        iteration is unbounded. `abort_above_inner_cycles` already detects the condition inside the inner
-        loop, so the change is to the *reaction* — refresh and continue, keeping β escalation as the
-        fallback, which also makes the refresh a diagnostic: if it does not help, the operator really is
-        hard.
-        **The probe is 79 % of a refresh, and the obvious way to halve it — stencil reach 3 → 2 — is
-        MEASURED AND FAILS.** The saving is real (112 → 60 colours, build 30 s → 12 s) but the V-cycle is
-        not: at `state-00062`, β = 0.0072 against the 0.05 floor, reach-2 gives **41 cycles at a true
-        relative residual of 1.9** — worse than the initial guess — where the shipped reach-3 arm reaches
-        1.5e-10 in six. A failure at a *benign* state is conclusive: it cannot be excused by a hard
-        operator. Note this also disposes of an appealing argument that does **not** work: the older
-        refutation blamed "the pattern-dependent ILU(1) smoother", and at ILU(0) there is no fill to be
-        pattern-dependent about — yet reach-2 still fails at ILU(0), so the conclusion outlived the
-        mechanism that was offered for it. **Retested under plain aggregation too — it still fails, so the lever is
-        CLOSED.** At `state-00049`, β = 0.0293 (where reach-3 does 2 cycles to 1.3e-14): reach-2 plain
-        gives **58 cycles at 1.7e-01**, and doubling the smoother sweeps barely moves it (1.4e-01, still
-        at the restart cap). Note what that rules out: it is not a smoothing deficit. And the hierarchy
-        itself changes — reach-2 yields **3 levels / 480 coarse equations** against reach-3's 2 / 1296 —
-        so the dropped couplings are load-bearing for the *coarse space*, not merely for the smoother's
-        fill. Reach 3 is required, now measured across both aggregations at ILU(0). **There is no cheap
-        way to shrink the probe**, which leaves refreshing *less often* as the only open axis on refresh
-        cost — see the refresh-trigger note below.
-        **A trap: the cheap `refresh_shift_in_place` branch does NOT help within a step.** The shift is
-        formed once per step at the reference state and held fixed across the inner loop, so what drifts
-        inside a step is `J(p)`. The shift-only branch only helps *across* steps, where β moves.
-        **Untested but cheap and worth doing: whether staleness also drives the GLOBALIZATION cost.** A
-        stale preconditioner returns a less accurate Newton direction (5.9e-02 against 6.6e-06 here), and
-        an inaccurate direction can fail to descend — which is what α → 0 means. If so, the retries and
-        line-search collapses are downstream of the same cause, not a separate problem. The captured
-        iterate is all that is needed to check it. Two details worth keeping from the
-        attempt: the builder's `amg_beta` defaults to **2.0**, which at a sub-floor β is a two-orders
-        mismatch that alone turns a 1-cycle solve into 7 (pass `max(β, beta_floor)`); and a
-        preconditioner frozen 11 steps back yields **no descent whatsoever** — α reads 1.000 because
-        that is the line search's non-descent fallback, with ‖G‖ flat — which is independent evidence
-        that the refresh is load-bearing.
+  **✅ ANSWERED: the cap binds on ONE cell, it is a step-corner cell whose `k` is already numerically
+  zero, and it is NOT one of the ill-conditioned ones.** Measured from twelve `BFS3D_DUMP_STEP_LIMIT`
+  dumps taken on the native march at rung 2 (`equilibrate=True`, `sweeps=4`, `aggressive_levels=1`,
+  `spectral_damping=False`, `refresh on cycles 3`, `retry on cycles / alpha 10 / 0.01`, PC β floor
+  0.05), the operator swept over β 0 … 0.4. The probe reproduces the recorded cap exactly
+  (3.761982e-03 both ways), so the capture is reading the quantity the march acted on.
 
-        The probe now **validates itself against `march.log`** (inner-0 cycles and α) and refuses to
-        report if it disagrees, which is how both errors above were caught rather than written up. Hold
-        any future march-reproduction harness to the same gate.
+  | dump | cap | cell | room | `k` | `dk` | next cell | next room |
+  |---|---|---|---|---|---|---|---|
+  | 04 | 3.7620e-03 | **12800** | 3.80e-03 | 3.08e-16 | −8.11e-14 | 22400 | 2.60e-01 |
+  | 05 | 1.4517e-04 | **12800** | 1.47e-04 | 3.08e-18 | −2.10e-14 | 12840 | 2.09e+00 |
+  | 08 | 1.0516e-07 | **12800** | 1.06e-07 | 3.08e-20 | −2.90e-13 | 12840 | 1.12e-01 |
+  | 11 | 1.0516e-09 | **12800** | 1.06e-09 | 3.08e-22 | −2.90e-13 | 12840 | 1.12e-01 |
 
-      **How to re-run it — the smoother and the harness are BUILT (`aquaflux/solve/vanka.py`,
-      `validation/bfs3d_openfoam/preconditioner_sweep.py`); what is missing is the measurement.** The
-      discriminating question is narrow: **with plain aggregation, does a Vanka smoother still stall?**
-      If yes, the coarse space really is the wall and the inf-sup / block-Schur direction is justified.
-      If no, the original verdict was an artifact of the aggregation default and the smoother direction
-      reopens. Record the smoother, aggregation, state and shift pairing alongside whichever answer
-      comes out. The `ARMS` ladder in the harness reads the question two independent ways — a **sweeps**
-      ladder on the *shipped* smoother (if cycles keep falling as sweeps rise the smoother is not
-      saturated and cannot be the binding constraint; if they plateau, what survives is in the coarse
-      space's blind spot) and the **Vanka** arms themselves, the widest deliberately over-strong.
-    - **The Jacobian's fill is irreducible.** The coupled `(u,p)` Jacobian is intrinsically **distance-2**
-      (~38 nnz/row) because Rhie–Chow damping couples pressure to the neighbour-of-neighbour ring; the
-      advection scheme is irrelevant to this. A distance-1 preconditioner pattern is not available for a
-      second-order collocated Rhie–Chow discretization, so "make the PC pattern local" is not a lever.
-  - **Coupled builder `coupled_amg_continuation`** (`.claude/rules/turbulence.md`) shares
-    `MonolithicFactorShiftPolicy` + `_monolithic_factor_step` with the ILUT/LU. Verified: converges to the
-    block PC's fixed point AND passes the **coupled-adjoint FD gate** (the transpose V-cycle serves the
-    gradient), `tests/integration/test_coupled_amg.py`; V-cycle mechanics in `tests/unit/test_amg_preconditioner.py`.
-    Follow-ups: a refreshing/β-tracking variant (the frozen build serves the forward + adjoint; a developing
-    3D march would want the refresh), and the FGMRES forward optimization.
+  - **One cell out of 23040 throttles the whole march,** and it is not a crowd: at dump 04 exactly
+    **one** cell sits within 100× of the tightest room, the runner-up 68× behind; by dump 11 the gap is
+    **eight orders**. Cell 12800 owns ten of the twelve dumps and every one from step 25 on.
+  - **`k` there ratchets by exactly 100× per step** (the per-step evidence is the checkpoint mantissa
+    below; these dumps are non-consecutive) — 3.08e-16 → 3.08e-18 → 3.08e-20 → 3.08e-22 — which
+    is `1 − τ` at `τ = 0.99`, the same factor the cap collapses by. Against a mesh median `k` of
+    **2.97e-02**, so the binding cell's `k` is ~20 orders below typical. It is not small; it is zero.
+  - **`dk` stays ~1e-13 throughout while `k` collapses.** ⚠️ **The inference drawn from this — "the
+    cell's `k` equation has no root at `k ≥ 0`" — is WRONG, and was refuted the same day by direct
+    measurement. It is the opposite.** Holding every other field at the `step-limit-11` iterate and
+    scanning `R_k[12800]` over `k_P` gives a straight line to seven digits,
+    `R_k = A·k − b` with `A = 2.8740e-06`, `b = 5.7236e-20`, so the **root is `k* = +1.99e-14`,
+    strictly positive** — and the iterate sits **eight decades BELOW its own root**. Newton should be
+    pushing `k` *up*.
+
+    Production, destruction and the `Dirichlet(0)` wall term all vanish linearly at `k = 0`, so `k = 0`
+    solves the row exactly when the neighbours are 0. (⚠️ An earlier version called the corner `k` system
+    "**homogeneous and an M-matrix**" — the M-matrix half is **false**: `A_kk` carries **14 non-positive
+    diagonals**, min −9.03e-07.)
+
+    **Why the returned correction is wrong there, corrected — it is Krylov truncation, NOT roundoff.**
+    An adversarial re-derivation (independent colour-recovery of `A_kk`, verified row-wise against a
+    `jax.vjp` to 5e-16) settles the mechanism:
+    - `R_k[12800] = −5.72e-20` is **deterministic and 13 orders ABOVE its own row's floating-point
+      floor** (~1.3e-33). "Roundoff floor" was the wrong description.
+    - What is true is stronger: `|R_row| / ‖R_k‖₂ = 2.94e-16 ≈ machine epsilon`, and
+      `|R_row| / ‖R‖₂ = 2.15e-22`. **Any Krylov solve stopping on a relative-residual test would need
+      ~1e-22 relative accuracy in float64 to resolve this row — unreachable in principle, not merely
+      under-solved.** Measured: `‖A_kk·dk − rhs_k‖/‖rhs_k‖ = 1.0055`, i.e. the returned correction does
+      not reduce the k-block linear residual at all, and dumps 08/09/10 sit at a **bit-identical state**
+      yet return `dk[12800]` of −2.901e-13, −8.825e-14, −1.567e-14, an **18× spread**.
+    - The returned `dk` also provably violates its own row for *every* admissible shift: the row demands
+      `βD·(k_ref + 2.901e-13) = −3.958e-19`, and the left side is ≥ 0 while the right is < 0.
+    - ⚠️ **"14× larger than the exact local step" was wrong** — that froze the neighbours. Given the
+      dumped neighbours the row-consistent `dk` is −1.52e-13, still negative; it is the **exact k-BLOCK
+      solve** that comes out positive, at `+3.90e-10` (β = 0) through `+1.90e-15` (β = 10), i.e.
+      **positive at every β from 0 to 10** while the dumped value is negative and 3–5 orders off.
+
+    `positive_block_limit` then computes a purely **relative** room `0.99·k/|dk|` and lets that cell veto
+    the global step.
+    - **⚠️ THE MOST USEFUL LEAD OF THE LOT: at β ≥ 0.5 an exact k-block solve produces NO binding cell at
+      all (cap = 1.0).** Only at β ≤ 0.05 does an exact solve give a tight cap, and then on a *different*
+      cell (7.6e-14 at cell 2679). So the cap is **not intrinsic to the `k` equations at a healthy
+      shift** — it is a low-β-plus-inexact-solve artifact, which points back at the low-β conditioning
+      wall rather than at the closure.
+
+    **The ratchet is proved by the mantissa.** `k[12800]` reads `3.0816e-22` at `step-limit-11` and
+    `3.0816e-208 / e-210 / e-212` at checkpoints 120 / 121 / 122 — **the same five digits, 190 decades
+    apart**, i.e. ninety-five successive ×0.01 cuts, while `u/v/w/p` report a relative change of
+    exactly 0.
+  - **It is not one cell, either: 1876 of 23040 cells sit below `k = 1e-6`** at this state, against an
+    OpenFOAM global minimum of 1.672e-6. ⚠️ **BOTH HALVES OF THAT COMPARISON WERE WRONG, AND THE
+    CONVERGED ROOT HAS NO SUCH DEFICIT — see the resolution below.**
+  - **Geometry: it is a step-corner cell, and its mirror is the runner-up.** 12800 sits at
+    `(0.0007, −0.0099, 0.0009)` and 22400 at `(0.0007, −0.0099, 0.0391)` — bottom wall (`y ≈ −h`),
+    immediately behind the step (`x ≈ 0`), against each side wall (span `4h = 0.04`). The stagnant
+    bottom/side-wall corner, i.e. the same corner-separation region that makes the full-span
+    reattachment (16.14 here) disagree with the mid-span one (5.34). ω there is 4.01e+05, a wall value.
+  - **The tightness ranking tracks the wall-face count — on n = 4 cells, one dump, one state.** Counted
+    off `face_patches`, the four tightest cells carry **3, 3, 2, 1** no-slip faces out of six:
+
+    | cell | room (dump 04) | boundary faces |
+    |---|---|---|
+    | 12800 | 3.80e-03 | `lowerWall`, `lowerWall`, `sideWalls` |
+    | 22400 | 2.60e-01 | `lowerWall`, `lowerWall`, `sideWalls` |
+    | 12840 | 1.38e+00 | `lowerWall`, `sideWalls` |
+    | 13129 | 2.17e+00 | `sideWalls` |
+
+    The two cells that own the cap are **trihedral wall corners** — half of every face is a no-slip
+    wall, the two `lowerWall` faces being the floor and the vertical step face. **Hypothesis, not yet
+    measured:** the near-wall `k` closure is per-wall-cell, and its production is area-averaged over a
+    cell's wall faces while the destruction `β*kω_wall` is not obviously averaged the same way — so a
+    three-wall-face cell could take up to 3× the destruction against one cell's worth of production.
+    **❌ REFUTED the same day by reading both sources** — our reduction is already OpenFOAM's:
+    `wall_cells` is a `jnp.unique`, so a cell appears once however many wall faces it has, and
+    `wall_shear_rate` area-averages `Σ|S_f|r_f / Σ|S_f|` over them, which is exactly
+    `patchFieldsToWallCellField` in OpenFOAM 13's `wallCellWallFunctionFvPatchScalarField`. Nothing is
+    summed per face. The ranking most likely reads **stagnation** — three wall faces means the deepest
+    dead zone and so the least production — not double counting. See `.claude/rules/turbulence.md` for
+    the two differences that are real, of which one bears directly on the lever below.
+  - **NOT the ill-conditioned cells — the standing hypothesis is refuted at this state.** **Zero**
+    singular blocks at every β from 0 to 0.4. The binding cells run cond 3.6e5 … 2.9e7, ranks
+    1088–2165 of 23040, and **none** of them is among the twelve worst-conditioned. `cond > 1e6`
+    catches 50% of them against an 8.7% base rate — mildly enriched — but `cond > 1e9` catches none,
+    and the separately characterised cond ~1e12 / ‖B⁻¹‖ ~9.5e8 cells are absent entirely (the worst
+    here is 2.9e7 / 6.6e6). **Caveat on comparing those two numbers:** the 1e12 figure was measured on
+    `state-00057` under *symmetric equilibration*, and this is a different state, raw — so this
+    refutes the coincidence at this state rather than retiring the 1e12 finding.
+
+  **✅ RESOLVED (2026-08-10, by re-running the shipped march end to end): the `k` trough is a REYNOLDS-
+  CONTINUATION TRANSIENT, and the converged root does not have it.** At the converged target-Re root
+  (step 58, `R` 9.588e-06, `x_r/h` 8.36) there are **ZERO** cells below `k = 1e-6`: `k_min` 1.2997e-05,
+  median 0.7017 against OpenFOAM's 0.7468, a ratio of **0.98**. Cells below 1e-6 go 190 (step 37) → 130
+  → **0** (step 46) → 0 at convergence.
+  - **Both halves of the "1876 vs 1.672e-6" comparison were wrong.** It is **cross-Reynolds** —
+    `state-00122` is rung 2 (ν = 1e-4), the OpenFOAM field is target Re — and 1.672e-6 is the **steady**
+    OpenFOAM run's minimum, the run this case's own docstring rules out as a reference. The valid
+    transient reference has `k_min` **6.2247e-03**.
+  - **The mechanism is the continuation's own doing.** `y* = β*^0.25 √k d/ν` scales as **1/ν**, so at the
+    Re/100 anchor `wall_function_weight = tanh((y*/y*_lam)⁴)` is ~1e-7 — **the log-layer wall production
+    is switched off even at fully turbulent `k`** — while `ω_wall = 6ν/(β₁d²)` is **100×** larger, so
+    `β*kω` destruction is 100× the target's. Homogeneous, linear, destruction-dominated ⇒ `k` decays.
+    Raising Re reverses both: the weight median goes 5.6e-20 (rung-1 root) → 1.9e-10 → **1.000** (target).
+  - The rung-1 root is **correctly** laminar (`ν_t/ν` median 1.7e-5 at `Re_h = 100`), and **1732 of the
+    1876 cells (92%) are inherited from it**.
+  - **Population is pre-stall, depth is stall-caused**: `#k<1e-6` is 1876 by dump 04 and frozen there for
+    all 97 remaining steps, while `k[12800]` falls 3.08e-16 → 3.08e-212 over the same span.
+  - **The stalled arm is `BFS3D_TURBULENCE_INVERSE=native`; the default `petsc` arm walks the same trough
+    and recovers** — agreeing with the exact-solve finding that at β ≥ 0.5 there is no binding cell.
+  - ❌ **REFUTED — the initialization.** `hybrid_initialize` gives a **uniform** `k = 0.2489585`, zero
+    cells below 1e-6.
+  - ❌ **REFUTED — the "ω is exactly 10×, still at its 60ν seed" lead.** `ω[12800] = 400910.4` **is**
+    `6ν/(β₁d²)` at **rung 2's own** ν = 1e-4 to 16 digits (all 4490 wall cells within 4.8e-5). The three
+    rungs give 4.0091e6 / 4.0091e5 / 4.0091e4 — the "10×" compared a rung-2 state against the
+    **target-Re** formula. Those rows are converged; the `60ν` seed was replaced by `omega_wall` in
+    `c324021` (2026-07-23), well before these checkpoints.
+  - **The sustaining/ambient source has no motivating evidence left**: it targets a defect absent from
+    the converged root. The defensible levers are the absolute floor in the limiter, and not anchoring
+    the ladder below the Reynolds number at which the wall function turns itself on.
+  - **Genuinely open, and now the real physics question — but BOTH numbers needed a definition before
+    they meant anything (harness: `validation/bfs3d_openfoam/wall_layer_comparison.py`).**
+    - "**First wall layer**" spans a 4× range of defensible meanings, and the choice matters more than
+      the discrepancy: **all wall-adjacent (4490 cells) is 1.054**, the **finest layer (1600) is 0.459**,
+      the **floor behind the step (640) is 0.342**. The recorded 0.164/0.46× is the *finest layer*. Side
+      walls, 64% of wall-adjacent cells, agree at **1.113** and do not participate.
+    - `x_r/h` **7.24 and 8.36 are both grid stations, two apart.** The floor's stations near
+      reattachment are `… 6.728, 7.243, 7.787, 8.361, 8.966 …`, local spacing **0.375–0.749 h**, so the
+      metric's resolution is about half a step height and "15%" is a two-cell offset. A sub-cell
+      interpolated crossing puts the reference at **~7.6**, i.e. the quoted 7.24 carries a systematic
+      −0.36 h truncation, and the interior spanwise columns scatter by **sd 0.13 h**. A defensible
+      reference is **x_r/h ≈ 7.6 ± 0.3**; the gap survives it (~1.0 h, ~13%) but is smaller than quoted.
+    - **The wall closure is NOT the cause.** The `Dirichlet(0)` vs `kqRWallFunction` (zero-gradient)
+      difference is real but worth only ~7.4% of local destruction (k ×0.93–0.98); `nut_wall` is
+      *algebraically identical* to `nutkWallFunction`; every verified wall-closure difference multiplies
+      to **~0.87–0.93, not 0.46**. The wall-cell `k` budget is **transport-dominated**
+      (|transport|/production ≈ 1.16), so that `k` is inherited, not locally made.
+    - **Where it is inherited from, and this is the causally clean part:** the deficit is already there
+      **upstream of the step** (x/h −2.85 … −0.15, no recirculation), first-cell `k` **0.54–0.68×** with
+      the channel core at parity (0.987), and the lip-shed rows carry the same ratios. In wall units
+      `k⁺` ≈ 1.3–2.4 against OpenFOAM's 2.4–4.0, DNS channel ≈3.9–4.4, and the SST log-layer equilibrium
+      `1/√Cμ` = 3.33 — **low against both references**, which is what makes it a defect rather than a
+      difference. It seeds a shear layer carrying 20–25% less `ν_t` through x/h 0.3–2.
+    - ❌ **Exonerated with evidence:** the momentum scheme (aquaflux is *more* dissipative yet its shear
+      layer is *thinner* — wrong sign); the SST shear limiter (identical branch in both); the mesh
+      (cell-for-cell identical, max centroid distance 4.7e-9 m); and first-order upwind on k/ω (false
+      diffusion ~5% of `ν_t S²` at x/h 0.4, <1% beyond — an order of magnitude too small).
+    - ⚠️ **THE EXPANSION RATIO CHANGES WHICH NUMBER LOOKS WRONG, AND NEITHER OF US HAD ACCOUNTED FOR
+      IT.** The famous benchmarks are ER 1.125–1.2 (Driver & Seegmiller 1985: 6.26 ± 0.10; Le, Moin &
+      Kim 1997 DNS: 6.28) and **must not be used as the target here — this case is ER = 2**, and the
+      published trend is that larger ER *lengthens* the normalized bubble (Armaly et al. 1983, quoting
+      Durst & Tropea 1981). **At ER = 2 the 2D references cluster at 8.0–8.8**: Pont-Vílchez, Trias,
+      Gorobets & Oliva (2019, *JFM* 863) DNS gives **X_r = 8.8h** at Re_τ = 395 (verified independently
+      of the agent that reported it — a later LES cites it as its reference, calling its own 8.15h a
+      7.3% under-estimate); Durst & Tropea (1981) 8.5 at Re_H 1.5e4; Rothe & Johnston (1975) 7.8.
+      **So aquaflux's 8.36 sits INSIDE the ER = 2 band and OpenFOAM's 7.24 sits below it** — the
+      opposite of the "aquaflux over-predicts by 15%" framing this section started from.
+    - ⚠️ **"SST is a known under-predictor" is also wrong.** On Driver & Seegmiller, NASA's turbulence-
+      model resource puts SST at x/H ≈ **6.50** against 6.26 ± 0.10 — a 4% **over**-prediction,
+      reproduced across four codes; Menter (1994) reports 6.5 himself. The classic under-prediction is
+      **k-ε** (Menter's Jones–Launder 5.5), and even the widely-repeated "20–25%" is disowned by
+      Thangam & Speziale (ICASE 91-23) as a resolution artifact.
+    - **What is genuinely unresolved is the FINITE SPAN.** span/h = 4 is 2.5× below the span/h > 10
+      that de Brederode & Bradshaw (1972) require for two-dimensionality at the centreline (quoted
+      verbatim in Jovic & Driver 1994, NASA TM 108807). Lower aspect ratio **shortens** reattachment —
+      direction unanimous across every source found — which would pull both codes below the 2D band.
+      **No open-access `x_r`-vs-aspect-ratio numbers exist**, so the magnitude is unknown and neither
+      7.24 nor 8.36 can be called correct.
+    - ⚠️ **One anomaly worth chasing: our spanwise profile has the WRONG SIGN against the literature.**
+      Both codes here reattach *later* at the outer slabs (10.28) than in the interior (7.24), but the
+      two published spanwise measurements go the other way — Sugiyama et al. (2013) find near-side-wall
+      reattachment ~60% of the centreline value at AR 16, and Armaly, Li & Nie (2003) find a *minimum*
+      near the side wall. Both are laminar/transitional, so the transfer is uncertain, but this is the
+      one place our result contradicts published structure rather than merely differing in magnitude.
+    - **Untested and the largest remaining unknown: grid convergence.** One mesh exists.
+
+  **⚠️ THE LEVER, as corrected earlier — with the scan's reach stated.** The measurement below is a **1-D scan of
+  one row at one iterate with every other field frozen**. It establishes a strictly positive root of cell
+  12800's frozen-field `k` row, which removes the motivation for a projection *at this state*. It does
+  **not** establish the sign of the coupled Newton direction, nor anything about the other 1875 collapsed
+  cells, nor that no state has a negative root. Two defects remain, and they are different from
+  each other:
+  1. **`positive_block_limit` is a purely RELATIVE rule** — `room = tau·k/|dk|` — applied to a field
+     whose physical floor is 0. A relative rule has no lower bound, so a roundoff-level `dk` in an
+     already-collapsed cell produces an arbitrarily small cap. An **absolute floor**
+     (`room = tau·(k + k_abs)/|dk|`) fixes it, is pure globalization, sits off the IFT path entirely,
+     and — *provided the cap is inactive at the converged state* — changes nothing at the solution.
+     Scale `k_abs` off the block (`eps·max(k)`), not a constant, so it carries `k`'s units.
+     **⚠️ IT IS NOT SAFE ALONE — clamping `k` in the closure is a PREREQUISITE, in the same change.**
+     Relaxing the cap lets `k` go slightly negative, and two sites then misbehave badly (verified):
+     `SSTModel.f1`/`.f2` (`sst.py:136,178`) take a raw `jnp.sqrt(k)` and NaN the whole residual, where
+     every closure in `boundary.py` uses `safe_sqrt(jnp.maximum(k, 0.0))`; and `OmegaProduction`
+     (`sources.py:288-294`) divides by `jnp.maximum(nu_t, 1e-30)`, so a negative `ν_t` selects the floor
+     and the cap becomes ~**−1e23** at the measured corner values. `KProduction`'s cap
+     (`sources.py:209`) also flips sign, turning production into a sink. **Unbuilt and unmeasured.**
+  2. **A large part of the near-wall field has laminarized** (1876 cells below 1e-6). That is the real
+     physics defect and the absolute floor does not address it. The candidate is a **sustaining /
+     ambient source**. ⚠️ **Both the form and the citation first recorded here were WRONG; corrected:**
+     - The literature terms are **constant**, and there are **two** of them, one per equation:
+       `k: + β* ω_amb k_amb` and `ω: + β ω_amb²`, where `ω_amb` is an **ambient constant, not the local
+       ω**. Source: **Rumsey & Spalart, AIAA J. 47(4), 2009, 982–993** (NASA calls it `SST-sust`).
+       **Spalart & Rumsey 2007** — cited here originally — proposes *floor values*, not source terms.
+     - The form written here first, `+β* k_amb ω` with the **local** ω, is a different term: it makes
+       the destruction `−β* ω (k − k_amb)`, pinning `k ≥ k_amb` *uniformly including deep in the
+       boundary layer* where ω is O(1e5). At the `bfs3d` corner that is ~80× the literature term and
+       would override the `Dirichlet(0)` wall condition the case sets — which is exactly what Rumsey &
+       Spalart warn against. It also is **not** diagonal-free: `∂R_k/∂ω = −β* k_amb` is an off-diagonal
+       the frozen AMG operator would not see. The literature (constant) form does have both properties.
+     - **Motivating evidence is weak.** The `k` deficit is measured at an *unconverged* state whose ω
+       rows have not moved off initialization, and OpenFOAM reaches min `k` 1.672e-6 on this mesh with
+       **no** sustaining term at all. It would also make two existing assertions tautological
+       (`test_coupled_mass_flow.py:138`, `test_coupled_periodic_channel.py:124`, both of which assert
+       `min(k) > 1e-6` and document themselves as *non*-tautological).
+     - **Order of work: do the step-limiter fix first and re-measure.** If the march then converges with
+       `min(k)` near OpenFOAM's, this has no motivating evidence left. Unbuilt and unmeasured.
+
+  Two further leads found while measuring this, both unverified: `ω[12800] = 4.0091e5` is **exactly
+  10×** the `omega_wall` value `6ν/(β₁d²)` its own residual imposes, which is the `60ν` initialization
+  value never relaxed (so this state's `ω` rows are unconverged too); and `SSTModel.f1`/`.f2`
+  (`sst.py:136,178`) use **plain unclamped `jnp.sqrt(k)`** where every closure in `boundary.py` uses
+  `safe_sqrt(jnp.maximum(k, 0.0))` — clamping those two would make a transiently negative `k`
+  survivable, which is what an absolute-floor cap needs.
+
+  **The rest of this paragraph is the superseded framing, kept because the OpenFOAM comparison in it
+  still stands on its own:** `kOmegaSSTBase.C` ends every `k` solve with
+  `bound(k_, kMin_)`, and `bound` replaces a negative cell by the **average of its neighbours** before
+  flooring at `kMin` (`isf = max(max(isf, fvc::average(max(vsf,min))*pos0(-isf)), min)`). It also
+  *replaces* the `ω` row in wall cells (`matrix.setValues`) and lags `G`, so its wall-cell `k` equation
+  is linear with a non-negative source. We do the opposite on both counts: both terms stay live
+  functions of `k` in one Newton residual (deliberately — a frozen `ω` degenerates the row), and we
+  constrain the **step** rather than projecting the state. Constraining the step is what locks up; a
+  projection cannot. That reframes the choice, and it is the one to make with the user:
+  a positivity **projection** after the step (OpenFOAM's answer, and it changes the forward path but
+  not the root provided the floor is inactive there) against keeping the step constraint and finding
+  why that cell's row is hard to satisfy (its root is **positive**, at `+1.99e-14`). Neither is built.
+
+  **⚠️ (2026-08-10, LATER STILL) THE `k` WALL BC A/B, RUN AS A CONTROLLED PAIR — and the crash is NOT
+  fixed by any of it.** Two full 3-rung marches from the initial state, `BFS3D_TURBULENCE_INVERSE=native`,
+  everything identical but `BFS3D_K_WALL`, both carrying the four negative-`k` clamps and
+  `stop_on_limit_stall=3`:
+
+  | | `dirichlet` (control) | `zerogradient` |
+  |---|---|---|
+  | rung 1 | 14 steps, 43 cycles, ‖R‖ 5.882e-06 | 14 steps, 45 cycles, ‖R‖ 7.821e-06 |
+  | rung-2 step it locks at | **25** | **35** |
+  | rung-2 ‖R‖ at lock | **7.316e-02** | **1.257e-02** |
+  | rung-2 steps before the guard ends it | 15 | 24 |
+  | outcome | `RuntimeError` from `solve_reynolds_continuation` | same |
+
+  - **❌ Zero-gradient does NOT cure the lock-up.** The same fraction-to-the-boundary ratchet appears,
+    same β ceiling of 16.0, same ~100×-per-step cap collapse — just later. Consistent with the
+    term-by-term account that put the whole wall closure at ~0.87–0.93.
+  - **✅ But it is worth keeping on the evidence: a 5.8× lower residual and 10 more steps of rung 2**,
+    and the attribution is clean because the clamps are verified neutral (below) and both arms had the
+    guard. It also produced five consecutive *uncapped* full steps in rung 2, which the control never
+    does.
+  - **✅ THE CLAMPS ARE EXACTLY NEUTRAL, end to end.** The control's rung 1 is **14 steps / 43 cycles /
+    5.882e-06 / ‖R₀‖ 3.3078e-01 — identical in every digit to the pre-clamp recorded baseline** — and its
+    rung-2 steps 25–29 reproduce that baseline's trajectory exactly (step 25 β 0.4682, ‖R‖ 7.567e-02,
+    `a_min` 0.004, cap 3.76e-03; then 1.00e-05 → 1.95e-06 → 1.95e-08 → 1.95e-10). The per-guard
+    `array_equal` unit tests said this; a real coupled march now confirms it.
+  - **✅ `stop_on_limit_stall` works, on two independent arms.** The control's rung 2 ends at **15 steps
+    instead of the recorded 108**; the zero-gradient arm's at 24. ~90 dead steps saved each time, and the
+    run now fails with a `RuntimeError` naming the rung instead of grinding out `MAX_STEPS`.
+  - **⚠️ THE DEAD GRIND MOVED RATHER THAN VANISHED — a real coverage gap.** Once the guard ends the
+    segment, `solve_coupled` falls through to the finishing solve (`ImplicitNewtonSolver`), which has **no
+    equivalent guard**, and that grinds at α 0.000 / 0 cycles with the residual frozen until `max_steps`.
+    `stop_on_limit_stall` covers `forward_march` only. Fixing that is the next march-level item.
+  - The step-limit dumps now carry **β and the anchor** (`cap 2.2923e-06 beta 1.754 anchor yes`), so the
+    falsifier named against the earlier diagnosis is closed: these dumps can be paired with the linear
+    system that produced them.
+
+  **✅ GATES GREEN on all of the above** (CSR level operator, native trailing inverse, and both march
+  changes), with the tiers named because a default-on march guard reaches further than the fast gate:
+  - fast gate **967 passed / 1 skipped** (899 unit `-n auto`, 68 integration `-n 1`);
+  - `test_coupled_rans` + `test_coupled_amg` + `test_coupled_field_split` + `test_reynolds_continuation`
+    — 33 tests, 18 of them `slow` — **33 passed**;
+  - `test_coupled_lu` + `test_coupled_ilut` — **15 passed**. These two matter and were nearly missed:
+    they drive `forward_march` with `step_control` + `precondition_step`, so they pick up
+    `stop_on_limit_stall` exactly as the four above do, and they are in neither the fast gate nor the
+    list a first pass would think to run;
+  - **`-m validation` — 18 passed.**
+
+  **The trap, recorded because it nearly landed:** a default-on guard on a *shared* seam is not covered
+  by "the tests for the subsystem I changed". `forward_march` has one production caller, but everything
+  that reaches `solve_coupled` with an observer picks the new default up. Enumerate by **who calls the
+  seam**, not by which file the change is in.
+
+
+## Faithful smoothed aggregation — matching PETSc GAMG
+
+- **⚠️ (2026-08-09): making the JAX-native multigrid a FAITHFUL smoothed aggregation, so a
+  comparison against PETSc GAMG means something. Uncommitted work sits on `claude/block-aware-aggregation`.**
+  Read this before touching `solve/multigrid.py`'s aggregation path.
+
+  **⚠️ THE EQUILIBRATION HYPOTHESIS WAS WRONG, AND MEASURING IT IS WHAT SETTLED THE COMPARISON
+  (2026-08-09).** The suspicion recorded here was that ours and PETSc's were not built on the same
+  matrix — `AmgVCycle` calls `equilibrate_cell_major` before handing the operator to PETSc, so GAMG
+  coarsens a **unit-diagonal** matrix, while `build_convection_hierarchy` coarsened the raw block,
+  whose diagonal on `bfs3d`'s `[k, ω]` slice spans **7.96e5×** (1.26e-06 … 1.0). That description of
+  the code is accurate, and the σ_max figures reproduce exactly (**4.365** raw against **2.832e3**
+  equilibrated, so the standard prolongator step `1.4/σ_max` is ~0.32 for us and ~5e-4 for PETSc).
+  The **inference** from it — that no ours-vs-PETSc number meant anything until it was fixed — does
+  not survive. `equilibrate=True` is now built and measured, and it makes our hierarchy **worse**:
+  8 → 11 cycles on the RCM arm, 5 → 10 on the plain-aggregation MIS arm.
+
+  **Why it barely matters, and this is the part worth carrying: a symmetric equilibration is a
+  SIMILARITY TRANSFORM, so almost the whole setup is invariant under it.** `D̂⁻¹Â = S⁻¹(D⁻¹A)S`, so
+  both spectral estimates are unchanged; the damped-Jacobi smoother `x += (ω/λ)D⁻¹r` is unchanged
+  with them; and at `strength_threshold = 0` the aggregation reads only the sparsity pattern.
+  Measured on a badly scaled chain: the **fine** level's `lam_max` is 1.966 raw against 1.976
+  equilibrated (equal to power-iteration accuracy) while the **coarse** level's is 1.81 against
+  15.3. The one non-equivariant object is the **tentative prolongation** — a fixed 0/1 aggregate
+  indicator, which does not transform with the operator — so the coarse operator it builds is the
+  only thing rescaling actually changes. Everything the original note listed as reading `D` does
+  read `D`, but reads it in a way that cancels.
+
+  **Reference numbers, re-measured on the current code** — `bfs3d` `state-00057`, PC β 0.05, the
+  `[k, ω]` block **ALONE** (46080 dofs, 4.20M nnz, 91/row), GMRES restart 15 to rtol 1e-8 on the
+  TRUE residual, random right-hand side; harness
+  `validation/bfs3d_openfoam/trailing_hierarchy_sweep.py`:
+
+  | preconditioner | coarse eq | cycles |
+  |---|---|---|
+  | PETSc GAMG, plain aggregation, ILU(0) ×4 | 432 | **1** |
+  | PETSc GAMG, plain aggregation, ILU(0) ×1 | 432 | **2** |
+  | **PETSc GAMG, plain aggregation, point-block Jacobi ×4** | **432** | **2** |
+  | ours, MIS, standard prolongator, ×8, EQUILIBRATED | 2150 | 4 |
+  | ours, MIS, plain, ×4, raw | 2150 | 5 |
+  | ours, RCM, symmetric-part prolongator, ×4, raw | 598 | 8 |
+  | ours, MIS, plain, ×4, EQUILIBRATED | 2150 | 10 |
+  | ours, RCM, symmetric-part prolongator, ×4, EQUILIBRATED | 598 | 11 |
+  | ours, MIS, standard prolongator, ×4, raw / EQUILIBRATED | 2150 | 44 / 44 — both fail (true rel 1.0) |
+
+  **Read the THIRD row, not the first — the like-for-like arm.** Comparing our Jacobi-class smoother
+  against PETSc's incomplete-LU measures the smoother, not the hierarchy, and an ILU sweep is a much
+  stronger and much less parallel unit of work.
+
+  **✅ THE GAP IS CLOSED: matched to PETSc's algorithm, our V-cycle equals it — 2 cycles against 2,
+  on a 436-equation coarse space against 432.** Two differences accounted for the whole of it, and
+  neither was scaling. Both were found by reading `agg.c`/`misk.c`/`rich.c` against our code rather
+  than by tuning:
+
+  | arm, `[k, ω]` block alone, matched smoother class | coarse eq | cycles |
+  |---|---|---|
+  | PETSc GAMG, plain aggregation, point-block Jacobi ×4 | 432 | **2** |
+  | ours, MIS ×4, damped, no aggressive level | 2150 | 5 |
+  | ours + **aggressive level** ×4, damped | **436** | 10 |
+  | ours + aggressive level ×8, damped | 436 | 3 |
+  | ours + aggressive level + **undamped** ×2 | 436 | 11 |
+  | **ours + aggressive level + undamped ×4** | **436** | **2** |
+
+  1. **The aggressive first level, which PETSc applies BY DEFAULT and we did not.**
+     `build_amg_vcycle` never sets `pc_gamg_aggressive_coarsening`, and GAMG's default is
+     `aggressive_coarsening_levels 1` with `use_aggressive_square_graph` — so on level 0 it coarsens
+     the **squared** graph. That is the entire 5× coarse-space difference: ours coarsened 21×, GAMG
+     107×, and with `aggressive_levels=1` ours lands at 436 equations against PETSc's 432.
+     **Note `use_aggressive_square_graph` and `aggressive_mis_k` are ALTERNATIVES, not a pair** —
+     `mis_k` is read only in the non-squared branch (`agg.c:1314`), so at the default the coarsener
+     is plain MIS at distance **1** on the squared graph.
+  2. **PETSc's level smoother is UNDAMPED.** `mg_levels_ksp_type richardson` at its default
+     `scale = 1.0` (`rich.c:277`) is `x += D⁻¹(b − Ax)`, while ours relaxed by `omega/lam_max` with
+     `omega = 0.8`. That is never a *smaller* factor than 0.8 and usually much smaller: `D⁻¹A` has
+     unit diagonal blocks, so its eigenvalues average one and `lam_max ≥ 1` always. Dividing by it
+     under-relaxes every mode except the extreme one. Worth **10 → 2 cycles** at four sweeps.
+     Reachable as `convection_multigrid_solve(..., omega=1.0, spectral_damping=False)`; the
+     spectral default is unchanged, because an undamped sweep is not a contraction standing alone —
+     it does not need to be under a coarse correction and an outer Krylov.
+
+  **Equilibration is NOT among the causes**, and the two that are were invisible until the sources
+  were read side by side. The earlier "ours is behind on both axes" reading was correct as a
+  measurement and wrong as a diagnosis: it described a hierarchy that was simply not running the
+  same algorithm.
+
+  **The three remaining differences, now BUILT and measured (same block, same state, matched arm):**
+
+  | arm | coarse eq | ×1 | ×2 | ×4 |
+  |---|---|---|---|---|
+  | matched, before | 436 | 58 | 11 | **2** |
+  | + fix-up pass + magnitude-first graph | 438 | 52 | 10 | **2** |
+  | + coarse-size stopping rule | 438 | 52 | 10 | **2** |
+
+  - **The fix-up pass — BUILT, `_reattach_to_adjacent_root`.** PETSc's `fixAggregatesWithSquare`
+    (`agg.c:1032-1075`): after the squared-graph MIS, each selected root **in ascending index
+    order** steals every distance-1 neighbour in the *unsquared* graph that belongs to another
+    aggregate. Only members move, never roots, so the count is unchanged and no aggregate empties.
+    **Its guarantee is conditional and must not be stated as absolute** — a member whose neighbours
+    are all themselves members has no adjacent root to move to and keeps its distant one. Worth a
+    cycle at ×2 and six at ×1; nothing at ×4, where the arm was already at PETSc's 2.
+  - **Magnitude before symmetrization — BUILT.** PETSc block-sums `|A_ij|` and *then* symmetrizes;
+    we took the symmetric part first, so an edge with `A_ij ≈ −A_ji` **cancelled out of the graph
+    entirely**. On an M-matrix (every frozen upwind transport operator) the sparsity is identical
+    either way, so at `strength_threshold = 0` — the default, and what every scalar hierarchy runs —
+    this is a no-op. **It is NOT a no-op at a threshold**, because the weights differ (`|A_ij|`
+    against `|A_ij + A_ji|/2`) and the strong-connection set is chosen from them: the coupled flow
+    block runs at **0.25** (`turbulence/coupled.py`), so its hierarchy genuinely moves. Do not quote
+    the M-matrix equivalence without that caveat — it is a statement about the pattern only.
+  - **The stopping rule — measured INERT here, and that is a real result rather than a null one.**
+    PETSc coarsens until the grid is under `coarse_eq_limit`; we stop at `max_levels`, at which
+    point `max_coarse` can never fire. Setting `max_coarse=2000, max_levels=20` gives a
+    **bit-identical** hierarchy on this block, because one aggregation already lands at 438 < 2000
+    and both rules then stop. So it changes nothing *at this size* and remains the correct rule for
+    a mesh where it would bind. The two knobs are still not equivalents and must not be quoted as
+    matched.
+
+  **Still different, verified by reading the source, and NOT measured:**
+  - **Strength-of-connection semantics differ** — PETSc thresholds absolutely on the
+    diagonally-scaled graph (Vanek), we use the row-max-relative classical criterion. Inert at
+    threshold 0, so it affects no measurement here, but the recorded threshold arms on the two sides
+    are not comparable.
+  - **Tentative prolongation.** PETSc orthonormalizes each aggregate's block by QR (`agg.c:690-714`),
+    giving unit-2-norm columns where ours are 0/1 — i.e. `P_ours = P_petsc · diag(√|agg|)`. For a
+    2-level cycle with an exact coarse solve this is **provably inert**: `P A_c⁻¹ Pᵀ` is invariant
+    under a column rescaling. It starts to matter with inexact or deeper coarse levels, and for the
+    conditioning of our dense `pinv` coarse solve.
+  - **Singletons.** PETSc drops a neighbourless vertex from the coarse space entirely (zero row in
+    `P`, left to the smoother); we give it its own aggregate.
+
+  **What equilibration IS worth (keep it, default off):** the coarse solve is a dense pseudo-inverse,
+  and its singular-value truncation is what a badly scaled operator defeats first — on the chain
+  fixture the one-level direct solve goes from a 1e-9 true residual to 1e-13. That is a real second
+  benefit, pinned by a unit test, and unrelated to the coarsening.
+
+  **What is BUILT and measured good (keep):**
+  - **Nodal (block-aware) aggregation** — `_cell_graph` collapses the dof graph to cell connectivity
+    (exact, since field-major means `index % n_cells` *is* the cell) and `_block_tentative` gives each
+    field its own coarse unknown. With a **block smoother** (`_cell_block_inverse`,
+    `_block_diagonal_inverse_operator`) this makes the two-field slice buildable and convergent.
+    **All three are required; no pair suffices** (measured 2×2).
+  - **MIS aggregation** (`_mis_aggregate`) — greedy maximal independent set over a **randomized** visit
+    order, single sweep, selector-claims-neighbours, faithful to `MatCoarsenApply_MISK_private`. Worth
+    **8 → 5 cycles** over the two-pass RCM scheme. The old scheme only seeded from a fully-free
+    neighbourhood, so it seeded few aggregates and left most vertices to a ragged cleanup pass.
+  - `jax.jit` on the native applies (they were dispatching eagerly, ~18 % of apply cost) and
+    `indices_are_sorted=True` in `_coo_apply` (CSR→COO is row-sorted by construction).
+  - `PerFieldNativeInverse` / `NodalNativeInverse` in `solve/field_split.py`, both transposable in
+    closed form and fixed linear operators, so adjoint-legal. Neither is wired into production.
+
+  - **`prolongation_smoothing` is its own parameter, no longer welded to `mis_aggregation`.** The old
+    flag chose the aggregation *and* the prolongator formula together, so "MIS with and without
+    prolongator smoothing" was not expressible and the two effects could not be separated — which is
+    how the smoothed prolongator came to be recorded as void when what it actually needs is more
+    smoother sweeps. `"symmetric-part"` (default, the historical formula), `"standard"` (the textbook
+    σ_max form on the true operator and scalar diagonal), `"none"` (plain aggregation, what the
+    shipped PETSc bundle runs). An unknown value raises.
+  - **`_mis_aggregate` returns its ROOTS**, not just the aggregate index per vertex — the fix-up pass
+    cannot be written without knowing which vertex seeded each aggregate, and re-deriving it
+    afterwards is not possible (an aggregate's root is not recoverable from the labelling).
+
+  **What is BUILT and measured BAD (revert or gate):**
+  - The **standard prolongator at 4 sweeps** fails outright (44 cycles, true rel 1.0) — raw *and*
+    equilibrated, so this is not the scaling. At **8 sweeps equilibrated it is the best native arm
+    (4 cycles)**, so it is under-smoothed rather than wrong: the earlier "VOID / much worse" reading
+    conflated a smoothing deficit with a broken formula. Treat sweeps as part of that arm's
+    specification, never quote it at a single sweep count.
+  - **⚠️ GRAPH SQUARING ON THE FIRST LEVEL IS GAMG'S DEFAULT COARSENING, NOT A SIZE KNOB — and
+    recording it as harmful was the single thing holding the comparison open.** Squaring the graph on the first level is not a size knob, it is
+    GAMG's *default coarsening* (`aggressive_coarsening_levels 1`), and its 106× ratio is not
+    over-coarsening — it is PETSc's 107×, i.e. the target. The 5 → 10 reading is real but was taken
+    with the damped smoother; at the matched undamped smoother the same arm is **2 cycles**. A knob
+    measured harmful in one configuration was recorded as harmful in general, and that closed off
+    the one change that mattered.
+
+  **Two corrections to older entries in this file, both of which cost real time:**
+  - The recorded *"the builders refuse the `[k,ω]` slice because its diagonal is negative from the live
+    source linearizations"* is **wrong**. The fine slice is clean — **0 of 23040** cells non-positive at
+    β = 0, at the march shift, and at the floor. The refusal names `level 1`, a **coarse** operator, and
+    is manufactured by **field-blind aggregation** merging a k-dof with an ω-dof of another cell. The
+    error text said `level 1` all along; an inference was stapled to a verbatim quote and only the quote
+    was ever checked.
+  - **A field split HIDES the quality of its trailing half.** That half is ~11 % of the nonzeros, so the
+    flow block carries the solve: a trailing inverse that does not converge *at all* in isolation still
+    produced a plausible 1.36× blended march estimate. **Measure a block's preconditioner on the block
+    alone first**, then in situ.
+
+  - **A THIRD correction, from this round: an arm quoted at one smoother-sweep count is not a
+    result about the method.** The standard prolongator was written down as "much worse" from its
+    4-sweep numbers; at 8 it is the best native arm. Two of the three wrong conclusions in this
+    section came from holding one axis fixed while attributing the outcome to another.
+
+  **Also established:** block Jacobi is a perfectly good smoother class here given enough sweeps (PETSc
+  ×4 = 2 cycles against ILU ×1's 2), and on CPU the two cost the *same* per apply (102 vs 101 ms) — so
+  the penalty for a GPU-friendly smoother is quality, buyable with sweeps, not cost. The remaining
+  question is a GPU one and **cannot be measured in the current environment** (CPU-only JAX).
+
+  **⚠️ COMPARE LIKE WITH LIKE, or the arm measures the smoother and gets attributed to the hierarchy
+  (binding for this campaign).** Our multigrid has only Jacobi-class smoothers; PETSc's default here
+  is an incomplete-LU sweep, which is both far stronger and the least parallelizable piece in it. An
+  ours-vs-PETSc table whose PETSc row is ILU therefore cannot say anything about the *coarsening*,
+  which is the thing under development. Every such table must carry a **matched-smoother** row —
+  PETSc `pbjacobi` against our block Jacobi, at the same sweep count and the same aggregation — and
+  that row is the one to quote. The ILU rows stay as the incumbent's absolute bar, not as the
+  comparison.
+
+  **⚠️ HOW THE GAP WAS ACTUALLY FOUND, because the method generalizes and the alternative cost
+  days.** Three rounds of tuning our own knobs (equilibration, prolongator variants, sweep ladders)
+  moved nothing and produced two wrong write-ups. What worked was **an independent agent reading
+  `agg.c` / `misk.c` / `rich.c` against `multigrid.py` and reporting differences with citations on
+  both sides** — it found the undamped Richardson scale, the default aggressive level, and the
+  fix-up pass in one pass, none of which was visible from any measurement we had. When a
+  reimplementation of a *published, available* algorithm underperforms it, read the source before
+  running another sweep; and do not describe a port as faithful until something has checked it
+  line by line, which is exactly the claim that was wrong here.
+
+  **NEXT STEPS, in order:**
+  1. **Decide whether the matched configuration becomes the DEFAULT, and for which consumers.**
+     ⚠️ **This shipped: `NodalNativeInverse` now defaults to the whole matched bundle**
+     (`aggressive_levels=1`, `prolongation_smoothing="none"`, `spectral_damping=False`,
+     `equilibrate=True`) and is the `BFS3D_TURBULENCE_INVERSE=native` arm. The open part is whether it
+     transfers to other consumers; the library `build_amg_vcycle` defaults are untouched. The measurement says the matched
+     bundle is 5 → 2 cycles on the turbulence block; whether that transfers to the scalar transport
+     and velocity blocks is unmeasured, and flipping a default is a march-level decision, not a
+     block-probe one.
+  2. Then, if still short: sparse-LU coarse solve (ours is a dense `pinv`), QR-orthonormalized
+     tentative columns (inert at 2 levels, not deeper), and Chebyshev with the SA-cached bounds.
+  3. **Scalability, independent of all the above and unaddressed:** the convection hierarchy is capped
+     at 2 levels (`_CONVECTION_LEVELS`) with a **dense `pinv`** coarse solve. At a 77× ratio that is
+     ~26k coarse dofs and a 5.4 GB pinv at 1M cells — infeasible. Depth now *builds* (3 levels, no
+     refusal) via the new `max_levels` argument, so the fix is cheap once the method itself works.
+     PETSc reaches only 2 levels here because it coarsens until under `coarse_eq_limit`; our
+     `max_coarse` is NOT the equivalent knob and has no effect at 2 levels.
+
+  **Local PETSc source** for continuing the port (shallow sparse clone, may need re-cloning):
+  `src/ksp/pc/impls/gamg/{agg,gamg}.c` and `src/mat/graphops/coarsen/impls/misk/misk.c` — note
+  `coarsen` moved under `graphops` in current PETSc. GAMG-AGG defaults: `nsmooths 1`,
+  `aggressive_coarsening_levels 1`, `use_aggressive_square_graph TRUE`,
+  `use_minimum_degree_ordering FALSE` (so: random order), `aggressive_mis_k 2`, `graph_symmetrize TRUE`.
+
+
+## Low-β directions already measured out — CLOSED, do not re-litigate
+
+- **⚠️ LOW-β DIRECTIONS ALREADY MEASURED OUT — do not re-litigate without new evidence.** The low-shift
+  wall on the 3D coupled saddle has absorbed a lot of probing. What is settled:
+  - **Turbulence decoupling ("just lag ω") — REFUTED.** A true-residual arm comparison found
+    block-diagonal `(u,v,w,p) ⊕ exact(k,ω)` to be the **worst** arm tested: the flow–turbulence coupling
+    is load-bearing in the preconditioner, not a nuisance to be segregated away.
+  - **A pre-AMG SIMPLE-type transform of the matrix — DEAD.** The published "SIMPLE preconditioning" for
+    monolithic coupled AMG *is* Rhie–Chow interpolation; our residual already assembles that matrix, so
+    there is no transform left to apply. (Established by reading the primary sources in full, not from
+    abstracts.)
+  - **PC-only pressure-Poisson augmentation — NO-GO, triple-confirmed.** The `(p,p)` block is *already*
+    0.71× the SIMPLE-Schur elliptic operator, and the augmentation degraded cycles ~2.7×.
+  - **`coarse_eq_limit` beyond ~2000 — inert, but read this correctly: the ARM was a no-op, which is
+    not the same as a null result.** GAMG stops coarsening as soon as the grid falls below the limit,
+    and this hierarchy is already **2 levels** — its single aggregation step has landed under 2000
+    already, so a *larger* limit cannot make it stop any sooner and produces a bit-identical
+    hierarchy. `K=8000 ≡ K=2000` is therefore arithmetic, not evidence, and it says nothing about
+    whether the coarse space matters. **To probe the coarse space, degrade it instead**
+    (`mg_coarse_pc_type: jacobi` in place of the direct LU) — that reads in both directions, and it
+    is the control that decides what a *smoother* plateau means: if degrading the coarse solve barely
+    moves the cycle count then the coarse correction is not load-bearing, and a smoother plateau
+    cannot be attributed to the coarse space at all. Always print the coarse grid's equation count
+    (`AmgVCycle.coarse_size`) beside the level count, so an arm that changed nothing is
+    distinguishable from a setting that made no difference.
+  - **Additive Vanka + Richardson — invalid by construction** (Richardson on an indefinite saddle).
+    A *Krylov*-Vanka smoother, which is genuinely strong and stable, still stalls the true residual at
+    5–6e-2 at every β and is insensitive to the inner count (4 vs 8) — which points at the **coarse
+    space**, not the smoother, as the remaining wall. Note the smoother-vs-coarse-space split is only
+    established for the *2-level* GAMG hierarchy we run.
+  - **Where the V-cycle actually under-performs:** per-field, pressure is *well* smoothed and **ω** is
+    the unsmoothed field (by ~700–1300×), then `u`. If a per-field lever is wanted in 3D, ω is it —
+    pressure is not.
+    **⚠️ PARTLY REHABILITATED (2026-08-08): a second, independent measurement puts ω in the same
+    place.** The cell-block singular-value decomposition above finds the near-null direction of the
+    worst diagonal blocks to be **pure ω**, in 353 of 23040 cells, under the *current* bundle. That is
+    local block conditioning, not per-field V-cycle smoothing rates — a different quantity by a
+    different route — so "ω is the 3D per-field lever, not pressure" now rests on two legs instead of
+    one unfalsifiable one. The specific *number* below (~700–1300×) is still unverified and still
+    carries no configuration; treat the **field** as corroborated and the **factor** as not.
+    **⚠️ NEITHER THIS NOR THE VANKA BULLET RECORDS WHICH SMOOTHER OR AGGREGATION IT WAS MEASURED
+    WITH, so neither can be relied on now.** The smoother default has since moved ILU(1) → ILU(0) and
+    the aggregation smoothed → plain, and *both* of those changes have inverted a conclusion on this
+    case. Concretely, the Vanka bullet's inference — "a strong smoother still stalls, therefore the
+    **coarse space** is the wall" — is valid but **under-determined**: "the coarse space" could mean
+    the space is intrinsically inadequate (needing inf-sup-aware coarsening, a research problem) or
+    that the coarse *correction* was corrupted by prolongator smoothing (a setting, now changed). A
+    stall at 5–6e-2 fits both, so that experiment never distinguished them. Re-measure before building
+    on either, and **record the smoother and aggregation** in any replacement.
+    **The second reading is now measured, not speculative.** Prolongator smoothing *was* degrading the
+    coarse correction on this operator: turning it off (`pc_gamg_agg_nsmooths = 0`) is worth
+    **22 → 9 cycles** at a hard state and ~16 % of the whole march's Krylov cost. Every arm in that
+    Vanka campaign was judged against a coarse correction built with smoothing **on**, so a *smoother*
+    arm failing to rescue it is what you would see whether or not the smoother was any good — which
+    also explains why the campaign kept concluding "the smoother is not the lever" whichever smoother
+    it tried. **Do not treat "the coarse space is the wall" as settled.**
+    **⚠️ FIRST MEASUREMENT UNDER THE CURRENT BUNDLE (2026-08-08) — and it moved the question.**
+    Configuration, in full, because that is the point: 3-rung `bfs3d` cold march to ‖R‖ = 2.64e-6 (69
+    steps, 60.5 min); state `state-00049` (rung 3, the target Reynolds number); operator β = 0.0293
+    with the V-cycle at the floor 0.05; **plain aggregation, ILU(0), 4 sweeps, `coarse_eq_limit` 2000
+    → 2 levels with 1296 coarse equations**; real right-hand side `−R(state)`, judged on the true
+    residual through GMRES at rtol 1e-6 (restart 15).
+
+    | arm | patch width | worst `\|A_p⁻¹\|` | restart cycles | true relative residual |
+    |---|---|---|---|---|
+    | self-check, the march's own solver | — | — | 1 | 2.0e-06 |
+    | shipped (ILU(0) ×4) | — | — | **2** | 1.3e-14 |
+    | ILU(0) ×8 | — | — | 1 | 1.4e-14 |
+    | ILU(0) ×16 | — | — | 1 | 1.4e-14 |
+    | coarse solve degraded to Jacobi | — | — | 2 | 1.3e-14 |
+    | Vanka, 0 neighbours (the cell block) | 6 | 3.011e3 | 58 (cap) | 7.8e-01 |
+    | Vanka, 6 velocity neighbours | 24 | 3.006e3 | 58 (cap) | 3.6e-01 |
+    | Vanka, 6 neighbours, all fields | 42 | 3.242e3 | 58 (cap) | 2.4e-01 |
+    | Vanka, 6 velocity neighbours, damped 0.3 | 24 | 3.006e3 | 58 (cap) | 4.1e-01 |
+
+    Two things follow, and the second is the bigger one.
+    - **Vanka does not stall here — it fails outright, at a state where the operator is easy**, and it
+      fails for a reason that has nothing to do with the coarse space. It cannot be excused by a hard
+      operator: ILU(0) solves the same system to 1.3e-14 in two cycles. Every patch width runs to the
+      restart cap; widening helps monotonically (0.78 → 0.36 → 0.24) but nowhere near enough, and
+      **the worst patch gain is flat at ~3e3 across all three widths** — on an operator equilibrated
+      to unit diagonals, i.e. a local singular value four to five orders down. Flat under widening is
+      the informative part: no amount of surrounding a cell repairs it, so the degeneracy is in a row
+      of the **centre block** that stays degenerate however large the patch. (Adding the neighbours'
+      `k` and `ω` — the "all fields" arm — did not reduce it either; it rose slightly.)
+      That the *narrowest* arm is plain point-block Jacobi also settles the "is the implementation
+      wrong" question the right way: block-Jacobi failing on a saddle point is textbook, and is
+      precisely why patch smoothers exist. **Why ILU(0) succeeds where every patch method fails:** in
+      cell-major ordering it is a *global* forward/backward sweep and never inverts a cell block in
+      isolation, which is exactly what a patch method is obliged to do.
+      **⚠️ It STAGNATES, it does not amplify — and that distinction is not decoration, it points at a
+      different cause.** Every arm stops at a finite true residual and runs to the restart cap; none
+      diverges. Under-relaxing (damping 0.3), which is what tames an over-correcting smoother, made it
+      **worse** (0.36 → 0.41), as it would for a smoother that is too *weak* rather than explosive.
+      So the large patch gain is at present a **correlation with the failure, not a demonstrated
+      cause** — do not write it up as the mechanism. Two explanations survive the data equally well:
+      1. a few near-singular cell blocks poison the recombination; or
+      2. the **additive** form is simply too weak here. Weighted-additive Schwarz is block-Jacobi-like
+         and needs a relaxation that may not exist for this operator, which predicts exactly what is
+         seen: monotone gains with patch width, stagnation at every width, no help from damping. The
+         classical Vanka sweep is *multiplicative* and remains **untested**.
+
+      **WHICH row is degenerate — measured, and it is ω.** A batched singular-value decomposition of
+      all 23040 diagonal 6×6 blocks of the equilibrated cell-major operator at the same state:
+      `σ_min` median 2.87e-2, 1st percentile 8.42e-4, minimum 3.21e-4, with **353 cells below 1e-3**
+      and condition numbers there of 5e6–9e6. In every one of the twenty worst blocks the near-null
+      right singular vector is **pure ω** — `(u,v,w,p,k,ω) = (0,0,0,0,0,1)` to three decimals. So it
+      is the ω *column* that is nearly empty: perturbing ω in such a cell barely changes any of that
+      cell's own six equations, because ω's influence there is carried almost entirely by neighbour
+      transport rather than locally. That is exactly the quantity a cell-centred patch must invert and
+      a global cell-major incomplete-LU sweep never does, which is the cleanest available explanation
+      for why every patch smoother fails on this operator while ILU(0) is untroubled. The affected
+      cells sit in low-`k` regions (median `k` 0.122 against 0.655 over the mesh) and occur in exact
+      spanwise-symmetric pairs, so they are a coherent region of the flow, not scattered noise.
+      **⚠️ BUT THE SHIFT DOES NOT CONTROL IT, so this does NOT explain the low-β wall.** Sweeping the
+      shift over a 500× range at the same state (one materialization; the Jacobian does not depend on
+      β, only the added diagonal does):
+
+      | shift | median `σ_min` | min | cells below 1e-3 |
+      |---|---|---|---|
+      | 0.5 | 3.450e-2 | 3.929e-4 | 204 |
+      | 0.05 (the floor) | 2.873e-2 | 3.214e-4 | 353 |
+      | 0.005 | 2.807e-2 | 3.133e-4 | 367 |
+      | 0 (unshifted) | 2.799e-2 | 3.124e-4 | 369 |
+
+      Over the range the march's tail actually occupies (0.05 → 0.005) the near-singular count moves
+      **4 %**. The degeneracy is a fixed property of the discretization and state, not something β
+      governs — so the low-shift conditioning wall is *something else*, and this is not the mechanistic
+      account of it that it first looked like.
+      **It also kills the obvious lever before anyone builds it.** An ω-only, preconditioner-only shift
+      boost cannot work, because the shift is `β·d` and for ω that `d` **is the weak transport coupling
+      that is the problem** — scaling a near-zero diagonal by β leaves it near-zero at any β. Anything
+      along these lines would have to be an *absolute* floor on the preconditioner's ω diagonal rather
+      than a multiple of `d`, which is untested speculation and has no headroom to be demonstrated at a
+      state where ILU(0) already converges in two cycles.
+      **What the ω finding does license** is narrow and solid: it explains why *cell-local*
+      preconditioners fail here, and it gives a two-minute screen for the next one.
+
+      **It also independently corroborates the ω bullet below**, which was recorded without its
+      configuration and marked unusable: a completely different measurement — local block
+      conditioning rather than per-field V-cycle smoothing rates — lands on the same field. Two
+      unrelated routes to "ω is the 3D preconditioner lever" is much better evidence than either
+      alone, and it also suggests a concrete arm: **leave ω out of the patch**, since a local solve
+      cannot resolve a direction the local block does not see.
+
+      **RESOLVED, and (1) IS REFUTED — the near-singular blocks are NOT the mechanism.** The test was
+      pre-registered (`VankaSmoother(max_patch_gain=...)`: converges ⇒ (1), stagnates ⇒ (2)) and the
+      answer is unambiguous, because dropping precisely the near-singular patches made the solve
+      **worse**, not merely no better. The whole family of drop-arms is monotone in *coverage* and in
+      nothing else:
+
+      | patches dropped | fraction of the mesh | true relative residual |
+      |---|---|---|
+      | 0 | — | **0.360** |
+      | 337 (gain > 1e3 — the σ_min < 1e-3 set) | 1.5 % | 0.737 |
+      | 1925 (gain > 3e2) | 8.4 % | 0.9975 |
+      | 6044 (gain > 1e2) | 26 % | 0.9995 |
+
+      Strictly monotone in how much of the mesh still gets relaxed, which is the tell: these arms
+      measure **coverage** and nothing else.
+
+      Those 337 patches were doing *useful* work; removing them leaves their degrees of freedom
+      unrelaxed and costs more than their ill-conditioning ever did. So the large patch gains are a
+      real property of this operator — and worth knowing, since two independent measurements agree on
+      the set (337 patches by inverse gain, 353 cells by block `σ_min`) — but they are **not** why the
+      smoother fails. **Explanation (2) is what survives: the ADDITIVE recombination is the limit.** It
+      smooths usefully but insufficiently *everywhere* rather than being poisoned anywhere, which is
+      also what the width ladder and the damping arm independently say.
+      **MULTIPLICATIVE IS NOW TESTED TOO, AND IT IS WORSE — so (2) falls as well.** Compared
+      sweep-for-sweep, which is the only fair way to ask whether *sequencing* helps (one multiplicative
+      sweep against four additive ones confounds recombination with sweep count): **additive ×1 →
+      0.497, multiplicative ×1 → 0.855.** Sequencing the patches does not rescue this smoother; it
+      costs. Built as `VankaSmoother(multiplicative=True)`, 16 colours on this mesh, ~33× the additive
+      apply cost.
+
+      **So neither hypothesis stands, and what is left is the one fact that survived every arm: the
+      cell block is weakly coupled in ω EVERYWHERE, and the 353 near-singular cells are only its tail.**
+      Median `σ_min` is 2.9e-2 on an operator equilibrated to unit diagonals — some 34× down — so
+      *every* cell-local solve mishandles ω, not just the extremes. That single fact accounts for the
+      whole ladder: widening the patch adds neighbour velocities and cannot help ω; dropping the worst
+      patches removes useful work without touching the general weakness; damping and sequencing change
+      only how corrections are combined, and no recombination repairs a local solve that cannot see the
+      field. It equally explains why ILU(0) is untroubled — a global cell-major sweep propagates ω along
+      the transport direction, which is where ω's coupling actually lives.
+
+      **Verdict: cell-centred patch relaxation is the wrong shape for this operator, and the reason is
+      structural rather than tunable.** Do not re-open it with another patch variant. `VankaSmoother`
+      stays in the tree as the evidence and as a testbed; `validation/bfs3d_openfoam/cell_block_conditioning.py`
+      screens any future cell-local proposal in ~2 minutes, which is what this campaign cost hours to
+      learn.
+
+      **Choose that cap from the gain distribution, not from the maximum**, or the arm measures the
+      wrong thing. Measured over the 23040 width-24 patches at this state: gain above **1e1 in 96.6 %**
+      of them (22251), above **1e2 in 26.2 %** (6044), maximum 3.0e3. A gain of order ten to a hundred
+      is therefore *ordinary* here — it is what `1/σ_min` gives for the median block (`σ_min` ≈ 2.9e-2)
+      — and only the ~1.5 % above 1e3 are the near-singular ω blocks the hypothesis is about. Capping
+      at 1e2 drops a quarter of the mesh and the true residual goes to **0.9995**, i.e. no reduction at
+      all: with that many patches gone, any degree of freedom covered only by them has weight zero and
+      is never relaxed. That number says the smoother was gutted, and nothing whatever about whether
+      near-singular patches caused the original failure — a confounded arm, not a null result.
+
+      Related and worth keeping either way: this is the same *family* of failure as the two earlier
+      patch-smoother attempts (unweighted additive Vanka, "ρ = 9e4"; undamped block-ILU/inexact Uzawa,
+      "1-apply reduction 5.10"), and the overlap weighting that was supposed to fix it does not. Note
+      also that the published algebraic Vanka does *not* solve the patch exactly: Metsch's (§4.6) local
+      solve is an inexact-Uzawa form built on a diagonal `Â > A` with a scaling `β` chosen so
+      `Ŝ > C + BÂ⁻¹Bᵀ`, provably convergent precisely because it never inverts a near-singular local
+      saddle. The exact patch solve chosen here as the *stronger* option may be the thing that breaks.
+    - **⚠️ THE STATE-SELECTION PREMISE IS BROKEN FOR A DUAL-TIME MARCH, and this invalidates the
+      comparison above as a test of the *coarse-space* question.** A checkpoint is written at the end
+      of a step, so it holds the state the *next* step starts from — and a step's first solve is its
+      easy one, from a settled state with a freshly rebuilt preconditioner. Across the whole march:
+      **all 70 step-initial solves cost ≤ 2 restart cycles, while solves at inner > 0 reached 15.**
+      No checkpointed state in this march poses a hard linear system, so every arm ties there and the
+      sweep says nothing about smoother-versus-coarse-space. (It still says plenty about Vanka, which
+      *failed* at an easy state — a positive result needs a hard state, a failure does not.) The fix
+      is `DualTimeStep.inner_observer`, which now also carries the **iterate**.
+      **⚠️ But a march step CANNOT be reconstructed from a checkpoint — its configuration is
+      path-dependent.** `validation/bfs3d_openfoam/inner_iterate_probe.py` tried, driving one step from
+      the checkpoint, and both plausible arrangements bracket the march without reaching it. At
+      `state-00049`, β = 0.0293, where the march's first inner solve costs **1 cycle at α = 0.500**:
+
+      | how the engine was built | inner-0 cycles | ‖G‖ |
+      |---|---|---|
+      | at the probed state (self-consistent) | 7 | descends cleanly, α = 1 |
+      | at the Reynolds rung's seed, 11 steps back | **39** | **no descent at all** |
+
+      The march is outside both because `amg_beta_tracking_refresh` rebuilds the preconditioner
+      repeatedly on the way to the step, so by then it is recent, while the shift policy dates from the
+      seed with its transport part rebuilt at each refresh — a product of the refresh *history* that no
+      checkpoint records. **The route to the hard iterates is therefore to capture them DURING a
+      march**, via the observer, not to replay a step afterwards.
+      **✅ DONE, and it settles the question: the march's expensive solves are STALENESS, not hard
+      operators.** `InnerIterateCheckpointer` (`solve/checkpoint.py`, wired in the case behind
+      `BFS3D_INNER_DUMP_ABOVE`) caught the seven solves that reached ≥4 restart cycles on an otherwise
+      byte-identical march (`x_r/h` 8.361, 290 cycles, unchanged). Note the replay problem does **not**
+      apply once you hold the iterate: the state is on disk, so the operator can be rebuilt around it
+      directly. At the march's single hardest solve — attempt 50 inner 3, β = 0.0293, where the march
+      took **15 cycles** and the line search collapsed to α = 0:
+
+      | iterate | β | the march | one step stale | matched at the iterate |
+      |---|---|---|---|---|
+      | attempt 50 inner 3, α → 0 | 0.0293 | **15** | 3 (5.9e-02) | **1 (6.6e-06)** |
+      | attempt 40 inner 3, α = 1 | 0.3333 | **8** | 1 (9.9e-05) | 1 (1.7e-10) |
+
+      Read the two rows together: at β = 0.33 even a stale preconditioner is already optimal, so
+      **staleness only bites at low β** — and there it bites hard. Note also that both march counts far
+      exceed what *one* step of staleness costs (15 against 3, 8 against 1), so the march's real
+      staleness — up to four steps in `J` — is worth several times a single step.
+
+      **That operator is easy.** One cycle to 6.6e-06 with a matched preconditioner, and a single step
+      of staleness already triples the cost and gives up four orders of accuracy. So there is **no
+      preconditioner headroom left on this case at any state the march visits** — which is the
+      retrospective explanation for why every arm in the Vanka campaign tied or lost, and why the
+      aggregation sweep only separated at all under the *older*, weaker bundle. The lever here is
+      **refresh cadence** (`refresh_every=8`, `materialize_every=4`, `beta_rel_change=0.25` are lax
+      around the hard steps), consistent with the earlier gate fix, which bought 132 fewer cycles and
+      removed three of five retry cascades by refreshing ~50 % more often — the same mechanism found
+      from the other end.
+      **✅ THE COST TRIGGER IS BUILT — `amg_beta_tracking_refresh(refresh_on_cycles=N)`.** A solve that
+      reaches `N` restart cycles refreshes the preconditioner **at the iterate it was handed** and the
+      inner loop carries on, rather than aborting the step and escalating β (which discards both the
+      work and the pseudo-timestep). Capped at **one refresh per step**, without which a genuinely hard
+      operator would refresh on every inner iteration; a new inner loop re-arms it. Off by default
+      (`None`), so a march that does not opt in is byte-identical. Pinned by
+      `test_inner_refresh_fires_on_an_expensive_solve_at_that_iterate_and_once_per_step`.
+
+      **Measured end to end on the 3D coupled backward-facing step, against the scheduled cadence:**
+
+      | | scheduled | on cost |
+      |---|---|---|
+      | wall | 3632 s | **3140 s (−14 %)** |
+      | refresh | 758 s | **310 s (−59 %)**, 62 refreshes → **19** |
+      | Krylov cycles | 290 | 293 (**unchanged**) |
+      | steps with α = 0 | 5 | **0** |
+      | `x_r/h` | 8.361 | 8.361 (unchanged) |
+
+      **Read the cycle row: this is not a better-conditioned solve.** Cycles are flat, so the whole
+      saving is refresh no longer spent maintaining freshness nothing consumed, plus the elimination of
+      five dead steps — those where the line search collapsed, the residual froze or rose, and the shift
+      escalated twenty-fold before recovering. That the *same* change removes both is the point: an
+      inaccurate direction from a stale preconditioner is what α → 0 was, so the retries were downstream
+      of the refresh cadence rather than a separate globalization problem.
+
+      **Do not read the arithmetic below as an open proposal — it is the projection this shipped
+      against**, and it came out close on the total (−492 s measured vs −515 s predicted) while missing
+      the mechanism: it predicted the saving would come from refresh alone, and half of it came from the
+      dead steps. The cost arithmetic, measured on the earlier 3501 s
+      march: scheduled refreshes are 50 full + 12 shift = **742 s, 21 % of the wall**. A refresh fired
+      only when a solve reaches ≥3 cycles would fire **16** times (227 s, **−515 s**); at ≥4, **7**
+      times (99 s, **−643 s**) — a 15–18 % whole-march saving, against a ~8 % ceiling for a *perfect*
+      preconditioner. Read as an *addition* to the schedule the trigger looks break-even; as a
+      **replacement** it is the biggest win on the table, and conflating the two is easy to do.
+      **Why no schedule can work here:** 193 of the 232 solves already take 1 cycle, so most scheduled
+      refreshes maintain a freshness nothing consumes — and the right interval is regime-dependent (at
+      β = 0.333 a one-step-stale preconditioner still gives 1 cycle; at β = 0.029 it gives 3), so a
+      fixed cadence necessarily over-refreshes in the easy regime and under-refreshes in the hard one.
+      Targeting cannot be predictive either — the Step-0 diagnostic refuted every static signal — which
+      leaves reacting to the cost itself.
+      **Two things to get right.** The counts above come from a march that *had* the schedule keeping it
+      fresh, so removing it shifts the distribution up and the trigger fires more often; the equilibrium
+      rate is a feedback loop (staleness → cycles → trigger → freshness) and is unknown until it is run.
+      And it needs a **cap of one refresh per step**: with it the worst case is 69 × 14.2 = 980 s against
+      today's 742 s, a bounded +238 s downside for a ~515 s upside; without it, a refresh per inner
+      iteration is unbounded. `abort_above_inner_cycles` already detects the condition inside the inner
+      loop, so the change is to the *reaction* — refresh and continue, keeping β escalation as the
+      fallback, which also makes the refresh a diagnostic: if it does not help, the operator really is
+      hard.
+      **The probe is 79 % of a refresh, and the obvious way to halve it — stencil reach 3 → 2 — is
+      MEASURED AND FAILS.** The saving is real (112 → 60 colours, build 30 s → 12 s) but the V-cycle is
+      not: at `state-00062`, β = 0.0072 against the 0.05 floor, reach-2 gives **41 cycles at a true
+      relative residual of 1.9** — worse than the initial guess — where the shipped reach-3 arm reaches
+      1.5e-10 in six. A failure at a *benign* state is conclusive: it cannot be excused by a hard
+      operator. Note this also disposes of an appealing argument that does **not** work: the older
+      refutation blamed "the pattern-dependent ILU(1) smoother", and at ILU(0) there is no fill to be
+      pattern-dependent about — yet reach-2 still fails at ILU(0), so the conclusion outlived the
+      mechanism that was offered for it. **Retested under plain aggregation too — it still fails, so the lever is
+      CLOSED.** At `state-00049`, β = 0.0293 (where reach-3 does 2 cycles to 1.3e-14): reach-2 plain
+      gives **58 cycles at 1.7e-01**, and doubling the smoother sweeps barely moves it (1.4e-01, still
+      at the restart cap). Note what that rules out: it is not a smoothing deficit. And the hierarchy
+      itself changes — reach-2 yields **3 levels / 480 coarse equations** against reach-3's 2 / 1296 —
+      so the dropped couplings are load-bearing for the *coarse space*, not merely for the smoother's
+      fill. Reach 3 is required, now measured across both aggregations at ILU(0). **There is no cheap
+      way to shrink the probe**, which leaves refreshing *less often* as the only open axis on refresh
+      cost — see the refresh-trigger note below.
+      **A trap: the cheap `refresh_shift_in_place` branch does NOT help within a step.** The shift is
+      formed once per step at the reference state and held fixed across the inner loop, so what drifts
+      inside a step is `J(p)`. The shift-only branch only helps *across* steps, where β moves.
+      **Untested but cheap and worth doing: whether staleness also drives the GLOBALIZATION cost.** A
+      stale preconditioner returns a less accurate Newton direction (5.9e-02 against 6.6e-06 here), and
+      an inaccurate direction can fail to descend — which is what α → 0 means. If so, the retries and
+      line-search collapses are downstream of the same cause, not a separate problem. The captured
+      iterate is all that is needed to check it. Two details worth keeping from the
+      attempt: the builder's `amg_beta` defaults to **2.0**, which at a sub-floor β is a two-orders
+      mismatch that alone turns a 1-cycle solve into 7 (pass `max(β, beta_floor)`); and a
+      preconditioner frozen 11 steps back yields **no descent whatsoever** — α reads 1.000 because
+      that is the line search's non-descent fallback, with ‖G‖ flat — which is independent evidence
+      that the refresh is load-bearing.
+
+      The probe now **validates itself against `march.log`** (inner-0 cycles and α) and refuses to
+      report if it disagrees, which is how both errors above were caught rather than written up. Hold
+      any future march-reproduction harness to the same gate.
+
+    **How to re-run it — the smoother and the harness are BUILT (`aquaflux/solve/vanka.py`,
+    `validation/bfs3d_openfoam/preconditioner_sweep.py`); what is missing is the measurement.** The
+    discriminating question is narrow: **with plain aggregation, does a Vanka smoother still stall?**
+    If yes, the coarse space really is the wall and the inf-sup / block-Schur direction is justified.
+    If no, the original verdict was an artifact of the aggregation default and the smoother direction
+    reopens. Record the smoother, aggregation, state and shift pairing alongside whichever answer
+    comes out. The `ARMS` ladder in the harness reads the question two independent ways — a **sweeps**
+    ladder on the *shipped* smoother (if cycles keep falling as sweeps rise the smoother is not
+    saturated and cannot be the binding constraint; if they plateau, what survives is in the coarse
+    space's blind spot) and the **Vanka** arms themselves, the widest deliberately over-strong.
+  - **The Jacobian's fill is irreducible.** The coupled `(u,p)` Jacobian is intrinsically **distance-2**
+    (~38 nnz/row) because Rhie–Chow damping couples pressure to the neighbour-of-neighbour ring; the
+    advection scheme is irrelevant to this. A distance-1 preconditioner pattern is not available for a
+    second-order collocated Rhie–Chow discretization, so "make the PC pattern local" is not a lever.
+
+## The coupled AMG builder
+
+- **Coupled builder `coupled_amg_continuation`** (`.claude/rules/turbulence.md`) shares
+  `MonolithicFactorShiftPolicy` + `_monolithic_factor_step` with the ILUT/LU. Verified: converges to the
+  block PC's fixed point AND passes the **coupled-adjoint FD gate** (the transpose V-cycle serves the
+  gradient), `tests/integration/test_coupled_amg.py`; V-cycle mechanics in `tests/unit/test_amg_preconditioner.py`.
+  Follow-ups: a refreshing/β-tracking variant (the frozen build serves the forward + adjoint; a developing
+  3D march would want the refresh), and the FGMRES forward optimization.
+
+## Globalization — forward step, continuation, line search
+
 - **Forward globalization is ONE injected strategy — `forward_step: ForwardStep`.** The forward
   Newton loop has a single point of variation: `ImplicitNewtonSolver` takes one `forward_step`
   implementing the `ForwardStep` protocol (`stepper()` → the per-step
@@ -3494,6 +3573,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     `custom_vjp`'s `nondiff_argnums`, which requires a hashable object, and a pytree holding arrays is
     not hashable there. So the finishing solve keeps whatever measure it was constructed with. Letting
     the traced solver use it requires reworking that slot — not done.
+
+## The observed march — forward_march, triggers, controls, logging
+
 - **`march.py` — BUILT (`forward_march`, `StepReport`/`MarchResult`, `RefreshTrigger`/`CycleGrowthTrigger`):
   the observed, forward-only march that drives a mid-march preconditioner refresh.**
   - **Two marches, ONE decision layer (binding — this is the shape to hold).** `_forward` (traced,
@@ -4127,6 +4209,9 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     brakes on a rising residual at α = 1, brakes on an inner clip, holds in the band, carries β). The ratio
     thresholds are march-calibrated numbers — set them from a logged march, not intuition (the 3D
     development overshoot shows ratios ~1.14).
+
+## Gates
+
 - **Gate C — PASSED (`tests/integration/test_skewed_diffusion.py`).** With
   `CorrectedGreenGauss` injected into the residual on a 25%-skewed mesh, one Newton step
   drives `‖R‖` ~24 → ~1e-12 and reproduces a harmonic linear field to ~5e-13 (linear-exact

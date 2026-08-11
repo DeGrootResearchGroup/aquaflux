@@ -19,7 +19,24 @@ the adjoint of the **unfrozen coupled residual**. Governed by the root `CLAUDE.m
 Principles; the flow block it feeds is `.claude/rules/flow.md`, and the Newton / linear-solve
 adjoint machinery it must reuse is `.claude/rules/solve.md`.
 
-## Status — BUILT (segregated forward solve **and** monolithic coupled solve + coupled adjoint)
+## How to read this file (read this before grepping it)
+
+Same three rules as `.claude/rules/solve.md`: **every entry sits under a `##` section** (scan up to the
+nearest one); **a superseded entry is DELETED, never struck through or annotated in place** (`~~tildes~~`
+are invisible to `grep`, and "see above" expresses supersession by adjacency, which a hit does not
+carry); and **a measurement without its configuration is unfalsifiable** — name the case, state,
+bundle and shift, or the number cannot be re-adjudicated when a default moves.
+
+**Check any symbol or default against the source before quoting it.** Stale entries here have been
+lifted by `grep` and asserted as current. See `CLAUDE.md` → **Stale-Record Check**.
+
+⚠️ **Two defaults that have moved and that older entries in this file were measured under:**
+the AMG smoother fill (the validated `bfs3d` bundle is **ILU(0) × 4 sweeps**; the library still defaults
+to ILU(1) × 2) and the aggregation (**plain**, not smoothed). Any AMG-adjacent number written before
+those moves is un-adjudicable — treat it as a lead, not a fact.
+
+## The closure — model, strain, sources, transport, preconditioner
+
 - **`sst.py` — `SSTModel`.** Menter's SST constants and the quantities derived directly from
   them (the F₁/F₂ blend, the eddy-viscosity limiter).
 - **`strain.py`** — the strain-rate magnitude `S = sqrt(2 S_ij S_ij)` the production terms read.
@@ -206,6 +223,9 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
   ride on the traced side and only their *values* change. (`k_residual` already returned a bound
   `ResidualAssembler.residual`, which equinox treats as a pytree — that one was always fine.) Note the
   contrast with the preconditioner above: a *per-sweep* callable must be a pytree, a *frozen* one must not.
+
+## Near-wall treatment — `boundary.py` (the four pieces, and the wall BC question)
+
 - **`boundary.py`** — inlet/wall closures for k and ω over the generic scalar boundary machinery.
   - **The wall ω is the adaptive (`y+`-insensitive) blend `omega_wall`, imposed at the wall-adjacent
     cell centroid (binding).** `omega_wall(nu, d, k, model) = [omega_vis^p + omega_log^p]^{1/p}` — a
@@ -703,6 +723,9 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     measured `u_τ` error on the channel is **−0.6% at y+≈68, −2.0% at y+≈33, −6.9% at y+≈16, −5.0% at
     y+≈11**, versus 0 on the wall-resolved mesh. Place the first cell either inside the sublayer or out
     past `y+ ~ 30`; the buffer-layer dip is a model limitation, not a bug to chase.
+
+## The segregated driver — `solve_segregated`
+
 - **`driver.py` — `solve_segregated`.** The outer Picard loop: μ_t → flow solve → k solve → ω
   solve, with under-relaxation and positivity floors as the stabilizers, and injected
   `solve_flow` / `solve_scalar` so the driver is pure orchestration. The per-sweep coupling is
@@ -740,6 +763,9 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     `turbulence.resolve_boundaries()` before the loop, so those compiled prologues never re-run the
     dynamic-shape patch resolve inside `closure_fields`'s gradient assembler. Bit-identical to the old
     eager path; pinned by `test_segregated_prologues_match_the_eager_assembly`.
+
+## The coupled solve — `CoupledRANS` / `solve_coupled`
+
 - **`coupled.py` — `CoupledRANS`, `solve_coupled` (Option 2, the target engine).** The monolithic
   residual `R(u, p, k, ω)` over the flat `[flow…, k, ω]` state (`CoupledRANSLayout`, whose `unpack`
   yields the momentum block's own `[u,p]` sub-vector so `MomentumContinuity` runs on it unchanged),
@@ -1166,6 +1192,9 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     independent AMG coarsenings (`air` ≡ `twolevel`, same `β`) — the periodic analogue of the inlet
     coupled-vs-segregated cross-check. Pinned by `test_coupled_mass_flow.py` (constraint met + turbulent
     + floors inactive; method-independence; the adjoint FD gate).
+
+## Initialization, diagnostics, Reynolds continuation
+
 - **`initialization.py` — `hybrid_initialize` (cold-start, the reason `solve_coupled` self-starts).**
   The monolithic Newton is a *local* method: from a raw cold start (`u=0`, uniform k/ω) it **stalls** —
   the near-wall ω fixation alone injects a `~6ν/(β₁d²)` jump, and a uniform interior is far from a
