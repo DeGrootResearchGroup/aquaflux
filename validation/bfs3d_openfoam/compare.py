@@ -288,11 +288,18 @@ if TURBULENCE_INVERSE not in _TURBULENCE_INVERSES:
 #: this operator.
 NATIVE_TRAILING = {
     "max_coarse": COARSE_EQ_LIMIT,
-    # Exposed because it is under investigation, not because it is a tuning knob. Rescaling improves
-    # the per-cell block conditioning by ~1600x, yet the one march run with it on lost its line-search
-    # factor on the middle rung where the unscaled build had tracked the host solver step for step.
-    # Those two facts are not reconciled, so both arms need to be runnable.
-    "equilibrate": os.environ.get("BFS3D_NATIVE_EQUILIBRATE", "1") not in ("", "0"),
+    # Exposed because it decides whether this case converges, not because it is a tuning knob. Rescaling
+    # improves the per-cell block conditioning, yet an otherwise-identical pair of marches differing only
+    # in this flag came out opposite: with it off the march converged all three continuation rungs, and
+    # with it on it lost its line-search factor on the middle rung and stalled with the residual frozen.
+    # The two arms agree only to the fourth printed digit of the step summary: they differ from step one
+    # in the pressure-block residual, accumulate dozens of differing log lines, and cross the positivity
+    # limiter around step sixteen, where one is clipped and the other is not. So the flag seeds a small
+    # difference that amplifies rather than flipping a switch, and both arms need to stay runnable.
+    # Default OFF, which is NOT the class default: on this case it is the difference between a march
+    # that converges every rung and one that stalls. `BFS3D_NATIVE_EQUILIBRATE=1` selects the rescaled
+    # arm for an A/B of the flag itself.
+    "equilibrate": os.environ.get("BFS3D_NATIVE_EQUILIBRATE", "0") not in ("", "0"),
 }
 #: Write every trailing sub-block to disk just BEFORE its inverse is built, keeping only the last.
 #: The build refuses a singular cell block, and that refusal fires from a mid-step refresh whose
@@ -365,6 +372,14 @@ def _native_trailing_description() -> str:
     }
     settings.update(NATIVE_TRAILING)
     return ", ".join(f"{k}={v}" for k, v in settings.items())
+
+
+#: Suffix marking the PETSc trailing-smoother banner lines as dead. `build_block_triangular_field_split`
+#: uses `trailing_options` / `trailing_smoother_sweeps` only on the branch that builds its own V-cycle;
+#: a supplied `trailing_inverse` skips that branch entirely.
+_TRAILING_SMOOTHER_NOTE = (
+    "" if TRAILING_INVERSE is None else "  (unused: the native trailing inverse replaces it)"
+)
 
 
 CYCLE_BUDGET = 42  # summed per step: a cost cap, so summed is what it should cap
@@ -746,8 +761,15 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         # steps and that went unnoticed. A configuration line is worth nothing if it omits the variable
         # under test.
         ("turbulence inverse", TURBULENCE_INVERSE),
-        ("turbulence smoother", _TURBULENCE_SMOOTHER or "ilu0 (shipped)"),
-        ("turbulence smoother sweeps", TRAILING_SWEEPS),
+        # ...and, when a `trailing_inverse` is supplied, it REPLACES the PETSc V-cycle wholesale, so the
+        # two smoother settings below are never read. Marking them is the same rule as the note above:
+        # a banner that prints a setting the run did not use is worse than one that omits it, because a
+        # reader diffing two runs attributes a difference to a line that was dead in both.
+        (
+            "turbulence smoother",
+            f"{_TURBULENCE_SMOOTHER or 'ilu0 (shipped)'}{_TRAILING_SMOOTHER_NOTE}",
+        ),
+        ("turbulence smoother sweeps", f"{TRAILING_SWEEPS}{_TRAILING_SMOOTHER_NOTE}"),
         *(
             [("native trailing settings", _native_trailing_description())]
             if TURBULENCE_INVERSE == "native"
@@ -762,6 +784,12 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("preconditioner beta floor", PC_BETA_FLOOR),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
         ("k wall BC", K_WALL),
+        # Printed because a banner diff is only a CONFIG diff if every knob that installs a wrapper or
+        # changes what is retained appears in it. These three were read and never shown, so two runs
+        # could differ in them and produce banners identical to the character.
+        ("checkpoint keep", CHECKPOINT_KEEP),
+        ("inner dump above", INNER_DUMP_ABOVE or "off"),
+        ("trailing block dump", DUMP_TRAILING_BLOCK or "off"),
         *(
             [("step-limit dump below / keep", f"{DUMP_STEP_LIMIT} / {DUMP_STEP_LIMIT_KEEP}")]
             if DUMP_STEP_LIMIT

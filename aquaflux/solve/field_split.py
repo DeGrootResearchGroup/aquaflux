@@ -780,12 +780,21 @@ class NodalNativeInverse:
     ``D^-1 A`` has a unit diagonal, so scaling the relaxation by ``1 / lambda_max`` can only ever
     under-relax, and it was costing a factor of five in sweeps.
 
-    **``equilibrate`` is on because the per-cell block solve is not otherwise safe.** Rescaled to a
-    unit-magnitude diagonal, each cell block is triangular with a unit diagonal and a determinant of
-    exactly one, so it cannot be singular; raw, it can be, and on a developed state of the coupled
-    turbulence block four of 23040 are -- which aborts the build mid-march, at a refresh, hours in. It
-    is free at these settings (measured: same 2 restart cycles, marginally faster), and it is also what
-    the host V-cycle this reproduces is handed.
+    **``equilibrate`` rescales each cell block to a unit-magnitude diagonal**, which leaves the per-cell
+    block triangular with a determinant of exactly one, so the block solve cannot meet a singular block.
+    That was the original reason for the default: raw, a developed state of the coupled turbulence block
+    produced blocks the build rejected, aborting a march at a refresh. The rejection test has since been
+    replaced by a row-norm (Hadamard) determinant bound, which is invariant under rescaling any row or
+    column, so the rescaling is no longer what keeps the build safe.
+
+    **It is not a free choice on a marched solve, and better conditioning is not the deciding property.**
+    Rescaling is close to a similarity transform on the Jacobi-preconditioned operator, so the smoother
+    and the spectral estimates barely see it; what it does change is the coarse operator built by the
+    fixed aggregate indicator, and so the corrections that come out. On a backward-facing-step Reynolds
+    continuation, an otherwise-identical pair of marches differing only in this flag came out opposite --
+    rescaled, the line search lost its step length on an intermediate rung and the march stalled with the
+    residual frozen; unscaled, it converged every rung. Measure it on the case at hand rather than
+    assuming the better-conditioned operator marches better.
     """
 
     def __init__(
