@@ -1330,9 +1330,18 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   reads such a dump and reports the exact per-cell room, the binding set, and the binding cells'
   conditioning against the **base rate** for the mesh.
 
-  **⚠️ EQUILIBRATION DECIDES WHETHER THE `bfs3d` NATIVE MARCH CONVERGES AT ALL — measured 2026-08-11, and
-  it is the opposite sign from "equilibration improves conditioning, so keep it".** An A/B differing in
-  **one flag** was run end to end:
+  **⚠️ SUPERSEDED THE SAME DAY — equilibration is a TRIGGER, not the cause. Read the floored-limiter
+  entry above before using anything here.** The A/B below is real and reproducible, but it holds **only
+  at `positivity_floor = 0`**. With the floor at 1e-8 the flag stops mattering: `equilibrate=True`
+  converges all three rungs in 69 steps and `equilibrate=False` in 67, to the **same root in every
+  reported digit**. So rescaling never caused the failure — it pushed a cell into the numerically-dead
+  zone a few steps earlier than the unscaled arm did, and the global positivity limiter's geometric
+  ratchet did the killing. The defect was in the limiter. Keep the case default at `False` (it is free,
+  and it is what the converging arms were measured with), but do not describe this flag as deciding
+  convergence.
+
+  **⚠️ EQUILIBRATION DECIDES WHETHER THE `bfs3d` NATIVE MARCH CONVERGES — true ONLY at floor 0 (see
+  above). Measured 2026-08-11.** An A/B differing in **one flag** was run end to end:
 
   *Configuration, both arms:* `bfs3d` (23040 cells), 3-rung Reynolds continuation (`N_POINTS=2` →
   Re/100, Re/10, target), `BFS3D_TURBULENCE_INVERSE=native`, `field_split=True`; native trailing
@@ -1394,6 +1403,96 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     not invariant under row scaling and is **the guard that was found wrong and replaced** by the
     Hadamard row-norm bound, which is invariant. The default is **unchanged pending a decision**; flipping
     it is a shipped-default change.
+
+  **✅ THE FLOOR RESCUES A CONFIGURATION THAT PREVIOUSLY DIED — which is the real case for it, not the
+  step count (measured 2026-08-11).** `equilibrate=True` had failed on rung 2 **twice**, under both wall
+  closures (`march-20260810-221936.log`, ‖R‖ frozen at 1.257e-02 from step 34; `march-20260810-223702.log`,
+  frozen at 7.316e-02 from step 26). Re-run with `positivity_floor=1e-8` and **nothing else changed**, it
+  converges all three rungs.
+
+  | arm | `equilibrate` | floor | outcome | steps | wall | final ‖R‖ | `x_r/h` | escalations |
+  |---|---|---|---|---|---|---|---|---|
+  | `221936` | True | 0 | **died, rung 2 step 34** | 39 | — | frozen 1.257e-02 | — | 13 |
+  | `223702` | True | 0 | **died, rung 2 step 26** | — | — | frozen 7.316e-02 | — | — |
+  | `003915` | False | 0 | converged | 77 | 2081 s | 3.586e-06 | 8.3611 | 8 |
+  | — | False | **1e-8** | converged | **67** | 2133 s | 3.586e-06 | 8.3611 | 4 |
+  | — | **True** | **1e-8** | **converged** | **69** | 2188 s | 3.586e-06 | 8.3611 | 5 |
+
+  **The chain the floor breaks, visible step by step.** `221936` clipped at rung-2 step 16 (α 0.699,
+  `L`), which tripped `retry_on_alpha`, which escalated β, which clipped harder, up to the 16.0 ceiling
+  at zero cycles. With the floor, that **same step 16 takes α 1.000 with no flag**, matching the
+  unscaled arm exactly — the binding cell there was numerically dead, and buying it out removes the
+  first link. From step 22 on, the floored equilibrated and floored unscaled arms run the *same*
+  trajectory field for field.
+
+  **What it does NOT fix, confirmed on all three converging arms.** The rung-3 hard point reproduces
+  bit-for-bit regardless of floor or flag: α 0.010 at 15 cycles, then α 0.000, then β 0.0293 → 0.9364
+  (**32×**) across two steps and six steps of SER walking it back, then a constraint-free α 0.031 with
+  **no `L` flag**. That is the bad-direction mode, and the escalation ladder's **overshoot** is now the
+  clearest remaining cost on this case.
+
+  **Where the wall time goes** (equilibrated + floored run, per-step sums, one run on a shared machine —
+  proportions not a benchmark): preconditioner **19 %** (304 s of 1561 s through step 48), of which the
+  coloured Jacobian probe is 243 s and the refactor 56 s; 17 of 48 steps carried a refresh and only 2
+  were scheduled — the rest fired on the reactive 3-cycle rule. Rung 3 costs ~56 s/step against ~25–30 s
+  on rungs 1–2. The four most expensive steps are all first-of-rung (115–171 s), carrying a compilation
+  on top of the PC build.
+
+  **⚠️ THE α COLLAPSES ARE TWO DIFFERENT FAILURE MODES, and only one is the limiter's fault — measured
+  2026-08-11 by a floored-limiter A/B.** `PositiveBlockLimit` gained a `floor`: the room becomes
+  `(phi_i + floor)/|delta_i|`, so an entry that is numerically zero stops setting the step for all of
+  them. `floor=0` (the library default) is bit-identical to the plain rule, and the limiter is inactive
+  at a root for **any** floor (there `delta = 0`), which is what keeps it out of the converged state and
+  therefore out of the implicit-function-theorem adjoint — the adjoint never sees it in any case, since
+  `_implicit_solve_bwd` reads only `jax.vjp(residual_fn, phi_star)` and a transpose solve, never
+  `forward_step_fn`.
+
+  *Configuration, both arms:* `bfs3d`, native trailing inverse with **`equilibrate=False`**, `k` wall BC
+  `zerogradient`, 3-rung Reynolds continuation (`N_POINTS=2`), ILU(0) ×4, `coarse_eq_limit` 2000, plain
+  aggregation, reach 3, forward restart 15, `refresh_on_cycles` 3, `retry on cycles / alpha` 10 / 0.01,
+  PC β floor 0.05, stop `(0.0, 1e-5)`. Floor **1e-8**, calibrated by replaying the recorded clips
+  (`positivity_floor_calibration.py`).
+
+  | | floor 0 | **floor 1e-8** |
+  |---|---|---|
+  | steps | 77 | **67** |
+  | escalations (all `alpha`-triggered) | 8 | **4** |
+  | final ‖R‖ | 3.586e-06 | 3.586e-06 |
+  | mid-span `x_r/h` | 8.3611 | 8.3611 |
+  | `ux`/`uy`/`uz` rel-L2 | 0.0616 / 0.0072 / 0.0061 | identical |
+  | ν_t peak | 150.1071 | 150.1071 |
+  | wall | 2081 s | 2133 s |
+
+  **The root is unchanged in every reported digit, and the wall clock is a WASH — do not sell this as a
+  speed-up.** The floored arm's rung-2 steps run at low β costing 4–9 cycles where the unfloored arm
+  escalated into cheap 2-cycle solves, and that cancels the ten steps. (One run each, and this case has
+  no measured run-to-run spread, so 2.5% is not resolvable.)
+
+  - **Mode 1, the RATCHET — the floor eliminates it.** A numerically-dead cell with a *tiny* correction:
+    `tau` leaves it at `1 - tau` of its value, so the cap falls ×100 per step while its `delta` never
+    moves. Rung 2 went 34 steps → 24, three escalations → one, and the clips stopped binding at all by
+    step 33.
+  - **Mode 2, a BAD DIRECTION — the floor cannot and should not touch it.** Rung 3 steps 50–51
+    reproduce bit-for-bit with the floor in place (α 0.000, ‖R‖ 6.191e-03 vs 6.192e-03), and step 58's
+    α 0.031 carries **no `L` flag at all**. For α to collapse with a 1e-8 floor the binding cell needs
+    `|delta_k| >> 1e-8` — a large correction on a live cell, not a tiny `k`. No physically-sized floor
+    rescues a step whose correction dwarfs the field; the escalation ladder is the right response, and
+    the open question there is its **32× overshoot** (β 0.0293 → 0.9364 across two steps, then six
+    steps of SER walking it back), not its trigger.
+  - **Healthy clips survive, which the dumps could NOT show** (they were written only below cap 0.05).
+    Steps 7 and 8 are preserved exactly; steps 9 and 44 shift by 0.1–0.3 % — exactly the `floor/k`
+    perturbation the softened form predicts for a live cell. That is also how to read a clip: a live
+    cell moves by `floor/k`, a dead one is bought out entirely.
+  - **⚠️ Choose the floor by REPLAY, not by guess — the dead cells are a graded population, not one
+    outlier.** Exempting the worst promotes the next: worst recorded cap 1.05e-09 unfloored, 1.6e-02 at
+    a 1e-12 floor, 6.9e-02 at 1e-10, ~0.35 at 1e-08. An earlier estimate of "1e-12 should do it" was
+    wrong by four orders. At 1e-06 the binding cell is a live one (`k` 4.7e-03, cap 0.84), so 1e-08
+    keeps two orders of margin below anything physical here (inlet `k` 0.375, mesh median ~3e-2).
+  - **Safe only because every consumer of the solved `k` clamps at zero.** The limiter's original
+    justification — a negative `k` reaching a bare `sqrt` and poisoning the residual — no longer holds:
+    `f1`, `f2`, `eddy_viscosity`, the production cap and the wall closures all clamp, and at `k < 0` the
+    destruction term runs on the `k`-independent viscous ω branch, whose sign pushes `k` back up.
+    **Re-check that before floating this limiter on another field.**
 
   **⚠️ REFUTED — "rescaling promotes collapsed-`k` rows and inflates their corrections" is FALSE. Do not
   re-propose it (measured 2026-08-11, `k_row_scale_probe.py`).** The proposed explanation for why the

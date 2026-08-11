@@ -839,7 +839,7 @@ def _mass_flow_residual_norm(coupled: CoupledRANS, reference_state: jnp.ndarray)
     return BlockScaledNorm(sizes, (s_flow, s_k, s_omega, s_flow))
 
 
-def positive_k_limit(coupled: CoupledRANS, tau: float = 0.99):
+def positive_k_limit(coupled: CoupledRANS, tau: float = 0.99, floor: float = 0.0):
     """The step limiter keeping ``k`` strictly positive, or ``None`` when the transform already does.
 
     ``k`` is solved DIRECTLY (``log k`` is singular at a no-slip wall, where ``k = 0`` is the physical
@@ -858,6 +858,12 @@ def positive_k_limit(coupled: CoupledRANS, tau: float = 0.99):
     tau : float
         Fraction of the distance to the boundary taken (see
         :func:`~aquaflux.solve.positive_block_limit`).
+    floor : float
+        Absolute room in ``k`` granted to every cell, so a cell whose ``k`` is numerically zero stops
+        setting the step length for all of them (see :func:`~aquaflux.solve.positive_block_limit` for
+        the collapse this prevents and how to choose it). ``0`` (default) is the plain rule. Give it as
+        a fraction of a reference ``k`` for the case -- an absolute constant does not transfer between
+        cases with different velocity scales.
 
     Returns
     -------
@@ -868,7 +874,7 @@ def positive_k_limit(coupled: CoupledRANS, tau: float = 0.99):
         return None
     layout = coupled.layout
     n, dim = layout.n_cells, layout.dim
-    return positive_block_limit((dim + 1) * n, (dim + 2) * n, tau)
+    return positive_block_limit((dim + 1) * n, (dim + 2) * n, tau, floor)
 
 
 def coupled_scaled_norm(
@@ -1903,6 +1909,7 @@ def coupled_amg_continuation(
     refresh_on_cycles: int | None = None,
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     cycle_budget: int | None = None,
+    positivity_floor: float = 0.0,
     field_split: bool = False,
     trailing_smoother_sweeps: int = 1,
     leading_options: dict | None = None,
@@ -1988,6 +1995,13 @@ def coupled_amg_continuation(
         ``inner_steps`` into the restart cap; pair it with ``solve_coupled``'s β-escalation
         (``retry_on_cycles < cycle_budget``), which redoes the capped step at a larger β. ``None`` (default)
         is unbounded and byte-identical. Forward-only.
+    positivity_floor : float
+        Absolute room in ``k`` given to every cell by the step limiter, so a cell whose ``k`` is
+        numerically zero cannot set the step length for all of them (see
+        :func:`~aquaflux.solve.positive_block_limit`). Express it as a fraction of a reference ``k``
+        for the case rather than as a bare constant. ``0.0`` (default) is the plain
+        fraction-to-the-boundary rule and is byte-identical to it. It does not move the converged root
+        or the adjoint -- at a root the correction vanishes and the limiter is inactive for any floor.
     field_split : bool
         Precondition with a **block-triangular field split** — separate multigrid hierarchies for the
         ``[u, v, w, p]`` saddle and the ``[k, ω]`` transported scalars, retaining one triangle of the
@@ -2150,7 +2164,9 @@ def coupled_amg_continuation(
         cycle_budget=cycle_budget,
         # Keep `k` off zero: it is solved directly, and one negative cell reaches the closure's
         # sqrt(k) and NaNs the whole residual. `None` when the transform already guarantees it.
-        step_limit=positive_k_limit(coupled),
+        # `positivity_floor` stops a cell whose `k` is numerically zero from setting the cap for all
+        # of them; `0` (default) is the plain rule.
+        step_limit=positive_k_limit(coupled, floor=positivity_floor),
     )
 
 

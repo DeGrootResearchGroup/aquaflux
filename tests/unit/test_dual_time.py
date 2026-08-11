@@ -320,6 +320,59 @@ def test_positive_block_limit_keeps_a_constrained_field_off_zero() -> None:
     assert float(limit(phi, jnp.array([-1e3, 0.0, 1.0, 1.0, 1.0]))) == 1.0
 
 
+def test_a_floored_limit_ignores_a_numerically_dead_entry_but_still_guards_a_live_one() -> None:
+    """The floor exists so one entry that is numerically zero cannot set the step for all of them.
+
+    The failure it answers: the cap is a minimum over entries, so taking ``tau`` of the distance to
+    the boundary leaves the binding entry at ``1 - tau`` of its value, whose next room is smaller by
+    the same factor. That is a geometric collapse -- on the march that motivated this, one cell of
+    23040 drove the cap from 3.8e-03 to 1.1e-09 while its own correction never changed.
+    """
+    dead, live = 3.08e-22, 1.0e-2
+    phi = jnp.array([dead, live])
+    delta = jnp.array([-8.1e-14, -1.0e-2])
+
+    plain = positive_block_limit(0, 2)
+    floored = positive_block_limit(0, 2, floor=1.0e-8)
+
+    # Unfloored, the dead entry sets the cap and it is catastrophic.
+    assert float(plain(phi, delta)) == pytest.approx(0.99 * dead / 8.1e-14)
+    # Floored, the dead entry is bought out of the minimum and the LIVE entry sets the cap -- the
+    # limiter is still guarding, just not on an entry whose own equation is asking it to be zero.
+    assert float(floored(phi, delta)) == pytest.approx(0.99 * (live + 1.0e-8) / 1.0e-2)
+
+
+def test_a_floor_of_zero_is_the_plain_rule_and_a_floored_limit_is_inactive_at_a_root() -> None:
+    """Two properties the floor must not break.
+
+    ``floor=0`` has to be bit-identical, so adopting the parameter cannot move an existing march. And
+    the limiter has to stay inactive at a root for **any** floor -- that is what keeps it out of the
+    converged state, and therefore out of the implicit-function-theorem adjoint, which is taken at
+    that state.
+    """
+    phi = jnp.array([1.0, 1.0e-5, 2.0])
+    delta = jnp.array([-0.5, -1.0e-3, -1.0])
+
+    assert float(positive_block_limit(0, 3, floor=0.0)(phi, delta)) == float(
+        positive_block_limit(0, 3)(phi, delta)
+    )
+    # At a root the correction vanishes, so nothing decreases and the cap is 1 whatever the floor.
+    for floor in (0.0, 1.0e-8, 1.0):
+        assert float(positive_block_limit(0, 3, floor=floor)(phi, jnp.zeros_like(phi))) == 1.0
+
+
+def test_a_floored_limiter_is_still_a_compilation_cache_hit() -> None:
+    """The floor rides in the same static field, so it must not break value equality.
+
+    A closure here would make every rebuild a fresh cache key and recompile the whole coupled solve;
+    the limiter is a frozen dataclass of plain numbers precisely to avoid that, and adding a field
+    must not change it.
+    """
+    assert positive_block_limit(0, 3, floor=1e-8) == positive_block_limit(0, 3, floor=1e-8)
+    assert positive_block_limit(0, 3, floor=1e-8) != positive_block_limit(0, 3, floor=1e-9)
+    assert positive_block_limit(0, 3, floor=0.0) == positive_block_limit(0, 3)
+
+
 def test_a_capped_line_search_never_exceeds_the_cap() -> None:
     """The cap applies to every rung, including the growth rungs above one."""
     phi, delta = jnp.array([1.0]), jnp.array([-1.0])

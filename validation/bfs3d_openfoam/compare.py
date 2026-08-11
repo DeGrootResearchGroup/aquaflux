@@ -288,14 +288,15 @@ if TURBULENCE_INVERSE not in _TURBULENCE_INVERSES:
 #: this operator.
 NATIVE_TRAILING = {
     "max_coarse": COARSE_EQ_LIMIT,
-    # Exposed because it decides whether this case converges, not because it is a tuning knob. Rescaling
-    # improves the per-cell block conditioning, yet an otherwise-identical pair of marches differing only
-    # in this flag came out opposite: with it off the march converged all three continuation rungs, and
-    # with it on it lost its line-search factor on the middle rung and stalled with the residual frozen.
-    # The two arms agree only to the fourth printed digit of the step summary: they differ from step one
-    # in the pressure-block residual, accumulate dozens of differing log lines, and cross the positivity
-    # limiter around step sixteen, where one is clipped and the other is not. So the flag seeds a small
-    # difference that amplifies rather than flipping a switch, and both arms need to stay runnable.
+    # Kept off by default, and kept exposed. With NO positivity floor this flag decides whether the case
+    # converges at all: an otherwise-identical pair of marches came out opposite, the rescaled one losing
+    # its line-search factor on the middle rung and stalling with the residual frozen. But that turned out
+    # to be a trigger rather than a cause -- with `K_POSITIVITY_FLOOR` set, both settings converge to the
+    # same root (69 steps rescaled, 67 unscaled), because what actually killed the rescaled arm was one
+    # numerically-zero cell ratcheting the global step cap toward zero. Rescaling merely reached that cell
+    # a few steps sooner: the two arms differ from step one in the pressure-block residual and amplify
+    # until they cross the limiter around step sixteen, where one is clipped and the other is not.
+    # Off is free and is what the converging arms were measured with; both arms stay runnable.
     # Default OFF, which is NOT the class default: on this case it is the difference between a march
     # that converges every rung and one that stalls. `BFS3D_NATIVE_EQUILIBRATE=1` selects the rescaled
     # arm for an A/B of the flag itself.
@@ -380,6 +381,36 @@ def _native_trailing_description() -> str:
 _TRAILING_SMOOTHER_NOTE = (
     "" if TRAILING_INVERSE is None else "  (unused: the native trailing inverse replaces it)"
 )
+
+
+# Absolute room in `k` the step limiter grants every cell, so a cell whose `k` is numerically zero
+# cannot set the step length for all 23040. Calibrated by replaying the recorded clips
+# (`positivity_floor_calibration.py`): unfloored, the worst recorded cap is 1.05e-09; the dead cells
+# form a graded population rather than a single outlier, so a small floor only promotes the next one
+# (1e-12 reaches 1.6e-02, 1e-10 reaches 6.9e-02) and the knee is near 1e-08, where the worst cap
+# becomes ~0.35. At 1e-06 the binding cell is a live one (k 4.7e-03) capped at 0.84, which is the
+# limiter working -- so 1e-08 keeps two orders of margin below anything physical here, where the inlet
+# k is 0.375 and the mesh median ~3e-2.
+#
+# `0` (the library default) is the plain fraction-to-the-boundary rule. It moves neither the converged
+# root nor the adjoint: at a root the correction vanishes and the limiter is inactive for any floor.
+# It is safe here only because every consumer of the solved `k` clamps at zero, so a cell that dips
+# slightly negative no longer reaches a bare sqrt -- and the destruction term, running on the
+# k-independent viscous omega branch there, pushes such a cell back up.
+K_POSITIVITY_FLOOR = float(os.environ.get("BFS3D_K_POSITIVITY_FLOOR", "0") or 0.0)
+
+
+# The inexact-Newton stop for each inner linear solve, measured in the ROW-SCALED `coupled_scaled_norm`
+# (not the Euclidean one -- the coupled Euclidean residual is ~100% omega, which is why the row-scaled
+# measure exists). `0.3` is the builder default: every field block is resolved loosely so the flow is
+# never left blind, and the outer Newton iteration recovers the accuracy.
+#
+# Exposed because a loose stop leaves the accepted correction substantially determined by the
+# PRECONDITIONER rather than the operator -- two preconditioners land at different points inside the same
+# admissible ball -- and the step length is decided by a MINIMUM over cells, an extreme order statistic
+# that a norm-based tolerance does not control. Tightening it trades cycles per step for a correction
+# that is closer to the true shifted-Newton direction.
+FORWARD_RTOL = float(os.environ.get("BFS3D_FORWARD_RTOL", "0.3"))
 
 
 CYCLE_BUDGET = 42  # summed per step: a cost cap, so summed is what it should cap
@@ -784,6 +815,8 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("preconditioner beta floor", PC_BETA_FLOOR),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
         ("k wall BC", K_WALL),
+        ("k positivity floor", K_POSITIVITY_FLOOR or "0 (plain rule)"),
+        ("inner forward rtol (row-scaled)", FORWARD_RTOL),
         # Printed because a banner diff is only a CONFIG diff if every knob that installs a wrapper or
         # changes what is retained appears in it. These three were read and never shown, so two runs
         # could differ in them and produce banners identical to the character.
@@ -846,6 +879,8 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             smoother_sweeps=SWEEPS,
             coarse_eq_limit=COARSE_EQ_LIMIT,
             cycle_budget=round(CYCLE_BUDGET * _RESTART_SCALE),
+            positivity_floor=K_POSITIVITY_FLOOR,
+            forward_rtol=FORWARD_RTOL,
             forward_restart=FORWARD_RESTART,
             inner_observer=combine_observers(
                 logger.on_inner,
