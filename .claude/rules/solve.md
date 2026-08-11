@@ -1549,6 +1549,42 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     ~~why the root is negative~~ (**struck — the root is positive; see the corrected lever above**).
     Neither is built.
 
+    **⚠️ (2026-08-10, LATER STILL) THE `k` WALL BC A/B, RUN AS A CONTROLLED PAIR — and the crash is NOT
+    fixed by any of it.** Two full 3-rung marches from the initial state, `BFS3D_TURBULENCE_INVERSE=native`,
+    everything identical but `BFS3D_K_WALL`, both carrying the four negative-`k` clamps and
+    `stop_on_limit_stall=3`:
+
+    | | `dirichlet` (control) | `zerogradient` |
+    |---|---|---|
+    | rung 1 | 14 steps, 43 cycles, ‖R‖ 5.882e-06 | 14 steps, 45 cycles, ‖R‖ 7.821e-06 |
+    | rung-2 step it locks at | **25** | **35** |
+    | rung-2 ‖R‖ at lock | **7.316e-02** | **1.257e-02** |
+    | rung-2 steps before the guard ends it | 15 | 24 |
+    | outcome | `RuntimeError` from `solve_reynolds_continuation` | same |
+
+    - **❌ Zero-gradient does NOT cure the lock-up.** The same fraction-to-the-boundary ratchet appears,
+      same β ceiling of 16.0, same ~100×-per-step cap collapse — just later. Consistent with the
+      term-by-term account that put the whole wall closure at ~0.87–0.93.
+    - **✅ But it is worth keeping on the evidence: a 5.8× lower residual and 10 more steps of rung 2**,
+      and the attribution is clean because the clamps are verified neutral (below) and both arms had the
+      guard. It also produced five consecutive *uncapped* full steps in rung 2, which the control never
+      does.
+    - **✅ THE CLAMPS ARE EXACTLY NEUTRAL, end to end.** The control's rung 1 is **14 steps / 43 cycles /
+      5.882e-06 / ‖R₀‖ 3.3078e-01 — identical in every digit to the pre-clamp recorded baseline** — and its
+      rung-2 steps 25–29 reproduce that baseline's trajectory exactly (step 25 β 0.4682, ‖R‖ 7.567e-02,
+      `a_min` 0.004, cap 3.76e-03; then 1.00e-05 → 1.95e-06 → 1.95e-08 → 1.95e-10). The per-guard
+      `array_equal` unit tests said this; a real coupled march now confirms it.
+    - **✅ `stop_on_limit_stall` works, on two independent arms.** The control's rung 2 ends at **15 steps
+      instead of the recorded 108**; the zero-gradient arm's at 24. ~90 dead steps saved each time, and the
+      run now fails with a `RuntimeError` naming the rung instead of grinding out `MAX_STEPS`.
+    - **⚠️ THE DEAD GRIND MOVED RATHER THAN VANISHED — a real coverage gap.** Once the guard ends the
+      segment, `solve_coupled` falls through to the finishing solve (`ImplicitNewtonSolver`), which has **no
+      equivalent guard**, and that grinds at α 0.000 / 0 cycles with the residual frozen until `max_steps`.
+      `stop_on_limit_stall` covers `forward_march` only. Fixing that is the next march-level item.
+    - The step-limit dumps now carry **β and the anchor** (`cap 2.2923e-06 beta 1.754 anchor yes`), so the
+      falsifier named against the earlier diagnosis is closed: these dumps can be paired with the linear
+      system that produced them.
+
     **✅ GATES GREEN on all of the above** (CSR level operator, native trailing inverse, and both march
     changes), with the tiers named because a default-on march guard reaches further than the fast gate:
     - fast gate **967 passed / 1 skipped** (899 unit `-n auto`, 68 integration `-n 1`);
