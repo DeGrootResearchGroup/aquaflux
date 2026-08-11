@@ -38,18 +38,25 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
 from .amg_preconditioner import MonolithicAmgPreconditioner, build_amg_vcycle
 from .ilut_preconditioner import equilibrate_cell_major
+from .multigrid import build_convection_hierarchy, convection_multigrid_solve
 from .refresh_timing import PhaseTimer
 
 __all__ = [
     "BlockTriangularFieldSplit",
     "FieldGroups",
     "FieldSplitAmgPreconditioner",
+    "NodalNativeInverse",
+    "PerFieldNativeInverse",
     "build_block_triangular_field_split",
+    "native_nodal_inverse",
+    "native_per_field_inverse",
 ]
 
 
@@ -286,10 +293,17 @@ class BlockTriangularFieldSplit:
         matrix : scipy.sparse matrix
             The new assembled field-major operator, already shifted, of this partition's shape.
 
+        An inverse may take the new operator in either of **two forms**, and the distinction is real
+        rather than two spellings of one thing. A host solver wants it already put into the shape it
+        factors — equilibrated and reordered cell-major — so it re-fits without redoing that work, and
+        takes ``refactor(cell_major, scale, perm)``. A hierarchy built on the raw field-major block
+        cannot use that shape at all: a nodal coarsening recovers each cell as ``index % n_cells``,
+        which only holds field-major. Such an inverse takes ``refactor_block(block)`` instead.
+
         Raises
         ------
         AttributeError
-            If a block inverse cannot re-fit in place (an injected inverse need not provide ``refactor``).
+            If a block inverse offers neither (an injected inverse need not be refreshable at all).
         """
         blocks = self._groups.blocks(matrix)
         leading_block, trailing_block = blocks[0], blocks[3]
@@ -297,12 +311,15 @@ class BlockTriangularFieldSplit:
             (self._leading, leading_block, self._groups.n_leading_fields),
             (self._trailing, trailing_block, self._groups.n_trailing_fields),
         ):
-            if not hasattr(inverse, "refactor"):
+            if (refit := getattr(inverse, "refactor_block", None)) is not None:
+                refit(block)
+            elif hasattr(inverse, "refactor"):
+                inverse.refactor(*equilibrate_cell_major(block, n_group_fields))
+            else:
                 raise AttributeError(
                     f"{type(inverse).__name__} cannot refactor in place, so this split cannot be "
                     "refreshed mid-march; rebuild it instead, or inject an inverse that can."
                 )
-            inverse.refactor(*equilibrate_cell_major(block, n_group_fields))
         self._coupling = sp.csr_matrix(self._select_coupling(blocks))
         self._coupling_transpose = sp.csr_matrix(self._coupling.transpose())
 
@@ -536,6 +553,7 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
         coarse_eq_limit: int | None = 2000,
         leading_options: dict | None = None,
         trailing_options: dict | None = None,
+        trailing_inverse: Callable[[sp.csr_matrix, int], object] | None = None,
         batched_matvec: Callable | None = None,
         probe_batch_size: int | None = None,
         structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
@@ -555,6 +573,10 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
             Passed through to each block's V-cycle. ``smoother_sweeps`` is the leading (saddle) block's
             and ``trailing_smoother_sweeps`` the trailing (transported-scalar) block's; they differ by
             default because the two halves want different amounts of smoothing.
+        trailing_inverse : callable or None
+            ``(sub_matrix, n_fields_in_group) -> inverse`` replacing the trailing block's V-cycle
+            entirely — the seam for preconditioning the transported scalars with something that is not
+            a host solver's V-cycle. When set, the trailing smoother settings above do not apply to it.
 
         Returns
         -------
@@ -573,6 +595,7 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
             coarse_eq_limit=coarse_eq_limit,
             leading_options=leading_options,
             trailing_options=trailing_options,
+            trailing_inverse=trailing_inverse,
         )
         return cls(split, groups, jacobian_no_shift=jacobian, n_fields=n_fields)
 
@@ -624,3 +647,289 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
         self.factors.refactor(shifted)
         timer.lap("refactor")
         return timer.phases()
+
+
+class PerFieldNativeInverse:
+    """A block inverse built from one hierarchy PER FIELD, written in JAX rather than a host solver.
+
+    The multigrid in :mod:`aquaflux.solve.multigrid` is written in JAX, so a block preconditioned by it
+    needs no callback out of a traced solve and no host solver at all — which is what a field split's
+    trailing half wants if any of this is ever to run on an accelerator. What stops it being applied to a
+    multi-field block directly is the **aggregation**: those builders take a bare matrix with no notion
+    of a block size, so they coarsen *scalar* degrees of freedom and will merge two different fields of
+    two different cells into one aggregate. On a strongly nonsymmetric multi-field operator that produces
+    a degenerate Galerkin (``R A P``) row, and the build is refused for a non-positive coarse diagonal —
+    a failure that reads as though the fine operator were the problem when the fine operator is clean.
+
+    So each field gets its **own** hierarchy, over its own diagonal sub-block, where "aggregate" cannot
+    mean "mix fields", and the coupling between them is restored exactly by composing the two
+    block-triangularly (:func:`build_block_triangular_field_split` again, one field per group).
+
+    **These are sub-blocks of the real operator, not a stand-in for it.** An earlier arrangement built
+    each field's hierarchy on a separately assembled transport operator, on the belief that the Jacobian's
+    own diagonal went negative; measured, it does not — only the *coarse* operator of a field-mixing
+    aggregation does. Using the real sub-blocks keeps the full stencil fill and the true source-term
+    linearizations, and needs no reparametrization scaling, since the Jacobian is already expressed in
+    whatever variable is being solved for.
+
+    Host in, host out: the field split works in numpy while the hierarchies are JAX, so each application
+    crosses the boundary. That marshalling is why this is a study adapter rather than the production
+    arrangement — a native split would keep the whole application on the traced side.
+
+    Parameters
+    ----------
+    block : scipy.sparse matrix
+        The group's diagonal block, **field-major** within the group: degree of freedom
+        ``(cell i, field f)`` sits at ``f * n_cells + i``.
+    n_fields : int
+        Fields in the group.
+    cycles : int
+        V-cycles per application, per field. Fixed, not a tolerance: a constant cycle count is what keeps
+        ``b -> x`` a linear map, which the non-flexible outer Krylov and the transposed adjoint solve both
+        require.
+
+    Raises
+    ------
+    ValueError
+        If the block is not divisible into ``n_fields`` equal fields.
+    """
+
+    def __init__(self, block: sp.spmatrix, n_fields: int, *, cycles: int = 1) -> None:
+        matrix = sp.csr_matrix(block)
+        n_dofs = matrix.shape[0]
+        if n_dofs % n_fields:
+            raise ValueError(f"a {n_dofs}-row block does not divide into {n_fields} equal fields.")
+        n_cells = n_dofs // n_fields
+        self._n_dofs = n_dofs
+        self._n_fields = n_fields
+        self._n_cells = n_cells
+        self._cycles = cycles
+        self._hierarchies = [
+            build_convection_hierarchy(
+                sp.csr_matrix(
+                    matrix[f * n_cells : (f + 1) * n_cells, :][:, f * n_cells : (f + 1) * n_cells]
+                )
+            )
+            for f in range(n_fields)
+        ]
+        self._transposes = [
+            jax.linear_transpose(self._cycle(h), jnp.zeros(n_cells, dtype=jnp.float64))
+            for h in self._hierarchies
+        ]
+
+    def _cycle(self, hierarchy):
+        """One field's fixed-cycle solve, as a callable of its residual alone."""
+        return lambda r: convection_multigrid_solve(hierarchy, r, cycles=self._cycles)
+
+    @property
+    def n_dofs(self) -> int:
+        """Degrees of freedom in this block."""
+        return self._n_dofs
+
+    def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
+        """Approximate ``A^-1 r`` (or ``A^-T r``) field by field, block-diagonally."""
+        vector = jnp.asarray(residual, dtype=jnp.float64)
+        out = []
+        for f in range(self._n_fields):
+            part = vector[f * self._n_cells : (f + 1) * self._n_cells]
+            if transpose:
+                out.append(self._transposes[f](part)[0])
+            else:
+                out.append(self._cycle(self._hierarchies[f])(part))
+        return np.asarray(jnp.concatenate(out), dtype=np.float64)
+
+    def destroy(self) -> None:
+        """Nothing to release — the hierarchies are plain arrays, not a host solver's handles."""
+
+
+class NodalNativeInverse:
+    """A block inverse from ONE JAX-native hierarchy over the whole group, coarsening cells.
+
+    The sibling of :class:`PerFieldNativeInverse`, and what supersedes it wherever it works. That class
+    exists because the aggregation used to be field-blind and could only be handed one field at a time;
+    given a block size it coarsens **cells**, so a single hierarchy spans the group and the cross-field
+    coupling is inside the operator being coarsened rather than approximated away outside it.
+
+    Two things have to change together and neither suffices alone — measured, both refused otherwise:
+    the aggregation must coarsen cells, and the level smoother must invert each cell's dense block
+    rather than the scalar diagonal. On a multi-field operator whose within-cell coupling exceeds its
+    diagonal, a point smoother discards the dominant term and the sweep does not contract.
+
+    Host in, host out, like its sibling: the field split is numpy and the hierarchy is JAX, so each
+    application crosses the boundary. A production native split would keep the whole thing traced.
+
+    Parameters
+    ----------
+    block : scipy.sparse matrix
+        The group's diagonal block, **field-major**: ``(cell i, field f)`` at ``f * n_cells + i``.
+    n_fields : int
+        Fields per cell, passed to the aggregation as the block size.
+    cycles : int
+        V-cycles per application. Fixed, so ``b -> x`` stays a linear map — required by the
+        non-flexible outer Krylov and by the transposed adjoint solve.
+    sweeps : int
+        Smoother sweeps per level.
+
+    Notes
+    -----
+    **The defaults here are the settings measured to reproduce a PETSc GAMG V-cycle on this operator,
+    and they are not the multigrid builder's own defaults.** Three of them together took the coupled
+    turbulence block from 5 restart cycles to 2, matching an equivalently-configured GAMG on a coarse
+    space of the same size: one aggressive (squared-graph) coarsening level, an unsmoothed tentative
+    prolongation, and an **undamped** smoother. The last is the one that looks wrong and is not —
+    ``D^-1 A`` has a unit diagonal, so scaling the relaxation by ``1 / lambda_max`` can only ever
+    under-relax, and it was costing a factor of five in sweeps.
+
+    **``equilibrate`` rescales each cell block to a unit-magnitude diagonal**, which leaves the per-cell
+    block triangular with a determinant of exactly one, so the block solve cannot meet a singular block.
+    That was the original reason for the default: raw, a developed state of the coupled turbulence block
+    produced blocks the build rejected, aborting a march at a refresh. The rejection test has since been
+    replaced by a row-norm (Hadamard) determinant bound, which is invariant under rescaling any row or
+    column, so the rescaling is no longer what keeps the build safe.
+
+    **It is not a free choice on a marched solve, and better conditioning is not the deciding property.**
+    Rescaling is close to a similarity transform on the Jacobi-preconditioned operator, so the smoother
+    and the spectral estimates barely see it; what it does change is the coarse operator built by the
+    fixed aggregate indicator, and so the corrections that come out. On a backward-facing-step Reynolds
+    continuation, an otherwise-identical pair of marches differing only in this flag came out opposite --
+    rescaled, the line search lost its step length on an intermediate rung and the march stalled with the
+    residual frozen; unscaled, it converged every rung. Measure it on the case at hand rather than
+    assuming the better-conditioned operator marches better.
+    """
+
+    def __init__(
+        self,
+        block: sp.spmatrix,
+        n_fields: int,
+        *,
+        cycles: int = 1,
+        sweeps: int = 4,
+        max_coarse: int = 16,
+        aggressive_levels: int = 1,
+        prolongation_smoothing: str = "none",
+        spectral_damping: bool = False,
+        equilibrate: bool = True,
+    ) -> None:
+        matrix = sp.csr_matrix(block)
+        self._n_dofs = matrix.shape[0]
+        self._cycles = cycles
+        # Kept so a refresh re-derives the hierarchy at exactly the settings it was built at, rather
+        # than at whatever the builder's defaults happen to be.
+        self._build_settings = {
+            "block_size": n_fields,
+            "max_coarse": max_coarse,
+            "mis_aggregation": True,
+            "aggressive_levels": aggressive_levels,
+            "prolongation_smoothing": prolongation_smoothing,
+            "equilibrate": equilibrate,
+        }
+        self._hierarchy = build_convection_hierarchy(matrix, **self._build_settings)
+        # JIT, because this is applied once per Krylov matrix-vector product and an un-jitted V-cycle
+        # dispatches every operation in it separately -- pure overhead that has nothing to do with the
+        # method. The hierarchy is captured as a constant, which is correct here precisely because it
+        # is frozen.
+        cycle = jax.jit(
+            lambda hierarchy, r: convection_multigrid_solve(
+                hierarchy,
+                r,
+                cycles=self._cycles,
+                sweeps=sweeps,
+                omega=1.0 if not spectral_damping else 0.8,
+                spectral_damping=spectral_damping,
+            )
+        )
+        # The hierarchy rides as a jit ARGUMENT, not a captured constant, so a refresh swaps its values
+        # into the SAME compiled cycle: only the level sizes are static, and the coarsening is a pure
+        # function of the (fixed) sparsity pattern, so a re-derived hierarchy has identical metadata.
+        # Captured, every refresh would retrace -- which on this operator costs more than the refresh.
+        self._solve = lambda r: cycle(self._hierarchy, r)
+        self._transpose = lambda r: jax.linear_transpose(
+            lambda v: cycle(self._hierarchy, v), jnp.zeros(self._n_dofs, dtype=jnp.float64)
+        )(r)
+
+    @property
+    def n_dofs(self) -> int:
+        """Degrees of freedom in this block."""
+        return self._n_dofs
+
+    def refactor_block(self, block: sp.spmatrix) -> None:
+        """Re-fit to a new operator on the same graph, in place, without recompiling the apply.
+
+        The march refreshes its frozen preconditioner as the flow develops, so an inverse that cannot
+        do this cannot be used in one. Re-deriving the hierarchy is cheap and, more importantly,
+        **structure-preserving**: the aggregation reads only the sparsity pattern, which is fixed for a
+        fixed stencil, so every array keeps its shape and the jitted V-cycle stays a compilation-cache
+        hit rather than retracing on each refresh.
+
+        Takes the **raw field-major** block rather than the equilibrated cell-major form a host solver
+        would want, because the nodal coarsening recovers each cell as ``index % n_cells`` and that
+        only holds field-major.
+
+        Parameters
+        ----------
+        block : scipy.sparse matrix
+            The group's new diagonal block, field-major, of the shape this was built at.
+
+        Raises
+        ------
+        ValueError
+            If the new block's shape differs from the built one — silently re-fitting to a different
+            operator would give a preconditioner for a system nothing is solving.
+        """
+        matrix = sp.csr_matrix(block)
+        if matrix.shape != (self._n_dofs, self._n_dofs):
+            raise ValueError(
+                f"cannot refactor a {self._n_dofs}-dof inverse onto a {matrix.shape[0]}-dof block."
+            )
+        self._hierarchy = build_convection_hierarchy(matrix, **self._build_settings)
+
+    def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
+        """Approximate ``A^-1 r`` (or ``A^-T r``) with one hierarchy over the whole group."""
+        vector = jnp.asarray(residual, dtype=jnp.float64)
+        out = self._transpose(vector)[0] if transpose else self._solve(vector)
+        return np.asarray(out, dtype=np.float64)
+
+    def destroy(self) -> None:
+        """Nothing to release — plain arrays, not a host solver's handles."""
+
+
+def native_nodal_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
+    """A ``leading_inverse``/``trailing_inverse`` factory using :class:`NodalNativeInverse`.
+
+    Every keyword is forwarded, so the defaults — and the reasoning behind them — live on the class
+    rather than being restated here. ``max_coarse`` is worth knowing about: it is the coarse-grid size
+    the hierarchy stops at and solves directly, and a coarse grid large enough to invert the global
+    coupling exactly is measured to be worth a great deal on this operator.
+    """
+
+    def build(block: sp.spmatrix, n_group_fields: int) -> object:
+        return NodalNativeInverse(block, n_group_fields, **settings)
+
+    return build
+
+
+def native_per_field_inverse(*, cycles: int = 1) -> Callable[[sp.spmatrix, int], object]:
+    """A ``leading_inverse``/``trailing_inverse`` factory using :class:`PerFieldNativeInverse`.
+
+    For a two-field group the fields are additionally composed **block-triangularly** rather than
+    block-diagonally, because on the coupled turbulence pair the two directions are wildly asymmetric:
+    the second field's dependence on the first is the largest off-diagonal block in the operator while
+    the reverse is negligible, so ordering the coupling costs one sparse product and recovers nearly all
+    of it. Groups of other widths get the plain per-field composition.
+    """
+
+    def build(block: sp.spmatrix, n_group_fields: int) -> object:
+        if n_group_fields != 2:
+            return PerFieldNativeInverse(block, n_group_fields, cycles=cycles)
+        n_cells = sp.csr_matrix(block).shape[0] // 2
+        groups = FieldGroups(n_cells=n_cells, n_leading_fields=1, n_trailing_fields=1)
+        single = {"cycles": cycles}
+        return build_block_triangular_field_split(
+            block,
+            groups,
+            flow_first=True,
+            leading_inverse=lambda sub, n: PerFieldNativeInverse(sub, n, **single),
+            trailing_inverse=lambda sub, n: PerFieldNativeInverse(sub, n, **single),
+        )
+
+    return build

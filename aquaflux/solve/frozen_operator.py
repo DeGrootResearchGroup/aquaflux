@@ -1,4 +1,4 @@
-"""Assemble a frozen transport operator as a sparse matrix, for the algebraic-multigrid setup.
+"""Assemble and rescale a frozen transport operator, for the algebraic-multigrid setup.
 
 The preconditioners freeze an approximate linearization of a transport equation — a symmetric
 diffusive coupling on the interior faces, optionally plus first-order-upwind convection at a
@@ -13,6 +13,13 @@ viscous velocity block (symmetric, ``flux=None``), the convection-aware velocity
 scalar-transport preconditioner. The multigrid builders in :mod:`aquaflux.solve.multigrid` then take
 the assembled matrix, so they stay a pure operator-coarsening library.
 
+It also holds the **symmetric square-root-diagonal equilibration rule**
+(:func:`equilibration_scale`), because a frozen operator is rescaled before it is factored *or*
+coarsened and both must apply the identical rule. They did not: the incomplete factorizations
+rescaled and the aggregation did not, so the two coarsened different matrices and no comparison
+between them meant anything. One home is what makes that failure impossible rather than merely
+unlikely.
+
 This module imports only ``numpy`` and ``scipy.sparse`` — it holds no mesh, no field, and no
 ``jax`` — so it stays testable on a bare graph and adds no dependency to any subsystem that already
 builds a hierarchy.
@@ -22,6 +29,63 @@ from __future__ import annotations
 
 import numpy as np
 import scipy.sparse as sp
+
+
+def equilibration_scale(diagonal: np.ndarray) -> np.ndarray:
+    """The symmetric square-root-diagonal equilibration factor ``diag(D) = 1/sqrt(|diag A|)``.
+
+    The rule on its own, so that a caller which already holds the diagonal — or which moves the matrix
+    data itself by a precomputed gather rather than by generic sparse products — applies the identical
+    one rather than restating it. A zero diagonal entry is treated as one, so a structurally empty row
+    scales by one instead of producing ``inf``.
+
+    Parameters
+    ----------
+    diagonal : np.ndarray
+        The matrix diagonal, shape ``(n_dofs,)``.
+
+    Returns
+    -------
+    np.ndarray
+        The equilibration factor, shape ``(n_dofs,)``.
+    """
+    magnitude = np.abs(np.asarray(diagonal, dtype=np.float64))
+    magnitude[magnitude == 0.0] = 1.0
+    return 1.0 / np.sqrt(magnitude)
+
+
+def symmetrically_equilibrate(a: sp.spmatrix) -> tuple[sp.csr_matrix, np.ndarray]:
+    """Rescale ``a`` to a unit-magnitude diagonal: return ``(D A D, diag(D))``.
+
+    The similarity transform behind every rescaled frozen operator, with ``D`` from
+    :func:`equilibration_scale`. It is symmetric, so it preserves symmetry, sparsity pattern and
+    definiteness, and it is exactly invertible: a solve of ``(D A D) y = D b`` recovers ``A x = b`` as
+    ``x = D y``. Nothing is approximated — only the scale in which the operator is presented to a
+    factorization or a coarsening.
+
+    Why it matters to the coarsening in particular: every step of a multigrid setup reads the diagonal
+    — the smoother's damping, the prolongation smoothing, and the spectral estimates that scale both.
+    On an operator whose diagonal spans several orders of magnitude those steps are calibrated against
+    a scale that has no physical meaning, and the resulting hierarchy is not the one the same algorithm
+    would build on the rescaled matrix.
+
+    Parameters
+    ----------
+    a : scipy.sparse matrix
+        The operator to rescale, shape ``(n, n)``.
+
+    Returns
+    -------
+    scaled : scipy.sparse.csr_matrix
+        ``D A D``, shape ``(n, n)``.
+    scale : np.ndarray
+        ``diag(D)``, shape ``(n,)`` — apply to the right-hand side before, and to the result after, a
+        solve with ``scaled``.
+    """
+    a = a.tocsr()
+    scale = equilibration_scale(a.diagonal())
+    diagonal = sp.diags(scale)
+    return (diagonal @ a @ diagonal).tocsr(), scale
 
 
 def _require_valid_graph(n: int, owner: np.ndarray, nb: np.ndarray, where: str) -> None:

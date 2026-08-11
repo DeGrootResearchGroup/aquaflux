@@ -175,20 +175,26 @@ class PositiveBlockLimit:
         The half-open slice of the flat state that must stay positive.
     tau : float
         Fraction of the distance to the boundary actually taken, in ``(0, 1)``.
+    floor : float
+        Absolute room granted to every entry on top of its own value, in the units of ``phi``. ``0``
+        (default) is the plain rule.
     """
 
     start: int
     stop: int
     tau: float = 0.99
+    floor: float = 0.0
 
     def __call__(self, phi: jnp.ndarray, delta: jnp.ndarray) -> jnp.ndarray:
         values, corrections = phi[self.start : self.stop], delta[self.start : self.stop]
         # Only decreasing entries can cross zero; the rest are unbounded, hence `inf` so `min` skips them.
-        room = jnp.where(corrections < 0.0, values / jnp.abs(corrections), jnp.inf)
+        room = jnp.where(corrections < 0.0, (values + self.floor) / jnp.abs(corrections), jnp.inf)
         return jnp.minimum(jnp.asarray(1.0), self.tau * jnp.min(room))
 
 
-def positive_block_limit(start: int, stop: int, tau: float = 0.99) -> PositiveBlockLimit:
+def positive_block_limit(
+    start: int, stop: int, tau: float = 0.99, floor: float = 0.0
+) -> PositiveBlockLimit:
     """Build ``(phi, delta) -> alpha_max``: the largest step fraction keeping ``phi[start:stop] > 0``.
 
     The **fraction-to-the-boundary** rule from interior-point methods:
@@ -215,6 +221,31 @@ def positive_block_limit(start: int, stop: int, tau: float = 0.99) -> PositiveBl
         Fraction of the distance to the boundary actually taken, in ``(0, 1)``. ``0.99`` (default)
         stops just short, so the constrained entries stay strictly positive rather than landing on
         zero -- where ``sqrt`` is defined but its derivative is not.
+    floor : float
+        Absolute room granted to every entry on top of its own value: the room becomes
+        ``(phi_i + floor) / -delta_i``. ``0`` (default) is the plain rule, bit-identical to it.
+
+        **Why a floor is wanted.** The cap is a minimum over entries, so an entry that is numerically
+        zero -- and whose own equation is asking it to be zero -- sets the step length for the entire
+        state. Protecting such an entry's positivity to *relative* precision buys nothing, and the cost
+        is unbounded: taking ``tau`` of the distance leaves it at ``1 - tau`` of its value, so the next
+        step's room is smaller by the same factor and the cap collapses geometrically while the
+        correction at that entry never changes. Measured on a coupled turbulence march: one cell of
+        23040 drove the cap from ``3.8e-03`` to ``1.1e-09`` across four recorded steps, its value
+        falling ``3.08e-16 -> 3.08e-22`` with the mantissa preserved -- exactly ``1 - tau`` per step --
+        while the march made no progress at all.
+
+        A floor grants that much *absolute* room instead, so an entry below it stops setting the cap
+        while an entry well above it is unaffected. Choose it far below any physically meaningful value
+        of the field, and scale it with the field (a fraction of a reference value) rather than as a
+        bare dimensional constant: too small and the cap is simply set by the next numerically-dead
+        entry, since these come in graded populations rather than singly; too large and it exempts
+        entries that are genuinely small rather than dead.
+
+        **It changes neither the converged state nor the adjoint.** At a root ``delta = 0``, so the
+        room is infinite for any floor and the limiter is inactive -- the same reason the plain rule is
+        absent there. The entries it exempts may go slightly negative on the way, which is safe only if
+        every consumer of the constrained field clamps at zero; verify that before using it.
 
     Returns
     -------
@@ -228,9 +259,10 @@ def positive_block_limit(start: int, stop: int, tau: float = 0.99) -> PositiveBl
     -----
     The cap is **global**: one entry near zero throttles the whole step. On a field spanning several
     orders of magnitude that can trade a failure for a crawl, so a march using this should report the
-    cap and check whether it binds every step or only near the boundary.
+    cap and check whether it binds every step or only near the boundary. ``floor`` is the lever for
+    exactly that case.
     """
-    return PositiveBlockLimit(start, stop, tau)
+    return PositiveBlockLimit(start, stop, tau, floor)
 
 
 def backtracking_line_search(

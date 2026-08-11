@@ -206,7 +206,20 @@ class KProduction(VolumeSource):
     def source(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
         production = self.nu_t * self.strain_rate**2
         cap_field = jax.lax.stop_gradient(field) if self.explicit_limiter else field
-        limit = _PRODUCTION_LIMIT_RATIO * self.model.beta_star * cap_field * self.omega
+        # The Menter cap `10 β* k ω` is an upper bound on a non-negative production, so it must not be
+        # allowed to go negative: at a transiently negative `k` the unclamped limit wins the `min` and
+        # turns this term into a SINK, driving `k` further down -- the production term deepening the very
+        # excursion the limiter exists to damp. `nu_t` is separately clamped non-negative at its source
+        # (`SSTModel.eddy_viscosity`), so with both guards `min(production, limit) >= 0`. Neither is a
+        # model choice: both are off-solution, inactive at convergence where `k > 0`, so the converged
+        # field and its sensitivity are untouched. `KDestruction` deliberately keeps the RAW `k`, which is
+        # what preserves that row's diagonal.
+        limit = (
+            _PRODUCTION_LIMIT_RATIO
+            * self.model.beta_star
+            * jnp.maximum(cap_field, 0.0)
+            * self.omega
+        )
         limited = jnp.minimum(production, limit)
         if self.near_wall is not None:
             limited = self.near_wall.production(limited, field)
@@ -285,10 +298,20 @@ class OmegaProduction(VolumeSource):
         # α min(S², 10 β* k ω / ν_t): the cap is α/ν_t times the destruction-scale k-production cap.
         # The ν_t floor only guards the k → 0 (ν_t → 0) edge; k/ν_t stays finite there (both vanish),
         # so where the cap actually bites it is unaffected.
+        #
+        # ⚠️ `k` IS CLAMPED, AND THE FLOOR IS WHY. For k > 0 the quotient very nearly cancels --
+        # ν_t = a₁k / max(a₁ω, S F₂), so k/ν_t is max(a₁ω, S F₂)/a₁, bounded and independent of k's
+        # magnitude -- and the floor never bites. A *negative* k breaks exactly that cancellation: ν_t
+        # goes negative, `maximum(ν_t, 1e-30)` selects the floor instead of ν_t, and the quotient becomes
+        # k·ω/1e-30. Measured on a real iterate (k = -2.9e-13, ω = 4.0e5) that is a cap of ≈ -1e23, which
+        # wins the `min` and injects an ω source of ~1e13. A NaN would at least be caught; this is finite,
+        # so it propagates. Clamping the numerator gives cap = 0 there, which is the same value the
+        # unclamped formula already returns at k = 0 exactly, so the guard introduces no new behaviour --
+        # it only stops the sign flip. Off-solution and inactive at convergence, where k > 0.
         cap = (
             _PRODUCTION_LIMIT_RATIO
             * self.model.beta_star
-            * self.k
+            * jnp.maximum(self.k, 0.0)
             * self.omega
             / jnp.maximum(self.nu_t, _EDDY_VISCOSITY_FLOOR)
         )

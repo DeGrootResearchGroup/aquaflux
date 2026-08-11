@@ -41,6 +41,8 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
+from .frozen_operator import symmetrically_equilibrate
+
 
 def cell_major_permutation(n_cells: int, n_fields: int) -> np.ndarray:
     """Permutation from cell-major to field-major degree-of-freedom ordering.
@@ -122,29 +124,6 @@ class IlutFactors:
         return self.scale * out
 
 
-def equilibration_scale(diagonal: np.ndarray) -> np.ndarray:
-    """The symmetric square-root-diagonal equilibration factor ``diag(D) = 1/sqrt(|diag A|)``.
-
-    The scaling rule behind :func:`equilibrate_cell_major`, on its own so that a caller which already
-    holds the diagonal — and which moves the matrix data itself by a precomputed gather rather than by
-    generic sparse products — applies the identical rule rather than restating it. A zero diagonal
-    entry is treated as one, so a structurally empty row scales by one instead of producing ``inf``.
-
-    Parameters
-    ----------
-    diagonal : np.ndarray
-        The matrix diagonal, shape ``(n_dofs,)``.
-
-    Returns
-    -------
-    np.ndarray
-        The equilibration factor, shape ``(n_dofs,)``.
-    """
-    magnitude = np.abs(np.asarray(diagonal, dtype=np.float64))
-    magnitude[magnitude == 0.0] = 1.0
-    return 1.0 / np.sqrt(magnitude)
-
-
 def equilibrate_cell_major(
     matrix: sp.spmatrix, n_fields: int
 ) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
@@ -190,9 +169,7 @@ def equilibrate_cell_major(
         raise ValueError(
             f"equilibrate_cell_major: matrix size {n_dofs} is not a multiple of n_fields={n_fields}."
         )
-    matrix = matrix.tocsr()
-    scale = equilibration_scale(matrix.diagonal())
-    equilibrated = (sp.diags(scale) @ matrix @ sp.diags(scale)).tocsr()
+    equilibrated, scale = symmetrically_equilibrate(matrix)
     perm = cell_major_permutation(n_dofs // n_fields, n_fields)
     reordered = equilibrated[perm][:, perm].tocsr()
     # Canonical form, because the permutation above leaves each row's column indices OUT OF ORDER and a

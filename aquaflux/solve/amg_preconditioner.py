@@ -40,11 +40,8 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .ilut_preconditioner import (
-    cell_major_permutation,
-    equilibrate_cell_major,
-    equilibration_scale,
-)
+from .frozen_operator import equilibration_scale
+from .ilut_preconditioner import cell_major_permutation, equilibrate_cell_major
 from .refresh_timing import PhaseTimer
 
 # A process-unique options prefix per V-cycle, so several preconditioners' PETSc options never collide.
@@ -434,8 +431,12 @@ def build_amg_vcycle(
     n_fields : int
         Degrees of freedom per cell.
     smoother_fill_levels : int
-        Incomplete-LU fill levels of the stationary level smoother (``1`` = ILU(1); the indefinite saddle
-        stalls at ``0``).
+        Incomplete-LU fill levels of the stationary level smoother (``1`` = ILU(1), ``0`` = ILU(0)).
+        **Which is better depends on the pseudo-transient shift, and the two regimes rank them
+        oppositely.** Near a converged state at a large shift the operator is diagonally dominant, fill is
+        harmless, and ILU(1) wins -- the measurement this default was set from. At the small shifts a cold
+        march runs at, the fill is what breaks: ILU(1) acquires negative pivots and diverges where ILU(0)
+        converges. A march living at low shift should pass ``0``.
     smoother_sweeps : int
         Richardson sweeps of the level smoother per V-cycle visit. Two is the default: on the
         low-shift operator the pseudo-transient march spends its tail in, a second smoother sweep
@@ -485,7 +486,7 @@ class ShiftedCellMajorOperator:
     This precomputes the pattern-dependent part once — which base nonzero feeds each output nonzero, where
     the diagonal entries sit, and the cell-major CSR structure — so a refresh is one gather plus an
     ``O(n_dofs)`` diagonal add plus a symmetric scale, written into a **preallocated** buffer. The scaling
-    rule itself is :func:`~aquaflux.solve.ilut_preconditioner.equilibration_scale`, shared with the generic
+    rule itself is :func:`~aquaflux.solve.frozen_operator.equilibration_scale`, shared with the generic
     :func:`~aquaflux.solve.ilut_preconditioner.equilibrate_cell_major` that serves an arbitrary matrix;
     only the data movement differs, and the two agree to the last bit (pinned by a unit test).
 

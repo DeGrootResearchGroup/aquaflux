@@ -30,4 +30,30 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -qE '^(aquaflux|tests
   echo "Docs and code land together. (Not blocking; 'git commit --no-verify' to skip.)" >&2
 fi
 
+# The Stale-Record Check: a rename/delete leaves the OLD name readable in the rules
+# files, where it auto-loads into context and is served to the next reader as current
+# fact. Three wrong facts were lifted out of these files by grep in a single session
+# this way. Surface the specific identifiers this commit REMOVED that still appear.
+removed=$(git diff --cached -U0 -- 'aquaflux/*.py' 'tests/*.py' 'validation/*.py' \
+  | grep -E '^-' | grep -v '^---' \
+  | grep -oE '\b_?[A-Za-z][A-Za-z0-9_]{5,}\b' | sort -u || true)
+if [ -n "$removed" ]; then
+  # Only names the commit does not still define somewhere -- a moved line is not a rename.
+  kept=$(git diff --cached -U0 | grep -E '^\+' | grep -v '^+++' || true)
+  stale=""
+  for name in $removed; do
+    printf '%s' "$kept" | grep -q "$name" && continue
+    hit=$(grep -rlF "$name" CLAUDE.md .claude/rules/ README.md 2>/dev/null | head -3 || true)
+    [ -n "$hit" ] && stale="$stale  $name -> $(printf '%s' "$hit" | tr '\n' ' ')
+"
+  done
+  if [ -n "$stale" ]; then
+    echo "" >&2
+    echo "pre-commit reminder: identifiers this commit REMOVES still appear in the" >&2
+    echo "Claude-facing files. Update or DELETE them (never strikethrough -- grep" >&2
+    echo "cannot see tildes). See CLAUDE.md -> Stale-Record Check." >&2
+    printf '%s' "$stale" >&2
+  fi
+fi
+
 exit 0

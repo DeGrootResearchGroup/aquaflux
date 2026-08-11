@@ -49,8 +49,11 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
+from jax.experimental.sparse import BCSR
 from jax.ops import segment_sum
 from scipy.sparse.csgraph import reverse_cuthill_mckee
+
+from .frozen_operator import symmetrically_equilibrate
 
 
 def _require_positive_diagonal(diagonal: np.ndarray, where: str) -> None:
@@ -109,6 +112,291 @@ def _rcm_order(owner: np.ndarray, nb: np.ndarray, n: int) -> np.ndarray:
         shape=(n, n),
     ).tocsr()
     return reverse_cuthill_mckee(symmetric, symmetric_mode=True)
+
+
+def _cell_graph(a: sp.csr_matrix, block_size: int) -> sp.csr_matrix:
+    """Collapse a block operator's degree-of-freedom graph onto its **cell** connectivity.
+
+    Aggregation on the degree-of-freedom graph is field-blind: with several fields per cell it can put
+    one field of cell ``i`` and a *different* field of cell ``j`` into the same aggregate. On a strongly
+    nonsymmetric multi-field operator that produces a degenerate Galerkin (``Rᵀ A P``) row, so the build
+    is then refused for a non-positive coarse diagonal — a failure that reads as though the *fine*
+    operator were at fault when the fine operator is clean. Coarsening whole cells removes the cause,
+    which is why a nodal aggregation is what a multi-field hierarchy needs.
+
+    The collapse is exact rather than approximate because the layout is **field-major**: degree of
+    freedom ``(cell i, field f)`` sits at ``f * n_cells + i``, so ``index % n_cells`` *is* the cell. The
+    cell edge weight is the sum of ``|A_ij|`` over the corresponding ``block_size × block_size`` block —
+    the standard nodal strength measure, and the reason a cell pair couples if **any** of their fields do.
+
+    Parameters
+    ----------
+    a : scipy.sparse matrix
+        The operator to coarsen, shape ``(block_size * n_cells,) * 2``, field-major. Pass the true
+        operator, not its symmetric part: the magnitude is taken per entry here, so symmetrizing
+        first would let an antisymmetric coupling cancel itself out of the graph.
+    block_size : int
+        Fields per cell.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        The cell graph, shape ``(n_cells, n_cells)``, with non-negative weights.
+    """
+    n_cells = a.shape[0] // block_size
+    entries = sp.coo_matrix(abs(a))
+    # `coo_matrix` sums duplicate (row, col) pairs on conversion, which is exactly the block sum.
+    return sp.coo_matrix(
+        (entries.data, (entries.row % n_cells, entries.col % n_cells)),
+        shape=(n_cells, n_cells),
+    ).tocsr()
+
+
+def _block_tentative(aggregate: np.ndarray, n_coarse_cells: int, block_size: int) -> sp.csr_matrix:
+    """The piecewise-constant prolongation for a **nodal** aggregation, one column per coarse field.
+
+    Degree of freedom ``(cell i, field f)`` interpolates from coarse degree of freedom
+    ``(aggregate[i], field f)`` — each field is carried by its own coarse unknown, so the coarse
+    operator is a block operator of the *same* block size and the recursion can coarsen it again. A
+    single shared column per aggregate would instead average the fields together, which is the
+    field-blind failure in a different guise.
+
+    Parameters
+    ----------
+    aggregate : np.ndarray
+        Aggregate index per fine cell, shape ``(n_cells,)``.
+    n_coarse_cells : int
+        Number of aggregates.
+    block_size : int
+        Fields per cell, preserved onto the coarse level.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Shape ``(block_size * n_cells, block_size * n_coarse_cells)``, field-major on both sides.
+    """
+    n_cells = aggregate.shape[0]
+    rows = np.arange(block_size * n_cells)
+    fields, cells = np.divmod(rows, n_cells)
+    cols = fields * n_coarse_cells + aggregate[cells]
+    return sp.csr_matrix(
+        (np.ones(rows.shape[0]), (rows, cols)),
+        shape=(block_size * n_cells, block_size * n_coarse_cells),
+    )
+
+
+def _cell_block_inverse(a: sp.csr_matrix, block_size: int, where: str = "operator") -> np.ndarray:
+    """The inverse of each cell's own dense ``block_size × block_size`` block, shape ``(n_cells, b, b)``.
+
+    What a **block** smoother inverts, in place of the scalar diagonal a point smoother uses. The
+    distinction is the whole reason a nodal level needs its own smoother: on a multi-field operator the
+    within-cell coupling between fields can dwarf the diagonal itself, and a point method throws all of
+    it away, so it neither smooths nor even reliably contracts.
+
+    The requirement is correspondingly weaker than the point smoother's, which is the useful part: point
+    Jacobi needs every ``a_ii`` positive, while this needs only each block **invertible** — a block can
+    be perfectly well conditioned with a negative entry on its diagonal.
+
+    Field-major, so a cell's degrees of freedom are strided by ``n_cells`` rather than contiguous.
+
+    **Singularity is judged against the product of the block's ROW NORMS, not against its Frobenius
+    norm — and the difference is not pedantry.** Hadamard's inequality bounds ``|det| <= prod ||row_i||``
+    with equality when the rows are orthogonal, so that ratio is how close a block is to rank-deficient
+    *given the size of its rows*, and it is invariant under rescaling either a row or a column. A
+    ``||B||_F ** b`` denominator is only equivalent when the rows have comparable magnitude, and it is
+    dominated by the largest of them when they do not.
+
+    On the coupled turbulence pair they do not. A degenerate-looking cell there reads
+
+        [[ 8.8e-06,  1.7e-12],        row norms 8.8e-06 and 1.4e+03,
+         [-1.3e+03,  1.5e-01]]        a ratio of 1.5e+08
+
+    whose determinant is 1.35e-06 against a Frobenius-squared norm of 1.6e+06 — so the older test put
+    the bar at 1.6e-06, just above the determinant, and **refused a block that is not singular at all**:
+    the same block scores 1.2e-04 on the row-norm bound, eight orders clear. That false refusal aborted
+    a march at a mid-march refresh, and rescaling does not avoid it (equilibration moves the imbalance
+    from the rows into the subdiagonal and the Frobenius test misfires identically).
+
+    Note the block is genuinely **ill conditioned** — around 1e12 here, so its inverse is large — and
+    that is a real question about whether a cell-local method should invert it exactly. It is a
+    different question from whether the block is invertible, which it is, and it is not this guard's to
+    answer.
+
+    Parameters
+    ----------
+    a : scipy.sparse matrix
+        The operator whose cell blocks to invert, shape ``(block_size * n_cells,) * 2``, field-major.
+    block_size : int
+        Degrees of freedom per cell.
+    where : str
+        What to name in the refusal below. **A count alone is not diagnosable**: the caller coarsens,
+        so this runs on the fine operator and on every Galerkin coarse one, and "4 of 23040 are
+        singular" sent three separate attempts hunting a fine-grid state that was never degenerate.
+        Say which level.
+
+    Raises
+    ------
+    ValueError
+        If any cell block is singular, naming where and how many — a genuinely degenerate operator, as
+        distinct from a merely indefinite one, and not something a different smoother would rescue.
+    """
+    n_cells = a.shape[0] // block_size
+    rows = np.arange(n_cells)
+    blocks = np.empty((n_cells, block_size, block_size))
+    for f in range(block_size):
+        for g in range(block_size):
+            blocks[:, f, g] = np.asarray(a[f * n_cells + rows, g * n_cells + rows]).ravel()
+    # Hadamard: |det| <= prod ||row_i||, so the ratio is how near rank-deficiency the block is given
+    # its own row sizes -- invariant under rescaling any row or column, which the Frobenius form is not.
+    # A structurally empty row makes the bound zero, and the comparison below can then never fire, so
+    # that case is named rather than left to arithmetic.
+    bound = np.prod(np.linalg.norm(blocks, axis=2), axis=1)
+    singular = (bound == 0.0) | (np.abs(np.linalg.det(blocks)) < 1e-12 * bound)
+    if singular.any():
+        raise ValueError(
+            f"{where}: block smoothing needs every cell block invertible, but {int(singular.sum())} "
+            f"of {n_cells} are singular. Unlike a non-positive scalar diagonal — which a block smoother "
+            "tolerates — this is a genuinely degenerate operator that no smoother choice repairs."
+        )
+    return np.linalg.inv(blocks)
+
+
+def _block_diagonal_inverse_operator(
+    a: sp.csr_matrix, block_size: int, where: str = "operator"
+) -> sp.csr_matrix:
+    """The block-diagonal inverse as a sparse operator, for the build-time spectral estimate.
+
+    The runtime smoother applies :func:`_cell_block_inverse` as a batched contraction; the *build* needs
+    the same operator in sparse form, because the damping factor comes from a power iteration on
+    ``D_blk⁻¹ A``. Estimating it from the scalar ``D⁻¹ A`` instead would scale the sweep by the wrong
+    spectrum entirely — on this operator by orders of magnitude, since the two differ by exactly the
+    within-cell coupling the block inverse exists to capture.
+
+    Field-major, so cell ``i``'s degrees of freedom are ``{f * n_cells + i}`` and the assembled operator
+    is block-diagonal in the *cell* sense while being scattered in index space.
+    """
+    inverse = _cell_block_inverse(a, block_size, where)
+    n_cells = inverse.shape[0]
+    cells = np.arange(n_cells)
+    rows = np.concatenate(
+        [f * n_cells + cells for f in range(block_size) for _ in range(block_size)]
+    )
+    cols = np.concatenate(
+        [g * n_cells + cells for _ in range(block_size) for g in range(block_size)]
+    )
+    values = np.concatenate(
+        [inverse[:, f, g] for f in range(block_size) for g in range(block_size)]
+    )
+    return sp.coo_matrix((values, (rows, cols)), shape=a.shape).tocsr()
+
+
+def _square_graph(graph: sp.csr_matrix) -> sp.csr_matrix:
+    """``G·G`` — the graph of distance-2 connectivity, for an aggressive first coarsening.
+
+    Aggregating on the squared graph makes each aggregate span a cell's neighbours-of-neighbours, which
+    coarsens far faster than the plain graph and is what keeps the number of levels low as the mesh
+    grows. It is the standard aggressive-coarsening device and is applied to the **first** level only:
+    deeper levels aggregate on their own plain graph, because by then the operator is dense enough that
+    squaring it again would produce very large, badly-shaped aggregates.
+    """
+    squared = (graph @ graph).tocsr()
+    squared.setdiag(0.0)
+    squared.eliminate_zeros()
+    return squared
+
+
+def _mis_aggregate(graph: sp.csr_matrix, seed: int = 0) -> tuple[np.ndarray, int]:
+    """Greedy maximal-independent-set aggregation over a **randomized** visit order.
+
+    One sweep over the vertices in a random permutation. Any vertex still unclaimed when it is visited
+    becomes a **selector**: it opens an aggregate and claims every unclaimed neighbour. Because a
+    selector is chosen on its *own* state rather than its neighbourhood's, a single sweep leaves nothing
+    behind — every vertex is either a selector or claimed by one — so there is no leftover pass and no
+    aggregate built from whatever happened to be adjacent to a straggler.
+
+    That is the difference from a stricter two-pass scheme that only seeds from vertices whose whole
+    neighbourhood is free: such a scheme seeds few aggregates and consigns most vertices to the
+    cleanup pass, which attaches them to the first adjacent aggregate it finds. The aggregates it
+    produces are correspondingly ragged, and a ragged coarse space is measurably worse at the same
+    aggregate count.
+
+    **The order is random on purpose.** A locality-preserving order (reverse Cuthill--McKee, say) is the
+    intuitive choice and is the wrong one here: sweeping along a spatial ordering makes each selector
+    claim the vertices just ahead of it, producing long thin aggregates aligned with the numbering
+    rather than compact ones. Randomizing removes that bias.
+
+    Parameters
+    ----------
+    graph : scipy.sparse matrix
+        Symmetric connectivity, shape ``(n, n)``. Only its sparsity is read.
+    seed : int
+        Seed for the permutation, so a hierarchy is reproducible.
+
+    Returns
+    -------
+    tuple
+        ``(aggregate, roots, n_aggregates)`` — the aggregate index of every vertex, and the vertex
+        that seeded each aggregate. The roots are returned because a caller coarsening a *squared*
+        graph needs them to repair the result (:func:`_reattach_to_adjacent_root`).
+    """
+    n = graph.shape[0]
+    indptr, indices = graph.indptr, graph.indices
+    aggregate = np.full(n, -1, dtype=np.int64)
+    roots: list[int] = []
+    for i in np.random.default_rng(seed).permutation(n):
+        if aggregate[i] != -1:
+            continue
+        neighbours = indices[indptr[i] : indptr[i + 1]]
+        # A true singleton (no neighbour but itself) is left for the sweep to pick up as its own
+        # aggregate rather than being attached to something it does not touch.
+        aggregate[i] = len(roots)
+        for j in neighbours:
+            if aggregate[j] == -1:
+                aggregate[j] = len(roots)
+        roots.append(int(i))
+    return aggregate, np.asarray(roots, dtype=np.int64), len(roots)
+
+
+def _reattach_to_adjacent_root(
+    aggregate: np.ndarray, roots: np.ndarray, graph: sp.csr_matrix
+) -> np.ndarray:
+    """Repair a squared-graph aggregation: give every member a root it is genuinely adjacent to.
+
+    Aggregating the squared graph is what makes a hierarchy coarsen fast enough to stay shallow, but
+    it buys that by letting an aggregate reach two hops: a member can be assigned to a root it has no
+    direct coupling to at all, which is a poor thing for a piecewise-constant coarse basis function to
+    be supported on. This walks each root in ascending index order and claims every **distance-1**
+    neighbour — in the *unsquared* graph — that currently belongs to some other aggregate.
+
+    Only members move; a root is never stolen from, so no aggregate is emptied and the count is
+    unchanged. What changes is aggregate *shape*. Later roots override earlier ones, so a member
+    adjacent to several roots ends up with the highest-indexed of them — arbitrary, but the tie has to
+    break somehow and matching the reference's order keeps the two comparable.
+
+    Parameters
+    ----------
+    aggregate : np.ndarray
+        Aggregate index per vertex, shape ``(n,)``, from coarsening the squared graph.
+    roots : np.ndarray
+        The seeding vertex of each aggregate, shape ``(n_aggregates,)``.
+    graph : scipy.sparse matrix
+        The **unsquared** symmetric connectivity, shape ``(n, n)``. Only its sparsity is read.
+
+    Returns
+    -------
+    np.ndarray
+        The repaired aggregate index per vertex, shape ``(n,)``.
+    """
+    aggregate = aggregate.copy()
+    indptr, indices = graph.indptr, graph.indices
+    is_root = np.zeros(aggregate.shape[0], dtype=bool)
+    is_root[roots] = True
+    for root in np.sort(roots):
+        target = aggregate[root]
+        for j in indices[indptr[root] : indptr[root + 1]]:
+            if not is_root[j] and aggregate[j] != target:
+                aggregate[j] = target
+    return aggregate
 
 
 def _aggregate(owner: np.ndarray, nb: np.ndarray, n: int) -> tuple[np.ndarray, int]:
@@ -184,9 +472,7 @@ class _SparseLevel(eqx.Module):
     """
 
     n: int = eqx.field(static=True)  # cells at this level (sizes the matvec output)
-    row: jnp.ndarray  # (nnz,) COO row of the level operator A
-    col: jnp.ndarray  # (nnz,) COO col
-    val: jnp.ndarray  # (nnz,) COO value
+    operator: _CsrOperator  # the level operator A, in CSR form and owning its matvec
     diagonal: jnp.ndarray  # (n,) diagonal of A
     lam_max: jnp.ndarray  # 0-d: largest eigenvalue of D^-1 A, for the smoother damping
     coarse_inv: jnp.ndarray | None  # dense pseudo-inverse (coarsest level only); None otherwise
@@ -194,12 +480,57 @@ class _SparseLevel(eqx.Module):
     p_ccol: jnp.ndarray | None  # (pnnz,) prolongation coarse col (next level)
     p_val: jnp.ndarray | None  # (pnnz,) prolongation value
     n_coarse: int = eqx.field(static=True)  # next-coarser cell count (0 on coarsest)
+    # A nodal level additionally carries the inverse of each cell's own dense block. The scalar
+    # diagonal cannot smooth a multi-field operator whose within-cell coupling dwarfs it -- a point
+    # method discards that coupling entirely -- so the smoother inverts the block instead. Traced,
+    # like `diagonal`, so a refreshed hierarchy stays a compilation-cache hit; `block_size` is static
+    # because it sizes the reshape.
+    block_inverse: jnp.ndarray | None = None  # (n_cells, b, b), or None for a scalar level
+    block_size: int = eqx.field(static=True, default=1)
 
 
 class SmoothedHierarchy(eqx.Module):
-    """A built smoothed-aggregation hierarchy: general-sparse levels, finest to coarsest."""
+    """A built smoothed-aggregation hierarchy: general-sparse levels, finest to coarsest.
+
+    The levels may have been coarsened on a **rescaled** operator ``D A D`` rather than on ``A``
+    itself (:func:`~aquaflux.solve.frozen_operator.symmetrically_equilibrate`), in which case
+    ``equilibration`` holds ``diag(D)`` and :meth:`fixed_cycle_solve` moves the right-hand side into
+    that scale and the answer back out. Keeping the factor **on the hierarchy** rather than asking
+    each caller to remember it is what makes the two spellings interchangeable at every call site;
+    ``None`` means the levels were built on ``a`` as given, and the solve is then unscaled.
+    """
 
     levels: tuple[_SparseLevel, ...]
+    equilibration: jnp.ndarray | None = None  # (n,) diag(D), or None for an unscaled hierarchy
+
+    def fixed_cycle_solve(self, b: jnp.ndarray, cycles: int, ops: _VCycleOps) -> jnp.ndarray:
+        """``cycles`` V-cycles for ``A x = b``, undoing any equilibration around the solve.
+
+        With ``D A D`` coarsened into the levels, ``A^-1 = D (D A D)^-1 D``, so the scaled solve is
+        ``x = D M(D b)`` — exact, because the rescaling is a similarity transform and not an
+        approximation. It composes two fixed linear maps with a third, so the result is still a fixed
+        linear operator: valid as a frozen preconditioner under a non-flexible Krylov solve, and
+        transposable for the adjoint.
+
+        Parameters
+        ----------
+        b : jnp.ndarray
+            Right-hand side, shape ``(n,)``.
+        cycles : int
+            Number of V-cycles (static).
+        ops : _VCycleOps
+            The family's restriction, prolongation and smoother.
+
+        Returns
+        -------
+        jnp.ndarray
+            The approximate solution ``x``, shape ``(n,)``.
+        """
+        if self.equilibration is None:
+            return _fixed_cycle_solve(self.levels, b, cycles, ops)
+        return self.equilibration * _fixed_cycle_solve(
+            self.levels, self.equilibration * b, cycles, ops
+        )
 
 
 def _sparse_level(
@@ -208,9 +539,9 @@ def _sparse_level(
     coarse_inv: np.ndarray | None,
     prolongation: sp.coo_matrix | None,
     n_coarse: int,
+    block_size: int = 1,
 ) -> _SparseLevel:
     """Freeze a scipy sparse operator (+ optional prolongation / coarse inverse) into JAX arrays."""
-    a_coo = a.tocoo()
     p_frow = p_ccol = p_val = None
     if prolongation is not None:
         p_frow = jnp.asarray(prolongation.row)
@@ -218,9 +549,7 @@ def _sparse_level(
         p_val = jnp.asarray(prolongation.data)
     return _SparseLevel(
         n=a.shape[0],
-        row=jnp.asarray(a_coo.row),
-        col=jnp.asarray(a_coo.col),
-        val=jnp.asarray(a_coo.data),
+        operator=_CsrOperator.from_scipy(a),
         diagonal=jnp.asarray(a.diagonal()),
         lam_max=jnp.asarray(float(lam_max)),
         coarse_inv=None if coarse_inv is None else jnp.asarray(coarse_inv),
@@ -228,7 +557,32 @@ def _sparse_level(
         p_ccol=p_ccol,
         p_val=p_val,
         n_coarse=n_coarse,
+        block_inverse=(
+            None if block_size == 1 else jnp.asarray(_cell_block_inverse(a, block_size))
+        ),
+        block_size=block_size,
     )
+
+
+def _largest_singular_value(matrix: sp.spmatrix, iterations: int = 20) -> float:
+    """Largest singular value of a sparse matrix, by power iteration on ``MᵀM`` (off-jit).
+
+    Distinct from :func:`_spectral_radius`, and the distinction is load-bearing for a nonsymmetric
+    operator: ``sigma_max >= |lambda|_max``, so using an eigenvalue where the method calls for a
+    singular value produces too large a smoothing step. They coincide only for a normal matrix.
+    """
+    rng = np.random.default_rng(0)
+    v = rng.standard_normal(matrix.shape[1])
+    v /= np.linalg.norm(v)
+    sigma = 1.0
+    for _ in range(iterations):
+        w = matrix.T @ (matrix @ v)
+        norm = np.linalg.norm(w)
+        if norm == 0.0:
+            return 0.0
+        v = w / norm
+        sigma = np.sqrt(norm)
+    return float(sigma)
 
 
 def _spectral_radius(matrix: sp.spmatrix, iterations: int = 20) -> float:
@@ -269,6 +623,18 @@ def _aggregation_edges(a_agg: sp.csr_matrix, strength_threshold: float) -> sp.co
     return sp.triu((strength + strength.T).tocsr(), k=1).tocoo()
 
 
+# How the tentative piecewise-constant prolongation is smoothed before it is frozen into a level.
+#
+# `"none"` keeps the tentative injection (plain aggregation). It is not a degenerate case: on a
+# strongly indefinite or badly scaled operator the smoothing step degrades the coarse correction it
+# exists to improve, and the smoothing damping is only meaningful on a unit-magnitude diagonal.
+# `"standard"` is the textbook `P <- (I - 1.4/sigma_max(D^-1 A)) P_tent` on the true operator with the
+# scalar diagonal. `"symmetric-part"` damps by an eigenvalue of the aggregation operator instead, and
+# on a nodal level uses the block diagonal; the two coincide on a symmetric operator up to the damping
+# constant.
+_PROLONGATION_SMOOTHING = frozenset({"none", "standard", "symmetric-part"})
+
+
 def _build_aggregation_hierarchy(
     a: sp.csr_matrix,
     *,
@@ -277,6 +643,11 @@ def _build_aggregation_hierarchy(
     max_coarse: int,
     max_levels: int,
     strength_threshold: float = 0.0,
+    block_size: int = 1,
+    mis_aggregation: bool = False,
+    aggressive_levels: int = 0,
+    equilibrate: bool = False,
+    prolongation_smoothing: str = "symmetric-part",
 ) -> SmoothedHierarchy:
     """Coarsen ``a`` into a frozen smoothed-aggregation hierarchy — the loop shared by the symmetric
     and convection-diffusion builders.
@@ -294,14 +665,38 @@ def _build_aggregation_hierarchy(
     symmetric part misses, so a coarse-level smoother damped by ``lam_smooth`` alone would diverge. When
     the aggregation operator *is* the true operator (the symmetric path) the two coincide and the
     estimate is computed once.
+
+    ``equilibrate`` rescales the fine operator to a unit-magnitude diagonal before any of that runs,
+    and the hierarchy then carries the factor so the solve is unchanged. It matters because every
+    quantity above is derived from ``D``: both spectral estimates, the smoother damping they scale,
+    and the prolongation smoothing. On an operator whose diagonal spans orders of magnitude those are
+    calibrated against a scale with no meaning — the same algorithm on the rescaled matrix builds a
+    different hierarchy. Only the *fine* operator is rescaled; the Galerkin coarse operators inherit
+    whatever scale the prolongation gives them, which is what a coarsening on a rescaled input does.
     """
+    if prolongation_smoothing not in _PROLONGATION_SMOOTHING:
+        raise ValueError(
+            f"prolongation_smoothing must be one of {sorted(_PROLONGATION_SMOOTHING)}, "
+            f"got {prolongation_smoothing!r}."
+        )
+    scale: np.ndarray | None = None
+    if equilibrate:
+        a, scale = symmetrically_equilibrate(a)
     levels: list[_SparseLevel] = []
     while True:
         a_agg = aggregation_operator(a)
-        _require_positive_diagonal(
-            a.diagonal(), f"_build_aggregation_hierarchy (level {len(levels)})"
-        )
-        d_inv = sp.diags(1.0 / a.diagonal())
+        # A nodal level inverts cell blocks, not the scalar diagonal, so the scalar-positivity
+        # precondition does not apply to it -- `_cell_block_inverse` enforces the weaker and correct
+        # one (every block invertible) when it builds them.
+        if block_size == 1:
+            _require_positive_diagonal(
+                a.diagonal(), f"_build_aggregation_hierarchy (level {len(levels)})"
+            )
+            d_inv = sp.diags(1.0 / a.diagonal())
+        else:
+            d_inv = _block_diagonal_inverse_operator(
+                a, block_size, f"_build_aggregation_hierarchy (level {len(levels)})"
+            )
         lam_smooth = _spectral_radius(d_inv @ a_agg)  # prolongation-smoothing damping
         lam_store = (
             lam_smooth if a_agg is a else _spectral_radius(d_inv @ a)
@@ -310,19 +705,74 @@ def _build_aggregation_hierarchy(
             # Coarsest level: a direct (dense pseudo-inverse) solve — an inexact coarse solve is the
             # dominant cause of mesh-dependent V-cycle degradation, so it must be an actual solve; pinv
             # also handles a nonsymmetric coarse operator.
-            levels.append(_sparse_level(a, lam_store, np.linalg.pinv(a.toarray()), None, 0))
+            levels.append(
+                _sparse_level(a, lam_store, np.linalg.pinv(a.toarray()), None, 0, block_size)
+            )
             break
-        upper = _aggregation_edges(a_agg, strength_threshold)  # full graph, or strong edges only
-        aggregate, n_coarse = _aggregate(upper.row, upper.col, a.shape[0])
-        tentative = sp.csr_matrix(
-            (np.ones(a.shape[0]), (np.arange(a.shape[0]), aggregate)), shape=(a.shape[0], n_coarse)
-        )
-        prolongation = (
-            tentative - (omega_smooth * 2.0 / lam_smooth) * (d_inv @ (a_agg @ tentative))
-        ).tocsr()
-        levels.append(_sparse_level(a, lam_store, None, prolongation.tocoo(), n_coarse))
+        # Coarsen CELLS, not degrees of freedom, when the operator has several fields per cell: the
+        # aggregation graph is collapsed onto cell connectivity and the prolongation carries each field
+        # on its own coarse unknown, so the coarse operator keeps the same block size and the recursion
+        # stays nodal all the way down. At `block_size == 1` both reduce to the scalar path exactly.
+        # Take the magnitude BEFORE symmetrizing, never after. On a nonsymmetric operator an edge
+        # with `A_ij ~ -A_ji` cancels in the symmetric part and vanishes from the graph entirely, so
+        # two strongly coupled cells can end up with no edge between them to aggregate across. On an
+        # M-matrix (every frozen upwind transport operator) the off-diagonals share a sign and the two
+        # orders coincide exactly, which is why this costs the shipped hierarchies nothing.
+        graph = _cell_graph(a, block_size) if block_size > 1 else abs(a).tocsr()
+        if mis_aggregation:
+            connectivity = sp.csr_matrix(abs(_aggregation_edges(graph, strength_threshold)))
+            connectivity = (connectivity + connectivity.T).tocsr()
+            if len(levels) < aggressive_levels:
+                # Aggressive coarsening: aggregate over distance-2 connectivity so the hierarchy
+                # coarsens fast enough to stay shallow as the mesh grows, then repair the reach it
+                # buys by re-attaching each member to a root it actually touches.
+                aggregate, roots, n_coarse_cells = _mis_aggregate(
+                    _square_graph(connectivity), seed=len(levels)
+                )
+                aggregate = _reattach_to_adjacent_root(aggregate, roots, connectivity)
+            else:
+                aggregate, _, n_coarse_cells = _mis_aggregate(connectivity, seed=len(levels))
+        else:
+            upper = _aggregation_edges(
+                graph, strength_threshold
+            )  # full graph, or strong edges only
+            aggregate, n_coarse_cells = _aggregate(upper.row, upper.col, graph.shape[0])
+        tentative = _block_tentative(aggregate, n_coarse_cells, block_size)
+        n_coarse = tentative.shape[1]
+        if prolongation_smoothing == "none":
+            prolongation = tentative.tocsr()
+        elif prolongation_smoothing == "standard":
+            # The prolongator smoothing as smoothed aggregation actually specifies it:
+            #   P <- (I - 1.4/sigma_max * D^-1 A) P_tent
+            # with four details that each matter and that a from-memory version gets wrong.
+            # `A` is the TRUE operator, not its symmetric part -- the advected error modes the
+            # smoothing is meant to capture live in the nonsymmetric part. `D` is the SCALAR
+            # diagonal even when the operator is a block one. The scale is the largest
+            # SINGULAR value, not the largest eigenvalue: for a nonsymmetric operator
+            # sigma_max >= |lambda|_max, so an eigenvalue estimate gives too large a step and
+            # over-smooths the prolongator, degrading the very coarse space it is improving.
+            # And the whole step presumes a unit-magnitude diagonal (`equilibrate=True`): the
+            # step length is set by sigma_max(D^-1 A), which on a raw operator whose diagonal
+            # spans orders of magnitude measures the spread of the diagonal rather than
+            # anything about the coupling, so the resulting smoothing is arbitrary.
+            scalar_d_inv = sp.diags(1.0 / a.diagonal())
+            prolongation = (
+                tentative
+                - (1.4 / _largest_singular_value(scalar_d_inv @ a))
+                * (scalar_d_inv @ (a @ tentative))
+            ).tocsr()
+        else:
+            # The symmetric-part variant: damp by an EIGENVALUE of the aggregation operator's
+            # `D^-1 A_agg`, and use the block diagonal on a nodal level. On the symmetric path
+            # `A_agg is A` and the two forms coincide up to the damping constant.
+            prolongation = (
+                tentative - (omega_smooth * 2.0 / lam_smooth) * (d_inv @ (a_agg @ tentative))
+            ).tocsr()
+        levels.append(_sparse_level(a, lam_store, None, prolongation.tocoo(), n_coarse, block_size))
         a = (prolongation.T @ a @ prolongation).tocsr()  # Galerkin coarse operator from the true A
-    return SmoothedHierarchy(tuple(levels))
+    return SmoothedHierarchy(
+        tuple(levels), None if scale is None else jnp.asarray(scale, dtype=jnp.float64)
+    )
 
 
 def build_smoothed_hierarchy(
@@ -377,18 +827,78 @@ def build_smoothed_hierarchy(
     )
 
 
+class _CsrOperator(eqx.Module):
+    """A frozen level operator in compressed-sparse-row (CSR) form, owning its own matvec.
+
+    **Why CSR and not the coordinate (COO) form the rest of this module uses.** A COO matvec is a
+    scatter-add: it computes every ``val * x[col]`` and then reduces them onto output rows that several
+    entries share. A CSR matvec instead walks one row at a time and accumulates into a single output
+    element, so nothing collides and the reduction is a contiguous scan. Measured on the coupled
+    turbulence block (46080 rows, 4.2M nonzeros), that is worth **9.5x** — 13.3 ms for the scatter-add
+    against 1.4 ms here, which also beats a host ``scipy`` CSR matvec at 2.6 ms. The level operator is
+    applied about ten times per V-cycle, so this is most of what the cycle costs.
+
+    Kept as its own object rather than three loose arrays on each level because both level kinds carry
+    one and both apply it the same way; the arrays never travel without each other.
+
+    The three arrays are all **traced** leaves and only ``shape`` is static, so re-deriving a hierarchy
+    at a new operator on the same graph leaves every shape untouched — the compiled V-cycle is a cache
+    hit rather than a retrace, which is what makes a mid-march preconditioner refresh affordable.
+    """
+
+    indptr: jnp.ndarray  # (n_rows + 1,) row start offsets
+    indices: jnp.ndarray  # (nnz,) column index of each entry
+    data: jnp.ndarray  # (nnz,) the entries themselves
+    shape: tuple[int, int] = eqx.field(static=True)
+
+    @classmethod
+    def from_scipy(cls, a: sp.csr_matrix) -> _CsrOperator:
+        """Freeze an assembled ``scipy`` matrix, in canonical (sorted-column) CSR form."""
+        a = a.tocsr()
+        a.sort_indices()
+        return cls(
+            indptr=jnp.asarray(a.indptr),
+            indices=jnp.asarray(a.indices),
+            data=jnp.asarray(a.data),
+            shape=a.shape,
+        )
+
+    def apply(self, x: jnp.ndarray) -> jnp.ndarray:
+        """``A x``. Linear and transposable, so the adjoint's transpose solve goes through it."""
+        return BCSR((self.data, self.indices, self.indptr), shape=self.shape) @ x
+
+    @property
+    def diagonal(self) -> jnp.ndarray:
+        """The operator's diagonal, read off the CSR structure."""
+        rows = jnp.repeat(
+            jnp.arange(self.shape[0]), jnp.diff(self.indptr), total_repeat_length=self.data.shape[0]
+        )
+        return segment_sum(
+            jnp.where(rows == self.indices, self.data, 0.0),
+            rows,
+            self.shape[0],
+            indices_are_sorted=True,
+        )
+
+
 def _coo_apply(row, col, val, x: jnp.ndarray, n_out: int) -> jnp.ndarray:
     """General sparse matvec ``M x`` for a COO operator: ``segment_sum(val * x[col], row, n_out)``.
 
     The one sparse-matvec kernel, shared by every frozen operator, prolongation, and restriction.
+
+    ``indices_are_sorted`` is asserted rather than hoped for: every operator here is frozen from a
+    ``scipy.sparse`` CSR matrix, and ``csr.tocoo()`` emits entries in row-major order, so the segment
+    identifiers are non-decreasing by construction. Saying so lets the reduction run as a contiguous
+    segmented scan instead of an unordered scatter-add, which is the difference between reading the
+    output once and colliding on it — the same reason a CSR matvec beats a COO one.
     """
-    return segment_sum(val * x[col], row, n_out)
+    return segment_sum(val * x[col], row, n_out, indices_are_sorted=True)
 
 
 def _operator_matvec(level: _SparseLevel | _AirLevel, x: jnp.ndarray) -> jnp.ndarray:
-    """Apply a frozen level's operator ``A x``. Works for any COO level type — ``_SparseLevel`` and
-    ``_AirLevel`` both carry the operator as ``row`` / ``col`` / ``val`` over ``n`` rows."""
-    return _coo_apply(level.row, level.col, level.val, x, level.n)
+    """Apply a frozen level's operator ``A x``. Works for either level kind — ``_SparseLevel`` and
+    ``_AirLevel`` both carry the operator as a :class:`_CsrOperator`."""
+    return level.operator.apply(x)
 
 
 def _chebyshev_smooth(
@@ -534,7 +1044,7 @@ def smoothed_multigrid_solve(
     def smoother(level: _SparseLevel, rhs: jnp.ndarray, guess: jnp.ndarray) -> jnp.ndarray:
         return _chebyshev_smooth(level, rhs, guess, degree, lo_frac)
 
-    return _fixed_cycle_solve(hierarchy.levels, b, cycles, _smoothed_ops(smoother))
+    return hierarchy.fixed_cycle_solve(b, cycles, _smoothed_ops(smoother))
 
 
 # --- nonsymmetric (convection-diffusion) smoothed aggregation ---------------------------
@@ -572,8 +1082,14 @@ def build_convection_hierarchy(
     omega_smooth: float = 2.0 / 3.0,
     max_coarse: int = 16,
     strength_threshold: float = 0.0,
+    block_size: int = 1,
+    max_levels: int = _CONVECTION_LEVELS,
+    mis_aggregation: bool = False,
+    aggressive_levels: int = 0,
+    equilibrate: bool = False,
+    prolongation_smoothing: str = "symmetric-part",
 ) -> SmoothedHierarchy:
-    """Build the two-level convection-diffusion hierarchy for operator ``a`` — off the jit path.
+    """Build the convection-diffusion hierarchy for operator ``a`` — off the jit path.
 
     ``a`` is an assembled first-order-upwind convection-diffusion operator (viscous coupling plus the
     upwind convective off-diagonals); the symmetric part ``(A + Aᵀ)/2`` drives aggregation and
@@ -604,6 +1120,38 @@ def build_convection_hierarchy(
         the symmetric part's full graph). ``> 0`` aggregates only along strong connections
         (:func:`_aggregation_edges`) — the fix for an anisotropic / high-aspect-ratio operator; see
         :func:`build_smoothed_hierarchy` for the effect and the value-dependence caveat.
+    block_size : int
+        Degrees of freedom per cell. Above one the aggregation coarsens **cells** — the graph is
+        collapsed onto cell connectivity and each field rides its own coarse unknown — and the level
+        smoother inverts each cell's dense block instead of the scalar diagonal. Both are required
+        together on a multi-field operator whose within-cell coupling exceeds its diagonal: a
+        field-blind aggregation can merge one field's degree of freedom with another field's from a
+        different cell, which manufactures a degenerate coarse row, and a point smoother discards the
+        dominant coupling outright.
+    max_levels : int
+        Stop coarsening at this many levels and solve the last one directly.
+    mis_aggregation : bool
+        Aggregate by a randomly-ordered maximal independent set rather than the two-pass
+        reverse-Cuthill--McKee pairing. The pairing only seeded an aggregate from a fully-free
+        neighbourhood, so it seeded few and left most cells to a ragged cleanup pass.
+    prolongation_smoothing : {"symmetric-part", "standard", "none"}
+        How the tentative prolongation is smoothed. ``"standard"`` is the textbook
+        ``P <- (I - 1.4/sigma_max(D^-1 A)) P_tent`` on the true operator and the scalar diagonal, and
+        presumes a unit-magnitude diagonal, so pair it with ``equilibrate=True``. ``"none"`` keeps the
+        tentative injection; on a badly scaled or strongly indefinite operator that is a real choice
+        rather than a degenerate one, since the smoothing can degrade the coarse correction it exists
+        to improve.
+    aggressive_levels : int
+        Aggregate over the squared graph ``G·G`` on this many leading levels. It exists to bound the
+        level count as the mesh grows, not to improve the coarse space, and it over-coarsens a mesh
+        that already reaches the coarse limit in one step.
+    equilibrate : bool
+        Coarsen ``D A D`` — the operator rescaled to a unit-magnitude diagonal — instead of ``a`` as
+        given, carrying the factor on the hierarchy so ``b -> x`` is unchanged. Every step of the
+        setup reads the diagonal (both spectral estimates, the smoother damping they scale, and the
+        prolongation smoothing), so on an operator whose diagonal spans orders of magnitude they are
+        calibrated against a scale with no meaning. Default ``False`` builds bit-identically to an
+        unscaled build.
 
     Returns
     -------
@@ -617,25 +1165,62 @@ def build_convection_hierarchy(
         aggregation_operator=lambda m: (0.5 * (m + m.T)).tocsr(),
         omega_smooth=omega_smooth,
         max_coarse=max_coarse,
-        max_levels=_CONVECTION_LEVELS,
+        max_levels=max_levels,
         strength_threshold=strength_threshold,
+        block_size=block_size,
+        mis_aggregation=mis_aggregation,
+        aggressive_levels=aggressive_levels,
+        equilibrate=equilibrate,
+        prolongation_smoothing=prolongation_smoothing,
     )
 
 
-def _jacobi_smooth(
-    level: _SparseLevel, b: jnp.ndarray, x: jnp.ndarray, sweeps: int, omega: float
-) -> jnp.ndarray:
-    """Damped-Jacobi smoother ``x <- x + (omega / lambda_max) D^-1 (b - A x)`` (``sweeps`` times).
+def _apply_block_inverse(level: _SparseLevel, vector: jnp.ndarray) -> jnp.ndarray:
+    """Apply the per-cell block inverse to a field-major vector: reshape, contract per cell, flatten."""
+    per_cell = vector.reshape(level.block_size, -1).T  # (n_cells, block_size)
+    return jnp.einsum("cij,cj->ci", level.block_inverse, per_cell).T.ravel()
 
-    Matrix-free and a fixed linear operator. The relaxation is scaled by the per-level ``lambda_max``
-    (of the symmetric part) so ``omega`` in ``(0, 1]`` is a mesh- and scale-independent damping — the
-    high-frequency-smoothing choice for the M-matrix convection-diffusion operator, where a Chebyshev
-    interval smoother (assuming a real spectrum) is not safe.
+
+def _jacobi_smooth(
+    level: _SparseLevel,
+    b: jnp.ndarray,
+    x: jnp.ndarray,
+    sweeps: int,
+    omega: float,
+    spectral_damping: bool = True,
+) -> jnp.ndarray:
+    """Damped-Jacobi smoother ``x <- x + alpha D^-1 (b - A x)`` (``sweeps`` times).
+
+    Matrix-free and a fixed linear operator. With ``spectral_damping`` the relaxation is
+    ``alpha = omega / lambda_max``, scaled by the per-level ``lambda_max`` (of the symmetric part) so
+    ``omega`` in ``(0, 1]`` is a mesh- and scale-independent damping — the high-frequency-smoothing
+    choice for the M-matrix convection-diffusion operator, where a Chebyshev interval smoother
+    (assuming a real spectrum) is not safe.
+
+    **Without it, ``alpha = omega`` is an absolute Richardson scale, and ``omega = 1`` is the
+    undamped sweep ``x <- x + D^-1 (b - A x)``.** That is a real and sometimes much better choice, not
+    a degenerate one: ``D^-1 A`` has unit diagonal blocks, so its eigenvalues average one and
+    ``lambda_max >= 1`` always — spectral damping therefore *never* relaxes by more than ``omega``,
+    and on an operator with an eigenvalue tail it relaxes by far less, under-smoothing every mode that
+    is not the extreme one. Measured on the coupled turbulence block, the undamped sweep is worth 10
+    cycles against 2 at four sweeps, closing the whole gap to an equivalently-configured PETSc GAMG.
+    An undamped sweep is not a contraction on its own, which is why it is not the default; under a
+    coarse correction and an outer Krylov it does not need to be.
+
+    On a **nodal** level ``D`` is the per-cell dense block rather than the scalar diagonal, which is not
+    a refinement but a requirement: where the within-cell coupling between fields exceeds the diagonal,
+    a point method discards the dominant term and the sweep stops contracting. The per-cell solves are
+    independent — a batched tiny contraction, no sequential dependency — so unlike the incomplete-LU
+    sweep this is the same shape on an accelerator as on a host.
     """
-    alpha = omega / level.lam_max
-    inv_diagonal = 1.0 / level.diagonal
+    alpha = omega / level.lam_max if spectral_damping else omega
+    if level.block_inverse is None:
+        inv_diagonal = 1.0 / level.diagonal
+        for _ in range(sweeps):
+            x = x + alpha * inv_diagonal * (b - _operator_matvec(level, x))
+        return x
     for _ in range(sweeps):
-        x = x + alpha * inv_diagonal * (b - _operator_matvec(level, x))
+        x = x + alpha * _apply_block_inverse(level, b - _operator_matvec(level, x))
     return x
 
 
@@ -646,6 +1231,7 @@ def convection_multigrid_solve(
     cycles: int = 1,
     sweeps: int = 2,
     omega: float = 0.8,
+    spectral_damping: bool = True,
 ) -> jnp.ndarray:
     """A **fixed** number of convection-diffusion V-cycles for ``A x = b`` — the Peclet-robust,
     constant-linear inner solve for the momentum (velocity) block.
@@ -665,7 +1251,15 @@ def convection_multigrid_solve(
     sweeps : int
         Damped-Jacobi pre/post sweeps per level (static).
     omega : float
-        Jacobi damping factor in ``(0, 1]`` (static).
+        The smoother's relaxation factor (static). Its meaning depends on ``spectral_damping``: a
+        damping in ``(0, 1]`` relative to the level's ``lambda_max`` when that is set, or the absolute
+        relaxation itself when it is not.
+    spectral_damping : bool
+        Scale the relaxation by the level's ``lambda_max`` (default). Setting it ``False`` makes
+        ``omega`` an absolute relaxation, so ``omega = 1`` is the plain undamped sweep — which on a
+        strongly nonsymmetric multi-field block is much the stronger smoother, because
+        ``lambda_max >= 1`` always and dividing by it under-relaxes every mode but the extreme one.
+        See :func:`_jacobi_smooth`.
 
     Returns
     -------
@@ -674,9 +1268,9 @@ def convection_multigrid_solve(
     """
 
     def smoother(level: _SparseLevel, rhs: jnp.ndarray, guess: jnp.ndarray) -> jnp.ndarray:
-        return _jacobi_smooth(level, rhs, guess, sweeps, omega)
+        return _jacobi_smooth(level, rhs, guess, sweeps, omega, spectral_damping)
 
-    return _fixed_cycle_solve(hierarchy.levels, b, cycles, _smoothed_ops(smoother))
+    return hierarchy.fixed_cycle_solve(b, cycles, _smoothed_ops(smoother))
 
 
 # --- local approximate ideal restriction (lAIR) -----------------------------------------
@@ -715,9 +1309,7 @@ class _AirLevel(eqx.Module):
     """
 
     n: int = eqx.field(static=True)  # cells at this level (sizes the matvec output)
-    row: jnp.ndarray  # (nnz,) COO row of the level operator A
-    col: jnp.ndarray  # (nnz,) COO col
-    val: jnp.ndarray  # (nnz,) COO value
+    operator: _CsrOperator  # the level operator A, in CSR form and owning its matvec
     diagonal: jnp.ndarray  # (n,) diagonal of A
     f_mask: jnp.ndarray  # (n,) 1.0 on fine points, else 0.0
     c_mask: jnp.ndarray  # (n,) 1.0 on coarse points, else 0.0
@@ -884,15 +1476,12 @@ def _lair_restriction(a: sp.csr_matrix, split: np.ndarray, degree: int) -> sp.cs
 
 def _air_level(a: sp.csr_matrix, split: np.ndarray, restriction, prolongation) -> _AirLevel:
     """Freeze a scipy operator, its C/F masks, and (optional) restriction/prolongation into JAX arrays."""
-    a_coo = a.tocoo()
     coarsest = restriction is None
     r = None if coarsest else restriction.tocoo()
     p = None if coarsest else prolongation.tocoo()
     return _AirLevel(
         n=a.shape[0],
-        row=jnp.asarray(a_coo.row),
-        col=jnp.asarray(a_coo.col),
-        val=jnp.asarray(a_coo.data),
+        operator=_CsrOperator.from_scipy(a),
         diagonal=jnp.asarray(a.diagonal()),
         f_mask=jnp.asarray((split == 0).astype(np.float64)),
         c_mask=jnp.asarray((split == 1).astype(np.float64)),
@@ -991,11 +1580,14 @@ def _require_matching_structure(original, refreshed, where: str) -> None:
             "hierarchy was built from (same mesh graph), and `degree` must match the build."
         )
     for i, (old, new) in enumerate(zip(original.levels, refreshed.levels, strict=True)):
-        if (old.n, old.n_coarse) != (new.n, new.n_coarse) or old.val.shape != new.val.shape:
+        if (old.n, old.n_coarse) != (
+            new.n,
+            new.n_coarse,
+        ) or old.operator.data.shape != new.operator.data.shape:
             raise ValueError(
                 f"{where}: level {i} changed shape — (n, n_coarse, nnz) "
-                f"{(old.n, old.n_coarse, old.val.shape[0])} -> "
-                f"{(new.n, new.n_coarse, new.val.shape[0])}. The refreshed values would be a new "
+                f"{(old.n, old.n_coarse, old.operator.data.shape[0])} -> "
+                f"{(new.n, new.n_coarse, new.operator.data.shape[0])}. The refreshed values would be a new "
                 "compilation signature, defeating the purpose; check that `a` has the same sparsity "
                 "pattern and that `degree` matches the build."
             )

@@ -51,6 +51,8 @@ Run (after both OpenFOAM runs) from the repo root:
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import os
 import re
 import sys
@@ -64,6 +66,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import aquaflux  # noqa: F401  (enables x64)
+import jax
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
@@ -78,6 +81,7 @@ from aquaflux.solve import (
     MarchLogger,
     StateCheckpointer,
     combine_observers,
+    native_nodal_inverse,
     relative_residual_gmres,
 )
 from aquaflux.turbulence import (
@@ -244,6 +248,17 @@ _TURBULENCE_SMOOTHERS = {
         "mg_levels_ksp_richardson_scale": 0.7,
         "mg_levels_pc_type": "pbjacobi",
     },
+    # The SAME smoother undamped, which is PETSc's own default Richardson scale and a materially
+    # different arm -- the damped one above relaxes by 0.7 of every correction. Kept apart rather than
+    # folded together because the recorded screen of the arm above was taken at 0.7, and because the
+    # undamped form is the one the framework-native block-Jacobi hierarchy is built to reproduce: an
+    # end-to-end comparison against the damped variant would understate the host solver and would not
+    # be the like-for-like run it appeared to be.
+    "pbjacobi1": {
+        "mg_levels_ksp_type": "richardson",
+        "mg_levels_ksp_richardson_scale": 1.0,
+        "mg_levels_pc_type": "pbjacobi",
+    },
     "sor": {"mg_levels_ksp_type": "richardson", "mg_levels_pc_type": "sor"},
 }
 _TURBULENCE_SMOOTHER = os.environ.get("BFS3D_TURBULENCE_SMOOTHER", "")
@@ -253,6 +268,151 @@ if _TURBULENCE_SMOOTHER not in _TURBULENCE_SMOOTHERS:
         f"{sorted(k for k in _TURBULENCE_SMOOTHERS if k)}"
     )
 TRAILING_OPTIONS = _TURBULENCE_SMOOTHERS[_TURBULENCE_SMOOTHER]
+
+# Which preconditioner the trailing [k, omega] block gets. "petsc" (default) is the host GAMG V-cycle
+# the case has always run; "native" swaps in the differentiable-framework nodal hierarchy, whose
+# aggregation and smoother are configured to reproduce that V-cycle -- matched, it reaches the same
+# 2 restart cycles on the same-sized coarse space when measured on the block alone. The point of the
+# swap is not cycles but the host callback: the native inverse is plain array work, so it is the half
+# of the preconditioner that could run on an accelerator.
+_TURBULENCE_INVERSES = ("petsc", "native")
+TURBULENCE_INVERSE = os.environ.get("BFS3D_TURBULENCE_INVERSE", "petsc")
+if TURBULENCE_INVERSE not in _TURBULENCE_INVERSES:
+    raise SystemExit(
+        f"BFS3D_TURBULENCE_INVERSE={TURBULENCE_INVERSE!r} is not one of {list(_TURBULENCE_INVERSES)}"
+    )
+#: The native inverse's own settings, kept here rather than left to the class defaults so the banner can
+#: print them and a later reader can tell two runs apart. `max_coarse` is the one deliberate departure
+#: from the class default: the coarse grid is grown to match the host V-cycle's own coarse-equation
+#: limit, since a coarse grid big enough to invert the global coupling exactly is worth a great deal on
+#: this operator.
+NATIVE_TRAILING = {
+    "max_coarse": COARSE_EQ_LIMIT,
+    # Kept off by default, and kept exposed. With NO positivity floor this flag decides whether the case
+    # converges at all: an otherwise-identical pair of marches came out opposite, the rescaled one losing
+    # its line-search factor on the middle rung and stalling with the residual frozen. But that turned out
+    # to be a trigger rather than a cause -- with `K_POSITIVITY_FLOOR` set, both settings converge to the
+    # same root (69 steps rescaled, 67 unscaled), because what actually killed the rescaled arm was one
+    # numerically-zero cell ratcheting the global step cap toward zero. Rescaling merely reached that cell
+    # a few steps sooner: the two arms differ from step one in the pressure-block residual and amplify
+    # until they cross the limiter around step sixteen, where one is clipped and the other is not.
+    # Off is free and is what the converging arms were measured with; both arms stay runnable.
+    # Default OFF, which is NOT the class default: on this case it is the difference between a march
+    # that converges every rung and one that stalls. `BFS3D_NATIVE_EQUILIBRATE=1` selects the rescaled
+    # arm for an A/B of the flag itself.
+    "equilibrate": os.environ.get("BFS3D_NATIVE_EQUILIBRATE", "0") not in ("", "0"),
+}
+#: Write every trailing sub-block to disk just BEFORE its inverse is built, keeping only the last.
+#: The build refuses a singular cell block, and that refusal fires from a mid-step refresh whose
+#: iterate no observer records -- the inner-iterate dump happens after an iteration succeeds, so the
+#: one that fails is precisely the one never written. Dumping before the build inverts that: whatever
+#: happens, the last file on disk is the operator that failed, with no state to reload and no shift to
+#: pair correctly. Off by default; it costs a ~35 MB write per refresh.
+DUMP_TRAILING_BLOCK = os.environ.get("BFS3D_DUMP_TRAILING_BLOCK", "") not in ("", "0")
+
+
+def _dumping(factory):
+    """Wrap a trailing inverse so every block it is about to consume is saved first.
+
+    Both entry points have to be covered, and missing one wasted three capture runs: the factory is
+    called once when the split is first built, but a mid-march refresh re-fits the **existing** inverse
+    through ``refactor_block`` and never goes near the factory. The refusal happens on a refresh, so
+    wrapping only the factory dumps every block except the one that matters.
+    """
+    import scipy.sparse as _sp
+
+    def save(block):
+        _sp.save_npz(HERE / "checkpoints" / "trailing-block.npz", _sp.csr_matrix(block))
+
+    class Dumping:
+        """Forwards the inverse's interface, saving the operator ahead of any (re)build."""
+
+        def __init__(self, inverse):
+            self._inverse = inverse
+
+        @property
+        def n_dofs(self):
+            return self._inverse.n_dofs
+
+        def apply(self, residual, *, transpose=False):
+            return self._inverse.apply(residual, transpose=transpose)
+
+        def refactor_block(self, block):
+            save(block)
+            return self._inverse.refactor_block(block)
+
+        def destroy(self):
+            self._inverse.destroy()
+
+    def build(block, n_group_fields):
+        save(block)
+        return Dumping(factory(block, n_group_fields))
+
+    return build
+
+
+TRAILING_INVERSE = (
+    native_nodal_inverse(**NATIVE_TRAILING) if TURBULENCE_INVERSE == "native" else None
+)
+if TRAILING_INVERSE is not None and DUMP_TRAILING_BLOCK:
+    TRAILING_INVERSE = _dumping(TRAILING_INVERSE)
+
+
+def _native_trailing_description() -> str:
+    """Every setting the native trailing hierarchy is actually built with, defaults included.
+
+    Reads them off the class signature rather than restating them, so a changed default cannot make the
+    banner lie -- which is the one failure a configuration banner must not have.
+    """
+    from aquaflux.solve import NodalNativeInverse
+
+    settings = {
+        name: parameter.default
+        for name, parameter in inspect.signature(NodalNativeInverse).parameters.items()
+        if parameter.default is not inspect.Parameter.empty
+    }
+    settings.update(NATIVE_TRAILING)
+    return ", ".join(f"{k}={v}" for k, v in settings.items())
+
+
+#: Suffix marking the PETSc trailing-smoother banner lines as dead. `build_block_triangular_field_split`
+#: uses `trailing_options` / `trailing_smoother_sweeps` only on the branch that builds its own V-cycle;
+#: a supplied `trailing_inverse` skips that branch entirely.
+_TRAILING_SMOOTHER_NOTE = (
+    "" if TRAILING_INVERSE is None else "  (unused: the native trailing inverse replaces it)"
+)
+
+
+# Absolute room in `k` the step limiter grants every cell, so a cell whose `k` is numerically zero
+# cannot set the step length for all 23040. Calibrated by replaying the recorded clips
+# (`positivity_floor_calibration.py`): unfloored, the worst recorded cap is 1.05e-09; the dead cells
+# form a graded population rather than a single outlier, so a small floor only promotes the next one
+# (1e-12 reaches 1.6e-02, 1e-10 reaches 6.9e-02) and the knee is near 1e-08, where the worst cap
+# becomes ~0.35. At 1e-06 the binding cell is a live one (k 4.7e-03) capped at 0.84, which is the
+# limiter working -- so 1e-08 keeps two orders of margin below anything physical here, where the inlet
+# k is 0.375 and the mesh median ~3e-2.
+#
+# `0` (the library default) is the plain fraction-to-the-boundary rule. It moves neither the converged
+# root nor the adjoint: at a root the correction vanishes and the limiter is inactive for any floor.
+# It is safe here only because every consumer of the solved `k` clamps at zero, so a cell that dips
+# slightly negative no longer reaches a bare sqrt -- and the destruction term, running on the
+# k-independent viscous omega branch there, pushes such a cell back up.
+K_POSITIVITY_FLOOR = float(os.environ.get("BFS3D_K_POSITIVITY_FLOOR", "0") or 0.0)
+
+
+# The inexact-Newton stop for each inner linear solve, measured in the ROW-SCALED `coupled_scaled_norm`
+# (not the Euclidean one -- the coupled Euclidean residual is ~100% omega, which is why the row-scaled
+# measure exists). `0.3` is the builder default: every field block is resolved loosely so the flow is
+# never left blind, and the outer Newton iteration recovers the accuracy.
+#
+# Exposed because a loose stop leaves the accepted correction substantially determined by the
+# PRECONDITIONER rather than the operator -- two preconditioners land at different points inside the same
+# admissible ball -- and the step length is decided by a MINIMUM over cells, an extreme order statistic
+# that a norm-based tolerance does not control. Tightening it trades cycles per step for a correction
+# that is closer to the true shifted-Newton direction.
+FORWARD_RTOL = float(os.environ.get("BFS3D_FORWARD_RTOL", "0.3"))
+
+
 CYCLE_BUDGET = 42  # summed per step: a cost cap, so summed is what it should cap
 RETRY_ON_CYCLES = (
     10  # PER SOLVE: a summed trigger is ~6x more sensitive for a 5-inner step than a 1-inner one
@@ -308,6 +468,22 @@ CHECKPOINT_KEEP = int(os.environ.get("BFS3D_CHECKPOINT_KEEP", "3"))
 # here: they cannot be replayed from a checkpoint afterwards, because a step's preconditioner and shift
 # are a product of the refresh history rather than of the state.
 INNER_DUMP_ABOVE = int(os.environ.get("BFS3D_INNER_DUMP_ABOVE", "0"))
+# Save the (iterate, correction) pair whenever the k-positivity cap comes out below this fraction. Off
+# by default (0), and the march is byte-identical with it off.
+#
+# It exists because the cap is the only quantity in the step table that CANNOT be reconstructed after
+# the fact: it is a property of the correction `delta`, and no checkpoint holds one. A step checkpoint
+# holds the state a step ended at, and the inner-iterate dump holds the iterate an inner iteration
+# reached -- neither carries the direction, so "which cells is the cap binding on" is unanswerable from
+# either. Capturing it at the call site is the only honest answer; dividing an iterate difference by the
+# reported alpha would recover the direction only up to whatever the line search did to it.
+#
+# The threshold is `RETRY_ON_ALPHA` by default, i.e. exactly the caps the march reacts to. Dumps STOP
+# after `DUMP_STEP_LIMIT_KEEP` of them rather than wrapping, so the FIRST binding events survive -- the
+# escalation ladder that follows one drives the cap two orders of magnitude further down, and a rolling
+# buffer would keep only that tail and throw away the step that started it.
+DUMP_STEP_LIMIT = float(os.environ.get("BFS3D_DUMP_STEP_LIMIT", "0") or 0.0)
+DUMP_STEP_LIMIT_KEEP = int(os.environ.get("BFS3D_DUMP_STEP_LIMIT_KEEP", "12"))
 # Refresh the preconditioner MID-STEP as soon as one solve reaches this many restart cycles, and switch
 # the scheduled refreshes off. `0` selects the scheduled cadence instead.
 #
@@ -328,9 +504,107 @@ INNER_DUMP_ABOVE = int(os.environ.get("BFS3D_INNER_DUMP_ABOVE", "0"))
 # default, not another warning. `BFS3D_REFRESH_ON_CYCLES=0` still selects the scheduled cadence for an
 # A/B of the trigger itself.
 REFRESH_ON_CYCLES = int(os.environ.get("BFS3D_REFRESH_ON_CYCLES", "3"))
+#: The wall boundary condition on `k`, as an A/B. `Dirichlet(0)` (default) is the resolved-wall
+#: condition -- turbulent fluctuations vanish at a no-slip wall, so `k -> 0`. `BFS3D_K_WALL=zerogradient`
+#: selects the wall-function condition instead.
+#:
+#: **Both are defensible, and the established codes SPLIT on it** -- so this is a knob, not a fix:
+#: OpenFOAM's `kqRWallFunction` is zero-gradient unconditionally; SU2 pins `k = 0` at the wall node
+#: (`solution[0] = 0.0` plus `SetSolution_Old` / `LinSysRes.SetBlock_Zero` / `Jacobian.DeleteValsRowi`)
+#: and switches to an algebraic `k = omega nu_t / rho` only when wall functions are enabled.
+#:
+#: The reason to try zero-gradient here is an INTERNAL INCONSISTENCY rather than either authority. The
+#: wall-face `k` diffusivity is already faded to `(1 - f) gamma`, so on a wall-function cell the flux is
+#: zero -- but the Dirichlet face value still enters the GRADIENT reconstruction (`grad_k` feeds `F1`'s
+#: cross-diffusion, `omega_wall_gradient` and `OmegaCrossDiffusion`), which is not faded. So the model
+#: says "no turbulent-energy flux to the wall" while the gradient says `k` falls to zero across half a
+#: cell. Zero-gradient removes that disagreement, and unlike the deleted blended face value `f k_P` it
+#: carries `d(phi_ip)/d(k_P) = 1` exactly, so it cannot become the `k`-amplifying wall face that failed
+#: to converge.
+#:
+#: In the continuum the two conditions do NOT conflict: `u' ~ y`, `w' ~ y`, `v' ~ y**2` give `k ~ y**2`,
+#: so `k -> 0` AND `dk/dy -> 0` at the wall, and the true diffusive wall flux is zero in both regimes.
+#: The conflict is purely discrete -- a linear face reconstruction cannot satisfy both on one cell.
+_K_WALL_BCS = {"dirichlet": Dirichlet(0.0), "zerogradient": ZeroGradient()}
+K_WALL = os.environ.get("BFS3D_K_WALL", "dirichlet")
+if K_WALL not in _K_WALL_BCS:
+    raise SystemExit(f"BFS3D_K_WALL={K_WALL!r} is not one of {sorted(_K_WALL_BCS)}")
+K_WALL_BC = _K_WALL_BCS[K_WALL]
+
 CONTROL = CflResidualDualTimeControl(
     beta_start=0.5, beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25
 )
+
+_STEP_LIMIT_DUMPS = 0
+#: The shift and the anchor of the step currently being taken. The limiter is called with only
+#: ``(phi, delta)``, so without these a dump cannot be paired with the linear system that produced it --
+#: and that is exactly what a reader needs to re-solve it. Captured from ``precondition_step``, which the
+#: march calls once per attempt with the step (carrying its beta) and the state the attempt starts from.
+_STEP_BETA, _STEP_ANCHOR = float("nan"), None
+
+
+def _recording_precondition(refresh):
+    """Wrap the preconditioner refresh so each attempt's shift and anchor are recorded for the dumps.
+
+    The march calls ``precondition_step(step, state)`` once per attempt, after the control has set beta
+    and before the step runs -- so it is the one place where both are in hand together. Delegates
+    unchanged; only used when the step-limit dump is switched on.
+    """
+
+    def precondition(step, state):
+        global _STEP_BETA, _STEP_ANCHOR
+        _STEP_BETA = float(getattr(step.relaxation_schedule, "beta", float("nan")))
+        _STEP_ANCHOR = np.asarray(state)
+        return refresh(step, state)
+
+    return precondition
+
+
+def _save_step_limit(cap, phi, delta):
+    """Write one ``(cap, iterate, correction)`` triple, if the cap is tight and the budget is unspent.
+
+    Records the attempt's ``beta`` and ``anchor`` alongside, so the dump identifies the shifted system
+    ``(J + beta*d) delta = -G(phi; anchor)`` rather than just its solution. Without them a reader can
+    reproduce the *residual* at the iterate but not the *correction*, which is the half that matters --
+    an attempt to identify beta by least squares from the dump alone was inconsistent across blocks
+    (beta ~2.7 fitted on the k rows against ~130 on the omega rows, 52% residual).
+    """
+    global _STEP_LIMIT_DUMPS
+    cap = float(cap)
+    if cap >= DUMP_STEP_LIMIT or _STEP_LIMIT_DUMPS >= DUMP_STEP_LIMIT_KEEP:
+        return
+    path = HERE / "checkpoints" / f"step-limit-{_STEP_LIMIT_DUMPS:02d}.npz"
+    np.savez(
+        path,
+        cap=cap,
+        state=np.asarray(phi),
+        delta=np.asarray(delta),
+        beta=_STEP_BETA,
+        anchor=_STEP_ANCHOR if _STEP_ANCHOR is not None else np.asarray(phi),
+    )
+    _STEP_LIMIT_DUMPS += 1
+    print(f"[step-limit] cap {cap:.3e} beta {_STEP_BETA:.4g} -> {path.name}", flush=True)
+
+
+@dataclasses.dataclass(frozen=True)
+class _DumpingStepLimit:
+    """A step limiter that saves the pair it was called on whenever it comes out tight.
+
+    Wraps the real limiter and returns its cap unchanged, so the march it instruments takes exactly the
+    steps it would have taken without it. A **frozen dataclass around the real limiter**, not a closure,
+    for the reason the limiter itself is one: it rides in a static field of the compiled step, which is
+    compared by ``__eq__``, and a function compares by identity -- so a closure here would make every
+    rebuilt step a fresh compilation key and retrace the whole coupled solve.
+    """
+
+    inner: object
+
+    def __call__(self, phi, delta):
+        cap = self.inner(phi, delta)
+        # Fires during execution (this runs inside the inner loop's `while_loop`) and is a no-op under
+        # differentiation; the host side decides whether the cap is worth a file.
+        jax.debug.callback(_save_step_limit, cap, phi, delta, ordered=True)
+        return cap
 
 
 # --- OpenFOAM ascii internalField parsing (nonuniform scalar / vector list) ---
@@ -430,9 +704,7 @@ def build_case(model=None):
             {
                 "inlet": Dirichlet(K_IN),
                 "outlet": ZeroGradient(),
-                "upperWall": Dirichlet(0.0),
-                "lowerWall": Dirichlet(0.0),
-                "sideWalls": Dirichlet(0.0),
+                **dict.fromkeys(WALLS, K_WALL_BC),
             }
         ),
         omega_boundary=BoundaryConditions(
@@ -513,8 +785,27 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
     logger.note("[configuration]")
     for name, value in (
         ("field split", FIELD_SPLIT),
-        ("turbulence smoother", _TURBULENCE_SMOOTHER or "ilu0 (shipped)"),
-        ("turbulence smoother sweeps", TRAILING_SWEEPS),
+        # WHICH INVERSE the trailing block gets, before how it is smoothed -- a setting that once cost
+        # a finding. Two runs differing only in this wrote banners identical to the character, so
+        # afterwards the only way to tell them apart was the launch order and the text of the exception
+        # each happened to die on. One of them had quietly reproduced the reference trajectory for four
+        # steps and that went unnoticed. A configuration line is worth nothing if it omits the variable
+        # under test.
+        ("turbulence inverse", TURBULENCE_INVERSE),
+        # ...and, when a `trailing_inverse` is supplied, it REPLACES the PETSc V-cycle wholesale, so the
+        # two smoother settings below are never read. Marking them is the same rule as the note above:
+        # a banner that prints a setting the run did not use is worse than one that omits it, because a
+        # reader diffing two runs attributes a difference to a line that was dead in both.
+        (
+            "turbulence smoother",
+            f"{_TURBULENCE_SMOOTHER or 'ilu0 (shipped)'}{_TRAILING_SMOOTHER_NOTE}",
+        ),
+        ("turbulence smoother sweeps", f"{TRAILING_SWEEPS}{_TRAILING_SMOOTHER_NOTE}"),
+        *(
+            [("native trailing settings", _native_trailing_description())]
+            if TURBULENCE_INVERSE == "native"
+            else []
+        ),
         ("refresh on cycles", REFRESH_ON_CYCLES or "scheduled cadence"),
         ("Reynolds continuation points", N_POINTS),
         ("forward restart", FORWARD_RESTART),
@@ -523,6 +814,20 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("smoother fill / sweeps / coarse limit", f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"),
         ("preconditioner beta floor", PC_BETA_FLOOR),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
+        ("k wall BC", K_WALL),
+        ("k positivity floor", K_POSITIVITY_FLOOR or "0 (plain rule)"),
+        ("inner forward rtol (row-scaled)", FORWARD_RTOL),
+        # Printed because a banner diff is only a CONFIG diff if every knob that installs a wrapper or
+        # changes what is retained appears in it. These three were read and never shown, so two runs
+        # could differ in them and produce banners identical to the character.
+        ("checkpoint keep", CHECKPOINT_KEEP),
+        ("inner dump above", INNER_DUMP_ABOVE or "off"),
+        ("trailing block dump", DUMP_TRAILING_BLOCK or "off"),
+        *(
+            [("step-limit dump below / keep", f"{DUMP_STEP_LIMIT} / {DUMP_STEP_LIMIT_KEEP}")]
+            if DUMP_STEP_LIMIT
+            else []
+        ),
     ):
         logger.note(f"  {name}: {value}")
 
@@ -574,6 +879,8 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             smoother_sweeps=SWEEPS,
             coarse_eq_limit=COARSE_EQ_LIMIT,
             cycle_budget=round(CYCLE_BUDGET * _RESTART_SCALE),
+            positivity_floor=K_POSITIVITY_FLOOR,
+            forward_rtol=FORWARD_RTOL,
             forward_restart=FORWARD_RESTART,
             inner_observer=combine_observers(
                 logger.on_inner,
@@ -584,14 +891,19 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             field_split=FIELD_SPLIT,
             trailing_smoother_sweeps=TRAILING_SWEEPS,
             trailing_options=TRAILING_OPTIONS if FIELD_SPLIT else None,
+            trailing_inverse=TRAILING_INVERSE if FIELD_SPLIT else None,
         )
+        if DUMP_STEP_LIMIT and engine.step_limit is not None:
+            # `dataclasses.replace`, not `eqx.tree_at`: the limiter is a STATIC field, so it lives in the
+            # treedef rather than among the leaves and `tree_at` (which addresses leaves) cannot reach it.
+            engine = dataclasses.replace(engine, step_limit=_DumpingStepLimit(engine.step_limit))
         # Seeded with this rung's own starting state: the march equilibrates each step at the state it
         # begins from, so without the seed the rung's first step would be scaled at its end state and
         # its per-equation rows would not add up to the residual reported beside them.
         rung_residuals.append(coupled_residuals(companion, engine, seed_state))
         return dict(
             continuation=engine,
-            precondition_step=refresh,
+            precondition_step=_recording_precondition(refresh) if DUMP_STEP_LIMIT else refresh,
         )
 
     options = (
@@ -741,6 +1053,26 @@ def spanwise_reattachment(centroid, u_x, n_bins=8):
     return out
 
 
+def _fresh_log(path: Path) -> Path:
+    """Move any existing march log aside, so a new run cannot destroy the one it is compared against.
+
+    The log is the only per-step record a run leaves -- cycle counts, betas, retries, the per-equation
+    residual grid -- and every arm comparison this case exists for is a comparison of two of them. It
+    used to be written to one fixed path, so starting a run silently deleted the baseline: a
+    native-preconditioner arm was measured against aggregates alone for exactly this reason, and the
+    step-by-step comparison that would have been most informative could not be made at all.
+
+    The previous log is renamed with the modification time it already carried, not the current time, so
+    the archived name says when that run happened rather than when it was displaced.
+    """
+    if path.exists():
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(path.stat().st_mtime))
+        archived = path.with_name(f"{path.stem}-{stamp}{path.suffix}")
+        path.rename(archived)
+        print(f"archived the previous march log to {archived.name}", flush=True)
+    return path
+
+
 def main():
     if not (RUNS / "polyMesh").exists():
         raise SystemExit(f"OpenFOAM mesh not found in {RUNS}; run of_case/run_of.sh first.")
@@ -757,7 +1089,9 @@ def main():
     )
 
     t0 = time.time()
-    aq = solve_aquaflux(log_path=HERE / "march.log", checkpoint_dir=HERE / "checkpoints")
+    aq = solve_aquaflux(
+        log_path=_fresh_log(HERE / "march.log"), checkpoint_dir=HERE / "checkpoints"
+    )
     print(
         f"aquaflux coupled solve: {time.time() - t0:.0f}s, "
         f"Ux in [{aq['U'][:, 0].min():.3f}, {aq['U'][:, 0].max():.3f}]",

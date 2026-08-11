@@ -100,3 +100,65 @@ def test_constants_and_state_are_differentiable() -> None:
     grad_k = jax.grad(lambda kk: jnp.sum(SSTModel().eddy_viscosity(kk, omega, s, nu, d)))(k)
     assert not bool(jnp.isnan(grad_a1))
     assert not bool(jnp.any(jnp.isnan(grad_k)))
+
+
+# --- transiently negative k (off-solution guards) ---------------------------------------
+
+
+def test_f1_and_f2_are_finite_and_bounded_for_a_negative_k() -> None:
+    """A cell whose ``k`` has been carried below zero must not poison the blend.
+
+    ``k`` is solved directly -- a log transform is singular at a no-slip wall, where ``k = 0`` is the
+    physical boundary condition -- so a Newton step can carry it negative, and one such cell is enough:
+    a plain ``sqrt`` of it is NaN, which spreads through the whole residual. ``F1``'s cross-diffusion
+    branch has the quieter failure of the two: a negative ``k`` makes it negative, so it wins the ``min``
+    and ``arg1**4`` selects the wrong blend with no NaN to announce it.
+    """
+    model = SSTModel()
+    grad = jnp.ones((1, 2))
+    f1 = model.f1(_cell(-1e-12), _cell(100.0), _cell(1e-5), _cell(1.0), grad, grad)
+    f2 = model.f2(_cell(-1e-12), _cell(100.0), _cell(1e-5), _cell(1.0))
+    for name, value in (("F1", f1), ("F2", f2)):
+        assert jnp.all(jnp.isfinite(value)), name
+        assert jnp.all(value >= 0.0) and jnp.all(value <= 1.0), name
+
+
+def test_the_negative_k_guards_are_inactive_for_a_positive_k() -> None:
+    """The guards are off-solution: at any ``k > 0`` both blends are bit-identical to the unguarded form.
+
+    This is the property that lets them sit inside a differentiated residual -- inactive at the fixed
+    point means the sensitivity is untouched there.
+    """
+    model = SSTModel()
+    grad = jnp.ones((1, 2))
+    k, omega, nu, d = _cell(0.81), _cell(100.0), _cell(0.06), _cell(1.0)
+    cross = jnp.maximum(2.0 * model.sigma_omega2 * 2.0 / omega, 1e-10)
+    unguarded_f2 = jnp.tanh(
+        jnp.maximum(2.0 * jnp.sqrt(k) / (model.beta_star * omega * d), 500.0 * nu / (d**2 * omega))
+        ** 2
+    )
+    unguarded_f1 = jnp.tanh(
+        jnp.minimum(
+            jnp.maximum(jnp.sqrt(k) / (model.beta_star * omega * d), 500.0 * nu / (d**2 * omega)),
+            4.0 * model.sigma_omega2 * k / (cross * d**2),
+        )
+        ** 4
+    )
+    assert model.f2(k, omega, nu, d) == unguarded_f2
+    assert model.f1(k, omega, nu, d, grad, grad) == unguarded_f1
+
+
+def test_a_negative_k_gives_a_finite_gradient_through_the_blends() -> None:
+    """The guard must be differentiable too -- a NaN derivative poisons the Jacobian as surely as a
+    NaN value, and this residual is differentiated by automatic differentiation, not by hand."""
+    model = SSTModel()
+    grad = jnp.ones((1, 2))
+
+    def blends(k):
+        return (
+            model.f1(k, _cell(100.0), _cell(1e-5), _cell(1.0), grad, grad)
+            + model.f2(k, _cell(100.0), _cell(1e-5), _cell(1.0))
+        ).sum()
+
+    assert jnp.all(jnp.isfinite(jax.grad(blends)(_cell(-1e-12))))
+    assert jnp.all(jnp.isfinite(jax.grad(blends)(_cell(0.0))))

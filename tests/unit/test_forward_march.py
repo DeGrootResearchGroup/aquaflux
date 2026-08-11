@@ -10,6 +10,8 @@ hit (the property without which an eager march would recompile its linear solve 
 
 from __future__ import annotations
 
+import itertools
+
 import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax
@@ -35,7 +37,7 @@ from aquaflux.solve import (
 _TRACES: list[int] = []
 
 
-def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False):
+def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False, binding=1.0):
     """A `StepOutcome` for a test double, so a fake step matches the real protocol in one place.
 
     The doubles used to build the tuple inline; when the protocol grew a field every one of them broke
@@ -43,7 +45,8 @@ def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False):
 
     ``reached`` defaults to **False** because these doubles model steps that do not converge -- which
     is what makes them useful for testing the escalation, and what the escalation now requires: a step
-    that met its own target is not redone on cost alone.
+    that met its own target is not redone on cost alone. ``binding`` defaults to **1.0**, i.e. no
+    constraint was in play, so a double models a step whose length the descent test alone decided.
     """
     cycles = jnp.asarray(cycles, dtype=jnp.int32)
     return StepOutcome(
@@ -53,7 +56,7 @@ def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False):
         jnp.asarray(inner, dtype=jnp.int32),
         jnp.asarray(reached),
         jnp.maximum(cycles - 2, 0),
-        jnp.asarray(1.0),
+        jnp.asarray(binding),
     )
 
 
@@ -894,3 +897,177 @@ def test_no_escalation_reason_when_neither_threshold_is_set() -> None:
         )
         is None
     )
+
+
+def test_the_alpha_trigger_fires_whatever_collapsed_the_step_length() -> None:
+    """A constraint-bound collapse escalates too -- gating this on ``binding_limit`` is a regression.
+
+    Tempting and wrong: more damping shrinks the correction, so it *widens* a fraction-to-the-boundary
+    cap rather than tightening it. The one escalation of an entire coupled RANS march fired at a step
+    whose cap was 4.37e-10, and doubling the shift there was worth 8 steps and 199 s end to end. The
+    failure damping cannot fix is a cell already pinned on the boundary, and that is caught by the
+    stall bailout below, not here.
+    """
+    from aquaflux.solve.march import _escalation_reason
+
+    kwargs = dict(retry_on_cycles=None, retry_on_alpha=0.01, divergence_cap=float("inf"))
+    search = _outcome(jnp.zeros((1,)), 3, alpha=0.001)  # binding 1.0: the ladder chose this length
+    capped = _outcome(jnp.zeros((1,)), 3, alpha=0.001, binding=0.001)  # the cap chose it
+    assert _escalation_reason(search, jnp.asarray(1.0), 1.0, **kwargs) == "alpha"
+    assert _escalation_reason(capped, jnp.asarray(1.0), 1.0, **kwargs) == "alpha"
+
+
+def _recorded(rows):
+    """Step reports from ``(step, residual_norm, binding_limit)`` triples off a real march log."""
+    return [
+        StepReport(
+            step=n, cycles=0, residual_norm=r, residual_ratio=0.0, alpha=0.0, binding_limit=cap
+        )
+        for n, r, cap in rows
+    ]
+
+
+def _first_bailout(history, stall_limit=3):
+    """The step a march with ``stop_on_limit_stall=stall_limit`` would end on, or ``None``."""
+    from aquaflux.solve.march import _limit_collapsing
+
+    run = 0
+    for previous, report in itertools.pairwise(history):
+        run = run + 1 if _limit_collapsing(previous, report) else 0
+        if run >= stall_limit:
+            return report.step
+    return None
+
+
+def test_the_stall_bailout_fires_on_a_recorded_lock_up() -> None:
+    """The rung this guard exists for: a cap collapsing 100x per step at a frozen residual.
+
+    Verbatim from a coupled RANS march (`bfs3d`, native trailing inverse, rung 2), which then ran
+    ninety-six more steps exactly like the last one before its budget ended it.
+    """
+    history = _recorded(
+        [
+            (24, 1.123e-01, 6.94e-01),
+            (25, 7.567e-02, 3.76e-03),
+            (26, 7.316e-02, 1.00e-05),
+            (27, 7.316e-02, 1.95e-06),
+            (28, 7.316e-02, 1.95e-08),
+            (29, 7.316e-02, 1.95e-10),
+            (30, 7.316e-02, 1.95e-12),
+        ]
+    )
+    assert _first_bailout(history) == 29
+
+
+def test_the_stall_bailout_spares_a_recorded_excursion_that_recovers() -> None:
+    """The false positive that a one-sided "made no progress" rule fires on, and must not.
+
+    Verbatim from a march whose rung went on to converge to 4.994e-06: three consecutive constraint-bound
+    steps with a narrowing cap and a *rising* residual. A rising residual means the step did something --
+    a pseudo-transient path is a march in pseudo-time, not a descent method -- and the recovery at step
+    22 is what it was doing. Only a step that changes nothing is a stall.
+    """
+    history = _recorded(
+        [
+            (18, 1.293e-01, 1.0),
+            (19, 1.310e-01, 9.83e-01),
+            (20, 1.335e-01, 9.28e-01),
+            (21, 1.489e-01, 2.53e-01),
+            (22, 9.241e-02, 9.80e-01),
+            (23, 8.230e-02, 8.42e-01),
+        ]
+    )
+    assert _first_bailout(history) is None
+
+
+def test_a_constraint_bound_step_is_only_a_stall_when_it_narrows_and_gains_nothing() -> None:
+    """``_limit_collapsing`` needs all three conditions; each alone names an ordinary step.
+
+    A capped step is a legitimate short step and a pseudo-transient path may be non-monotone, so
+    neither a tight cap nor a risen residual is a failure on its own. The lock-up is the conjunction:
+    the cap narrowing while the residual does not fall.
+    """
+    from aquaflux.solve.march import _limit_collapsing
+
+    def report(binding, residual):
+        return StepReport(
+            step=0,
+            cycles=1,
+            residual_norm=residual,
+            residual_ratio=residual,
+            alpha=binding,
+            binding_limit=binding,
+        )
+
+    previous = report(1e-5, 1.0)
+    assert _limit_collapsing(previous, report(1e-7, 1.0))  # narrowing, no gain -> a stall
+    assert not _limit_collapsing(previous, report(1e-7, 0.5))  # the residual fell
+    assert not _limit_collapsing(previous, report(1e-3, 1.0))  # the cap widened again
+    assert not _limit_collapsing(previous, report(1.0, 1.0))  # no constraint bound this step
+    assert not _limit_collapsing(None, report(1e-7, 1.0))  # nothing to continue
+
+
+class _PinnedOnItsLimit(eqx.Module):
+    """A step held against a constraint: the cap never widens and the iterate never moves.
+
+    The stand-in for a fraction-to-the-boundary lock-up. In the real march the cap *narrows* every step
+    -- taking ``tau`` of the distance to a constraint leaves the binding entry at ``1 - tau`` of its
+    value, so the next step's room is a fixed fraction of this one's for as long as the direction keeps
+    pointing at the boundary. A constant cap is the same case for the predicate under test (which asks
+    only that the cap not widen) and keeps this double a pure function of its inputs, which the march
+    requires. The iterate is held, so the residual is frozen and no stopping test can ever fire --
+    which is the whole failure.
+    """
+
+    cap: float = eqx.field(static=True, default=0.01)
+
+    def stepper(self):
+        cap = self.cap
+
+        def step(residual_fn, phi, residual_norm_0, solver):
+            return _outcome(phi, 1, alpha=0.0, binding=cap)
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def default_solver(self):
+        return None
+
+
+def test_a_collapsing_constraint_cap_ends_the_segment() -> None:
+    """A march pinned on a cap stops after ``stop_on_limit_stall`` steps, not at ``max_steps``.
+
+    Without this the segment spends its entire budget on arithmetically null steps -- measured on a
+    coupled RANS march as ninety-six consecutive steps at a frozen residual, the cap falling by exactly
+    100x each one. Ending the segment hands back an honestly unconverged state instead.
+    """
+    residual = _Cubic(jnp.zeros((1,)))
+    result = forward_march(
+        _PinnedOnItsLimit(),
+        residual,
+        jnp.ones((1,)),
+        max_steps=50,
+        rtol=1e-10,
+        atol=1e-12,
+        stop_on_limit_stall=3,
+    )
+    # One step establishes the sequence; three more continue it and trip the count.
+    assert len(result.reports) == 4
+    assert not result.converged and not result.triggered
+
+
+def test_the_stall_bailout_is_off_when_unset() -> None:
+    """``stop_on_limit_stall=None`` disables the test, so the march runs its whole budget as before."""
+    residual = _Cubic(jnp.zeros((1,)))
+    result = forward_march(
+        _PinnedOnItsLimit(),
+        residual,
+        jnp.ones((1,)),
+        max_steps=7,
+        rtol=1e-10,
+        atol=1e-12,
+        stop_on_limit_stall=None,
+    )
+    assert len(result.reports) == 7

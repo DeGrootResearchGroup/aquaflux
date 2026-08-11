@@ -727,6 +727,50 @@ bloat/re-cut it forces later.
 
 ---
 
+## Stale-Record Check (binding — run before EVERY commit, BEFORE the Post-Change Checklist)
+
+**Ask what your change makes FALSE, not only what it leaves incomplete.** The Post-Change Checklist's
+documentation-sync item catches the file that *describes* the code you touched. This catches the far
+larger class: every entry anywhere in the Claude-facing files that your change silently invalidates —
+a symbol you renamed, a default you moved, a measurement taken under the configuration you just
+changed. Those entries do not announce themselves, and nothing in the test suite fails when they rot.
+
+**This is not hypothetical bookkeeping. It is the most expensive recurring defect in this project.**
+In one session, three separate wrong facts were lifted out of these files by grep and asserted as
+current — a march solver that had been replaced, a tolerance that had moved, and a preconditioning
+side that had been deliberately reversed. Two of them were passed into sub-agent briefs, which would
+have produced confidently wrong measurements. A later audit found a **binding decision** stating
+`NewtonSolver` was deleted and, 34 lines below it, another entry using `NewtonSolver` as live.
+
+**Run this before every commit that renames, deletes, moves, or re-values anything:**
+
+```
+git diff --cached | grep -E "^-" | grep -oE "\b_?[A-Za-z][A-Za-z0-9_]{3,}\b" | sort -u > /tmp/touched
+grep -rnFf /tmp/touched CLAUDE.md .claude/rules/ README.md docs/
+```
+
+Then, for every hit, decide: still true / update / **delete**. Concretely:
+
+1. **A renamed or deleted symbol is a defect wherever it still appears.** Grep every Claude-facing
+   file for the old name, not just the rule that owns the subsystem — these names spread.
+2. **A moved default orphans every measurement taken under it.** Such a number is not merely
+   out of date, it is *unfalsifiable*: a reader cannot tell it no longer applies. Mark it with the
+   configuration it was taken under, or delete it. (See the Development-workflow rule on recording
+   what a measurement was taken under.)
+3. **⚠️ SUPERSEDE BY DELETING. Never by striking through, and never by appending a correction
+   below the claim.** `~~strikethrough~~` is invisible to grep, and "SUPERSEDED — see below"
+   expresses supersession by *adjacency*, which a grep hit does not carry. Both leave the wrong
+   statement fully readable and fully greppable. If the dead finding taught a trap worth keeping,
+   collapse it to **one line stating the trap** and delete the body.
+4. **Prefer a pointer that inoculates.** Where a dead name is likely to be searched for, one line
+   saying "there is no such symbol; the real one is X" is worth more than silence — a grep then lands
+   on the correction instead of on nothing.
+5. **Never cite a path that is not in the repository.** A `scratchpad/` or private-note pointer makes
+   its finding permanently un-re-adjudicable; move the harness into `validation/` or drop the pointer.
+
+**Why the rules files specifically:** they auto-load into context and are searched by name, so a stale
+entry there is not a passive error — it is actively served to the next reader as current fact.
+
 ## Post-Change Checklist
 
 After **every code change**, before considering the task complete, review and act on:
@@ -801,9 +845,11 @@ After **every code change**, before considering the task complete, review and ac
 
 4. **Documentation sync (binding — this is how the docs stop drifting).** A code change is
    **not complete** until every file that *describes* the changed code is updated in the **same
-   change** — docs move with code, never "fix it later." When you rename a symbol, change a
-   signature/default, move a file, add a dependency, or change behaviour, update each of these
-   that applies (grep the repo for the old name/path to find every mention):
+   change** — docs move with code, never "fix it later." **Run the Stale-Record Check above first:**
+   this item covers the file that *describes* what you changed, that one covers everything your
+   change silently made FALSE elsewhere, which is the larger and more dangerous set. When you rename
+   a symbol, change a signature/default, move a file, add a dependency, or change behaviour, update
+   each of these that applies (grep the repo for the old name/path to find every mention):
    - **The matching `.claude/rules/*.md`** — the per-subsystem design record: binding decisions,
      interfaces, class/function names, file paths, and `BUILT` / `Not yet built` status. Inline
      the fact rather than pointing at any private note.

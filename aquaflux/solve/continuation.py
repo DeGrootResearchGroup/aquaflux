@@ -80,7 +80,13 @@ def _shifted_solve(residual_fn, phi, rhs, shift, preconditioner, solver):
         The pseudo-time diagonal ``β d`` added to the Jacobian, shape ``(n,)`` (zeros off the shifted
         degrees of freedom).
     preconditioner : callable or None
-        The frozen left preconditioner for the shifted operator.
+        The frozen preconditioner for the shifted operator, applied on the **RIGHT** -- this call passes
+        no ``preconditioner_side``, so it takes :func:`~aquaflux.solve.solve_linear`'s ``"right"``
+        default. That is deliberate and load-bearing: under right preconditioning the Krylov residual is
+        ``b - A M y = b - A x``, the **true** residual, so the relative-residual stop stays honest even
+        where ``M`` is a poor inverse -- the shifted coupled saddle at low shift, where a
+        left-preconditioned solve would report convergence while returning a step that does not solve
+        the system. Do not read the loose ``forward_rtol`` as a preconditioned-residual stop; it is not.
     solver : lineax.AbstractLinearSolver
         The Krylov solver for the shifted system.
 
