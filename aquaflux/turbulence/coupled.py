@@ -1941,8 +1941,12 @@ def coupled_amg_continuation(
     stencil_reach : int
         The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
     smoother_fill_levels : int
-        Incomplete-LU fill levels of the stationary level smoother (``1`` = ILU(1); the indefinite saddle
-        stalls at ``0``, and a Krylov-accelerated smoother would make the V-cycle nonlinear).
+        Incomplete-LU fill levels of the stationary level smoother (``1`` = ILU(1), ``0`` = ILU(0)). The
+        smoother must stay **stationary** -- a Krylov-accelerated one makes the V-cycle nonlinear, so it
+        would need flexible GMRES and has no clean transpose for the adjoint. **On the fill level the two
+        shift regimes rank oppositely:** ILU(1) wins near a converged state at a large shift, and *breaks
+        down* at the small shifts a cold march runs at, where its extra fill produces negative pivots and
+        ILU(0) converges instead. The 3D backward-facing-step case therefore passes ``0``.
     smoother_sweeps : int
         Richardson sweeps of the level smoother per V-cycle visit.
     coarse_eq_limit : int or None

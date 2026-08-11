@@ -642,8 +642,8 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
 
     ❌ **REFUTED — the "ω is exactly 10×, i.e. still at its 60ν seed" lead.** That ω is `6ν/(β₁d²)` at the
     *rung's own* viscosity to 16 digits; the 10× compared a rung-2 state against the target-Re formula.
-    **One real defect does survive:** `SSTModel.f1`/`.f2` (`sst.py:136,178`) use plain unclamped
-    `jnp.sqrt(k)` where every closure here uses `safe_sqrt(jnp.maximum(k, 0.0))`.
+    (The unclamped `jnp.sqrt(k)` in `SSTModel.f1`/`.f2` that this bullet once flagged is **fixed** —
+    both now call `safe_sqrt(jnp.maximum(k, 0.0))`, as does `eddy_viscosity` and both production caps.)
 
     **Open, and now the real physics question:** at the converged root the first-wall-layer `k` median is
     **0.0754 against OpenFOAM's 0.164 (0.46×)**, 196 cells below the reference minimum. Leftover of the
@@ -857,7 +857,7 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     pressure Schur through the factorization's fill** rather than approximating it — the block PC's
     measured wall is the Schur *approximation* (the "Stage 3" note above / `.claude/rules/flow.md`), which
     the ILUT sidesteps: on the coupled RANS saddle it reaches the forward tolerance in ~3–10 GMRES cycles
-    against the block PC's hundreds. `MonolithicIlutShiftPolicy` **reuses `CoupledShiftPolicy`'s
+    against the block PC's hundreds. `MonolithicFactorShiftPolicy` **reuses `CoupledShiftPolicy`'s
     pseudo-transient shift diagonal** (the physics — same velocity `a_P` + k/ω transport diagonals) and
     swaps only the preconditioner; the factorization is a host `scipy` object so it rides as a **static**
     field and is applied via `jax.pure_callback`, with the adjoint's `Mᵀ` supplied directly through a
@@ -903,7 +903,7 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     preconditioner is exact and the Krylov solve converges in **one** iteration. With the UMFPACK backend
     (optional `petsc4py` dep, `backend="auto"|"umfpack"|"scipy"`) it factors the developed pitzDaily
     coupled Jacobian in **~1.2 s vs the ILUT's ~32 s (~26×)**, exact, verified on the real forward operator
-    and the β=0 adjoint (`reference/ILU_REFRESH_PROFILING.md`). It **shares the ILUT's machinery** —
+    and the β=0 adjoint. It **shares the ILUT's machinery** —
     `MonolithicFactorShiftPolicy` (generalized from the old `MonolithicIlutShiftPolicy`; agnostic to which
     factorization) and the `_monolithic_factor_step` builder tail — one implementation, parameterized by
     the preconditioner. Verified: `solve_coupled(continuation=coupled_lu_continuation(...))` reaches the
@@ -920,14 +920,18 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     a **direct-LU coarse solve** keeps the heavy fill on only the small coarsest grid, so it builds in
     ~seconds with bounded memory where both factorizations hit the 3D wall (the complete LU's fill OOMs; the
     ILUT's `spilu` on the distance-3 3D Jacobian — measured 38.7M nnz on `bfs3d` — runs >7.5 min). Shares
-    `MonolithicFactorShiftPolicy` + `_monolithic_factor_step`; its forward solver default is
-    `_COUPLED_AMG_FORWARD_SOLVER` (restart-15, since the V-cycle is a weaker approximate inverse than a
-    factorization — ~21 GMRES iters to 1e-8 on `bfs3d` at full accuracy, vs the LU's 1, but the inexact-Newton
-    march stops at ~1%). The V-cycle is a **fixed linear operator** (one apply), so the coupled-adjoint reuses
+    `MonolithicFactorShiftPolicy` + `_monolithic_factor_step`; it builds its forward solver **inline** —
+    `forward_rtol = 0.3` measured in the **row-scaled** `coupled_scaled_norm`, `restart=15`,
+    `max_restarts=60` (there is no `_COUPLED_AMG_FORWARD_SOLVER` symbol; the row-scaled stop is the
+    substantive part, since a plain 2-norm stop is ~100% `omega` and leaves the flow correction blind). The V-cycle is a **fixed linear operator** (one apply), so the coupled-adjoint reuses
     its **transpose** V-cycle — verified: reaches the block PC's fixed point AND passes the coupled-adjoint FD
     gate (`tests/integration/test_coupled_amg.py`). **Needs `petsc4py`** (the one builder that does; the module
-    raises a clear install hint otherwise). MVP smoother is a stationary ILU(1) (ILU(0) stalls, a Krylov
-    smoother goes nonlinear); the shipped per-step tuning is `smoother_sweeps=2` + restart-15 — restart-15
+    raises a clear install hint otherwise). The smoother must stay **stationary** (a Krylov-accelerated one
+    makes the V-cycle nonlinear, so it needs flexible GMRES and has no clean transpose — it can never be the
+    adjoint path). ⚠️ **Fill level: the validated `bfs3d` bundle is ILU(0) × 4 sweeps**; "ILU(0) stalls" was a
+    HIGH-β measurement and is superseded — at low β it is ILU(1) that breaks down. The library defaults still
+    ship `smoother_fill_levels=1, smoother_sweeps=2`, so the case bundle and the library disagree; the
+    `sweeps=2` optimum was tuned against ILU(1) and does not carry over. Restart-15
     stops the forward solve at the ~1% inexact-Newton tolerance, and the second smoother sweep roughly quarters
     the outer Krylov count on the low-shift operator the march's tail runs at (~2.1× the whole `bfs3d` solve
     there) for one extra cheap incomplete-LU back-solve (`.claude/rules/solve.md`). This is the coupled

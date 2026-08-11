@@ -431,8 +431,12 @@ def build_amg_vcycle(
     n_fields : int
         Degrees of freedom per cell.
     smoother_fill_levels : int
-        Incomplete-LU fill levels of the stationary level smoother (``1`` = ILU(1); the indefinite saddle
-        stalls at ``0``).
+        Incomplete-LU fill levels of the stationary level smoother (``1`` = ILU(1), ``0`` = ILU(0)).
+        **Which is better depends on the pseudo-transient shift, and the two regimes rank them
+        oppositely.** Near a converged state at a large shift the operator is diagonally dominant, fill is
+        harmless, and ILU(1) wins -- the measurement this default was set from. At the small shifts a cold
+        march runs at, the fill is what breaks: ILU(1) acquires negative pivots and diverges where ILU(0)
+        converges. A march living at low shift should pass ``0``.
     smoother_sweeps : int
         Richardson sweeps of the level smoother per V-cycle visit. Two is the default: on the
         low-shift operator the pseudo-transient march spends its tail in, a second smoother sweep

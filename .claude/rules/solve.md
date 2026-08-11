@@ -110,7 +110,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   differentiable params `theta` explicit so the adjoint returns their cotangents. Reverse-mode
   only (`jax.grad`), which is what a scalar objective through the solver needs. This is the
   "IFT on the converged Newton state" half of the two-level scheme; it activates with the first
-  nonlinear residual (the flux limiter). `newton_step` is shared with `NewtonSolver`. Verified
+  nonlinear residual (the flux limiter). Verified
   (`test_implicit_solve.py`): converges a nonlinear root, gradient matches the closed form to
   1e-10, and is iteration-count-independent. Used by the limited-advection solve.
   - **Convergence guard (binding — the IFT adjoint is only valid at a root).** `_forward` carries the
@@ -218,7 +218,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     can NaN. `MonolithicIlutPreconditioner.refresh_in_place(matvec, colouring, n_fields, shift_diagonal,
     …)` re-materializes and re-factors at the developed state and swaps `self.factors` **in place**. Two
     facts make this a **compilation cache hit** rather than a recompile: the preconditioner is a *static*
-    field of `MonolithicIlutShiftPolicy` (so its identity is the jit treedef, unchanged by mutating its
+    field of `MonolithicFactorShiftPolicy` (so its identity is the jit treedef, unchanged by mutating its
     factors), and `matvec()` reads `self.factors` **at callback time** (not captured), so the mutation is
     seen by the already-compiled solve. `build` and `refresh_in_place` share one form-and-factor path
     (`_factor`). **This is sound only because the forward march is NEVER differentiated** — the mutation
@@ -325,9 +325,11 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     reaches **1e-8 in 21 iterations**; **ILU(0) stalls** ~2e-4 and **SOR diverges**. A Krylov-accelerated
     (GMRES) smoother is a few iterations *faster* (12–18 via FGMRES) but makes the V-cycle **nonlinear** — it
     needs flexible GMRES and has no clean transpose, so it is a deferred forward-only optimization, **not** the
-    adjoint path. The MVP forward solver is `_COUPLED_AMG_FORWARD_SOLVER` (restart-15, vs the ILUT's
-    restart-10: the V-cycle is a weaker approximate inverse so the loose inexact-Newton solve needs a couple
-    dozen vectors, not a handful).
+    adjoint path. ⚠️ **Name the forward solver's PATH — there are three and they differ.**
+    `coupled_amg_continuation` builds its own inline: `forward_rtol = 0.3` in the **row-scaled**
+    `coupled_scaled_norm`, `restart=15`, `max_restarts=60`. (`_COUPLED_FORWARD_SOLVER`, block-SIMPLE 2D:
+    `relative_residual_gmres(1e-2)`, 2-norm, restart 120. `_COUPLED_ILUT_FORWARD_SOLVER`, 2D ILUT: 1e-2
+    2-norm, restart 10.) There is no `_COUPLED_AMG_FORWARD_SOLVER` symbol.
   - **Per-step cost tuning (measured): `smoother_sweeps=2` default and the forward restart 15 (from 40).**
     The restart-15 forward loop stops as soon as the ~1% inexact-Newton tolerance is met instead of running
     out a 40-vector subspace (the dominant per-step saving). The **smoother-sweeps knob is the second lever,
@@ -1817,8 +1819,10 @@ Governed by the root `CLAUDE.md` Engineering Principles.
 
     **NEXT STEPS, in order:**
     1. **Decide whether the matched configuration becomes the DEFAULT, and for which consumers.**
-       Nothing shipped has moved: `aggressive_levels` and `spectral_damping` both default to the old
-       behaviour, and no production preconditioner passes either. The measurement says the matched
+       ⚠️ **This shipped: `NodalNativeInverse` now defaults to the whole matched bundle**
+       (`aggressive_levels=1`, `prolongation_smoothing="none"`, `spectral_damping=False`,
+       `equilibrate=True`) and is the `BFS3D_TURBULENCE_INVERSE=native` arm. The open part is whether it
+       transfers to other consumers; the library `build_amg_vcycle` defaults are untouched. The measurement says the matched
        bundle is 5 → 2 cycles on the turbulence block; whether that transfers to the scalar transport
        and velocity blocks is unmeasured, and flipping a default is a march-level decision, not a
        block-probe one.
@@ -3134,8 +3138,11 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     rows start satisfied (right-hand side ~0), so their per-row scale collapses onto the absolute `atol`
     floor and a handful of them hold the whole solve to ~1e-10 (~9 orders past 1e-3). `relative_residual_gmres`
     scales the system to unit right-hand-side 2-norm and runs GMRES at `rtol=0, atol=target, norm=2-norm`,
-    so it stops on `‖Mr‖₂/‖Mb‖₂ ≤ target` (≈ 1% *solution* accuracy at `target=1e-2`, since M≈A⁻¹) —
-    immune to those rows. Measured on the real cold-IC march: ~3-5 cycles (often 2-3/step), ~4× fewer
+    so it stops on `norm(r)/norm(b) ≤ target` — immune to those rows. ⚠️ **That residual is the TRUE
+    one, not `‖Mr‖`: `_shifted_solve` takes `solve_linear`'s `preconditioner_side="right"` default, so the
+    Krylov residual is `b − A M y = b − A x`. No "solution accuracy" follows from it — an earlier version of
+    this line inferred "≈1% solution accuracy since M≈A⁻¹", which holds only under LEFT preconditioning and
+    misled a later reader into a wrong hypothesis.** Measured on the real cold-IC march: ~3-5 cycles (often 2-3/step), ~4× fewer
     matvecs to the same `x_r/h`, trajectory unchanged.
   - **⚠️ THE "TIGHT TOLERANCE IS LOAD-BEARING UNDER LOG-ω" CLAIM WAS STALE — corrected 2026-07-28.** The
     old note here (and in `turbulence.md`) said an inexact/loose forward solve is unsafe under log-ω
@@ -4154,8 +4161,10 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   direction and the traps follow. Headline: a
   **block-triangular SIMPLE-type** preconditioner using the lagged `a_P` for the Schur approximation,
   with a **fixed-cycle multigrid inner** pressure solve built once off-jit and frozen; keep the inner
-  *fixed* (constant operator) so plain GMRES + the verified transparent-left-PC suffices (a *variable*
-  inner would force FGMRES). On **`jaxamg`**: the search confirmed it is **NVIDIA/AmgX-locked and
+  *fixed* (constant operator) so plain GMRES suffices (a *variable* inner would force FGMRES); the
+  preconditioner is applied on the **RIGHT** (`solve_linear`'s default), so the Krylov residual is the true
+  residual — a left-preconditioned stop is honest only for a strong `M` on a well-behaved operator
+  (`potential_flow` passes `preconditioner_side="left"`), never on the shifted saddle. On **`jaxamg`**: the search confirmed it is **NVIDIA/AmgX-locked and
   scalar-only** (no coupled/saddle-point, no AMD/TPU) — usable at most as a pressure-Poisson *inner*
   escape-hatch on NVIDIA hardware, **not** the coupled solver or an architectural commitment. Do not
   adopt it on the README's word. **`LSC` original / `PCD` carry equal-order/FEM traps** (use stabilized
@@ -4265,7 +4274,8 @@ Governed by the root `CLAUDE.md` Engineering Principles.
     diagonal / the positive momentum `a_P`, need no per-apply floor.
   - **The damped-Jacobi convection hierarchy is TWO-LEVEL by design (binding — do not add a depth
     knob).** `build_convection_hierarchy(a)` builds exactly a smoothed fine level + a single **direct**
-    (dense pseudo-inverse) coarse solve; it has no `max_levels` parameter. On the fine level the
+    (dense pseudo-inverse) coarse solve. **`max_levels` exists** (`multigrid.py`, default
+    `_CONVECTION_LEVELS = 2`); raising it re-opens the defect below, so leave it at 2. On the fine level the
     upwind operator is a diagonally dominant M-matrix, so one damping factor `ω/λ_max` contracts
     (`_jacobi_smooth`, ρ ≈ 0.7 at high cell Peclet). A *deeper* Galerkin recursion is deliberately not
     built: a coarse-of-coarse operator of a strongly convection-dominated problem acquires
@@ -4296,7 +4306,7 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   `CorrectedGreenGauss` **converges quadratically** (‖R‖ → 6e-12, `u_min=-0.204` vs Ghia −0.211),
   full Newton, differentiable. What remained was purely performance — not correctness or
   convergence of the absorbed gradient.
-- **The efficient realization of the absorbed gradient — `SweptCorrectedGradient` (built, measured,
+- **The efficient realization of the absorbed gradient — `SweptGradientSolve` (built, measured,
   a ~5× win).** Two costs of applying `A_g⁻¹` inside every outer matvec are separable from the outer
   iteration count above: the *per-matvec* cost and the *compile* cost of a nested implicit-diff GMRES.
   Both collapse if the constant, well-conditioned `A_g` is inverted by a **fixed number of matrix-free

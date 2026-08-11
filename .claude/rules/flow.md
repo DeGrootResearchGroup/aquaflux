@@ -509,7 +509,7 @@ Engineering Principles.
   independently (finite-element boundary recipes that do not transfer to FVM). Full numbers and the
   matching "what a preconditioner can and cannot change" rule are in `.claude/rules/solve.md`.
 - **Fully-AD `a_P`** — a possible refinement (the diffusion Gate-C / limiter pattern), not yet needed.
-- **Gradient-scheme cost — largely solved (use `SweptCorrectedGradient`).** The *per-matvec* and
+- **Gradient-scheme cost — largely solved (use `SweptGradientSolve`).** The *per-matvec* and
   *compile* cost of the nested corrected-gradient solve (distinct from the outer iteration count) is
   cut ~5× by inverting the constant `A_g` with fixed matrix-free Richardson sweeps instead of a
   nested implicit-diff GMRES — an exact `O(n)` drop-in (N=32 coupled Newton step 112 s → 23 s). It is
