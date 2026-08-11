@@ -501,11 +501,20 @@ adjoint machinery it must reuse is `.claude/rules/solve.md`.
     `wall_omega_viscous_coeff = C`, `omega_vis = C·6ν/(β₁d²)`):
     - **aquaflux default: `p = 2`, `C = 1`** — `sqrt(omega_vis² + omega_log²)` (Menter's quadrature). The
       default is **unchanged** by the parametrization (all existing wall tests pin it).
-    - **OpenFOAM `omegaWallFunction` (default): `p → ∞`, `C = 1`** — `max(omega_vis, omega_log)`; reached in
-      aquaflux with a large exponent (`p ≈ 60` is `max` to <2 %). On pitzDaily wall cells `max` matches OF's
-      field to **<2 %** (median ratio 1.00); aquaflux's `p = 2` runs **~20 % high in the buffer layer**
-      (`y+≈8–15`, `sqrt(a²+b²)` exceeds `max(a,b)` by up to 41 %; median aquaflux/OF `omega_wall` = 1.20).
-      The wall distance and constants **agree** — only the exponent differs.
+    - **OpenFOAM `omegaWallFunction` (default): ⚠️ NOT a power mean at all — a HARD SWITCH at `yPlusLam`.**
+      Read from source: `blended_(dict.lookupOrDefault<Switch>("blended", false))`
+      (`omegaWallFunctionFvPatchScalarField.C:215`), and the `blended_` branch at `:81` selects
+      `omega_vis` below `yPlusLam` and `omega_log` above, with no combination. (`blended = true` is an
+      *exponential* `exp(-Rey/11)` interpolation — also not a max.) The earlier entry here described it as
+      `p → ∞`, `max(omega_vis, omega_log)`; **that names the wrong mechanism**, and the correction matters
+      in a specific band: the two branches cross at `y* ≈ 9.84` while the switch is at `y*_lam = 11.53`, so
+      between those a `max` takes `omega_log` where OpenFOAM takes `omega_vis`. Everywhere else `max` is a
+      good numerical proxy, which is why the measurement below still stands.
+      **Measurements, each with its case** (they differ, and the rule is to name what each was taken on):
+      on **pitzDaily** wall cells `max` matched OF's field to **<2 %** (median ratio 1.00) while aquaflux's
+      `p = 2` ran **~20 % high in the buffer layer** (`y+≈8–15`, median aquaflux/OF `omega_wall` = 1.20);
+      on **bfs3d** at the converged root the median `omega_aq/omega_OF` over the fine wall layer is
+      **1.129** (p90 1.28, max 1.41). The wall distance and constants **agree** in both.
     - **Ansys Fluent (`correlation` default, Theory Guide §4.18.3, eqs 4.404–4.407): `p = C_exp = 1.3`,
       `C = C_calib = 1/3`** — both fit on plane Couette flow (Re 1e6) to flatten the wall shear across `y+`
       (Fluent also blends `u*`, `u_τ`, and the k-production consistently, and offers a `tabulated` option).

@@ -241,3 +241,84 @@ def test_sources_are_differentiable() -> None:
     )(k)
     assert not bool(jnp.isnan(grad_const))
     assert not bool(jnp.any(jnp.isnan(grad_field)))
+
+
+def test_omega_production_cap_does_not_invert_on_a_negative_k() -> None:
+    """The cap must not flip sign when ``k`` goes transiently negative -- it is finite, so it spreads.
+
+    ``nu_t = a1 k / max(a1 omega, S F2)`` follows ``k``'s sign, so a negative ``k`` sends ``nu_t``
+    negative, ``maximum(nu_t, floor)`` then selects the ``1e-30`` floor instead of ``nu_t``, and the
+    quotient becomes ``k omega / 1e-30``. At the values this was measured on -- ``k = -2.9e-13``,
+    ``omega = 4.0e5`` -- the unguarded cap is about ``-1e23``, which wins the ``min`` and injects an
+    ``omega`` source of order ``1e13``. A NaN would at least be caught by the divergence guard; this is
+    finite, so it propagates. Bounded above by ``alpha S^2 V`` is the property that matters.
+    """
+    context, _ = _context_and_volume()
+    negative = _cell(-2.9e-13, -2.9e-13)
+    # A NEGATIVE nu_t is passed deliberately. `SSTModel.eddy_viscosity` now clamps it non-negative at
+    # source, so this can no longer be produced by calling the closure -- but this test pins the cap's
+    # own guard, which must hold whether or not the upstream one is there. Two independent guards, two
+    # independent tests; a test that leaned on the other would go vacuous the moment it moved.
+    nu_t = _cell(-1e-9, -1e-9)
+    source = _omega_production(
+        _cell(2.0, 2.0), _cell(1.0, 1.0), nu_t=nu_t, k=negative, omega=_cell(4.0e5, 4.0e5)
+    ).source(_cell(1.0, 1.0), context)
+    assert jnp.all(jnp.isfinite(source))
+    # The cap is 0 at k <= 0, so `min(S^2, 0)` is 0 and the source vanishes -- bounded, and the same
+    # value the unguarded formula already gives at k = 0 exactly.
+    assert jnp.allclose(source, 0.0)
+
+
+def test_omega_production_cap_is_unchanged_for_a_positive_k() -> None:
+    """The clamp is off-solution: at ``k > 0`` the source is exactly the unguarded closed form."""
+    context, volume = _context_and_volume()
+    k, omega, nu_t, s = _cell(1.0, 1.0), _cell(1.0, 1.0), _cell(0.01, 0.01), _cell(2.0, 2.0)
+    source = _omega_production(s, _cell(1.0, 1.0), nu_t=nu_t, k=k, omega=omega).source(
+        _cell(1.0, 1.0), context
+    )
+    cap = 10.0 * MODEL.beta_star * k * omega / nu_t
+    expected = MODEL.alpha_1 * jnp.minimum(s**2, cap) * volume
+    assert jnp.array_equal(source, expected)
+
+
+def test_k_production_does_not_become_a_sink_on_a_negative_k() -> None:
+    """The production term must never drive ``k`` further down -- the failure that motivates the guards.
+
+    Two independent sign flips have to be stopped for this to hold, which is why the fix is in two
+    places: ``nu_t`` follows ``k``'s sign, so ``nu_t S**2`` goes negative; and the Menter cap
+    ``10 β* k ω`` goes negative, so it wins the ``min``. Either one alone leaves the term a sink.
+    """
+    context, _ = _context_and_volume()
+    negative = _cell(-2.9e-13, -2.9e-13)
+    omega, s, d, nu = _cell(4.0e5, 4.0e5), _cell(2.0, 2.0), _cell(1.0, 1.0), _cell(1e-5, 1e-5)
+    nu_t = MODEL.eddy_viscosity(negative, omega, s, nu, d)
+    assert jnp.all(nu_t >= 0.0)  # the source clamp: nu_t never follows k negative
+    source = KProduction(nu_t=nu_t, strain_rate=s, omega=omega, model=MODEL).source(
+        negative, context
+    )
+    assert jnp.all(jnp.isfinite(source))
+    assert jnp.all(source >= 0.0)
+
+
+def test_k_production_is_unchanged_for_a_positive_k() -> None:
+    """Off-solution: at ``k > 0`` the source is exactly the unguarded closed form, on both cap branches."""
+    context, volume = _context_and_volume()
+    omega, s, d, nu = _cell(1.0, 1.0), _cell(2.0, 2.0), _cell(1.0, 1.0), _cell(1e-5, 1e-5)
+    for k in (_cell(1.0, 1.0), _cell(1e-4, 1e-4)):  # cap inactive, then cap active
+        nu_t = MODEL.eddy_viscosity(k, omega, s, nu, d)
+        source = KProduction(nu_t=nu_t, strain_rate=s, omega=omega, model=MODEL).source(k, context)
+        expected = jnp.minimum(nu_t * s**2, 10.0 * MODEL.beta_star * k * omega) * volume
+        assert jnp.array_equal(source, expected)
+
+
+def test_eddy_viscosity_is_unchanged_for_a_positive_k() -> None:
+    """The ``nu_t`` clamp is off-solution too: bit-identical to the unguarded form wherever ``k > 0``."""
+    k, omega, s, d, nu = (
+        _cell(0.81, 1.0),
+        _cell(100.0, 1.0),
+        _cell(2.0, 2.0),
+        _cell(1.0, 1.0),
+        _cell(0.06, 1e-5),
+    )
+    expected = MODEL.a1 * k / jnp.maximum(MODEL.a1 * omega, s * MODEL.f2(k, omega, nu, d))
+    assert jnp.array_equal(MODEL.eddy_viscosity(k, omega, s, nu, d), expected)

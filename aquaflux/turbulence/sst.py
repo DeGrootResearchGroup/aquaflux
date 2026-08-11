@@ -18,6 +18,17 @@ import jax.numpy as jnp
 
 from aquaflux.vectors import dot
 
+from .strain import safe_sqrt
+
+# ``k`` is clamped to zero wherever it enters ``F1``/``F2`` -- under the square root, and in ``F1``'s
+# cross-diffusion branch. ``k`` is solved DIRECTLY (a log transform is singular at a no-slip wall, where
+# ``k = 0`` is the physical boundary condition), so nothing structurally prevents a Newton step from
+# carrying it below zero, and one such cell is enough to matter: a plain ``sqrt`` of it is NaN, which
+# poisons the entire residual, while a negative cross-diffusion branch wins the ``min`` and silently
+# selects the wrong blend. Both are **off-solution** guards, inactive wherever ``k > 0``, so the value
+# and the sensitivity at a converged field are unchanged -- the same convention every wall closure in
+# ``boundary.py`` already follows.
+
 # A positive floor on the cross-diffusion term CD, guarding the ``1 / CD`` inside ``F1``'s argument
 # where the two gradients are near-orthogonal. Part of the SST definition of ``F1``.
 _CROSS_DIFFUSION_FLOOR = 1e-10
@@ -133,7 +144,7 @@ class SSTModel(eqx.Module):
             ``F2`` per cell, shape ``(n_cells,)``.
         """
         arg2 = jnp.maximum(
-            2.0 * jnp.sqrt(k) / (self.beta_star * omega * d),
+            2.0 * safe_sqrt(jnp.maximum(k, 0.0)) / (self.beta_star * omega * d),
             500.0 * nu / (d**2 * omega),
         )
         return jnp.tanh(arg2**2)
@@ -173,12 +184,13 @@ class SSTModel(eqx.Module):
         cross_diffusion = jnp.maximum(
             2.0 * self.sigma_omega2 * dot(grad_k, grad_omega) / omega, _CROSS_DIFFUSION_FLOOR
         )
+        positive_k = jnp.maximum(k, 0.0)
         arg1 = jnp.minimum(
             jnp.maximum(
-                jnp.sqrt(k) / (self.beta_star * omega * d),
+                safe_sqrt(positive_k) / (self.beta_star * omega * d),
                 500.0 * nu / (d**2 * omega),
             ),
-            4.0 * self.sigma_omega2 * k / (cross_diffusion * d**2),
+            4.0 * self.sigma_omega2 * positive_k / (cross_diffusion * d**2),
         )
         return jnp.tanh(arg1**4)
 
@@ -210,6 +222,18 @@ class SSTModel(eqx.Module):
         Returns
         -------
         jnp.ndarray
-            The kinematic eddy viscosity ``nu_t`` per cell, shape ``(n_cells,)``.
+            The kinematic eddy viscosity ``nu_t`` per cell, shape ``(n_cells,)``, never negative.
+
+        Notes
+        -----
+        ``k`` is clamped at zero, so ``nu_t >= 0`` for any input. Without it ``nu_t`` follows ``k``'s
+        sign, and a negative eddy viscosity is not a small error downstream: it makes
+        :class:`~aquaflux.turbulence.KProduction` a *sink* (the production ``nu_t S**2`` turns negative
+        and drives ``k`` further down, deepening the very excursion it should damp), and it inverts the
+        ``omega`` production cap. Off-solution and inactive at convergence, where ``k > 0``.
         """
-        return self.a1 * k / jnp.maximum(self.a1 * omega, strain_rate * self.f2(k, omega, nu, d))
+        return (
+            self.a1
+            * jnp.maximum(k, 0.0)
+            / jnp.maximum(self.a1 * omega, strain_rate * self.f2(k, omega, nu, d))
+        )
