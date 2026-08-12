@@ -197,6 +197,18 @@ closure.
   residuals part. That last number is the check that a pair of arms differs in one thing only; runs that
   should share an operator and separate at step one are not a controlled comparison, however well their
   totals line up.
+- `zero_pattern_pivots.py` — what the preconditioner's sparsity pattern actually contains at **zero
+  pseudo-transient shift**, and the incomplete-LU pivots it produces. Zero shift is the operator the
+  adjoint solves, so every gradient goes through it, and no forward step ever visits it (the march floors
+  its preconditioner at a positive shift) — which is why it needs a harness of its own rather than a march.
+  It sweeps the probing reach against how the shift and the equilibration are written, since both decide
+  whether the assembler's stored *exactly-zero* positions survive into the factorization, and reports the
+  pattern per `(row field, column field)` block, the pivot census, the hierarchy shape, and the true
+  residual through GMRES. Both spellings are implemented in the harness rather than imported, so an arm
+  describes the spelling and not whichever version of the library is checked out, and the arms are
+  fingerprinted over their nonzero entries so a comparison whose arms differ in their *values* cannot be
+  mistaken for one that differs only in pattern. `BFS3D_CENSUS_ONLY=1` skips the solves when the pattern
+  and the factorization answer the question on their own.
 - `step_policy_replay.py` — pre-screens candidate step-control policies against those same archived logs,
   in milliseconds rather than in 35–50-minute marches. The rule that sets the shift strength β is
   arithmetic over three recorded numbers per step (the accepted step length, the steady residual, and the

@@ -358,6 +358,18 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       entries are not themselves near-zero.** Shortening `k`/`ω` is measured safe on this case;
       shortening `p` is measured catastrophic on this case; the two are not distinguished by any number
       in the table above.
+      **⚠️ "Safe" here means AT POSITIVE SHIFT, which is the only regime a march visits. At β = 0 —
+      the adjoint's operator — shortening `k`/`ω` is measured to DOUBLE the cost** (22 restart cycles
+      against uniform reach's 11 to the same 1e-11 floor; see the stored-zeros entry below for the full
+      configuration). It still converges, so this is a cost to know about rather than a reason to widen
+      the march's reach, but do not carry "proven safe" across the β boundary.
+      **⚠️ AND `(3,3,3,2,2,2)` IS ONLY SOUND IF THE FACTORIZATION KEEPS STORED ZEROS, WHICH IT MUST NOT.**
+      Shortening `p` is safe only when the dropped positions are held in the pattern as stored zeros —
+      and stored zeros are exactly what `AmgVCycle._live` removes, because the incomplete factorization
+      cannot take them. So with the operator pruned at the factorization the `p` column is back in the
+      configuration that diverges the case, and the case default must stay `(3,3,3,3,2,2)`. **Predicted
+      from the mechanism, not re-measured on a march** — the divergence itself is the measured #191
+      result, at β > 0 under a pruning assembly.
       **⚠️ A SHORT REACH CORRUPTS RATHER THAN TRUNCATES, and this is the trap the design turns on.** A
       colouring is collision-free only for the pattern it was built at, so two cells sharing a reach-2
       colour may still both couple to a common row at distance 3; the response then holds the *sum* and
@@ -532,11 +544,70 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       GAMG refactor needs. On `bfs3d` the full pattern is ~47.2M positions, but that is a **structural
       over-estimate**, mostly explicit zeros at every state — LIVE nnz is ~constant (**38.7M cold / 39.0M
       developed**; there is *no* cold→developed nnz collapse — an earlier "47.2M cold → 39.0M developed"
-      reading conflated the fixed pattern with live nnz). The explicit zeros are harmless to aggregation —
-      strength-of-connection ignores a zero coupling — but they are why an incomplete/complete factorization
-      can't use this path: an explicit zero is fill. De-compression 22.4→11.2 s (2.0× vs
+      reading conflated the fixed pattern with live nnz). **The stored zeros must be pruned before the
+      operator reaches an incomplete factorization, and `AmgVCycle._live` is where that now happens** — see
+      *"stored exactly-zero positions break the ZERO-SHIFT V-cycle"* below, which measures what they cost and
+      corrects the two mechanisms this bullet used to assert for it. De-compression 22.4→11.2 s (2.0× vs
       loop); full build (materialize + GAMG) only 56.0→54.2 s (**1.03×** — GAMG-dominated), so the gather's
       real value is the fixed-structure invariant, not the wall-clock.
+    - **⚠️⚠️ STORED EXACTLY-ZERO POSITIONS BREAK THE ZERO-SHIFT V-CYCLE, and BOTH obvious mechanisms are
+      REFUTED (measured 2026-08-12, harness `validation/bfs3d_openfoam/zero_pattern_pivots.py`).** The
+      coloured probe stores the full block-stencil pattern, of which **8.03M of 47.21M positions are exactly
+      zero**; whether they survive into the preconditioner depends only on how the shift and the
+      equilibration are *spelled*. A sparse product or addition stores only nonzero results and deletes them;
+      an in-place diagonal assignment and value scale cannot, and keeps them.
+
+      *Configuration:* `bfs3d` `state-00067` (converged, ‖R‖ 3.586e-06), **operator and preconditioner both
+      at β = 0**, right-hand side the real steady residual `−R(state)`, monolithic V-cycle, plain
+      aggregation, ILU(0) ×4, `coarse_eq_limit` 2000, pattern reach 3, GMRES restart 15 to rtol 1e-8 judged
+      on the **TRUE** residual.
+
+      | column reach | shift / equilibration | nnz | stored zeros | cycles | TRUE rel |
+      |---|---|---|---|---|---|
+      | uniform 3 | prune / prune | 39.18M | 0 | **11** | **8.474e-11** |
+      | uniform 3 | preserve / preserve | 47.21M | 8.03M | 58 | **2.299e-02** |
+      | uniform 3 | **preserve / prune** | 39.18M | 0 | **11** | **8.474e-11** |
+      | 3/3/3/3/2/2 | prune / prune | 36.97M | 0 | 22 | 8.545e-11 |
+      | 3/3/3/3/2/2 | preserve / preserve | 47.21M | 10.24M | 58 | 2.299e-02 |
+
+      - **⚠️ AT THE FORWARD MARCH'S OWN OPERATING POINT EVERY ARM TIES, so a march cannot reveal any of
+        this.** Same harness at `state-00066` (step-initial, operator β 0.0096 with the V-cycle at the 0.05
+        floor — the shipped mismatch): **all five arms give 4 restart cycles at a true relative residual of
+        1.435e-13** (1.444e-13 at the shortened reach). Not a cycle of difference, from either the stored
+        zeros or the reach. So the damage is **confined to the zero-shift adjoint**, and the pattern-preserving
+        change's clean march revalidation was correct rather than lucky — its validation and its failure mode
+        genuinely do not overlap. This is the "a benign operating point cannot discriminate" rule biting on
+        exactly the axis that was being changed: β = 0 is the only state on this case that separates these arms.
+      - **Pruning at EITHER stage restores the good operator bit-identically** (11 cycles, 8.474e-11), so the
+        fix is not "which stage prunes" but "prune before the factorization". Shipped as
+        **`AmgVCycle._live`**, at the boundary where the operator reaches PETSc, so the assemblers can stay
+        pattern-preserving (which is what makes the fixed-pattern fast path and the generic sparse path agree
+        entry for entry) while the factorization still gets the live pattern.
+      - **⚠️ A PIVOT CENSUS CANNOT DETECT THIS — all four arms are IDENTICAL: min |pivot| 1.546e-01, zero
+        negative pivots, median 1.020.** So is the coarse space's size (2 levels, 1296 coarse equations in
+        every arm). Both were the natural diagnoses, both were measured, and both are blind here; do not
+        spend a run on either again. **The blindness holds at BOTH states, i.e. over nine arms:** at
+        `state-00066` every arm reads min |pivot| 2.145e-01 and median 1.017 — the shift lifts the smallest
+        pivot from 1.546e-01, which is the shift doing its job on the diagonal — while the arms there tie in
+        convergence and at β = 0 they differ five-fold. A census that is constant across arms that converge
+        identically *and* across arms that do not is not measuring the thing that separates them. What *is* demonstrated (small-scale, PETSc directly) is that the stored
+        zeros are genuinely kept by PETSc (`nz_used` counts them, in the `Mat` and in the ILU factor) and
+        that the smoother's **action** differs, i.e. the elimination does deposit fill into them.
+      - **⚠️ Why a denser incomplete factor is a WORSE smoother on this operator at zero shift is NOT
+        established.** Retaining fill can only make an incomplete factorization a closer approximation to
+        `A⁻¹`, and the pivots stay healthy, so the ILU(1)-style "fill produces negative pivots" account does
+        **not** transfer. The open instrument is to compare the two V-cycles' action per level, or to degrade
+        the coarse solve to `jacobi` in both arms and see whether the gap survives.
+      - **Column shortening is a separate and much milder effect: it DEGRADES but does not break.** At the
+        tight stop `3/3/3/3/2/2` converges in 22 cycles against uniform's 11 — 2× the cost, same 1e-11 floor
+        — where preserving does not converge at all. A loose march-solver stop reads its 4.779e-03 as a
+        failure, but that is the stop, not divergence. Under preservation the reach is genuinely irrelevant
+        (58 cycles / 2.299e-02 at both reaches), which is the one claim of the pattern-preserving change that
+        the measurement fully confirms.
+      - **The reach-3-positions padding experiment is consistent with all of this, and the distinction is now
+        load-bearing:** that experiment padded with **~1e-30**, which is *nonzero* and therefore survives a
+        pruning assembly. An exact zero does not. Do not read "explicit zeros are required in the pattern" as
+        licensing stored exact zeros.
     - **Probe REACH is a preconditioner choice — reach-2 is NOT a safe drop-in (measured, SHELVED — a
       GENUINE failure, not a build artifact).** The materialized `J` is only the preconditioner's operator
       (the solve matvec is always the exact matrix-free jvp), so a lower `stencil_reach` gives an approximate
@@ -550,10 +621,14 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       the graph gives a structurally weaker incomplete factorization that is non-convergent on the indefinite
       saddle. The ≤6e-6 magnitude argument bounds only the value-based *aggregation* (consistent
       reach-2↔reach-3); it does not touch the smoother. Proof: padding reach-2's values onto the reach-3
-      *positions* (distance-3 shell as ~1e-30 explicit zeros) recovers reach-3 convergence **bit-identically**
-      (32 matvecs) — so the distance-3 *positions* are causal, their values are not. **This is why the full
-      reach-3 pattern with explicit zeros is REQUIRED for smoother convergence (not merely a
-      structure-invariance nicety), and why you must not lower the default reach.** Recovery is not cheap:
+      *positions* (distance-3 shell as ~**1e-30**, which is *nonzero*) recovers reach-3 convergence
+      **bit-identically** (32 matvecs) — so the distance-3 *positions* are causal, their values are not.
+      **This is why the reach-3 pattern is REQUIRED for smoother convergence (not merely a
+      structure-invariance nicety), and why you must not lower the default reach.** ⚠️ **Read "positions
+      carrying a tiny NONZERO", not "stored exact zeros" — the two are opposite in effect and the padding here
+      was 1e-30.** A stored *exact* zero survives no pruning assembly and, when it does reach the
+      factorization, is measured to break the zero-shift V-cycle outright (see the stored-zeros entry above).
+      Recovery is not cheap:
       `smoother_sweeps=3` / ILU(2) still diverge *and* erase the setup win; restoring the reach-3 pattern
       converges but forfeits the GAMG-setup half of the economy (the larger half — refresh is
       setup-dominated), leaving only the marginal probe-colour saving. The one open lever is a fundamentally
