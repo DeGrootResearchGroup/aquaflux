@@ -83,6 +83,16 @@ class Constant(Property):
         return jnp.full((cell_zones.label.shape[0],), self.value)
 
     def scaled(self, factor):
+        """A copy with the value multiplied by ``factor``.
+
+        **A scaled copy shares compiled code with the original only if the value is an ARRAY.** A plain
+        Python float is not a JAX array, so it rides on the *static* side of a jitted function and is
+        compared by value: rescale it and every compiled function taking the owning assembler as an
+        argument is a fresh cache key. That is invisible until it is expensive -- on a Reynolds-number
+        continuation, whose whole purpose is to rescale this value per rung, it recompiled the entire
+        coupled solve at every rung. Pass the value as ``jnp.asarray(...)`` when the rungs are meant to
+        share compilations; a float stays perfectly correct, just not shared.
+        """
         return Constant(self.value * factor)
 
 

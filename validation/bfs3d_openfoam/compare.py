@@ -85,6 +85,7 @@ from aquaflux.solve import (
     relative_residual_gmres,
 )
 from aquaflux.turbulence import (
+    CoupledJacobianProbe,
     CoupledRANS,
     LogScalars,
     SSTModel,
@@ -861,7 +862,12 @@ def build_case(model=None, momentum_advection=None, gradient=None):
     momentum = MomentumContinuity.build(
         mesh,
         geom,
-        PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
+        # `jnp.asarray`, not a bare float: the Reynolds continuation RESCALES this value per rung,
+        # and a Python float is not a JAX array, so it rides on the static side of every jitted
+        # function taking this assembler -- making each rung a fresh compilation key for the whole
+        # coupled solve. As an array the rungs differ in a leaf VALUE and share the compilation.
+        # Density is left a float: nothing rescales it, so its static value is the same every rung.
+        PropertyModel({"viscosity": Constant(jnp.asarray(RHO * NU)), "density": Constant(RHO)}),
         grad,
         BoundaryConditions(
             {
@@ -1043,36 +1049,71 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         else None
     )
 
-    def point_setup(companion, seed_state, point):
-        """Build each rung's preconditioner at ITS OWN viscosity and seed state.
+    # Everything below is built ONCE and shared by every continuation rung, and each piece is here rather
+    # than inside `point_setup` for the same reason: a rung rebuilding it would hand the compiled coupled
+    # solve a new object in a STATIC field, which is compared by identity, so the whole solve recompiles.
+    #
+    # That is the largest fixed overhead a continuation march carries, and it is self-diagnosing in this
+    # case's own log: each rung's FIRST step is that rung's most expensive step by a wide margin while
+    # its Krylov cycle count is no higher than its cheap steps' -- cost with no linear algebra behind it
+    # is compilation. Only the first rung's is unavoidable.
+    #
+    # The probe (colouring plan + gather map) depends on the mesh alone, so a rung was additionally
+    # building the single largest allocation this case makes -- twice, once for the engine and once for
+    # the refresh hook beside it.
+    probe = CoupledJacobianProbe.build(coupled, column_reach=COLUMN_REACH)
+    # With the cycle trigger on, the scheduled cadences are switched OFF so it REPLACES them: as an
+    # addition it is break-even, as a replacement it is the largest saving measured on this march.
+    # CAREFUL: `beta_rel_change=None` does NOT switch the schedule off -- it removes the gate, and a
+    # missing gate means "refresh every step". Switching it off means a gate that exists and never
+    # fires again after its first (initialising) call, plus no materialize gates, so the refresh
+    # branch resolves to `none`.
+    scheduled = not REFRESH_ON_CYCLES
+    refresh = amg_beta_tracking_refresh(
+        coupled,
+        probe=probe,
+        beta_rel_change=0.25 if scheduled else REFRESH_ON_BETA,
+        refresh_every=8 if scheduled else 10**9,
+        materialize_drift=0.05 if scheduled else None,
+        materialize_every=4 if scheduled else None,
+        beta_floor=PC_BETA_FLOOR,
+        observer=logger.on_refresh,
+    )
+    # A fresh `combine_observers` closure per rung would be its own recompile -- it lands in the step's
+    # static `inner_observer` and functions compare by identity.
+    inner_observer = combine_observers(
+        logger.on_inner,
+        *([inner_dump.on_inner] if inner_dump is not None else []),
+    )
+    #: The one V-cycle every rung shares, held here so `point_setup` can hand it back to the next rung.
+    shared_preconditioner: list = []
 
-        A single continuation built once cannot serve the ramp: the frozen operator has to be rebuilt
-        per rung, and the beta-tracking refresh has to close over that rung's residual.
+    def point_setup(companion, seed_state, point):
+        """Configure each rung, REUSING one preconditioner and one refresh hook across the whole ramp.
+
+        Only the molecular viscosity changes between rungs, so a rung needs its own residual assembler
+        and its own row scales -- both of which ride as ordinary data and cost nothing to rebuild -- but
+        it does not need its own V-cycle. It needs that V-cycle *fitted to it*, which is a different
+        thing and is what `rebind` arranges: the shared hook is pointed at this rung's companion and
+        forced to re-materialize at this rung's own state and shift, which the march does before the
+        rung's first step. So each rung still solves with a V-cycle built for its own problem, and the
+        compiled coupled solve is a cache hit across the boundary instead of a full recompile.
+
+        The distinction to hold on to is between FITTING the preconditioner per rung, which is real and
+        still happens, and rebuilding the *object*, which only costs a compilation.
         """
         logger.note(f"[{point.label}]")
-        # With the cycle trigger on, the scheduled cadences are switched OFF so it REPLACES them: as an
-        # addition it is break-even, as a replacement it is the largest saving measured on this march.
-        # CAREFUL: `beta_rel_change=None` does NOT switch the schedule off -- it removes the gate, and a
-        # missing gate means "refresh every step". Switching it off means a gate that exists and never
-        # fires again after its first (initialising) call, plus no materialize gates, so the refresh
-        # branch resolves to `none`.
-        scheduled = not REFRESH_ON_CYCLES
-        refresh = amg_beta_tracking_refresh(
-            companion,
-            column_reach=COLUMN_REACH,
-            beta_rel_change=0.25 if scheduled else REFRESH_ON_BETA,
-            refresh_every=8 if scheduled else 10**9,
-            materialize_drift=0.05 if scheduled else None,
-            materialize_every=4 if scheduled else None,
-            beta_floor=PC_BETA_FLOOR,
-            observer=logger.on_refresh,
-        )
+        # Point the shared hook at this rung. Called for EVERY rung including the first, so the V-cycle
+        # is always re-materialized at the rung's own state and shift before its first solve -- the first
+        # rung's build freezes at `amg_beta`, and the march's own beta_start is a different value.
+        refresh.rebind(companion)
         engine = coupled_amg_continuation(
             companion,
             seed_state,
             inner_steps=INNER_STEPS,
             inner_tol=INNER_TOL,
-            column_reach=COLUMN_REACH,
+            probe=probe,
+            preconditioner=shared_preconditioner[0] if shared_preconditioner else None,
             smoother_fill_levels=FILL_LEVELS,
             smoother_sweeps=SWEEPS,
             coarse_eq_limit=COARSE_EQ_LIMIT,
@@ -1081,10 +1122,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             positivity_projection=K_POSITIVITY_PROJECTION,
             forward_rtol=FORWARD_RTOL,
             forward_restart=FORWARD_RESTART,
-            inner_observer=combine_observers(
-                logger.on_inner,
-                *([inner_dump.on_inner] if inner_dump is not None else []),
-            ),
+            inner_observer=inner_observer,
             refresh_on_cycles=REFRESH_ON_CYCLES or None,
             inner_refresh=refresh.refresh_at if REFRESH_ON_CYCLES else None,
             field_split=FIELD_SPLIT,
@@ -1092,6 +1130,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             trailing_options=TRAILING_OPTIONS if FIELD_SPLIT else None,
             trailing_inverse=TRAILING_INVERSE if FIELD_SPLIT else None,
         )
+        shared_preconditioner[:] = [engine.shift_policy.preconditioner]
         if DUMP_STEP_LIMIT and engine.step_limit is not None:
             # `dataclasses.replace`, not `eqx.tree_at`: the limiter is a STATIC field, so it lives in the
             # treedef rather than among the leaves and `tree_at` (which addresses leaves) cannot reach it.

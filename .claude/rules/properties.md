@@ -42,6 +42,23 @@ module owns them. Governed by the root `CLAUDE.md` Engineering Principles.
   function) — the same pattern `boundary.Convective(h=…)` uses. `ZoneConstant.values` is the one
   array (an indexed collection of per-zone scalars — the label gather needs it). Do **not** wrap
   constants in `jnp.asarray` "for differentiability"; it is unnecessary.
+  - **⚠️ BUT A FLOAT VALUE IS A *STATIC* JIT LEAF, AND THAT COSTS A FULL RECOMPILE PER REYNOLDS RUNG
+    (measured 2026-08-12).** The decision above is about differentiability and stands on that ground.
+    It has a second consequence nobody had looked at: a Python float is not a JAX array, so
+    `eqx.filter_jit` puts it on the **static** side and compares it **by value** — and every function
+    taking the owning assembler as an argument is then keyed on it. `Property.scaled` exists for
+    Reynolds continuation, whose every rung rescales exactly this value, so on `bfs3d` each rung was a
+    fresh key for `_march_step`, i.e. a full compilation of the coupled solve. `_jacobian_matvec`'s
+    docstring claims a rung is a cache hit because "a scaled viscosity changes only two leaf values";
+    that is true **only if those leaves are arrays**. Verified by trace count: with a float viscosity a
+    companion assembler retraces, with `Constant(jnp.asarray(...))` it does not.
+  - **The library still does not force it; the CASE opts in.** `validation/bfs3d_openfoam/compare.py`
+    builds `Constant(jnp.asarray(RHO * NU))` for viscosity (density stays a float — nothing rescales
+    it, so its static value is the same every rung). `Constant.scaled`'s docstring carries the rule, and
+    `test_properties.py::test_scaling_an_array_valued_constant_shares_compiled_code_and_a_float_does_not`
+    pins **both** halves, so the float behaviour cannot be "fixed" by accident either. If a second
+    continuation case appears and this keeps catching people, promoting it to a converter on the field
+    is the change to make — but that would reverse the binding decision above, so measure first.
 - **Scalar per-cell only for now.** `evaluate` returns `(n_cells,)`. The contract is left open for a
   future `(n_cells, dim, dim)` anisotropic case — not built.
 - **`ZoneConstant` reuses `CellZones`.** `from_dict(cell_zones, {zone: value})` keys values to the
