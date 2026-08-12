@@ -45,7 +45,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .frozen_operator import equilibration_scale
+from .frozen_operator import apply_symmetric_scale, equilibration_scale, row_chunks
 from .ilut_preconditioner import cell_major_permutation, equilibrate_cell_major
 from .refresh_timing import PhaseTimer
 
@@ -557,7 +557,7 @@ class ShiftedCellMajorOperator:
         # scipy may re-type the index arrays on construction; keep writing into whatever it actually holds.
         self._data = self._matrix.data
         self._matrix.has_sorted_indices = True
-        self._chunks = _row_chunks(self._indptr, _SCALE_CHUNK_NNZ)
+        self._chunks = row_chunks(self._indptr)
 
     def assemble(
         self, values: np.ndarray, shift_diagonal: np.ndarray
@@ -585,22 +585,13 @@ class ShiftedCellMajorOperator:
         shift = np.asarray(shift_diagonal, dtype=np.float64)[self._perm]
         data[self._diagonal] += shift
         cell_major_scale = equilibration_scale(data[self._diagonal])
-        # D A D, chunked over rows: the row factor needs one entry per nonzero and the column factor a
-        # gather of the same length, so doing it whole would allocate two more Jacobian-sized temporaries.
-        for start, stop in self._chunks:
-            lo, hi = int(self._indptr[start]), int(self._indptr[stop])
-            block = data[lo:hi]
-            block *= np.repeat(cell_major_scale[start:stop], self._counts[start:stop])
-            block *= cell_major_scale[self._indices[lo:hi]]
+        # The chunks are precomputed here because this structure is fixed for the life of the object.
+        apply_symmetric_scale(
+            data, self._indptr, self._indices, cell_major_scale, chunks=self._chunks
+        )
         scale = np.empty_like(cell_major_scale)
         scale[self._perm] = cell_major_scale
         return self._matrix, scale, self._perm
-
-
-#: Target nonzeros per row-chunk in the symmetric scaling of :meth:`ShiftedCellMajorOperator.assemble`.
-#: Bounds the transient allocation there to a few megabytes rather than the size of the Jacobian's
-#: values; small enough to stay in cache, large enough that the per-chunk NumPy overhead is negligible.
-_SCALE_CHUNK_NNZ = 1 << 20
 
 
 def _smallest_index(values: np.ndarray) -> np.ndarray:
@@ -612,20 +603,6 @@ def _smallest_index(values: np.ndarray) -> np.ndarray:
     """
     values = np.asarray(values)
     return values.astype(np.int32) if values.size == 0 or values.max() < 2**31 else values
-
-
-def _row_chunks(indptr: np.ndarray, target_nnz: int) -> tuple[tuple[int, int], ...]:
-    """Split ``[0, n_rows)`` into ``(start, stop)`` row ranges of roughly ``target_nnz`` nonzeros each.
-
-    Ranges are cut on row boundaries so each chunk is a contiguous slice of the CSR values, and every row
-    lands in exactly one chunk. A row wider than ``target_nnz`` simply forms its own oversized chunk.
-    """
-    n_rows = int(indptr.shape[0]) - 1
-    if n_rows == 0:
-        return ()
-    edges = np.searchsorted(indptr, np.arange(0, int(indptr[-1]), target_nnz), side="right") - 1
-    bounds = np.unique(np.concatenate(([0], np.maximum(edges, 0), [n_rows])))
-    return tuple((int(a), int(b)) for a, b in itertools.pairwise(bounds) if b > a)
 
 
 class MonolithicAmgPreconditioner:
@@ -695,8 +672,18 @@ class MonolithicAmgPreconditioner:
 
     @staticmethod
     def _shifted(jacobian_no_shift: sp.csr_matrix, shift_diagonal: np.ndarray) -> sp.csr_matrix:
-        """Add the pseudo-transient shift ``β d`` to the Jacobian's diagonal (cheap -- ``O(nnz)`` numpy)."""
-        return (jacobian_no_shift + sp.diags(np.asarray(shift_diagonal))).tocsr()
+        """Add the pseudo-transient shift ``β d`` to the Jacobian's diagonal (cheap -- ``O(nnz)`` numpy).
+
+        Written as a diagonal assignment rather than ``a + sp.diags(shift)`` for the same reason the
+        equilibration is (:func:`~aquaflux.solve.frozen_operator.apply_symmetric_scale`): a sparse
+        **addition** also stores only the entries whose result is nonzero, so it would drop every
+        explicit zero the assembler deliberately kept. Only the diagonal is touched, so an off-diagonal
+        position survives whatever its value; a diagonal the pattern lacks is still created, matching the
+        sparse addition's semantics.
+        """
+        shifted = jacobian_no_shift.tocsr().copy()
+        shifted.setdiag(shifted.diagonal() + np.asarray(shift_diagonal, dtype=np.float64))
+        return shifted
 
     @staticmethod
     def _assembler_for(
