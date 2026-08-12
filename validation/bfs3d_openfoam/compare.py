@@ -269,14 +269,32 @@ if _TURBULENCE_SMOOTHER not in _TURBULENCE_SMOOTHERS:
     )
 TRAILING_OPTIONS = _TURBULENCE_SMOOTHERS[_TURBULENCE_SMOOTHER]
 
-# Which preconditioner the trailing [k, omega] block gets. "petsc" (default) is the host GAMG V-cycle
-# the case has always run; "native" swaps in the differentiable-framework nodal hierarchy, whose
-# aggregation and smoother are configured to reproduce that V-cycle -- matched, it reaches the same
-# 2 restart cycles on the same-sized coarse space when measured on the block alone. The point of the
-# swap is not cycles but the host callback: the native inverse is plain array work, so it is the half
-# of the preconditioner that could run on an accelerator.
+# Which preconditioner the trailing [k, omega] block gets. "native" (default) is the
+# differentiable-framework nodal hierarchy; "petsc" is the host GAMG V-cycle the case originally ran.
+# Their aggregation and smoother are configured to match -- measured on the block alone they reach the
+# same 2 restart cycles on the same-sized coarse space. Beyond cycles, the native inverse is plain array
+# work rather than a host callback, so it is the half of the preconditioner that could run on an
+# accelerator.
+#
+# ⚠️ THE DEFAULT WAS "petsc", AND THE MEASUREMENT THAT MOVED IT ALSO RETIRED A LONG-STANDING CLAIM.
+# The host arm was believed faster on this case -- 58 steps against 67 -- but the two logs behind that
+# reading were not comparable: the 58-step run used the OTHER wall condition on `k` (`dirichlet`), had
+# no positivity floor, and predated both. Run as a controlled pair at the settings below, the ranking
+# REVERSES:
+#
+#                     native    petsc
+#     wall            2124 s    2893 s   (+36 % for the host arm)
+#     steps               67        72
+#     Krylov cycles      329       371
+#     escalations          4         8
+#     mid-span x_r/h    8.36      8.36   (identical -- same root, different path cost)
+#
+# So the host arm is not the faster one here; the wall condition was carrying that difference, and the
+# `dirichlet` number is not a target because it is a different problem (see `K_WALL` below). Leaving
+# "petsc" as the default would have shipped the slowest measured arm. `BFS3D_TURBULENCE_INVERSE=petsc`
+# still selects the host V-cycle for an A/B of the inverse itself.
 _TURBULENCE_INVERSES = ("petsc", "native")
-TURBULENCE_INVERSE = os.environ.get("BFS3D_TURBULENCE_INVERSE", "petsc")
+TURBULENCE_INVERSE = os.environ.get("BFS3D_TURBULENCE_INVERSE", "native")
 if TURBULENCE_INVERSE not in _TURBULENCE_INVERSES:
     raise SystemExit(
         f"BFS3D_TURBULENCE_INVERSE={TURBULENCE_INVERSE!r} is not one of {list(_TURBULENCE_INVERSES)}"
@@ -392,12 +410,35 @@ _TRAILING_SMOOTHER_NOTE = (
 # limiter working -- so 1e-08 keeps two orders of margin below anything physical here, where the inlet
 # k is 0.375 and the mesh median ~3e-2.
 #
-# `0` (the library default) is the plain fraction-to-the-boundary rule. It moves neither the converged
-# root nor the adjoint: at a root the correction vanishes and the limiter is inactive for any floor.
-# It is safe here only because every consumer of the solved `k` clamps at zero, so a cell that dips
-# slightly negative no longer reaches a bare sqrt -- and the destruction term, running on the
-# k-independent viscous omega branch there, pushes such a cell back up.
-K_POSITIVITY_FLOOR = float(os.environ.get("BFS3D_K_POSITIVITY_FLOOR", "0") or 0.0)
+# `0` (the library default, and `BFS3D_K_POSITIVITY_FLOOR=0` here) is the plain
+# fraction-to-the-boundary rule. It moves neither the converged root nor the adjoint: at a root the
+# correction vanishes and the limiter is inactive for any floor. It is safe here only because every
+# consumer of the solved `k` clamps at zero, so a cell that dips slightly negative no longer reaches a
+# bare sqrt -- and the destruction term, running on the k-independent viscous omega branch there,
+# pushes such a cell back up.
+#
+# ⚠️ THE CASE DEFAULT IS 1e-08, WHICH IS NOT THE LIBRARY DEFAULT, and it is load-bearing rather than a
+# tuning preference: with the `zerogradient` wall condition above, an unfloored march is the one whose
+# cap ratchets to 1.05e-09 and stalls. Every archived measurement quoted in this file was taken at
+# 1e-08, so leaving the default at the library's `0` would mean the case's own default configuration
+# was one that none of its recorded numbers describe -- and, on the arm that was measured both ways,
+# one that does not converge.
+#
+# ⚠️ BUT THE FLOOR POSTPONES THE RATCHET, IT DOES NOT REMOVE IT -- and this is algebra, not a
+# measurement, so no configuration caveat applies. When the cap binds, the step takes
+# `k_new = k - tau*(k + floor)`, hence
+#
+#     (k_new + floor) = (1 - tau) * (k + floor)
+#
+# so the SHIFTED variable `k + floor` decays by exactly `1 - tau` per clipped step whatever the floor
+# is. The cell parks at `k -> -tau*floor` while the cap keeps falling 100x per step; the floor buys
+# `log10(floor / k_0)` decades of headroom and then reproduces the same collapse. That is why 1e-08
+# moved the march 77 -> 67 steps yet the cap still reached 1.44e-05 at step 51 WITH the floor active.
+# Raising the floor further buys two more decades and one-off ceiling (worst cap ~0.84 at 1e-06 rather
+# than ~0.35 at 1e-08), not a cure -- and 1e-06 is one decade from this case's own live near-wall `k`.
+# The structural fix is to stop one cell setting a GLOBAL step length at all; see the discussion of
+# clipping the correction per cell rather than capping the step, which leaves the cap at 1.
+K_POSITIVITY_FLOOR = float(os.environ.get("BFS3D_K_POSITIVITY_FLOOR", "1e-8") or 0.0)
 
 
 # The inexact-Newton stop for each inner linear solve, measured in the ROW-SCALED `coupled_scaled_norm`
@@ -504,6 +545,36 @@ DUMP_STEP_LIMIT_KEEP = int(os.environ.get("BFS3D_DUMP_STEP_LIMIT_KEEP", "12"))
 # default, not another warning. `BFS3D_REFRESH_ON_CYCLES=0` still selects the scheduled cadence for an
 # A/B of the trigger itself.
 REFRESH_ON_CYCLES = int(os.environ.get("BFS3D_REFRESH_ON_CYCLES", "3"))
+#: The β-MISMATCH refresh trigger, as a fraction of the β the V-cycle was last built at. Off by default
+#: (`inf`, a gate that can never fire), which is byte-identical to the configuration every archived
+#: measurement on this case was taken under.
+#:
+#: What it is for, and why `inf` is not obviously right. With the cost trigger above selected, the
+#: scheduled cadences are switched off by setting this gate to `inf` -- so the ONLY thing that rebuilds
+#: the V-cycle is a solve that has already cost more than `REFRESH_ON_CYCLES` cycles. That is a purely
+#: REACTIVE rule, and it has one blind spot: the β-escalation bailout. When a step is redone at
+#: `β *= RETRY_BETA_FACTOR`, the march re-invokes this same refresh hook specifically to re-match the
+#: V-cycle to the escalated β -- and with the gate at `inf` that call does nothing, so the escalated
+#: attempt is solved against a V-cycle built for a β up to 4x smaller.
+#:
+#: The escalation then cannot cure the step it was invoked for. Measured across the three converging
+#: marches that reached the target rung, the same pair repeats
+#: bit-for-bit in all three: an `e2` step at β = 0.2341 whose V-cycle was left stale returns a_min
+#: 0.000 -- a step that moves nothing and costs three solves -- and the FOLLOWING step, at β = 0.9364,
+#: takes a_min 1.000 once the cost trigger has finally forced a rebuild. Across those same runs every
+#: escalated step whose V-cycle WAS rebuilt came back with a_min >= 0.595, and not one was null.
+#:
+#: The mechanism is the one the smoother-screen note above raises as a live hypothesis: at the march's
+#: loose inner stop the accepted correction is substantially determined by the preconditioner, and the
+#: step length is a MINIMUM over cells, so a mismatched V-cycle need not cost cycles to hand back a
+#: direction whose worst cell collapses the line search. Both null steps above solved in 2 cycles.
+#:
+#: Sizing, replayed over a completed march's own β sequence: at 0.9 the gate would add 2 step-boundary
+#: rebuilds (~35 s) on top of the 23 that run already, plus one per escalation attempt. 0.9 is chosen so
+#: a DOUBLING trips it -- which every escalation is -- while the control's own /1.5 growth (a 33 % fall)
+#: does not, since re-matching a V-cycle to a β that is drifting slowly is what the cost trigger already
+#: covers more cheaply. Lower values get expensive fast: 0.5 would add 13 rebuilds (~225 s).
+REFRESH_ON_BETA = float(os.environ.get("BFS3D_REFRESH_ON_BETA", "0") or 0.0) or float("inf")
 #: The wall boundary condition on `k`, as an A/B. `Dirichlet(0)` (default) is the resolved-wall
 #: condition -- turbulent fluctuations vanish at a no-slip wall, so `k -> 0`. `BFS3D_K_WALL=zerogradient`
 #: selects the wall-function condition instead.
@@ -525,8 +596,29 @@ REFRESH_ON_CYCLES = int(os.environ.get("BFS3D_REFRESH_ON_CYCLES", "3"))
 #: In the continuum the two conditions do NOT conflict: `u' ~ y`, `w' ~ y`, `v' ~ y**2` give `k ~ y**2`,
 #: so `k -> 0` AND `dk/dy -> 0` at the wall, and the true diffusive wall flux is zero in both regimes.
 #: The conflict is purely discrete -- a linear face reconstruction cannot satisfy both on one cell.
+#: **The default is `zerogradient`**, on the internal-consistency argument above rather than on cost --
+#: this mesh is in the wall-function regime on the walls that matter (the side walls sit at `y* ~ 34`,
+#: fully in the log layer), which is where the faded-flux / unfaded-gradient disagreement bites.
+#:
+#: State the cost honestly, because it runs the other way and a reader comparing archived logs will hit
+#: it. Measured as a controlled pair -- same code, same native trailing inverse, same 1e-08 floor, only
+#: the wall condition differing:
+#:
+#:                       dirichlet   zerogradient
+#:     wall                 1911 s         2124 s   (+11 %)
+#:     steps                    59             67
+#:     Krylov cycles           292            329
+#:     mid-span x_r/h         8.36           8.36
+#:
+#: That is not a reason to select it. The two conditions solve DIFFERENT discrete problems, so their
+#: step counts are not a like-for-like comparison of solver cost, and the cheaper one is cheaper for a
+#: diagnosable
+#: reason -- under `zerogradient` near-wall `k` is free to ratchet toward zero, and one numerically dead
+#: cell then sets the global positivity cap for the whole march. Measured minimum cap over a whole
+#: march: 2.02e-01 under `dirichlet`, against 1.44e-05 (native) and 5.41e-03 (host) under
+#: `zerogradient`. The `K_POSITIVITY_FLOOR` below is what keeps that ratchet survivable.
 _K_WALL_BCS = {"dirichlet": Dirichlet(0.0), "zerogradient": ZeroGradient()}
-K_WALL = os.environ.get("BFS3D_K_WALL", "dirichlet")
+K_WALL = os.environ.get("BFS3D_K_WALL", "zerogradient")
 if K_WALL not in _K_WALL_BCS:
     raise SystemExit(f"BFS3D_K_WALL={K_WALL!r} is not one of {sorted(_K_WALL_BCS)}")
 K_WALL_BC = _K_WALL_BCS[K_WALL]
@@ -807,6 +899,9 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             else []
         ),
         ("refresh on cycles", REFRESH_ON_CYCLES or "scheduled cadence"),
+        # Beside the cost trigger, because the two together are what decides when the V-cycle is
+        # rebuilt, and a run that re-matches on a β escalation is a different arm from one that does not.
+        ("refresh on beta mismatch", "off" if REFRESH_ON_BETA == float("inf") else REFRESH_ON_BETA),
         ("Reynolds continuation points", N_POINTS),
         ("forward restart", FORWARD_RESTART),
         ("retry on cycles / alpha", f"{RETRY_ON_CYCLES} / {RETRY_ON_ALPHA}"),
@@ -863,7 +958,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         scheduled = not REFRESH_ON_CYCLES
         refresh = amg_beta_tracking_refresh(
             companion,
-            beta_rel_change=0.25 if scheduled else float("inf"),
+            beta_rel_change=0.25 if scheduled else REFRESH_ON_BETA,
             refresh_every=8 if scheduled else 10**9,
             materialize_drift=0.05 if scheduled else None,
             materialize_every=4 if scheduled else None,

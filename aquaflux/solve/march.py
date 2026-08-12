@@ -530,14 +530,21 @@ def _escalation_reason(
     # not an oversight: gating it on `binding_limit == 1` was tried and is a regression. MEASURED --
     # the one escalation of an entire coupled RANS march fired at a step whose cap was 4.37e-10, and
     # suppressing it cost 8 steps and 199 s end to end. (The mechanism usually offered for the gate,
-    # that more damping tightens such a cap, is not measurable from a march log at all: only the
-    # accepted attempt's cap is recorded, so per-attempt caps are never observed. Rest the decision on
-    # the A/B above, not on a mechanism.)
+    # that more damping tightens such a cap, is not measurable from a march LOG -- only the accepted
+    # attempt's cap is recorded there. It IS measurable if the limiter's inputs are dumped per call,
+    # and when that was done the answer was that `d(cap)/d(shift)` has NO FIXED SIGN at a fixed state:
+    # doubling the shift narrowed the cap ~9x on one state and widened it ~3x on another, and on a
+    # third the binding cell changed between attempts, so consecutive caps did not measure the same
+    # quantity. Rest the decision on the A/B above, not on a mechanism -- in either direction.)
     #
-    # What damping cannot do is un-pin a cell already ON the boundary: once the constrained entry has
-    # been driven to (almost) zero, the cap is small however small the correction gets, and the
-    # fraction-to-the-boundary rule then shrinks it by a fixed factor per step. That failure is not
-    # this predicate's to catch -- see `_limit_collapsing`, which ends the segment.
+    # What damping cannot do is un-pin a cell already ON the boundary, WITH AN UNFLOORED LIMITER: the
+    # room is `phi_i / |delta_i|`, so once the constrained entry is driven to (almost) zero the cap is
+    # small however small the correction gets, and the fraction-to-the-boundary rule then shrinks it by
+    # a fixed factor per step. Note this is exactly the unfloored case -- give the limiter a `floor` and
+    # the room becomes `(phi_i + floor)/|delta_i|`, which a smaller correction DOES widen. It does not
+    # rescue the cell, though: the floored rule leaves `(phi_i + floor)` decaying by that same fixed
+    # factor per clipped step, so the collapse restarts a fixed number of decades later. That failure is
+    # not this predicate's to catch -- see `_limit_collapsing`, which ends the segment.
     if retry_on_alpha is not None and float(outcome.alpha) <= retry_on_alpha:
         return "alpha"
     return None
@@ -881,8 +888,9 @@ def forward_march(
         # it fits inside whatever was clipping it, and it is far cheaper than the tight-Krylov divergence
         # retry below -- on the coupled AMG march a NaN'd low-β step recovers in a handful of cycles at 2β,
         # where the tight retry would grind hundreds of matvecs to recover the same step the escalation then
-        # re-damps anyway. β vanishes at the root, so the escalation reshapes only the forward path; it is
-        # not carried into the control, so a persistently hard region re-triggers each step. Needs a
+        # re-damps anyway. β vanishes at the root, so the escalation reshapes only the forward path; the
+        # discovered-safe β IS then carried into the control (see the carry below), so a persistently hard
+        # region continues from it rather than re-paying the escalation every step. Needs a
         # readable β leaf (a `ConstantRelaxation` set by a step control) and at least one threshold set;
         # otherwise it no-ops and a diverged step falls straight through to the divergence retry. Both
         # thresholds `None` (the default) is byte-identical.
@@ -915,7 +923,19 @@ def forward_march(
             escalated = active_step.relaxation_schedule.beta * retry_beta_factor
             active_step = eqx.tree_at(lambda s: s.relaxation_schedule.beta, active_step, escalated)
             if precondition_step is not None:
-                precondition_step(active_step, prestep_state)  # re-match the PC to the escalated β
+                # Re-match the preconditioner to the escalated β. Whether this actually rebuilds is the
+                # HOOK'S decision, not this call's: a gated refresh may judge the move too small to be
+                # worth its cost and reuse the standing factorization. That is worth stating, because a
+                # hook gated so tightly that it never fires makes every escalated attempt solve against
+                # a factorization built for the PRE-escalation β, which is not what this call site
+                # intends. Observed on a coupled RANS march whose β-mismatch gate was effectively off:
+                # a step's three escalated attempts all ran with no rebuild and all returned a step
+                # length of 0.000, and the following step took a full step once a rebuild happened to
+                # be triggered by its solve cost. That is a correlation across three runs, NOT an
+                # established cause -- the same steps were also positivity-cap-bound, and the two
+                # explanations are not separated by that data. Whichever it is, a refresh hook used
+                # with escalation should let a doubling through: re-matching is what this call asks for.
+                precondition_step(active_step, prestep_state)
             outcome, residual_norm = _march_step(
                 active_step, residual_fn, prestep_state, residual_norm_0, solver
             )
