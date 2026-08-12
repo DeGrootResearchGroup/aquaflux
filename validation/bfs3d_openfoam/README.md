@@ -36,6 +36,13 @@ collapse to the 2D problem; the viscous side walls are what make this a three-di
 
 ## The preconditioner is the point of this case
 
+> **The two tables in this section were measured before the defaults moved**, at the host (`petsc`)
+> trailing inverse, the `dirichlet` wall condition on `k`, and no positivity floor. All three defaults
+> have since changed (see *The trailing inverse* below), so these numbers describe the arms they
+> compare and not the configuration `compare.py` now runs. What they establish — that splitting the
+> hierarchy by field wins, and that the trailing half wants one smoother sweep rather than four — is
+> unaffected: both were controlled pairs differing only in the thing named.
+
 ### The hierarchy is split by field
 
 The six coupled fields are not one kind of equation: `[u, v, w, p]` is a pressure–velocity saddle, while
@@ -84,6 +91,53 @@ And a candidate needs three things, not two — cheap per application, convergen
 **not materially weaker than what it replaces**: the arms that were markedly weaker (point-block and
 plain Jacobi at low sweep counts) rank well on per-solve cost and are not settled on a march, so cost
 ranking alone does not select a smoother.
+
+### The trailing inverse: the in-framework hierarchy, and a comparison that was not one
+
+The trailing `[k, ω]` half can be inverted either by the host GAMG V-cycle or by the framework's own
+nodal hierarchy, configured to match it. The host arm was believed faster on this case — 58 steps
+against 67 — and that reading was wrong, in a way worth recording because nothing in either log said so.
+The two runs behind it differed in three things at once: the wall condition on `k`, the presence of the
+positivity floor, and the code they ran on. Their trajectories separate at step one.
+
+Run as a controlled pair — same code, same `zerogradient` wall condition, same `1e-08` floor, everything
+else at the settings above — the ranking reverses:
+
+| | in-framework | host GAMG |
+|---|---|---|
+| wall | **2124 s** | 2893 s (+36%) |
+| steps | **67** | 72 |
+| Krylov cycles | **329** | 371 |
+| escalations | **4** | 8 |
+| mid-span `x_r/h` | 8.36 | 8.36 |
+
+Same root by either route; the difference is entirely path cost. The in-framework hierarchy is now the
+default (`BFS3D_TURBULENCE_INVERSE=petsc` selects the host arm), which also takes the host callback off
+the trailing half and leaves it as plain array work. The flow half still runs on the host V-cycle.
+
+**And the whole difference is one event, not a diffuse quality gap.** The two arms are identical for
+**49 steps** — same shift, same residual to four figures (8.810e-03, then 7.274e-03), same full step
+length — and part at step 50. What happens there is not a preconditioner failure: it is the positivity
+cap collapsing, and each arm meets it at a different step. The in-framework arm hits it first, at 50
+(cap 1.01e-02, then 1.44e-05); the host arm sails through 50–52 and hits it at 53–55 instead
+(`a_min` 0.316, 0.075, 0.005). Both then pay the same cascade, and the host arm's is the more expensive
+one — its shift is driven to 4.44 against 0.94, and the step control can only unwind it at `/grow` per
+step, so it spends **ten** steps walking back where the other spends six:
+
+> **walk-back steps = log(β_peak / β_resume) / log(grow)** — predicted 6.0 and 10.0 for the two arms,
+> observed 6 and 10.
+
+So the arms are separated by *when* they meet the cap and *how far* the shift is driven when they do,
+not by how well either inverts its block. That also says where the remaining wall time is: the cascade,
+not the preconditioner.
+
+**The lesson is about the comparison, not the arms.** These marches were read against each other on
+the strength of matching aggregate step counts, and no single log was wrong — each stated its own
+configuration correctly. What was missing was any check that the arms differed in *one*
+thing. A cheap one exists and is now used: two runs that differ only in the preconditioner should track
+each other's residuals for the first few steps, because the operator is identical. These separated at
+step one, which was visible in the logs the whole time. `march_log_compare.py` reports exactly this —
+per-rung counts for one run, and for two runs the first step at which their residuals part.
 
 The 2D cases run on a factorization of the coupled Jacobian; in 3D that factorization is the wall. On this
 mesh the assembled coupled Jacobian has ≈ 38.7 million nonzeros (≈ 280 per row), and a single incomplete-LU
@@ -138,6 +192,20 @@ closure.
 - `compare.py` — imports that mesh into aquaflux, runs the coupled AMG solve on it, compares cell-for-cell,
   and writes `report.md` + `figures/comparison.png`. Reports a **mid-span** reattachment length and the
   **spanwise variation** of it — the 3D structure the 2D case cannot show.
+- `march_log_compare.py` — reads archived march logs back as data: per-rung steps, cycles, wall time,
+  clips, escalations and preconditioner cost for one run, and for two runs the first step at which their
+  residuals part. That last number is the check that a pair of arms differs in one thing only; runs that
+  should share an operator and separate at step one are not a controlled comparison, however well their
+  totals line up.
+- `step_policy_replay.py` — pre-screens candidate step-control policies against those same archived logs,
+  in milliseconds rather than in 35–50-minute marches. The rule that sets the shift strength β is
+  arithmetic over three recorded numbers per step (the accepted step length, the steady residual, and the
+  escalation count), so it can be replayed exactly — which it self-tests by reproducing every logged β
+  before printing anything — and then re-run with a candidate rule in place. A candidate's trajectory is a
+  **counterfactual under frozen recorded inputs**, never a predicted saving: a different β would have
+  produced a different step length and residual, which the replay cannot know. Its use is elimination, and
+  its labelling says so. Alongside it reports quantities that *are* measurements: the walk-back a
+  β-escalation commits the march to, and the steps whose residual did not move at all.
 
 ### Reproducing the aquaflux result
 

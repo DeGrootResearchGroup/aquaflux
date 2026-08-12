@@ -1001,6 +1001,112 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     than the single nodal one now used, so its measurements never transferred; and it is the clearest
     instance in this file of a *cost* attributed to a method when it belonged to a data structure.
 
+    **✅ CONFIRMED ON A MARCH (2026-08-11), and the parity above is now a WIN.** Block-level parity does
+    not by itself say which arm marches faster, so it was measured end to end as a controlled pair.
+    *Configuration, both arms:* `bfs3d`, field split, `zerogradient` k wall BC, `K_POSITIVITY_FLOOR`
+    1e-08, `equilibrate=False`, `refresh_on_cycles` 3, β-mismatch gate off, ILU(0) × 4 on the saddle,
+    trailing sweeps 1, `coarse_eq_limit` 2000, restart 15, `forward_rtol` 0.3, two continuation rungs.
+
+    | | native (`march-20260811-132658.log`) | petsc (`march-20260811-161642.log`) |
+    |---|---|---|
+    | wall | **2124 s** | 2893 s (+36 %) |
+    | steps | **67** | 72 |
+    | Krylov cycles | **329** | 371 |
+    | escalations | **4** | 8 |
+    | mid-span `x_r/h` | 8.361 | 8.361 |
+
+    **The entire difference is ONE event, and the arms are otherwise bit-identical.** They track for
+    **49 steps** — same β, same ‖R‖ to four figures (8.810e-03, 7.274e-03), same α — and part at step
+    50. That is the controlled-pair signature the confounded comparison lacked, and it is worth more
+    than the totals: it localizes the whole 769 s to the positivity-cap collapse, which each arm meets
+    at a *different* step. Native meets it at 50 (cap 1.01e-02 → 1.44e-05); petsc sails through 50–52
+    and meets it at 53–55 (α 0.316 / 0.075 / 0.005). Both then pay the cascade, and petsc's is worse —
+    β driven to **4.4394** against **0.9364**, hence ten walk-back steps against six by the law below.
+    So the arms differ in *when* they hit the cap and *how far* β is driven, **not** in how well either
+    inverts its block — and the remaining wall time is in the cascade, not the preconditioner.
+
+    So the native inverse is not merely at parity on a march, it is ahead, and **the case defaults moved
+    to it** (`BFS3D_TURBULENCE_INVERSE` now defaults to `native`, with `K_WALL` `zerogradient` and
+    `K_POSITIVITY_FLOOR` 1e-08 moved in the same change so the default configuration *is* the arm
+    measured above; `compare.py` states all three in its banner).
+
+    **⚠️ THE "PETSC IS FASTER" READING THAT THIS REPLACES WAS A THREE-WAY CONFOUND, AND NO SINGLE LOG
+    WAS WRONG.** The belief was 58 steps against 67. The 58-step run (`march-20260811-095526.log`) used
+    the **`dirichlet`** k wall BC, had **no positivity floor**, and predated both `ad3e144` and
+    `bb46032` — three differences at once, each correctly stated in its own banner. Held like-for-like
+    the ranking reverses, as above. **The cheap check that would have caught it on day one:** two arms
+    differing only in the preconditioner solve the *same* operator, so their residuals must track for
+    the first few steps. These separated at **step 1** (2.051e-01 against 2.046e-01). That test is now
+    `validation/bfs3d_openfoam/march_log_compare.py`, which reports the first step at which two logs
+    part. Matching aggregate step counts are not evidence of a controlled comparison.
+
+    **The step-count gap is the positivity limiter, not the inverse** — consistent with the `limit`
+    warning further down this file. Minimum step cap over a whole march: **2.02e-01** under `dirichlet`,
+    against **1.44e-05** (native) and **5.41e-03** (petsc) under `zerogradient`. Under `zerogradient`
+    near-wall `k` is free to ratchet down until one numerically dead cell (12800, `k ≈ 3e-20`) sets the
+    global cap, which is why the `dirichlet` arm looked fast. It is a different discrete problem, not a
+    faster solver.
+
+    **The wall condition's own cost, as a controlled pair** (2026-08-11, `march-bc-dirichlet-native.log`
+    against `march-20260811-132658.log`): same code, same native inverse, same 1e-08 floor, only the k
+    wall BC differing — `dirichlet` **59 steps / 1911 s / 292 cycles**, `zerogradient` **67 / 2124 /
+    329**, both to mid-span `x_r/h` 8.36. So the BC is worth ~11 % of the wall, and the earlier
+    cross-version "58 against 67" is superseded by this same-code pair. Note what it does *not* say:
+    under `dirichlet` the two inverses are within one step of each other (native 59, petsc 58 — and the
+    58 is on older code), so **the native inverse's margin is regime-dependent**, clear under
+    `zerogradient` and inside the noise under `dirichlet`. The default rests on `zerogradient` being the
+    selected physics, not on the inverse winning everywhere.
+
+    **The reaction to a collapsed cap is quantified, and the RETURN is the waste — not the ladder.** A
+    capped step trips `retry_on_alpha` and the ladder escalates β (×2 per retry, to
+    `retry_cycles_limit`); β then has to be walked back at `/grow` per step, and that unwind is
+    arithmetic: **walk-back steps = log(β_peak / β_resume) / log(grow)** — predicted 2.4 / 6.0 / 10.0
+    across the three marches above, observed ~2 / 6 / 10. Replaying `CflResidualDualTimeControl` over
+    each logged (α, ‖R‖) sequence reproduces every logged β to four decimals on **all 22 archived
+    marches**, so the law is checkable rather than inferred. The cascade regions are **12.4 %** of wall
+    (native trio) and **24.7 %** (petsc).
+
+    **⚠️ THREE OBVIOUS FIXES ARE REFUTED BY THE ARCHIVED LOGS — do not re-propose them (2026-08-11).**
+    Each was proposed here first and killed by a counterexample:
+
+    - **"Stop a ladder whose attempts move nothing."** `march-20260811-161642.log` step 56: attempts 1
+      and 2 are bit-null (`G` 5.670e-03 → 5.669e-03 → 5.668e-03, α 0.000, **0 cycles each**), and
+      attempt 3 at β 4.4394 is the one that **cures** the step (α 1.000). Any "stop after N nulls" with
+      N ≤ 2 stops one attempt short of the cure, and the accepted null step then triggers the control's
+      backoff to the same β anyway — paying a whole outer step (12–30 s) to save two 0-cycle attempts.
+    - **Decaying `carry_beta`.** At `132658` step 52 the ladder *tried* β = 0.4682 and it was rejected;
+      the cure was 0.9364. Carrying any decayed fraction (half → 0.47, geometric → 0.66) lands the next
+      step at or below a β just demonstrated to fail at that state, and re-pays the escalation at once.
+    - **"The control should skip its own backoff after an escalation."** They are a **serial search, not
+      a redundancy**: across all 24 archived logs there is **not one instance** of the control backing
+      off after a *successful* escalation (α ≥ 0.25 ⇒ it grows or holds). The two only co-occur when the
+      ladder was *exhausted*, where the control's doubling continues the same search — the ladder gave
+      up at 0.2341 / 0.5549 and the cures were 0.9364 / 4.4394. Suppressing it lengthens each cascade.
+
+    **⚠️ "Damping cannot widen a positivity cap" is FALSE as a general statement.** The per-attempt
+    `checkpoints/step-limit-*.npz` dumps (which `compare.py` wrongly called unobservable) show
+    `d(cap)/dβ` with **no fixed sign** at a fixed anchor: doubling β narrowed the cap ×9.4 then ×1.6 on
+    one anchor and widened it ×3.3 then ×5.6 on another, and on a third the binding cell *changed
+    between attempts* (3181 → 22400 → 12800) so consecutive caps do not even measure the same thing.
+    This does not reopen gating on `binding_limit == 1` (measured and reverted, below).
+
+    **⚠️ AND THE FUTILITY READING IS CONFOUNDED.** The native trio's step-51 attempts all ran with
+    `pc none 0.0s` — `REFRESH_ON_BETA` defaults to `inf`, so the `precondition_step` the march calls on
+    every escalation does nothing, and every escalated attempt was solved against a V-cycle built for
+    β = 0.0293. Step 52 escaped only because its inner solve happened to trip the mid-step rebuild. So
+    **"the ladder is futile" and "the ladder was never given a matched preconditioner" are NOT separated
+    by this data.** `BFS3D_REFRESH_ON_BETA=0.9` is the existing knob that discriminates them, at roughly
+    +35 s of rebuild on one march.
+
+    **What survives as the lever: the asymmetric return.** β is driven up by ×2 (backoff) and up to ×4
+    (ladder) but recovers at only ÷1.5 per step — ~5:1 in log space — and every walk-back step is
+    massively over-damped (inner counts 2,2,2,2,3,5 and 2,2,2,2,2,2,2,2,2,3, converging the implicit
+    step to ~1e-7 of its start). Accelerating the ramp *only while unwinding an escalation* is
+    byte-identical on any march that never escalates, and is worth ≈3 steps on the trio and 5–6 on
+    `161642` by exact control arithmetic. Second lever: **the ladder is not clamped by the control** —
+    it multiplies the β leaf past `beta_max`, giving β = 4.4394 against a ceiling of 4.0 and a stable
+    β = 16.0 limit cycle for **74 consecutive steps** in `march-20260810-090711.log`.
+
     **⚠️ HISTORICAL — measured 2026-08-09, void since:** taking PETSc off the trailing half is not a
     win, and the two blockers are now specific (`bfs3d`, three states, arms `native`/`native2` in
     `turbulence_smoother_sweep.py`). With the per-field hierarchies above wired in as the trailing
