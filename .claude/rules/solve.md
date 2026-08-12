@@ -258,11 +258,68 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       the march's hardest solve (`inner-00050-03`, 15 cycles, α → 0) — the share of each column's norm
       lying **beyond reach 2**:
 
-      | | u | v | w | p | k | ω |
+      | arm | stored pattern | exact zeros | after equilibration | lost |
+      |---|---|---|---|---|
+      | uniform reach 3 | 47 209 392 | 8 487 718 | **38 721 674** | 18.0 % |
+      | `column_reach=(3,3,3,2,2,2)` | 47 209 392 | 14 899 552 | **32 309 840** | 31.6 % |
+
+      **6 411 834 positions — 16.6 % — that the uniform arm keeps are stripped from the operator the
+      smoother factorizes**, and a zero-fill incomplete factorization takes its pattern from exactly that.
+      (38.7M also matches the independently recorded live-nnz figure, which corroborates the reading.)
+      **This retro-explains the padding experiment that established the reach-3 requirement:** it padded
+      the distance-3 shell with **~1e-30, not exact zero** — precisely what survives the product. That is
+      why positions read as causal and values did not.
+      It equally explains the p/kω asymmetry: pressure is in the incomplete-LU-smoothed **leading** block,
+      while k/ω are in the trailing block, whose native cell-block inverse has no factorization pattern to
+      weaken.
+      ⚠️ **It also violated the "full pattern, no `eliminate_zeros`, so the structure is truly fixed"
+      invariant the in-place GAMG refactor relies on — for EVERY arm**, since the pruned set is whichever
+      entries happen to be exactly zero at that state, which moves with the state.
+      **✅ FIXED — pattern-preserving assembly, and there were TWO pruning sites, not one (BUILT).**
+      Sparse *arithmetic* is what prunes, so both the shift add and the equilibration had to change:
+      - `frozen_operator.apply_symmetric_scale(data, indptr, indices, scale, chunks=…)` scales the stored
+        values in place (row-chunked, so the row factor's per-nonzero expansion never allocates an array
+        the size of the values). `symmetrically_equilibrate` uses it in place of `diags(s) @ a @ diags(s)`.
+      - `MonolithicAmgPreconditioner._shifted` adds the shift by **diagonal assignment**, not
+        `a + sp.diags(shift)` — a sparse **addition** drops explicit zeros just as the product does, so
+        the zeros were being lost before the equilibration ever ran. Found only because the bit-identity
+        test kept failing after the first fix.
+      - `ShiftedCellMajorOperator.assemble` already had the correct chunked form privately; it now calls
+        the shared helper, and `_row_chunks` moved to `frozen_operator.row_chunks` rather than being a
+        second copy.
+      Strictly cheaper than the sparse products it replaces. Pinned by `test_frozen_operator_scaling.py`
+      (pattern preserved including explicit zeros, values bit-identical to the product where it stores
+      them, **and an explicit test that the old product form would have dropped them**, so it cannot
+      quietly return).
+      ⚠️ **The bit-identity test had SEEN this and worked around it:** it compared the two paths as dense
+      arrays under the comment *"the fast path keeps the full pattern's explicit zeros, so compare as
+      dense rather than by nnz"* — a dense comparison passes whether or not a path drops positions. It now
+      compares `indptr`/`indices`/`data`, and against the production `_shifted` rather than a raw
+      `jacobian + sp.diags(shift)` written in the test. **A workaround in a test is a defect report;
+      read it as one.**
+      **✅ CONFIRMED ON THE CASE — the acceptance test passes bit for bit.** With the fix and the case
+      back at its `COLUMN_REACH=(3,3,3,2,2,2)` default, `bfs3d` rung-1 step 1 reproduces the uniform-reach
+      baseline in **every reported digit**: `‖R₀‖` 3.2901e-01, β 0.5000, 4 inner, **3 cycles**,
+      `‖R‖` 2.046e-01, α 1.000, no flags — against the diverged arm's 44 cycles, `‖R‖` 3.758e-01, α 0.000.
+      So the values were never the problem and the stored pattern always was.
+      **Expect a cost shift, not only a win:** the trailing block carries ~37 % more stored entries
+      (5 245 488 against 3 839 276) into its factorization than it did when equilibration pruned them, so
+      per-cycle cost there may rise even where cycle counts fall. Judge on march wall clock, not cycles —
+      and **not on the confirming run above, whose wall clock is void** (forced past the load guard with
+      the test tiers running; cycles and step counts are unaffected, timings absorbed the contention).
+      Still open: a full march to mid-span `x_r/h` 8.361, and what the restored pattern does to the
+      `equilibrate=True` arm, which is a different question from this one.
+      **THE MECHANISM IS COLOUR ALIASING, and it is the MAJORITY of a shortened column, not an edge
+      case (measured structurally 2026-08-12, `validation/bfs3d_openfoam/column_reach_collisions.py` —
+      mesh graph only, no state, no Jacobian, no solve).** A colouring is collision-free only on the
+      pattern it was built at, so under the reach-3 assembly pattern two cells sharing a reach-2 colour
+      can both couple to one row; the response holds their **sum** and de-compression charges all of it
+      to whichever lies in reach. On `bfs3d` (23040 cells, 1 311 372 pattern cell-blocks):
+
+      | column | reach | entries in reach | corrupted | share | far entries folded in | rows touched |
       |---|---|---|---|---|---|---|
-      | developed | 1.4e-04 | 1.1e-05 | 3.4e-05 | **9.8e-16** | **1.5e-17** | **1.2e-17** |
-      | hardest | 1.4e-04 | 1.1e-05 | 3.4e-05 | **9.8e-16** | **1.5e-17** | **1.2e-17** |
-      | cold | ~1e-16 | ~1e-16 | ~1e-16 | ~1e-15 | ~1e-30 | ~1e-30 |
+      | u, v, w | 3 | 1311372 | 0 | 0% | 0 | 0 |
+      | p, k, ω | 2 | 537896 | 287315 | **53.4%** | 369396 | **23025 of 23040** |
 
       **By this measure `p`, `k` and `ω` all close inside reach 2 and the velocities do not — and acting
       on that for `p` is what diverges the case.** The table is kept because it is the evidence that a
@@ -308,6 +365,44 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       cell's near coupling into a position the matrix has nothing in. Both halves are pinned
       (`test_a_short_probed_column_zeroes_its_out_of_reach_entries`,
       `test_per_column_plan_recovers_a_mixed_reach_matrix_exactly_and_more_cheaply`).
+
+      **✅ ROOT CAUSE AND FIX (2026-08-12) — it was NOT the aliasing, and it was NOT the reach. Sparse
+      arithmetic was pruning the explicit zeros out of the smoother's pattern.** Two readings of #191
+      preceded this and both are refuted; the falsifying harnesses are in `validation/bfs3d_openfoam/`.
+      - **Aliasing is real and pervasive but is not the cause.** A reach-2 colouring is collision-free
+        only on its own pattern, so under the reach-3 assembly pattern two cells sharing a colour can
+        both couple to one row and the response is charged entirely to the near one:
+        `column_reach_collisions.py` (mesh graph only, no state, no solve) finds **287 315 of 537 896
+        entries — 53.4 % — corrupted in every shortened column**, touching 23 025 of 23 040 rows.
+        Yet `trailing_column_reach_probe.py`, which measures the assembled error *exactly* (seed the
+        colour class, minus seed the one cell), puts the pressure column's error at **1.4e-17 … 4.0e-16
+        at the rung ICs — the float64 floor, and the divergence is at step 1, so no other state is
+        involved.** A perturbation that size cannot take a solve from 3 cycles to 44.
+      - **The cause: `a + sp.diags(shift)` and `diags(s) @ a @ diags(s)` are sparse arithmetic, which
+        stores only entries whose result is nonzero.** `column_reach` writes out-of-reach entries as
+        **exact `0.0`**; a uniform build stores the true value there (~1e-26, nonzero). Exact zeros were
+        stripped, 1e-26 survived. Measured (`column_reach_zero_pruning.py`): same 47 209 392 stored
+        pattern in both arms, but **38 721 674 against 32 309 840 after assembly — 6 411 834 positions,
+        16.6 %, removed from what the ILU(0) smoother factorizes.** A zero-fill factorization takes its
+        pattern from exactly that.
+      - **Why `p` and not `k`/`ω`:** pressure is in the incomplete-LU-smoothed **leading** block; k and ω
+        are in the trailing block, whose cell-block inverse has no factorization pattern to weaken. That
+        also retro-explains the padding experiment which established the reach-3 requirement — it padded
+        with **~1e-30, not exact zero**, precisely what survives sparse arithmetic.
+      - **Fixed** by pattern-preserving assembly (`frozen_operator.apply_symmetric_scale`, and a diagonal
+        assignment for the shift) — see the equilibration entry under *Faithful smoothed aggregation*.
+        **Confirmed:** with the fix, `(3,3,3,2,2,2)` reproduces the uniform-reach baseline in **every
+        reported digit** at rung-1 step 1 — `‖R₀‖` 3.2901e-01, β 0.5000, 4 inner, **3 cycles**, `‖R‖`
+        2.046e-01, α 1.000, no flags. So `p` at reach 2 is no longer a correctness constraint. The
+        shipped default stays `(3,3,3,3,2,2)`; changing it is a separate decision and wants a full march.
+      - ⚠️ **How it got through, which is the transferable part: the audit that licensed it AND the gate
+        that verified it both collapse over row fields**, on a matrix whose row norms differ by ~8 orders
+        (k row 8.8e-06, ω row 1.4e+03). `column_reach_ladder` takes a whole column block;
+        `jacobian_relative_error` is one random vector over the whole matrix. Neither can see a wrong
+        pressure block, and `probe_reach_audit.py` already had the right function — `block_shell_fractions`,
+        per (row field, column field) pair. **Read a reach or exactness measurement per PAIR, never over a
+        whole column or a whole matrix.**
+
       **✅ MEASURED, and CPU time tracks the probe count 1:1** (`state-00077`, at the then-default
       `_PROBE_BATCH_SIZE = 4` — since moved to 8, so the RATIO below stands and the absolute seconds
       are ~10 % lower now,
@@ -2286,16 +2381,43 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   not survive. `equilibrate=True` is now built and measured, and it makes our hierarchy **worse**:
   8 → 11 cycles on the RCM arm, 5 → 10 on the plain-aggregation MIS arm.
 
-  **Why it barely matters, and this is the part worth carrying: a symmetric equilibration is a
-  SIMILARITY TRANSFORM, so almost the whole setup is invariant under it.** `D̂⁻¹Â = S⁻¹(D⁻¹A)S`, so
-  both spectral estimates are unchanged; the damped-Jacobi smoother `x += (ω/λ)D⁻¹r` is unchanged
-  with them; and at `strength_threshold = 0` the aggregation reads only the sparsity pattern.
-  Measured on a badly scaled chain: the **fine** level's `lam_max` is 1.966 raw against 1.976
-  equilibrated (equal to power-iteration accuracy) while the **coarse** level's is 1.81 against
-  15.3. The one non-equivariant object is the **tentative prolongation** — a fixed 0/1 aggregate
-  indicator, which does not transform with the operator — so the coarse operator it builds is the
-  only thing rescaling actually changes. Everything the original note listed as reading `D` does
-  read `D`, but reads it in a way that cancels.
+  **A symmetric equilibration is a SIMILARITY TRANSFORM, so the SPECTRAL half of the setup is
+  invariant under it.** `D̂⁻¹Â = S⁻¹(D⁻¹A)S`, so both spectral estimates are unchanged and the
+  damped-Jacobi smoother `x += (ω/λ)D⁻¹r` is unchanged with them. Measured on a badly scaled chain:
+  the **fine** level's `lam_max` is 1.966 raw against 1.976 equilibrated (equal to power-iteration
+  accuracy) while the **coarse** level's is 1.81 against 15.3. The **tentative prolongation** — a
+  fixed 0/1 aggregate indicator, which does not transform with the operator — is non-equivariant.
+
+  **❌ "EQUILIBRATION CHANGES THE GRAPH THE COARSENING SEES" — PROPOSED AND REFUTED BY MEASUREMENT
+  (2026-08-12). Do not re-propose it; the falsifying run is cheap and is in the tree.** The reasoning
+  was sound as far as it went: `symmetrically_equilibrate` returns `(diagonal @ a @ diagonal).tocsr()`,
+  **a sparse product stores only entries whose result is nonzero, so it DROPS every explicit zero**
+  (verified in isolation), and at `strength_threshold = 0` the aggregation reads the graph and nothing
+  else. The dropped counts are large and real — on `bfs3d` at the target-Re cold initial field, the
+  trailing `[k, ω]` block loses **26.8 %** of its stored entries to equilibration (5 245 488 → 3 839 276,
+  1 406 212 exact zeros) while the leading block loses **0.0 %** (5 662 of 20 981 952).
+  **It does not reach the coarsening, because the cell collapse absorbs it**
+  (`validation/bfs3d_openfoam/equilibration_graph_effect.py`, running the real `_cell_graph` /
+  `_aggregation_edges` / `_mis_aggregate`):
+
+  | trailing `[k, ω]` | cell edges | aggregates | max aggregate |
+  |---|---|---|---|
+  | raw | 644 166 | 2300 | 45 |
+  | equilibrated | 643 967 | 2302 | 45 |
+
+  **199 of 644 166 edges — 0.03 %.** `_cell_graph` sums `\|A_ij\|` over each `block_size²` block, so a
+  cell pair keeps its edge if **any** of its entries is nonzero; the dropped degrees of freedom are
+  scattered across blocks rather than clustered within them, so almost every edge survives. The coarse
+  space is effectively identical. The leading-block control loses **1** edge and its partition is
+  bit-identical.
+  **So the similarity-transform argument stands, and the recorded explanation — the non-equivariant
+  tentative prolongation and the coarse operator it builds — remains the live one for the 5 → 10.**
+  **What survives, and it is worth keeping:** *the aggregation is robust to explicit-zero pruning while
+  an incomplete factorization is not.* The smoother takes its pattern from the stored pattern directly,
+  with no cell collapse to absorb the loss — which is why the same pruning is fatal to `column_reach`'s
+  pressure column (see the per-column reach entry under `sparse_jacobian.py`) and inert here. When
+  reasoning about a pattern change, **ask which consumer sees it**: a nodal coarsening and a zero-fill
+  factorization have opposite sensitivities.
 
   **Reference numbers, re-measured on the current code** — `bfs3d` `state-00057`, PC β 0.05, the
   `[k, ω]` block **ALONE** (46080 dofs, 4.20M nnz, 91/row), GMRES restart 15 to rtol 1e-8 on the
@@ -2847,12 +2969,13 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       fill. Reach 3 is required, now measured across both aggregations at ILU(0). **The reach-3 PATTERN
       is required; probing every COLUMN at reach 3 is not, and that distinction was missed here.**
       This entry shrinks the pattern, which is what moves the hierarchy. Keeping the pattern at reach 3
-      and shortening only the columns measured to carry nothing beyond reach 2 (`p`, `k`, `ω`) leaves the
-      coarse space and the smoother untouched and is worth **564 → 399 probes** — see *"per-column
-      probing reach"* under `sparse_jacobian.py` above. So the conclusion drawn from this arm, "there is
-      no cheap way to shrink the probe", was **too strong**: it followed from testing only the
-      all-columns-and-the-pattern variant. Refreshing less often is not the only open axis on refresh
-      cost.
+      and shortening only the *columns* (`column_reach`) leaves the coarse space and the smoother
+      untouched and is worth 564 → 399 probes — but it is **not** the cheap win it was recorded as: it
+      aliases each shortened column's far couplings onto its near entries, over half the entries of
+      every shortened column on `bfs3d`, and the shipped `(3,3,3,2,2,2)` diverged the march at step 1.
+      See *"per-column probing reach"* under `sparse_jacobian.py` above before reaching for it. So this
+      arm's "there is no cheap way to shrink the probe" stands for the *pattern*, and the column
+      variant that looked like the exception has not yet been shown safe on this case.
       **A trap: the cheap `refresh_shift_in_place` branch does NOT help within a step.** The shift is
       formed once per step at the reference state and held fixed across the inner loop, so what drifts
       inside a step is `J(p)`. The shift-only branch only helps *across* steps, where β moves.
