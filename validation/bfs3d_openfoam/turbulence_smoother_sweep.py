@@ -82,7 +82,7 @@ from aquaflux.solve import (  # noqa: E402
 )
 from aquaflux.solve.linear import restart_cycles  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
-    _coupled_jacobian_colouring,
+    _coupled_jacobian_plan,
     _coupled_shift_policy,
     _frozen_shift_diagonal,
     _jacobian_matvec,
@@ -410,7 +410,7 @@ def report(measured, baseline_arm: str) -> None:
     )
 
 
-def sweep_state(name: str, selected, coupled, groups, n_fields, colouring, structure):
+def sweep_state(name: str, selected, coupled, groups, n_fields, plan, structure):
     """Measure every selected arm at one state, then release that state's Jacobian.
 
     One state per call, and its several-gigabyte operator is dropped before the next: two live copies of
@@ -428,7 +428,7 @@ def sweep_state(name: str, selected, coupled, groups, n_fields, colouring, struc
     base = _coupled_shift_policy(coupled, state, "twolevel")
     rhs = -coupled.residual(state)
     op_shift = _frozen_shift_diagonal(base, march_beta, state) if march_beta > 0 else 0.0
-    jacobian = materialize(coupled, state, colouring, structure, n_fields)
+    jacobian = materialize(coupled, state, plan, structure, n_fields)
     pc_shift = (
         _frozen_shift_diagonal(base, pc_beta, state) if pc_beta > 0 else np.zeros(groups.n_dofs)
     )
@@ -488,10 +488,10 @@ def main() -> None:
         f"preconditioner beta floor {FLOOR}\n{'=' * 92}",
         flush=True,
     )
-    colouring = _coupled_jacobian_colouring(coupled, 3)
-    structure = block_stencil_gather_map(colouring, n_fields)
+    plan = _coupled_jacobian_plan(coupled, 3)
+    structure = block_stencil_gather_map(plan)
     measured = {
-        name: sweep_state(name, selected, coupled, groups, n_fields, colouring, structure)
+        name: sweep_state(name, selected, coupled, groups, n_fields, plan, structure)
         for name in names
     }
     report(measured, ARMS[0])

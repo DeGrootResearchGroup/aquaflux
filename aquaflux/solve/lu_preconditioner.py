@@ -264,21 +264,19 @@ class MonolithicLuPreconditioner:
     @staticmethod
     def _materialize(
         matvec: Callable[[jnp.ndarray], jnp.ndarray],
-        colouring,
-        n_fields: int,
+        plan,
         shift_diagonal: np.ndarray,
     ) -> sp.spmatrix:
         from .sparse_jacobian import materialize_block_jacobian
 
-        jacobian = materialize_block_jacobian(matvec, colouring, n_fields)
+        jacobian = materialize_block_jacobian(matvec, plan)
         return (jacobian + sp.diags(np.asarray(shift_diagonal))).tocsr()
 
     @classmethod
     def build(
         cls,
         matvec: Callable[[jnp.ndarray], jnp.ndarray],
-        colouring,
-        n_fields: int,
+        plan,
         shift_diagonal: np.ndarray,
         *,
         backend: str = "auto",
@@ -289,11 +287,9 @@ class MonolithicLuPreconditioner:
         ----------
         matvec : callable
             The frozen Jacobian-vector product ``v -> J v`` at the state it is frozen at.
-        colouring : BlockColouring
-            The stencil colouring for the materialization
-            (:func:`~aquaflux.solve.sparse_jacobian.block_stencil_colouring`).
-        n_fields : int
-            Degrees of freedom per cell.
+        plan : ColumnProbePlan
+            The probing plan for the materialization
+            (:class:`~aquaflux.solve.sparse_jacobian.ColumnProbePlan`).
         shift_diagonal : np.ndarray
             The pseudo-transient shift added to the Jacobian's diagonal, shape ``(n_fields * n,)`` — the
             same block-diagonal shift the step solves against (velocity/scalar shifts, pressure zero).
@@ -305,14 +301,13 @@ class MonolithicLuPreconditioner:
         MonolithicLuPreconditioner
             The built preconditioner.
         """
-        matrix = cls._materialize(matvec, colouring, n_fields, shift_diagonal)
+        matrix = cls._materialize(matvec, plan, shift_diagonal)
         return cls(factorize_lu(matrix, backend=backend))
 
     def refresh_in_place(
         self,
         matvec: Callable[[jnp.ndarray], jnp.ndarray],
-        colouring,
-        n_fields: int,
+        plan,
         shift_diagonal: np.ndarray,
     ) -> None:
         """Re-factor at a developed state and swap the factorization IN PLACE (no new object).
@@ -329,7 +324,7 @@ class MonolithicLuPreconditioner:
         between its calls; only the eager, non-differentiated march may refresh. The refresh never moves
         the converged root (the shift vanishes there), so it changes only the forward Krylov path.
         """
-        matrix = self._materialize(matvec, colouring, n_fields, shift_diagonal)
+        matrix = self._materialize(matvec, plan, shift_diagonal)
         self.factors.backend.refactor(matrix)
 
     def matvec(self, *, transpose: bool = False) -> Callable[[jnp.ndarray], jnp.ndarray]:

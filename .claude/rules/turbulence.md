@@ -57,6 +57,24 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     the coupled solve self-start from the symmetric plug with **no symmetry-breaking perturbation** (see
     the `initialization.py` note). Pinned by `test_strain.py` (finite/zero Jacobian at `S = 0`; FD-match
     where `S > 0`).
+- **⚠️ `S` IS WHAT MAKES THE VELOCITY COLUMNS OF THE COUPLED JACOBIAN REACH ONE RING FURTHER THAN
+  EVERYTHING ELSE — a closure property with a direct solver cost (measured 2026-08-11).** The coloured
+  probe that materializes the coupled Jacobian is charged per (colour, **column** field), and the colour
+  count climbs steeply with the stencil reach: on `bfs3d` 11 colours at reach 1, 39 at 2, 94 at 3. The
+  velocity columns need reach 3 while `p`, `k` and `ω` close inside reach 2, and the whole of that
+  difference is `ν_t`'s dependence on `S`. Holding `S` constant (a `stop_gradient`, i.e. what a lagged-`ν_t`
+  linearization would do) takes the velocity columns to **2**; every other arm — the flux limiter, the
+  second-order reconstruction, a one-shot compact Green-Gauss gradient, and the velocity gradient inside
+  the momentum diagonal's lagged flux — leaves them at **3**.
+  **Why:** `ν_t = a1 k / max(a1 ω, S F2)` reads `S`, which is built from `∇u`, so `ν_t` is a
+  *velocity-dependent coefficient* multiplying a flux that is already gradient-based, and the composition
+  spends the extra ring. It equally explains the columns that do **not**: `k` and `ω` enter `ν_t`
+  **pointwise** (no gradient), and pressure does not enter it at all.
+  **Consequence to hold onto:** this is a real cost of differentiating the closure exactly, not a defect.
+  A lagged `ν_t` would make the whole operator reach 2 and roughly halve the probe, but it is a
+  quasi-Newton linearization — and the reach-2 *pattern* is separately measured to break the multigrid
+  hierarchy, so it is not a free lever. Harness `validation/bfs3d_openfoam/column_reach_probe.py`; the
+  probe-cost side is in `.claude/rules/solve.md`.
 - **`sources.py`** — the k and ω production / destruction / cross-diffusion terms as
   `VolumeSourceFn` volume-source operators (the transport equations reuse the shared advection
   and diffusion flux operators; only the sources are turbulence-specific).
@@ -1022,13 +1040,17 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       On a fast-developing flow a *fresh* `J` cuts the Krylov cycle count on `bfs3d` (fewer/cheaper steps) by
       more than the materialize costs, so a stale frozen `J` is a net loss (the reduction was recorded with no
       state, β or preconditioner bundle — re-measure before relying on its size); the right lever is a
-      *cheaper* materialize, not a rarer one — hence the two `sparse_jacobian` speedups (batched probe +
-      gather de-compression; see the materialize-efficiency bullet in `.claude/rules/solve.md`), which
-      `coupled_amg_continuation` and the refresh wire in (built once, reused). **DON'T lower `stencil_reach`
-      to 2 to cheapen it either** — reach-2 is numerically near-exact at *every* state, but GAMG(reach-2)
-      DIVERGES as a preconditioner because the ILU(1) smoother's fill is pattern-dependent (halving the graph
-      makes the incomplete factorization non-convergent on the saddle — the full reach-3 pattern is required;
-      see the reach bullet in `.claude/rules/solve.md`).
+      *cheaper* materialize, not a rarer one — hence the `sparse_jacobian` speedups (batched probe,
+      gather de-compression, the saturation colouring and the per-column reach; see the
+      materialize-efficiency bullet in `.claude/rules/solve.md`), which `coupled_amg_continuation` and the
+      refresh wire in (built once, reused). **DON'T lower `stencil_reach` to 2 to cheapen it** — reach-2 is
+      numerically near-exact at *every* state, but GAMG(reach-2) DIVERGES as a preconditioner. ⚠️ The
+      mechanism once given here — the ILU(1) smoother's pattern-dependent fill — **does not survive**:
+      reach-2 fails at ILU(0) too, where there is no fill to be pattern-dependent about, and the surviving
+      reason is that it builds a *different hierarchy* (3 levels / 480 coarse equations against 2 / 1296).
+      **What IS available is `column_reach`**, which keeps the reach-3 pattern — so the hierarchy is
+      untouched — and shortens only the columns measured to carry nothing beyond reach 2 (`p`, `k`, `ω` on
+      `bfs3d`): 564 probes → 399, exact to float64 rounding. Both in `.claude/rules/solve.md`.
       **⚠️ THE DRIFT GATE MUST NOT BE NESTED INSIDE THE β GATE — it was, and a PC-only `beta_floor` then
       made it unreachable.** The β gate sees `max(β, beta_floor)`, so below the floor its input is pinned
       and it answers "no change" forever; asking the drift gate only inside it therefore froze the

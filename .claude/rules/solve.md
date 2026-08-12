@@ -65,6 +65,7 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 | aggregation | plain (`pc_gamg_agg_nsmooths=0`) | plain | `amg_preconditioner.py` |
 | field split | `field_split=False` | **True** | `compare.py` |
 | stencil reach | `stencil_reach=3` | 3 | — |
+| probe column reach | `column_reach=None` (uniform) | **(3,3,3,2,2,2)** | `compare.py` `COLUMN_REACH` |
 
 **The three coupled forward solvers — always name which path you mean.** There is no
 `_COUPLED_AMG_FORWARD_SOLVER` symbol.
@@ -193,10 +194,157 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   - **`sparse_jacobian.py`** materializes the coupled Jacobian from the *same* residual the solver uses
     (no re-derived assembly): `block_stencil_colouring(owner, nb, n, reach)` (pure NumPy — the cell-block
     pattern at a stencil `reach` and a collision-free CPR colouring, the conflict graph is the pattern
-    squared) then `materialize_block_jacobian(matvec, colouring, n_fields)` (one `jax.jvp` per
-    colour×field — e.g. 112 colours × 6 fields = **~670 probes** on the 23k-cell reach-3 `bfs3d` mesh, NOT
-    ~240). `jacobian_relative_error` guards that `reach` covers the stencil (coupled RANS reaches distance
-    **3**). Field-major DOF layout `(cell i, field f) = f·n + i`.
+    squared) then `materialize_block_jacobian(matvec, plan)` (one `jax.jvp` per colour×column-field).
+    **The `(colouring, n_fields)` pair is GONE — both take a `ColumnProbePlan`** (`ColumnProbePlan.uniform(
+    colouring, n_fields)` for one reach throughout, `column_probe_plan(owner, nb, n, column_reach,
+    pattern_reach)` to give each column its own); `block_stencil_gather_map(plan)` likewise takes one
+    argument. `jacobian_relative_error` guards that `reach` covers the stencil (coupled RANS reaches
+    distance **3**). Field-major DOF layout `(cell i, field f) = f·n + i`.
+    - **The colouring is by SATURATION degree, not by degree — 112 → 94 colours on `bfs3d` (BUILT,
+      2026-08-11).** `_saturation_colouring` picks the uncoloured vertex whose neighbours already show
+      the most *distinct* colours. The colour count **is** the probe count, so this is 108 fewer
+      directional derivatives per materialize for free; the build costs 0.6 s against the degree-ordered
+      greedy's 0.2 s, paid a handful of times per march. **Any collision-free colouring de-compresses to
+      the same matrix**, so this changes what a materialize costs and not what it returns — which is why
+      it needed no re-validation of anything downstream. Colour counts on this mesh: reach 1 **16 → 11**,
+      reach 2 **60 → 39**, reach 3 **112 → 94**. Pinned by
+      `test_saturation_colouring_uses_fewer_colours_than_degree_ordering` on a 3D lattice.
+    - **✅ SEEDS ARE BUILT ONE CHUNK AT A TIME, not all at once (BUILT, 2026-08-11).** The probe seeds
+      are `n_probes x n_fields x n_cells` floats — **441 MB on `bfs3d` at 399 probes, 624 MB at 564** —
+      and the old code materialized the whole set before chunking it, holding it for the entire
+      materialize. `ColumnProbePlan.seed_block(start, stop, out=)` fills a **reused** buffer of one chunk
+      instead, so the seeds cost `probe_batch_size x nf` (a few MB) rather than `n_probes x nf`. Measured
+      on an 18³ lattice at 546 probes: **153 MB → 1.1 MB, 136x less.** The buffer keeps one shape across
+      every chunk, so the batched map still compiles a single time, and a final short chunk is padded by
+      the rows `seed_block` leaves zero — the previous `np.vstack` pad is gone with it.
+    - **✅ THE DE-COMPRESSION RUNS PER CHUNK TOO, so a materialize costs the matrix and nothing else
+      (BUILT, 2026-08-11).** `block_stencil_gather_map` now returns a **`ProbeGather`** rather than an
+      `(indptr, indices, gather_map)` tuple, and it sorts the CSR entries by the probe that feeds them.
+      Each chunk's responses are scattered in as they are computed and then dropped, so the full
+      `n_probes x nf` response array is gone — and with it the `np.concatenate` that appended a zero
+      sentinel, which was a **second** full copy. Measured on an 18³ lattice, 546 probes, 11.5M nnz:
+
+      | | |
+      |---|---|
+      | matrix data alone (irreducible) | 92 MB |
+      | responses + sentinel copy (old, on top) | 306 MB |
+      | **peak now** | **95 MB** |
+
+      Scaled to `bfs3d` at 47.2M nnz that is roughly **1260 MB → 380 MB**. Out-of-reach entries need no
+      sentinel: having no source probe, they never enter the sorted order, so a zero-initialized `data`
+      leaves them zero. The index arrays are `int32` (entry counts and `n_probes x nf` both sit well
+      inside its range), so the permanent structure is no larger than the `int64` gather map it replaced.
+      **Verified against the TRUE matrix-free jvp on the real case** — `jacobian_relative_error` 2.5e-16
+      (uniform) and 6.5e-16 (per-column), i.e. the float64 floor, which is an independent check rather
+      than the two paths agreeing with each other.
+
+      **⚠️ Read this before tuning `_PROBE_BATCH_SIZE` against memory.** Most of the peak the batch size
+      was being traded against was never the batch: seeds and responses are both `n_probes x nf` and
+      neither scaled with `probe_batch_size`. Both are now gone, so the peak is the matrix plus one chunk
+      — which is what makes a memory-budgeted batch size a meaningful knob rather than a knob on the
+      small term. The recorded "16 vs 4: ~2.2 GB vs ~0.7 GB" was measured against the old allocations and
+      **no longer describes this code**; re-measure before using it.
+
+    - **✅ PER-COLUMN PROBING REACH — 564 → 399 probes on `bfs3d`, EXACT (BUILT, 2026-08-11).** The probe
+      is charged per (colour, **column** field), so the reach is worth choosing per column rather than
+      once. Measured with `validation/bfs3d_openfoam/probe_reach_audit.py` at three states — a cold inner
+      iterate (`inner-00003-02`), a developed step (`state-00072`, step 33, ‖R‖ 3.1e-6, shift 0.0068) and
+      the march's hardest solve (`inner-00050-03`, 15 cycles, α → 0) — the share of each column's norm
+      lying **beyond reach 2**:
+
+      | | u | v | w | p | k | ω |
+      |---|---|---|---|---|---|---|
+      | developed | 1.4e-04 | 1.1e-05 | 3.4e-05 | **9.8e-16** | **1.5e-17** | **1.2e-17** |
+      | hardest | 1.4e-04 | 1.1e-05 | 3.4e-05 | **9.8e-16** | **1.5e-17** | **1.2e-17** |
+      | cold | ~1e-16 | ~1e-16 | ~1e-16 | ~1e-15 | ~1e-30 | ~1e-30 |
+
+      **`p`, `k` and `ω` close inside reach 2; the velocities do not** (and at a cold state nothing
+      reaches 3 — the velocity content appears only as the flow develops). So `column_reach = (3,3,3,2,2,2)`
+      with the pattern held at reach 3: **399 probes against 564**, the assembled sparsity byte-identical
+      (1 311 372 cell-blocks either way), and the two Jacobians agreeing to **5.7e-16 relative Frobenius**
+      (max abs 6.3e-15 over 8.4M of 47.2M entries) — float64 rounding from different seed vectors, not a
+      modelling difference. Note this is **exact to machine precision, NOT bit-identical**; a different
+      seed changes the rounding in the residual evaluation.
+      **Why it is a case property and not a library constant:** it follows from the *schemes*. First-order
+      upwind on k/ω plus a non-orthogonal diffusion correction reaches 2; the velocity columns carry the
+      limited second-order upwind reconstruction out to 3. Re-measure for any case that changes them —
+      the library default (`column_reach=None`) probes every column at `stencil_reach`, unchanged.
+      **⚠️ A SHORT REACH CORRUPTS RATHER THAN TRUNCATES, and this is the trap the design turns on.** A
+      colouring is collision-free only for the pattern it was built at, so two cells sharing a reach-2
+      colour may still both couple to a common row at distance 3; the response then holds the *sum* and
+      the de-compression charges all of it to the near entry. So a column with far couplings has its
+      **near** entries perturbed — it is not simply missing the far ones. Correspondingly, every pattern
+      entry outside its column's own reach is written as an **explicit zero** rather than gathered
+      (`ColumnProbePlan.in_reach` plus a zero sentinel row): gathering there would deposit a *different*
+      cell's near coupling into a position the matrix has nothing in. Both halves are pinned
+      (`test_a_short_probed_column_zeroes_its_out_of_reach_entries`,
+      `test_per_column_plan_recovers_a_mixed_reach_matrix_exactly_and_more_cheaply`).
+      **✅ MEASURED, and CPU time tracks the probe count 1:1** (`state-00077`, at the then-default
+      `_PROBE_BATCH_SIZE = 4` — since moved to 8, so the RATIO below stands and the absolute seconds
+      are ~10 % lower now,
+      four interleaved repetitions after a discarded warm-up, minimum reported):
+
+      | | uniform reach 3 | per-column | |
+      |---|---|---|---|
+      | probes | 564 | 399 | −29% |
+      | **process CPU** | 65.74 s | 46.74 s | **−29%** |
+      | wall | 10.36 s | 7.11 s | −31% |
+
+      Per-arm spread was ≤5% and the arms do not overlap (worst per-column 7.50 s beats best uniform
+      10.36 s). **The CPU row is the load-bearing one:** it is nearly insensitive to other processes
+      competing for cores, and it moves exactly with the probe count, which is what establishes that the
+      saving is work removed rather than a scheduling artifact.
+      **⚠️ Against the ORIGINAL shipped probe (672, degree-ordered colouring at uniform reach 3) the
+      combined saving is 672 → 399 = −41%, but that arm was NOT timed in this run** — it is a probe-count
+      ratio extrapolated on the 1:1 CPU-vs-probes relation above. Time it before quoting a second.
+      **⚠️ THREE EARLIER ATTEMPTS AT THIS NUMBER WERE EACH CONFOUNDED, in three different ways, and the
+      method is the finding.** (1) The batched jvp compiles on its first call, so whichever arm ran first
+      carried the trace and the second looked cheap — 12.4 s vs 6.3 s, which is the compile, not the
+      probe. (2) A concurrent 4.4 GB march drove the machine 8 GB into swap and the result came out
+      *inverted*, 10.4 s vs 11.8 s. (3) The machine is shared and rarely idle. The method that works:
+      discard a warm-up, interleave the arms so a load excursion hits both, repeat, report the minimum,
+      and carry CPU time beside wall as the cross-check.
+      **✅ WHY the velocity columns reach further than the scalars: the EDDY VISCOSITY's dependence on
+      the strain rate (measured 2026-08-11, `validation/bfs3d_openfoam/column_reach_probe.py`).** The
+      momentum and scalar transport equations look alike, so the split invites an explanation, and the
+      two obvious ones are both wrong. The harness perturbs one degree of freedom and takes a single
+      directional derivative — that *is* the column, and how far the response spreads on the cell graph
+      is its reach — so it costs megabytes rather than a materialize's gigabytes and can sweep arms
+      freely. At `state-00077` (step 28, ‖R‖ 3.586e-06, shift 0.0064), from the four deepest interior
+      cells:
+
+      | arm | u | v | w | p | k | ω |
+      |---|---|---|---|---|---|---|
+      | Venkatakrishnan-limited linear upwind (the case) | 3 | 3 | 3 | 2 | 2 | 2 |
+      | unlimited second-order upwind | 3 | 3 | 3 | 2 | 2 | 2 |
+      | first-order upwind on momentum | 3 | 3 | 3 | 2 | 2 | 2 |
+      | compact (one-shot) Green-Gauss gradient | 3 | 3 | 3 | 2 | 2 | 2 |
+      | `a_P`'s lagged flux with no velocity gradient | 3 | 3 | 3 | 2 | 2 | 2 |
+      | **`nu_t` with `stop_gradient` on the strain rate** | **2** | **2** | **2** | 2 | 2 | 2 |
+
+      **`nu_t = a1 k / max(a1 omega, S F2)` reads the strain-rate magnitude, which is built from the
+      velocity gradient.** That makes the eddy viscosity a *velocity-dependent coefficient* of a flux
+      that is already gradient-based, and the composition of the two is what spends the extra ring.
+      It also accounts for the columns that do NOT reach three: `k` and `omega` enter `nu_t` **pointwise**
+      (no gradient), and pressure does not enter it at all.
+      **Three explanations are REFUTED — do not re-propose them:** the flux limiter and the second-order
+      reconstruction (first-order upwind on momentum, the very scheme k/ω use, still reaches three); the
+      gradient scheme's own stencil (a one-shot compact Green-Gauss still reaches three); and the
+      velocity gradient inside `a_P`'s lagged convective flux. The last was *my* account, argued from the
+      source and killed by the arm built to test it — the lesson being that the ring is not where the
+      pressure-velocity coupling is, it is in the closure.
+      **⚠️ The arm is a DIAGNOSTIC, not a proposal.** `stop_gradient` on the strain rate changes the
+      *Jacobian*, not the residual, so it is a quasi-Newton linearization rather than a model change.
+      It is worth knowing that it would take the whole operator to reach two — but the probe feeds the
+      **preconditioner**, and a reach-2 *pattern* is separately measured to break the hierarchy (below),
+      so this is not a route to 234 probes without re-opening that.
+
+      **This does NOT reopen the reach-2 lever below, and must not be read as contradicting it.** That
+      entry is about probing *every* column at reach 2 **and coarsening the reach-2 pattern**, which
+      changes the hierarchy (3 levels / 480 coarse equations against 2 / 1296) and fails. Here the
+      pattern stays at reach 3, so the coarse space and the smoother see exactly what they see today; only
+      columns with *nothing* beyond reach 2 are shortened, and the velocities — which do carry content
+      there — are not.
     - **Materialize efficiency — two shipped speedups, both AMG-path-only, bit-identical (BUILT).** The
       probe dominates a refresh, so `materialize_block_jacobian` takes two optional accelerators the AMG
       preconditioner passes (LU/ILUT keep the plain loop, which any NumPy matvec supports). **(1) Batched
@@ -204,15 +352,47 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       single time; `probe_batch_size` chunks it for memory) runs the coloured probes as a few fused passes
       instead of a Python loop of separate calls. Measured 22.4→14.0 s (~1.6×) on `bfs3d` — modest because
       CPU forward-AD does not vectorize across the batch like a GPU (the win is dispatch amortization). For
-      the SAME reason the chunk is kept **small** (`_PROBE_BATCH_SIZE = 4`, not 16): a larger batch holds
-      more simultaneous forward-AD tapes for almost no time gain — measured chunk 16 vs 4 was ~33 s vs ~36 s
-      but ~2.2 GB vs ~0.7 GB of transient peak, and on a memory-bounded box (the refresh re-materializes
-      every few steps) that peak is what tips a long march into swap/OOM. Four keeps the dispatch
-      amortization at a third of the peak; the materialize itself frees cleanly (no cross-refresh growth).
-      **(2) Gather de-compression** — `block_stencil_gather_map(colouring, n_fields)` precomputes, once, the
-      **fixed full-pattern** CSR structure + a flat `gather_map`, so de-compression is one vectorized
-      `data = responses.ravel()[gather_map]` (no scatter loop, no per-materialize CSR re-sort) passed as
-      `structure=`. The **full** pattern (no `eliminate_zeros`) is the fixed mesh distance-3 colouring graph
+      the SAME reason the chunk was once kept **small** (`_PROBE_BATCH_SIZE` was 4, not 16): a larger
+      batch holds more simultaneous forward-AD tapes. **The default is now 8** — see the sweep below,
+      which is what retired that reasoning.
+      **✅ RE-MEASURED, and the memory half of that trade NO LONGER EXISTS (2026-08-11,
+      `validation/bfs3d_openfoam/probe_batch_sweep.py`; `bfs3d` `state-00077`, 399 probes at the
+      per-column reach, 47.2M nnz, warm-up discarded per chunk shape, min of 3):**
+
+      | batch | wall (s) | cpu (s) | python peak | vs batch 1 |
+      |---|---|---|---|---|
+      | 1 | 11.73 | 91.37 | 380 MB | 1.00× |
+      | 2 | 8.42 | 70.29 | 383 MB | 1.39× |
+      | **4 (shipped)** | 6.69 | 53.89 | 388 MB | 1.75× |
+      | **8** | 5.94 | **46.35** | 399 MB | 1.98× |
+      | 16 | **5.81** | 49.13 | 419 MB | 2.02× |
+      | 32 | 6.47 | 52.33 | 460 MB | 1.81× |
+
+      - **Memory barely moves: 380 → 460 MB across batch 1 → 32**, about 2.5 MB per unit of batch. The
+        old "16 vs 4: ~2.2 GB vs ~0.7 GB" was the seed set and the response array, and **neither ever
+        scaled with the batch**; both are gone. So the memory argument for a small chunk is void.
+      - **The curve has an interior optimum and TURNS: 32 is worse than 16** (6.47 s against 5.81 s), so
+        "bigger is better up to memory" was never the shape. CPU time — the cleaner axis on a shared
+        machine — bottoms at **8**.
+      - **The default is now `_PROBE_BATCH_SIZE = 8`** (was 4), which is where processor time bottoms.
+        16 is a hair faster in wall and slower in CPU; on a shared machine CPU is the more trustworthy
+        axis, and the wall difference between 8 and 16 is 0.13 s on a 6 s probe.
+      **⚠️ AUTO-SIZING THE BATCH TO AVAILABLE MEMORY IS NOT WORTH BUILDING, and this is why.** The
+      motivation was that the right chunk depends on machine state and case size. At 2.5 MB per unit it
+      does not: any sane fixed value is safe, and the constraint that motivated the mechanism was an
+      artifact of allocations that have since been removed. Fix the allocation, not the knob.
+      **⚠️ WHERE THE MEMORY ACTUALLY GOES, measured by attribution rather than assumed:** peak RSS is
+      149 MB after imports, **6889 MB after `build_case`**, 7154 MB after the colouring and plan, 8359 MB
+      after the gather map. So the case assembly is ~6.7 GB, the gather map ~1.2 GB, and a whole
+      materialize 0.4 GB. **A run's memory ceiling is set by building the case, not by probing it** — the
+      probe is now a rounding error against it, and an initial reading that blamed the structure build was
+      wrong.
+      **(2) Gather de-compression** — `block_stencil_gather_map(plan)` precomputes, once, the
+      **fixed full-pattern** CSR structure and the de-compression that fills it (no scatter loop, no
+      per-materialize CSR re-sort), passed as `structure=`. ⚠️ It used to return an
+      `(indptr, indices, gather_map)` tuple consumed as one vectorized `data = responses.ravel()[gather_map]`;
+      it now returns a `ProbeGather` that scatters **chunk by chunk**, so no such expression exists and the
+      full response array it indexed is gone (see the chunked-de-compression entry above). The **full** pattern (no `eliminate_zeros`) is the fixed mesh distance-3 colouring graph
       — a superset of the Jacobian's live nonzeros at *any* state — so the structure stays fixed
       cold→developed and no entry is ever dropped as values change: a guaranteed-fixed structure the in-place
       GAMG refactor needs. On `bfs3d` the full pattern is ~47.2M positions, but that is a **structural
@@ -229,7 +409,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       PC. On the orthogonal `bfs3d` mesh reach-2 is numerically near-*exact* at *every* state
       (‖A2−A3‖_F/‖A3‖ = 6e-6 cold, ~1e-15 developed — the dropped distance-3 shell is negligible; swapping
       Corrected→Compact Green-Gauss leaves it bit-identical, so the non-orthogonal skew correction
-      contributes ~0 here) and ~2.2× cheaper to probe (60 vs 112 colours, ~half the nnz). **Yet GAMG(reach-2)
+      contributes ~0 here) and ~2.2x cheaper to probe (60 vs 112 colours under the degree-ordered colouring this was measured with; 39 vs 94 under the saturation colouring now shipped, ~half the nnz). **Yet GAMG(reach-2)
       DIVERGES as a preconditioner** (true residual 1e3–1e8) at cold AND developed, on its own operator, with
       a verified-correct build — so it is genuine, not a build/scaling bug. **The cause is the ILU(1)
       smoother, whose fill is PATTERN-dependent (a symbolic/graph operation), not value-dependent:** halving
@@ -268,7 +448,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     unchanged.
   - **Cheap in-place mid-march refresh — `refresh_in_place` (BUILT; forward-march only).** The frozen
     ILUT goes stale as the flow develops — the shifted solve slows, and on a low-shift dual-time path it
-    can NaN. `MonolithicIlutPreconditioner.refresh_in_place(matvec, colouring, n_fields, shift_diagonal,
+    can NaN. `MonolithicIlutPreconditioner.refresh_in_place(matvec, plan, shift_diagonal,
     …)` re-materializes and re-factors at the developed state and swaps `self.factors` **in place**. Two
     facts make this a **compilation cache hit** rather than a recompile: the preconditioner is a *static*
     field of `MonolithicFactorShiftPolicy` (so its identity is the jit treedef, unchanged by mutating its
@@ -2592,9 +2772,15 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       at the restart cap). Note what that rules out: it is not a smoothing deficit. And the hierarchy
       itself changes — reach-2 yields **3 levels / 480 coarse equations** against reach-3's 2 / 1296 —
       so the dropped couplings are load-bearing for the *coarse space*, not merely for the smoother's
-      fill. Reach 3 is required, now measured across both aggregations at ILU(0). **There is no cheap
-      way to shrink the probe**, which leaves refreshing *less often* as the only open axis on refresh
-      cost — see the refresh-trigger note below.
+      fill. Reach 3 is required, now measured across both aggregations at ILU(0). **The reach-3 PATTERN
+      is required; probing every COLUMN at reach 3 is not, and that distinction was missed here.**
+      This entry shrinks the pattern, which is what moves the hierarchy. Keeping the pattern at reach 3
+      and shortening only the columns measured to carry nothing beyond reach 2 (`p`, `k`, `ω`) leaves the
+      coarse space and the smoother untouched and is worth **564 → 399 probes** — see *"per-column
+      probing reach"* under `sparse_jacobian.py` above. So the conclusion drawn from this arm, "there is
+      no cheap way to shrink the probe", was **too strong**: it followed from testing only the
+      all-columns-and-the-pattern variant. Refreshing less often is not the only open axis on refresh
+      cost.
       **A trap: the cheap `refresh_shift_in_place` branch does NOT help within a step.** The shift is
       formed once per step at the reference state and held fixed across the inner loop, so what drifts
       inside a step is `J(p)`. The shift-only branch only helps *across* steps, where β moves.

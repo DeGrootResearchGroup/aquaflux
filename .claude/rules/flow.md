@@ -80,6 +80,18 @@ Engineering Principles.
   force** (`momentum.py::_face_pressure`) is likewise reconstructed to the integration point; the
   lagged-`a_P` momentum estimate uses `interpolate_to_face` too when `grad_velocity` is available
   (the preconditioner keeps the cheap leading-order blend, exact at convergence since `a_P` is lagged).
+  - **⚠️ `a_P` does NOT widen the coupled Jacobian's velocity stencil — measured, and the opposite is an
+    easy conclusion to reach from this code (2026-08-11).** The argument that looks right: the mass flux
+    carries `V/a_P` averaged across the face, so a cell's residual reads its *neighbour's* momentum
+    diagonal, and that diagonal is a sum over the neighbour's own faces of a lagged convective flux which
+    is itself gradient-reconstructed — a ring on the far side. It is wrong. Removing the velocity gradient
+    from `_lagged_mdot_estimate` leaves the velocity columns reaching graph distance **3**, unchanged; so
+    does first-order momentum advection, and so does a one-shot compact gradient. What actually spends the
+    ring is the **eddy viscosity's dependence on the strain rate** (`.claude/rules/turbulence.md`). Note
+    the one asymmetry here that *is* real and is worth keeping: `_lagged_mdot_estimate` is a function of
+    velocity alone — it carries no pressure, which is what breaks the `a_P` ↔ `mdot` circularity — so
+    pressure never enters `a_P`. That is true, and it is not what sets the reach.
+    Harness: `validation/bfs3d_openfoam/column_reach_probe.py`.
   **Boundary faces respect the BC type** (`boundary_owner_coeff`, from each patch's
   `momentum_diagonal_coefficient`): a zero-gradient outlet adds **no** viscous diagonal (its viscous
   flux `μ(u_owner−u_owner)/(d·n)` is zero), and a no-through-flow wall adds **no** convective diagonal

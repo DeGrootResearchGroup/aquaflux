@@ -147,6 +147,28 @@ INNER_STEPS, INNER_TOL = 5, 1e-3
 # coarse=None stalls at every low shift. The beta floor is PRECONDITIONER-ONLY: the V-cycle is built at
 # max(beta, floor) while the march solves at its own beta, so the root and the adjoint are unchanged.
 FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT, PC_BETA_FLOOR = 0, 4, 2000, 0.05
+# How far each COLUMN of the Jacobian is probed. The coloured probe costs one directional derivative per
+# (colour, column field) and the colour count climbs steeply with the reach -- 11 colours at reach one,
+# 39 at two, 94 at three on this mesh -- so probing a column further than it reaches is pure cost. The
+# assembled sparsity stays at reach three either way, so every consumer sees the same matrix.
+#
+# Measured on this case with `probe_reach_audit.py`, at a cold iterate, a developed step and the march's
+# hardest solve alike: the share of each column's norm lying beyond reach two is
+#
+#     u 1.4e-04   v 1.1e-05   w 3.4e-05   |   p 9.8e-16   k 1.5e-17   omega 1.2e-17
+#
+# so p, k and omega close inside reach two and the velocities do not. That is a consequence of the
+# schemes -- first-order upwind on k/omega with a non-orthogonal diffusion correction reaches two, while
+# the velocity columns carry the limited second-order upwind reconstruction out to three -- so it must be
+# re-measured for any case that changes them, NOT inherited. Shortening a column that does carry far
+# couplings corrupts its near entries rather than truncating them.
+#
+# 564 probes -> 399 (-29%); the two Jacobians agree to 5.7e-16 relative Frobenius, i.e. float64 rounding.
+COLUMN_REACH = (
+    None
+    if os.environ.get("BFS3D_COLUMN_REACH", "1") in ("", "0")
+    else (3, 3, 3, 2, 2, 2)  # [u, v, w, p, k, omega]
+)
 # Split the preconditioner's hierarchy in two -- the [u,v,w,p] saddle and the [k,omega] transported
 # scalars each get their own, with one triangle of the coupling between them retained exactly -- rather
 # than putting all six fields through one hierarchy with one smoother. ON, because it is measured 31%
@@ -740,7 +762,7 @@ def read_openfoam_reference():
     )
 
 
-def build_case(model=None):
+def build_case(model=None, momentum_advection=None, gradient=None):
     """Assemble the benchmark: mesh, momentum, turbulence and the coupled residual -- no solve.
 
     Split out from :func:`solve_aquaflux` so a solver study can re-solve at a saved state without
@@ -751,6 +773,15 @@ def build_case(model=None):
     ----------
     model : SSTModel, optional
         The SST constants to use. Defaults to :class:`~aquaflux.turbulence.SSTModel`.
+    gradient : GradientScheme, optional
+        The gradient reconstruction, for the same reason as ``momentum_advection``: its stencil is part
+        of what the coloured probe has to cover. ``None`` (default) is the benchmark's own corrected
+        Green-Gauss.
+    momentum_advection : AdvectionScheme, optional
+        The momentum face-value reconstruction, so a study can ask what the *scheme* costs -- its
+        stencil reach sets how far the coloured Jacobian probe has to see. ``None`` (default) is the
+        benchmark's own Venkatakrishnan-limited linear upwind; changing it changes the case, so a result
+        measured with it must say so.
 
     Returns
     -------
@@ -761,11 +792,15 @@ def build_case(model=None):
         model = SSTModel()
     mesh = read_openfoam(RUNS / "polyMesh")
     geom = mesh.geometry()
-    grad = CorrectedGreenGauss()
+    grad = CorrectedGreenGauss() if gradient is None else gradient
     # Second-order upwind momentum advection (Venkatakrishnan-limited linear upwind); first-order upwind
     # on the stiff k/omega scalars (a second-order stencil there lets the coupled Newton step drive omega
     # negative -- an M-matrix effect the limiter does not prevent).
-    momentum_upwind = LimitedUpwind(limiter=VenkatakrishnanLimiter())
+    momentum_upwind = (
+        LimitedUpwind(limiter=VenkatakrishnanLimiter())
+        if momentum_advection is None
+        else momentum_advection
+    )
     scalar_upwind = FirstOrderUpwind()
     momentum = MomentumContinuity.build(
         mesh,
@@ -898,6 +933,10 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             if TURBULENCE_INVERSE == "native"
             else []
         ),
+        (
+            "probe column reach",
+            "uniform 3" if COLUMN_REACH is None else "/".join(map(str, COLUMN_REACH)),
+        ),
         ("refresh on cycles", REFRESH_ON_CYCLES or "scheduled cadence"),
         # Beside the cost trigger, because the two together are what decides when the V-cycle is
         # rebuilt, and a run that re-matches on a β escalation is a different arm from one that does not.
@@ -958,6 +997,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         scheduled = not REFRESH_ON_CYCLES
         refresh = amg_beta_tracking_refresh(
             companion,
+            column_reach=COLUMN_REACH,
             beta_rel_change=0.25 if scheduled else REFRESH_ON_BETA,
             refresh_every=8 if scheduled else 10**9,
             materialize_drift=0.05 if scheduled else None,
@@ -970,6 +1010,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             seed_state,
             inner_steps=INNER_STEPS,
             inner_tol=INNER_TOL,
+            column_reach=COLUMN_REACH,
             smoother_fill_levels=FILL_LEVELS,
             smoother_sweeps=SWEEPS,
             coarse_eq_limit=COARSE_EQ_LIMIT,

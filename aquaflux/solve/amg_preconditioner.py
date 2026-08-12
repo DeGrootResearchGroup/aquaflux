@@ -32,6 +32,11 @@ dependency; there is no pure-SciPy algebraic-multigrid fallback.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .sparse_jacobian import ProbeGather
+
 import itertools
 from collections.abc import Callable
 
@@ -667,11 +672,10 @@ class MonolithicAmgPreconditioner:
     @staticmethod
     def _materialize_jacobian(
         matvec: Callable[[jnp.ndarray], jnp.ndarray],
-        colouring,
-        n_fields: int,
+        plan,
         batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         probe_batch_size: int | None = None,
-        structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+        structure: ProbeGather | None = None,
     ) -> sp.csr_matrix:
         """The coupled Jacobian **without** the shift, from the graph-coloured jvp probe (one jvp per
         (colour, field) -- the expensive part of a refresh; e.g. ~670 probes on a 23k-cell reach-3 bfs3d
@@ -683,8 +687,7 @@ class MonolithicAmgPreconditioner:
 
         return materialize_block_jacobian(
             matvec,
-            colouring,
-            n_fields,
+            plan,
             batched_matvec=batched_matvec,
             probe_batch_size=probe_batch_size,
             structure=structure,
@@ -697,7 +700,7 @@ class MonolithicAmgPreconditioner:
 
     @staticmethod
     def _assembler_for(
-        structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None, n_fields: int
+        structure: ProbeGather | None, n_fields: int
     ) -> ShiftedCellMajorOperator | None:
         """The fixed-pattern assembler for this materialize, or ``None`` for the generic sparse path.
 
@@ -709,7 +712,7 @@ class MonolithicAmgPreconditioner:
         """
         if structure is None:
             return None
-        indptr, indices, _ = structure
+        indptr, indices = structure.indptr, structure.indices
         return ShiftedCellMajorOperator(indptr, indices, n_fields)
 
     def _cell_major(
@@ -729,8 +732,7 @@ class MonolithicAmgPreconditioner:
     def build(
         cls,
         matvec: Callable[[jnp.ndarray], jnp.ndarray],
-        colouring,
-        n_fields: int,
+        plan,
         shift_diagonal: np.ndarray,
         *,
         native: bool = False,
@@ -740,7 +742,7 @@ class MonolithicAmgPreconditioner:
         coarse_eq_limit: int | None = None,
         batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         probe_batch_size: int | None = None,
-        structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+        structure: ProbeGather | None = None,
         extra_options: dict | None = None,
     ) -> MonolithicAmgPreconditioner:
         """Materialize the shifted coupled Jacobian and build a V-cycle preconditioner for it, off the jit path.
@@ -749,11 +751,9 @@ class MonolithicAmgPreconditioner:
         ----------
         matvec : callable
             The frozen Jacobian-vector product ``v -> J v`` at the state it is frozen at.
-        colouring : BlockColouring
-            The stencil colouring for the materialization
-            (:func:`~aquaflux.solve.sparse_jacobian.block_stencil_colouring`).
-        n_fields : int
-            Degrees of freedom per cell.
+        plan : ColumnProbePlan
+            The probing plan for the materialization
+            (:class:`~aquaflux.solve.sparse_jacobian.ColumnProbePlan`).
         shift_diagonal : np.ndarray
             The pseudo-transient shift added to the Jacobian's diagonal, shape ``(n_fields * n,)`` — the
             same block-diagonal shift the step solves against (velocity/scalar shifts, pressure zero).
@@ -783,16 +783,16 @@ class MonolithicAmgPreconditioner:
             The built preconditioner.
         """
         jacobian = cls._materialize_jacobian(
-            matvec, colouring, n_fields, batched_matvec, probe_batch_size, structure
+            matvec, plan, batched_matvec, probe_batch_size, structure
         )
-        assembler = cls._assembler_for(structure, n_fields)
+        assembler = cls._assembler_for(structure, plan.n_fields)
         # `build_amg_vcycle` equilibrates and reorders internally, so the build takes the generic path
         # regardless; the assembler is constructed here so every later refresh has it.
         matrix = cls._shifted(jacobian, shift_diagonal)
         return cls(
             build_amg_vcycle(
                 matrix,
-                n_fields,
+                plan.n_fields,
                 smoother_fill_levels=smoother_fill_levels,
                 smoother_sweeps=smoother_sweeps,
                 coarse_eq_limit=coarse_eq_limit,
@@ -801,22 +801,21 @@ class MonolithicAmgPreconditioner:
             ),
             residual_fn=residual_fn,
             jacobian_no_shift=jacobian,
-            n_fields=n_fields,
+            n_fields=plan.n_fields,
             assembler=assembler,
         )
 
     def refresh_in_place(
         self,
         matvec: Callable[[jnp.ndarray], jnp.ndarray],
-        colouring,
-        n_fields: int,
+        plan,
         shift_diagonal: np.ndarray,
         *,
         smoother_fill_levels: int = 1,
         smoother_sweeps: int = 2,
         batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         probe_batch_size: int | None = None,
-        structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+        structure: ProbeGather | None = None,
     ) -> tuple[tuple[str, float], ...]:
         """Rebuild the V-cycle at a developed state and swap it IN PLACE (no new object).
 
@@ -841,14 +840,14 @@ class MonolithicAmgPreconditioner:
         del smoother_fill_levels, smoother_sweeps  # the smoother config is fixed at build
         timer = PhaseTimer()
         self._jacobian_no_shift = self._materialize_jacobian(
-            matvec, colouring, n_fields, batched_matvec, probe_batch_size, structure
+            matvec, plan, batched_matvec, probe_batch_size, structure
         )
         timer.lap("probe")
-        self._n_fields = n_fields
+        self._n_fields = plan.n_fields
         if self._assembler is None:
-            self._assembler = self._assembler_for(structure, n_fields)
+            self._assembler = self._assembler_for(structure, plan.n_fields)
         cell_major, scale, perm = self._cell_major(
-            self._jacobian_no_shift, shift_diagonal, n_fields
+            self._jacobian_no_shift, shift_diagonal, plan.n_fields
         )
         timer.lap("assemble")
         self.factors.refactor(cell_major, scale, perm)

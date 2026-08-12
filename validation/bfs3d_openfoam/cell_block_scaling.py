@@ -45,7 +45,7 @@ from aquaflux.solve import (  # noqa: E402
     symmetrically_equilibrate,
 )
 from aquaflux.turbulence.coupled import (  # noqa: E402
-    _coupled_jacobian_colouring,
+    _coupled_jacobian_plan,
     _coupled_shift_policy,
     _frozen_shift_diagonal,
 )
@@ -165,10 +165,10 @@ def main() -> None:
     print(f"operator beta {march_beta}, preconditioner beta {pc_beta}\n{'=' * 96}", flush=True)
 
     state = load_state(name)
-    colouring = _coupled_jacobian_colouring(coupled, 3)
-    structure = block_stencil_gather_map(colouring, n_fields)
+    plan = _coupled_jacobian_plan(coupled, 3)
+    structure = block_stencil_gather_map(plan)
     base = _coupled_shift_policy(coupled, state, "twolevel")
-    jacobian = materialize(coupled, state, colouring, structure, n_fields)
+    jacobian = materialize(coupled, state, plan, structure, n_fields)
     shift = _frozen_shift_diagonal(base, pc_beta, state) if pc_beta > 0 else np.zeros(groups.n_dofs)
     block = sp.csr_matrix(
         MonolithicAmgPreconditioner._shifted(jacobian, shift)[groups.trailing, :][

@@ -134,8 +134,10 @@ from .relaxation import ConstantRelaxation, RelaxationSchedule, SwitchedEvolutio
 from .shift_basis import LocalCourantBasis, ShiftBasis, VelocityShiftParts
 from .sparse_jacobian import (
     BlockColouring,
+    ColumnProbePlan,
     block_stencil_colouring,
     block_stencil_gather_map,
+    column_probe_plan,
     jacobian_relative_error,
     materialize_block_jacobian,
 )
@@ -155,6 +157,7 @@ __all__ = [
     "BlockTriangularFieldSplit",
     "CflResidualDualTimeControl",
     "CoefficientDriftTrigger",
+    "ColumnProbePlan",
     "ConstantRelaxation",
     "CycleGrowthTrigger",
     "DampedNewtonStep",
@@ -206,6 +209,7 @@ __all__ = [
     "build_block_triangular_field_split",
     "build_convection_hierarchy",
     "build_smoothed_hierarchy",
+    "column_probe_plan",
     "combine_metrics",
     "combine_observers",
     "convection_diffusion_operator",

@@ -151,7 +151,7 @@ def test_amg_beta_floor_builds_the_preconditioner_above_the_marchs_own_beta(
     monkeypatch.setattr(
         pc_type,
         "refresh_in_place",
-        lambda _self, _mv, _col, _nf, shift, **_kw: seen.__setitem__("shift", np.asarray(shift)),
+        lambda _self, _mv, _plan, shift, **_kw: seen.__setitem__("shift", np.asarray(shift)),
     )
 
     amg_beta_tracking_refresh(coupled, beta_floor=floor)(active, state)
@@ -185,7 +185,7 @@ def test_inner_refresh_rebuilds_at_the_iterate_it_is_handed(case, monkeypatch) -
     monkeypatch.setattr(
         type(active.shift_policy.preconditioner),
         "refresh_in_place",
-        lambda _self, _mv, _col, _nf, shift, **_kw: built_at.append(np.asarray(shift)),
+        lambda _self, _mv, _plan, shift, **_kw: built_at.append(np.asarray(shift)),
     )
     refresh = amg_beta_tracking_refresh(coupled)
     refresh(active, state)  # the march calls this before each step; it is what binds the hook

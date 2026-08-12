@@ -32,7 +32,7 @@ from __future__ import annotations
 import abc
 import dataclasses
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 import equinox as eqx
@@ -55,6 +55,7 @@ from aquaflux.flow.mean_velocity import (
 )
 from aquaflux.solve import (
     BlockScaledNorm,
+    ColumnProbePlan,
     DivergenceGuard,
     DualTimeControl,
     DualTimeStep,
@@ -80,6 +81,7 @@ from aquaflux.solve import (
     VelocityShiftParts,
     block_stencil_colouring,
     block_stencil_gather_map,
+    column_probe_plan,
     forward_march,
     positive_block_limit,
     relative_residual_gmres,
@@ -785,14 +787,26 @@ _COUPLED_ILUT_FORWARD_SOLVER = relative_residual_gmres(
 )
 
 
-# How many coloured tangents share one vmapped jvp pass when materializing the AMG Jacobian. Smaller uses
-# less peak memory (fewer simultaneous forward-AD tapes), larger amortizes dispatch over more probes; the
-# coloured probes run in ceil(n_probes / this) fused passes instead of an n_probes-call Python loop.
-# Measured on the 3D backward-facing step (~670 reach-3 probes): forward-AD does not vectorize across the
-# batch on CPU, so a large batch buys almost nothing in time (16 vs 4: ~33 s vs ~36 s) while costing it in
-# peak memory (16 holds ~2.2 GB of simultaneous tapes vs ~0.7 GB at 4). Four keeps essentially all of the
-# dispatch amortization at a third of the transient peak -- the right default for a memory-bounded solve.
-_PROBE_BATCH_SIZE = 4
+# How many coloured tangents share one vmapped jvp pass when materializing the AMG Jacobian. Larger
+# amortizes dispatch over more probes; the coloured probes run in ceil(n_probes / this) fused passes
+# instead of an n_probes-call Python loop.
+#
+# Measured on the 3D backward-facing step (399 probes, 47.2M nonzeros), wall / peak against the batch:
+#
+#     batch      1      2      4      8     16     32
+#     wall    11.7    8.4    6.7    5.9    5.8    6.5   s
+#     peak     380    383    388    399    419    460   MB
+#
+# Two things decide the eight. The curve has an interior optimum and **turns** -- 32 is slower than 16 --
+# so this is not "as large as memory allows"; and the memory it costs is ~2.5 MB per unit of batch, which
+# is nothing against the matrix being built, so the peak is not what picks the value. Eight is where the
+# processor time bottoms; sixteen is a hair faster in wall and slower in processor time, which on a shared
+# machine is the less trustworthy of the two.
+#
+# An earlier default of four came from a measurement -- "16 vs 4: ~2.2 GB against ~0.7 GB" -- taken when
+# the seed set and the response array dominated the peak, and NEITHER of those ever scaled with the batch.
+# Both are built a chunk at a time now, so that trade no longer exists.
+_PROBE_BATCH_SIZE = 8
 
 # Backtracking rungs for the shifted step. The full coupled Newton step from the hybrid initial
 # condition overshoots violently (the residual blows up many orders of magnitude), so the step length
@@ -1431,16 +1445,28 @@ class FrozenTransposeFactory:
         return self.preconditioner.matvec(transpose=True)
 
 
-def _coupled_jacobian_colouring(coupled: CoupledRANS, stencil_reach: int):
-    """The block-stencil colouring for materializing the coupled Jacobian (a mesh-fixed quantity).
+def _coupled_jacobian_plan(
+    coupled: CoupledRANS, stencil_reach: int, column_reach: Sequence[int] | None = None
+):
+    """The probing plan for materializing the coupled Jacobian (a mesh-fixed quantity).
 
-    Shared by :func:`coupled_ilut_continuation` (the initial factorization) and
-    :func:`coupled_ilut_refreshing_continuation` (each in-place refactor), so both probe the Jacobian
-    with the same colouring.
+    Shared by every monolithic-factorization builder (the initial factorization) and by each in-place
+    refresh, so all of them probe the Jacobian the same way.
+
+    ``column_reach`` gives each column field its own reach while keeping the assembly pattern at
+    ``stencil_reach``, so the materialized sparsity is unchanged. It is a property of the *case*: which
+    columns close inside a shorter reach follows from the schemes the residual was assembled with, so
+    it must be measured for a given case rather than assumed. ``None`` (default) probes every column at
+    ``stencil_reach``.
     """
     n_cells = coupled.momentum.mesh.n_cells
     owner, nb, _ = coupled.momentum.mesh.face_cells.interior_edges()
-    return block_stencil_colouring(np.asarray(owner), np.asarray(nb), n_cells, stencil_reach)
+    owner, nb = np.asarray(owner), np.asarray(nb)
+    if column_reach is None:
+        return ColumnProbePlan.uniform(
+            block_stencil_colouring(owner, nb, n_cells, stencil_reach), coupled.layout.dim + 3
+        )
+    return column_probe_plan(owner, nb, n_cells, column_reach, stencil_reach)
 
 
 def _frozen_shift_diagonal(base: CoupledShiftPolicy, beta: float, state: jnp.ndarray) -> np.ndarray:
@@ -1537,6 +1563,7 @@ def coupled_ilut_continuation(
     *,
     ilut_beta: float = 2.0,
     stencil_reach: int = 3,
+    column_reach: Sequence[int] | None = None,
     fill_factor: float = 30.0,
     drop_tol: float = 1e-6,
     beta0: float = 2.0,
@@ -1581,6 +1608,17 @@ def coupled_ilut_continuation(
     stencil_reach : int
         The cell-graph distance the Jacobian's sparsity is probed to (the coupled RANS Jacobian reaches
         distance ``3`` -- gradient reconstruction, Rhie--Chow, and the k/omega cross-coupling).
+    column_reach : sequence of int, optional
+        A stencil reach per **column field**, in the flat layout's order ``[u, ..., p, k, omega]``, while
+        the assembled sparsity stays at ``stencil_reach``. The probe costs one directional derivative per
+        (colour, column field) and the colour count falls steeply with the reach, so a column whose
+        couplings all close inside a shorter reach can be probed far more cheaply and assembled
+        unchanged. It is **exact only for a column that genuinely carries nothing further out** -- a
+        column with far couplings is corrupted rather than truncated, because the short colouring folds
+        them onto near entries. Which columns qualify follows from the schemes the residual was
+        assembled with, so measure it for the case rather than assuming it
+        (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
+        probes every column at ``stencil_reach``.
     fill_factor, drop_tol : float
         The incomplete-factorization fill controls (see
         :func:`~aquaflux.solve.ilut_preconditioner.factorize_ilut`). ``drop_tol = 1e-6`` keeps the small
@@ -1620,8 +1658,7 @@ def coupled_ilut_continuation(
     # block. The flow block is still assembled as the a_P source -- a lightweight shift-diagonal-only
     # policy is a follow-up optimization.
     base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
-    n_fields = coupled.layout.dim + 3
-    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
+    plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
     frozen = jax.lax.stop_gradient(reference_state)
 
     def matvec(v):
@@ -1629,8 +1666,7 @@ def coupled_ilut_continuation(
 
     preconditioner = MonolithicIlutPreconditioner.build(
         matvec,
-        colouring,
-        n_fields,
+        plan,
         _frozen_shift_diagonal(base, ilut_beta, reference_state),
         fill_factor=fill_factor,
         drop_tol=drop_tol,
@@ -1697,6 +1733,7 @@ def coupled_ilut_refreshing_continuation(
     *,
     ilut_beta: float = 2.0,
     stencil_reach: int = 3,
+    column_reach: Sequence[int] | None = None,
     fill_factor: float = 30.0,
     drop_tol: float = 1e-6,
     **continuation_kwargs: object,
@@ -1740,8 +1777,7 @@ def coupled_ilut_refreshing_continuation(
     callable
         ``state -> ForwardStep`` as described.
     """
-    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
-    n_fields = coupled.layout.dim + 3
+    plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
 
     # `frozen` as a traced argument (not closed over) so this jvp-matvec compiles once and every refresh
     # reuses it, rather than a fresh lambda recompiling each time.
@@ -1757,6 +1793,7 @@ def coupled_ilut_refreshing_continuation(
                 state,
                 ilut_beta=ilut_beta,
                 stencil_reach=stencil_reach,
+                column_reach=column_reach,
                 fill_factor=fill_factor,
                 drop_tol=drop_tol,
                 **continuation_kwargs,
@@ -1767,8 +1804,7 @@ def coupled_ilut_refreshing_continuation(
         frozen = jax.lax.stop_gradient(state)
         policy.preconditioner.refresh_in_place(
             lambda v: matvec_at(frozen, v),
-            colouring,
-            n_fields,
+            plan,
             _frozen_shift_diagonal(policy.base, ilut_beta, state),
             fill_factor=fill_factor,
             drop_tol=drop_tol,
@@ -1784,6 +1820,7 @@ def coupled_lu_continuation(
     *,
     lu_beta: float = 2.0,
     stencil_reach: int = 3,
+    column_reach: Sequence[int] | None = None,
     backend: str = "auto",
     beta0: float = 2.0,
     exponent: float = 1.0,
@@ -1830,6 +1867,17 @@ def coupled_lu_continuation(
         factorization tolerates the mismatch.
     stencil_reach : int
         The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+    column_reach : sequence of int, optional
+        A stencil reach per **column field**, in the flat layout's order ``[u, ..., p, k, omega]``, while
+        the assembled sparsity stays at ``stencil_reach``. The probe costs one directional derivative per
+        (colour, column field) and the colour count falls steeply with the reach, so a column whose
+        couplings all close inside a shorter reach can be probed far more cheaply and assembled
+        unchanged. It is **exact only for a column that genuinely carries nothing further out** -- a
+        column with far couplings is corrupted rather than truncated, because the short colouring folds
+        them onto near entries. Which columns qualify follows from the schemes the residual was
+        assembled with, so measure it for the case rather than assuming it
+        (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
+        probes every column at ``stencil_reach``.
     backend : {'auto', 'umfpack', 'scipy'}
         The complete-LU backend (see :func:`~aquaflux.solve.lu_preconditioner.factorize_lu`). ``'auto'``
         uses UMFPACK (the fast path, via the optional ``petsc`` dependency) when available, else SciPy
@@ -1845,8 +1893,7 @@ def coupled_lu_continuation(
         The step to hand ``solve_coupled`` as ``continuation``.
     """
     base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
-    n_fields = coupled.layout.dim + 3
-    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
+    plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
     frozen = jax.lax.stop_gradient(reference_state)
 
     def matvec(v):
@@ -1854,8 +1901,7 @@ def coupled_lu_continuation(
 
     preconditioner = MonolithicLuPreconditioner.build(
         matvec,
-        colouring,
-        n_fields,
+        plan,
         _frozen_shift_diagonal(base, lu_beta, reference_state),
         backend=backend,
     )
@@ -1886,6 +1932,7 @@ def coupled_amg_continuation(
     *,
     amg_beta: float = 2.0,
     stencil_reach: int = 3,
+    column_reach: Sequence[int] | None = None,
     smoother_fill_levels: int = 1,
     smoother_sweeps: int = 2,
     coarse_eq_limit: int | None = None,
@@ -1947,6 +1994,17 @@ def coupled_amg_continuation(
         V-cycle tolerates the mismatch.
     stencil_reach : int
         The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+    column_reach : sequence of int, optional
+        A stencil reach per **column field**, in the flat layout's order ``[u, ..., p, k, omega]``, while
+        the assembled sparsity stays at ``stencil_reach``. The probe costs one directional derivative per
+        (colour, column field) and the colour count falls steeply with the reach, so a column whose
+        couplings all close inside a shorter reach can be probed far more cheaply and assembled
+        unchanged. It is **exact only for a column that genuinely carries nothing further out** -- a
+        column with far couplings is corrupted rather than truncated, because the short colouring folds
+        them onto near entries. Which columns qualify follows from the schemes the residual was
+        assembled with, so measure it for the case rather than assuming it
+        (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
+        probes every column at ``stencil_reach``.
     smoother_fill_levels : int
         Incomplete-LU fill levels of the stationary level smoother (``1`` = ILU(1), ``0`` = ILU(0)). The
         smoother must stay **stationary** -- a Krylov-accelerated one makes the V-cycle nonlinear, so it
@@ -2056,7 +2114,6 @@ def coupled_amg_continuation(
             "nothing."
         )
     base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
-    n_fields = coupled.layout.dim + 3
     # The forward-solve stop. A plain global-2-norm relative stop is ~100% the largest-magnitude field
     # (``omega``, whose residual is orders above the flow), so a "1%" solve resolves ``omega`` and halts
     # while the flow-dominated Newton step is still coarse -- leaving the flow correction blind (measured
@@ -2078,10 +2135,10 @@ def coupled_amg_continuation(
             stagnation_iters=40,
             max_restarts=60,
         )
-    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
+    plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
     # The fixed CSR structure + gather map (pattern is mesh-fixed), so each materialize de-compresses by one
     # gather rather than a scatter loop + re-sort. Reused by the β-tracking refresh (built once there too).
-    structure = block_stencil_gather_map(colouring, coupled.layout.dim + 3)
+    structure = block_stencil_gather_map(plan)
     frozen = jax.lax.stop_gradient(reference_state)
 
     def matvec(v):
@@ -2117,8 +2174,7 @@ def coupled_amg_continuation(
     if field_split:
         preconditioner = FieldSplitAmgPreconditioner.build(
             matvec,
-            colouring,
-            n_fields,
+            plan,
             shift,
             FieldGroups(
                 n_cells=coupled.layout.n_cells,
@@ -2134,8 +2190,7 @@ def coupled_amg_continuation(
     else:
         preconditioner = MonolithicAmgPreconditioner.build(
             matvec,
-            colouring,
-            n_fields,
+            plan,
             shift,
             native=native_forward_solve,
             residual_fn=coupled.residual if native_forward_solve else None,
@@ -2175,6 +2230,7 @@ def coupled_lu_refreshing_continuation(
     *,
     lu_beta: float = 2.0,
     stencil_reach: int = 3,
+    column_reach: Sequence[int] | None = None,
     backend: str = "auto",
     **continuation_kwargs: object,
 ) -> Callable[[jnp.ndarray], ForwardStep]:
@@ -2206,8 +2262,7 @@ def coupled_lu_refreshing_continuation(
     callable
         ``state -> ForwardStep`` as described.
     """
-    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
-    n_fields = coupled.layout.dim + 3
+    plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
 
     def matvec_at(frozen, v):
         return _jacobian_matvec(coupled, frozen, v)
@@ -2221,6 +2276,7 @@ def coupled_lu_refreshing_continuation(
                 state,
                 lu_beta=lu_beta,
                 stencil_reach=stencil_reach,
+                column_reach=column_reach,
                 backend=backend,
                 **continuation_kwargs,
             )
@@ -2230,8 +2286,7 @@ def coupled_lu_refreshing_continuation(
         frozen = jax.lax.stop_gradient(state)
         policy.preconditioner.refresh_in_place(
             lambda v: matvec_at(frozen, v),
-            colouring,
-            n_fields,
+            plan,
             _frozen_shift_diagonal(policy.base, lu_beta, state),
         )
         return step
@@ -2391,6 +2446,7 @@ def _refresh_branch(*, stale_state: bool, moved_beta: bool, split: bool) -> str:
 def _beta_tracking_refresh(
     coupled: CoupledRANS,
     stencil_reach: int,
+    column_reach: Sequence[int] | None = None,
     *,
     gate: Callable[[float], bool] | None = None,
     refresh_kwargs: dict[str, object] | None = None,
@@ -2414,6 +2470,17 @@ def _beta_tracking_refresh(
         The coupled residual assembler (supplies the Jacobian-vector product and the shift diagonal).
     stencil_reach : int
         The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+    column_reach : sequence of int, optional
+        A stencil reach per **column field**, in the flat layout's order ``[u, ..., p, k, omega]``, while
+        the assembled sparsity stays at ``stencil_reach``. The probe costs one directional derivative per
+        (colour, column field) and the colour count falls steeply with the reach, so a column whose
+        couplings all close inside a shorter reach can be probed far more cheaply and assembled
+        unchanged. It is **exact only for a column that genuinely carries nothing further out** -- a
+        column with far couplings is corrupted rather than truncated, because the short colouring folds
+        them onto near entries. Which columns qualify follows from the schemes the residual was
+        assembled with, so measure it for the case rather than assuming it
+        (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
+        probes every column at ``stencil_reach``.
     gate : callable, optional
         ``should_refresh(beta: float) -> bool``. ``None`` means always refresh.
     refresh_kwargs : dict, optional
@@ -2426,11 +2493,10 @@ def _beta_tracking_refresh(
         ``precondition_step(active_step, state) -> None``.
     """
     refresh_kwargs = {} if refresh_kwargs is None else refresh_kwargs
-    colouring = _coupled_jacobian_colouring(coupled, stencil_reach)
-    n_fields = coupled.layout.dim + 3
+    plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
     # Fixed CSR structure + gather map for the AMG materialize (mesh-fixed pattern): each materialize
     # de-compresses by one gather rather than a scatter loop + re-sort. Built once; used only on the AMG path.
-    structure = block_stencil_gather_map(colouring, n_fields)
+    structure = block_stencil_gather_map(plan)
 
     # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
     # reuses it, rather than a fresh lambda recompiling each step.
@@ -2537,8 +2603,7 @@ def _beta_tracking_refresh(
         return (
             pc.refresh_in_place(
                 lambda v: matvec_at(frozen, v),
-                colouring,
-                n_fields,
+                plan,
                 shift,
                 **extra,
                 **refresh_kwargs,
@@ -2586,7 +2651,10 @@ def _beta_tracking_refresh(
 
 
 def lu_beta_tracking_refresh(
-    coupled: CoupledRANS, *, stencil_reach: int = 3
+    coupled: CoupledRANS,
+    *,
+    stencil_reach: int = 3,
+    column_reach: Sequence[int] | None = None,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """A ``precondition_step`` for :func:`solve_coupled` that re-factors the complete LU at the current β.
 
@@ -2615,19 +2683,31 @@ def lu_beta_tracking_refresh(
         The coupled residual assembler (supplies the Jacobian-vector product and the shift diagonal).
     stencil_reach : int
         The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+    column_reach : sequence of int, optional
+        A stencil reach per **column field**, in the flat layout's order ``[u, ..., p, k, omega]``, while
+        the assembled sparsity stays at ``stencil_reach``. The probe costs one directional derivative per
+        (colour, column field) and the colour count falls steeply with the reach, so a column whose
+        couplings all close inside a shorter reach can be probed far more cheaply and assembled
+        unchanged. It is **exact only for a column that genuinely carries nothing further out** -- a
+        column with far couplings is corrupted rather than truncated, because the short colouring folds
+        them onto near entries. Which columns qualify follows from the schemes the residual was
+        assembled with, so measure it for the case rather than assuming it
+        (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
+        probes every column at ``stencil_reach``.
 
     Returns
     -------
     callable
         ``precondition_step(active_step, state) -> None``.
     """
-    return _beta_tracking_refresh(coupled, stencil_reach)
+    return _beta_tracking_refresh(coupled, stencil_reach, column_reach)
 
 
 def ilut_beta_tracking_refresh(
     coupled: CoupledRANS,
     *,
     stencil_reach: int = 3,
+    column_reach: Sequence[int] | None = None,
     fill_factor: float = 30.0,
     drop_tol: float = 1e-6,
     refresh_every: int = 5,
@@ -2664,6 +2744,17 @@ def ilut_beta_tracking_refresh(
         The coupled residual assembler (supplies the Jacobian-vector product and the shift diagonal).
     stencil_reach : int
         The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+    column_reach : sequence of int, optional
+        A stencil reach per **column field**, in the flat layout's order ``[u, ..., p, k, omega]``, while
+        the assembled sparsity stays at ``stencil_reach``. The probe costs one directional derivative per
+        (colour, column field) and the colour count falls steeply with the reach, so a column whose
+        couplings all close inside a shorter reach can be probed far more cheaply and assembled
+        unchanged. It is **exact only for a column that genuinely carries nothing further out** -- a
+        column with far couplings is corrupted rather than truncated, because the short colouring folds
+        them onto near entries. Which columns qualify follows from the schemes the residual was
+        assembled with, so measure it for the case rather than assuming it
+        (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
+        probes every column at ``stencil_reach``.
     fill_factor, drop_tol : float
         The ILUT factorization controls, used for every in-place refresh (as in
         :func:`coupled_ilut_continuation`).
@@ -2681,6 +2772,7 @@ def ilut_beta_tracking_refresh(
     return _beta_tracking_refresh(
         coupled,
         stencil_reach,
+        column_reach,
         gate=_staleness_beta_gate(refresh_every=refresh_every, beta_rel_change=beta_rel_change),
         refresh_kwargs={"fill_factor": fill_factor, "drop_tol": drop_tol},
     )
@@ -2690,6 +2782,7 @@ def amg_beta_tracking_refresh(
     coupled: CoupledRANS,
     *,
     stencil_reach: int = 3,
+    column_reach: Sequence[int] | None = None,
     materialize_every: int | None = None,
     materialize_drift: float | None = None,
     beta_rel_change: float | None = None,
@@ -2732,6 +2825,17 @@ def amg_beta_tracking_refresh(
         The coupled residual assembler (supplies the Jacobian-vector product and the shift diagonal).
     stencil_reach : int
         The cell-graph distance the Jacobian's sparsity is probed to (coupled RANS reaches distance ``3``).
+    column_reach : sequence of int, optional
+        A stencil reach per **column field**, in the flat layout's order ``[u, ..., p, k, omega]``, while
+        the assembled sparsity stays at ``stencil_reach``. The probe costs one directional derivative per
+        (colour, column field) and the colour count falls steeply with the reach, so a column whose
+        couplings all close inside a shorter reach can be probed far more cheaply and assembled
+        unchanged. It is **exact only for a column that genuinely carries nothing further out** -- a
+        column with far couplings is corrupted rather than truncated, because the short colouring folds
+        them onto near entries. Which columns qualify follows from the schemes the residual was
+        assembled with, so measure it for the case rather than assuming it
+        (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
+        probes every column at ``stencil_reach``.
     materialize_every : int or None
         Enables the **β-diagonal split**. ``None`` (default) re-materializes the Jacobian on every refresh
         (the original behaviour). A value ``K > 1`` re-materializes only every ``K`` steps and, in between,
@@ -2794,6 +2898,7 @@ def amg_beta_tracking_refresh(
     return _beta_tracking_refresh(
         coupled,
         stencil_reach,
+        column_reach,
         gate=gate,
         materialize_every=materialize_every,
         materialize_drift=materialize_drift,

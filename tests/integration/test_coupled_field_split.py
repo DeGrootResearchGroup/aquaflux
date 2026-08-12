@@ -36,7 +36,7 @@ from aquaflux.solve import (
 )
 from aquaflux.turbulence import CoupledRANS, hybrid_initialize
 from aquaflux.turbulence.coupled import (
-    _coupled_jacobian_colouring,
+    _coupled_jacobian_plan,
     _jacobian_matvec,
 )
 
@@ -53,8 +53,7 @@ def case():
     n_fields = coupled.layout.dim + 3
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
         lambda v: _jacobian_matvec(coupled, state, v),
-        _coupled_jacobian_colouring(coupled, 3),
-        n_fields,
+        _coupled_jacobian_plan(coupled, 3),
     )
     groups = FieldGroups(
         n_cells=coupled.layout.n_cells,
@@ -206,23 +205,21 @@ def test_the_split_refreshes_in_place_onto_the_same_object(case):
     """
     from aquaflux.solve import FieldSplitAmgPreconditioner
 
-    groups, n_fields = case["groups"], case["n_fields"]
+    groups = case["groups"]
     coupled, state = case["coupled"], case["state"]
-    colouring = _coupled_jacobian_colouring(coupled, 3)
+    plan = _coupled_jacobian_plan(coupled, 3)
 
     def matvec(v):
         return _jacobian_matvec(coupled, state, v)
 
     shift = np.full(groups.n_dofs, 0.5)
-    pc = FieldSplitAmgPreconditioner.build(
-        matvec, colouring, n_fields, shift, groups, coarse_eq_limit=200
-    )
+    pc = FieldSplitAmgPreconditioner.build(matvec, plan, shift, groups, coarse_eq_limit=200)
     split_before = pc.factors
     rng = np.random.default_rng(4)
     b = rng.standard_normal(groups.n_dofs)
     before = pc.factors.apply(b).copy()
 
-    phases = pc.refresh_in_place(matvec, colouring, n_fields, shift * 4.0)
+    phases = pc.refresh_in_place(matvec, plan, shift * 4.0)
 
     assert pc.factors is split_before, "the refresh replaced the object instead of mutating it"
     assert [name for name, _ in phases] == ["probe", "assemble", "refactor"]
@@ -236,15 +233,15 @@ def test_the_split_shift_refresh_reuses_the_cached_jacobian(case):
     """The cheap branch: re-fit at a new shift without re-running the coloured probe."""
     from aquaflux.solve import FieldSplitAmgPreconditioner
 
-    groups, n_fields = case["groups"], case["n_fields"]
+    groups = case["groups"]
     coupled, state = case["coupled"], case["state"]
-    colouring = _coupled_jacobian_colouring(coupled, 3)
+    plan = _coupled_jacobian_plan(coupled, 3)
 
     def matvec(v):
         return _jacobian_matvec(coupled, state, v)
 
     pc = FieldSplitAmgPreconditioner.build(
-        matvec, colouring, n_fields, np.full(groups.n_dofs, 0.5), groups, coarse_eq_limit=200
+        matvec, plan, np.full(groups.n_dofs, 0.5), groups, coarse_eq_limit=200
     )
     phases = pc.refresh_shift_in_place(np.full(groups.n_dofs, 2.0))
     # No probe phase at all -- that absence IS the saving this branch exists for.

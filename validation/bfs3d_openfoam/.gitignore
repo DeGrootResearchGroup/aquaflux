@@ -11,7 +11,9 @@ of_case/postProcessing/
 of_case/processor*/
 __pycache__/
 # Rolling per-step state checkpoints written by compare.py; regenerable, and large.
-checkpoints/
+# No trailing slash: like `runs` above, this is often a symlink to a shared checkpoint
+# directory, and git treats a symlink as a file, so a `checkpoints/` rule would not match it.
+checkpoints
 *.npz
 of_case/constant/polyMesh/
 # The transient reference: mesh/constant/BCs are copied from of_case at run time (one source of
