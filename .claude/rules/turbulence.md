@@ -1053,9 +1053,9 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       its far couplings onto its near entries, at 53.4 % of the entries of every shortened column on
       `bfs3d`. And the `(3,3,3,2,2,2)` default **diverged the march at step 1** (issue #191) — though not
       through the aliasing, whose assembled error is at the float64 floor there; the cause was sparse
-      arithmetic pruning the explicit zeros out of the smoother's pattern, since fixed. The shipped value
-      is `(3,3,3,3,2,2)`, with `p` back at reach 3 and only `k`/`ω` shortened. Keep the two reaches apart
-      when reasoning; both are in `.claude/rules/solve.md`.
+      arithmetic pruning the explicit zeros out of the smoother's pattern. With that fixed the shipped
+      value is `(3,3,3,2,2,2)` — `p` shortened again, and converging to the same root in every reported
+      digit. Keep the two reaches apart when reasoning; both are in `.claude/rules/solve.md`.
       **⚠️ THE DRIFT GATE MUST NOT BE NESTED INSIDE THE β GATE — it was, and a PC-only `beta_floor` then
       made it unreachable.** The β gate sees `max(β, beta_floor)`, so below the floor its input is pinned
       and it answers "no change" forever; asking the drift gate only inside it therefore froze the
