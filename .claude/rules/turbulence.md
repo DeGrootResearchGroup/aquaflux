@@ -1051,6 +1051,8 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       **What IS available is `column_reach`**, which keeps the reach-3 pattern — so the hierarchy is
       untouched — and shortens only the columns measured to carry nothing beyond reach 2 (`p`, `k`, `ω` on
       `bfs3d`): 564 probes → 399, exact to float64 rounding. Both in `.claude/rules/solve.md`.
+      ⚠️ That `(3,3,3,2,2,2)` split **diverges the case on its first step** — the shipped value is
+      `(3,3,3,3,2,2)`, with `p` back at reach 3 and only `k`/`ω` shortened (issue #191).
       **⚠️ THE DRIFT GATE MUST NOT BE NESTED INSIDE THE β GATE — it was, and a PC-only `beta_floor` then
       made it unreachable.** The β gate sees `max(β, beta_floor)`, so below the floor its input is pinned
       and it answers "no change" forever; asking the drift gate only inside it therefore froze the
