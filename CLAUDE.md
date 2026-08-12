@@ -42,6 +42,36 @@ Checklist still governs).
 
 ---
 
+## Task lifecycle — the operational sequence, in order
+
+The rules below are grouped by *topic*, which is the wrong order for doing a task. This is the right
+order. Each line links to the section that explains why; the point here is that the sequence is
+findable in one place rather than reconstructed from three sections hundreds of lines apart.
+
+**Before the first branch or the first test run**
+1. `git fetch origin`, and check `git log --oneline HEAD..origin/main` is empty — branching from a
+   stale base is the failure this prevents (*Start from an up-to-date main*).
+
+**While working**
+2. Run long solves with `validation/run_case.sh <script.py>`; run tests with `tools/fastgate.sh`
+   (*Use the blessed command*). One case at a time — these are memory-bound.
+3. Record what every measurement was taken under: defaults in force, state, operating point
+   (*Record what a measurement was taken under*). A number without its configuration cannot be
+   falsified later, which is worse than being wrong.
+4. If you deviate from an agreed approach, say so **at the point of deviation**, and never report a
+   measurement taken under a deviation without naming it (*Principle 3.5*).
+
+**Before every commit**
+5. **Stale-Record Check** — ask what your change makes FALSE, not just what it leaves incomplete. Run
+   the grep in that section; it is the most expensive recurring defect here.
+6. **Post-Change Checklist** — principles review, `ruff check` + `ruff format`, the comment-hygiene
+   greps, tests (including the `slow`/`validation` tiers if your change could reach them), and the
+   documentation sync.
+
+**Never without being asked**: commit or push, change a shipped default, or remove a guard.
+
+---
+
 ## Engineering Principles
 
 > **Read this section as binding, not aspirational.** These three principles exist
@@ -372,10 +402,17 @@ the effect is process-global, so it is tested in a subprocess.
   marked `@pytest.mark.validation`, run separately.
 
 ```bash
-pytest -m "not validation and not slow"   # fast gate
-pytest -m validation                       # analytical/published-solution suite
-pytest                                     # everything
+tools/fastgate.sh              # the always-on gate: not slow, not validation
+tools/fastgate.sh validation   # analytical/published-solution suite
+tools/fastgate.sh slow         # the slow tier
+tools/fastgate.sh all          # everything
 ```
+
+`fastgate.sh` wraps `pytest -q -m <tier>`, writing the run to a file and reporting pytest's **own**
+exit status with the summary line found by pattern. Invoke `pytest` directly if you need something the
+wrapper does not pass through, but never through a pipe: this suite prints library shutdown chatter
+*after* the summary, so `| tail -n` shows the chatter, hides the result, and returns `tail`'s exit
+status — which is `0` however the run went.
 
 ### Canonical tests (must always pass once implemented)
 
@@ -530,42 +567,47 @@ So: `LabelledGroups`, `cell-centred`, `neighbour` (already used throughout).
 > The workflow mirrors aquakin: branch → PR → green lint gate → merge; never commit on
 > `main`; commit/push only when the user asks.
 
-### Long-running probes and solves stream progress (binding)
+### Use the blessed command; do not hand-roll it (binding)
 
-**Any run longer than ~30 s — a coupled march, a β/α sweep, a validation solve, a diagnostic probe —
-must stream per-step progress to a log you can read *while it runs*, never buffer to the end.** The
-repeated, expensive failure mode this guards against: a job pipes its output through `tail`/`head` or
-otherwise captures-at-EOF, so you fly blind for the entire run and only discover a bug, a stall, or a
-useless result *after* minutes (or hours) of runtime are already spent.
+Three operations have one correct invocation. Use it.
 
-Concretely:
-- Run the script with **`python3 -u`** (unbuffered) and **redirect to a log file** (`> run.log 2>&1`);
-  do **not** pipe it through `tail`/`head` (both wait for EOF and emit nothing until the process ends).
-- Have the script **print one line per outer step / sweep / β-value with `flush=True`** — the residual,
-  α, cycle count, whatever the run is deciding on — so the log grows continuously.
-- **Watch it live**: read the log as it grows (a background watcher that emits new lines as they land),
-  so a bad trajectory can be killed early instead of run to completion.
+| to do this | run this |
+|---|---|
+| run a validation case or any long solve | `validation/run_case.sh <script.py> [--wait]` |
+| see what a long run is doing | `validation/run_case.sh --status` · `tail -f <its log>` |
+| run a test tier | `tools/fastgate.sh [fast \| slow \| validation \| all]` |
 
-This is a first-class rule, not a nicety: knowing what a long run is doing is how you avoid burning
-runtime on a job that was never going to tell you anything.
+Each exists because the hand-rolled version fails *silently* — it produces a plausible answer that is
+wrong and says nothing about it. `pytest … | tail -n` reports the exit status of `tail`, which is `0`
+whatever pytest did. A case launched with a bare `python … &` dies with its parent, or outlives a
+cancellation you believe succeeded. `pgrep -f <script>` matches the watcher's own command line, so a
+waiter waits on itself forever. Every one of those has happened here and cost hours.
 
-### One heavy probe at a time (binding)
+`run_case.sh` puts in one place everything the surrounding rules used to ask you to remember:
+unbuffered output **redirected, never piped**, to a timestamped log; the machine held awake; a
+free-memory and load pre-flight; a refusal to start a second case; and a run-file recording pid,
+worktree, branch, commit and case settings. Its most valuable output is not the log — it is that
+**"is this run mine, and what is it testing?" has a written answer**, a question that has been got
+wrong from the process table alone.
 
-**A materialized 3D coupled Jacobian is ~2 GB per copy. Running several such probes concurrently
-exhausted physical memory and caused the operating system to suspend every application on the
-machine** — including the session driving the probes, which is a failure mode you cannot debug from
-inside. These jobs are memory-bound, not CPU-bound, so "there are spare cores" is not a reason to
-parallelize them.
+### What no runner can enforce (binding)
 
-Concretely, when a probe materializes a large operator:
-- **Run one at a time.** Do not fan out a sweep over β (or over preconditioner variants) into
-  concurrent processes; loop over them in one process instead.
-- **`del` the big arrays and force a collection between iterations**, so peak usage is one copy rather
-  than one per sweep point.
-- **Load a cached factor/matrix from disk rather than re-materializing it** when the state has not
-  changed — this is faster *and* keeps only one copy live.
-- **Check free memory before launching**, and prefer a slower sequential plan to a faster one that might
-  not fit.
+- **Print one line per outer step, `flush=True`.** The runner keeps the log unbuffered; only the script
+  can make it worth reading. A log that grows per step lets a bad trajectory be killed at minute three
+  instead of at the end.
+- **Actually watch it.** A run nobody reads until it finishes is a run that cost its full wall time to
+  tell you something it knew in the first minute.
+- **A run that spanned a machine sleep is void for cost.** It keeps converging correctly and nothing in
+  the log looks wrong, but the wall-clock column has silently absorbed the sleep. `run_case.sh` holds
+  the machine awake; if one happened anyway, keep its step and cycle counts and discard its timings.
+- **Sweep in one process, not N.** These jobs are memory-bound — a materialized 3D coupled Jacobian is
+  ~2 GB per copy — so spare cores are not a reason to parallelize. Loop over β in one process, `del` the
+  big arrays between iterations, and load a cached factor from disk rather than re-materializing it.
+  Concurrent probes have exhausted this machine and suspended every application on it, including the
+  session driving them, which cannot be debugged from inside.
+- **Before asserting what a background job is or did, read its own record** — the run-file, the task
+  output file, the log. A start time and a parent pid are circumstantial; a run whose gate logged
+  `HEALTHY -- launching march` is not.
 
 ### Measure the quantity you will be judged by (binding)
 
@@ -837,7 +879,8 @@ After **every code change**, before considering the task complete, review and ac
    break on merge. Before calling a change done, ask **whether it could affect a `slow` or
    `validation` test** — you are touching a shared solver / operator / scheme / helper those tests
    call, deleting or renaming a symbol, or changing convergence/behaviour — and if it could, **run
-   those tiers locally** (`pytest -m validation`, `pytest -m slow`) or apply `full-ci` to the PR.
+   those tiers locally** (`tools/fastgate.sh validation`, `tools/fastgate.sh slow`) or apply
+   `full-ci` to the PR.
    The trap is a migration reached only through a validation-marked test (e.g. a case whose sole
    test is `@pytest.mark.validation`): the fast gate exercises the *mechanism* elsewhere but never
    that call path, so grep for the changed symbol across `-m slow`/`-m validation` tests and run the
