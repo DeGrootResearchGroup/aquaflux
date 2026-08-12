@@ -1128,8 +1128,9 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       **MEASURED END TO END on the 3-rung `bfs3d` cold march** (field split, native trailing inverse,
       ILU(0)×4, plain aggregation, `coarse_eq_limit` 2000, `refresh_on_cycles` 3, PC β floor 0.05,
       `retry_on_alpha` 0.01, `zerogradient` k wall, positivity floor 1e-08, forward restart 15 —
-      **and `BFS3D_COLUMN_REACH=0`, a uniform reach 3**, since the case's own default at the time had
-      `p` at reach 2 and does not converge):
+      **and `BFS3D_COLUMN_REACH=0`, a uniform reach 3** -- the case's default carried `p` at reach 2
+      when this ran, which does not converge; the shipped default is now `(3,3,3,3,2,2)`, so a
+      re-run needs no override and probes 454 columns rather than this run's 564):
 
       | | this change | archived `march-20260811-132658` |
       |---|---|---|
@@ -1162,9 +1163,10 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       ⚠️⚠️ **AND BUILD THE CONTROL FROM YOUR OWN BASE, NOT FROM AN ARCHIVED LOG.** Validating this
       change against archived `bfs3d` marches showed step 1 stagnating at 47 Krylov cycles where the
       archived logs took 1, which read as a regression and cost hours of bisection. It was not: those
-      logs were produced on a *different branch*, and the base being worked on carried a stale
+      logs were produced on a *different branch*, and the base being worked on carried a
       `COLUMN_REACH` with **pressure at reach 2**, which corrupts that column and poisons the operator
-      the preconditioner is fitted to. Three arms — the change, the change with the old driver, and the
+      the preconditioner is fitted to (since fixed on the case; `.claude/rules/solve.md` carries it).
+      Three arms — the change, the change with the old driver, and the
       **untouched base** — came out identical to the digit, which is what identified the base rather
       than the change; restoring pressure to reach 3 then reproduced the archived trajectory exactly
       (`3.896e-02, 4.115e-03, 5.275e-04, 2.851e-05` at 1/1/1/0 cycles). A march log from another branch
@@ -1186,7 +1188,8 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       | 1× ν | 47 cycles, 1.477e+00 | 47 cycles, 1.477e+00 |
 
       *(one state throughout — the anchor's cold hybrid initialization — and the column reach the case
-      shipped at the time, `p` at 2. See the warning below before reading any number here as a cost.)*
+      shipped at the time, `p` at 2 -- since fixed. See the warning below before reading any number
+      here as a cost.)*
 
       **Identical to the digit**, which is stronger than "close" and is the tell for the mechanism: this
       bundle runs **plain aggregation** (`pc_gamg_agg_nsmooths = 0`) and sets **no** `pc_gamg_threshold`,
@@ -1197,8 +1200,8 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       ⚠️⚠️ **THE ABSOLUTE NUMBERS IN THAT TABLE ARE NOT INTERPRETABLE — only the arm-vs-arm equality is.**
       Two things spoil them, and the second was found afterwards: the anchor's cold field is not a state
       the target rung ever occupies (its real seed is a converged Re/10 root), **and** the run inherited
-      the case's then-current `COLUMN_REACH` with **pressure at reach 2**, which corrupts that column and
-      poisons the operator being solved (see `.claude/rules/solve.md`). That is why both arms fail so
+      the case's then-current `COLUMN_REACH` with **pressure at reach 2** (since fixed), which corrupts
+      that column and poisons the operator being solved (see `.claude/rules/solve.md`). That is why both arms fail so
       badly at the lower viscosities — at 1× ν the true residual ends *above* the initial guess.
       Neither spoiler touches the **comparison**, which holds the state, the operator and the reach fixed
       and varies only the hierarchy's provenance — and the arms agree *to the digit*, which is a stronger
