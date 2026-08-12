@@ -279,7 +279,9 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       cell's near coupling into a position the matrix has nothing in. Both halves are pinned
       (`test_a_short_probed_column_zeroes_its_out_of_reach_entries`,
       `test_per_column_plan_recovers_a_mixed_reach_matrix_exactly_and_more_cheaply`).
-      **✅ MEASURED, and CPU time tracks the probe count 1:1** (`state-00077`, `_PROBE_BATCH_SIZE = 4`,
+      **✅ MEASURED, and CPU time tracks the probe count 1:1** (`state-00077`, at the then-default
+      `_PROBE_BATCH_SIZE = 4` — since moved to 8, so the RATIO below stands and the absolute seconds
+      are ~10 % lower now,
       four interleaved repetitions after a discarded warm-up, minimum reported):
 
       | | uniform reach 3 | per-column | |
@@ -350,8 +352,9 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       single time; `probe_batch_size` chunks it for memory) runs the coloured probes as a few fused passes
       instead of a Python loop of separate calls. Measured 22.4→14.0 s (~1.6×) on `bfs3d` — modest because
       CPU forward-AD does not vectorize across the batch like a GPU (the win is dispatch amortization). For
-      the SAME reason the chunk was kept **small** (`_PROBE_BATCH_SIZE = 4`, not 16): a larger batch holds
-      more simultaneous forward-AD tapes.
+      the SAME reason the chunk was once kept **small** (`_PROBE_BATCH_SIZE` was 4, not 16): a larger
+      batch holds more simultaneous forward-AD tapes. **The default is now 8** — see the sweep below,
+      which is what retired that reasoning.
       **✅ RE-MEASURED, and the memory half of that trade NO LONGER EXISTS (2026-08-11,
       `validation/bfs3d_openfoam/probe_batch_sweep.py`; `bfs3d` `state-00077`, 399 probes at the
       per-column reach, 47.2M nnz, warm-up discarded per chunk shape, min of 3):**
@@ -371,8 +374,9 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       - **The curve has an interior optimum and TURNS: 32 is worse than 16** (6.47 s against 5.81 s), so
         "bigger is better up to memory" was never the shape. CPU time — the cleaner axis on a shared
         machine — bottoms at **8**.
-      - **The shipped 4 leaves ~11–13 % of the probe on the table** for ~11–31 MB. Changing the default
-        is a shipped-default decision and has not been taken here.
+      - **The default is now `_PROBE_BATCH_SIZE = 8`** (was 4), which is where processor time bottoms.
+        16 is a hair faster in wall and slower in CPU; on a shared machine CPU is the more trustworthy
+        axis, and the wall difference between 8 and 16 is 0.13 s on a 6 s probe.
       **⚠️ AUTO-SIZING THE BATCH TO AVAILABLE MEMORY IS NOT WORTH BUILDING, and this is why.** The
       motivation was that the right chunk depends on machine state and case size. At 2.5 MB per unit it
       does not: any sane fixed value is safe, and the constraint that motivated the mechanism was an

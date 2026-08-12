@@ -787,14 +787,26 @@ _COUPLED_ILUT_FORWARD_SOLVER = relative_residual_gmres(
 )
 
 
-# How many coloured tangents share one vmapped jvp pass when materializing the AMG Jacobian. Smaller uses
-# less peak memory (fewer simultaneous forward-AD tapes), larger amortizes dispatch over more probes; the
-# coloured probes run in ceil(n_probes / this) fused passes instead of an n_probes-call Python loop.
-# Measured on the 3D backward-facing step (~670 reach-3 probes): forward-AD does not vectorize across the
-# batch on CPU, so a large batch buys almost nothing in time (16 vs 4: ~33 s vs ~36 s) while costing it in
-# peak memory (16 holds ~2.2 GB of simultaneous tapes vs ~0.7 GB at 4). Four keeps essentially all of the
-# dispatch amortization at a third of the transient peak -- the right default for a memory-bounded solve.
-_PROBE_BATCH_SIZE = 4
+# How many coloured tangents share one vmapped jvp pass when materializing the AMG Jacobian. Larger
+# amortizes dispatch over more probes; the coloured probes run in ceil(n_probes / this) fused passes
+# instead of an n_probes-call Python loop.
+#
+# Measured on the 3D backward-facing step (399 probes, 47.2M nonzeros), wall / peak against the batch:
+#
+#     batch      1      2      4      8     16     32
+#     wall    11.7    8.4    6.7    5.9    5.8    6.5   s
+#     peak     380    383    388    399    419    460   MB
+#
+# Two things decide the eight. The curve has an interior optimum and **turns** -- 32 is slower than 16 --
+# so this is not "as large as memory allows"; and the memory it costs is ~2.5 MB per unit of batch, which
+# is nothing against the matrix being built, so the peak is not what picks the value. Eight is where the
+# processor time bottoms; sixteen is a hair faster in wall and slower in processor time, which on a shared
+# machine is the less trustworthy of the two.
+#
+# An earlier default of four came from a measurement -- "16 vs 4: ~2.2 GB against ~0.7 GB" -- taken when
+# the seed set and the response array dominated the peak, and NEITHER of those ever scaled with the batch.
+# Both are built a chunk at a time now, so that trade no longer exists.
+_PROBE_BATCH_SIZE = 8
 
 # Backtracking rungs for the shifted step. The full coupled Newton step from the hybrid initial
 # condition overshoots violently (the residual blows up many orders of magnitude), so the step length
