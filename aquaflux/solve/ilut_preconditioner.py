@@ -254,8 +254,7 @@ class MonolithicIlutPreconditioner:
     @staticmethod
     def _factor(
         matvec: Callable[[jnp.ndarray], jnp.ndarray],
-        colouring,
-        n_fields: int,
+        plan,
         shift_diagonal: np.ndarray,
         *,
         fill_factor: float,
@@ -269,11 +268,11 @@ class MonolithicIlutPreconditioner:
         """
         from .sparse_jacobian import materialize_block_jacobian
 
-        jacobian = materialize_block_jacobian(matvec, colouring, n_fields)
+        jacobian = materialize_block_jacobian(matvec, plan)
         shifted = (jacobian + sp.diags(np.asarray(shift_diagonal))).tocsr()
         return factorize_ilut(
             shifted,
-            n_fields,
+            plan.n_fields,
             fill_factor=fill_factor,
             drop_tol=drop_tol,
             diag_pivot_thresh=diag_pivot_thresh,
@@ -283,8 +282,7 @@ class MonolithicIlutPreconditioner:
     def build(
         cls,
         matvec: Callable[[jnp.ndarray], jnp.ndarray],
-        colouring,
-        n_fields: int,
+        plan,
         shift_diagonal: np.ndarray,
         *,
         fill_factor: float = 30.0,
@@ -297,11 +295,9 @@ class MonolithicIlutPreconditioner:
         ----------
         matvec : callable
             The frozen Jacobian-vector product ``v -> J v`` at the state it is frozen at.
-        colouring : BlockColouring
-            The stencil colouring for the materialization
-            (:func:`~aquaflux.solve.sparse_jacobian.block_stencil_colouring`).
-        n_fields : int
-            Degrees of freedom per cell.
+        plan : ColumnProbePlan
+            The probing plan for the materialization
+            (:class:`~aquaflux.solve.sparse_jacobian.ColumnProbePlan`).
         shift_diagonal : np.ndarray
             The pseudo-transient shift added to the Jacobian's diagonal, shape ``(n_fields * n,)`` —
             the same block-diagonal shift the step solves against (velocity/scalar shifts, pressure
@@ -317,8 +313,7 @@ class MonolithicIlutPreconditioner:
         return cls(
             cls._factor(
                 matvec,
-                colouring,
-                n_fields,
+                plan,
                 shift_diagonal,
                 fill_factor=fill_factor,
                 drop_tol=drop_tol,
@@ -329,8 +324,7 @@ class MonolithicIlutPreconditioner:
     def refresh_in_place(
         self,
         matvec: Callable[[jnp.ndarray], jnp.ndarray],
-        colouring,
-        n_fields: int,
+        plan,
         shift_diagonal: np.ndarray,
         *,
         fill_factor: float = 30.0,
@@ -353,8 +347,7 @@ class MonolithicIlutPreconditioner:
         """
         self.factors = self._factor(
             matvec,
-            colouring,
-            n_fields,
+            plan,
             shift_diagonal,
             fill_factor=fill_factor,
             drop_tol=drop_tol,

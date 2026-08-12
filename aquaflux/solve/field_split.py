@@ -35,6 +35,11 @@ Jacobian and the coupled adjoint are untouched; only the preconditioner is split
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .sparse_jacobian import ProbeGather
+
 import dataclasses
 from collections.abc import Callable
 
@@ -542,8 +547,7 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
     def build(
         cls,
         matvec: Callable,
-        colouring,
-        n_fields: int,
+        plan,
         shift_diagonal: np.ndarray,
         groups: FieldGroups,
         *,
@@ -556,13 +560,13 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
         trailing_inverse: Callable[[sp.csr_matrix, int], object] | None = None,
         batched_matvec: Callable | None = None,
         probe_batch_size: int | None = None,
-        structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+        structure: ProbeGather | None = None,
     ) -> FieldSplitAmgPreconditioner:
         """Materialize the coupled Jacobian, shift it, and fit a split to it.
 
         Parameters
         ----------
-        matvec, colouring, n_fields, batched_matvec, probe_batch_size, structure
+        matvec, plan, batched_matvec, probe_batch_size, structure
             The coloured-probe materialization, exactly as the monolithic build takes them.
         shift_diagonal : np.ndarray
             The pseudo-transient shift ``beta d`` added to the diagonal, shape ``(n_dofs,)``.
@@ -584,7 +588,7 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
             The frozen preconditioner.
         """
         jacobian = cls._materialize_jacobian(
-            matvec, colouring, n_fields, batched_matvec, probe_batch_size, structure
+            matvec, plan, batched_matvec, probe_batch_size, structure
         )
         split = build_block_triangular_field_split(
             cls._shifted(jacobian, shift_diagonal),
@@ -597,20 +601,19 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
             trailing_options=trailing_options,
             trailing_inverse=trailing_inverse,
         )
-        return cls(split, groups, jacobian_no_shift=jacobian, n_fields=n_fields)
+        return cls(split, groups, jacobian_no_shift=jacobian, n_fields=plan.n_fields)
 
     def refresh_in_place(
         self,
         matvec: Callable,
-        colouring,
-        n_fields: int,
+        plan,
         shift_diagonal: np.ndarray,
         *,
         smoother_fill_levels: int = 0,
         smoother_sweeps: int = 4,
         batched_matvec: Callable | None = None,
         probe_batch_size: int | None = None,
-        structure: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+        structure: ProbeGather | None = None,
     ) -> tuple[tuple[str, float], ...]:
         """Re-materialize at the developed state and re-fit both blocks IN PLACE.
 
@@ -621,10 +624,10 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
         del smoother_fill_levels, smoother_sweeps  # the smoother config is fixed at build
         timer = PhaseTimer()
         self._jacobian_no_shift = self._materialize_jacobian(
-            matvec, colouring, n_fields, batched_matvec, probe_batch_size, structure
+            matvec, plan, batched_matvec, probe_batch_size, structure
         )
         timer.lap("probe")
-        self._n_fields = n_fields
+        self._n_fields = plan.n_fields
         shifted = self._shifted(self._jacobian_no_shift, shift_diagonal)
         timer.lap("assemble")
         self.factors.refactor(shifted)

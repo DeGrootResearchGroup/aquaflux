@@ -12,7 +12,7 @@ from aquaflux.solve.ilut_preconditioner import (
     cell_major_permutation,
     factorize_ilut,
 )
-from aquaflux.solve.sparse_jacobian import block_stencil_colouring
+from aquaflux.solve.sparse_jacobian import ColumnProbePlan, block_stencil_colouring
 
 
 def _diagonally_dominant_block_matrix(n, n_fields, rng):
@@ -105,8 +105,7 @@ def test_build_materializes_and_factors_from_a_matvec():
     shift = np.zeros(nf * n)
     pc = MonolithicIlutPreconditioner.build(
         lambda v: jnp.asarray(a @ np.asarray(v)),
-        colouring,
-        nf,
+        ColumnProbePlan.uniform(colouring, nf),
         shift,
         fill_factor=100.0,
         drop_tol=1e-12,
@@ -132,8 +131,7 @@ def test_refresh_in_place_repreconditions_the_same_compiled_matvec():
     shift = np.zeros(nf * n)
     pc = MonolithicIlutPreconditioner.build(
         lambda v: jnp.asarray(a @ np.asarray(v)),
-        colouring,
-        nf,
+        ColumnProbePlan.uniform(colouring, nf),
         shift,
         fill_factor=100.0,
         drop_tol=1e-12,
@@ -145,8 +143,7 @@ def test_refresh_in_place_repreconditions_the_same_compiled_matvec():
 
     pc.refresh_in_place(
         lambda v: jnp.asarray(b @ np.asarray(v)),
-        colouring,
-        nf,
+        ColumnProbePlan.uniform(colouring, nf),
         shift,
         fill_factor=100.0,
         drop_tol=1e-12,

@@ -147,7 +147,11 @@ def test_lu_beta_tracking_refresh_makes_the_lu_exact_at_the_current_beta(case) -
     import numpy as np
     import scipy.sparse as sp
     from aquaflux.solve import DualTimeControl
-    from aquaflux.solve.sparse_jacobian import block_stencil_colouring, materialize_block_jacobian
+    from aquaflux.solve.sparse_jacobian import (
+        ColumnProbePlan,
+        block_stencil_colouring,
+        materialize_block_jacobian,
+    )
     from aquaflux.turbulence.coupled import _coupled_shift_policy
 
     coupled = case["coupled"]
@@ -167,7 +171,10 @@ def test_lu_beta_tracking_refresh_makes_the_lu_exact_at_the_current_beta(case) -
     frozen = jax.lax.stop_gradient(state)
     mv = jax.jit(lambda v: jax.jvp(coupled.residual, (frozen,), (v,))[1])
     d = np.asarray(_coupled_shift_policy(coupled, state, None).shift_term(state).diagonal)
-    A = (materialize_block_jacobian(mv, colouring, n_fields) + sp.diags(0.7 * d)).tocsr()
+    A = (
+        materialize_block_jacobian(mv, ColumnProbePlan.uniform(colouring, n_fields))
+        + sp.diags(0.7 * d)
+    ).tocsr()
 
     b = np.random.default_rng(0).standard_normal(A.shape[0])
     x = active.shift_policy.preconditioner.factors.apply(b)

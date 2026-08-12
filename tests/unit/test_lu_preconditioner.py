@@ -61,7 +61,7 @@ def test_monolithic_lu_preconditioner_matvec_and_refresh() -> None:
     import jax
     import jax.numpy as jnp
     from aquaflux.solve import MonolithicLuPreconditioner
-    from aquaflux.solve.sparse_jacobian import block_stencil_colouring
+    from aquaflux.solve.sparse_jacobian import ColumnProbePlan, block_stencil_colouring
 
     n_cells, n_fields = 40, 2
     owner = np.arange(n_cells - 1)
@@ -88,13 +88,17 @@ def test_monolithic_lu_preconditioner_matvec_and_refresh() -> None:
         return jnp.asarray(a @ np.asarray(v))
 
     shift = np.zeros(dof)
-    pc = MonolithicLuPreconditioner.build(matvec, colouring, n_fields, shift, backend="scipy")
+    pc = MonolithicLuPreconditioner.build(
+        matvec, ColumnProbePlan.uniform(colouring, n_fields), shift, backend="scipy"
+    )
     b = jnp.asarray(np.random.default_rng(6).standard_normal(dof))
     x = jax.jit(pc.matvec())(b)
     assert float(jnp.linalg.norm(jnp.asarray(a @ np.asarray(x)) - b) / jnp.linalg.norm(b)) < 1e-10
     # refresh in place at a scaled operator: the same object now inverts the new matvec
     factors_before = pc.factors.backend
-    pc.refresh_in_place(lambda v: 2.0 * matvec(v), colouring, n_fields, shift)
+    pc.refresh_in_place(
+        lambda v: 2.0 * matvec(v), ColumnProbePlan.uniform(colouring, n_fields), shift
+    )
     assert pc.factors.backend is factors_before  # same backend object, refactored in place
     x2 = jax.jit(pc.matvec())(b)
     assert (
