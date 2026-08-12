@@ -265,6 +265,112 @@ def positive_block_limit(
     return PositiveBlockLimit(start, stop, tau, floor)
 
 
+@dataclasses.dataclass(frozen=True)
+class PositiveBlockProjection:
+    """``(phi, delta) -> delta'``: clip each entry's own correction so ``phi[start:stop]`` stays > 0.
+
+    Built by :func:`positive_block_projection`, whose docstring carries the rule and why it exists
+    beside the cap. A **value object rather than a closure** for the same reason as
+    :class:`PositiveBlockLimit`: it rides in a forward step's static fields, which are compared by
+    ``__eq__`` to form the compiled step's cache key, and a closure compares by identity so every
+    rebuild would recompile the whole solve.
+
+    Attributes
+    ----------
+    start, stop : int
+        The half-open slice of the flat state that must stay positive.
+    tau : float
+        Fraction of the distance to the boundary each entry may take, in ``(0, 1)``.
+    floor : float
+        Absolute room granted to every entry on top of its own value, in the units of ``phi``.
+    """
+
+    start: int
+    stop: int
+    tau: float = 0.99
+    floor: float = 0.0
+
+    def __call__(self, phi: jnp.ndarray, delta: jnp.ndarray) -> jnp.ndarray:
+        values = phi[self.start : self.stop]
+        # Only a decreasing entry can cross zero, and `maximum` leaves an increasing one untouched
+        # (its correction is above any negative bound), so no `where` is needed.
+        clipped = jnp.maximum(delta[self.start : self.stop], -self.tau * (values + self.floor))
+        return delta.at[self.start : self.stop].set(clipped)
+
+
+def positive_block_projection(
+    start: int, stop: int, tau: float = 0.99, floor: float = 0.0
+) -> PositiveBlockProjection:
+    """Build ``(phi, delta) -> delta'`` clipping each entry's correction to keep ``phi`` positive.
+
+    The **per-entry** counterpart of :func:`positive_block_limit`. Both enforce the same
+    fraction-to-the-boundary condition; they differ in *who pays for it*. The cap scales the whole
+    step by ``tau * min_i(room_i)``, so a single entry near zero throttles every entry in the state.
+    This clips each entry's own correction instead::
+
+        delta_i <- max(delta_i, -tau * (phi_i + floor))
+
+    leaving every other entry's correction untouched.
+
+    **Why the cap alone is not enough.** The cap is a minimum over entries, so one entry whose value
+    is numerically zero -- and whose own equation is asking it to be zero -- sets the step length for
+    the entire state. A ``floor`` was introduced to stop that, and it postpones the collapse rather
+    than removing it, which is arithmetic rather than a measurement: when the cap binds, the step takes
+    ``phi_new = phi - tau * (phi + floor)``, so
+
+        ``(phi_new + floor) = (1 - tau) * (phi + floor)``
+
+    and the shifted value ``phi + floor`` decays by exactly ``1 - tau`` per capped step **whatever the
+    floor is**. The entry parks at ``phi -> -tau * floor`` while the cap keeps falling by that same
+    factor per step; a floor buys a fixed number of decades of headroom and the collapse then repeats.
+    Clipping removes the mechanism instead: the constrained entry still decays toward zero, because
+    that is what its own equation asks, but it does so *alone*.
+
+    **It remains one search direction, which is the constraint that rules out a per-entry step
+    length.** A per-entry ``alpha`` would make ``phi_i + alpha_i * delta_i`` a different direction at
+    every backtracking rung, so the descent test, the non-descent fallback and the reported step
+    fraction would each stop meaning anything. Clipping produces a single modified vector, once, before
+    the search -- which then walks a genuine ray through it, exactly as before.
+
+    **Composes with the cap rather than replacing it.** Applied first, this makes the cap compute
+    exactly ``1``: every decreasing entry then satisfies ``|delta_i| <= tau * (phi_i + floor)``, hence
+    ``room_i >= 1 / tau`` and ``tau * min_i(room_i) >= 1``. So a step carrying both reports an
+    unbinding cap, and the diagnostics keyed on that cap keep working and simply say "nothing bound".
+
+    Parameters
+    ----------
+    start, stop : int
+        The half-open slice of the flat state that must stay positive.
+    tau : float
+        Fraction of the distance to the boundary an entry may take, in ``(0, 1)``. ``0.99`` (default)
+        stops just short, so a constrained entry stays strictly positive rather than landing on zero,
+        where ``sqrt`` is defined but its derivative is not.
+    floor : float
+        Absolute room granted on top of each entry's own value. ``0`` (default) is the plain rule and
+        is sufficient here: an entry at exactly zero has its correction clipped to zero, which freezes
+        it harmlessly rather than throttling anything else.
+
+    Returns
+    -------
+    PositiveBlockProjection
+        A callable ``(phi, delta) -> delta'`` of the same shape as ``delta``. A value object, not a
+        closure, so a forward step carrying one stays a compilation-cache hit across rebuilds.
+
+    Notes
+    -----
+    **Inactive at a root, for any ``tau`` and ``floor``.** There ``delta = 0``, and clipping zero
+    against a non-positive bound returns zero, so the projection cannot perturb the converged state --
+    and therefore cannot reach the implicit-function-theorem adjoint, which is taken at that state.
+
+    The clipped direction is no longer exactly the solved correction, so it is not *guaranteed* to be a
+    descent direction; the line search's own descent test and fallback remain the guard. The
+    perturbation is bounded by the constraint violation it removes, which is small whenever the step
+    was nearly admissible to begin with -- report it (the count of clipped entries, and
+    ``||delta' - delta|| / ||delta||``) rather than assuming it.
+    """
+    return PositiveBlockProjection(start, stop, tau, floor)
+
+
 def backtracking_line_search(
     residual_fn,
     phi,

@@ -886,3 +886,46 @@ def test_the_frozen_transpose_factory_ignores_the_state_it_is_given() -> None:
     factory = FrozenTransposeFactory(pc)
     assert float(factory(jnp.ones(3))(jnp.ones(3))[0]) == 2.0
     assert float(factory(jnp.zeros(3))(jnp.ones(3))[0]) == 2.0
+
+
+def test_the_k_positivity_builders_address_the_k_block_and_defer_to_the_transform() -> None:
+    """Both positivity constructions target the ``k`` slice, and both stand down for a log variable.
+
+    Worth its own test for two reasons. The slice ``((dim + 1) n, (dim + 2) n)`` is block-order
+    knowledge, so a builder that computed it independently would drift silently when the order
+    changed -- here both read one helper, and this pins the answer. And these builders are the only
+    place the projection is constructed for a coupled case, so a missing import in the module would
+    otherwise surface for the first time in the middle of a march rather than here.
+
+    The builders read only the transform and the block layout, so a stub carrying those two is a
+    sufficient collaborator -- no mesh, no assembled case.
+    """
+    from types import SimpleNamespace
+
+    from aquaflux.turbulence import positive_k_limit, positive_k_projection
+    from aquaflux.turbulence.coupled import DirectScalars, LogScalars
+
+    n, dim = 7, 3
+    direct = SimpleNamespace(
+        k_transform=DirectScalars(), layout=SimpleNamespace(n_cells=n, dim=dim)
+    )
+
+    cap = positive_k_limit(direct)
+    project = positive_k_projection(direct)
+    assert (cap.start, cap.stop) == ((dim + 1) * n, (dim + 2) * n)
+    assert (project.start, project.stop) == (cap.start, cap.stop)
+
+    # ...and each acts on that slice only. One dead k cell, one healthy, velocities driven hard.
+    phi = jnp.ones((dim + 3) * n)
+    phi = phi.at[cap.start].set(1.0e-12)
+    delta = -jnp.ones_like(phi)
+    assert float(cap(phi, delta)) < 1.0e-9  # the dead cell throttles the whole step
+    clipped = project(phi, delta)
+    assert float(clipped[cap.start]) == pytest.approx(-0.99e-12)  # ...held back alone
+    assert float(clipped[0]) == -1.0  # a velocity entry is untouched
+    assert float(cap(phi, clipped)) == pytest.approx(1.0)  # the cap now finds nothing binding
+
+    # A log variable is positive by construction, so neither constrains it.
+    logged = SimpleNamespace(k_transform=LogScalars(), layout=SimpleNamespace(n_cells=n, dim=dim))
+    assert positive_k_limit(logged) is None
+    assert positive_k_projection(logged) is None

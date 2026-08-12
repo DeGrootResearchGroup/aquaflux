@@ -723,6 +723,13 @@ class DualTimeStep(eqx.Module):
         :func:`~aquaflux.solve.positive_block_limit`. Without it a direct-variable field can cross
         zero and reach a ``sqrt`` in the closure, which turns a healthy state into NaN with no warning
         the guard can act on. ``None`` (default) is byte-identical.
+    step_projection : callable or None
+        ``(phi, delta) -> delta'``, clipping the correction itself before the line search (static). The
+        per-entry form of the same positivity constraint ``step_limit`` caps globally, via
+        :func:`~aquaflux.solve.positive_block_projection`. Applied FIRST, so a step carrying both then
+        computes an unbinding cap of exactly ``1`` and the diagnostics keyed on the cap keep working.
+        Prefer it wherever one near-zero entry would otherwise set the step length for the whole state.
+        ``None`` (default) is byte-identical.
     refresh_on_cycles : int or None
         Refresh the preconditioner **inside** the step once a single solve reaches this many restart
         cycles, by calling :attr:`inner_refresh` at the iterate it reached (static). ``None`` (default)
@@ -809,6 +816,9 @@ class DualTimeStep(eqx.Module):
     step_limit: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
         static=True, default=None
     )
+    step_projection: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
+        static=True, default=None
+    )
     abort_above_inner_cycles: int | None = eqx.field(static=True, default=None)
     abort_below_alpha: float | None = eqx.field(static=True, default=None)
 
@@ -857,6 +867,7 @@ class DualTimeStep(eqx.Module):
                 inner_refresh(iterate)
 
         step_limit = self.step_limit
+        step_projection = self.step_projection
         abort_above = self.abort_above_inner_cycles
         abort_below = self.abort_below_alpha
 
@@ -932,6 +943,12 @@ class DualTimeStep(eqx.Module):
                 # a clipped inner step is a signal the pseudo-timestep is too large, read out via alpha.
                 # Cap the ladder by whatever constraint the residual cannot express (positivity of a
                 # directly-solved field). `None` leaves the cap at 1, i.e. no cap.
+                # Clip the correction per entry BEFORE the cap reads it: an entry that would cross
+                # zero is held back on its own, rather than shortening the step for every entry. The
+                # cap below then finds nothing binding and returns 1 (see
+                # `positive_block_projection`), so the two compose and the cap's diagnostics survive.
+                if step_projection is not None:
+                    delta = step_projection(p, delta)
                 max_alpha = 1.0 if step_limit is None else step_limit(p, delta)
                 candidate, alpha = backtracking_line_search(
                     transient_residual, p, delta, gnorm, line_search, norm=norm, max_alpha=max_alpha

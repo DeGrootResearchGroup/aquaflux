@@ -11,6 +11,8 @@ step it reduces to the ordinary pseudo-transient step.
 
 from __future__ import annotations
 
+import itertools
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -23,6 +25,7 @@ from aquaflux.solve import (
     ShiftTerm,
     SwitchedEvolutionRelaxation,
     positive_block_limit,
+    positive_block_projection,
 )
 from aquaflux.solve.implicit import backtracking_line_search
 
@@ -318,6 +321,102 @@ def test_positive_block_limit_keeps_a_constrained_field_off_zero() -> None:
     assert bool(((phi + alpha * delta)[2:5] > 0).all())
     # Entries outside the block are unconstrained: the cap ignores them however far they move.
     assert float(limit(phi, jnp.array([-1e3, 0.0, 1.0, 1.0, 1.0]))) == 1.0
+
+
+def test_the_projection_holds_each_entry_off_zero_without_shortening_the_step() -> None:
+    """The per-entry counterpart of the cap: a dead entry is held back ALONE.
+
+    The failure it answers is the cap's one structural weakness -- it is a minimum over entries, so an
+    entry whose value is numerically zero, and whose own equation is asking it to be zero, sets the
+    step length for every other entry. Here the same near-zero entry is clipped on its own and the
+    healthy entries keep their full corrections.
+    """
+    project = positive_block_projection(2, 5)
+    phi = jnp.array([1.0, 1.0, 1.0e-5, 2.0, 3.0])
+    delta = jnp.array([9.0, 9.0, -1.0e-3, 0.5, -1.0])
+
+    clipped = project(phi, delta)
+
+    # The dead entry is held to 0.99 of its own distance to zero...
+    assert float(clipped[2]) == pytest.approx(-0.99 * 1.0e-5)
+    # ...while every other entry, in and out of the block, keeps its correction exactly.
+    assert [float(clipped[i]) for i in (0, 1, 3, 4)] == [9.0, 9.0, 0.5, -1.0]
+    # A FULL step is now admissible, which is the whole point: the cap would have allowed 0.0099.
+    assert bool(((phi + clipped)[2:5] > 0).all())
+
+
+def test_the_projection_makes_the_cap_unbinding_so_the_two_compose() -> None:
+    """Projection first, cap second: the cap then computes exactly 1 rather than being deleted.
+
+    This is what lets the projection be added without tearing out the cap and everything keyed on it.
+    After clipping, every decreasing entry satisfies ``|delta_i| <= tau (phi_i + floor)``, hence
+    ``room_i >= 1 / tau`` and ``tau * min_i(room_i) >= 1`` -- so a step carrying both reports an
+    unbinding cap and its diagnostics keep working, saying "nothing bound" rather than going silent.
+    """
+    phi = jnp.array([1.0e-12, 3.0e-2, 5.0, 0.25])
+    delta = jnp.array([-7.0e-4, -1.0e-1, -9.0, -1.0e-3])
+    for floor in (0.0, 1.0e-8):
+        cap = positive_block_limit(0, 4, floor=floor)
+        project = positive_block_projection(0, 4, floor=floor)
+        # Unprojected, one near-zero entry throttles everything.
+        assert float(cap(phi, delta)) < 1.0e-3
+        assert float(cap(phi, project(phi, delta))) == pytest.approx(1.0)
+
+
+def test_the_projection_is_inactive_at_a_root_and_is_a_compilation_cache_hit() -> None:
+    """Two properties that keep it out of the converged state and out of the recompilation path.
+
+    At a root the correction vanishes, so the projection returns it unchanged for any ``tau`` and
+    ``floor`` -- which is what keeps it from perturbing the converged state, and therefore from
+    reaching the implicit-function-theorem adjoint taken there. And like the cap it is a value object
+    rather than a closure, so two built for the same block compare equal and a forward step carrying
+    one stays a compilation-cache hit across rebuilds instead of retracing the whole solve.
+    """
+    phi = jnp.array([1.0, 2.0, 3.0])
+    zero = jnp.zeros_like(phi)
+    for floor in (0.0, 1.0e-8, 1.0e-3):
+        assert bool((positive_block_projection(0, 3, floor=floor)(phi, zero) == zero).all())
+
+    assert positive_block_projection(0, 3, floor=1e-8) == positive_block_projection(
+        0, 3, floor=1e-8
+    )
+    assert positive_block_projection(0, 3, floor=1e-8) != positive_block_projection(
+        0, 3, floor=1e-9
+    )
+    assert positive_block_projection(0, 3, floor=0.0) == positive_block_projection(0, 3)
+    # ...and it is not interchangeable with the cap, which returns a scalar rather than a direction.
+    assert positive_block_projection(0, 3) != positive_block_limit(0, 3)
+
+
+def test_the_projection_does_not_reproduce_the_floors_ratchet() -> None:
+    """A floored CAP postpones the collapse; the projection removes the coupling that caused it.
+
+    Iterating the capped rule on a dead entry, ``(phi + floor)`` decays by exactly ``1 - tau`` per
+    step whatever the floor is -- so the cap falls by that factor per step and every other entry pays.
+    Under the projection the same entry decays identically, because that is what its own equation
+    asks, but the admissible step for everything else stays 1.
+    """
+    tau, floor, correction = 0.99, 1.0e-8, -7.0e-4
+    cap = positive_block_limit(0, 2, tau=tau, floor=floor)
+    project = positive_block_projection(0, 2, tau=tau, floor=floor)
+
+    capped, projected = jnp.array([0.0, 1.0]), jnp.array([0.0, 1.0])
+    delta = jnp.array([correction, -1.0e-3])
+    caps = []
+    for _ in range(4):
+        alpha = cap(capped, delta)
+        caps.append(float(alpha))
+        capped = capped + alpha * delta
+        # The projection leaves a full step admissible at every iteration.
+        assert float(cap(projected, project(projected, delta))) == pytest.approx(1.0)
+        projected = projected + project(projected, delta)
+
+    # The capped rule's admissible step falls by (1 - tau) per step, without bound.
+    for earlier, later in itertools.pairwise(caps):
+        assert later == pytest.approx((1.0 - tau) * earlier, rel=1e-6)
+    # ...and the healthy entry has been dragged down with it, while the projected one is untouched.
+    assert float(capped[1]) == pytest.approx(1.0, abs=1e-5)  # throttled: it never moved
+    assert float(projected[1]) < float(capped[1])  # ...whereas this one made progress every step
 
 
 def test_a_floored_limit_ignores_a_numerically_dead_entry_but_still_guards_a_live_one() -> None:
