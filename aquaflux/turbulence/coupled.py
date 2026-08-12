@@ -84,6 +84,7 @@ from aquaflux.solve import (
     column_probe_plan,
     forward_march,
     positive_block_limit,
+    positive_block_projection,
     relative_residual_gmres,
 )
 
@@ -886,9 +887,59 @@ def positive_k_limit(coupled: CoupledRANS, tau: float = 0.99, floor: float = 0.0
     """
     if not isinstance(coupled.k_transform, DirectScalars):
         return None
+    start, stop = _k_block(coupled)
+    return positive_block_limit(start, stop, tau, floor)
+
+
+def _k_block(coupled: CoupledRANS) -> tuple[int, int]:
+    """The half-open slice of the flat coupled state holding ``k``.
+
+    Its one home: the positivity constructions each need this slice, and re-deriving
+    ``((dim + 1) * n, (dim + 2) * n)`` at each of them is a formula that drifts when the block order
+    changes.
+    """
     layout = coupled.layout
     n, dim = layout.n_cells, layout.dim
-    return positive_block_limit((dim + 1) * n, (dim + 2) * n, tau, floor)
+    return (dim + 1) * n, (dim + 2) * n
+
+
+def positive_k_projection(coupled: CoupledRANS, tau: float = 0.99, floor: float = 0.0):
+    """The step projection keeping ``k`` positive per cell, or ``None`` when the transform already does.
+
+    The per-cell counterpart of :func:`positive_k_limit`, and the reason to prefer it on this system:
+    the cap is a minimum over cells, so a single cell whose ``k`` is numerically zero sets the step
+    length for all of them. That is not hypothetical here -- on a 3D backward-facing step the binding
+    cell is the stagnant corner where the step face, the floor and a side wall meet, which has no shear
+    and therefore no turbulent-energy production, so its ``k`` decays with nothing to arrest it. Its
+    correction then throttles the whole march while every other cell is healthy.
+
+    Clipping each cell's own correction leaves that cell to decay alone and lets the rest take a full
+    step. See :func:`~aquaflux.solve.positive_block_projection` for the rule, why a floor on the cap
+    postpones rather than removes the collapse, and why this stays a single search direction.
+
+    Returns ``None`` when ``k`` is solved in a form that is positive by construction (a log variable),
+    since a projection there would clip nothing.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The assembled case, for its block layout.
+    tau : float
+        Fraction of the distance to the boundary a cell may take.
+    floor : float
+        Absolute room in ``k`` granted to every cell. ``0`` (default) is the plain rule and is normally
+        what this wants -- unlike the cap, a projection has no reason to exempt a dead cell, because a
+        dead cell no longer costs anything.
+
+    Returns
+    -------
+    callable or None
+        ``(phi, delta) -> delta'`` for a directly-solved ``k``; ``None`` otherwise.
+    """
+    if not isinstance(coupled.k_transform, DirectScalars):
+        return None
+    start, stop = _k_block(coupled)
+    return positive_block_projection(start, stop, tau, floor)
 
 
 def coupled_scaled_norm(
@@ -1504,6 +1555,7 @@ def _monolithic_factor_step(
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     cycle_budget: int | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
+    step_projection: Callable[..., jnp.ndarray] | None = None,
 ) -> ForwardStep:
     """Assemble the pseudo-transient / dual-time step around a frozen monolithic factorization.
 
@@ -1543,6 +1595,7 @@ def _monolithic_factor_step(
             inner_refresh=inner_refresh,
             cycle_budget=cycle_budget,
             step_limit=step_limit,
+            step_projection=step_projection,
         )
     return PseudoTransientStep(
         policy,
@@ -1957,6 +2010,7 @@ def coupled_amg_continuation(
     inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     cycle_budget: int | None = None,
     positivity_floor: float = 0.0,
+    positivity_projection: bool = False,
     field_split: bool = False,
     trailing_smoother_sweeps: int = 1,
     leading_options: dict | None = None,
@@ -2060,6 +2114,16 @@ def coupled_amg_continuation(
         for the case rather than as a bare constant. ``0.0`` (default) is the plain
         fraction-to-the-boundary rule and is byte-identical to it. It does not move the converged root
         or the adjoint -- at a root the correction vanishes and the limiter is inactive for any floor.
+    positivity_projection : bool
+        Additionally clip each cell's OWN ``k`` correction, so a cell that would cross zero is held
+        back alone instead of shortening the step for every cell (see
+        :func:`~aquaflux.solve.positive_block_projection`). Prefer this to raising ``positivity_floor``
+        where one numerically-dead cell is setting the step length: a floor postpones that collapse by
+        a fixed number of decades and cannot remove it, because ``(k + floor)`` decays by the same
+        ``1 - tau`` per capped step whatever the floor is, whereas clipping removes the coupling
+        between that cell and the rest. Applied before the cap, which then finds nothing binding and
+        reports ``1``. ``False`` (default) is byte-identical. Like the floor it does not move the
+        converged root or the adjoint -- at a root the correction vanishes and it clips nothing.
     field_split : bool
         Precondition with a **block-triangular field split** — separate multigrid hierarchies for the
         ``[u, v, w, p]`` saddle and the ``[k, ω]`` transported scalars, retaining one triangle of the
@@ -2222,6 +2286,10 @@ def coupled_amg_continuation(
         # `positivity_floor` stops a cell whose `k` is numerically zero from setting the cap for all
         # of them; `0` (default) is the plain rule.
         step_limit=positive_k_limit(coupled, floor=positivity_floor),
+        # ...and, when asked for, hold each cell off zero SEPARATELY, so the dead cell above cannot
+        # set the step length for the other 23039 at all. Applied before the cap, which then finds
+        # nothing binding. `None` (default) leaves the cap the only constraint, byte-identically.
+        step_projection=(positive_k_projection(coupled) if positivity_projection else None),
     )
 
 

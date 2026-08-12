@@ -33,6 +33,7 @@ from .continuation import ScalarShiftPolicy, scalar_pseudo_transient_solve
 from .diagnostics import coupled_equation_names, coupled_fields, coupled_residuals
 from .coupled import (
     positive_k_limit,
+    positive_k_projection,
     CoupledRANS,
     CoupledRANSLayout,
     CoupledShiftPolicy,
@@ -133,6 +134,7 @@ __all__ = [
     "omega_wall_gradient",
     "omega_wall_value",
     "positive_k_limit",
+    "positive_k_projection",
     "scalar_pseudo_transient_solve",
     "scalar_transport_preconditioner",
     "scalar_transport_shift_diagonal",

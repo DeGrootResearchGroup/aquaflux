@@ -462,6 +462,25 @@ _TRAILING_SMOOTHER_NOTE = (
 # clipping the correction per cell rather than capping the step, which leaves the cap at 1.
 K_POSITIVITY_FLOOR = float(os.environ.get("BFS3D_K_POSITIVITY_FLOOR", "1e-8") or 0.0)
 
+#: Clip each cell's OWN `k` correction rather than capping the whole step by the worst cell
+#: (`BFS3D_K_POSITIVITY_PROJECTION=1`). Off by default and byte-identical off, pending an end-to-end
+#: measurement on this case.
+#:
+#: This is the structural answer to what the floor above can only postpone. The cap is a minimum over
+#: cells, so the stagnant corner where the step face, the floor and a side wall meet -- no shear, so no
+#: `k` production, so `k` decaying with nothing to arrest it -- sets the step length for all 23040.
+#: A floor buys `log10(floor / k)` decades and no more, because when the cap binds the step takes
+#: `k_new = k - tau (k + floor)`, hence `(k_new + floor) = (1 - tau)(k + floor)`: the SHIFTED value
+#: decays by exactly `1 - tau` per capped step whatever the floor is, so the collapse repeats a fixed
+#: number of decades later. That is algebra, not a measurement, and it is why raising the floor is not
+#: the lever here. Clipping per cell removes the coupling instead -- the dead cell still decays,
+#: because that is what its own equation asks, but alone.
+#:
+#: It composes with the cap rather than replacing it: applied first, it leaves every decreasing cell
+#: with `|dk| <= tau (k + floor)`, so the cap computes exactly 1 and the `limit` aside below keeps
+#: reporting (as "nothing bound") instead of going silent.
+K_POSITIVITY_PROJECTION = os.environ.get("BFS3D_K_POSITIVITY_PROJECTION", "") not in ("", "0")
+
 
 # The inexact-Newton stop for each inner linear solve, measured in the ROW-SCALED `coupled_scaled_norm`
 # (not the Euclidean one -- the coupled Euclidean residual is ~100% omega, which is why the row-scaled
@@ -950,6 +969,12 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
         ("k wall BC", K_WALL),
         ("k positivity floor", K_POSITIVITY_FLOOR or "0 (plain rule)"),
+        # Beside the floor, because the two are alternative answers to the same failure and a run
+        # carrying the projection is a different arm from one carrying only a floor.
+        (
+            "k positivity projection",
+            "per-cell clip" if K_POSITIVITY_PROJECTION else "off (cap only)",
+        ),
         ("inner forward rtol (row-scaled)", FORWARD_RTOL),
         # Printed because a banner diff is only a CONFIG diff if every knob that installs a wrapper or
         # changes what is retained appears in it. These three were read and never shown, so two runs
@@ -1016,6 +1041,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             coarse_eq_limit=COARSE_EQ_LIMIT,
             cycle_budget=round(CYCLE_BUDGET * _RESTART_SCALE),
             positivity_floor=K_POSITIVITY_FLOOR,
+            positivity_projection=K_POSITIVITY_PROJECTION,
             forward_rtol=FORWARD_RTOL,
             forward_restart=FORWARD_RESTART,
             inner_observer=combine_observers(

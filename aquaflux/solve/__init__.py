@@ -92,7 +92,9 @@ from .implicit import (
     StepOutcome,
     TransposedPreconditioner,
     PositiveBlockLimit,
+    PositiveBlockProjection,
     positive_block_limit,
+    positive_block_projection,
 )
 from .line_search_growth import (
     LineSearchGrowth,
@@ -181,6 +183,7 @@ __all__ = [
     "PerFieldNativeInverse",
     "PhaseTimer",
     "PositiveBlockLimit",
+    "PositiveBlockProjection",
     "PseudoTransientStep",
     "RefreshTiming",
     "RefreshTrigger",
@@ -224,6 +227,7 @@ __all__ = [
     "native_per_field_inverse",
     "newton_step",
     "positive_block_limit",
+    "positive_block_projection",
     "refresh_air_hierarchy",
     "relative_residual_gmres",
     "restart_cycles",
