@@ -97,6 +97,28 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
 - `cell.py` — `CellGeometry` (volume, centroid) with `from_faces(...)` and
   `approx_centroids(...)`; a single class (the C++ `Cell<T,N>` is dimension-generic, not
   specialized), computed by the divergence theorem.
+- `distance.py` — `distance_to_patches(mesh, geometry, patch_names)`: per-cell distance to the nearest
+  face centroid among named boundary patches — the geometric field the near-wall turbulence closures
+  need, computed once at build time from the static geometry. Nearest-face-*centroid*, an approximation
+  to the true surface distance that is essentially exact for a wall-adjacent cell and loosens far from
+  the wall.
+  - **⚠️ The search is BLOCKED over cells, and the whole-array form it replaced was the single largest
+    allocation in a 3D build (measured 2026-08-11).** `centroid[:, None, :] - target[None, :, :]` is a
+    dense cell-by-target-face structure: on `bfs3d` (23040 cells, 4736 wall faces) that is 109M entries,
+    and because `norm_squared` materializes its own product under eager JAX **~6.1 GB was live at
+    once** — `build_case` peaked at **6889 MB**, against ~5 MB of retained mesh and geometry. Blocked at
+    a 64 MB working set it peaks at **850 MB, an 8.1× cut**, and the result is **bit-identical**
+    (verified on 300 real cells against the unblocked form): each cell's nearest face is independent of
+    every other cell's, so a block boundary reorders and drops nothing.
+  - **A spatial index would be asymptotically better and is deliberately NOT used.** `scipy.cKDTree`
+    needs concrete coordinates, and these may be **tracers** — geometry is derived from `node_coords` on
+    demand precisely so gradients w.r.t. node positions chain through, and a differentiated build
+    reaches here with traced centroids. The problem was memory, not search cost, and blocking fixes
+    memory without giving that up. Pinned by
+    `test_distance.py::test_distance_is_differentiable_through_node_positions`.
+  - **The residency question this raised is settled: nothing leaks.** After the fix `jax.live_arrays()`
+    totals **17.6 MB** while resident sits at 811 MB, so the gap is allocator retention of freed pages,
+    not held buffers — and it is now bounded by the smaller peak.
 - `groups.py` — `LabelledGroups` base → `CellZones` / `FacePatches`. Named **partitions**
   of cells (zones) and faces (patches) — the SoA analogue of the C++ `MeshObjectGroup`
   `name→group` maps. See `docs/mesh_zones_and_patches.md` for the full design.

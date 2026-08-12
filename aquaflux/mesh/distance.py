@@ -10,9 +10,13 @@ face — what near-wall models depend on — and it loosens on coarser cells far
 is a function of the static mesh geometry, so it is computed once at build time and reused as a
 frozen field. (The patch-to-face lookup is data-dependent, so it runs eagerly, not under ``jit``.)
 
-The nearest face is found by materializing the full cell-by-target-face offset array, so the working
-memory scales with the cell count times the number of target faces; a spatial index would replace
-this for very large meshes.
+The nearest face is found by direct search over the target faces, **a block of cells at a time**. The
+whole-array form of that search is one expression, but it is a dense cell-by-target-face structure and
+it does not survive contact with a three-dimensional case: on a 23040-cell mesh with 4736 wall faces
+it needs 109 million entries, and because the squared magnitude materializes its own product, a little
+over 6 GB is live at once — far more than the mesh, the geometry and the assembled case put together.
+Blocking the search bounds that by construction while computing exactly the same numbers in the same
+order, since each cell's nearest face is independent of every other cell's.
 """
 
 from __future__ import annotations
@@ -61,6 +65,39 @@ def distance_to_patches(
     if face_index.shape[0] == 0:
         raise ValueError(f"distance_to_patches: patches {list(patch_names)} contain no faces")
     target = geometry.face.centroid[face_index]  # (n_target, dim)
-    offset = geometry.cell.centroid[:, None, :] - target[None, :, :]  # (n_cells, n_target, dim)
-    # Compare squared distances (cheaper, same argmin), take the sqrt of the nearest.
-    return jnp.sqrt(jnp.min(norm_squared(offset), axis=1))
+    return jnp.sqrt(_nearest_squared_distance(geometry.cell.centroid, target))
+
+
+#: Working set the blocked search is allowed per block, in bytes. It buys nothing but a bound: every
+#: block computes the same numbers, so this trades the number of dispatches against how much is live at
+#: once, and never the answer. Sized to sit far below the assembled case rather than to be tuned.
+_SEARCH_WORKING_BYTES = 64 << 20
+
+
+def _nearest_squared_distance(centroid: jnp.ndarray, target: jnp.ndarray) -> jnp.ndarray:
+    """Squared distance from each cell centroid to the nearest target, shape ``(n_cells,)``.
+
+    Searched a block of cells at a time. Each cell's nearest target is independent of every other
+    cell's, so blocking reorders nothing and drops nothing — the result is identical entry for entry to
+    the whole-array form, which is what lets the block size be a memory decision alone.
+
+    Kept as ``jnp`` throughout rather than handing the search to a spatial index. The index would be
+    asymptotically better, but it would need concrete coordinates, and these may be **tracers**:
+    geometry is derived from ``node_coords`` on demand precisely so that gradients with respect to node
+    positions chain through it, and a build that is differentiated would reach here with traced
+    centroids. Memory was the problem; the search cost was not.
+    """
+    n_cells = centroid.shape[0]
+    n_target, dim = target.shape
+    # Per cell: the offset, the square the magnitude forms, and the reduced row -- the three that are
+    # live together at the peak.
+    per_cell = max(1, 3 * n_target * dim * centroid.dtype.itemsize)
+    block = max(1, min(n_cells, _SEARCH_WORKING_BYTES // per_cell))
+    return jnp.concatenate(
+        [
+            jnp.min(
+                norm_squared(centroid[start : start + block, None, :] - target[None, :, :]), axis=1
+            )
+            for start in range(0, n_cells, block)
+        ]
+    )
