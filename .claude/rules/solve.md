@@ -65,7 +65,7 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 | aggregation | plain (`pc_gamg_agg_nsmooths=0`) | plain | `amg_preconditioner.py` |
 | field split | `field_split=False` | **True** | `compare.py` |
 | stencil reach | `stencil_reach=3` | 3 | — |
-| probe column reach | `column_reach=None` (uniform) | **(3,3,3,2,2,2)** | `compare.py` `COLUMN_REACH` |
+| probe column reach | `column_reach=None` (uniform) | **(3,3,3,3,2,2)** | `compare.py` `COLUMN_REACH` |
 
 **The three coupled forward solvers — always name which path you mean.** There is no
 `_COUPLED_AMG_FORWARD_SOLVER` symbol.
@@ -245,10 +245,13 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       small term. The recorded "16 vs 4: ~2.2 GB vs ~0.7 GB" was measured against the old allocations and
       **no longer describes this code**; re-measure before using it.
 
-    - **⚠️⚠️ PER-COLUMN PROBING REACH — shipped at `(3,3,3,2,2,2)`. It DID diverge this case on its
-      first step, and the cause was never the reach: it was sparse arithmetic pruning the pattern, since
-      fixed (issue #191).** Read the root-cause section at the end of this bullet before using anything
-      in it. The 564 → 399 figure and the 5.7e-16 Frobenius agreement below are both real and both fail
+    - **⚠️⚠️ PER-COLUMN PROBING REACH — shipped at `(3,3,3,3,2,2)`; `p` MUST stay at reach 3.**
+      `(3,3,3,2,2,2)` diverges this case on its first step (issue #191), and the cause is not the reach's
+      accuracy — the matrix is exact to the floating-point floor — but the *sparsity* the shortening
+      leaves behind. Keeping those positions as stored zeros does cure the divergence and is **not
+      available**, because the zero-fill incomplete factorization cannot be handed stored zeros; see
+      *"stored exactly-zero positions break the ZERO-SHIFT V-cycle"* below. Read the root-cause section at
+      the end of this bullet before using anything in it. The 564 → 399 figure and the 5.7e-16 Frobenius agreement below are both real and both fail
       to predict the divergence, which is the instructive part — the matrix was exact and the *sparsity*
       was not.
 
@@ -325,16 +328,15 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       **By this measure `p`, `k` and `ω` all close inside reach 2 and the velocities do not.** The
       table is kept because a column-norm measure does **not** license shortening a column — it collapses
       over row fields, and on this system the ω rows set it alone — so read it as evidence about the
-      method, not as the licence. The shipped value is `(3,3,3,2,2,2)`, with the pattern held at reach 3,
-      giving **399 probes against 564** and a **−29 % probe cost per build**.
+      method, not as the licence. The shipped value is `(3,3,3,3,2,2)` — `p` at reach 3 with only k and ω
+      shortened, the pattern held at reach 3 — giving **454 probes against 564** and a **−16 % probe cost
+      per build**.
       **Why it is a case property and not a library constant:** it follows from the *schemes*. First-order
       upwind on k/ω plus a non-orthogonal diffusion correction reaches 2; the velocity columns carry the
       limited second-order upwind reconstruction out to 3. Re-measure for any case that changes them —
       the library default (`column_reach=None`) probes every column at `stencil_reach`, unchanged.
 
-      **⚠️ THE CORRECTION (2026-08-12) — EVERYTHING IN THIS PARAGRAPH DESCRIBES THE PRE-FIX CODE AND NO
-      LONGER HAPPENS. It is kept for the diagnostic trail; the shipped default is `(3,3,3,2,2,2)` and it
-      converges.** At `(3,3,3,2,2,2)` the `bfs3d` march took **44 restart cycles
+      **⚠️ THE MEASUREMENT THAT SETS THE DEFAULT (2026-08-12).** At `(3,3,3,2,2,2)` the `bfs3d` march took **44 restart cycles
       at step 1 instead of 3**, α collapses to 0.000, and by step 2 β is at its 16.0 ceiling with ‖R‖ an
       order of magnitude ABOVE its start. The p row is the signature: **1.402e-01 after step one against
       6.217e-07**. Restoring p to reach 3 — `(3,3,3,3,2,2)` — reproduces the uniform-reach trajectory
@@ -404,19 +406,23 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
         are in the trailing block, whose cell-block inverse has no factorization pattern to weaken. That
         also retro-explains the padding experiment which established the reach-3 requirement — it padded
         with **~1e-30, not exact zero**, precisely what survives sparse arithmetic.
-      - **Fixed** by pattern-preserving assembly (`frozen_operator.apply_symmetric_scale`, and a diagonal
-        assignment for the shift) — see the equilibration entry under *Faithful smoothed aggregation*.
-        **Confirmed:** with the fix, `(3,3,3,2,2,2)` reproduces the uniform-reach baseline in **every
-        reported digit** at rung-1 step 1 — `‖R₀‖` 3.2901e-01, β 0.5000, 4 inner, **3 cycles**, `‖R‖`
-        2.046e-01, α 1.000, no flags. **And the FULL march converges to the recorded root in every
-        reported digit** — 67 steps, 320 cycles, 4 escalations, final ‖R‖ **3.586e-06**, mid-span `x_r/h`
-        **8.3611**, `ux`/`uy`/`uz` rel-L2 0.0616 / 0.0072 / 0.0061, ν_t peak **150.1071** — against the
-        same arm previously diverging at step 1 and pinned at the β = 16.0 ceiling by step 2. So `p` at
-        reach 2 is no longer a correctness constraint and `column_reach` is the no-op it was documented
-        to be. ⚠️ That run's **wall clock is void** (its early steps ran against the test tiers); its step
-        and cycle counts are not. **The shipped default is now `(3,3,3,2,2,2)`** (399 probes against 564,
-        −29 %), taken on that march plus a controlled pair showing the trailing inverse's `equilibrate`
-        setting is inert under it — both settings step-for-step identical.
+      - **⚠️ CURED BY PATTERN-PRESERVING ASSEMBLY, AND THAT CURE IS NOT AVAILABLE — so `p` STAYS at reach
+        3.** Preserving the pattern (`frozen_operator.apply_symmetric_scale`, plus a diagonal assignment
+        for the shift) does exactly what this entry says: `(3,3,3,2,2,2)` then reproduces the uniform-reach
+        baseline in **every reported digit** at rung-1 step 1 — `‖R₀‖` 3.2901e-01, β 0.5000, 4 inner,
+        **3 cycles**, `‖R‖` 2.046e-01, α 1.000, no flags — and the **full march** converges to the recorded
+        root: 67 steps, 320 cycles, 4 escalations, final ‖R‖ **3.586e-06**, mid-span `x_r/h` **8.3611**,
+        ν_t peak **150.1071**, with the trailing inverse's `equilibrate` setting inert (both settings
+        step-for-step identical). ⚠️ That run's **wall clock is void** (its early steps ran against the
+        test tiers); its step and cycle counts are not.
+        **But what it preserves are stored EXACT ZEROS, and the zero-fill incomplete factorization cannot
+        take those** — measured at zero shift, carrying them costs 58 restart cycles at a true relative
+        residual of 2.299e-02 against 11 cycles to 8.474e-11 without (see *"stored exactly-zero positions
+        break the ZERO-SHIFT V-cycle"*). They are therefore pruned at the factorization boundary
+        (`AmgVCycle._live`), which puts `p` at reach 2 back in the configuration above. **The shipped
+        default is `(3,3,3,3,2,2)`** — 454 probes against 564, −16 % — and `p` at reach 3 IS a correctness
+        constraint after all. The march numbers here stand as a measurement of the preserving arm; they are
+        not a licence for the shortened default under the shipped one.
       - ⚠️ **How it got through, which is the transferable part: the audit that licensed it AND the gate
         that verified it both collapse over row fields**, on a matrix whose row norms differ by ~8 orders
         (k row 8.8e-06, ω row 1.4e+03). `column_reach_ladder` takes a whole column block;
@@ -3055,9 +3061,10 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       is required; probing every COLUMN at reach 3 is not, and that distinction was missed here.**
       This entry shrinks the pattern, which is what moves the hierarchy. Keeping the pattern at reach 3
       and shortening only the *columns* (`column_reach`) leaves the coarse space and the smoother
-      untouched and is worth 564 → 399 probes — but it is **not** the cheap win it was recorded as: it
-      aliases each shortened column's far couplings onto its near entries, over half the entries of
-      every shortened column on `bfs3d`, and the shipped `(3,3,3,2,2,2)` diverged the march at step 1.
+      untouched and is worth 564 → 454 probes at the shipped `(3,3,3,3,2,2)` — but it is **not** the cheap
+      win it was recorded as: it aliases each shortened column's far couplings onto its near entries, over
+      half the entries of every shortened column on `bfs3d`, and shortening `p` as well
+      (`(3,3,3,2,2,2)`) diverges the march at step 1.
       See *"per-column probing reach"* under `sparse_jacobian.py` above before reaching for it. So this
       arm's "there is no cheap way to shrink the probe" stands for the *pattern*, and the column
       variant that looked like the exception has not yet been shown safe on this case.
