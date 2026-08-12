@@ -172,11 +172,52 @@ class AmgVCycle:
         self._pc.destroy()
         self._mat.destroy()
 
+    @staticmethod
+    def _live(cell_major: sp.csr_matrix) -> sp.csr_matrix:
+        """``cell_major`` with its exactly-zero entries dropped, in canonical CSR order.
+
+        **The level smoother is a stationary incomplete-LU sweep, and an incomplete factorization takes
+        its pattern from the entries that are STORED, not from the ones that are nonzero.** A stored
+        exactly-zero entry is therefore a slot the elimination deposits fill into — fill that a pattern
+        without that slot discards — so it changes the smoother even though it changes no value in the
+        operator.
+
+        That matters here because the coloured-probe assembler deliberately stores the *full*
+        block-stencil pattern, a structural over-estimate of which a large fraction carries no coupling
+        at all: on the 23k-cell three-dimensional coupled case, 8.0M of 47.2M positions. Handing those to
+        the factorization stops the **zero-shift** operator converging — the operator the
+        implicit-function-theorem adjoint solves, and so the one behind every gradient through a
+        converged coupled solve. Measured at a converged state with no pseudo-transient shift, right-hand
+        side the real steady residual, judged on the true residual through restarted GMRES: **11 restart
+        cycles to 8.5e-11 on the live pattern against 58 cycles to 2.3e-02 on the full one.** Pruning at
+        either the shift or the equilibration reproduces the 11-cycle result bit-identically.
+
+        Two things it is **not**, both measured rather than assumed, because each is the natural guess and
+        each would point somewhere else: it is not a pivot pathology (the fine-level ILU(0) pivots are
+        identical either way — min magnitude 1.546e-01, zero negative, median 1.020 — so a pivot census
+        cannot detect it), and it is not a change in the coarse space's size (2 levels and 1296 coarse
+        equations either way).
+
+        Dropping the zeros **here** rather than in the assemblers is deliberate. The assemblers are
+        pattern-preserving so that the fixed-pattern fast path and the generic sparse path agree entry for
+        entry, which is a property worth having and which the coarsening is perfectly content with; it is
+        the factorization that is not, and this is the boundary at which the operator reaches it.
+
+        It copies rather than compacting in place, because the fixed-pattern assembler hands back a matrix
+        aliasing its own **reused buffer** and pruning that in place would corrupt the next refresh. The copy
+        is transient and proportional to the assembled pattern (on the case above, a few hundred megabytes
+        against a case build of several gigabytes), and it happens off the jit path once per build or
+        refresh.
+        """
+        live = cell_major.tocsr().copy()
+        live.eliminate_zeros()
+        live.sort_indices()
+        return live
+
     def _build(self, cell_major: sp.csr_matrix) -> None:
         """Assemble the PETSc ``Mat`` and set up the ``PCGAMG`` V-cycle at ``cell_major``."""
         PETSc = self._PETSc
-        cell_major = cell_major.tocsr()
-        cell_major.sort_indices()
+        cell_major = self._live(cell_major)
         # The Mat wraps a PERSISTENT copy of the CSR arrays: a refresh (:meth:`refactor`) overwrites
         # ``self._data`` in place (O(nnz) numpy) and re-sets-up the PC, so the aggregation/prolongation
         # and the smoother's ordering are kept -- only the coarse operators and factor values recompute.
@@ -361,23 +402,28 @@ class AmgVCycle:
     def refactor(self, cell_major: sp.csr_matrix, scale: np.ndarray, perm: np.ndarray) -> None:
         """Refresh the V-cycle at a new (developed-state, new-shift) matrix, reusing the coarse space.
 
-        A β-tracking march re-factors every step. Because the graph-coloured Jacobian probe uses a
-        **fixed** stencil reach and the equilibration + cell-major reorder are value-only, the operator's
-        sparsity graph is **identical** across refreshes -- only its values change. So the refresh
-        overwrites the persistent CSR values in place (O(nnz) numpy) and re-sets-up the *same* PC with the
+        A β-tracking march re-factors every step. The graph-coloured Jacobian probe uses a **fixed** stencil
+        reach and the equilibration + cell-major reorder are value-only, so the *assembled* graph is
+        identical across refreshes and usually the **live** graph is too. When it is, the refresh overwrites
+        the persistent CSR values in place (O(nnz) numpy) and re-sets-up the *same* PC with the
         ``pc_gamg_reuse_interpolation`` / smoother-``reuse_ordering`` flags (:meth:`_configure`): the
         aggregation, prolongation and factor orderings are kept, and only the Galerkin coarse operators and
         the incomplete-LU factor values are recomputed. That is markedly cheaper than rebuilding the whole
         hierarchy, which dominates the refresh cost.
 
-        If the sparsity pattern ever differs (it should not, given the fixed stencil), it falls back to a
-        full rebuild. The native exact-solve KSP (:attr:`_native`) also takes the full rebuild -- it is the
-        deferred experimental path and shares the ``Mat`` with its shell operator.
+        **The live graph is what is compared, because the factorization is built on it** (:meth:`_live`),
+        and unlike the assembled graph it is not fixed by construction: an entry that was exactly zero at
+        the reference state may carry a coupling at a developed one. Such a refresh falls back to a full
+        rebuild, which is correct but forfeits the interpolation reuse for that refresh. The native
+        exact-solve KSP (:attr:`_native`) also takes the full rebuild -- it is the deferred experimental
+        path and shares the ``Mat`` with its shell operator.
         """
         self.scale = scale
         self.perm = perm
-        cell_major = cell_major.tocsr()
-        cell_major.sort_indices()
+        # Pruned on the same terms as the build (:meth:`_live`) -- the refresh must hand the factorization
+        # the same kind of operator the build did, or the first refresh would silently reintroduce the
+        # stored zeros the build removed.
+        cell_major = self._live(cell_major)
         if not self._matches_pattern(cell_major):
             self.destroy()
             self._build(cell_major)
@@ -393,10 +439,13 @@ class AmgVCycle:
         """Whether ``cell_major`` has the sparsity the persistent ``Mat`` was built on.
 
         Comparing the index arrays is ``O(nnz)`` and runs on every refresh, which on a three-dimensional
-        coupled Jacobian is tens of millions of elements compared twice to re-confirm something that is
-        fixed by construction. A caller that assembles through a precomputed fixed-pattern structure hands
-        back the **same** index arrays every time, so their identity settles it; the element-wise
-        comparison stays as the fallback for a caller that does not.
+        coupled Jacobian is tens of millions of elements compared twice.
+
+        The identity shortcut below is kept for a caller that hands back the *same* index arrays, but note
+        that pruning the stored zeros (:meth:`_live`) allocates fresh arrays per refresh, so on that path
+        the element-wise comparison is what runs. It costs a fraction of a second against a refresh
+        measured in tens, and it is not optional: the live pattern genuinely can move between states, which
+        is the case this has to detect rather than assume away.
         """
         if self._native:
             return False
