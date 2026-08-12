@@ -124,7 +124,7 @@ from aquaflux.solve.linear import restart_cycles  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _PROBE_BATCH_SIZE,
     _batched_jacobian_matvec,
-    _coupled_jacobian_colouring,
+    _coupled_jacobian_plan,
     _coupled_shift_policy,
     _frozen_shift_diagonal,
     _jacobian_matvec,
@@ -346,7 +346,7 @@ def march_solver(coupled, policy, state):
     )
 
 
-def materialize(coupled, state, colouring, structure, n_fields) -> sp.csr_matrix:
+def materialize(coupled, state, plan, structure, n_fields) -> sp.csr_matrix:
     """The **unshifted** field-major Jacobian at this iterate -- the one expensive step, done once.
 
     Unshifted because the operating points below differ only in the diagonal they add, and re-running a
@@ -355,8 +355,7 @@ def materialize(coupled, state, colouring, structure, n_fields) -> sp.csr_matrix
     started = time.time()
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
         lambda v: _jacobian_matvec(coupled, state, v),
-        colouring,
-        n_fields,
+        plan,
         lambda seeds: _batched_jacobian_matvec(coupled, state, seeds),
         _PROBE_BATCH_SIZE,
         structure,
@@ -813,8 +812,8 @@ def main():
     state = load_state(name)
     print(f"  {description}", flush=True)
 
-    colouring = _coupled_jacobian_colouring(coupled, 3)
-    structure = block_stencil_gather_map(colouring, n_fields)
+    plan = _coupled_jacobian_plan(coupled, 3)
+    structure = block_stencil_gather_map(plan)
     base = _coupled_shift_policy(coupled, state, "twolevel")
     rhs = -coupled.residual(state)
     op_shift = _frozen_shift_diagonal(base, march_beta, state) if march_beta > 0 else 0.0
@@ -832,7 +831,7 @@ def main():
         pc_base = _coupled_shift_policy(coupled, pc_state, "twolevel")
     else:
         pc_state, pc_base = state, base
-    jacobian = materialize(coupled, pc_state, colouring, structure, n_fields)
+    jacobian = materialize(coupled, pc_state, plan, structure, n_fields)
     pc_shift = (
         _frozen_shift_diagonal(pc_base, pc_beta, pc_state)
         if pc_beta > 0

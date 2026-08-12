@@ -50,7 +50,7 @@ from aquaflux.solve import (  # noqa: E402
     build_convection_hierarchy,
 )
 from aquaflux.turbulence.coupled import (  # noqa: E402
-    _coupled_jacobian_colouring,
+    _coupled_jacobian_plan,
     _coupled_shift_policy,
     _frozen_shift_diagonal,
 )
@@ -128,11 +128,12 @@ def main() -> None:
     print(f"{'=' * 88}\n{name}: {description}\nmarch shift {march_beta}\n{'=' * 88}", flush=True)
     state = load_state(name)
     base = _coupled_shift_policy(coupled, state, "twolevel")
+    plan = _coupled_jacobian_plan(coupled, 3)
     jacobian = materialize(
         coupled,
         state,
-        _coupled_jacobian_colouring(coupled, 3),
-        block_stencil_gather_map(_coupled_jacobian_colouring(coupled, 3), n_fields),
+        plan,
+        block_stencil_gather_map(plan),
         n_fields,
     )
     # THREE pairings, and the unshifted one is the point. The pseudo-transient shift adds `beta * d`

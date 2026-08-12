@@ -65,6 +65,7 @@ import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     AmgVCycle,
+    ColumnProbePlan,
     MonolithicAmgPreconditioner,
     block_stencil_gather_map,
     relative_residual_gmres,
@@ -75,7 +76,7 @@ from aquaflux.solve.linear import restart_cycles  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _PROBE_BATCH_SIZE,
     _batched_jacobian_matvec,
-    _coupled_jacobian_colouring,
+    _coupled_jacobian_plan,
     _coupled_shift_policy,
     _frozen_shift_diagonal,
     _jacobian_matvec,
@@ -151,7 +152,7 @@ _VANKA = {
 #: If this arm disagrees with the log by more than a cycle or two, stop and fix that before reading any
 #: other row.
 #: An arm may also change the Jacobian probe's **stencil reach** via a ``"reach"`` key, which is not a
-#: PETSc option: it changes the sparsity the preconditioner is built from, so it needs its own colouring
+#: PETSc option: it changes the sparsity the preconditioner is built from, so it needs its own plan
 #: and materialization. Reach 2 roughly halves the probe (112 colours -> 60), and the probe is 79 % of a
 #: refresh -- but it is measured to DIVERGE under smoothed aggregation (41 cycles at a true residual of
 #: 1.9, where reach 3 reaches 1.5e-10 in six). Plain aggregation is the one condition under which it has
@@ -276,14 +277,17 @@ def load_state(path: Path):
 
 
 def stencil(coupled, n_fields, reach, _cache={}):  # noqa: B006 - a deliberate per-process memo
-    """The colouring and gather map for one stencil reach, built once per reach."""
+    """The plan and gather map for one stencil reach, built once per reach."""
     if reach not in _cache:
-        colouring = _coupled_jacobian_colouring(coupled, reach)
-        _cache[reach] = (colouring, block_stencil_gather_map(colouring, n_fields))
+        plan = _coupled_jacobian_plan(coupled, reach)
+        _cache[reach] = (
+            plan,
+            block_stencil_gather_map(plan),
+        )
     return _cache[reach]
 
 
-def materialize(coupled, state, colouring, structure, n_fields, pc_shift):
+def materialize(coupled, state, plan, structure, n_fields, pc_shift):
     """The equilibrated cell-major operator every arm at this state is built from.
 
     Done once per state rather than per arm, for two reasons. The coloured jvp probe is the dominant
@@ -298,8 +302,7 @@ def materialize(coupled, state, colouring, structure, n_fields, pc_shift):
     """
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
         lambda v: _jacobian_matvec(coupled, state, v),
-        colouring,
-        n_fields,
+        plan,
         lambda seeds: _batched_jacobian_matvec(coupled, state, seeds),
         _PROBE_BATCH_SIZE,
         structure,
@@ -349,7 +352,7 @@ def arm(label, coupled, state, rhs, op_shift, assembled, n_fields, options, solv
     return cycles, true
 
 
-def probe_state(coupled, state, march_beta, label, colouring, structure, n_fields):
+def probe_state(coupled, state, march_beta, label, plan, structure, n_fields):
     """Run every arm at one state, reporting each and surviving any that fails."""
     base = _coupled_shift_policy(coupled, state, "twolevel")
     self_check = march_solver(coupled, base, state)
@@ -363,8 +366,8 @@ def probe_state(coupled, state, march_beta, label, colouring, structure, n_field
     )
     for name, options in ARMS:
         options = dict(options)
-        colouring, structure = stencil(coupled, n_fields, options.pop("reach", 3))
-        assembled = materialize(coupled, state, colouring, structure, n_fields, pc_shift)
+        plan, structure = stencil(coupled, n_fields, options.pop("reach", 3))
+        assembled = materialize(coupled, state, plan, structure, n_fields, pc_shift)
         # A raise in one arm -- a singular patch, a coarse-solve zero pivot -- must not take the arms
         # queued behind it, which by then represent most of the run's elapsed time.
         try:
@@ -406,8 +409,8 @@ def main():
         states = hard_states(int(sys.argv[1]) if len(sys.argv) > 1 else 1)
     coupled = compare.build_case()["coupled"]
     n_fields = coupled.layout.dim + 3
-    reach3 = _coupled_jacobian_colouring(coupled, 3)
-    struct3 = block_stencil_gather_map(reach3, n_fields)
+    reach3 = _coupled_jacobian_plan(coupled, 3)
+    struct3 = block_stencil_gather_map(ColumnProbePlan.uniform(reach3, n_fields))
     for path, march_beta, label in states:
         probe_state(coupled, load_state(path), march_beta, label, reach3, struct3, n_fields)
 

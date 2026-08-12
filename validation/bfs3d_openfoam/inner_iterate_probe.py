@@ -77,7 +77,7 @@ from aquaflux.turbulence import coupled_amg_continuation  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _PROBE_BATCH_SIZE,
     _batched_jacobian_matvec,
-    _coupled_jacobian_colouring,
+    _coupled_jacobian_plan,
     _coupled_shift_policy,
     _frozen_shift_diagonal,
     _jacobian_matvec,
@@ -141,7 +141,7 @@ def capture_inner_iterates(coupled, state, beta, seed_state):
     return records
 
 
-def solve_with(label, coupled, state, pc_state, beta, colouring, structure, n_fields):
+def solve_with(label, coupled, state, pc_state, beta, plan, structure, n_fields):
     """Solve the shifted system at ``state`` with the preconditioner built at ``pc_state``."""
     base = _coupled_shift_policy(coupled, state, "twolevel")
     op_shift = _frozen_shift_diagonal(base, beta, state)
@@ -149,8 +149,7 @@ def solve_with(label, coupled, state, pc_state, beta, colouring, structure, n_fi
     pc_shift = _frozen_shift_diagonal(pc_base, max(beta, FLOOR), pc_state)
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
         lambda v: _jacobian_matvec(coupled, pc_state, v),
-        colouring,
-        n_fields,
+        plan,
         lambda seeds: _batched_jacobian_matvec(coupled, pc_state, seeds),
         _PROBE_BATCH_SIZE,
         structure,
@@ -233,8 +232,8 @@ def main():
     )
     coupled = compare.build_case()["coupled"]
     n_fields = coupled.layout.dim + 3
-    colouring = _coupled_jacobian_colouring(coupled, 3)
-    structure = block_stencil_gather_map(colouring, n_fields)
+    plan = _coupled_jacobian_plan(coupled, 3)
+    structure = block_stencil_gather_map(plan)
 
     seed = jnp.asarray(np.load(CASE / f"checkpoints/state-{seed_index:05d}.npz")["state"])
     records = capture_inner_iterates(coupled, start, beta, seed)
@@ -254,7 +253,7 @@ def main():
         iterate,
         start,
         beta,
-        colouring,
+        plan,
         structure,
         n_fields,
     )
@@ -264,7 +263,7 @@ def main():
         iterate,
         iterate,
         beta,
-        colouring,
+        plan,
         structure,
         n_fields,
     )

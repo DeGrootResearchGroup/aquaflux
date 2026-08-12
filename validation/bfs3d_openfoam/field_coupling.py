@@ -39,7 +39,7 @@ sys.path.insert(0, str(CASE.parents[1]))
 
 import compare  # noqa: E402
 from aquaflux.solve import block_stencil_gather_map  # noqa: E402
-from aquaflux.turbulence.coupled import _coupled_jacobian_colouring  # noqa: E402
+from aquaflux.turbulence.coupled import _coupled_jacobian_plan  # noqa: E402
 from field_split_probe import STATES, load_state, materialize  # noqa: E402
 
 #: The field order of the flat coupled state, and the order the blocks are reported in.
@@ -150,9 +150,9 @@ def main() -> None:
     print(f"{'=' * 78}\n{name}: {description}\n{n_fields} fields over {n_cells} cells\n{'=' * 78}")
     state = load_state(name)
 
-    colouring = _coupled_jacobian_colouring(coupled, 3)
-    structure = block_stencil_gather_map(colouring, n_fields)
-    jacobian = materialize(coupled, state, colouring, structure, n_fields)
+    plan = _coupled_jacobian_plan(coupled, 3)
+    structure = block_stencil_gather_map(plan)
+    jacobian = materialize(coupled, state, plan, structure, n_fields)
 
     started = time.time()
     scaled = equilibrate(jacobian)

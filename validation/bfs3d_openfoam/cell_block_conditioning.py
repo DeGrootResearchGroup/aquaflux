@@ -52,12 +52,15 @@ sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
-from aquaflux.solve import MonolithicAmgPreconditioner, block_stencil_gather_map  # noqa: E402
+from aquaflux.solve import (  # noqa: E402
+    MonolithicAmgPreconditioner,
+    block_stencil_gather_map,
+)
 from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _PROBE_BATCH_SIZE,
     _batched_jacobian_matvec,
-    _coupled_jacobian_colouring,
+    _coupled_jacobian_plan,
     _coupled_shift_policy,
     _frozen_shift_diagonal,
     _jacobian_matvec,
@@ -98,13 +101,12 @@ def main():
     coupled = compare.build_case()["coupled"]
     n_fields = coupled.layout.dim + 3
     n_cells = coupled.layout.n_cells
-    colouring = _coupled_jacobian_colouring(coupled, 3)
-    structure = block_stencil_gather_map(colouring, n_fields)
+    plan = _coupled_jacobian_plan(coupled, 3)
+    structure = block_stencil_gather_map(plan)
     policy = _coupled_shift_policy(coupled, state, "twolevel")
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
         lambda v: _jacobian_matvec(coupled, state, v),
-        colouring,
-        n_fields,
+        plan,
         lambda seeds: _batched_jacobian_matvec(coupled, state, seeds),
         _PROBE_BATCH_SIZE,
         structure,

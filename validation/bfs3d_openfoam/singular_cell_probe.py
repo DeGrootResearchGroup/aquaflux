@@ -53,7 +53,7 @@ from aquaflux.solve import (  # noqa: E402
 )
 from aquaflux.turbulence import positive_k_limit  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
-    _coupled_jacobian_colouring,
+    _coupled_jacobian_plan,
     _coupled_shift_policy,
     _frozen_shift_diagonal,
     _jacobian_matvec,
@@ -174,7 +174,6 @@ def main() -> None:
 
     case = compare.build_case()
     coupled = case["coupled"]
-    n_fields = coupled.layout.dim + 3
     n_cells = coupled.layout.n_cells
     groups = FieldGroups(
         n_cells=n_cells, n_leading_fields=coupled.layout.dim + 1, n_trailing_fields=N_TRAILING
@@ -187,11 +186,11 @@ def main() -> None:
 
     # The block the smoother is handed, at the pairing the march uses: the operator at its own shift,
     # the preconditioner built at the floor.
-    colouring = _coupled_jacobian_colouring(coupled, 3)
-    structure = block_stencil_gather_map(colouring, n_fields)
+    plan = _coupled_jacobian_plan(coupled, 3)
+    structure = block_stencil_gather_map(plan)
     base = _coupled_shift_policy(coupled, state, "twolevel")
     jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
-        lambda v: _jacobian_matvec(coupled, state, v), colouring, n_fields, None, None, structure
+        lambda v: _jacobian_matvec(coupled, state, v), plan, None, None, structure
     )
     # SWEEP the shift rather than probing one value. The block is `J + beta d`, so beta props up the
     # very diagonal that makes each cell block invertible -- and the refresh that failed happens at the
