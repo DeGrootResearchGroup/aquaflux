@@ -34,6 +34,7 @@ from .diagnostics import coupled_equation_names, coupled_fields, coupled_residua
 from .coupled import (
     positive_k_limit,
     positive_k_projection,
+    CoupledJacobianProbe,
     CoupledRANS,
     CoupledRANSLayout,
     CoupledShiftPolicy,
@@ -85,6 +86,7 @@ from .transport import SSTClosureFields, SSTTurbulence, WallFixedResidual
 __all__ = [
     "AirAmgPreconditioner",
     "ConvectionAmgPreconditioner",
+    "CoupledJacobianProbe",
     "CoupledRANS",
     "CoupledRANSLayout",
     "CoupledShiftPolicy",

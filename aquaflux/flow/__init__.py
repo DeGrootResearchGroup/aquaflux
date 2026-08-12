@@ -8,7 +8,7 @@ flux to couple pressure implicitly. See :class:`MomentumContinuity`.
 
 from __future__ import annotations
 
-from .block_preconditioner import BlockPreconditioner
+from .block_preconditioner import BlockPreconditioner, frozen_momentum_diagonal_parts
 from .boundary import FlowBoundary, MovingWall, NoSlipWall, PressureOutlet, VelocityInlet
 from .continuation import (
     FrozenViscosityVelocityParts,
@@ -40,6 +40,7 @@ __all__ = [
     "bulk_velocity_flow_solve",
     "characteristic_velocity",
     "damped_jacobi_solve",
+    "frozen_momentum_diagonal_parts",
     "interior_mass_flux",
     "laplace_field",
     "momentum_continuation",

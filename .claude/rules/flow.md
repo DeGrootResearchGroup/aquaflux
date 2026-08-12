@@ -389,6 +389,17 @@ Engineering Principles.
   The low-level coefficient/Laplacian kernels stay in `preconditioner.py`. `a_P` comes from
   `MomentumContinuity.momentum_matrix_diagonal` / `BlockPreconditioner.frozen_momentum_diagonal`. `InnerSchurSolver` / `VelocityBlockSolver` stay abstract
   as the extension seam — when adding a strategy, add a subclass; do **not** grow an `if … == …` branch.
+  - **`frozen_momentum_diagonal_parts(assembler, state)` is a PUBLIC module-level function, not only a
+    `BlockPreconditioner` method (2026-08-12).** The convective/dissipative buckets a
+    `ShiftBasis` combines need **the assembler and nothing else** — the method has always just
+    delegated to it. Exposing it is what lets a pseudo-transient shift be built without a
+    preconditioner, and that is not cosmetic: `CoupledShiftPolicy` used to hold a whole
+    `BlockPreconditioner` to read these two arrays, so a monolithically-preconditioned coupled step
+    (which supplies its own inverse and never applies that one) built two multigrid hierarchies per
+    build that were never used — *and*, because their aggregation reads the operator's values, their
+    coarse-grid array shapes moved with the molecular viscosity, recompiling the whole coupled solve at
+    every Reynolds-continuation rung. See `.claude/rules/turbulence.md`. The method stays as the one
+    call site's convenience; the function is the one home.
 - **Frozen operators are assembled by `aquaflux/solve/frozen_operator.py`, not here (#45).** All three preconditioner hierarchies (pressure Schur, viscous velocity block,
   convection velocity block) build their scipy CSR operator with
   `convection_diffusion_operator(owner, nb, coefficient, n, *, flux=None, boundary_diagonal=None)` and

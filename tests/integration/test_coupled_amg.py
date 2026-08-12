@@ -200,3 +200,96 @@ def test_inner_refresh_rebuilds_at_the_iterate_it_is_handed(case, monkeypatch) -
     assert not np.allclose(
         built_at[0], 0.5 * np.asarray(active.shift_policy.base.shift_term(state).diagonal)
     )
+
+
+_RUNG_TRACES: list[int] = []
+
+
+class _CountingRans(eqx.Module):
+    """The coupled assembler, wrapped so each TRACE of its residual is countable.
+
+    A bound method of an ``equinox.Module`` is a pytree, exactly as ``coupled.residual`` is, so this
+    wrapper has the same cache-key behaviour as the real thing while making compilations observable --
+    which ``equinox``'s jit wrapper exposes no handle for.
+    """
+
+    inner: CoupledRANS
+
+    def residual(self, state: jnp.ndarray) -> jnp.ndarray:
+        _RUNG_TRACES.append(1)
+        return self.inner.residual(state)
+
+
+def _continuation_ready(momentum):
+    """The same assembler with an ARRAY viscosity -- the precondition a Reynolds continuation needs.
+
+    A Python float is not a JAX array, so it rides on the *static* side of a jitted function and is
+    compared by value; a rung that rescales it is a fresh compilation key for everything taking the
+    assembler as an argument, the coupled solve included. As an array the rungs differ in a leaf value
+    and share the compilation. Left to the caller rather than forced by the library, which deliberately
+    keeps property values plain scalars.
+    """
+    from aquaflux.properties import Constant
+
+    viscosity = momentum.properties.properties["viscosity"]
+    return eqx.tree_at(
+        lambda m: m.properties.properties["viscosity"],
+        momentum,
+        Constant(jnp.asarray(viscosity.value)),
+        is_leaf=lambda leaf: leaf is viscosity,
+    )
+
+
+@pytest.mark.slow
+def test_sharing_one_preconditioner_makes_a_new_rung_a_march_step_cache_hit() -> None:
+    """A Reynolds rung that reuses the V-cycle OBJECT must not recompile the coupled solve.
+
+    The preconditioner rides in a static field of the forward step, so it is part of the compiled
+    step's cache key and is compared by identity: a rung that fits its own V-cycle hands ``_march_step``
+    a new key and pays a full compilation of the coupled solve. That was the largest fixed overhead of
+    the three-dimensional march -- the three most expensive steps of every archived run were exactly the
+    three rung-first steps, at cycle counts no higher than their cheap ones.
+
+    Sharing the object is necessary and, on its own, **not sufficient**, which is why this test drives
+    the real builder rather than comparing two policies. Two further things had to hold, and both are
+    exercised here: the shift policy must not carry a block preconditioner it never applies (its
+    multigrid coarsening reads the operator's values, so its array shapes moved with the viscosity), and
+    the viscosity must be an array rather than a float (see :func:`_continuation_ready`).
+    """
+    from aquaflux.solve.march import _march_step
+    from aquaflux.turbulence import CoupledJacobianProbe, hybrid_initialize
+
+    momentum, turbulence = _channel()
+    momentum = _continuation_ready(momentum)
+    coupled = CoupledRANS.build(momentum, turbulence)
+    state = coupled.pack_state(*hybrid_initialize(momentum, turbulence))
+    # The next rung of a ramp: the same case at a tenth of the Reynolds number.
+    companion = coupled.with_scaled_molecular_viscosity(10.0)
+    probe = CoupledJacobianProbe.build(coupled)
+
+    def build(assembler, preconditioner=None):
+        return coupled_amg_continuation(
+            assembler, state, inner_steps=2, probe=probe, preconditioner=preconditioner
+        )
+
+    def run(assembler, step) -> int:
+        before = len(_RUNG_TRACES)
+        _march_step(
+            step,
+            _CountingRans(inner=assembler).residual,
+            state,
+            jnp.asarray(1.0),
+            step.default_solver(),
+        )
+        return len(_RUNG_TRACES) - before
+
+    _RUNG_TRACES.clear()
+    # The control: a fresh V-cycle per rung, which is what the driver used to do.
+    assert run(coupled, build(coupled)) > 0  # the first rung compiles either way
+    assert run(companion, build(companion)) > 0  # ...and so does the second, for the V-cycle alone
+
+    # Now the same two rungs sharing one V-cycle. The first still compiles (a different object again
+    # from the control's), and the second is the assertion this test exists for.
+    shared = build(coupled)
+    assert run(coupled, shared) > 0
+    assert run(companion, build(companion, preconditioner=shared.shift_policy.preconditioner)) == 0
