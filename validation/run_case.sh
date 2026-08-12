@@ -57,6 +57,42 @@ print(int(free * size / 1e9))
 
 load_1min() { uptime | sed 's/.*load averages*: *//' | awk '{print $1}' | tr -d ','; }
 
+# How long the machine slept since a given "YYYY-MM-DD HH:MM:SS", and how many times.
+#
+# `caffeinate` holds off IDLE sleep, but it does NOT stop a deliberate suspend -- closing the lid puts
+# the machine out regardless, and sometimes a run has to survive a commute. The run keeps converging
+# correctly across that, so nothing in the march log looks wrong; only its WALL CLOCK is silently
+# wrong, having counted the sleep as compute. A run measured that way is void for cost and looks
+# identical to one that is not. So the run records its own sleep, and a contaminated run declares
+# itself rather than relying on someone thinking to check afterwards.
+#
+# Counts each Sleep..(Wake|DarkWake) pair. DarkWake resumes enough of the machine for a compute
+# process to make progress, so treating it as the end of a sleep UNDERSTATES the loss slightly --
+# which is the right direction for a warning that exists to make you distrust a number.
+sleep_since() {
+  python3 - "$1" <<'PYEOF' 2>/dev/null || echo "0 0"
+import datetime as dt, re, subprocess, sys
+start = dt.datetime.strptime(sys.argv[1], "%Y-%m-%d %H:%M:%S")
+try:
+    out = subprocess.run(["pmset", "-g", "log"], capture_output=True, text=True, timeout=30).stdout
+except Exception:
+    print("0 0"); raise SystemExit
+# pmset states each sleep's DURATION on its own Sleep line ("... 780 secs"), which is its own
+# accounting and is what to trust. Pairing Sleep with the following Wake looks equivalent and is not:
+# the log interleaves DarkWake and maintenance events, so the pairing silently under-counts -- an
+# earlier version of this returned 15 s for a window containing an 18-minute suspend.
+total = count = 0
+for line in out.splitlines():
+    m = re.match(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s[-+]\d+\s+Sleep\s", line)
+    if not m or dt.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S") < start:
+        continue
+    secs = re.search(r"(\d+)\s+secs\s*$", line)
+    if secs:
+        total += int(secs.group(1)); count += 1
+print(f"{count} {total}")
+PYEOF
+}
+
 # The PID of a live run, or empty. Reads the run-file rather than scanning the process table: a
 # `pgrep -f <script>` matches any shell whose own command line mentions the script, including the
 # waiter doing the matching, which is a deadlock that has happened here.
@@ -137,6 +173,7 @@ fi
 
 # --- launch ----------------------------------------------------------------------------------------
 STAMP=$(date +%Y%m%d-%H%M%S)
+STARTED_AT=$(date "+%Y-%m-%d %H:%M:%S")
 LOG="$(cd "$(dirname "$SCRIPT")" && pwd)/run-${STAMP}.log"
 
 # `caffeinate -ims` holds the machine awake for the run's lifetime. A march that spans a sleep keeps
@@ -157,7 +194,7 @@ PID=$!
   echo "pid=$PID"
   echo "script=$SCRIPT"
   echo "log=$LOG"
-  echo "started=$(date '+%Y-%m-%d %H:%M:%S')"
+  echo "started=$STARTED_AT"
   echo "worktree=$(pwd)"
   echo "branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '(not a git tree)')"
   echo "commit=$(git rev-parse --short HEAD 2>/dev/null || echo '-')"
@@ -165,6 +202,21 @@ PID=$!
   # produced logs identical to the character, leaving launch order as the only way to tell them apart.
   env | grep -E '^(BFS3D|AQUAFLUX)_' | sort | sed 's/^/env: /' || true
 } > "$RUN_FILE"
+
+# Appended to the run's OWN log, not only printed, so the warning travels with the artifact it
+# invalidates -- a log read months later carries its own provenance.
+report_sleep() {
+  local started="$1" log="$2" n secs
+  read -r n secs <<< "$(sleep_since "$started")"
+  if [ "${n:-0}" -gt 0 ] 2>/dev/null && [ "${secs:-0}" -gt 60 ] 2>/dev/null; then
+    {
+      echo
+      echo "[!] THIS RUN SPANNED $n MACHINE SLEEP(S), ~$((secs / 60)) MIN TOTAL."
+      echo "[!] Its wall-clock columns counted that as compute and are VOID for cost comparison."
+      echo "[!] Step counts, cycle counts and residuals are unaffected -- use those."
+    } | tee -a "$log"
+  fi
+}
 
 echo "launched pid $PID"
 sed 's/^/  /' "$RUN_FILE"
@@ -176,4 +228,5 @@ if [ "$WANT_WAIT" -eq 1 ]; then
   while kill -0 "$PID" 2>/dev/null; do sleep 20; done
   echo "case exited"
   tail -5 "$LOG"
+  report_sleep "$STARTED_AT" "$LOG"
 fi
