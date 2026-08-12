@@ -65,7 +65,7 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 | aggregation | plain (`pc_gamg_agg_nsmooths=0`) | plain | `amg_preconditioner.py` |
 | field split | `field_split=False` | **True** | `compare.py` |
 | stencil reach | `stencil_reach=3` | 3 | — |
-| probe column reach | `column_reach=None` (uniform) | **(3,3,3,2,2,2)** | `compare.py` `COLUMN_REACH` |
+| probe column reach | `column_reach=None` (uniform) | **(3,3,3,3,2,2)** | `compare.py` `COLUMN_REACH` |
 
 **The three coupled forward solvers — always name which path you mean.** There is no
 `_COUPLED_AMG_FORWARD_SOLVER` symbol.
@@ -245,7 +245,13 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       small term. The recorded "16 vs 4: ~2.2 GB vs ~0.7 GB" was measured against the old allocations and
       **no longer describes this code**; re-measure before using it.
 
-    - **✅ PER-COLUMN PROBING REACH — 564 → 399 probes on `bfs3d`, EXACT (BUILT, 2026-08-11).** The probe
+    - **⚠️⚠️ PER-COLUMN PROBING REACH — `(3,3,3,2,2,2)` DIVERGES THE CASE ON ITS FIRST STEP. The shipped
+      value is now `(3,3,3,3,2,2)`; `p` must stay at reach 3 (measured 2026-08-12, issue #191).** Read
+      the correction at the end of this bullet before using anything in it. The 564 → 399 figure and the
+      5.7e-16 Frobenius agreement below are both real and both fail to predict the divergence, which is
+      the instructive part.
+
+      The probe
       is charged per (colour, **column** field), so the reach is worth choosing per column rather than
       once. Measured with `validation/bfs3d_openfoam/probe_reach_audit.py` at three states — a cold inner
       iterate (`inner-00003-02`), a developed step (`state-00072`, step 33, ‖R‖ 3.1e-6, shift 0.0068) and
@@ -258,17 +264,40 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       | hardest | 1.4e-04 | 1.1e-05 | 3.4e-05 | **9.8e-16** | **1.5e-17** | **1.2e-17** |
       | cold | ~1e-16 | ~1e-16 | ~1e-16 | ~1e-15 | ~1e-30 | ~1e-30 |
 
-      **`p`, `k` and `ω` close inside reach 2; the velocities do not** (and at a cold state nothing
-      reaches 3 — the velocity content appears only as the flow develops). So `column_reach = (3,3,3,2,2,2)`
-      with the pattern held at reach 3: **399 probes against 564**, the assembled sparsity byte-identical
-      (1 311 372 cell-blocks either way), and the two Jacobians agreeing to **5.7e-16 relative Frobenius**
-      (max abs 6.3e-15 over 8.4M of 47.2M entries) — float64 rounding from different seed vectors, not a
-      modelling difference. Note this is **exact to machine precision, NOT bit-identical**; a different
-      seed changes the rounding in the residual evaluation.
+      **By this measure `p`, `k` and `ω` all close inside reach 2 and the velocities do not — and acting
+      on that for `p` is what diverges the case.** The table is kept because it is the evidence that a
+      column-norm measure does NOT license shortening a column; it is not a licence itself. The shipped
+      value is `(3,3,3,3,2,2)`, with the pattern held at reach 3, giving **454 probes against 564** and
+      a **−16 % probe cost per build**.
       **Why it is a case property and not a library constant:** it follows from the *schemes*. First-order
       upwind on k/ω plus a non-orthogonal diffusion correction reaches 2; the velocity columns carry the
       limited second-order upwind reconstruction out to 3. Re-measure for any case that changes them —
       the library default (`column_reach=None`) probes every column at `stencil_reach`, unchanged.
+
+      **⚠️ THE CORRECTION (2026-08-12).** At `(3,3,3,2,2,2)` the `bfs3d` march takes **44 restart cycles
+      at step 1 instead of 3**, α collapses to 0.000, and by step 2 β is at its 16.0 ceiling with ‖R‖ an
+      order of magnitude ABOVE its start. The p row is the signature: **1.402e-01 after step one against
+      6.217e-07**. Restoring p to reach 3 — `(3,3,3,3,2,2)` — reproduces the uniform-reach trajectory
+      *exactly* (identical ‖R‖, cycles, β and α over the first 24 steps to the log's four figures) and
+      keeps a **−16 % probe cost per build** (8.4 s against 10.0 s; 13.9 s at the pre-#188 baseline).
+      Verified 67 steps / 319 cycles / 1960 s, mid-span `x_r/h` 8.36 unchanged.
+
+      **Why the audit above did not catch it, as a HYPOTHESIS and not a measurement.** The shell norm is
+      a **column-relative** quantity — the share of a column's norm beyond the reach — while the damage
+      from folding is **entry-relative**: the aliased mass lands on particular positions, and what
+      matters is its size against *the entry it lands on*. In an incompressible collocated saddle the
+      (p,p) block is near-zero by construction (it carries only the Rhie–Chow damping), so folding even
+      1e-15 of column mass onto it can be a large relative perturbation of exactly the entries an
+      incomplete LU turns into pivots. That would explain why p audits as clean at 9.8e-16 and still
+      breaks the smoother, while k and ω — whose columns are read only by the turbulence rows, under a
+      per-cell block inverse — are genuinely inert. **This is not established.** What would settle it is
+      an entry-relative audit (folded mass over the magnitude of the receiving entry, per block) rather
+      than a column-norm one; `probe_reach_audit.py` reports the column-relative measure only.
+
+      **The safe reading until then: a shell norm licenses shortening a column only when that column's
+      entries are not themselves near-zero.** Shortening `k`/`ω` is measured safe on this case;
+      shortening `p` is measured catastrophic on this case; the two are not distinguished by any number
+      in the table above.
       **⚠️ A SHORT REACH CORRUPTS RATHER THAN TRUNCATES, and this is the trap the design turns on.** A
       colouring is collision-free only for the pattern it was built at, so two cells sharing a reach-2
       colour may still both couple to a common row at distance 3; the response then holds the *sum* and

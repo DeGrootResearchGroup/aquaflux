@@ -164,11 +164,48 @@ FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT, PC_BETA_FLOOR = 0, 4, 2000, 0.05
 # couplings corrupts its near entries rather than truncating them.
 #
 # 564 probes -> 399 (-29%); the two Jacobians agree to 5.7e-16 relative Frobenius, i.e. float64 rounding.
-COLUMN_REACH = (
-    None
-    if os.environ.get("BFS3D_COLUMN_REACH", "1") in ("", "0")
-    else (3, 3, 3, 2, 2, 2)  # [u, v, w, p, k, omega]
-)
+#
+# ⚠️ (3, 3, 3, 2, 2, 2) DIVERGES THIS CASE ON ITS FIRST STEP, and the measurement above does not catch
+# it. At the rung-1 cold iterate the default march takes 44 restart cycles instead of 3, the step length
+# collapses to 0.000, and by step two the shift is at its 16.0 ceiling with the residual an order of
+# magnitude ABOVE its start. The p row is the tell: 1.402e-01 after step one against 6.217e-07.
+#
+# The mechanism is NOT truncation, and that distinction is the whole reason the Frobenius check above
+# passes while the march fails. A colouring is collision-free only for the pattern it was built from, so
+# two cells sharing a reach-two colour may still both couple to one row at distance three; the probe
+# response is their SUM, and de-compression charges all of it to the single column inside the reach-two
+# pattern. A short-probed column therefore has its NEAR entries corrupted rather than its far entries
+# dropped. The licence for shortening a column is that its mass beyond the shortened reach is negligible
+# at every state the march visits -- and the shell norms above were measured at three states that do not
+# include this one.
+#
+# So p is restored to reach three and only k and omega are shortened. That split follows the SPLIT
+# PRECONDITIONER rather than the schemes: with the flow block leading, the field split applies
+# `d R_turb / d flow` and never `d R_flow / d turb`, so the turbulence COLUMNS are read only by the
+# turbulence ROWS -- whose hierarchy is smoothed by a per-cell block inverse that sees a cell's own
+# 2x2 block and nothing else. Corruption confined to those columns cannot reach the saddle. The p
+# column has no such shelter: it feeds the [u,v,w,p] block, whose smoother is an incomplete LU.
+#
+# `BFS3D_COLUMN_REACH` takes a comma-separated reach per column ("3,3,3,3,2,2"), or `0` for a uniform
+# reach-three probe. Re-measure before shortening any column on a case that changes the schemes or the
+# split; none of this is inheritable.
+_DEFAULT_COLUMN_REACH = "3,3,3,3,2,2"  # [u, v, w, p, k, omega]
+_column_reach = os.environ.get("BFS3D_COLUMN_REACH", _DEFAULT_COLUMN_REACH)
+if _column_reach in ("", "0"):
+    COLUMN_REACH = None  # uniform, at the widest reach the assembler asks for
+else:
+    try:
+        COLUMN_REACH = tuple(int(r) for r in _column_reach.split(","))
+    except ValueError:
+        raise SystemExit(
+            f"BFS3D_COLUMN_REACH={_column_reach!r} is not a comma-separated list of integers "
+            f'(e.g. "{_DEFAULT_COLUMN_REACH}"), nor "0" for a uniform reach.'
+        ) from None
+    if len(COLUMN_REACH) != 6:
+        raise SystemExit(
+            f"BFS3D_COLUMN_REACH={_column_reach!r} gives {len(COLUMN_REACH)} reaches; this case has "
+            f"six columns [u, v, w, p, k, omega]."
+        )
 # Split the preconditioner's hierarchy in two -- the [u,v,w,p] saddle and the [k,omega] transported
 # scalars each get their own, with one triangle of the coupling between them retained exactly -- rather
 # than putting all six fields through one hierarchy with one smoother. ON, because it is measured 31%
