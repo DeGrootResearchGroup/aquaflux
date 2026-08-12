@@ -629,10 +629,17 @@ def materialize_block_jacobian(
     structure : ProbeGather, optional
         A precomputed :func:`block_stencil_gather_map` for this plan. When given, each chunk's responses
         are scattered into the **fixed full-pattern** CSR as they are computed and then dropped -- so the
-        materialize never holds more than one chunk, and ``eliminate_zeros`` is **not** applied (the
-        structure stays fixed, which an in-place multigrid refactor needs; the explicit zeros are harmless
-        to aggregation but would be fill for an incomplete factorization, so this path is
-        multigrid-only).
+        materialize never holds more than one chunk, and ``eliminate_zeros`` is **not** applied, so the
+        structure stays fixed -- which an in-place multigrid refactor needs.
+
+        **A stored exactly-zero entry is a fill slot for any incomplete factorization, so it must not reach
+        one.** On this path the stored zeros are a large share of the pattern (8.0M of 47.2M on a 23k-cell
+        three-dimensional coupled mesh), and handing them to the multigrid's incomplete-LU level smoother
+        stops the zero-shift operator converging. They are pruned at the boundary where the operator
+        reaches the factorization
+        (:meth:`~aquaflux.solve.amg_preconditioner.AmgVCycle._live`) rather than here, so this path stays
+        fixed-pattern; a consumer that factors the matrix *without* going through that boundary must prune
+        it first.
 
     Returns
     -------
