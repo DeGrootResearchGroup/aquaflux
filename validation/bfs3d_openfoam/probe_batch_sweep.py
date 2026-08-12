@@ -26,6 +26,7 @@ from __future__ import annotations
 import gc
 import os
 import resource
+import subprocess
 import sys
 import time
 import tracemalloc
@@ -63,6 +64,19 @@ def peak_rss_mb():
     return rss / 1e6 if sys.platform == "darwin" else rss / 1e3  # bytes on macOS, kB on Linux
 
 
+def current_rss_mb():
+    """The process's resident set right now, in MB.
+
+    The **guard** has to read this rather than the high-water mark: the one-time structure build peaks
+    far above anything the sweep itself reaches, so a ceiling compared against the maximum would trip
+    before the first batch and stay tripped, which is precisely what it did the first time.
+    """
+    out = subprocess.run(
+        ["ps", "-o", "rss=", "-p", str(os.getpid())], capture_output=True, text=True
+    )
+    return int(out.stdout.strip()) / 1024  # ps reports kB on both macOS and Linux
+
+
 def main():
     name = sys.argv[1] if len(sys.argv) > 1 else "state-00077"
     case = compare.build_case()
@@ -78,6 +92,15 @@ def main():
     print(
         f"[plan] reach {plan.reach}, {plan.n_probes} probes, {structure.nnz / 1e6:.1f}M nnz"
         f"  (matrix data alone {structure.nnz * 8 / 1e6:.0f} MB)",
+        flush=True,
+    )
+    # Reported because it dwarfs everything the sweep below measures, and it is NOT the probe: attributed
+    # separately, the case assembly is ~6.7 GB of it, the gather map ~1.2 GB, and a materialize 0.4 GB. So
+    # a run's memory ceiling is set by building the case, not by probing it -- worth knowing before
+    # sizing anything against "available" memory.
+    print(
+        f"[setup] peaked at {peak_rss_mb():.0f} MB building the case, the plan and the structure;"
+        f" resident now {current_rss_mb():.0f} MB",
         flush=True,
     )
 
@@ -96,9 +119,9 @@ def main():
         # Stop climbing before the machine starts swapping rather than after. A materialize is already
         # the largest allocation in the process, and this sweep deliberately makes it larger; running a
         # 3D case into swap does not merely slow the sweep, it takes the whole machine down with it.
-        if peak_rss_mb() > RSS_CEILING_MB:
+        if current_rss_mb() > RSS_CEILING_MB:
             print(
-                f"  stopping before batch {batch}: resident set is {peak_rss_mb():.0f} MB,"
+                f"  stopping before batch {batch}: resident set is {current_rss_mb():.0f} MB,"
                 f" over the {RSS_CEILING_MB:.0f} MB ceiling",
                 flush=True,
             )

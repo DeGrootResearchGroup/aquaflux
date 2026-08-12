@@ -350,13 +350,39 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       single time; `probe_batch_size` chunks it for memory) runs the coloured probes as a few fused passes
       instead of a Python loop of separate calls. Measured 22.4→14.0 s (~1.6×) on `bfs3d` — modest because
       CPU forward-AD does not vectorize across the batch like a GPU (the win is dispatch amortization). For
-      the SAME reason the chunk is kept **small** (`_PROBE_BATCH_SIZE = 4`, not 16): a larger batch holds
-      more simultaneous forward-AD tapes for almost no time gain. ⚠️ **The peak figures that justified the
-      4 — "16 vs 4: ~2.2 GB vs ~0.7 GB", against ~33 s vs ~36 s — were measured when the seed set and the
-      response array dominated the peak and NEITHER scaled with the batch. Both are gone, so those numbers
-      no longer describe this code and the default is unre-justified.** Re-measure with
-      `validation/bfs3d_openfoam/probe_batch_sweep.py`, which reports wall, CPU, Python-side peak and
-      process resident set together — either axis alone picks the wrong number.
+      the SAME reason the chunk was kept **small** (`_PROBE_BATCH_SIZE = 4`, not 16): a larger batch holds
+      more simultaneous forward-AD tapes.
+      **✅ RE-MEASURED, and the memory half of that trade NO LONGER EXISTS (2026-08-11,
+      `validation/bfs3d_openfoam/probe_batch_sweep.py`; `bfs3d` `state-00077`, 399 probes at the
+      per-column reach, 47.2M nnz, warm-up discarded per chunk shape, min of 3):**
+
+      | batch | wall (s) | cpu (s) | python peak | vs batch 1 |
+      |---|---|---|---|---|
+      | 1 | 11.73 | 91.37 | 380 MB | 1.00× |
+      | 2 | 8.42 | 70.29 | 383 MB | 1.39× |
+      | **4 (shipped)** | 6.69 | 53.89 | 388 MB | 1.75× |
+      | **8** | 5.94 | **46.35** | 399 MB | 1.98× |
+      | 16 | **5.81** | 49.13 | 419 MB | 2.02× |
+      | 32 | 6.47 | 52.33 | 460 MB | 1.81× |
+
+      - **Memory barely moves: 380 → 460 MB across batch 1 → 32**, about 2.5 MB per unit of batch. The
+        old "16 vs 4: ~2.2 GB vs ~0.7 GB" was the seed set and the response array, and **neither ever
+        scaled with the batch**; both are gone. So the memory argument for a small chunk is void.
+      - **The curve has an interior optimum and TURNS: 32 is worse than 16** (6.47 s against 5.81 s), so
+        "bigger is better up to memory" was never the shape. CPU time — the cleaner axis on a shared
+        machine — bottoms at **8**.
+      - **The shipped 4 leaves ~11–13 % of the probe on the table** for ~11–31 MB. Changing the default
+        is a shipped-default decision and has not been taken here.
+      **⚠️ AUTO-SIZING THE BATCH TO AVAILABLE MEMORY IS NOT WORTH BUILDING, and this is why.** The
+      motivation was that the right chunk depends on machine state and case size. At 2.5 MB per unit it
+      does not: any sane fixed value is safe, and the constraint that motivated the mechanism was an
+      artifact of allocations that have since been removed. Fix the allocation, not the knob.
+      **⚠️ WHERE THE MEMORY ACTUALLY GOES, measured by attribution rather than assumed:** peak RSS is
+      149 MB after imports, **6889 MB after `build_case`**, 7154 MB after the colouring and plan, 8359 MB
+      after the gather map. So the case assembly is ~6.7 GB, the gather map ~1.2 GB, and a whole
+      materialize 0.4 GB. **A run's memory ceiling is set by building the case, not by probing it** — the
+      probe is now a rounding error against it, and an initial reading that blamed the structure build was
+      wrong.
       **(2) Gather de-compression** — `block_stencil_gather_map(plan)` precomputes, once, the
       **fixed full-pattern** CSR structure and the de-compression that fills it (no scatter loop, no
       per-materialize CSR re-sort), passed as `structure=`. ⚠️ It used to return an
