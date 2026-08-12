@@ -393,8 +393,14 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
         assignment for the shift) — see the equilibration entry under *Faithful smoothed aggregation*.
         **Confirmed:** with the fix, `(3,3,3,2,2,2)` reproduces the uniform-reach baseline in **every
         reported digit** at rung-1 step 1 — `‖R₀‖` 3.2901e-01, β 0.5000, 4 inner, **3 cycles**, `‖R‖`
-        2.046e-01, α 1.000, no flags. So `p` at reach 2 is no longer a correctness constraint. The
-        shipped default stays `(3,3,3,3,2,2)`; changing it is a separate decision and wants a full march.
+        2.046e-01, α 1.000, no flags. **And the FULL march converges to the recorded root in every
+        reported digit** — 67 steps, 320 cycles, 4 escalations, final ‖R‖ **3.586e-06**, mid-span `x_r/h`
+        **8.3611**, `ux`/`uy`/`uz` rel-L2 0.0616 / 0.0072 / 0.0061, ν_t peak **150.1071** — against the
+        same arm previously diverging at step 1 and pinned at the β = 16.0 ceiling by step 2. So `p` at
+        reach 2 is no longer a correctness constraint and `column_reach` is the no-op it was documented
+        to be. ⚠️ That run's **wall clock is void** (its early steps ran against the test tiers); its step
+        and cycle counts are not. The shipped default stays `(3,3,3,3,2,2)` — moving it is a separate
+        decision, worth 454 → 399 probes, and wants a clean-machine cost comparison rather than this run.
       - ⚠️ **How it got through, which is the transferable part: the audit that licensed it AND the gate
         that verified it both collapse over row fields**, on a matrix whose row norms differ by ~8 orders
         (k row 8.8e-06, ω row 1.4e+03). `column_reach_ladder` takes a whole column block;
