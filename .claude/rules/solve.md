@@ -1780,6 +1780,49 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     destruction term runs on the `k`-independent viscous ω branch, whose sign pushes `k` back up.
     **Re-check that before floating this limiter on another field.**
 
+  **✅ BUILT AND MEASURED (2026-08-11): the per-cell PROJECTION removes the cap's failure mode entirely
+  and does NOT make the case faster. Read this before proposing anything else aimed at the limiter.**
+  `PositiveBlockProjection` clips each cell's own correction, `delta_i <- max(delta_i, -tau(k_i + floor))`,
+  instead of scaling the whole step by the worst cell; applied before the cap, which then computes
+  exactly `1`. It answers Mode 1 structurally rather than by decades of headroom, since a floored *cap*
+  only postpones the ratchet — `(k_new + floor) = (1 - tau)(k + floor)` per capped step, whatever the
+  floor.
+
+  *Configuration, both arms:* `bfs3d`, native trailing inverse, `zerogradient` k wall, floor 1e-08,
+  `equilibrate=False`, `refresh_on_cycles` 3, ILU(0) ×4, trailing sweeps 1, `coarse_eq_limit` 2000,
+  restart 15, two rungs. **Both predate the probe/memory work merged in #188/#189**, so their wall
+  clocks are not comparable to anything measured after it.
+
+  | | projection | cap only |
+  |---|---|---|
+  | steps | 65 | 67 |
+  | **Krylov cycles** | **329** | **329** |
+  | wall | 2021 s | 2124 s |
+  | positivity-limited (`L`) steps | **0** | 22 |
+  | escalations | 5 | 4 |
+  | mid-span `x_r/h` | 8.36 | 8.36 |
+
+  **The cycle count is IDENTICAL, which is the number to read.** Wall differs by 4.8 % between runs
+  taken at different machine loads and this case has no measured run-to-run spread; the linear-solve
+  work did not move. **Do not cite this as a speed-up.**
+
+  **Why it bought nothing: the cap was one DOOR into the cascade, not its cause.** The mechanism worked
+  exactly as designed — the cap never binds once, against 22 times — and the same cascade reappeared
+  through the line search's descent test instead. Rung 3 steps 53–55: α 0.000 twice with **no `L`
+  flag**, β driven 0.0548 → 0.8769 (**16×**), cured at 0.8769, then six steps walking back to 0.0770 —
+  the walk-back law again, `log(0.8769/0.0770)/log(1.5)` = **6.00** predicted, **6** observed. This is
+  Mode 2 above, and it confirms that entry empirically: no treatment of the *limiter* reaches it.
+
+  **So the lever is the RETURN, not the trigger and not the constraint.** Three separate attacks on the
+  trigger side are now measured or refuted — gating `retry_on_alpha` on `binding_limit`, raising the
+  floor, and removing the cap's global coupling altogether — and none moved the cycle count.
+
+  **Keep the projection for ROBUSTNESS, not speed.** It eliminates the positivity lock-up outright (the
+  mode that killed the 77-step march and the β = 16 runaways), and it is off by default and
+  byte-identical off (`positivity_projection=False`, `BFS3D_K_POSITIVITY_PROJECTION` unset). It is not
+  *dominated* — it removes a failure mode nothing else does — so it is not a deletion candidate, but it
+  must not be sold as a performance feature.
+
   **⚠️ REFUTED — "rescaling promotes collapsed-`k` rows and inflates their corrections" is FALSE. Do not
   re-propose it (measured 2026-08-11, `k_row_scale_probe.py`).** The proposed explanation for why the
   `equilibrate` flag changes the step length was: symmetric rescaling divides row `i` by `sqrt(A_ii)`; a
