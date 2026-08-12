@@ -929,3 +929,137 @@ def test_the_k_positivity_builders_address_the_k_block_and_defer_to_the_transfor
     logged = SimpleNamespace(k_transform=LogScalars(), layout=SimpleNamespace(n_cells=n, dim=dim))
     assert positive_k_limit(logged) is None
     assert positive_k_projection(logged) is None
+
+
+def test_the_probe_is_the_same_for_every_reynolds_rung() -> None:
+    """The colouring plan and its de-compression map depend on the MESH, never on the viscosity.
+
+    That is the whole licence for building one :class:`CoupledJacobianProbe` and handing it to every
+    continuation rung's step and to the refresh hook beside it. Without it a three-rung ramp built six
+    copies of the largest allocation a three-dimensional case makes, and the assertion that they would
+    all have been identical was never checked.
+    """
+    import numpy as np
+    from aquaflux.turbulence import CoupledJacobianProbe
+
+    _, coupled = _cavity()
+    probe = CoupledJacobianProbe.build(coupled, stencil_reach=2)
+    scaled = CoupledJacobianProbe.build(coupled.with_scaled_molecular_viscosity(100.0), 2)
+
+    assert probe.plan.n_probes == scaled.plan.n_probes
+    assert probe.plan.n_fields == scaled.plan.n_fields
+    assert np.array_equal(probe.structure.indptr, scaled.structure.indptr)
+    assert np.array_equal(probe.structure.indices, scaled.structure.indices)
+
+
+def test_the_materialize_gate_forgets_its_reference_on_reset() -> None:
+    """``reset`` discards the drift reference, so a rebound hook cannot compare across two problems.
+
+    The gate measures how far the eddy viscosity has moved since the Jacobian was last probed. Point the
+    hook at the next Reynolds rung's companion and that reference belongs to a different Reynolds
+    number, so the drift it reports is a viscosity difference rather than flow development. Resetting
+    makes the next call re-seed against the state it is actually handed.
+    """
+    from aquaflux.turbulence.coupled import _materialize_gate
+
+    seen: list[float] = []
+
+    def drift_factory(reference):
+        seen.append(float(reference))
+        return lambda state: jnp.abs(state - reference)
+
+    gate = _materialize_gate(drift_factory, materialize_drift=0.5, materialize_every=None)
+
+    assert gate(jnp.asarray(1.0)) is False  # seeds at 1.0; zero drift against its own reference
+    assert seen == [1.0]
+    assert gate(jnp.asarray(1.2)) is False  # still inside the threshold, reference unchanged
+    assert seen == [1.0]
+
+    gate.reset()
+    assert gate(jnp.asarray(1.2)) is False  # re-seeded at 1.2 rather than fired against the old 1.0
+    assert seen == [1.0, 1.2]
+    assert gate(jnp.asarray(2.0)) is True  # ...and it still fires on a genuine move from there
+
+
+class _ScalarRans(eqx.Module):
+    """A one-line stand-in assembler whose Jacobian is a scalar, so a rebind is visible in one apply."""
+
+    gain: jnp.ndarray
+
+    def residual(self, state: jnp.ndarray) -> jnp.ndarray:
+        return self.gain * state
+
+
+class _RecordingPreconditioner:
+    """A frozen inverse that records what each refresh was asked to build, and builds nothing.
+
+    Deliberately does NOT expose ``refresh_shift_in_place``: without a cheap branch every refresh is a
+    full re-materialize, which is the decision under test here.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def refresh_in_place(self, matvec, plan, shift_diagonal, **_kwargs):
+        self.calls.append({"matvec": matvec, "shift": shift_diagonal})
+        return ()
+
+
+def _stub_step(preconditioner, beta, diagonal):
+    """The smallest forward step the refresh hook reads: a shift strength, a policy and its diagonal."""
+    from types import SimpleNamespace
+
+    from aquaflux.solve import ShiftTerm
+
+    base = SimpleNamespace(shift_term=lambda _phi: ShiftTerm(diagonal, lambda _relaxation: None))
+    return SimpleNamespace(
+        relaxation_schedule=SimpleNamespace(beta=beta),
+        shift_policy=SimpleNamespace(preconditioner=preconditioner, base=base),
+    )
+
+
+def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> None:
+    """One refresh hook can serve a whole Reynolds ramp, which is what lets the ramp share one V-cycle.
+
+    A rung boundary is invisible to both gates -- one watches the shift strength, the other the eddy
+    viscosity's drift *within* one case -- so a hook whose gate had gone quiet would leave the next rung
+    solving against a V-cycle fitted to the previous rung's viscosity. ``rebind`` therefore does two
+    things, and both are asserted: the Jacobian probe starts reporting the NEW companion's derivative,
+    and the next refresh is a full re-materialize whatever the gates make of it.
+    """
+    from types import SimpleNamespace
+
+    import numpy as np
+    from aquaflux.turbulence.coupled import _beta_tracking_refresh, _staleness_beta_gate
+
+    state = jnp.linspace(1.0, 2.0, 5)
+    diagonal = jnp.full(5, 2.0)
+    tangent = jnp.ones(5)
+    probe = SimpleNamespace(plan=object(), structure=object())
+
+    pc = _RecordingPreconditioner()
+    step = _stub_step(pc, beta=0.5, diagonal=diagonal)
+    # A gate that fires once (its initializing call) and then never again, which is the shipped bfs3d
+    # configuration: the cost trigger replaces the schedule, so nothing else may rebuild the V-cycle.
+    refresh = _beta_tracking_refresh(
+        _ScalarRans(gain=jnp.asarray(3.0)),
+        stencil_reach=2,
+        probe=probe,
+        gate=_staleness_beta_gate(refresh_every=10**9, beta_rel_change=float("inf")),
+    )
+
+    refresh(step, state)  # the initializing call
+    assert len(pc.calls) == 1
+    assert np.allclose(pc.calls[0]["shift"], 0.5 * np.asarray(diagonal))
+    assert np.allclose(pc.calls[0]["matvec"](tangent), 3.0 * tangent)
+
+    refresh(step, state)  # the gate has gone quiet, as it does for the rest of a rung
+    assert len(pc.calls) == 1
+
+    refresh.rebind(_ScalarRans(gain=jnp.asarray(7.0)))
+    refresh(step, state)
+    assert len(pc.calls) == 2  # forced, though the gate is still quiet
+    assert np.allclose(pc.calls[1]["matvec"](tangent), 7.0 * tangent)  # ...at the new companion
+
+    refresh(step, state)  # and the force is spent: one rebuild per rebind, not a stuck flag
+    assert len(pc.calls) == 2

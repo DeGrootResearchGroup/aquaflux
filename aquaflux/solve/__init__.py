@@ -137,6 +137,7 @@ from .shift_basis import LocalCourantBasis, ShiftBasis, VelocityShiftParts
 from .sparse_jacobian import (
     BlockColouring,
     ColumnProbePlan,
+    ProbeGather,
     block_stencil_colouring,
     block_stencil_gather_map,
     column_probe_plan,
@@ -184,6 +185,7 @@ __all__ = [
     "PhaseTimer",
     "PositiveBlockLimit",
     "PositiveBlockProjection",
+    "ProbeGather",
     "PseudoTransientStep",
     "RefreshTiming",
     "RefreshTrigger",

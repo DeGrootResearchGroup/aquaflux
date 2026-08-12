@@ -917,7 +917,13 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     GMRES cycles where the block PC needs orders of magnitude more (cycle counts recorded with no β, rtol
     or state — re-measure before relying on them). `MonolithicFactorShiftPolicy` **reuses `CoupledShiftPolicy`'s
     pseudo-transient shift diagonal** (the physics — same velocity `a_P` + k/ω transport diagonals) and
-    swaps only the preconditioner; the factorization is a host `scipy` object so it rides as a **static**
+    swaps only the preconditioner. It takes **only that diagonal**, so all three monolithic builders
+    construct their base through `_monolithic_shift_source`, which builds the policy with
+    `flow_preconditioner=None` — the shift's velocity buckets come straight from the assembler
+    (`flow.frozen_momentum_diagonal_parts`), and the block preconditioner that used to be built for them
+    contributed two never-applied multigrid hierarchies whose value-dependent coarsening recompiled the
+    coupled solve at every Reynolds rung. Asking a shift-only policy for a composed preconditioner
+    raises. The factorization is a host `scipy` object so it rides as a **static**
     field and is applied via `jax.pure_callback`, with the adjoint's `Mᵀ` supplied directly through a
     `TransposedPreconditioner` (the generic `jax.linear_transpose` machinery cannot transpose a callback —
     `.claude/rules/solve.md`). **Its forward solver is `_COUPLED_ILUT_FORWARD_SOLVER` (restart-10),
@@ -1073,17 +1079,134 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       `test_scaling_the_viscosity_leaves_the_pytree_structure_identical`), so every rung *could* be a
       cache hit. Same defect and same fix as `eddy_viscosity_drift`. Pinned by
       `test_the_jacobian_probe_is_a_cache_hit_across_reynolds_rungs`.
-      **⚠️ This does NOT remove the whole per-rung recompile — MEASURED, it is 20 % of it.** The excess
-      of each rung's first step over that rung's median step, at identical cycle counts, went **377 s →
-      302 s** (rung 1 118→104, rung 2 108→89, rung 3 151→109). The probe is a minority contributor; the
-      dominant one is that
-      `point_setup` rebuilds the engine per rung, and three of `DualTimeStep`'s **static** fields then
-      hold fresh objects — `step_limit` (a new function from `positive_k_limit`), the adjoint
-      preconditioner factory, and the shift policy's `MonolithicAmgPreconditioner` (a non-pytree, hashed
-      by identity). Any one of those is a new `_march_step` cache key, i.e. a full recompile of the
-      coupled solve. Removing it means reusing one engine and one preconditioner across rungs and
-      refreshing in place at each new viscosity — which contradicts the "the frozen operator has to be
-      rebuilt per rung" note above, so that claim must be **re-tested, not assumed**, before building it.
+      ⚠️ **That "two leaf values" holds only if those leaves are ARRAYS, and on this case one of them
+      was not** — see the per-rung-recompile entry below, which is where a rung is now made a cache
+      hit end to end.
+    - **⚠️ THE PER-RUNG RECOMPILE — THREE independent causes, all three now closed, and finding only
+      two of them would have bought nothing (2026-08-12).** Each rung's first step was the most
+      expensive step of that rung by a wide margin *at a cycle count no higher than its cheap ones* —
+      on one march the target rung's first step cost 141 s at **7** cycles where a **19**-cycle step in
+      the same rung cost 57 s. Measured per rung as the first step's excess over the median of its
+      rung's same-cycle-count peers (after subtracting that step's own reported `pc ... Ns`), across
+      four archived marches: rung 1 **86–90 s**, rung 2 **98–106 s**, rung 3 **112–250 s**. Rung 1's is
+      the unavoidable first compile; rungs 2–3 are **~190–230 s, ~10 % of the march**.
+
+      The compiled unit is `_march_step`, whose key is the forward step, the residual and the solver.
+      **Any one difference recompiles the whole coupled solve, so this had to be closed on every axis
+      at once** — which is why the earlier probe fix (above) moved only 20 %:
+      1. **The preconditioner object.** It rides in a *static* field of the step and is compared by
+         **identity**, so a rung that fits its own V-cycle is a new key. Fixed by reusing one object:
+         `coupled_amg_continuation(preconditioner=…)` glues in an existing V-cycle instead of fitting
+         one, and `amg_beta_tracking_refresh(...).rebind(companion)` points the shared refresh hook at
+         the new rung and forces its next refresh to a **full** re-materialize — so the V-cycle is
+         still fitted to each rung's own state and shift (the march calls `precondition_step` before a
+         segment's first step), it is just not a new *object*. The adjoint factory follows for free,
+         being a value object over that preconditioner.
+      2. **The shift policy's unused block preconditioner.** `MonolithicFactorShiftPolicy` reads only
+         `base.shift_term(phi).diagonal` and supplies its own inverse, yet `base` held a whole
+         `BlockPreconditioner` — two multigrid hierarchies, built and never applied. They aggregate
+         along strong connections (`strength_threshold=0.25`), which reads the operator's **values**,
+         so their coarse-grid array shapes moved with the viscosity. `_monolithic_shift_source` now
+         builds the policy with **no flow block at all** (`build_flow_block=False`); the shift's
+         velocity buckets come from `flow.frozen_momentum_diagonal_parts(assembler, flow)`, which was
+         always the whole dependency. Asking such a policy for a composed preconditioner raises.
+         ⚠️ Turning the aggregation down to graph-only instead **looks** equivalent (the shift diagonal
+         is bit-identical and the shapes do stabilize) and is **not safe**: with graph-only coarsening
+         the hierarchy can refuse to build on a degenerate coarse row, giving a failure mode to
+         something that has no consumer. Do not re-propose it.
+      3. **A `float` molecular viscosity.** `Constant(RHO * NU)` is a Python float, which is not a JAX
+         array, so it sits on the **static** side and is compared by value — and `Property.scaled`
+         rescales exactly it, once per rung. This one is invisible: it defeats the "two leaf values"
+         argument above wholesale. The case now builds `Constant(jnp.asarray(RHO * NU))`; the library
+         still does not force it (`.claude/rules/properties.md` carries the rule and both halves are
+         pinned).
+      Also removed while sharing: the probe plan and its gather map (`CoupledJacobianProbe`, mesh-fixed
+      — a three-rung march built the largest allocation the case makes **six** times, once per rung per
+      consumer), the per-rung `combine_observers` closure (a static field, so a fresh one is its own
+      recompile), and the per-rung engine's V-cycle fit itself.
+
+      **MEASURED END TO END on the 3-rung `bfs3d` cold march** (field split, native trailing inverse,
+      ILU(0)×4, plain aggregation, `coarse_eq_limit` 2000, `refresh_on_cycles` 3, PC β floor 0.05,
+      `retry_on_alpha` 0.01, `zerogradient` k wall, positivity floor 1e-08, forward restart 15 —
+      **and `BFS3D_COLUMN_REACH=0`, a uniform reach 3** -- the case's default carried `p` at reach 2
+      when this ran, which does not converge; the shipped default is now `(3,3,3,3,2,2)`, so a
+      re-run needs no override and probes 454 columns rather than this run's 564):
+
+      | | this change | archived `march-20260811-132658` |
+      |---|---|---|
+      | steps | 67 | 67 |
+      | wall | **1883 s** | 2124 s |
+      | mid-span `x_r/h` | **8.361** | 8.361 |
+      | rung-3 first step | **71 s at 7 cycles** | 161 s at 7 cycles |
+      | rung-2 first-step excess | **1 s** | 98 s |
+      | rung-3 first-step excess | **25 s** | 112 s |
+      | **rungs 2+ excess** | **26 s** | 210 s |
+
+      Same step count, same rung-3 step count (29), same answer. The excess is the first step's wall
+      minus its own reported `pc`, against the median of its rung's *same-cycle-count* peers —
+      self-controlled within one march, which is what makes it quotable across runs at all
+      (`validation/bfs3d_openfoam/rung_compile_cost.py`; it reproduces the archived baselines' figures
+      exactly). Read the wall row with its caveat: this run probed **564** columns against the
+      baseline's 399, so the 241 s is if anything an under-statement.
+      **Rung 3's residual 25 s is NOT established as compilation** — its peer set is four steps, and it
+      is the rung whose excess was noisiest in the baselines too (112–250 s). Per-rung work the metric
+      cannot subtract (the row-scale rebuild, seeding the per-equation residual reporter) is a live
+      alternative; attribute it before removing it.
+      Pinned end to end by
+      `test_coupled_amg.py::test_sharing_one_preconditioner_makes_a_new_rung_a_march_step_cache_hit`,
+      which drives the real builder and counts residual traces through `_march_step`: a rung that
+      rebuilds retraces, one that shares does not.
+      ⚠️ **Method note for any future cache-key work: the process-global compilation cache contaminates
+      a leave-one-out test.** Once a key is compiled a later identical key reads as a hit, so an
+      arm that drops one shared field can look unnecessary purely because an earlier arm compiled it.
+      Use a fresh jitted wrapper (or a uniquely-shaped stand-in) per arm.
+      ⚠️⚠️ **AND BUILD THE CONTROL FROM YOUR OWN BASE, NOT FROM AN ARCHIVED LOG.** Validating this
+      change against archived `bfs3d` marches showed step 1 stagnating at 47 Krylov cycles where the
+      archived logs took 1, which read as a regression and cost hours of bisection. It was not: those
+      logs were produced on a *different branch*, and the base being worked on carried a
+      `COLUMN_REACH` with **pressure at reach 2**, which corrupts that column and poisons the operator
+      the preconditioner is fitted to (since fixed on the case; `.claude/rules/solve.md` carries it).
+      Three arms — the change, the change with the old driver, and the
+      **untouched base** — came out identical to the digit, which is what identified the base rather
+      than the change; restoring pressure to reach 3 then reproduced the archived trajectory exactly
+      (`3.896e-02, 4.115e-03, 5.275e-04, 2.851e-05` at 1/1/1/0 cycles). A march log from another branch
+      is not a control, and `validation/bfs3d_openfoam/march_log_compare.py` exists to say so.
+    - **✅ CARRYING THE COARSE SPACE ACROSS A REYNOLDS RUNG IS INERT — measured, and structurally so
+      (2026-08-12, `validation/bfs3d_openfoam/rung_hierarchy_reuse.py`).** Reusing one preconditioner
+      object across the ramp means its GAMG coarse space is built at the *anchor* and carried down two
+      decades of viscosity by `refactor`'s `pc_gamg_reuse_interpolation`, which was the standing reason
+      to re-test rather than assume the reuse was safe. *Configuration:* `bfs3d`, field split, ILU(0)×4,
+      trailing ×1 native, `coarse_eq_limit` 2000, column reach (3,3,3,2,2,2), shift β = 0.5 (a rung's
+      first step, not the low-shift tail), one state throughout (the anchor's cold hybrid
+      initialization, so the viscosity is the only variable), GMRES restart 15 to rtol 1e-8 on the
+      **true** residual.
+
+      | viscosity | carried | fresh |
+      |---|---|---|
+      | 100× ν (the build) | 9 cycles, 1.64e-09 | — |
+      | 10× ν | 58 cycles, 1.651e-03 | 58 cycles, 1.651e-03 |
+      | 1× ν | 47 cycles, 1.477e+00 | 47 cycles, 1.477e+00 |
+
+      *(one state throughout — the anchor's cold hybrid initialization — and the column reach the case
+      shipped at the time, `p` at 2 -- since fixed. See the warning below before reading any number
+      here as a cost.)*
+
+      **Identical to the digit**, which is stronger than "close" and is the tell for the mechanism: this
+      bundle runs **plain aggregation** (`pc_gamg_agg_nsmooths = 0`) and sets **no** `pc_gamg_threshold`,
+      so GAMG's strength graph is every nonzero — the sparsity pattern, which the coloured probe fixes
+      at the mesh. The coarsening therefore never reads the operator's *values*, and a carried coarse
+      space is not merely as good as a fresh one, it is **the same one**. Expect this to stop holding if
+      a strength threshold is ever turned on for the monolithic V-cycle.
+      ⚠️⚠️ **THE ABSOLUTE NUMBERS IN THAT TABLE ARE NOT INTERPRETABLE — only the arm-vs-arm equality is.**
+      Two things spoil them, and the second was found afterwards: the anchor's cold field is not a state
+      the target rung ever occupies (its real seed is a converged Re/10 root), **and** the run inherited
+      the case's then-current `COLUMN_REACH` with **pressure at reach 2** (since fixed), which corrupts
+      that column and poisons the operator being solved (see `.claude/rules/solve.md`). That is why both arms fail so
+      badly at the lower viscosities — at 1× ν the true residual ends *above* the initial guess.
+      Neither spoiler touches the **comparison**, which holds the state, the operator and the reach fixed
+      and varies only the hierarchy's provenance — and the arms agree *to the digit*, which is a stronger
+      form of agreement than any operating point could manufacture. But do not quote a cycle count from
+      this table for anything else, and **re-run it at reach 3 before extending it.**
     - The rebuild REUSES the aggregation coarse space (`MonolithicAmgPreconditioner.refactor` overwrites
     the operator values in place over a persistent CSR array and re-sets-up the PC with
     `pc_gamg_reuse_interpolation`), since the graph-coloured probe's sparsity is fixed across β; only the
@@ -1429,6 +1552,15 @@ tuning follow-up noted above.
     and `None` reproduces the plain ramp). Used by
     `validation/pitzdaily_openfoam/compare_reynolds_continuation.py` (the complete-LU + aggressive-control
     ramp that reaches `x_r/h` ~ 8).
+    - **⚠️ "Per-rung" is about FITTING, not about OBJECTS — and conflating the two cost ~10 % of the
+      `bfs3d` march.** A rung genuinely needs its V-cycle fitted at its own viscosity and seed state;
+      it does **not** need a new preconditioner *object*, and a new object recompiles the entire
+      coupled solve (a static field, compared by identity). The `bfs3d` driver therefore builds the
+      preconditioner, the probe, the refresh hook and the inner observer **once**, outside
+      `point_setup`, and each rung reuses them — `refresh.rebind(companion)` re-fits the shared V-cycle
+      at that rung. `point_setup` is still the right seam; what it should vary per rung is the
+      *residual assembler and the row scales*, which are ordinary data and cost nothing. See the
+      per-rung-recompile entry under `amg_beta_tracking_refresh` for all three causes.
   - **`intermediate_atol` — stop every rung at one PHYSICAL standard (BUILT), and prefer it over the
     relative bar on a row-scaled measure.** `intermediate_rtol` sets each rung's bar as a fraction of
     *that rung's own* starting residual, and under continuation every rung **re-bases `‖R₀‖`** — so a

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -35,6 +36,40 @@ def test_constant_scaled_multiplies_the_value() -> None:
     scaled = Constant(value=1e-5).scaled(10.0)
     assert isinstance(scaled, Constant)
     assert scaled.value == 1e-4
+
+
+def test_scaling_an_array_valued_constant_shares_compiled_code_and_a_float_does_not() -> None:
+    """A rescaled property shares a jitted consumer's compiled code only if its value is an ARRAY.
+
+    ``scaled`` exists for Reynolds-number continuation, whose every rung rescales the same property. A
+    plain Python float is not a JAX array, so it lands on the *static* side of a jitted function and is
+    compared by value -- so each rung hands every function taking the owning assembler a fresh cache
+    key. On the coupled solve that is a full recompilation per rung. As an array the rungs differ in a
+    leaf value and the compilation is shared.
+
+    Both halves are asserted, because the float behaviour is deliberate (the library keeps property
+    values plain scalars) and a caller who needs sharing has to opt in rather than discover this.
+    """
+    traces: list[int] = []
+    zones = CellZones.default(4)
+
+    @eqx.filter_jit
+    def consume(prop: Constant) -> jnp.ndarray:
+        traces.append(1)
+        return jnp.sum(prop.evaluate(zones, {}))
+
+    array_valued = Constant(value=jnp.asarray(1e-5))
+    consume(array_valued)
+    compiled = len(traces)
+    assert compiled == 1
+    consume(array_valued.scaled(10.0))
+    assert len(traces) == compiled  # a rescaled rung reuses the compilation
+
+    traces.clear()
+    float_valued = Constant(value=1e-5)
+    consume(float_valued)
+    consume(float_valued.scaled(10.0))
+    assert len(traces) == 2  # ...where a float value recompiles per rung
 
 
 # --- ZoneConstant ----------------------------------------------------------------------

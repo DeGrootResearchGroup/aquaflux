@@ -42,7 +42,7 @@ import lineax as lx
 import numpy as np
 
 from aquaflux.discretization import DifferenceRow, FixationRow, LogRatioRow
-from aquaflux.flow import BlockPreconditioner
+from aquaflux.flow import BlockPreconditioner, frozen_momentum_diagonal_parts
 
 # The mass-flow-constraint primitives (a body force that is a solve unknown enforcing a bulk velocity)
 # are shared with the flow-block solve `aquaflux.flow.bulk_velocity_flow_solve`: the border column/row,
@@ -67,6 +67,7 @@ from aquaflux.solve import (
     MonolithicAmgPreconditioner,
     MonolithicIlutPreconditioner,
     MonolithicLuPreconditioner,
+    ProbeGather,
     PseudoTransientStep,
     RefreshTiming,
     RefreshTrigger,
@@ -506,9 +507,18 @@ class CoupledShiftPolicy(eqx.Module):
     ----------
     layout : CoupledRANSLayout
         The coupled state layout, for packing the block-diagonal shift and preconditioner.
-    flow_preconditioner : BlockPreconditioner
-        The block-SIMPLE preconditioner built at the reference effective viscosity; supplies the
-        frozen ``a_P`` and the velocity/Schur solves.
+    momentum : MomentumContinuity
+        The flow assembler at the reference effective viscosity. It is the **shift's** dependency and
+        the only one: the velocity damping is built from this assembler's frozen momentum diagonal, and
+        the flat flow sub-vector is packed with it.
+    flow_preconditioner : BlockPreconditioner or None
+        The block-SIMPLE preconditioner built at that same assembler -- the velocity and pressure-Schur
+        solves :meth:`shift_term`'s ``make_preconditioner`` composes. ``None`` when this policy is a
+        **shift source only**, which is what a monolithically preconditioned step wants: such a step
+        supplies its own inverse and never asks for this one, and building it anyway meant two multigrid
+        hierarchies per build that were never applied *and* whose value-dependent coarsening made the
+        policy's array shapes move with the molecular viscosity -- recompiling the whole coupled solve at
+        every Reynolds-continuation rung. Asking a shift-only policy for a preconditioner raises.
     k_shift_transport, omega_shift_transport : jnp.ndarray
         The per-cell transport-operator shift diagonals for k and omega, shape ``(n_cells,)`` (the
         omega one has its near-wall fixed cells zeroed). This is the **local time scale** — the
@@ -538,11 +548,12 @@ class CoupledShiftPolicy(eqx.Module):
     """
 
     layout: CoupledRANSLayout
-    flow_preconditioner: BlockPreconditioner
+    momentum: MomentumContinuity
     k_shift_transport: jnp.ndarray
     k_jacobian_scale: jnp.ndarray
     omega_shift_transport: jnp.ndarray
     omega_jacobian_scale: jnp.ndarray
+    flow_preconditioner: BlockPreconditioner | None = None
     k_preconditioner: ScalarTransportPreconditioner | None = None
     omega_preconditioner: ScalarTransportPreconditioner | None = None
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS
@@ -557,23 +568,21 @@ class CoupledShiftPolicy(eqx.Module):
             The flat coupled state ``[flow..., k, omega]``, shape ``((dim + 3) n_cells,)``.
         """
         flow, k, omega = self.layout.unpack(phi)
-        block = self.flow_preconditioner
-        assembler = block.assembler
         n_cells = self.layout.n_cells
-        # `a_p` is a PRECONDITIONER quantity: it is what the velocity block inverts, so it must come
-        # from the block itself or the two disagree.
-        convective, dissipative = block.frozen_momentum_diagonal_parts(flow)
-        a_p = convective + dissipative
+        # The shift's velocity buckets come from the ASSEMBLER's frozen momentum diagonal, which is all
+        # they ever needed -- the preconditioner used to be asked for them, which is what made a
+        # shift-only policy carry one.
+        convective, dissipative = frozen_momentum_diagonal_parts(self.momentum, flow)
         # The SHIFT's buckets are a separate concern with a different lifetime (see
-        # `VelocityShiftParts`), so their source is injected; `None` reuses the preconditioner's, which
-        # is the historical behaviour and keeps the default path bit-identical.
+        # `VelocityShiftParts`), so their source is injected; `None` uses the assembler's own, which is
+        # the historical behaviour and keeps the default path bit-identical.
         if self.velocity_shift_parts is not None:
             convective, dissipative = self.velocity_shift_parts.parts(flow, k, omega)
         d_vel = self.shift_basis.local_diagonal(convective, dissipative)
 
         # Full-state base shift: d_vel on every velocity component, 0 on pressure, the frozen scalar
         # transport diagonals on k and omega.
-        flow_diagonal = assembler.pack(
+        flow_diagonal = self.momentum.pack(
             jnp.broadcast_to(d_vel[:, None], (n_cells, self.layout.dim)), jnp.zeros(n_cells)
         )
         # The scalar shift diagonal is transport-time-scale * coordinate factor; kept as two fields so a
@@ -585,6 +594,18 @@ class CoupledShiftPolicy(eqx.Module):
         )
 
         def make_preconditioner(relaxation: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
+            block = self.flow_preconditioner
+            if block is None:
+                raise ValueError(
+                    "this CoupledShiftPolicy is a shift source only (flow_preconditioner=None), so it "
+                    "cannot compose a block preconditioner. A monolithically preconditioned step "
+                    "supplies its own inverse and asks only for the shift diagonal; build the policy "
+                    "with a flow block if the composed one is wanted."
+                )
+            # `a_p` is a PRECONDITIONER quantity -- it is what the velocity block inverts, so it comes
+            # from the block itself or the two disagree.
+            convective_ap, dissipative_ap = block.frozen_momentum_diagonal_parts(flow)
+            a_p = convective_ap + dissipative_ap
             # Flow block at the shifted diagonal a_P + beta*d_vel matching the shifted Jacobian; scalar
             # blocks at their frozen AMG (beta-independent -- the shift only adds positive diagonal).
             flow_m = block.apply_at(flow, jax.lax.stop_gradient(a_p + relaxation * d_vel))
@@ -1216,6 +1237,7 @@ def _coupled_shift_policy(
     reuse: CoupledShiftPolicy | None = None,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     velocity_shift_parts: VelocityShiftParts | None = None,
+    build_flow_block: bool = True,
     **preconditioner_kwargs: object,
 ) -> CoupledShiftPolicy:
     """Build the block-diagonal :class:`CoupledShiftPolicy` frozen at ``reference_state``.
@@ -1276,8 +1298,13 @@ def _coupled_shift_policy(
     # pitzDaily field, stalling the march). The convection block's convective linearization and the
     # MSIMPLER Schur's velocity-independent scaling both stay valid frozen at the cold initial state
     # (the reference), so no per-sweep refresh is needed. Overridable via preconditioner_kwargs.
+    # `build_flow_block=False` leaves it out entirely: a monolithically preconditioned step reads this
+    # policy for its shift diagonal and supplies its own inverse, so the two multigrid hierarchies here
+    # would be built and never applied.
     block = (
-        reuse.flow_preconditioner  # measured: re-freezing the flow block does not help
+        None
+        if not build_flow_block
+        else reuse.flow_preconditioner  # measured: re-freezing the flow block does not help
         if reuse is not None
         else BlockPreconditioner.build(
             momentum,
@@ -1360,13 +1387,14 @@ def _coupled_shift_policy(
     parts = reuse.velocity_shift_parts if reuse is not None else velocity_shift_parts
     return CoupledShiftPolicy(
         coupled.layout,
-        block,
+        momentum,
         k_transport,
         k_coord,
         omega_transport,
         omega_coord,
-        k_amg,
-        omega_amg,
+        flow_preconditioner=block,
+        k_preconditioner=k_amg,
+        omega_preconditioner=omega_amg,
         shift_basis=basis,
         velocity_shift_parts=parts,
     )
@@ -1518,6 +1546,104 @@ def _coupled_jacobian_plan(
             block_stencil_colouring(owner, nb, n_cells, stencil_reach), coupled.layout.dim + 3
         )
     return column_probe_plan(owner, nb, n_cells, column_reach, stencil_reach)
+
+
+@dataclasses.dataclass(frozen=True)
+class CoupledJacobianProbe:
+    """How the coupled Jacobian is materialized: the colouring plan and its fixed de-compression map.
+
+    Both are functions of the cell graph and the stencil / per-column reaches alone -- never of the
+    state, and never of the molecular viscosity. So **one is valid for a whole Reynolds continuation**
+    and for the refresh hook running beside it, and they are one object rather than two arguments
+    threaded in parallel because they are built together and consumed together at every call site (the
+    initial build, and every in-place refresh).
+
+    Building them is not free. The colouring is a graph pass over the whole mesh, and on a
+    three-dimensional coupled case the gather map is the single largest allocation the case makes -- so
+    a driver that builds one engine per continuation rung with a refresh hook beside it would otherwise
+    build both twice per rung, for six identical copies over a three-rung ramp. Pass one in
+    (``coupled_amg_continuation(probe=...)``, ``amg_beta_tracking_refresh(probe=...)``) and every
+    consumer shares it.
+
+    Attributes
+    ----------
+    plan : ColumnProbePlan
+        The collision-free colouring and per-column reach the coloured directional-derivative probe
+        runs, which is what fixes how many probes a materialize costs.
+    structure : ProbeGather
+        The fixed compressed-sparse-row structure -- a row-pointer array plus a flat column-index array
+        -- together with the ordering that scatters the probe responses into it, so a materialize
+        de-compresses by one gather rather than a scatter loop and a re-sort.
+    """
+
+    plan: ColumnProbePlan
+    structure: ProbeGather
+
+    @classmethod
+    def build(
+        cls,
+        coupled: CoupledRANS,
+        stencil_reach: int = 3,
+        column_reach: Sequence[int] | None = None,
+    ) -> CoupledJacobianProbe:
+        """Colour the cell graph at these reaches and precompute the de-compression for it.
+
+        Parameters
+        ----------
+        coupled : CoupledRANS
+            The assembled case, read for its mesh graph and block layout only -- so any companion of
+            the same case (a Reynolds-continuation rung at a scaled viscosity) gives the same probe.
+        stencil_reach : int
+            The cell-graph distance the assembled sparsity covers (coupled RANS reaches distance ``3``).
+        column_reach : sequence of int, optional
+            A shorter reach per **column field**, in the flat layout's order ``[u, ..., p, k, omega]``,
+            while the assembled pattern stays at ``stencil_reach``. Exact only for a column that
+            genuinely carries nothing further out; measure it for the case rather than assuming it.
+            ``None`` (default) probes every column at ``stencil_reach``.
+
+        Returns
+        -------
+        CoupledJacobianProbe
+            The shared probe.
+        """
+        plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
+        return cls(plan, block_stencil_gather_map(plan))
+
+
+def _monolithic_shift_source(
+    coupled: CoupledRANS, reference_state: jnp.ndarray, shift_basis: ShiftBasis
+) -> CoupledShiftPolicy:
+    """The shift policy a **monolithically** preconditioned step reads its diagonal from.
+
+    Shared by all three monolithic builders (threshold-ILU, complete-LU, algebraic multigrid), which
+    want exactly the same thing from it and had each written the call out.
+
+    :class:`MonolithicFactorShiftPolicy` takes only ``base.shift_term(phi).diagonal`` -- it supplies its
+    own inverse and never calls the block policy's ``make_preconditioner``. So the block preconditioner
+    inside this policy is a **diagonal source**, and its velocity and pressure-Schur multigrid
+    hierarchies are built here and then never applied. That costs two multigrid setups per build, and it
+    is also what makes a Reynolds-continuation rung recompile the whole coupled solve: those hierarchies
+    aggregate along strong connections, which reads the operator's *values*, so their coarse grids --
+    and hence the array shapes this policy carries -- move with the molecular viscosity, and the
+    compiled step is keyed on them.
+
+    :class:`MonolithicFactorShiftPolicy` takes only ``base.shift_term(phi).diagonal`` -- it supplies its
+    own inverse and never calls the block policy's ``make_preconditioner``. So this policy is built
+    **without a flow block at all**: the shift's velocity buckets come from the flow assembler's frozen
+    momentum diagonal, which is the whole dependency, and the block preconditioner that used to be built
+    for them contributed two multigrid hierarchies that were never applied.
+
+    Removing them is not only a saving. Their aggregation reads the operator's *values*, so their coarse
+    grids -- and hence the array shapes the policy carried -- moved with the molecular viscosity, and the
+    compiled coupled step is keyed on those shapes: every Reynolds-continuation rung was a fresh
+    compilation of the whole solve, the largest fixed overhead in the three-dimensional march. (Turning
+    the aggregation down to graph-only would have fixed the shapes and is inert in everything read, but
+    it lets the hierarchy refuse to build on a degenerate coarse row -- a failure mode for something with
+    no consumer.)
+    """
+    return _coupled_shift_policy(
+        coupled, reference_state, None, shift_basis=shift_basis, build_flow_block=False
+    )
 
 
 def _frozen_shift_diagonal(base: CoupledShiftPolicy, beta: float, state: jnp.ndarray) -> np.ndarray:
@@ -1710,7 +1836,7 @@ def coupled_ilut_continuation(
     # transport diagonals); its scalar AMGs are skipped (`method=None`) since the ILUT preconditions every
     # block. The flow block is still assembled as the a_P source -- a lightweight shift-diagonal-only
     # policy is a follow-up optimization.
-    base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
+    base = _monolithic_shift_source(coupled, reference_state, shift_basis)
     plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
     frozen = jax.lax.stop_gradient(reference_state)
 
@@ -1945,7 +2071,7 @@ def coupled_lu_continuation(
     ForwardStep
         The step to hand ``solve_coupled`` as ``continuation``.
     """
-    base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
+    base = _monolithic_shift_source(coupled, reference_state, shift_basis)
     plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
     frozen = jax.lax.stop_gradient(reference_state)
 
@@ -2016,6 +2142,8 @@ def coupled_amg_continuation(
     leading_options: dict | None = None,
     trailing_options: dict | None = None,
     trailing_inverse: Callable | None = None,
+    probe: CoupledJacobianProbe | None = None,
+    preconditioner: MonolithicAmgPreconditioner | None = None,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **algebraic-multigrid** V-cycle.
 
@@ -2153,6 +2281,32 @@ def coupled_amg_continuation(
         fixed *linear* map (the outer Krylov is not flexible) and transpose exactly (the adjoint's
         solve uses it). The trailing smoother settings above then do not apply. Requires
         ``field_split=True``.
+    probe : CoupledJacobianProbe or None
+        The colouring plan and de-compression map to materialize with, when a caller already has one.
+        They depend on the mesh and the reaches alone, so a driver building several steps over one case
+        — a Reynolds continuation, or a step and a refresh hook side by side — should build one
+        :class:`CoupledJacobianProbe` and pass it to all of them. ``None`` (default) builds one here
+        from ``stencil_reach`` / ``column_reach``, which are then ignored if a ``probe`` is given.
+    preconditioner : MonolithicAmgPreconditioner or None
+        An **existing** V-cycle to glue in rather than fit a new one, so that several steps built over
+        one case share a single preconditioner object. ``None`` (default) fits one at
+        ``reference_state``, which is the ordinary case.
+
+        Reuse exists because the preconditioner rides in a *static* field, so it is compared by
+        identity and a fresh object recompiles the whole coupled solve. On a Reynolds continuation that
+        is the largest fixed overhead in the march: each rung's first step is its most expensive by a
+        wide margin, at a cycle count no higher than its cheap ones.
+
+        **The reused preconditioner is taken as it stands — it is NOT re-fitted here, and the caller
+        owns making it current.** That is not a loose end: a frozen V-cycle is deliberately stale
+        between refreshes anyway, and the caller that reuses one is by construction the caller that
+        already has a refresh hook (``inner_refresh`` here, ``precondition_step`` on the march), which
+        the march calls **before** the first step of every segment. Pair reuse with
+        :func:`amg_beta_tracking_refresh` and ``rebind`` it to the new case, and the V-cycle is
+        re-fitted at that segment's own state and shift before it is ever applied. The shift vanishes at
+        the root either way, so a stale V-cycle can only ever cost Krylov cycles — never the converged
+        state or its adjoint.
+
     Returns
     -------
     ForwardStep
@@ -2177,7 +2331,7 @@ def coupled_amg_continuation(
             "is only one hierarchy without field_split=True. Passing them here would silently do "
             "nothing."
         )
-    base = _coupled_shift_policy(coupled, reference_state, None, shift_basis=shift_basis)
+    base = _monolithic_shift_source(coupled, reference_state, shift_basis)
     # The forward-solve stop. A plain global-2-norm relative stop is ~100% the largest-magnitude field
     # (``omega``, whose residual is orders above the flow), so a "1%" solve resolves ``omega`` and halts
     # while the flow-dominated Newton step is still coarse -- leaving the flow correction blind (measured
@@ -2199,10 +2353,12 @@ def coupled_amg_continuation(
             stagnation_iters=40,
             max_restarts=60,
         )
-    plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
-    # The fixed CSR structure + gather map (pattern is mesh-fixed), so each materialize de-compresses by one
-    # gather rather than a scatter loop + re-sort. Reused by the β-tracking refresh (built once there too).
-    structure = block_stencil_gather_map(plan)
+    # The colouring plan and the fixed CSR structure + gather map that de-compresses a probe into it. Both
+    # are mesh-fixed, so a caller building several steps over one case (a Reynolds continuation, or a step
+    # and its refresh hook) supplies one shared `probe` and nothing here is rebuilt.
+    if probe is None:
+        probe = CoupledJacobianProbe.build(coupled, stencil_reach, column_reach)
+    plan, structure = probe.plan, probe.structure
     frozen = jax.lax.stop_gradient(reference_state)
 
     def matvec(v):
@@ -2226,39 +2382,44 @@ def coupled_amg_continuation(
     # between them retained exactly. Everything downstream -- the shift policy, the forward solver, the
     # step tail, the refresh hooks -- is shared, which is the point: it makes the two comparable on a
     # march by changing one construction, not by maintaining a second solver.
-    shift = _frozen_shift_diagonal(base, amg_beta, reference_state)
-    common = {
-        "smoother_fill_levels": smoother_fill_levels,
-        "smoother_sweeps": smoother_sweeps,
-        "coarse_eq_limit": coarse_eq_limit,
-        "batched_matvec": batched_matvec,
-        "probe_batch_size": _PROBE_BATCH_SIZE,
-        "structure": structure,
-    }
-    if field_split:
-        preconditioner = FieldSplitAmgPreconditioner.build(
-            matvec,
-            plan,
-            shift,
-            FieldGroups(
-                n_cells=coupled.layout.n_cells,
-                n_leading_fields=coupled.layout.dim + 1,  # u, v, w, p -- the saddle
-                n_trailing_fields=2,  # k, omega -- the transported scalars
-            ),
-            trailing_smoother_sweeps=trailing_smoother_sweeps,
-            leading_options=leading_options,
-            trailing_options=trailing_options,
-            trailing_inverse=trailing_inverse,
-            **common,
-        )
-    else:
-        preconditioner = MonolithicAmgPreconditioner.build(
-            matvec,
-            plan,
-            shift,
-            native=native_forward_solve,
-            residual_fn=coupled.residual if native_forward_solve else None,
-            **common,
+    # A supplied `preconditioner` skips all of it: the caller is sharing one V-cycle across several steps
+    # and its refresh hook re-fits it at each segment's own state and shift, so fitting one here would be
+    # both a wasted coloured probe and a wasted multigrid setup.
+    if preconditioner is None:
+        shift = _frozen_shift_diagonal(base, amg_beta, reference_state)
+        common = {
+            "smoother_fill_levels": smoother_fill_levels,
+            "smoother_sweeps": smoother_sweeps,
+            "coarse_eq_limit": coarse_eq_limit,
+            "batched_matvec": batched_matvec,
+            "probe_batch_size": _PROBE_BATCH_SIZE,
+            "structure": structure,
+        }
+        preconditioner = (
+            FieldSplitAmgPreconditioner.build(
+                matvec,
+                plan,
+                shift,
+                FieldGroups(
+                    n_cells=coupled.layout.n_cells,
+                    n_leading_fields=coupled.layout.dim + 1,  # u, v, w, p -- the saddle
+                    n_trailing_fields=2,  # k, omega -- the transported scalars
+                ),
+                trailing_smoother_sweeps=trailing_smoother_sweeps,
+                leading_options=leading_options,
+                trailing_options=trailing_options,
+                trailing_inverse=trailing_inverse,
+                **common,
+            )
+            if field_split
+            else MonolithicAmgPreconditioner.build(
+                matvec,
+                plan,
+                shift,
+                native=native_forward_solve,
+                residual_fn=coupled.residual if native_forward_solve else None,
+                **common,
+            )
         )
     return _monolithic_factor_step(
         coupled,
@@ -2442,9 +2603,16 @@ def _materialize_gate(
     Returns
     -------
     callable
-        ``should_materialize(state) -> bool``, carrying its own ``(drift reference, steps_since)`` state.
+        ``should_materialize(state) -> bool``, carrying its own ``(drift reference, steps_since)`` state,
+        with a ``reset()`` that discards both. Reset it when the *problem* changes under the gate -- a
+        Reynolds-continuation rung hands the refresh a companion at a different viscosity, and a drift
+        reference built against the previous one would be comparing two different eddy viscosities.
     """
     st: dict[str, object] = {"since": 0, "drift_fn": None}
+
+    def reset() -> None:
+        """Forget the reference and the count: they describe a problem this gate no longer watches."""
+        st["since"], st["drift_fn"] = 0, None
 
     def should_materialize(state: jnp.ndarray) -> bool:
         st["since"] = int(st["since"]) + 1  # type: ignore[arg-type]
@@ -2465,6 +2633,7 @@ def _materialize_gate(
             return True
         return False
 
+    should_materialize.reset = reset  # type: ignore[attr-defined]
     return should_materialize
 
 
@@ -2522,6 +2691,7 @@ def _beta_tracking_refresh(
     materialize_drift: float | None = None,
     beta_floor: float = 0.0,
     observer: Callable[[RefreshTiming], None] | None = None,
+    probe: CoupledJacobianProbe | None = None,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """Shared skeleton for the β-tracking ``precondition_step`` hooks (complete-LU and ILUT).
 
@@ -2554,42 +2724,58 @@ def _beta_tracking_refresh(
     refresh_kwargs : dict, optional
         Extra keyword arguments forwarded to the preconditioner's ``refresh_in_place`` (e.g. the ILUT's
         ``fill_factor`` / ``drop_tol``). ``None`` forwards none (the complete LU takes no extra options).
+    probe : CoupledJacobianProbe, optional
+        A shared colouring plan and de-compression map, when the caller already has one -- see the
+        parameter of :func:`coupled_amg_continuation`. ``None`` (default) builds one from
+        ``stencil_reach`` / ``column_reach``, which are then ignored if a ``probe`` is given.
 
     Returns
     -------
     callable
-        ``precondition_step(active_step, state) -> None``.
+        ``precondition_step(active_step, state) -> None``, carrying ``refresh_at`` (the inner-loop hook)
+        and ``rebind`` (point it at another companion of the same case -- see below).
     """
     refresh_kwargs = {} if refresh_kwargs is None else refresh_kwargs
-    plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
-    # Fixed CSR structure + gather map for the AMG materialize (mesh-fixed pattern): each materialize
-    # de-compresses by one gather rather than a scatter loop + re-sort. Built once; used only on the AMG path.
-    structure = block_stencil_gather_map(plan)
+    if probe is None:
+        probe = CoupledJacobianProbe.build(coupled, stencil_reach, column_reach)
+    plan, structure = probe.plan, probe.structure
+
+    # WHICH case this hook currently refreshes for, in a mutable binding rather than closed over, so
+    # `rebind` can point it at another companion of the same case. A Reynolds continuation solves a
+    # sequence of companions that differ only in their molecular viscosity, and rebinding one hook lets
+    # them all share ONE preconditioner -- which is what keeps the compiled coupled step a cache hit
+    # across a rung boundary, since the preconditioner rides in a static field compared by identity.
+    # Both probes below take the assembler as an argument to a module-level jitted function, so swapping
+    # it changes no compilation key of theirs either.
+    bound: dict[str, CoupledRANS] = {"coupled": coupled}
 
     # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
     # reuses it, rather than a fresh lambda recompiling each step.
     def matvec_at(frozen, v):
-        return _jacobian_matvec(coupled, frozen, v)
+        return _jacobian_matvec(bound["coupled"], frozen, v)
 
     # Batched form (vmapped over the tangent) so the coloured probes of a full materialize run as a few
     # fused passes rather than a Python loop of separate calls. Built once (state-independent, `frozen` a
     # traced argument) so it compiles a single time and every materialize reuses it. Used only by the AMG
     # preconditioner's `refresh_in_place`.
     def batched_matvec_at(frozen, seeds):
-        return _batched_jacobian_matvec(coupled, frozen, seeds)
+        return _batched_jacobian_matvec(bound["coupled"], frozen, seeds)
 
     # The β-diagonal split's materialize gate (built once): decides per refresh whether to re-materialize
     # the Jacobian or only re-add the shift. `None` when neither trigger is set (then every refresh is a
     # full materialize, the original behaviour).
     materialize_gate = (
         _materialize_gate(
-            lambda ref: eddy_viscosity_drift(coupled, ref),
+            lambda ref: eddy_viscosity_drift(bound["coupled"], ref),
             materialize_drift=materialize_drift,
             materialize_every=materialize_every,
         )
         if (materialize_drift is not None or materialize_every is not None)
         else None
     )
+    # Set by `rebind`: the standing preconditioner describes the PREVIOUS companion, so whatever the
+    # gates make of the next step, it has to be a full re-materialize.
+    forced_full = {"pending": False}
 
     def _report_refresh(
         kind: str, started: float, phases: tuple[tuple[str, float], ...] | None = None
@@ -2636,10 +2822,17 @@ def _beta_tracking_refresh(
         # AMG preconditioner exposes that shift-only path; without it (ILUT/LU) every refresh is full.
         is_amg = hasattr(pc, "refresh_shift_in_place")
         split = materialize_gate is not None and is_amg
-        # Both gates are stateful, so each must be called EXACTLY ONCE per step -- no short-circuiting.
+        # Both gates are stateful, so each must be called EXACTLY ONCE per step -- no short-circuiting,
+        # and that holds after a `rebind` too: the forced branch overrides their VERDICT, never their
+        # bookkeeping, so each still sees every step and stays in step with the march.
         stale_state = bool(split and materialize_gate(state))
         moved_beta = gate is None or bool(gate(pc_beta))
         branch = _refresh_branch(stale_state=stale_state, moved_beta=moved_beta, split=split)
+        if forced_full["pending"]:
+            # `rebind` has pointed this hook at a different companion since the last refresh, so the
+            # standing preconditioner was fitted to another problem. Neither gate can see that -- one
+            # watches the shift strength, the other the eddy viscosity's drift within one case.
+            forced_full["pending"], branch = False, "full"
         if branch == "none":
             _report_refresh("none", started)
             return
@@ -2714,7 +2907,37 @@ def _beta_tracking_refresh(
             _materialize_at(pc, hasattr(pc, "refresh_shift_in_place"), frozen, shift),
         )
 
+    def rebind(companion: CoupledRANS) -> None:
+        """Point this hook at another companion of the same case, and force the next refresh to be full.
+
+        A Reynolds continuation solves a sequence of companions differing only in their molecular
+        viscosity. Each is a separate ``solve_coupled`` segment, and rebuilding a preconditioner per
+        segment recompiles the whole coupled solve, because the preconditioner rides in a *static* field
+        of the forward step and is compared by identity. Rebinding one hook instead lets every segment
+        share a single preconditioner object -- so the compiled step is a cache hit across a rung
+        boundary -- while each segment's V-cycle is still fitted to its own problem, at its own state and
+        shift, by the refresh the march runs before that segment's first step.
+
+        Two pieces of standing state describe the previous companion and are therefore discarded: the
+        next refresh is forced to a **full** re-materialize (a shift-only refresh would re-use a Jacobian
+        probed at a different viscosity), and the materialize gate's drift reference is reset (it would
+        otherwise measure an eddy viscosity against another Reynolds number's).
+
+        Forward-only, like everything else on this hook. The companion must be the same case -- same
+        mesh, same layout, same schemes -- since the colouring plan and the gather map are not rebuilt.
+
+        Parameters
+        ----------
+        companion : CoupledRANS
+            The assembler the following segment solves.
+        """
+        bound["coupled"] = companion
+        forced_full["pending"] = True
+        if materialize_gate is not None:
+            materialize_gate.reset()
+
     precondition_step.refresh_at = refresh_at
+    precondition_step.rebind = rebind
     return precondition_step
 
 
@@ -2857,6 +3080,7 @@ def amg_beta_tracking_refresh(
     refresh_every: int = 8,
     beta_floor: float = 0.0,
     observer: Callable[[RefreshTiming], None] | None = None,
+    probe: CoupledJacobianProbe | None = None,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """A ``precondition_step`` that rebuilds the AMG V-cycle at the current β, every step.
 
@@ -2944,7 +3168,6 @@ def amg_beta_tracking_refresh(
         is exactly how a per-step refresh cost gets mistaken for a fixed overhead. ``None`` (default)
         elides the call.
     beta_floor : float
-    beta_floor : float
         A lower bound on the shift strength the **preconditioner** is built at: the V-cycle is refreshed at
         ``max(β, beta_floor)`` while the march keeps solving at its own ``β``. As ``β`` falls the shift's
         diagonal dominance vanishes and the V-cycle degrades sharply -- but the operator needs the small
@@ -2952,11 +3175,18 @@ def amg_beta_tracking_refresh(
         only changes the *path* of a solve and not its solution, this leaves the converged root and its
         adjoint untouched; the operator/preconditioner mismatch it introduces saturates at
         ``beta_floor * d`` instead of growing without bound. ``0.0`` (default) tracks ``β`` exactly.
+    probe : CoupledJacobianProbe, optional
+        A shared colouring plan and de-compression map -- see the parameter of
+        :func:`coupled_amg_continuation`. Pass the *same* object to both, or the step and the hook beside
+        it each build their own copy of the largest allocation the case makes. ``None`` (default) builds
+        one from ``stencil_reach`` / ``column_reach``, which are then ignored if a ``probe`` is given.
 
     Returns
     -------
     callable
-        ``precondition_step(active_step, state) -> None``.
+        ``precondition_step(active_step, state) -> None``, with ``refresh_at`` (the ``inner_refresh``
+        hook) and ``rebind(companion)`` (re-point it at the next Reynolds-continuation rung's companion,
+        so a whole ramp can share one preconditioner and stop recompiling per rung) attached.
     """
     gate = (
         None
@@ -2972,6 +3202,7 @@ def amg_beta_tracking_refresh(
         materialize_drift=materialize_drift,
         beta_floor=beta_floor,
         observer=observer,
+        probe=probe,
     )
 
 
