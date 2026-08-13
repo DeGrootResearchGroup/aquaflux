@@ -458,6 +458,60 @@ def _reattach_to_adjacent_root(
     return aggregate
 
 
+def _absorb_singleton_aggregates(
+    aggregate: np.ndarray, n_aggregates: int, graph: sp.csr_matrix
+) -> tuple[np.ndarray, int]:
+    """Dissolve any aggregate left holding only its own root, and renumber what remains.
+
+    The repair inside the aggregation sweep cannot catch these. It refuses to *open* an aggregate that
+    would be a singleton, but the reattachment pass that repairs a squared graph's reach runs
+    afterwards and moves members away from aggregates it does not own — so an aggregate can be reduced
+    to its root alone after the fact. A coarse unknown standing for one cell, coupled to almost
+    nothing, is what makes a coarse level a slightly smaller copy of the fine one.
+
+    Each lone vertex joins the largest aggregate it is genuinely adjacent to, ties broken by lowest
+    index so the result does not depend on iteration order. A vertex with no neighbour outside its own
+    aggregate is a true isolate and keeps its aggregate — there is nothing to join. Aggregate labels
+    are then made contiguous again, because the caller uses the count to size the prolongation.
+
+    Parameters
+    ----------
+    aggregate : np.ndarray
+        Aggregate index per vertex, shape ``(n,)``.
+    n_aggregates : int
+        Number of aggregates before absorption.
+    graph : scipy.sparse matrix
+        The symmetric connectivity the aggregates were formed over, shape ``(n, n)``. Only its
+        sparsity is read.
+
+    Returns
+    -------
+    tuple
+        ``(aggregate, n_aggregates)`` — relabelled contiguously from zero.
+    """
+    counts = np.bincount(aggregate, minlength=n_aggregates)
+    if not (counts == 1).any():
+        return aggregate, n_aggregates
+    aggregate = aggregate.copy()
+    indptr, indices = graph.indptr, graph.indices
+    for vertex in np.flatnonzero(counts[aggregate] == 1):
+        current = aggregate[vertex]
+        if counts[current] != 1:  # already absorbed one of its neighbours
+            continue
+        neighbours = indices[indptr[vertex] : indptr[vertex + 1]]
+        candidates = aggregate[neighbours[aggregate[neighbours] != current]]
+        if candidates.size == 0:
+            continue
+        target = int(candidates[np.lexsort((candidates, -counts[candidates]))[0]])
+        counts[current] -= 1
+        counts[target] += 1
+        aggregate[vertex] = target
+    kept = np.flatnonzero(counts > 0)
+    relabel = np.zeros(n_aggregates, dtype=np.int64)
+    relabel[kept] = np.arange(kept.size, dtype=np.int64)
+    return relabel[aggregate], int(kept.size)
+
+
 def _aggregate(owner: np.ndarray, nb: np.ndarray, n: int) -> tuple[np.ndarray, int]:
     """Two-pass aggregation (Vaněk et al.): seed clean aggregates, then attach leftovers.
 
@@ -699,6 +753,13 @@ _PROLONGATION_SMOOTHING = frozenset({"none", "standard", "symmetric-part"})
 _AGGREGATE_STATS: list[dict] = []
 
 
+#: Largest coarsest-level size, in degrees of freedom, that may be inverted densely. The coarse solve
+#: is a dense pseudo-inverse: quadratic to store (8 bytes per entry, so ~512 MB here) and cubic to
+#: build. Exceeding it is never intentional -- it means the level cap stopped the coarsening before the
+#: coarse-size limit could, which makes the coarse grid grow with the mesh instead of staying fixed.
+_MAX_DENSE_COARSE_DOFS = 8192
+
+
 def _build_aggregation_hierarchy(
     a: sp.csr_matrix,
     *,
@@ -748,6 +809,7 @@ def _build_aggregation_hierarchy(
     scale: np.ndarray | None = None
     if equilibrate:
         a, scale = symmetrically_equilibrate(a)
+    _AGGREGATE_STATS.clear()  # this build's statistics only; the consumer reads the whole list
     levels: list[_SparseLevel] = []
     while True:
         a_agg = aggregation_operator(a)
@@ -768,6 +830,15 @@ def _build_aggregation_hierarchy(
             lam_smooth if a_agg is a else _spectral_radius(d_inv @ a)
         )  # runtime smoother scale
         if a.shape[0] <= max_coarse or len(levels) + 1 >= max_levels:
+            if a.shape[0] > _MAX_DENSE_COARSE_DOFS:
+                raise ValueError(
+                    f"coarsest level has {a.shape[0]} degrees of freedom, above the "
+                    f"{_MAX_DENSE_COARSE_DOFS} that may be inverted densely "
+                    f"(~{8 * a.shape[0] ** 2 / 1e9:.1f} GB, and cubic to build). The level cap "
+                    f"(max_levels={max_levels}) stopped the coarsening before max_coarse="
+                    f"{max_coarse} could: raise max_levels so the size limit binds, or lower "
+                    f"max_coarse."
+                )
             # Coarsest level: a direct (dense pseudo-inverse) solve — an inexact coarse solve is the
             # dominant cause of mesh-dependent V-cycle degradation, so it must be an actual solve; pinv
             # also handles a nonsymmetric coarse operator.
@@ -796,6 +867,13 @@ def _build_aggregation_hierarchy(
                     _square_graph(connectivity), seed=len(levels), avoid_singletons=avoid_singletons
                 )
                 aggregate = _reattach_to_adjacent_root(aggregate, roots, connectivity)
+                if avoid_singletons:
+                    # Reattachment moves members between aggregates, so it can strand a root that the
+                    # sweep's own repair had no way to foresee. Dissolve those here, where the final
+                    # assignment is known.
+                    aggregate, n_coarse_cells = _absorb_singleton_aggregates(
+                        aggregate, n_coarse_cells, connectivity
+                    )
             else:
                 aggregate, _, n_coarse_cells = _mis_aggregate(
                     connectivity, seed=len(levels), avoid_singletons=avoid_singletons
@@ -869,7 +947,9 @@ def build_smoothed_hierarchy(
         Prolongation-smoothing damping factor; the applied damping is ``omega_smooth * 2 / lambda_max``
         (i.e. ``4/(3 lambda_max)`` at the default ``2/3``), with ``lambda_max`` estimated per level.
     max_coarse : int
-        Stop coarsening once a level has at most this many cells (solved directly there).
+        Stop coarsening once a level has at most this many **degrees of freedom** (solved directly
+        there). Dofs, not cells: at ``block_size`` fields per cell the two differ by that factor, and
+        the limit exists to bound a dense pseudo-inverse whose cost is cubic in the dof count.
     max_levels : int
         Hard cap on the number of levels.
     strength_threshold : float
@@ -1186,11 +1266,13 @@ def build_convection_hierarchy(
         Prolongation-smoothing damping factor; the applied damping is ``omega_smooth * 2 / lambda_max``
         (``lambda_max`` of the symmetric part).
     max_coarse : int
-        Skip the aggregation and solve the fine operator directly when it already has at most this many
-        cells (a one-level direct solve for a trivially small system).
+        Stop coarsening once a level has at most this many **degrees of freedom**, and solve it
+        directly there. Dofs, not cells: at ``block_size`` fields per cell the two differ by that
+        factor, and the limit exists to bound a dense pseudo-inverse whose cost is cubic in the dof
+        count.
     strength_threshold : float
         Strength-of-connection threshold for the aggregation (default ``0`` = isotropic aggregation on
-        the symmetric part's full graph). ``> 0`` aggregates only along strong connections
+        the full cell-adjacency graph, which reads no values from the operator at all). ``> 0`` aggregates only along strong connections
         (:func:`_aggregation_edges`) — the fix for an anisotropic / high-aspect-ratio operator; see
         :func:`build_smoothed_hierarchy` for the effect and the value-dependence caveat.
     block_size : int

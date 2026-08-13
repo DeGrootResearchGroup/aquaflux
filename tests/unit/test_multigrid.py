@@ -222,9 +222,10 @@ def test_avoid_singletons_reaches_the_aggressively_coarsened_level() -> None:
     large enough that the case never arises); a strength threshold thins the graph enough to bring it
     back, so the two settings have to work together.
 
-    The residual count on the aggressive level is expected, not a partial fix: the reattachment pass
-    that repairs the squared graph's reach runs *after* the aggregation and can itself strand a root
-    by moving away every member, which the repair inside the aggregation cannot see.
+    Two passes are needed, which is why both levels are checked. Refusing to *open* a singleton
+    handles the aggregation sweep; the reattachment pass that repairs the squared graph's reach runs
+    afterwards, moves members between aggregates, and can strand a root the sweep had no way to
+    foresee — so those are dissolved separately once the final assignment is known.
     """
     a = _anisotropic_poisson(24, 24, aspect_ratio=100.0)
 
@@ -245,9 +246,20 @@ def test_avoid_singletons_reaches_the_aggressively_coarsened_level() -> None:
     with_repair = singletons_per_level(True)
 
     assert without[0] > 0 and without[1] > 0  # both levels strand vertices when unrepaired
-    assert with_repair[0] < without[0]  # the squared-graph level is repaired ...
-    assert with_repair[1] == 0  # ... and the plain level clears entirely
-    assert with_repair[0] > 0  # what the later reattachment strands, the repair cannot reach
+    assert with_repair == [0] * len(with_repair)  # and neither does once both passes run
+
+
+def test_dense_coarse_solve_guard_rejects_an_oversized_coarsest_level() -> None:
+    """The coarsest level is inverted densely, so its size has to stay bounded as the mesh grows.
+
+    Coarsening stops on whichever of the two limits is reached first. When the level cap wins, nothing
+    bounds the coarse grid at all — it then scales with the mesh, and the dense inverse is quadratic to
+    store and cubic to build, so a large enough case turns into a multi-gigabyte allocation with no
+    indication of why. Fail with the two ways out instead.
+    """
+    a = _anisotropic_poisson(128, 128, aspect_ratio=1.0)  # 16384 dofs, above the dense limit
+    with pytest.raises(ValueError, match="inverted densely"):
+        build_convection_hierarchy(a, max_coarse=20, max_levels=1)
 
 
 def _chebyshev_propagation_polynomial(eigenvalues, lam_max, degree, lo_frac):

@@ -3029,7 +3029,7 @@ residual gain there is not a like-for-like comparison with a four-sweep arm.
 `strength_threshold = 0`. Do not read "the lever is sweeps, not the hierarchy" out of it; the aggregation
 was the larger lever all along, and these arms simply never varied it. See *Where this stands*.
 
-### Where this stands — the native flow block converges, and is 2.3x the incumbent's wall clock
+### Where this stands — the native flow block converges: 2.3x the incumbent at the adjoint, ~4x on the march
 
 **The four-to-five-order gap never existed: it was the GMRES restart cap read as a convergence floor.**
 Every earlier reading here was taken at a 20-restart cap, where `restart_cycles` reports 18 for any arm
@@ -3113,14 +3113,41 @@ cache-friendly. Its other figures (per-level sweep schedule 31 %, asymmetric V-c
 truncation 57 %) carry the same flaw and must be measured before being believed — the last one especially,
 being the only proposal that would change what `M` is.
 
-**Scope, binding.** This is **one state at β = 0**, which is the *adjoint's* operator and, per the record
-above, the only state on this case that separates these arms at all — at `state-00066` all five tie at 4
-cycles. The forward march floors β at 0.05 and never builds a preconditioner at zero shift. It also runs a
-**uniform** column reach that the case does not use; at the shipped reach the incumbent's cost doubles
-(22 cycles against 11), and the native arm there is unmeasured. So this is an adjoint-grade result, which
-is where the tight transpose solve lives and therefore worth having — but it is not a march result.
+**⚠️ SCOPE, BINDING — THE 2.3x IS A ZERO-SHIFT NUMBER. Across the shift range the march runs, the
+native hierarchy is ~4x slower.** Swept 2026-08-13 by overriding the operator shift on the fixed
+converged state (`BFS3D_PROBE_BETA`, which is the only way to move β without also changing state — the
+other entries in `STATES` are step-initial checkpoints and cost every arm a cycle or two). The
+preconditioner takes the march's own floor, so β = 0.01 reproduces the shipped operator/preconditioner
+mismatch (0.01 against 0.05):
 
-**Why the 2.3x is still the right trade to pursue.** The incomplete-LU is a sequential triangular solve.
+| β | `split flow/ilu0` | native, 8x4 | native, 8x2 | ratio |
+|---|---|---|---|---|
+| **0** — the adjoint | 11 cyc, 29 s | 10 cyc, 83 s | 11 cyc, **68 s** | **2.34x** |
+| 0.01 | 4 cyc, 15 s | 9 cyc, 76 s | 11 cyc, 69 s | **4.6x** |
+| 0.05 | 2 cyc, 11 s | 6 cyc, 56 s | 7 cyc, 49 s | 4.45x |
+| 0.10 | 2 cyc, 11 s | 5 cyc, 48 s | 6 cyc, 43 s | 3.9x |
+
+**The asymmetry has a mechanism, and it is not going away.** The shift adds `β·d` to the diagonal, and an
+incomplete-LU approaches exactness as diagonal dominance grows — so ILU(0) collapses to its floor (2
+cycles, 11 s) the moment any shift is present and cannot go lower. An aggregation multigrid gets no such
+windfall: its rate is set by smoother/coarse-space complementarity, which the shift barely improves. The
+native arm does improve (68 -> 43 s) but from far behind. **The ratio is therefore bounded below by how
+cheap the native V-cycle can be made, not by anything about convergence** — at β = 0.1 it needs 6 cycles,
+which is a perfectly healthy preconditioner, and still costs 3.9x.
+
+**So the native path's competitiveness is concentrated at β = 0, which is the ADJOINT and nothing else.**
+The forward march floors β at 0.05 and never builds a preconditioner at zero shift; the transpose solve
+behind every `jax.grad` meets exactly the unshifted operator, with no floor to soften it, and must
+converge tightly. That is a real place to win and it is where a differentiable solver spends its gradient
+budget — but it is not the march, and a 2.3x quoted without the shift beside it will be read as the march.
+
+**What DID transfer: `8 x 2` is the right sweep pair at every β** (49 s against 56 s at 0.05, 43 s against
+48 s at 0.1), so that tuning is not an artifact of zero shift.
+
+⚠️ Still measured under a **uniform** column reach the case does not use; at the shipped reach the
+incumbent's cost doubles at β = 0 (22 cycles against 11) and the native arm is unmeasured there.
+
+**Why the gap may still be the right trade.** The incomplete-LU is a sequential triangular solve.
 This smoother is sparse matrix-vector products, diagonal scalings and one small dense coarse solve, and
 its fine level was measured memory-bandwidth-bound at 37–40 GB/s — the profile of something that
 vectorizes. Kernel fusion and JAX dispatch overhead were measured out as levers (a chain of 8 matvecs in
@@ -3146,19 +3173,30 @@ value-dependence would cost. ⚠️ Note `NodalNativeInverse` exposes neither `s
 size guard — testing a threshold there at 2 levels would reproduce the flow block's original failure and
 refute the transfer for the wrong reason.
 
-**Known defects in the aggregation, found here and not all fixed.**
-- `_reattach_to_adjacent_root` runs *after* `_mis_aggregate` and can **create** singletons: it never
-  steals a root but does steal every member, so an aggregate can be cut down to its root alone.
-  `avoid_singletons` lives inside `_mis_aggregate` and cannot see them. Measured: **82 singletons at
-  level 0** on the aggressive + θ = 0.25 arm, and none at θ = 0.10 where the graph is denser. NOT FIXED.
-- `max_coarse` is compared against `a.shape[0]` — **dofs** — while both builder docstrings say *cells*. A
-  4x error at `block_size = 4`, on the knob guarding a dense pseudo-inverse that is cubic to build and
-  quadratic to store. NOT FIXED.
-- With `max_levels` binding at the bottom rather than `max_coarse`, the coarse grid grows **linearly with
-  the mesh**: 23040 cells → 500 dofs, so 1M cells → ~21500 dofs and ~3.7 GB. The fix costs nothing (raise
-  `max_levels`, let `max_coarse` bind) and extra levels measured +3 % per cycle. NOT FIXED.
-- `_AGGREGATE_STATS` is appended and never cleared despite its docstring; the probe reads its tail, so a
-  build that stops early shifts every later arm's window. NOT FIXED.
+**Defects found here, and what was done about each.**
+- **FIXED — `_reattach_to_adjacent_root` could CREATE singletons.** It never steals a root but does
+  steal every member, so an aggregate could be cut down to its root alone *after* the aggregation's own
+  repair had run and could no longer see it. Two passes are needed and both now run under
+  `avoid_singletons`: the sweep refuses to open a singleton, and `_absorb_singleton_aggregates`
+  dissolves whatever reattachment strands, relabelling contiguously. Measured on a 24x24 anisotropic
+  Poisson at threshold 0.25 with one aggressive level: **15 and 11 singletons on the two levels
+  unrepaired, 3 and 0 with the sweep repair alone, 0 and 0 with both** — and it coarsens further while
+  doing it (260 -> 208 aggregates). Pinned by
+  `test_avoid_singletons_reaches_the_aggressively_coarsened_level`.
+- **FIXED (documentation) — `max_coarse` is in DEGREES OF FREEDOM, not cells.** It is compared against
+  `a.shape[0]`, while both builder docstrings said *cells* — a `block_size`-fold error on the knob
+  bounding a dense pseudo-inverse. Dofs is the correct unit and the code was right: the limit exists to
+  bound a solve whose cost is cubic in the dof count. The docstrings now say so.
+- **FIXED (guarded, not defaulted) — the coarse grid grows LINEARLY with the mesh when the level cap
+  binds before the size limit.** At `max_levels = 5` and a measured 184x total ratio, 23040 cells give
+  500 coarse dofs and 1M cells would give ~21500 (~3.7 GB, dense, cubic to build). The level cap is a
+  deliberate shipped default on the turbulence path (`_CONVECTION_LEVELS = 2`), so it was NOT changed;
+  instead `_MAX_DENSE_COARSE_DOFS` (8192, ~512 MB) makes the case fail with both ways out named, rather
+  than silently allocating. Nothing measured here approaches it — the largest coarse level in any arm
+  is 4300 dofs. Pinned by `test_dense_coarse_solve_guard_rejects_an_oversized_coarsest_level`.
+- **FIXED — `_AGGREGATE_STATS` accumulated across builds** despite its docstring saying to clear it, so
+  a build that stopped early shifted every later arm's window in the consumer's tail slice. Cleared at
+  the start of each build; the consumer may now read the whole list.
 
 ⚠️ **Stale by this section:** the recorded refutation that *"equilibration does not reach the coarsening"*
 (0.03 % of edges) was measured at `strength_threshold = 0`, where only the sparsity **pattern** matters.

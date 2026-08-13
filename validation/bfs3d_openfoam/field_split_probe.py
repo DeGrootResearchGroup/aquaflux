@@ -729,6 +729,15 @@ def _simple_pieces(
     d_block = a[nv:, :nv].tocsr()
     dg = (sp.diags(f_inverse) @ g_block).tocsr()
     schur = (a[nv:, nv:] - d_block @ dg).tocsr()
+    # The formed Schur against the pieces it is built from. Applying `S` matrix-free -- as C.p minus
+    # D.(diag(F)^-1.(G.p)) -- is algebraically identical, so which is cheaper is purely a question of
+    # which side carries more nonzeros. Printed rather than assumed.
+    print(
+        f"      Schur {schur.data.shape[0] / 1e6:.1f}M nnz formed vs "
+        f"{(a[nv:, nv:].nnz + d_block.nnz + g_block.nnz) / 1e6:.1f}M as pieces "
+        f"(C {a[nv:, nv:].nnz / 1e6:.1f}M + D {d_block.nnz / 1e6:.1f}M + G {g_block.nnz / 1e6:.1f}M)",
+        flush=True,
+    )
     schur_diagonal = schur.diagonal()
     # A zero Schur diagonal would make the pressure relaxation undefined. It does not arise on this
     # discretization -- Rhie-Chow damping gives the continuity row a genuine diagonal, and the
@@ -2165,6 +2174,31 @@ ARMS = (
         "split flow-first, SIMPLE smoother, strength 0.25, 24 sweeps, 1 inner",
         lambda m, g, n: field_split(
             m, g, n, "simplesmooth24-a0-t25-ns-L5-c500-ps1", "ilu0", flow_first=True
+        ),
+    ),
+    # Re-tuning the OUTER sweep count at a march shift. Every count here was chosen at beta = 0, where
+    # the operator is hardest; a shift makes it diagonally dominant and eight sweeps may be smoothing
+    # something easy. Each sweep costs a full-operator residual matvec, which at two inner pressure
+    # sweeps is the dominant term, so this is the axis with the most cost attached to it.
+    (
+        "split simplesmooth2-a0-t25-ns-L5-c500-ps2/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 2 sweeps, 2 inner",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth2-a0-t25-ns-L5-c500-ps2", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth4-a0-t25-ns-L5-c500-ps2/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 4 sweeps, 2 inner",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-a0-t25-ns-L5-c500-ps2", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth6-a0-t25-ns-L5-c500-ps2/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 6 sweeps, 2 inner",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth6-a0-t25-ns-L5-c500-ps2", "ilu0", flow_first=True
         ),
     ),
     (
