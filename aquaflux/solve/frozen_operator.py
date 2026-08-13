@@ -27,8 +27,86 @@ builds a hierarchy.
 
 from __future__ import annotations
 
+import itertools
+
 import numpy as np
 import scipy.sparse as sp
+
+#: Target nonzeros per row-chunk in :func:`apply_symmetric_scale`. Bounds the transient allocation
+#: there to a few megabytes rather than the size of the matrix's values; small enough to stay in
+#: cache, large enough that the per-chunk NumPy overhead is negligible.
+_SCALE_CHUNK_NNZ = 1 << 20
+
+
+def row_chunks(
+    indptr: np.ndarray, target_nnz: int = _SCALE_CHUNK_NNZ
+) -> tuple[tuple[int, int], ...]:
+    """Split ``[0, n_rows)`` into ``(start, stop)`` row ranges of roughly ``target_nnz`` nonzeros each.
+
+    Ranges are cut on row boundaries so each chunk is a contiguous slice of the compressed-sparse-row
+    (CSR) values, and every row lands in exactly one chunk. A row wider than ``target_nnz`` simply forms
+    its own oversized chunk.
+
+    Parameters
+    ----------
+    indptr : np.ndarray
+        The CSR row-pointer array, shape ``(n_rows + 1,)``.
+    target_nnz : int
+        Approximate nonzeros per chunk.
+
+    Returns
+    -------
+    tuple of tuple of int
+        The ``(start, stop)`` row ranges, covering every row exactly once.
+    """
+    n_rows = int(indptr.shape[0]) - 1
+    if n_rows == 0:
+        return ()
+    edges = np.searchsorted(indptr, np.arange(0, int(indptr[-1]), target_nnz), side="right") - 1
+    bounds = np.unique(np.concatenate(([0], np.maximum(edges, 0), [n_rows])))
+    return tuple((int(a), int(b)) for a, b in itertools.pairwise(bounds) if b > a)
+
+
+def apply_symmetric_scale(
+    data: np.ndarray,
+    indptr: np.ndarray,
+    indices: np.ndarray,
+    scale: np.ndarray,
+    chunks: tuple[tuple[int, int], ...] | None = None,
+) -> None:
+    """Scale stored entries **in place** by ``scale[row] * scale[column]`` — ``D A D``, pattern-preserving.
+
+    **This is why it is not written as the sparse product ``diags(scale) @ a @ diags(scale)``, and the
+    distinction is load-bearing rather than a performance detail.** A sparse product stores only the
+    entries whose *result* is nonzero, so it silently deletes every explicit zero the operator carried.
+    Those positions are not decoration: an incomplete factorization with zero fill takes its pattern
+    from exactly the stored entries, so dropping them gives it a structurally weaker factorization of
+    the same matrix. Scaling the values in place cannot change which entries exist, so the operator a
+    factorization or a coarsening receives has the pattern its assembler chose.
+
+    Scaling per stored entry is also strictly cheaper than two sparse products over the whole matrix,
+    and it is applied in row chunks so the row factor's per-nonzero expansion never allocates an array
+    the size of the values.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        The CSR values, shape ``(nnz,)``. **Modified in place.**
+    indptr, indices : np.ndarray
+        The CSR structure, shapes ``(n_rows + 1,)`` and ``(nnz,)``.
+    scale : np.ndarray
+        The per-row/column factor, shape ``(n_rows,)`` (see :func:`equilibration_scale`).
+    chunks : tuple of tuple of int, optional
+        Precomputed row ranges from :func:`row_chunks`, for a caller that holds a fixed structure and
+        would otherwise re-derive them every call. ``None`` (default) derives them here.
+    """
+    counts = np.diff(indptr)
+    for start, stop in row_chunks(indptr) if chunks is None else chunks:
+        lo, hi = int(indptr[start]), int(indptr[stop])
+        block = data[lo:hi]
+        # The row factor needs one entry per nonzero; the column factor is a gather on the indices.
+        block *= np.repeat(scale[start:stop], counts[start:stop])
+        block *= scale[indices[lo:hi]]
 
 
 def equilibration_scale(diagonal: np.ndarray) -> np.ndarray:
@@ -63,6 +141,14 @@ def symmetrically_equilibrate(a: sp.spmatrix) -> tuple[sp.csr_matrix, np.ndarray
     ``x = D y``. Nothing is approximated — only the scale in which the operator is presented to a
     factorization or a coarsening.
 
+    **The sparsity pattern is preserved entry for entry** (:func:`apply_symmetric_scale`), including any
+    explicit zeros. Written as the sparse product ``diags(scale) @ a @ diags(scale)`` it would not be:
+    a sparse product stores only entries whose result is nonzero, so every explicit zero would be
+    dropped. That is invisible in the values and decisive for a consumer that reads the structure — an
+    incomplete factorization with zero fill takes its pattern from the stored entries, so it would be
+    handed a structurally weaker factorization of a numerically identical matrix, and a caller that
+    assembled a deliberately fixed pattern would silently not get one.
+
     Why it matters to the coarsening in particular: every step of a multigrid setup reads the diagonal
     — the smoother's damping, the prolongation smoothing, and the spectral estimates that scale both.
     On an operator whose diagonal spans several orders of magnitude those steps are calibrated against
@@ -82,10 +168,10 @@ def symmetrically_equilibrate(a: sp.spmatrix) -> tuple[sp.csr_matrix, np.ndarray
         ``diag(D)``, shape ``(n,)`` — apply to the right-hand side before, and to the result after, a
         solve with ``scaled``.
     """
-    a = a.tocsr()
-    scale = equilibration_scale(a.diagonal())
-    diagonal = sp.diags(scale)
-    return (diagonal @ a @ diagonal).tocsr(), scale
+    scaled = a.tocsr().copy()
+    scale = equilibration_scale(scaled.diagonal())
+    apply_symmetric_scale(scaled.data, scaled.indptr, scaled.indices, scale)
+    return scaled, scale
 
 
 def _require_valid_graph(n: int, owner: np.ndarray, nb: np.ndarray, where: str) -> None:

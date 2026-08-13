@@ -1054,11 +1054,16 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       mechanism once given here — the ILU(1) smoother's pattern-dependent fill — **does not survive**:
       reach-2 fails at ILU(0) too, where there is no fill to be pattern-dependent about, and the surviving
       reason is that it builds a *different hierarchy* (3 levels / 480 coarse equations against 2 / 1296).
-      **What IS available is `column_reach`**, which keeps the reach-3 pattern — so the hierarchy is
-      untouched — and shortens only the columns measured to carry nothing beyond reach 2 (`p`, `k`, `ω` on
-      `bfs3d`): 564 probes → 399, exact to float64 rounding. Both in `.claude/rules/solve.md`.
-      ⚠️ That `(3,3,3,2,2,2)` split **diverges the case on its first step** — the shipped value is
-      `(3,3,3,3,2,2)`, with `p` back at reach 3 and only `k`/`ω` shortened (issue #191).
+      **`column_reach` is a DIFFERENT knob — it keeps the reach-3 pattern, so the hierarchy is untouched.**
+      Two things were wrong with how it was first recorded. It is not free: shortening a column **aliases**
+      its far couplings onto its near entries, at 53.4 % of the entries of every shortened column on
+      `bfs3d`. And `(3,3,3,2,2,2)` **diverges the march at step 1** (issue #191) — though not
+      through the aliasing, whose assembled error is at the float64 floor there; the cause is sparse
+      arithmetic pruning the stored zeros out of the smoother's pattern. Preserving them cures that and is
+      not available, because a zero-fill incomplete factorization cannot be handed stored zeros (measured at
+      zero shift: 58 restart cycles at 2.299e-02 against 11 at 8.474e-11), so they are pruned at the
+      factorization boundary and the shipped value is `(3,3,3,3,2,2)` — `p` at reach 3, only k and ω
+      shortened. Keep the two reaches apart when reasoning; both are in the solve rules.
       **⚠️ THE DRIFT GATE MUST NOT BE NESTED INSIDE THE β GATE — it was, and a PC-only `beta_floor` then
       made it unreachable.** The β gate sees `max(β, beta_floor)`, so below the floor its input is pinned
       and it answers "no change" forever; asking the drift gate only inside it therefore froze the

@@ -14,7 +14,7 @@ import scipy.sparse as sp
 
 pytest.importorskip("petsc4py")
 
-from aquaflux.solve import MonolithicAmgPreconditioner, build_amg_vcycle
+from aquaflux.solve import AmgVCycle, MonolithicAmgPreconditioner, build_amg_vcycle
 from aquaflux.solve.ilut_preconditioner import equilibrate_cell_major
 
 
@@ -52,6 +52,92 @@ def test_amg_vcycle_reduces_the_residual() -> None:
     x = vcycle.apply(b)
     ratio = np.linalg.norm(a @ x - b) / np.linalg.norm(b)
     assert ratio < 0.7  # a single multigrid cycle removes most of the residual
+
+
+def _with_stored_zeros(a: sp.csr_matrix, per_row: int = 3) -> sp.csr_matrix:
+    """``a`` padded with exactly-zero entries at positions it does not already store.
+
+    Imitates what the coloured probe hands the preconditioner: the *full* block-stencil pattern, whose
+    out-of-reach and genuinely-uncoupled positions are stored as exact zeros. Built from coordinates so the
+    zeros survive -- assembling through a sparse product or addition would drop them, which is the very
+    behaviour the tests below exist to be independent of.
+    """
+    coo = a.tocoo()
+    n = a.shape[0]
+    extra_rows = np.repeat(np.arange(n), per_row)
+    extra_cols = (extra_rows + np.tile(np.arange(2, 2 + per_row), n) * 7) % n
+    rows = np.concatenate([coo.row, extra_rows])
+    cols = np.concatenate([coo.col, extra_cols])
+    data = np.concatenate([coo.data, np.zeros(extra_rows.shape[0])])
+    padded = sp.csr_matrix((data, (rows, cols)), shape=a.shape)
+    padded.sort_indices()
+    return padded
+
+
+def test_live_drops_stored_zeros_without_changing_the_operator() -> None:
+    """Pruning the stored zeros changes the pattern and nothing else -- same matrix, fewer stored entries."""
+    a = _laplacian_2d(12)
+    padded = _with_stored_zeros(a)
+    assert (padded.data == 0.0).sum() > 0, "fixture stores no zeros, so it tests nothing"
+
+    live = AmgVCycle._live(padded)
+
+    assert live.nnz < padded.nnz  # positions really were removed
+    assert (live.data == 0.0).sum() == 0
+    np.testing.assert_array_equal(live.toarray(), padded.toarray())  # identical operator
+
+
+def test_the_vcycle_is_built_on_the_live_pattern_not_the_stored_one() -> None:
+    """The incomplete-LU smoother must not be handed stored zeros -- they are fill slots for it.
+
+    A stored exactly-zero entry changes the smoother's factorization without changing the operator, and on
+    the three-dimensional coupled case at **zero** pseudo-transient shift that takes the V-cycle from
+    converging in 11 restart cycles to stalling at a true relative residual of 2.3e-02. Zero shift is the
+    operator the implicit-function-theorem adjoint solves, so no forward march ever visits it (the march
+    floors its preconditioner at a positive shift) and no march can reveal the regression -- which is
+    exactly why it is pinned here rather than left to the case.
+
+    Neither of the two natural diagnoses detects it, so neither can serve as the gate: the fine-level
+    pivots are identical with and without the stored zeros, and so is the coarse space's size.
+    """
+    a = _laplacian_2d(12)
+    padded = _with_stored_zeros(a)
+    stored_zeros = int((padded.data == 0.0).sum())
+    assert stored_zeros > 0, "fixture stores no zeros, so it tests nothing"
+
+    # Handed to the V-cycle DIRECTLY, with an identity equilibration and permutation, rather than through
+    # `equilibrate_cell_major`. That keeps the test independent of which spelling the assemblers use: a
+    # pruning one would strip the zeros before the V-cycle ever saw them and the test would silently
+    # assert nothing, while a pattern-preserving one hands them straight through. This is the boundary
+    # that has to stop them either way.
+    identity_scale, identity_perm = np.ones(padded.shape[0]), np.arange(padded.shape[0])
+    vcycle = AmgVCycle(
+        padded, identity_scale, identity_perm, 1, smoother_fill_levels=0, smoother_sweeps=2
+    )
+
+    assert vcycle._data.shape[0] == padded.nnz - stored_zeros
+    assert vcycle._data.shape[0] < padded.nnz  # the pruning is not vacuous
+    assert not np.any(vcycle._data == 0.0)
+    # and it still preconditions the operator it was built on
+    rng = np.random.default_rng(5)
+    b = rng.standard_normal(a.shape[0])
+    assert np.linalg.norm(padded @ vcycle.apply(b) - b) / np.linalg.norm(b) < 0.7
+
+
+def test_a_refactor_does_not_reintroduce_stored_zeros() -> None:
+    """The refresh prunes on the same terms as the build, or the first refresh undoes the guard."""
+    a = _laplacian_2d(12)
+    vcycle = build_amg_vcycle(a, n_fields=1)
+    padded = _with_stored_zeros((2.5 * a).tocsr())
+    assert (padded.data == 0.0).sum() > 0, "fixture stores no zeros, so it tests nothing"
+    identity_scale, identity_perm = np.ones(padded.shape[0]), np.arange(padded.shape[0])
+
+    vcycle.refactor(padded, identity_scale, identity_perm)
+
+    assert not np.any(vcycle._data == 0.0)
+    rng = np.random.default_rng(6)
+    b = rng.standard_normal(a.shape[0])
+    assert np.linalg.norm(padded @ vcycle.apply(b) - b) / np.linalg.norm(b) < 0.7
 
 
 def test_amg_vcycle_transpose_is_consistent() -> None:

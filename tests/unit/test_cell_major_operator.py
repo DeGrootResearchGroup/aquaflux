@@ -13,7 +13,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator, _row_chunks
+from aquaflux.solve.amg_preconditioner import MonolithicAmgPreconditioner, ShiftedCellMajorOperator
+from aquaflux.solve.frozen_operator import row_chunks
 from aquaflux.solve.ilut_preconditioner import equilibrate_cell_major
 
 
@@ -58,16 +59,24 @@ def test_assemble_is_bit_identical_to_the_generic_sparse_composition(n_fields: i
     jacobian = _fixed_pattern_jacobian(n_cells, n_fields, seed=0)
     shift = np.linspace(0.5, 3.0, n_cells * n_fields)
 
+    # The production generic path, not a restatement of it: `_shifted` adds the shift by diagonal
+    # assignment precisely so it does not prune, where `jacobian + sp.diags(shift)` would drop every
+    # explicit zero and leave the two paths comparable only as dense arrays.
     expected, expected_scale, expected_perm = equilibrate_cell_major(
-        (jacobian + sp.diags(shift)).tocsr(), n_fields
+        MonolithicAmgPreconditioner._shifted(jacobian, shift), n_fields
     )
     operator = ShiftedCellMajorOperator(jacobian.indptr, jacobian.indices, n_fields)
     actual, scale, perm = operator.assemble(jacobian.data, shift)
 
     np.testing.assert_array_equal(perm, expected_perm)
     np.testing.assert_array_equal(scale, expected_scale)
-    # The fast path keeps the full pattern's explicit zeros, so compare as dense rather than by nnz.
-    np.testing.assert_array_equal(actual.toarray(), expected.toarray())
+    # Compared as STRUCTURE, not as dense arrays. Both paths now scale the stored values in place, so
+    # both keep the full pattern's explicit zeros; a dense comparison would pass just as well if one of
+    # them silently dropped those positions, which is exactly the defect that hid here before.
+    np.testing.assert_array_equal(actual.indptr, expected.indptr)
+    np.testing.assert_array_equal(actual.indices, expected.indices)
+    np.testing.assert_array_equal(actual.data, expected.data)
+    assert actual.nnz == jacobian.nnz
 
 
 def test_a_second_assemble_reflects_the_new_shift_and_values() -> None:
@@ -115,7 +124,7 @@ def test_a_size_that_is_not_a_multiple_of_the_field_count_is_rejected() -> None:
 def test_row_chunks_cover_every_row_exactly_once(target: int) -> None:
     """The chunked symmetric scaling must partition the rows -- a gap silently leaves a row unscaled."""
     indptr = np.array([0, 2, 2, 7, 9, 14, 20])  # includes an empty row
-    chunks = _row_chunks(indptr, target)
+    chunks = row_chunks(indptr, target)
 
     assert chunks[0][0] == 0
     assert chunks[-1][1] == indptr.shape[0] - 1
@@ -125,7 +134,7 @@ def test_row_chunks_cover_every_row_exactly_once(target: int) -> None:
 
 def test_row_chunks_of_an_empty_matrix_is_empty() -> None:
     """No rows means no work, not a one-element chunk of nothing."""
-    assert _row_chunks(np.array([0]), 4) == ()
+    assert row_chunks(np.array([0]), 4) == ()
 
 
 def test_equilibrate_cell_major_returns_canonical_csr():

@@ -164,28 +164,55 @@ FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT, PC_BETA_FLOOR = 0, 4, 2000, 0.05
 # re-measured for any case that changes them, NOT inherited. Shortening a column that does carry far
 # couplings corrupts its near entries rather than truncating them.
 #
-# 564 probes -> 399 (-29%); the two Jacobians agree to 5.7e-16 relative Frobenius, i.e. float64 rounding.
+# Shortening all three would be 564 probes -> 399 (-29%), and the two Jacobians agree to 5.7e-16 relative
+# Frobenius, i.e. float64 rounding. The SHIPPED value shortens only k and omega: 564 -> 454 (-16%).
 #
-# ⚠️ (3, 3, 3, 2, 2, 2) DIVERGES THIS CASE ON ITS FIRST STEP, and the measurement above does not catch
-# it. At the rung-1 cold iterate the default march takes 44 restart cycles instead of 3, the step length
-# collapses to 0.000, and by step two the shift is at its 16.0 ceiling with the residual an order of
-# magnitude ABOVE its start. The p row is the tell: 1.402e-01 after step one against 6.217e-07.
+# That measurement is sound and it is NOT what licenses the shortening, which is worth stating plainly
+# because shortening p on the strength of it has been tried twice and withdrawn twice.
+# (3, 3, 3, 2, 2, 2) DIVERGES this case on its first step -- 44 restart cycles instead of 3, the step
+# length collapsing to 0.000, the shift at its 16.0 ceiling by step two -- and neither the shell norms
+# above nor the Frobenius agreement predicted
+# it, because the fault was never in the matrix. Every value in it was exact to the floating-point
+# floor. What differed was the SPARSITY: a shortened column writes its out-of-reach entries as exact
+# zeros where a uniform probe leaves the true value (tiny, around 1e-26, but nonzero), and the sparse
+# arithmetic that assembled the preconditioner stored only entries whose result was nonzero. Six and a
+# half million positions -- a sixth of the operator -- were dropped from what the zero-fill incomplete
+# LU factorizes, which is a structurally weaker factorization of a numerically identical matrix.
 #
-# The mechanism is NOT truncation, and that distinction is the whole reason the Frobenius check above
-# passes while the march fails. A colouring is collision-free only for the pattern it was built from, so
-# two cells sharing a reach-two colour may still both couple to one row at distance three; the probe
-# response is their SUM, and de-compression charges all of it to the single column inside the reach-two
-# pattern. A short-probed column therefore has its NEAR entries corrupted rather than its far entries
-# dropped. The licence for shortening a column is that its mass beyond the shortened reach is negligible
-# at every state the march visits -- and the shell norms above were measured at three states that do not
-# include this one.
+# Keeping those positions in the pattern DOES cure that divergence -- with the shift and the
+# equilibration applied to the stored values in place, (3, 3, 3, 2, 2, 2) converges to the same root as a
+# uniform probe in every reported digit: 67 steps, 320 cycles, residual 3.586e-06, mid-span reattachment
+# 8.3611, eddy-viscosity peak 150.1071, and independently of the trailing inverse's `equilibrate`
+# setting. But it is not a remedy that is available, because the positions it keeps are stored EXACT
+# ZEROS and an incomplete factorization cannot be handed those: it takes its pattern from the entries
+# that are stored, so each one is a slot the elimination deposits fill into. Measured at the converged
+# state with no pseudo-transient shift -- the operator the adjoint solves, and the one every gradient
+# goes through -- carrying them costs 58 restart cycles at a true relative residual of 2.299e-02 against
+# 11 cycles to 8.474e-11 without. So they are pruned before the factorization sees them, which puts the
+# pressure column back in the configuration that diverges this case.
 #
-# So p is restored to reach three and only k and omega are shortened. That split follows the SPLIT
+# Hence p stays at reach three. Only k and omega are shortened, and that split follows the SPLIT
 # PRECONDITIONER rather than the schemes: with the flow block leading, the field split applies
 # `d R_turb / d flow` and never `d R_flow / d turb`, so the turbulence COLUMNS are read only by the
-# turbulence ROWS -- whose hierarchy is smoothed by a per-cell block inverse that sees a cell's own
-# 2x2 block and nothing else. Corruption confined to those columns cannot reach the saddle. The p
-# column has no such shelter: it feeds the [u,v,w,p] block, whose smoother is an incomplete LU.
+# turbulence ROWS -- whose hierarchy is smoothed by a per-cell block inverse that sees a cell's own 2x2
+# block and nothing else. Corruption confined to those columns cannot reach the saddle. The p column has
+# no such shelter: it feeds the [u, v, w, p] block, whose smoother is an incomplete LU.
+#
+# What shortening k and omega costs, measured: nothing at the shift the march runs at (every arm ties at
+# 4 restart cycles and 1.435e-13 at a step-initial state, preconditioner floored), and a factor of two at
+# zero shift (22 cycles against a uniform probe's 11, to the same 1e-11 floor). It converges either way
+# there, so this is a cost to know about rather than a reason to widen the march's probe -- but "proven
+# safe" does not cross the shift boundary on its own.
+#
+# One caution that survives all of it: shortening a column is only sound where its mass beyond the
+# shortened reach is negligible AT EVERY STATE THE MARCH VISITS, and a short-probed column with far
+# couplings has its NEAR entries corrupted rather than its far entries dropped -- a colouring is
+# collision-free only for the pattern it was built from, so two cells sharing a reach-two colour can
+# both couple to one row at distance three and the response is charged entirely to the near one.
+# Measured structurally, that aliasing touches 53% of the entries of every shortened column here; it
+# is harmless only because the folded values are at the floating-point floor (3e-29 for k and omega).
+# Re-measure per (row field, column field) pair, never over a whole column -- a column-wide norm on
+# this system is set by the omega rows and cannot see a wrong pressure block.
 #
 # `BFS3D_COLUMN_REACH` takes a comma-separated reach per column ("3,3,3,3,2,2"), or `0` for a uniform
 # reach-three probe. Re-measure before shortening any column on a case that changes the schemes or the
