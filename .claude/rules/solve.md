@@ -3247,17 +3247,38 @@ structural claim with the native side finally measured at its best: at zero shif
 the *better* preconditioner and loses only on arithmetic; once a shift is present an incomplete-LU is
 nearly exact in two triangular passes and no multigrid quality catches it.
 
-⚠️ **SIMPLEC IS REFUTED, and the mechanism generalizes.** Its velocity coefficient is
-`1/(a_P - sum a_nb)` — this matrix's **row sum**. On a conservative discretization the interior row sum
-nearly vanishes: convection cancels by continuity, diffusion telescopes by conservation, and what remains
-is essentially the pseudo-transient shift. Measured, **46 % of fine-level rows have a row sum below a
-tenth of their own diagonal** (13 % on coarse levels, where aggregation accumulates boundary
-contributions). On the rows that clear that guard the coefficient is still up to ten times the Jacobi
-value, and the arm does not converge at all — true relative residual **1.0** at both relaxations. The
-segregated solvers SIMPLEC was designed for run velocity under-relaxation, which divides the diagonal by
-`alpha_u` and manufactures the anchor the method stands on; this solver removed under-relaxation
-deliberately. **SIMPLER is a separate no on cost**: it targets the smooth global pressure mode, which is
-what the coarse grid already owns, at roughly double the pressure work already measured as not paying.
+⚠️ **SIMPLEC FAILS HERE (true relative residual 1.0 at both relaxations) BUT THE RECORDED MECHANISM WAS
+WRONG — and the measurement that would settle it has not been run.** Its velocity coefficient is
+`1/(a_P - sum a_nb)`, which is this matrix's **row sum**. The first reading was that a conservative
+discretization makes the interior row sum vanish — convection cancels by continuity, diffusion telescopes
+by conservation — so the coefficient degenerates and that is why the arm failed. **That reading does not
+survive its own numbers.**
+
+The guard fell back to the Frobenius diagonal when a row sum dropped below **0.1** of its own diagonal,
+and the arm ran at **beta = 0.1**. For an interior cell the row sum is essentially the shift `beta d` with
+`d ~ a_P ~ diagonal`, so `row sum / diagonal ~ beta = 0.1` — sitting exactly on the cutoff. The reported
+"46 % of fine rows fell back" therefore measures rows scattered either side of a threshold set, by
+coincidence, at the physical value. It is not evidence of a degenerate operator.
+
+On the rows where SIMPLEC did apply the coefficient was about `1/(beta d) = 10/d` against Jacobi's `1/d`.
+**That is a legitimate SIMPLEC coefficient for this shift, not a pathology** — a larger, consistent `d` is
+the method's entire point, and it is why SIMPLEC needs no pressure under-relaxation as a solver.
+
+**The likelier cause is specific to SMOOTHING rather than solving.** In a segregated solver the larger `d`
+is bounded by the outer iteration and the velocity under-relaxation. As a fixed-sweep level smoother
+there is no outer control, and a velocity coefficient ten times larger pushes the error operator
+`I - omega M A` past unit spectral radius — the same failure shape as an undamped **Jacobi** pressure
+sweep (3.435e-01), one block over. Note this is consistent with SIMPLEC converging perfectly well as a
+solver without relaxation; the two claims do not conflict.
+
+**To settle it, measure `||I - F~^-1 F||` under the SIMPLEC diagonal** (`_splitting_balance` already
+computes this quantity for the other splittings) with the fallback threshold dropped far below `beta` so
+SIMPLEC is genuinely in force. Above the Frobenius diagonal's 1.449 means it amplifies and the direction
+closes for that reason; comparable or lower means something else killed the arm and it deserves another
+look. **Until that is run, treat SIMPLEC as failed-but-unexplained, not as closed.**
+
+**SIMPLER is a separate no, on cost**: it targets the smooth global pressure mode, which is what the
+coarse grid already owns, at roughly double the pressure work already measured as not paying.
 
 ### Q&A on the remaining levers — three closed, one small win
 
