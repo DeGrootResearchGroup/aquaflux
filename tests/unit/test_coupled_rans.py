@@ -1039,7 +1039,7 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
 
     pc = _RecordingPreconditioner()
     step = _stub_step(pc, beta=0.5, diagonal=diagonal)
-    # A gate that fires once (its initialising call) and then never again, which is the shipped bfs3d
+    # A gate that fires once (its initializing call) and then never again, which is the shipped bfs3d
     # configuration: the cost trigger replaces the schedule, so nothing else may rebuild the V-cycle.
     refresh = _beta_tracking_refresh(
         _ScalarRans(gain=jnp.asarray(3.0)),
@@ -1048,7 +1048,7 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
         gate=_staleness_beta_gate(refresh_every=10**9, beta_rel_change=float("inf")),
     )
 
-    refresh(step, state)  # the initialising call
+    refresh(step, state)  # the initializing call
     assert len(pc.calls) == 1
     assert np.allclose(pc.calls[0]["shift"], 0.5 * np.asarray(diagonal))
     assert np.allclose(pc.calls[0]["matvec"](tangent), 3.0 * tangent)
