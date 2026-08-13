@@ -3193,6 +3193,72 @@ with the smoothed-aggregation path over the **symmetric pressure Schur** — whi
 literature result was actually measured on, and where it may well hold. What is refuted is the W-cycle on
 the saddle under a SIMPLE smoother, not the W-cycle.
 
+### The gap is CONVERGENCE, not cost — measured, and it reverses the priorities
+
+**The per-iteration split had never been measured, and both directions of inference about it were
+wrong.** `BFS3D_PROBE_SPLIT=1` times the exact matrix-free Jacobian product against the preconditioner
+apply, separately, on every arm. At β = 0.1:
+
+| arm | jacobian product | preconditioner | cycles |
+|---|---|---|---|
+| `split flow/ilu0` (incumbent) | 34 ms | **121 ms** | 2 |
+| native, 4 sweeps x 2 inner | 38 ms | **175 ms** | 8 |
+| native, block splitting | 49 ms | 212 ms | 7 |
+| native, 8 sweeps | 46 ms | 319 ms | 5 |
+
+**The native preconditioner is only ~1.45x more expensive per application and needs 4x the cycles.** So
+the wall-clock gap is convergence, and **a lever that buys cycles at no cost is worth about four times an
+equally-sized cost reduction.** Two independent audits had inferred the Jacobian product to be roughly
+half of an iteration and concluded preconditioner work was capped at half the gap; it is **14 %**. That
+inference chained three estimates, one resting on a wrong nonzero count, where the direct measurement
+takes seconds — take it before ranking any cost work.
+
+**TWO FREE QUALITY LEVERS, AND THEY COMPOSE.**
+
+`omega` — the relaxation on the whole SIMPLE correction — was 0.7, and **no arm in this campaign had ever
+varied it; there was no token.** It stacks on the Frobenius per-row relaxation the velocity predictor
+already carries (median 0.53) for an effective ~0.37. This is the **third** time the same over-damping has
+been found here, after the pressure relaxation (worth 1.6x) and the transported scalars' smoother
+(10 cycles against 2). Undamping is worth one cycle at *both* sweep counts, so it is not a single point.
+
+| configuration (β = 0.1, 4 sweeps x 2 inner) | cycles | solve |
+|---|---|---|
+| baseline, omega 0.7, scalar diagonal | 8 | 34 s |
+| + per-cell block splitting | 7 | 32 s |
+| + omega 1.0 | 7 | 31 s |
+| **+ both** | **6** | **29 s** |
+
+Each is worth one cycle alone and together they are worth two, so they correct **different** deficiencies
+rather than being two routes to the same one. Both are properties of the **velocity splitting** — which is
+where the balance measurement pointed (`||S|| = 1.449` against `||E|| = 1.029`) before that reading was
+mistakenly talked down.
+
+**AT β = 0 THE NATIVE PRECONDITIONER NOW CONVERGES IN FEWER ITERATIONS THAN THE INCUMBENT.** The
+composition holds at zero shift, so it is not a march-only effect:
+
+| arm at β = 0 | cycles | solve |
+|---|---|---|
+| `split flow/ilu0` | 11 | 31 s |
+| native, 8 sweeps, omega 0.7, diagonal | 11 | 76 s |
+| **native, 8 sweeps, block + undamped** | **7** | **57 s** |
+
+**1.84x at the adjoint point** (from 2.45x), and **2.4x on the march** (from 3.0x). The asymmetry is the
+structural claim with the native side finally measured at its best: at zero shift the native hierarchy is
+the *better* preconditioner and loses only on arithmetic; once a shift is present an incomplete-LU is
+nearly exact in two triangular passes and no multigrid quality catches it.
+
+⚠️ **SIMPLEC IS REFUTED, and the mechanism generalizes.** Its velocity coefficient is
+`1/(a_P - sum a_nb)` — this matrix's **row sum**. On a conservative discretization the interior row sum
+nearly vanishes: convection cancels by continuity, diffusion telescopes by conservation, and what remains
+is essentially the pseudo-transient shift. Measured, **46 % of fine-level rows have a row sum below a
+tenth of their own diagonal** (13 % on coarse levels, where aggregation accumulates boundary
+contributions). On the rows that clear that guard the coefficient is still up to ten times the Jacobi
+value, and the arm does not converge at all — true relative residual **1.0** at both relaxations. The
+segregated solvers SIMPLEC was designed for run velocity under-relaxation, which divides the diagonal by
+`alpha_u` and manufactures the anchor the method stands on; this solver removed under-relaxation
+deliberately. **SIMPLER is a separate no on cost**: it targets the smooth global pressure mode, which is
+what the coarse grid already owns, at roughly double the pressure work already measured as not paying.
+
 ### Q&A on the remaining levers — three closed, one small win
 
 Four questions were put to measurement together, because each earlier answer had been taken with another
