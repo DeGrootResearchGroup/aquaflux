@@ -706,10 +706,183 @@ class _SimplePieces(NamedTuple):
     divergence: _CsrOperator  # D
     schur: _CsrOperator  # S = C - D diag(F)^-1 G
     schur_diagonal_inverse: jnp.ndarray  # (n_pressure,) 1 / diag(S)
+    #: Set when the splitting is a per-cell BLOCK inverse instead of a scalar diagonal; the velocity
+    #: predictor then applies this rather than an elementwise multiply. ``None`` keeps the diagonal path,
+    #: which stays an elementwise multiply rather than a nine-nonzero-per-row matvec.
+    f_block_inverse: _CsrOperator | None
+
+    #: The same Schur complement in host sparse form. Kept because the balance diagnostic needs a
+    #: transposable sparse operator for a singular-value iteration, which the traced form is not.
+    schur_scipy: sp.csr_matrix
+
+
+def _splitting_balance(a, pieces, block_size, pressure_sweeps, pressure_omega):
+    """Report the two approximation errors a block-diagonal saddle preconditioner is governed by.
+
+    Siefert and de Sturler (2006) analyse exactly this operator class -- a generalized saddle point whose
+    (1,2) block differs from the transposed (2,1) block and whose (2,2) block is nonzero but small in
+    norm, which is what Rhie--Chow interpolation produces -- and show the eigenvalues of the
+    preconditioned system cluster to within a constant times ``max(||S||, ||E||)``, where ``S`` is the
+    error of the splitting used for the velocity block and ``E`` the error of the approximate Schur
+    inverse. Their practical conclusion is that the two must be BALANCED: shrinking whichever is already
+    the smaller one cannot move the bound, so the effort is wasted.
+
+    Both have closed forms for this smoother rather than needing an estimate.
+
+    The splitting is ``F ~ diag``, so ``S = I - F_diag^-1 F``.
+
+    The Schur inverse is ``n`` damped-Jacobi sweeps, a fixed linear map. Writing
+    ``G = I - omega D_S^-1 S_schur``, the sweep recurrence telescopes to ``M_S S_schur = I - G^n``, so the
+    Schur error is exactly ``E = -G^n`` and its norm is ``||G^n||``.
+
+    Both norms are the largest singular value, taken by a sparse iteration -- no dense factor is formed.
+
+    Parameters
+    ----------
+    a : scipy.sparse matrix
+        The level operator, shape ``(block_size * n_cells,) * 2``, field-major.
+    pieces : _SimplePieces
+        That level's SIMPLE pieces.
+    block_size : int
+        Fields per cell.
+    pressure_sweeps : int
+        Inner pressure relaxations per SIMPLE sweep -- the exponent ``n`` above.
+    pressure_omega : float
+        The pressure relaxation factor.
+
+    Returns
+    -------
+    tuple
+        ``(||S||, ||E||)``.
+    """
+    from scipy.sparse.linalg import LinearOperator, svds
+
+    n_cells = a.shape[0] // block_size
+    nv = (block_size - 1) * n_cells
+    f_block = a[:nv, :nv].tocsr()
+    f_inverse = np.asarray(pieces.f_diagonal_inverse)
+    splitting = sp.eye(nv, format="csr") - sp.diags(f_inverse) @ f_block
+
+    # The same splitting error for a per-cell BLOCK inverse instead of a scalar diagonal. The velocity
+    # block carries `block_size - 1` fields per cell, so the block captures the intra-cell coupling a
+    # diagonal throws away, at a precomputed 3x3 inverse per cell -- negligible beside the matvecs. The
+    # comparison says whether the diagonal's error is intra-cell (a block fixes it) or neighbour coupling
+    # (nothing local will), which decides whether a stronger splitting is worth building at all.
+    # BOTH block forms, because they are not interchangeable and comparing the wrong pair is misleading.
+    # The scalar in use is the Frobenius-optimal diagonal, so the meaningful comparison is against the
+    # Frobenius-optimal BLOCK. The exact inverse of a cell's own block is the block analogue of plain
+    # Jacobi -- the form that amplified, and that the Frobenius diagonal beat by four orders -- so it is
+    # reported beside it rather than in place of it.
+    n_fields_v = block_size - 1
+    diagonal_norm = float(svds(splitting, k=1, return_singular_vectors=False)[0])
+    norms = {}
+    for label, frobenius in (("Frobenius", True), ("exact inverse", False)):
+        block_matrix = _block_approximate_inverse(f_block, n_cells, n_fields_v, frobenius)
+        block_splitting = sp.eye(nv, format="csr") - block_matrix @ f_block
+        norms[label] = float(svds(block_splitting, k=1, return_singular_vectors=False)[0])
+    print(
+        f"      splitting: scalar Frobenius diagonal {diagonal_norm:.3e}  |  cell-block Frobenius "
+        f"{norms['Frobenius']:.3e}  |  cell-block exact inverse {norms['exact inverse']:.3e}",
+        flush=True,
+    )
+
+    schur = pieces.schur_scipy
+    schur_inverse = np.asarray(pieces.schur_diagonal_inverse)
+    damping = sp.diags(pressure_omega * schur_inverse) @ schur
+
+    def apply_iteration(vector):
+        # G^n v, applied rather than formed: G = I - omega D_S^-1 S.
+        for _ in range(pressure_sweeps):
+            vector = vector - damping @ vector
+        return vector
+
+    iteration = LinearOperator(schur.shape, matvec=apply_iteration, rmatvec=None, dtype=float)
+    # `svds` needs a transpose; the operator is a polynomial in `damping`, so transposing each factor
+    # and reversing the order gives it in closed form.
+    damping_t = damping.T.tocsr()
+
+    def apply_iteration_t(vector):
+        for _ in range(pressure_sweeps):
+            vector = vector - damping_t @ vector
+        return vector
+
+    iteration = LinearOperator(
+        schur.shape, matvec=apply_iteration, rmatvec=apply_iteration_t, dtype=float
+    )
+    splitting_norm = float(svds(splitting, k=1, return_singular_vectors=False)[0])
+    schur_norm = float(svds(iteration, k=1, return_singular_vectors=False)[0])
+    return splitting_norm, schur_norm
+
+
+def _block_approximate_inverse(f_block, n_cells, n_fields, frobenius):
+    """A per-cell block approximate inverse of the velocity block, as a sparse operator.
+
+    The scalar diagonal this replaces throws away the coupling between a cell's own velocity components.
+    A block inverse keeps it at a precomputed ``n_fields x n_fields`` solve per cell -- nine multiplies
+    instead of three, negligible beside the matrix-vector products -- so it is the cheapest strengthening
+    of the splitting available, and the splitting error is what the eigenvalue clustering of a
+    block-diagonal saddle preconditioner is governed by.
+
+    ``frobenius`` selects the block generalization of the Frobenius-optimal diagonal. Minimizing
+    ``||I - M F||_F`` over block-diagonal ``M`` decouples by cell: with ``R_i`` the cell's row block of
+    ``F``, the minimizer is ``M_i = F_ii^T (R_i R_i^T)^-1``. At one field per cell this reduces exactly to
+    ``F_ii / ||F_i||^2``, which is the diagonal form measured to be worth four orders as a velocity
+    predictor -- so the block version should not be built without it.
+
+    Parameters
+    ----------
+    f_block : scipy.sparse matrix
+        The velocity block, shape ``(n_fields * n_cells,) * 2``, field-major.
+    n_cells, n_fields : int
+        Cells, and velocity components per cell.
+    frobenius : bool
+        Use the Frobenius-optimal block rather than the exact inverse of the diagonal block.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        The block-diagonal approximate inverse, shape ``(n_fields * n_cells,) * 2``.
+    """
+    diagonal_blocks = np.zeros((n_cells, n_fields, n_fields))
+    for f in range(n_fields):
+        rows_f = f_block[f * n_cells : (f + 1) * n_cells]
+        for g in range(n_fields):
+            diagonal_blocks[:, f, g] = rows_f[:, g * n_cells : (g + 1) * n_cells].diagonal()
+    if frobenius:
+        # Gram matrix of each cell's row block: (R_i R_i^T)_{fg} = <row f, row g> over the whole row.
+        gram = np.zeros((n_cells, n_fields, n_fields))
+        row_blocks = [f_block[f * n_cells : (f + 1) * n_cells] for f in range(n_fields)]
+        for f in range(n_fields):
+            for g in range(n_fields):
+                gram[:, f, g] = np.asarray(
+                    row_blocks[f].multiply(row_blocks[g]).sum(axis=1)
+                ).ravel()
+        # M_i = F_ii^T G^-1 with G = R_i R_i^T symmetric, computed as solve(G, F_ii) transposed:
+        # (G^-1 F_ii)^T = F_ii^T G^-T = F_ii^T G^-1. Passing F_ii^T here instead would give F_ii G^-1,
+        # which differs whenever the cell's own velocity-component block is nonsymmetric -- and it
+        # coincides at one field per cell, so a scalar reduction check cannot catch the difference.
+        inverse = np.transpose(np.linalg.solve(gram, diagonal_blocks), (0, 2, 1))
+    else:
+        inverse = np.linalg.inv(diagonal_blocks)
+    cells = np.arange(n_cells)
+    rows, cols, vals = [], [], []
+    for f in range(n_fields):
+        for g in range(n_fields):
+            rows.append(cells + f * n_cells)
+            cols.append(cells + g * n_cells)
+            vals.append(inverse[:, f, g])
+    return sp.csr_matrix(
+        (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(n_fields * n_cells,) * 2,
+    )
 
 
 def _simple_pieces(
-    a: sp.csr_matrix, block_size: int, frobenius: bool = True, schur_frobenius: bool = False
+    a: sp.csr_matrix,
+    block_size: int,
+    frobenius: bool = True,
+    schur_frobenius: bool = False,
+    block_splitting: bool = False,
 ) -> _SimplePieces:
     """Form one level's SIMPLE pieces from that level's assembled operator.
 
@@ -727,7 +900,15 @@ def _simple_pieces(
     f_inverse = _diagonal_approximate_inverse(a[:nv, :nv].tocsr(), frobenius)
     g_block = a[:nv, nv:].tocsr()
     d_block = a[nv:, :nv].tocsr()
-    dg = (sp.diags(f_inverse) @ g_block).tocsr()
+    if block_splitting:
+        f_inverse_matrix = _block_approximate_inverse(
+            a[:nv, :nv].tocsr(), n_cells, block_size - 1, frobenius
+        )
+        block_inverse = _CsrOperator.from_scipy(f_inverse_matrix)
+    else:
+        f_inverse_matrix = sp.diags(f_inverse)
+        block_inverse = None
+    dg = (f_inverse_matrix @ g_block).tocsr()
     schur = (a[nv:, nv:] - d_block @ dg).tocsr()
     # The formed Schur against the pieces it is built from. Applying `S` matrix-free -- as C.p minus
     # D.(diag(F)^-1.(G.p)) -- is algebraically identical, so which is cheaper is purely a question of
@@ -756,6 +937,8 @@ def _simple_pieces(
             flush=True,
         )
     return _SimplePieces(
+        f_block_inverse=block_inverse,
+        schur_scipy=schur,
         n_velocity=nv,
         f_diagonal_inverse=jnp.asarray(f_inverse),
         dg=_CsrOperator.from_scipy(dg),
@@ -783,7 +966,11 @@ def _simple_correction(
     """
     nv = pieces.n_velocity
     velocity_residual, pressure_residual = residual[:nv], residual[nv:]
-    predictor = pieces.f_diagonal_inverse * velocity_residual
+    predictor = (
+        pieces.f_block_inverse.apply(velocity_residual)
+        if pieces.f_block_inverse is not None
+        else pieces.f_diagonal_inverse * velocity_residual
+    )
     rhs = pressure_residual - pieces.divergence.apply(predictor)
     # The first sweep is peeled because it would otherwise multiply the Schur complement by a zero
     # vector: starting from p = 0, the update collapses to omega * S_diag^-1 * rhs. That is one of every
@@ -854,6 +1041,17 @@ class NativeSimpleInverse:
         strength_threshold: float = 0.0,
         orthonormal: bool = False,
         avoid_singletons: bool = False,
+        # A W-cycle visits each coarse level twice per visit of its parent. It buys convergence with
+        # COARSE work, where every other lever here buys it with fine-level relaxation -- and the fine
+        # level is ~60% of the smoothing cost, so the two are priced very differently.
+        # Replace the velocity predictor's scalar diagonal with a per-cell block inverse. The splitting
+        # error is the larger half of what governs this preconditioner's eigenvalue clustering at the fine
+        # level, and a diagonal cannot represent a cell's own velocity-component coupling at all.
+        block_splitting: bool = False,
+        mu: int = 1,
+        # Dropping the pre-relaxation also drops the residual matvec that follows it, which at two inner
+        # pressure sweeps is the single largest term in a sweep.
+        pre_smooth: bool = True,
         # Every arm here has run UNSMOOTHED aggregation, which interpolates a coarse correction by
         # injecting it piecewise-constant over each aggregate. That is the standard explanation for a
         # hierarchy that works at two levels and gains nothing deeper: the interpolation error does not
@@ -905,8 +1103,25 @@ class NativeSimpleInverse:
                 shape=operator.shape,
             )
             pieces[level.n] = _simple_pieces(
-                level_matrix, level.block_size, frobenius, schur_frobenius
+                level_matrix, level.block_size, frobenius, schur_frobenius, block_splitting
             )
+            if os.environ.get("BFS3D_PROBE_BALANCE"):
+                # Which half of the relaxation limits it -- the velocity splitting or the Schur solve.
+                # Whichever norm is larger governs the eigenvalue clustering, so effort spent on the
+                # other one cannot move it.
+                split_norm, schur_norm = _splitting_balance(
+                    level_matrix,
+                    pieces[level.n],
+                    level.block_size,
+                    pressure_sweeps,
+                    pressure_omega,
+                )
+                print(
+                    f"      balance at level {level.n}: ||splitting|| {split_norm:.3e}  "
+                    f"||schur inverse error|| {schur_norm:.3e}  "
+                    f"(ratio {split_norm / max(schur_norm, 1e-300):.2f})",
+                    flush=True,
+                )
         sizes = ", ".join(
             f"level {n}: S {p.schur.shape[0]} dofs / {p.schur.data.shape[0] / 1e6:.1f}M nnz"
             for n, p in pieces.items()
@@ -941,7 +1156,7 @@ class NativeSimpleInverse:
                 guess = guess + omega * correction
             return guess
 
-        ops = _smoothed_ops(smooth)
+        ops = _smoothed_ops(smooth, mu=mu, pre_smooth=pre_smooth)
         cycle = jax.jit(lambda r: self._hierarchy.fixed_cycle_solve(r, cycles, ops))
         self._solve = cycle
         self._transpose = jax.linear_transpose(cycle, jnp.zeros(self._n_dofs, dtype=jnp.float64))
@@ -1389,11 +1604,13 @@ def _leading_inverse(spec):
         rest = spec.removeprefix("simplesmooth")
         frobenius = "-jacobi" not in rest
         schur_frobenius = "-sjacobi" not in rest
-        levels = next((int(t[2:]) for t in ("-L3", "-L4", "-L5") if t in rest), 2)
+        levels = next((int(t[2:]) for t in ("-L3", "-L4", "-L5", "-L6", "-L8") if t in rest), 2)
         # `-cNNN` lowers the size at which coarsening stops. Depth alone cannot go deeper than the
         # first level that falls under this limit, so raising `-L` without lowering it is a no-op:
         # the loop breaks on `size <= max_coarse` before it ever reaches the level cap.
-        coarse_token = next((t for t in ("-c1000", "-c500", "-c200", "-c50") if t in rest), None)
+        coarse_token = next(
+            (t for t in ("-c1000", "-c500", "-c200", "-c100", "-c50", "-c20") if t in rest), None
+        )
         # `-psN` sets the inner pressure relaxations per SIMPLE sweep. Never varied before this: every
         # arm ran at four, while the OUTER sweep count was swept 4/8/16 -- so the single largest term in
         # the smoother's cost is the one axis that was held fixed. Four inner sweeps are two thirds of an
@@ -1416,12 +1633,22 @@ def _leading_inverse(spec):
         else:
             prolongation_smoothing = "none"
         equilibrate = "-eq" in rest
+        block_splitting = "-bs" in rest
+        mu = 2 if "-W" in rest else 1
+        pre_smooth = "-pre0" not in rest
         # `-p1` removes the explicit pressure relaxation. It exists to test whether Eq. (39) on the
         # Schur was harmful in itself or only because it stacked on top of an existing damping: the
         # velocity predictor carries no relaxation of its own, which is why the same substitution was
         # worth four orders there and negative here.
         pressure_omega = 0.7 if "-p07" in rest else 1.0
         for token in (
+            "-bs",
+            "-L6",
+            "-L8",
+            "-c100",
+            "-c20",
+            "-pre0",
+            "-W",
             "-smstd",
             "-sm",
             "-eq",
@@ -1466,6 +1693,9 @@ def _leading_inverse(spec):
                 pressure_omega=pressure_omega,
                 prolongation_smoothing=prolongation_smoothing,
                 equilibrate=equilibrate,
+                mu=mu,
+                pre_smooth=pre_smooth,
+                block_splitting=block_splitting,
             )
 
         return build
@@ -2199,6 +2429,85 @@ ARMS = (
         "split flow-first, SIMPLE smoother, strength 0.25, 6 sweeps, 2 inner",
         lambda m, g, n: field_split(
             m, g, n, "simplesmooth6-a0-t25-ns-L5-c500-ps2", "ilu0", flow_first=True
+        ),
+    ),
+    # W-CYCLE and PRE-SMOOTH REMOVAL, from Jasak, Jemcov and Maruszewski (2007). On a segregated LES
+    # pressure equation they measure a W-cycle at 26 iterations against a V-cycle's 71 on the same
+    # coarsener and smoother, and their fastest arms all drop the pre-sweep entirely -- their stated
+    # reason being the residual re-evaluation a nonzero pre-sweep forces, which is exactly the term that
+    # dominates a sweep here. Their system is a symmetric Poisson solved with conjugate gradients rather
+    # than this saddle, so it is a hypothesis to test, not a result to import.
+    (
+        "split simplesmooth4-a0-t25-ns-L5-c500-ps2-W/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 4 sweeps, 2 inner, W-cycle",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-a0-t25-ns-L5-c500-ps2-W", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth4-a0-t25-ns-L5-c500-ps2-pre0/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 4 sweeps, 2 inner, no pre-smooth",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-a0-t25-ns-L5-c500-ps2-pre0", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth4-a0-t25-ns-L5-c500-ps2-W-pre0/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 4 sweeps, 2 inner, W-cycle, no pre-smooth",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-a0-t25-ns-L5-c500-ps2-W-pre0", "ilu0", flow_first=True
+        ),
+    ),
+    # Q2: DOES A STRONGER SPLITTING BUY CONVERGENCE, or only a better norm? The velocity predictor's
+    # scalar diagonal is the larger half of the two errors governing this preconditioner at the fine
+    # level, and it cannot represent a cell's own velocity-component coupling at all. A per-cell block
+    # inverse is the cheapest strengthening there is.
+    (
+        "split simplesmooth4-a0-t25-ns-L5-c500-ps2-bs/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, block splitting",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-a0-t25-ns-L5-c500-ps2-bs", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth8-a0-t25-ns-L5-c500-ps2-bs/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, block splitting, 8 sweeps",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth8-a0-t25-ns-L5-c500-ps2-bs", "ilu0", flow_first=True
+        ),
+    ),
+    # Q3: AGGRESSIVE COARSENING x W-CYCLE x DEPTH, the combination neither of the two earlier arms tested.
+    # Aggressive coarsening was measured net-neutral under a V-cycle, and the W-cycle measured a loss on a
+    # five-level non-aggressive hierarchy -- each with the other axis held at the value that makes it fail.
+    # A W-cycle's cost is the 2^k visits to level k, so it only pays on a hierarchy whose deep levels are
+    # genuinely cheap, which is exactly what aggressive coarsening and real depth produce, and is the
+    # configuration the literature runs (eight to fifteen levels down to a few tens of equations).
+    (
+        "split simplesmooth4-t25-ns-L5-c500-ps2-W/ilu0",
+        "split flow-first, SIMPLE smoother, aggressive + W-cycle, 5 levels",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-t25-ns-L5-c500-ps2-W", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth4-t25-ns-L8-c20-ps2/ilu0",
+        "split flow-first, SIMPLE smoother, aggressive + deep V-cycle (control)",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-t25-ns-L8-c20-ps2", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth4-t25-ns-L8-c20-ps2-W/ilu0",
+        "split flow-first, SIMPLE smoother, aggressive + deep W-cycle",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-t25-ns-L8-c20-ps2-W", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth4-a0-t25-ns-L8-c20-ps2-W/ilu0",
+        "split flow-first, SIMPLE smoother, plain + deep W-cycle",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-a0-t25-ns-L8-c20-ps2-W", "ilu0", flow_first=True
         ),
     ),
     (

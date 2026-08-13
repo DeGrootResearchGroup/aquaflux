@@ -1103,11 +1103,20 @@ class _VCycleOps(NamedTuple):
     ``Pᵀ`` (the ``R = Pᵀ`` special case, :func:`_smoothed_ops`) and lAIR with an independent restriction
     ``R`` (:func:`_air_ops`); the smoother is Chebyshev / damped-Jacobi (symmetric / convection
     two-level) or FC-Jacobi (reduction).
+
+    ``mu`` is the number of times each coarse level is visited per visit of its parent: 1 is a V-cycle,
+    2 a W-cycle, which moves work onto the cheaper coarse levels instead of buying convergence with more
+    fine-level relaxation. ``pre_smooth`` may be turned off, which removes both the pre-relaxation and
+    the residual evaluation that follows it — with a zero initial guess the fine residual *is* the
+    right-hand side, so the matvec is pure waste. Both are static, so the cycle stays a fixed linear
+    operator and transposes as one.
     """
 
     restrict: Callable[[object, jnp.ndarray], jnp.ndarray]
     prolong: Callable[[object, jnp.ndarray], jnp.ndarray]
     smooth: _Smoother
+    mu: int = 1
+    pre_smooth: bool = True
 
 
 def _frozen_v_cycle(
@@ -1123,10 +1132,22 @@ def _frozen_v_cycle(
     if level.coarse_inv is not None:  # coarsest: a direct (dense pseudo-inverse) solve
         return level.coarse_inv @ b
 
-    x = ops.smooth(level, b, jnp.zeros_like(b))  # pre-smooth
-    residual = b - _operator_matvec(level, x)
+    if ops.pre_smooth:
+        x = ops.smooth(level, b, jnp.zeros_like(b))
+        residual = b - _operator_matvec(level, x)
+    else:
+        # No pre-relaxation, so the iterate is still zero and the residual is the right-hand side
+        # itself: skipping the matvec here is exact, not an approximation.
+        x = jnp.zeros_like(b)
+        residual = b
     coarse_residual = ops.restrict(level, residual)
     coarse_error = _frozen_v_cycle(levels, coarse_residual, level_index + 1, ops)
+    coarse = levels[level_index + 1]
+    for _ in range(ops.mu - 1):
+        if coarse.coarse_inv is not None:
+            break  # the child solves exactly; visiting it again corrects nothing
+        defect = coarse_residual - _operator_matvec(coarse, coarse_error)
+        coarse_error = coarse_error + _frozen_v_cycle(levels, defect, level_index + 1, ops)
     x = x + ops.prolong(level, coarse_error)  # prolong and correct
     return ops.smooth(level, b, x)  # post-smooth
 
@@ -1146,9 +1167,11 @@ def _fixed_cycle_solve(levels: tuple, b: jnp.ndarray, cycles: int, ops: _VCycleO
     return x
 
 
-def _smoothed_ops(smoother: _Smoother) -> _VCycleOps:
+def _smoothed_ops(smoother: _Smoother, mu: int = 1, pre_smooth: bool = True) -> _VCycleOps:
     """V-cycle ops for a smoothed-aggregation level: restrict by ``Pᵀ``, prolong by ``P`` (``R = Pᵀ``)."""
     return _VCycleOps(
+        mu=mu,
+        pre_smooth=pre_smooth,
         restrict=lambda level, r: _coo_apply(
             level.p_ccol, level.p_frow, level.p_val, r, level.n_coarse
         ),

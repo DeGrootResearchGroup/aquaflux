@@ -3141,6 +3141,214 @@ behind every `jax.grad` meets exactly the unshifted operator, with no floor to s
 converge tightly. That is a real place to win and it is where a differentiable solver spends its gradient
 budget — but it is not the march, and a 2.3x quoted without the shift beside it will be read as the march.
 
+**⚠️ THE W-CYCLE AND PRE-SMOOTH REMOVAL ARE BOTH REFUTED ON THIS SADDLE.** Jasak, Jemcov and
+Maruszewski (2007) measure, on a segregated LES pressure equation, a W-cycle at 26 iterations against a
+V-cycle's 71 on the same coarsener and smoother, and their fastest arms all drop the pre-sweep entirely
+— their stated reason being the residual re-evaluation a nonzero pre-sweep forces, which is exactly the
+term that dominates a sweep here. Neither survives on the flow saddle. Measured at β = 0.1, strength
+0.25, 4 outer x 2 inner sweeps, 5 levels, no singletons:
+
+| arm | cycles | solve | s/cycle |
+|---|---|---|---|
+| **V-cycle with pre-smoothing** | **8** | **37 s** | 4.63 |
+| W-cycle (`mu = 2`) | 6 | 46 s | 7.67 |
+| no pre-smoothing | 14 | 41 s | 2.93 |
+| W-cycle + no pre-smoothing | 12 | 46 s | 3.83 |
+
+Each lever does mechanically what it promises and neither pays. The W-cycle buys 25 % of the cycles and
+costs 66 % per cycle, because a W-cycle visits level *k* **2^k** times — at five levels that multiplies far
+faster than the coarse share can absorb, and our level 1 carries a 1.6M-nonzero Schur where their deeper,
+more aggressive hierarchies really are nearly free to revisit. Dropping the pre-sweep does cut per-cycle
+cost by 37 %, exactly the mechanism claimed, and costs 75 % more cycles.
+
+**⚠️ A first reading of this called convergence here "smoother-dominated, not coarse-grid-dominated".
+That is TOO STRONG and two results of the same day contradict it: the strength threshold is a pure
+coarse-SPACE change and was the largest win measured (4x), and the W-cycle DID cut cycles 25 % — it failed
+on cost, not on effect. "Did not pay" is not "does not matter". What the evidence supports is narrower:
+more smoother (8 -> 16 sweeps: 11 -> 6 cycles) and more coarse grid (W-cycle: 8 -> 6 cycles) each buy
+25-45 % fewer cycles and each cost more than they return, so this sits at a MARGINAL-COST OPTIMUM rather
+than in a regime where one half is limiting.** The mechanism below still explains why each specific lever
+loses: On a symmetric Poisson under an incomplete-LU or
+symmetric Gauss–Seidel smoother the coarse correction carries the solve, so revisiting it pays and a
+post-smooth alone can clean up what an unsmoothed restriction lets through. On this indefinite saddle
+under a SIMPLE smoother the fine level carries it, so extra coarse visits buy little and restricting an
+unsmoothed residual costs a lot.
+
+**Separating a DEFECT from an INVESTMENT does organize the results, and that much holds.** The coarse
+space had a real defect — isotropic aggregation coarsening across the stiff wall-normal direction — and
+repairing it was worth 4x. Investing *further* in the coarse grid once repaired has returned nothing at a
+price worth paying: more levels, aggressive coarsening, both smoothed prolongators, orthonormalization,
+and the W-cycle. But note the W-cycle case carefully — it improved convergence and lost on cost, so this
+is a statement about marginal return, not about the coarse grid being irrelevant. Weigh a new
+coarse-grid idea against the *cost* it adds, not against a claim that the coarse space is finished.
+
+**The binding constraint is the smoother's absolute quality, which the balance measurement below puts at
+`||S|| ~ 1.45` and `||E|| ~ 1.03` — where useful preconditioning needs both far below 1.** Each sweep
+contracts very little, which is why many sweeps are needed and why many are expensive. **Improvement
+therefore requires a smoother that is better PER UNIT COST, not more of the same one.**
+
+⚠️ **Scoped to this operator, deliberately.** `mu` and `pre_smooth` are kept on `_VCycleOps` (defaulting
+to a V-cycle with pre-smoothing, byte-identical) rather than deleted, because `_frozen_v_cycle` is shared
+with the smoothed-aggregation path over the **symmetric pressure Schur** — which is the configuration the
+literature result was actually measured on, and where it may well hold. What is refuted is the W-cycle on
+the saddle under a SIMPLE smoother, not the W-cycle.
+
+### Q&A on the remaining levers — three closed, one small win
+
+Four questions were put to measurement together, because each earlier answer had been taken with another
+axis pinned. All at β = 0.1 on `state-00067`, strength 0.25, 5 levels, no singletons, 60-restart cap;
+matched incumbent `split flow/ilu0` is **2 cycles / 11 s**.
+
+**A STRONGER SPLITTING IS A SMALL, FREE WIN — the only Pareto improvement found.** Replacing the velocity
+predictor's scalar diagonal with a per-cell block form saves a cycle at both sweep counts and does not cost
+wall clock, despite tripling the nonzeros in `dg` and hence in the Schur:
+
+| sweeps | splitting | cycles | solve |
+|---|---|---|---|
+| 4 | scalar diagonal | 8 | 34 s |
+| 4 | **cell block** | **7** | **33 s** |
+| 8 | scalar diagonal | 6 | 43 s |
+| 8 | **cell block** | **5** | 40 s |
+
+Five cycles is the fewest any native arm has reached at this shift. Everything else measured here trades
+cost against cycles; this is the one change that improved the smoother's *quality* at fixed price.
+
+⚠️ **The block form MUST be the Frobenius-optimal one, and the exact inverse of the cell's own block is
+much WORSE than the scalar diagonal it would replace.** Measured `||I - F~^-1 F||` per level: scalar
+Frobenius diagonal 1.449 / 1.230 / 1.482 / 1.275, against the cell-block **exact inverse** 12.03 / 10.53 /
+8.64 / 5.76 — four to eight times worse. Inverting a cell's own block ignores the row's dominant
+off-diagonal mass, which on a convection-dominated operator is most of it. This is the same trap as plain
+Jacobi versus Eq. (39) on the diagonal, one block size up.
+
+⚠️ **The Frobenius block is `M_i = F_ii^T (R_i R_i^T)^-1`, and getting the transpose wrong is silent at one
+field per cell.** Minimizing `||I - M F||_F` over block-diagonal `M` decouples by cell, with `R_i` the
+cell's row block. Computing `F_ii (R R^T)^-1` instead — the same expression without the transpose — is
+correct only when the cell's own block is symmetric, which a velocity block is not. Measured on a
+nonsymmetric test: correct 1.048, transposed 1.246, plain exact inverse 1.101, so the error makes the
+"optimal" form worse than simply inverting the block. In the solver it took the arm from **7 cycles to 58**
+(no convergence). It reduces exactly to the scalar `F_ii / ||F_i||^2` at one field per cell, so a scalar
+reduction check cannot catch it — check against a brute-force minimizer on a nonsymmetric case instead.
+
+**⚠️ AGGRESSIVE COARSENING x W-CYCLE x DEPTH — CLOSED, and the earlier one-axis results were RIGHT.** The
+suspicion was that each had been measured with the other pinned at the value that makes it fail, and that
+a W-cycle needs the genuinely cheap deep levels aggressive coarsening produces (the configuration the
+literature runs at eight to fifteen levels). Tested jointly, it does not hold:
+
+| arm | cycles | solve |
+|---|---|---|
+| **plain, V-cycle, 5 levels** | 8 | **34 s** |
+| aggressive, V-cycle, deep | 9 | 36 s |
+| aggressive, W-cycle, 5 levels | 8 | 47 s |
+| aggressive, W-cycle, deep | 8 | 60 s |
+| plain, W-cycle, deep | 6 | 54 s |
+
+The W-cycle reliably buys ~25 % of the cycles and never once pays for it, across five configurations — the
+2^k visits to level k outrun any cheapness depth and aggressive coarsening can create. And aggressive
+coarsening makes the W-cycle **worse** on cycles (8 against 6), the opposite of the hypothesis. Note this
+is the one place where suspecting a premature closure was itself the error.
+
+**So the marginal-cost optimum is REAL, not an artifact of exploring one axis at a time.** The coarse-grid
+side survived a genuine joint test; the smoother side yielded one small Pareto gain that shifts the
+optimum rather than contradicting it. Best native arm is now **7 cycles / 33 s** against the matched
+incumbent's **2 / 11 s** — a threefold wall-clock gap that is structural for this smoother family.
+
+### The sparse matvec is at the limit of what JAX's primitives give — block-CSR REFUTED
+
+The level operators are applied through `_CsrOperator.apply`, a `jax.experimental.sparse.BCSR` product at
+**scalar** block size. Since the flow block carries four fields per cell it has genuine 4x4 dense block
+structure, and a true block form stores one column index per **sixteen** nonzeros rather than one per
+nonzero — cutting index traffic from 4 bytes per nonzero to 0.25, about 31 % of total traffic on a kernel
+whose fine level is bandwidth-limited. Measured on a synthetic operator at the flow block's exact shape
+(92160 rows, 11.8M nonzeros, 128 per row), the saving does not materialize:
+
+| variant | time | Gnnz/s |
+|---|---|---|
+| scalar CSR (what is shipped) | 5.20 ms | 2.27 |
+| block 4x4, state already cell-major | **5.20 ms** | 2.27 |
+| block 4x4 including the field-major transposes | 6.58 ms | 1.79 |
+
+**Even granting the layout migration for free, the block form exactly TIES the scalar one**, because the
+traffic it saves is spent on intermediates a fused kernel never writes: a per-edge gather buffer and a
+per-edge product buffer. The transposes that the field-major layout `(cell i, field f) = f n + i` would
+actually require cost a further 27 %. So a block-CSR migration is worth zero at best and -27 % as it would
+have to be built, against a state-layout change across the whole solver.
+
+**The corollary is the useful part: JAX's CSR matvec is not index-bound.** It matches a formulation
+carrying sixteen times less index traffic, so it is near what the primitive can do and there is no easy
+headroom in the kernel. Beating it needs a **fused** custom kernel doing gather → block multiply →
+scatter without materializing between the steps, which is a Pallas or custom-call project — and one whose
+payoff is on an accelerator, where that access pattern is the bottleneck, not on CPU where it would chase
+a fraction of a threefold gap.
+
+⚠️ **Per-call launch overhead is NOT why the coarse levels look expensive** — measured at about **10 us**
+per matvec, against roughly 144 matvec calls in a V-cycle of ~400 ms, i.e. under 1 %. Nor are the coarse
+levels especially inefficient where it matters: level 1 runs at 1.38 Gnnz/s against the fine level's 1.43
+and simply holds 27 % of the nonzeros. Only levels 2-3 degrade (0.45-0.75 Gnnz/s) and they hold ~7 % of
+the nonzeros, so their excess costs ~5 % of the cycle. **The fine level is ~70 % of the work and is where
+any real saving has to come from.**
+
+⚠️ **A kernel timing taken on RANDOM column indices understates the shipped matvec by ~2.2x** (1.43 against
+3.13 Gnnz/s at the fine level's shape) purely through locality — real mesh-ordered matrices are far more
+cache-friendly. Any cost model built on synthetic sparsity therefore overweights matvec work relative to
+everything else, which is exactly why one such model predicted 16 % for removing a multiply-by-zero and it
+delivered 2-7 %.
+
+### The SIMPLE smoother is BALANCED and both halves are poor — measured, not argued
+
+Siefert and de Sturler (2006) analyse precisely this operator class: a generalized saddle point whose
+(1,2) block differs from the transposed (2,1) block and whose (2,2) block is nonzero but small in norm —
+which is what Rhie–Chow interpolation produces, and which they note has received little attention and no
+numerical experiments. They show the preconditioned eigenvalues cluster to within a constant times
+`max(||S||, ||E||)`, where `S` is the error of the splitting used for the velocity block and `E` the error
+of the approximate Schur inverse, and conclude that the two must be **balanced**: shrinking whichever is
+already smaller cannot move the bound, so that effort is wasted.
+
+Both have closed forms for this smoother rather than needing an estimate. The splitting is `F ~ diag`, so
+`S = I - F_diag^-1 F`. The Schur inverse is `n` damped-Jacobi sweeps, whose recurrence telescopes to
+`M_S S = I - G^n` with `G = I - omega D_S^-1 S`, so `E = -G^n` exactly. `_splitting_balance` in the probe
+takes both as largest singular values by sparse iteration; `BFS3D_PROBE_BALANCE=1` prints them per level.
+
+Measured at β = 0.1 on `state-00067`, strength 0.25, 4 outer x 2 inner sweeps, 5 levels, no singletons:
+
+| level | `||S||` splitting | `||E||` Schur inverse | ratio |
+|---|---|---|---|
+| 92160 (fine) | 1.449 | 1.029 | 1.41 |
+| 26828 | 1.230 | 1.113 | 1.10 |
+| 6540 | 1.482 | 1.373 | 1.08 |
+| 1448 | 1.275 | 1.238 | 1.03 |
+
+**The DEEP levels are balanced (ratios 1.03–1.10); the FINE level is not (1.41), and it carries ~70 % of
+the cost.** Read the two separately — a single "they are balanced" reading of this table is wrong where it
+matters most. By the `max(||S||, ||E||)` criterion, bringing the fine level's splitting error down to its
+Schur error would cut the bound 1.449 -> 1.113, about **23 %**; beyond that, further gains need both halves
+together. So a one-sided improvement of the splitting is worth something, but bounded, and only on the
+fine level.
+
+It does explain why dropping the inner pressure sweeps 4 -> 2 was nearly free: the Schur side was already
+no worse than the splitting side, so the extra sweeps had nothing to buy.
+
+**Both norms are ~1.0–1.5, which is bad in absolute terms and is the real finding.** Their favourable
+regime is `||S||, ||E|| << 1`, where the eigenvalues cluster tightly; at `max ~ 1.4` the bound is vacuous,
+which matches this arm needing 8 cycles where the incumbent needs 2. Concretely `||I - F_diag^-1 F|| =
+1.449` says the diagonal splitting of the velocity block is a ~100 % error, and `||G^2|| = 1.03` says two
+damped-Jacobi sweeps on the Schur barely contract in the worst direction. (A 2-norm above 1 does not mean
+divergence for a non-normal iteration — the spectral radius governs asymptotically — but it does mean very
+little progress.)
+
+**The consequence is structural, not tunable: a SIMPLE smoother with a DIAGONAL splitting is near its
+ceiling here.** A real gain needs both halves improved together, and improving the velocity splitting past
+a diagonal means solving with `F`, which is the cost this whole direction exists to avoid.
+
+⚠️ **Cao, Du and Niu (2014) shift-splitting does NOT apply here** — there is no such lever to reach for.
+Their construction assumes a **symmetric positive definite** (1,1) block, a **zero** (2,2) block, and
+off-diagonal blocks that are exact transposes; the convergence proofs use all three (Lemma 2.2 needs
+`||(alpha I + A)^-1 (alpha I - A)|| < 1`, Theorem 3.1 forms `A^{1/2}`). Our velocity block is
+convection-dominated and nonsymmetric, our (2,2) block is the Rhie–Chow damping, and Rhie–Chow also breaks
+the transpose relation. Their central device — adding `alpha I` to a zero (2,2) block to regularize it —
+is something this discretization already provides, and augmenting that block further is separately
+recorded as a triple-confirmed no-go that degraded cycles 2.7x. Their experiments are a Stokes problem,
+i.e. no convection at all.
+
 **What DID transfer: `8 x 2` is the right sweep pair at every β** (49 s against 56 s at 0.05, 43 s against
 48 s at 0.1), so that tuning is not an artifact of zero shift.
 
