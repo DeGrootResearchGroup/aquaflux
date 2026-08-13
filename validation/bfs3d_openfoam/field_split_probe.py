@@ -1139,6 +1139,14 @@ class NativeSimpleInverse:
                 f"spread {stat['spread']:.0f}x, {stat['singletons']} singletons",
                 flush=True,
             )
+        # Print what was actually PARSED, not just what was built. A spec-token collision once made an
+        # arm run forty sweeps instead of four while every other line of output looked correct.
+        print(
+            f"      smoother: {sweeps} sweeps x {pressure_sweeps} inner, omega {omega}, "
+            f"pressure_omega {pressure_omega}, strength {strength_threshold}, "
+            f"block splitting {block_splitting}",
+            flush=True,
+        )
         coarse = self._hierarchy.levels[-1]
         print(
             f"      native SIMPLE smoother: {len(self._hierarchy.levels)} levels, "
@@ -1532,6 +1540,44 @@ def _trailing_inverse(spec):
     raise ValueError(f"unknown trailing inverse {spec!r}")
 
 
+#: Every modifier `_leading_inverse` strips off a `simplesmooth` spec before reading the sweep count.
+#: Stripped longest-first; see the loop for why that is not optional.
+_SPEC_TOKENS = (
+    "-bs",
+    "-L3",
+    "-L4",
+    "-L5",
+    "-L6",
+    "-L8",
+    "-c1000",
+    "-c500",
+    "-c200",
+    "-c100",
+    "-c50",
+    "-c20",
+    "-pre0",
+    "-W",
+    "-smstd",
+    "-sm",
+    "-eq",
+    "-qr",
+    "-ns",
+    "-jacobi",
+    "-sjacobi",
+    "-ps1",
+    "-ps2",
+    "-ps3",
+    "-ps6",
+    "-a0",
+    "-p07",
+    "-o07",
+    "-o10",
+    "-t10",
+    "-t25",
+    "-t50",
+)
+
+
 def _leading_inverse(spec):
     """The leading (flow saddle) block's inverse factory: a PETSc V-cycle by smoother name, or a native one.
 
@@ -1633,6 +1679,12 @@ def _leading_inverse(spec):
         else:
             prolongation_smoothing = "none"
         equilibrate = "-eq" in rest
+        # The relaxation on the WHOLE SIMPLE correction, which no arm has ever varied. It stacks on top
+        # of the Frobenius per-row relaxation the velocity predictor already carries (median 0.53), for
+        # an effective ~0.37 -- which is the same over-damping that was found and removed on the
+        # pressure relaxation, and the same defect that cost 10 cycles against 2 on the transported
+        # scalars when their smoother was damped where the reference's was not.
+        omega = 1.0 if "-o10" in rest else 0.7
         block_splitting = "-bs" in rest
         mu = 2 if "-W" in rest else 1
         pre_smooth = "-pre0" not in rest
@@ -1641,38 +1693,11 @@ def _leading_inverse(spec):
         # velocity predictor carries no relaxation of its own, which is why the same substitution was
         # worth four orders there and negative here.
         pressure_omega = 0.7 if "-p07" in rest else 1.0
-        for token in (
-            "-bs",
-            "-L6",
-            "-L8",
-            "-c100",
-            "-c20",
-            "-pre0",
-            "-W",
-            "-smstd",
-            "-sm",
-            "-eq",
-            "-qr",
-            "-ns",
-            "-jacobi",
-            "-sjacobi",
-            "-L3",
-            "-L4",
-            "-L5",
-            "-ps1",
-            "-ps2",
-            "-ps3",
-            "-ps6",
-            "-c1000",
-            "-c500",
-            "-c200",
-            "-c50",
-            "-a0",
-            "-p07",
-            "-t10",
-            "-t25",
-            "-t50",
-        ):
+        # LONGEST FIRST, or a token that is a prefix of another silently corrupts the sweep count:
+        # stripping `-c20` out of `-c200` leaves a stray `0` that concatenates onto the leading digits,
+        # so `simplesmooth4-...-c200` parsed as FORTY sweeps. Sorting by descending length makes the
+        # order independent of how the tuple is edited.
+        for token in sorted(_SPEC_TOKENS, key=len, reverse=True):
             rest = rest.replace(token, "")
         sweeps = int(rest or 2)
 
@@ -1696,6 +1721,7 @@ def _leading_inverse(spec):
                 mu=mu,
                 pre_smooth=pre_smooth,
                 block_splitting=block_splitting,
+                omega=omega,
             )
 
         return build
@@ -2508,6 +2534,25 @@ ARMS = (
         "split flow-first, SIMPLE smoother, plain + deep W-cycle",
         lambda m, g, n: field_split(
             m, g, n, "simplesmooth4-a0-t25-ns-L8-c20-ps2-W", "ilu0", flow_first=True
+        ),
+    ),
+    # THE OUTER RELAXATION, never varied by any arm in this campaign. `omega` damps the whole SIMPLE
+    # correction by 0.7 on top of the Frobenius per-row relaxation the velocity predictor already
+    # carries (median 0.53), for an effective ~0.37. Removing exactly this stacking on the PRESSURE
+    # relaxation was worth 1.6x, and a damped level smoother where the reference ran undamped cost
+    # 10 cycles against 2 on the transported scalars. The same defect, one level up.
+    (
+        "split simplesmooth4-a0-t25-ns-L5-c500-ps2-o10/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 4 sweeps, undamped correction",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-a0-t25-ns-L5-c500-ps2-o10", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth8-a0-t25-ns-L5-c500-ps2-o10/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 8 sweeps, undamped correction",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth8-a0-t25-ns-L5-c500-ps2-o10", "ilu0", flow_first=True
         ),
     ),
     (
