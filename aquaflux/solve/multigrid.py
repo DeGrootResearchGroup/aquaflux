@@ -793,7 +793,7 @@ def _build_aggregation_hierarchy(
                 # coarsens fast enough to stay shallow as the mesh grows, then repair the reach it
                 # buys by re-attaching each member to a root it actually touches.
                 aggregate, roots, n_coarse_cells = _mis_aggregate(
-                    _square_graph(connectivity), seed=len(levels)
+                    _square_graph(connectivity), seed=len(levels), avoid_singletons=avoid_singletons
                 )
                 aggregate = _reattach_to_adjacent_root(aggregate, roots, connectivity)
             else:

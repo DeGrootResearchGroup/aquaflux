@@ -17,6 +17,7 @@ import scipy.sparse as sp
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.solve.frozen_operator import convection_diffusion_operator, decouple_dof
 from aquaflux.solve.multigrid import (
+    _AGGREGATE_STATS,
     _cell_graph,
     _chebyshev_smooth,
     _CsrOperator,
@@ -209,6 +210,44 @@ def test_strength_of_connection_aggregation_fixes_an_anisotropic_operator() -> N
     # Isotropic aggregation has not reached 1% even after 8 V-cycles; SoC reaches it in 3.
     assert relative_after(plain, 8) > 1e-2
     assert relative_after(soc, 3) < 1e-2
+
+
+def test_avoid_singletons_reaches_the_aggressively_coarsened_level() -> None:
+    """``avoid_singletons`` must apply to the squared-graph level too, not only the plain ones.
+
+    A vertex reached late in the aggregation sweep can find every neighbour already claimed and then
+    opens an aggregate holding only itself — a coarse unknown standing for one cell and coupling to
+    almost nothing. The repair attaches such a vertex to an adjacent aggregate instead. It went to the
+    plain branch only, which was invisible while the squared graph ran unfiltered (its aggregates are
+    large enough that the case never arises); a strength threshold thins the graph enough to bring it
+    back, so the two settings have to work together.
+
+    The residual count on the aggressive level is expected, not a partial fix: the reattachment pass
+    that repairs the squared graph's reach runs *after* the aggregation and can itself strand a root
+    by moving away every member, which the repair inside the aggregation cannot see.
+    """
+    a = _anisotropic_poisson(24, 24, aspect_ratio=100.0)
+
+    def singletons_per_level(avoid_singletons):
+        _AGGREGATE_STATS.clear()
+        build_convection_hierarchy(
+            a,
+            max_coarse=20,
+            max_levels=3,
+            mis_aggregation=True,
+            aggressive_levels=1,
+            strength_threshold=0.25,
+            avoid_singletons=avoid_singletons,
+        )
+        return [level["singletons"] for level in _AGGREGATE_STATS]
+
+    without = singletons_per_level(False)
+    with_repair = singletons_per_level(True)
+
+    assert without[0] > 0 and without[1] > 0  # both levels strand vertices when unrepaired
+    assert with_repair[0] < without[0]  # the squared-graph level is repaired ...
+    assert with_repair[1] == 0  # ... and the plain level clears entirely
+    assert with_repair[0] > 0  # what the later reattachment strands, the repair cannot reach
 
 
 def _chebyshev_propagation_polynomial(eigenvalues, lam_max, degree, lo_frac):

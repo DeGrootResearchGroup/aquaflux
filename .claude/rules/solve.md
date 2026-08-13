@@ -2742,9 +2742,21 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
 preconditioner both at `beta = 0`** — the operator the implicit-function-theorem adjoint solves, and the
 only state in this set that discriminates between candidates. Real right-hand side `-R(state)`, GMRES
 restart 15 judged on the **TRUE** residual, uniform stencil reach 3, field split with ILU(0) on the
-trailing half, harness `validation/bfs3d_openfoam/field_split_probe.py`. The incumbent — the shipped
-monolithic ILU(0) — reads **11 restart cycles to 8.474e-11**, and every arm below was measured against it
-in the same run.
+trailing half, harness `validation/bfs3d_openfoam/field_split_probe.py`.
+
+⚠️ **THE INCUMBENT IS THE FIELD SPLIT, NOT THE MONOLITHIC ARM — and calling the monolithic one "shipped"
+here cost a day of comparisons against a bar 45 % too slow.** The shipped bundle runs `field split True`
+(`compare.py`, and the bundle table at the top of this file), so the arm that differs from a native
+leading-block candidate in exactly one place is `split flow/ilu0`. Both reach 11 restart cycles at this
+state, but they are **not** interchangeable as a baseline:
+
+| ILU(0) arm at `state-00067`, β = 0 | cycles | solve |
+|---|---|---|
+| monolithic, six fields | 11 | 42–46 s |
+| **`split flow/ilu0` — the matched incumbent** | 11 | **29 s** |
+
+Quote the split arm. A candidate that replaces only the leading block must be measured against the arm
+that differs only in the leading block; the monolithic number flatters it by ~45 %.
 
 ⚠️ **Two restart caps are in play and residuals across them are NOT comparable:** `max_restarts` 60
 (reported as 58 cycles) and 20 (reported as 18). A failing arm runs its cap out, so it costs 3–4× a
@@ -3006,67 +3018,153 @@ also widens the coarse stencil (level-1 operator 0.4M nnz against 0.1M) and chan
 aggregation sees, landing a 108-dof coarse grid instead of 376, so the arms differ in coarse space as
 well as in interpolation.
 
-**The lever is SWEEPS, not the hierarchy.** Doubling relaxation on the unchanged three-level hierarchy
-was worth **3.6×** (2.844e-05 → 8.002e-06) — more than depth, smoothing, orthonormalization, or the
-strength threshold have ever returned. Weigh it against cost before treating it as a win: eight sweeps
-roughly doubles the work in every application, and at a restart cap all arms report the same cycle count,
-so a residual gain there is not a like-for-like comparison with a four-sweep arm.
+**Sweeps beat every structural change tried in this subsection.** Doubling relaxation on the unchanged
+three-level hierarchy was worth **3.6×** (2.844e-05 → 8.002e-06) — more than depth, smoothing, or
+orthonormalization returned. Weigh it against cost before treating it as a win: eight sweeps roughly
+doubles the work in every application, and at a restart cap all arms report the same cycle count, so a
+residual gain there is not a like-for-like comparison with a four-sweep arm.
 
-### Where this stands — the native flow block CONVERGES to adjoint grade
+⚠️ **This was written before the strength threshold was measured, and the threshold beats it — 4× against
+3.6×, and on cycles rather than on a capped residual.** Every arm in this subsection ran
+`strength_threshold = 0`. Do not read "the lever is sweeps, not the hierarchy" out of it; the aggregation
+was the larger lever all along, and these arms simply never varied it. See *Where this stands*.
 
-**The four-to-five-order gap is closed. What is left is a cost gap.** Every earlier reading here was
-taken at a 20-restart cap, where every native arm stops at 18 cycles whatever its quality — so "native
-stalls at 1e-5" was measuring the *cap*, not the method. Re-run at a 60-restart cap on `state-00067`
-(β = 0 on operator and preconditioner — the adjoint's operator), GMRES to rtol 1e-8 on the TRUE
-residual, native SIMPLE smoother with the Frobenius diagonal on both halves, plain aggregation, no
-singleton aggregates:
+### Where this stands — the native flow block converges, and is 2.3x the incumbent's wall clock
 
-| arm | levels | coarse dofs | sweeps | build | cycles | TRUE rel | solve |
-|---|---|---|---|---|---|---|---|
-| **ILU(0), the incumbent** | — | — | — | 4 s | **11** | 8.474e-11 | **43 s** |
-| no singletons | 2 | 3872 | 4 | 15 s | 58 — *the cap* | 4.013e-09 | 169 s |
-| **no singletons** | 2 | 3872 | **8** | 13 s | **39** | 2.813e-10 | 182 s |
-| **no singletons** | **3** | **376** | **8** | **6 s** | 44 | 7.504e-10 | 212 s |
-| no singletons | 3 | 376 | 16 | 6 s | 24 | 1.509e-10 | 224 s |
+**The four-to-five-order gap never existed: it was the GMRES restart cap read as a convergence floor.**
+Every earlier reading here was taken at a 20-restart cap, where `restart_cycles` reports 18 for any arm
+whatever its quality. Uncapped, the native hierarchy reaches adjoint grade. Two later corrections then
+moved the number again, both in the incumbent's favour, so read the table and not the older prose.
 
-So the native hierarchy reaches adjoint grade at **~3.5–4× the cycles and ~4–5× the wall time** of the
-incomplete-LU on CPU. That trade is the point of the exercise rather than a defeat: the incomplete-LU is a
-sequential triangular solve, while this smoother is matrix-vector products, diagonal scalings and one
-small dense coarse solve, all of which vectorize.
+Measured 2026-08-13 on `state-00067` (converged, march shift 0.0064, |R| 3.586e-06) with **β = 0 on both
+operator and preconditioner**, real right-hand side `-R(state)`, GMRES restart 15 to rtol 1e-8 on the
+**TRUE** residual, 60-restart cap, uniform column reach, ILU(0) on the trailing half. Native arms are the
+SIMPLE-smoothed hierarchy with the Frobenius diagonal on both halves, plain aggregation, no singleton
+aggregates, 5 levels, `max_coarse` 500.
 
-**Prefer the THREE-level arm even though two levels is 16 % faster here.** The coarsest level is inverted
-densely — cubic to build, quadratic to store — so a 3872-equation coarse space is 120 MB and grows with
-the mesh, where 376 is free; the three-level build is already half the time (6 s against 13 s). The
-two-level arm's speed is borrowed against the one part of the hierarchy that does not scale.
+| arm | strength | outer x inner sweeps | cycles | solve | s/cycle |
+|---|---|---|---|---|---|
+| **`split flow/ilu0` — the matched incumbent** | — | — | 11 | **29 s** | 2.64 |
+| monolithic ILU(0) — *not* the right bar | — | — | 11 | 42 s | 3.82 |
+| native | 0.10 | 8 x 4 | 11 | 80 s | 7.27 |
+| native | 0.25 | 8 x 4 | 10 | 83 s | 8.30 |
+| **native — best** | **0.25** | **8 x 2** | 11 | **68 s** | 6.18 |
+| native | 0.25 | 8 x 1 | 14 | 70 s | 5.00 |
+| **native — fewest cycles** | 0.25 | **16 x 4** | **6** | 98 s | 16.3 |
 
-**Sweeps buy margin nearly for free, and four sweeps has none.** Wall time is almost flat across the sweep
-count (169 / 182 / 224 s) while robustness improves monotonically. The four-sweep arm reaches 4.013e-09 but
-does it *at* the cap, so it converged with no headroom; eight finishes at 39 of 58. Read a result that lands
-exactly on the restart cap as "did not converge with margin", never as a converged cycle count.
+**STRENGTH OF CONNECTION IS THE LARGEST LEVER, worth 4x.** At `strength_threshold = 0` — the builder
+default, and what every native arm ran until now — `_aggregation_edges` returns the full cell adjacency,
+so aggregation ignores the operator's values entirely and coarsens across the stiff direction. Turning it
+on took the arm from 44 cycles / 213 s to 10 / 83 s. The optimum is interior and sits on the standard
+value: 0 → 44 cycles, 0.10 → 11, 0.25 → 10, 0.50 → 11 (and 0.50 costs the most per cycle). **This is not a
+new discovery — `turbulence/coupled.py` already ships `strength_threshold: 0.25` on the frozen
+velocity/Schur AMGs for exactly this reason.** The native hierarchy was simply built without a setting the
+production path already used.
+
+**The value-dependence is free HERE and only here.** A threshold makes the coarsening read `|A_ij|`, so a
+rebuilt hierarchy is no longer structurally invariant. The flow block is frozen at the reference state and
+never refreshed, so it costs nothing; the k/ω path refreshes (~48 times in a 61-step march) and a binding
+decision keeps it at θ = 0 there.
+
+**The INNER pressure sweep count was never varied before this, and is the best cost lever found.** Four
+inner relaxations sit inside every outer SIMPLE sweep; the spec parser had tokens for outer sweeps,
+levels, coarse size, threshold, aggregation, prolongator and `pressure_omega`, and none for this one — so
+the largest single term in the smoother's cost was the one axis held fixed, while the outer count was
+swept 4/8/16. Dropping 4 → 2 is worth **18 % of wall clock** for one extra cycle; 4 → 1 removes the Schur
+matvec entirely (the peeled first sweep is a pure diagonal solve) and costs three cycles, which is too
+many.
+
+**The (outer, inner) frontier is FLAT — swept, and 8 x 2 survives.** Everything from 68 s to 87 s lies
+within 28 %, so the pair is not finely tuned and there is no hidden corner:
+
+| outer x inner | 8x2 | 8x1 | 12x2 | 16x1 | 8x4 | 16x2 | 24x1 | 16x4 |
+|---|---|---|---|---|---|---|---|---|
+| cycles | 11 | 14 | 8 | 8 | 10 | 7 | **6** | **6** |
+| solve | **68 s** | 70 s | 73 s | 79 s | 83 s | 86 s | 87 s | 98 s |
+
+One structural fact falls out and is consistent across the whole table: **six cycles is reachable two
+ways — 16x4 at 98 s and 24x1 at 87 s — and the cheaper route is more outer sweeps with fewer inner ones.**
+At any fixed cycle count, inner pressure relaxations are the expensive way to buy convergence.
+
+Note for the march rather than for this probe: **12 x 2 buys 8 cycles for 73 s**, 7 % above the optimum.
+A march's cost is dominated by staleness and refresh cadence rather than by any single solve, so fewer
+cycles per solve may be worth more there than wall clock is here. That cannot be settled from a
+single-state probe.
+
+**TEN CYCLES IS NOT A FLOOR — REFUTED by measurement.** Three structurally unrelated leading inverses all
+landed at 10–11, which raised the real possibility that the count was set by the trailing block or by the
+coupling triangle the split discards, and that the comparison was saturated. It is not: at 16 outer
+sweeps the native arm reaches **6 cycles**, below the incumbent's 11. The native hierarchy can be made
+*stronger* than the incomplete-LU; what it is not yet is cheaper.
+
+**Two structural levers measured and NOT worth taking.** Aggressive (squared-graph) coarsening *combined*
+with a threshold does what it promises mechanically — level 0 coarsens 8.7x instead of 3.4x, the hierarchy
+drops to 4 levels, the heavy level-1 Schur falls 1.2M → 0.5M nnz — and nets **zero**: per-cycle cost falls
+15 % and the cycle count rises by two (11 → 13 at θ = 0.10; 10 → 11 at θ = 0.25). The fine level is ~60 %
+of the smoothing cost, so removing intermediate levels can only ever reach the ~28 % that level 1 holds.
+**Depth past three levels is separately closed**, non-monotonically (4 levels worse than 5) with a clean
+aggregation at every level.
+
+⚠️ **A kernel-level cost model over-predicted its own first result by 6x — treat its remaining estimates
+as unmeasured.** A profiling pass modelled the Schur applications as ~64 % of the V-cycle and predicted
+16 % from removing the multiply-by-zero first pressure sweep; measured, that change is worth **2–7 %**.
+The probe used synthetic matrices with random column patterns, and real mesh-ordered matrices are far more
+cache-friendly. Its other figures (per-level sweep schedule 31 %, asymmetric V-cycle 25 %, Schur
+truncation 57 %) carry the same flaw and must be measured before being believed — the last one especially,
+being the only proposal that would change what `M` is.
+
+**Scope, binding.** This is **one state at β = 0**, which is the *adjoint's* operator and, per the record
+above, the only state on this case that separates these arms at all — at `state-00066` all five tie at 4
+cycles. The forward march floors β at 0.05 and never builds a preconditioner at zero shift. It also runs a
+**uniform** column reach that the case does not use; at the shipped reach the incumbent's cost doubles
+(22 cycles against 11), and the native arm there is unmeasured. So this is an adjoint-grade result, which
+is where the tight transpose solve lives and therefore worth having — but it is not a march result.
+
+**Why the 2.3x is still the right trade to pursue.** The incomplete-LU is a sequential triangular solve.
+This smoother is sparse matrix-vector products, diagonal scalings and one small dense coarse solve, and
+its fine level was measured memory-bandwidth-bound at 37–40 GB/s — the profile of something that
+vectorizes. Kernel fusion and JAX dispatch overhead were measured out as levers (a chain of 8 matvecs in
+one jit costs exactly 8x one matvec); the only thing that helps on CPU is touching fewer nonzeros.
 
 Cell-local smoothing on the saddle is separately closed (point Jacobi, Chebyshev, cell-block Jacobi and
-Vanka all fail), the flat-inverse family is closed, smoothed aggregation is closed, and depth past three
-levels is closed.
+Vanka all fail), the flat-inverse family is closed, smoothed aggregation is closed, and orthonormalized
+prolongation is closed.
 
-**The open lever is the AGGREGATION'S BLINDNESS TO DIRECTION, not the restriction.** `R = P^T` is
-Galerkin, which is optimal for a symmetric positive-definite operator and not for this one — but the
-nonsymmetry is discarded *earlier* than that: `build_convection_hierarchy` selects aggregates from
-`0.5 (A + A^T)` (`aggregation_operator`), and the connectivity graph is symmetrized again inside
-`_build_aggregation_hierarchy`. On a convection-dominated operator that throws away exactly the
-directional information a coarse space should follow. The Galerkin product itself keeps the nonsymmetry
-(`P^T A P` is formed on the true `A`), so the coarse *operator* is honest and only the *aggregate
-selection* is blind — which makes the cheap experiment (feed the unsymmetrized operator) separable from
-the expensive one (a Petrov–Galerkin `R` built from `A^T`'s aggregates). Both keep `P` block-structured
-and both stay fixed linear operators, so both are adjoint-legal.
+⚠️ **lAIR is not the way in here**, and two of the three reasons are already measured on this mesh.
+`build_air_hierarchy` is **scalar** — no `block_size` — and its classical C/F splitting picks individual
+degrees of freedom, destroying the four-field block structure the SIMPLE smoother needs on every coarse
+level. It calls `_require_positive_diagonal` at every level, and the saddle's pressure rows are the
+Rhie–Chow damping. And on the true Jacobian slice of the `[k, omega]` block on this same mesh it ran
+~50 minutes without finishing at 91 nonzeros per row; the flow block carries 128.
 
-⚠️ **lAIR is NOT the way in here, and two of the three reasons are already measured on this mesh.**
-`build_air_hierarchy` is **scalar** — it has no `block_size`, and its classical C/F splitting picks
-individual degrees of freedom, which destroys the four-field block structure the SIMPLE smoother needs on
-every coarse level. It calls `_require_positive_diagonal` at every level, and the saddle's pressure rows
-are the Rhie–Chow damping. And on the true Jacobian slice of the `[k, omega]` block on this same mesh it
-ran **~50 minutes without finishing**, at 91 nonzeros per row; the flow block carries **128**. A
-reduction-based coarsening may well be the right idea for a convection-dominated operator, but it would
-need a block/systems variant before it could be tried on this one.
+**Do not transfer the threshold to the `[k, omega]` block.** That block already converges in **2 restart
+cycles** against an absolute floor of 1; removing its coarse grid entirely costs 14 %, quartering its
+smoother work costs 1.8 % of cycles, and a PETSc-side threshold on this mesh already returned the same
+cycle count. The ceiling is 2 → 1 cycles on ~11 % of the nonzeros, against a refresh path the
+value-dependence would cost. ⚠️ Note `NodalNativeInverse` exposes neither `strength_threshold` nor
+`max_levels`, so that path is hard-capped at 2 levels (`_CONVECTION_LEVELS`) with a dense `pinv` and no
+size guard — testing a threshold there at 2 levels would reproduce the flow block's original failure and
+refute the transfer for the wrong reason.
+
+**Known defects in the aggregation, found here and not all fixed.**
+- `_reattach_to_adjacent_root` runs *after* `_mis_aggregate` and can **create** singletons: it never
+  steals a root but does steal every member, so an aggregate can be cut down to its root alone.
+  `avoid_singletons` lives inside `_mis_aggregate` and cannot see them. Measured: **82 singletons at
+  level 0** on the aggressive + θ = 0.25 arm, and none at θ = 0.10 where the graph is denser. NOT FIXED.
+- `max_coarse` is compared against `a.shape[0]` — **dofs** — while both builder docstrings say *cells*. A
+  4x error at `block_size = 4`, on the knob guarding a dense pseudo-inverse that is cubic to build and
+  quadratic to store. NOT FIXED.
+- With `max_levels` binding at the bottom rather than `max_coarse`, the coarse grid grows **linearly with
+  the mesh**: 23040 cells → 500 dofs, so 1M cells → ~21500 dofs and ~3.7 GB. The fix costs nothing (raise
+  `max_levels`, let `max_coarse` bind) and extra levels measured +3 % per cycle. NOT FIXED.
+- `_AGGREGATE_STATS` is appended and never cleared despite its docstring; the probe reads its tail, so a
+  build that stops early shifts every later arm's window. NOT FIXED.
+
+⚠️ **Stale by this section:** the recorded refutation that *"equilibration does not reach the coarsening"*
+(0.03 % of edges) was measured at `strength_threshold = 0`, where only the sparsity **pattern** matters.
+With a threshold live the aggregation reads **weights**, and these arms run `equilibrate=False` on a block
+whose momentum, gradient, divergence and Rhie–Chow entries sit at raw scales. That refutation does not
+transfer to any thresholded arm.
 
 ## Low-β directions already measured out — CLOSED, do not re-litigate
 

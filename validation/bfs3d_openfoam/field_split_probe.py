@@ -776,8 +776,15 @@ def _simple_correction(
     velocity_residual, pressure_residual = residual[:nv], residual[nv:]
     predictor = pieces.f_diagonal_inverse * velocity_residual
     rhs = pressure_residual - pieces.divergence.apply(predictor)
-    pressure = jnp.zeros_like(rhs)
-    for _ in range(pressure_sweeps):
+    # The first sweep is peeled because it would otherwise multiply the Schur complement by a zero
+    # vector: starting from p = 0, the update collapses to omega * S_diag^-1 * rhs. That is one of every
+    # `pressure_sweeps` applications of the densest operator in the smoother, and it is not folded away
+    # -- the sparse product runs at full cost against the zeros. Peeling it is bit-identical.
+    if pressure_sweeps <= 0:
+        pressure = jnp.zeros_like(rhs)
+    else:
+        pressure = pressure_omega * pieces.schur_diagonal_inverse * rhs
+    for _ in range(pressure_sweeps - 1):
         pressure = pressure + pressure_omega * pieces.schur_diagonal_inverse * (
             rhs - pieces.schur.apply(pressure)
         )
@@ -1378,6 +1385,14 @@ def _leading_inverse(spec):
         # first level that falls under this limit, so raising `-L` without lowering it is a no-op:
         # the loop breaks on `size <= max_coarse` before it ever reaches the level cap.
         coarse_token = next((t for t in ("-c1000", "-c500", "-c200", "-c50") if t in rest), None)
+        # `-psN` sets the inner pressure relaxations per SIMPLE sweep. Never varied before this: every
+        # arm ran at four, while the OUTER sweep count was swept 4/8/16 -- so the single largest term in
+        # the smoother's cost is the one axis that was held fixed. Four inner sweeps are two thirds of an
+        # outer sweep, so they buy relaxation far cheaper than an outer sweep does, and the question is
+        # where the (outer, inner) pair sits rather than whether either alone is too high.
+        pressure_sweeps = next(
+            (int(t[3:]) for t in ("-ps1", "-ps2", "-ps3", "-ps6") if t in rest), 4
+        )
         max_coarse = int(coarse_token[2:]) if coarse_token else compare.COARSE_EQ_LIMIT
         aggressive = 0 if "-a0" in rest else 1
         threshold = next((float(t[2:]) / 100 for t in ("-t10", "-t25", "-t50") if t in rest), 0.0)
@@ -1408,6 +1423,10 @@ def _leading_inverse(spec):
             "-L3",
             "-L4",
             "-L5",
+            "-ps1",
+            "-ps2",
+            "-ps3",
+            "-ps6",
             "-c1000",
             "-c500",
             "-c200",
@@ -1426,6 +1445,7 @@ def _leading_inverse(spec):
                 block,
                 n_group_fields,
                 sweeps=sweeps,
+                pressure_sweeps=pressure_sweeps,
                 max_coarse=max_coarse,
                 frobenius=frobenius,
                 schur_frobenius=schur_frobenius,
@@ -2063,6 +2083,97 @@ ARMS = (
             m, g, n, "simplesmooth8-a0-t25-ns-L5-c500", "ilu0", flow_first=True
         ),
     ),
+    # Where the threshold turns over. A stronger filter keeps aggregating along the stiff directions but
+    # discards more of the graph, so past some point there is too little left to aggregate across and the
+    # coarsening rate collapses -- 0.25 already needs five levels where the unfiltered graph needed three.
+    # The coarsening RATE recovered without giving up strong-connection SELECTION. The strength filter
+    # is applied BEFORE the graph is squared, so squaring acts on the strong graph rather than the full
+    # one: aggregates get large again, but they are still grown along the couplings the threshold kept.
+    # This is the arm the per-cycle cost points at -- at a threshold the hierarchy already matches the
+    # incomplete-LU on iteration count, and everything left is the price of the intermediate levels that
+    # a three-times-per-level coarsening rate leaves behind.
+    (
+        "split simplesmooth8-t10-ns-L5-c500/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.10 + aggressive coarsening",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth8-t10-ns-L5-c500", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth8-t25-ns-L5-c500/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25 + aggressive coarsening",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth8-t25-ns-L5-c500", "ilu0", flow_first=True
+        ),
+    ),
+    # The INNER pressure relaxation count, on its own axis. Four of these sit inside every outer sweep
+    # and are two thirds of its cost, so they are the largest single term in the smoother -- and the only
+    # one never varied.
+    (
+        "split simplesmooth8-a0-t25-ns-L5-c500-ps2/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 2 inner pressure sweeps",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth8-a0-t25-ns-L5-c500-ps2", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth8-a0-t25-ns-L5-c500-ps1/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 1 inner pressure sweep",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth8-a0-t25-ns-L5-c500-ps1", "ilu0", flow_first=True
+        ),
+    ),
+    # IS TEN CYCLES A FLOOR? Three structurally unrelated leading inverses all land at 10-11 here, and
+    # nothing has ever beaten 10 at this state. If doubling the smoothing does not move it, the leading
+    # block is saturated and the count is being set somewhere else -- the trailing block, or the coupling
+    # triangle the split discards -- in which case this comparison says nothing about the leading block.
+    (
+        "split simplesmooth16-a0-t25-ns-L5-c500/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 16 sweeps (saturation probe)",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth16-a0-t25-ns-L5-c500", "ilu0", flow_first=True
+        ),
+    ),
+    # The (outer sweeps, inner pressure sweeps) FRONTIER. The two trade against different things --
+    # outer sweeps buy cycles (8 -> 16 halves them), inner sweeps buy per-cycle cost (4 -> 2 cuts it by a
+    # quarter) -- and every arm measured so far sits at one corner of that grid, with the other axis at a
+    # default nobody chose. Sixteen outer sweeps reach six cycles, below the incomplete-LU's eleven, so a
+    # cheaper-per-cycle variant of that corner is where a win would be.
+    (
+        "split simplesmooth16-a0-t25-ns-L5-c500-ps2/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 16 sweeps, 2 inner",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth16-a0-t25-ns-L5-c500-ps2", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth16-a0-t25-ns-L5-c500-ps1/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 16 sweeps, 1 inner",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth16-a0-t25-ns-L5-c500-ps1", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth12-a0-t25-ns-L5-c500-ps2/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 12 sweeps, 2 inner",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth12-a0-t25-ns-L5-c500-ps2", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth24-a0-t25-ns-L5-c500-ps1/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 24 sweeps, 1 inner",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth24-a0-t25-ns-L5-c500-ps1", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth8-a0-t50-ns-L5-c500/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.50 aggregation, coarse under 500",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth8-a0-t50-ns-L5-c500", "ilu0", flow_first=True
+        ),
+    ),
     # The singleton fix against the two-level arm that can actually contain singletons. The squared
     # graph builds aggregates of median size 82 and produces none, so pairing the fix with it tests
     # nothing; only the gentler maximal-independent-set rate leaves vertices that arrive to find every
@@ -2298,6 +2409,17 @@ def main():
     name = sys.argv[1]
     entry = STATES[name]
     march_beta, recorded, description = entry.march_beta, entry.recorded, entry.description
+    # `BFS3D_PROBE_BETA` builds the OPERATOR at a chosen shift on whichever state is loaded, which is the
+    # only way to vary beta as an axis: every entry in `STATES` carries one fixed shift, and the two
+    # shifted ones are step-initial checkpoints that cost a cycle or two for every arm and so cannot rank
+    # anything. Holding the state fixed and moving the shift separates the shift from the state, where
+    # switching entries confounds them. `checkpoint_shift` is a separate field and still checks identity
+    # against the file, so this does not weaken the faithfulness gate.
+    override = os.environ.get("BFS3D_PROBE_BETA")
+    if override is not None:
+        march_beta = float(override)
+        recorded = None  # nothing is on record at a synthesized shift
+        description = f"{description} -- OPERATOR SHIFT OVERRIDDEN to beta={march_beta}"
     # An optional SECOND state builds the preconditioner, while the operator and right-hand side stay at
     # the first. That is what the march actually does -- it freezes the preconditioner for a whole inner
     # loop -- and its expensive solves are measured to be this staleness rather than hard operators (15
