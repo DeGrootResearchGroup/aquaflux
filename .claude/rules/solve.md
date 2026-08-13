@@ -2143,7 +2143,9 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   2. **Pair the operator with the right β.** Probing state-N with state-N's β when the failing
      refresh uses state-N+1's is the recorded trap; sweep β instead.
   3. **Never quote an arm at one smoother-sweep count.** The standard prolongator was recorded as
-     "void" from its 4-sweep numbers; at 8 it is the best native arm.
+     "void" from its 4-sweep numbers; at 8 it is the best native arm on the scalar problem. The rule
+     cuts both ways — on the flow saddle it fails at 4 sweeps and fails *worse* at 8, which is what
+     distinguishes an under-smoothed arm from an amplified one.
   4. **A block-alone probe ties where a march separates.** Raw and equilibrated are both 2 cycles on
      the block and behave differently in a march.
 
@@ -2655,6 +2657,10 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     (4 cycles)**, so it is under-smoothed rather than wrong: the earlier "VOID / much worse" reading
     conflated a smoothing deficit with a broken formula. Treat sweeps as part of that arm's
     specification, never quote it at a single sweep count.
+    ⚠️ **Measured on the 2150-equation scalar problem under a point-block-Jacobi / ILU smoother. It does
+    NOT carry to the flow saddle**, where both smoothed prolongators are refuted under the SIMPLE
+    smoother at 4 *and* 8 sweeps — see *Smoothed aggregation on the flow saddle*. "Best native arm"
+    below always means best on the operator it was measured on.
   - **⚠️ GRAPH SQUARING ON THE FIRST LEVEL IS GAMG'S DEFAULT COARSENING, NOT A SIZE KNOB — and
     recording it as harmful was the single thing holding the comparison open.** Squaring the graph on the first level is not a size knob, it is
     GAMG's *default coarsening* (`aggressive_coarsening_levels 1`), and its 106× ratio is not
@@ -2907,7 +2913,10 @@ Worth **1.7×**, and it coarsens *further* while doing it (644 → 376). Off by 
 **The practical consequence is that the coarse-space cost problem largely dissolves.** The best
 two-level arm is 2.522e-05 on a **4300**-equation coarse grid; three levels without singletons is
 2.844e-05 on **376** — within 13 % at **a eleventh of the coarse space**, which is back inside ordinary
-practice and trivial to invert densely. The earlier reading here, that gentler coarsening's 1.7× was
+practice and trivial to invert densely. (Both figures are residual-after-18-cycles at a 20-restart cap,
+not convergence; uncapped, the same two hierarchies converge in 39 and 44 cycles, which corroborates the
+conclusion. Every residual quoted in this subsection is capped — see *Where this stands* for the
+converged numbers.) The earlier reading here, that gentler coarsening's 1.7× was
 unaffordable and therefore not a lever, was measuring a hierarchy whose second level was degenerate.
 
 **⚠️ ORTHONORMALIZING THE TENTATIVE PROLONGATION IS REFUTED — twice, and the mechanism offered for it
@@ -2935,16 +2944,129 @@ finite-volume conservation-law discretization the row sums are the conservation 
 `1 / sqrt(|agg|)` destroys it, which is why agglomeration multigrid for conservation laws uses unscaled
 sums. Do not act on this without measuring it.
 
-**Still untested:** whether the singleton fix also helps the two-level hierarchies (it is measured only at
-depth so far), and whether four or five levels now shrink the coarse grid below 376 without the
-degeneracy that made depth harmful. Both are cheap and both bear on whether this becomes a default.
+**The singleton fix helps at TWO levels as well — 1.85×, so it is a property of the aggregation and not
+a repair for depth.** Measured 2026-08-13 on `state-00067` (β = 0 on both operator and preconditioner,
+the adjoint's operator), native SIMPLE smoother at 4 sweeps with the Frobenius diagonal on both halves,
+plain aggregation, restart cap 20 (so every arm below stops at 18 cycles — the cap, not a convergence
+test; only the residual separates them):
 
-### Where this stands
+| two-level arm | level-0 aggregates | coarse dofs | build | TRUE rel |
+|---|---|---|---|---|
+| as built | 1075, 107 singletons | 4300 | 19 s | 2.522e-05 |
+| **no singletons** | 968, none | **3872** | 15 s | **1.362e-05** |
 
-Best native flow-block arm: **2.522e-05 at 18 cycles**, against the incumbent's **8.474e-11 at 11** — four
-to five orders. Cell-local smoothing on the saddle is separately closed (point Jacobi, Chebyshev,
-cell-block Jacobi, and Vanka all fail), and the flat-inverse family is closed by the table above. What
-remains untested is a conventional deep hierarchy with a small coarse space.
+It is better, coarser, and cheaper to build at once. **`avoid_singletons` should therefore become the
+default rather than an opt-in** — it is currently `False`, and byte-identical when off.
+
+⚠️ **The same fix paired with the SQUARED-GRAPH first level is a NULL TEST, not a negative result.**
+Aggressive coarsening builds aggregates of median size 82 and produces **no singletons at all**, so
+`-ns` there returns a bit-identical 4.199e-05 and measures nothing. Only the gentler rate strands
+vertices. Read a no-change result from that arm as "nothing to fix here", never as "the fix does not
+work".
+
+**DEPTH PAST THREE LEVELS DOES NOT PAY, and singletons were not the reason.** With the aggregation
+clean at every level, the same configuration continued to coarsen:
+
+| levels | coarse dofs | ratio | TRUE rel |
+|---|---|---|---|
+| 2 | 3872 | 24× | 1.362e-05 |
+| **3** | 376 | 245× | **2.844e-05** |
+| 4 | 56 | 1646× | 4.875e-05 |
+| 5 | 12 | 7680× | 3.820e-05 |
+
+Four levels is worse than five, so this is not a monotone degradation that a further fix would unwind —
+it is noise around a floor the hierarchy cannot get below. Depth buys coarse-grid *size* (376 at 13 %
+worse than 3872, which is the trade worth taking) and nothing else.
+
+⚠️ **`max_levels` cannot bind while `max_coarse` stops the coarsening first.** The three-level arm lands
+at 376, already under the 2000-equation limit, so `-L4` and `-L5` rebuild the identical hierarchy and
+return the identical residual. The depth rows above were obtained by lowering that limit alongside the
+level cap. A depth sweep that moves only the level count is measuring one hierarchy N times.
+
+### Smoothed aggregation on the flow saddle — REFUTED under the SIMPLE smoother
+
+Every native arm interpolates the coarse correction piecewise-constant over each aggregate, which is the
+textbook reason a hierarchy works at two levels and gains nothing deeper. Smoothing the prolongator once
+with the operator is the standard cure, and it had only ever been measured here under a *Jacobi*
+smoother — before the Frobenius diagonal turned the velocity predictor from amplifying to contracting —
+so it was a fresh question rather than a settled one. It is now settled. Same state and bundle as above,
+three levels, plain aggregation, no singletons:
+
+| prolongator | 4 sweeps | 8 sweeps |
+|---|---|---|
+| **unsmoothed** (`"none"`) | 2.844e-05 | **8.002e-06** |
+| symmetric-part (`"symmetric-part"`) | 2.925e-04 | 1.035e-04 |
+| standard σ_max (`"standard"`) | 1.611e-01 | 3.005e-01 |
+| standard σ_max, equilibrated | — | 8.810e-01 |
+
+Symmetric-part is **10–13× worse** and the gap *widens* with sweeps. The standard formula does not
+converge at all, gets **worse** with more relaxation — the signature of a mode the smoother amplifies and
+the coarse grid cannot correct, not of under-smoothing — and equilibrating it costs another 3×. Smoothing
+also widens the coarse stencil (level-1 operator 0.4M nnz against 0.1M) and changes what the next
+aggregation sees, landing a 108-dof coarse grid instead of 376, so the arms differ in coarse space as
+well as in interpolation.
+
+**The lever is SWEEPS, not the hierarchy.** Doubling relaxation on the unchanged three-level hierarchy
+was worth **3.6×** (2.844e-05 → 8.002e-06) — more than depth, smoothing, orthonormalization, or the
+strength threshold have ever returned. Weigh it against cost before treating it as a win: eight sweeps
+roughly doubles the work in every application, and at a restart cap all arms report the same cycle count,
+so a residual gain there is not a like-for-like comparison with a four-sweep arm.
+
+### Where this stands — the native flow block CONVERGES to adjoint grade
+
+**The four-to-five-order gap is closed. What is left is a cost gap.** Every earlier reading here was
+taken at a 20-restart cap, where every native arm stops at 18 cycles whatever its quality — so "native
+stalls at 1e-5" was measuring the *cap*, not the method. Re-run at a 60-restart cap on `state-00067`
+(β = 0 on operator and preconditioner — the adjoint's operator), GMRES to rtol 1e-8 on the TRUE
+residual, native SIMPLE smoother with the Frobenius diagonal on both halves, plain aggregation, no
+singleton aggregates:
+
+| arm | levels | coarse dofs | sweeps | build | cycles | TRUE rel | solve |
+|---|---|---|---|---|---|---|---|
+| **ILU(0), the incumbent** | — | — | — | 4 s | **11** | 8.474e-11 | **43 s** |
+| no singletons | 2 | 3872 | 4 | 15 s | 58 — *the cap* | 4.013e-09 | 169 s |
+| **no singletons** | 2 | 3872 | **8** | 13 s | **39** | 2.813e-10 | 182 s |
+| **no singletons** | **3** | **376** | **8** | **6 s** | 44 | 7.504e-10 | 212 s |
+| no singletons | 3 | 376 | 16 | 6 s | 24 | 1.509e-10 | 224 s |
+
+So the native hierarchy reaches adjoint grade at **~3.5–4× the cycles and ~4–5× the wall time** of the
+incomplete-LU on CPU. That trade is the point of the exercise rather than a defeat: the incomplete-LU is a
+sequential triangular solve, while this smoother is matrix-vector products, diagonal scalings and one
+small dense coarse solve, all of which vectorize.
+
+**Prefer the THREE-level arm even though two levels is 16 % faster here.** The coarsest level is inverted
+densely — cubic to build, quadratic to store — so a 3872-equation coarse space is 120 MB and grows with
+the mesh, where 376 is free; the three-level build is already half the time (6 s against 13 s). The
+two-level arm's speed is borrowed against the one part of the hierarchy that does not scale.
+
+**Sweeps buy margin nearly for free, and four sweeps has none.** Wall time is almost flat across the sweep
+count (169 / 182 / 224 s) while robustness improves monotonically. The four-sweep arm reaches 4.013e-09 but
+does it *at* the cap, so it converged with no headroom; eight finishes at 39 of 58. Read a result that lands
+exactly on the restart cap as "did not converge with margin", never as a converged cycle count.
+
+Cell-local smoothing on the saddle is separately closed (point Jacobi, Chebyshev, cell-block Jacobi and
+Vanka all fail), the flat-inverse family is closed, smoothed aggregation is closed, and depth past three
+levels is closed.
+
+**The open lever is the AGGREGATION'S BLINDNESS TO DIRECTION, not the restriction.** `R = P^T` is
+Galerkin, which is optimal for a symmetric positive-definite operator and not for this one — but the
+nonsymmetry is discarded *earlier* than that: `build_convection_hierarchy` selects aggregates from
+`0.5 (A + A^T)` (`aggregation_operator`), and the connectivity graph is symmetrized again inside
+`_build_aggregation_hierarchy`. On a convection-dominated operator that throws away exactly the
+directional information a coarse space should follow. The Galerkin product itself keeps the nonsymmetry
+(`P^T A P` is formed on the true `A`), so the coarse *operator* is honest and only the *aggregate
+selection* is blind — which makes the cheap experiment (feed the unsymmetrized operator) separable from
+the expensive one (a Petrov–Galerkin `R` built from `A^T`'s aggregates). Both keep `P` block-structured
+and both stay fixed linear operators, so both are adjoint-legal.
+
+⚠️ **lAIR is NOT the way in here, and two of the three reasons are already measured on this mesh.**
+`build_air_hierarchy` is **scalar** — it has no `block_size`, and its classical C/F splitting picks
+individual degrees of freedom, which destroys the four-field block structure the SIMPLE smoother needs on
+every coarse level. It calls `_require_positive_diagonal` at every level, and the saddle's pressure rows
+are the Rhie–Chow damping. And on the true Jacobian slice of the `[k, omega]` block on this same mesh it
+ran **~50 minutes without finishing**, at 91 nonzeros per row; the flow block carries **128**. A
+reduction-based coarsening may well be the right idea for a convection-dominated operator, but it would
+need a block/systems variant before it could be tried on this one.
 
 ## Low-β directions already measured out — CLOSED, do not re-litigate
 

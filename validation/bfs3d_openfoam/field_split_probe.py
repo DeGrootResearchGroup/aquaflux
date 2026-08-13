@@ -838,6 +838,13 @@ class NativeSimpleInverse:
         strength_threshold: float = 0.0,
         orthonormal: bool = False,
         avoid_singletons: bool = False,
+        # Every arm here has run UNSMOOTHED aggregation, which interpolates a coarse correction by
+        # injecting it piecewise-constant over each aggregate. That is the standard explanation for a
+        # hierarchy that works at two levels and gains nothing deeper: the interpolation error does not
+        # fall as the grids coarsen. Smoothing the prolongator once with the operator is what makes
+        # aggregation multigrid depth-independent.
+        prolongation_smoothing: str = "none",
+        equilibrate: bool = False,
     ) -> None:
         matrix = sp.csr_matrix(block)
         self._n_dofs = matrix.shape[0]
@@ -862,8 +869,8 @@ class NativeSimpleInverse:
             strength_threshold=strength_threshold,
             orthonormal_prolongation=orthonormal,
             avoid_singletons=avoid_singletons,
-            prolongation_smoothing="none",
-            equilibrate=False,
+            prolongation_smoothing=prolongation_smoothing,
+            equilibrate=equilibrate,
         )
         # Keyed by level size: the V-cycle recursion is unrolled at trace time, so the smoother is
         # handed the concrete level object and can look its pieces up by a static attribute. The
@@ -1367,16 +1374,33 @@ def _leading_inverse(spec):
         frobenius = "-jacobi" not in rest
         schur_frobenius = "-sjacobi" not in rest
         levels = next((int(t[2:]) for t in ("-L3", "-L4", "-L5") if t in rest), 2)
+        # `-cNNN` lowers the size at which coarsening stops. Depth alone cannot go deeper than the
+        # first level that falls under this limit, so raising `-L` without lowering it is a no-op:
+        # the loop breaks on `size <= max_coarse` before it ever reaches the level cap.
+        coarse_token = next((t for t in ("-c1000", "-c500", "-c200", "-c50") if t in rest), None)
+        max_coarse = int(coarse_token[2:]) if coarse_token else compare.COARSE_EQ_LIMIT
         aggressive = 0 if "-a0" in rest else 1
         threshold = next((float(t[2:]) / 100 for t in ("-t10", "-t25", "-t50") if t in rest), 0.0)
         orthonormal = "-qr" in rest
         avoid_singletons = "-ns" in rest
+        # `-sm` is the historical formula, `-smstd` the textbook sigma_max one. Both must be read
+        # BEFORE the tokens are stripped, and `-smstd` before `-sm`, since one contains the other.
+        if "-smstd" in rest:
+            prolongation_smoothing = "standard"
+        elif "-sm" in rest:
+            prolongation_smoothing = "symmetric-part"
+        else:
+            prolongation_smoothing = "none"
+        equilibrate = "-eq" in rest
         # `-p1` removes the explicit pressure relaxation. It exists to test whether Eq. (39) on the
         # Schur was harmful in itself or only because it stacked on top of an existing damping: the
         # velocity predictor carries no relaxation of its own, which is why the same substitution was
         # worth four orders there and negative here.
         pressure_omega = 0.7 if "-p07" in rest else 1.0
         for token in (
+            "-smstd",
+            "-sm",
+            "-eq",
             "-qr",
             "-ns",
             "-jacobi",
@@ -1384,6 +1408,10 @@ def _leading_inverse(spec):
             "-L3",
             "-L4",
             "-L5",
+            "-c1000",
+            "-c500",
+            "-c200",
+            "-c50",
             "-a0",
             "-p07",
             "-t10",
@@ -1398,7 +1426,7 @@ def _leading_inverse(spec):
                 block,
                 n_group_fields,
                 sweeps=sweeps,
-                max_coarse=compare.COARSE_EQ_LIMIT,
+                max_coarse=max_coarse,
                 frobenius=frobenius,
                 schur_frobenius=schur_frobenius,
                 levels=levels,
@@ -1407,6 +1435,8 @@ def _leading_inverse(spec):
                 orthonormal=orthonormal,
                 avoid_singletons=avoid_singletons,
                 pressure_omega=pressure_omega,
+                prolongation_smoothing=prolongation_smoothing,
+                equilibrate=equilibrate,
             )
 
         return build
@@ -1912,6 +1942,30 @@ ARMS = (
         "split flow-first, native MG + SIMPLE smoother, no singletons + orthonormal, deep",
         lambda m, g, n: field_split(m, g, n, "simplesmooth4-a0-L4-ns-qr", "ilu0", flow_first=True),
     ),
+    # The singleton fix at TWO levels. It was only ever measured deep, where a degenerate coarse-of-
+    # coarse operator is the obvious place for it to matter; whether it also improves the two-level
+    # hierarchies decides if it is a general property of the aggregation or a depth-only repair.
+    (
+        "split simplesmooth4-ns/ilu0",
+        "split flow-first, native MG + SIMPLE smoother, no singletons, 2 levels",
+        lambda m, g, n: field_split(m, g, n, "simplesmooth4-ns", "ilu0", flow_first=True),
+    ),
+    # DEPTH, now that the aggregation no longer manufactures degenerate coarse unknowns. Raising the
+    # level cap on its own does nothing -- coarsening stops at the first level under `max_coarse`, and
+    # the three-level arm already lands there -- so each of these lowers that limit as well. The
+    # coarsest level is inverted densely, so shrinking it is the cost that matters.
+    (
+        "split simplesmooth4-a0-L4-ns-c200/ilu0",
+        "split flow-first, native MG + SIMPLE smoother, no singletons, coarse under 200",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-a0-L4-ns-c200", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth4-a0-L5-ns-c50/ilu0",
+        "split flow-first, native MG + SIMPLE smoother, no singletons, coarse under 50",
+        lambda m, g, n: field_split(m, g, n, "simplesmooth4-a0-L5-ns-c50", "ilu0", flow_first=True),
+    ),
     # QR-orthonormalized tentative prolongation. Provably inert at two levels with an exact coarse
     # solve, so the two-level arm is a REGRESSION CHECK rather than a candidate; the deep arm is the
     # test, since that is where the 0/1 columns' scaling stops cancelling.
@@ -1961,6 +2015,110 @@ ARMS = (
         "split simplesmooth4-a0/ilu0",
         "split flow-first, native MG + SIMPLE smoother, 2 levels, gentle coarsening, 4 sweeps",
         lambda m, g, n: field_split(m, g, n, "simplesmooth4-a0", "ilu0", flow_first=True),
+    ),
+    # The two changes that have actually paid, combined -- the singleton fix and the sweep count. Each
+    # was measured against a hierarchy carrying the other at its old value, so their product is an
+    # assumption until it is run. `simplesmooth16` asks the separate question of whether relaxation
+    # saturates: doubling sweeps doubles the cost of every application, so a gain that keeps halving
+    # the residual is worth taking and one that flattens is not.
+    (
+        "split simplesmooth8-a0-ns/ilu0",
+        "split flow-first, native MG + SIMPLE smoother, 2 levels, no singletons, 8 sweeps",
+        lambda m, g, n: field_split(m, g, n, "simplesmooth8-a0-ns", "ilu0", flow_first=True),
+    ),
+    (
+        "split simplesmooth16-a0-L4-ns/ilu0",
+        "split flow-first, native MG + SIMPLE smoother, no singletons, deep, 16 sweeps",
+        lambda m, g, n: field_split(m, g, n, "simplesmooth16-a0-L4-ns", "ilu0", flow_first=True),
+    ),
+    # DOES AGGREGATION NEED TO READ THE OPERATOR AT ALL? At a zero strength threshold the edge set is
+    # the full cell adjacency, so aggregates are chosen from connectivity alone and every coupling
+    # magnitude -- and with it every trace of the flow direction -- is discarded before coarsening
+    # begins. A threshold makes the choice value-dependent, which is the cheapest available test of
+    # whether that blindness costs anything.
+    #
+    # The earlier threshold sweep is not usable as that test: filtering edges REMOVES aggregation
+    # candidates, so the coarse grid grew to 26244 dofs against the unfiltered arm's few hundred, and a
+    # knob that moves coarse size by seventy-fold cannot be compared against one that does not. These
+    # three therefore share one coarsening limit and one level cap, so each is free to take as many
+    # levels as its own rate needs to reach a comparable coarse grid.
+    (
+        "split simplesmooth8-a0-ns-L5-c500/ilu0",
+        "split flow-first, SIMPLE smoother, isotropic aggregation, coarse under 500",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth8-a0-ns-L5-c500", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth8-a0-t10-ns-L5-c500/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.10 aggregation, coarse under 500",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth8-a0-t10-ns-L5-c500", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth8-a0-t25-ns-L5-c500/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25 aggregation, coarse under 500",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth8-a0-t25-ns-L5-c500", "ilu0", flow_first=True
+        ),
+    ),
+    # The singleton fix against the two-level arm that can actually contain singletons. The squared
+    # graph builds aggregates of median size 82 and produces none, so pairing the fix with it tests
+    # nothing; only the gentler maximal-independent-set rate leaves vertices that arrive to find every
+    # neighbour already claimed.
+    (
+        "split simplesmooth4-a0-ns/ilu0",
+        "split flow-first, native MG + SIMPLE smoother, 2 levels, gentle coarsening, no singletons",
+        lambda m, g, n: field_split(m, g, n, "simplesmooth4-a0-ns", "ilu0", flow_first=True),
+    ),
+    # SMOOTHED AGGREGATION under the SIMPLE smoother. Every native arm to date has interpolated the
+    # coarse correction piecewise-constant over each aggregate, which is the usual reason a hierarchy
+    # stops improving past two levels. Smoothing was measured before, but under a Jacobi smoother and a
+    # different SIMPLE relaxation, so it is a fresh question here rather than a settled one.
+    #
+    # Sweeps are a CONFOUND, not a detail: the smoothed prolongator is on record as failing outright at
+    # four sweeps and being the best native arm at eight, so a smoothing result quoted at one sweep
+    # count says nothing. Each formula therefore runs at both, against an eight-sweep UNSMOOTHED
+    # control -- without which a win at eight cannot be attributed to the prolongator rather than to
+    # the extra relaxation.
+    (
+        "split simplesmooth8-a0-L4-ns/ilu0",
+        "split flow-first, native MG + SIMPLE smoother, no singletons, deep, 8 sweeps",
+        lambda m, g, n: field_split(m, g, n, "simplesmooth8-a0-L4-ns", "ilu0", flow_first=True),
+    ),
+    (
+        "split simplesmooth4-a0-L4-ns-sm/ilu0",
+        "split flow-first, native MG + SIMPLE smoother, smoothed prolongator, deep, 4 sweeps",
+        lambda m, g, n: field_split(m, g, n, "simplesmooth4-a0-L4-ns-sm", "ilu0", flow_first=True),
+    ),
+    (
+        "split simplesmooth8-a0-L4-ns-sm/ilu0",
+        "split flow-first, native MG + SIMPLE smoother, smoothed prolongator, deep, 8 sweeps",
+        lambda m, g, n: field_split(m, g, n, "simplesmooth8-a0-L4-ns-sm", "ilu0", flow_first=True),
+    ),
+    (
+        "split simplesmooth4-a0-L4-ns-smstd/ilu0",
+        "split flow-first, native MG + SIMPLE smoother, standard prolongator, deep, 4 sweeps",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-a0-L4-ns-smstd", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth8-a0-L4-ns-smstd/ilu0",
+        "split flow-first, native MG + SIMPLE smoother, standard prolongator, deep, 8 sweeps",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth8-a0-L4-ns-smstd", "ilu0", flow_first=True
+        ),
+    ),
+    # The standard prolongator's best recorded configuration, carried over intact: eight sweeps with
+    # the operator equilibrated before coarsening.
+    (
+        "split simplesmooth8-a0-L4-ns-smstd-eq/ilu0",
+        "split flow-first, native MG + SIMPLE smoother, standard prolongator equilibrated, deep",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth8-a0-L4-ns-smstd-eq", "ilu0", flow_first=True
+        ),
     ),
     (
         "split simplesmooth2-jacobi/ilu0",
