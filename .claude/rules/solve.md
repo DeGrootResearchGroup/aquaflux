@@ -2597,13 +2597,17 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     diagonally-scaled graph (Vanek), we use the row-max-relative classical criterion. Inert at
     threshold 0, so it affects no measurement here, but the recorded threshold arms on the two sides
     are not comparable.
-  - **Tentative prolongation.** PETSc orthonormalizes each aggregate's block by QR (`agg.c:690-714`),
-    giving unit-2-norm columns where ours are 0/1 — i.e. `P_ours = P_petsc · diag(√|agg|)`. For a
-    2-level cycle with an exact coarse solve this is **provably inert**: `P A_c⁻¹ Pᵀ` is invariant
-    under a column rescaling. It starts to matter with inexact or deeper coarse levels, and for the
-    conditioning of our dense `pinv` coarse solve.
-  - **Singletons.** PETSc drops a neighbourless vertex from the coarse space entirely (zero row in
-    `P`, left to the smoother); we give it its own aggregate.
+  - **Tentative prolongation — NOW MEASURED, and it is REFUTED as a deep-hierarchy fix.** PETSc
+    orthonormalizes each aggregate's block by QR (`agg.c:690-714`), giving unit-2-norm columns where
+    ours are 0/1 — i.e. `P_ours = P_petsc · diag(√|agg|)`. The inertness claim is confirmed exactly (a
+    2-level pair is bit-identical), but deeper it is **17–30× worse**, not better. Built as
+    `orthonormal_prolongation`; see *"Depth, singletons, and the prolongation"* below for the arms and
+    for the mechanism that was proposed and refuted.
+  - **Singletons — NOW MEASURED, and this one was a real defect worth 1.7×.** PETSc drops a
+    neighbourless vertex from the coarse space entirely (zero row in `P`, left to the smoother); we gave
+    it its own aggregate. On this operator most such vertices are not neighbourless at all — they are
+    an artifact of the random sweep's arrival order — and a three-level hierarchy came out with 49
+    singletons of 161 aggregates on its second level. Fixed behind `avoid_singletons`; see below.
 
   **What equilibration IS worth (keep it). ⚠️ "Default off" was a scope error — settled from source
   2026-08-10:** `build_convection_hierarchy` and `_build_aggregation_hierarchy` default `equilibrate=False`,
@@ -2724,6 +2728,223 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   `aggressive_coarsening_levels 1`, `use_aggressive_square_graph TRUE`,
   `use_minimum_degree_ordering FALSE` (so: random order), `aggressive_mis_k 2`, `graph_symmetrize TRUE`.
 
+
+## The flow block — native preconditioning of the `[u, v, w, p]` saddle
+
+**Standing configuration for every measurement below**, because none of them mean anything without it:
+`bfs3d` `state-00067` (converged, `|R|` 3.586e-06, written at march shift 0.0064), **operator and
+preconditioner both at `beta = 0`** — the operator the implicit-function-theorem adjoint solves, and the
+only state in this set that discriminates between candidates. Real right-hand side `-R(state)`, GMRES
+restart 15 judged on the **TRUE** residual, uniform stencil reach 3, field split with ILU(0) on the
+trailing half, harness `validation/bfs3d_openfoam/field_split_probe.py`. The incumbent — the shipped
+monolithic ILU(0) — reads **11 restart cycles to 8.474e-11**, and every arm below was measured against it
+in the same run.
+
+⚠️ **Two restart caps are in play and residuals across them are NOT comparable:** `max_restarts` 60
+(reported as 58 cycles) and 20 (reported as 18). A failing arm runs its cap out, so it costs 3–4× a
+converging one — measured, the Krylov solves are ~80 % of a run's wall clock and the fixed setup (case
+build, materialize, compile) is a constant ~95 s. Each run therefore carries its own controls.
+
+### Equation (39): the Frobenius-optimal diagonal approximate inverse — the one transferable result
+
+Jemcov & Maruszewski (ECCOMAS/WCCM 2008) minimize `||I - F~^-1 F||_F` over **diagonal** approximate
+inverses and obtain the closed form `F~^-1_ii = F_ii / ||F_i||^2`, against Jacobi's `1 / F_ii`. Written
+as a ratio the two differ by `F_ii^2 / ||F_i||^2`, which is at most one and is the fraction of row `i`'s
+energy sitting on its diagonal — so **the optimal choice is Jacobi with an automatic, per-row
+under-relaxation.** That is the derived form of a quantity this solver otherwise sets by hand in at least
+three places: a velocity under-relaxation, a preconditioner-only velocity-row shift floor, and the
+relative velocity-row relaxation the closest published work on this discretization never manages to drop.
+
+On the `bfs3d` flow block that per-row factor runs min 3.9e-03, **median 0.53**, max 0.998 — a median
+47 % under-relaxation. On a small 2D coupled channel it is 0.88–1.0, i.e. nearly inert, which is why a
+small case cannot screen this.
+
+**As the velocity predictor inside a SIMPLE smoother it is worth four orders AND changes the sign of the
+sweep** (58-cycle cap):
+
+| smoother's `F~^-1` | 2 sweeps | 4 sweeps |
+|---|---|---|
+| Jacobi `1 / F_ii` | 4.015e-01 | 9.758e-01 |
+| Frobenius `F_ii / ||F_i||^2` | **4.281e-05** | **9.399e-06** |
+
+9400× at two sweeps, with nothing else changed and the same 5 s build. **The qualitative change matters
+more than the magnitude: under Jacobi more sweeps make it worse (the sweep amplifies), under Frobenius
+more sweeps help (it contracts).** A relaxation is exactly what an amplifying sweep lacks, and this
+supplies it without a tuned constant.
+
+**On the SCHUR relaxation the answer is sweep-count dependent, and one count gets it backwards** — at 2
+sweeps Frobenius is 5.200e-05 against Jacobi's 4.281e-05 (1.2× **worse**); at 4 sweeps it is 3.990e-06
+against 9.399e-06 (2.4× **better**). Recorded because the 2-sweep number was written up as the verdict
+before the 4-sweep one landed; the file's standing rule against quoting an arm at a single sweep count
+earned itself again here.
+
+**The two damping sources are one knob and must move together** (4 sweeps, 20-cycle cap, so not
+comparable with the table above):
+
+| Schur diagonal | `pressure_omega` 0.7 | `pressure_omega` 1.0 |
+|---|---|---|
+| Jacobi | 6.774e-05 | **3.435e-01** |
+| Frobenius | 6.828e-05 | **4.199e-05** |
+
+An undamped **Jacobi** pressure sweep blows up; an undamped **Frobenius** one is the best of the four. So
+the hand-set 0.7 was standing in for the derived relaxation, and stacking the two over-damps — but the
+constant cannot simply be dropped, only replaced.
+
+**Set from this:** Frobenius on **both** the velocity predictor and the Schur relaxation, with
+`pressure_omega = 1.0`.
+
+### What does NOT transfer from that paper
+
+- **Multi-step is nearly inert here.** `N` = 1 / 3 / 10 gives 7.399e-03 / 6.690e-03 / 3.823e-03 while the
+  solve goes 91 s → 262 s: **1.9× for 10× the work**, where the paper reports `N = 10` working across all
+  its cases.
+- **Algorithm 2 is WORSE than Algorithm 1 by 45×** (7.399e-03 against 1.632e-04), where the paper reports
+  it much better. Untested hypothesis: its velocity seed is one algebraic-multigrid cycle on `F`, which is
+  a good solve on a gentle case and may be poor on a developed high-Reynolds velocity block, making a
+  seeded start worse than a zero one.
+- **The structural mismatch is the likely cause.** Their system has a `(p, p)` block that is exactly zero
+  and `D = G^T` (inf-sup-stable unequal-order finite elements); ours has a nonzero Rhie–Chow damping block
+  and a nonsymmetric `D`. Their optimality result — two distinct eigenvalues, hence a Krylov method
+  converging in two iterations — rests on that zero block and does not carry over. Their cases are a
+  driven cavity and a bent duct: no turbulence, no separation, no pseudo-transient shift.
+
+### FLAT block preconditioners are CLOSED on this case
+
+Every arm that replaces the flow block's inverse outright — no hierarchy, no coarse-grid correction over
+the saddle — fails at `beta = 0` (58-cycle cap):
+
+| arm | TRUE rel |
+|---|---|
+| block-SIMPLE, MSIMPLER Schur | 2.554e-06 |
+| block-SIMPLE, `a_P` Schur | 7.812e-03 |
+| algebraic SIMPLE Schur, native sub-block inverses | 1.049e-02 |
+| left block transform (exact) + native multigrid on the transformed operator | 1.473e-02 |
+| left block transform (Schur-only) | 1.395e-03 |
+| multi-step saddle, Frobenius, 1 step | 1.632e-04 |
+
+**The signature is a floor almost insensitive to the shift** — MSIMPLER moves only ~2× between `beta = 0`
+and the forward operating point, where ILU(0) goes 11 cycles to 4. That is an *approximation* ceiling, not
+a conditioning one: a flat inverse must get every error component right in one application, and a
+SIMPLE-type Schur is worst precisely on the smooth global pressure mode a coarse grid exists to handle.
+
+Two sub-results worth keeping:
+- **Neither sub-block inverse is the constraint.** A 2×2 over which half is native: PETSc/PETSc 1.707e-02,
+  native/PETSc 1.555e-02, PETSc/native 3.904e-03, native/native 1.049e-02 — a 4.4× spread against an
+  eight-order gap to the incumbent.
+- **The raw `(p, p)` block is NOT usable as the pressure operator in a split.** With host V-cycles it
+  *diverges* (39 cycles, true relative residual 1.198e+00). That it is already 0.71× the SIMPLE-Schur
+  elliptic operator does not make it a Schur substitute.
+
+⚠️ **The block-SIMPLE arms were built with `reference_state` at the developed field**, where the production
+path passes none and falls back to a characteristic uniform flow at the fastest patch velocity. They were
+therefore *flattered* relative to the shipped object, and still failed.
+
+### Coarsening rate and depth — measured, and the direction that helps is the wrong one
+
+Native nodal hierarchy over the flow block, SIMPLE smoother at the settings above, 4 sweeps, 20-cycle cap:
+
+| coarsening | levels | fine → coarse | ratio | TRUE rel | dense coarse solve |
+|---|---|---|---|---|---|
+| squared graph (`aggressive_levels = 1`) | 2 | 92160 → 872 | 106× | 4.199e-05 | 6 MB |
+| plain maximal-independent-set | 2 | 92160 → 4300 | 21× | **2.522e-05** | 148 MB |
+| plain MIS + strength threshold 0.10 | 2 | 92160 → 26244 | 4× | aborted | **5.94 GB** |
+| plain MIS, three levels | 3 | 92160 → 644 | 143× | 4.964e-05 | — |
+
+- **`max_levels` is INERT while `max_coarse` binds first.** Asking for three levels at the aggressive rate
+  produced a bit-identical two-level hierarchy and a bit-identical result, because the first aggregation
+  already lands at 872 < `max_coarse` 2000. A level count alone cannot distinguish that from "depth does
+  not help", which is why the coarse size is now printed beside it.
+- **A strength threshold coarsens LESS, not more.** It aggregates only along strong connections, so the
+  aggregates shrink: 0.10 gives a 4× ratio and a 26244-equation coarse grid whose dense pseudo-inverse is a
+  5.94 GB captured constant (JAX warns and the arm was abandoned). It is the wrong instrument for
+  controlling coarse-grid size.
+- ⚠️ **The aggressive first level on this block is INHERITED, not measured here.** It was adopted to match
+  PETSc GAMG on the `[k, omega]` **trailing** block under a point-block-Jacobi smoother, where it was worth
+  5 → 2 cycles. On the flow saddle under a SIMPLE smoother it costs **1.7×**.
+
+**A coarse solve is NOT where to worry about a host solver or a sequential algorithm.** The incomplete-LU
+this work exists to remove is **fine-grid** work — 92160 rows, 21M nonzeros, on every sweep of every cycle.
+A direct solve on a few hundred coarse equations is negligible beside it in both cost and parallelism. An
+earlier reading here, that the dense coarse pseudo-inverse must be replaced before this direction can
+proceed, had that backwards: what has to go is the oversized coarse grid, not the density of its solve.
+
+### Depth, singletons, and the prolongation — where the AMG method itself was wrong
+
+**Depth had never actually been tried, and one arm proved it.** Asking for three levels at the
+aggressive rate produced a **bit-identical two-level hierarchy and a bit-identical residual**, because
+`max_levels` cannot bind while `max_coarse` (2000) stops the coarsening first. A level count alone
+cannot distinguish that from "depth does not help", which is why the coarse size and the aggregate-size
+distribution are now printed beside it (`aggregate_size_histogram`, and `_AGGREGATE_STATS` for the most
+recent build).
+
+**The defect the histogram found: `_mis_aggregate` manufactures SINGLETON aggregates, and they are an
+artifact of arrival order rather than of the graph.** The sweep visits vertices in a random permutation
+and any unclaimed vertex becomes a selector; a vertex reached late can find *every* neighbour already
+claimed, and then opens an aggregate containing only itself. Measured on the `bfs3d` flow block with
+plain aggregation, three levels:
+
+| level | aggregates | size min/median/max | singletons |
+|---|---|---|---|
+| 0 | 1075 | 1 / 17 / 63 | **107** |
+| 1 | 161 | 1 / **3** / 35 | **49 of 161** |
+
+A second level with a median aggregate size of three and 30 % singletons is not a coarse space — it is
+a slightly smaller copy of the fine grid in which a third of the unknowns stand for one cell each and
+couple to almost nothing.
+
+**Fixed by attaching such a vertex to an adjacent aggregate instead** (`_mis_aggregate(
+avoid_singletons=True)`; a vertex with genuinely no neighbours is a true isolate and still gets its
+own). Same configuration, 20-cycle cap, native SIMPLE smoother at 4 sweeps:
+
+| arm | level-0 aggregates | level-1 aggregates | coarse dofs | TRUE rel |
+|---|---|---|---|---|
+| three levels, as built | 1075, 107 singletons | 161, median 3, 49 singletons | 644 | 4.964e-05 |
+| **three levels, no singletons** | 968, none | 94, median 8, **none** | **376** | **2.844e-05** |
+
+Worth **1.7×**, and it coarsens *further* while doing it (644 → 376). Off by default
+(`avoid_singletons=False`) and byte-identical off.
+
+**The practical consequence is that the coarse-space cost problem largely dissolves.** The best
+two-level arm is 2.522e-05 on a **4300**-equation coarse grid; three levels without singletons is
+2.844e-05 on **376** — within 13 % at **a eleventh of the coarse space**, which is back inside ordinary
+practice and trivial to invert densely. The earlier reading here, that gentler coarsening's 1.7× was
+unaffordable and therefore not a lever, was measuring a hierarchy whose second level was degenerate.
+
+**⚠️ ORTHONORMALIZING THE TENTATIVE PROLONGATION IS REFUTED — twice, and the mechanism offered for it
+was wrong both times.** The recorded prediction was that our 0/1 columns (against PETSc's QR-orthonormal
+ones) are "provably inert at two levels with an exact coarse solve" but "start to matter with inexact or
+deeper coarse levels", making them the suspect for depth being unhelpful. Built as
+`orthonormal_prolongation=True`:
+
+| arm | TRUE rel |
+|---|---|
+| two levels, with and without orthonormalization | 4.199e-05 **both, bit-identical** |
+| three levels, as built | 4.964e-05 |
+| three levels + orthonormalization | 8.411e-04 |
+| three levels, no singletons | 2.844e-05 |
+| three levels, no singletons + orthonormalization | 8.465e-04 |
+
+The two-level identity confirms the inertness claim exactly. Deeper it is **17–30× worse**, and
+eliminating the singletons does not rescue it (8.465e-04 against 8.411e-04) — so the proposed mechanism,
+that orthonormalization promotes singletons by scaling a column by `1 / sqrt(|agg|)`, is refuted.
+
+**A better hypothesis, offered as one and NOT measured:** the coarse *space* is identical either way, since
+scaling a column does not change its span, so this can only be about the coarse *operator*. With 0/1
+columns `A_c = P^T A P` **sums** fine rows over each aggregate, preserving row-sum structure — and for a
+finite-volume conservation-law discretization the row sums are the conservation statement. Scaling by
+`1 / sqrt(|agg|)` destroys it, which is why agglomeration multigrid for conservation laws uses unscaled
+sums. Do not act on this without measuring it.
+
+**Still untested:** whether the singleton fix also helps the two-level hierarchies (it is measured only at
+depth so far), and whether four or five levels now shrink the coarse grid below 376 without the
+degeneracy that made depth harmful. Both are cheap and both bear on whether this becomes a default.
+
+### Where this stands
+
+Best native flow-block arm: **2.522e-05 at 18 cycles**, against the incumbent's **8.474e-11 at 11** — four
+to five orders. Cell-local smoothing on the saddle is separately closed (point Jacobi, Chebyshev,
+cell-block Jacobi, and Vanka all fail), and the flat-inverse family is closed by the table above. What
+remains untested is a conventional deep hierarchy with a small coarse space.
 
 ## Low-β directions already measured out — CLOSED, do not re-litigate
 

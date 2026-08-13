@@ -152,7 +152,9 @@ def _cell_graph(a: sp.csr_matrix, block_size: int) -> sp.csr_matrix:
     ).tocsr()
 
 
-def _block_tentative(aggregate: np.ndarray, n_coarse_cells: int, block_size: int) -> sp.csr_matrix:
+def _block_tentative(
+    aggregate: np.ndarray, n_coarse_cells: int, block_size: int, orthonormal: bool = False
+) -> sp.csr_matrix:
     """The piecewise-constant prolongation for a **nodal** aggregation, one column per coarse field.
 
     Degree of freedom ``(cell i, field f)`` interpolates from coarse degree of freedom
@@ -179,10 +181,45 @@ def _block_tentative(aggregate: np.ndarray, n_coarse_cells: int, block_size: int
     rows = np.arange(block_size * n_cells)
     fields, cells = np.divmod(rows, n_cells)
     cols = fields * n_coarse_cells + aggregate[cells]
+    values = np.ones(rows.shape[0])
+    if orthonormal:
+        # Orthonormalize each aggregate's column, which for a piecewise-constant prolongation is
+        # exactly its QR: divide by ``sqrt(|aggregate|)`` so every column has unit 2-norm.
+        #
+        # **This is provably inert on a two-level cycle with an exact coarse solve** -- ``P A_c^-1
+        # P^T`` is invariant under a column rescaling -- and that is precisely why it went unnoticed:
+        # every hierarchy here has been two-level. It is NOT inert deeper. With 0/1 columns the
+        # Galerkin operator ``P^T A P`` picks up a scaling of order ``|agg_i| * |agg_j|`` per entry,
+        # and the next level's smoother and spectral estimate read ``D^-1 A_c`` and ``lambda_max`` off
+        # that mis-scaled operator -- neither of which is invariant to it. The distortion therefore
+        # compounds once per level, in proportion to how UNEVEN the aggregate sizes are, which is the
+        # standing explanation for depth being unhelpful and sometimes harmful here.
+        counts = np.bincount(aggregate, minlength=n_coarse_cells).astype(np.float64)
+        values = values / np.sqrt(np.maximum(counts, 1.0))[aggregate[cells]]
     return sp.csr_matrix(
-        (np.ones(rows.shape[0]), (rows, cols)),
+        (values, (rows, cols)),
         shape=(block_size * n_cells, block_size * n_coarse_cells),
     )
+
+
+def aggregate_size_histogram(aggregate: np.ndarray, n_coarse_cells: int) -> dict:
+    """Aggregate-size statistics for one coarsening step — the spread is what makes scaling bite.
+
+    A piecewise-constant prolongation with 0/1 columns distorts the Galerkin coarse operator in
+    proportion to the *variation* in aggregate size, so a hierarchy whose aggregates are all the same
+    size loses nothing by not orthonormalizing and one whose sizes span an order of magnitude loses a
+    great deal. Reported rather than assumed, because the two cases call for different work.
+    """
+    counts = np.bincount(aggregate, minlength=n_coarse_cells)
+    counts = counts[counts > 0]
+    return {
+        "aggregates": int(counts.size),
+        "min": int(counts.min()),
+        "median": float(np.median(counts)),
+        "max": int(counts.max()),
+        "singletons": int((counts == 1).sum()),
+        "spread": float(counts.max() / max(counts.min(), 1)),
+    }
 
 
 def _cell_block_inverse(a: sp.csr_matrix, block_size: int, where: str = "operator") -> np.ndarray:
@@ -305,7 +342,9 @@ def _square_graph(graph: sp.csr_matrix) -> sp.csr_matrix:
     return squared
 
 
-def _mis_aggregate(graph: sp.csr_matrix, seed: int = 0) -> tuple[np.ndarray, int]:
+def _mis_aggregate(
+    graph: sp.csr_matrix, seed: int = 0, avoid_singletons: bool = False
+) -> tuple[np.ndarray, int]:
     """Greedy maximal-independent-set aggregation over a **randomized** visit order.
 
     One sweep over the vertices in a random permutation. Any vertex still unclaimed when it is visited
@@ -331,6 +370,18 @@ def _mis_aggregate(graph: sp.csr_matrix, seed: int = 0) -> tuple[np.ndarray, int
         Symmetric connectivity, shape ``(n, n)``. Only its sparsity is read.
     seed : int
         Seed for the permutation, so a hierarchy is reproducible.
+    avoid_singletons : bool
+        Attach a vertex whose neighbours are **all already claimed** to one of their aggregates instead
+        of letting it open an aggregate containing only itself.
+
+        Those singletons are an artifact of arrival order, not of the graph: a vertex reached late in
+        the random sweep can find every neighbour taken, and the one-sweep selector rule then opens a
+        new aggregate for it alone. Measured on a coupled flow block, the second level of a three-level
+        hierarchy came out **49 singletons of 161 aggregates, median aggregate size 3** -- a coarse
+        space that is a slightly smaller copy of the fine grid with a third of its unknowns standing for
+        one cell each and coupling to almost nothing. They also interact badly with an orthonormalized
+        prolongation, which scales a column by ``1 / sqrt(|agg|)`` and so *promotes* a singleton by
+        several-fold against a real aggregate.
 
     Returns
     -------
@@ -347,6 +398,14 @@ def _mis_aggregate(graph: sp.csr_matrix, seed: int = 0) -> tuple[np.ndarray, int
         if aggregate[i] != -1:
             continue
         neighbours = indices[indptr[i] : indptr[i + 1]]
+        if avoid_singletons and neighbours.size:
+            claimed = neighbours[aggregate[neighbours] != -1]
+            if claimed.size == neighbours.size:
+                # Every neighbour is taken, so opening an aggregate here would produce a singleton.
+                # Join an adjacent one instead. A vertex with NO neighbours is a true isolate and still
+                # gets its own aggregate -- it has nothing to attach to.
+                aggregate[i] = aggregate[claimed[0]]
+                continue
         # A true singleton (no neighbour but itself) is left for the sweep to pick up as its own
         # aggregate rather than being attached to something it does not touch.
         aggregate[i] = len(roots)
@@ -635,6 +694,11 @@ def _aggregation_edges(a_agg: sp.csr_matrix, strength_threshold: float) -> sp.co
 _PROLONGATION_SMOOTHING = frozenset({"none", "standard", "symmetric-part"})
 
 
+#: Aggregate-size statistics from the most recent hierarchy build, newest level last. A diagnostic
+#: only -- read it after a build and clear it before the next one.
+_AGGREGATE_STATS: list[dict] = []
+
+
 def _build_aggregation_hierarchy(
     a: sp.csr_matrix,
     *,
@@ -644,6 +708,8 @@ def _build_aggregation_hierarchy(
     max_levels: int,
     strength_threshold: float = 0.0,
     block_size: int = 1,
+    orthonormal_prolongation: bool = False,
+    avoid_singletons: bool = False,
     mis_aggregation: bool = False,
     aggressive_levels: int = 0,
     equilibrate: bool = False,
@@ -731,13 +797,18 @@ def _build_aggregation_hierarchy(
                 )
                 aggregate = _reattach_to_adjacent_root(aggregate, roots, connectivity)
             else:
-                aggregate, _, n_coarse_cells = _mis_aggregate(connectivity, seed=len(levels))
+                aggregate, _, n_coarse_cells = _mis_aggregate(
+                    connectivity, seed=len(levels), avoid_singletons=avoid_singletons
+                )
         else:
             upper = _aggregation_edges(
                 graph, strength_threshold
             )  # full graph, or strong edges only
             aggregate, n_coarse_cells = _aggregate(upper.row, upper.col, graph.shape[0])
-        tentative = _block_tentative(aggregate, n_coarse_cells, block_size)
+        _AGGREGATE_STATS.append(aggregate_size_histogram(aggregate, n_coarse_cells))
+        tentative = _block_tentative(
+            aggregate, n_coarse_cells, block_size, orthonormal_prolongation
+        )
         n_coarse = tentative.shape[1]
         if prolongation_smoothing == "none":
             prolongation = tentative.tocsr()
@@ -1088,6 +1159,8 @@ def build_convection_hierarchy(
     aggressive_levels: int = 0,
     equilibrate: bool = False,
     prolongation_smoothing: str = "symmetric-part",
+    orthonormal_prolongation: bool = False,
+    avoid_singletons: bool = False,
 ) -> SmoothedHierarchy:
     """Build the convection-diffusion hierarchy for operator ``a`` — off the jit path.
 
@@ -1172,6 +1245,8 @@ def build_convection_hierarchy(
         aggressive_levels=aggressive_levels,
         equilibrate=equilibrate,
         prolongation_smoothing=prolongation_smoothing,
+        orthonormal_prolongation=orthonormal_prolongation,
+        avoid_singletons=avoid_singletons,
     )
 
 
