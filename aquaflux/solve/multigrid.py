@@ -1032,18 +1032,41 @@ class _CsrOperator(eqx.Module):
         )
 
 
-def _coo_apply(row, col, val, x: jnp.ndarray, n_out: int) -> jnp.ndarray:
+def _coo_apply(
+    row, col, val, x: jnp.ndarray, n_out: int, sorted_segments: bool = True
+) -> jnp.ndarray:
     """General sparse matvec ``M x`` for a COO operator: ``segment_sum(val * x[col], row, n_out)``.
 
     The one sparse-matvec kernel, shared by every frozen operator, prolongation, and restriction.
 
-    ``indices_are_sorted`` is asserted rather than hoped for: every operator here is frozen from a
-    ``scipy.sparse`` CSR matrix, and ``csr.tocoo()`` emits entries in row-major order, so the segment
-    identifiers are non-decreasing by construction. Saying so lets the reduction run as a contiguous
-    segmented scan instead of an unordered scatter-add, which is the difference between reading the
-    output once and colliding on it — the same reason a CSR matvec beats a COO one.
+    ``sorted_segments`` states whether the segment identifiers are non-decreasing. It lets the reduction
+    run as a contiguous segmented scan instead of an unordered scatter-add — the difference between
+    reading the output once and colliding on it, the same reason a CSR matvec beats a COO one.
+
+    **It is a promise, not a hint, and passing it falsely is a silent wrong answer.** A frozen operator
+    taken from ``scipy.sparse`` CSR has row-major entries, so its ROW array is non-decreasing and the
+    default holds. Applying the same operator TRANSPOSED does not: the column array of a row-major COO
+    is not sorted, so a transposed apply must pass ``False``. A backend that ignores the flag returns the
+    right answer either way, which is exactly what lets a false promise sit dormant until it moves to one
+    that does not.
+
+    Parameters
+    ----------
+    row, col, val : jnp.ndarray
+        Coordinate form of the operator, each shape ``(nnz,)``. ``row`` supplies the segment identifiers.
+    x : jnp.ndarray
+        The vector to apply to, shape ``(n_in,)``.
+    n_out : int
+        Length of the result.
+    sorted_segments : bool
+        Whether ``row`` is non-decreasing. Pass ``False`` for a transposed apply.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``M x``, shape ``(n_out,)``.
     """
-    return segment_sum(val * x[col], row, n_out, indices_are_sorted=True)
+    return segment_sum(val * x[col], row, n_out, indices_are_sorted=sorted_segments)
 
 
 def _operator_matvec(level: _SparseLevel | _AirLevel, x: jnp.ndarray) -> jnp.ndarray:
@@ -1172,8 +1195,11 @@ def _smoothed_ops(smoother: _Smoother, mu: int = 1, pre_smooth: bool = True) -> 
     return _VCycleOps(
         mu=mu,
         pre_smooth=pre_smooth,
+        # Restriction is the prolongation applied TRANSPOSED, so the segment identifiers are its COLUMN
+        # array -- which a row-major coordinate form does not leave sorted. Promising otherwise is a
+        # silent wrong answer on any backend that acts on the promise.
         restrict=lambda level, r: _coo_apply(
-            level.p_ccol, level.p_frow, level.p_val, r, level.n_coarse
+            level.p_ccol, level.p_frow, level.p_val, r, level.n_coarse, sorted_segments=False
         ),
         prolong=lambda level, e: _coo_apply(level.p_frow, level.p_ccol, level.p_val, e, level.n),
         smooth=smoother,

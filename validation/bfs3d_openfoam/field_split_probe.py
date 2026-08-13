@@ -796,7 +796,6 @@ def _splitting_balance(a, pieces, block_size, pressure_sweeps, pressure_omega):
             vector = vector - damping @ vector
         return vector
 
-    iteration = LinearOperator(schur.shape, matvec=apply_iteration, rmatvec=None, dtype=float)
     # `svds` needs a transpose; the operator is a polynomial in `damping`, so transposing each factor
     # and reversing the order gives it in closed form.
     damping_t = damping.T.tocsr()
@@ -809,9 +808,8 @@ def _splitting_balance(a, pieces, block_size, pressure_sweeps, pressure_omega):
     iteration = LinearOperator(
         schur.shape, matvec=apply_iteration, rmatvec=apply_iteration_t, dtype=float
     )
-    splitting_norm = float(svds(splitting, k=1, return_singular_vectors=False)[0])
     schur_norm = float(svds(iteration, k=1, return_singular_vectors=False)[0])
-    return splitting_norm, schur_norm
+    return diagonal_norm, schur_norm
 
 
 def _block_approximate_inverse(f_block, n_cells, n_fields, frobenius):
