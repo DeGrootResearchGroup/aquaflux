@@ -881,6 +881,7 @@ def _simple_pieces(
     frobenius: bool = True,
     schur_frobenius: bool = False,
     block_splitting: bool = False,
+    simplec: bool = False,
 ) -> _SimplePieces:
     """Form one level's SIMPLE pieces from that level's assembled operator.
 
@@ -895,9 +896,19 @@ def _simple_pieces(
     # this smoother used when it amplified; the Frobenius-optimal diagonal is the same object with a
     # derived per-row relaxation, which is measured to be worth 25x in a flat setting on this operator
     # -- and an under-relaxed sweep is exactly what an amplifying one is missing.
-    f_inverse = _diagonal_approximate_inverse(a[:nv, :nv].tocsr(), frobenius)
+    f_inverse = _diagonal_approximate_inverse(
+        a[:nv, :nv].tocsr(), frobenius, row_sum=simplec, label=" (velocity)"
+    )
     g_block = a[:nv, nv:].tocsr()
     d_block = a[nv:, :nv].tocsr()
+    if block_splitting and simplec:
+        # The block inverse overrides the diagonal entirely, so a SIMPLEC diagonal built alongside it is
+        # computed, reported, and never applied -- an arm whose name claims a splitting it does not run.
+        # Caught because the pair returned a residual bit-identical to block splitting alone.
+        raise ValueError(
+            "block splitting overrides the velocity diagonal, so `simplec` would have no effect; "
+            "choose one."
+        )
     if block_splitting:
         f_inverse_matrix = _block_approximate_inverse(
             a[:nv, :nv].tocsr(), n_cells, block_size - 1, frobenius
@@ -1046,6 +1057,10 @@ class NativeSimpleInverse:
         # error is the larger half of what governs this preconditioner's eigenvalue clustering at the fine
         # level, and a diagonal cannot represent a cell's own velocity-component coupling at all.
         block_splitting: bool = False,
+        # SIMPLEC's velocity coefficient: divide by the row sum rather than the diagonal. The appeal as
+        # a smoother is that the splitting error then annihilates constants exactly, so it does not
+        # fight the coarse grid over the smoothest mode.
+        simplec: bool = False,
         mu: int = 1,
         # Dropping the pre-relaxation also drops the residual matvec that follows it, which at two inner
         # pressure sweeps is the single largest term in a sweep.
@@ -1101,7 +1116,12 @@ class NativeSimpleInverse:
                 shape=operator.shape,
             )
             pieces[level.n] = _simple_pieces(
-                level_matrix, level.block_size, frobenius, schur_frobenius, block_splitting
+                level_matrix,
+                level.block_size,
+                frobenius,
+                schur_frobenius,
+                block_splitting,
+                simplec,
             )
             if os.environ.get("BFS3D_PROBE_BALANCE"):
                 # Which half of the relaxation limits it -- the velocity splitting or the Schur solve.
@@ -1141,6 +1161,7 @@ class NativeSimpleInverse:
         # arm run forty sweeps instead of four while every other line of output looked correct.
         print(
             f"      smoother: {sweeps} sweeps x {pressure_sweeps} inner, omega {omega}, "
+            f"simplec {simplec}, "
             f"pressure_omega {pressure_omega}, strength {strength_threshold}, "
             f"block splitting {block_splitting}",
             flush=True,
@@ -1302,7 +1323,9 @@ class BlockTransformedInverse:
         """Nothing to release -- plain arrays, no host solver handles."""
 
 
-def _diagonal_approximate_inverse(f_block: sp.csr_matrix, frobenius: bool) -> np.ndarray:
+def _diagonal_approximate_inverse(
+    f_block: sp.csr_matrix, frobenius: bool, row_sum: bool = False, label: str = ""
+) -> np.ndarray:
     """The diagonal approximate inverse of a block, Jacobi or Frobenius-optimal.
 
     Written for the velocity block but specific to nothing about it -- the derivation reads only the
@@ -1324,6 +1347,30 @@ def _diagonal_approximate_inverse(f_block: sp.csr_matrix, frobenius: bool) -> np
     diagonal = f_block.diagonal()
     if not np.all(np.isfinite(diagonal)) or np.any(diagonal == 0.0):
         raise ValueError("the velocity block has a zero or non-finite diagonal.")
+    if row_sum:
+        # The SIMPLEC coefficient. Where SIMPLE drops the neighbour corrections entirely and divides by
+        # a_P, SIMPLEC approximates each neighbour correction by the cell's own, which collapses the
+        # neighbour sum onto the diagonal and divides by a_P - sum(a_nb) -- exactly this matrix's ROW
+        # SUM. Its appeal as a smoother is a property the other two choices lack: `I - F~^-1 F`
+        # annihilates the constant vector exactly, so the smoother does not fight the coarse grid over
+        # the smoothest mode, which is the one the coarse grid exists to carry.
+        #
+        # It has a failure mode the others do not. A row sum can approach zero where a diagonal cannot,
+        # and this operator is measurably NOT diagonally dominant, so rows whose sum is small relative
+        # to their own diagonal would produce an enormous coefficient. Those fall back to the
+        # Frobenius-optimal value, and the count is reported: if many rows fall back, SIMPLEC is not
+        # meaningfully in force and any result under it is really a result about the fallback.
+        sums = np.asarray(f_block.sum(axis=1)).ravel()
+        usable = sums > 0.1 * np.abs(diagonal)
+        squared = np.asarray(f_block.multiply(f_block).sum(axis=1)).ravel()
+        fallback = diagonal / squared
+        inverse = np.where(usable, 1.0 / np.where(usable, sums, 1.0), fallback)
+        print(
+            f"      SIMPLEC splitting{label}: {int((~usable).sum())} of {usable.size} rows fell back "
+            f"to Frobenius (row sum below a tenth of the diagonal)",
+            flush=True,
+        )
+        return inverse
     if not frobenius:
         return 1.0 / diagonal
     # Row 2-norms squared, straight off the CSR values.
@@ -1541,6 +1588,7 @@ def _trailing_inverse(spec):
 #: Every modifier `_leading_inverse` strips off a `simplesmooth` spec before reading the sweep count.
 #: Stripped longest-first; see the loop for why that is not optional.
 _SPEC_TOKENS = (
+    "-simplec",
     "-bs",
     "-L3",
     "-L4",
@@ -1683,6 +1731,7 @@ def _leading_inverse(spec):
         # pressure relaxation, and the same defect that cost 10 cycles against 2 on the transported
         # scalars when their smoother was damped where the reference's was not.
         omega = 1.0 if "-o10" in rest else 0.7
+        simplec = "-simplec" in rest
         block_splitting = "-bs" in rest
         mu = 2 if "-W" in rest else 1
         pre_smooth = "-pre0" not in rest
@@ -1719,6 +1768,7 @@ def _leading_inverse(spec):
                 mu=mu,
                 pre_smooth=pre_smooth,
                 block_splitting=block_splitting,
+                simplec=simplec,
                 omega=omega,
             )
 
@@ -2553,6 +2603,50 @@ ARMS = (
             m, g, n, "simplesmooth8-a0-t25-ns-L5-c500-ps2-o10", "ilu0", flow_first=True
         ),
     ),
+    # SIMPLEC's velocity coefficient in place of SIMPLE's, and the free quality levers COMPOSED. The gap
+    # to the incumbent is measured to be convergence rather than cost -- the native preconditioner is
+    # only ~1.45x more expensive per application and needs 4x the cycles -- so a change that buys cycles
+    # at no cost is worth about four times what an equally-sized cost reduction is. Three such levers now
+    # exist (undamped correction, block splitting, and this), each worth one cycle alone; whether they
+    # compose is the question these arms exist to answer.
+    (
+        "split simplesmooth4-a0-t25-ns-L5-c500-ps2-simplec/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, SIMPLEC splitting",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-a0-t25-ns-L5-c500-ps2-simplec", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth4-a0-t25-ns-L5-c500-ps2-simplec-o10/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, SIMPLEC, undamped correction",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-a0-t25-ns-L5-c500-ps2-simplec-o10", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth4-a0-t25-ns-L5-c500-ps2-bs-o10/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, block splitting, undamped correction",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-a0-t25-ns-L5-c500-ps2-bs-o10", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "split simplesmooth4-a0-t25-ns-L5-c500-ps2-bs-simplec-o10/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, block splitting, SIMPLEC, undamped",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth4-a0-t25-ns-L5-c500-ps2-bs-simplec-o10", "ilu0", flow_first=True
+        ),
+    ),
+    # The two composing levers at eight sweeps. Undamping alone reached five cycles there; the pair
+    # reaches six at four sweeps, so this asks whether the composition holds at the sweep count that
+    # buys cycles hardest -- and at what per-application price, since eight sweeps roughly doubles it.
+    (
+        "split simplesmooth8-a0-t25-ns-L5-c500-ps2-bs-o10/ilu0",
+        "split flow-first, SIMPLE smoother, strength 0.25, 8 sweeps, block + undamped",
+        lambda m, g, n: field_split(
+            m, g, n, "simplesmooth8-a0-t25-ns-L5-c500-ps2-bs-o10", "ilu0", flow_first=True
+        ),
+    ),
     (
         "split simplesmooth8-a0-t50-ns-L5-c500/ilu0",
         "split flow-first, SIMPLE smoother, strength 0.50 aggregation, coarse under 500",
@@ -2630,6 +2724,31 @@ def run_arm(label, preconditioner, built, coupled, state, rhs, op_shift, solver)
 
     def operator(v):
         return _jacobian_matvec(coupled, state, v) + op_shift * v
+
+    # Time the two halves of a Krylov iteration SEPARATELY before attributing cost to either. Both the
+    # incumbent and every candidate pay the same exact matrix-free Jacobian product; only the
+    # preconditioner differs. So if the product is a large share of an iteration, the whole
+    # preconditioner effort is bounded by the remainder, and no amount of work on it can close a gap
+    # larger than that share allows. Nothing in this campaign has measured the split.
+    if os.environ.get("BFS3D_PROBE_SPLIT"):
+        apply_pc = preconditioner.matvec()
+        probe = jnp.asarray(rhs)
+        jax.block_until_ready(operator(probe))
+        jax.block_until_ready(apply_pc(probe))
+        started = time.time()
+        for _ in range(5):
+            jax.block_until_ready(operator(probe))
+        jvp_each = (time.time() - started) / 5
+        started = time.time()
+        for _ in range(5):
+            jax.block_until_ready(apply_pc(probe))
+        pc_each = (time.time() - started) / 5
+        print(
+            f"      per-iteration split: jacobian product {jvp_each * 1e3:.0f} ms  |  "
+            f"preconditioner {pc_each * 1e3:.0f} ms  |  preconditioner is "
+            f"{100 * pc_each / max(jvp_each + pc_each, 1e-12):.0f}% of the pair",
+            flush=True,
+        )
 
     solving = time.time()
     solution, raw = solve_linear(
