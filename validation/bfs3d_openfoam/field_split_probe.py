@@ -1182,10 +1182,23 @@ def _trailing_inverse(spec):
             matrix = sp.csr_matrix(block)
             factors = sp.linalg.spilu(matrix.tocsc(), drop_tol=1e-12, fill_factor=60)
             probe_rhs = np.random.default_rng(0).normal(size=matrix.shape[0])
-            achieved = np.linalg.norm(matrix @ factors.solve(probe_rhs) - probe_rhs) / np.linalg.norm(
-                probe_rhs
+            residual = matrix @ factors.solve(probe_rhs) - probe_rhs
+            # PER FIELD, never as one norm. This block's k and omega rows differ by some eight orders of
+            # magnitude, so a global relative residual is ~100% omega and would report a factorization
+            # that solves omega beautifully and k not at all as "near-exact". That is the same
+            # collapse-over-row-fields blindness that let a column-reach audit approve a configuration
+            # which then diverged the march -- and it would turn this arm from a bound into a fiction,
+            # since a bound that is not tight in k cannot be read as "quality does not help".
+            n_group = matrix.shape[0] // n_group_fields
+            per_field = " ".join(
+                f"f{f} {np.linalg.norm(residual[f * n_group : (f + 1) * n_group]) / max(np.linalg.norm(probe_rhs[f * n_group : (f + 1) * n_group]), 1e-300):.3e}"
+                for f in range(n_group_fields)
             )
-            print(f"      exact trailing bound: true rel {achieved:.3e} on a random rhs", flush=True)
+            achieved = np.linalg.norm(residual) / np.linalg.norm(probe_rhs)
+            print(
+                f"      exact trailing bound: true rel {achieved:.3e} global | per field {per_field}",
+                flush=True,
+            )
             return _HostFactorInverse(factors, matrix.shape[0])
 
         return build
