@@ -557,6 +557,7 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
         coarse_eq_limit: int | None = 2000,
         leading_options: dict | None = None,
         trailing_options: dict | None = None,
+        leading_inverse: Callable[[sp.csr_matrix, int], object] | None = None,
         trailing_inverse: Callable[[sp.csr_matrix, int], object] | None = None,
         batched_matvec: Callable | None = None,
         probe_batch_size: int | None = None,
@@ -577,10 +578,11 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
             Passed through to each block's V-cycle. ``smoother_sweeps`` is the leading (saddle) block's
             and ``trailing_smoother_sweeps`` the trailing (transported-scalar) block's; they differ by
             default because the two halves want different amounts of smoothing.
-        trailing_inverse : callable or None
-            ``(sub_matrix, n_fields_in_group) -> inverse`` replacing the trailing block's V-cycle
-            entirely — the seam for preconditioning the transported scalars with something that is not
-            a host solver's V-cycle. When set, the trailing smoother settings above do not apply to it.
+        leading_inverse, trailing_inverse : callable or None
+            ``(sub_matrix, n_fields_in_group) -> inverse`` replacing that block's V-cycle entirely — the
+            seam for preconditioning a block with something that is not a host solver's V-cycle. When
+            set, the corresponding smoother settings above do not apply to it. An injected inverse must
+            offer ``refactor_block`` or ``refactor`` to survive a mid-march refresh.
 
         Returns
         -------
@@ -599,6 +601,7 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
             coarse_eq_limit=coarse_eq_limit,
             leading_options=leading_options,
             trailing_options=trailing_options,
+            leading_inverse=leading_inverse,
             trailing_inverse=trailing_inverse,
         )
         return cls(split, groups, jacobian_no_shift=jacobian, n_fields=plan.n_fields)

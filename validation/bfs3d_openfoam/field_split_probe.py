@@ -1075,6 +1075,59 @@ class NativeSimpleInverse:
     ) -> None:
         matrix = sp.csr_matrix(block)
         self._n_dofs = matrix.shape[0]
+        # Held so a refresh re-derives at exactly the settings this was built at, rather than at
+        # whatever the builder defaults happen to be -- the same reason the sibling nodal inverse
+        # keeps its own build settings.
+        self._settings = dict(
+            n_fields=n_fields,
+            cycles=cycles,
+            sweeps=sweeps,
+            pressure_sweeps=pressure_sweeps,
+            pressure_omega=pressure_omega,
+            omega=omega,
+            max_coarse=max_coarse,
+            frobenius=frobenius,
+            schur_frobenius=schur_frobenius,
+            levels=levels,
+            aggressive=aggressive,
+            strength_threshold=strength_threshold,
+            orthonormal=orthonormal,
+            avoid_singletons=avoid_singletons,
+            block_splitting=block_splitting,
+            simplec=simplec,
+            mu=mu,
+            pre_smooth=pre_smooth,
+            prolongation_smoothing=prolongation_smoothing,
+            equilibrate=equilibrate,
+        )
+        self._rebuild(matrix)
+
+    def _rebuild(self, matrix: sp.csr_matrix) -> None:
+        """Derive the hierarchy, the per-level SIMPLE pieces, and the jitted cycle from an operator.
+
+        Shared by construction and by the mid-march refresh so the two cannot drift apart.
+        """
+        settings = self._settings
+        n_fields = settings["n_fields"]
+        cycles = settings["cycles"]
+        sweeps = settings["sweeps"]
+        pressure_sweeps = settings["pressure_sweeps"]
+        pressure_omega = settings["pressure_omega"]
+        omega = settings["omega"]
+        max_coarse = settings["max_coarse"]
+        frobenius = settings["frobenius"]
+        schur_frobenius = settings["schur_frobenius"]
+        levels = settings["levels"]
+        aggressive = settings["aggressive"]
+        strength_threshold = settings["strength_threshold"]
+        orthonormal = settings["orthonormal"]
+        avoid_singletons = settings["avoid_singletons"]
+        block_splitting = settings["block_splitting"]
+        simplec = settings["simplec"]
+        mu = settings["mu"]
+        pre_smooth = settings["pre_smooth"]
+        prolongation_smoothing = settings["prolongation_smoothing"]
+        equilibrate = settings["equilibrate"]
         self._hierarchy = build_convection_hierarchy(
             matrix,
             block_size=n_fields,
@@ -1186,16 +1239,66 @@ class NativeSimpleInverse:
         ops = _smoothed_ops(smooth, mu=mu, pre_smooth=pre_smooth)
         cycle = jax.jit(lambda r: self._hierarchy.fixed_cycle_solve(r, cycles, ops))
         self._solve = cycle
-        self._transpose = jax.linear_transpose(cycle, jnp.zeros(self._n_dofs, dtype=jnp.float64))
+        # LAZY. `jax.linear_transpose` traces eagerly, and a forward march never applies the transpose --
+        # only the adjoint does. Building it at construction cost a measured 0.27 GB and 0.27 s per arm
+        # for something most callers never touch, on a machine where the memory is the binding constraint.
+        self._cycle = cycle
+        self._transpose_fn = None
 
     @property
     def n_dofs(self) -> int:
         return self._n_dofs
 
+    def refactor_block(self, block: sp.spmatrix) -> None:
+        """Re-fit to a new operator on the same graph, in place. Required to survive a march refresh.
+
+        The field split refuses to refresh an inverse that offers neither this nor ``refactor``, so
+        without it this preconditioner cannot be used in a march at all -- a single-state probe never
+        reaches the code path.
+
+        **A straight rebuild, and whether that is structure-preserving depends on a setting.** The
+        sibling nodal inverse can rebuild freely because its aggregation reads only the sparsity
+        pattern, so every array keeps its shape and the jitted cycle stays a compilation-cache hit. That
+        argument does NOT hold at a nonzero strength threshold, where the aggregation reads ``|A_ij|``
+        and the coarsening can move as the flow develops. Rather than assume either way, the level sizes
+        are compared against the previous build and any change is reported: a march whose coarsening is
+        stable costs nothing, and one whose coarsening moves is paying a retrace that will show up in
+        the refresh timings with a reason attached.
+
+        Parameters
+        ----------
+        block : scipy.sparse matrix
+            The group's new diagonal block, field-major, of the shape this was built at.
+
+        Raises
+        ------
+        ValueError
+            If the new block's shape differs from the built one.
+        """
+        matrix = sp.csr_matrix(block)
+        if matrix.shape != (self._n_dofs, self._n_dofs):
+            raise ValueError(
+                f"cannot refactor a {self._n_dofs}-dof inverse onto a {matrix.shape[0]}-dof block."
+            )
+        before = tuple(level.n for level in self._hierarchy.levels)
+        self._rebuild(matrix)
+        after = tuple(level.n for level in self._hierarchy.levels)
+        if after != before:
+            print(
+                f"      refresh moved the coarsening: levels {before} -> {after} "
+                f"(the jitted cycle retraces; the strength threshold reads values)",
+                flush=True,
+            )
+
     def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
         vector = jnp.asarray(residual, dtype=jnp.float64)
-        out = self._transpose(vector)[0] if transpose else self._solve(vector)
-        return np.asarray(out, dtype=np.float64)
+        if not transpose:
+            return np.asarray(self._solve(vector), dtype=np.float64)
+        if self._transpose_fn is None:
+            self._transpose_fn = jax.linear_transpose(
+                self._cycle, jnp.zeros(self._n_dofs, dtype=jnp.float64)
+            )
+        return np.asarray(self._transpose_fn(vector)[0], dtype=np.float64)
 
     def destroy(self) -> None:
         """Nothing to release -- plain arrays, no host solver handles."""

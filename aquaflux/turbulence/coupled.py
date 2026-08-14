@@ -2141,6 +2141,7 @@ def coupled_amg_continuation(
     trailing_smoother_sweeps: int = 1,
     leading_options: dict | None = None,
     trailing_options: dict | None = None,
+    leading_inverse: Callable | None = None,
     trailing_inverse: Callable | None = None,
     probe: CoupledJacobianProbe | None = None,
     preconditioner: MonolithicAmgPreconditioner | None = None,
@@ -2273,6 +2274,10 @@ def coupled_amg_continuation(
         served by much cheaper relaxations. Keys are PETSc options without the instance prefix, e.g.
         ``{"mg_levels_ksp_max_it": 1}`` for a single smoother sweep. Both require ``field_split=True``;
         passing either without it raises, since there would be only one hierarchy to apply them to.
+    leading_inverse : callable or None
+        ``(sub_matrix, n_fields_in_group) -> inverse`` replacing the LEADING (flow saddle) block's
+        V-cycle entirely, the counterpart of ``trailing_inverse``. An injected inverse must offer
+        ``refactor_block`` or ``refactor``, or the mid-march refresh cannot re-fit it.
     trailing_inverse : callable or None
         ``(sub_matrix, n_fields_in_group) -> inverse`` replacing the trailing block's V-cycle outright,
         so the transported scalars can be preconditioned by something that is not a host solver's
@@ -2319,6 +2324,11 @@ def coupled_amg_continuation(
         raise ValueError(
             "native_forward_solve builds a PETSc KSP around a single monolithic V-cycle and has no "
             "field-split counterpart; use one or the other."
+        )
+    if not field_split and leading_inverse is not None:
+        raise ValueError(
+            "leading_inverse replaces the leading block's inverse, and there is no leading block "
+            "without field_split."
         )
     if not field_split and trailing_inverse is not None:
         raise ValueError(
@@ -2408,6 +2418,7 @@ def coupled_amg_continuation(
                 trailing_smoother_sweeps=trailing_smoother_sweeps,
                 leading_options=leading_options,
                 trailing_options=trailing_options,
+                leading_inverse=leading_inverse,
                 trailing_inverse=trailing_inverse,
                 **common,
             )

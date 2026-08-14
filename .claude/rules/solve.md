@@ -3035,7 +3035,12 @@ residual gain there is not a like-for-like comparison with a four-sweep arm.
 `strength_threshold = 0`. Do not read "the lever is sweeps, not the hierarchy" out of it; the aggregation
 was the larger lever all along, and these arms simply never varied it. See *Where this stands*.
 
-### Where this stands — the native flow block converges: 2.3x the incumbent at the adjoint, ~4x on the march
+### Where this stands — the native flow block converges: 1.84x at the adjoint, 2.4x on the march
+
+⚠️ **The tables in THIS subsection predate the two free quality levers** (a per-cell block velocity
+splitting and an undamped correction) and the per-iteration split measurement. They are kept because the
+closures they record still stand, but for the current standing read *The gap is CONVERGENCE, not cost*
+below: **7 cycles / 57 s against 11 / 31 s at β = 0**, and **6 / 29 s against 2 / 12 s at β = 0.1**.
 
 **The four-to-five-order gap never existed: it was the GMRES restart cap read as a convergence floor.**
 Every earlier reading here was taken at a 20-restart cap, where `restart_cycles` reports 18 for any arm
@@ -3198,6 +3203,81 @@ to a V-cycle with pre-smoothing, byte-identical) rather than deleted, because `_
 with the smoothed-aggregation path over the **symmetric pressure Schur** — which is the configuration the
 literature result was actually measured on, and where it may well hold. What is refuted is the W-cycle on
 the saddle under a SIMPLE smoother, not the W-cycle.
+
+### THE NATIVE FLOW BLOCK IN A REAL MARCH — 1.16-1.32x, and the trajectories are identical
+
+Everything above is single-state probing. The preconditioner has now been run in the full `bfs3d`
+continuation march, which required three things a probe never reaches, and which are the reason no earlier
+arm could have been marched at all.
+
+**`NativeSimpleInverse` needed a `refactor_block`.** `BlockTriangularFieldSplit.refactor` RAISES on an
+inverse offering neither `refactor_block` nor `refactor`, because a mid-march refresh must mutate the same
+object the compiled Krylov solve holds — replacing it would recompile. A single-state probe exits before
+that path. `leading_inverse` is now threaded through `FieldSplitAmgPreconditioner.build` and the coupled
+march builder (the underlying `build_block_triangular_field_split` already supported it), and `compare.py`
+selects on `BFS3D_FLOW_INVERSE=native`.
+
+**The result, against an archived march of the incumbent** (`zen-newton-3f1b39`, PETSc ILU(0) on the flow
+block, same trailing native inverse, same continuation schedule, same `refresh_on_cycles` 3):
+
+| | steps | wall | step-14 `R` | step-38 `R` |
+|---|---|---|---|---|
+| incumbent | 67 total, 1957 s | — | 7.821e-06 | 4.155e-06 |
+| native | in progress | — | **7.822e-06** | **4.155e-06** |
+| ratio | | 1.32x (rung 1), 1.27x (rung 2), **1.16x** (step 39) | | |
+
+**The residuals agree to FOUR SIGNIFICANT FIGURES at every step through both early rungs**, with identical
+step counts, identical β schedules, and identical line-search factors. The native preconditioner is not
+merely converging — it produces the same Newton steps. It also uses **equal or fewer cycles at most
+steps**. They first separate in the target rung at step 41, where the native takes a full step
+(α = 1.000, `R` 3.343e-02) against the incumbent's clipped one (α = 0.328, `R` 3.757e-02).
+
+⚠️ **The archived march's column reach differs (3/3/3/2/2/2 against the shipped 3/3/3/3/2/2), and it does
+NOT matter.** Measured from the two logs' own refresh breakdowns, the difference lands entirely in the
+probe phase at **8.3 s against 7.7 s** — about 8 %, not the 24 % a column count suggests — which over ~10
+refreshes is 0.6 % of wall. Measure the phase breakdown rather than reasoning from column counts.
+
+**WHERE THE GAP ACTUALLY IS, from the same breakdown at a matched step 28:**
+
+| | native | incumbent |
+|---|---|---|
+| refreshes | 8 | 9 |
+| probe / refresh | 8.3 s | 7.7 s |
+| **refactor / refresh** | **5.7 s** | **2.5 s** |
+| cumulative wall | 931 s | 776 s |
+
+Refresh accounts for **20 s of the 155 s gap — 13 %. The other 87 % is the V-cycle's per-application
+cost**, which the per-iteration split measured independently at 1.45x. So the frozen-coarsening work below
+is worth ~20-26 s of a 155 s gap: real, and NOT the lever. The lever is the apply.
+
+**⚠️ `refresh_on_cycles` IS PER INNER ITERATION, NOT PER STEP, AND RAISING IT TO 8 SWITCHED THE REFRESH
+OFF.** The trigger is `corrected >= refresh_on_cycles` against a single inner solve, capped at one refresh
+per step. A step reporting `cyc 12` is the SUM over three inners at ~4 each, so nothing ever fired: every
+step logged `pc none 0.0s`. The march then ground on a never-refreshed preconditioner and the line search
+collapsed at step 9 of the LOWEST rung (α 0.469 → 0.030 → 0.000, β escalating, `R` rising) — a rung that
+completes in 14 steps in every other configuration. At the shipped threshold of 3 the same march completes
+that rung in **14 steps, 429 s**, full Newton steps throughout. The sizing error underneath it: 6-8 was
+taken from the PROBE's per-solve count at rtol 1e-8, but the march solves to `forward_rtol` 0.3 and needs
+**2-5 cycles per inner**. A cycle count does not survive a change of tolerance any more than it survives a
+change of β.
+
+**⚠️ THE COARSENING MOVES ON EVERY REFRESH, AND THE JITTED CYCLE RETRACES.** At `strength_threshold` 0.25
+the aggregation reads `|A_ij|`, so a refresh at a developed state produces a different hierarchy: measured
+**14 retraces** in one march, level sizes wandering (coarse dofs 312 → 348 → 340 → 288 → 296 → 268 → …).
+The sibling `NodalNativeInverse` rebuilds freely and calls itself structure-preserving only because its
+aggregation reads SPARSITY alone — the property this arm gave up to win 4x. That trade was invisible until
+the preconditioner met a march.
+
+**The fix is to freeze the coarsening and refresh only values, but whether that is SAFE is unmeasured.**
+Frozen means derived once at the first build and reused across all three Reynolds rungs — effectively the
+initial condition's coarsening at the target Reynolds number. The case for it: aggregation quality is set
+by coupling anisotropy, which on this mesh is geometric (within-row conductance ratios of 64 median, 1700
+max, from wall-normal grading; 99 % of cells above 4:1) and does not change with the flow. The case
+against: the eddy viscosity grows to ~150x molecular and varies spatially, so it changes the anisotropy
+PATTERN, not merely its magnitude. **The observed drift is 10-20 % in coarse SIZE, but size is a weak
+proxy — two hierarchies can have identical counts and completely different partitions.** Measure aggregate
+MEMBERSHIP stability across refreshes before relying on it, then test a frozen hierarchy at a developed
+state against one built there. A middle option is freezing per RUNG rather than per march.
 
 ### The gap is CONVERGENCE, not cost — measured, and it reverses the priorities
 

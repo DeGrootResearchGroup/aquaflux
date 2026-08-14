@@ -459,6 +459,51 @@ def _dumping(factory):
 TRAILING_INVERSE = (
     native_nodal_inverse(**NATIVE_TRAILING) if TURBULENCE_INVERSE == "native" else None
 )
+
+
+#: `BFS3D_FLOW_INVERSE=native` replaces the LEADING (flow saddle) block's host V-cycle with the JAX-native
+#: SIMPLE-smoothed hierarchy, which is the arm the native-preconditioner work has been measuring on single
+#: states. Off by default: it is a measurement seam, not a shipped default, and on single states it costs
+#: more wall clock than the incumbent even where it converges in fewer cycles.
+#:
+#: ⚠️ `BFS3D_REFRESH_ON_CYCLES` must be raised alongside it. The refresh fires when a solve REACHES the
+#: threshold, and 3 is calibrated to an incomplete-LU that runs two cycles per solve; a preconditioner
+#: that healthily takes six or seven would trip it on essentially every step and the march would measure
+#: the trigger rather than the preconditioner.
+FLOW_INVERSE = os.environ.get("BFS3D_FLOW_INVERSE", "petsc")
+if FLOW_INVERSE not in ("petsc", "native"):
+    raise SystemExit(f"BFS3D_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'native']")
+LEADING_INVERSE = None
+if FLOW_INVERSE == "native":
+    #: The arm measured best on single states: strength-of-connection aggregation with no singleton
+    #: aggregates, five levels, a per-cell block velocity splitting and an undamped correction.
+    _NATIVE_FLOW = dict(
+        sweeps=4,
+        pressure_sweeps=2,
+        strength_threshold=0.25,
+        avoid_singletons=True,
+        aggressive=0,
+        levels=5,
+        max_coarse=500,
+        block_splitting=True,
+        omega=1.0,
+    )
+
+    def _native_flow_inverse(block, n_fields):
+        # Imported HERE, not at module scope: the probe imports this module for its bundle constants, so
+        # a top-level import the other way is a cycle. Deferring it to first use breaks the cycle without
+        # either module having to know about the other's import order.
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        _sys.path.insert(0, str(_Path(__file__).parent))
+        from field_split_probe import NativeSimpleInverse
+
+        return NativeSimpleInverse(block, n_fields, **_NATIVE_FLOW)
+
+    LEADING_INVERSE = _native_flow_inverse
+
+
 if TRAILING_INVERSE is not None and DUMP_TRAILING_BLOCK:
     TRAILING_INVERSE = _dumping(TRAILING_INVERSE)
 
@@ -1007,6 +1052,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         # each happened to die on. One of them had quietly reproduced the reference trajectory for four
         # steps and that went unnoticed. A configuration line is worth nothing if it omits the variable
         # under test.
+        ("flow inverse", FLOW_INVERSE),
         ("turbulence inverse", TURBULENCE_INVERSE),
         # ...and, when a `trailing_inverse` is supplied, it REPLACES the PETSc V-cycle wholesale, so the
         # two smoother settings below are never read. Marking them is the same rule as the note above:
@@ -1155,6 +1201,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             field_split=FIELD_SPLIT,
             trailing_smoother_sweeps=TRAILING_SWEEPS,
             trailing_options=TRAILING_OPTIONS if FIELD_SPLIT else None,
+            leading_inverse=LEADING_INVERSE if FIELD_SPLIT else None,
             trailing_inverse=TRAILING_INVERSE if FIELD_SPLIT else None,
         )
         shared_preconditioner[:] = [engine.shift_policy.preconditioner]
