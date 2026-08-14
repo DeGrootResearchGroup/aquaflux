@@ -3456,6 +3456,48 @@ no measurement needed. Consequences:
   pytree argument. Unbuilt; sized at ~3–4 % here and a prerequisite for tracing the V-cycle into the
   solve on GPU.
 
+### The peel and the cap ON A MARCH — the cycles land, the seconds mostly do not (2026-08-14)
+
+Both changes marched at 2 sweeps against the 2-sweep control, native flow block, everything else equal.
+The first attempt's wall clock is **void** — pytest tiers, ruff and JAX probes ran on the same machine
+throughout it — so it was re-run on a quiet one. Cycle counts and trajectories from both agree, being
+contention-immune.
+
+| arm | steps | wall | step cycles | **solve cycles** | max single solve | mid-span `x_r/h` |
+|---|---|---|---|---|---|---|
+| control, 2 sweeps | 63 | 2533 s | 440 | **622** | 45 | 8.361 |
+| peel + cap (contended, wall VOID) | 63 | 3100 s | 440 | 529 | 12 | 8.361 |
+| **peel + cap (clean)** | 63 | **2486 s** | 440 | **529** | **12** | 8.361 |
+
+**✅ THE CAP DOES EXACTLY WHAT IT WAS SIZED TO DO, AND COSTS NOTHING IN QUALITY.** Three solves ran
+41/43/45 cycles in the control and were truncated to 12; **no solve exceeded the cap**; total solve
+cycles fell 622 → 529 (**−93, −15 %**). The accepted trajectory is **identical on all 63 steps** with the
+same root and the same reattachment length, so a truncated direction cost **no extra escalation rung** —
+the one risk the 671-solve archive could not speak to, since every solve in it ran uncapped.
+
+**⚠️ READ THE STEP TABLE'S CYCLE COLUMN CORRECTLY OR THE CAP LOOKS INERT.** It reports the **accepted**
+attempt only, and the cap truncates **discarded** ones — so identical step-table cycles (440 in every
+arm) is what a *working* cap produces, not evidence it never fired. The effect is visible only in the
+per-inner tables. This was misread once here before the inner-table parse settled it.
+
+**❌ BUT A 15 % CYCLE REDUCTION BOUGHT 1.9 % OF WALL, AND THE PEEL IS INVISIBLE AT MARCH SCALE.** Per
+rung: **+1.0 % / +4.9 % / −5.6 %**. The whole saving sits in rung 3, where the cap's three solves live
+(~85 s, against ~206 s that a 2.22 s/cycle cost model predicts). The peel measured **12.5 % of the
+V-cycle** on a 5-level 0.7M-nnz synthetic and should have shown in every rung; rungs 1 and 2 are
+slightly *slower*.
+
+**Two candidate explanations, NOT distinguished, and the missing instrument is the same in both:**
+- the synthetic does not transfer to the real 21M-nnz block (plausible — a cost model on synthetic
+  sparsity already over-predicted itself 6× once here, real mesh-ordered matrices being far more
+  cache-friendly); or
+- march wall on this case carries several percent of run-to-run spread.
+
+**⚠️ THIS CASE STILL HAS NO MEASURED RUN-TO-RUN SPREAD**, which is recorded elsewhere in this file as a
+gap and is now load-bearing: without it, a ±5 % per-rung difference cannot be called signal or noise.
+The cheap discriminator is not another march but `BFS3D_PROBE_SPLIT=1` at the **real** block, which
+times the Jacobian product against the preconditioner apply directly — exactly the quantity the
+synthetic stood in for. Unrun.
+
 ### The gap is CONVERGENCE, not cost — measured, and it reverses the priorities
 
 **The per-iteration split had never been measured, and both directions of inference about it were
