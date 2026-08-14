@@ -1404,11 +1404,18 @@ class _VCycleOps(NamedTuple):
     the residual evaluation that follows it — with a zero initial guess the fine residual *is* the
     right-hand side, so the matvec is pure waste. Both are static, so the cycle stays a fixed linear
     operator and transposes as one.
+    ``smooth_zero(level, b) -> x`` is the same relaxation specialized to a ZERO initial guess, where the
+    first sweep's residual evaluation ``b - A x`` is exactly ``b``. That matvec is against the level
+    operator — the densest thing in the cycle — and it is charged at every level of every cycle, so
+    skipping it is worth real time; it is exact rather than an approximation, by the same argument the
+    ``pre_smooth=False`` branch already uses. A family that does not supply one falls back to
+    ``smooth(level, b, zeros)``, which is byte-identical to the unpeeled form.
     """
 
     restrict: Callable[[object, jnp.ndarray], jnp.ndarray]
     prolong: Callable[[object, jnp.ndarray], jnp.ndarray]
     smooth: _Smoother
+    smooth_zero: _Smoother | None = None
     mu: int = 1
     pre_smooth: bool = True
 
@@ -1427,7 +1434,12 @@ def _frozen_v_cycle(
         return level.coarse_inv @ b
 
     if ops.pre_smooth:
-        x = ops.smooth(level, b, jnp.zeros_like(b))
+        # The pre-smooth always starts from a zero iterate, so its first sweep's residual is `b`.
+        x = (
+            ops.smooth_zero(level, b)
+            if ops.smooth_zero is not None
+            else ops.smooth(level, b, jnp.zeros_like(b))
+        )
         residual = b - _operator_matvec(level, x)
     else:
         # No pre-relaxation, so the iterate is still zero and the residual is the right-hand side
@@ -1454,18 +1466,33 @@ def _fixed_cycle_solve(levels: tuple, b: jnp.ndarray, cycles: int, ops: _VCycleO
     a valid frozen left preconditioner under plain GMRES, and what lets the adjoint transpose it.
     Only the level-local ``ops`` differ between the families.
     """
-    x = jnp.zeros_like(b)
-    for _ in range(cycles):
+    if cycles <= 0:
+        return jnp.zeros_like(b)
+    # The first pass starts from a zero iterate, so its residual is `b` itself and the matvec that would
+    # compute it is against a zero vector -- a full application of the FINE operator, the most expensive
+    # one in the hierarchy. Peeling it is exact.
+    x = _frozen_v_cycle(levels, b, 0, ops)
+    for _ in range(cycles - 1):
         residual = b - _operator_matvec(levels[0], x)
         x = x + _frozen_v_cycle(levels, residual, 0, ops)
     return x
 
 
-def _smoothed_ops(smoother: _Smoother, mu: int = 1, pre_smooth: bool = True) -> _VCycleOps:
-    """V-cycle ops for a smoothed-aggregation level: restrict by ``Pᵀ``, prolong by ``P`` (``R = Pᵀ``)."""
+def _smoothed_ops(
+    smoother: _Smoother,
+    mu: int = 1,
+    pre_smooth: bool = True,
+    smooth_zero: _Smoother | None = None,
+) -> _VCycleOps:
+    """V-cycle ops for a smoothed-aggregation level: restrict by ``Pᵀ``, prolong by ``P`` (``R = Pᵀ``).
+
+    ``smooth_zero`` is the optional zero-initial-guess specialization of ``smoother``; ``None`` keeps the
+    general form and is byte-identical.
+    """
     return _VCycleOps(
         mu=mu,
         pre_smooth=pre_smooth,
+        smooth_zero=smooth_zero,
         # Restriction is the prolongation applied TRANSPOSED, so the segment identifiers are its COLUMN
         # array -- which a row-major coordinate form does not leave sorted. Promising otherwise is a
         # silent wrong answer on any backend that acts on the promise.

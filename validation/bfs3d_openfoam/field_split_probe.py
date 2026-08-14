@@ -1294,7 +1294,28 @@ class NativeSimpleInverse:
 
             return jax.lax.fori_loop(0, sweeps, outer, guess)
 
-        ops = _smoothed_ops(smooth, mu=mu, pre_smooth=pre_smooth)
+        def smooth_zero(level, rhs):
+            """`smooth` from a zero iterate, with the first sweep's residual matvec peeled off.
+
+            At `g = 0` the residual `rhs - A g` is exactly `rhs`, so that application of the level
+            operator -- the densest thing in the smoother -- computes a known answer at full price. The
+            pre-smooth always starts here, so it is charged at every level of every cycle. This is the
+            same peel `_simple_correction` already does for the first pressure sweep, one loop out.
+            """
+            if sweeps <= 0:
+                return jnp.zeros_like(rhs)
+            piece = pieces[level.n]
+            guess = omega * _simple_correction(piece, rhs, pressure_sweeps, pressure_omega)
+
+            def outer(_, g):
+                correction = _simple_correction(
+                    piece, rhs - _operator_matvec(level, g), pressure_sweeps, pressure_omega
+                )
+                return g + omega * correction
+
+            return jax.lax.fori_loop(0, sweeps - 1, outer, guess)
+
+        ops = _smoothed_ops(smooth, mu=mu, pre_smooth=pre_smooth, smooth_zero=smooth_zero)
         cycle = jax.jit(lambda r: self._hierarchy.fixed_cycle_solve(r, cycles, ops))
         self._solve = cycle
         # LAZY. `jax.linear_transpose` traces eagerly, and a forward march never applies the transpose --
