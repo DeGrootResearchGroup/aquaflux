@@ -3204,7 +3204,16 @@ with the smoothed-aggregation path over the **symmetric pressure Schur** — whi
 literature result was actually measured on, and where it may well hold. What is refuted is the W-cycle on
 the saddle under a SIMPLE smoother, not the W-cycle.
 
-### THE NATIVE FLOW BLOCK IN A REAL MARCH — 1.16-1.32x, and the trajectories are identical
+### THE NATIVE FLOW BLOCK IN A REAL MARCH — identical trajectories, but the RATIO GROWS WITH THE RUNG
+
+⚠️ **READ THE RATIO AS A TREND, NOT A NUMBER, AND DO NOT QUOTE THE EARLY RUNGS.** Measured through the
+march: **1.32x** (rung 1) → **1.27x** (rung 2) → **1.16x** (target rung, first step) → **1.57x** (target
+rung, step 49, where the native arm is at 2342 s against 1489 s and the incumbent's ENTIRE 67-step march
+took 1957 s). The early rungs run at high β where both preconditioners are cheap and they flatter the
+native arm; the target rung runs at low β, which is exactly where an incomplete factorization's O(eps^2)
+advantage is largest. At matched β inside the target rung the native needs **~1.35x the cycles** (9 against
+6 at β = 0.0439; 17 against 13 at β = 0.0293). A first write-up of this section quoted "1.16-1.32x" as the
+result, which was the most favourable point of a rising sequence.
 
 Everything above is single-state probing. The preconditioner has now been run in the full `bfs3d`
 continuation march, which required three things a probe never reaches, and which are the reason no earlier
