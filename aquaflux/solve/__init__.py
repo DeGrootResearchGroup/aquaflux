@@ -119,8 +119,14 @@ from .march import (
     forward_march,
 )
 from .march_log import MarchLogger, combine_metrics, field_change_metrics
+from .saddle_multigrid import (
+    NativeSimpleInverse,
+    block_approximate_inverse,
+    native_saddle_inverse,
+)
 from .multigrid import (
     AirHierarchy,
+    ShapeBudget,
     SmoothedHierarchy,
     air_multigrid_solve,
     build_air_hierarchy,
@@ -180,6 +186,7 @@ __all__ = [
     "MonolithicIlutPreconditioner",
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
+    "NativeSimpleInverse",
     "NodalNativeInverse",
     "PerFieldNativeInverse",
     "PhaseTimer",
@@ -194,6 +201,7 @@ __all__ = [
     "ResidualNorm",
     "ResidualRatioDualTimeControl",
     "RowScaledNorm",
+    "ShapeBudget",
     "ShiftBasis",
     "ShiftPolicy",
     "ShiftTerm",
@@ -207,6 +215,7 @@ __all__ = [
     "TransposedPreconditioner",
     "VelocityShiftParts",
     "air_multigrid_solve",
+    "block_approximate_inverse",
     "block_stencil_colouring",
     "block_stencil_gather_map",
     "build_air_hierarchy",
@@ -227,6 +236,7 @@ __all__ = [
     "materialize_block_jacobian",
     "native_nodal_inverse",
     "native_per_field_inverse",
+    "native_saddle_inverse",
     "newton_step",
     "positive_block_limit",
     "positive_block_projection",

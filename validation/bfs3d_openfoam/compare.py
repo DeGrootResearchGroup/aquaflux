@@ -82,6 +82,7 @@ from aquaflux.solve import (
     StateCheckpointer,
     combine_observers,
     native_nodal_inverse,
+    native_saddle_inverse,
     relative_residual_gmres,
 )
 from aquaflux.turbulence import (
@@ -459,6 +460,62 @@ def _dumping(factory):
 TRAILING_INVERSE = (
     native_nodal_inverse(**NATIVE_TRAILING) if TURBULENCE_INVERSE == "native" else None
 )
+
+
+#: `BFS3D_FLOW_INVERSE=native` replaces the LEADING (flow saddle) block's host V-cycle with the JAX-native
+#: SIMPLE-smoothed hierarchy, which is the arm the native-preconditioner work has been measuring on single
+#: states. Off by default: it is a measurement seam, not a shipped default, and on single states it costs
+#: more wall clock than the incumbent even where it converges in fewer cycles.
+#:
+#: ⚠️ `BFS3D_REFRESH_ON_CYCLES` must be raised alongside it. The refresh fires when a solve REACHES the
+#: threshold, and 3 is calibrated to an incomplete-LU that runs two cycles per solve; a preconditioner
+#: that healthily takes six or seven would trip it on essentially every step and the march would measure
+#: the trigger rather than the preconditioner.
+def _flush_print(message: str) -> None:
+    """Send a preconditioner's build record to the run log, flushed so it lands in order.
+
+    The library object is silent by default -- it must not write to stdout on its own -- so the case
+    supplies the sink. Flushing matters because these lines interleave with a march whose value is that
+    it can be read while it runs.
+    """
+    print(message, flush=True)
+
+
+FLOW_INVERSE = os.environ.get("BFS3D_FLOW_INVERSE", "petsc")
+if FLOW_INVERSE not in ("petsc", "native"):
+    raise SystemExit(f"BFS3D_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'native']")
+LEADING_INVERSE = None
+if FLOW_INVERSE == "native":
+    #: The arm measured best on single states: strength-of-connection aggregation with no singleton
+    #: aggregates, five levels, a per-cell block velocity splitting and an undamped correction.
+    #:
+    #: Two settings are exposed to the environment because a march is a different operating point from
+    #: the state the rest were chosen on. ``BFS3D_FLOW_SWEEPS`` -- the sweep count was calibrated at zero
+    #: shift, the adjoint's operator, and every shift the march runs at makes the block easier, so the
+    #: march may not need four. ``BFS3D_FLOW_FROZEN_COARSENING`` -- at this strength threshold the
+    #: aggregation reads values, so each refresh re-coarsens and retraces the compiled cycle; frozen, the
+    #: partition is the one derived at the first build and reused for the whole march.
+    _NATIVE_FLOW = dict(
+        sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", "4")),
+        pressure_sweeps=2,
+        strength_threshold=0.25,
+        avoid_singletons=True,
+        aggressive=0,
+        levels=5,
+        max_coarse=500,
+        block_splitting=True,
+        omega=1.0,
+        frozen_coarsening=os.environ.get("BFS3D_FLOW_FROZEN_COARSENING", "") not in ("", "0"),
+        shape_headroom=(
+            float(os.environ["BFS3D_FLOW_SHAPE_HEADROOM"])
+            if os.environ.get("BFS3D_FLOW_SHAPE_HEADROOM")
+            else None
+        ),
+    )
+
+    LEADING_INVERSE = native_saddle_inverse(**_NATIVE_FLOW, report=_flush_print)
+
+
 if TRAILING_INVERSE is not None and DUMP_TRAILING_BLOCK:
     TRAILING_INVERSE = _dumping(TRAILING_INVERSE)
 
@@ -602,6 +659,16 @@ BASELINE_RESTART = 15  # the coupled AMG builder's own default
 FORWARD_RESTART = int(os.environ.get("BFS3D_FORWARD_RESTART", str(BASELINE_RESTART)))
 _RESTART_SCALE = BASELINE_RESTART / FORWARD_RESTART
 RETRY_BETA_FACTOR = 2.0
+#: The retry threshold the march actually uses, scaled with the restart like every other cycle-denominated
+#: setting above. Computed once because the forward solver's restart CAP is derived from it: a solve that
+#: passes this without reaching target has already doomed its attempt, so letting it run further only
+#: produces work the retry discards. Measured over 671 solves on this case, no accepted attempt exceeded
+#: 9 corrected cycles while discarded ones ran 39-45 -- the distribution is empty between, so a cap just
+#: above the threshold sits in a hole.
+RETRY_ON_CYCLES_SCALED = round(RETRY_ON_CYCLES * _RESTART_SCALE)
+#: In RAW lineax restarts (+2 per solve), and strictly above the corrected threshold so that a capped
+#: solve TRIPS the retry rather than being accepted as a truncated step. Corrected cap = threshold + 2.
+FORWARD_MAX_RESTARTS = RETRY_ON_CYCLES_SCALED + 4
 # How many per-step states to retain. Three is enough to restart from, which is all a normal run needs.
 # A PRECONDITIONER STUDY needs more: an easy operator does not discriminate between preconditioners, so a
 # sweep has to run at the march's own HARD states (highest cycle count, clipped a_min, a retry flag) and
@@ -1007,6 +1074,10 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         # each happened to die on. One of them had quietly reproduced the reference trajectory for four
         # steps and that went unnoticed. A configuration line is worth nothing if it omits the variable
         # under test.
+        (
+            "flow inverse",
+            FLOW_INVERSE if LEADING_INVERSE is None else f"{FLOW_INVERSE} {_NATIVE_FLOW}",
+        ),
         ("turbulence inverse", TURBULENCE_INVERSE),
         # ...and, when a `trailing_inverse` is supplied, it REPLACES the PETSc V-cycle wholesale, so the
         # two smoother settings below are never read. Marking them is the same rule as the note above:
@@ -1149,12 +1220,14 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             positivity_projection=K_POSITIVITY_PROJECTION,
             forward_rtol=FORWARD_RTOL,
             forward_restart=FORWARD_RESTART,
+            forward_max_restarts=FORWARD_MAX_RESTARTS,
             inner_observer=inner_observer,
             refresh_on_cycles=REFRESH_ON_CYCLES or None,
             inner_refresh=refresh.refresh_at if REFRESH_ON_CYCLES else None,
             field_split=FIELD_SPLIT,
             trailing_smoother_sweeps=TRAILING_SWEEPS,
             trailing_options=TRAILING_OPTIONS if FIELD_SPLIT else None,
+            leading_inverse=LEADING_INVERSE if FIELD_SPLIT else None,
             trailing_inverse=TRAILING_INVERSE if FIELD_SPLIT else None,
         )
         shared_preconditioner[:] = [engine.shift_policy.preconditioner]
@@ -1184,7 +1257,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             retry_solver=relative_residual_gmres(1e-4, restart=40),
             on_checkpoint=on_checkpoint,
             on_retry=logger.on_retry,
-            retry_on_cycles=round(RETRY_ON_CYCLES * _RESTART_SCALE),
+            retry_on_cycles=RETRY_ON_CYCLES_SCALED,
             retry_on_alpha=RETRY_ON_ALPHA,
             retry_beta_factor=RETRY_BETA_FACTOR,
         )

@@ -152,7 +152,9 @@ def _cell_graph(a: sp.csr_matrix, block_size: int) -> sp.csr_matrix:
     ).tocsr()
 
 
-def _block_tentative(aggregate: np.ndarray, n_coarse_cells: int, block_size: int) -> sp.csr_matrix:
+def _block_tentative(
+    aggregate: np.ndarray, n_coarse_cells: int, block_size: int, orthonormal: bool = False
+) -> sp.csr_matrix:
     """The piecewise-constant prolongation for a **nodal** aggregation, one column per coarse field.
 
     Degree of freedom ``(cell i, field f)`` interpolates from coarse degree of freedom
@@ -179,10 +181,45 @@ def _block_tentative(aggregate: np.ndarray, n_coarse_cells: int, block_size: int
     rows = np.arange(block_size * n_cells)
     fields, cells = np.divmod(rows, n_cells)
     cols = fields * n_coarse_cells + aggregate[cells]
+    values = np.ones(rows.shape[0])
+    if orthonormal:
+        # Orthonormalize each aggregate's column, which for a piecewise-constant prolongation is
+        # exactly its QR: divide by ``sqrt(|aggregate|)`` so every column has unit 2-norm.
+        #
+        # **This is provably inert on a two-level cycle with an exact coarse solve** -- ``P A_c^-1
+        # P^T`` is invariant under a column rescaling -- and that is precisely why it went unnoticed:
+        # every hierarchy here has been two-level. It is NOT inert deeper. With 0/1 columns the
+        # Galerkin operator ``P^T A P`` picks up a scaling of order ``|agg_i| * |agg_j|`` per entry,
+        # and the next level's smoother and spectral estimate read ``D^-1 A_c`` and ``lambda_max`` off
+        # that mis-scaled operator -- neither of which is invariant to it. The distortion therefore
+        # compounds once per level, in proportion to how UNEVEN the aggregate sizes are, which is the
+        # standing explanation for depth being unhelpful and sometimes harmful here.
+        counts = np.bincount(aggregate, minlength=n_coarse_cells).astype(np.float64)
+        values = values / np.sqrt(np.maximum(counts, 1.0))[aggregate[cells]]
     return sp.csr_matrix(
-        (np.ones(rows.shape[0]), (rows, cols)),
+        (values, (rows, cols)),
         shape=(block_size * n_cells, block_size * n_coarse_cells),
     )
+
+
+def aggregate_size_histogram(aggregate: np.ndarray, n_coarse_cells: int) -> dict:
+    """Aggregate-size statistics for one coarsening step — the spread is what makes scaling bite.
+
+    A piecewise-constant prolongation with 0/1 columns distorts the Galerkin coarse operator in
+    proportion to the *variation* in aggregate size, so a hierarchy whose aggregates are all the same
+    size loses nothing by not orthonormalizing and one whose sizes span an order of magnitude loses a
+    great deal. Reported rather than assumed, because the two cases call for different work.
+    """
+    counts = np.bincount(aggregate, minlength=n_coarse_cells)
+    counts = counts[counts > 0]
+    return {
+        "aggregates": int(counts.size),
+        "min": int(counts.min()),
+        "median": float(np.median(counts)),
+        "max": int(counts.max()),
+        "singletons": int((counts == 1).sum()),
+        "spread": float(counts.max() / max(counts.min(), 1)),
+    }
 
 
 def _cell_block_inverse(a: sp.csr_matrix, block_size: int, where: str = "operator") -> np.ndarray:
@@ -305,7 +342,9 @@ def _square_graph(graph: sp.csr_matrix) -> sp.csr_matrix:
     return squared
 
 
-def _mis_aggregate(graph: sp.csr_matrix, seed: int = 0) -> tuple[np.ndarray, int]:
+def _mis_aggregate(
+    graph: sp.csr_matrix, seed: int = 0, avoid_singletons: bool = False
+) -> tuple[np.ndarray, int]:
     """Greedy maximal-independent-set aggregation over a **randomized** visit order.
 
     One sweep over the vertices in a random permutation. Any vertex still unclaimed when it is visited
@@ -331,6 +370,18 @@ def _mis_aggregate(graph: sp.csr_matrix, seed: int = 0) -> tuple[np.ndarray, int
         Symmetric connectivity, shape ``(n, n)``. Only its sparsity is read.
     seed : int
         Seed for the permutation, so a hierarchy is reproducible.
+    avoid_singletons : bool
+        Attach a vertex whose neighbours are **all already claimed** to one of their aggregates instead
+        of letting it open an aggregate containing only itself.
+
+        Those singletons are an artifact of arrival order, not of the graph: a vertex reached late in
+        the random sweep can find every neighbour taken, and the one-sweep selector rule then opens a
+        new aggregate for it alone. Measured on a coupled flow block, the second level of a three-level
+        hierarchy came out **49 singletons of 161 aggregates, median aggregate size 3** -- a coarse
+        space that is a slightly smaller copy of the fine grid with a third of its unknowns standing for
+        one cell each and coupling to almost nothing. They also interact badly with an orthonormalized
+        prolongation, which scales a column by ``1 / sqrt(|agg|)`` and so *promotes* a singleton by
+        several-fold against a real aggregate.
 
     Returns
     -------
@@ -347,6 +398,14 @@ def _mis_aggregate(graph: sp.csr_matrix, seed: int = 0) -> tuple[np.ndarray, int
         if aggregate[i] != -1:
             continue
         neighbours = indices[indptr[i] : indptr[i + 1]]
+        if avoid_singletons and neighbours.size:
+            claimed = neighbours[aggregate[neighbours] != -1]
+            if claimed.size == neighbours.size:
+                # Every neighbour is taken, so opening an aggregate here would produce a singleton.
+                # Join an adjacent one instead. A vertex with NO neighbours is a true isolate and still
+                # gets its own aggregate -- it has nothing to attach to.
+                aggregate[i] = aggregate[claimed[0]]
+                continue
         # A true singleton (no neighbour but itself) is left for the sweep to pick up as its own
         # aggregate rather than being attached to something it does not touch.
         aggregate[i] = len(roots)
@@ -397,6 +456,60 @@ def _reattach_to_adjacent_root(
             if not is_root[j] and aggregate[j] != target:
                 aggregate[j] = target
     return aggregate
+
+
+def _absorb_singleton_aggregates(
+    aggregate: np.ndarray, n_aggregates: int, graph: sp.csr_matrix
+) -> tuple[np.ndarray, int]:
+    """Dissolve any aggregate left holding only its own root, and renumber what remains.
+
+    The repair inside the aggregation sweep cannot catch these. It refuses to *open* an aggregate that
+    would be a singleton, but the reattachment pass that repairs a squared graph's reach runs
+    afterwards and moves members away from aggregates it does not own — so an aggregate can be reduced
+    to its root alone after the fact. A coarse unknown standing for one cell, coupled to almost
+    nothing, is what makes a coarse level a slightly smaller copy of the fine one.
+
+    Each lone vertex joins the largest aggregate it is genuinely adjacent to, ties broken by lowest
+    index so the result does not depend on iteration order. A vertex with no neighbour outside its own
+    aggregate is a true isolate and keeps its aggregate — there is nothing to join. Aggregate labels
+    are then made contiguous again, because the caller uses the count to size the prolongation.
+
+    Parameters
+    ----------
+    aggregate : np.ndarray
+        Aggregate index per vertex, shape ``(n,)``.
+    n_aggregates : int
+        Number of aggregates before absorption.
+    graph : scipy.sparse matrix
+        The symmetric connectivity the aggregates were formed over, shape ``(n, n)``. Only its
+        sparsity is read.
+
+    Returns
+    -------
+    tuple
+        ``(aggregate, n_aggregates)`` — relabelled contiguously from zero.
+    """
+    counts = np.bincount(aggregate, minlength=n_aggregates)
+    if not (counts == 1).any():
+        return aggregate, n_aggregates
+    aggregate = aggregate.copy()
+    indptr, indices = graph.indptr, graph.indices
+    for vertex in np.flatnonzero(counts[aggregate] == 1):
+        current = aggregate[vertex]
+        if counts[current] != 1:  # already absorbed one of its neighbours
+            continue
+        neighbours = indices[indptr[vertex] : indptr[vertex + 1]]
+        candidates = aggregate[neighbours[aggregate[neighbours] != current]]
+        if candidates.size == 0:
+            continue
+        target = int(candidates[np.lexsort((candidates, -counts[candidates]))[0]])
+        counts[current] -= 1
+        counts[target] += 1
+        aggregate[vertex] = target
+    kept = np.flatnonzero(counts > 0)
+    relabel = np.zeros(n_aggregates, dtype=np.int64)
+    relabel[kept] = np.arange(kept.size, dtype=np.int64)
+    return relabel[aggregate], int(kept.size)
 
 
 def _aggregate(owner: np.ndarray, nb: np.ndarray, n: int) -> tuple[np.ndarray, int]:
@@ -462,13 +575,20 @@ class _SparseLevel(eqx.Module):
     **The level is split into a static index structure and dynamic values (binding).** Only ``n`` and
     ``n_coarse`` are static: they size the sparse matvec's output (:func:`_coo_apply`'s ``n_out``), so
     they must be concrete. Everything else — including ``lam_max``, which is pure arithmetic in the
-    smoothers — rides as a **traced** leaf. That split is what makes a hierarchy *refreshable*: because
-    the coarsening is a pure function of the graph (see :func:`_aggregate`, which reads only the
-    sparsity pattern), re-deriving a hierarchy at a new operator on the same mesh yields the identical
-    structure and changes only these values, so a refreshed hierarchy passed as a **jit argument** has
-    unchanged static metadata and array shapes — a compilation-cache hit rather than a rebuild-and-
-    recompile. Keeping ``lam_max`` a Python ``float`` would defeat exactly that (a changed static field
-    is a changed cache key), which is why it is stored as a 0-d array.
+    smoothers — rides as a **traced** leaf. That split is what makes a hierarchy *refreshable*:
+    re-deriving one at a new operator on the same mesh can yield the identical structure and change only
+    these values, so the hierarchy passed as a **jit argument** is a compilation-cache hit rather than a
+    rebuild-and-recompile. Keeping ``lam_max`` a Python ``float`` would defeat exactly that (a changed
+    static field is a changed cache key), which is why it is stored as a 0-d array.
+
+    **Whether a rebuild actually preserves the structure depends on the aggregation, and at a nonzero
+    strength threshold it does NOT.** At ``strength_threshold = 0`` the coarsening reads only the
+    sparsity pattern (:func:`_aggregate`), so a rebuild on a fixed mesh reproduces the aggregates
+    exactly. Above zero it reads ``|A_ij|`` (:func:`_aggregation_edges`) and the partition moves as the
+    operator develops — measured on a coupled flow block, level sizes wander by 10–20 % across a march's
+    refreshes and every move retraces the compiled cycle. :meth:`SmoothedHierarchy.refit` is the way to
+    keep the structure fixed in that case: it reuses this level's prolongation and re-derives only the
+    values.
     """
 
     n: int = eqx.field(static=True)  # cells at this level (sizes the matvec output)
@@ -487,6 +607,35 @@ class _SparseLevel(eqx.Module):
     # because it sizes the reshape.
     block_inverse: jnp.ndarray | None = None  # (n_cells, b, b), or None for a scalar level
     block_size: int = eqx.field(static=True, default=1)
+
+
+class ShapeBudget(NamedTuple):
+    """Per-level array sizes to coarsen *into*, so a rebuilt hierarchy keeps one compiled cycle.
+
+    An aggregation that reads operator values re-partitions whenever the operator develops, and the
+    coarse levels then change size — on a coupled flow block, measured across one march's refreshes,
+    the first coarse level wanders 8 % and the fourth 40 %, never twice the same. Each move retraces
+    the jitted V-cycle. Coarsening into a *fixed* ladder instead makes every rebuild a cache hit while
+    still re-deriving the partition from the current operator, which is the difference between this and
+    freezing the coarsening outright (measured to cost 16 % in Krylov cycles).
+
+    **Budget at the observed MAXIMUM, so the build only ever pads.** A level whose aggregation returns
+    fewer aggregates than budgeted is padded with empty ones, which are decoupled (a unit diagonal, no
+    off-diagonal coupling) and therefore contribute exactly nothing to the coarse correction — so the
+    coarse space is precisely what the aggregation asked for. A level that returns *more* cannot be
+    padded and raises, rather than merging aggregates to fit: merging would change the coarse space,
+    which is the quality loss this exists to avoid. Headroom is what keeps that from happening.
+
+    Attributes
+    ----------
+    coarse_cells : tuple of int
+        Aggregates to coarsen into at each level, finest first. Its length fixes the level count.
+    operator_nnz : tuple of int
+        Entry-array length for each coarse level's operator, in the same order.
+    """
+
+    coarse_cells: tuple[int, ...]
+    operator_nnz: tuple[int, ...]
 
 
 class SmoothedHierarchy(eqx.Module):
@@ -532,6 +681,126 @@ class SmoothedHierarchy(eqx.Module):
             self.levels, self.equilibration * b, cycles, ops
         )
 
+    def shape_budget(self, headroom: float = 1.0) -> ShapeBudget:
+        """This hierarchy's level sizes as a budget to rebuild into, optionally with headroom.
+
+        Parameters
+        ----------
+        headroom : float
+            Multiply every budgeted size by this before rounding up. ``1.0`` reproduces exactly this
+            hierarchy's shapes; above one leaves room for a later rebuild whose aggregation returns
+            more aggregates or a denser Galerkin operator, which would otherwise raise. Size the
+            headroom from the observed spread across real refreshes, not by guess — the spread grows
+            with depth, and a budget below the maximum turns a refresh into an error.
+
+        Returns
+        -------
+        ShapeBudget
+            Aggregate counts and operator entry counts for each coarse level, finest first.
+        """
+        coarse_cells, operator_nnz = [], []
+        for level in self.levels[1:]:
+            coarse_cells.append(int(np.ceil(level.n // level.block_size * headroom)))
+            operator_nnz.append(int(np.ceil(int(level.operator.data.shape[0]) * headroom)))
+        return ShapeBudget(tuple(coarse_cells), tuple(operator_nnz))
+
+    def refit(self, a: sp.csr_matrix) -> SmoothedHierarchy:
+        """Re-derive every level's operator at a new ``a``, reusing **this** hierarchy's prolongations.
+
+        A plain rebuild re-runs the aggregation, which reproduces the same partition only when the
+        coarsening reads the sparsity pattern alone — false at a nonzero ``strength_threshold``, where
+        the partition follows ``|A_ij|`` and moves as the operator develops. Refitting holds the
+        coarsening fixed and recomputes only what depends on values: each level's Galerkin operator
+        ``Pᵀ A P``, its diagonal (or per-cell block inverse), its spectral estimate, and the coarsest
+        level's dense inverse. Array shapes and static metadata are therefore unchanged by construction,
+        so a refitted hierarchy passed as a jit argument is a compilation-cache hit.
+
+        **What is frozen is the interpolation, which is more than the aggregation when the prolongator
+        was smoothed.** With ``prolongation_smoothing="none"`` the prolongation is the aggregates'
+        piecewise-constant indicator and holds no operator values, so freezing it *is* freezing the
+        coarsening exactly. With either smoothed prolongator it also carries a relaxation built from the
+        old operator, and refitting keeps that too.
+
+        An equilibrated hierarchy re-derives its scale from ``a``, as a rebuild would; the prolongations
+        it reuses were shaped by the previous operator's scale.
+
+        Parameters
+        ----------
+        a : scipy.sparse matrix
+            The new fine operator, of the shape this hierarchy was built at.
+
+        Returns
+        -------
+        SmoothedHierarchy
+            A new hierarchy over ``a`` with this one's coarsening.
+
+        Raises
+        ------
+        ValueError
+            If ``a``'s shape differs from the finest level's, or a level's diagonal is not usable.
+        """
+        finest = self.levels[0].n
+        if a.shape != (finest, finest):
+            raise ValueError(
+                f"cannot refit a {finest}-dof hierarchy onto a {a.shape[0]}-dof operator."
+            )
+        a = a.tocsr()
+        scale: np.ndarray | None = None
+        if self.equilibration is not None:
+            a, scale = symmetrically_equilibrate(a)
+        levels: list[_SparseLevel] = []
+        for depth, level in enumerate(self.levels):
+            context = f"SmoothedHierarchy.refit (level {depth})"
+            d_inv = _diagonal_inverse_operator(a, level.block_size, context)
+            lam = _spectral_radius(d_inv @ a)
+            if level.coarse_inv is None:
+                prolongation = sp.coo_matrix(
+                    (
+                        np.asarray(level.p_val),
+                        (np.asarray(level.p_frow), np.asarray(level.p_ccol)),
+                    ),
+                    shape=(level.n, level.n_coarse),
+                )
+                levels.append(
+                    _sparse_level(a, lam, None, prolongation, level.n_coarse, level.block_size)
+                )
+                csr = prolongation.tocsr()
+                a = (csr.T @ a @ csr).tocsr()
+            else:
+                levels.append(
+                    _sparse_level(a, lam, np.linalg.pinv(a.toarray()), None, 0, level.block_size)
+                )
+        return SmoothedHierarchy(
+            tuple(levels), None if scale is None else jnp.asarray(scale, dtype=jnp.float64)
+        )
+
+
+def _diagonal_inverse_operator(a: sp.csr_matrix, block_size: int, context: str) -> sp.spmatrix:
+    """``D⁻¹`` for a level: the reciprocal scalar diagonal, or each cell's inverted dense block.
+
+    A nodal level inverts cell blocks rather than the scalar diagonal, so the scalar-positivity
+    precondition does not apply to it — :func:`_cell_block_inverse` enforces the weaker and correct one
+    (every block invertible) when it builds them.
+
+    Parameters
+    ----------
+    a : scipy.sparse matrix
+        The level operator.
+    block_size : int
+        Degrees of freedom per cell; ``1`` selects the scalar path.
+    context : str
+        Where the failure happened, for the diagnostic a bad diagonal raises.
+
+    Returns
+    -------
+    scipy.sparse matrix
+        An operator applying ``D⁻¹``.
+    """
+    if block_size == 1:
+        _require_positive_diagonal(a.diagonal(), context)
+        return sp.diags(1.0 / a.diagonal())
+    return _block_diagonal_inverse_operator(a, block_size, context)
+
 
 def _sparse_level(
     a: sp.csr_matrix,
@@ -540,8 +809,13 @@ def _sparse_level(
     prolongation: sp.coo_matrix | None,
     n_coarse: int,
     block_size: int = 1,
+    nnz: int | None = None,
 ) -> _SparseLevel:
-    """Freeze a scipy sparse operator (+ optional prolongation / coarse inverse) into JAX arrays."""
+    """Freeze a scipy sparse operator (+ optional prolongation / coarse inverse) into JAX arrays.
+
+    ``nnz`` pads the operator's entry arrays to a fixed length (see :meth:`_CsrOperator.from_scipy`),
+    which is what keeps a budgeted rebuild a compilation-cache hit.
+    """
     p_frow = p_ccol = p_val = None
     if prolongation is not None:
         p_frow = jnp.asarray(prolongation.row)
@@ -549,7 +823,7 @@ def _sparse_level(
         p_val = jnp.asarray(prolongation.data)
     return _SparseLevel(
         n=a.shape[0],
-        operator=_CsrOperator.from_scipy(a),
+        operator=_CsrOperator.from_scipy(a, nnz),
         diagonal=jnp.asarray(a.diagonal()),
         lam_max=jnp.asarray(float(lam_max)),
         coarse_inv=None if coarse_inv is None else jnp.asarray(coarse_inv),
@@ -635,6 +909,18 @@ def _aggregation_edges(a_agg: sp.csr_matrix, strength_threshold: float) -> sp.co
 _PROLONGATION_SMOOTHING = frozenset({"none", "standard", "symmetric-part"})
 
 
+#: Aggregate-size statistics from the most recent hierarchy build, newest level last. A diagnostic
+#: only -- read it after a build and clear it before the next one.
+_AGGREGATE_STATS: list[dict] = []
+
+
+#: Largest coarsest-level size, in degrees of freedom, that may be inverted densely. The coarse solve
+#: is a dense pseudo-inverse: quadratic to store (8 bytes per entry, so ~512 MB here) and cubic to
+#: build. Exceeding it is never intentional -- it means the level cap stopped the coarsening before the
+#: coarse-size limit could, which makes the coarse grid grow with the mesh instead of staying fixed.
+_MAX_DENSE_COARSE_DOFS = 8192
+
+
 def _build_aggregation_hierarchy(
     a: sp.csr_matrix,
     *,
@@ -644,10 +930,13 @@ def _build_aggregation_hierarchy(
     max_levels: int,
     strength_threshold: float = 0.0,
     block_size: int = 1,
+    orthonormal_prolongation: bool = False,
+    avoid_singletons: bool = False,
     mis_aggregation: bool = False,
     aggressive_levels: int = 0,
     equilibrate: bool = False,
     prolongation_smoothing: str = "symmetric-part",
+    shape_budget: ShapeBudget | None = None,
 ) -> SmoothedHierarchy:
     """Coarsen ``a`` into a frozen smoothed-aggregation hierarchy — the loop shared by the symmetric
     and convection-diffusion builders.
@@ -682,31 +971,57 @@ def _build_aggregation_hierarchy(
     scale: np.ndarray | None = None
     if equilibrate:
         a, scale = symmetrically_equilibrate(a)
+    _AGGREGATE_STATS.clear()  # this build's statistics only; the consumer reads the whole list
     levels: list[_SparseLevel] = []
+    live_cells = (
+        a.shape[0] // block_size
+    )  # cells carrying real equations; the rest are budget padding
     while True:
         a_agg = aggregation_operator(a)
-        # A nodal level inverts cell blocks, not the scalar diagonal, so the scalar-positivity
-        # precondition does not apply to it -- `_cell_block_inverse` enforces the weaker and correct
-        # one (every block invertible) when it builds them.
-        if block_size == 1:
-            _require_positive_diagonal(
-                a.diagonal(), f"_build_aggregation_hierarchy (level {len(levels)})"
-            )
-            d_inv = sp.diags(1.0 / a.diagonal())
-        else:
-            d_inv = _block_diagonal_inverse_operator(
-                a, block_size, f"_build_aggregation_hierarchy (level {len(levels)})"
-            )
+        d_inv = _diagonal_inverse_operator(
+            a, block_size, f"_build_aggregation_hierarchy (level {len(levels)})"
+        )
         lam_smooth = _spectral_radius(d_inv @ a_agg)  # prolongation-smoothing damping
         lam_store = (
             lam_smooth if a_agg is a else _spectral_radius(d_inv @ a)
         )  # runtime smoother scale
-        if a.shape[0] <= max_coarse or len(levels) + 1 >= max_levels:
+        budgeted = (
+            None
+            if shape_budget is None
+            else (shape_budget.coarse_cells[len(levels)], shape_budget.operator_nnz[len(levels)])
+            if len(levels) < len(shape_budget.coarse_cells)
+            else None
+        )
+        coarsest = (
+            len(levels) >= len(shape_budget.coarse_cells)
+            if shape_budget is not None
+            else a.shape[0] <= max_coarse or len(levels) + 1 >= max_levels
+        )
+        if coarsest:
+            if a.shape[0] > _MAX_DENSE_COARSE_DOFS:
+                raise ValueError(
+                    f"coarsest level has {a.shape[0]} degrees of freedom, above the "
+                    f"{_MAX_DENSE_COARSE_DOFS} that may be inverted densely "
+                    f"(~{8 * a.shape[0] ** 2 / 1e9:.1f} GB, and cubic to build). The level cap "
+                    f"(max_levels={max_levels}) stopped the coarsening before max_coarse="
+                    f"{max_coarse} could: raise max_levels so the size limit binds, or lower "
+                    f"max_coarse."
+                )
             # Coarsest level: a direct (dense pseudo-inverse) solve — an inexact coarse solve is the
             # dominant cause of mesh-dependent V-cycle degradation, so it must be an actual solve; pinv
             # also handles a nonsymmetric coarse operator.
             levels.append(
-                _sparse_level(a, lam_store, np.linalg.pinv(a.toarray()), None, 0, block_size)
+                _sparse_level(
+                    a,
+                    lam_store,
+                    np.linalg.pinv(a.toarray()),
+                    None,
+                    0,
+                    block_size,
+                    nnz=None
+                    if len(levels) == 0 or shape_budget is None
+                    else shape_budget.operator_nnz[len(levels) - 1],
+                )
             )
             break
         # Coarsen CELLS, not degrees of freedom, when the operator has several fields per cell: the
@@ -719,6 +1034,13 @@ def _build_aggregation_hierarchy(
         # M-matrix (every frozen upwind transport operator) the off-diagonals share a sign and the two
         # orders coincide exactly, which is why this costs the shipped hierarchies nothing.
         graph = _cell_graph(a, block_size) if block_size > 1 else abs(a).tocsr()
+        # A padded cell carries a unit diagonal and no coupling, so it is ISOLATED in this graph and
+        # the aggregation would hand each one its own aggregate -- inflating the next level's count by
+        # the padding, which then pads further, compounding down the hierarchy. Aggregate the real
+        # cells only; the padded ones are reassigned to a reserved slot below.
+        padded_cells = graph.shape[0] - live_cells
+        if padded_cells:
+            graph = graph[:live_cells, :live_cells]
         if mis_aggregation:
             connectivity = sp.csr_matrix(abs(_aggregation_edges(graph, strength_threshold)))
             connectivity = (connectivity + connectivity.T).tocsr()
@@ -727,17 +1049,51 @@ def _build_aggregation_hierarchy(
                 # coarsens fast enough to stay shallow as the mesh grows, then repair the reach it
                 # buys by re-attaching each member to a root it actually touches.
                 aggregate, roots, n_coarse_cells = _mis_aggregate(
-                    _square_graph(connectivity), seed=len(levels)
+                    _square_graph(connectivity), seed=len(levels), avoid_singletons=avoid_singletons
                 )
                 aggregate = _reattach_to_adjacent_root(aggregate, roots, connectivity)
+                if avoid_singletons:
+                    # Reattachment moves members between aggregates, so it can strand a root that the
+                    # sweep's own repair had no way to foresee. Dissolve those here, where the final
+                    # assignment is known.
+                    aggregate, n_coarse_cells = _absorb_singleton_aggregates(
+                        aggregate, n_coarse_cells, connectivity
+                    )
             else:
-                aggregate, _, n_coarse_cells = _mis_aggregate(connectivity, seed=len(levels))
+                aggregate, _, n_coarse_cells = _mis_aggregate(
+                    connectivity, seed=len(levels), avoid_singletons=avoid_singletons
+                )
         else:
             upper = _aggregation_edges(
                 graph, strength_threshold
             )  # full graph, or strong edges only
             aggregate, n_coarse_cells = _aggregate(upper.row, upper.col, graph.shape[0])
-        tentative = _block_tentative(aggregate, n_coarse_cells, block_size)
+        _AGGREGATE_STATS.append(aggregate_size_histogram(aggregate, n_coarse_cells))
+        # Coarsen into the BUDGETED number of aggregates rather than the number this partition
+        # happened to produce. The surplus slots hold no real cells and are decoupled below -- inert,
+        # so the coarse space is exactly the one the aggregation chose. Only padding is allowed: see
+        # ShapeBudget on why merging is not.
+        occupied = n_coarse_cells
+        if budgeted is not None:
+            # One slot is RESERVED for this level's padded cells, all of which are sent to it together.
+            # Sending them there rather than leaving them unassigned is what keeps the prolongation at
+            # exactly one entry per fine cell, hence a fixed shape; and because every one of them is
+            # decoupled, the slot they share stays decoupled from everything real.
+            usable = budgeted[0] - 1
+            if n_coarse_cells > usable:
+                raise ValueError(
+                    f"level {len(levels)} aggregated into {n_coarse_cells} cells, above the "
+                    f"{usable} usable of {budgeted[0]} budgeted (one slot is reserved for padding). "
+                    f"Raise the budget's headroom; aggregates are never merged to fit, because that "
+                    f"would change the coarse space."
+                )
+            aggregate = np.concatenate(
+                [aggregate, np.full(padded_cells, budgeted[0] - 1, dtype=aggregate.dtype)]
+            )
+            n_coarse_cells = budgeted[0]
+        tentative = _block_tentative(
+            aggregate, n_coarse_cells, block_size, orthonormal_prolongation
+        )
         n_coarse = tentative.shape[1]
         if prolongation_smoothing == "none":
             prolongation = tentative.tocsr()
@@ -768,8 +1124,35 @@ def _build_aggregation_hierarchy(
             prolongation = (
                 tentative - (omega_smooth * 2.0 / lam_smooth) * (d_inv @ (a_agg @ tentative))
             ).tocsr()
-        levels.append(_sparse_level(a, lam_store, None, prolongation.tocoo(), n_coarse, block_size))
+        levels.append(
+            _sparse_level(
+                a,
+                lam_store,
+                None,
+                prolongation.tocoo(),
+                n_coarse,
+                block_size,
+                nnz=None
+                if len(levels) == 0 or shape_budget is None
+                else shape_budget.operator_nnz[len(levels) - 1],
+            )
+        )
         a = (prolongation.T @ a @ prolongation).tocsr()  # Galerkin coarse operator from the true A
+        live_cells = occupied
+        if budgeted is not None and occupied < n_coarse_cells:
+            # An empty aggregate leaves a structurally zero row and column, which no diagonal-based
+            # smoother or dense inverse can handle. A unit diagonal decouples it: its residual is zero
+            # (nothing restricts into it), so its correction is zero and prolongates as zero.
+            slots = np.concatenate(
+                [
+                    field * n_coarse_cells + np.arange(occupied, n_coarse_cells)
+                    for field in range(block_size)
+                ]
+            )
+            # Only the genuinely structurally-empty ones: the reserved slot already carries a diagonal
+            # summed from the padded cells it absorbed, and adding to that would be arbitrary.
+            empty = slots[a.diagonal()[slots] == 0.0]
+            a = (a + sp.coo_matrix((np.ones(empty.size), (empty, empty)), shape=a.shape)).tocsr()
     return SmoothedHierarchy(
         tuple(levels), None if scale is None else jnp.asarray(scale, dtype=jnp.float64)
     )
@@ -798,7 +1181,9 @@ def build_smoothed_hierarchy(
         Prolongation-smoothing damping factor; the applied damping is ``omega_smooth * 2 / lambda_max``
         (i.e. ``4/(3 lambda_max)`` at the default ``2/3``), with ``lambda_max`` estimated per level.
     max_coarse : int
-        Stop coarsening once a level has at most this many cells (solved directly there).
+        Stop coarsening once a level has at most this many **degrees of freedom** (solved directly
+        there). Dofs, not cells: at ``block_size`` fields per cell the two differ by that factor, and
+        the limit exists to bound a dense pseudo-inverse whose cost is cubic in the dof count.
     max_levels : int
         Hard cap on the number of levels.
     strength_threshold : float
@@ -852,14 +1237,51 @@ class _CsrOperator(eqx.Module):
     shape: tuple[int, int] = eqx.field(static=True)
 
     @classmethod
-    def from_scipy(cls, a: sp.csr_matrix) -> _CsrOperator:
-        """Freeze an assembled ``scipy`` matrix, in canonical (sorted-column) CSR form."""
+    def from_scipy(cls, a: sp.csr_matrix, nnz: int | None = None) -> _CsrOperator:
+        """Freeze an assembled ``scipy`` matrix, in canonical (sorted-column) CSR form.
+
+        Parameters
+        ----------
+        a : scipy.sparse matrix
+            The operator to freeze.
+        nnz : int, optional
+            Pad the entry arrays to exactly this length, so an operator whose sparsity depends on a
+            coarsening keeps a **fixed shape** across rebuilds and the compiled cycle stays a cache
+            hit. The padding is inert: the extra entries are appended to the last row with value zero
+            and the largest valid column index, so they add zero to that row's product and leave the
+            column indices non-decreasing. ``None`` freezes ``a`` as it is.
+
+        Returns
+        -------
+        _CsrOperator
+            The frozen operator.
+
+        Raises
+        ------
+        ValueError
+            If ``a`` has more entries than ``nnz``. This is a **checked overflow, never a silent
+            truncation** — dropping entries would corrupt the Galerkin operator with no bound on the
+            error, so the budget must be raised instead.
+        """
         a = a.tocsr()
         a.sort_indices()
+        indptr, indices, data = a.indptr, a.indices, a.data
+        if nnz is not None:
+            if a.nnz > nnz:
+                raise ValueError(
+                    f"operator has {a.nnz} entries, above the {nnz} budgeted for this level. "
+                    f"Raise the budget (see SmoothedHierarchy.shape_budget's headroom); entries are "
+                    f"never dropped to fit."
+                )
+            pad = nnz - a.nnz
+            indices = np.concatenate([indices, np.full(pad, a.shape[1] - 1, dtype=indices.dtype)])
+            data = np.concatenate([data, np.zeros(pad, dtype=data.dtype)])
+            indptr = indptr.copy()
+            indptr[-1] = nnz
         return cls(
-            indptr=jnp.asarray(a.indptr),
-            indices=jnp.asarray(a.indices),
-            data=jnp.asarray(a.data),
+            indptr=jnp.asarray(indptr),
+            indices=jnp.asarray(indices),
+            data=jnp.asarray(data),
             shape=a.shape,
         )
 
@@ -881,18 +1303,41 @@ class _CsrOperator(eqx.Module):
         )
 
 
-def _coo_apply(row, col, val, x: jnp.ndarray, n_out: int) -> jnp.ndarray:
+def _coo_apply(
+    row, col, val, x: jnp.ndarray, n_out: int, sorted_segments: bool = True
+) -> jnp.ndarray:
     """General sparse matvec ``M x`` for a COO operator: ``segment_sum(val * x[col], row, n_out)``.
 
     The one sparse-matvec kernel, shared by every frozen operator, prolongation, and restriction.
 
-    ``indices_are_sorted`` is asserted rather than hoped for: every operator here is frozen from a
-    ``scipy.sparse`` CSR matrix, and ``csr.tocoo()`` emits entries in row-major order, so the segment
-    identifiers are non-decreasing by construction. Saying so lets the reduction run as a contiguous
-    segmented scan instead of an unordered scatter-add, which is the difference between reading the
-    output once and colliding on it — the same reason a CSR matvec beats a COO one.
+    ``sorted_segments`` states whether the segment identifiers are non-decreasing. It lets the reduction
+    run as a contiguous segmented scan instead of an unordered scatter-add — the difference between
+    reading the output once and colliding on it, the same reason a CSR matvec beats a COO one.
+
+    **It is a promise, not a hint, and passing it falsely is a silent wrong answer.** A frozen operator
+    taken from ``scipy.sparse`` CSR has row-major entries, so its ROW array is non-decreasing and the
+    default holds. Applying the same operator TRANSPOSED does not: the column array of a row-major COO
+    is not sorted, so a transposed apply must pass ``False``. A backend that ignores the flag returns the
+    right answer either way, which is exactly what lets a false promise sit dormant until it moves to one
+    that does not.
+
+    Parameters
+    ----------
+    row, col, val : jnp.ndarray
+        Coordinate form of the operator, each shape ``(nnz,)``. ``row`` supplies the segment identifiers.
+    x : jnp.ndarray
+        The vector to apply to, shape ``(n_in,)``.
+    n_out : int
+        Length of the result.
+    sorted_segments : bool
+        Whether ``row`` is non-decreasing. Pass ``False`` for a transposed apply.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``M x``, shape ``(n_out,)``.
     """
-    return segment_sum(val * x[col], row, n_out, indices_are_sorted=True)
+    return segment_sum(val * x[col], row, n_out, indices_are_sorted=sorted_segments)
 
 
 def _operator_matvec(level: _SparseLevel | _AirLevel, x: jnp.ndarray) -> jnp.ndarray:
@@ -952,11 +1397,27 @@ class _VCycleOps(NamedTuple):
     ``Pᵀ`` (the ``R = Pᵀ`` special case, :func:`_smoothed_ops`) and lAIR with an independent restriction
     ``R`` (:func:`_air_ops`); the smoother is Chebyshev / damped-Jacobi (symmetric / convection
     two-level) or FC-Jacobi (reduction).
+
+    ``mu`` is the number of times each coarse level is visited per visit of its parent: 1 is a V-cycle,
+    2 a W-cycle, which moves work onto the cheaper coarse levels instead of buying convergence with more
+    fine-level relaxation. ``pre_smooth`` may be turned off, which removes both the pre-relaxation and
+    the residual evaluation that follows it — with a zero initial guess the fine residual *is* the
+    right-hand side, so the matvec is pure waste. Both are static, so the cycle stays a fixed linear
+    operator and transposes as one.
+    ``smooth_zero(level, b) -> x`` is the same relaxation specialized to a ZERO initial guess, where the
+    first sweep's residual evaluation ``b - A x`` is exactly ``b``. That matvec is against the level
+    operator — the densest thing in the cycle — and it is charged at every level of every cycle, so
+    skipping it is worth real time; it is exact rather than an approximation, by the same argument the
+    ``pre_smooth=False`` branch already uses. A family that does not supply one falls back to
+    ``smooth(level, b, zeros)``, which is byte-identical to the unpeeled form.
     """
 
     restrict: Callable[[object, jnp.ndarray], jnp.ndarray]
     prolong: Callable[[object, jnp.ndarray], jnp.ndarray]
     smooth: _Smoother
+    smooth_zero: _Smoother | None = None
+    mu: int = 1
+    pre_smooth: bool = True
 
 
 def _frozen_v_cycle(
@@ -972,10 +1433,27 @@ def _frozen_v_cycle(
     if level.coarse_inv is not None:  # coarsest: a direct (dense pseudo-inverse) solve
         return level.coarse_inv @ b
 
-    x = ops.smooth(level, b, jnp.zeros_like(b))  # pre-smooth
-    residual = b - _operator_matvec(level, x)
+    if ops.pre_smooth:
+        # The pre-smooth always starts from a zero iterate, so its first sweep's residual is `b`.
+        x = (
+            ops.smooth_zero(level, b)
+            if ops.smooth_zero is not None
+            else ops.smooth(level, b, jnp.zeros_like(b))
+        )
+        residual = b - _operator_matvec(level, x)
+    else:
+        # No pre-relaxation, so the iterate is still zero and the residual is the right-hand side
+        # itself: skipping the matvec here is exact, not an approximation.
+        x = jnp.zeros_like(b)
+        residual = b
     coarse_residual = ops.restrict(level, residual)
     coarse_error = _frozen_v_cycle(levels, coarse_residual, level_index + 1, ops)
+    coarse = levels[level_index + 1]
+    for _ in range(ops.mu - 1):
+        if coarse.coarse_inv is not None:
+            break  # the child solves exactly; visiting it again corrects nothing
+        defect = coarse_residual - _operator_matvec(coarse, coarse_error)
+        coarse_error = coarse_error + _frozen_v_cycle(levels, defect, level_index + 1, ops)
     x = x + ops.prolong(level, coarse_error)  # prolong and correct
     return ops.smooth(level, b, x)  # post-smooth
 
@@ -988,18 +1466,38 @@ def _fixed_cycle_solve(levels: tuple, b: jnp.ndarray, cycles: int, ops: _VCycleO
     a valid frozen left preconditioner under plain GMRES, and what lets the adjoint transpose it.
     Only the level-local ``ops`` differ between the families.
     """
-    x = jnp.zeros_like(b)
-    for _ in range(cycles):
+    if cycles <= 0:
+        return jnp.zeros_like(b)
+    # The first pass starts from a zero iterate, so its residual is `b` itself and the matvec that would
+    # compute it is against a zero vector -- a full application of the FINE operator, the most expensive
+    # one in the hierarchy. Peeling it is exact.
+    x = _frozen_v_cycle(levels, b, 0, ops)
+    for _ in range(cycles - 1):
         residual = b - _operator_matvec(levels[0], x)
         x = x + _frozen_v_cycle(levels, residual, 0, ops)
     return x
 
 
-def _smoothed_ops(smoother: _Smoother) -> _VCycleOps:
-    """V-cycle ops for a smoothed-aggregation level: restrict by ``Pᵀ``, prolong by ``P`` (``R = Pᵀ``)."""
+def _smoothed_ops(
+    smoother: _Smoother,
+    mu: int = 1,
+    pre_smooth: bool = True,
+    smooth_zero: _Smoother | None = None,
+) -> _VCycleOps:
+    """V-cycle ops for a smoothed-aggregation level: restrict by ``Pᵀ``, prolong by ``P`` (``R = Pᵀ``).
+
+    ``smooth_zero`` is the optional zero-initial-guess specialization of ``smoother``; ``None`` keeps the
+    general form and is byte-identical.
+    """
     return _VCycleOps(
+        mu=mu,
+        pre_smooth=pre_smooth,
+        smooth_zero=smooth_zero,
+        # Restriction is the prolongation applied TRANSPOSED, so the segment identifiers are its COLUMN
+        # array -- which a row-major coordinate form does not leave sorted. Promising otherwise is a
+        # silent wrong answer on any backend that acts on the promise.
         restrict=lambda level, r: _coo_apply(
-            level.p_ccol, level.p_frow, level.p_val, r, level.n_coarse
+            level.p_ccol, level.p_frow, level.p_val, r, level.n_coarse, sorted_segments=False
         ),
         prolong=lambda level, e: _coo_apply(level.p_frow, level.p_ccol, level.p_val, e, level.n),
         smooth=smoother,
@@ -1088,6 +1586,9 @@ def build_convection_hierarchy(
     aggressive_levels: int = 0,
     equilibrate: bool = False,
     prolongation_smoothing: str = "symmetric-part",
+    orthonormal_prolongation: bool = False,
+    avoid_singletons: bool = False,
+    shape_budget: ShapeBudget | None = None,
 ) -> SmoothedHierarchy:
     """Build the convection-diffusion hierarchy for operator ``a`` — off the jit path.
 
@@ -1113,11 +1614,13 @@ def build_convection_hierarchy(
         Prolongation-smoothing damping factor; the applied damping is ``omega_smooth * 2 / lambda_max``
         (``lambda_max`` of the symmetric part).
     max_coarse : int
-        Skip the aggregation and solve the fine operator directly when it already has at most this many
-        cells (a one-level direct solve for a trivially small system).
+        Stop coarsening once a level has at most this many **degrees of freedom**, and solve it
+        directly there. Dofs, not cells: at ``block_size`` fields per cell the two differ by that
+        factor, and the limit exists to bound a dense pseudo-inverse whose cost is cubic in the dof
+        count.
     strength_threshold : float
         Strength-of-connection threshold for the aggregation (default ``0`` = isotropic aggregation on
-        the symmetric part's full graph). ``> 0`` aggregates only along strong connections
+        the full cell-adjacency graph, which reads no values from the operator at all). ``> 0`` aggregates only along strong connections
         (:func:`_aggregation_edges`) — the fix for an anisotropic / high-aspect-ratio operator; see
         :func:`build_smoothed_hierarchy` for the effect and the value-dependence caveat.
     block_size : int
@@ -1172,6 +1675,9 @@ def build_convection_hierarchy(
         aggressive_levels=aggressive_levels,
         equilibrate=equilibrate,
         prolongation_smoothing=prolongation_smoothing,
+        orthonormal_prolongation=orthonormal_prolongation,
+        avoid_singletons=avoid_singletons,
+        shape_budget=shape_budget,
     )
 
 

@@ -2128,6 +2128,7 @@ def coupled_amg_continuation(
     forward_solver: lx.AbstractLinearSolver | None = None,
     forward_rtol: float = 0.3,
     forward_restart: int = 15,
+    forward_max_restarts: int = 60,
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     residual_norm: ResidualNorm | None = None,
@@ -2141,6 +2142,7 @@ def coupled_amg_continuation(
     trailing_smoother_sweeps: int = 1,
     leading_options: dict | None = None,
     trailing_options: dict | None = None,
+    leading_inverse: Callable | None = None,
     trailing_inverse: Callable | None = None,
     probe: CoupledJacobianProbe | None = None,
     preconditioner: MonolithicAmgPreconditioner | None = None,
@@ -2273,6 +2275,10 @@ def coupled_amg_continuation(
         served by much cheaper relaxations. Keys are PETSc options without the instance prefix, e.g.
         ``{"mg_levels_ksp_max_it": 1}`` for a single smoother sweep. Both require ``field_split=True``;
         passing either without it raises, since there would be only one hierarchy to apply them to.
+    leading_inverse : callable or None
+        ``(sub_matrix, n_fields_in_group) -> inverse`` replacing the LEADING (flow saddle) block's
+        V-cycle entirely, the counterpart of ``trailing_inverse``. An injected inverse must offer
+        ``refactor_block`` or ``refactor``, or the mid-march refresh cannot re-fit it.
     trailing_inverse : callable or None
         ``(sub_matrix, n_fields_in_group) -> inverse`` replacing the trailing block's V-cycle outright,
         so the transported scalars can be preconditioned by something that is not a host solver's
@@ -2320,6 +2326,11 @@ def coupled_amg_continuation(
             "native_forward_solve builds a PETSc KSP around a single monolithic V-cycle and has no "
             "field-split counterpart; use one or the other."
         )
+    if not field_split and leading_inverse is not None:
+        raise ValueError(
+            "leading_inverse replaces the leading block's inverse, and there is no leading block "
+            "without field_split."
+        )
     if not field_split and trailing_inverse is not None:
         raise ValueError(
             "trailing_inverse replaces the trailing block's inverse, and there is no trailing block "
@@ -2342,7 +2353,18 @@ def coupled_amg_continuation(
     # Restart 15 is the measured sweet spot for the one-V-cycle preconditioner: enough Arnoldi history for
     # its convergence while checking the stop often enough not to overshoot the loose target deep into the
     # next cycle (a larger restart costs ~2x the expensive host V-cycle applies for the same trajectory);
-    # ``max_restarts`` stays generous so a drifted-reference solve still completes. ``forward_restart``
+    # ``forward_max_restarts`` is the ONLY bound on a single running solve: ``cycle_budget`` and
+    # ``abort_above_inner_cycles`` are tested between inner iterations, so neither can stop a solve
+    # already in progress. Left generous, a solve whose attempt is already doomed -- one that has passed
+    # the march's ``retry_on_cycles`` without reaching target -- keeps running to the cap, and that work
+    # is discarded when the step is redone at a larger shift.
+    #
+    # ⚠️ It is in RAW ``lineax`` restarts, which carry a fixed +2 per solve, while ``retry_on_cycles`` is
+    # in CORRECTED cycles (:func:`restart_cycles`). So a corrected cap of ``c`` is ``max_restarts = c + 2``.
+    # ⚠️ And it must leave the corrected count STRICTLY ABOVE ``retry_on_cycles``: the march's test is
+    # ``max_inner_cycles > retry_on_cycles``, so a cap landing exactly on the threshold does not trip the
+    # retry and the step ACCEPTS the truncated, non-converged direction instead of escalating.
+    # ``forward_restart``
     # exists so that length can be varied on its own -- passing a whole ``forward_solver`` to do it would
     # also drop the loose row-scaled stop above, which is a much larger change than the one intended.
     if forward_solver is None:
@@ -2351,7 +2373,7 @@ def coupled_amg_continuation(
             norm=coupled_scaled_norm(coupled, base, reference_state),
             restart=forward_restart,
             stagnation_iters=40,
-            max_restarts=60,
+            max_restarts=forward_max_restarts,
         )
     # The colouring plan and the fixed CSR structure + gather map that de-compresses a probe into it. Both
     # are mesh-fixed, so a caller building several steps over one case (a Reynolds continuation, or a step
@@ -2408,6 +2430,7 @@ def coupled_amg_continuation(
                 trailing_smoother_sweeps=trailing_smoother_sweeps,
                 leading_options=leading_options,
                 trailing_options=trailing_options,
+                leading_inverse=leading_inverse,
                 trailing_inverse=trailing_inverse,
                 **common,
             )

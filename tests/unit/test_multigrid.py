@@ -17,6 +17,7 @@ import scipy.sparse as sp
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.solve.frozen_operator import convection_diffusion_operator, decouple_dof
 from aquaflux.solve.multigrid import (
+    _AGGREGATE_STATS,
     _cell_graph,
     _chebyshev_smooth,
     _CsrOperator,
@@ -209,6 +210,56 @@ def test_strength_of_connection_aggregation_fixes_an_anisotropic_operator() -> N
     # Isotropic aggregation has not reached 1% even after 8 V-cycles; SoC reaches it in 3.
     assert relative_after(plain, 8) > 1e-2
     assert relative_after(soc, 3) < 1e-2
+
+
+def test_avoid_singletons_reaches_the_aggressively_coarsened_level() -> None:
+    """``avoid_singletons`` must apply to the squared-graph level too, not only the plain ones.
+
+    A vertex reached late in the aggregation sweep can find every neighbour already claimed and then
+    opens an aggregate holding only itself — a coarse unknown standing for one cell and coupling to
+    almost nothing. The repair attaches such a vertex to an adjacent aggregate instead. It went to the
+    plain branch only, which was invisible while the squared graph ran unfiltered (its aggregates are
+    large enough that the case never arises); a strength threshold thins the graph enough to bring it
+    back, so the two settings have to work together.
+
+    Two passes are needed, which is why both levels are checked. Refusing to *open* a singleton
+    handles the aggregation sweep; the reattachment pass that repairs the squared graph's reach runs
+    afterwards, moves members between aggregates, and can strand a root the sweep had no way to
+    foresee — so those are dissolved separately once the final assignment is known.
+    """
+    a = _anisotropic_poisson(24, 24, aspect_ratio=100.0)
+
+    def singletons_per_level(avoid_singletons):
+        _AGGREGATE_STATS.clear()
+        build_convection_hierarchy(
+            a,
+            max_coarse=20,
+            max_levels=3,
+            mis_aggregation=True,
+            aggressive_levels=1,
+            strength_threshold=0.25,
+            avoid_singletons=avoid_singletons,
+        )
+        return [level["singletons"] for level in _AGGREGATE_STATS]
+
+    without = singletons_per_level(False)
+    with_repair = singletons_per_level(True)
+
+    assert without[0] > 0 and without[1] > 0  # both levels strand vertices when unrepaired
+    assert with_repair == [0] * len(with_repair)  # and neither does once both passes run
+
+
+def test_dense_coarse_solve_guard_rejects_an_oversized_coarsest_level() -> None:
+    """The coarsest level is inverted densely, so its size has to stay bounded as the mesh grows.
+
+    Coarsening stops on whichever of the two limits is reached first. When the level cap wins, nothing
+    bounds the coarse grid at all — it then scales with the mesh, and the dense inverse is quadratic to
+    store and cubic to build, so a large enough case turns into a multi-gigabyte allocation with no
+    indication of why. Fail with the two ways out instead.
+    """
+    a = _anisotropic_poisson(128, 128, aspect_ratio=1.0)  # 16384 dofs, above the dense limit
+    with pytest.raises(ValueError, match="inverted densely"):
+        build_convection_hierarchy(a, max_coarse=20, max_levels=1)
 
 
 def _chebyshev_propagation_polynomial(eigenvalues, lam_max, degree, lo_frac):
@@ -1096,3 +1147,242 @@ def test_a_badly_scaled_block_is_not_mistaken_for_a_singular_one() -> None:
     assert np.allclose(
         inverses[1] @ block, np.eye(2), atol=1e-6
     )  # ...and inverting it is meaningful
+
+
+def test_refit_reproduces_a_rebuild_where_the_coarsening_is_value_independent() -> None:
+    """With an unsmoothed prolongator at ``strength_threshold=0``, a rebuild and a refit must agree.
+
+    Both halves of that condition are load-bearing, and together they are what makes a refit *exact*
+    rather than approximate. The coarsening then reads only the sparsity pattern, so a rebuild at a new
+    operator lands on the aggregates a refit reuses; and the tentative prolongation is their 0/1
+    indicator, which holds no operator values, so freezing it freezes nothing but the partition.
+    Everything downstream is then a deterministic function of the new operator and that partition, so
+    the two paths must land in the same place.
+    """
+    plain = dict(prolongation_smoothing="none")
+    n = 600
+    cold = build_convection_hierarchy(_chain_operator(n, 0.01, np.ones(n - 1)), **plain)
+    developed_operator = _chain_operator(n, 50.0, np.linspace(1.0, 1000.0, n - 1))
+
+    refitted = cold.refit(developed_operator)
+    rebuilt = build_convection_hierarchy(developed_operator, **plain)
+
+    assert len(refitted.levels) == len(rebuilt.levels)
+    for got, want in zip(refitted.levels, rebuilt.levels, strict=True):
+        assert (got.n, got.n_coarse) == (want.n, want.n_coarse)
+        assert np.allclose(np.asarray(got.operator.data), np.asarray(want.operator.data))
+        assert np.allclose(np.asarray(got.diagonal), np.asarray(want.diagonal))
+        assert np.allclose(float(got.lam_max), float(want.lam_max))
+    # ...and the refit really moved the values, so the agreement above is not two copies of `cold`.
+    assert not np.allclose(
+        np.asarray(refitted.levels[0].operator.data), np.asarray(cold.levels[0].operator.data)
+    )
+
+
+def test_refit_keeps_a_smoothed_prolongator_a_rebuild_would_re_derive() -> None:
+    """A smoothed prolongator reads operator values, so a refit freezes MORE than the partition.
+
+    ``P <- P_tent - w D^-1 A P_tent`` carries a relaxation built from the operator it was derived at, so
+    holding it fixed holds that relaxation too and the coarse operator then differs from a rebuild's.
+    That is a real limitation of the frozen path rather than a defect, and it is pinned here so nobody
+    reads the exact agreement above as holding for every configuration.
+    """
+    n = 600
+    smoothed = dict(prolongation_smoothing="symmetric-part")
+    cold = build_convection_hierarchy(_chain_operator(n, 0.01, np.ones(n - 1)), **smoothed)
+    developed_operator = _chain_operator(n, 50.0, np.linspace(1.0, 1000.0, n - 1))
+
+    refitted = cold.refit(developed_operator)
+    rebuilt = build_convection_hierarchy(developed_operator, **smoothed)
+
+    coarsest = -1
+    assert not np.allclose(
+        np.asarray(refitted.levels[coarsest].operator.data),
+        np.asarray(rebuilt.levels[coarsest].operator.data),
+    )
+
+
+def test_refit_holds_a_partition_that_a_rebuild_would_move() -> None:
+    """With a strength threshold live, a rebuild re-partitions and a refit does not — the whole point.
+
+    The aggregation then reads ``|A_ij|``, so an operator whose anisotropy has rotated (strong direction
+    x rather than y, on the identical graph) aggregates differently. A rebuild follows it; a refit keeps
+    the partition and moves only the values.
+
+    **The assertion is on aggregate MEMBERSHIP, not on level sizes, because sizes do not discriminate
+    here:** on a square grid, aggregating along either direction gives the identical *count*. Two
+    hierarchies can agree in every level size and still partition the mesh completely differently, which
+    is exactly why a march reporting stable level sizes is not reporting a stable coarsening.
+    """
+    threshold, coarse = 0.25, 16
+    plain = dict(prolongation_smoothing="none", max_coarse=coarse, strength_threshold=threshold)
+    strong_y = _anisotropic_poisson(24, 24, aspect_ratio=100.0)
+    strong_x = _anisotropic_poisson(24, 24, aspect_ratio=0.01)
+    built = build_convection_hierarchy(strong_y, **plain)
+
+    rebuilt = build_convection_hierarchy(strong_x, **plain)
+    refitted = built.refit(strong_x)
+
+    def membership(hierarchy):
+        """Which coarse unknown each fine degree of freedom feeds, on the finest level."""
+        level = hierarchy.levels[0]
+        order = np.argsort(np.asarray(level.p_frow))
+        return np.asarray(level.p_ccol)[order]
+
+    assert np.array_equal(membership(refitted), membership(built))
+    assert not np.array_equal(membership(rebuilt), membership(built)), (
+        "the rotated operator did not re-partition, so this fixture cannot show the difference"
+    )
+    # The refit is over the NEW operator, not a copy of the old hierarchy.
+    assert np.allclose(np.asarray(refitted.levels[0].operator.data), strong_x.tocsr().data, atol=0)
+
+
+def test_refit_rejects_an_operator_of_the_wrong_size() -> None:
+    """A mismatched operator raises rather than returning a hierarchy that silently coarsens nothing."""
+    hierarchy = build_convection_hierarchy(_chain_operator(200, 0.01, np.ones(199)))
+    with pytest.raises(ValueError, match="cannot refit"):
+        hierarchy.refit(_chain_operator(100, 0.01, np.ones(99)))
+
+
+def _rotated_anisotropy():
+    """Two operators on one graph whose aggregations genuinely differ in SIZE, not just membership.
+
+    A square grid is the wrong fixture for this: aggregating along either direction gives the identical
+    count, so the shapes coincide and a budget appears to do nothing. A rectangular one separates them.
+    """
+    return (
+        _anisotropic_poisson(24, 16, aspect_ratio=100.0),
+        _anisotropic_poisson(24, 16, aspect_ratio=0.01),
+    )
+
+
+def test_a_repartitioning_rebuild_changes_shape_without_a_budget() -> None:
+    """The premise of the budget: at a live strength threshold, a rebuild moves the array shapes.
+
+    Asserted separately so the budget tests below cannot pass vacuously on a fixture where the two
+    hierarchies would have coincided anyway — which is exactly what a square grid does.
+    """
+    plain = dict(prolongation_smoothing="none", max_coarse=16, strength_threshold=0.25)
+    strong_y, strong_x = _rotated_anisotropy()
+
+    sizes = [
+        [(level.n, level.n_coarse) for level in build_convection_hierarchy(a, **plain).levels]
+        for a in (strong_y, strong_x)
+    ]
+    assert sizes[0] != sizes[1], "fixture does not repartition; the budget tests would be vacuous"
+
+
+def test_shape_budget_makes_a_repartitioning_rebuild_a_compilation_cache_hit() -> None:
+    """Coarsening into a fixed ladder keeps one compiled V-cycle across a rebuild that repartitions.
+
+    This is the difference between a budget and freezing the coarsening: the partition is still
+    re-derived from the current operator — only the *sizes* it is poured into are fixed — so the coarse
+    space tracks the flow while the compiled cycle does not have to be rebuilt.
+    """
+    plain = dict(prolongation_smoothing="none", max_coarse=16, strength_threshold=0.25)
+    strong_y, strong_x = _rotated_anisotropy()
+    budget = build_convection_hierarchy(strong_y, **plain).shape_budget(headroom=1.3)
+
+    built = [
+        build_convection_hierarchy(a, **plain, shape_budget=budget) for a in (strong_y, strong_x)
+    ]
+
+    def signature(hierarchy):
+        return [
+            (
+                level.n,
+                level.n_coarse,
+                int(level.operator.data.shape[0]),
+                None if level.p_val is None else int(level.p_val.shape[0]),
+            )
+            for level in hierarchy.levels
+        ]
+
+    assert signature(built[0]) == signature(built[1])
+
+    traces = []
+
+    @jax.jit
+    def apply(hierarchy, b):
+        traces.append(1)  # appended once per trace, not per call
+        return convection_multigrid_solve(hierarchy, b, cycles=1)
+
+    b = jnp.asarray(np.random.default_rng(0).normal(size=strong_y.shape[0]))
+    apply(built[0], b).block_until_ready()
+    assert len(traces) == 1
+    apply(built[1], b).block_until_ready()
+    assert len(traces) == 1, "a budgeted rebuild retraced the jitted V-cycle"
+
+
+def test_budget_padding_leaves_the_preconditioner_unchanged() -> None:
+    """Padding must be INERT: the budgeted hierarchy is the same operator as the one it padded.
+
+    Empty aggregates carry a unit diagonal and no coupling, so nothing restricts into them and their
+    correction prolongates as zero; the operator's padded entries are zeros in the last row. If either
+    were wrong the coarse correction would differ, and the budget would be buying its cache hit by
+    quietly changing the preconditioner.
+    """
+    plain = dict(prolongation_smoothing="none", max_coarse=16, strength_threshold=0.25)
+    strong_y, strong_x = _rotated_anisotropy()
+    budget = build_convection_hierarchy(strong_y, **plain).shape_budget(headroom=1.3)
+
+    unpadded = build_convection_hierarchy(strong_x, **plain)
+    padded = build_convection_hierarchy(strong_x, **plain, shape_budget=budget)
+    assert padded.levels[-1].n > unpadded.levels[-1].n  # padding really happened
+
+    b = jnp.asarray(np.random.default_rng(1).normal(size=strong_x.shape[0]))
+    reference = convection_multigrid_solve(unpadded, b, cycles=2)
+    assert np.allclose(
+        np.asarray(reference),
+        np.asarray(convection_multigrid_solve(padded, b, cycles=2)),
+        rtol=1e-10,
+    )
+
+
+def test_budget_overflow_raises_rather_than_dropping_entries() -> None:
+    """A budget too small to hold the rebuild must RAISE. Dropping to fit would corrupt the operator.
+
+    Silently truncating the Galerkin product is the failure this guards: it would leave a coarse
+    operator missing arbitrary couplings, with no bound on the error and nothing in the output to say
+    so. Raising turns that into a re-budget.
+    """
+    plain = dict(prolongation_smoothing="none", max_coarse=16, strength_threshold=0.25)
+    strong_y, strong_x = _rotated_anisotropy()
+    # Budget from the SMALLER hierarchy at no headroom, then rebuild at the operator that aggregates
+    # into more cells than it — the direction a budget cannot absorb.
+    tight = build_convection_hierarchy(strong_x, **plain).shape_budget(headroom=1.0)
+
+    with pytest.raises(ValueError, match="budget"):
+        build_convection_hierarchy(strong_y, **plain, shape_budget=tight)
+
+
+def test_budget_padding_does_not_compound_down_the_hierarchy() -> None:
+    """A padded cell must not become its own aggregate on the next level, or the padding multiplies.
+
+    The regression this guards was found only by running a budget through several levels. A padded
+    cell is decoupled — unit diagonal, no off-diagonal coupling — so in the next level's aggregation
+    graph it is an ISOLATED vertex, and an isolated vertex gets an aggregate to itself. Each level's
+    padding therefore inflated the next level's aggregate count by the padding it had just added, which
+    compounded until the budget overflowed: on a four-level synthetic, level 1 asked for 180 slots
+    against a budget of 85 that its own natural coarsening fitted inside comfortably.
+
+    The fix is to aggregate the real cells only and send every padded cell to one reserved slot, so the
+    count entering each level is the number of REAL aggregates and the padding cannot accumulate.
+    """
+    # `max_levels` must be raised explicitly: the convection builder defaults to two levels, which is
+    # one coarsening — too shallow for padding to compound, so the test would pass vacuously.
+    plain = dict(prolongation_smoothing="none", max_coarse=8, strength_threshold=0.25, max_levels=5)
+    strong_y, strong_x = _rotated_anisotropy()
+    budget = build_convection_hierarchy(strong_y, **plain).shape_budget(headroom=1.4)
+    assert len(budget.coarse_cells) >= 3, "fixture must be deep enough for padding to compound"
+
+    hierarchy = build_convection_hierarchy(strong_x, **plain, shape_budget=budget)
+
+    # Every level lands exactly on its budget — no level absorbed the one above it's padding.
+    assert [level.n // level.block_size for level in hierarchy.levels[1:]] == list(
+        budget.coarse_cells
+    )
+    # And the coarse operators stay sparse: a level of isolated padded cells would show up as a
+    # diagonal-heavy operator with an aggregate count near its cell count.
+    b = jnp.asarray(np.random.default_rng(0).normal(size=strong_x.shape[0]))
+    assert np.all(np.isfinite(np.asarray(convection_multigrid_solve(hierarchy, b, cycles=2))))
