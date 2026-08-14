@@ -3552,6 +3552,72 @@ axis.
 *toward* 1.0, so the march's own regime is where over-relaxation has least to offer; what it would settle
 is whether the cliff ever descends BELOW 1.0, which would put the shipped default near an edge.
 
+### The trailing ablation, and the two structural ideas it points at (2026-08-14)
+
+**The question: how far below the coupled cycle count can a better TRAILING inverse alone take it?** The
+figure that had stood in for this — "2 restart cycles against a floor of 1" — is a **standalone** solve of
+the `[k, ω]` block, which production never performs: one Krylov iteration runs on all six fields with a
+block-triangular `M`, so the count is a property of the whole preconditioned operator and of the coupling
+the split discards, not of either block alone.
+
+*Configuration:* `bfs3d` `state-00067`, **β = 0**, **uniform** column reach, real right-hand side
+`−R(state)`, GMRES restart 15 to rtol 1e-8 on the TRUE residual, 58-restart cap, **leading inverse held at
+PETSc ILU(0) in every arm**.
+
+| trailing inverse | cycles |
+|---|---|
+| PETSc ILU(0) (control, reproduces the recorded 11) | **11** |
+| **native nodal, 4 sweeps (SHIPPED)** | **11** |
+| native nodal, 2 sweeps | 16 |
+| native nodal, 1 sweep | 28 |
+| damped Jacobi | 38 |
+| near-exact factorization (diagnostic bound) | **58 cap, 2.5e-05 — WORSE than all of them** |
+
+**Three results.** The shipped native trailing inverse **matches PETSc ILU(0)** in the coupled system,
+which nothing on record established (the recorded 11 used ILU(0) on *both* halves). **Cutting its sweeps
+is measured harmful** — 4 → 2 costs +45 % of coupled cycles, 4 → 1 costs +155 % — which settles the
+"4 sweeps is an unexamined default" question in the opposite direction, and is what the record's own
+(false) claim that this case already shipped at 1 sweep would have cost. And **more quality does not
+help**: nothing in this ablation supports spending on the trailing block's accuracy.
+
+**⚠️ THE BOUND ARM'S RESULT IS NOT YET INTERPRETABLE, and the reason is instructive.** Its residual was
+reported as **1.693e-06 globally on a random right-hand side** — but this block's k and ω rows differ by
+some eight orders of magnitude, so a global norm is ~100 % ω and would report a factorization that solves ω
+beautifully and k not at all as "near-exact". Two readings survive and are not separated:
+1. **Real**: an exact inverse of an ill-conditioned block (recorded cell-block condition ~1e12,
+   ‖B⁻¹‖ ~9.5e8) **amplifies the coupling the split discards**, where a fixed-cycle V-cycle is bounded and
+   cannot. This has a precedent on the flow side: inverting the Schur *more* accurately with ×2/×4/×8
+   V-cycles measured ρ 41.6/48.7/48.5, strictly worse, and was read as "the operator being inverted is the
+   wrong one".
+2. **Artifact**: the bound was never tight in k, so it bounds nothing.
+
+The discriminator is cheap and is BUILT: the arm now reports its achieved residual **per field**. Run it.
+This is the third appearance of collapse-over-row-fields in this project — after the column-reach audit and
+the Euclidean coupled residual — and this time it was in the check written to avoid assuming.
+
+**⚠️ ORDERING (flow-first against turbulence-first) is measured and is nearly a tie**: 11 against 13 at
+β = 0, and **4 against 4** at the forward operating point, where the operator discriminates between
+neither. Flow-first ships. But the ordering decides *which* cross-coupling is discarded — flow-first
+retains `∂R_turb/∂flow` and drops `∂R_flow/∂turb` — so if reading (1) above is right, the ordering stops
+being a 2-cycle detail. The prediction to test: measure the two cross-coupling block norms
+(`field_coupling.py` already does this for k↔ω). If `∂R_turb/∂flow` dominates, flow-first's win is
+explained; if they are comparable, the split is discarding something material either way.
+
+**💡 THE IDEA THIS POINTS AT, unbuilt: ALTERNATE the two blocks instead of completing one then the other.**
+The apply is currently ONE pass of block forward substitution — one flow V-cycle, one sparse coupling
+product, one trailing V-cycle (`cycles=1` on both inverses) — so the flow solve never sees turbulence at
+all. A second pass is block Gauss–Seidel and picks up the discarded coupling.
+
+- **The asymmetry decides the cost.** The flow block is ~89 % of the split's nonzeros and the trailing one
+  ~11 %, so `flow → turb → flow` roughly doubles the apply, while **`turb → flow → turb`** costs a second
+  *trailing* V-cycle plus one coupling product — perhaps +15 % — and still captures both triangles.
+- **Both correctness constraints hold**: a FIXED number of alternations keeps `b → x` linear (which the
+  non-flexible outer GMRES requires), and the transpose is closed-form — the transpose of a product is the
+  reversed product of transposes, which `BlockTriangularFieldSplit.apply(transpose=True)` already does for
+  one sweep.
+- **What it needs that does not exist**: `∂R_flow/∂turb` **assembled**. The split forms only the one
+  triangle today.
+
 ### The gap is CONVERGENCE, not cost — measured, and it reverses the priorities
 
 **The per-iteration split had never been measured, and both directions of inference about it were
