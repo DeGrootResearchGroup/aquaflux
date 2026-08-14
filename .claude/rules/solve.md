@@ -3283,16 +3283,35 @@ The sibling `NodalNativeInverse` rebuilds freely and calls itself structure-pres
 aggregation reads SPARSITY alone — the property this arm gave up to win 4x. That trade was invisible until
 the preconditioner met a march.
 
-**The fix is to freeze the coarsening and refresh only values, but whether that is SAFE is unmeasured.**
-Frozen means derived once at the first build and reused across all three Reynolds rungs — effectively the
-initial condition's coarsening at the target Reynolds number. The case for it: aggregation quality is set
-by coupling anisotropy, which on this mesh is geometric (within-row conductance ratios of 64 median, 1700
-max, from wall-normal grading; 99 % of cells above 4:1) and does not change with the flow. The case
-against: the eddy viscosity grows to ~150x molecular and varies spatially, so it changes the anisotropy
-PATTERN, not merely its magnitude. **The observed drift is 10-20 % in coarse SIZE, but size is a weak
-proxy — two hierarchies can have identical counts and completely different partitions.** Measure aggregate
-MEMBERSHIP stability across refreshes before relying on it, then test a frozen hierarchy at a developed
-state against one built there. A middle option is freezing per RUNG rather than per march.
+**✅ THE MECHANISM IS BUILT — `SmoothedHierarchy.refit(a)` (2026-08-13).** It holds this hierarchy's
+prolongations and re-derives only what depends on values: each level's Galerkin operator `Pᵀ A P`, its
+diagonal or per-cell block inverse, its spectral estimate, and the coarsest level's dense inverse. Shapes
+cannot move, so a refitted hierarchy is a compilation-cache hit **by construction** rather than by the
+sparsity-pattern-only argument that the strength threshold invalidated. Reached from the case as
+`BFS3D_FLOW_FROZEN_COARSENING=1` (and `-fc` on a probe spec), off by default.
+
+**It is EXACT where the flow arm runs, and NOT exact in general — the boundary is the prolongator.** With
+`prolongation_smoothing="none"` — what this arm uses — the tentative prolongation is the aggregates' 0/1
+indicator and holds no operator values, so freezing it freezes the partition and nothing else: at
+`strength_threshold=0` a refit then reproduces a from-scratch rebuild in every level's values. With either
+smoothed prolongator it *also* freezes a relaxation built from the old operator, and the coarse operators
+then differ from a rebuild's. Both halves are pinned, so the exact agreement cannot be read as
+unconditional.
+
+**⚠️ AND THE "MEASURE MEMBERSHIP, NOT SIZE" CAUTION IS NOW DEMONSTRATED, NOT JUST ARGUED.** On a square
+grid, aggregating along either direction gives the **identical count** — so rotating an operator's
+anisotropy re-partitions the mesh completely while every level size is unchanged. That is now a unit test
+(`test_refit_holds_a_partition_that_a_rebuild_would_move`), which is worth more than the argument: **a
+march reporting stable level sizes is not reporting a stable coarsening**, and the 10–20 % size drift
+recorded above is a lower bound on how much the partition moved, not an estimate of it.
+
+**Whether freezing is SAFE for the coarse space is the open half.** Frozen means derived once at the first
+build and reused across all three Reynolds rungs — effectively the initial condition's coarsening at the
+target Reynolds number. The case for it: aggregation quality is set by coupling anisotropy, which on this
+mesh is geometric (within-row conductance ratios of 64 median, 1700 max, from wall-normal grading; 99 % of
+cells above 4:1) and does not change with the flow. The case against: the eddy viscosity grows to ~150x
+molecular and varies spatially, so it changes the anisotropy PATTERN, not merely its magnitude. A middle
+option is freezing per RUNG rather than per march.
 
 ### The gap is CONVERGENCE, not cost — measured, and it reverses the priorities
 
@@ -5172,10 +5191,14 @@ transfer to any thresholded arm.
         scipy AMG assembly cannot run inside it; `solve_coupled(refresh_trigger=…)` is the driver.
         **⚠️ SETTLED FROM THE CODE — the old claim here, "a refresh still forces a full recompile because these
         are non-pytrees hashed by identity", is SUPERSEDED and deleted.** The fix it proposed as hypothetical was
-        built: the coarsening structure is value-independent, and `_SparseLevel` now holds only `n` / `n_coarse`
+        built: the coarsening structure is value-independent **at this path's `strength_threshold=0`**, and
+        `_SparseLevel` now holds only `n` / `n_coarse`
         static with `val` / `diagonal` / `lam_max` / `coarse_inv` as **traced leaves** — so a refreshed hierarchy
         passed as a jit argument is a **compilation-cache hit**, pinned by
-        `test_refreshing_a_hierarchy_is_a_compilation_cache_hit`. What a refresh still costs is the off-jit scipy
+        `test_refreshing_a_hierarchy_is_a_compilation_cache_hit`. ⚠️ **The value-independence is a property of
+        the threshold, not of the level split**, so it does not carry to the native flow block, which runs at
+        0.25 and re-partitions on every refresh; that path keeps the cache hit with
+        `SmoothedHierarchy.refit` instead (see the flow-block section). What a refresh still costs is the off-jit scipy
         rebuild plus the one-off retrace of the rebuilt `ForwardStep`, which is why `refresh_limit` still bounds
         it. The wall figures once attached to this question (a "~60–240 s" recompile and a "~38 s" refresh) were
         both recorded with no configuration and are deleted with it.

@@ -36,6 +36,11 @@ def main() -> None:
         f"field split: {compare.FIELD_SPLIT}  |  refresh at {compare.REFRESH_ON_CYCLES} cycles",
         flush=True,
     )
+    # The native arm's own settings, every one of them, because two runs that differ only in a sweep
+    # count or in whether the coarsening is frozen would otherwise produce identical headers -- and a
+    # timing comparison between them is then unattributable after the fact.
+    if compare.FLOW_INVERSE == "native":
+        print(f"native flow block: {compare._NATIVE_FLOW}", flush=True)
     log_path = compare._fresh_log(HERE / "march_timing.log")
     started = time.time()
     result = compare.solve_aquaflux(log_path=log_path, checkpoint_dir=HERE / "checkpoints")

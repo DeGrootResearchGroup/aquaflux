@@ -1134,6 +1134,11 @@ class NativeSimpleInverse:
             prolongation_smoothing=settings["prolongation_smoothing"],
             equilibrate=settings["equilibrate"],
         )
+        # Snapshot NOW, while the accumulator still describes this build: it is module-level and every
+        # later hierarchy overwrites it, so reading it at report time is reading someone else's.
+        from aquaflux.solve.multigrid import _AGGREGATE_STATS
+
+        self._aggregate_stats = list(_AGGREGATE_STATS[-(len(self._hierarchy.levels) - 1) :])
         self._derive_cycle()
 
     def _derive_cycle(self) -> None:
@@ -1205,9 +1210,12 @@ class NativeSimpleInverse:
         # alone cannot distinguish a hierarchy that stopped because it hit its cap from one that
         # stopped because it reached its coarse limit, and it says nothing about whether a single
         # aggregation had to represent the error across a hundredfold jump.
-        from aquaflux.solve.multigrid import _AGGREGATE_STATS
-
-        for depth, stat in enumerate(_AGGREGATE_STATS[-(len(self._hierarchy.levels) - 1) :]):
+        #
+        # These come from THIS inverse's own last coarsening, captured when it ran. Reading the module
+        # accumulator here instead would print whichever hierarchy aggregated most recently -- and on
+        # the refit path nothing aggregates at all, so it printed another block's aggregates as if they
+        # were this one's. A frozen coarsening still HAS aggregates; they are the ones below.
+        for depth, stat in enumerate(self._aggregate_stats):
             print(
                 f"      aggregates level {depth}: {stat['aggregates']} of size "
                 f"{stat['min']}/{stat['median']:.0f}/{stat['max']} (min/med/max), "
