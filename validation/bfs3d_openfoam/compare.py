@@ -142,7 +142,36 @@ RTOL, ATOL = 0.0, 1e-5
 # at a higher Reynolds number where the cold Re/10 solve may stop converging. `BFS3D_N_POINTS=1 ...`
 # runs the one-rung ladder.
 N_POINTS = int(os.environ.get("BFS3D_N_POINTS", "2"))
-INNER_STEPS, INNER_TOL = 5, 1e-3
+# The dual-time inner loop: at most `INNER_STEPS` shifted Newton iterations per outer timestep, stopping
+# once `|G|` has fallen to `INNER_TOL` of the step's own starting residual.
+#
+# ⚠️ **`INNER_TOL` WAS 1e-3 AND THAT COST A THIRD OF THE MARCH.** `DualTimeStep` documents a loose value
+# as sufficient ("e.g. 0.05 -- the outer march re-solves each timestep anyway") and the shipped value was
+# fifty times tighter, which nothing had ever tested. Swept over three full marches (native flow block,
+# 2 sweeps, otherwise this file's own settings), the same root and the same reattachment length
+# (`x_r/h` 8.3611 mid-span) in every arm:
+#
+#   inner_tol   steps   wall    cycles  inners   final |R|
+#   1e-3          63    2253 s    445     211    1.689e-06
+#   1e-2          63    1510 s    338     166    1.828e-06   <- shipped
+#   5e-2          64    1568 s    277     145    1.168e-06
+#
+# **1e-2 is a 33% shorter march at an IDENTICAL step count.** The mechanism is that `G` and `R` are
+# different quantities: `R = -beta*d*(phi - phi_n)` is set by where `phi` lands, not by how far `G` was
+# driven, so two inner iterations place the step as well as three and the outer contraction never sees
+# the difference.
+#
+# ⚠️ **AND 0.05 -- the value the docstring suggests -- IS PAST THE OPTIMUM, which is why the sweep did
+# not stop at its best-looking point.** It has FEWER cycles (277) and FEWER inner iterations (145) than
+# 1e-2 and is still slower, because it spends an extra OUTER step (64), and a step costs a Jacobian
+# assembly and a refresh check -- more than the 61 cycles it saved. Read that as the shape of this
+# knob's failure: it does not diverge, it quietly trades inner work for outer steps, and an arm judged
+# on cycles alone would have picked the slower one.
+#
+# Each point is ONE march and this case has no measured march-level noise floor, so the 1e-2/5e-2 gap
+# (4%) rests on the step and cycle counts, which are contention-immune, rather than on the wall clock.
+INNER_STEPS = int(os.environ.get("BFS3D_INNER_STEPS", "5"))
+INNER_TOL = float(os.environ.get("BFS3D_INNER_TOL", "1e-2"))
 # Preconditioner bundle. ILU(1) DIVERGES at the low shifts this march's tail runs at (ground truth: 303
 # negative pivots at beta = 0.02, zero for ILU(0)); zero fill converges at every shift tested and builds
 # 3-4x faster. ILU(0) is the weaker smoother, so the extra sweeps pay more than they did for ILU(1).
@@ -1102,6 +1131,9 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         # rebuilt, and a run that re-matches on a β escalation is a different arm from one that does not.
         ("refresh on beta mismatch", "off" if REFRESH_ON_BETA == float("inf") else REFRESH_ON_BETA),
         ("Reynolds continuation points", N_POINTS),
+        # Both are swept, so both must be printed: without them two differently-configured runs produce
+        # identical banners, which is the failure this table exists to prevent.
+        ("dual-time inner steps / tol", f"{INNER_STEPS} / {INNER_TOL:g}"),
         ("forward restart", FORWARD_RESTART),
         ("retry on cycles / alpha", f"{RETRY_ON_CYCLES} / {RETRY_ON_ALPHA}"),
         ("cycle budget", CYCLE_BUDGET),

@@ -66,6 +66,7 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 | field split | `field_split=False` | **True** | `compare.py` |
 | stencil reach | `stencil_reach=3` | 3 | — |
 | probe column reach | `column_reach=None` (uniform) | **(3,3,3,3,2,2)** | `compare.py` `COLUMN_REACH` |
+| dual-time inner tol | `inner_tol=0.05` | **1e-2** | `compare.py` `INNER_TOL` |
 
 **The three coupled forward solvers — always name which path you mean.** There is no
 `_COUPLED_AMG_FORWARD_SOLVER` symbol.
@@ -3800,6 +3801,62 @@ having failed to appear at march scale — see the noise-floor entry: a per-appl
 is **below the measurement floor** on this case, so take the peel because it is free and exact, not
 because a march will show it.
 
+### ✅ THE DUAL-TIME INNER TOLERANCE WAS COSTING A THIRD OF THE MARCH (2026-08-14)
+
+**`inner_tol` shipped at 1e-3 where `DualTimeStep`'s own docstring says a loose value is enough ("e.g.
+0.05 -- the outer march re-solves each timestep anyway"). Fifty times tighter than documented, never
+tested, and worth 33 % of the march.** Three full `bfs3d` marches, native flow block at 2 sweeps,
+otherwise the case's own settings, on one machine at one commit with only `inner_tol` moved. **Same root,
+same reattachment length (`x_r/h` 8.3611 mid-span, 12.53 full-span) in every arm:**
+
+| `inner_tol` | steps | wall | Krylov cycles | inner iterations | final ‖R‖ |
+|---|---|---|---|---|---|
+| 1e-3 — as shipped | 63 | 2253 s | 445 | 211 | 1.689e-06 |
+| **1e-2 — the new default** | **63** | **1510 s** | 338 | 166 | 1.828e-06 |
+| 5e-2 — the docstring's value | **64** | 1568 s | **277** | **145** | 1.168e-06 |
+
+**Why loosening is free: `G` and `R` are different quantities.** The inner loop drives
+`G = R + β d (φ − φⁿ)`; the march is judged on `R`, and at the next anchor `R = −β d (φ − φⁿ)` — set by
+**where φ lands**, not by how far `G` was driven. Two inner iterations place the step as well as three,
+and the outer contraction never sees the difference. That is why the step count is identical at 1e-2
+while a fifth of the inner Newton iterations disappear.
+
+⚠️ **AND 0.05 IS PAST THE OPTIMUM — the arm with the FEWEST cycles and the FEWEST inner iterations is
+the slower one.** It saves 61 cycles and 21 inner iterations against 1e-2 and loses on wall, because it
+spends an **extra outer step** (64 against 63), and a step costs a Jacobian assembly and a refresh check.
+**Read the failure mode: this knob does not diverge when pushed, it quietly trades inner work for outer
+steps.** Nothing looks wrong — ‖R‖ ends *deeper* at 1.168e-06 and the reattachment length is unchanged —
+so an arm judged on cycles, or on inner count, or on final residual, picks the slower configuration. Only
+wall clock and the step count separate them.
+
+**This is the second time in this file that running the ladder PAST the expected optimum was what
+produced the answer** (the first was `omega`, where 0.7/1.0/1.2 read as monotone improvement and 1.4
+diverged). There the cliff was loud; here it is silent. Both were invisible from the best measured point.
+
+⚠️ **Each point is ONE march and this case still has no measured march-level noise floor.** The
+1e-2/5e-2 wall gap is 4 %, which a single sample cannot resolve on its own — so that comparison rests on
+the **step count and cycle count**, which are contention-immune, and not on the seconds. The 1e-3 → 1e-2
+result does not need that care: 33 % of wall alongside a 24 % cycle drop at an identical step count.
+
+⚠️ **The optimum is bracketed, not located.** The two points either side of it differ by 5×, and the
+region between them is flat to 4 %, so a finer sweep has little to find. `BFS3D_INNER_TOL` and
+`BFS3D_INNER_STEPS` are exposed for anyone who wants to try.
+
+⚠️ **THIS DOES NOT OVERTURN THE RECORDED "TIGHTEN `inner_tol`" FINDING — it bounds it.** Elsewhere in
+this file a *pitzDaily* (2D, ILUT, large-Δτ dual-time) march is recorded as hitting a residual floor and
+over-developing because "at `inner_tol = 0.05` the implicit step is only 5 %-solved, so a large-Δτ
+backward-Euler step on a half-solved system overshoots", with the fix being to tighten it. **That
+mechanism is real and this sweep shows its onset:** the 0.05 arm is precisely where an extra outer step
+appears. What the two together establish is that the threshold is **case- and Δτ-dependent, and that
+"tight" meant about 1e-2 rather than 1e-3** — on `bfs3d` at this Courant ramp, 1e-3 bought nothing over
+1e-2 while costing a third of the march. Neither number transfers to the other case; the *mechanism*
+does. (That pitzDaily entry's own numbers were deleted as unrecorded, so only its mechanism was ever
+citable.)
+
+⚠️ **`INNER_STEPS` (5) is INERT and always has been** — the loop exits on the tolerance long before the
+cap, at every arm above. It becomes a real knob only if the tolerance is loosened far enough for the cap
+to start catching, which none of these arms reach.
+
 ### ⚠️ THE FORWARD SOLVE CANNOT REACH A TIGHT ROOT AT β = 0 — and nobody had asked (2026-08-14)
 
 **The whole native-preconditioner case rests on β = 0 being where the adjoint lives, and every probe in
@@ -5432,6 +5489,11 @@ transfer to any thresholded arm.
       conditioning wall; tight `inner_tol` restores dual-time stability; the two together are what settle
       the rung. *(the floor and the `x_r/h` it corresponded to shared the unrecorded configuration of the
       bullet above — the mechanism stands, the numbers are deleted.)*
+      ⚠️ **"Tighten" has since been bounded on the OTHER case, and it does not mean 1e-3.** On `bfs3d`
+      a three-point sweep measured `inner_tol` 1e-2 as a **33 % shorter march than 1e-3 at an identical
+      step count**, with 0.05 the first value to cost an outer step — see the dual-time inner-tolerance
+      entry above. So this bullet's direction is right and its magnitude is case- and Δτ-specific: do not
+      read it as an argument for 1e-3 anywhere else.
       - **⚠️ READING SMALL CYCLE COUNTS (binding — two offsets fooled a whole investigation).** Two things
         inflate the reported linear-solve cost at the low end, so a "6" is NOT six times a "1":
         (1) **lineax's `num_steps` has a +2 offset and is blind within a restart cycle.** Calibrated: a
