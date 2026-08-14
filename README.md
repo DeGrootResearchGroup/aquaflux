@@ -167,6 +167,8 @@ is at [aquaflux.readthedocs.io](https://aquaflux.readthedocs.io).
 pip install -e ".[lint,test]"
 
 # Optional: enable the local ruff pre-push gate (opt-in, once per clone).
+# Keep the path relative -- git resolves it from the top of the working tree, so it
+# follows each checkout (and each worktree) to its own .githooks/.
 git config core.hooksPath .githooks
 
 ruff check aquaflux tests

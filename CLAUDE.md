@@ -697,6 +697,23 @@ item) — the guard against the `.claude/rules/`, `CLAUDE.md`, `README`, and `do
 of step with the code. It never blocks a commit (doc-sync is a judgement a script cannot make);
 bypass its output with `git commit --no-verify`.
 
+**Both hooks fail silent when `core.hooksPath` does not resolve to the hooks**, which is the state
+worth knowing about: git runs no hook and says nothing, so the gate is simply gone while everyone
+assumes it is there — and the first sign is a red required check on a PR. Prefer the **relative**
+`.githooks`: git resolves a relative `core.hooksPath` from the top level of the working tree, so it
+follows every checkout, including every worktree, to its own copy. An **absolute** path instead pins
+every worktree to one named directory, whose contents depend on whichever branch *that* checkout is
+sitting on — the hooks then appear and disappear according to unrelated state. Because the setting
+can also be overridden **per worktree** (`git config --worktree`, active when
+`extensions.worktreeConfig` is set), a repository-level value that reads correctly can still be
+shadowed; `git config --show-origin --get core.hooksPath` names the file actually in force, and
+`git config --worktree --unset core.hooksPath` drops a worktree-level override.
+
+`tools/fastgate.sh` checks this before it runs anything and prints a warning naming the offending
+path and the command that fixes it (it stays silent when the hooks are wired, and in CI, where the
+workflow runs the gate directly). That is the only warning you get — the hooks themselves cannot
+report their own absence.
+
 ### Documentation
 
 User-facing docs live in `docs/` as a **Sphinx site written in MyST Markdown**, mirroring
