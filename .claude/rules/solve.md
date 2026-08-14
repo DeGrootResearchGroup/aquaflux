@@ -3206,6 +3206,12 @@ the saddle under a SIMPLE smoother, not the W-cycle.
 
 ### THE NATIVE FLOW BLOCK IN A REAL MARCH — identical trajectories, but the RATIO GROWS WITH THE RUNG
 
+**COMPLETED. Final: 60 steps / 3044 s against the incumbent's 67 / 1957 s — 1.56x — and the SAME
+REATTACHMENT LENGTH, `x_r/h` 8.361 mid-span and 12.53 full-span, to four significant figures.** The native
+preconditioner converges to the same solution, in SEVEN FEWER STEPS, and pays 1.56x in wall clock: it
+produces better Newton directions and pays for them per application. 26 coarsening retraces are inside
+that figure, worth roughly 80 s (~7 % of the gap), so removing them helps without changing the verdict.
+
 ⚠️ **READ THE RATIO AS A TREND, NOT A NUMBER, AND DO NOT QUOTE THE EARLY RUNGS.** Measured through the
 march: **1.32x** (rung 1) → **1.27x** (rung 2) → **1.16x** (target rung, first step) → **1.57x** (target
 rung, step 49, where the native arm is at 2342 s against 1489 s and the incumbent's ENTIRE 67-step march
