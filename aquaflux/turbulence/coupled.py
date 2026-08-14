@@ -2128,6 +2128,7 @@ def coupled_amg_continuation(
     forward_solver: lx.AbstractLinearSolver | None = None,
     forward_rtol: float = 0.3,
     forward_restart: int = 15,
+    forward_max_restarts: int = 60,
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     residual_norm: ResidualNorm | None = None,
@@ -2352,7 +2353,18 @@ def coupled_amg_continuation(
     # Restart 15 is the measured sweet spot for the one-V-cycle preconditioner: enough Arnoldi history for
     # its convergence while checking the stop often enough not to overshoot the loose target deep into the
     # next cycle (a larger restart costs ~2x the expensive host V-cycle applies for the same trajectory);
-    # ``max_restarts`` stays generous so a drifted-reference solve still completes. ``forward_restart``
+    # ``forward_max_restarts`` is the ONLY bound on a single running solve: ``cycle_budget`` and
+    # ``abort_above_inner_cycles`` are tested between inner iterations, so neither can stop a solve
+    # already in progress. Left generous, a solve whose attempt is already doomed -- one that has passed
+    # the march's ``retry_on_cycles`` without reaching target -- keeps running to the cap, and that work
+    # is discarded when the step is redone at a larger shift.
+    #
+    # ⚠️ It is in RAW ``lineax`` restarts, which carry a fixed +2 per solve, while ``retry_on_cycles`` is
+    # in CORRECTED cycles (:func:`restart_cycles`). So a corrected cap of ``c`` is ``max_restarts = c + 2``.
+    # ⚠️ And it must leave the corrected count STRICTLY ABOVE ``retry_on_cycles``: the march's test is
+    # ``max_inner_cycles > retry_on_cycles``, so a cap landing exactly on the threshold does not trip the
+    # retry and the step ACCEPTS the truncated, non-converged direction instead of escalating.
+    # ``forward_restart``
     # exists so that length can be varied on its own -- passing a whole ``forward_solver`` to do it would
     # also drop the loose row-scaled stop above, which is a much larger change than the one intended.
     if forward_solver is None:
@@ -2361,7 +2373,7 @@ def coupled_amg_continuation(
             norm=coupled_scaled_norm(coupled, base, reference_state),
             restart=forward_restart,
             stagnation_iters=40,
-            max_restarts=60,
+            max_restarts=forward_max_restarts,
         )
     # The colouring plan and the fixed CSR structure + gather map that de-compresses a probe into it. Both
     # are mesh-fixed, so a caller building several steps over one case (a Reynolds continuation, or a step

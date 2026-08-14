@@ -660,6 +660,16 @@ BASELINE_RESTART = 15  # the coupled AMG builder's own default
 FORWARD_RESTART = int(os.environ.get("BFS3D_FORWARD_RESTART", str(BASELINE_RESTART)))
 _RESTART_SCALE = BASELINE_RESTART / FORWARD_RESTART
 RETRY_BETA_FACTOR = 2.0
+#: The retry threshold the march actually uses, scaled with the restart like every other cycle-denominated
+#: setting above. Computed once because the forward solver's restart CAP is derived from it: a solve that
+#: passes this without reaching target has already doomed its attempt, so letting it run further only
+#: produces work the retry discards. Measured over 671 solves on this case, no accepted attempt exceeded
+#: 9 corrected cycles while discarded ones ran 39-45 -- the distribution is empty between, so a cap just
+#: above the threshold sits in a hole.
+RETRY_ON_CYCLES_SCALED = round(RETRY_ON_CYCLES * _RESTART_SCALE)
+#: In RAW lineax restarts (+2 per solve), and strictly above the corrected threshold so that a capped
+#: solve TRIPS the retry rather than being accepted as a truncated step. Corrected cap = threshold + 2.
+FORWARD_MAX_RESTARTS = RETRY_ON_CYCLES_SCALED + 4
 # How many per-step states to retain. Three is enough to restart from, which is all a normal run needs.
 # A PRECONDITIONER STUDY needs more: an easy operator does not discriminate between preconditioners, so a
 # sweep has to run at the march's own HARD states (highest cycle count, clipped a_min, a retry flag) and
@@ -1211,6 +1221,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             positivity_projection=K_POSITIVITY_PROJECTION,
             forward_rtol=FORWARD_RTOL,
             forward_restart=FORWARD_RESTART,
+            forward_max_restarts=FORWARD_MAX_RESTARTS,
             inner_observer=inner_observer,
             refresh_on_cycles=REFRESH_ON_CYCLES or None,
             inner_refresh=refresh.refresh_at if REFRESH_ON_CYCLES else None,
@@ -1247,7 +1258,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             retry_solver=relative_residual_gmres(1e-4, restart=40),
             on_checkpoint=on_checkpoint,
             on_retry=logger.on_retry,
-            retry_on_cycles=round(RETRY_ON_CYCLES * _RESTART_SCALE),
+            retry_on_cycles=RETRY_ON_CYCLES_SCALED,
             retry_on_alpha=RETRY_ON_ALPHA,
             retry_beta_factor=RETRY_BETA_FACTOR,
         )
