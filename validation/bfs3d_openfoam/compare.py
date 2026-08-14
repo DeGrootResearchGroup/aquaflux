@@ -477,8 +477,15 @@ LEADING_INVERSE = None
 if FLOW_INVERSE == "native":
     #: The arm measured best on single states: strength-of-connection aggregation with no singleton
     #: aggregates, five levels, a per-cell block velocity splitting and an undamped correction.
+    #:
+    #: Two settings are exposed to the environment because a march is a different operating point from
+    #: the state the rest were chosen on. ``BFS3D_FLOW_SWEEPS`` -- the sweep count was calibrated at zero
+    #: shift, the adjoint's operator, and every shift the march runs at makes the block easier, so the
+    #: march may not need four. ``BFS3D_FLOW_FROZEN_COARSENING`` -- at this strength threshold the
+    #: aggregation reads values, so each refresh re-coarsens and retraces the compiled cycle; frozen, the
+    #: partition is the one derived at the first build and reused for the whole march.
     _NATIVE_FLOW = dict(
-        sweeps=4,
+        sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", "4")),
         pressure_sweeps=2,
         strength_threshold=0.25,
         avoid_singletons=True,
@@ -487,6 +494,7 @@ if FLOW_INVERSE == "native":
         max_coarse=500,
         block_splitting=True,
         omega=1.0,
+        frozen_coarsening=os.environ.get("BFS3D_FLOW_FROZEN_COARSENING", "") not in ("", "0"),
     )
 
     def _native_flow_inverse(block, n_fields):
@@ -1052,7 +1060,10 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         # each happened to die on. One of them had quietly reproduced the reference trajectory for four
         # steps and that went unnoticed. A configuration line is worth nothing if it omits the variable
         # under test.
-        ("flow inverse", FLOW_INVERSE),
+        (
+            "flow inverse",
+            FLOW_INVERSE if LEADING_INVERSE is None else f"{FLOW_INVERSE} {_NATIVE_FLOW}",
+        ),
         ("turbulence inverse", TURBULENCE_INVERSE),
         # ...and, when a `trailing_inverse` is supplied, it REPLACES the PETSc V-cycle wholesale, so the
         # two smoother settings below are never read. Marking them is the same rule as the note above:

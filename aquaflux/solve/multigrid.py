@@ -575,13 +575,20 @@ class _SparseLevel(eqx.Module):
     **The level is split into a static index structure and dynamic values (binding).** Only ``n`` and
     ``n_coarse`` are static: they size the sparse matvec's output (:func:`_coo_apply`'s ``n_out``), so
     they must be concrete. Everything else — including ``lam_max``, which is pure arithmetic in the
-    smoothers — rides as a **traced** leaf. That split is what makes a hierarchy *refreshable*: because
-    the coarsening is a pure function of the graph (see :func:`_aggregate`, which reads only the
-    sparsity pattern), re-deriving a hierarchy at a new operator on the same mesh yields the identical
-    structure and changes only these values, so a refreshed hierarchy passed as a **jit argument** has
-    unchanged static metadata and array shapes — a compilation-cache hit rather than a rebuild-and-
-    recompile. Keeping ``lam_max`` a Python ``float`` would defeat exactly that (a changed static field
-    is a changed cache key), which is why it is stored as a 0-d array.
+    smoothers — rides as a **traced** leaf. That split is what makes a hierarchy *refreshable*:
+    re-deriving one at a new operator on the same mesh can yield the identical structure and change only
+    these values, so the hierarchy passed as a **jit argument** is a compilation-cache hit rather than a
+    rebuild-and-recompile. Keeping ``lam_max`` a Python ``float`` would defeat exactly that (a changed
+    static field is a changed cache key), which is why it is stored as a 0-d array.
+
+    **Whether a rebuild actually preserves the structure depends on the aggregation, and at a nonzero
+    strength threshold it does NOT.** At ``strength_threshold = 0`` the coarsening reads only the
+    sparsity pattern (:func:`_aggregate`), so a rebuild on a fixed mesh reproduces the aggregates
+    exactly. Above zero it reads ``|A_ij|`` (:func:`_aggregation_edges`) and the partition moves as the
+    operator develops — measured on a coupled flow block, level sizes wander by 10–20 % across a march's
+    refreshes and every move retraces the compiled cycle. :meth:`SmoothedHierarchy.refit` is the way to
+    keep the structure fixed in that case: it reuses this level's prolongation and re-derives only the
+    values.
     """
 
     n: int = eqx.field(static=True)  # cells at this level (sizes the matvec output)
@@ -644,6 +651,103 @@ class SmoothedHierarchy(eqx.Module):
         return self.equilibration * _fixed_cycle_solve(
             self.levels, self.equilibration * b, cycles, ops
         )
+
+    def refit(self, a: sp.csr_matrix) -> SmoothedHierarchy:
+        """Re-derive every level's operator at a new ``a``, reusing **this** hierarchy's prolongations.
+
+        A plain rebuild re-runs the aggregation, which reproduces the same partition only when the
+        coarsening reads the sparsity pattern alone — false at a nonzero ``strength_threshold``, where
+        the partition follows ``|A_ij|`` and moves as the operator develops. Refitting holds the
+        coarsening fixed and recomputes only what depends on values: each level's Galerkin operator
+        ``Pᵀ A P``, its diagonal (or per-cell block inverse), its spectral estimate, and the coarsest
+        level's dense inverse. Array shapes and static metadata are therefore unchanged by construction,
+        so a refitted hierarchy passed as a jit argument is a compilation-cache hit.
+
+        **What is frozen is the interpolation, which is more than the aggregation when the prolongator
+        was smoothed.** With ``prolongation_smoothing="none"`` the prolongation is the aggregates'
+        piecewise-constant indicator and holds no operator values, so freezing it *is* freezing the
+        coarsening exactly. With either smoothed prolongator it also carries a relaxation built from the
+        old operator, and refitting keeps that too.
+
+        An equilibrated hierarchy re-derives its scale from ``a``, as a rebuild would; the prolongations
+        it reuses were shaped by the previous operator's scale.
+
+        Parameters
+        ----------
+        a : scipy.sparse matrix
+            The new fine operator, of the shape this hierarchy was built at.
+
+        Returns
+        -------
+        SmoothedHierarchy
+            A new hierarchy over ``a`` with this one's coarsening.
+
+        Raises
+        ------
+        ValueError
+            If ``a``'s shape differs from the finest level's, or a level's diagonal is not usable.
+        """
+        finest = self.levels[0].n
+        if a.shape != (finest, finest):
+            raise ValueError(
+                f"cannot refit a {finest}-dof hierarchy onto a {a.shape[0]}-dof operator."
+            )
+        a = a.tocsr()
+        scale: np.ndarray | None = None
+        if self.equilibration is not None:
+            a, scale = symmetrically_equilibrate(a)
+        levels: list[_SparseLevel] = []
+        for depth, level in enumerate(self.levels):
+            context = f"SmoothedHierarchy.refit (level {depth})"
+            d_inv = _diagonal_inverse_operator(a, level.block_size, context)
+            lam = _spectral_radius(d_inv @ a)
+            if level.coarse_inv is None:
+                prolongation = sp.coo_matrix(
+                    (
+                        np.asarray(level.p_val),
+                        (np.asarray(level.p_frow), np.asarray(level.p_ccol)),
+                    ),
+                    shape=(level.n, level.n_coarse),
+                )
+                levels.append(
+                    _sparse_level(a, lam, None, prolongation, level.n_coarse, level.block_size)
+                )
+                csr = prolongation.tocsr()
+                a = (csr.T @ a @ csr).tocsr()
+            else:
+                levels.append(
+                    _sparse_level(a, lam, np.linalg.pinv(a.toarray()), None, 0, level.block_size)
+                )
+        return SmoothedHierarchy(
+            tuple(levels), None if scale is None else jnp.asarray(scale, dtype=jnp.float64)
+        )
+
+
+def _diagonal_inverse_operator(a: sp.csr_matrix, block_size: int, context: str) -> sp.spmatrix:
+    """``D⁻¹`` for a level: the reciprocal scalar diagonal, or each cell's inverted dense block.
+
+    A nodal level inverts cell blocks rather than the scalar diagonal, so the scalar-positivity
+    precondition does not apply to it — :func:`_cell_block_inverse` enforces the weaker and correct one
+    (every block invertible) when it builds them.
+
+    Parameters
+    ----------
+    a : scipy.sparse matrix
+        The level operator.
+    block_size : int
+        Degrees of freedom per cell; ``1`` selects the scalar path.
+    context : str
+        Where the failure happened, for the diagnostic a bad diagonal raises.
+
+    Returns
+    -------
+    scipy.sparse matrix
+        An operator applying ``D⁻¹``.
+    """
+    if block_size == 1:
+        _require_positive_diagonal(a.diagonal(), context)
+        return sp.diags(1.0 / a.diagonal())
+    return _block_diagonal_inverse_operator(a, block_size, context)
 
 
 def _sparse_level(
@@ -813,18 +917,9 @@ def _build_aggregation_hierarchy(
     levels: list[_SparseLevel] = []
     while True:
         a_agg = aggregation_operator(a)
-        # A nodal level inverts cell blocks, not the scalar diagonal, so the scalar-positivity
-        # precondition does not apply to it -- `_cell_block_inverse` enforces the weaker and correct
-        # one (every block invertible) when it builds them.
-        if block_size == 1:
-            _require_positive_diagonal(
-                a.diagonal(), f"_build_aggregation_hierarchy (level {len(levels)})"
-            )
-            d_inv = sp.diags(1.0 / a.diagonal())
-        else:
-            d_inv = _block_diagonal_inverse_operator(
-                a, block_size, f"_build_aggregation_hierarchy (level {len(levels)})"
-            )
+        d_inv = _diagonal_inverse_operator(
+            a, block_size, f"_build_aggregation_hierarchy (level {len(levels)})"
+        )
         lam_smooth = _spectral_radius(d_inv @ a_agg)  # prolongation-smoothing damping
         lam_store = (
             lam_smooth if a_agg is a else _spectral_radius(d_inv @ a)

@@ -1072,6 +1072,12 @@ class NativeSimpleInverse:
         # aggregation multigrid depth-independent.
         prolongation_smoothing: str = "none",
         equilibrate: bool = False,
+        # Refresh by refitting values onto the coarsening derived at the first build, rather than
+        # coarsening again. At a nonzero strength threshold the aggregation reads |A_ij|, so a rebuild
+        # at a developed state returns a DIFFERENT partition and the jitted cycle retraces; frozen, the
+        # shapes cannot move. What it trades is coarse-space quality: the partition then describes the
+        # operator at the state it was first built at, for the whole march.
+        frozen_coarsening: bool = False,
     ) -> None:
         matrix = sp.csr_matrix(block)
         self._n_dofs = matrix.shape[0]
@@ -1099,59 +1105,57 @@ class NativeSimpleInverse:
             pre_smooth=pre_smooth,
             prolongation_smoothing=prolongation_smoothing,
             equilibrate=equilibrate,
+            frozen_coarsening=frozen_coarsening,
         )
         self._rebuild(matrix)
 
     def _rebuild(self, matrix: sp.csr_matrix) -> None:
-        """Derive the hierarchy, the per-level SIMPLE pieces, and the jitted cycle from an operator.
+        """Coarsen ``matrix`` from scratch, then derive the smoother and the jitted cycle over it."""
+        settings = self._settings
+        self._hierarchy = build_convection_hierarchy(
+            matrix,
+            block_size=settings["n_fields"],
+            max_coarse=settings["max_coarse"],
+            mis_aggregation=True,
+            # Depth and coarsening RATE are two halves of one choice. One aggressive level gives a
+            # roughly hundredfold jump in a single step, so one prolongation from a ~860-equation
+            # coarse space carries the whole error; more levels at a gentler rate ask less of each
+            # interpolation.
+            aggressive_levels=settings["aggressive"],
+            max_levels=settings["levels"],
+            # The coarsening RATE. Aggregating only along strong connections makes the aggregates
+            # smaller, landing a coarse grid between the squared graph's ~106x and plain aggregation's
+            # ~21x -- and the coarse grid size is the binding cost here, since the coarsest level is
+            # inverted DENSELY (cubic to build, quadratic to store), which is affordable at ~1000
+            # equations and is not at 4300 and above.
+            strength_threshold=settings["strength_threshold"],
+            orthonormal_prolongation=settings["orthonormal"],
+            avoid_singletons=settings["avoid_singletons"],
+            prolongation_smoothing=settings["prolongation_smoothing"],
+            equilibrate=settings["equilibrate"],
+        )
+        self._derive_cycle()
 
-        Shared by construction and by the mid-march refresh so the two cannot drift apart.
+    def _derive_cycle(self) -> None:
+        """Build the per-level SIMPLE pieces and the jitted V-cycle over the current hierarchy.
+
+        Split out of :meth:`_rebuild` because a refresh has two ways to reach the same place -- coarsen
+        again, or refit the values onto the coarsening already held -- and only the hierarchy differs
+        between them. Everything below reads ``self._hierarchy`` and is common to both.
         """
         settings = self._settings
-        n_fields = settings["n_fields"]
         cycles = settings["cycles"]
         sweeps = settings["sweeps"]
         pressure_sweeps = settings["pressure_sweeps"]
         pressure_omega = settings["pressure_omega"]
         omega = settings["omega"]
-        max_coarse = settings["max_coarse"]
         frobenius = settings["frobenius"]
         schur_frobenius = settings["schur_frobenius"]
-        levels = settings["levels"]
-        aggressive = settings["aggressive"]
         strength_threshold = settings["strength_threshold"]
-        orthonormal = settings["orthonormal"]
-        avoid_singletons = settings["avoid_singletons"]
         block_splitting = settings["block_splitting"]
         simplec = settings["simplec"]
         mu = settings["mu"]
         pre_smooth = settings["pre_smooth"]
-        prolongation_smoothing = settings["prolongation_smoothing"]
-        equilibrate = settings["equilibrate"]
-        self._hierarchy = build_convection_hierarchy(
-            matrix,
-            block_size=n_fields,
-            max_coarse=max_coarse,
-            mis_aggregation=True,
-            # Depth and coarsening RATE are two halves of one choice. One aggressive level gives a
-            # roughly hundredfold jump in a single step, so one prolongation from a ~860-equation
-            # coarse space carries the whole error; more levels at a gentler rate ask less of each
-            # interpolation. The recorded caution against depth here was derived for a damped-Jacobi
-            # smoother on a convection-dominated operator, whose coarse-of-coarse operators it could
-            # not damp -- that is not the smoother running now, so it is a reason to measure.
-            aggressive_levels=aggressive,
-            max_levels=levels,
-            # The coarsening RATE, which is the knob the depth sweep pointed at. Aggregating only along
-            # strong connections makes the aggregates smaller, so it lands a coarse grid between the
-            # squared graph's ~106x and plain aggregation's ~21x -- and the coarse grid size is the
-            # binding cost here, since the coarsest level is inverted DENSELY (O(n^3) to build,
-            # O(n^2) to store), which is affordable at ~1000 equations and is not at 4300 and above.
-            strength_threshold=strength_threshold,
-            orthonormal_prolongation=orthonormal,
-            avoid_singletons=avoid_singletons,
-            prolongation_smoothing=prolongation_smoothing,
-            equilibrate=equilibrate,
-        )
         # Keyed by level size: the V-cycle recursion is unrolled at trace time, so the smoother is
         # handed the concrete level object and can look its pieces up by a static attribute. The
         # coarsest level solves directly and needs none.
@@ -1256,14 +1260,14 @@ class NativeSimpleInverse:
         without it this preconditioner cannot be used in a march at all -- a single-state probe never
         reaches the code path.
 
-        **A straight rebuild, and whether that is structure-preserving depends on a setting.** The
-        sibling nodal inverse can rebuild freely because its aggregation reads only the sparsity
-        pattern, so every array keeps its shape and the jitted cycle stays a compilation-cache hit. That
-        argument does NOT hold at a nonzero strength threshold, where the aggregation reads ``|A_ij|``
-        and the coarsening can move as the flow develops. Rather than assume either way, the level sizes
-        are compared against the previous build and any change is reported: a march whose coarsening is
-        stable costs nothing, and one whose coarsening moves is paying a retrace that will show up in
-        the refresh timings with a reason attached.
+        **Whether a rebuild is structure-preserving depends on a setting.** The sibling nodal inverse
+        can rebuild freely because its aggregation reads only the sparsity pattern, so every array keeps
+        its shape and the jitted cycle stays a compilation-cache hit. That argument does NOT hold at a
+        nonzero strength threshold, where the aggregation reads ``|A_ij|`` and the coarsening moves as
+        the flow develops. Two answers are available and the setting chooses between them: coarsen again
+        and report any move (the level sizes are compared against the previous build, so a retrace shows
+        up in the refresh timings with a reason attached), or hold the coarsening and refit only the
+        values onto it (``frozen_coarsening``), which cannot move the shapes at all.
 
         Parameters
         ----------
@@ -1280,6 +1284,10 @@ class NativeSimpleInverse:
             raise ValueError(
                 f"cannot refactor a {self._n_dofs}-dof inverse onto a {matrix.shape[0]}-dof block."
             )
+        if self._settings["frozen_coarsening"]:
+            self._hierarchy = self._hierarchy.refit(matrix)
+            self._derive_cycle()
+            return
         before = tuple(level.n for level in self._hierarchy.levels)
         self._rebuild(matrix)
         after = tuple(level.n for level in self._hierarchy.levels)
@@ -1724,6 +1732,7 @@ _SPEC_TOKENS = (
     "-t10",
     "-t25",
     "-t50",
+    "-fc",
 )
 
 
@@ -1836,6 +1845,7 @@ def _leading_inverse(spec):
         omega = 1.0 if "-o10" in rest else 0.7
         simplec = "-simplec" in rest
         block_splitting = "-bs" in rest
+        frozen_coarsening = "-fc" in rest
         mu = 2 if "-W" in rest else 1
         pre_smooth = "-pre0" not in rest
         # `-p1` removes the explicit pressure relaxation. It exists to test whether Eq. (39) on the
@@ -1873,6 +1883,7 @@ def _leading_inverse(spec):
                 block_splitting=block_splitting,
                 simplec=simplec,
                 omega=omega,
+                frozen_coarsening=frozen_coarsening,
             )
 
         return build

@@ -1147,3 +1147,98 @@ def test_a_badly_scaled_block_is_not_mistaken_for_a_singular_one() -> None:
     assert np.allclose(
         inverses[1] @ block, np.eye(2), atol=1e-6
     )  # ...and inverting it is meaningful
+
+
+def test_refit_reproduces_a_rebuild_where_the_coarsening_is_value_independent() -> None:
+    """With an unsmoothed prolongator at ``strength_threshold=0``, a rebuild and a refit must agree.
+
+    Both halves of that condition are load-bearing, and together they are what makes a refit *exact*
+    rather than approximate. The coarsening then reads only the sparsity pattern, so a rebuild at a new
+    operator lands on the aggregates a refit reuses; and the tentative prolongation is their 0/1
+    indicator, which holds no operator values, so freezing it freezes nothing but the partition.
+    Everything downstream is then a deterministic function of the new operator and that partition, so
+    the two paths must land in the same place.
+    """
+    plain = dict(prolongation_smoothing="none")
+    n = 600
+    cold = build_convection_hierarchy(_chain_operator(n, 0.01, np.ones(n - 1)), **plain)
+    developed_operator = _chain_operator(n, 50.0, np.linspace(1.0, 1000.0, n - 1))
+
+    refitted = cold.refit(developed_operator)
+    rebuilt = build_convection_hierarchy(developed_operator, **plain)
+
+    assert len(refitted.levels) == len(rebuilt.levels)
+    for got, want in zip(refitted.levels, rebuilt.levels, strict=True):
+        assert (got.n, got.n_coarse) == (want.n, want.n_coarse)
+        assert np.allclose(np.asarray(got.operator.data), np.asarray(want.operator.data))
+        assert np.allclose(np.asarray(got.diagonal), np.asarray(want.diagonal))
+        assert np.allclose(float(got.lam_max), float(want.lam_max))
+    # ...and the refit really moved the values, so the agreement above is not two copies of `cold`.
+    assert not np.allclose(
+        np.asarray(refitted.levels[0].operator.data), np.asarray(cold.levels[0].operator.data)
+    )
+
+
+def test_refit_keeps_a_smoothed_prolongator_a_rebuild_would_re_derive() -> None:
+    """A smoothed prolongator reads operator values, so a refit freezes MORE than the partition.
+
+    ``P <- P_tent - w D^-1 A P_tent`` carries a relaxation built from the operator it was derived at, so
+    holding it fixed holds that relaxation too and the coarse operator then differs from a rebuild's.
+    That is a real limitation of the frozen path rather than a defect, and it is pinned here so nobody
+    reads the exact agreement above as holding for every configuration.
+    """
+    n = 600
+    smoothed = dict(prolongation_smoothing="symmetric-part")
+    cold = build_convection_hierarchy(_chain_operator(n, 0.01, np.ones(n - 1)), **smoothed)
+    developed_operator = _chain_operator(n, 50.0, np.linspace(1.0, 1000.0, n - 1))
+
+    refitted = cold.refit(developed_operator)
+    rebuilt = build_convection_hierarchy(developed_operator, **smoothed)
+
+    coarsest = -1
+    assert not np.allclose(
+        np.asarray(refitted.levels[coarsest].operator.data),
+        np.asarray(rebuilt.levels[coarsest].operator.data),
+    )
+
+
+def test_refit_holds_a_partition_that_a_rebuild_would_move() -> None:
+    """With a strength threshold live, a rebuild re-partitions and a refit does not — the whole point.
+
+    The aggregation then reads ``|A_ij|``, so an operator whose anisotropy has rotated (strong direction
+    x rather than y, on the identical graph) aggregates differently. A rebuild follows it; a refit keeps
+    the partition and moves only the values.
+
+    **The assertion is on aggregate MEMBERSHIP, not on level sizes, because sizes do not discriminate
+    here:** on a square grid, aggregating along either direction gives the identical *count*. Two
+    hierarchies can agree in every level size and still partition the mesh completely differently, which
+    is exactly why a march reporting stable level sizes is not reporting a stable coarsening.
+    """
+    threshold, coarse = 0.25, 16
+    plain = dict(prolongation_smoothing="none", max_coarse=coarse, strength_threshold=threshold)
+    strong_y = _anisotropic_poisson(24, 24, aspect_ratio=100.0)
+    strong_x = _anisotropic_poisson(24, 24, aspect_ratio=0.01)
+    built = build_convection_hierarchy(strong_y, **plain)
+
+    rebuilt = build_convection_hierarchy(strong_x, **plain)
+    refitted = built.refit(strong_x)
+
+    def membership(hierarchy):
+        """Which coarse unknown each fine degree of freedom feeds, on the finest level."""
+        level = hierarchy.levels[0]
+        order = np.argsort(np.asarray(level.p_frow))
+        return np.asarray(level.p_ccol)[order]
+
+    assert np.array_equal(membership(refitted), membership(built))
+    assert not np.array_equal(membership(rebuilt), membership(built)), (
+        "the rotated operator did not re-partition, so this fixture cannot show the difference"
+    )
+    # The refit is over the NEW operator, not a copy of the old hierarchy.
+    assert np.allclose(np.asarray(refitted.levels[0].operator.data), strong_x.tocsr().data, atol=0)
+
+
+def test_refit_rejects_an_operator_of_the_wrong_size() -> None:
+    """A mismatched operator raises rather than returning a hierarchy that silently coarsens nothing."""
+    hierarchy = build_convection_hierarchy(_chain_operator(200, 0.01, np.ones(199)))
+    with pytest.raises(ValueError, match="cannot refit"):
+        hierarchy.refit(_chain_operator(100, 0.01, np.ones(99)))
