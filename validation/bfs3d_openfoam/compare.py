@@ -82,6 +82,7 @@ from aquaflux.solve import (
     StateCheckpointer,
     combine_observers,
     native_nodal_inverse,
+    native_saddle_inverse,
     relative_residual_gmres,
 )
 from aquaflux.turbulence import (
@@ -470,6 +471,16 @@ TRAILING_INVERSE = (
 #: threshold, and 3 is calibrated to an incomplete-LU that runs two cycles per solve; a preconditioner
 #: that healthily takes six or seven would trip it on essentially every step and the march would measure
 #: the trigger rather than the preconditioner.
+def _flush_print(message: str) -> None:
+    """Send a preconditioner's build record to the run log, flushed so it lands in order.
+
+    The library object is silent by default -- it must not write to stdout on its own -- so the case
+    supplies the sink. Flushing matters because these lines interleave with a march whose value is that
+    it can be read while it runs.
+    """
+    print(message, flush=True)
+
+
 FLOW_INVERSE = os.environ.get("BFS3D_FLOW_INVERSE", "petsc")
 if FLOW_INVERSE not in ("petsc", "native"):
     raise SystemExit(f"BFS3D_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'native']")
@@ -502,19 +513,7 @@ if FLOW_INVERSE == "native":
         ),
     )
 
-    def _native_flow_inverse(block, n_fields):
-        # Imported HERE, not at module scope: the probe imports this module for its bundle constants, so
-        # a top-level import the other way is a cycle. Deferring it to first use breaks the cycle without
-        # either module having to know about the other's import order.
-        import sys as _sys
-        from pathlib import Path as _Path
-
-        _sys.path.insert(0, str(_Path(__file__).parent))
-        from field_split_probe import NativeSimpleInverse
-
-        return NativeSimpleInverse(block, n_fields, **_NATIVE_FLOW)
-
-    LEADING_INVERSE = _native_flow_inverse
+    LEADING_INVERSE = native_saddle_inverse(**_NATIVE_FLOW, report=_flush_print)
 
 
 if TRAILING_INVERSE is not None and DUMP_TRAILING_BLOCK:
