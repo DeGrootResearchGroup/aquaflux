@@ -3512,6 +3512,31 @@ this supersedes was itself never measured. Do not quote a march number until one
 captured as a constant, which is correct here precisely because it is frozen" — contradicted the code
 four lines below it and is corrected in the same change.
 
+**✅ AND THE TWO NATIVE INVERSES NOW SHARE ONE BODY — `solve/native_inverse.NativeHierarchyInverse`
+(2026-08-14).** Fixing the flow arm alone would have left the package with *two different correct*
+answers to one problem: a module-level `filter_jit` taking arguments here, a per-instance `jax.jit`
+taking the hierarchy as an argument there. The base owns the hierarchy, the two-pass shape-ladder
+discovery, the rebuild-or-refit refresh, the lazy transpose, and the host boundary; a subclass supplies
+**only** its smoother, through four hooks — `build_settings()`, `smoother()`, `cycle()`,
+`derive_extras(hierarchy)`. `NodalNativeInverse` passes `extras=None` (it reads the levels alone);
+`NativeSimpleInverse` passes its per-level SIMPLE pieces.
+
+**The consequence that motivated it: the trailing block was hard-capped at two levels with an isotropic
+coarsening, and not by decision — the knobs had been added on the other side of a duplicated seam.** It
+now takes `strength_threshold`, `max_levels`, `frozen_coarsening` and `shape_headroom`, so a trailing
+coarsening sweep is runnable; verified to build 4 levels where it previously built 2. ⚠️ **A nonzero
+threshold there still forfeits the refresh cache-hit** unless paired with `frozen_coarsening` or
+`shape_headroom` — the binding decision keeping the k/ω path at θ=0 in a *march* is unchanged, and the
+knob is safe for a single-state sweep precisely because a sweep never refreshes.
+
+Both classes are **bit-identical** across the refactor at their own defaults — forward, transpose and
+post-refresh, 0.000e+00 — the nodal one checked against `main` and the saddle one against the
+pre-refactor commit. `NodalNativeInverse` is the shipped `bfs3d` trailing default, so that check is the
+load-bearing one. Also renamed for symmetry, since the two now name one concept one way:
+`NativeSimpleInverse`'s `levels`/`aggressive` are `max_levels`/`aggressive_levels`.
+⚠️ `PerFieldNativeInverse` was deliberately **not** ported: it is superseded by the nodal inverse, is
+un-jitted, and is reachable only from its own tests — it is a deletion candidate, not a third subclass.
+
 ### The peel and the cap ON A MARCH — the cycles land, the seconds mostly do not (2026-08-14)
 
 Both changes marched at 2 sweeps against the 2-sweep control, native flow block, everything else equal.
@@ -3944,10 +3969,11 @@ Rhie–Chow damping. And on the true Jacobian slice of the `[k, omega]` block on
 cycles** against an absolute floor of 1; removing its coarse grid entirely costs 14 %, quartering its
 smoother work costs 1.8 % of cycles, and a PETSc-side threshold on this mesh already returned the same
 cycle count. The ceiling is 2 → 1 cycles on ~11 % of the nonzeros, against a refresh path the
-value-dependence would cost. ⚠️ Note `NodalNativeInverse` exposes neither `strength_threshold` nor
-`max_levels`, so that path is hard-capped at 2 levels (`_CONVECTION_LEVELS`) with a dense inverse and no
-size guard — testing a threshold there at 2 levels would reproduce the flow block's original failure and
-refute the transfer for the wrong reason.
+value-dependence would cost. ⚠️ `NodalNativeInverse` **used to expose** neither `strength_threshold` nor
+`max_levels`, so that path was hard-capped at 2 levels and a threshold could not be tested there at all —
+at 2 levels it would have reproduced the flow block's original failure and refuted the transfer for the
+wrong reason. **Both knobs now reach it** (see the shared-base entry below), so the sweep is runnable;
+the ceiling argument above is unaffected and is still the reason not to spend a run on it.
 
 **Defects found here, and what was done about each.**
 - **FIXED — `_reattach_to_adjacent_root` could CREATE singletons.** It never steals a root but does

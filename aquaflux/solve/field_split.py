@@ -35,7 +35,7 @@ Jacobian and the coupled adjoint are untouched; only the preconditioner is split
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
     from .sparse_jacobian import ProbeGather
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 import dataclasses
 from collections.abc import Callable
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -50,7 +51,8 @@ import scipy.sparse as sp
 
 from .amg_preconditioner import MonolithicAmgPreconditioner, build_amg_vcycle
 from .ilut_preconditioner import equilibrate_cell_major
-from .multigrid import build_convection_hierarchy, convection_multigrid_solve
+from .multigrid import SmoothedHierarchy, build_convection_hierarchy, convection_multigrid_solve
+from .native_inverse import NativeHierarchyInverse
 from .refresh_timing import PhaseTimer
 
 __all__ = [
@@ -748,7 +750,45 @@ class PerFieldNativeInverse:
         """Nothing to release — the hierarchies are plain arrays, not a host solver's handles."""
 
 
-class NodalNativeInverse:
+class _NodalSmoother(NamedTuple):
+    """The nodal cycle's counts and relaxations -- everything about it that must be concrete.
+
+    A plain tuple of Python numbers, so it is hashable and compares by value: it lands wholly on the
+    static side of :func:`_native_nodal_cycle` and two builds at the same settings share one compiled
+    cycle.
+    """
+
+    cycles: int
+    sweeps: int
+    omega: float
+    spectral_damping: bool
+
+
+@eqx.filter_jit
+def _native_nodal_cycle(
+    hierarchy: SmoothedHierarchy,
+    extras: None,
+    residual: jnp.ndarray,
+    smoother: _NodalSmoother,
+) -> jnp.ndarray:
+    """``smoother.cycles`` V-cycles over ``hierarchy``, relaxed by a damped or block Jacobi sweep.
+
+    Module-level and taking the hierarchy as an ARGUMENT, so a refresh at unchanged shapes swaps its
+    values into the SAME compiled cycle. ``extras`` is the smoother-specific record the shared
+    :class:`~aquaflux.solve.native_inverse.NativeHierarchyInverse` passes through; this family reads the
+    levels alone, so it is always ``None`` and is accepted only to keep the two cycles one shape.
+    """
+    return convection_multigrid_solve(
+        hierarchy,
+        residual,
+        cycles=smoother.cycles,
+        sweeps=smoother.sweeps,
+        omega=smoother.omega,
+        spectral_damping=smoother.spectral_damping,
+    )
+
+
+class NodalNativeInverse(NativeHierarchyInverse):
     """A block inverse from ONE JAX-native hierarchy over the whole group, coarsening cells.
 
     The sibling of :class:`PerFieldNativeInverse`, and what supersedes it wherever it works. That class
@@ -766,15 +806,16 @@ class NodalNativeInverse:
 
     Parameters
     ----------
-    block : scipy.sparse matrix
-        The group's diagonal block, **field-major**: ``(cell i, field f)`` at ``f * n_cells + i``.
-    n_fields : int
-        Fields per cell, passed to the aggregation as the block size.
+    block, n_fields, strength_threshold, max_levels, max_coarse, frozen_coarsening, shape_headroom, report
+        See :class:`~aquaflux.solve.native_inverse.NativeHierarchyInverse`, which owns the hierarchy,
+        the in-place refresh and the host boundary. Only the smoother below belongs to this class.
     cycles : int
         V-cycles per application. Fixed, so ``b -> x`` stays a linear map — required by the
         non-flexible outer Krylov and by the transposed adjoint solve.
     sweeps : int
         Smoother sweeps per level.
+    equilibrate : bool
+        Coarsen the operator rescaled to a unit-magnitude diagonal; see the note below.
 
     Notes
     -----
@@ -815,88 +856,38 @@ class NodalNativeInverse:
         prolongation_smoothing: str = "none",
         spectral_damping: bool = False,
         equilibrate: bool = True,
+        **hierarchy_settings,
     ) -> None:
-        matrix = sp.csr_matrix(block)
-        self._n_dofs = matrix.shape[0]
-        self._cycles = cycles
-        # Kept so a refresh re-derives the hierarchy at exactly the settings it was built at, rather
-        # than at whatever the builder's defaults happen to be.
-        self._build_settings = {
-            "block_size": n_fields,
-            "max_coarse": max_coarse,
-            "mis_aggregation": True,
-            "aggressive_levels": aggressive_levels,
-            "prolongation_smoothing": prolongation_smoothing,
-            "equilibrate": equilibrate,
-        }
-        self._hierarchy = build_convection_hierarchy(matrix, **self._build_settings)
-        # JIT, because this is applied once per Krylov matrix-vector product and an un-jitted V-cycle
-        # dispatches every operation in it separately -- pure overhead that has nothing to do with the
-        # method. The hierarchy is NOT captured; see the note on the argument below, which this comment
-        # used to contradict.
-        cycle = jax.jit(
-            lambda hierarchy, r: convection_multigrid_solve(
-                hierarchy,
-                r,
-                cycles=self._cycles,
-                sweeps=sweeps,
-                omega=1.0 if not spectral_damping else 0.8,
-                spectral_damping=spectral_damping,
-            )
+        self._aggressive_levels = aggressive_levels
+        self._prolongation_smoothing = prolongation_smoothing
+        self._equilibrate = equilibrate
+        # The cycle's static half, built once: it never changes over this inverse's life, so a refresh
+        # cannot move the compilation key through it.
+        self._smoother = _NodalSmoother(
+            cycles=cycles,
+            sweeps=sweeps,
+            # `omega` means different things either side of `spectral_damping`: a damping relative to
+            # the level's `lambda_max`, or the absolute relaxation itself. Undamped is the measured
+            # default and is why the pair travels together.
+            omega=1.0 if not spectral_damping else 0.8,
+            spectral_damping=spectral_damping,
         )
-        # The hierarchy rides as a jit ARGUMENT, not a captured constant, so a refresh swaps its values
-        # into the SAME compiled cycle: only the level sizes are static, and the coarsening is a pure
-        # function of the (fixed) sparsity pattern, so a re-derived hierarchy has identical metadata.
-        # Captured, every refresh would retrace -- which on this operator costs more than the refresh.
-        self._solve = lambda r: cycle(self._hierarchy, r)
-        self._transpose = lambda r: jax.linear_transpose(
-            lambda v: cycle(self._hierarchy, v), jnp.zeros(self._n_dofs, dtype=jnp.float64)
-        )(r)
+        super().__init__(block, n_fields, max_coarse=max_coarse, **hierarchy_settings)
 
-    @property
-    def n_dofs(self) -> int:
-        """Degrees of freedom in this block."""
-        return self._n_dofs
+    def build_settings(self) -> dict:
+        """This family coarsens by a randomized maximal independent set, on the settings above."""
+        return {
+            "mis_aggregation": True,
+            "aggressive_levels": self._aggressive_levels,
+            "prolongation_smoothing": self._prolongation_smoothing,
+            "equilibrate": self._equilibrate,
+        }
 
-    def refactor_block(self, block: sp.spmatrix) -> None:
-        """Re-fit to a new operator on the same graph, in place, without recompiling the apply.
+    def smoother(self) -> _NodalSmoother:
+        return self._smoother
 
-        The march refreshes its frozen preconditioner as the flow develops, so an inverse that cannot
-        do this cannot be used in one. Re-deriving the hierarchy is cheap and, more importantly,
-        **structure-preserving**: the aggregation reads only the sparsity pattern, which is fixed for a
-        fixed stencil, so every array keeps its shape and the jitted V-cycle stays a compilation-cache
-        hit rather than retracing on each refresh.
-
-        Takes the **raw field-major** block rather than the equilibrated cell-major form a host solver
-        would want, because the nodal coarsening recovers each cell as ``index % n_cells`` and that
-        only holds field-major.
-
-        Parameters
-        ----------
-        block : scipy.sparse matrix
-            The group's new diagonal block, field-major, of the shape this was built at.
-
-        Raises
-        ------
-        ValueError
-            If the new block's shape differs from the built one — silently re-fitting to a different
-            operator would give a preconditioner for a system nothing is solving.
-        """
-        matrix = sp.csr_matrix(block)
-        if matrix.shape != (self._n_dofs, self._n_dofs):
-            raise ValueError(
-                f"cannot refactor a {self._n_dofs}-dof inverse onto a {matrix.shape[0]}-dof block."
-            )
-        self._hierarchy = build_convection_hierarchy(matrix, **self._build_settings)
-
-    def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
-        """Approximate ``A^-1 r`` (or ``A^-T r``) with one hierarchy over the whole group."""
-        vector = jnp.asarray(residual, dtype=jnp.float64)
-        out = self._transpose(vector)[0] if transpose else self._solve(vector)
-        return np.asarray(out, dtype=np.float64)
-
-    def destroy(self) -> None:
-        """Nothing to release — plain arrays, not a host solver's handles."""
+    def cycle(self):
+        return _native_nodal_cycle
 
 
 def native_nodal_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:

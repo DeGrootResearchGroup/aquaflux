@@ -82,6 +82,7 @@ from .field_split import (
     native_nodal_inverse,
     native_per_field_inverse,
 )
+from .native_inverse import NativeHierarchyInverse
 from .refresh_timing import PhaseTimer, RefreshTiming
 from .ilut_preconditioner import MonolithicIlutPreconditioner
 from .lu_preconditioner import MonolithicLuPreconditioner
@@ -186,6 +187,7 @@ __all__ = [
     "MonolithicIlutPreconditioner",
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
+    "NativeHierarchyInverse",
     "NativeSimpleInverse",
     "NodalNativeInverse",
     "PerFieldNativeInverse",

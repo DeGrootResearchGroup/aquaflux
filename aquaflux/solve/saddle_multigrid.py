@@ -42,8 +42,8 @@ from .multigrid import (
     _CsrOperator,
     _operator_matvec,
     _smoothed_ops,
-    build_convection_hierarchy,
 )
+from .native_inverse import NativeHierarchyInverse
 
 __all__ = ["NativeSimpleInverse", "block_approximate_inverse", "native_saddle_inverse"]
 
@@ -449,7 +449,7 @@ def _diagonal_approximate_inverse(
     return diagonal / squared
 
 
-class NativeSimpleInverse:
+class NativeSimpleInverse(NativeHierarchyInverse):
     """A JAX-native multigrid over the flow saddle whose LEVEL SMOOTHER is a SIMPLE relaxation.
 
     This is the arm every earlier one was not. Those replaced the flow block's preconditioner outright
@@ -468,10 +468,9 @@ class NativeSimpleInverse:
 
     Parameters
     ----------
-    block : scipy.sparse matrix
-        The flow block, field-major, ``[u, v, w]`` then ``p``.
-    n_fields : int
-        Fields per cell, the aggregation's block size.
+    block, n_fields, strength_threshold, max_levels, max_coarse, frozen_coarsening, shape_headroom, report
+        See :class:`~aquaflux.solve.native_inverse.NativeHierarchyInverse`, which owns the hierarchy,
+        the in-place refresh and the host boundary. Only the smoother below belongs to this class.
     cycles, sweeps : int
         V-cycles per application, and SIMPLE sweeps per level. Both fixed, so ``b -> x`` stays linear.
     pressure_sweeps, pressure_omega : int, float
@@ -495,25 +494,22 @@ class NativeSimpleInverse:
         # constant cannot simply be dropped, it can only be replaced.
         pressure_omega: float = 1.0,
         omega: float = 0.7,
-        max_coarse: int = 2000,
         frobenius: bool = True,
         schur_frobenius: bool = True,
-        levels: int = 2,
-        aggressive: int = 1,
-        strength_threshold: float = 0.0,
+        aggressive_levels: int = 1,
         orthonormal: bool = False,
         avoid_singletons: bool = False,
-        # A W-cycle visits each coarse level twice per visit of its parent. It buys convergence with
-        # COARSE work, where every other lever here buys it with fine-level relaxation -- and the fine
-        # level is ~60% of the smoothing cost, so the two are priced very differently.
         # Replace the velocity predictor's scalar diagonal with a per-cell block inverse. The splitting
-        # error is the larger half of what governs this preconditioner's eigenvalue clustering at the fine
-        # level, and a diagonal cannot represent a cell's own velocity-component coupling at all.
+        # error is the larger half of what governs this preconditioner's eigenvalue clustering at the
+        # fine level, and a diagonal cannot represent a cell's own velocity-component coupling at all.
         block_splitting: bool = False,
         # SIMPLEC's velocity coefficient: divide by the row sum rather than the diagonal. The appeal as
         # a smoother is that the splitting error then annihilates constants exactly, so it does not
         # fight the coarse grid over the smoothest mode.
         simplec: bool = False,
+        # A W-cycle visits each coarse level twice per visit of its parent. It buys convergence with
+        # COARSE work, where every other lever here buys it with fine-level relaxation -- and the fine
+        # level is ~60% of the smoothing cost, so the two are priced very differently.
         mu: int = 1,
         # Dropping the pre-relaxation also drops the residual matvec that follows it, which at two inner
         # pressure sweeps is the single largest term in a sweep.
@@ -525,53 +521,17 @@ class NativeSimpleInverse:
         # aggregation multigrid depth-independent.
         prolongation_smoothing: str = "none",
         equilibrate: bool = False,
-        # Refresh by refitting values onto the coarsening derived at the first build, rather than
-        # coarsening again. At a nonzero strength threshold the aggregation reads |A_ij|, so a rebuild
-        # at a developed state returns a DIFFERENT partition and the jitted cycle retraces; frozen, the
-        # shapes cannot move. What it trades is coarse-space quality: the partition then describes the
-        # operator at the state it was first built at, for the whole march.
-        frozen_coarsening: bool = False,
-        # Coarsen into a FIXED ladder of array sizes, discovered on the first build and padded by this
-        # factor. Unlike freezing, the partition is still re-derived from the current operator at every
-        # refresh -- only the sizes it is poured into are held -- so the coarse space tracks the flow
-        # while the compiled cycle stays a cache hit. `None` disables it and is byte-identical.
-        shape_headroom: float | None = None,
-        # Where the build record goes. The hierarchy's level sizes, aggregate statistics and parsed
-        # smoother settings are worth having in a run log -- a spec-token collision once made an arm run
-        # forty sweeps while every other line of output looked correct -- but a library object must not
-        # write to stdout on its own. `None` is silent; a case passes `print`.
-        report: Callable[[str], None] | None = None,
+        **hierarchy_settings,
     ) -> None:
-        self._report = report if report is not None else lambda _message: None
-        matrix = sp.csr_matrix(block)
-        self._n_dofs = matrix.shape[0]
-        # Held so a refresh re-derives at exactly the settings this was built at, rather than at
-        # whatever the builder defaults happen to be -- the same reason the sibling nodal inverse
-        # keeps its own build settings.
-        self._settings = dict(
-            n_fields=n_fields,
-            cycles=cycles,
-            sweeps=sweeps,
-            pressure_sweeps=pressure_sweeps,
-            pressure_omega=pressure_omega,
-            omega=omega,
-            max_coarse=max_coarse,
-            frobenius=frobenius,
-            schur_frobenius=schur_frobenius,
-            levels=levels,
-            aggressive=aggressive,
-            strength_threshold=strength_threshold,
-            orthonormal=orthonormal,
-            avoid_singletons=avoid_singletons,
-            block_splitting=block_splitting,
-            simplec=simplec,
-            mu=mu,
-            pre_smooth=pre_smooth,
-            prolongation_smoothing=prolongation_smoothing,
-            equilibrate=equilibrate,
-            frozen_coarsening=frozen_coarsening,
-            shape_headroom=shape_headroom,
-        )
+        self._frobenius = frobenius
+        self._schur_frobenius = schur_frobenius
+        self._block_splitting = block_splitting
+        self._simplec = simplec
+        self._aggressive_levels = aggressive_levels
+        self._orthonormal = orthonormal
+        self._avoid_singletons = avoid_singletons
+        self._prolongation_smoothing = prolongation_smoothing
+        self._equilibrate = equilibrate
         # The cycle's static half, built once: it never changes over this inverse's life, so a refresh
         # cannot move the compilation key through it.
         self._smoother = _SmootherSettings(
@@ -583,91 +543,48 @@ class NativeSimpleInverse:
             mu=mu,
             pre_smooth=pre_smooth,
         )
-        # Discovered on the first build and held for the life of the inverse, so every later rebuild
-        # coarsens into the same ladder. `None` until then, and forever if no headroom was asked for.
-        self._budget = None
-        self._rebuild(matrix)
+        super().__init__(block, n_fields, **hierarchy_settings)
 
-    def _rebuild(self, matrix: sp.csr_matrix) -> None:
-        """Coarsen ``matrix`` from scratch, then derive the smoother and the jitted cycle over it.
-
-        With ``shape_headroom`` set, the FIRST build runs twice: once to discover what this operator
-        naturally coarsens into, then again into a budget derived from it. Every later rebuild reuses
-        that budget, so it re-derives the partition from the current operator -- unlike a frozen
-        coarsening -- while keeping the array shapes, and therefore the compiled cycle, fixed.
-        """
-        settings = self._settings
-        self._hierarchy = self._coarsen(matrix, self._budget)
-        if self._budget is None and settings["shape_headroom"] is not None:
-            self._budget = self._hierarchy.shape_budget(settings["shape_headroom"])
-            self._report(
-                f"      shape ladder: cells {self._budget.coarse_cells}, "
-                f"nnz {self._budget.operator_nnz} (headroom {settings['shape_headroom']})",
-            )
-            self._hierarchy = self._coarsen(matrix, self._budget)
-        self._after_coarsening()
-
-    def _coarsen(self, matrix: sp.csr_matrix, budget):
-        """Build the hierarchy at this inverse's settings, optionally into a fixed shape ladder."""
-        settings = self._settings
-        return build_convection_hierarchy(
-            matrix,
-            block_size=settings["n_fields"],
-            max_coarse=settings["max_coarse"],
-            mis_aggregation=True,
+    def build_settings(self) -> dict:
+        """This family coarsens by a randomized maximal independent set, on the settings above."""
+        return {
+            "mis_aggregation": True,
             # Depth and coarsening RATE are two halves of one choice. One aggressive level gives a
             # roughly hundredfold jump in a single step, so one prolongation from a ~860-equation
             # coarse space carries the whole error; more levels at a gentler rate ask less of each
             # interpolation.
-            aggressive_levels=settings["aggressive"],
-            max_levels=settings["levels"],
-            # The coarsening RATE. Aggregating only along strong connections makes the aggregates
-            # smaller, landing a coarse grid between the squared graph's ~106x and plain aggregation's
-            # ~21x -- and the coarse grid size is the binding cost here, since the coarsest level is
-            # inverted DENSELY (cubic to build, quadratic to store), which is affordable at ~1000
-            # equations and is not at 4300 and above.
-            strength_threshold=settings["strength_threshold"],
-            orthonormal_prolongation=settings["orthonormal"],
-            avoid_singletons=settings["avoid_singletons"],
-            prolongation_smoothing=settings["prolongation_smoothing"],
-            equilibrate=settings["equilibrate"],
-            shape_budget=budget,
-        )
+            "aggressive_levels": self._aggressive_levels,
+            "orthonormal_prolongation": self._orthonormal,
+            "avoid_singletons": self._avoid_singletons,
+            "prolongation_smoothing": self._prolongation_smoothing,
+            "equilibrate": self._equilibrate,
+        }
+
+    def smoother(self) -> _SmootherSettings:
+        return self._smoother
+
+    def cycle(self):
+        return _native_saddle_cycle
 
     def _after_coarsening(self) -> None:
         """Capture this build's aggregate statistics, then derive the smoother over the hierarchy."""
         # Snapshot NOW, while the accumulator still describes this build: it is module-level and every
         # later hierarchy overwrites it, so reading it at report time is reading someone else's.
         self._aggregate_stats = list(_AGGREGATE_STATS[-(len(self._hierarchy.levels) - 1) :])
-        self._derive_cycle()
+        super()._after_coarsening()
 
-    def _derive_cycle(self) -> None:
-        """Build the per-level SIMPLE pieces over the current hierarchy, and report the build.
+    def derive_extras(self, hierarchy) -> dict:
+        """The per-level SIMPLE pieces over ``hierarchy``, and the build record.
 
-        Split out of :meth:`_rebuild` because a refresh has two ways to reach the same place -- coarsen
-        again, or refit the values onto the coarsening already held -- and only the hierarchy differs
-        between them. Everything below reads ``self._hierarchy`` and is common to both.
-
-        **It builds no jitted function.** The cycle is the module-level :func:`_native_saddle_cycle`,
-        which takes the hierarchy and these pieces as arguments, so re-deriving them on unchanged shapes
-        reuses the compiled cycle. Building one here instead would put them in a closure, where every
-        refresh is a fresh cache key and a full recompile.
+        Returned as a plain dict keyed by level size, which is a pytree: the cycle takes it as an
+        argument, so re-deriving it on unchanged shapes leaves the compiled cycle a cache hit.
         """
-        settings = self._settings
-        sweeps = settings["sweeps"]
-        pressure_sweeps = settings["pressure_sweeps"]
-        pressure_omega = settings["pressure_omega"]
-        omega = settings["omega"]
-        frobenius = settings["frobenius"]
-        schur_frobenius = settings["schur_frobenius"]
-        strength_threshold = settings["strength_threshold"]
-        block_splitting = settings["block_splitting"]
-        simplec = settings["simplec"]
+        smoother = self._smoother
         # Keyed by level size: the V-cycle recursion is unrolled at trace time, so the smoother is
         # handed the concrete level object and can look its pieces up by a static attribute. The
         # coarsest level solves directly and needs none.
         pieces = {}
-        for level in self._hierarchy.levels:
+        for level in hierarchy.levels:
             if level.coarse_inv is not None:
                 continue
             operator = level.operator
@@ -685,10 +602,10 @@ class NativeSimpleInverse:
             pieces[level.n], _ = _simple_pieces(
                 level_matrix,
                 level.block_size,
-                frobenius,
-                schur_frobenius,
-                block_splitting,
-                simplec,
+                self._frobenius,
+                self._schur_frobenius,
+                self._block_splitting,
+                self._simplec,
                 report=self._report,
             )
         sizes = ", ".join(
@@ -713,89 +630,20 @@ class NativeSimpleInverse:
         # Print what was actually PARSED, not just what was built. A spec-token collision once made an
         # arm run forty sweeps instead of four while every other line of output looked correct.
         self._report(
-            f"      smoother: {sweeps} sweeps x {pressure_sweeps} inner, omega {omega}, "
-            f"simplec {simplec}, "
-            f"pressure_omega {pressure_omega}, strength {strength_threshold}, "
-            f"block splitting {block_splitting}",
+            f"      smoother: {smoother.sweeps} sweeps x {smoother.pressure_sweeps} inner, "
+            f"omega {smoother.omega}, simplec {self._simplec}, "
+            f"pressure_omega {smoother.pressure_omega}, "
+            f"strength {self._build_settings['strength_threshold']}, "
+            f"block splitting {self._block_splitting}",
         )
-        coarse = self._hierarchy.levels[-1]
+        coarse = hierarchy.levels[-1]
         self._report(
-            f"      native SIMPLE smoother: {len(self._hierarchy.levels)} levels, "
+            f"      native SIMPLE smoother: {len(hierarchy.levels)} levels, "
             f"fine {self._n_dofs} -> coarse {coarse.n} dofs "
             f"({self._n_dofs / max(coarse.n, 1):.0f}x, direct solve), {sizes}",
         )
 
-        self._pieces = pieces
-        # LAZY. `jax.linear_transpose` traces eagerly, and a forward march never applies the transpose --
-        # only the adjoint does. Building it at construction cost a measured 0.27 GB and 0.27 s per arm
-        # for something most callers never touch, on a machine where the memory is the binding constraint.
-        # Dropped here rather than kept, because it describes the pieces this call has just replaced.
-        self._transpose_fn = None
-
-    @property
-    def n_dofs(self) -> int:
-        return self._n_dofs
-
-    def _solve(self, residual: jnp.ndarray) -> jnp.ndarray:
-        """The cycle over the pieces this inverse currently holds, traced in and not captured."""
-        return _native_saddle_cycle(self._hierarchy, self._pieces, residual, self._smoother)
-
-    def refactor_block(self, block: sp.spmatrix) -> None:
-        """Re-fit to a new operator on the same graph, in place. Required to survive a march refresh.
-
-        The field split refuses to refresh an inverse that offers neither this nor ``refactor``, so
-        without it this preconditioner cannot be used in a march at all -- a single-state probe never
-        reaches the code path.
-
-        **Whether a rebuild is structure-preserving depends on a setting.** The sibling nodal inverse
-        can rebuild freely because its aggregation reads only the sparsity pattern, so every array keeps
-        its shape and the jitted cycle stays a compilation-cache hit. That argument does NOT hold at a
-        nonzero strength threshold, where the aggregation reads ``|A_ij|`` and the coarsening moves as
-        the flow develops. Two answers are available and the setting chooses between them: coarsen again
-        and report any move (the level sizes are compared against the previous build, so a retrace shows
-        up in the refresh timings with a reason attached), or hold the coarsening and refit only the
-        values onto it (``frozen_coarsening``), which cannot move the shapes at all.
-
-        Parameters
-        ----------
-        block : scipy.sparse matrix
-            The group's new diagonal block, field-major, of the shape this was built at.
-
-        Raises
-        ------
-        ValueError
-            If the new block's shape differs from the built one.
-        """
-        matrix = sp.csr_matrix(block)
-        if matrix.shape != (self._n_dofs, self._n_dofs):
-            raise ValueError(
-                f"cannot refactor a {self._n_dofs}-dof inverse onto a {matrix.shape[0]}-dof block."
-            )
-        if self._settings["frozen_coarsening"]:
-            self._hierarchy = self._hierarchy.refit(matrix)
-            self._derive_cycle()
-            return
-        before = tuple(level.n for level in self._hierarchy.levels)
-        self._rebuild(matrix)
-        after = tuple(level.n for level in self._hierarchy.levels)
-        if after != before:
-            self._report(
-                f"      refresh moved the coarsening: levels {before} -> {after} "
-                f"(the jitted cycle retraces; the strength threshold reads values)",
-            )
-
-    def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
-        vector = jnp.asarray(residual, dtype=jnp.float64)
-        if not transpose:
-            return np.asarray(self._solve(vector), dtype=np.float64)
-        if self._transpose_fn is None:
-            self._transpose_fn = jax.linear_transpose(
-                self._solve, jnp.zeros(self._n_dofs, dtype=jnp.float64)
-            )
-        return np.asarray(self._transpose_fn(vector)[0], dtype=np.float64)
-
-    def destroy(self) -> None:
-        """Nothing to release -- plain arrays, no host solver handles."""
+        return pieces
 
 
 def native_saddle_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:

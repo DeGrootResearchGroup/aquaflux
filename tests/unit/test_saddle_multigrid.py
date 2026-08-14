@@ -48,7 +48,7 @@ def _saddle(n_cells: int = 240, dim: int = 3, seed: int = 0) -> sp.csr_matrix:
 
 
 _SETTINGS = dict(
-    levels=4, max_coarse=40, strength_threshold=0.25, avoid_singletons=True, aggressive=0
+    max_levels=4, max_coarse=40, strength_threshold=0.25, avoid_singletons=True, aggressive_levels=0
 )
 
 
@@ -147,7 +147,7 @@ def test_a_refresh_at_unchanged_shapes_reuses_the_compiled_cycle() -> None:
     inverse.apply(b)
 
     def signature(inv):
-        arguments = (inv._hierarchy, inv._pieces)
+        arguments = (inv._hierarchy, inv._extras)
         leaves, structure = jax.tree_util.tree_flatten(arguments)
         return structure, [(leaf.shape, leaf.dtype) for leaf in leaves]
 
@@ -170,10 +170,10 @@ def test_a_refresh_at_unchanged_shapes_reuses_the_compiled_cycle() -> None:
         return _native_saddle_cycle(hierarchy, pieces, residual, inverse._smoother)
 
     rhs = jnp.asarray(b)
-    cycle(inverse._hierarchy, inverse._pieces, rhs).block_until_ready()
+    cycle(inverse._hierarchy, inverse._extras, rhs).block_until_ready()
     assert len(traces) == 1
     inverse.refactor_block((a * 2.3).tocsr())
-    cycle(inverse._hierarchy, inverse._pieces, rhs).block_until_ready()
+    cycle(inverse._hierarchy, inverse._extras, rhs).block_until_ready()
     assert len(traces) == 1, "a refreshed hierarchy retraced the cycle"
 
 
@@ -187,7 +187,7 @@ def test_the_pieces_carry_no_host_matrix_so_they_can_be_traced() -> None:
     a = _saddle()
     inverse = NativeSimpleInverse(a, 4, **_SETTINGS)
 
-    leaves = jax.tree_util.tree_leaves(inverse._pieces)
+    leaves = jax.tree_util.tree_leaves(inverse._extras)
     assert leaves, "the pieces have no traced leaves at all"
     assert all(isinstance(leaf, jnp.ndarray) for leaf in leaves), (
         "a non-array leaf would be traced as one and fail"

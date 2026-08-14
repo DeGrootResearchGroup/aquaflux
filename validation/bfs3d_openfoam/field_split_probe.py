@@ -1364,9 +1364,7 @@ def _leading_inverse(spec):
         # factor at most one, median 0.53 on this block -- and SIMPLE's dropped neighbour terms shrink
         # the pressure correction again. For a correction behaving like `gamma * A^-1` with gamma < 1,
         # the optimal Richardson factor is about `1/gamma`, which puts it near 1.9 rather than at 1.
-        omega_token = next(
-            (t for t in re.findall(r"-o(\d+)", rest)), None
-        )
+        omega_token = next((t for t in re.findall(r"-o(\d+)", rest)), None)
         omega = int(omega_token) / 10 if omega_token else 0.7
         simplec = "-simplec" in rest
         block_splitting = "-bs" in rest
@@ -1399,8 +1397,8 @@ def _leading_inverse(spec):
                 max_coarse=max_coarse,
                 frobenius=frobenius,
                 schur_frobenius=schur_frobenius,
-                levels=levels,
-                aggressive=aggressive,
+                max_levels=levels,
+                aggressive_levels=aggressive,
                 strength_threshold=threshold,
                 orthonormal=orthonormal,
                 avoid_singletons=avoid_singletons,
