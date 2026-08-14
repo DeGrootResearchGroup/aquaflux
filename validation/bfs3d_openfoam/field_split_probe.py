@@ -525,6 +525,38 @@ class JaxNativeBlockInverse:
         """Nothing to release -- the hierarchy is plain arrays, not a host solver's handles."""
 
 
+class _HostFactorInverse:
+    """A host factorization wearing the block-inverse interface -- a DIAGNOSTIC BOUND, not a candidate.
+
+    The field split applies each block inverse on the host (the whole preconditioner reaches the solver
+    through one ``jax.pure_callback``), so a scipy factorization can serve directly with no JAX in the
+    path at all. That is what makes this simpler than :class:`JaxNativeBlockInverse`, which jits its
+    cycle and takes its transpose from :func:`jax.linear_transpose` -- neither of which a host solve
+    supports.
+
+    It exists to answer "how far below the coupled cycle count could a better trailing inverse take us",
+    which a standalone solve of that block cannot. It is **not shippable**: a complete factorization in
+    three dimensions is the fill wall this whole direction exists to avoid.
+    """
+
+    def __init__(self, factors, n_dofs: int) -> None:
+        self._factors = factors
+        self._n_dofs = n_dofs
+
+    @property
+    def n_dofs(self) -> int:
+        return self._n_dofs
+
+    def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
+        return self._factors.solve(
+            np.asarray(residual, dtype=np.float64), trans="T" if transpose else "N"
+        )
+
+    def destroy(self) -> None:
+        """Release the factorization: it is the largest host allocation any arm here makes."""
+        self._factors = None
+
+
 class BlockJacobiInverse:
     """A fixed number of block-Jacobi sweeps as a WHOLE block inverse -- no multigrid, no host solver.
 
@@ -1154,9 +1186,7 @@ def _trailing_inverse(spec):
                 probe_rhs
             )
             print(f"      exact trailing bound: true rel {achieved:.3e} on a random rhs", flush=True)
-            return JaxNativeBlockInverse(
-                lambda b: jnp.asarray(factors.solve(np.asarray(b))), matrix.shape[0]
-            )
+            return _HostFactorInverse(factors, matrix.shape[0])
 
         return build
     raise ValueError(f"unknown trailing inverse {spec!r}")
