@@ -707,10 +707,20 @@ surface. Read the Docs builds it (`.readthedocs.yaml`, `fail_on_warning: true`),
 cross-reference must resolve and every page must sit in a toctree. Build locally with the
 `docs` extra (`pip install -e ".[docs]"`, then `cd docs && make html`, or
 `sphinx-build -b html -W docs docs/_build/html` to match the strict RTD build).
-**CI does not build the docs** — the GitHub Actions workflow is ruff + codespell + the test
-tiers only — so a warning that would fail RTD is invisible to every PR check. Build locally
-with `-W` when you touch a docstring of a documented subpackage, a `docs/` page, or a
-cross-reference.
+**CI builds the docs on every PR** — the `docs` job runs the same `-W` build Read the Docs
+runs, and the required `fast gate` depends on it, so a broken cross-reference or a page
+missing from a toctree blocks the merge instead of turning the published site red afterwards.
+Build locally with `-W` as well when you touch a docstring of a documented subpackage, a
+`docs/` page, or a cross-reference — the CI job is the backstop, not the first line.
+
+**A Sphinx extension enabled in `conf.py` must be matched by a dependency in the `docs`
+extra.** MyST's `linkify` needs `linkify-it-py` (hence `myst-parser[linkify]`), and its
+absence does not degrade gracefully: the parser raises on the first inline token of the first
+page, so *every* page fails, not just pages containing a bare URL. This shipped once — the
+site's first Read the Docs build died on it, because at the time nothing but Read the Docs
+ever built the docs. When you enable an extension, install the extra in a **clean**
+environment and build; an environment that has accumulated packages will not reproduce what
+Read the Docs does.
 
 The docs are the **shipped surface**, so the Comment Convention and the Claude-Facing-File
 Reference Ban apply to them too: no references to the precursor codebases, the Claude-facing

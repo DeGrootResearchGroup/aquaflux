@@ -74,7 +74,11 @@ test = [
 # next major; raise a cap intentionally.
 docs = [
     "sphinx>=7.2,<9",
-    "myst-parser>=2.0,<5",
+    # The `linkify` extra pulls `linkify-it-py`, which MyST's `linkify` extension
+    # (enabled in `docs/conf.py`) requires. Without it the parser raises on the
+    # first inline token of the first page, so every page fails, not just pages
+    # containing a bare URL.
+    "myst-parser[linkify]>=2.0,<5",
     "pydata-sphinx-theme>=0.15,<1",
     "sphinx-copybutton>=0.5,<1",
 ]
