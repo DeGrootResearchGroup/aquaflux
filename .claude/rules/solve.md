@@ -2638,11 +2638,47 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   2026-08-10:** `build_convection_hierarchy` and `_build_aggregation_hierarchy` default `equilibrate=False`,
   so "default off" is true of the **JAX-native builder only**; `NodalNativeInverse` overrides it to `True`
   (its per-cell block solve is not otherwise safe); and the PETSc `AmgVCycle` path equilibrates
-  **unconditionally** via `equilibrate_cell_major`. Three different objects, no contradiction. What it
-  buys: the coarse solve is a dense pseudo-inverse,
-  and its singular-value truncation is what a badly scaled operator defeats first — on the chain
-  fixture the one-level direct solve goes from a 1e-9 true residual to 1e-13. That is a real second
-  benefit, pinned by a unit test, and unrelated to the coarsening.
+  **unconditionally** via `equilibrate_cell_major`. Three different objects, no contradiction.
+
+  **⚠️ THE SECOND, COARSENING-INDEPENDENT BENEFIT RECORDED HERE WAS A PSEUDO-INVERSE ARTIFACT, AND IT IS
+  GONE (2026-08-14).** The claim was that the coarse solve's singular-value truncation is what a badly
+  scaled operator defeats first, so rescaling buys accuracy there: on the badly-scaled chain fixture
+  (condition ~1.6e8) the one-level direct solve went from 1.2e-09 unscaled to 5.3e-13 rescaled. That is a
+  property of the **pseudo-inverse**, which truncates small singular values, and not of the operator. The
+  coarse solve is now a factorization (`_dense_inverse`), which the scaling does not defeat, and the same
+  fixture reads **2.8e-13 unscaled against 3.9e-13 rescaled** — both at the floating-point floor, the
+  unscaled one four thousand times better than it was, and their ordering now noise. The unit test that
+  pinned the gap asserted `scaled < raw` and duly failed on the change; it now pins only what remains
+  true, that both paths invert `A`. **The surviving case for rescaling is per-cell block conditioning**
+  (measured separately, orders of magnitude in the median) and its effect on the coarse operator the
+  tentative prolongation builds — not coarse-solve accuracy.
+
+  **✅ THE COARSE SOLVE IS A FACTORIZATION, NOT A PSEUDO-INVERSE — `_dense_inverse` (2026-08-14).** A
+  pseudo-inverse is a singular value decomposition, and it was **59 % of a whole hierarchy build**
+  (1.37 s of 2.32 s on a 92160-dof, 8.7M-nnz flow block coarsening to 2156). The generality is only
+  needed for a *singular* coarse operator, which this module works to avoid producing — an empty
+  aggregate is given a unit diagonal precisely so no coarse row is structurally zero. So the LU is taken
+  where it is valid, falling back to the decomposition where it is not. Cost at the coarse sizes that
+  arise, and at the ceiling `_MAX_DENSE_COARSE_DOFS` permits:
+
+  | n | pinv | inv | LU factor alone |
+  |---|---|---|---|
+  | 868 | 0.090 s | 0.013 s (7.0×) | 0.011 s |
+  | 2000 | 1.027 s | 0.118 s (8.7×) | 0.032 s |
+  | 4096 | 12.06 s | 1.154 s (10.5×) | 0.263 s |
+  | **8192** (the cap) | **101.8 s** | **9.7 s** | 2.0 s |
+
+  Whole-build effect **1.97×** (2.30 s → 1.17 s), with the coarse inverse agreeing to 6.4e-15 and the
+  cycle output to 1.1e-16. **The gap widens with coarse size**, so this matters more as the mesh grows,
+  which is the direction 3D is heading.
+  ⚠️ **Singularity is judged by LAPACK's reciprocal-condition estimate, not by whether the factorization
+  raised.** An operator can be numerically singular without being exactly so, and a factorization of one
+  returns finite nonsense rather than failing — measured, `np.linalg.inv` of a matrix with a 1e-18
+  diagonal entry returns finite garbage without complaint. The threshold is the same `n · eps` the
+  pseudo-inverse itself uses when truncating, so the two paths agree on where invertibility stops
+  instead of drawing the line in two places. All three cases are pinned
+  (`test_the_coarse_solve_is_a_factorization_where_the_operator_admits_one`); a fallback that never
+  fires and one that always does look identical from the outside.
 
   **What is BUILT and measured good (keep):**
   - **Nodal (block-aware) aggregation** — `_cell_graph` collapses the dof graph to cell connectivity
@@ -2742,11 +2778,12 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      bundle is 5 → 2 cycles on the turbulence block; whether that transfers to the scalar transport
      and velocity blocks is unmeasured, and flipping a default is a march-level decision, not a
      block-probe one.
-  2. Then, if still short: sparse-LU coarse solve (ours is a dense `pinv`), QR-orthonormalized
+  2. Then, if still short: sparse-LU coarse solve (ours is a dense inverse, `_dense_inverse`),
+     QR-orthonormalized
      tentative columns (inert at 2 levels, not deeper), and Chebyshev with the SA-cached bounds.
   3. **Scalability, independent of all the above and unaddressed:** the convection hierarchy is capped
-     at 2 levels (`_CONVECTION_LEVELS`) with a **dense `pinv`** coarse solve. At a 77× ratio that is
-     ~26k coarse dofs and a 5.4 GB pinv at 1M cells — infeasible. Depth now *builds* (3 levels, no
+     at 2 levels (`_CONVECTION_LEVELS`) with a **dense inverse** coarse solve. At a 77× ratio that is
+     ~26k coarse dofs and 5.4 GB to store at 1M cells — infeasible. Depth now *builds* (3 levels, no
      refusal) via the new `max_levels` argument, so the fix is cheap once the method itself works.
      PETSc reaches only 2 levels here because it coarsens until under `coarse_eq_limit`; our
      `max_coarse` is NOT the equivalent knob and has no effect at 2 levels.
@@ -2896,7 +2933,7 @@ Native nodal hierarchy over the flow block, SIMPLE smoother at the settings abov
   already lands at 872 < `max_coarse` 2000. A level count alone cannot distinguish that from "depth does
   not help", which is why the coarse size is now printed beside it.
 - **A strength threshold coarsens LESS, not more.** It aggregates only along strong connections, so the
-  aggregates shrink: 0.10 gives a 4× ratio and a 26244-equation coarse grid whose dense pseudo-inverse is a
+  aggregates shrink: 0.10 gives a 4× ratio and a 26244-equation coarse grid whose dense inverse is a
   5.94 GB captured constant (JAX warns and the arm was abandoned). It is the wrong instrument for
   controlling coarse-grid size.
 - ⚠️ **The aggressive first level on this block is INHERITED, not measured here.** It was adopted to match
@@ -2906,7 +2943,7 @@ Native nodal hierarchy over the flow block, SIMPLE smoother at the settings abov
 **A coarse solve is NOT where to worry about a host solver or a sequential algorithm.** The incomplete-LU
 this work exists to remove is **fine-grid** work — 92160 rows, 21M nonzeros, on every sweep of every cycle.
 A direct solve on a few hundred coarse equations is negligible beside it in both cost and parallelism. An
-earlier reading here, that the dense coarse pseudo-inverse must be replaced before this direction can
+earlier reading here, that the dense coarse inverse must be replaced before this direction can
 proceed, had that backwards: what has to go is the oversized coarse grid, not the density of its solve.
 
 ### Depth, singletons, and the prolongation — where the AMG method itself was wrong
@@ -3437,24 +3474,68 @@ matvecs, vector-length work in every diagonal scaling, and the dense coarse solv
 **square** of its size. Do not revive it at this problem size; the minimum viable headroom is set by how
 far the partition genuinely moves (~12 %), which still costs several times the retrace saving.
 
-**⚠️⚠️ AND THE RETRACE WAS NEVER PRICED CORRECTLY — the recompile is UNCONDITIONAL. Read this before
-citing any retrace figure.** `NativeSimpleInverse._derive_cycle` builds `jax.jit(lambda …)` on a **fresh
-lambda every refresh**, closing over the hierarchy and the smoother pieces. A new `jax.jit` object starts
-with an empty cache, so it recompiles **whether or not the coarsening moved** — verified from the source,
-no measurement needed. Consequences:
+**⚠️⚠️ THE RETRACE WAS NEVER PRICED CORRECTLY — the recompile was UNCONDITIONAL. Read this before citing
+any retrace figure recorded above.** `NativeSimpleInverse._derive_cycle` built `jax.jit(lambda …)` on a
+**fresh lambda every refresh**, closing over the hierarchy and the smoother pieces. A new `jax.jit`
+object starts with an empty cache, so it recompiled **whether or not the coarsening moved**.
+Consequences for the figures above, which stand as corrections whatever happens next:
 - **`refit`'s 17 s rung-1 saving was HOST AGGREGATION, not retrace**: it skips `_mis_aggregate` and
-  friends but still rebuilds the jit. So the "~3.4 s per retrace, ~88 s per march, ~3 %" figure recorded
+  friends but still rebuilt the jit. So the "~3.4 s per retrace, ~88 s per march, ~3 %" figure recorded
   above is an attribution error; that time is Python, not XLA.
-- **Compile is a SEPARATE cost that neither refuted experiment removed**, and it has never been measured
-  on this case. It may be additional to the 88 s rather than part of it.
-- The sibling `NodalNativeInverse` (`aquaflux/solve/field_split.py`) already passes its hierarchy as a
-  jit **argument** and says why. ⚠️ The comment immediately above it — "The hierarchy is captured as a
-  constant, which is correct here precisely because it is frozen" — is **stale and contradicted by the
-  code four lines below it**, and is the likely source of the flow arm's pattern. Fixing the flow arm
-  requires lifting the *pieces* as well (an attempt that moved only the hierarchy was measured still to
-  recompile, 271 ms), which needs `_SimplePieces` to drop its `schur_scipy` field to become a valid
-  pytree argument. Unbuilt; sized at ~3–4 % here and a prerequisite for tracing the V-cycle into the
-  solve on GPU.
+- **Compile was a SEPARATE cost that neither refuted experiment removed**, and it was never measured on
+  a march. It may be additional to the 88 s rather than part of it.
+
+**✅ FIXED (2026-08-14) — the cycle is a module-level `_native_saddle_cycle(hierarchy, pieces, residual,
+settings)` and a refresh at unchanged shapes is now a cache hit.** `_SimplePieces` is an `equinox.Module`
+with only `n_velocity` static (the `_SparseLevel` rule), and the formed Schur — which is neither a traced
+leaf nor a hashable static field — rides out of `_simple_pieces` as a second return value, reachable as
+`NativeSimpleInverse.schur(level_dofs)`. The static counts and relaxations travel as a hashable
+`_SmootherSettings` tuple. Measured on a synthetic 4-field flow block of the shape the real one has
+(23040 cells, reach 2, 92160 dofs, 8.7M nnz, 2 levels, `shape_headroom=1.3`):
+
+| | closure | argument |
+|---|---|---|
+| first apply | 1.31 s, 1 compile | **0.16 s**, 1 compile |
+| `refactor_block` | 3.96 s | **1.50 s** (also carries the coarse-solve fix below) |
+| apply after refresh | 1.07 s, **1 compile** | **0.04 s, 0 compiles** |
+
+The first-apply collapse is the second half of the same defect: closed-over arrays are compile-time
+constants, so a hierarchy's worth of them was being embedded in the compiled program rather than passed
+as buffers. **Bit-identical** — the traced form against the closure form on the same pieces differs by
+0.000e+00, forward and transposed. Pinned by
+`test_a_refresh_at_unchanged_shapes_reuses_the_compiled_cycle` (asserted on the jit cache size, not a
+wall clock) and `test_the_pieces_carry_no_host_matrix_so_they_can_be_traced`.
+⚠️ **Measured on a SYNTHETIC operator, not on `bfs3d`, and not on a march** — the per-refresh figures
+should hold at the real block's ~4× nnz but the march-level share is unmeasured, and the ~3–4 % estimate
+this supersedes was itself never measured. Do not quote a march number until one is run.
+⚠️ The `NodalNativeInverse` comment that was the likely source of this pattern — "The hierarchy is
+captured as a constant, which is correct here precisely because it is frozen" — contradicted the code
+four lines below it and is corrected in the same change.
+
+**✅ AND THE TWO NATIVE INVERSES NOW SHARE ONE BODY — `solve/native_inverse.NativeHierarchyInverse`
+(2026-08-14).** Fixing the flow arm alone would have left the package with *two different correct*
+answers to one problem: a module-level `filter_jit` taking arguments here, a per-instance `jax.jit`
+taking the hierarchy as an argument there. The base owns the hierarchy, the two-pass shape-ladder
+discovery, the rebuild-or-refit refresh, the lazy transpose, and the host boundary; a subclass supplies
+**only** its smoother, through four hooks — `build_settings()`, `smoother()`, `cycle()`,
+`derive_extras(hierarchy)`. `NodalNativeInverse` passes `extras=None` (it reads the levels alone);
+`NativeSimpleInverse` passes its per-level SIMPLE pieces.
+
+**The consequence that motivated it: the trailing block was hard-capped at two levels with an isotropic
+coarsening, and not by decision — the knobs had been added on the other side of a duplicated seam.** It
+now takes `strength_threshold`, `max_levels`, `frozen_coarsening` and `shape_headroom`, so a trailing
+coarsening sweep is runnable; verified to build 4 levels where it previously built 2. ⚠️ **A nonzero
+threshold there still forfeits the refresh cache-hit** unless paired with `frozen_coarsening` or
+`shape_headroom` — the binding decision keeping the k/ω path at θ=0 in a *march* is unchanged, and the
+knob is safe for a single-state sweep precisely because a sweep never refreshes.
+
+Both classes are **bit-identical** across the refactor at their own defaults — forward, transpose and
+post-refresh, 0.000e+00 — the nodal one checked against `main` and the saddle one against the
+pre-refactor commit. `NodalNativeInverse` is the shipped `bfs3d` trailing default, so that check is the
+load-bearing one. Also renamed for symmetry, since the two now name one concept one way:
+`NativeSimpleInverse`'s `levels`/`aggressive` are `max_levels`/`aggressive_levels`.
+⚠️ `PerFieldNativeInverse` was deliberately **not** ported: it is superseded by the nodal inverse, is
+un-jitted, and is reachable only from its own tests — it is a deletion candidate, not a third subclass.
 
 ### The peel and the cap ON A MARCH — the cycles land, the seconds mostly do not (2026-08-14)
 
@@ -3888,10 +3969,11 @@ Rhie–Chow damping. And on the true Jacobian slice of the `[k, omega]` block on
 cycles** against an absolute floor of 1; removing its coarse grid entirely costs 14 %, quartering its
 smoother work costs 1.8 % of cycles, and a PETSc-side threshold on this mesh already returned the same
 cycle count. The ceiling is 2 → 1 cycles on ~11 % of the nonzeros, against a refresh path the
-value-dependence would cost. ⚠️ Note `NodalNativeInverse` exposes neither `strength_threshold` nor
-`max_levels`, so that path is hard-capped at 2 levels (`_CONVECTION_LEVELS`) with a dense `pinv` and no
-size guard — testing a threshold there at 2 levels would reproduce the flow block's original failure and
-refute the transfer for the wrong reason.
+value-dependence would cost. ⚠️ `NodalNativeInverse` **used to expose** neither `strength_threshold` nor
+`max_levels`, so that path was hard-capped at 2 levels and a threshold could not be tested there at all —
+at 2 levels it would have reproduced the flow block's original failure and refuted the transfer for the
+wrong reason. **Both knobs now reach it** (see the shared-base entry below), so the sweep is runnable;
+the ceiling argument above is unaffected and is still the reason not to spend a run on it.
 
 **Defects found here, and what was done about each.**
 - **FIXED — `_reattach_to_adjacent_root` could CREATE singletons.** It never steals a root but does
@@ -3905,7 +3987,7 @@ refute the transfer for the wrong reason.
   `test_avoid_singletons_reaches_the_aggressively_coarsened_level`.
 - **FIXED (documentation) — `max_coarse` is in DEGREES OF FREEDOM, not cells.** It is compared against
   `a.shape[0]`, while both builder docstrings said *cells* — a `block_size`-fold error on the knob
-  bounding a dense pseudo-inverse. Dofs is the correct unit and the code was right: the limit exists to
+  bounding a dense inverse. Dofs is the correct unit and the code was right: the limit exists to
   bound a solve whose cost is cubic in the dof count. The docstrings now say so.
 - **FIXED (guarded, not defaulted) — the coarse grid grows LINEARLY with the mesh when the level cap
   binds before the size limit.** At `max_levels = 5` and a measured 184x total ratio, 23040 cells give
@@ -6414,7 +6496,7 @@ transfer to any thresholded arm.
     diagonal / the positive momentum `a_P`, need no per-apply floor.
   - **The damped-Jacobi convection hierarchy is TWO-LEVEL by design (binding — do not add a depth
     knob).** `build_convection_hierarchy(a)` builds exactly a smoothed fine level + a single **direct**
-    (dense pseudo-inverse) coarse solve. **`max_levels` exists** (`multigrid.py`, default
+    (dense inverse) coarse solve. **`max_levels` exists** (`multigrid.py`, default
     `_CONVECTION_LEVELS = 2`); raising it re-opens the defect below, so leave it at 2. On the fine level the
     upwind operator is a diagonally dominant M-matrix, so one damping factor `ω/λ_max` contracts
     (`_jacobi_smooth`, ρ ≈ 0.7 at high cell Peclet). A *deeper* Galerkin recursion is deliberately not

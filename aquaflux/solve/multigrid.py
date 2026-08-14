@@ -18,7 +18,7 @@ family contributes only its ops:
 * **Smoothed aggregation** (:func:`build_smoothed_hierarchy`, :func:`smoothed_multigrid_solve`): the
   symmetric pressure Schur. The tentative piecewise-constant prolongation is smoothed
   ``P = (I - omega D^-1 A) P_tent``, restriction is ``Pᵀ``, the smoother is a Chebyshev polynomial,
-  and the coarse level is a direct (dense pseudo-inverse) solve — ~0.25 mesh-independent contraction.
+  and the coarse level is a direct dense solve — ~0.25 mesh-independent contraction.
   Its two-level convection variant (:func:`build_convection_hierarchy`,
   :func:`convection_multigrid_solve`) uses a damped-Jacobi smoother for the nonsymmetric momentum
   operator.
@@ -42,12 +42,14 @@ diagonal rescaling in the apply.
 from __future__ import annotations
 
 import heapq
+import warnings
 from collections.abc import Callable
 from typing import NamedTuple
 
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
+import scipy.linalg as sla
 import scipy.sparse as sp
 from jax.experimental.sparse import BCSR
 from jax.ops import segment_sum
@@ -561,7 +563,7 @@ def _aggregate(owner: np.ndarray, nb: np.ndarray, n: int) -> tuple[np.ndarray, i
 # nonlinear iterates" practice) and then applied as a frozen matrix-free V-cycle under jit.
 #
 # Three ingredients make the V-cycle **mesh-independent** (~0.25 contraction, flat over 256->9216
-# cells), where a naive version degrades toward 1: (i) a **direct coarse solve** (dense pseudo-inverse,
+# cells), where a naive version degrades toward 1: (i) a **direct coarse solve** (a dense inverse,
 # the dominant fix -- an inexact bottom solve leaves the smoothest error in and compounds with depth);
 # (ii) a **Chebyshev polynomial smoother** (a far stronger, still matrix-free/linear smoother than
 # damped Jacobi); (iii) **pin decoupling** -- the closed-domain pressure pin is zeroed out of the
@@ -595,7 +597,7 @@ class _SparseLevel(eqx.Module):
     operator: _CsrOperator  # the level operator A, in CSR form and owning its matvec
     diagonal: jnp.ndarray  # (n,) diagonal of A
     lam_max: jnp.ndarray  # 0-d: largest eigenvalue of D^-1 A, for the smoother damping
-    coarse_inv: jnp.ndarray | None  # dense pseudo-inverse (coarsest level only); None otherwise
+    coarse_inv: jnp.ndarray | None  # dense inverse (coarsest level only); None otherwise
     p_frow: jnp.ndarray | None  # (pnnz,) prolongation fine row (this level); None on coarsest
     p_ccol: jnp.ndarray | None  # (pnnz,) prolongation coarse col (next level)
     p_val: jnp.ndarray | None  # (pnnz,) prolongation value
@@ -767,9 +769,7 @@ class SmoothedHierarchy(eqx.Module):
                 csr = prolongation.tocsr()
                 a = (csr.T @ a @ csr).tocsr()
             else:
-                levels.append(
-                    _sparse_level(a, lam, np.linalg.pinv(a.toarray()), None, 0, level.block_size)
-                )
+                levels.append(_sparse_level(a, lam, _dense_inverse(a), None, 0, level.block_size))
         return SmoothedHierarchy(
             tuple(levels), None if scale is None else jnp.asarray(scale, dtype=jnp.float64)
         )
@@ -836,6 +836,53 @@ def _sparse_level(
         ),
         block_size=block_size,
     )
+
+
+def _dense_inverse(a: sp.spmatrix) -> np.ndarray:
+    """The coarsest level's dense inverse, by LU where the operator admits one.
+
+    The coarse solve must be an actual solve — an inexact bottom solve leaves the smoothest error in
+    and is the dominant cause of mesh-dependent V-cycle degradation — but it need not be a
+    *pseudo*-inverse. A pseudo-inverse is a singular value decomposition, which costs roughly an order
+    of magnitude more than a factorization at the same size and grows worse with it: at the largest
+    coarse level this module permits (:data:`_MAX_DENSE_COARSE_DOFS`) the decomposition takes around a
+    hundred seconds against ten for the factorization. That cost is charged at every build and at every
+    mid-march refresh, so it is the largest single term in a hierarchy setup.
+
+    The generality is only needed for a **singular** operator, and this module works to avoid producing
+    one: an empty aggregate is given a unit diagonal precisely so the coarse level has no structurally
+    zero row. So the factorization is tried first, and the decomposition is kept as the fallback for the
+    case it genuinely covers.
+
+    **Singularity is judged by LAPACK's reciprocal-condition estimate rather than by whether the
+    factorization raised**, because an operator can be numerically singular without being exactly so:
+    a factorization of one returns finite nonsense rather than failing. The threshold is the same one
+    the pseudo-inverse applies when it truncates a small singular value, so the two paths agree on
+    where the operator stops being invertible instead of drawing the line in two places.
+
+    Parameters
+    ----------
+    a : scipy.sparse matrix
+        The coarsest level operator, shape ``(n, n)``.
+
+    Returns
+    -------
+    np.ndarray
+        Its inverse (or pseudo-inverse), shape ``(n, n)``.
+    """
+    dense = a.toarray()
+    n = dense.shape[0]
+    with warnings.catch_warnings():
+        # A singular operator is handled below, so LAPACK's warning about it is not news.
+        warnings.simplefilter("ignore", sla.LinAlgWarning)
+        try:
+            lu_and_pivots = sla.lu_factor(dense, check_finite=False)
+        except ValueError:
+            return np.linalg.pinv(dense)
+    reciprocal_condition = sla.lapack.dgecon(lu_and_pivots[0], np.linalg.norm(dense, 1))[0]
+    if reciprocal_condition > n * np.finfo(np.float64).eps:
+        return sla.lu_solve(lu_and_pivots, np.eye(n), check_finite=False)
+    return np.linalg.pinv(dense)
 
 
 def _largest_singular_value(matrix: sp.spmatrix, iterations: int = 20) -> float:
@@ -915,7 +962,7 @@ _AGGREGATE_STATS: list[dict] = []
 
 
 #: Largest coarsest-level size, in degrees of freedom, that may be inverted densely. The coarse solve
-#: is a dense pseudo-inverse: quadratic to store (8 bytes per entry, so ~512 MB here) and cubic to
+#: is a dense inverse: quadratic to store (8 bytes per entry, so ~512 MB here) and cubic to
 #: build. Exceeding it is never intentional -- it means the level cap stopped the coarsening before the
 #: coarse-size limit could, which makes the coarse grid grow with the mesh instead of staying fixed.
 _MAX_DENSE_COARSE_DOFS = 8192
@@ -1007,14 +1054,14 @@ def _build_aggregation_hierarchy(
                     f"{max_coarse} could: raise max_levels so the size limit binds, or lower "
                     f"max_coarse."
                 )
-            # Coarsest level: a direct (dense pseudo-inverse) solve — an inexact coarse solve is the
-            # dominant cause of mesh-dependent V-cycle degradation, so it must be an actual solve; pinv
-            # also handles a nonsymmetric coarse operator.
+            # Coarsest level: a direct dense solve — an inexact coarse solve is the dominant cause of
+            # mesh-dependent V-cycle degradation, so it must be an actual solve. `_dense_inverse`
+            # handles a nonsymmetric coarse operator, and a singular one.
             levels.append(
                 _sparse_level(
                     a,
                     lam_store,
-                    np.linalg.pinv(a.toarray()),
+                    _dense_inverse(a),
                     None,
                     0,
                     block_size,
@@ -1183,7 +1230,7 @@ def build_smoothed_hierarchy(
     max_coarse : int
         Stop coarsening once a level has at most this many **degrees of freedom** (solved directly
         there). Dofs, not cells: at ``block_size`` fields per cell the two differ by that factor, and
-        the limit exists to bound a dense pseudo-inverse whose cost is cubic in the dof count.
+        the limit exists to bound a dense inverse whose cost is cubic in the dof count.
     max_levels : int
         Hard cap on the number of levels.
     strength_threshold : float
@@ -1430,7 +1477,7 @@ def _frozen_v_cycle(
     restriction, prolongation, and pre/post smoother come from the injected ``ops`` (:class:`_VCycleOps`).
     """
     level = levels[level_index]
-    if level.coarse_inv is not None:  # coarsest: a direct (dense pseudo-inverse) solve
+    if level.coarse_inv is not None:  # coarsest: a direct dense solve
         return level.coarse_inv @ b
 
     if ops.pre_smooth:
@@ -1570,7 +1617,7 @@ def smoothed_multigrid_solve(
 
 
 # The two levels this convection hierarchy builds: a single aggregation of the fine cells, then a
-# direct (dense pseudo-inverse) solve on that one coarse level.
+# direct dense solve on that one coarse level.
 _CONVECTION_LEVELS = 2
 
 
@@ -1597,7 +1644,7 @@ def build_convection_hierarchy(
     prolongation smoothing while the single Galerkin coarse operator keeps the true nonsymmetric ``A``.
 
     This hierarchy is deliberately **two-level**: the fine cells are aggregated once and the resulting
-    coarse operator is solved *directly* (a dense pseudo-inverse), with the damped-Jacobi smoother
+    coarse operator is solved *directly* (a dense inverse), with the damped-Jacobi smoother
     applied only on the fine level. On the fine level the operator is a diagonally dominant M-matrix,
     where a single damping factor contracts, so the two-level cycle is robust at high cell Peclet. A
     *deeper* Galerkin recursion is not built here: the coarse-of-coarse operators of a strongly
@@ -1616,7 +1663,7 @@ def build_convection_hierarchy(
     max_coarse : int
         Stop coarsening once a level has at most this many **degrees of freedom**, and solve it
         directly there. Dofs, not cells: at ``block_size`` fields per cell the two differ by that
-        factor, and the limit exists to bound a dense pseudo-inverse whose cost is cubic in the dof
+        factor, and the limit exists to bound a dense inverse whose cost is cubic in the dof
         count.
     strength_threshold : float
         Strength-of-connection threshold for the aggregation (default ``0`` = isotropic aggregation on
@@ -1825,7 +1872,7 @@ class _AirLevel(eqx.Module):
     p_row: jnp.ndarray | None  # (pnnz,) prolongation COO fine row; None on coarsest
     p_col: jnp.ndarray | None  # (pnnz,) prolongation COO coarse col
     p_val: jnp.ndarray | None  # (pnnz,) prolongation value
-    coarse_inv: jnp.ndarray | None  # dense pseudo-inverse (coarsest level only); None otherwise
+    coarse_inv: jnp.ndarray | None  # dense inverse (coarsest level only); None otherwise
     n_coarse: int = eqx.field(static=True)  # next-coarser cell count (0 on coarsest)
 
 
@@ -1997,7 +2044,7 @@ def _air_level(a: sp.csr_matrix, split: np.ndarray, restriction, prolongation) -
         p_row=None if coarsest else jnp.asarray(p.row),
         p_col=None if coarsest else jnp.asarray(p.col),
         p_val=None if coarsest else jnp.asarray(p.data),
-        coarse_inv=jnp.asarray(np.linalg.pinv(a.toarray())) if coarsest else None,
+        coarse_inv=jnp.asarray(_dense_inverse(a)) if coarsest else None,
         n_coarse=0 if coarsest else prolongation.shape[1],
     )
 

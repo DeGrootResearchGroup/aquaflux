@@ -21,6 +21,7 @@ from aquaflux.solve.multigrid import (
     _cell_graph,
     _chebyshev_smooth,
     _CsrOperator,
+    _dense_inverse,
     _jacobi_smooth,
     _lair_restriction,
     _mis_aggregate,
@@ -247,6 +248,37 @@ def test_avoid_singletons_reaches_the_aggressively_coarsened_level() -> None:
 
     assert without[0] > 0 and without[1] > 0  # both levels strand vertices when unrepaired
     assert with_repair == [0] * len(with_repair)  # and neither does once both passes run
+
+
+def test_the_coarse_solve_is_a_factorization_where_the_operator_admits_one() -> None:
+    """A pseudo-inverse is a singular value decomposition, and the coarse operator rarely needs one.
+
+    The decomposition costs roughly an order of magnitude more than a factorization at the same size
+    and the gap widens with it — measured at a 2000-equation coarse level, 1.03 s against 0.12 s, and at
+    the 8192 this module permits, 102 s against 9.7 s. That is charged at every build and every
+    mid-march refresh, and it was 59 % of a hierarchy setup.
+
+    So the factorization is taken where it is valid and the decomposition kept for the case it covers.
+    Both halves are pinned, because a fallback that never fires and one that always does look identical
+    from the outside.
+    """
+    rng = np.random.default_rng(0)
+    n = 200
+    nonsingular = sp.csr_matrix(rng.normal(size=(n, n)) + n * np.eye(n))
+    assert np.allclose(
+        _dense_inverse(nonsingular), np.linalg.pinv(nonsingular.toarray()), atol=1e-12
+    )
+
+    # Exactly singular: the factorization cannot be used at all.
+    singular = np.eye(n)
+    singular[7, 7] = 0.0
+    assert np.allclose(_dense_inverse(sp.csr_matrix(singular)), np.linalg.pinv(singular))
+
+    # Numerically singular, which is the case a raised/not-raised test misses: the factorization does
+    # NOT fail here, it returns finite nonsense, so the fallback has to be chosen on conditioning.
+    almost = np.eye(n)
+    almost[7, 7] = 1e-18
+    assert np.allclose(_dense_inverse(sp.csr_matrix(almost)), np.linalg.pinv(almost))
 
 
 def test_dense_coarse_solve_guard_rejects_an_oversized_coarsest_level() -> None:
@@ -901,17 +933,22 @@ def test_equilibration_rescales_the_coarsened_operator_to_a_unit_diagonal() -> N
     assert np.allclose(np.abs(np.asarray(hierarchy.levels[0].diagonal)), 1.0)
 
 
-def test_equilibration_solves_the_original_operator_only_more_accurately() -> None:
-    """``x = D M(D b)`` inverts ``A`` itself, and on a badly scaled operator it inverts it *better*.
+def test_equilibration_solves_the_original_operator() -> None:
+    """``x = D M(D b)`` inverts ``A`` itself, at either scale.
 
     The rescaling is a similarity transform rather than an approximation, so where the hierarchy is
     exact — ``max_coarse`` above the problem size makes level 0 a direct solve — both paths must
     reproduce ``A x = b``. That is what licenses treating the factor as bookkeeping the hierarchy owns
     rather than a change of preconditioner.
 
-    The accuracy gap is asserted too, because it is a second reason to rescale that has nothing to do
-    with the coarsening: the direct coarse solve is a dense pseudo-inverse, and its singular-value
-    truncation is what a badly scaled operator defeats first.
+    **The rescaling is not what makes the coarse solve accurate, and a version of this test that asserted
+    so was measuring the old pseudo-inverse.** A pseudo-inverse truncates small singular values, and a
+    badly scaled operator defeats that first: on this fixture (condition ~1.6e8) it left the unscaled
+    solve at 1.2e-09 against the rescaled 5.3e-13, which read as a second, coarsening-independent reason
+    to rescale. A factorization is not defeated by the scaling — the unscaled solve is 2.8e-13, four
+    thousand times better and at the same floating-point floor as the rescaled one — so that reason has
+    gone with the pseudo-inverse. The remaining case for rescaling is per-cell block conditioning, which
+    is a different measurement.
     """
     n = 60
     a = _badly_scaled_chain(n)
@@ -924,9 +961,8 @@ def test_equilibration_solves_the_original_operator_only_more_accurately() -> No
         return np.linalg.norm(a @ x - np.asarray(b)) / np.linalg.norm(np.asarray(b))
 
     raw, scaled = residual(False), residual(True)
-    assert raw < 1e-6, f"the unscaled direct solve should still invert A, got {raw:.3e}"
-    assert scaled < 1e-10, f"the scaled direct solve should be near-exact, got {scaled:.3e}"
-    assert scaled < raw
+    assert raw < 1e-10, f"the unscaled direct solve should invert A, got {raw:.3e}"
+    assert scaled < 1e-10, f"the scaled direct solve should invert A, got {scaled:.3e}"
 
 
 def test_an_equilibrated_cycle_is_a_fixed_linear_operator_and_transposes() -> None:

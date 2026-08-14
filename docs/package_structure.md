@@ -133,6 +133,8 @@ cfd/                                  # repo root
 │   │   ├── ilut_preconditioner.py    #   MonolithicIlutPreconditioner (threshold incomplete LU)
 │   │   ├── lu_preconditioner.py      #   MonolithicLuPreconditioner (complete sparse LU)
 │   │   ├── field_split.py            #   BlockTriangularFieldSplit: block-triangular field-split preconditioning for flow-plus-transport
+│   │   ├── native_inverse.py         #   NativeHierarchyInverse: the shared body of a JAX-native block inverse (hierarchy, in-place refresh, transpose)
+│   │   ├── saddle_multigrid.py       #   NativeSimpleInverse: a JAX-native multigrid over the flow saddle, smoothed by SIMPLE relaxation
 │   │   ├── vanka.py                  #   a Vanka (patch) smoother for the monolithic saddle-point V-cycle
 │   │   ├── sparse_jacobian.py        #   materialize_block_jacobian: the sparse Jacobian by compressed graph-coloured probing
 │   │   └── refresh_timing.py         #   RefreshTiming: what a preconditioner refresh did, and what each part cost

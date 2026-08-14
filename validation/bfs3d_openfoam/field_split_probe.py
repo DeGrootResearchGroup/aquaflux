@@ -731,7 +731,7 @@ class AlgebraicSimpleInverse:
                 inverse.destroy()
 
 
-def _splitting_balance(a, pieces, block_size, pressure_sweeps, pressure_omega):
+def _splitting_balance(a, pieces, schur, block_size, pressure_sweeps, pressure_omega):
     """Report the two approximation errors a block-diagonal saddle preconditioner is governed by.
 
     Siefert and de Sturler (2006) analyse exactly this operator class -- a generalized saddle point whose
@@ -758,6 +758,10 @@ def _splitting_balance(a, pieces, block_size, pressure_sweeps, pressure_omega):
         The level operator, shape ``(block_size * n_cells,) * 2``, field-major.
     pieces : _SimplePieces
         That level's SIMPLE pieces.
+    schur : scipy.sparse matrix
+        That level's formed Schur complement, which `_simple_pieces` returns alongside the traced
+        record. It is needed in host sparse form here because the singular-value iteration below wants
+        a transpose, and the traced record carries only a matrix-vector product.
     block_size : int
         Fields per cell.
     pressure_sweeps : int
@@ -801,7 +805,6 @@ def _splitting_balance(a, pieces, block_size, pressure_sweeps, pressure_omega):
         flush=True,
     )
 
-    schur = pieces.schur_scipy
     schur_inverse = np.asarray(pieces.schur_diagonal_inverse)
     damping = sp.diags(pressure_omega * schur_inverse) @ schur
 
@@ -1361,9 +1364,7 @@ def _leading_inverse(spec):
         # factor at most one, median 0.53 on this block -- and SIMPLE's dropped neighbour terms shrink
         # the pressure correction again. For a correction behaving like `gamma * A^-1` with gamma < 1,
         # the optimal Richardson factor is about `1/gamma`, which puts it near 1.9 rather than at 1.
-        omega_token = next(
-            (t for t in re.findall(r"-o(\d+)", rest)), None
-        )
+        omega_token = next((t for t in re.findall(r"-o(\d+)", rest)), None)
         omega = int(omega_token) / 10 if omega_token else 0.7
         simplec = "-simplec" in rest
         block_splitting = "-bs" in rest
@@ -1396,8 +1397,8 @@ def _leading_inverse(spec):
                 max_coarse=max_coarse,
                 frobenius=frobenius,
                 schur_frobenius=schur_frobenius,
-                levels=levels,
-                aggressive=aggressive,
+                max_levels=levels,
+                aggressive_levels=aggressive,
                 strength_threshold=threshold,
                 orthonormal=orthonormal,
                 avoid_singletons=avoid_singletons,

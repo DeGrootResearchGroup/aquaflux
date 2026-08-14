@@ -9,9 +9,11 @@ deviation is a defect in this module and nowhere else.
 
 from __future__ import annotations
 
+import jax
 import numpy as np
 import pytest
 import scipy.sparse as sp
+from aquaflux.solve import NativeHierarchyInverse, NativeSimpleInverse, NodalNativeInverse
 from aquaflux.solve.field_split import (
     BlockTriangularFieldSplit,
     FieldGroups,
@@ -201,3 +203,83 @@ class TestBlockTriangularAlgebra:
         )
         split.destroy()
         assert sorted(released) == ["leading", "trailing"]
+
+
+def _nodal_block(n_cells: int = 400, n_fields: int = 2, seed: int = 0) -> sp.csr_matrix:
+    """A field-major transported-scalar pair on a chain graph, diagonally dominant."""
+    rng = np.random.default_rng(seed)
+    rows, cols, vals = [], [], []
+    for cell in range(n_cells):
+        for offset in (0, 1, -1, 2, -2):
+            other = cell + offset
+            if not 0 <= other < n_cells:
+                continue
+            for row_field in range(n_fields):
+                for col_field in range(n_fields):
+                    diagonal = offset == 0 and row_field == col_field
+                    vals.append(6.0 if diagonal else rng.normal() * 0.2)
+                    rows.append(row_field * n_cells + cell)
+                    cols.append(col_field * n_cells + other)
+    return sp.csr_matrix((vals, (rows, cols)), shape=(n_cells * n_fields,) * 2)
+
+
+def test_the_trailing_inverse_takes_the_hierarchy_knobs_its_sibling_had() -> None:
+    """The coarsening knobs are the shared base's, so the trailing block is no longer capped at two.
+
+    Both native inverses wrap a coarsened hierarchy and differ only in their level smoother, but the
+    knobs had been added on one side of a duplicated seam: the saddle inverse grew a strength threshold,
+    a level cap and a shape ladder, and this one grew none of them — so a trailing coarsening sweep could
+    not be run at all. Not a decision, just where the code was written.
+    """
+    a = _nodal_block()
+    plain = NodalNativeInverse(a, 2)
+    assert len(plain._hierarchy.levels) == 2, "the two-level default should be unchanged"
+
+    deeper = NodalNativeInverse(a, 2, max_levels=4, max_coarse=40)
+    assert len(deeper._hierarchy.levels) == 4, "max_levels did not reach the coarsening"
+
+    # And the value-dependent knobs build, which is what a sweep needs; a single-state probe never
+    # refreshes, so the structure-invariance they cost does not arise there.
+    for extra in (
+        {"strength_threshold": 0.25},
+        {"strength_threshold": 0.25, "shape_headroom": 1.3},
+    ):
+        inverse = NodalNativeInverse(a, 2, max_levels=4, max_coarse=40, **extra)
+        x = np.asarray(inverse.apply(np.random.default_rng(1).normal(size=a.shape[0])))
+        assert np.all(np.isfinite(x))
+
+
+def test_the_trailing_refresh_keeps_the_argument_pytree_at_an_isotropic_coarsening() -> None:
+    """At threshold zero the coarsening reads only the sparsity pattern, so a refresh cannot move it.
+
+    That invariant is what makes the jitted cycle a compilation-cache hit across a march refresh, and it
+    is the same property the saddle inverse's own test pins — which is the point of them now sharing a
+    base rather than each carrying their own copy of the refresh.
+    """
+    a = _nodal_block()
+    inverse = NodalNativeInverse(a, 2)
+    inverse.apply(np.asarray(np.random.default_rng(2).normal(size=a.shape[0])))
+
+    def signature(inv):
+        leaves, structure = jax.tree_util.tree_flatten((inv._hierarchy, inv._extras))
+        return structure, [(leaf.shape, leaf.dtype) for leaf in leaves]
+
+    before = signature(inverse)
+    inverse.refactor_block((a * 1.9).tocsr())
+
+    assert signature(inverse) == before, "the refresh moved the argument pytree"
+
+
+def test_both_native_inverses_share_one_refresh_implementation() -> None:
+    """The seam itself, asserted: a capability added to the base reaches both smoothers.
+
+    Written as a structural check rather than a behavioural one because the failure it guards against is
+    a future divergence — someone re-adding a private `refactor_block` or `apply` to one class, which
+    would silently take it off the shared path and let the two drift again.
+    """
+    for cls in (NodalNativeInverse, NativeSimpleInverse):
+        assert issubclass(cls, NativeHierarchyInverse)
+        for shared in ("refactor_block", "apply", "destroy", "n_dofs", "_rebuild", "_solve"):
+            assert shared not in vars(cls), (
+                f"{cls.__name__} overrides {shared!r}, which the shared base owns"
+            )
