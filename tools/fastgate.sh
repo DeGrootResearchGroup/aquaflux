@@ -20,56 +20,13 @@
 #
 # Exits with pytest's status, so it composes in a shell `&&` chain and in a hook.
 #
-# It also warns, before running anything, when the committed hooks in .githooks/ are not wired up --
-# see check_hook_wiring below. That warning never changes the exit status; only pytest does.
+# It also warns, before running anything, when the committed hooks in .githooks/ are not wired up
+# (or are wired only by coincidence). That check lives in tools/check_hooks.sh, which always exits
+# 0 -- the warning never changes this script's exit status; only pytest does.
 
 set -uo pipefail
 
-# Warn when git will not run the committed hooks in .githooks/.
-#
-# Those hooks are the local half of the same gate CI enforces, but git runs them only when
-# core.hooksPath points at them -- and when it does not, git says nothing whatsoever. A safety net
-# that is quietly absent is worse than no net at all, because it is trusted: a lint slip then
-# reaches CI as a red required check on the pull request, which is exactly what the hook exists to
-# prevent. This script is the thing run most often, so it is the cheapest place to notice.
-#
-# The path is resolved the way git itself resolves it: a RELATIVE core.hooksPath is taken from the
-# top level of the working tree, so it follows each checkout -- including each worktree -- to its
-# own .githooks/. An ABSOLUTE one instead pins every worktree to the single directory it names,
-# whose contents depend on whatever branch that other checkout happens to be sitting on.
-check_hook_wiring() {
-  # A CI checkout deliberately does not wire the hooks; the workflow runs the gate directly.
-  [ -n "${CI:-}" ] && return 0
-
-  local top configured resolved
-  top=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
-  configured=$(git config --get core.hooksPath 2>/dev/null || true)
-
-  if [ -z "$configured" ]; then
-    printf 'fastgate: git hooks are NOT enabled -- the local ruff/codespell gate will not run.\n' >&2
-    printf '          enable them once per clone:  git config core.hooksPath .githooks\n' >&2
-    return 0
-  fi
-
-  case "$configured" in
-    /*) resolved="$configured" ;;
-    *)  resolved="$top/$configured" ;;
-  esac
-
-  [ -x "$resolved/pre-push" ] && return 0
-
-  printf 'fastgate: git hooks are NOT wired up -- core.hooksPath = %s\n' "$configured" >&2
-  printf '          resolves to %s, which holds no executable pre-push,\n' "$resolved" >&2
-  printf '          so the ruff/codespell gate will NOT run before a push.\n' >&2
-  if [ -n "$(git config --worktree --get core.hooksPath 2>/dev/null || true)" ]; then
-    printf '          this worktree overrides the repository setting; drop the override with:\n' >&2
-    printf '            git config --worktree --unset core.hooksPath\n' >&2
-  else
-    printf '          point it at this checkout with:  git config core.hooksPath .githooks\n' >&2
-  fi
-}
-
-check_hook_wiring
+"$(dirname "$0")/check_hooks.sh" || true
 
 TIER="${1:-fast}"
 [ $# -gt 0 ] && shift

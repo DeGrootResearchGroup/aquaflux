@@ -29,6 +29,7 @@ cfd/                                  # repo root
 │
 ├── tools/
 │   ├── fastgate.sh                   # the blessed test-tier runner (redirects, never pipes; reports pytest's own status)
+│   ├── check_hooks.sh                # warns when core.hooksPath does not resolve to .githooks (run by fastgate.sh)
 │   └── canadian-spelling.dict        # codespell dictionary for the spelling gate
 │
 ├── validation/                       # runnable scientific cases (not the pytest tiers)

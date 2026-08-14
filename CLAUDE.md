@@ -709,10 +709,15 @@ can also be overridden **per worktree** (`git config --worktree`, active when
 shadowed; `git config --show-origin --get core.hooksPath` names the file actually in force, and
 `git config --worktree --unset core.hooksPath` drops a worktree-level override.
 
-`tools/fastgate.sh` checks this before it runs anything and prints a warning naming the offending
-path and the command that fixes it (it stays silent when the hooks are wired, and in CI, where the
-workflow runs the gate directly). That is the only warning you get — the hooks themselves cannot
-report their own absence.
+`tools/check_hooks.sh` reports both failures, and `tools/fastgate.sh` runs it before it runs
+anything, so the state surfaces on an ordinary test run. It warns when the hooks **will not run**
+(nothing configured, or a path holding no executable `pre-push`) and, separately, when they run
+only **by coincidence** — an absolute path resolving outside this checkout, which works today and
+disappears without a word the moment that other checkout changes branch. It stays silent when the
+wiring is sound and under `CI`, where the workflow runs the gate directly, and it always exits `0`,
+so a caller's status is its own. That is the only warning you get: the hooks cannot report their
+own absence, which is why the checker is covered by `tests/unit/test_check_hooks.py` — a warning
+that quietly stops firing looks exactly like a repository whose hooks are fine.
 
 ### Documentation
 
