@@ -30,6 +30,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import NamedTuple
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -37,6 +38,7 @@ import scipy.sparse as sp
 
 from .multigrid import (
     _AGGREGATE_STATS,
+    SmoothedHierarchy,
     _CsrOperator,
     _operator_matvec,
     _smoothed_ops,
@@ -46,15 +48,26 @@ from .multigrid import (
 __all__ = ["NativeSimpleInverse", "block_approximate_inverse", "native_saddle_inverse"]
 
 
-class _SimplePieces(NamedTuple):
+class _SimplePieces(eqx.Module):
     """One level's SIMPLE relaxation pieces, all frozen and all traced.
 
     ``n_velocity`` is the split point in the level's field-major vector; everything else is either an
     elementwise reciprocal or a sparse operator, so a sweep is diagonal scalings and matrix-vector
     products and nothing else -- no factorization, no triangular solve, no sequential dependency.
+
+    **An ``equinox.Module`` with only the split point static, on the same rule as
+    :class:`~aquaflux.solve.multigrid._SparseLevel`, and for the same reason.** That makes the record a
+    pytree whose every array is a traced leaf, so it can be passed as an *argument* to the jitted cycle
+    rather than captured by it. Re-deriving the pieces at a new operator on unchanged shapes then reuses
+    the compiled cycle instead of tracing a new one -- which is what makes a mid-march refresh cheap, and
+    is defeated outright by a closure, since a closed-over array is a compile-time constant and every
+    refresh mints a new one.
+
+    The formed Schur is deliberately **not** carried here. It has no traced form a diagnostic can
+    transpose, and a host sparse matrix is neither a leaf nor a hashable static field, so
+    :func:`_simple_pieces` returns it alongside instead.
     """
 
-    n_velocity: int
     f_diagonal_inverse: jnp.ndarray  # (n_velocity,) 1 / diag(F)
     dg: _CsrOperator  # diag(F)^-1 G, the velocity correction operator
     divergence: _CsrOperator  # D
@@ -64,10 +77,8 @@ class _SimplePieces(NamedTuple):
     #: predictor then applies this rather than an elementwise multiply. ``None`` keeps the diagonal path,
     #: which stays an elementwise multiply rather than a nine-nonzero-per-row matvec.
     f_block_inverse: _CsrOperator | None
-
-    #: The same Schur complement in host sparse form. Kept because the balance diagnostic needs a
-    #: transposable sparse operator for a singular-value iteration, which the traced form is not.
-    schur_scipy: sp.csr_matrix
+    #: Static: it slices the level vector, so it must be concrete.
+    n_velocity: int = eqx.field(static=True)
 
 
 def block_approximate_inverse(f_block, n_cells, n_fields, frobenius):
@@ -141,13 +152,23 @@ def _simple_pieces(
     block_splitting: bool = False,
     simplec: bool = False,
     report: Callable[[str], None] = lambda _message: None,
-) -> _SimplePieces:
+) -> tuple[_SimplePieces, sp.csr_matrix]:
     """Form one level's SIMPLE pieces from that level's assembled operator.
 
     Works on **any** level, including a Galerkin coarse operator, because it reads nothing but the
     matrix -- which is the property that decides whether a SIMPLE relaxation can be a smoother at all.
     The assembler-built Schur cannot: it needs the mesh, the Rhie--Chow coefficients and the boundary
     closures, none of which a coarse level has.
+
+    Returns
+    -------
+    pieces : _SimplePieces
+        The traced record the smoother applies.
+    schur : scipy.sparse.csr_matrix
+        The same Schur complement in host sparse form, returned separately because it cannot ride on a
+        traced pytree. Forming it is the expensive part of this function, so a diagnostic that needs a
+        transposable sparse operator takes it from here rather than rebuilding it -- which would be a
+        second spelling of ``C - D diag(F)^-1 G``.
     """
     n_cells = a.shape[0] // block_size
     nv = (block_size - 1) * n_cells
@@ -202,15 +223,17 @@ def _simple_pieces(
             f"      Schur relaxation (Eq. 39): min {ratio.min():.3e} median {np.median(ratio):.3e} "
             f"max {ratio.max():.3e}  ({schur.data.shape[0] / schur.shape[0]:.0f} nnz/row)",
         )
-    return _SimplePieces(
-        f_block_inverse=block_inverse,
-        schur_scipy=schur,
-        n_velocity=nv,
-        f_diagonal_inverse=jnp.asarray(f_inverse),
-        dg=_CsrOperator.from_scipy(dg),
-        divergence=_CsrOperator.from_scipy(d_block),
-        schur=_CsrOperator.from_scipy(schur),
-        schur_diagonal_inverse=jnp.asarray(schur_inverse),
+    return (
+        _SimplePieces(
+            f_block_inverse=block_inverse,
+            n_velocity=nv,
+            f_diagonal_inverse=jnp.asarray(f_inverse),
+            dg=_CsrOperator.from_scipy(dg),
+            divergence=_CsrOperator.from_scipy(d_block),
+            schur=_CsrOperator.from_scipy(schur),
+            schur_diagonal_inverse=jnp.asarray(schur_inverse),
+        ),
+        schur,
     )
 
 
@@ -258,6 +281,112 @@ def _simple_correction(
 
     pressure = jax.lax.fori_loop(0, max(pressure_sweeps - 1, 0), sweep, pressure)
     return jnp.concatenate([predictor - pieces.dg.apply(pressure), pressure])
+
+
+class _SmootherSettings(NamedTuple):
+    """The cycle's counts and relaxations -- everything about it that must be concrete.
+
+    A plain tuple of Python numbers, so it is hashable and compares by value: under
+    :func:`equinox.filter_jit` it lands wholly on the static side and two builds at the same settings
+    share one compiled cycle. That is the point of separating it from the pieces, which land wholly on
+    the traced side.
+    """
+
+    cycles: int
+    sweeps: int
+    pressure_sweeps: int
+    pressure_omega: float
+    omega: float
+    mu: int
+    pre_smooth: bool
+
+
+@eqx.filter_jit
+def _native_saddle_cycle(
+    hierarchy: SmoothedHierarchy,
+    pieces: dict[int, _SimplePieces],
+    residual: jnp.ndarray,
+    settings: _SmootherSettings,
+) -> jnp.ndarray:
+    """``settings.cycles`` V-cycles over ``hierarchy``, smoothed by SIMPLE relaxation.
+
+    **Module-level, and taking the hierarchy and the pieces as ARGUMENTS rather than closing over them,
+    so a refresh at unchanged shapes is a compilation-cache hit.** A locally-defined ``jax.jit`` closure
+    is a fresh cache entry per closure, so re-deriving the preconditioner would recompile the whole
+    cycle every time -- which is what the level records' static/traced split, the shape ladder and
+    :meth:`~aquaflux.solve.multigrid.SmoothedHierarchy.refit` all exist to avoid. Closing over the
+    arrays is also expensive on the *first* build: they become compile-time constants, so a hierarchy's
+    worth of them is embedded in the compiled program rather than passed as buffers.
+
+    ``pieces`` is keyed by level size because the V-cycle recursion is unrolled at trace time, so the
+    smoother is handed the concrete level object and looks its pieces up by a static attribute; the
+    coarsest level solves directly and has none.
+
+    Parameters
+    ----------
+    hierarchy : SmoothedHierarchy
+        The coarsened levels, finest first.
+    pieces : dict
+        Each smoothed level's SIMPLE pieces, keyed by that level's degree-of-freedom count.
+    residual : jnp.ndarray
+        The right-hand side, shape ``(n_dofs,)``.
+    settings : _SmootherSettings
+        The cycle's static counts and relaxations.
+
+    Returns
+    -------
+    jnp.ndarray
+        The approximate solution, shape ``(n_dofs,)``.
+    """
+
+    def smooth(level, rhs, guess):
+        piece = pieces[level.n]
+
+        # Looped rather than unrolled, for the same reason as the inner pressure sweeps: the graph is
+        # what a refresh recompiles, and it is otherwise unrolled over levels x sweeps x inner sweeps.
+        # The level dimension has to stay unrolled (each level has its own shapes), so the two sweep
+        # dimensions are where the size actually comes from.
+        def outer(_, g):
+            correction = _simple_correction(
+                piece,
+                rhs - _operator_matvec(level, g),
+                settings.pressure_sweeps,
+                settings.pressure_omega,
+            )
+            return g + settings.omega * correction
+
+        return jax.lax.fori_loop(0, settings.sweeps, outer, guess)
+
+    def smooth_zero(level, rhs):
+        """``smooth`` from a zero iterate, with the first sweep's residual matvec peeled off.
+
+        At ``g = 0`` the residual ``rhs - A g`` is exactly ``rhs``, so that application of the level
+        operator -- the densest thing in the smoother -- computes a known answer at full price. The
+        pre-smooth always starts here, so it is charged at every level of every cycle. This is the same
+        peel :func:`_simple_correction` already does for the first pressure sweep, one loop out.
+        """
+        if settings.sweeps <= 0:
+            return jnp.zeros_like(rhs)
+        piece = pieces[level.n]
+        guess = settings.omega * _simple_correction(
+            piece, rhs, settings.pressure_sweeps, settings.pressure_omega
+        )
+
+        def outer(_, g):
+            correction = _simple_correction(
+                piece,
+                rhs - _operator_matvec(level, g),
+                settings.pressure_sweeps,
+                settings.pressure_omega,
+            )
+            return g + settings.omega * correction
+
+        return jax.lax.fori_loop(0, settings.sweeps - 1, outer, guess)
+
+    ops = _smoothed_ops(
+        smooth, mu=settings.mu, pre_smooth=settings.pre_smooth, smooth_zero=smooth_zero
+    )
+    return hierarchy.fixed_cycle_solve(residual, settings.cycles, ops)
 
 
 def _diagonal_approximate_inverse(
@@ -443,6 +572,17 @@ class NativeSimpleInverse:
             frozen_coarsening=frozen_coarsening,
             shape_headroom=shape_headroom,
         )
+        # The cycle's static half, built once: it never changes over this inverse's life, so a refresh
+        # cannot move the compilation key through it.
+        self._smoother = _SmootherSettings(
+            cycles=cycles,
+            sweeps=sweeps,
+            pressure_sweeps=pressure_sweeps,
+            pressure_omega=pressure_omega,
+            omega=omega,
+            mu=mu,
+            pre_smooth=pre_smooth,
+        )
         # Discovered on the first build and held for the life of the inverse, so every later rebuild
         # coarsens into the same ladder. `None` until then, and forever if no headroom was asked for.
         self._budget = None
@@ -495,21 +635,25 @@ class NativeSimpleInverse:
         )
 
     def _after_coarsening(self) -> None:
-        """Capture this build's aggregate statistics, then derive the smoother and jitted cycle."""
+        """Capture this build's aggregate statistics, then derive the smoother over the hierarchy."""
         # Snapshot NOW, while the accumulator still describes this build: it is module-level and every
         # later hierarchy overwrites it, so reading it at report time is reading someone else's.
         self._aggregate_stats = list(_AGGREGATE_STATS[-(len(self._hierarchy.levels) - 1) :])
         self._derive_cycle()
 
     def _derive_cycle(self) -> None:
-        """Build the per-level SIMPLE pieces and the jitted V-cycle over the current hierarchy.
+        """Build the per-level SIMPLE pieces over the current hierarchy, and report the build.
 
         Split out of :meth:`_rebuild` because a refresh has two ways to reach the same place -- coarsen
         again, or refit the values onto the coarsening already held -- and only the hierarchy differs
         between them. Everything below reads ``self._hierarchy`` and is common to both.
+
+        **It builds no jitted function.** The cycle is the module-level :func:`_native_saddle_cycle`,
+        which takes the hierarchy and these pieces as arguments, so re-deriving them on unchanged shapes
+        reuses the compiled cycle. Building one here instead would put them in a closure, where every
+        refresh is a fresh cache key and a full recompile.
         """
         settings = self._settings
-        cycles = settings["cycles"]
         sweeps = settings["sweeps"]
         pressure_sweeps = settings["pressure_sweeps"]
         pressure_omega = settings["pressure_omega"]
@@ -519,8 +663,6 @@ class NativeSimpleInverse:
         strength_threshold = settings["strength_threshold"]
         block_splitting = settings["block_splitting"]
         simplec = settings["simplec"]
-        mu = settings["mu"]
-        pre_smooth = settings["pre_smooth"]
         # Keyed by level size: the V-cycle recursion is unrolled at trace time, so the smoother is
         # handed the concrete level object and can look its pieces up by a static attribute. The
         # coarsest level solves directly and needs none.
@@ -537,7 +679,10 @@ class NativeSimpleInverse:
                 ),
                 shape=operator.shape,
             )
-            pieces[level.n] = _simple_pieces(
+            # The formed Schur is discarded: nothing here applies it, and the smoother's traced copy
+            # is the one the cycle uses. A diagnostic that wants it in host form calls `_simple_pieces`
+            # itself and takes it from the pair.
+            pieces[level.n], _ = _simple_pieces(
                 level_matrix,
                 level.block_size,
                 frobenius,
@@ -580,54 +725,20 @@ class NativeSimpleInverse:
             f"({self._n_dofs / max(coarse.n, 1):.0f}x, direct solve), {sizes}",
         )
 
-        def smooth(level, rhs, guess):
-            piece = pieces[level.n]
-
-            # Looped rather than unrolled, for the same reason as the inner pressure sweeps: the graph
-            # is what a refresh recompiles, and it is currently unrolled over levels x sweeps x inner
-            # sweeps. The level dimension has to stay unrolled (each level has its own shapes), so the
-            # two sweep dimensions are where the size actually comes from.
-            def outer(_, g):
-                correction = _simple_correction(
-                    piece, rhs - _operator_matvec(level, g), pressure_sweeps, pressure_omega
-                )
-                return g + omega * correction
-
-            return jax.lax.fori_loop(0, sweeps, outer, guess)
-
-        def smooth_zero(level, rhs):
-            """`smooth` from a zero iterate, with the first sweep's residual matvec peeled off.
-
-            At `g = 0` the residual `rhs - A g` is exactly `rhs`, so that application of the level
-            operator -- the densest thing in the smoother -- computes a known answer at full price. The
-            pre-smooth always starts here, so it is charged at every level of every cycle. This is the
-            same peel `_simple_correction` already does for the first pressure sweep, one loop out.
-            """
-            if sweeps <= 0:
-                return jnp.zeros_like(rhs)
-            piece = pieces[level.n]
-            guess = omega * _simple_correction(piece, rhs, pressure_sweeps, pressure_omega)
-
-            def outer(_, g):
-                correction = _simple_correction(
-                    piece, rhs - _operator_matvec(level, g), pressure_sweeps, pressure_omega
-                )
-                return g + omega * correction
-
-            return jax.lax.fori_loop(0, sweeps - 1, outer, guess)
-
-        ops = _smoothed_ops(smooth, mu=mu, pre_smooth=pre_smooth, smooth_zero=smooth_zero)
-        cycle = jax.jit(lambda r: self._hierarchy.fixed_cycle_solve(r, cycles, ops))
-        self._solve = cycle
+        self._pieces = pieces
         # LAZY. `jax.linear_transpose` traces eagerly, and a forward march never applies the transpose --
         # only the adjoint does. Building it at construction cost a measured 0.27 GB and 0.27 s per arm
         # for something most callers never touch, on a machine where the memory is the binding constraint.
-        self._cycle = cycle
+        # Dropped here rather than kept, because it describes the pieces this call has just replaced.
         self._transpose_fn = None
 
     @property
     def n_dofs(self) -> int:
         return self._n_dofs
+
+    def _solve(self, residual: jnp.ndarray) -> jnp.ndarray:
+        """The cycle over the pieces this inverse currently holds, traced in and not captured."""
+        return _native_saddle_cycle(self._hierarchy, self._pieces, residual, self._smoother)
 
     def refactor_block(self, block: sp.spmatrix) -> None:
         """Re-fit to a new operator on the same graph, in place. Required to survive a march refresh.
@@ -679,7 +790,7 @@ class NativeSimpleInverse:
             return np.asarray(self._solve(vector), dtype=np.float64)
         if self._transpose_fn is None:
             self._transpose_fn = jax.linear_transpose(
-                self._cycle, jnp.zeros(self._n_dofs, dtype=jnp.float64)
+                self._solve, jnp.zeros(self._n_dofs, dtype=jnp.float64)
             )
         return np.asarray(self._transpose_fn(vector)[0], dtype=np.float64)
 

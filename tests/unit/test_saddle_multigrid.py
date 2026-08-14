@@ -8,10 +8,14 @@ cover. Nothing here needs a mesh, a flow, or a case.
 
 from __future__ import annotations
 
+import equinox as eqx
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
 from aquaflux.solve import NativeSimpleInverse, block_approximate_inverse, native_saddle_inverse
+from aquaflux.solve.saddle_multigrid import _native_saddle_cycle, _simple_pieces
 
 
 def _saddle(n_cells: int = 240, dim: int = 3, seed: int = 0) -> sp.csr_matrix:
@@ -118,6 +122,79 @@ def test_refactor_refits_in_place_onto_a_new_operator() -> None:
 
     assert np.all(np.isfinite(after))
     assert not np.allclose(before, after), "the refresh did not re-fit to the new operator"
+
+
+def test_a_refresh_at_unchanged_shapes_reuses_the_compiled_cycle() -> None:
+    """The whole point of the level records' static/traced split — and it is easy to lose.
+
+    The cycle is a module-level jitted function taking the hierarchy and the smoother pieces as
+    ARGUMENTS. Building one per refresh instead — a fresh ``jax.jit`` closing over them — recompiles the
+    entire unrolled V-cycle every time, because a new closure is a new cache key whatever its contents.
+    Measured on a 92160-degree-of-freedom flow block that cost 1.07 s per refresh, which is most of what
+    a refresh costs; it also embeds the hierarchy's arrays in the compiled program as constants, which is
+    why the first build took 1.31 s rather than 0.15 s.
+
+    **Asserted on what DETERMINES the cache key — the argument pytree's structure and its leaves' shapes
+    and dtypes — plus a trace count over a function this test owns.** A first version read
+    ``jax.jit._cache_size()`` off the module's own jitted cycle, which passes alone and fails in a long
+    run: those entries are not retained for the life of a process, so the probe reports zero for reasons
+    that have nothing to do with the code under test. A cache-size probe measures JAX's retention policy;
+    this measures the invariant.
+    """
+    a = _saddle()
+    inverse = NativeSimpleInverse(a, 4, **_SETTINGS)
+    b = np.asarray(np.random.default_rng(11).normal(size=a.shape[0]))
+    inverse.apply(b)
+
+    def signature(inv):
+        arguments = (inv._hierarchy, inv._pieces)
+        leaves, structure = jax.tree_util.tree_flatten(arguments)
+        return structure, [(leaf.shape, leaf.dtype) for leaf in leaves]
+
+    before = signature(inverse)
+    inverse.refactor_block((a * 1.7).tocsr())
+    after = signature(inverse)
+
+    assert after == before, (
+        "the refresh moved the argument pytree, so the compiled cycle cannot be reused; a shape or a "
+        "static field is tracking the operator's values"
+    )
+
+    # And they are genuinely arguments rather than captures: a function over them traces ONCE across
+    # both hierarchies. Owned here, so the count is this test's and not JAX's to evict.
+    traces = []
+
+    @eqx.filter_jit
+    def cycle(hierarchy, pieces, residual):
+        traces.append(1)  # appended once per trace, not per call
+        return _native_saddle_cycle(hierarchy, pieces, residual, inverse._smoother)
+
+    rhs = jnp.asarray(b)
+    cycle(inverse._hierarchy, inverse._pieces, rhs).block_until_ready()
+    assert len(traces) == 1
+    inverse.refactor_block((a * 2.3).tocsr())
+    cycle(inverse._hierarchy, inverse._pieces, rhs).block_until_ready()
+    assert len(traces) == 1, "a refreshed hierarchy retraced the cycle"
+
+
+def test_the_pieces_carry_no_host_matrix_so_they_can_be_traced() -> None:
+    """A host sparse matrix on the record is neither a traced leaf nor a hashable static field.
+
+    Carrying one would make the record unusable as a jit argument — silently, by falling back to a
+    closure — so the formed Schur rides out of :func:`_simple_pieces` as a second return value instead,
+    which a caller that wants it in host form takes from the pair.
+    """
+    a = _saddle()
+    inverse = NativeSimpleInverse(a, 4, **_SETTINGS)
+
+    leaves = jax.tree_util.tree_leaves(inverse._pieces)
+    assert leaves, "the pieces have no traced leaves at all"
+    assert all(isinstance(leaf, jnp.ndarray) for leaf in leaves), (
+        "a non-array leaf would be traced as one and fail"
+    )
+
+    _, schur = _simple_pieces(a, 4)
+    assert sp.issparse(schur) and schur.shape == (a.shape[0] // 4,) * 2
 
 
 def test_a_mismatched_block_is_rejected() -> None:

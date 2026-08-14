@@ -3474,24 +3474,43 @@ matvecs, vector-length work in every diagonal scaling, and the dense coarse solv
 **square** of its size. Do not revive it at this problem size; the minimum viable headroom is set by how
 far the partition genuinely moves (~12 %), which still costs several times the retrace saving.
 
-**⚠️⚠️ AND THE RETRACE WAS NEVER PRICED CORRECTLY — the recompile is UNCONDITIONAL. Read this before
-citing any retrace figure.** `NativeSimpleInverse._derive_cycle` builds `jax.jit(lambda …)` on a **fresh
-lambda every refresh**, closing over the hierarchy and the smoother pieces. A new `jax.jit` object starts
-with an empty cache, so it recompiles **whether or not the coarsening moved** — verified from the source,
-no measurement needed. Consequences:
+**⚠️⚠️ THE RETRACE WAS NEVER PRICED CORRECTLY — the recompile was UNCONDITIONAL. Read this before citing
+any retrace figure recorded above.** `NativeSimpleInverse._derive_cycle` built `jax.jit(lambda …)` on a
+**fresh lambda every refresh**, closing over the hierarchy and the smoother pieces. A new `jax.jit`
+object starts with an empty cache, so it recompiled **whether or not the coarsening moved**.
+Consequences for the figures above, which stand as corrections whatever happens next:
 - **`refit`'s 17 s rung-1 saving was HOST AGGREGATION, not retrace**: it skips `_mis_aggregate` and
-  friends but still rebuilds the jit. So the "~3.4 s per retrace, ~88 s per march, ~3 %" figure recorded
+  friends but still rebuilt the jit. So the "~3.4 s per retrace, ~88 s per march, ~3 %" figure recorded
   above is an attribution error; that time is Python, not XLA.
-- **Compile is a SEPARATE cost that neither refuted experiment removed**, and it has never been measured
-  on this case. It may be additional to the 88 s rather than part of it.
-- The sibling `NodalNativeInverse` (`aquaflux/solve/field_split.py`) already passes its hierarchy as a
-  jit **argument** and says why. ⚠️ The comment immediately above it — "The hierarchy is captured as a
-  constant, which is correct here precisely because it is frozen" — is **stale and contradicted by the
-  code four lines below it**, and is the likely source of the flow arm's pattern. Fixing the flow arm
-  requires lifting the *pieces* as well (an attempt that moved only the hierarchy was measured still to
-  recompile, 271 ms), which needs `_SimplePieces` to drop its `schur_scipy` field to become a valid
-  pytree argument. Unbuilt; sized at ~3–4 % here and a prerequisite for tracing the V-cycle into the
-  solve on GPU.
+- **Compile was a SEPARATE cost that neither refuted experiment removed**, and it was never measured on
+  a march. It may be additional to the 88 s rather than part of it.
+
+**✅ FIXED (2026-08-14) — the cycle is a module-level `_native_saddle_cycle(hierarchy, pieces, residual,
+settings)` and a refresh at unchanged shapes is now a cache hit.** `_SimplePieces` is an `equinox.Module`
+with only `n_velocity` static (the `_SparseLevel` rule), and the formed Schur — which is neither a traced
+leaf nor a hashable static field — rides out of `_simple_pieces` as a second return value, reachable as
+`NativeSimpleInverse.schur(level_dofs)`. The static counts and relaxations travel as a hashable
+`_SmootherSettings` tuple. Measured on a synthetic 4-field flow block of the shape the real one has
+(23040 cells, reach 2, 92160 dofs, 8.7M nnz, 2 levels, `shape_headroom=1.3`):
+
+| | closure | argument |
+|---|---|---|
+| first apply | 1.31 s, 1 compile | **0.16 s**, 1 compile |
+| `refactor_block` | 3.96 s | **1.50 s** (also carries the coarse-solve fix below) |
+| apply after refresh | 1.07 s, **1 compile** | **0.04 s, 0 compiles** |
+
+The first-apply collapse is the second half of the same defect: closed-over arrays are compile-time
+constants, so a hierarchy's worth of them was being embedded in the compiled program rather than passed
+as buffers. **Bit-identical** — the traced form against the closure form on the same pieces differs by
+0.000e+00, forward and transposed. Pinned by
+`test_a_refresh_at_unchanged_shapes_reuses_the_compiled_cycle` (asserted on the jit cache size, not a
+wall clock) and `test_the_pieces_carry_no_host_matrix_so_they_can_be_traced`.
+⚠️ **Measured on a SYNTHETIC operator, not on `bfs3d`, and not on a march** — the per-refresh figures
+should hold at the real block's ~4× nnz but the march-level share is unmeasured, and the ~3–4 % estimate
+this supersedes was itself never measured. Do not quote a march number until one is run.
+⚠️ The `NodalNativeInverse` comment that was the likely source of this pattern — "The hierarchy is
+captured as a constant, which is correct here precisely because it is frozen" — contradicted the code
+four lines below it and is corrected in the same change.
 
 ### The peel and the cap ON A MARCH — the cycles land, the seconds mostly do not (2026-08-14)
 

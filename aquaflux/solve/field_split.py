@@ -832,8 +832,8 @@ class NodalNativeInverse:
         self._hierarchy = build_convection_hierarchy(matrix, **self._build_settings)
         # JIT, because this is applied once per Krylov matrix-vector product and an un-jitted V-cycle
         # dispatches every operation in it separately -- pure overhead that has nothing to do with the
-        # method. The hierarchy is captured as a constant, which is correct here precisely because it
-        # is frozen.
+        # method. The hierarchy is NOT captured; see the note on the argument below, which this comment
+        # used to contradict.
         cycle = jax.jit(
             lambda hierarchy, r: convection_multigrid_solve(
                 hierarchy,
