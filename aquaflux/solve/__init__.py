@@ -121,6 +121,7 @@ from .march import (
 from .march_log import MarchLogger, combine_metrics, field_change_metrics
 from .multigrid import (
     AirHierarchy,
+    ShapeBudget,
     SmoothedHierarchy,
     air_multigrid_solve,
     build_air_hierarchy,
@@ -194,6 +195,7 @@ __all__ = [
     "ResidualNorm",
     "ResidualRatioDualTimeControl",
     "RowScaledNorm",
+    "ShapeBudget",
     "ShiftBasis",
     "ShiftPolicy",
     "ShiftTerm",

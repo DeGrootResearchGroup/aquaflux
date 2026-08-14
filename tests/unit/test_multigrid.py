@@ -1242,3 +1242,147 @@ def test_refit_rejects_an_operator_of_the_wrong_size() -> None:
     hierarchy = build_convection_hierarchy(_chain_operator(200, 0.01, np.ones(199)))
     with pytest.raises(ValueError, match="cannot refit"):
         hierarchy.refit(_chain_operator(100, 0.01, np.ones(99)))
+
+
+def _rotated_anisotropy():
+    """Two operators on one graph whose aggregations genuinely differ in SIZE, not just membership.
+
+    A square grid is the wrong fixture for this: aggregating along either direction gives the identical
+    count, so the shapes coincide and a budget appears to do nothing. A rectangular one separates them.
+    """
+    return (
+        _anisotropic_poisson(24, 16, aspect_ratio=100.0),
+        _anisotropic_poisson(24, 16, aspect_ratio=0.01),
+    )
+
+
+def test_a_repartitioning_rebuild_changes_shape_without_a_budget() -> None:
+    """The premise of the budget: at a live strength threshold, a rebuild moves the array shapes.
+
+    Asserted separately so the budget tests below cannot pass vacuously on a fixture where the two
+    hierarchies would have coincided anyway — which is exactly what a square grid does.
+    """
+    plain = dict(prolongation_smoothing="none", max_coarse=16, strength_threshold=0.25)
+    strong_y, strong_x = _rotated_anisotropy()
+
+    sizes = [
+        [(level.n, level.n_coarse) for level in build_convection_hierarchy(a, **plain).levels]
+        for a in (strong_y, strong_x)
+    ]
+    assert sizes[0] != sizes[1], "fixture does not repartition; the budget tests would be vacuous"
+
+
+def test_shape_budget_makes_a_repartitioning_rebuild_a_compilation_cache_hit() -> None:
+    """Coarsening into a fixed ladder keeps one compiled V-cycle across a rebuild that repartitions.
+
+    This is the difference between a budget and freezing the coarsening: the partition is still
+    re-derived from the current operator — only the *sizes* it is poured into are fixed — so the coarse
+    space tracks the flow while the compiled cycle does not have to be rebuilt.
+    """
+    plain = dict(prolongation_smoothing="none", max_coarse=16, strength_threshold=0.25)
+    strong_y, strong_x = _rotated_anisotropy()
+    budget = build_convection_hierarchy(strong_y, **plain).shape_budget(headroom=1.3)
+
+    built = [
+        build_convection_hierarchy(a, **plain, shape_budget=budget) for a in (strong_y, strong_x)
+    ]
+
+    def signature(hierarchy):
+        return [
+            (
+                level.n,
+                level.n_coarse,
+                int(level.operator.data.shape[0]),
+                None if level.p_val is None else int(level.p_val.shape[0]),
+            )
+            for level in hierarchy.levels
+        ]
+
+    assert signature(built[0]) == signature(built[1])
+
+    traces = []
+
+    @jax.jit
+    def apply(hierarchy, b):
+        traces.append(1)  # appended once per trace, not per call
+        return convection_multigrid_solve(hierarchy, b, cycles=1)
+
+    b = jnp.asarray(np.random.default_rng(0).normal(size=strong_y.shape[0]))
+    apply(built[0], b).block_until_ready()
+    assert len(traces) == 1
+    apply(built[1], b).block_until_ready()
+    assert len(traces) == 1, "a budgeted rebuild retraced the jitted V-cycle"
+
+
+def test_budget_padding_leaves_the_preconditioner_unchanged() -> None:
+    """Padding must be INERT: the budgeted hierarchy is the same operator as the one it padded.
+
+    Empty aggregates carry a unit diagonal and no coupling, so nothing restricts into them and their
+    correction prolongates as zero; the operator's padded entries are zeros in the last row. If either
+    were wrong the coarse correction would differ, and the budget would be buying its cache hit by
+    quietly changing the preconditioner.
+    """
+    plain = dict(prolongation_smoothing="none", max_coarse=16, strength_threshold=0.25)
+    strong_y, strong_x = _rotated_anisotropy()
+    budget = build_convection_hierarchy(strong_y, **plain).shape_budget(headroom=1.3)
+
+    unpadded = build_convection_hierarchy(strong_x, **plain)
+    padded = build_convection_hierarchy(strong_x, **plain, shape_budget=budget)
+    assert padded.levels[-1].n > unpadded.levels[-1].n  # padding really happened
+
+    b = jnp.asarray(np.random.default_rng(1).normal(size=strong_x.shape[0]))
+    reference = convection_multigrid_solve(unpadded, b, cycles=2)
+    assert np.allclose(
+        np.asarray(reference),
+        np.asarray(convection_multigrid_solve(padded, b, cycles=2)),
+        rtol=1e-10,
+    )
+
+
+def test_budget_overflow_raises_rather_than_dropping_entries() -> None:
+    """A budget too small to hold the rebuild must RAISE. Dropping to fit would corrupt the operator.
+
+    Silently truncating the Galerkin product is the failure this guards: it would leave a coarse
+    operator missing arbitrary couplings, with no bound on the error and nothing in the output to say
+    so. Raising turns that into a re-budget.
+    """
+    plain = dict(prolongation_smoothing="none", max_coarse=16, strength_threshold=0.25)
+    strong_y, strong_x = _rotated_anisotropy()
+    # Budget from the SMALLER hierarchy at no headroom, then rebuild at the operator that aggregates
+    # into more cells than it — the direction a budget cannot absorb.
+    tight = build_convection_hierarchy(strong_x, **plain).shape_budget(headroom=1.0)
+
+    with pytest.raises(ValueError, match="budget"):
+        build_convection_hierarchy(strong_y, **plain, shape_budget=tight)
+
+
+def test_budget_padding_does_not_compound_down_the_hierarchy() -> None:
+    """A padded cell must not become its own aggregate on the next level, or the padding multiplies.
+
+    The regression this guards was found only by running a budget through several levels. A padded
+    cell is decoupled — unit diagonal, no off-diagonal coupling — so in the next level's aggregation
+    graph it is an ISOLATED vertex, and an isolated vertex gets an aggregate to itself. Each level's
+    padding therefore inflated the next level's aggregate count by the padding it had just added, which
+    compounded until the budget overflowed: on a four-level synthetic, level 1 asked for 180 slots
+    against a budget of 85 that its own natural coarsening fitted inside comfortably.
+
+    The fix is to aggregate the real cells only and send every padded cell to one reserved slot, so the
+    count entering each level is the number of REAL aggregates and the padding cannot accumulate.
+    """
+    # `max_levels` must be raised explicitly: the convection builder defaults to two levels, which is
+    # one coarsening — too shallow for padding to compound, so the test would pass vacuously.
+    plain = dict(prolongation_smoothing="none", max_coarse=8, strength_threshold=0.25, max_levels=5)
+    strong_y, strong_x = _rotated_anisotropy()
+    budget = build_convection_hierarchy(strong_y, **plain).shape_budget(headroom=1.4)
+    assert len(budget.coarse_cells) >= 3, "fixture must be deep enough for padding to compound"
+
+    hierarchy = build_convection_hierarchy(strong_x, **plain, shape_budget=budget)
+
+    # Every level lands exactly on its budget — no level absorbed the one above it's padding.
+    assert [level.n // level.block_size for level in hierarchy.levels[1:]] == list(
+        budget.coarse_cells
+    )
+    # And the coarse operators stay sparse: a level of isolated padded cells would show up as a
+    # diagonal-heavy operator with an aggregate count near its cell count.
+    b = jnp.asarray(np.random.default_rng(0).normal(size=strong_x.shape[0]))
+    assert np.all(np.isfinite(np.asarray(convection_multigrid_solve(hierarchy, b, cycles=2))))

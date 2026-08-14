@@ -989,10 +989,17 @@ def _simple_correction(
         pressure = jnp.zeros_like(rhs)
     else:
         pressure = pressure_omega * pieces.schur_diagonal_inverse * rhs
-    for _ in range(pressure_sweeps - 1):
-        pressure = pressure + pressure_omega * pieces.schur_diagonal_inverse * (
-            rhs - pieces.schur.apply(pressure)
-        )
+
+    # A LOOP, not a Python `for`, so the remaining sweeps enter the graph ONCE instead of being
+    # unrolled into `pressure_sweeps - 1` copies of the densest operator in the smoother. Every sweep
+    # has identical shapes, so there is nothing for unrolling to specialize on, and the traced graph is
+    # what a refresh has to recompile whenever the coarsening moves. `fori_loop` at a static trip count
+    # stays linearly transposable -- verified to give the same value AND the same transpose as the
+    # unrolled form -- which the adjoint requires.
+    def sweep(_, p):
+        return p + pressure_omega * pieces.schur_diagonal_inverse * (rhs - pieces.schur.apply(p))
+
+    pressure = jax.lax.fori_loop(0, max(pressure_sweeps - 1, 0), sweep, pressure)
     return jnp.concatenate([predictor - pieces.dg.apply(pressure), pressure])
 
 
@@ -1078,6 +1085,11 @@ class NativeSimpleInverse:
         # shapes cannot move. What it trades is coarse-space quality: the partition then describes the
         # operator at the state it was first built at, for the whole march.
         frozen_coarsening: bool = False,
+        # Coarsen into a FIXED ladder of array sizes, discovered on the first build and padded by this
+        # factor. Unlike freezing, the partition is still re-derived from the current operator at every
+        # refresh -- only the sizes it is poured into are held -- so the coarse space tracks the flow
+        # while the compiled cycle stays a cache hit. `None` disables it and is byte-identical.
+        shape_headroom: float | None = None,
     ) -> None:
         matrix = sp.csr_matrix(block)
         self._n_dofs = matrix.shape[0]
@@ -1106,13 +1118,37 @@ class NativeSimpleInverse:
             prolongation_smoothing=prolongation_smoothing,
             equilibrate=equilibrate,
             frozen_coarsening=frozen_coarsening,
+            shape_headroom=shape_headroom,
         )
+        # Discovered on the first build and held for the life of the inverse, so every later rebuild
+        # coarsens into the same ladder. `None` until then, and forever if no headroom was asked for.
+        self._budget = None
         self._rebuild(matrix)
 
     def _rebuild(self, matrix: sp.csr_matrix) -> None:
-        """Coarsen ``matrix`` from scratch, then derive the smoother and the jitted cycle over it."""
+        """Coarsen ``matrix`` from scratch, then derive the smoother and the jitted cycle over it.
+
+        With ``shape_headroom`` set, the FIRST build runs twice: once to discover what this operator
+        naturally coarsens into, then again into a budget derived from it. Every later rebuild reuses
+        that budget, so it re-derives the partition from the current operator -- unlike a frozen
+        coarsening -- while keeping the array shapes, and therefore the compiled cycle, fixed.
+        """
         settings = self._settings
-        self._hierarchy = build_convection_hierarchy(
+        self._hierarchy = self._coarsen(matrix, self._budget)
+        if self._budget is None and settings["shape_headroom"] is not None:
+            self._budget = self._hierarchy.shape_budget(settings["shape_headroom"])
+            print(
+                f"      shape ladder: cells {self._budget.coarse_cells}, "
+                f"nnz {self._budget.operator_nnz} (headroom {settings['shape_headroom']})",
+                flush=True,
+            )
+            self._hierarchy = self._coarsen(matrix, self._budget)
+        self._after_coarsening()
+
+    def _coarsen(self, matrix: sp.csr_matrix, budget):
+        """Build the hierarchy at this inverse's settings, optionally into a fixed shape ladder."""
+        settings = self._settings
+        return build_convection_hierarchy(
             matrix,
             block_size=settings["n_fields"],
             max_coarse=settings["max_coarse"],
@@ -1133,7 +1169,11 @@ class NativeSimpleInverse:
             avoid_singletons=settings["avoid_singletons"],
             prolongation_smoothing=settings["prolongation_smoothing"],
             equilibrate=settings["equilibrate"],
+            shape_budget=budget,
         )
+
+    def _after_coarsening(self) -> None:
+        """Capture this build's aggregate statistics, then derive the smoother and jitted cycle."""
         # Snapshot NOW, while the accumulator still describes this build: it is module-level and every
         # later hierarchy overwrites it, so reading it at report time is reading someone else's.
         from aquaflux.solve.multigrid import _AGGREGATE_STATS
@@ -1241,12 +1281,18 @@ class NativeSimpleInverse:
 
         def smooth(level, rhs, guess):
             piece = pieces[level.n]
-            for _ in range(sweeps):
+
+            # Looped rather than unrolled, for the same reason as the inner pressure sweeps: the graph
+            # is what a refresh recompiles, and it is currently unrolled over levels x sweeps x inner
+            # sweeps. The level dimension has to stay unrolled (each level has its own shapes), so the
+            # two sweep dimensions are where the size actually comes from.
+            def outer(_, g):
                 correction = _simple_correction(
-                    piece, rhs - _operator_matvec(level, guess), pressure_sweeps, pressure_omega
+                    piece, rhs - _operator_matvec(level, g), pressure_sweeps, pressure_omega
                 )
-                guess = guess + omega * correction
-            return guess
+                return g + omega * correction
+
+            return jax.lax.fori_loop(0, sweeps, outer, guess)
 
         ops = _smoothed_ops(smooth, mu=mu, pre_smooth=pre_smooth)
         cycle = jax.jit(lambda r: self._hierarchy.fixed_cycle_solve(r, cycles, ops))

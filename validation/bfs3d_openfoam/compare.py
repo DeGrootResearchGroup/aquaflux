@@ -495,6 +495,11 @@ if FLOW_INVERSE == "native":
         block_splitting=True,
         omega=1.0,
         frozen_coarsening=os.environ.get("BFS3D_FLOW_FROZEN_COARSENING", "") not in ("", "0"),
+        shape_headroom=(
+            float(os.environ["BFS3D_FLOW_SHAPE_HEADROOM"])
+            if os.environ.get("BFS3D_FLOW_SHAPE_HEADROOM")
+            else None
+        ),
     )
 
     def _native_flow_inverse(block, n_fields):
