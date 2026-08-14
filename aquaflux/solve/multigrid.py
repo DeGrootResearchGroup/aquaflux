@@ -1777,6 +1777,38 @@ def _jacobi_smooth(
     return x
 
 
+def _jacobi_smooth_zero(
+    level: _SparseLevel,
+    b: jnp.ndarray,
+    sweeps: int,
+    omega: float,
+    spectral_damping: bool = True,
+) -> jnp.ndarray:
+    """:func:`_jacobi_smooth` from a ZERO initial guess, with the first sweep's matvec peeled off.
+
+    At ``x = 0`` the residual ``b - A x`` is exactly ``b``, so that application of the level operator --
+    the densest thing in the cycle -- computes a known answer at full price, and XLA does not fold it
+    away inside a traced cycle. The pre-smooth always starts here, so it is charged at **every level of
+    every V-cycle**, which is what makes a fixed two-application saving worth taking: it is the same
+    peel :class:`_VCycleOps` already accepts for the SIMPLE relaxation, extended to the point smoother
+    the transported scalars use.
+
+    **Exact, not approximate.** ``A x`` at a zero vector is exactly zero in floating point, so
+    ``b - A x`` is ``b`` bit-for-bit and the peeled first sweep is the same arithmetic with two
+    operations removed; the remaining sweeps run unchanged.
+    """
+    if sweeps <= 0:
+        return jnp.zeros_like(b)
+    alpha = omega / level.lam_max if spectral_damping else omega
+    if level.block_inverse is None:
+        # Written in the order `_jacobi_smooth`'s own first sweep evaluates it -- `alpha * inv * b`
+        # rather than `alpha * (b / diagonal)` -- so the peel cannot move a rounding.
+        x = alpha * (1.0 / level.diagonal) * b
+    else:
+        x = alpha * _apply_block_inverse(level, b)
+    return _jacobi_smooth(level, b, x, sweeps - 1, omega, spectral_damping)
+
+
 def convection_multigrid_solve(
     hierarchy: SmoothedHierarchy,
     b: jnp.ndarray,
@@ -1823,7 +1855,12 @@ def convection_multigrid_solve(
     def smoother(level: _SparseLevel, rhs: jnp.ndarray, guess: jnp.ndarray) -> jnp.ndarray:
         return _jacobi_smooth(level, rhs, guess, sweeps, omega, spectral_damping)
 
-    return hierarchy.fixed_cycle_solve(b, cycles, _smoothed_ops(smoother))
+    def smoother_zero(level: _SparseLevel, rhs: jnp.ndarray) -> jnp.ndarray:
+        return _jacobi_smooth_zero(level, rhs, sweeps, omega, spectral_damping)
+
+    return hierarchy.fixed_cycle_solve(
+        b, cycles, _smoothed_ops(smoother, smooth_zero=smoother_zero)
+    )
 
 
 # --- local approximate ideal restriction (lAIR) -----------------------------------------
