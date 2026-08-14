@@ -3305,13 +3305,50 @@ anisotropy re-partitions the mesh completely while every level size is unchanged
 march reporting stable level sizes is not reporting a stable coarsening**, and the 10–20 % size drift
 recorded above is a lower bound on how much the partition moved, not an estimate of it.
 
-**Whether freezing is SAFE for the coarse space is the open half.** Frozen means derived once at the first
-build and reused across all three Reynolds rungs — effectively the initial condition's coarsening at the
-target Reynolds number. The case for it: aggregation quality is set by coupling anisotropy, which on this
-mesh is geometric (within-row conductance ratios of 64 median, 1700 max, from wall-normal grading; 99 % of
-cells above 4:1) and does not change with the flow. The case against: the eddy viscosity grows to ~150x
-molecular and varies spatially, so it changes the anisotropy PATTERN, not merely its magnitude. A middle
-option is freezing per RUNG rather than per march.
+**❌ AND FREEZING LOSES ON A MARCH — the stale coarse space costs FOUR TIMES what the retraces do
+(measured 2026-08-13). Do not ship it; the case default stays on the rebuild.** Two full `bfs3d` marches
+differing in **one flag**, `BFS3D_FLOW_FROZEN_COARSENING`; otherwise identical (native flow block at
+4 outer x 2 inner sweeps, strength 0.25, no singletons, 5 levels, `max_coarse` 500, block splitting,
+`omega` 1.0; native trailing inverse; field split; `refresh_on_cycles` 3; three Reynolds rungs):
+
+| | steps | wall | **Krylov cycles** | final ‖R‖ | mid-span `x_r/h` |
+|---|---|---|---|---|---|
+| rebuild (the default) | 60 | **3044 s** | **327** | 8.076e-06 | 8.361 |
+| frozen | 63 | 3153 s | **381 (+16.5 %)** | 1.689e-06 | 8.361 |
+
+**Read the CYCLE row.** The frozen arm converged deeper (1.7e-06 against 8.1e-06) and took three more
+steps, so part of the +109 s is work past the tolerance rather than inefficiency; the cycle count is not
+subject to that and says the same thing. The like-for-like window — through **step 35**, the last step at
+which the two arms agree to four figures — gives **+18 cycles (+12.1 %)** and **+66 s**, so the whole-march
+figure is not an artifact of the trajectories parting. Same reattachment length either way.
+
+**The per-rung split is the mechanistic result, and it is cleaner than the total:**
+
+| | cycles | wall |
+|---|---|---|
+| rung 1 (steps 1–14, Re/100) | 49 → **49, bit-identical at every step** | 429 → **412 s (−17 s)** |
+| rung 2 (steps 15–35) | 100 → **118 (+18 %)** | 776 → **859 s (+83 s)** |
+
+**Rung 1 is a clean null: a coarsening derived at the initial condition is worth EXACTLY as much as one
+rebuilt at every refresh, as long as the flow has not moved.** So the degradation is not drift in the
+aggregation algorithm — it is the anisotropy PATTERN rotating under a partition chosen by reading `|A_ij|`
+at a state the flow has since left. That is the "case against" (the eddy viscosity grows to ~150x molecular
+and varies spatially) confirmed, against the "case for" (the anisotropy is geometric — wall-normal grading,
+within-row conductance ratios of 64 median and 1700 max, 99 % of cells above 4:1), which does not survive.
+
+**⚠️ THE RETRACE IS NOW PRICED, AND IT IS SMALL: ~3.4 s each, ~88 s over a march, ~3 %.** Rung 1's 17 s came
+with *bit-identical* cycle counts over ~5 refreshes, so it is pure retrace removal with nothing else moving
+— the one place in this comparison where the two effects are separated. That is what makes the verdict
+quantitative rather than directional: the whole prize for eliminating retraces is ~88 s, and freezing spent
++109 s of cycles to collect it.
+⚠️ **This prices the retrace AT 23040 CELLS and says nothing about how it scales.** The V-cycle is unrolled
+over levels x sweeps x inner sweeps and the level count grows like log(n), so the per-retrace cost grows
+with the mesh while this measurement does not. Do not carry the 3 % to a larger case.
+
+**Freezing per RUNG is the surviving variant and is NOT measured.** Rung 1 shows a frozen partition is free
+while the flow resembles its build state; rung 2 shows it degrades once the flow develops. Rebuilding at
+each Reynolds boundary bounds the staleness to one rung. But note the ceiling before spending a run on it:
+the whole retrace prize is ~88 s of a 1087 s gap to the incumbent, so this was never the lever.
 
 ### The gap is CONVERGENCE, not cost — measured, and it reverses the priorities
 
