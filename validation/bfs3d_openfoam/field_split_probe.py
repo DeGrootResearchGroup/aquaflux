@@ -1119,6 +1119,46 @@ def _trailing_inverse(spec):
             )
 
         return build
+    if spec.startswith("nodal"):
+        # The SHIPPED trailing inverse, at the case's own settings. It has to be an arm in its own right:
+        # the recorded 11-cycle coupled baseline was measured with ILU(0) on BOTH halves, so the
+        # production configuration's coupled cost is nowhere on record -- and without it there is no
+        # baseline for the thing any trailing improvement would be improving.
+        #
+        # `nodalN` overrides the sweep count. That is worth its own axis because
+        # `trailing_smoother_sweeps` NEVER REACHES an injected inverse -- the field split passes it only
+        # to the V-cycle it builds itself -- so the native arm runs the class default of 4, and the
+        # recorded 16.5% saving for "1 sweep" describes the PETSc V-cycle this case no longer uses.
+        settings = dict(compare.NATIVE_TRAILING)
+        tail = spec.removeprefix("nodal")
+        if tail:
+            settings["sweeps"] = int(tail)
+
+        def build(block, n_group_fields):
+            return NodalNativeInverse(block, n_group_fields, **settings)
+
+        return build
+    if spec == "exact":
+        # A DIAGNOSTIC BOUND, not a shippable preconditioner: a near-complete factorization of the
+        # trailing block answers "how far below the coupled cycle count could a better trailing inverse
+        # possibly take us", which a standalone solve of that block cannot. A complete LU in three
+        # dimensions is the fill wall this whole programme exists to avoid, and this is a host object.
+        #
+        # It reports the achieved residual on a random right-hand side, so "near-exact" is a MEASURED
+        # claim rather than an assumption about `drop_tol`.
+        def build(block, n_group_fields):
+            matrix = sp.csr_matrix(block)
+            factors = sp.linalg.spilu(matrix.tocsc(), drop_tol=1e-12, fill_factor=60)
+            probe_rhs = np.random.default_rng(0).normal(size=matrix.shape[0])
+            achieved = np.linalg.norm(matrix @ factors.solve(probe_rhs) - probe_rhs) / np.linalg.norm(
+                probe_rhs
+            )
+            print(f"      exact trailing bound: true rel {achieved:.3e} on a random rhs", flush=True)
+            return JaxNativeBlockInverse(
+                lambda b: jnp.asarray(factors.solve(np.asarray(b))), matrix.shape[0]
+            )
+
+        return build
     raise ValueError(f"unknown trailing inverse {spec!r}")
 
 
@@ -1809,6 +1849,45 @@ ARMS = (
         "split simplesmooth4/ilu0",
         "split flow-first, native MG + SIMPLE smoother on flow, 4 sweeps",
         lambda m, g, n: field_split(m, g, n, "simplesmooth4", "ilu0", flow_first=True),
+    ),
+    # THE TRAILING ABLATION. How far below the coupled cycle count can a better trailing inverse alone
+    # take it? The standalone `[k, omega]` figure that has stood in for this ("2 cycles against a floor
+    # of 1") measures a solve production never performs: in the coupled system one Krylov iteration runs
+    # on all six fields with a block-triangular M, so the count is a property of the whole preconditioned
+    # operator, not of either block. The leading inverse is held at ILU(0) in every arm below; only the
+    # trailing one moves.
+    #
+    # Read it as a CURVE, not a point. `tail/exact` bounds what quality could buy; `tail/jacobi` is the
+    # known-bad end (recorded at 16 against ILU(0)'s 11), without which a small drop from 11 cannot be
+    # told from "already at the ceiling". `tail/nodal` is the shipped configuration, whose coupled cost
+    # is not on record at all.
+    #
+    # ⚠️ Report the trailing APPLY time beside every cycle count: the exact arm is far more expensive per
+    # application, and quoting its cycle count as a win would repeat "a cycle is not a unit of cost".
+    (
+        "tail/exact",
+        "split flow-first, ILU(0) flow + NEAR-EXACT trailing (diagnostic bound)",
+        lambda m, g, n: field_split(m, g, n, "ilu0", "exact", flow_first=True),
+    ),
+    (
+        "tail/nodal",
+        "split flow-first, ILU(0) flow + the SHIPPED native trailing inverse",
+        lambda m, g, n: field_split(m, g, n, "ilu0", "nodal", flow_first=True),
+    ),
+    (
+        "tail/nodal2",
+        "split flow-first, ILU(0) flow + native trailing at 2 sweeps",
+        lambda m, g, n: field_split(m, g, n, "ilu0", "nodal2", flow_first=True),
+    ),
+    (
+        "tail/nodal1",
+        "split flow-first, ILU(0) flow + native trailing at 1 sweep",
+        lambda m, g, n: field_split(m, g, n, "ilu0", "nodal1", flow_first=True),
+    ),
+    (
+        "tail/jacobi",
+        "split flow-first, ILU(0) flow + damped-Jacobi trailing (the known-bad end)",
+        lambda m, g, n: field_split(m, g, n, "ilu0", "jacobi", flow_first=True),
     ),
     # OVER-RELAXATION. `omega` scales the whole SIMPLE correction, and until now the grammar admitted
     # only 0.7 or 1.0 -- so no arm in this campaign could test above one, and "omega 1.0 is worth a
