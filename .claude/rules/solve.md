@@ -3498,6 +3498,60 @@ The cheap discriminator is not another march but `BFS3D_PROBE_SPLIT=1` at the **
 times the Jacobian product against the preconditioner apply directly — exactly the quantity the
 synthetic stood in for. Unrun.
 
+### Over-relaxing the SIMPLE correction — real, small, and one step from a cliff (2026-08-14)
+
+**The grammar capped `omega` at 1.0, so no arm in this campaign had ever tested over-relaxation.**
+`_leading_inverse` read `omega = 1.0 if "-o10" in rest else 0.7` — a binary token — while the class always
+took a float. So the recorded "omega 1.0 is worth a cycle" was measuring the **top of the grid**, not an
+optimum. `-oNN` (NN/10) now spans it.
+
+*Configuration:* `bfs3d` `state-00067`, **beta = 0 on operator and preconditioner** (the adjoint's
+operator), **uniform** column reach, real right-hand side `-R(state)`, GMRES restart 15 to rtol 1e-8 on the
+**TRUE** residual, 58-restart cap. Everything but `omega` pinned to the shipped bundle: 2 sweeps x 2 inner,
+strength 0.25, no singletons, 5 levels, `max_coarse` 500, per-cell block splitting, ILU(0) trailing.
+
+| omega | 0.7 | **1.0 (shipped)** | **1.2** | 1.4 | 1.6 | 1.8 | 2.0 |
+|---|---|---|---|---|---|---|---|
+| cycles | 30 | **20** | **19** | 58 cap | 58 cap | 58 cap | 58 cap |
+| TRUE rel | 1.99e-10 | 7.24e-10 | 5.62e-10 | 7.1e-05 | 1.2e-02 | 1.8e-02 | 5.0e-02 |
+| solve | 84 s | 68 s | **66 s** | 136 s | 139 s | 143 s | 141 s |
+
+**Confirmed in direction, REFUTED in magnitude.** The optimum is above 1.0 and is worth **one cycle (~5 %)**
+— not the 1.8x a synthetic saddle predicted. **The synthetic's optimum, 1.4–1.6, is exactly where the real
+block stops converging.**
+
+**⚠️ THE DERIVATION IS WRONG, AND PREDICTS ALMOST EXACTLY THE WORST POINT.** The argument was: the Frobenius
+velocity predictor is a least-squares fit and so shrinks by construction (median 0.53), SIMPLE's dropped
+neighbour terms shrink again, and a correction behaving like `gamma * A^-1` wants a Richardson factor near
+`1/gamma ~ 1.9`. Measured, 1.8 is the second-worst arm on the ladder. The premise that fails is
+**uniform** shrinkage: the SIMPLE correction's error varies by mode, so one scalar cannot compensate for
+it, and pushing the scalar far enough to fix the worst-shrunk mode amplifies the rest. That accounts for
+both halves of the result — a small gain from mild over-relaxation, and a hard cliff far below the derived
+value.
+
+**DO NOT MOVE THE DEFAULT — 1.0 STAYS.** 1.2 buys 5 % and sits ONE GRID STEP from a cliff that costs
+convergence outright, and past the cliff the degradation is monotone (7.1e-05 → 1.2e-02 → 1.8e-02 →
+5.0e-02), i.e. genuine amplification rather than a near-miss on the restart budget. The synthetic's one
+durable finding was that the optimum **moves with operator hardness**, which makes a fixed 1.2 fragile
+across a march that visits a wide range of operators. A per-level, per-refresh derived relaxation would be
+a different proposition, and at a 5 % ceiling it is not worth building.
+
+**⚠️ METHOD, worth more than the result: RUN THE WHOLE LADDER, INCLUDING PAST WHERE YOU EXPECT THE
+OPTIMUM.** The arms 0.7 / 1.0 / 1.2 alone read as monotone improvement and invite pushing further — and
+the next step diverges. A sweep that stops at its best point cannot see a cliff one step beyond it.
+
+**⚠️ AND THE SELF-CHECK EARNED ITS KEEP.** The first attempt ran at the case's shipped column reach and the
+control stopped at a TRUE relative residual of **4.779e-03**, so the harness refused to report any arm.
+That value is recorded elsewhere in this file as the benign signature of the loose march-solver stop at
+`(3,3,3,3,2,2)` — so without the gate there would have been seven plausible omega numbers measured against
+a control sitting at 5e-3. Every beta = 0 measurement in this campaign is at **uniform** reach for this
+reason; the shipped reach doubles the incumbent's zero-shift cost (22 cycles against 11) and is a separate
+axis.
+
+**Unrun:** the same ladder at beta = 0.1. A shift raises diagonal dominance and should pull the optimum
+*toward* 1.0, so the march's own regime is where over-relaxation has least to offer; what it would settle
+is whether the cliff ever descends BELOW 1.0, which would put the shipped default near an edge.
+
 ### The gap is CONVERGENCE, not cost — measured, and it reverses the priorities
 
 **The per-iteration split had never been measured, and both directions of inference about it were
