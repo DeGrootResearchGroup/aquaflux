@@ -115,6 +115,7 @@ from __future__ import annotations
 
 import gc
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -1267,7 +1268,20 @@ def _leading_inverse(spec):
         # an effective ~0.37 -- which is the same over-damping that was found and removed on the
         # pressure relaxation, and the same defect that cost 10 cycles against 2 on the transported
         # scalars when their smoother was damped where the reference's was not.
-        omega = 1.0 if "-o10" in rest else 0.7
+        # `-oNN` sets the relaxation to NN/10, so `-o14` is 1.4. It was a BINARY token (`-o10` or the
+        # 0.7 default), which capped every arm this campaign ever ran at 1.0 -- so OVER-relaxation had
+        # never been reachable, and "omega 1.0 is worth a cycle" was measuring the top of the grid
+        # rather than an optimum. The class always took a float; only the grammar was the limit.
+        #
+        # There is a derivation behind expecting the optimum above 1. The Frobenius velocity predictor
+        # is a least-squares fit, so it shrinks by construction -- `F_ii/||F_i||^2` is Jacobi times a
+        # factor at most one, median 0.53 on this block -- and SIMPLE's dropped neighbour terms shrink
+        # the pressure correction again. For a correction behaving like `gamma * A^-1` with gamma < 1,
+        # the optimal Richardson factor is about `1/gamma`, which puts it near 1.9 rather than at 1.
+        omega_token = next(
+            (t for t in re.findall(r"-o(\d+)", rest)), None
+        )
+        omega = int(omega_token) / 10 if omega_token else 0.7
         simplec = "-simplec" in rest
         block_splitting = "-bs" in rest
         frozen_coarsening = "-fc" in rest
@@ -1284,6 +1298,10 @@ def _leading_inverse(spec):
         # order independent of how the tuple is edited.
         for token in sorted(_SPEC_TOKENS, key=len, reverse=True):
             rest = rest.replace(token, "")
+        # `-oNN` is generated rather than enumerated, so it cannot be in `_SPEC_TOKENS`; strip it by
+        # pattern for the same reason the tuple is stripped longest-first -- a leftover digit joins the
+        # sweep count and silently changes the arm.
+        rest = re.sub(r"-o\d+", "", rest)
         sweeps = int(rest or 2)
 
         def build(block, n_group_fields):
@@ -1791,6 +1809,68 @@ ARMS = (
         "split simplesmooth4/ilu0",
         "split flow-first, native MG + SIMPLE smoother on flow, 4 sweeps",
         lambda m, g, n: field_split(m, g, n, "simplesmooth4", "ilu0", flow_first=True),
+    ),
+    # OVER-RELAXATION. `omega` scales the whole SIMPLE correction, and until now the grammar admitted
+    # only 0.7 or 1.0 -- so no arm in this campaign could test above one, and "omega 1.0 is worth a
+    # cycle" measured the top of the grid rather than an optimum. Everything else here is the shipped
+    # bundle (2 sweeps, strength 0.25, no singletons, 5 levels, coarse 500, block splitting), so omega
+    # is the only axis that moves.
+    #
+    # Expect the optimum ABOVE one on a derivation rather than a hunch: the Frobenius velocity
+    # predictor is a least-squares fit and so shrinks by construction (median factor 0.53 on this
+    # block), and SIMPLE's dropped neighbour terms shrink the pressure correction again. A correction
+    # behaving like `gamma * A^-1` with gamma < 1 wants a Richardson factor near `1/gamma`.
+    #
+    # Read the whole ladder, not the best point: a relaxation has a stability cliff, and where the
+    # optimum sits relative to it decides whether this is a new default or a per-state control.
+    (
+        "omega07",
+        "split flow-first, SIMPLE smoother at omega 0.7",
+        lambda m, g, n, _t=7: field_split(
+            m, g, n, f"simplesmooth2-a0-t25-ns-L5-c500-ps2-bs-o{_t}", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "omega10",
+        "split flow-first, SIMPLE smoother at omega 1.0",
+        lambda m, g, n, _t=10: field_split(
+            m, g, n, f"simplesmooth2-a0-t25-ns-L5-c500-ps2-bs-o{_t}", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "omega12",
+        "split flow-first, SIMPLE smoother at omega 1.2",
+        lambda m, g, n, _t=12: field_split(
+            m, g, n, f"simplesmooth2-a0-t25-ns-L5-c500-ps2-bs-o{_t}", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "omega14",
+        "split flow-first, SIMPLE smoother at omega 1.4",
+        lambda m, g, n, _t=14: field_split(
+            m, g, n, f"simplesmooth2-a0-t25-ns-L5-c500-ps2-bs-o{_t}", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "omega16",
+        "split flow-first, SIMPLE smoother at omega 1.6",
+        lambda m, g, n, _t=16: field_split(
+            m, g, n, f"simplesmooth2-a0-t25-ns-L5-c500-ps2-bs-o{_t}", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "omega18",
+        "split flow-first, SIMPLE smoother at omega 1.8",
+        lambda m, g, n, _t=18: field_split(
+            m, g, n, f"simplesmooth2-a0-t25-ns-L5-c500-ps2-bs-o{_t}", "ilu0", flow_first=True
+        ),
+    ),
+    (
+        "omega20",
+        "split flow-first, SIMPLE smoother at omega 2.0",
+        lambda m, g, n, _t=20: field_split(
+            m, g, n, f"simplesmooth2-a0-t25-ns-L5-c500-ps2-bs-o{_t}", "ilu0", flow_first=True
+        ),
     ),
     # Eq. (39) applied to the SCHUR relaxation as well, tested on its own axis. The velocity side is
     # held at the Frobenius inverse in both arms, so the only thing that moves is the pressure
