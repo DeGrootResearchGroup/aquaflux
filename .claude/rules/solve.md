@@ -51,6 +51,56 @@ wrong facts were lifted from here by `grep` and asserted as current in a single 
 solver that had been replaced, a tolerance that had moved, and a preconditioning side that had been
 deliberately reversed. See `CLAUDE.md` → **Stale-Record Check**.
 
+## ⏳ DEFERRED TO A BIGGER MESH — read this before scaling the case up
+
+**Everything in this file is measured on `bfs3d` at 23040 cells, and one open question is deferred
+*specifically* until that number grows. It is recorded here rather than buried because the trigger is a
+new case, not a new idea, and whoever builds that case is the one who needs to know.**
+
+### The trailing `[k, ω]` block's coarse grid does not scale, and nothing on this mesh can show it
+
+**The cycle case for improving the trailing block is CLOSED — three independent measurements agree
+there is nothing left there** (2026-08-14): the ablation says its *quality* buys nothing coupled (a
+near-exact factorization is worse than the shipped inverse); the ordering measurement says its *retained*
+coupling is worth two cycles; and the block norms say its *discarded* coupling is 0.09 % of the diagonal
+blocks. **Do not go looking for coupled cycles in that half again.**
+
+**What remains is a pure scaling argument, and it is unfalsifiable at this size.** The trailing hierarchy
+runs 2 levels, so its coarse grid grows **linearly** with the mesh while its coarsest solve is a **dense
+inverse — cubic to build, quadratic to store, and rebuilt at every refresh**:
+
+| cells | trailing coarse dofs | status |
+|---|---|---|
+| 23040 (`bfs3d` today) | ~438 | free — invisible in any measurement here |
+| ~230k | ~4400 | the dense solve starts to dominate the refresh |
+| — | **8192** | `_MAX_DENSE_COARSE_DOFS` **raises outright** |
+
+**So the symptom, when it comes, is a refresh that grows superlinearly with the mesh, or an outright
+raise from `_MAX_DENSE_COARSE_DOFS`. If you are reading this because you hit one of those, this is the
+entry you want.**
+
+**The fix is to let the trailing block coarsen deeper, and both knobs now exist** — 197's shared
+`NativeHierarchyInverse` base gave it `strength_threshold` and `max_levels`, which it previously lacked
+(that absence was an accident of a duplicated seam, not a decision). Three conditions, each of which has
+already cost someone a wrong conclusion elsewhere in this file:
+
+1. **Sweep `max_levels` and `strength_threshold` TOGETHER, never separately.** A threshold coarsens
+   *less*, so it enlarges the coarse grid. Testing one at the old 2-level cap reproduces the flow block's
+   original failure and refutes the transfer for the wrong reason.
+2. **Normalize `_cell_graph`'s edge weights per row-field first (UNBUILT).** It weights each cell edge by
+   the **sum** of `|A_ij|` over the block, and this block's ω rows sit ~8 orders above its k rows — so a
+   raw threshold there is an **ω-only** strength measure. This is the same collapse-over-row-fields
+   failure that let a column-reach audit approve a configuration which then diverged the march, and that
+   made the trailing bound arm unreadable for a day.
+3. **A nonzero threshold forfeits the refresh compilation-cache hit** unless paired with
+   `frozen_coarsening` or `shape_headroom`, because the aggregation then reads values. Safe for a
+   single-state sweep, which never refreshes; **not** obviously safe in a march, and the binding decision
+   keeping the k/ω path at θ = 0 in a march is unchanged.
+
+**The harness is `validation/bfs3d_openfoam/trailing_hierarchy_sweep.py`**, which runs the block alone at
+every arm. ⚠️ It, and five sibling probes, were dead on arrival until 2026-08-14 on a positional unpack —
+if it fails at startup again, check that first rather than the numerics.
+
 ## Current configuration (check here FIRST — the library and the case deliberately differ)
 
 **The library defaults and the validated `bfs3d` case bundle are not the same, and conflating them is a
