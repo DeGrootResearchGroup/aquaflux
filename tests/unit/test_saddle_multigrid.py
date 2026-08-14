@@ -8,12 +8,9 @@ cover. Nothing here needs a mesh, a flow, or a case.
 
 from __future__ import annotations
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
-
 from aquaflux.solve import NativeSimpleInverse, block_approximate_inverse, native_saddle_inverse
 
 
@@ -168,12 +165,8 @@ def test_the_frobenius_block_inverse_beats_inverting_the_cell_block_alone() -> N
     a = _saddle(n_cells=40)
     n_cells, n_fields = 40, 4
 
-    fitted = block_approximate_inverse(
-        a[: n_cells * 3, : n_cells * 3], n_cells, 3, frobenius=True
-    )
-    exact = block_approximate_inverse(
-        a[: n_cells * 3, : n_cells * 3], n_cells, 3, frobenius=False
-    )
+    fitted = block_approximate_inverse(a[: n_cells * 3, : n_cells * 3], n_cells, 3, frobenius=True)
+    exact = block_approximate_inverse(a[: n_cells * 3, : n_cells * 3], n_cells, 3, frobenius=False)
     velocity = a[: n_cells * 3, : n_cells * 3]
     identity = sp.eye(velocity.shape[0], format="csr")
 
