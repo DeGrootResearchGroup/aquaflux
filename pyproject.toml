@@ -43,9 +43,8 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     # NOTE: pydantic + pyyaml are intentionally NOT dependencies yet. The
-    # YAML→AST DSL is the LAST layer (dsl-design-note.md §6); it is added when
-    # that milestone starts, not before. Do not add them to scaffold empty
-    # structure.
+    # YAML→AST model format is the last layer to be built; it is added when that
+    # work starts, not before. Do not add them to scaffold empty structure.
 ]
 
 [project.optional-dependencies]
@@ -66,6 +65,19 @@ test = [
     "pytest-split>=0.9",
     "pytest-timeout>=2.3",
 ]
+# `docs` is the Sphinx toolchain for the site under `docs/` — MyST Markdown pages,
+# the pydata theme, and the copy-button extension; autodoc imports the package
+# itself, so the docs build needs aquaflux installed alongside these. Read the Docs
+# installs this extra (see `.readthedocs.yaml`). The build runs with
+# `fail_on_warning`, which makes any warning a hard failure — so a major release of
+# Sphinx or the theme can turn the build red on its own. Each is capped below the
+# next major; raise a cap intentionally.
+docs = [
+    "sphinx>=7.2,<9",
+    "myst-parser>=2.0,<5",
+    "pydata-sphinx-theme>=0.15,<1",
+    "sphinx-copybutton>=0.5,<1",
+]
 # `petsc` (petsc4py) backs two coupled preconditioners. For the complete-LU
 # (`coupled_lu_continuation`) it is the optional fast backend — UMFPACK (SuiteSparse) factors the coupled
 # Jacobian roughly an order of magnitude faster than the threshold-ILU on a moderate 2D mesh; without it
@@ -83,15 +95,15 @@ Repository = "https://github.com/DeGrootResearchGroup/aquaflux"
 version = { attr = "aquaflux.__version__" }
 
 [tool.setuptools.packages.find]
-# Only package `aquaflux*`. The repo root also holds design docs, `reference/`
-# (PDFs), and `reference_codes/` (the C++/Fortran blueprints) — none are code.
+# Only package `aquaflux*`. The repo root also holds documentation, tests, and
+# runnable validation cases — none of which belong in the installed distribution.
 include = ["aquaflux*"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-# Lint only the package. Design docs, references, and reference_codes are
-# out of scope for the style gate.
+# Lint only the package and its tests; everything else in the repo is out of
+# scope for the style gate.
 src = ["aquaflux", "tests"]
 
 [tool.ruff.lint]
@@ -114,12 +126,13 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Package __init__ re-export files carry deliberate import ordering — e.g.
 # aquaflux/__init__.py must enable JAX x64 before any submodule import that
-# builds JAX state (documented in CLAUDE.md).
+# builds JAX state, so those imports cannot be sorted or hoisted.
 "**/__init__.py" = ["I001", "E402"]
 
 [tool.codespell]
-# Spelling gate for the Canadian convention (see the Spelling Convention section
-# of CLAUDE.md). The convention is a mix — British `-our`/`-re`/`-lled` but
+# Spelling gate for the Canadian convention used throughout this project:
+# `colour`/`centre`/`labelled`, but `normalize`/`analyze`. The convention is a mix
+# — British `-our`/`-re`/`-lled` but
 # American `-ize`/`-yze` — so no stock dictionary matches it: an off-the-shelf
 # `en-GB_to_en-US` list would wrongly "correct" `colour`/`centre`/`neighbour`.
 # `tools/canadian-spelling.dict` is therefore a targeted custom list of the

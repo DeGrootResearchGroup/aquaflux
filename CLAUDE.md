@@ -706,7 +706,11 @@ aquakin: `pydata-sphinx-theme`, autodoc + napoleon (NumPy docstrings), and an AP
 surface. Read the Docs builds it (`.readthedocs.yaml`, `fail_on_warning: true`), so every
 cross-reference must resolve and every page must sit in a toctree. Build locally with the
 `docs` extra (`pip install -e ".[docs]"`, then `cd docs && make html`, or
-`sphinx-build -b html -W docs docs/_build/html` to match the strict CI/RTD build).
+`sphinx-build -b html -W docs docs/_build/html` to match the strict RTD build).
+**CI does not build the docs** — the GitHub Actions workflow is ruff + codespell + the test
+tiers only — so a warning that would fail RTD is invisible to every PR check. Build locally
+with `-W` when you touch a docstring of a documented subpackage, a `docs/` page, or a
+cross-reference.
 
 The docs are the **shipped surface**, so the Comment Convention and the Claude-Facing-File
 Reference Ban apply to them too: no references to the precursor codebases, the Claude-facing

@@ -42,6 +42,12 @@ coverage.xml
 !/README.md
 !/CLAUDE.md
 
+# Sphinx documentation build artifacts (the API page + per-object stubs are
+# generated at build time; the rendered site is built by Read the Docs).
+docs/_build/
+docs/generated/
+docs/api.md
+
 # Precursor codebases and source papers: external prior-art kept locally for reference
 # only. These are NOT part of the public repository and must never be committed.
 /reference/
