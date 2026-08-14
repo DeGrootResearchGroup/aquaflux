@@ -1537,6 +1537,23 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     *loses* there. What the measurement argues for is a **`β = 0` adjoint-only** preconditioner seam
     (`ForwardStep.adjoint_preconditioner()` already exists as the natural home), plus the JAX-native k/ω
     hierarchy the damped-Jacobi result unlocks. Both are unbuilt.
+  - **⚠️⚠️ `trailing_smoother_sweeps` DOES NOT REACH AN INJECTED TRAILING INVERSE, SO THE NATIVE ARM
+    SHIPS AT FOUR SWEEPS, NOT ONE (verified in source, 2026-08-14).** In
+    `build_block_triangular_field_split` the injected inverse is called as
+    `trailing_inverse(trailing_block, groups.n_trailing_fields)` — two arguments — while
+    `smoother_sweeps=trailing_smoother_sweeps` is passed **only on the `else` branch** that builds its own
+    `build_amg_vcycle`. `NodalNativeInverse`'s own default is `sweeps: int = 4`, and the case's
+    `NATIVE_TRAILING` sets only `max_coarse` and `equilibrate`. **So the entry below, and its measured
+    16.5 % wall saving, describe the PETSc trailing V-cycle — which this case no longer uses.** Cutting
+    the NATIVE trailing sweeps is therefore an untaken lever, not a shipped setting: measured on a
+    same-shape synthetic, its apply runs 10.7 / 6.9 / 5.3 ms at 4 / 2 / 1 sweeps.
+    ⚠️ **Two more shipped-vs-record mismatches found in the same pass:** the case runs
+    `equilibrate=False` (the class default is `True`), so every statement here about the *equilibrated*
+    `[k, ω]` cell block — unit diagonal, determinant exactly 1, subdiagonal 100–340 — describes an
+    operator the shipped configuration does not build; and `NATIVE_TRAILING`'s `max_coarse=2000` is
+    **inert**, because at `max_levels = _CONVECTION_LEVELS = 2` the level cap fires first regardless
+    (`max_coarse=16` builds a bit-identical hierarchy).
+
   - **✅ THE TWO HALVES ARE NOW SMOOTHED APART, AND THE TRAILING DEFAULT IS ONE SWEEP —
     `trailing_smoother_sweeps=1` (BUILT, SHIPPED, 2026-08-09).** Splitting the hierarchies is only half
     the value; the other half is that they can then be *tuned* apart, which the shipped bundle was not
@@ -3349,6 +3366,95 @@ with the mesh while this measurement does not. Do not carry the 3 % to a larger 
 while the flow resembles its build state; rung 2 shows it degrades once the flow develops. Rebuilding at
 each Reynolds boundary bounds the staleness to one rung. But note the ceiling before spending a run on it:
 the whole retrace prize is ~88 s of a 1087 s gap to the incumbent, so this was never the lever.
+
+### Sweep count, the zero-vector peel, and the forward solve cap — 2026-08-14
+
+**FEWER SWEEPS WIN ON THIS MARCH: 2 against 4 is −16.8 % wall for +34.6 % cycles.** Full `bfs3d` marches,
+native flow block, everything else identical (strength 0.25, no singletons, 5 levels, `max_coarse` 500,
+block splitting, omega 1.0, 2 inner pressure sweeps, `refresh_on_cycles` 3):
+
+| arm | steps | wall | Krylov cycles | final ‖R‖ | mid-span `x_r/h` |
+|---|---|---|---|---|---|
+| 4 sweeps | 60 | 3044 s | 327 | 8.076e-06 | 8.361 |
+| **2 sweeps** | 63 | **2533 s** | 440 | 1.689e-06 | 8.361 |
+
+The apply cost dominates strongly enough that buying cheapness with convergence pays. ⚠️ These arms part
+at **step 10** (a materially weaker preconditioner returns different Newton directions), so this is not
+the step-for-step controlled pair the frozen-coarsening comparison was; the direction is consistent
+across both early rungs independently.
+
+**✅ THE V-CYCLE MULTIPLIED THE LEVEL OPERATOR BY A VECTOR KNOWN TO BE ZERO, TWICE PER CYCLE (fixed).**
+`_fixed_cycle_solve` began each pass with `b − A x` at `x = 0`, and every level's pre-smooth ran its
+first sweep's `rhs − A g` at `g = 0`. The second is charged at **every level of every cycle**, and inside
+a `fori_loop` the body cannot be specialized away. XLA does not fold it: measured 2.88 ms against 1.33 ms
+for the peeled form on a 2.0M-nnz operator held as a jit constant.
+
+`_VCycleOps` gained an optional `smooth_zero(level, b)`; families supplying none fall back to
+`smooth(level, b, zeros)` and are byte-identical. **Exact, not approximate** — `smooth_zero(level, b)`
+matches `smooth(level, b, zeros)` to **0.0** at every level at 1, 2 and 4 sweeps. Worth, on a 5-level
+0.7M-nnz block:
+
+| sweeps | 1 | **2 (shipped)** | 4 |
+|---|---|---|---|
+| saving | 36.0 % | **12.5 %** | 5.7 % |
+
+The peel removes a fixed **two** operator applications out of `2·sweeps + 2`, so it is worth more at
+fewer sweeps — which makes low sweep counts more attractive than the sweep table alone suggests. The
+argument is the one the `pre_smooth=False` branch already made in its own comment, and the peel is the
+one `_simple_correction` already did for the first pressure sweep one loop further in; it simply had not
+been applied to the two outer sites.
+
+**✅ A SINGLE FORWARD SOLVE WAS BOUNDED ONLY AT 60 RESTARTS, LONG PAST THE POINT ITS ATTEMPT WAS DOOMED
+(fixed).** `cycle_budget` and `abort_above_inner_cycles` are both tested in `DualTimeStep`'s `cond`,
+i.e. **between** inner iterations, so neither can stop a solve already running — and neither bounded any
+of the 41–45 cycle solves in the archived marches. Meanwhile `forward_march` discards an attempt whose
+worst solve passes `retry_on_cycles` without reaching target, so a solve at 11 corrected cycles has
+already determined its work will be thrown away.
+
+Measured over **671 solves across three marches**: no accepted attempt exceeded **9** corrected cycles,
+discarded ones ran **39–45**, and the distribution is **empty between**. The archived logs put the
+recoverable work at ~404 s of a 2533 s march.
+
+**Two traps decide the constant, and both rule out the obvious choice of 10:**
+- **`max_restarts` is in RAW `lineax` restarts** (a fixed +2 per solve); `retry_on_cycles` is in
+  **corrected** cycles. A corrected cap of 12 is `max_restarts = 14`.
+- **The march's test is `max_inner_cycles > retry_on_cycles`, STRICTLY.** A cap landing exactly on the
+  threshold does not trip the retry, so the step **accepts the truncated, non-converged direction**
+  instead of escalating β — turning a doomed attempt into a bad accepted step. The corrected cap must
+  be strictly above the threshold.
+
+Shipped as `coupled_amg_continuation(forward_max_restarts=…)`, library default unchanged at 60; the case
+derives it as `retry_on_cycles + 4` from a single scaled constant so the two cannot drift.
+⚠️ **The 671-solve distribution describes UNCAPPED solves.** Whether a truncated direction ever needs an
+extra escalation rung is not answerable from it, and the first capped march is the first evidence.
+
+**❌ THE FIXED SHAPE LADDER IS DEAD — cycles IDENTICAL to the last step, wall +52.6 %.** Full march at
+2 sweeps with `shape_headroom` 1.25 against the 2-sweep control: **431 cycles against 431** through step
+62, wall 3808 s against 2495 s. The padding is provably inert (which is the mechanism working exactly as
+designed) and unaffordable, because it is charged per **application** (~440 cycles) while the retrace it
+avoids is charged per **refresh** (~26). The 25 % headroom hits every level three ways — operator
+matvecs, vector-length work in every diagonal scaling, and the dense coarse solve, which goes as the
+**square** of its size. Do not revive it at this problem size; the minimum viable headroom is set by how
+far the partition genuinely moves (~12 %), which still costs several times the retrace saving.
+
+**⚠️⚠️ AND THE RETRACE WAS NEVER PRICED CORRECTLY — the recompile is UNCONDITIONAL. Read this before
+citing any retrace figure.** `NativeSimpleInverse._derive_cycle` builds `jax.jit(lambda …)` on a **fresh
+lambda every refresh**, closing over the hierarchy and the smoother pieces. A new `jax.jit` object starts
+with an empty cache, so it recompiles **whether or not the coarsening moved** — verified from the source,
+no measurement needed. Consequences:
+- **`refit`'s 17 s rung-1 saving was HOST AGGREGATION, not retrace**: it skips `_mis_aggregate` and
+  friends but still rebuilds the jit. So the "~3.4 s per retrace, ~88 s per march, ~3 %" figure recorded
+  above is an attribution error; that time is Python, not XLA.
+- **Compile is a SEPARATE cost that neither refuted experiment removed**, and it has never been measured
+  on this case. It may be additional to the 88 s rather than part of it.
+- The sibling `NodalNativeInverse` (`aquaflux/solve/field_split.py`) already passes its hierarchy as a
+  jit **argument** and says why. ⚠️ The comment immediately above it — "The hierarchy is captured as a
+  constant, which is correct here precisely because it is frozen" — is **stale and contradicted by the
+  code four lines below it**, and is the likely source of the flow arm's pattern. Fixing the flow arm
+  requires lifting the *pieces* as well (an attempt that moved only the hierarchy was measured still to
+  recompile, 271 ms), which needs `_SimplePieces` to drop its `schur_scipy` field to become a valid
+  pytree argument. Unbuilt; sized at ~3–4 % here and a prerequisite for tracing the V-cycle into the
+  solve on GPU.
 
 ### The gap is CONVERGENCE, not cost — measured, and it reverses the priorities
 
