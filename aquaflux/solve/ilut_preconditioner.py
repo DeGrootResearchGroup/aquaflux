@@ -35,13 +35,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 from .frozen_operator import symmetrically_equilibrate
+from .host_preconditioner import HostPreconditioner
 
 
 def cell_major_permutation(n_cells: int, n_fields: int) -> np.ndarray:
@@ -233,7 +233,7 @@ def factorize_ilut(
     return IlutFactors(lu, scale, perm)
 
 
-class MonolithicIlutPreconditioner:
+class MonolithicIlutPreconditioner(HostPreconditioner):
     """The coupled ILUT preconditioner as JAX matvecs, wrapping a frozen :class:`IlutFactors`.
 
     Not an :class:`equinox.Module`: the factorization is a host ``scipy`` object, so this is held by a
@@ -247,9 +247,6 @@ class MonolithicIlutPreconditioner:
     Build it off the jit path with :meth:`build` from the residual, a reference state, and the
     (already-formed) shift diagonal.
     """
-
-    def __init__(self, factors: IlutFactors) -> None:
-        self.factors = factors
 
     @staticmethod
     def _factor(
@@ -266,10 +263,9 @@ class MonolithicIlutPreconditioner:
         The single form-and-factor path shared by :meth:`build` (constructs a new preconditioner) and
         :meth:`refresh_in_place` (re-factors an existing one).
         """
-        from .sparse_jacobian import materialize_block_jacobian
+        from .sparse_jacobian import materialize_block_jacobian, shifted_jacobian
 
-        jacobian = materialize_block_jacobian(matvec, plan)
-        shifted = (jacobian + sp.diags(np.asarray(shift_diagonal))).tocsr()
+        shifted = shifted_jacobian(materialize_block_jacobian(matvec, plan).tocsr(), shift_diagonal)
         return factorize_ilut(
             shifted,
             plan.n_fields,
@@ -353,32 +349,3 @@ class MonolithicIlutPreconditioner:
             drop_tol=drop_tol,
             diag_pivot_thresh=diag_pivot_thresh,
         )
-
-    def matvec(self, *, transpose: bool = False) -> Callable[[jnp.ndarray], jnp.ndarray]:
-        """The preconditioner as a JAX callable ``residual -> M residual`` (or ``M^T``).
-
-        Parameters
-        ----------
-        transpose : bool
-            Return ``M^T`` (for the adjoint transpose solve) instead of ``M``.
-
-        Returns
-        -------
-        callable
-            A ``jax.pure_callback`` matvec applying the current factorization on the host.
-
-        Notes
-        -----
-        The callback reads ``self.factors`` at call time rather than capturing it, so a
-        :meth:`refresh_in_place` between two calls of the returned matvec is picked up without
-        rebuilding the callback. The number of degrees of freedom is fixed by the mesh, so the output
-        shape is stable across a refresh.
-        """
-        shape = jax.ShapeDtypeStruct((self.factors.n_dofs,), jnp.float64)
-
-        def apply(residual: jnp.ndarray) -> jnp.ndarray:
-            return jax.pure_callback(
-                lambda r: self.factors.apply(r, transpose=transpose), shape, residual
-            )
-
-        return apply

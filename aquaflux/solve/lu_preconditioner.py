@@ -38,11 +38,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+
+from .host_preconditioner import HostPreconditioner
 
 
 class _LuBackend:
@@ -245,7 +246,7 @@ def factorize_lu(matrix: sp.spmatrix, *, backend: str = "auto") -> LuFactors:
     return LuFactors(_make_backend(matrix, backend))
 
 
-class MonolithicLuPreconditioner:
+class MonolithicLuPreconditioner(HostPreconditioner):
     """The coupled complete-LU preconditioner as JAX matvecs, wrapping a frozen :class:`LuFactors`.
 
     The complete-LU counterpart of
@@ -258,19 +259,15 @@ class MonolithicLuPreconditioner:
     calls ``M^T``, both only in forward evaluations.
     """
 
-    def __init__(self, factors: LuFactors) -> None:
-        self.factors = factors
-
     @staticmethod
     def _materialize(
         matvec: Callable[[jnp.ndarray], jnp.ndarray],
         plan,
         shift_diagonal: np.ndarray,
     ) -> sp.spmatrix:
-        from .sparse_jacobian import materialize_block_jacobian
+        from .sparse_jacobian import materialize_block_jacobian, shifted_jacobian
 
-        jacobian = materialize_block_jacobian(matvec, plan)
-        return (jacobian + sp.diags(np.asarray(shift_diagonal))).tocsr()
+        return shifted_jacobian(materialize_block_jacobian(matvec, plan).tocsr(), shift_diagonal)
 
     @classmethod
     def build(
@@ -326,28 +323,3 @@ class MonolithicLuPreconditioner:
         """
         matrix = self._materialize(matvec, plan, shift_diagonal)
         self.factors.backend.refactor(matrix)
-
-    def matvec(self, *, transpose: bool = False) -> Callable[[jnp.ndarray], jnp.ndarray]:
-        """The preconditioner as a JAX callable ``residual -> M residual`` (or ``M^T``).
-
-        The callback reads ``self.factors`` at call time rather than capturing it, so a
-        :meth:`refresh_in_place` between two calls is picked up without rebuilding the callback.
-
-        Parameters
-        ----------
-        transpose : bool
-            Return ``M^T`` (for the adjoint transpose solve) instead of ``M``.
-
-        Returns
-        -------
-        callable
-            A ``jax.pure_callback`` matvec applying the current factorization on the host.
-        """
-        shape = jax.ShapeDtypeStruct((self.factors.n_dofs,), jnp.float64)
-
-        def apply(residual: jnp.ndarray) -> jnp.ndarray:
-            return jax.pure_callback(
-                lambda r: self.factors.apply(r, transpose=transpose), shape, residual
-            )
-
-        return apply

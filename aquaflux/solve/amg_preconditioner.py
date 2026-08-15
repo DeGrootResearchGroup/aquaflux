@@ -46,6 +46,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from .frozen_operator import apply_symmetric_scale, equilibration_scale, row_chunks
+from .host_preconditioner import HostPreconditioner
 from .ilut_preconditioner import cell_major_permutation, equilibrate_cell_major
 from .refresh_timing import PhaseTimer
 
@@ -659,7 +660,7 @@ def _smallest_index(values: np.ndarray) -> np.ndarray:
     return values.astype(np.int32) if values.size == 0 or values.max() < 2**31 else values
 
 
-class MonolithicAmgPreconditioner:
+class MonolithicAmgPreconditioner(HostPreconditioner):
     """The coupled algebraic-multigrid preconditioner as JAX matvecs, wrapping a frozen :class:`AmgVCycle`.
 
     The algebraic-multigrid counterpart of
@@ -682,7 +683,7 @@ class MonolithicAmgPreconditioner:
         n_fields: int | None = None,
         assembler: ShiftedCellMajorOperator | None = None,
     ) -> None:
-        self.factors = vcycle
+        super().__init__(vcycle)
         self._residual_fn = residual_fn
         # The fixed-pattern shift/equilibrate/reorder assembler, present exactly when the materialize ran
         # on a precomputed ``structure`` (which is what guarantees the pattern is the same every refresh).
@@ -726,18 +727,16 @@ class MonolithicAmgPreconditioner:
 
     @staticmethod
     def _shifted(jacobian_no_shift: sp.csr_matrix, shift_diagonal: np.ndarray) -> sp.csr_matrix:
-        """Add the pseudo-transient shift ``β d`` to the Jacobian's diagonal (cheap -- ``O(nnz)`` numpy).
+        """The Jacobian with the pseudo-transient shift on its diagonal.
 
-        Written as a diagonal assignment rather than ``a + sp.diags(shift)`` for the same reason the
-        equilibration is (:func:`~aquaflux.solve.frozen_operator.apply_symmetric_scale`): a sparse
-        **addition** also stores only the entries whose result is nonzero, so it would drop every
-        explicit zero the assembler deliberately kept. Only the diagonal is touched, so an off-diagonal
-        position survives whatever its value; a diagonal the pattern lacks is still created, matching the
-        sparse addition's semantics.
+        Delegates to :func:`~aquaflux.solve.sparse_jacobian.shifted_jacobian`, which is the one home for
+        the shift across the whole host-preconditioner family -- it lives beside the probe that produced
+        the pattern, because keeping that pattern intact is the whole point of the spelling it uses.
+        Kept as a method because the field split and two tests reach for it here.
         """
-        shifted = jacobian_no_shift.tocsr().copy()
-        shifted.setdiag(shifted.diagonal() + np.asarray(shift_diagonal, dtype=np.float64))
-        return shifted
+        from .sparse_jacobian import shifted_jacobian
+
+        return shifted_jacobian(jacobian_no_shift, shift_diagonal)
 
     @staticmethod
     def _assembler_for(
@@ -970,28 +969,3 @@ class MonolithicAmgPreconditioner:
             return self.factors.solve_exact(matvec, rhs_np, shift_np)
 
         return jax.pure_callback(host, shape, rhs, phi, shift)
-
-    def matvec(self, *, transpose: bool = False) -> Callable[[jnp.ndarray], jnp.ndarray]:
-        """The preconditioner as a JAX callable ``residual -> M residual`` (or ``M^T``).
-
-        The callback reads ``self.factors`` at call time rather than capturing it, so a
-        :meth:`refresh_in_place` between two calls is picked up without rebuilding the callback.
-
-        Parameters
-        ----------
-        transpose : bool
-            Return the transpose V-cycle ``M^T`` (for the adjoint transpose solve) instead of ``M``.
-
-        Returns
-        -------
-        callable
-            A ``jax.pure_callback`` matvec applying the current V-cycle on the host.
-        """
-        shape = jax.ShapeDtypeStruct((self.factors.n_dofs,), jnp.float64)
-
-        def apply(residual: jnp.ndarray) -> jnp.ndarray:
-            return jax.pure_callback(
-                lambda r: self.factors.apply(r, transpose=transpose), shape, residual
-            )
-
-        return apply

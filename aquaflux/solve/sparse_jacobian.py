@@ -781,3 +781,40 @@ def jacobian_relative_error(
     v = np.random.default_rng(seed).standard_normal(jacobian.shape[0])
     reference = np.asarray(matvec(jnp.asarray(v)), dtype=np.float64)
     return float(np.linalg.norm(jacobian @ v - reference) / (np.linalg.norm(reference) + 1e-300))
+
+
+def shifted_jacobian(jacobian: sp.csr_matrix, shift_diagonal: np.ndarray) -> sp.csr_matrix:
+    """Add the pseudo-transient shift ``beta d`` to a materialized Jacobian's diagonal.
+
+    Cheap -- ``O(nnz)`` numpy, no sparse arithmetic. The single home for the shift every host
+    preconditioner adds before factoring or coarsening, so the three cannot disagree about what
+    "the shifted Jacobian" is.
+
+    Written as a **diagonal assignment** rather than ``jacobian + sp.diags(shift)``, for the same reason
+    the equilibration is (:func:`~aquaflux.solve.frozen_operator.apply_symmetric_scale`): a sparse
+    *addition* stores only entries whose result is nonzero, so it silently drops every explicit zero the
+    coloured probe deliberately kept when it assembled against a fixed pattern. Those stored zeros are
+    the pattern, and a zero-fill incomplete factorization takes its own pattern from exactly that.
+
+    The two spellings are otherwise **identical, including the sparsity pattern** -- verified over a
+    matrix with a full diagonal, one with diagonal entries missing (both create them), and one carrying
+    explicit zeros, which is the only case where they part. So this is a no-op for a caller that
+    materialized without a precomputed ``structure`` (nothing is storing zeros there) and a correctness
+    fix for one that did.
+
+    Parameters
+    ----------
+    jacobian : sp.csr_matrix
+        The materialized Jacobian **without** the shift, shape ``(n_dofs, n_dofs)``.
+    shift_diagonal : np.ndarray
+        The shift to add to the diagonal, shape ``(n_dofs,)`` -- the same block-diagonal shift the step
+        solves against (velocity/scalar shifts, pressure zero).
+
+    Returns
+    -------
+    sp.csr_matrix
+        A copy of ``jacobian`` with the shift on its diagonal. The input is not modified.
+    """
+    shifted = jacobian.tocsr().copy()
+    shifted.setdiag(shifted.diagonal() + np.asarray(shift_diagonal, dtype=np.float64))
+    return shifted

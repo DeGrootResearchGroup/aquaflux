@@ -83,6 +83,7 @@ from .field_split import (
     native_nodal_inverse,
     native_per_field_inverse,
 )
+from .host_preconditioner import HostFactors, HostPreconditioner
 from .native_inverse import NativeHierarchyInverse
 from .refresh_timing import PhaseTimer, RefreshTiming
 from .ilut_preconditioner import MonolithicIlutPreconditioner
@@ -149,6 +150,7 @@ from .sparse_jacobian import (
     block_stencil_colouring,
     block_stencil_gather_map,
     column_probe_plan,
+    shifted_jacobian,
     jacobian_relative_error,
     materialize_block_jacobian,
 )
@@ -177,6 +179,8 @@ __all__ = [
     "FieldGroups",
     "FieldSplitAmgPreconditioner",
     "ForwardStep",
+    "HostFactors",
+    "HostPreconditioner",
     "ImplicitNewtonSolver",
     "InnerIterateCheckpointer",
     "LineSearchGrowth",
@@ -246,6 +250,7 @@ __all__ = [
     "refresh_air_hierarchy",
     "relative_residual_gmres",
     "restart_cycles",
+    "shifted_jacobian",
     "smoothed_multigrid_solve",
     "solve_linear",
     "symmetrically_equilibrate",

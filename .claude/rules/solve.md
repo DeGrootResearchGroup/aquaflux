@@ -225,6 +225,42 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     `cond` and the guard. A `NaN` mid-iteration is often caught first by `lineax`'s own non-finite
     guard at the next linear solve — both are hard errors, neither is silent.
 
+## Preconditioner — the frozen host family (shared contract)
+
+- **The three host preconditioners share ONE application path and ONE declared contract —
+  `solve/host_preconditioner.py` (BUILT, 2026-08-14).** The ILUT, the complete LU and the AMG V-cycle
+  differ entirely in how the inverse is *fitted* and not at all in how it is *applied*, so
+  `HostPreconditioner` owns `__init__` and `matvec()` and each subclass supplies only `build` /
+  `refresh_in_place`. Those two genuinely differ (different inputs, different refresh costs) and are
+  deliberately **not** unified behind a signature that would be the union of three.
+  - **`HostFactors` is the contract, and it is exactly `n_dofs` + `apply(residual, *, transpose=…)`.**
+    That pair was already a real structural contract satisfied by **seven** classes — the three
+    factorizations, `AmgVCycle`, `NativeHierarchyInverse`, both `BlockTriangularFieldSplit`s and
+    `VankaSmoother` — and declared by none, so `matvec` was written out three times byte for byte and
+    `FieldSplitAmgPreconditioner` obtained it by subclassing a *concrete sibling*.
+  - **⚠️ Anything a base reads off `self.factors` beyond that pair is a requirement on ALL of them
+    (binding).** This is not hypothetical: `has_native_solve` read `self.factors.has_native_solve`,
+    which only `AmgVCycle` has, so the property **raised** on the field split — and both call sites ask
+    through `getattr(pc, "is_exact_native", False)`, whose default swallows an `AttributeError` raised
+    inside a property body exactly as it swallows a missing name. The answer it produced was
+    accidentally the correct `False`. If a capability is not in `HostFactors`, answer it on the
+    subclass. Pinned by an AST check on the base's own source
+    (`test_the_base_asks_its_factors_for_nothing_beyond_the_declared_contract`) — read off the source
+    rather than exercised, because the failure is a lookup that is *never taken* on the paths a test
+    would naturally drive, which is why the original went unseen.
+  - **The pseudo-transient shift has one home: `sparse_jacobian.shifted_jacobian`.** All three added
+    `β d` before factoring, and they **disagreed**: the AMG used a pattern-preserving `setdiag` while
+    the ILUT and LU used `a + sp.diags(shift)` — the form the AMG's own docstring says is wrong, since
+    a sparse *addition* stores only entries whose result is nonzero and so drops the explicit zeros a
+    fixed-pattern probe deliberately kept. Benign only because the ILUT and LU never pass `structure=`;
+    it would have become a silent divergence the moment either took the fixed-pattern path, which is
+    the cheap one. **Measured:** the two spellings are identical in values *and* pattern on a full
+    diagonal and on a matrix with diagonal entries missing (both create them), and differ only where
+    explicit zeros are stored — so adopting `setdiag` everywhere is a verified **no-op** for the ILUT
+    and LU and a correctness fix in general. The whole refactor is **bit-identical** end to end: an
+    ILUT and an LU built and refreshed under both implementations return byte-equal `matvec` and
+    transpose output.
+
 ## Preconditioner — monolithic ILUT
 
 - **Monolithic ILUT preconditioner — BUILT (`sparse_jacobian.py` + `ilut_preconditioner.py`).** An
@@ -813,7 +849,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   solve converges in **one** iteration. Measured on the developed pitzDaily coupled Jacobian (61k dof):
   UMFPACK factors it in **~1.2 s vs the ILUT's ~32 s (~26×)**, exact (1 GMRES iter vs 2–4), verified on
   the real forward operator and the β=0 adjoint (true-residual checked). Because the fill is pattern-determined it is also **state-robust**
-  (no `drop_tol` tail that shifts with the flow). Same interface as the ILUT (`build` / `refresh_in_place`
+  (no `drop_tol` tail that shifts with the flow). Same interface as the ILUT — now shared rather than
+  restated, via `HostPreconditioner` (`build` / `refresh_in_place`
   / `matvec`), a host object applied via `pure_callback`, riding as a static field; the adjoint reuses the
   factorization's transpose. **No equilibration / cell-major reordering** (unlike the ILUT — the complete
   factorization's own pivoting + fill-reducing ordering handle the indefinite saddle on the raw
@@ -877,7 +914,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     `equilibrate_cell_major` (extracted from `factorize_ilut` into `ilut_preconditioner.py`, now the one
     home for the sqrt-diagonal equilibration + cell-major reorder both the ILUT and the V-cycle need); the
     `Mat` block size is `n_fields` so GAMG aggregates cell-blocks. Host object, applied via `pure_callback`,
-    riding as a static field; `build`/`refresh_in_place`/`matvec` identical to the ILUT/LU, so it plugs into
+    riding as a static field; `build`/`refresh_in_place` its own and `matvec` inherited from the shared
+    `HostPreconditioner`, so it plugs into
     `MonolithicFactorShiftPolicy` unchanged. **It is the one family member that needs `petsc4py`** (no
     pure-SciPy AMG fallback); the module lazily imports PETSc and raises a clear install hint otherwise.
   - **⚠️ SUPERSEDED BELOW — "ILU(0) stalls" is a HIGH-β measurement and does NOT hold at low β.** The
