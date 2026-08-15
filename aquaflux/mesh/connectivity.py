@@ -84,6 +84,17 @@ class FaceCellConnectivity(eqx.Module):
     neighbour_offset: jnp.ndarray | None = None
 
     @property
+    def n_faces(self) -> int:
+        """Number of faces — the length of every per-face array over this relation.
+
+        Derived from :attr:`owner` rather than stored, so it cannot disagree with the arrays it
+        describes. (:attr:`n_cells` is stored because it is *not* recoverable this way: no face need
+        reference the last cell.) The size a consumer allocates a per-face accumulator at — a
+        residual's face-flux sum, for instance — without reaching back to the whole ``Mesh``.
+        """
+        return self.owner.shape[0]
+
+    @property
     def interior(self) -> jnp.ndarray:
         """Boolean per-face mask, ``True`` on interior faces, shape ``(n_faces,)``."""
         return interior_mask(self.neighbour)

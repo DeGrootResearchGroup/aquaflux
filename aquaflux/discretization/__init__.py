@@ -20,13 +20,14 @@ from .diffusion import (
 )
 from .face_flux import FaceContext, FaceFluxOperator
 from .fixed_value import DifferenceRow, FixationRow, FixedValueCells, LogRatioRow
-from .residual import ResidualAssembler
+from .residual import CellBalance, ResidualAssembler
 from .source import VolumeSource
 from .transient import TransientTerm
 
 __all__ = [
     "AdvectionFlux",
     "AdvectionScheme",
+    "CellBalance",
     "DifferenceRow",
     "DiffusionFlux",
     "FaceContext",

@@ -1,4 +1,4 @@
-"""The residual assembler: gather -> compute -> scatter of the cell residual ``R(phi)``.
+"""The cell residual ``R(phi)``: the per-face context it is built from, and the balance itself.
 
 Everything the solver needs reduces to one discrete residual per cell — the finite-volume
 conservation balance
@@ -8,19 +8,30 @@ conservation balance
 which vanishes at the converged solution. Each flux operator returns the owner-outward flux of the
 conserved quantity (advection ``+ mdot phi``, diffusion ``- Gamma grad phi . n A``); each volume
 source returns its cell integral (production positive), which leaves the balance as a sink.
-:class:`ResidualAssembler` builds it by
 
-1. reconstructing cell gradients once (the injected :class:`GradientScheme`, if any) so
-   every flux operator shares a single gradient field;
-2. evaluating the weak boundary face values from the per-patch
-   :class:`~aquaflux.boundary.conditions.BoundaryCondition` closures;
-3. gathering owner/neighbour state onto faces, calling each injected
-   :class:`~aquaflux.discretization.diffusion.FaceFluxOperator`, and scattering the
-   owner-outward face flux back to cells with ``segment_sum`` (owner ``+``, neighbour
-   ``-``; boundary faces to the owner only);
-4. subtracting each injected volume source (its cell integral, from a
-   :class:`~aquaflux.discretization.source.VolumeSource`);
-5. adding the injected transient (accumulation) term.
+Forming that residual is two separable jobs, and this module gives each its own object:
+
+- :class:`ResidualAssembler` builds the **context** — it evaluates the per-cell properties,
+  reconstructs the cell gradients once (the injected :class:`GradientScheme`, if any) so every
+  operator shares a single gradient field, evaluates the weak boundary face values from the
+  per-patch :class:`~aquaflux.boundary.conditions.BoundaryCondition` closures, and packs the
+  result into a :class:`~aquaflux.discretization.face_flux.FaceContext`.
+- :class:`CellBalance` assembles the **balance** from that context — it sums the injected
+  :class:`~aquaflux.discretization.face_flux.FaceFluxOperator`\\ s, scatters the owner-outward
+  face flux back to cells with ``segment_sum`` (owner ``+``, neighbour ``-``; boundary faces to
+  the owner only), subtracts each injected
+  :class:`~aquaflux.discretization.source.VolumeSource`, and adds the injected transient
+  (accumulation) term.
+
+The assembler holds a balance and delegates to it, so a scalar transport equation is still one
+object built by :meth:`ResidualAssembler.build` and evaluated by
+:meth:`ResidualAssembler.residual`. They are separate because the two halves have genuinely
+different consumers: a coupled system that reconstructs its own gradients and evaluates its own
+boundary closures — the momentum block reconstructs one velocity-gradient *tensor* shared across
+its components, from boundary closures that take no gradient — arrives already holding a context,
+and needs only the balance. :class:`CellBalance` therefore stores nothing but its operators and
+reads the mesh, the geometry, and the boundary values off the context it is handed, exactly as the
+flux operators themselves do.
 
 The Jacobian and adjoint are never assembled here — they come from automatic
 differentiation of this ``R``. No hand-derived linearization coefficients live in this
@@ -55,6 +66,88 @@ if TYPE_CHECKING:
     from .transient import TransientTerm
 
 
+class CellBalance(eqx.Module):
+    """Assemble the cell balance ``R(phi)`` from injected operators, given a per-face context.
+
+    The half of the residual that is pure operator composition: sum the face fluxes, scatter them
+    to cells, subtract the volume sources, add the accumulation. It holds **only** the operators —
+    the connectivity, geometry, boundary face values, reconstructed gradient, and properties all
+    arrive on the :class:`~aquaflux.discretization.face_flux.FaceContext` it is handed, which is
+    the same context its operators gather from. So it needs no mesh to construct and none to
+    exercise: a stub flux operator and a two-cell context test it on its own.
+
+    :class:`ResidualAssembler` builds that context and delegates here, which is how a scalar
+    transport equation uses it. A coupled system that forms its own context drives this directly —
+    the momentum block reconstructs one velocity-gradient *tensor* shared across its components,
+    from boundary closures that take no gradient, so it cannot share the assembler's context step
+    but assembles the identical balance.
+
+    Attributes
+    ----------
+    flux_operators : tuple of FaceFluxOperator
+        Face-flux operators summed into the transport term. **Their order is the summation order**,
+        so it is part of the arithmetic, not a presentational choice.
+    source_operators : tuple of VolumeSource
+        Volume-source operators subtracted from the balance (each returns its cell integral,
+        production positive); empty for a flux-only equation.
+    transient : TransientTerm or None
+        Accumulation term; ``None`` for a steady residual.
+    """
+
+    flux_operators: tuple[FaceFluxOperator, ...]
+    source_operators: tuple[VolumeSource, ...] = ()
+    transient: TransientTerm | None = None
+
+    def residual(
+        self,
+        phi: jnp.ndarray,
+        context: FaceContext,
+        phi_old: jnp.ndarray | None = None,
+        phi_older: jnp.ndarray | None = None,
+        dt: float | None = None,
+        first_step: bool = False,
+    ) -> jnp.ndarray:
+        """Cell balance ``R(phi)`` for a context already formed, shape ``(n_cells,)``.
+
+        Parameters
+        ----------
+        phi : jnp.ndarray
+            Current cell field, shape ``(n_cells,)``.
+        context : FaceContext
+            The per-face inputs the operators gather from, and the source of the connectivity
+            (``face_cells``) this scatters over and the cell volumes the transient integrates on.
+        phi_old, phi_older : jnp.ndarray, optional
+            Previous / second-previous time levels for the transient term (required when a
+            :class:`TransientTerm` was injected), shape ``(n_cells,)``.
+        dt : float, optional
+            Timestep (required with a transient term).
+        first_step : bool
+            ``True`` on the first timestep (BDF1); static.
+
+        Returns
+        -------
+        jnp.ndarray
+            The balance ``accumulation + net outward flux - volume sources``, shape
+            ``(n_cells,)``.
+        """
+        face_cells = context.face_cells
+        face_flux = jnp.zeros(face_cells.n_faces, dtype=phi.dtype)
+        for operator in self.flux_operators:
+            face_flux = face_flux + operator.face_flux(phi, context)
+        # Each operator returns the owner-outward flux of the conserved quantity; the residual
+        # is the finite-volume balance accumulation + sum of net outward face fluxes.
+        residual = face_cells.scatter_conservative(face_flux)
+        # A volume source is produced inside the cell, so it leaves the balance as a sink: each
+        # returns its cell integral (production positive) and is subtracted from the residual.
+        for operator in self.source_operators:
+            residual = residual - operator.source(phi, context)
+        if self.transient is not None:
+            residual = residual + self.transient.residual(
+                phi, phi_old, phi_older, dt, first_step, context.geometry.cell.volume
+            )
+        return residual
+
+
 class ResidualAssembler(eqx.Module):
     """Assemble the cell residual ``R(phi)`` from injected operators, schemes, and closures.
 
@@ -75,13 +168,9 @@ class ResidualAssembler(eqx.Module):
     properties : PropertyModel
         The named per-cell physical properties, evaluated each residual and threaded to the flux
         operators (via the context) and the boundary closures.
-    flux_operators : tuple of FaceFluxOperator
-        Face-flux operators summed into the transport term.
-    source_operators : tuple of VolumeSource
-        Volume-source operators subtracted from the balance (each returns its cell integral,
-        production positive); empty for a flux-only equation.
-    transient : TransientTerm or None
-        Accumulation term; ``None`` for a steady residual.
+    balance : CellBalance
+        The injected operators and the composition of them into the cell balance, which this
+        delegates to once the context is formed.
     gradient_scheme : GradientScheme or None
         Cell-gradient reconstruction shared by the flux operators' non-orthogonal
         corrections. ``None`` reconstructs no gradient (exact on orthogonal grids, where the
@@ -97,9 +186,7 @@ class ResidualAssembler(eqx.Module):
     mesh: Mesh
     geometry: MeshGeometry
     properties: PropertyModel
-    flux_operators: tuple[FaceFluxOperator, ...]
-    source_operators: tuple[VolumeSource, ...]
-    transient: TransientTerm | None
+    balance: CellBalance
     gradient_scheme: GradientScheme | None
     coefficient: str = eqx.field(static=True)
     boundary: BoundaryConditions
@@ -130,7 +217,8 @@ class ResidualAssembler(eqx.Module):
             The named per-cell physical properties; the diffusion term reads its coefficient by
             name, and the flux-type boundary closures read ``coefficient``.
         flux_operators : tuple of FaceFluxOperator
-            Face-flux operators (e.g. one :class:`DiffusionFlux`).
+            Face-flux operators (e.g. one :class:`DiffusionFlux`). They are summed in the order
+            given, so the order is part of the arithmetic.
         boundary : BoundaryConditions
             The named ``{patch: closure}`` collection (``BoundaryConditions({name: bc})``), bound to
             ``mesh.face_patches`` internally. Every boundary face must lie in a named patch present
@@ -151,9 +239,11 @@ class ResidualAssembler(eqx.Module):
             mesh=mesh,
             geometry=geometry,
             properties=properties,
-            flux_operators=flux_operators,
-            source_operators=source_operators,
-            transient=transient,
+            balance=CellBalance(
+                flux_operators=flux_operators,
+                source_operators=source_operators,
+                transient=transient,
+            ),
             gradient_scheme=gradient_scheme,
             coefficient=coefficient,
             boundary=boundary.resolve(mesh.face_patches),
@@ -214,10 +304,6 @@ class ResidualAssembler(eqx.Module):
             gradient=gradient,
             properties=properties,
         )
-
-    def _scatter(self, face_flux: jnp.ndarray) -> jnp.ndarray:
-        """Scatter owner-outward face flux to cells (owner ``+``, interior neighbour ``-``)."""
-        return self.mesh.face_cells.scatter_conservative(face_flux)
 
     def _gradient(
         self,
@@ -281,6 +367,9 @@ class ResidualAssembler(eqx.Module):
     ) -> jnp.ndarray:
         """Cell residual ``R(phi)``, shape ``(n_cells,)``.
 
+        Forms the per-face context — properties, reconstructed gradients, weak boundary face
+        values — and hands it to :attr:`balance`, which assembles the balance itself.
+
         Parameters
         ----------
         phi : jnp.ndarray
@@ -320,19 +409,4 @@ class ResidualAssembler(eqx.Module):
         if gradient_hook is not None:
             gradient = gradient_hook(gradient)
         context = self._context(gradient, boundary_values, properties)
-
-        face_flux = jnp.zeros(self.mesh.n_faces, dtype=phi.dtype)
-        for operator in self.flux_operators:
-            face_flux = face_flux + operator.face_flux(phi, context)
-        # Each operator returns the owner-outward flux of the conserved quantity; the residual
-        # is the finite-volume balance accumulation + sum of net outward face fluxes.
-        residual = self._scatter(face_flux)
-        # A volume source is produced inside the cell, so it leaves the balance as a sink: each
-        # returns its cell integral (production positive) and is subtracted from the residual.
-        for operator in self.source_operators:
-            residual = residual - operator.source(phi, context)
-        if self.transient is not None:
-            residual = residual + self.transient.residual(
-                phi, phi_old, phi_older, dt, first_step, self.geometry.cell.volume
-            )
-        return residual
+        return self.balance.residual(phi, context, phi_old, phi_older, dt, first_step)

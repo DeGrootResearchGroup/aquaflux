@@ -32,6 +32,28 @@ def test_interior_mask_preserves_numpy_input():
     np.testing.assert_array_equal(mask, [True, False, True])
 
 
+def test_n_faces_is_derived_from_the_per_face_arrays():
+    """Derived, not stored, so it cannot disagree with the arrays it describes.
+
+    It is what a consumer sizes a per-face accumulator at without reaching back to the whole
+    ``Mesh`` -- a residual's face-flux sum, for instance.
+    """
+    fc = FaceCellConnectivity(jnp.array([0, 5, 2, 7]), jnp.array([1, -1, 3, -1]), n_cells=8)
+    assert fc.n_faces == 4
+    assert fc.n_faces == fc.owner.shape[0] == fc.interior.shape[0]
+
+
+def test_n_faces_is_independent_of_the_cell_count():
+    """A mesh no face references to the last cell still reports its own ``n_cells``.
+
+    Which is why ``n_cells`` is stored while ``n_faces`` is derived: the cell count is *not*
+    recoverable from the face arrays, and the face count is exactly their length.
+    """
+    fc = FaceCellConnectivity(jnp.array([0, 1]), jnp.array([1, -1]), n_cells=99)
+    assert fc.n_faces == 2
+    assert fc.n_cells == 99
+
+
 def test_safe_neighbour_substitutes_owner_on_boundary_faces():
     """Boundary faces get the owner index; interior faces keep the neighbour index."""
     fc = FaceCellConnectivity(jnp.array([0, 5, 2, 7]), jnp.array([1, -1, 3, -1]), n_cells=8)

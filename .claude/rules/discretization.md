@@ -22,7 +22,7 @@ Principles.
   nor scatter is open-coded — both compose `mesh.face_cells`
   (`aquaflux.mesh.FaceCellConnectivity`, the substrate-wide operator; see the mesh rule): operators
   gather by **direct indexing** with `face_cells.owner` / `face_cells.safe_neighbour`, and
-  `ResidualAssembler._scatter` delegates to `face_cells.scatter_conservative`. So this module owns
+  `CellBalance` delegates its scatter to `face_cells.scatter_conservative`. So this module owns
   the *physics* (the flux operators), not the `segment_sum` mechanics (the role the C++
   `FaceFluxAccumulator` plays).
 - **No monolithic gathered-state bundle.** Operators are handed a lean shared
@@ -94,14 +94,44 @@ Principles.
     interpolation of `Γ`: it agrees only for constant `Γ` and over-counts a graded face by `(1+r)²/(4r)`
     (`r = Γ_N/Γ_P`), which is what made `a_P` disagree with the operator diagonal under a graded turbulent
     viscosity (issue #154; the `.claude/rules/flow.md` `a_P` note has the consequences).
-- **`residual.py` — BUILT.** `ResidualAssembler` (`equinox.Module`, built via `.build()` from an
+- **`residual.py` — BUILT. Two objects: the CONTEXT half and the BALANCE half (binding — do not
+  re-fuse them).** `ResidualAssembler` (`equinox.Module`, built via `.build()` from an
   injected `BoundaryConditions({name: closure})` collection, which it binds to the mesh
-  (`boundary.resolve(mesh.face_patches)`, off the jit path) and stores as a single `boundary` field).
-  It reconstructs cell gradients once (injected `GradientScheme`, optional — `None` on
-  orthogonal grids where the correction vanishes), evaluates the per-patch boundary closures,
-  gathers owner/neighbour state, sums the injected `FaceFluxOperator`s, `segment_sum`-scatters
-  (owner `+`, interior neighbour `−`), and adds the transient term. `R = accumulation −
-  transport`. Verified: stub-operator scatter is conservative and correctly signed.
+  (`boundary.resolve(mesh.face_patches)`, off the jit path) and stores as a single `boundary` field)
+  builds the **context**: it reconstructs cell gradients once (injected `GradientScheme`, optional —
+  `None` on orthogonal grids where the correction vanishes), evaluates the per-patch boundary
+  closures, evaluates the `PropertyModel`, and packs a `FaceContext`. **`CellBalance`** then
+  assembles the **balance** from that context: sum the injected `FaceFluxOperator`s,
+  `segment_sum`-scatter (owner `+`, interior neighbour `−`), subtract the `VolumeSource`s, add the
+  transient. `R = accumulation − transport`. The assembler holds a `CellBalance` (field `balance`)
+  and delegates, so `build`/`residual` are unchanged for a scalar equation.
+  - **`CellBalance` stores ONLY its operators** — `flux_operators`, `source_operators`, `transient`.
+    The connectivity, geometry, boundary values, gradient and properties all arrive on the
+    `FaceContext` it is handed, exactly as its operators gather from it. So it needs no mesh to
+    construct and no `BoundaryConditions` to test (`test_cell_balance.py` hands it a hand-made
+    context), and it does not duplicate the geometry leaves the assembler already holds.
+  - **Why split:** the coupled flow needs the balance but *cannot* share the context step.
+    `MomentumContinuity` reconstructs one velocity-gradient **tensor** shared across its components,
+    from `FlowBoundary` closures that take **no gradient** (so the assembler's leading-order
+    two-pass has nothing to resolve there) — it arrives already holding a context. It therefore
+    drives a `CellBalance` per component directly. That is what let the momentum pressure term stop
+    being hand-added and become an ordinary operator (`flow.PressureForce`); see
+    `.claude/rules/flow.md`.
+  - **⚠️ The flux-operator tuple order IS the summation order, and floating-point addition is not
+    associative.** Reordering a balance's operators perturbs the residual in the last bits — which
+    matters here because archived march trajectories are compared bit-for-bit. The momentum block's
+    order is fixed at `(DiffusionFlux, PressureForce, AdvectionFlux)` to reproduce the arithmetic
+    of the hand-assembled form it replaced; pinned by
+    `test_cell_balance.py::test_operators_are_summed_in_tuple_order`.
+  - **Verified, and the extraction was gated on BIT-IDENTITY rather than on tests passing** (2026-08-15,
+    at the base `efc10e3`): the coupled `bfs3d` residual at `state-00067`, the momentum residual with
+    and without the wall-function eddy viscosity, `mdot` and `a_P` — all bit-unchanged; plus 97 arrays
+    over a 2D/3D × compact/corrected × Stokes/upwind/limited × pin-on/off sweep. Stub-operator scatter
+    is conservative and correctly signed (`test_cell_balance.py`).
+    ⚠️ **Method note for any future bit-identity comparison: include quantities the change should NOT
+    touch.** The first run of that harness showed order-one differences in `mdot` and `a_P`, which this
+    change cannot reach — the cause was `hash()` on strings being randomized per process, so the two
+    runs drew different random states. A residual-only comparison would have read as a real regression.
   - **`residual(phi, *, gradient_hook=None)` seam.** `gradient_hook` is an optional transform
     `gradient -> gradient` overwriting ghost rows with the value their owning partition computed
     (identity when omitted). It exists so the **distributed** residual can correct ghost-cell

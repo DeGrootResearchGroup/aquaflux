@@ -78,7 +78,7 @@ cfd/                                  # repo root
 │   │   ├── source.py                 #   VolumeSource: the volume-integrated source contract (the reaction-coupling seam; turbulence source terms implement it)
 │   │   ├── transient.py              #   TransientTerm: BDF1 on the first step, BDF2 thereafter
 │   │   ├── fixed_value.py            #   FixedValueCells: replace a set of cells' residual rows with an algebraic constraint (FixationRow → DifferenceRow / LogRatioRow)
-│   │   └── residual.py               #   ResidualAssembler: gather → operators → segment_sum scatter; R = accumulation + Σ outward flux; evaluates the PropertyModel
+│   │   └── residual.py               #   ResidualAssembler (builds the FaceContext: properties, gradients, boundary values) + CellBalance (operators → segment_sum scatter → sources → transient); R = accumulation + Σ outward flux
 │   │
 │   ├── schemes/                      # first-class swappable numerics (physics-free; one-way discretization → schemes)
 │   │   ├── gradient.py               #   GradientScheme → CompactGreenGauss, CorrectedGreenGauss (injected GradientSolve: GmresGradientSolve / SweptGradientSolve fixed-sweep), HessianCorrectedGradient
@@ -91,7 +91,7 @@ cfd/                                  # repo root
 │   │
 │   ├── flow/                         # the coupled pressure–velocity (u, v[, w], p) block
 │   │   ├── state.py                  #   BlockStateLayout: the flat [vel_0..vel_{dim-1}, pressure] layout (pack/unpack); FlowFields / VelocityFields
-│   │   ├── momentum.py               #   MomentumContinuity: the coupled residual (momentum reuses Advection/Diffusion + pressure force; Rhie–Chow continuity; pressure pin; takes a PropertyModel → viscosity/density)
+│   │   ├── momentum.py               #   MomentumContinuity: the coupled residual (each momentum component is a CellBalance over Diffusion/PressureForce/Advection; Rhie–Chow continuity; pressure pin; takes a PropertyModel → viscosity/density) + PressureForce
 │   │   ├── rhie_chow.py              #   interior_mass_flux + momentum_diagonal / frozen_momentum_diagonal_parts (viscous + convective)
 │   │   ├── boundary.py               #   FlowBoundary → NoSlipWall, MovingWall, VelocityInlet, PressureOutlet
 │   │   ├── preconditioner.py         #   SIMPLE Schur pieces: pressure_schur_laplacian (a_P-based), damped_jacobi_solve
