@@ -1,0 +1,28 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Version:  13
+    \\  /    A nd           |
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "constant";
+    object      momentumTransport;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Laminar, Newtonian stress (Stokes model): the viscous stress is
+// mu * (grad(U) + grad(U)^T - (2/3) div(U) I). For constant nu incompressible
+// flow the transpose/trace parts vanish at convergence, leaving mu*laplacian(U)
+// -- the operator the aquaflux DiffusionFlux assembles.
+simulationType  laminar;
+
+laminar
+{
+    model           Stokes;
+}
+
+// ************************************************************************* //
