@@ -48,7 +48,10 @@ unit tests. The surface is three groups:
   operator's own coefficients have moved since they were frozen (the direct staleness signal, fed by
   the march's `drift_measure`), while `CycleGrowthTrigger` infers it from the per-step linear-solve
   cost. It is an accelerator, not a solver: a real `ImplicitNewtonSolver` solve still produces the
-  result.
+  result. When and how it redoes a bad step is one injected `RetryPolicy` — the three escalation
+  triggers (a costly solve, a collapsed step length, a diverged correction), the shift factor and
+  escalation limit, and the optional tighter linear solver that is the fallback for a step more
+  damping cannot fix. The default policy retries nothing.
 * **Frozen algebraic multigrid** — the operator assembler `convection_diffusion_operator` (plus
   `decouple_dof` for a closed-domain pressure pin and `symmetrically_equilibrate` for the
   square-root-diagonal rescaling a factorization or a coarsening may want), the hierarchy builders
@@ -142,6 +145,7 @@ from .multigrid import (
 from .newton import newton_step
 from .norm import BlockScaledNorm, ResidualNorm, RowScaledNorm
 from .relaxation import ConstantRelaxation, RelaxationSchedule, SwitchedEvolutionRelaxation
+from .retry import NO_RETRIES, RetryPolicy
 from .shift_basis import LocalCourantBasis, ShiftBasis, VelocityShiftParts
 from .sparse_jacobian import (
     BlockColouring,
@@ -162,6 +166,7 @@ from .step_control import (
 )
 
 __all__ = [
+    "NO_RETRIES",
     "AirHierarchy",
     "AmgVCycle",
     "BlockColouring",
@@ -206,6 +211,7 @@ __all__ = [
     "RelaxedFarFromRoot",
     "ResidualNorm",
     "ResidualRatioDualTimeControl",
+    "RetryPolicy",
     "RowScaledNorm",
     "ShapeBudget",
     "ShiftBasis",

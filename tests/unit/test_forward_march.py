@@ -18,6 +18,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 from aquaflux.solve import (
+    NO_RETRIES,
     CoefficientDriftTrigger,
     ConstantRelaxation,
     CycleGrowthTrigger,
@@ -25,6 +26,7 @@ from aquaflux.solve import (
     DualTimeControl,
     ImplicitNewtonSolver,
     PseudoTransientStep,
+    RetryPolicy,
     ShiftTerm,
     StepOutcome,
     StepReport,
@@ -183,7 +185,7 @@ class _PoisonUnlessTight(eqx.Module):
 
 
 def test_march_retries_a_diverged_step_with_the_tighter_solver() -> None:
-    """A step that diverges under the loose default is redone with ``retry_solver`` and the recovered
+    """A step that diverges under the loose default is redone with ``retry.solver`` and the recovered
     (finite) step is what the march accepts -- the reactive divergence retry for an inexact PC.
 
     Without a retry solver the poisoned step breaks the march (the pre-existing behaviour, which lets
@@ -199,7 +201,7 @@ def test_march_retries_a_diverged_step_with_the_tighter_solver() -> None:
     assert not bool(jnp.isfinite(poisoned.reports[-1].residual_norm))
 
     recovered = forward_march(
-        step, residual, phi0, max_steps=5, rtol=1e-10, atol=1e-12, retry_solver="tight"
+        step, residual, phi0, max_steps=5, rtol=1e-10, atol=1e-12, retry=RetryPolicy(solver="tight")
     )
     assert recovered.converged
     assert jnp.allclose(recovered.state, 0.0, atol=1e-8)
@@ -209,7 +211,7 @@ def test_march_retries_a_diverged_step_with_the_tighter_solver() -> None:
 def test_march_does_not_retry_a_finite_step() -> None:
     """A retry solver set but never a divergence: the march runs exactly as without one.
 
-    The retry fires only on a diverged step, so on a healthy march ``retry_solver`` is inert -- the
+    The retry fires only on a diverged step, so on a healthy march ``retry.solver`` is inert -- the
     same path, the same root, the same reports -- which is what keeps it a safety net rather than an
     every-step cost.
     """
@@ -218,7 +220,7 @@ def test_march_does_not_retry_a_finite_step() -> None:
     common = dict(max_steps=50, rtol=1e-10, atol=1e-12)
 
     plain = forward_march(step, residual, phi0, **common)
-    with_retry = forward_march(step, residual, phi0, retry_solver="tight", **common)
+    with_retry = forward_march(step, residual, phi0, retry=RetryPolicy(solver="tight"), **common)
 
     assert with_retry.converged and plain.converged
     assert jnp.allclose(with_retry.state, root, atol=1e-8)
@@ -569,8 +571,8 @@ class _CyclesFromBeta(eqx.Module):
 
 
 def test_march_escalates_beta_on_a_cycle_count_spike() -> None:
-    """A step whose count exceeds ``retry_on_cycles`` is redone from the pre-step state with β escalated
-    (×``retry_beta_factor``) until the count drops or the limit is hit -- the hard-operator bailout. Here
+    """A step whose count exceeds ``retry.on_cycles`` is redone from the pre-step state with β escalated
+    (×``retry.beta_factor``) until the count drops or the limit is hit -- the hard-operator bailout. Here
     cyc ≈ 40/β, so β = 1 → 40 escalates to β = 4 → 10 over two ×2 escalations."""
     residual = _Cubic(
         jnp.zeros((1,))
@@ -584,21 +586,19 @@ def test_march_escalates_beta_on_a_cycle_count_spike() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry_on_cycles=10,
-        retry_beta_factor=2.0,
-        retry_cycles_limit=2,
+        retry=RetryPolicy(on_cycles=10, beta_factor=2.0, cycles_limit=2),
     )
     assert int(result.reports[0].cycles) == 10  # 40 -> 20 -> 10 over two escalations
 
 
 def test_march_does_not_escalate_below_the_cycle_cap() -> None:
-    """A count under ``retry_on_cycles`` never escalates -- the bailout is inert on a comfortable step,
+    """A count under ``retry.on_cycles`` never escalates -- the bailout is inert on a comfortable step,
     so it is a safety net, not an every-step cost."""
     residual = _Cubic(jnp.zeros((1,)))
     phi0 = jnp.ones((1,))
     step = _CyclesFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))  # cyc = 40
     result = forward_march(
-        step, residual, phi0, max_steps=1, rtol=1e-10, atol=1e-12, retry_on_cycles=100
+        step, residual, phi0, max_steps=1, rtol=1e-10, atol=1e-12, retry=RetryPolicy(on_cycles=100)
     )
     assert int(result.reports[0].cycles) == 40  # under the cap -> no escalation
 
@@ -629,7 +629,7 @@ def test_a_forced_escalation_adds_no_march_step_compilations() -> None:
     # One step under the cap compiles `_march_step` once (no escalation).
     _TRACES.clear()
     baseline = forward_march(
-        step, residual, phi0, max_steps=1, rtol=1e-10, atol=1e-12, retry_on_cycles=100
+        step, residual, phi0, max_steps=1, rtol=1e-10, atol=1e-12, retry=RetryPolicy(on_cycles=100)
     )
     compiled = len(_TRACES)
     assert compiled == 1 and int(baseline.reports[0].cycles) == 40
@@ -644,9 +644,7 @@ def test_a_forced_escalation_adds_no_march_step_compilations() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry_on_cycles=10,
-        retry_beta_factor=2.0,
-        retry_cycles_limit=2,
+        retry=RetryPolicy(on_cycles=10, beta_factor=2.0, cycles_limit=2),
     )
     assert len(_TRACES) == 0  # the escalation retries added no recompiles
     assert int(escalated.reports[0].cycles) == 10  # ...and still escalated β to recover the step
@@ -683,7 +681,7 @@ class _NaNUntilDamped(eqx.Module):
 
 def test_march_escalates_beta_before_the_tight_divergence_retry() -> None:
     """A non-finite step that recovers at escalated β is fixed by the CHEAP β-escalation first -- the
-    tight ``retry_solver`` (the expensive fallback) never fires. This is the reorder: on the stiff low-β
+    tight ``retry.solver`` (the expensive fallback) never fires. This is the reorder: on the stiff low-β
     saddle a NaN is cured by more damping, so grinding the tight Krylov solve before escalating (the old
     order) was wasted work that the escalation then re-damped away anyway."""
     residual = _Cubic(
@@ -698,10 +696,7 @@ def test_march_escalates_beta_before_the_tight_divergence_retry() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry_solver="tight",
-        retry_on_cycles=10,
-        retry_beta_factor=2.0,
-        retry_cycles_limit=2,
+        retry=RetryPolicy(solver="tight", on_cycles=10, beta_factor=2.0, cycles_limit=2),
     )
     assert result.converged
     assert jnp.allclose(result.state, 0.0, atol=1e-8)
@@ -725,10 +720,7 @@ def test_march_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergen
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry_solver="tight",
-        retry_on_cycles=10,
-        retry_beta_factor=2.0,
-        retry_cycles_limit=2,
+        retry=RetryPolicy(solver="tight", on_cycles=10, beta_factor=2.0, cycles_limit=2),
     )
     assert result.converged
     assert jnp.allclose(result.state, 0.0, atol=1e-8)
@@ -758,9 +750,7 @@ def test_march_carries_the_escalated_beta_into_the_control() -> None:
         rtol=1e-10,
         atol=1e-12,
         step_control=control,
-        retry_on_cycles=10,
-        retry_beta_factor=2.0,
-        retry_cycles_limit=3,
+        retry=RetryPolicy(on_cycles=10, beta_factor=2.0, cycles_limit=3),
     )
     beta, _memo = result.control_state
     assert beta == 4.0  # the escalated β, carried; not the control's beta_start
@@ -810,10 +800,8 @@ def test_march_escalates_beta_on_a_collapsed_step_length() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry_on_alpha=0.0,
-        retry_on_cycles=1000,  # far above the step's 3 cycles: only the α trigger can fire
-        retry_beta_factor=2.0,
-        retry_cycles_limit=2,
+        # on_cycles far above the step's 3 cycles: only the α trigger can fire
+        retry=RetryPolicy(on_alpha=0.0, on_cycles=1000, beta_factor=2.0, cycles_limit=2),
     )
     assert int(result.reports[0].escalations) == 2
     assert float(result.reports[0].alpha) == 1.0
@@ -826,7 +814,7 @@ def test_march_does_not_escalate_on_a_healthy_step_length() -> None:
     # beta_needed = 0 => alpha is 1 from the start.
     step = _AlphaFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)), beta_needed=0.0)
     result = forward_march(
-        step, residual, phi0, max_steps=1, rtol=1e-10, atol=1e-12, retry_on_alpha=0.5
+        step, residual, phi0, max_steps=1, rtol=1e-10, atol=1e-12, retry=RetryPolicy(on_alpha=0.5)
     )
     assert int(result.reports[0].escalations) == 0
 
@@ -844,16 +832,14 @@ def test_the_alpha_trigger_reports_its_own_reason() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry_on_alpha=0.0,
-        retry_on_cycles=1000,
-        retry_cycles_limit=2,
+        retry=RetryPolicy(on_alpha=0.0, on_cycles=1000, cycles_limit=2),
         on_retry=lambda reason, attempt, beta: reasons.append(reason),
     )
     assert reasons == ["alpha", "alpha"]
 
 
 def test_on_retry_reports_the_beta_the_retried_attempt_will_run_at() -> None:
-    """The reported shift is the escalated one, at whatever ``retry_beta_factor`` the march was given.
+    """The reported shift is the escalated one, at whatever ``retry.beta_factor`` the march was given.
 
     ``on_retry`` used to fire *before* the escalation and hand over the abandoned attempt's β, leaving
     its one consumer to reconstruct the real value by multiplying -- which it did, by a literal 2. That
@@ -870,9 +856,7 @@ def test_on_retry_reports_the_beta_the_retried_attempt_will_run_at() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry_on_alpha=0.5,
-        retry_beta_factor=3.0,
-        retry_cycles_limit=2,
+        retry=RetryPolicy(on_alpha=0.5, beta_factor=3.0, cycles_limit=2),
         on_retry=lambda reason, attempt, beta: seen.append(beta),
     )
     assert seen == pytest.approx([3.0, 9.0])
@@ -884,48 +868,77 @@ def test_the_alpha_trigger_never_bins_a_step_that_reached_its_target() -> None:
     Same guard the cost trigger carries: redoing a step that converged discards a good iterate and
     replaces it with a shorter one. Only a step that was cut short is escalated.
     """
-    from aquaflux.solve.march import _escalation_reason
-
     converged = _outcome(jnp.zeros((1,)), 3, alpha=0.0, reached=True)
     cut_short = _outcome(jnp.zeros((1,)), 3, alpha=0.0, reached=False)
-    kwargs = dict(retry_on_cycles=None, retry_on_alpha=0.0, divergence_cap=float("inf"))
-    assert _escalation_reason(converged, jnp.asarray(1.0), 1.0, **kwargs) is None
-    assert _escalation_reason(cut_short, jnp.asarray(1.0), 1.0, **kwargs) == "alpha"
+    policy = RetryPolicy(on_alpha=0.0)
+    assert policy.escalation_reason(converged, jnp.asarray(1.0), 1.0) is None
+    assert policy.escalation_reason(cut_short, jnp.asarray(1.0), 1.0) == "alpha"
+
+
+def test_the_default_retry_policy_is_the_inert_one() -> None:
+    """``NO_RETRIES`` must stay exactly the settings the march had before the policy existed.
+
+    Pinned as *values*, not as "whatever the class defaults to": every march in the tree runs this
+    policy unless it says otherwise, so a default moved here silently changes the trajectory of every
+    solve -- and a measurement taken under the old one cannot be told apart from one taken under the
+    new. The march-level consequence is covered separately (a default policy escalates nothing); this
+    is the numbers.
+    """
+    assert NO_RETRIES == RetryPolicy()
+    assert NO_RETRIES.solver is None
+    assert NO_RETRIES.divergence_cap == float("inf")
+    assert NO_RETRIES.on_cycles is None
+    assert NO_RETRIES.on_alpha is None
+    assert NO_RETRIES.beta_factor == 2.0
+    assert NO_RETRIES.cycles_limit == 2
+    # The whole point of the default: nothing can fire.
+    assert not NO_RETRIES.escalates
+
+
+def test_escalates_reports_whether_either_threshold_is_set() -> None:
+    """Either threshold alone arms escalation; neither leaves it off.
+
+    ``escalates`` is what decides whether a march is *observed* at all, so reading it as "both are set"
+    would silently drop the single-trigger configurations both validation cases use.
+    """
+    assert RetryPolicy(on_cycles=10).escalates
+    assert RetryPolicy(on_alpha=0.01).escalates
+    assert RetryPolicy(on_cycles=10, on_alpha=0.01).escalates
+    assert not RetryPolicy().escalates
+    # A tighter solver is the divergence FALLBACK, not an escalation trigger.
+    assert not RetryPolicy(solver="tight").escalates
+
+
+def test_escalate_preserves_the_shift_leafs_dtype_and_weak_type() -> None:
+    """Escalation scales the leaf, so the escalated step stays a compilation-cache hit.
+
+    Rebuilding the leaf from a Python float (``jnp.asarray(float(beta) * factor)``) yields a weak-typed
+    float64 whose abstract value need not match what the step carries, and any mismatch recompiles the
+    whole coupled solve on every retry. A strong-typed leaf is the case that catches it -- the shipped
+    controls happen to set weak float64, so a weak-only test passes against the defect.
+    """
+    policy = RetryPolicy(beta_factor=2.0)
+    for beta in (jnp.asarray(0.5), jnp.asarray(0.5, dtype=jnp.float64), jnp.float64(0.5)):
+        escalated = policy.escalate(beta)
+        assert escalated.dtype == jnp.asarray(beta).dtype
+        assert jnp.asarray(escalated).weak_type == jnp.asarray(beta).weak_type
+        assert float(escalated) == 1.0
 
 
 def test_a_diverged_step_outranks_the_other_escalation_reasons() -> None:
     """Divergence is reported first, and unlike the other two it fires whatever the step's target says --
     a non-finite residual is not a result to be kept because the loop happened to meet its tolerance."""
-    from aquaflux.solve.march import _escalation_reason
-
     outcome = _outcome(jnp.zeros((1,)), 3, alpha=0.0, reached=True)
-    reason = _escalation_reason(
-        outcome,
-        jnp.asarray(jnp.nan),
-        1.0,
-        retry_on_cycles=1,
-        retry_on_alpha=0.0,
-        divergence_cap=float("inf"),
+    reason = RetryPolicy(on_cycles=1, on_alpha=0.0).escalation_reason(
+        outcome, jnp.asarray(jnp.nan), 1.0
     )
     assert reason == "diverged"
 
 
 def test_no_escalation_reason_when_neither_threshold_is_set() -> None:
     """Both thresholds ``None`` disables escalation entirely -- the default path, byte-identical."""
-    from aquaflux.solve.march import _escalation_reason
-
     outcome = _outcome(jnp.zeros((1,)), 10_000, alpha=0.0, reached=False)
-    assert (
-        _escalation_reason(
-            outcome,
-            jnp.asarray(jnp.nan),
-            1.0,
-            retry_on_cycles=None,
-            retry_on_alpha=None,
-            divergence_cap=float("inf"),
-        )
-        is None
-    )
+    assert RetryPolicy().escalation_reason(outcome, jnp.asarray(jnp.nan), 1.0) is None
 
 
 def test_the_alpha_trigger_fires_whatever_collapsed_the_step_length() -> None:
@@ -937,13 +950,11 @@ def test_the_alpha_trigger_fires_whatever_collapsed_the_step_length() -> None:
     failure damping cannot fix is a cell already pinned on the boundary, and that is caught by the
     stall bailout below, not here.
     """
-    from aquaflux.solve.march import _escalation_reason
-
-    kwargs = dict(retry_on_cycles=None, retry_on_alpha=0.01, divergence_cap=float("inf"))
+    policy = RetryPolicy(on_alpha=0.01)
     search = _outcome(jnp.zeros((1,)), 3, alpha=0.001)  # binding 1.0: the ladder chose this length
     capped = _outcome(jnp.zeros((1,)), 3, alpha=0.001, binding=0.001)  # the cap chose it
-    assert _escalation_reason(search, jnp.asarray(1.0), 1.0, **kwargs) == "alpha"
-    assert _escalation_reason(capped, jnp.asarray(1.0), 1.0, **kwargs) == "alpha"
+    assert policy.escalation_reason(search, jnp.asarray(1.0), 1.0) == "alpha"
+    assert policy.escalation_reason(capped, jnp.asarray(1.0), 1.0) == "alpha"
 
 
 def _recorded(rows):
