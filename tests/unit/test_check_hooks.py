@@ -130,6 +130,45 @@ def test_warns_when_absolute_path_points_outside_the_checkout(tmp_path: Path) ->
     assert "NOT wired up" not in result.stderr
 
 
+def test_fragile_worktree_is_told_to_drop_the_override_not_to_set_the_repository(
+    tmp_path: Path,
+) -> None:
+    """The remedy has to name the level the setting actually lives at.
+
+    A worktree-level ``core.hooksPath`` shadows the repository one, so the general
+    advice -- set ``core.hooksPath`` to ``.githooks`` -- writes a value git never
+    consults. The hooks stay exactly as fragile and this warning repeats verbatim,
+    which reads as the advice being wrong rather than aimed at the wrong level. This
+    is the shape a worktree is routinely created in, so it is the shape most likely
+    to be met.
+    """
+    root = _repo(tmp_path)
+    _add_hooks(root)
+    _set_hooks_path(root, ".githooks")  # the repository is already correct
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "base"], cwd=root, check=True)
+
+    tree = tmp_path / "tree"
+    subprocess.run(["git", "worktree", "add", "-q", "--detach", str(tree)], cwd=root, check=True)
+    _add_hooks(tree)
+    # A worktree-level value exists at all only under this extension, which is precisely
+    # why the shadowing is easy to miss: without it, `git config --worktree` refuses.
+    subprocess.run(["git", "config", "extensions.worktreeConfig", "true"], cwd=tree, check=True)
+    # What the worktree tooling does, and what makes the repository setting inert.
+    subprocess.run(
+        ["git", "config", "--worktree", "core.hooksPath", str(root / ".githooks")],
+        cwd=tree,
+        check=True,
+    )
+
+    result = _run(tree)
+
+    assert result.returncode == 0
+    assert "fragile" in result.stderr
+    assert "--worktree --unset core.hooksPath" in result.stderr
+    # The repository level is already right, so it must not be suggested as the fix.
+    assert "point it at this checkout" not in result.stderr
+
+
 def test_silent_when_absolute_path_is_this_checkout(tmp_path: Path) -> None:
     """An absolute path naming this checkout's own .githooks is not fragile."""
     root = _repo(tmp_path)
