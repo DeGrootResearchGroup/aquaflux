@@ -37,10 +37,22 @@ def _run(cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedPr
 
 
 def _repo(tmp_path: Path, name: str = "repo") -> Path:
-    """A minimal git repository with no hooks configuration of its own."""
+    """A minimal git repository with no hooks configuration of its own.
+
+    The identity and signing settings are written into the repository rather than
+    inherited, so a case that commits does not depend on the machine having a global
+    git identity. A CI runner has none, and `git commit` there fails outright with
+    ``empty ident name`` -- a failure that cannot reproduce on a developer's machine.
+    """
     root = tmp_path / name
     root.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    for key, value in (
+        ("user.email", "test@example.invalid"),
+        ("user.name", "Test"),
+        ("commit.gpgsign", "false"),
+    ):
+        subprocess.run(["git", "config", key, value], cwd=root, check=True)
     return root
 
 
