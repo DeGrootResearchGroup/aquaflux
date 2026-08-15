@@ -173,3 +173,34 @@ def test_the_harnesses_internal_reaches_stay_the_listed_ones() -> None:
         f"its reason, or drop the stale entry. unlisted: {sorted(reached - VALIDATION_INTERNAL_REACHES)}; "
         f"listed but gone: {sorted(VALIDATION_INTERNAL_REACHES - reached)}"
     )
+
+
+def test_the_forward_step_contract_module_stays_a_leaf() -> None:
+    """`forward_step.py` may not import a module that imports it back.
+
+    It exists to break a cycle: `StepControl` was declared in `march.py` with no implementations there,
+    so `step_control.py` had to import `march`, which forbade the reverse -- and a defaulting rule about
+    two `solve/` objects therefore could not be written in `solve/` at all. An import here pointing at
+    any of its dependents re-creates that cycle, and the symptom would show up somewhere else entirely
+    (a rule stranded in another package), which is why this is asserted rather than left to review.
+    """
+    contract = SOLVE_ROOT / "forward_step.py"
+    dependents = {
+        "implicit",
+        "march",
+        "continuation",
+        "retry",
+        "step_control",
+        "march_log",
+        "checkpoint",
+    }
+    tree = ast.parse(contract.read_text())
+    siblings = {
+        node.module.lstrip(".")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.level > 0 and node.module
+    }
+    assert siblings.isdisjoint(dependents), (
+        "forward_step.py imports a module that depends on it, re-creating the cycle it removes: "
+        f"{sorted(siblings & dependents)}"
+    )

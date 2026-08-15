@@ -38,7 +38,8 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
-from .implicit import StepOutcome, _ForwardStep, backtracking_line_search
+from .forward_step import StepFn, StepOutcome
+from .implicit import backtracking_line_search
 from .line_search_growth import LineSearchGrowth, MonotoneLineSearch
 from .linear import corrected_cycles, solve_linear
 from .norm import ResidualNorm
@@ -400,7 +401,7 @@ class PseudoTransientStep(eqx.Module):
         """The (unshifted) ``state -> M`` factory for the adjoint solve at the converged state."""
         return self.adjoint_preconditioner_factory
 
-    def stepper(self) -> _ForwardStep:
+    def stepper(self) -> StepFn:
         """The accepted shifted-Newton step and its linear solve's cycle count.
 
         ``(residual_fn, φ, ‖R₀‖, solver) -> (φ_next, cycles, alpha, inner_iterations)``. ``cycles`` is the
@@ -859,7 +860,7 @@ class DualTimeStep(eqx.Module):
         """The (unshifted) ``state -> M`` factory for the adjoint solve at the converged state."""
         return self.adjoint_preconditioner_factory
 
-    def stepper(self) -> _ForwardStep:
+    def stepper(self) -> StepFn:
         """One backward-Euler outer timestep: the inner-converged iterate and its total solve cost.
 
         ``(residual_fn, φ, ‖R₀‖, solver) -> (φ_next, cycles, alpha, inner_iterations)``. The reference

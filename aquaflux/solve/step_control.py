@@ -33,8 +33,8 @@ from __future__ import annotations
 import equinox as eqx
 import jax.numpy as jnp
 
-from .implicit import ForwardStep
-from .march import StepReport
+from .continuation import DualTimeStep
+from .forward_step import ForwardStep, StepControl, StepReport
 from .relaxation import ConstantRelaxation
 
 
@@ -333,3 +333,45 @@ class CflResidualDualTimeControl(ShiftStrengthControl):
         elif alpha >= self.grow_above and ratio <= self.hold_ratio:  # both comfortable -> grow
             beta = beta / self.grow
         return self._clamp(beta), residual
+
+
+def default_dual_time_control(
+    step_control: StepControl | None, observing: bool, continuation: ForwardStep
+) -> StepControl | None:
+    """The step control for an observed march: the caller's, or the default Courant ramp for a dual-time
+    march that was given none.
+
+    It lives here, beside the controls it chooses between, rather than in the turbulence driver that
+    calls it. That is where it was: `StepControl` was declared in `march.py` with no implementations
+    there, so `step_control.py` had to import `march` -- which forbade the reverse, so a rule about two
+    `solve/` objects could not be expressed in `solve/` at all. With the contract in
+    :mod:`~aquaflux.solve.forward_step` that constraint is gone and the rule comes home.
+
+    A **dual-time** march (a :class:`~aquaflux.solve.DualTimeStep`, whose reported ``alpha`` is the
+    backward-Euler inner-loop comfort a Courant ramp reads) that is **already observing** (a
+    ``refresh_trigger`` or observer set ``observing``) but was handed **no** ``step_control`` defaults to
+    :class:`~aquaflux.solve.DualTimeControl`. That ramp grows the pseudo-timestep while the inner loop
+    stays comfortable, reaching a developed recirculation in far fewer outer steps than the residual-keyed
+    schedule (which pins ``beta`` because the row-scaled steady residual is nearly flat while the flow
+    develops). ``step_control`` is returned **unchanged** for a single-step march, a caller-supplied
+    control, or a march that is not observing — so the default is injected only where a control actually
+    runs, and injecting it never turns observation on (which would wrongly make the differentiable
+    single-stage solve raise the forward-only guard).
+
+    Parameters
+    ----------
+    step_control : StepControl or None
+        The caller-supplied control (``None`` if none was given).
+    observing : bool
+        Whether the march runs the observed eager path (a refresh or observer is active).
+    continuation : ForwardStep
+        The globalization step the march applies.
+
+    Returns
+    -------
+    StepControl or None
+        ``DualTimeControl()`` when defaulting applies; ``step_control`` otherwise.
+    """
+    if step_control is None and observing and isinstance(continuation, DualTimeStep):
+        return DualTimeControl()
+    return step_control

@@ -29,8 +29,8 @@ from typing import Any
 
 import numpy as np
 
+from .forward_step import StepReport
 from .linear import restart_cycles
-from .march import StepReport
 
 __all__ = ["InnerIterateCheckpointer", "StateCheckpointer"]
 

@@ -37,8 +37,8 @@ from typing import IO, Any
 import numpy as np
 
 from ..text_table import Column, TextTable
+from .forward_step import StepReport
 from .linear import restart_cycles
-from .march import StepReport
 from .refresh_timing import RefreshTiming
 
 #: Below this many seconds an unattributed remainder is measurement noise, not a missing phase, and
