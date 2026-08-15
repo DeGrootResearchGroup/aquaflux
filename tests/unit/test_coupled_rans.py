@@ -569,28 +569,26 @@ def _single_step():
 
 def test_dual_time_observed_march_defaults_to_the_courant_step_control() -> None:
     """A dual-time march that is observing but was given no control defaults to ``DualTimeControl``."""
-    from aquaflux.solve import DualTimeControl
-    from aquaflux.turbulence.coupled import _default_dual_time_control
+    from aquaflux.solve import DualTimeControl, default_dual_time_control
 
-    control = _default_dual_time_control(None, observing=True, continuation=_dual_time_step())
+    control = default_dual_time_control(None, observing=True, continuation=_dual_time_step())
     assert isinstance(control, DualTimeControl)
 
 
 def test_single_step_observed_march_gets_no_default_control() -> None:
     """A single-step (pseudo-transient) march is not a dual-time step, so no control is injected."""
-    from aquaflux.turbulence.coupled import _default_dual_time_control
+    from aquaflux.solve import default_dual_time_control
 
-    assert _default_dual_time_control(None, observing=True, continuation=_single_step()) is None
+    assert default_dual_time_control(None, observing=True, continuation=_single_step()) is None
 
 
 def test_a_caller_supplied_control_is_never_overridden() -> None:
     """An explicit control on a dual-time observed march is returned unchanged (the override path)."""
-    from aquaflux.solve import ResidualRatioDualTimeControl
-    from aquaflux.turbulence.coupled import _default_dual_time_control
+    from aquaflux.solve import ResidualRatioDualTimeControl, default_dual_time_control
 
     explicit = ResidualRatioDualTimeControl(beta_start=0.5)
     assert (
-        _default_dual_time_control(explicit, observing=True, continuation=_dual_time_step())
+        default_dual_time_control(explicit, observing=True, continuation=_dual_time_step())
         is explicit
     )
 
@@ -598,9 +596,9 @@ def test_a_caller_supplied_control_is_never_overridden() -> None:
 def test_a_non_observing_dual_time_march_gets_no_default_control() -> None:
     """Not observing (the differentiable single-stage path) => no control injected, so no forward-only
     control can make the grad path raise the observe-under-trace guard."""
-    from aquaflux.turbulence.coupled import _default_dual_time_control
+    from aquaflux.solve import default_dual_time_control
 
-    assert _default_dual_time_control(None, observing=False, continuation=_dual_time_step()) is None
+    assert default_dual_time_control(None, observing=False, continuation=_dual_time_step()) is None
 
 
 def test_the_equation_names_follow_the_flat_state_layout() -> None:

@@ -58,7 +58,6 @@ from aquaflux.solve import (
     BlockScaledNorm,
     ColumnProbePlan,
     DivergenceGuard,
-    DualTimeControl,
     DualTimeStep,
     FieldGroups,
     FieldSplitAmgPreconditioner,
@@ -85,6 +84,7 @@ from aquaflux.solve import (
     block_stencil_colouring,
     block_stencil_gather_map,
     column_probe_plan,
+    default_dual_time_control,
     forward_march,
     positive_block_limit,
     positive_block_projection,
@@ -1873,42 +1873,6 @@ def coupled_ilut_continuation(
     )
 
 
-def _default_dual_time_control(
-    step_control: StepControl | None, observing: bool, continuation: ForwardStep
-) -> StepControl | None:
-    """The step control for an observed march: the caller's, or the default Courant ramp for a dual-time
-    march that was given none.
-
-    A **dual-time** march (a :class:`~aquaflux.solve.DualTimeStep`, whose reported ``alpha`` is the
-    backward-Euler inner-loop comfort a Courant ramp reads) that is **already observing** (a
-    ``refresh_trigger`` or observer set ``observing``) but was handed **no** ``step_control`` defaults to
-    :class:`~aquaflux.solve.DualTimeControl`. That ramp grows the pseudo-timestep while the inner loop
-    stays comfortable, reaching a developed recirculation in far fewer outer steps than the residual-keyed
-    schedule (which pins ``beta`` because the row-scaled steady residual is nearly flat while the flow
-    develops). ``step_control`` is returned **unchanged** for a single-step march, a caller-supplied
-    control, or a march that is not observing — so the default is injected only where a control actually
-    runs, and injecting it never turns observation on (which would wrongly make the differentiable
-    single-stage solve raise the forward-only guard).
-
-    Parameters
-    ----------
-    step_control : StepControl or None
-        The caller-supplied control (``None`` if none was given).
-    observing : bool
-        Whether the march runs the observed eager path (a refresh or observer is active).
-    continuation : ForwardStep
-        The globalization step the march applies.
-
-    Returns
-    -------
-    StepControl or None
-        ``DualTimeControl()`` when defaulting applies; ``step_control`` otherwise.
-    """
-    if step_control is None and observing and isinstance(continuation, DualTimeStep):
-        return DualTimeControl()
-    return step_control
-
-
 def coupled_ilut_refreshing_continuation(
     coupled: CoupledRANS,
     *,
@@ -3564,7 +3528,7 @@ def solve_coupled(
     # below, reaching a developed recirculation in far fewer outer steps than the residual-keyed schedule.
     # It is injected only where a control runs and never turns observation on, so the differentiable
     # single-stage solve (guarded above) is untouched.
-    step_control = _default_dual_time_control(step_control, observing, continuation)
+    step_control = default_dual_time_control(step_control, observing, continuation)
 
     stage_rtol, stage_atol = rtol, atol
     if observing:

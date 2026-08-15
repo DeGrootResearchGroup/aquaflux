@@ -194,7 +194,9 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     from the previous report; all are forward-only (raise under `jax.grad`, same guard as the refresh).
     - **Default (`inner_steps > 1`, observing):** `solve_coupled` auto-selects `DualTimeControl` (the
       α-based Courant ramp) when the march is a `DualTimeStep`, a refresh/observer is active, and no
-      control was supplied (`_default_dual_time_control`, unit-tested in `test_coupled_rans.py`). It grows
+      control was supplied (`default_dual_time_control` -- **in `solve/step_control.py` since
+      2026-08-15**, beside the controls it chooses between; it lived here only because an import cycle
+      made it inexpressible in `solve/`. Unit-tested in `test_coupled_rans.py`). It grows
       the pseudo-timestep while the inner loop stays comfortable and **carries β across refreshes**,
       reaching a developed pitzDaily recirculation in materially fewer outer steps than the residual-keyed
       control, and carrying a full cold ramp to the target Reynolds number (step counts measured on pitzDaily,

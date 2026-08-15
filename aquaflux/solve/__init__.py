@@ -93,12 +93,16 @@ from .native_inverse import NativeHierarchyInverse
 from .refresh_timing import PhaseTimer, RefreshTiming
 from .ilut_preconditioner import MonolithicIlutPreconditioner
 from .lu_preconditioner import MonolithicLuPreconditioner
+from .forward_step import (
+    ForwardStep,
+    ShiftedForwardStep,
+    StepControl,
+    StepOutcome,
+    StepReport,
+)
 from .implicit import (
     DampedNewtonStep,
-    ForwardStep,
     ImplicitNewtonSolver,
-    ShiftedForwardStep,
-    StepOutcome,
     TransposedPreconditioner,
     PositiveBlockLimit,
     PositiveBlockProjection,
@@ -123,8 +127,6 @@ from .march import (
     CycleGrowthTrigger,
     MarchResult,
     RefreshTrigger,
-    StepControl,
-    StepReport,
     forward_march,
 )
 from .march_log import MarchLogger, combine_metrics, field_change_metrics
@@ -163,6 +165,7 @@ from .sparse_jacobian import (
 )
 from .step_control import (
     CflResidualDualTimeControl,
+    default_dual_time_control,
     DualTimeControl,
     ResidualRatioDualTimeControl,
     ShiftStrengthControl,
@@ -247,6 +250,7 @@ __all__ = [
     "convection_diffusion_operator",
     "convection_multigrid_solve",
     "decouple_dof",
+    "default_dual_time_control",
     "default_linear_solver",
     "equilibrate_cell_major",
     "field_change_metrics",

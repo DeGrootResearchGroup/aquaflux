@@ -20,7 +20,7 @@ import dataclasses
 import jax.numpy as jnp
 import lineax as lx
 
-from .implicit import ForwardStep, StepOutcome
+from .forward_step import ForwardStep, StepOutcome
 
 
 @dataclasses.dataclass(frozen=True)
