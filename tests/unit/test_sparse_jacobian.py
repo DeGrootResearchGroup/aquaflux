@@ -14,6 +14,7 @@ from aquaflux.solve.sparse_jacobian import (
     column_probe_plan,
     jacobian_relative_error,
     materialize_block_jacobian,
+    shifted_jacobian,
 )
 
 
@@ -373,3 +374,56 @@ def test_rejects_bad_inputs():
         block_stencil_colouring(np.array([0]), np.array([1]), 2, reach=0)
     with pytest.raises(ValueError):
         block_stencil_colouring(np.array([0]), np.array([5]), 2, reach=1)  # endpoint out of range
+
+
+def test_the_shift_keeps_stored_zeros_a_sparse_addition_would_drop() -> None:
+    """The whole reason the shift is a diagonal assignment rather than ``a + sp.diags(shift)``.
+
+    A coloured probe assembled against a fixed pattern deliberately stores exact zeros -- they *are* the
+    pattern, and a zero-fill incomplete factorization takes its own pattern from it. Sparse addition
+    stores only entries whose result is nonzero, so it silently prunes them.
+    """
+    a = (sp.random(30, 30, density=0.2, random_state=5, format="csr") + sp.eye(30)).tocsr()
+    a.data[:12] = 0.0  # stored explicit zeros, as a fixed-pattern assembly leaves them
+    shift = np.abs(np.random.default_rng(0).normal(size=30)) + 0.1
+
+    kept = shifted_jacobian(a, shift)
+    pruned = (a + sp.diags(shift)).tocsr()
+
+    assert kept.nnz == a.nnz, "the shift must not change the stored pattern"
+    assert pruned.nnz < a.nnz, (
+        "the addition form is expected to prune -- otherwise this proves nothing"
+    )
+    assert np.allclose(
+        kept.toarray(), pruned.toarray(), rtol=0, atol=0
+    )  # same operator, different pattern
+
+
+def test_the_shift_agrees_with_the_addition_form_where_nothing_is_stored_zero() -> None:
+    """So adopting it across the preconditioner family is a no-op for callers that prune anyway.
+
+    Both spellings are checked to create a diagonal entry the pattern lacks, which is the one place the
+    assignment form could plausibly have differed from the addition it replaced.
+    """
+    rng = np.random.default_rng(1)
+    full = (sp.random(25, 25, density=0.25, random_state=6, format="csr") + sp.eye(25)).tocsr()
+    missing = sp.random(25, 25, density=0.2, random_state=7, format="csr")
+    missing.setdiag(0)
+    missing.eliminate_zeros()
+
+    for a in (full, missing.tocsr()):
+        shift = np.abs(rng.normal(size=25)) + 0.1
+        kept, added = shifted_jacobian(a, shift), (a + sp.diags(shift)).tocsr()
+        kept.sort_indices()
+        added.sort_indices()
+        assert np.array_equal(kept.indptr, added.indptr)
+        assert np.array_equal(kept.indices, added.indices)
+        assert np.allclose(kept.data, added.data, rtol=0, atol=0)
+
+
+def test_the_shift_does_not_modify_its_input() -> None:
+    """A refresh re-adds a *new* shift to the cached unshifted Jacobian, so mutating it would compound."""
+    a = (sp.eye(6, format="csr") * 2.0).tocsr()
+    before = a.diagonal().copy()
+    shifted_jacobian(a, np.arange(6.0))
+    assert np.array_equal(a.diagonal(), before)
