@@ -326,6 +326,18 @@ class PseudoTransientStep(eqx.Module):
     escalation_factor: float = eqx.field(static=True, default=2.0)
     acceptance: StepAcceptance = eqx.field(default_factory=DivergenceGuard)
     line_search: int = eqx.field(static=True, default=0)
+    # The positivity constraint, the same pair `DualTimeStep` carries and applied identically. It lives
+    # on both because it guards the *state*, not the march: a field that must stay positive must stay
+    # positive whichever strategy is stepping it, and having it on only one meant choosing a strategy
+    # silently gave up a guard whose absence is a recorded march death (two cells of 23040 took `k`
+    # negative and NaN'd the whole residual through a bare `sqrt`). Both default `None`, which is the
+    # unconstrained step exactly.
+    step_limit: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
+        static=True, default=None
+    )
+    step_projection: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
+        static=True, default=None
+    )
     # Data, not static (the same reasoning as `residual_norm` below): a solver configured with a
     # row-scaled stopping measure CARRIES that measure's scale arrays, and equinox rightly warns when
     # arrays are put in a static field -- static leaves take part in the jit cache key by equality, so
@@ -430,6 +442,7 @@ class PseudoTransientStep(eqx.Module):
         descent_backoff, descent_test = self.descent_backoff, self.descent_test
         grow = self.grow
         norm = self.residual_norm
+        step_limit, step_projection = self.step_limit, self.step_projection
 
         def step(
             residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
@@ -464,6 +477,13 @@ class PseudoTransientStep(eqx.Module):
                 # Backtrack the step length before judging it: when the shifted direction is accurate
                 # but the full step overshoots, a scaled-back step descends from this one solve,
                 # sparing a re-solve at larger beta. `line_search == 0` takes the full step (alpha = 1).
+                # Clip the correction per entry BEFORE the cap reads it: an entry that would cross
+                # zero is held back on its own, rather than shortening the step for every entry. The
+                # cap below then finds nothing binding and returns 1, so the two compose -- the same
+                # ordering, and the same reasoning, as the dual-time step's inner loop.
+                if step_projection is not None:
+                    delta = step_projection(phi, delta)
+                max_alpha = 1.0 if step_limit is None else step_limit(phi, delta)
                 candidate, alpha = backtracking_line_search(
                     residual_fn,
                     phi,
@@ -473,6 +493,7 @@ class PseudoTransientStep(eqx.Module):
                     norm=norm,
                     growth=growth_factor,
                     grow=grow,
+                    max_alpha=max_alpha,
                 )
                 # The directional derivative of the measure along the correction, d/ds norm(R(phi +
                 # s delta)) at s = 0. Negative means the direction descends in the measure the solve

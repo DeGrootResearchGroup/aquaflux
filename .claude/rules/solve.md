@@ -6857,6 +6857,15 @@ transfer to any thresholded arm.
     - `turbulence.positive_k_limit(coupled)` returns the limiter for a directly-solved `k` and `None`
       for a log-solved one (positive by construction there, so a cap would only throttle);
       `coupled_amg_continuation` wires it automatically.
+    - **BOTH strategies carry `step_limit` / `step_projection` (fixed 2026-08-15).** They were
+      `DualTimeStep` fields only, so choosing `PseudoTransientStep` **silently gave up the guard** —
+      and the guard exists because its absence is a recorded march death (two cells of 23040 took `k`
+      negative and NaN'd the whole residual through a bare `sqrt`, every field still finite, nothing in
+      the ordinary stopping tests able to see it). The guard protects the **state**, not the march: a
+      field that must stay positive must stay positive whichever strategy steps it. `PseudoTransientStep`
+      now applies the identical pair in the identical order — project per entry first, then read the cap,
+      which then finds nothing binding — so the two compose the same way on both. Both default `None`,
+      which is the unconstrained step exactly, so the default path is unchanged.
     - **The cap is GLOBAL, so one entry near zero throttles the whole step** — a real risk on a field
       spanning `1e-5` to `4.5`. Measured, it does not bite, because the escape is not the cap: the cap
       forces `alpha → 0`, `CflResidualDualTimeControl` reads that as "shift too weak" and escalates
