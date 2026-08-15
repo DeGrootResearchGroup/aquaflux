@@ -31,6 +31,26 @@ top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 
 configured=$(git config --get core.hooksPath 2>/dev/null || true)
 
+# The remedy depends on WHERE the setting lives, and getting that wrong is itself silent. A
+# worktree-level value (`git config --worktree`, active when extensions.worktreeConfig is set)
+# SHADOWS the repository one, so advising `git config core.hooksPath .githooks` there writes a
+# setting git never consults: the hooks stay exactly as broken and this warning simply repeats,
+# which reads as the advice having been wrong rather than mis-aimed. Both warnings below route
+# their remedy through here so neither can drift from the other.
+_remedy() {
+  if [ -n "$(git config --worktree --get core.hooksPath 2>/dev/null || true)" ]; then
+    printf '       this worktree overrides the repository setting, and a worktree value wins --\n' >&2
+    printf '       so setting the repository one changes nothing. Drop the override with:\n' >&2
+    printf '         git config --worktree --unset core.hooksPath\n' >&2
+    if [ "$(git config --local --get core.hooksPath 2>/dev/null || true)" != ".githooks" ]; then
+      printf '       then point the repository at each checkout:\n' >&2
+      printf '         git config core.hooksPath .githooks\n' >&2
+    fi
+  else
+    printf '       point it at this checkout with:  git config core.hooksPath .githooks\n' >&2
+  fi
+}
+
 if [ -z "$configured" ]; then
   printf 'hooks: not enabled -- the local ruff/codespell gate will not run before a push.\n' >&2
   printf '       enable them once per clone:  git config core.hooksPath .githooks\n' >&2
@@ -47,12 +67,7 @@ if [ ! -x "$resolved/pre-push" ]; then
   printf 'hooks: NOT wired up -- core.hooksPath = %s\n' "$configured" >&2
   printf '       resolves to %s, which holds no executable pre-push,\n' "$resolved" >&2
   printf '       so the ruff/codespell gate will NOT run before a push.\n' >&2
-  if [ -n "$(git config --worktree --get core.hooksPath 2>/dev/null || true)" ]; then
-    printf '       this worktree overrides the repository setting; drop the override with:\n' >&2
-    printf '         git config --worktree --unset core.hooksPath\n' >&2
-  else
-    printf '       point it at this checkout with:  git config core.hooksPath .githooks\n' >&2
-  fi
+  _remedy
   exit 0
 fi
 
@@ -65,7 +80,8 @@ if [ "$absolute" -eq 1 ] && [ "$resolved" != "$top/.githooks" ]; then
   printf '       they run right now, but from outside this checkout, so they will vanish\n' >&2
   printf '       silently whenever that directory changes -- its contents follow whichever\n' >&2
   printf '       branch that other checkout is on.\n' >&2
-  printf '       make them follow this checkout instead:  git config core.hooksPath .githooks\n' >&2
+  printf '       make them follow this checkout instead:\n' >&2
+  _remedy
 fi
 
 exit 0
