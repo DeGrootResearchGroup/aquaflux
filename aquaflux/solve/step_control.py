@@ -349,7 +349,7 @@ def default_dual_time_control(
 
     A **dual-time** march (a :class:`~aquaflux.solve.DualTimeStep`, whose reported ``alpha`` is the
     backward-Euler inner-loop comfort a Courant ramp reads) that is **already observing** (a
-    ``refresh_trigger`` or observer set ``observing``) but was handed **no** ``step_control`` defaults to
+    a refresh or an observer set ``observing``) but was handed **no** ``step_control`` defaults to
     :class:`~aquaflux.solve.DualTimeControl`. That ramp grows the pseudo-timestep while the inner loop
     stays comfortable, reaching a developed recirculation in far fewer outer steps than the residual-keyed
     schedule (which pins ``beta`` because the row-scaled steady residual is nearly flat while the flow

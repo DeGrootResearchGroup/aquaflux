@@ -228,7 +228,7 @@ def solve_reynolds_continuation(
     function is **identical** to differentiating a direct :func:`~aquaflux.turbulence.solve_coupled` --
     exact and independent of ``n_points``. As with a direct solve, to differentiate, pass a
     ``continuation`` built on concrete parameters outside ``jax.grad`` (used by the final solve) and no
-    forward-only keywords (``refresh_trigger`` / ``on_step`` / ``step_control`` / ``point_setup``).
+    forward-only keywords (``refresh`` / ``on_step`` / ``step_control`` / ``point_setup``).
     """
     if n_points < 0:
         raise ValueError(f"n_points must be >= 0, got {n_points}")

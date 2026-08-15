@@ -110,7 +110,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
   `.claude/rules/solve.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
   `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output factor — the
   reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a frozen dataclass.
-  - **`solve_coupled(refresh_trigger=…)` segments the march to re-freeze the preconditioner — and a refresh
+  - **`solve_coupled(refresh=RefreshPolicy(trigger=…))` segments the march to re-freeze the preconditioner — and a refresh
     must CARRY the shift diagonals, not rebuild them (binding).** With a trigger set, the march runs as a
     sequence of *observed* segments (`aquaflux.solve.forward_march`): each steps until the trigger judges
     the frozen preconditioner stale, the k/ω AMGs are re-derived at the state reached, and the next
@@ -154,7 +154,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     so a slightly-stale factor changes only the path, never the converged state or its adjoint (the same
     argument that carries the flow block). Rebuilding the transport was measured ~1.87× faster end-to-end
     on pitzDaily than a stale baseline (~925 s vs 1726 s to rel 3e-2, flat ~22 s/step vs 100–300 s/step). Also: `max_steps` applies to **each** segment (so up to
-    `(refresh_limit+1)·max_steps` march steps plus the finishing solve's own allowance, deliberately not
+    `(refresh.limit+1)·max_steps` march steps plus the finishing solve's own allowance, deliberately not
     split — either segment may need the full allowance); the finishing solve is handed the **absolute**
     target `atol + rtol·‖R0‖` measured at the initial state, so a refreshed solve stops exactly where an
     unrefreshed one does for **any** number of refreshes (a relative tolerance would be measured against
@@ -174,7 +174,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       so there is **no** concrete-preconditioner path through it — hence the honest behaviour is a clear
       up-front `ValueError`, not a leak. `solve_coupled` guards this with `_is_traced((coupled, flow, k,
       omega))` (reliable because the solve is eager-only — the scalar AMGs are off-jit scipy, so a tracer
-      leaf can only mean a wrapping transform). To differentiate, drop `refresh_trigger` and take the
+      leaf can only mean a wrapping transform). To differentiate, drop `refresh.trigger` and take the
       gradient of the single-stage solve with a `continuation` built on concrete params outside
       `jax.grad`; the adjoint is refresh-independent (the preconditioner is `stop_gradient`-ed, both
       marches reach the same converged state, so the IFT adjoint is identical), so nothing is lost. This
@@ -943,7 +943,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     `coupled_ilut_refreshing_continuation` (BUILT, forward-march only).** For a differentiable solve the
     factorization is frozen at the reference state (state drift costs only a few cycles, and freezing
     keeps the adjoint valid). For a long developing march it instead goes stale — on a low-shift dual-time
-    path it can NaN — so `coupled_ilut_refreshing_continuation(coupled, …)` returns a `refresh_builder`
+    path it can NaN — so `coupled_ilut_refreshing_continuation(coupled, …)` returns a `refresh.builder`
     for `solve_coupled` that re-factors the ILUT **in place in the SAME continuation object**
     (`MonolithicIlutPreconditioner.refresh_in_place`), so the jitted march-step is a compilation cache hit
     (no recompile) — pair it with a `CoefficientDriftTrigger` so the re-factor leads the staleness. This
@@ -1020,7 +1020,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     Jacobian-vector-product matvecs a stale V-cycle costs. This is the only β-tracking that carries the 3D
     case: the complete LU's factorization is out of memory and the ILUT's `spilu` is prohibitively slow to
     build there. Same forward-only contract as the LU/ILUT hooks (raises under `jax.grad`); pass it to
-    `solve_coupled(precondition_step=…)` (or a `solve_reynolds_continuation` `point_setup`) with a
+    `solve_coupled(refresh=RefreshPolicy(precondition_step=…))` (or a `solve_reynolds_continuation` `point_setup`) with a
     `coupled_amg_continuation` step and a `DualTimeControl`.
     - **The refresh cadence is GATED, not every-step (measured on the developed-low-β tail).** Refreshing
       unconditionally every step is wasteful once the march has developed and β is nearly constant, and — the
@@ -1329,7 +1329,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     cuts the outer cycle count (staleness bullet in `.claude/rules/solve.md`). Neither figure was recorded
     with its state or its preconditioner bundle, so re-measure before relying on either.
     Driving a refresh **from the march** is BUILT:
-    `solve_coupled(refresh_trigger=CoefficientDriftTrigger(…))`. **The β coupling that motivated it:** a
+    `solve_coupled(refresh=RefreshPolicy(trigger=CoefficientDriftTrigger(…)))`. **The β coupling that motivated it:** a
     bolder β moves the state faster and stales the IC-frozen PC faster, so a *cost*-based trigger is
     confounded (cycles rise from β→0 **and** staleness — #19). The β-independent staleness trigger keyed
     on `‖Δν_t‖` is now **BUILT** and is the default recommendation; a `‖Δṁ‖` measure would be a second

@@ -23,6 +23,7 @@ from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, Veloci
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
+from aquaflux.solve import RefreshPolicy
 from aquaflux.turbulence import (
     CoupledRANS,
     SSTModel,
@@ -250,7 +251,7 @@ def test_ilut_beta_tracking_forward_march_converges_to_the_same_fixed_point(case
         omega_ws,
         continuation=ilut,
         step_control=DualTimeControl(beta_start=0.5, beta_min=0.02),
-        precondition_step=ilut_beta_tracking_refresh(coupled),
+        refresh=RefreshPolicy(precondition_step=ilut_beta_tracking_refresh(coupled)),
         scaled_norm=True,
         max_steps=60,
     )

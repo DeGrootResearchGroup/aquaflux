@@ -148,6 +148,7 @@ from .multigrid import (
 from .newton import newton_step
 from .norm import BlockScaledNorm, ResidualNorm, RowScaledNorm
 from .relaxation import ConstantRelaxation, RelaxationSchedule, SwitchedEvolutionRelaxation
+from .refresh import NO_REFRESH, RefreshPolicy
 from .retry import NO_RETRIES, RetryPolicy
 from .shift_basis import LocalCourantBasis, ShiftBasis, VelocityShiftParts
 from .sparse_jacobian import (
@@ -170,6 +171,7 @@ from .step_control import (
 )
 
 __all__ = [
+    "NO_REFRESH",
     "NO_RETRIES",
     "AirHierarchy",
     "AmgVCycle",
@@ -208,6 +210,7 @@ __all__ = [
     "PositiveBlockProjection",
     "ProbeGather",
     "PseudoTransientStep",
+    "RefreshPolicy",
     "RefreshTiming",
     "RefreshTrigger",
     "RelaxationSchedule",
