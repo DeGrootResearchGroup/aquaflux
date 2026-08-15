@@ -559,6 +559,22 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
         """The field partition the preconditioner is built over."""
         return self._groups
 
+    @property
+    def has_native_solve(self) -> bool:
+        """Always ``False``: a block-triangular split offers no native exact solve.
+
+        The base answers this by asking its frozen inverse, which is sound when that inverse is a single
+        :class:`~aquaflux.solve.AmgVCycle` and false here -- the split's is a
+        :class:`BlockTriangularFieldSplit`, which has no such solve to offer, because a native solve
+        inverts the whole shifted operator in one host call and a split deliberately never forms it.
+        Without this override the base's attribute lookup **raises**, and the raise is then invisible:
+        both callers ask through ``getattr(pc, "is_exact_native", False)`` -- the right spelling for the
+        factorization preconditioners, which genuinely lack the attribute -- and a default swallows an
+        ``AttributeError`` coming from inside a property body just as readily as a missing name. The
+        answer it produced was accidentally the correct ``False``, which is why this went unnoticed.
+        """
+        return False
+
     @classmethod
     def build(
         cls,

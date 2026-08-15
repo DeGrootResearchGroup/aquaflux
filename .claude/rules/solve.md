@@ -1303,6 +1303,19 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       transport pair coarsen differently. `AmgVCycle.apply` returns the inverse in the **original**
       (unequilibrated, field-major) space, so the retained coupling block is applied raw between the two
       block solves, with no scaling bookkeeping.
+      **⚠️ But `factors.n_dofs` + `factors.apply` is the WHOLE of what the split satisfies, and the base
+      asks for more elsewhere — `has_native_solve` reads `self.factors.has_native_solve`, which only an
+      `AmgVCycle` has, so on the split the inherited property RAISED (fixed 2026-08-14 by an explicit
+      `has_native_solve = False` override; a split never forms the whole shifted operator, so there is no
+      native solve to offer).** It went unseen for the reason worth carrying: **both call sites ask
+      through `getattr(pc, "is_exact_native", False)` — the right spelling for the ILUT and LU, which
+      genuinely lack the attribute — and a `getattr` default swallows an `AttributeError` raised *inside*
+      a property body exactly as it swallows a missing name.** The value it produced was accidentally the
+      correct `False`, so nothing failed. Two consequences: a test of such a property must read it
+      **directly**, never through `getattr` with a default (a `getattr` test passes against the defect —
+      `test_the_field_split_answers_the_native_solve_question_without_raising` reads it both ways for
+      this reason); and the unnamed `factors` contract the family shares is **`n_dofs` + `apply` only**,
+      so anything else the base reads off `self.factors` is an inheritance leak, not a contract.
     - **The transpose is closed-form, so the adjoint is served.** The transpose of a
       block-lower-triangular inverse is the block-upper-triangular one over the transposed blocks, so
       `apply(transpose=True)` reverses the two block solves and uses `Cᵀ` — pinned both as an exact dense
