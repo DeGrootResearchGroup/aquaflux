@@ -2061,9 +2061,11 @@ def coupled_lu_continuation(
         The complete-LU backend (see :func:`~aquaflux.solve.lu_preconditioner.factorize_lu`). ``'auto'``
         uses UMFPACK (the fast path, via the optional ``petsc`` dependency) when available, else SciPy
         SuperLU.
-    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search,
+    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search
+        The pseudo-transient schedule and guard parameters, exactly as in
+        :func:`coupled_ilut_continuation`.
     inner_steps, inner_tol, forward_solver, block_scaled_norm, shift_basis, residual_norm
-        The pseudo-transient schedule, dual-time, guard, and measure parameters, exactly as in
+        The dual-time, linear-solve, and measure parameters, exactly as in
         :func:`coupled_ilut_continuation`.
 
     Returns
@@ -2203,11 +2205,14 @@ def coupled_amg_continuation(
         (default) keeps PETSc's default (~50); a larger value grows the coarse-level direct solve so it
         inverts more of the saddle's global pressure coupling exactly — a stronger V-cycle (and stronger
         transpose V-cycle, so it helps the adjoint too) at a bounded, sub-linearly-growing coarse-solve cost.
-    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search,
+    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search
+        The pseudo-transient schedule and guard parameters, exactly as in
+        :func:`coupled_ilut_continuation`.
     inner_steps, inner_tol, forward_solver, block_scaled_norm, shift_basis, residual_norm
-        The pseudo-transient schedule, dual-time, guard, and measure parameters, exactly as in
-        :func:`coupled_ilut_continuation`. ``forward_solver`` defaults to a restart-40 GMRES matched to the
-        V-cycle's convergence (a few tens of vectors), rather than the ILUT's restart-10.
+        The dual-time, linear-solve, and measure parameters, exactly as in
+        :func:`coupled_ilut_continuation`, except that ``forward_solver`` defaults to a GMRES matched to
+        the V-cycle's convergence rather than to the ILUT's — the row-scaled stop of ``forward_rtol`` at
+        an Arnoldi restart of ``forward_restart``, both described below.
     forward_rtol : float
         The relative tolerance for the default **row-scaled** forward-solve stop (default ``0.3``). With no
         explicit ``forward_solver``, the forward solve stops on the march's own row-scaled progress measure

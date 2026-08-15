@@ -19,8 +19,8 @@ unknown fields, flattened into one vector) and returns how badly each cell's con
 equation is violated. A steady solution is a state where that residual is zero.
 
 For the coupled pressure–velocity system the residual is assembled by a
-`MomentumContinuity`, built over a mesh from the fluid properties, a gradient scheme, and the
-boundary conditions:
+{class}`~aquaflux.flow.MomentumContinuity`, built over a mesh from the fluid properties, a
+gradient scheme, and the boundary conditions:
 
 ```python
 import aquaflux  # noqa: F401  (enables 64-bit mode)
@@ -77,7 +77,7 @@ on a skewed mesh still converges in a **single** Newton step.
 
 For a residual that is genuinely linear — Stokes flow (build the assembler with no
 `advection_scheme`), or a scalar diffusion problem — one correction is the whole answer, and
-`newton_step` gives it directly:
+{func}`~aquaflux.solve.newton_step` gives it directly:
 
 ```python
 from aquaflux.solve import newton_step
@@ -107,11 +107,11 @@ never a different answer.
 
 ### Line search — the default
 
-`DampedNewtonStep` computes the full Newton correction and then backtracks: it takes the
-longest step from `1, 1/2, 1/4, …` that actually reduces the residual. Near the root the full
-step already reduces it, so the search costs one residual evaluation and the iteration is
-undamped — you keep Newton's fast terminal convergence and pay for the search only when you
-need it.
+{class}`~aquaflux.solve.DampedNewtonStep` computes the full Newton correction and then
+backtracks: it takes the longest step from `1, 1/2, 1/4, …` that actually reduces the
+residual. Near the root the full step already reduces it, so the search costs one residual
+evaluation and the iteration is undamped — you keep Newton's fast terminal convergence and
+pay for the search only when you need it.
 
 ```python
 from aquaflux.solve import DampedNewtonStep, ImplicitNewtonSolver
@@ -131,14 +131,14 @@ rather than capturing it in the closure.
 
 A line search has limits. On a strongly convective flow it can only shorten a direction that
 is pointing the wrong way, and past a certain Reynolds number no step length along it helps.
-`momentum_continuation` builds the stronger option: it adds a diagonal shift to the Jacobian,
-proportional to the momentum equation's own central coefficient, which damps the step in the
-manner of an implicit pseudo-time march. The shift ramps down as the residual falls, so the
-iteration recovers the exact steady Newton step as it converges.
+{func}`~aquaflux.flow.momentum_continuation` builds the stronger option: it adds a diagonal
+shift to the Jacobian, proportional to the momentum equation's own central coefficient, which
+damps the step in the manner of an implicit pseudo-time march. The shift ramps down as the
+residual falls, so the iteration recovers the exact steady Newton step as it converges.
 
 Here `channel` is an inlet/outlet duct assembler, built exactly as `cavity` was above but with
-a `VelocityInlet` and a `PressureOutlet` in place of two of the walls (and no pressure pin — the
-outlet sets the datum):
+a {class}`~aquaflux.flow.VelocityInlet` and a {class}`~aquaflux.flow.PressureOutlet` in place
+of two of the walls (and no pressure pin — the outlet sets the datum):
 
 ```python
 from aquaflux.flow import momentum_continuation
@@ -153,9 +153,9 @@ guess rather than a value that has to be tuned per case: a step that fails to ma
 automatically re-damped and retried, so choosing `beta0` too small is recovered rather than
 fatal.
 
-A good starting field helps both strategies. `potential_flow` builds one by solving a cheap
-potential problem for a divergence-free velocity that already respects the geometry and the
-inlet:
+A good starting field helps both strategies. {func}`~aquaflux.flow.potential_flow` builds one
+by solving a cheap potential problem for a divergence-free velocity that already respects the
+geometry and the inlet:
 
 ```python
 from aquaflux.flow import potential_flow
@@ -167,7 +167,7 @@ state = solver.solve(lambda s, a: a.residual(s), potential_flow(channel), channe
 
 Each Newton step solves a linear system, and for the coupled pressure–velocity block that
 system is a saddle-point problem: it does not respond to a generic Krylov method without help.
-`BlockPreconditioner` supplies that help, and the strategy carries it:
+{class}`~aquaflux.flow.BlockPreconditioner` supplies that help, and the strategy carries it:
 
 ```python
 from aquaflux.flow import BlockPreconditioner
@@ -204,8 +204,10 @@ without reference to how the root was found. The reverse-mode gradient is one tr
 solve at the converged state, whose cost is completely independent of how many Newton steps
 the forward solve took.
 
-You do not have to ask for any of this. `solver.solve` is differentiable — here, with respect
-to the fluid's viscosity, by rebuilding the assembler inside the differentiated function:
+You do not have to ask for any of this.
+{meth}`solver.solve <aquaflux.solve.ImplicitNewtonSolver.solve>` is differentiable — here, with
+respect to the fluid's viscosity, by rebuilding the assembler inside the differentiated
+function:
 
 ```python
 import jax
@@ -241,8 +243,9 @@ residual depends on.
 ```{note}
 The steady solve is differentiable in **reverse mode** (`jax.grad`, `jax.vjp`), which is what a
 scalar objective over a whole field needs. Forward-mode differentiation (`jax.jacfwd`, `jax.jvp`)
-through `ImplicitNewtonSolver` raises; use `newton_step` where a forward-mode derivative through
-a linear solve is what you want.
+through {class}`~aquaflux.solve.ImplicitNewtonSolver` raises; use
+{func}`~aquaflux.solve.newton_step` where a forward-mode derivative through a linear solve is
+what you want.
 ```
 
 ## Non-convergence is an error, not a result
@@ -252,22 +255,24 @@ The adjoint above is only valid **at a root**. Linearizing at a state that does 
 one, with nothing to signal that it is wrong.
 
 So the solver refuses to return it. If the iteration exhausts `max_steps` short of tolerance,
-or the residual norm becomes non-finite, `solve` raises `equinox.EquinoxRuntimeError` rather
+or the residual norm becomes non-finite,
+{meth}`~aquaflux.solve.ImplicitNewtonSolver.solve` raises `equinox.EquinoxRuntimeError` rather
 than handing back a state that cannot be trusted. This happens on the `jax.grad` path too, so a
 sensitivity can never be built quietly on an unconverged field.
 
 If you hit it, the useful responses in order are: start from a better initial field
-(`potential_flow`), switch from the line search to `momentum_continuation`, raise `max_steps`,
-and only then loosen `rtol`/`atol`.
+({func}`~aquaflux.flow.potential_flow`), switch from the line search to
+{func}`~aquaflux.flow.momentum_continuation`, raise `max_steps`, and only then loosen
+`rtol`/`atol`.
 
 ## Choosing the pieces
 
 | Situation | Forward step | Notes |
 | --- | --- | --- |
-| Linear residual (Stokes, scalar diffusion) | `newton_step` | Exact in one call; differentiable in both modes. |
-| Nonlinear, moderate Reynolds number | `DampedNewtonStep` | The default. Add a `preconditioner` for any coupled flow. |
-| Convection-dominated / high Reynolds number | `momentum_continuation` | Pseudo-transient damping that ramps to zero; pair it with `potential_flow`. |
-| Repeated solves at varying viscosity | `reused_flow_solve` | Builds the preconditioned strategy once and reuses the compiled solve across calls. |
+| Linear residual (Stokes, scalar diffusion) | {func}`~aquaflux.solve.newton_step` | Exact in one call; differentiable in both modes. |
+| Nonlinear, moderate Reynolds number | {class}`~aquaflux.solve.DampedNewtonStep` | The default. Add a `preconditioner` for any coupled flow. |
+| Convection-dominated / high Reynolds number | {func}`~aquaflux.flow.momentum_continuation` | Pseudo-transient damping that ramps to zero; pair it with {func}`~aquaflux.flow.potential_flow`. |
+| Repeated solves at varying viscosity | {func}`~aquaflux.flow.reused_flow_solve` | Builds the preconditioned strategy once and reuses the compiled solve across calls. |
 
 The default tolerances (`rtol=1e-10`, `atol=1e-12`) are deliberately tight, since the residual
 norm is what the adjoint's validity rests on. `max_steps` defaults to 50, which suits a

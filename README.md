@@ -158,8 +158,8 @@ the mesh node coordinates.
 
 ## Documentation
 
-Full documentation — the mesh model, zones and patches, and the API reference —
-is at [aquaflux.readthedocs.io](https://aquaflux.readthedocs.io).
+Full documentation — the mesh model, zones and patches, steady-state solving, and
+the API reference — is at [aquaflux.readthedocs.io](https://aquaflux.readthedocs.io).
 
 ## Development
 

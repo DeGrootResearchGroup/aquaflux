@@ -311,17 +311,17 @@ class BlockTriangularFieldSplit:
         ``refactor``, so each keeps its own aggregation and re-computes only the coarse operators and the
         smoother's factor values — the economy the monolithic refresh relies on, preserved per block.
 
-        Parameters
-        ----------
-        matrix : scipy.sparse matrix
-            The new assembled field-major operator, already shifted, of this partition's shape.
-
         An inverse may take the new operator in either of **two forms**, and the distinction is real
         rather than two spellings of one thing. A host solver wants it already put into the shape it
         factors — equilibrated and reordered cell-major — so it re-fits without redoing that work, and
         takes ``refactor(cell_major, scale, perm)``. A hierarchy built on the raw field-major block
         cannot use that shape at all: a nodal coarsening recovers each cell as ``index % n_cells``,
         which only holds field-major. Such an inverse takes ``refactor_block(block)`` instead.
+
+        Parameters
+        ----------
+        matrix : scipy.sparse matrix
+            The new assembled field-major operator, already shifted, of this partition's shape.
 
         Raises
         ------
@@ -605,11 +605,13 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
             The pseudo-transient shift ``beta d`` added to the diagonal, shape ``(n_dofs,)``.
         groups : FieldGroups
             The partition to split on.
-        smoother_fill_levels, smoother_sweeps, trailing_smoother_sweeps, coarse_eq_limit,
-        leading_options, trailing_options
+        smoother_fill_levels, smoother_sweeps, trailing_smoother_sweeps, coarse_eq_limit
             Passed through to each block's V-cycle. ``smoother_sweeps`` is the leading (saddle) block's
             and ``trailing_smoother_sweeps`` the trailing (transported-scalar) block's; they differ by
             default because the two halves want different amounts of smoothing.
+        leading_options, trailing_options
+            Extra multigrid options for one block only, so the two can be tuned apart. Ignored for a
+            block whose inverse is supplied directly.
         leading_inverse, trailing_inverse : callable or None
             ``(sub_matrix, n_fields_in_group) -> inverse`` replacing that block's V-cycle entirely — the
             seam for preconditioning a block with something that is not a host solver's V-cycle. When
