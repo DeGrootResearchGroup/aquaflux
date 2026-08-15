@@ -3,8 +3,8 @@
 # Pre-push hook: run the same gate CI will enforce, so a formatting, lint, or
 # spelling slip is caught locally instead of turning a required check red on the
 # PR:
-#     ruff check aquaflux tests
-#     ruff format --check aquaflux tests
+#     ruff check aquaflux tests docs
+#     ruff format --check aquaflux tests docs
 #     codespell aquaflux tests
 #
 # Enable it once per clone (git does not install repo hooks automatically):
@@ -25,15 +25,15 @@ fi
 
 fail=0
 
-echo "pre-push: ruff check aquaflux tests" >&2
-if ! ruff check aquaflux tests; then
+echo "pre-push: ruff check aquaflux tests docs" >&2
+if ! ruff check aquaflux tests docs; then
   echo "pre-push: 'ruff check' reported errors (see above)." >&2
   fail=1
 fi
 
-echo "pre-push: ruff format --check aquaflux tests" >&2
-if ! ruff format --check aquaflux tests; then
-  echo "pre-push: files are not formatted -- run 'ruff format aquaflux tests', commit, and re-push." >&2
+echo "pre-push: ruff format --check aquaflux tests docs" >&2
+if ! ruff format --check aquaflux tests docs; then
+  echo "pre-push: files are not formatted -- run 'ruff format aquaflux tests docs', commit, and re-push." >&2
   fail=1
 fi
 
