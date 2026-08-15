@@ -4175,16 +4175,16 @@ citable.)
 cap, at every arm above. It becomes a real knob only if the tolerance is loosened far enough for the cap
 to start catching, which none of these arms reach.
 
-### ⚠️ THE FORWARD SOLVE CANNOT REACH A TIGHT ROOT AT β = 0 — and nobody had asked (2026-08-14)
+### ⚠️ THE FORWARD SOLVE'S β = 0 CONTRACTION IS GEOMETRIC, NOT QUADRATIC — still undiagnosed (2026-08-14)
 
-**The whole native-preconditioner case rests on β = 0 being where the adjoint lives, and every probe in
-this file measures the LINEAR solve there. Nobody had asked whether the NONLINEAR solve can reach a root
-at β = 0 at all. It cannot, at any tolerance a gradient would want.** Found while building
-`validation/bfs3d_openfoam/adjoint_probe.py` for the first `jax.grad` ever taken on this case.
+**A root at β = 0 IS reachable — see *"`jax.grad` RUNS ON THIS CASE"* above, where `rtol` 1e-4 is reached
+and the gradient it yields is validated. What has never been explained is the RATE.** An earlier version
+of this entry concluded the solve "cannot reach a root at any tolerance a gradient would want"; that is
+**false** and is deleted. The rate finding below survives it, and is the part still worth chasing.
 
 *Configuration:* `state-00067` (the converged root), started from its **physical** fields, β = 0
 throughout, field split, shipped column reach, `coupled_amg_continuation` built once on concrete
-parameters.
+parameters, `forward_rtol` 0.3.
 
 From a converged root the solve decays **geometrically with FULL Newton steps** (`alpha` 1.000 at every
 step) where a Newton step at a root should be quadratic. The per-step contraction, measured over 22 steps:
@@ -4194,11 +4194,23 @@ step) where a Newton step at a root should be quadratic. The per-step contractio
 | contraction | 0.827 | 0.853 | 0.884 | 0.868 | 0.804 | 0.771 | **0.704** |
 
 **It is roughly flat at 0.83–0.88 for the first ~16 steps and then improves**, reaching 0.70 by step 22
-(relative residual 0.019). ⚠️ **So it is mildly superlinear at the tail, NOT the constant rate a first
-reading of this took it for** — an earlier draft here extrapolated the early rate to "~100 steps to reach
-1e-8", which the tail does not support. What is measured is that `rtol` **2e-2 is reached in 22 steps**
-and that 1e-8 was **not demonstrated**; how many steps it would actually take is unknown, because the rate
-is still moving where the data stops.
+(relative residual 0.019) — mildly superlinear at the tail, **not** the constant rate a first reading took
+it for.
+
+**How far it actually gets, measured 2026-08-15 (this supersedes "1e-8 was not demonstrated; how many
+steps is unknown"):** the guard in `ImplicitNewtonSolver` passes — i.e. the solve genuinely converged — at
+
+| `rtol` | steps allowed | outcome |
+|---|---|---|
+| 2e-2 | 30 | reached in **22** steps |
+| 1e-3 | 80 | **reached** |
+| 1e-4 | 90 | **reached** |
+
+so the reachable tolerance is at least **four orders tighter than the 2e-2 this entry was written at**.
+1e-8 is still not demonstrated. ⚠️ The 1e-3 and 1e-4 runs ran with the per-step observer off
+(`BFS3D_ADJOINT_SKIP_FORWARD=1`), so the step *counts* at those tolerances are bounded by the budget
+rather than measured; the preconditioner-application totals over one gradient evaluation — **1070 → 1702
+→ 1944** across the three rows — are the measured proxy.
 
 **Two candidate causes were tested and BOTH are refuted, by controlled arms that share one trajectory:**
 
@@ -4216,89 +4228,49 @@ is still moving where the data stops.
 
 **So the rate is set by the Jacobian or the residual itself, and that is UNDIAGNOSED.** The residual path
 carries no `stop_gradient` (every one in `turbulence/coupled.py` is on the preconditioner or the shift,
-which is correct), so a wrong Jacobian is not the cheap explanation. A constant rate immune to both
+which is correct), so a wrong Jacobian is not the cheap explanation. A near-constant rate immune to both
 levers is the signature of a fixed-point iteration rather than a Newton one; the next things to look at
 are whether the SST closure's blending/limiting makes the residual only piecewise differentiable near
 this state, and whether the step actually applied is the one `alpha` reports.
 
-**Why this matters more than it looks:** `ImplicitNewtonSolver` **refuses** to return a gradient at a
-non-converged root — "the implicit-function-theorem adjoint is only valid at a converged root, so the
-returned field and any gradient built on it would be silently wrong" — which is the guard working, and
-which means **the adjoint is currently unreachable on this case at a tight tolerance for reasons that
-have nothing to do with the preconditioner.** A faster β = 0 linear solve does not help a nonlinear solve
-that stalls at 1e-2 relative.
+**What it costs, now that the consequence is priced rather than feared.** The rate does not block the
+adjoint — it makes a *converged* gradient expensive: reaching `rtol` 1e-4 takes roughly twice the
+preconditioner applications of `rtol` 2e-2 (1944 against 1070), and a validated finite-difference check
+needs that tight root (at 2e-2 the check reports a 23 % mismatch that is entirely the difference's fault).
+So this is a cost and accuracy problem, not a reachability one.
 
-### ⚠️⚠️ AND THE ADJOINT'S TRANSPOSE SOLVE STAGNATES — `jax.grad` HAS NEVER SUCCEEDED HERE (2026-08-14)
+⚠️ **THE ADJOINT-STAGNATION ENTRY THAT USED TO SIT HERE IS DELETED — every claim in it is now false.**
+It said `jax.grad` had never succeeded, that the transpose solve stagnated even at a loose root, that both
+halves of the adjoint were broken, and that two arms (the Krylov settings, and the native leading inverse)
+remained unrun. The stagnation was a **solver-settings artifact reachable only through an API gap that is
+now closed** (`solve_coupled(adjoint_solver=…)`), the gradient runs and is validated to 1.9e-04, and both
+arms have been run. See *"`jax.grad` RUNS ON THIS CASE, AND IS VALIDATED"* above for the costs and the
+native-versus-PETSc comparison. Three findings from that entry are **not** superseded and are kept here
+because they cost real time to learn:
 
-**At a tolerance the forward solve CAN reach, the gradient still fails, and it fails in the other half.**
-Run at `rtol` 2e-2 (reached in 22 steps, relative residual 0.019) so the root guard above is satisfied,
-`forward_rtol` 0.3, shipped column reach `(3,3,3,3,2,2)`, shipped bundle (PETSc ILU(0) on the flow block,
-native nodal trailing, field split), preconditioner built once on concrete parameters:
+- **❌ The column reach is not a factor in the transpose solve** — measured, not assumed. At **uniform**
+  reach (`BFS3D_COLUMN_REACH=0`) the forward objective came back bit-identical to the shipped reach's
+  (5.337542799e+04), which is the expected control: the reach is a preconditioner-only approximation and
+  cannot move the root.
+- **⚠️ `on_step` CANNOT BE USED UNDER `jax.grad`, and it is the observer that makes a march readable.**
+  `solve_coupled` raises rather than letting it through: `refresh_trigger` / `step_control` / `on_step` /
+  `on_checkpoint` / `precondition_step` / `retry_solver` all drive a forward-only **eager** march that
+  steps in Python on concrete residual norms, which a differentiation tracer cannot flow through. The
+  adjoint is refresh-independent, so the single-stage solve returns the identical gradient; the cost is
+  only that **a differentiated evaluation is silent**. The probe therefore builds the objective twice,
+  watched and unwatched, and differentiates the unwatched one — and the transpose solve's own progress is
+  reported by counting preconditioner applications instead (see the instrumentation note above).
+- **⚠️ Two probe defects, either of which produces a confident wrong number**, and neither announces
+  itself:
+  - **`layout.unpack` is NOT the physical state.** The checkpoint stores the *solved* variables, whose
+    scalar blocks are `log(omega)` under this case's log-variable transport, while `solve_coupled` takes a
+    **physical** initial condition and maps it in itself. Feeding it the unpacked blocks applies the log
+    twice: the solve starts at |R| ~1.4 instead of ~1e-05, converges to *something*, and returns a finite
+    gradient of the wrong problem. Use `coupled.physical_fields(state)`.
+  - **A probe that builds its own continuation silently gets LIBRARY defaults**, not the case's — here the
+    positivity floor (case 1e-8, library 0). It made no difference, but only because it was checked.
 
-- the **forward** objective evaluates fine and is **reproducible to every digit** across runs
-  (`sum(k^2)` = 5.337542799e+04, 155 s);
-- `jax.grad` of it dies inside the transpose solve with
-  **`A stagnation in an iterative linear solve has occurred. Try increasing stagnation_iters or restart.`**
-
-**So both halves of the adjoint are currently broken on this case, independently:** the nonlinear solve
-cannot reach a tight root at β = 0, and the transpose linear solve stagnates even at a loose one. **This
-is the first time `jax.grad` has ever been attempted on `bfs3d`**, and it is why the attempt was worth
-making — the entire native-preconditioner programme is justified by an adjoint nobody had executed.
-
-**❌ THE COLUMN REACH IS NOT THE CAUSE — measured, not assumed.** Re-run at **uniform** reach
-(`BFS3D_COLUMN_REACH=0`), the setting every other β = 0 measurement in this file uses and which is on
-record as halving the incumbent's β = 0 cost (11 cycles against the shipped reach's 22): **identical
-stagnation.** The forward objective came back bit-identical (5.337542799e+04, 154 s against 155 s), which
-is the expected control — the reach is a preconditioner-only approximation and cannot move the root.
-
-**✅ AND THE ACTUAL BLOCKER IS AN API GAP, which is the actionable part.** `ImplicitNewtonSolver` carries
-an `adjoint_solver` field, but **`solve_coupled` does not expose it** — it forwards `retry_solver` (which
-is forward-only) and nothing for the transpose. So the adjoint falls through to
-`default_linear_solver()` = `lx.GMRES(rtol=1e-10, atol=1e-10)` at lineax's **default** restart and
-`stagnation_iters`, while the forward path runs restart 15 with a 60-restart cap and a relative-residual
-stop. **The fix the error message names — raise `stagnation_iters` or `restart` — is unreachable from the
-coupled entry point.** Threading `adjoint_solver` through `solve_coupled` is the prerequisite for any
-further adjoint work on this case, and it is a small change to a public signature rather than a
-measurement.
-
-⚠️ **STILL NOT ESTABLISHED, and the temptation to over-read this is large.** A stagnation at default
-Krylov settings is a *solver-settings* signature, not proof that the transposed operator is
-unpreconditionable. Two arms remain unrun and both are cheap once the passthrough exists:
-- **`restart` / `stagnation_iters`** at the values the forward path already uses;
-- **the leading inverse.** Both attempts used the PETSc default, not `BFS3D_FLOW_INVERSE=native`, so
-  nothing here speaks to whether the native flow block helps the adjoint — which is the one claim the
-  whole campaign exists to test.
-
-**Do not quote this as "the native preconditioner does not help the adjoint."** It is one arm, at the
-shipped reach, on the incumbent, with default Krylov settings. What it establishes is narrower and still
-important: **the adjoint path on this case is untested and does not currently work**, and that is a
-prerequisite for every performance claim made about β = 0 in this file.
-
-⚠️ **Do not read this as "the native preconditioner work was misdirected."** The linear operator at β = 0
-is still exactly what a transpose solve meets, and every comparison at that point remains valid on its own
-terms. What is now open is whether the forward solver can put us *at* a root there to take the transpose
-around.
-
-⚠️ **AND `on_step` CANNOT BE USED UNDER `jax.grad` — the observer that made this diagnosis is the one
-thing a gradient evaluation must not carry.** `solve_coupled` raises rather than letting it through:
-`refresh_trigger` / `step_control` / `on_step` / `on_checkpoint` / `precondition_step` / `retry_solver`
-all drive a forward-only **eager** march that steps in Python on concrete residual norms, which a
-differentiation tracer cannot flow through. The adjoint is refresh-independent, so the single-stage solve
-returns the identical gradient; the cost is only that **a differentiated evaluation is silent**. The probe
-therefore builds the objective twice, watched and unwatched, and differentiates the unwatched one.
-
-⚠️ **Two probe defects found on the way, both of which would have produced a confident wrong number**, and
-both worth repeating because neither announces itself:
-- **`layout.unpack` is NOT the physical state.** The checkpoint stores the *solved* variables, whose
-  scalar blocks are `log(omega)` under this case's log-variable transport, while `solve_coupled` takes a
-  **physical** initial condition and maps it in itself (`state_from_physical`). Feeding it the unpacked
-  blocks applies the log twice: the solve then starts at |R| ~1.4 instead of ~1e-05, converges to
-  *something*, and returns a finite gradient of the wrong problem. Use `coupled.physical_fields(state)`.
-- **A probe that builds its own continuation silently gets LIBRARY defaults**, not the case's — here the
-  positivity floor (case 1e-8, library 0). It made no difference to this result, but only because it was
-  checked.
-
-Both were caught only because the probe prints one line per outer step. It did not, at first.
+  Both were caught only because the probe prints one line per outer step. It did not, at first.
 
 ### The gap is CONVERGENCE, not cost — measured, and it reverses the priorities
 

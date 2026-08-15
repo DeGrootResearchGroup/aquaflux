@@ -53,49 +53,72 @@ from aquaflux.turbulence import solve_coupled  # noqa: E402
 from aquaflux.turbulence.coupled import coupled_amg_continuation  # noqa: E402
 from field_split_probe import STATES, load_state  # noqa: E402
 
-#: Newton steps allowed per objective evaluation. The start is an already-converged root, so a solve at
-#: the unperturbed viscosity should take one or two; the perturbed ones are what need the headroom.
-MAX_STEPS = int(os.environ.get("BFS3D_ADJOINT_MAX_STEPS", "30"))
+#: Newton steps allowed per objective evaluation. ⚠️ NOT "one or two": from a converged root at beta = 0
+#: this solve contracts GEOMETRICALLY at ~0.83 per step rather than quadratically (cause undiagnosed), so
+#: reaching `RTOL` takes tens of steps -- 22 to reach 2e-2, and the whole of this budget to reach 1e-4.
+MAX_STEPS = int(os.environ.get("BFS3D_ADJOINT_MAX_STEPS", "90"))
 
 #: The finite-difference step for part 2. Large enough that the solve's own tolerance does not dominate
 #: the difference, small enough to stay in the linear regime -- and the two constraints are why the
 #: forward tolerance below is far tighter than a march would use.
 FD_EPS = float(os.environ.get("BFS3D_ADJOINT_FD_EPS", "1e-4"))
 
-#: Both the gradient and the finite difference are only as good as the root each solve lands on, so this
-#: is far tighter than a march would use. But it is bounded from the other side too: the start is already
-#: a converged root at |R| ~ 3.6e-06, and a RELATIVE tolerance is measured against that, so 1e-10 would
-#: ask for ~3.6e-16 absolute -- unreachable in double precision, and the solve then spends its whole step
-#: budget without stopping (observed: over four minutes and still going). 1e-8 asks for ~3.6e-14, which
-#: is tight enough that a 1e-4 parameter perturbation is far above the noise it leaves.
-RTOL = float(os.environ.get("BFS3D_ADJOINT_RTOL", "1e-8"))
+#: How tight a root each solve must reach, RELATIVE to its own starting residual. This is the single most
+#: consequential setting here and the default is a MEASURED one, not a guess.
+#:
+#: ⚠️ A LOOSE ROOT SILENTLY BREAKS PART 2, AND BLAMES THE ADJOINT FOR IT. The implicit-function-theorem
+#: gradient is only valid at `R = 0`, while a finite difference differentiates "parameter -> wherever the
+#: solve stopped"; away from a root those are different functions. Measured on this case, against an
+#: adjoint that moves by 0.001 % across the whole range:
+#:
+#:     root rtol 2e-2  ->  finite difference disagrees by 23 %
+#:     root rtol 1e-3  ->  0.53 %
+#:     root rtol 1e-4  ->  1.9e-04, agrees
+#:
+#: ⚠️ AND A BIGGER `FD_EPS` MAKES IT WORSE, NOT BETTER (23 % -> 64 % at 1e-3), so "the difference is just
+#: noisy" is the wrong diagnosis however well the arithmetic seems to fit -- fix the root, not the step.
+#: 1e-4 is the loosest value measured to agree. Tighter is bounded from the other side: the start is
+#: already a converged root at |R| ~ 3.6e-06 and this is RELATIVE to it, so 1e-10 would ask for ~3.6e-16
+#: absolute -- unreachable in double precision, and the solve then spends its whole budget without
+#: stopping. 1e-8 is not demonstrated reachable at all.
+RTOL = float(os.environ.get("BFS3D_ADJOINT_RTOL", "1e-4"))
 
-#: How tightly each Newton step's LINEAR solve is driven. The march ships 0.3 because an inexact step is
-#: cheap and globalization does the rest -- but that makes the nonlinear rate inexact-Newton-linear, and
-#: measured here it is ~0.86 per step (each solve taking a single restart cycle), which cannot reach
-#: `RTOL` in any affordable number of steps. From a converged root a near-exact linear solve should give
-#: a Newton step that converges in a couple of iterations instead, so this probe pays for tight solves.
-#: ⚠️ Nothing is free: at beta = 0 a tight solve is the EXPENSIVE regime (11 restart cycles on record,
-#: against the 1 an `forward_rtol` of 0.3 buys), which is precisely the operator this whole campaign is
-#: about.
-FORWARD_RTOL = float(os.environ.get("BFS3D_ADJOINT_FORWARD_RTOL", "1e-6"))
+#: How tightly each Newton step's LINEAR solve is driven. The march ships 0.3, and so does this probe.
+#:
+#: ⚠️ TIGHTENING IT IS MEASURED USELESS HERE, and an earlier version of this default (1e-6) rested on a
+#: prediction that turned out to be wrong. The reasoning was: an inexact step makes the nonlinear rate
+#: inexact-Newton-linear, so a near-exact linear solve should restore a couple-of-iterations Newton. It
+#: does not. Two controlled arms sharing one trajectory show `forward_rtol` 0.3 against 1e-6 costs 4-8x
+#: the Krylov work per step and moves the nonlinear trajectory **not at all** -- identical to five
+#: significant figures. The geometric ~0.83 contraction is set by the Jacobian or the residual, not by
+#: how well each step is solved, and it remains undiagnosed. `rtol` 1e-4 is reachable AT 0.3, which is
+#: what the validated gradient was measured with.
+FORWARD_RTOL = float(os.environ.get("BFS3D_ADJOINT_FORWARD_RTOL", "0.3"))
 
-#: The adjoint's transpose solve gets its OWN Krylov settings, because it meets a different operator
-#: from the forward march: no pseudo-transient shift on the diagonal, once, at the converged state.
-#: Left to itself `solve_coupled` hands it `default_linear_solver()` -- a GMRES at lineax's stock
-#: restart length and stagnation budget -- and on this case that combination stagnates and raises,
-#: naming a remedy (a longer restart, a larger stagnation budget) that used not to be reachable from
-#: here at all. These are that remedy. The defaults mirror the forward path's own choices, restart 15
-#: with a 60-restart cap, since that is the pairing this case's linear algebra was tuned at; the
-#: stagnation budget is the one lineax itself suggests raising.
-ADJOINT_RESTART = int(os.environ.get("BFS3D_ADJOINT_SOLVER_RESTART", "15"))
+#: The adjoint's transpose solve gets its OWN Krylov settings, because it meets a different operator from
+#: the forward march: no pseudo-transient shift on the diagonal, once, at the converged state. Left to
+#: itself `solve_coupled` hands it `default_linear_solver()` -- a GMRES at lineax's stock restart and
+#: stagnation budget -- which on this case stagnates and raises, naming a remedy that was unreachable from
+#: here until `adjoint_solver` was threaded through `solve_coupled`.
+#:
+#: ⚠️ THESE DEFAULTS ARE THE MEASURED WORKING ONES. An earlier version defaulted to the FORWARD path's
+#: choices (restart 15, a 60-restart cap) on the reasoning that they were what this case's linear algebra
+#: was tuned at. That reasoning was unsound and the configuration FAILS: the transpose solve needs ~1450
+#: preconditioner applications and restart-15 x 60 allows only ~900, so it dies on "The maximum number of
+#: solver steps was reached". The operator was never intractable, it was under-resourced -- and the budget
+#: had been sized from this file's own zero-shift figures, which are LINEAR-PROBE numbers at a different
+#: right-hand side (`-R`, where the adjoint's is the cotangent, localized in one field block).
+#: **Do not re-derive an adjoint budget from a forward or linear-probe cycle count. Measure it.**
+#: At restart 120 the solve converges in ~12 restart cycles; the 150 cap leaves an order of headroom so it
+#: does not bind, which is what lets the cost be MEASURED rather than truncated.
+ADJOINT_RESTART = int(os.environ.get("BFS3D_ADJOINT_SOLVER_RESTART", "120"))
 ADJOINT_STAGNATION_ITERS = int(os.environ.get("BFS3D_ADJOINT_SOLVER_STAGNATION_ITERS", "40"))
-ADJOINT_MAX_RESTARTS = int(os.environ.get("BFS3D_ADJOINT_SOLVER_MAX_RESTARTS", "60"))
+ADJOINT_MAX_RESTARTS = int(os.environ.get("BFS3D_ADJOINT_SOLVER_MAX_RESTARTS", "150"))
 
-#: How tightly the transpose solve is driven. This single solve sets the gradient's accuracy directly,
-#: so it is the one place in the probe that should not be loosened for speed -- it is measured against
-#: a finite difference in part 2, which is itself only as good as the two solves behind it.
-ADJOINT_RTOL = float(os.environ.get("BFS3D_ADJOINT_SOLVER_RTOL", "1e-10"))
+#: How tightly the transpose solve is driven. This single solve sets the gradient's accuracy directly.
+#: 1e-6 is chosen against what the check can actually resolve -- a central difference between two
+#: independently converged 3D solves -- and is measured sufficient for the 1.9e-04 agreement above.
+ADJOINT_RTOL = float(os.environ.get("BFS3D_ADJOINT_SOLVER_RTOL", "1e-6"))
 
 #: Print a line every this many transposed applications, so the transpose solve is not a silent black
 #: box. `0` disables it. Cheap: one modulo per application, against a preconditioner apply.
