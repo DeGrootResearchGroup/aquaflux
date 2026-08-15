@@ -68,7 +68,9 @@ from .continuation import (
     StepAcceptance,
 )
 from .frozen_operator import (
+    cell_major_permutation,
     convection_diffusion_operator,
+    equilibrate_cell_major,
     decouple_dof,
     symmetrically_equilibrate,
 )
@@ -232,6 +234,7 @@ __all__ = [
     "build_block_triangular_field_split",
     "build_convection_hierarchy",
     "build_smoothed_hierarchy",
+    "cell_major_permutation",
     "column_probe_plan",
     "combine_metrics",
     "combine_observers",
@@ -239,6 +242,7 @@ __all__ = [
     "convection_multigrid_solve",
     "decouple_dof",
     "default_linear_solver",
+    "equilibrate_cell_major",
     "field_change_metrics",
     "forward_march",
     "jacobian_relative_error",

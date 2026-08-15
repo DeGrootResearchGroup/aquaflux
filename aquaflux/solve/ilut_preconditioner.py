@@ -40,36 +40,8 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-from .frozen_operator import symmetrically_equilibrate
+from .frozen_operator import equilibrate_cell_major
 from .host_preconditioner import HostPreconditioner
-
-
-def cell_major_permutation(n_cells: int, n_fields: int) -> np.ndarray:
-    """Permutation from cell-major to field-major degree-of-freedom ordering.
-
-    The state is stored **field-major** — degree of freedom ``(cell i, field f)`` at ``f * n + i``.
-    An incomplete factorization of the indefinite saddle is well conditioned in **cell-major** order —
-    ``(cell i, field f)`` at ``i * n_fields + f`` — which interleaves the pressure among the velocity
-    unknowns. This returns ``perm`` with ``perm[i * n_fields + f] = f * n + i``, so ``A[perm][:, perm]``
-    reorders a field-major matrix into cell-major, and ``x[perm]`` / scatter-by-``perm`` map vectors
-    across the two orderings.
-
-    Parameters
-    ----------
-    n_cells : int
-        Number of cells.
-    n_fields : int
-        Degrees of freedom per cell.
-
-    Returns
-    -------
-    np.ndarray
-        The permutation, shape ``(n_fields * n_cells,)``.
-    """
-    perm = np.empty(n_fields * n_cells, dtype=np.int64)
-    for f in range(n_fields):
-        perm[f::n_fields] = f * n_cells + np.arange(n_cells)
-    return perm
 
 
 class IlutFactors:
@@ -122,65 +94,6 @@ class IlutFactors:
         out = np.empty_like(residual)
         out[self.perm] = solved
         return self.scale * out
-
-
-def equilibrate_cell_major(
-    matrix: sp.spmatrix, n_fields: int
-) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
-    """Symmetrically equilibrate an assembled coupled block matrix and reorder it to cell-major.
-
-    The two conditioning transforms the indefinite Rhie--Chow saddle needs before *any* incomplete
-    factorization or multigrid smoother acts on it, shared by :func:`factorize_ilut` and the multigrid
-    preconditioner so both precondition the identical operator:
-
-    * **Symmetric square-root-diagonal equilibration** ``D A D`` with ``D = diag(1/sqrt(|diag A|))`` — the
-      momentum and continuity rows differ in scale by more than an order of magnitude, and this balances
-      them so the incomplete pivots (or the smoother's) stay well conditioned.
-    * **Cell-major reordering** — interleave the per-cell fields ``[u, v, (w,) p, k, omega]`` (rather than
-      all of one field then the next), which keeps the pressure among the velocity unknowns so the saddle
-      does not present a zero pivot, and groups each cell's degrees of freedom into a contiguous block.
-
-    Parameters
-    ----------
-    matrix : scipy.sparse matrix
-        The assembled **field-major** coupled Jacobian (already shifted), shape ``(n_fields * n, ...)``.
-    n_fields : int
-        Degrees of freedom per cell.
-
-    Returns
-    -------
-    cell_major : scipy.sparse.csr_matrix
-        The equilibrated, cell-major matrix ``(D A D)`` reordered by ``perm``.
-    scale : np.ndarray
-        The equilibration ``diag(D)``, shape ``(n_dofs,)`` — applied to a field-major vector before, and
-        after, the reordered solve/apply.
-    perm : np.ndarray
-        The cell-major permutation, shape ``(n_dofs,)`` (see :func:`cell_major_permutation`).
-
-    Raises
-    ------
-    ValueError
-        If ``matrix`` is not square or its size is not a multiple of ``n_fields``.
-    """
-    if matrix.shape[0] != matrix.shape[1]:
-        raise ValueError(f"equilibrate_cell_major: matrix must be square, got {matrix.shape}.")
-    n_dofs = matrix.shape[0]
-    if n_dofs % n_fields != 0:
-        raise ValueError(
-            f"equilibrate_cell_major: matrix size {n_dofs} is not a multiple of n_fields={n_fields}."
-        )
-    equilibrated, scale = symmetrically_equilibrate(matrix)
-    perm = cell_major_permutation(n_dofs // n_fields, n_fields)
-    reordered = equilibrated[perm][:, perm].tocsr()
-    # Canonical form, because the permutation above leaves each row's column indices OUT OF ORDER and a
-    # consumer that assumes ascending indices then reads the wrong entries. PETSc's AIJ format is exactly
-    # such a consumer: handed this matrix unsorted, a point-block-Jacobi preconditioner returns NaN in
-    # most entries while a point-Jacobi one is unaffected -- a diagonal scan does not care about column
-    # order, a block extraction does. That asymmetry looks precisely like a broken block method and is
-    # not, so the ordering is established here rather than left to each caller to remember. `sort_indices`
-    # is a no-op on an already-canonical matrix, so callers that sort defensively cost nothing.
-    reordered.sort_indices()
-    return reordered, scale, perm
 
 
 def factorize_ilut(

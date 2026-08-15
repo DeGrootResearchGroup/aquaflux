@@ -122,7 +122,7 @@ from aquaflux.solve import (  # noqa: E402
     block_stencil_gather_map,
 )
 from aquaflux.solve.frozen_operator import equilibration_scale  # noqa: E402
-from aquaflux.solve.ilut_preconditioner import cell_major_permutation  # noqa: E402
+from aquaflux.solve import cell_major_permutation  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _coupled_jacobian_plan,
     _coupled_shift_policy,
@@ -278,7 +278,7 @@ def _assemble_library(jacobian: sp.csr_matrix, shift: np.ndarray, n_fields: int)
     settle it, because they compare the arms' **values** rather than only their patterns.
     """
     from aquaflux.solve.amg_preconditioner import MonolithicAmgPreconditioner
-    from aquaflux.solve.ilut_preconditioner import equilibrate_cell_major
+    from aquaflux.solve import equilibrate_cell_major
 
     return equilibrate_cell_major(MonolithicAmgPreconditioner._shifted(jacobian, shift), n_fields)
 

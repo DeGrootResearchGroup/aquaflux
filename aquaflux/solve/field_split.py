@@ -50,7 +50,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from .amg_preconditioner import MonolithicAmgPreconditioner, build_amg_vcycle
-from .ilut_preconditioner import equilibrate_cell_major
+from .frozen_operator import equilibrate_cell_major
 from .multigrid import SmoothedHierarchy, build_convection_hierarchy, convection_multigrid_solve
 from .native_inverse import NativeHierarchyInverse
 from .refresh_timing import PhaseTimer
