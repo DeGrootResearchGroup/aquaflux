@@ -6672,6 +6672,17 @@ transfer to any thresholded arm.
   divergence retry. Without it a log shows the same step's work two or three times with nothing between
   the blocks, and the four reasons call for completely different responses. `MarchLogger.on_retry`
   writes the explanation between the abandoned attempt's block and the retry's, and numbers the attempt.
+    - **`beta` is the shift the RETRIED attempt will run at — escalated on the three escalation
+      reasons, unchanged on `"solver"` (binding, fixed 2026-08-14).** The call therefore sits *after*
+      `escalated = beta * retry_beta_factor` is formed and before it is written onto the step. It used
+      to fire before the escalation and hand over the abandoned attempt's β, which left `MarchLogger`
+      reconstructing the real one as **`beta * 2`** — `retry_beta_factor`'s *default*, hardcoded — so a
+      march configured with any other factor logged a shift it never ran at, and the `"solver"` path,
+      where β is not touched at all, logged an escalation that never happened. **The trap generalizes:
+      a callback that reports a value the caller is about to change makes its consumer re-derive the
+      change, and a consumer re-deriving a caller's arithmetic will encode a default as a constant.**
+      Pinned by `test_on_retry_reports_the_beta_the_retried_attempt_will_run_at` (at a *non-default*
+      factor, since 2 cannot catch this) and two `test_march_log.py` tests.
   - **A self-rescaling measure means two "same" residuals are NOT the same number (binding trap).**
     `forward_march(norm_builder=…)` re-derives the `RowScaledNorm` at the state each outer iteration
     *begins from* and holds it for that whole iteration. So the `R` reported at the end of step N and

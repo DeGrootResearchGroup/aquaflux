@@ -800,6 +800,11 @@ def forward_march(
         ``"cycles"`` (the cost trigger, and the step was cut short), ``"alpha"`` (the step-length
         trigger, likewise cut short), ``"diverged"`` (the β-escalation firing on a non-finite or runaway
         residual) or ``"solver"`` (the tighter-solver fallback).
+        ``beta`` is **the shift the retried attempt will run at**, not the one the abandoned attempt
+        used: on the three escalation reasons that is the already-escalated value, and on ``"solver"``
+        — which retries at a tighter Krylov tolerance and does not touch the shift — it is the
+        unchanged one. Reporting the pre-escalation value instead would leave a consumer to re-derive
+        the real shift from ``retry_beta_factor``, which is exactly what a log must not have to guess.
         Without it a log shows a step's work twice with nothing saying why, leaving a reader to infer
         the trigger from the numbers. ``None`` (default) elides the call.
     retry_cycles_limit : int
@@ -912,8 +917,6 @@ def forward_march(
             and hasattr(active_step.relaxation_schedule, "beta")
         ):
             retries += 1
-            if on_retry is not None:
-                on_retry(reason, retries, float(active_step.relaxation_schedule.beta))
             # Escalate by SCALING the existing β leaf, not by rebuilding it from a Python float.
             # `jnp.asarray(float(...) * factor)` yields a fresh weak-typed float64 array whose abstract
             # value (dtype and weak_type) need not match the β leaf the step already carries -- and any
@@ -921,6 +924,12 @@ def forward_march(
             # coupled solve on every retry. Multiplying the leaf in place preserves its dtype and weak_type
             # exactly, so the escalated step is a cache hit for whatever β dtype the step control set.
             escalated = active_step.relaxation_schedule.beta * retry_beta_factor
+            # Report the escalated β, and so only once it exists: `on_retry` promises the shift the
+            # retried attempt will RUN at. Reporting the pre-escalation leaf here instead left the one
+            # consumer reconstructing it as `beta * 2` -- correct only at the default `retry_beta_factor`,
+            # and wrong at every other, in the log a long march is read back from.
+            if on_retry is not None:
+                on_retry(reason, retries, float(escalated))
             active_step = eqx.tree_at(lambda s: s.relaxation_schedule.beta, active_step, escalated)
             if precondition_step is not None:
                 # Re-match the preconditioner to the escalated β. Whether this actually rebuilds is the

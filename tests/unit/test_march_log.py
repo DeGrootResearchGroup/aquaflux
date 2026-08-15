@@ -427,16 +427,44 @@ def test_on_retry_explains_why_a_step_is_repeated() -> None:
     """
     logger, buffer = _log(detail=("inner",))
     logger.on_inner(0, 1.0e-2, 3.3e-3, 5, 1.0)
-    logger.on_retry("cycles", 1, 0.0347)
+    logger.on_retry("cycles", 1, 0.0694)  # the march hands over the ESCALATED beta
     logger.on_inner(0, 1.0e-2, 3.3e-3, 3, 1.0)
 
     lines = buffer.getvalue().splitlines()
     explain = next(i for i, line in enumerate(lines) if "redo step" in line)
     assert lines[explain - 1].lstrip().startswith("+--")  # the abandoned block closed first
-    assert (
-        "cycles" in lines[explain] and "0.0694" in lines[explain]
-    )  # reason and the escalated beta
+    assert "cycles" in lines[explain] and "0.0694" in lines[explain]  # reason and the beta as given
     assert "attempt 2" in next(line for line in lines[explain:] if "+- step" in line)
+
+
+def test_the_retry_line_reports_the_beta_it_was_given_rather_than_recomputing_it() -> None:
+    """The logger must not re-derive the escalated shift, at any factor.
+
+    It used to print ``beta * 2`` -- the *default* ``retry_beta_factor``, applied whatever the march was
+    actually configured with -- so a march escalating by any other factor logged a shift it never ran at.
+    A factor of 2 cannot catch that, so this asserts on a value that is not twice anything plausible.
+    """
+    logger, buffer = _log()
+    logger.on_retry("cycles", 1, 0.15)
+
+    line = next(line for line in buffer.getvalue().splitlines() if "redo step" in line)
+    assert "0.1500" in line
+    assert "0.3000" not in line
+
+
+def test_the_solver_retry_does_not_claim_an_escalation_it_did_not_perform() -> None:
+    """``"solver"`` retries at a tighter Krylov tolerance and leaves the shift alone.
+
+    The same line served both retries, so it announced ``beta -> x`` on a path where the march never
+    touched beta -- and, before the beta was reported honestly, an x that was twice the real one.
+    """
+    logger, buffer = _log()
+    logger.on_retry("solver", 1, 0.25)
+
+    line = next(line for line in buffer.getvalue().splitlines() if "redo step" in line)
+    assert "solver" in line and "0.2500" in line
+    assert "unchanged" in line
+    assert "->" not in line.split("solver", 1)[1]  # no escalation arrow after the reason
 
 
 def test_the_attempt_counter_resets_between_steps() -> None:

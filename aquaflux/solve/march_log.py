@@ -421,11 +421,18 @@ class MarchLogger:
 
         Written whatever ``detail`` says: a repeated step is not a diagnostic, it is the log failing to
         explain itself. The attempt number also titles the block that follows.
+
+        ``beta`` is reported as the march hands it over -- the shift the retried attempt will run at --
+        and never recomputed here. The two retries differ in whether that shift moved at all: the three
+        escalation reasons raise it (``beta -> x``), while ``"solver"`` retries at a tighter Krylov
+        tolerance and leaves it alone (``beta x unchanged``). Saying "->" on the solver line would claim
+        an escalation the march did not perform.
         """
         self._close_block()  # the abandoned attempt's block ends here, before the explanation
         self._attempt = int(attempt) + 1
+        shift = f"beta {beta:.4f} unchanged" if reason == "solver" else f"beta -> {beta:.4f}"
         self._write(
-            f"  -> redo step {self._steps + 1} (attempt {self._attempt}): {reason}, beta -> {beta * 2:.4f}"
+            f"  -> redo step {self._steps + 1} (attempt {self._attempt}): {reason}, {shift}"
         )
 
     #: Written once, before the first inner block. `G` and `R` are different residuals and the table
