@@ -5045,6 +5045,30 @@ transfer to any thresholded arm.
   reintroduce them). Each strategy's shift vanishes at the fixed point, so the converged state and
   the IFT adjoint are strategy-independent. When adding a globalization (e.g. a monotone/forcing
   acceptance), add a `ForwardStep` — do **not** grow a branch in `_forward`.
+  - **`ShiftedForwardStep` is the SECOND contract, and the eager march's beta machinery requires it
+    (binding, 2026-08-15).** `ForwardStep` says what every strategy must *do*; `ShiftedForwardStep`
+    says what one must additionally *carry* — a `relaxation_schedule` holding `beta` as a readable,
+    replaceable **dynamic** leaf. It is separate rather than folded in because not every strategy has
+    a shift: `DampedNewtonStep` globalizes by backtracking alone, and demanding a `relaxation_schedule`
+    of it would be inventing a quantity it does not possess.
+    **What it replaces, and why it matters more than it looks:** the requirement was enforced by
+    `hasattr` probes scattered through `forward_march`, which fail **silently**. A `DampedNewtonStep`
+    satisfies `ForwardStep` in full, so a march configured with `retry_on_cycles` accepted it and then
+    never escalated — from the log, indistinguishable from a march that never needed to. One reporting
+    path failed the *opposite* way and read `active_step.relaxation_schedule` unguarded, so the same
+    conforming step raised `AttributeError` mid-march. `forward_march` now checks **once, before the
+    first step** (`_require_shifted`), naming the feature and what it needs.
+    - **Gate only what is genuinely silent (binding).** The escalation is gated. The divergence retry
+      (`retry_solver` / `retry_divergence_cap`) is **not** — it re-solves at a tighter tolerance and
+      never touches beta, so it works on any step; its *reporting* goes through `_shift_of`, which
+      returns `None` for a step with no shift rather than inventing one. A `StepControl` is **not**
+      gated either: the protocol only asks it to return a ready-to-run step, a step-agnostic one is
+      legitimate (and exercised), and a control that *does* drive beta already fails loudly from its
+      own `tree_at`. Gating those would reject what the protocol permits.
+    - **The runtime check tests the SHIFT, not `isinstance(..., ShiftedForwardStep)`.** The argument is
+      already typed `ForwardStep`, so re-testing those four methods at runtime would reject a
+      legitimate duck-typed step for a reason unrelated to the feature asked for — which it did, on
+      every test double, when first written that way.
 - **`continuation.py` — BUILT (`PseudoTransientStep`, residual-agnostic).** The pseudo-transient
   continuation engine lives **here in `solve/`, not in `flow/`** — it is a `ForwardStep`
   (`stepper`/`default_solver`/`adjoint_preconditioner`) that runs an **injected**
