@@ -417,7 +417,10 @@ def sweep_state(name: str, selected, coupled, groups, n_fields, plan, structure)
     a materialized 3D coupled Jacobian is enough to exhaust a workstation, and a sweep that fits in
     memory only when nothing else runs is a sweep that will eventually be run alongside something else.
     """
-    march_beta, _, description = STATES[name]
+    # By NAME, not by position: this record has grown a field before, and a positional unpack
+    # turns that into a probe that cannot start at all.
+    entry = STATES[name]
+    march_beta, description = entry.march_beta, entry.description
     pc_beta = max(march_beta, FLOOR) if march_beta > 0 else 0.0
     print(
         f"\n{'=' * 92}\n{name}: {description}\noperator beta {march_beta}, "

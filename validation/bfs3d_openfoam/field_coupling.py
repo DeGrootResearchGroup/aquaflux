@@ -21,11 +21,18 @@ cycles, which is exactly what the shipped flow/turbulence split does. Only a who
 Usage -- one state per run, since each materializes a Jacobian of some gigabytes::
 
     python3 -u validation/bfs3d_openfoam/field_coupling.py state-00069
+    BFS3D_PROBE_STATE=state-00069 validation/run_case.sh validation/bfs3d_openfoam/field_coupling.py
+
+The environment spelling exists because the case launcher takes only a script path -- a second
+positional argument would be read as the script -- so it is the only way to reach this from the
+launcher that holds the machine awake and refuses a second concurrent run. It is the same
+``BFS3D_PROBE_STATE`` the field-split probe reads, so one export selects the state for both.
 """
 
 from __future__ import annotations
 
 import gc
+import os
 import sys
 import time
 from pathlib import Path
@@ -138,10 +145,17 @@ def report(norms: np.ndarray, counts: np.ndarray, names: tuple[str, ...]) -> Non
 
 
 def main() -> None:
-    if len(sys.argv) != 2 or sys.argv[1] not in STATES:
-        raise SystemExit(f"usage: {Path(sys.argv[0]).name} <{' | '.join(STATES)}>")
-    name = sys.argv[1]
-    _, _, description = STATES[name]
+    # Argument first, environment second: an explicit argument should win over an export left in the
+    # shell from an earlier run, which is the failure a precedence rule exists to prevent.
+    name = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BFS3D_PROBE_STATE", "")
+    if len(sys.argv) > 2 or name not in STATES:
+        raise SystemExit(
+            f"usage: {Path(sys.argv[0]).name} <{' | '.join(STATES)}>\n"
+            f"       or set BFS3D_PROBE_STATE to one of them"
+        )
+    # By NAME, not by position. This unpacked three fields positionally and broke silently when the
+    # state record grew to five -- a probe that cannot start is the benign version of that failure.
+    description = STATES[name].description
 
     coupled = compare.build_case()["coupled"]
     n_fields = coupled.layout.dim + 3

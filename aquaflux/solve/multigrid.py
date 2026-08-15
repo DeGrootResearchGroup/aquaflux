@@ -965,6 +965,22 @@ _AGGREGATE_STATS: list[dict] = []
 #: is a dense inverse: quadratic to store (8 bytes per entry, so ~512 MB here) and cubic to
 #: build. Exceeding it is never intentional -- it means the level cap stopped the coarsening before the
 #: coarse-size limit could, which makes the coarse grid grow with the mesh instead of staying fixed.
+#:
+#: **If you have hit this raise, or watched a refresh grow faster than the mesh, the cause is almost
+#: certainly a hierarchy that is capped at too few levels rather than one that needs a bigger dense
+#: solve.** At a fixed level count the coarsest grid grows LINEARLY with the mesh while the cost of
+#: inverting it grows CUBICALLY, so the fix is to let the hierarchy coarsen deeper (``max_levels``,
+#: and a ``strength_threshold`` if the operator is anisotropic) -- not to raise this number.
+#:
+#: ⚠️ **Sweep those two together.** A strength threshold aggregates only along strong connections, so it
+#: makes aggregates SMALLER and the coarse grid LARGER; raising it at an unchanged level cap moves the
+#: coarse size the wrong way and reads as the threshold failing.
+#:
+#: ⚠️ **And on a multi-field block, check what the strength measure is actually reading first.** The
+#: aggregation weights each cell edge by the sum of ``|A_ij|`` over the block's fields, so on a block
+#: whose row scales differ by orders of magnitude -- a transported-scalar pair with one field solved in
+#: a log variable, say -- a threshold is a strength measure for the largest field alone and says nothing
+#: about the others. Normalize per row-field, or equilibrate, before trusting it.
 _MAX_DENSE_COARSE_DOFS = 8192
 
 
@@ -1777,6 +1793,38 @@ def _jacobi_smooth(
     return x
 
 
+def _jacobi_smooth_zero(
+    level: _SparseLevel,
+    b: jnp.ndarray,
+    sweeps: int,
+    omega: float,
+    spectral_damping: bool = True,
+) -> jnp.ndarray:
+    """:func:`_jacobi_smooth` from a ZERO initial guess, with the first sweep's matvec peeled off.
+
+    At ``x = 0`` the residual ``b - A x`` is exactly ``b``, so that application of the level operator --
+    the densest thing in the cycle -- computes a known answer at full price, and XLA does not fold it
+    away inside a traced cycle. The pre-smooth always starts here, so it is charged at **every level of
+    every V-cycle**, which is what makes a fixed two-application saving worth taking: it is the same
+    peel :class:`_VCycleOps` already accepts for the SIMPLE relaxation, extended to the point smoother
+    the transported scalars use.
+
+    **Exact, not approximate.** ``A x`` at a zero vector is exactly zero in floating point, so
+    ``b - A x`` is ``b`` bit-for-bit and the peeled first sweep is the same arithmetic with two
+    operations removed; the remaining sweeps run unchanged.
+    """
+    if sweeps <= 0:
+        return jnp.zeros_like(b)
+    alpha = omega / level.lam_max if spectral_damping else omega
+    if level.block_inverse is None:
+        # Written in the order `_jacobi_smooth`'s own first sweep evaluates it -- `alpha * inv * b`
+        # rather than `alpha * (b / diagonal)` -- so the peel cannot move a rounding.
+        x = alpha * (1.0 / level.diagonal) * b
+    else:
+        x = alpha * _apply_block_inverse(level, b)
+    return _jacobi_smooth(level, b, x, sweeps - 1, omega, spectral_damping)
+
+
 def convection_multigrid_solve(
     hierarchy: SmoothedHierarchy,
     b: jnp.ndarray,
@@ -1823,7 +1871,12 @@ def convection_multigrid_solve(
     def smoother(level: _SparseLevel, rhs: jnp.ndarray, guess: jnp.ndarray) -> jnp.ndarray:
         return _jacobi_smooth(level, rhs, guess, sweeps, omega, spectral_damping)
 
-    return hierarchy.fixed_cycle_solve(b, cycles, _smoothed_ops(smoother))
+    def smoother_zero(level: _SparseLevel, rhs: jnp.ndarray) -> jnp.ndarray:
+        return _jacobi_smooth_zero(level, rhs, sweeps, omega, spectral_damping)
+
+    return hierarchy.fixed_cycle_solve(
+        b, cycles, _smoothed_ops(smoother, smooth_zero=smoother_zero)
+    )
 
 
 # --- local approximate ideal restriction (lAIR) -----------------------------------------

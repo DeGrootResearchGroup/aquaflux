@@ -510,7 +510,10 @@ def main():
     )
     if name not in STATES:
         raise SystemExit(f"unknown state {name!r}; known: {list(STATES)}")
-    march_beta, _, description = STATES[name]
+    # By NAME, not by position: this record has grown a field before, and a positional unpack
+    # turns that into a probe that cannot start at all.
+    entry = STATES[name]
+    march_beta, description = entry.march_beta, entry.description
     # The V-cycle is built at the floor while the operator keeps the march's own beta -- the shipped
     # mismatch. At the converged state's zero shift there is no floor: the adjoint has none, and flooring it
     # here would measure a preconditioner no gradient ever uses.

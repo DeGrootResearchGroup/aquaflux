@@ -23,6 +23,7 @@ from aquaflux.solve.multigrid import (
     _CsrOperator,
     _dense_inverse,
     _jacobi_smooth,
+    _jacobi_smooth_zero,
     _lair_restriction,
     _mis_aggregate,
     _one_point_interpolation,
@@ -1422,3 +1423,45 @@ def test_budget_padding_does_not_compound_down_the_hierarchy() -> None:
     # diagonal-heavy operator with an aggregate count near its cell count.
     b = jnp.asarray(np.random.default_rng(0).normal(size=strong_x.shape[0]))
     assert np.all(np.isfinite(np.asarray(convection_multigrid_solve(hierarchy, b, cycles=2))))
+
+
+def test_the_zero_guess_peel_matches_the_general_jacobi_sweep_exactly() -> None:
+    """The peeled first sweep is EXACT, not an approximation, at every sweep count and damping.
+
+    At a zero iterate the residual ``b - A x`` is exactly ``b``, so the peel removes an application of
+    the level operator -- the densest thing in the cycle, charged at every level of every V-cycle --
+    without changing the arithmetic. Asserted as exact equality rather than a tolerance, because a
+    tolerance would hide a genuine reordering, and the whole claim is that there is none.
+
+    Covers the per-cell BLOCK branch as well as the scalar diagonal one: the two peel differently (a
+    batched contraction against an elementwise multiply) and only the block branch is what the coupled
+    transported scalars actually run.
+    """
+    rng = np.random.default_rng(0)
+    n_cells, n_fields = 60, 2
+    rows, cols, vals = [], [], []
+    for cell in range(n_cells):
+        for offset in (0, 1, -1):
+            other = cell + offset
+            if not 0 <= other < n_cells:
+                continue
+            for row_field in range(n_fields):
+                for col_field in range(n_fields):
+                    same = offset == 0 and row_field == col_field
+                    rows.append(row_field * n_cells + cell)
+                    cols.append(col_field * n_cells + other)
+                    vals.append(4.0 if same else rng.normal() * 0.2)
+    a = sp.csr_matrix((vals, (rows, cols)), shape=(n_cells * n_fields,) * 2)
+    hierarchy = build_convection_hierarchy(
+        a, block_size=n_fields, max_coarse=16, mis_aggregation=True, prolongation_smoothing="none"
+    )
+    level = hierarchy.levels[0]
+    b = jnp.asarray(rng.normal(size=level.n))
+
+    for sweeps in (1, 2, 4):
+        for damping in (False, True):
+            peeled = _jacobi_smooth_zero(level, b, sweeps, 1.0, damping)
+            general = _jacobi_smooth(level, b, jnp.zeros_like(b), sweeps, 1.0, damping)
+            assert np.array_equal(np.asarray(peeled), np.asarray(general)), (
+                f"the peel moved the answer at {sweeps} sweeps, spectral_damping={damping}"
+            )

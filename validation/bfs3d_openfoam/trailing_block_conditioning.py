@@ -119,7 +119,10 @@ def main() -> None:
     if len(sys.argv) != 2 or sys.argv[1] not in STATES:
         raise SystemExit(f"usage: {Path(sys.argv[0]).name} <{' | '.join(STATES)}>")
     name = sys.argv[1]
-    march_beta, _, description = STATES[name]
+    # By NAME, not by position: this record has grown a field before, and a positional unpack
+    # turns that into a probe that cannot start at all.
+    entry = STATES[name]
+    march_beta, description = entry.march_beta, entry.description
     coupled = compare.build_case()["coupled"]
     n_fields, n_cells = coupled.layout.dim + 3, coupled.layout.n_cells
     groups = FieldGroups(
