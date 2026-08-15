@@ -14,8 +14,12 @@ import scipy.sparse as sp
 
 pytest.importorskip("petsc4py")
 
-from aquaflux.solve import AmgVCycle, MonolithicAmgPreconditioner, build_amg_vcycle
-from aquaflux.solve.ilut_preconditioner import equilibrate_cell_major
+from aquaflux.solve import (
+    AmgVCycle,
+    MonolithicAmgPreconditioner,
+    build_amg_vcycle,
+    equilibrate_cell_major,
+)
 
 
 def _laplacian_2d(n: int) -> sp.csr_matrix:

@@ -14,7 +14,8 @@ The V-cycle is a **fixed linear operator** — a single application, not an inne
 drop-in for the same callback-matvec interface the ILUT and LU preconditioners expose (and, being linear
 and transposable, it serves the adjoint's transpose solve through the multigrid's own transpose, with no
 flexible outer Krylov needed). It preconditions the **equilibrated, cell-major** coupled matrix (the same
-conditioning transform the ILUT uses, :func:`~aquaflux.solve.ilut_preconditioner.equilibrate_cell_major`),
+conditioning transform every host preconditioner uses,
+:func:`~aquaflux.solve.frozen_operator.equilibrate_cell_major`),
 which balances the momentum/continuity row scales and interleaves the pressure among the velocity unknowns
 so the aggregation and the level smoother see a well-scaled block operator.
 
@@ -45,9 +46,14 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .frozen_operator import apply_symmetric_scale, equilibration_scale, row_chunks
+from .frozen_operator import (
+    apply_symmetric_scale,
+    cell_major_permutation,
+    equilibrate_cell_major,
+    equilibration_scale,
+    row_chunks,
+)
 from .host_preconditioner import HostPreconditioner
-from .ilut_preconditioner import cell_major_permutation, equilibrate_cell_major
 from .refresh_timing import PhaseTimer
 
 # A process-unique options prefix per V-cycle, so several preconditioners' PETSc options never collide.
@@ -547,7 +553,7 @@ class ShiftedCellMajorOperator:
     the diagonal entries sit, and the cell-major CSR structure — so a refresh is one gather plus an
     ``O(n_dofs)`` diagonal add plus a symmetric scale, written into a **preallocated** buffer. The scaling
     rule itself is :func:`~aquaflux.solve.frozen_operator.equilibration_scale`, shared with the generic
-    :func:`~aquaflux.solve.ilut_preconditioner.equilibrate_cell_major` that serves an arbitrary matrix;
+    :func:`~aquaflux.solve.frozen_operator.equilibrate_cell_major` that serves an arbitrary matrix;
     only the data movement differs, and the two agree to the last bit (pinned by a unit test).
 
     The scale and permutation are applied to vectors by the V-cycle, so :meth:`assemble` returns them
@@ -761,7 +767,7 @@ class MonolithicAmgPreconditioner(HostPreconditioner):
         """The equilibrated cell-major operator ``D P (J + diag(shift)) Pᵀ D`` the V-cycle is built on.
 
         Routes to the precomputed :class:`ShiftedCellMajorOperator` when the pattern is fixed, and to the
-        generic diagonal-add + :func:`~aquaflux.solve.ilut_preconditioner.equilibrate_cell_major` otherwise.
+        generic diagonal-add + :func:`~aquaflux.solve.frozen_operator.equilibrate_cell_major` otherwise.
         The two paths agree to the last bit; only how much work is repeated per refresh differs.
         """
         if self._assembler is not None:

@@ -7,11 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve.ilut_preconditioner import (
-    MonolithicIlutPreconditioner,
-    cell_major_permutation,
-    factorize_ilut,
-)
+from aquaflux.solve.ilut_preconditioner import MonolithicIlutPreconditioner, factorize_ilut
 from aquaflux.solve.sparse_jacobian import ColumnProbePlan, block_stencil_colouring
 
 
@@ -30,13 +26,6 @@ def _diagonally_dominant_block_matrix(n, n_fields, rng):
                     cols.append(b * n + j)
                     vals.append(block[a, b])
     return sp.csr_matrix((vals, (rows, cols)), shape=(n_fields * n, n_fields * n)).tocsr()
-
-
-def test_cell_major_permutation_is_a_valid_involution_free_permutation():
-    perm = cell_major_permutation(4, 3)
-    assert sorted(perm.tolist()) == list(range(12))
-    # (cell i, field f) at cell-major i*3+f maps to field-major f*4+i
-    assert perm[1 * 3 + 2] == 2 * 4 + 1
 
 
 def test_ilut_inverts_the_matrix_with_ample_fill():

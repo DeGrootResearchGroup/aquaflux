@@ -253,6 +253,24 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
 
 ## Preconditioner — the frozen host family (shared contract)
 
+- **`cell_major_permutation` / `equilibrate_cell_major` live in `frozen_operator.py`, NOT in the ILUT
+  (binding, moved 2026-08-15).** They are the reorder half of one transform whose rescale half
+  (`symmetrically_equilibrate`, `equilibration_scale`, `apply_symmetric_scale`, `row_chunks`) was
+  already there, and every consumer applies the two together -- a factorization or a coarsening wants
+  the matrix both unit-diagonal and grouped by cell.
+  - **Three of the four consumers were never the ILUT**, and the V-cycle uses them *more* than it does
+    (7 references against 4). They sat in `ilut_preconditioner.py` only because the threshold ILU
+    needed them first.
+  - **The concrete cost that removes:** the ILUT is the family member most likely to be deleted --
+    dominated by the complete LU at 2D and by the AMG at 3D, per its own docstring -- and deleting it
+    would have taken the monolithic AMG and the field split down with it. Those two sibling imports
+    are gone; nothing outside the ILUT's own module imports from it but `MonolithicIlutPreconditioner`.
+  - **Both are now exported from `aquaflux.solve`.** They were internal by `__all__` yet deep-imported
+    by three study harnesses, i.e. public in practice and unguarded in principle; the harnesses now
+    take them from the package surface. The permutation's unit test moved with the function, into
+    `test_frozen_operator_scaling.py` beside the rescale half it belongs with.
+
+
 - **The three host preconditioners share ONE application path and ONE declared contract —
   `solve/host_preconditioner.py` (BUILT, 2026-08-14).** The ILUT, the complete LU and the AMG V-cycle
   differ entirely in how the inverse is *fitted* and not at all in how it is *applied*, so
@@ -826,8 +844,9 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     inside the jitted Krylov solve through `jax.pure_callback` (`.matvec()` / `.matvec(transpose=True)`).
     Frozen at a reference state+shift like the AMG blocks; being far stronger it tolerates the freezing at
     a few extra cycles, and the shift vanishes at the root so it never changes the converged state or its
-    adjoint. `IlutFactors`/`factorize_ilut`/`cell_major_permutation` are the pure host core (testable
-    without JAX); the JAX wrapper is thin.
+    adjoint. `IlutFactors`/`factorize_ilut` are the pure host core (testable without JAX); the JAX
+    wrapper is thin. `cell_major_permutation`/`equilibrate_cell_major` are **not** the ILUT's -- they
+    live in `frozen_operator.py`; see the placement note below.
   - **Adjoint transpose wiring — `TransposedPreconditioner` (in `implicit.py`, binding).** The generic
     adjoint machinery `_adjoint_preconditioner` derives `Mᵀ` from the forward `M` with
     `jax.linear_transpose` — which works for a traceable AMG V-cycle but **cannot transpose a
@@ -937,8 +956,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     drop-in for the same callback-matvec interface as the ILUT/LU and — being linear and transposable —
     serves the adjoint's transpose solve through the multigrid's own transpose (`pc.applyTranspose`), with
     no flexible outer Krylov.** It preconditions the **equilibrated, cell-major** matrix via the shared
-    `equilibrate_cell_major` (extracted from `factorize_ilut` into `ilut_preconditioner.py`, now the one
-    home for the sqrt-diagonal equilibration + cell-major reorder both the ILUT and the V-cycle need); the
+    `equilibrate_cell_major` (**in `frozen_operator.py`** -- the one home for the sqrt-diagonal
+    equilibration + cell-major reorder, moved there 2026-08-15; see the placement note below); the
     `Mat` block size is `n_fields` so GAMG aggregates cell-blocks. Host object, applied via `pure_callback`,
     riding as a static field; `build`/`refresh_in_place` its own and `matvec` inherited from the shared
     `HostPreconditioner`, so it plugs into

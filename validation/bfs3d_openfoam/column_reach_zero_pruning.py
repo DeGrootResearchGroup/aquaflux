@@ -46,7 +46,7 @@ from aquaflux.solve import (  # noqa: E402
     column_probe_plan,
 )
 from aquaflux.solve.amg_preconditioner import MonolithicAmgPreconditioner  # noqa: E402
-from aquaflux.solve.ilut_preconditioner import equilibrate_cell_major  # noqa: E402
+from aquaflux.solve import equilibrate_cell_major  # noqa: E402
 from aquaflux.turbulence import hybrid_initialize  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _PROBE_BATCH_SIZE,

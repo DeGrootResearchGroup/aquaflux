@@ -18,6 +18,7 @@ import pytest
 import scipy.sparse as sp
 from aquaflux.solve.frozen_operator import (
     apply_symmetric_scale,
+    cell_major_permutation,
     equilibration_scale,
     row_chunks,
     symmetrically_equilibrate,
@@ -121,3 +122,14 @@ def test_an_empty_row_is_left_alone() -> None:
 
     assert scaled.nnz == 2
     assert scale[1] == 1.0  # a zero diagonal scales by one rather than dividing by zero
+
+
+def test_cell_major_permutation_is_a_valid_involution_free_permutation():
+    """Lives here with the function: the reorder and the rescale are one transform.
+
+    It sat in the threshold ILU's tests only because that preconditioner needed the reorder first --
+    while the multigrid V-cycle, the field split and three study harnesses all use it too."""
+    perm = cell_major_permutation(4, 3)
+    assert sorted(perm.tolist()) == list(range(12))
+    # (cell i, field f) at cell-major i*3+f maps to field-major f*4+i
+    assert perm[1 * 3 + 2] == 2 * 4 + 1

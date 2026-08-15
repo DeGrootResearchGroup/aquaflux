@@ -13,9 +13,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import scipy.sparse as sp
+from aquaflux.solve import equilibrate_cell_major
 from aquaflux.solve.amg_preconditioner import MonolithicAmgPreconditioner, ShiftedCellMajorOperator
 from aquaflux.solve.frozen_operator import row_chunks
-from aquaflux.solve.ilut_preconditioner import equilibrate_cell_major
 
 
 def _fixed_pattern_jacobian(n_cells: int, n_fields: int, seed: int) -> sp.csr_matrix:
@@ -150,7 +150,7 @@ def test_equilibrate_cell_major_returns_canonical_csr():
     """
     import numpy as np
     import scipy.sparse as sp
-    from aquaflux.solve.ilut_preconditioner import equilibrate_cell_major
+    from aquaflux.solve import equilibrate_cell_major
 
     # Dense-ish so the permutation genuinely scrambles the column order within each row.
     rng = np.random.default_rng(5)
