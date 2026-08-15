@@ -684,8 +684,10 @@ affect the task (a touched subsystem moved under you), surface that to the user 
 silently rebasing over it.
 
 CI runs a ruff gate on every pull request (and on pushes to `main`) via GitHub Actions
-(`.github/workflows/ci.yml`): `ruff check` + `ruff format --check` on `aquaflux` and `tests`,
-with ruff pinned by the `lint` extra so the gate cannot move under a new release. The same
+(`.github/workflows/ci.yml`): `ruff check` + `ruff format --check` on `aquaflux`, `tests` and
+`docs` — the last because `docs/conf.py` generates the API reference and is real code that
+nothing else checks — with ruff pinned by the `lint` extra so the gate cannot move under a new
+release. (`codespell` stays on `aquaflux tests`; the docs prose is not yet spell-gated.) The same
 gate is available locally through the committed pre-push hook (`.githooks/pre-push`) — enable
 it once per clone with `git config core.hooksPath .githooks`, and it runs the identical two
 commands before every push, so a slip is caught locally instead of as a red check on the PR.
@@ -915,8 +917,8 @@ After **every code change**, before considering the task complete, review and ac
      untracked prototype delivered as done is the exact Principle-0 failure this gate guards against.
 
 2. **Lint, format & comment hygiene** — from the repo root:
-   - `ruff check aquaflux tests` — must report no errors.
-   - `ruff format aquaflux tests` — auto-applies formatting (CI will run `--check`).
+   - `ruff check aquaflux tests docs` — must report no errors.
+   - `ruff format aquaflux tests docs` — auto-applies formatting (CI will run `--check`).
    - **Comment-hygiene guard (the Comment Convention + Claude-Facing-File Reference Ban):** the
      shipped surface must not point at the precursor codebases, the Claude-facing files
      (`CLAUDE.md` / `.claude/`), the internal design notes, or the author's own papers. This grep
