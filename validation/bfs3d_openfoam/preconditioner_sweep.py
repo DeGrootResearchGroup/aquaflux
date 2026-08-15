@@ -72,7 +72,7 @@ from aquaflux.solve import (  # noqa: E402
     solve_linear,
 )
 from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: E402
-from aquaflux.solve.linear import restart_cycles  # noqa: E402
+from aquaflux.solve import restart_cycles  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _PROBE_BATCH_SIZE,
     _batched_jacobian_matvec,

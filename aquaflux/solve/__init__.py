@@ -80,13 +80,11 @@ from .frozen_operator import (
 from .amg_preconditioner import AmgVCycle, MonolithicAmgPreconditioner, build_amg_vcycle
 from .field_split import (
     NodalNativeInverse,
-    PerFieldNativeInverse,
     BlockTriangularFieldSplit,
     FieldGroups,
     FieldSplitAmgPreconditioner,
     build_block_triangular_field_split,
     native_nodal_inverse,
-    native_per_field_inverse,
 )
 from .host_preconditioner import HostFactors, HostPreconditioner
 from .native_inverse import NativeHierarchyInverse
@@ -205,7 +203,6 @@ __all__ = [
     "NativeHierarchyInverse",
     "NativeSimpleInverse",
     "NodalNativeInverse",
-    "PerFieldNativeInverse",
     "PhaseTimer",
     "PositiveBlockLimit",
     "PositiveBlockProjection",
@@ -258,7 +255,6 @@ __all__ = [
     "jacobian_relative_error",
     "materialize_block_jacobian",
     "native_nodal_inverse",
-    "native_per_field_inverse",
     "native_saddle_inverse",
     "newton_step",
     "positive_block_limit",

@@ -149,7 +149,7 @@ from aquaflux.solve import (  # noqa: E402
     relative_residual_gmres,
     solve_linear,
 )
-from aquaflux.solve.linear import restart_cycles  # noqa: E402
+from aquaflux.solve import restart_cycles  # noqa: E402
 from aquaflux.solve.multigrid import (  # noqa: E402
     _CsrOperator,
 )
