@@ -152,8 +152,13 @@ intersphinx_mapping = {
     "scipy": ("https://docs.scipy.org/doc/scipy/", None),
     "jax": ("https://docs.jax.dev/en/latest/", None),
 }
-# Missing cross-refs into third-party APIs should not fail the -W build.
-intersphinx_disabled_reftypes = ["*"]
+# Left at Sphinx's default so type references resolve into the inventories above: the
+# published solver signatures are dense with `jnp.ndarray` and friends, and each becomes a
+# link rather than plain text. This was previously suppressed with `["*"]` to stop missing
+# third-party refs failing the `-W` build -- but `nitpicky` is off (the default), so an
+# unresolvable reference is silently left as text and cannot fail that gate either way.
+# Suppressing it therefore bought nothing and cost every link. Our own names are unaffected:
+# a local target always wins, so nothing in `aquaflux` resolves to a third-party page.
 
 # -- HTML output --------------------------------------------------------------
 
