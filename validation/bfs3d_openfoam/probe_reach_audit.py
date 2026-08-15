@@ -51,7 +51,7 @@ from aquaflux.solve import (  # noqa: E402
     block_stencil_colouring,
     block_stencil_gather_map,
 )
-from aquaflux.solve.amg_preconditioner import MonolithicAmgPreconditioner  # noqa: E402
+from aquaflux.solve import MonolithicAmgPreconditioner  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _PROBE_BATCH_SIZE,
     _batched_jacobian_matvec,

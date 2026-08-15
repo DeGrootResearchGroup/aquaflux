@@ -558,7 +558,6 @@ class MarchLogger:
             self._close_block()
             self._write("")
             self._write(f"reference |R0| = {reference:.4e}{stop}")
-            self._blank_pending = False
             self._needs_headings = True
 
         # An inner block just closed, so this row would otherwise be unlabelled: re-head compactly.
