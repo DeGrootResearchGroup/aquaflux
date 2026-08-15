@@ -3241,6 +3241,7 @@ def solve_coupled(
     max_steps: int = 60,
     rtol: float = 1e-10,
     atol: float = 1e-12,
+    adjoint_solver: lx.AbstractLinearSolver | None = None,
     refresh_trigger: RefreshTrigger | None = None,
     refresh_limit: int = 1,
     refresh_builder: Callable[[jnp.ndarray], ForwardStep] | None = None,
@@ -3296,6 +3297,18 @@ def solve_coupled(
         Newton iteration cap for the continuation march.
     rtol, atol : float
         Nonlinear stopping tolerances on the coupled residual norm.
+    adjoint_solver : lineax.AbstractLinearSolver, optional
+        The linear solver for the **adjoint** (transpose) solve behind every ``jax.grad`` through this
+        function -- the one solve the implicit-function-theorem gradient is built from, taken once at the
+        converged state on the **unshifted** operator. It is a separate injection point from the forward
+        march's solver because the two meet different operators: the forward steps solve ``J + beta d``,
+        which the pseudo-transient shift keeps diagonally dominant, while the transpose solve meets
+        ``J`` itself with no shift to soften it, and needs its Krylov settings chosen for that. ``None``
+        (default) uses :func:`~aquaflux.solve.default_linear_solver`, a tight restarted GMRES at
+        ``lineax``'s own restart length and stagnation budget -- which a coupled 3D saddle can exhaust,
+        raising a stagnation error whose suggested remedy (a longer restart, a larger stagnation budget)
+        is reachable only through this argument. Build one with
+        :func:`~aquaflux.solve.relative_residual_gmres`, which takes both.
     refresh_trigger : RefreshTrigger, optional
         Re-freeze the preconditioner part way through the march, on the evidence of the march's own
         per-step cost. The solve is run as a sequence of observed segments
@@ -3673,7 +3686,11 @@ def solve_coupled(
         stage_rtol, stage_atol = 0.0, atol + rtol * base_reference
 
     solver = ImplicitNewtonSolver(
-        max_steps=max_steps, rtol=stage_rtol, atol=stage_atol, forward_step=continuation
+        max_steps=max_steps,
+        rtol=stage_rtol,
+        atol=stage_atol,
+        adjoint_solver=adjoint_solver,
+        forward_step=continuation,
     )
     solved = solver.solve(lambda s, c: c.residual(s), state, coupled)
     return coupled.physical_fields(solved)

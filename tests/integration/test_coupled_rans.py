@@ -17,6 +17,7 @@ import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import lineax as lx
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
@@ -215,6 +216,50 @@ def test_coupled_adjoint_matches_finite_difference(case) -> None:
     eps = 1e-4
     finite_difference = float((objective(1.0 + eps) - objective(1.0 - eps)) / (2 * eps))
     assert abs(analytic - finite_difference) / abs(finite_difference) < 1e-5
+
+
+@pytest.mark.slow
+def test_the_injected_adjoint_solver_reaches_the_transpose_solve_and_only_it(case) -> None:
+    """``adjoint_solver`` controls the gradient's transpose solve, and leaves the forward march alone.
+
+    The transpose solve meets the **unshifted** operator, with none of the pseudo-transient diagonal
+    the forward steps enjoy, so its Krylov settings have to be choosable separately from theirs. This
+    pins that they are: a solver crippled to a single Krylov vector and a single restart cycle cannot
+    reach the tolerance it is given, so ``jax.grad`` fails outright -- while the very same argument
+    leaves the forward value untouched, which is what shows it reaches the adjoint and nothing else.
+    """
+    coupled = case["coupled"]
+    flow_ws, k_ws, omega_ws = case["coupled_start"]
+
+    reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
+    continuation = coupled_continuation(
+        coupled, reference_state, method="twolevel", **PRECONDITIONER
+    )
+    strangled = lx.GMRES(rtol=1e-12, atol=1e-12, restart=1, max_steps=1)
+
+    def objective(nu_scale, adjoint_solver):
+        scaled = eqx.tree_at(
+            lambda c: c.turbulence.molecular_viscosity,
+            coupled,
+            coupled.turbulence.molecular_viscosity * nu_scale,
+        )
+        _, k, _ = solve_coupled(
+            scaled,
+            flow_ws,
+            k_ws,
+            omega_ws,
+            continuation=continuation,
+            max_steps=40,
+            adjoint_solver=adjoint_solver,
+        )
+        return jnp.sum(k**2)
+
+    # Forward-transparent: the argument is consumed by a solve the forward pass never takes.
+    assert float(objective(1.0, strangled)) == float(objective(1.0, None))
+
+    assert jnp.isfinite(jax.grad(objective)(1.0, None))
+    with pytest.raises(eqx.EquinoxRuntimeError):
+        jax.grad(objective)(1.0, strangled)
 
 
 @pytest.mark.slow

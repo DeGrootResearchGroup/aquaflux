@@ -48,6 +48,7 @@ sys.path.insert(0, str(CASE))
 sys.path.insert(0, str(CASE.parents[1]))
 
 import compare  # noqa: E402
+from aquaflux.solve import relative_residual_gmres  # noqa: E402
 from aquaflux.turbulence import solve_coupled  # noqa: E402
 from aquaflux.turbulence.coupled import coupled_amg_continuation  # noqa: E402
 from field_split_probe import STATES, load_state  # noqa: E402
@@ -78,6 +79,150 @@ RTOL = float(os.environ.get("BFS3D_ADJOINT_RTOL", "1e-8"))
 #: against the 1 an `forward_rtol` of 0.3 buys), which is precisely the operator this whole campaign is
 #: about.
 FORWARD_RTOL = float(os.environ.get("BFS3D_ADJOINT_FORWARD_RTOL", "1e-6"))
+
+#: The adjoint's transpose solve gets its OWN Krylov settings, because it meets a different operator
+#: from the forward march: no pseudo-transient shift on the diagonal, once, at the converged state.
+#: Left to itself `solve_coupled` hands it `default_linear_solver()` -- a GMRES at lineax's stock
+#: restart length and stagnation budget -- and on this case that combination stagnates and raises,
+#: naming a remedy (a longer restart, a larger stagnation budget) that used not to be reachable from
+#: here at all. These are that remedy. The defaults mirror the forward path's own choices, restart 15
+#: with a 60-restart cap, since that is the pairing this case's linear algebra was tuned at; the
+#: stagnation budget is the one lineax itself suggests raising.
+ADJOINT_RESTART = int(os.environ.get("BFS3D_ADJOINT_SOLVER_RESTART", "15"))
+ADJOINT_STAGNATION_ITERS = int(os.environ.get("BFS3D_ADJOINT_SOLVER_STAGNATION_ITERS", "40"))
+ADJOINT_MAX_RESTARTS = int(os.environ.get("BFS3D_ADJOINT_SOLVER_MAX_RESTARTS", "60"))
+
+#: How tightly the transpose solve is driven. This single solve sets the gradient's accuracy directly,
+#: so it is the one place in the probe that should not be loosened for speed -- it is measured against
+#: a finite difference in part 2, which is itself only as good as the two solves behind it.
+ADJOINT_RTOL = float(os.environ.get("BFS3D_ADJOINT_SOLVER_RTOL", "1e-10"))
+
+#: Print a line every this many transposed applications, so the transpose solve is not a silent black
+#: box. `0` disables it. Cheap: one modulo per application, against a preconditioner apply.
+ADJOINT_HEARTBEAT = int(os.environ.get("BFS3D_ADJOINT_HEARTBEAT", "100"))
+
+#: Skip the watched forward-only evaluation, which exists to show the objective and its per-step march
+#: and costs a whole solve. A gradient evaluation re-runs the forward solve anyway, so when the
+#: question is the ADJOINT -- sweeping its Krylov settings, say -- that first pass is pure duplicate
+#: cost: it halves the price of every arm to drop it. Keep it for the first run of a configuration,
+#: where the per-step trajectory is what shows the solve reached a root at all.
+SKIP_FORWARD = os.environ.get("BFS3D_ADJOINT_SKIP_FORWARD", "") not in ("", "0")
+
+
+def adjoint_solver():
+    """The transpose solve's own GMRES, at a relative-residual stop rather than a componentwise one.
+
+    ``relative_residual_gmres`` stops on ``|A x - b| <= rtol |b|`` in a global two-norm. That matters
+    on this system for the same reason the forward path uses it: the coupled state's blocks differ by
+    orders of magnitude, and lineax's stock componentwise test lets a handful of near-zero right-hand
+    side rows collapse onto their absolute floor and hold the whole solve far past the tolerance asked
+    for.
+    """
+    return relative_residual_gmres(
+        ADJOINT_RTOL,
+        restart=ADJOINT_RESTART,
+        stagnation_iters=ADJOINT_STAGNATION_ITERS,
+        max_restarts=ADJOINT_MAX_RESTARTS,
+    )
+
+
+class TransposeApplyCounter:
+    """Counts the preconditioner applications the ADJOINT spends, by counting transposed ones.
+
+    The transpose solve's cost is what a preconditioner comparison at zero shift turns on, and nothing
+    reports it: the restart-cycle count the linear solver returns is discarded inside the reverse rule,
+    which has no observer. What *is* reachable is the preconditioner itself. It is a host object whose
+    ``matvec`` reads ``self.factors`` at callback time, so replacing that attribute with a delegating
+    proxy counts every application without touching the compiled solve.
+
+    Counting the **transposed** applications is what makes the split exact and free. Forward and adjoint
+    share one factorization, so a plain counter would mix them -- and a calibration run to subtract the
+    forward share would cost a whole extra solve. But the forward march never applies the transpose, so
+    the ``transpose=True`` applications are the adjoint's alone.
+
+    An application is one right-preconditioned Krylov matrix-vector product (plus one recovery apply per
+    restart cycle), so it is the honest unit here: restart cycles are not directly observable from
+    outside, and dividing applications by the restart length only estimates them.
+
+    Attributes
+    ----------
+    inner : object
+        The real factors object, supplying ``n_dofs`` and ``apply(residual, transpose=)``.
+    transposed : int
+        Applications taken with ``transpose=True`` so far -- the adjoint's.
+    forward : int
+        Applications taken with ``transpose=False`` so far, kept as the control: it must not move
+        across a gradient evaluation's transpose solve.
+    """
+
+    def __init__(self, inner: object, heartbeat: int = 0) -> None:
+        self.inner = inner
+        self.transposed = 0
+        self.forward = 0
+        self.heartbeat = heartbeat
+        self.started = time.time()
+
+    @property
+    def n_dofs(self) -> int:
+        return self.inner.n_dofs
+
+    def apply(self, residual, *, transpose: bool = False):
+        if transpose:
+            self.transposed += 1
+            # A HEARTBEAT, because the transpose solve is otherwise a silent black box for however
+            # long it runs -- it is one linear solve, so it has no steps to report, and a run that is
+            # going nowhere looks exactly like one that is nearly done. The application count is the
+            # analogue of a per-step line: it says the solve is alive, how fast it is spending its
+            # budget, and -- read against the restart length -- roughly which cycle it is in.
+            # ⚠️ It does NOT say whether the residual is falling, so it distinguishes running from
+            # hung, not converging from stagnating.
+            if self.heartbeat and self.transposed % self.heartbeat == 0:
+                print(
+                    f"    [adjoint] {self.transposed} applications "
+                    f"(~cycle {self.transposed / (ADJOINT_RESTART + 1):.1f}) "
+                    f"in {time.time() - self.started:.0f}s",
+                    flush=True,
+                )
+        else:
+            self.forward += 1
+        return self.inner.apply(residual, transpose=transpose)
+
+    def __getattr__(self, name: str):
+        # Anything else -- a refresh, a teardown -- goes straight through to the real object. Reached
+        # only for attributes this class does not define, so the two counted ones cannot be bypassed.
+        return getattr(self.inner, name)
+
+
+def _adjoint_cost(counter: TransposeApplyCounter, forward_before: int) -> str:
+    """The adjoint's measured cost, with the forward applications beside it as the control.
+
+    The restart-cycle figure is derived, not measured, and is labelled as such: a right-preconditioned
+    restarted GMRES applies the preconditioner once per Krylov matrix-vector product and once more to
+    recover the solution at the end of each cycle, so ``restart + 1`` applications go into a full cycle
+    -- but only the applications are counted here, and a partial final cycle makes the division an
+    estimate rather than a count.
+    """
+    return (
+        f"{counter.transposed} preconditioner applications "
+        f"(~{counter.transposed / (ADJOINT_RESTART + 1):.1f} restart cycles at restart "
+        f"{ADJOINT_RESTART}; the applications are measured, the cycles derived) -- forward "
+        f"applications over the same evaluation: {counter.forward - forward_before}"
+    )
+
+
+def count_adjoint_applies(continuation, heartbeat: int = 0) -> TransposeApplyCounter:
+    """Install a :class:`TransposeApplyCounter` on ``continuation``'s adjoint preconditioner.
+
+    The adjoint factory is a ``TransposedPreconditioner`` wrapping a frozen-transpose factory that holds
+    the host preconditioner, so the path to it is explicit rather than guessed. Mutating the host
+    object's ``factors`` attribute is what the in-place refresh already does, and is seen by an
+    already-compiled solve for the same reason: the callback reads the attribute rather than capturing
+    it.
+    """
+    preconditioner = continuation.adjoint_preconditioner_factory.factory.preconditioner
+    counter = TransposeApplyCounter(preconditioner.factors, heartbeat=heartbeat)
+    preconditioner.factors = counter
+    return counter
 
 
 def build():
@@ -166,6 +311,7 @@ def make_objective(coupled, start, continuation, *, observe: bool = True):
             continuation=continuation,
             max_steps=MAX_STEPS,
             rtol=RTOL,
+            adjoint_solver=adjoint_solver(),
             **({"on_step": _step_logger(f"solve {label['n']}")} if observe else {}),
         )
         return jnp.sum(k_out**2)
@@ -199,6 +345,23 @@ def main() -> None:
         leading_inverse=compare.LEADING_INVERSE,
     )
     print(f"  preconditioner built in {time.time() - started:.0f}s", flush=True)
+    counter = count_adjoint_applies(continuation, heartbeat=ADJOINT_HEARTBEAT)
+    # Every number below is only interpretable against the arm it was taken on, and the flow block is
+    # the whole point of the comparison -- so state the bundle here rather than leaving it to be
+    # reconstructed from the environment afterwards.
+    print(
+        f"  flow inverse {compare.FLOW_INVERSE}"
+        f"   trailing {compare.TURBULENCE_INVERSE}"
+        f"   column reach "
+        f"{'uniform 3' if compare.COLUMN_REACH is None else '/'.join(map(str, compare.COLUMN_REACH))}",
+        flush=True,
+    )
+    print(
+        f"  adjoint solver: relative-residual GMRES rtol {ADJOINT_RTOL:g}, restart "
+        f"{ADJOINT_RESTART}, stagnation_iters {ADJOINT_STAGNATION_ITERS}, max_restarts "
+        f"{ADJOINT_MAX_RESTARTS}",
+        flush=True,
+    )
     objective = make_objective(coupled, start, continuation, observe=True)
     # The same objective without the observer, for everything that runs under a JAX transform.
     silent = make_objective(coupled, start, continuation, observe=False)
@@ -207,13 +370,31 @@ def main() -> None:
         f"\n  -- forward only, rtol {RTOL:g}, forward_rtol {FORWARD_RTOL:g}, max_steps {MAX_STEPS}",
         flush=True,
     )
-    started = time.time()
-    value = float(objective(1.0))
-    print(f"  forward only: objective {value:.9e}  in {time.time() - started:.0f}s", flush=True)
+    if SKIP_FORWARD:
+        print(
+            "  SKIPPED (BFS3D_ADJOINT_SKIP_FORWARD) -- the gradient re-runs it anyway", flush=True
+        )
+    else:
+        started = time.time()
+        value = float(objective(1.0))
+        print(f"  forward only: objective {value:.9e}  in {time.time() - started:.0f}s", flush=True)
 
     print("\n  -- part 1: does the gradient run, and is it finite?", flush=True)
+    forward_applies_before = counter.forward
     started = time.time()
-    gradient = float(jax.grad(silent)(1.0))
+    # ⚠️ REPORT THE COST EVEN WHEN THE SOLVE RAISES. A failing adjoint is the interesting case here,
+    # and the count is the only thing that says WHICH solve failed and how far it got: a transposed
+    # count of zero means the run never reached the transpose solve at all (so the forward march is
+    # what raised), while a count sitting at the restart cap says the transpose solve ran and did not
+    # converge. Without this the first failure threw the number away and left both readings open.
+    try:
+        gradient = float(jax.grad(silent)(1.0))
+    except Exception:
+        print(
+            f"  ADJOINT COST AT FAILURE: {_adjoint_cost(counter, forward_applies_before)}",
+            flush=True,
+        )
+        raise
     elapsed = time.time() - started
     finite = np.isfinite(gradient)
     print(
@@ -221,6 +402,7 @@ def main() -> None:
         f"forward+adjoint in {elapsed:.0f}s",
         flush=True,
     )
+    print(f"  ADJOINT COST: {_adjoint_cost(counter, forward_applies_before)}", flush=True)
     if not finite:
         raise SystemExit("the gradient is not finite; nothing below is worth running")
 
