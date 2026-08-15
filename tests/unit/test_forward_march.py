@@ -849,6 +849,32 @@ def test_the_alpha_trigger_reports_its_own_reason() -> None:
     assert reasons == ["alpha", "alpha"]
 
 
+def test_on_retry_reports_the_beta_the_retried_attempt_will_run_at() -> None:
+    """The reported shift is the escalated one, at whatever ``retry_beta_factor`` the march was given.
+
+    ``on_retry`` used to fire *before* the escalation and hand over the abandoned attempt's β, leaving
+    its one consumer to reconstruct the real value by multiplying -- which it did, by a literal 2. That
+    is right only at the default factor, so this runs at 3: the reported β must be 1 -> 3 -> 9, matching
+    the shifts the retried attempts actually run at, and never 2 or 4.
+    """
+    seen: list[float] = []
+    residual = _Cubic(jnp.zeros((1,)))
+    step = _AlphaFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)), beta_needed=9.0)
+    forward_march(
+        step,
+        residual,
+        jnp.ones((1,)),
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        retry_on_alpha=0.5,
+        retry_beta_factor=3.0,
+        retry_cycles_limit=2,
+        on_retry=lambda reason, attempt, beta: seen.append(beta),
+    )
+    assert seen == pytest.approx([3.0, 9.0])
+
+
 def test_the_alpha_trigger_never_bins_a_step_that_reached_its_target() -> None:
     """A collapsed α on a step that met its own stopping criterion is NOT a reason to redo it.
 
