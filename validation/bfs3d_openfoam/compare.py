@@ -79,6 +79,7 @@ from aquaflux.solve import (
     CflResidualDualTimeControl,
     InnerIterateCheckpointer,
     MarchLogger,
+    RetryPolicy,
     StateCheckpointer,
     combine_observers,
     native_nodal_inverse,
@@ -679,7 +680,7 @@ RETRY_ON_ALPHA = float(os.environ.get("BFS3D_RETRY_ON_ALPHA", "0.01")) or None
 #
 # BOTH cost thresholds above are denominated in CYCLES, so they must scale with the restart or the
 # experiment changes the march's control behaviour rather than just its cost: at a restart of 5 an
-# unscaled `retry_on_cycles = 10` would fire after 50 matrix-vector products where it used to take 150.
+# unscaled `retry.on_cycles = 10` would fire after 50 matrix-vector products where it used to take 150.
 # Scaling by the ratio keeps every bailout at the same matvec count, so the only variable is how much
 # over-solving happens inside a cycle. Vary the restart through the builder's own `forward_restart`, NOT
 # by passing a whole `forward_solver`: the builder's default also carries a loose row-scaled stop that a
@@ -1286,12 +1287,14 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             step_control=CONTROL,
             point_setup=point_setup,
             scaled_norm=True,  # rebuild the row scales each outer step
-            retry_solver=relative_residual_gmres(1e-4, restart=40),
             on_checkpoint=on_checkpoint,
             on_retry=logger.on_retry,
-            retry_on_cycles=RETRY_ON_CYCLES_SCALED,
-            retry_on_alpha=RETRY_ON_ALPHA,
-            retry_beta_factor=RETRY_BETA_FACTOR,
+            retry=RetryPolicy(
+                solver=relative_residual_gmres(1e-4, restart=40),
+                on_cycles=RETRY_ON_CYCLES_SCALED,
+                on_alpha=RETRY_ON_ALPHA,
+                beta_factor=RETRY_BETA_FACTOR,
+            ),
         )
         | solve_kwargs
     )

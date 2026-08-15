@@ -440,7 +440,7 @@ def test_on_retry_explains_why_a_step_is_repeated() -> None:
 def test_the_retry_line_reports_the_beta_it_was_given_rather_than_recomputing_it() -> None:
     """The logger must not re-derive the escalated shift, at any factor.
 
-    It used to print ``beta * 2`` -- the *default* ``retry_beta_factor``, applied whatever the march was
+    It used to print ``beta * 2`` -- the *default* ``retry.beta_factor``, applied whatever the march was
     actually configured with -- so a march escalating by any other factor logged a shift it never ran at.
     A factor of 2 cannot catch that, so this asserts on a value that is not twice anything plausible.
     """

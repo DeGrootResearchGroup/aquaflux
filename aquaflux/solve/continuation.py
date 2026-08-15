@@ -773,12 +773,12 @@ class DualTimeStep(eqx.Module):
         grinding on a stiff low-β operator is cut after ~one over-budget inner iteration rather than
         running the full ``inner_steps`` into the restart cap (~5× the cost on the 3D coupled march). The
         partial, non-converged iterate it then returns is meant to be discarded by the march's β-escalation
-        (:func:`~aquaflux.solve.forward_march` with ``retry_on_cycles < cycle_budget``), which redoes the
+        (:func:`~aquaflux.solve.forward_march` with ``retry.on_cycles < cycle_budget``), which redoes the
         step at a larger β where it converges cheaply -- so the two are paired. ``None`` (default) is
         unbounded and byte-identical. Forward-only, like the escalation it pairs with.
     abort_above_inner_cycles : int or None
         Stop the inner loop as soon as any **single** solve has cost more than this (static). Set by
-        :func:`~aquaflux.solve.forward_march` from its own ``retry_on_cycles``, so the two are one number
+        :func:`~aquaflux.solve.forward_march` from its own ``retry.on_cycles``, so the two are one number
         rather than two that must be kept in step; a caller driving this class directly may set it itself.
 
         This is the *same* predicate the march applies after the step returns — cost above the threshold
@@ -926,7 +926,7 @@ class DualTimeStep(eqx.Module):
                 # after ~one over-budget inner iteration (~`cycle_budget` matvecs) instead of running the
                 # full `inner_steps` into the restart cap (measured ~5× the cost on the 3D coupled march).
                 # The partial, non-converged iterate this returns is meant to be discarded by the march's
-                # β-escalation (`forward_march(retry_on_cycles<cycle_budget)`), which redoes the step at a
+                # β-escalation (`forward_march(retry.on_cycles<cycle_budget)`), which redoes the step at a
                 # larger β where it converges cheaply -- so pair the two. `cycle_budget=None` (default) is
                 # byte-identical (the budget term is elided at trace time, as `cycle_budget` is static).
                 if cycle_budget is not None:

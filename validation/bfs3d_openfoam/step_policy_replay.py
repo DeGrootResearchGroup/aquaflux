@@ -15,7 +15,7 @@ have produced from the *same* recorded inputs.
    residual is not rising, brakes (multiplies by ``backoff``) when either wall is hit, and holds in
    between.
 2. If the step comes back with a collapsed step length or a runaway solve cost and it missed its own
-   stopping criterion, an escalation ladder redoes it at ``β × retry_beta_factor``, up to a fixed number
+   stopping criterion, an escalation ladder redoes it at ``β × retry.beta_factor``, up to a fixed number
    of rungs. The ladder multiplies the shift leaf directly, so it is **not** subject to the control's
    ``beta_max`` clamp -- an archived march reaches β = 4.44 against a ceiling of 4.0 this way.
 3. The escalated β is then seeded back into the control, so the ramp continues from the

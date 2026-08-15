@@ -192,7 +192,7 @@ def hard_states(
 
     .. warning::
        **A step's checkpoint describes only its ACCEPTED attempt, and the hardest linear systems in a
-       march are systematically in the rejected ones.** When a solve blows past ``retry_on_cycles`` the
+       march are systematically in the rejected ones.** When a solve blows past ``retry.on_cycles`` the
        step is redone at an escalated beta, and it is the *pre-escalation* attempt that met the hard
        operator; the retry then succeeds easily, and that easy attempt is what the checkpoint records.
        On the march this was written against, the hardest solve anywhere was 15 cycles at beta 0.0293

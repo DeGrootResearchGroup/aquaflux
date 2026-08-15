@@ -226,7 +226,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     guard at the next linear solve — both are hard errors, neither is silent.
   - **✅ `solve_coupled(adjoint_solver=…)` — the transpose solve's Krylov settings are REACHABLE
     (BUILT 2026-08-14).** `ImplicitNewtonSolver` has carried an `adjoint_solver` field all along, but
-    `solve_coupled` did not expose it: it forwarded `retry_solver`, which is **forward-only**, and
+    `solve_coupled` did not expose it: it forwarded the forward-only retry policy's `retry.solver`, and
     nothing for the transpose. So every `jax.grad` through a coupled solve fell through to
     `default_linear_solver()` = `lx.GMRES(rtol=1e-10, atol=1e-10)` at **lineax's own** restart length
     and stagnation budget — and on `bfs3d` that combination raises *"A stagnation in an iterative
@@ -1309,7 +1309,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
        `max_inner_cycles` for exactly this, and `StateCheckpointer` now serializes it (with
        `inner_iterations`) so a later study can rank without re-parsing the log.
      - **A step's record describes only its ACCEPTED attempt, and the hardest operators live in the
-       REJECTED ones.** A solve that blows past `retry_on_cycles` gets the step redone at an escalated
+       REJECTED ones.** A solve that blows past `retry.on_cycles` gets the step redone at an escalated
        β, and the retry then succeeds easily — so the record shows the *easy* attempt. Same march: step
        50's hardest solve is **15 cycles at β = 0.0293** with α collapsing to 0, in attempt 1; the step
        reports **3 cycles at β = 0.0585**. That is also why the escalated attempts are where the
@@ -1680,8 +1680,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     selected physics, not on the inverse winning everywhere.
 
     **The reaction to a collapsed cap is quantified, and the RETURN is the waste — not the ladder.** A
-    capped step trips `retry_on_alpha` and the ladder escalates β (×2 per retry, to
-    `retry_cycles_limit`); β then has to be walked back at `/grow` per step, and that unwind is
+    capped step trips `retry.on_alpha` and the ladder escalates β (×2 per retry, to
+    `retry.cycles_limit`); β then has to be walked back at `/grow` per step, and that unwind is
     arithmetic: **walk-back steps = log(β_peak / β_resume) / log(grow)** — predicted 2.4 / 6.0 / 10.0
     across the three marches above, observed ~2 / 6 / 10. Replaying `CflResidualDualTimeControl` over
     each logged (α, ‖R‖) sequence reproduces every logged β to four decimals on **all 22 archived
@@ -1790,7 +1790,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     `FieldSplitAmgPreconditioner.build` / `coupled_amg_continuation` all carry
     `smoother_sweeps` (leading) and `trailing_smoother_sweeps` (trailing, default **1**) as separate
     parameters, plus `leading_options` / `trailing_options` as the raw-PETSc escape hatch. Measured on
-    the full 3-point `bfs3d` Reynolds-continuation march (field split, `retry_on_alpha` 0.01,
+    the full 3-point `bfs3d` Reynolds-continuation march (field split, `retry.on_alpha` 0.01,
     `refresh_on_cycles` 3, ILU(0), plain aggregation, `coarse_eq_limit` 2000, reach 3, restart 15):
 
     | | 4 sweeps | 1 sweep |
@@ -1980,11 +1980,11 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     both under the `dirichlet` k wall BC. The genuine `equilibrate` A/B at step 16 is **0.699 against
     1.000**, under `zerogradient` (`march-20260810-221936.log` / `march-20260811-003915.log`, both at
     ‖R‖ 1.382e-01). The point about a capped step survives either way; the labelling did not.
-  - **⚠️ DO NOT GATE `retry_on_alpha` ON `binding_limit == 1`. It was proposed, built and reverted
+  - **⚠️ DO NOT GATE `retry.on_alpha` ON `binding_limit == 1`. It was proposed, built and reverted
     the same day (2026-08-10).** More damping shrinks the correction, so it *widens*
     `room = k/|dk|`. The measured evidence is already in this file: the single escalation of an
        entire `bfs3d` march fired at step 51, whose cap was **4.37e-10** — constraint-bound — and it
-       was worth **8 steps and 199 s** end to end. Gating `retry_on_alpha` on `binding_limit == 1`
+       was worth **8 steps and 199 s** end to end. Gating `retry.on_alpha` on `binding_limit == 1`
        would have suppressed exactly that one useful escalation.
 
     **What damping genuinely cannot do is un-pin a cell already ON the boundary**, and that is the
@@ -2120,7 +2120,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   (1.545e-07 vs 2.938e-06) while the reported ‖R‖ matches to four digits. Step 16 differs in the cycle
   count (5 vs 4) and the retry flag as well as α (1.000 vs 0.699 `L`). The correct statement is: **a
   small preconditioner-dependent difference is present from the first step and amplifies for fifteen
-  steps until it crosses the positivity limiter**, after which the clipped α trips `retry_on_alpha` →
+  steps until it crosses the positivity limiter**, after which the clipped α trips `retry.on_alpha` →
   β escalation → more clipping → the 16.0 ceiling at zero cycles. Do not describe this as a clean
   bifurcation; that framing implies a threshold the flag crosses cleanly and the data do not show one.
 
@@ -2136,7 +2136,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     57, 60, 61, **including α 0.000 at step 61**) and recovers from every one, α returning to 1.000.
   - **A constraint-free α collapse appeared, and nothing reacts to it.** Step 68: α 0.031 with **no `L`
     flag** and 15 cycles (the run's highest) — a poor *direction*, not a clipped step. α 0.031 is above
-    `retry_on_alpha` 0.01, no `RefreshTrigger` reads α or `binding_limit`, and this bundle sets
+    `retry.on_alpha` 0.01, no `RefreshTrigger` reads α or `binding_limit`, and this bundle sets
     `beta_rel_change=inf`, so no refresh fires. It cost a few steps here, not the run, but it is the
     first live evidence that the refresh gap is a real cost.
   - **⚠️ ONE RUN EACH, and one instrumentation difference:** the archived equilibrated arm ran with
@@ -2164,7 +2164,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   | — | **True** | **1e-8** | **converged** | **69** | 2188 s | 3.586e-06 | 8.3611 | 5 |
 
   **The chain the floor breaks, visible step by step.** `221936` clipped at rung-2 step 16 (α 0.699,
-  `L`), which tripped `retry_on_alpha`, which escalated β, which clipped harder, up to the 16.0 ceiling
+  `L`), which tripped `retry.on_alpha`, which escalated β, which clipped harder, up to the 16.0 ceiling
   at zero cycles. With the floor, that **same step 16 takes α 1.000 with no flag**, matching the
   unscaled arm exactly — the binding cell there was numerically dead, and buying it out removes the
   first link. From step 22 on, the floored equilibrated and floored unscaled arms run the *same*
@@ -2273,7 +2273,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   Mode 2 above, and it confirms that entry empirically: no treatment of the *limiter* reaches it.
 
   **So the lever is the RETURN, not the trigger and not the constraint.** Three separate attacks on the
-  trigger side are now measured or refuted — gating `retry_on_alpha` on `binding_limit`, raising the
+  trigger side are now measured or refuted — gating `retry.on_alpha` on `binding_limit`, raising the
   floor, and removing the cap's global coupling altogether — and none moved the cycle count.
 
   **Keep the projection for ROBUSTNESS, not speed.** It eliminates the positivity lock-up outright (the
@@ -3796,7 +3796,7 @@ been applied to the two outer sites.
 (fixed).** `cycle_budget` and `abort_above_inner_cycles` are both tested in `DualTimeStep`'s `cond`,
 i.e. **between** inner iterations, so neither can stop a solve already running — and neither bounded any
 of the 41–45 cycle solves in the archived marches. Meanwhile `forward_march` discards an attempt whose
-worst solve passes `retry_on_cycles` without reaching target, so a solve at 11 corrected cycles has
+worst solve passes `retry.on_cycles` without reaching target, so a solve at 11 corrected cycles has
 already determined its work will be thrown away.
 
 Measured over **671 solves across three marches**: no accepted attempt exceeded **9** corrected cycles,
@@ -3804,15 +3804,15 @@ discarded ones ran **39–45**, and the distribution is **empty between**. The a
 recoverable work at ~404 s of a 2533 s march.
 
 **Two traps decide the constant, and both rule out the obvious choice of 10:**
-- **`max_restarts` is in RAW `lineax` restarts** (a fixed +2 per solve); `retry_on_cycles` is in
+- **`max_restarts` is in RAW `lineax` restarts** (a fixed +2 per solve); `retry.on_cycles` is in
   **corrected** cycles. A corrected cap of 12 is `max_restarts = 14`.
-- **The march's test is `max_inner_cycles > retry_on_cycles`, STRICTLY.** A cap landing exactly on the
+- **The march's test is `max_inner_cycles > retry.on_cycles`, STRICTLY.** A cap landing exactly on the
   threshold does not trip the retry, so the step **accepts the truncated, non-converged direction**
   instead of escalating β — turning a doomed attempt into a bad accepted step. The corrected cap must
   be strictly above the threshold.
 
 Shipped as `coupled_amg_continuation(forward_max_restarts=…)`, library default unchanged at 60; the case
-derives it as `retry_on_cycles + 4` from a single scaled constant so the two cannot drift.
+derives it as `retry.on_cycles + 4` from a single scaled constant so the two cannot drift.
 ⚠️ **The 671-solve distribution describes UNCAPPED solves.** Whether a truncated direction ever needs an
 extra escalation rung is not answerable from it, and the first capped march is the first evidence.
 
@@ -4273,7 +4273,7 @@ because they cost real time to learn:
   cannot move the root.
 - **⚠️ `on_step` CANNOT BE USED UNDER `jax.grad`, and it is the observer that makes a march readable.**
   `solve_coupled` raises rather than letting it through: `refresh_trigger` / `step_control` / `on_step` /
-  `on_checkpoint` / `precondition_step` / `retry_solver` all drive a forward-only **eager** march that
+  `on_checkpoint` / `precondition_step` / `retry` all drive a forward-only **eager** march that
   steps in Python on concrete residual norms, which a differentiation tracer cannot flow through. The
   adjoint is refresh-independent, so the single-stage solve returns the identical gradient; the cost is
   only that **a differentiated evaluation is silent**. The probe therefore builds the objective twice,
@@ -6423,13 +6423,32 @@ transfer to any thresholded arm.
     accelerates. Pinned by a trace-counting test (extra steps add zero traces). Note the residual is
     invoked several times *within one trace* (step, line-search ladder, norm), so trace count ≠ compile
     count — assert that further steps add none, not that the total is 1.
-  - **Reactive divergence retry — `retry_solver` recovers a step an INEXACT preconditioner poisons,
+  - **The six retry settings are ONE injected object — `RetryPolicy` (`solve/retry.py`), exported from
+    `aquaflux.solve` (BUILT).** `solver` / `divergence_cap` / `on_cycles` / `on_alpha` / `beta_factor` /
+    `cycles_limit` used to be six parallel keyword arguments on **both** `forward_march` and
+    `solve_coupled`, and they are meaningless apart: a `beta_factor` with no threshold escalates nothing,
+    a `cycles_limit` bounds a loop that never runs. The three decisions taken from them read three or
+    four each, so they are **methods on the policy** rather than free functions taking a subset —
+    `escalation_reason` (was `_escalation_reason`), `has_diverged` (was `_has_diverged`),
+    `with_inner_abort` (was `_with_inner_abort`), plus `escalate`, which exists solely to keep the
+    "scale the β leaf, never rebuild it from a float" rule in one place (rebuilding changes the leaf's
+    dtype/weak type and recompiles the whole coupled solve on every retry).
+    - **`NO_RETRIES` is the shared default instance**, so both signatures' defaults name what the default
+      *means* rather than how it is spelled; it is byte-identical to the old all-`None` defaults.
+    - **The ORDER stays on `forward_march`, not on the policy** — escalation first, `solver` as the
+      fallback — because it is a property of the loop, not of the settings. Likewise `on_retry` stays a
+      separate argument: it is *reporting*, and it belongs with the other observation seams rather than
+      with the thresholds.
+    - **`forward_march` takes the whole policy; a refresh policy would NOT be passed the same way.** The
+      march uses all six, so the object is the smallest sufficient collaborator there. Do not extend this
+      to arguments a callee does not need in full.
+  - **Reactive divergence retry — `retry.solver` recovers a step an INEXACT preconditioner poisons,
     without tightening every step (BUILT).** An *inexact* preconditioner (the threshold-ILU) can return a
     non-finite correction on the stiff operator an aggressive Courant overshoot produces, where the
     *exact* complete-LU returns a finite one — the loose default Krylov tolerance is what leaves that
-    correction too inaccurate. `forward_march(retry_solver=…, retry_divergence_cap=inf)` redoes a diverged
-    step **from the same pre-step state** at the tighter `retry_solver`; the trigger is
-    `_has_diverged` (non-finite, or `> divergence_cap·reference` — default `inf`, i.e. non-finite only,
+    correction too inaccurate. `forward_march(retry=RetryPolicy(solver=…, divergence_cap=inf))` redoes a diverged
+    step **from the same pre-step state** at the tighter `retry.solver`; the trigger is
+    `RetryPolicy.has_diverged` (non-finite, or `> divergence_cap·reference` — default `inf`, i.e. non-finite only,
     because the residual legitimately *rises* during development via `β×travel`, so a tight cap would
     false-fire on the reachability descent). **The preconditioner is NOT re-refreshed on retry** — under a
     β-tracking refresh (`ilut_beta_tracking_refresh`, `.claude/rules/turbulence.md`) the factor is already
@@ -6437,29 +6456,29 @@ transfer to any thresholded arm.
     no-op; the failure is an under-converged *Krylov* solve, not a stale PC, so only the Krylov tolerance
     is tightened. This is orthogonal to the refresh *gating*: the retry recovers a diverged step whatever
     cadence the ILUT was refreshed at. One retry: a still-diverged
-    step breaks as before. Default `retry_solver=None` is **byte-identical**, and the exact-LU path never
+    step breaks as before. Default a policy with no `retry.solver` is **byte-identical**, and the exact-LU path never
     triggers it. **Why it beats tightening every step:** measured on the aggressive pitzDaily ILUT ramp,
     rung-1 steps 1–7 ran on the cheap loose solver and *only* the diverged step 8 retried tight —
     recovering to the exact-LU value (ratio 9.72e-2) and tracking the LU on — instead of paying the tight
-    solve on every step. Threaded through `solve_coupled(retry_solver=…)`; forward-only (raises under
+    solve on every step. Threaded through `solve_coupled(retry=RetryPolicy(solver=…))`; forward-only (raises under
     `jax.grad`, same guard as the refresh/control). Pinned by `test_forward_march.py`
     (`test_march_retries_a_diverged_step_with_the_tighter_solver`, `test_march_does_not_retry_a_finite_step`).
     On 2D the exact LU is cheaper *and* robust for free, so this is really a 3D-readiness lever (where the
     LU's fill is the wall and the ILUT is the only option).
-  - **Reactive β-escalation bailout — `retry_on_cycles` ESCALATES β for a bad step, tried BEFORE the tight
+  - **Reactive β-escalation bailout — `retry.on_cycles` ESCALATES β for a bad step, tried BEFORE the tight
     divergence retry (BUILT).** A step goes bad two ways — a *finite-but-expensive* solve (count `> N`) or a
     *non-finite* one — and on the stiff low-β saddle **both have the same cheap cure: more damping.** A
     larger β lifts the correction out of the NaN regime *and* cuts the cycle count (a stronger pseudo-time
     shift makes the same frozen preconditioner more diagonally dominant), and it is far cheaper than the
-    tight-Krylov divergence retry. So `forward_march(retry_on_cycles=N, retry_beta_factor=2.0,
-    retry_cycles_limit=2)` redoes a step whose count exceeds `N` **or** that diverged (non-finite / over
-    `retry_divergence_cap`) **from the same pre-step state** with β escalated (`×retry_beta_factor`,
+    tight-Krylov divergence retry. So `forward_march(retry=RetryPolicy(on_cycles=N, beta_factor=2.0,
+    cycles_limit=2))` redoes a step whose count exceeds `N` **or** that diverged (non-finite / over
+    `retry.divergence_cap`) **from the same pre-step state** with β escalated (`×retry.beta_factor`,
     re-applying `precondition_step` at the new β so a β-tracking refresh re-shifts), up to
-    `retry_cycles_limit` times or until it converges/drops below `N`. It reads β off
+    `retry.cycles_limit` times or until it converges/drops below `N`. It reads β off
     `active_step.relaxation_schedule.beta` (a `ConstantRelaxation` / `DualTimeStep`), so it requires a
-    readable β and is inert on the default switched-evolution schedule. `retry_on_cycles=None` (default) is
-    **byte-identical** (and a diverged step then falls straight to `retry_solver`, the pre-reorder
-    behaviour). Forward-only; threaded through `solve_coupled(retry_on_cycles=…)`. Pinned by
+    readable β and is inert on the default switched-evolution schedule. an unset `retry.on_cycles` (the default) is
+    **byte-identical** (and a diverged step then falls straight to `retry.solver`, the pre-reorder
+    behaviour). Forward-only; threaded through `solve_coupled(retry=RetryPolicy(on_cycles=…))`. Pinned by
     `test_forward_march.py` (`test_march_escalates_beta_on_a_cycle_count_spike`,
     `…_does_not_escalate_below_the_cycle_cap`, `…_escalates_beta_before_the_tight_divergence_retry`,
     `…_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergence`).
@@ -6468,26 +6487,26 @@ transfer to any thresholded arm.
       β, so a treedef **or aval** change on that step recompiles the whole solve every retry — which on a
       stiff region that retries most steps is ~half the march wall. β is a dynamic 0-d leaf, so the *value*
       change is fine; the trap is the leaf's **abstract value**. Escalate by **scaling the existing leaf**
-      (`beta * retry_beta_factor`), never by rebuilding it from a Python float (`jnp.asarray(float(beta) *
+      (`beta * retry.beta_factor`), never by rebuilding it from a Python float (`jnp.asarray(float(beta) *
       f)`): the latter yields a *weak*-typed float64 array whose dtype/weak_type need not match the leaf
       the step control set, and any mismatch is a cache miss. Scaling preserves the aval exactly, so the
       retried step is a hit for **any** β dtype (weak/strong f64, f32). The shipped controls happen to set
       weak-f64 (so the old form was accidentally a hit), but that was an unpinned coincidence one JAX
       weak-type-promotion change from breaking. Pinned by
       `test_a_forced_escalation_adds_no_march_step_compilations` (a strong-typed β leaf, the case the
-      rebuild recompiled on). Note the `retry_solver` (divergence) fallback is a *separate*, one-off
+      rebuild recompiled on). Note the `retry.solver` (divergence) fallback is a *separate*, one-off
       recompile — a distinct solver object (restart-40 vs the forward restart-15) is a genuinely different
       static key, compiled once and reused; it is not a per-step cost.
-    - **Why escalation leads and `retry_solver` is the FALLBACK (the reorder, measured on `bfs3d`).** The
-      two retries used to run divergence-first: a NaN'd step ran the tight `retry_solver` (a 1e-4 Krylov
+    - **Why escalation leads and `retry.solver` is the FALLBACK (the reorder, measured on `bfs3d`).** The
+      two retries used to run divergence-first: a NaN'd step ran the tight `retry.solver` (a 1e-4 Krylov
       solve, restart-40) and *then*, seeing its high count, the cycle bailout escalated β. On the 3D march
       that order was the single worst cost — measured on the cold `bfs3d` cold-continuation, step 28's
       primary NaN'd (α collapsed), the tight retry ground ~325 matvecs (~40 min) to recover it to finite,
       and *then* the β-escalation re-damped the same step to a clean ~5-cycle solve — so the entire tight
       grind was wasted work the escalation superseded. Reordered, the escalation fires first on the NaN,
-      recovers the step cheaply, and the tight `retry_solver` fires only as a **fallback** for a non-finite
+      recovers the step cheaply, and the tight `retry.solver` fires only as a **fallback** for a non-finite
       step escalation could *not* fix — the genuine inexact-ILUT case (loose Krylov → non-finite δ that a
-      tighter Krylov, not more damping, cures), where `retry_on_cycles` is typically `None` anyway so
+      tighter Krylov, not more damping, cures), where `retry.on_cycles` is typically `None` anyway so
       escalation is absent and the divergence retry is the sole, original mechanism.
     - **This is the PROACTIVE β-mismatch refresh's reactive twin** — the refresh
       (`amg_beta_tracking_refresh(beta_rel_change=…)`, `.claude/rules/turbulence.md`) re-freezes the PC
@@ -6509,7 +6528,7 @@ transfer to any thresholded arm.
       budget (`cond` gains `& (cycles < cycle_budget)`, elided at trace time when `None`), so a grinding
       primary is cut after ~one over-budget inner iteration and the partial iterate is handed to the
       escalation, which redoes it at a larger β where it converges cheaply. **Pair it with
-      `retry_on_cycles < cycle_budget`** so a capped primary's reported count trips the escalation (else the
+      `retry.on_cycles < cycle_budget`** so a capped primary's reported count trips the escalation (else the
       partial non-converged step would be accepted). Good steps converge well under the budget, so they are
       byte-identical; only a grinding primary hits it. `cycle_budget=None` (default) is unbounded and
       byte-identical. Threaded through `coupled_amg_continuation(cycle_budget=…)` (and the shared
@@ -6525,12 +6544,12 @@ transfer to any thresholded arm.
       **26 / 56 / 59** cycles, entering their last inner having spent only 14 / 17 / 16. The budget did
       bind — just a whole stagnating solve too late.
     - **`DualTimeStep(abort_above_inner_cycles=…)` — stop the moment the attempt is KNOWN to be
-      discarded (BUILT).** `retry_on_cycles` is a **per-solve** quantity, so the instant one solve
+      discarded (BUILT).** `retry.on_cycles` is a **per-solve** quantity, so the instant one solve
       exceeds it with the inner target unmet, `forward_march` is going to bin the whole attempt and redo
       it at a larger β. Yet the check lived only in `forward_march`, *after* the step returned — so the
       step kept running inner iterations whose results were already destined for the bin. The same
-      predicate now sits in the inner loop's `cond`, and `forward_march` pushes its own `retry_on_cycles`
-      down via `_with_inner_abort` (using `dataclasses.replace`, not `eqx.tree_at` — the field is static,
+      predicate now sits in the inner loop's `cond`, and `forward_march` pushes its own `retry.on_cycles`
+      down via `RetryPolicy.with_inner_abort` (using `dataclasses.replace`, not `eqx.tree_at` — the field is static,
       so it is in the treedef, not among the leaves), so there is **one** number rather than two to keep
       in step.
       **It cannot bin an expensive success**, and the ordering is what guarantees that: `cond` tests the
@@ -6560,10 +6579,10 @@ transfer to any thresholded arm.
       is the case that needs it, since its trip lands on the last inner where the abort cannot help.
       `None` (default) is byte-identical. Forward-only. Pinned by
       `test_dual_time.py::test_abort_above_inner_cycles_{stops_a_doomed_attempt_early,
-      never_bins_an_expensive_success, none_is_the_unbounded_step}` and the `_with_inner_abort` plumbing
+      never_bins_an_expensive_success, none_is_the_unbounded_step}` and the `RetryPolicy.with_inner_abort` plumbing
       tests beside them.
     - **A COLLAPSED STEP LENGTH is the third way a step dies, and neither the cost bailout nor the
-      escalation could see it — `retry_on_alpha` / `abort_below_alpha` (BUILT 2026-08-08).** The
+      escalation could see it — `retry.on_alpha` / `abort_below_alpha` (BUILT 2026-08-08).** The
       escalation's two triggers are cost-with-the-target-unmet and divergence. A step whose *solves are
       cheap* and whose *residual is finite* but whose **line search cannot move** is neither, so it was
       accepted as taken, and the only thing raising β was the step control's own backoff — **one doubling
@@ -6584,16 +6603,16 @@ transfer to any thresholded arm.
       returning it unchanged — with `limit 4.37e-10`, i.e. the **positivity cap**, not the descent test,
       is what admits nothing. The four steps cost ~233 s to cross half a decade.
       Both halves are now built and are the same predicate in two places, as the cost bailout already is:
-      **`forward_march(retry_on_alpha=α)`** escalates β (reason `"alpha"` on `on_retry`), and it is pushed
-      into **`DualTimeStep.abort_below_alpha`** by `_with_inner_abort` so the inner loop exits at the
-      collapse instead of iterating on. `_escalation_reason` now owns which of the three reasons applies,
+      **`forward_march(retry=RetryPolicy(on_alpha=α))`** escalates β (reason `"alpha"` on `on_retry`), and it is pushed
+      into **`DualTimeStep.abort_below_alpha`** by `RetryPolicy.with_inner_abort` so the inner loop exits at the
+      collapse instead of iterating on. `RetryPolicy.escalation_reason` now owns which of the three reasons applies,
       so the decision and the string reported for it cannot disagree.
       **Both cost and step-length reasons require the target unmet; divergence does not** — a non-finite
       residual is not a result to keep because the loop happened to meet its tolerance. Both `None`
       (default) is byte-identical.
       **MEASURED END TO END, and ONE retry is worth 8 steps and 199 s.** Same case and configuration as
       the baseline above (field split, `refresh_on_cycles=3`, ILU(0)×4, plain aggregation,
-      `coarse_eq_limit` 2000, `N_POINTS=2`), `retry_on_alpha = 0.01`:
+      `coarse_eq_limit` 2000, `N_POINTS=2`), `retry.on_alpha = 0.01`:
 
       | | baseline | with the trigger | |
       |---|---|---|---|
@@ -6770,7 +6789,7 @@ transfer to any thresholded arm.
     whether the step was redone: `cycles` counts only the **accepted** attempt, so a redone step is
     indistinguishable from a cheap one, **and a retry mechanism left unconfigured never announces its
     absence** — which is not hypothetical (a bfs3d march ran with `cycle_budget` set but
-    `retry_on_cycles` at its `None` default, so the beta-escalation never fired and nothing in the log
+    `retry.on_cycles` at its `None` default, so the beta-escalation never fired and nothing in the log
     said so; the cap exists to trip that trigger).
     The logger also reports the **reference norm and the stopping target**: the test is
     `‖R‖ <= atol + rtol·‖R₀‖`, and the march reports `‖R‖` and `‖R‖/‖R₀‖` but not `‖R₀‖`, so the target
@@ -6818,10 +6837,10 @@ transfer to any thresholded arm.
       cost-only escalation cannot tell an expensive success from a grind and **discards the success**:
       measured, an inner loop that reached `‖G‖ = 3.0e-6` against a `1.0e-5` target was thrown away for
       costing 54 raw cycles, wasting the work *and* replacing it with a shorter step. `forward_march`
-      now escalates only when `cycles > retry_on_cycles` **and not** `reached_target`.
+      now escalates only when `cycles > retry.on_cycles` **and not** `reached_target`.
     - **`max_inner_cycles`** — the offset-corrected cost of the step's most expensive SINGLE solve, and
-      what `retry_on_cycles` now triggers on. A **summed** threshold is not a difficulty signal: it
-      grows with how many times the step solved, so at `retry_on_cycles = 40` a 5-inner step trips at 6
+      what `retry.on_cycles` now triggers on. A **summed** threshold is not a difficulty signal: it
+      grows with how many times the step solved, so at `retry.on_cycles = 40` a 5-inner step trips at 6
       corrected cycles per solve and a 1-inner step at 38 — a 6× difference in sensitivity decided by a
       count that says nothing about conditioning. (Measured impact on one 63-step march: the two
       triggers agree on 62 steps and disagree on one — the expensive step, which per-inner catches and
@@ -6885,15 +6904,15 @@ transfer to any thresholded arm.
     state" is then lying. Skip a non-finite report, or do not claim "good".
   - **`on_retry(reason, attempt, beta)` — say WHY a step is being redone (BUILT).** `forward_march`
   calls it immediately before a redo with `"diverged"`, `"cycles"` or `"alpha"` — the three
-  `_escalation_reason` returns, all cured by escalating β — or `"solver"` for the tight-Krylov
+  `RetryPolicy.escalation_reason` returns, all cured by escalating β — or `"solver"` for the tight-Krylov
   divergence retry. Without it a log shows the same step's work two or three times with nothing between
   the blocks, and the four reasons call for completely different responses. `MarchLogger.on_retry`
   writes the explanation between the abandoned attempt's block and the retry's, and numbers the attempt.
     - **`beta` is the shift the RETRIED attempt will run at — escalated on the three escalation
       reasons, unchanged on `"solver"` (binding, fixed 2026-08-14).** The call therefore sits *after*
-      `escalated = beta * retry_beta_factor` is formed and before it is written onto the step. It used
+      `escalated = beta * retry.beta_factor` is formed and before it is written onto the step. It used
       to fire before the escalation and hand over the abandoned attempt's β, which left `MarchLogger`
-      reconstructing the real one as **`beta * 2`** — `retry_beta_factor`'s *default*, hardcoded — so a
+      reconstructing the real one as **`beta * 2`** — `retry.beta_factor`'s *default*, hardcoded — so a
       march configured with any other factor logged a shift it never ran at, and the `"solver"` path,
       where β is not touched at all, logged an escalation that never happened. **The trap generalizes:
       a callback that reports a value the caller is about to change makes its consumer re-derive the

@@ -22,6 +22,7 @@ from aquaflux.solve import (
     DualTimeStep,
     ImplicitNewtonSolver,
     PseudoTransientStep,
+    RetryPolicy,
     ShiftTerm,
     SwitchedEvolutionRelaxation,
     positive_block_limit,
@@ -509,7 +510,7 @@ def test_the_inner_line_search_honours_an_injected_step_limit() -> None:
 def test_abort_above_inner_cycles_stops_a_doomed_attempt_early() -> None:
     """A solve costing more than the march's discard threshold ends the attempt there and then.
 
-    ``retry_on_cycles`` is a PER-SOLVE quantity, so the moment one solve crosses it -- with the inner
+    ``retry.on_cycles`` is a PER-SOLVE quantity, so the moment one solve crosses it -- with the inner
     target still unmet -- the march is going to throw this attempt away and redo it at a larger shift.
     Every inner iteration after that point is work that is discarded. Measured on a three-dimensional
     coupled march, three such attempts ran 26, 56 and 59 cycles where the threshold was crossed at 14,
@@ -593,38 +594,32 @@ def test_abort_above_inner_cycles_none_is_the_unbounded_step() -> None:
 
 
 def test_the_march_pushes_its_discard_threshold_into_the_step() -> None:
-    """``retry_on_cycles`` reaches the inner loop, so a doomed attempt can stop where it is detected.
+    """The cost threshold reaches the inner loop, so a doomed attempt can stop where it is detected.
 
     The threshold is a per-solve quantity and the march evaluates it only after the whole step returns,
     which means inner iterations keep running after the attempt is already destined to be discarded.
     Handing the number to the step lets it stop there. It must stay ONE number -- a step configured with
     its own copy would be a second spelling to keep in step with this one.
     """
-    from aquaflux.solve.march import _with_inner_abort
-
     step = DualTimeStep(UniformShiftPolicy(strength=1.0), inner_steps=3)
     assert step.abort_above_inner_cycles is None
 
-    armed = _with_inner_abort(step, 10)
+    armed = RetryPolicy(on_cycles=10).with_inner_abort(step)
     assert armed.abort_above_inner_cycles == 10
     assert step.abort_above_inner_cycles is None  # the original is untouched
 
 
 def test_a_step_with_no_inner_loop_is_returned_unchanged() -> None:
     """Only a step that runs inner solves has anything to abort; the rest must pass through untouched."""
-    from aquaflux.solve.march import _with_inner_abort
-
     step = PseudoTransientStep(UniformShiftPolicy(strength=1.0))
-    assert _with_inner_abort(step, 10) is step
-    assert _with_inner_abort(step, None) is step
+    assert RetryPolicy(on_cycles=10).with_inner_abort(step) is step
+    assert RetryPolicy().with_inner_abort(step) is step
 
 
 def test_no_discard_threshold_leaves_the_step_untouched() -> None:
-    """``retry_on_cycles=None`` is the default, and must stay byte-identical."""
-    from aquaflux.solve.march import _with_inner_abort
-
+    """An unset threshold is the default, and must stay byte-identical."""
     step = DualTimeStep(UniformShiftPolicy(strength=1.0), inner_steps=3)
-    assert _with_inner_abort(step, None) is step
+    assert RetryPolicy().with_inner_abort(step) is step
 
 
 def test_a_rebuilt_step_limiter_is_a_compilation_cache_hit() -> None:
@@ -796,19 +791,17 @@ def test_the_march_pushes_both_discard_thresholds_into_the_step() -> None:
     ladder gives up -- while the march evaluates both only after the whole step is back. A step
     configured with its own copy of either would be a second spelling to keep in step with the march's.
     """
-    from aquaflux.solve.march import _with_inner_abort
-
     step = DualTimeStep(UniformShiftPolicy(strength=1.0), inner_steps=3)
     assert step.abort_below_alpha is None
 
-    armed = _with_inner_abort(step, 10, 0.01)
+    armed = RetryPolicy(on_cycles=10, on_alpha=0.01).with_inner_abort(step)
     assert armed.abort_above_inner_cycles == 10
     assert armed.abort_below_alpha == 0.01
     assert step.abort_below_alpha is None  # the original is untouched
 
     # Either alone arms only its own threshold.
-    assert _with_inner_abort(step, None, 0.01).abort_above_inner_cycles is None
-    assert _with_inner_abort(step, None, 0.01).abort_below_alpha == 0.01
-    assert _with_inner_abort(step, 10).abort_below_alpha is None
+    assert RetryPolicy(on_alpha=0.01).with_inner_abort(step).abort_above_inner_cycles is None
+    assert RetryPolicy(on_alpha=0.01).with_inner_abort(step).abort_below_alpha == 0.01
+    assert RetryPolicy(on_cycles=10).with_inner_abort(step).abort_below_alpha is None
     # Neither leaves the step untouched.
-    assert _with_inner_abort(step, None, None) is step
+    assert RetryPolicy().with_inner_abort(step) is step

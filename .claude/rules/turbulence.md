@@ -1131,7 +1131,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
 
       **MEASURED END TO END on the 3-rung `bfs3d` cold march** (field split, native trailing inverse,
       ILU(0)×4, plain aggregation, `coarse_eq_limit` 2000, `refresh_on_cycles` 3, PC β floor 0.05,
-      `retry_on_alpha` 0.01, `zerogradient` k wall, positivity floor 1e-08, forward restart 15 —
+      `retry.on_alpha` 0.01, `zerogradient` k wall, positivity floor 1e-08, forward restart 15 —
       **and `BFS3D_COLUMN_REACH=0`, a uniform reach 3** -- the case's default carried `p` at reach 2
       when this ran, which does not converge; the shipped default is now `(3,3,3,3,2,2)`, so a
       re-run needs no override and probes 454 columns rather than this run's 564):
@@ -1281,16 +1281,16 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     is what carries the solve; β-tracking is the forward-march robustness it needs *there*. Pinned in
     `tests/integration/test_coupled_ilut.py` (the pure gate logic as a fast test; the gated in-place
     refactor; cold-march convergence to the block PC's root).
-    - **The rung-1 overshoot NaN is fixed by a tighter SOLVE, not a refresh — `solve_coupled(retry_solver=…)`
+    - **The rung-1 overshoot NaN is fixed by a tighter SOLVE, not a refresh — `solve_coupled(retry=RetryPolicy(solver=…))`
       (BUILT).** The NaN above is the ILUT's *approximation* at the stiff operator the overshoot creates:
       it NaN'd *even on the step the gate had just re-factored*, so a "struggle-triggered refresh" (the
       candidate refinement mused above) cannot help — re-factoring the deterministic ILUT at the same
       `(state, β)` is a no-op. The failure is an under-converged *Krylov* solve (the loose default
       tolerance leaves the inexact δ non-finite on the stiff operator, where the exact LU's δ is finite),
       so the fix is to **redo the diverged step at a tighter linear solve**, same state, same (fresh)
-      factors: `forward_march`/`solve_coupled` take a `retry_solver` that recovers only a non-finite step
-      (see the `retry_solver` bullet in `.claude/rules/solve.md`). Measured: with the loose ILUT default +
-      `retry_solver=relative_residual_gmres(1e-4, restart=40)`, the aggressive-control ramp runs rung-1
+      factors: `forward_march`/`solve_coupled` take a `retry.solver` that recovers only a non-finite step
+      (see the `retry.solver` bullet in `.claude/rules/solve.md`). Measured: with the loose ILUT default +
+      `retry=RetryPolicy(solver=relative_residual_gmres(1e-4, restart=40))`, the aggressive-control ramp runs rung-1
       steps 1–7 on the cheap loose solver and *only* the diverged overshoot step retries tight, recovering
       to the exact-LU value and tracking the LU on — the state-adaptive alternative to tightening every
       step. Orthogonal to and composes with the refresh gating. This is the ILUT-side other half of the
@@ -1494,7 +1494,7 @@ tuning follow-up noted above.
     preconditioner options and the observers all compose unchanged — no coupling to which globalization runs.
   - **HOW MANY rungs: `bfs3d` keeps TWO, but the Re/100 anchor is a closer call than it looks
     (measured 2026-08-09).** Configuration for both numbers: field-split AMG preconditioner,
-    `refresh_on_cycles=3`, `retry_on_alpha=0.01`, ILU(0)×4, plain aggregation, `coarse_eq_limit` 2000,
+    `refresh_on_cycles=3`, `retry.on_alpha` 0.01, ILU(0)×4, plain aggregation, `coarse_eq_limit` 2000,
     cold hybrid initialization, `Re_h` 10000.
 
     | | 2 rungs | 1 rung |

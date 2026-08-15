@@ -54,6 +54,7 @@ from aquaflux.flow.mean_velocity import (
     _with_body_force,
 )
 from aquaflux.solve import (
+    NO_RETRIES,
     BlockScaledNorm,
     ColumnProbePlan,
     DivergenceGuard,
@@ -72,6 +73,7 @@ from aquaflux.solve import (
     RefreshTiming,
     RefreshTrigger,
     ResidualNorm,
+    RetryPolicy,
     RowScaledNorm,
     ShiftBasis,
     ShiftTerm,
@@ -2240,7 +2242,7 @@ def coupled_amg_continuation(
         :class:`~aquaflux.solve.DualTimeStep` (only used when ``inner_steps > 1``). It cuts off a primary
         solve grinding on a stiff low-β operator after ~``cycle_budget`` matvecs instead of the full
         ``inner_steps`` into the restart cap; pair it with ``solve_coupled``'s β-escalation
-        (``retry_on_cycles < cycle_budget``), which redoes the capped step at a larger β. ``None`` (default)
+        (``retry.on_cycles < cycle_budget``), which redoes the capped step at a larger β. ``None`` (default)
         is unbounded and byte-identical. Forward-only.
     positivity_floor : float
         Absolute room in ``k`` given to every cell by the step limiter, so a cell whose ``k`` is
@@ -2361,13 +2363,13 @@ def coupled_amg_continuation(
     # ``forward_max_restarts`` is the ONLY bound on a single running solve: ``cycle_budget`` and
     # ``abort_above_inner_cycles`` are tested between inner iterations, so neither can stop a solve
     # already in progress. Left generous, a solve whose attempt is already doomed -- one that has passed
-    # the march's ``retry_on_cycles`` without reaching target -- keeps running to the cap, and that work
+    # the march's ``retry.on_cycles`` without reaching target -- keeps running to the cap, and that work
     # is discarded when the step is redone at a larger shift.
     #
-    # ⚠️ It is in RAW ``lineax`` restarts, which carry a fixed +2 per solve, while ``retry_on_cycles`` is
+    # ⚠️ It is in RAW ``lineax`` restarts, which carry a fixed +2 per solve, while ``retry.on_cycles`` is
     # in CORRECTED cycles (:func:`restart_cycles`). So a corrected cap of ``c`` is ``max_restarts = c + 2``.
-    # ⚠️ And it must leave the corrected count STRICTLY ABOVE ``retry_on_cycles``: the march's test is
-    # ``max_inner_cycles > retry_on_cycles``, so a cap landing exactly on the threshold does not trip the
+    # ⚠️ And it must leave the corrected count STRICTLY ABOVE ``retry.on_cycles``: the march's test is
+    # ``max_inner_cycles > retry.on_cycles``, so a cap landing exactly on the threshold does not trip the
     # retry and the step ACCEPTS the truncated, non-converged direction instead of escalating.
     # ``forward_restart``
     # exists so that length can be varied on its own -- passing a whole ``forward_solver`` to do it would
@@ -3258,13 +3260,8 @@ def solve_coupled(
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     precondition_step: Callable[[ForwardStep, jnp.ndarray], None] | None = None,
-    retry_solver: lx.AbstractLinearSolver | None = None,
-    retry_divergence_cap: float = float("inf"),
-    retry_on_cycles: int | None = None,
-    retry_on_alpha: float | None = None,
-    retry_beta_factor: float = 2.0,
+    retry: RetryPolicy = NO_RETRIES,
     on_retry: Callable[[str, int, float], None] | None = None,
-    retry_cycles_limit: int = 2,
     **continuation_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system ``R(u, p, k, omega) = 0`` by one monolithic Newton solve.
@@ -3464,41 +3461,32 @@ def solve_coupled(
         moves away from it. Pair it with a :class:`~aquaflux.solve.DualTimeControl` (so β is a readable
         constant leaf) and a :func:`coupled_lu_continuation` step; the finishing solve and adjoint keep
         the last frozen factorization (exact enough near the converged β → 0 root).
-    retry_solver : lineax.AbstractLinearSolver, optional
-        A **tighter** linear solver used to redo an observed step that diverged (forward-only, same guard).
-        With an *inexact* preconditioner (a threshold-ILU) the loose default Krylov solve can return a
-        non-finite correction on the stiff operator an aggressive Courant overshoot produces, where the
-        *exact* complete LU returns a finite one. On a diverged step the march redoes it from the same
-        state at ``retry_solver`` -- the (β-tracked) factorization is already fresh, so only the Krylov
-        tolerance is tightened -- which recovers the step while keeping the accepted trajectory, and pays
-        the tighter solve only on the few trouble steps rather than every step. The exact-LU path never
-        diverges, so it needs none; ``None`` (default) never retries. See ``retry_divergence_cap`` for the
-        trigger and :func:`aquaflux.solve.forward_march` for the mechanism.
-    retry_divergence_cap : float, optional
-        A step is retried when its residual norm is non-finite **or**, if this cap is finite, exceeds
-        ``retry_divergence_cap * reference``. Defaults to ``inf`` (only non-finiteness triggers), because
-        the residual can legitimately rise during development (the ``β × travel`` identity), so a tight
-        cap would false-fire on the load-bearing reachability descent.
-    retry_on_cycles : int or None
-        A **cycle-count** bailout (:func:`aquaflux.solve.forward_march`): a step whose solve exceeds this
-        count is redone from the pre-step state with ``β`` escalated by ``retry_beta_factor`` -- more
-        damping for the stiff low-``β`` operator, the hard-operator cause of a high count (staleness, the
-        other, is pre-empted by a β-mismatch refresh). Needs a ``β``-carrying step control. ``None``
-        (default) disables it.
-    retry_on_alpha : float or None
-        A **step-length** bailout (:func:`aquaflux.solve.forward_march`): a step whose line-search factor
-        falls to this or below, without reaching its stopping criterion, is redone with ``β`` escalated
-        the same way. It catches the failure the cycle count cannot see -- cheap solves whose correction
-        cannot be followed, because it does not descend or because a positivity cap admits almost none of
-        it -- where the step otherwise makes no progress and escapes only via the step control's
-        one-doubling-per-step backoff. Needs a ``β``-carrying step control. ``None`` (default) disables it.
+    retry : RetryPolicy
+        When and how the observed march redoes a bad step (forward-only, same guard as the other
+        observed-march arguments): the cost and step-length escalation thresholds, the ``β`` factor and
+        escalation limit, and the optional tighter linear solver. See
+        :class:`~aquaflux.solve.RetryPolicy` for each setting and :func:`~aquaflux.solve.forward_march`
+        for the order they fire in. The default policy retries nothing, which is byte-identical to a
+        march without retries -- and note that setting **any** of them makes the march observed.
+
+        Both escalation triggers need a ``β``-carrying step control, since escalation works by scaling
+        the shift leaf the control sets. The two failures they cover are genuinely different: a high
+        cycle count is the stiff low-``β`` operator (the other cause of a high count, a stale
+        preconditioner, is pre-empted by a β-mismatch refresh instead), while a collapsed step length is
+        a correction that cannot be followed at all and is invisible to the cost trigger because those
+        solves are *cheap*.
+
+        ``solver`` covers what more damping cannot: with an inexact preconditioner (a threshold-ILU) the
+        loose default Krylov solve can return a non-finite correction on the stiff operator an
+        aggressive overshoot produces, where an exact complete-LU returns a finite one. The step is
+        redone from the same state at the tighter tolerance -- a β-tracked factorization is already
+        fresh, so only the Krylov solve changes -- which recovers it while keeping the accepted
+        trajectory, and pays the tighter solve on the few trouble steps rather than on every step. The
+        exact-LU path never diverges and needs none.
     on_retry : callable, optional
         ``(reason, attempt, beta) -> None``, forwarded to
         :func:`~aquaflux.solve.forward_march`: called before a step is redone, with why. Forward-only
         reporting; a log without it shows a step's work twice and never says what triggered the redo.
-    retry_beta_factor, retry_cycles_limit
-        The ``β`` escalation factor per retry (default ``2``) and the maximum successive escalations for one
-        step (default ``2``); see :func:`aquaflux.solve.forward_march`.
     **continuation_kwargs
         Forwarded to :func:`coupled_continuation` when building internally (schedule + preconditioner
         options). Notably ``inner_steps > 1`` selects the **dual-time** (backward-Euler) march
@@ -3522,9 +3510,8 @@ def solve_coupled(
         or on_step is not None
         or on_checkpoint is not None
         or precondition_step is not None
-        or retry_solver is not None
-        or retry_on_cycles is not None
-        or retry_on_alpha is not None
+        or retry.solver is not None
+        or retry.escalates
     )
     if observing and _is_traced((coupled, flow, k, omega)):
         # The refresh re-derives the preconditioner from the mid-march state, which is a tracer when
@@ -3533,7 +3520,7 @@ def solve_coupled(
         # refresh (it forbids an explicit `continuation`), so this cannot be worked around here --
         # raise with the fix rather than letting the leak surface as an opaque UnexpectedTracerError.
         raise ValueError(
-            "refresh_trigger/step_control/on_step/on_checkpoint/precondition_step/retry_solver drive a "
+            "refresh_trigger/step_control/on_step/on_checkpoint/precondition_step/retry drive a "
             "forward-only eager march and cannot be used "
             "under jax.grad (or any JAX transform): the march steps in Python on concrete residual "
             "norms, and a mid-march preconditioner rebuild would capture the differentiation tracer. "
@@ -3633,13 +3620,8 @@ def solve_coupled(
                 drift_measure=eddy_viscosity_drift(coupled, jax.lax.stop_gradient(state)),
                 norm_builder=norm_builder,
                 precondition_step=precondition_step,
-                retry_solver=retry_solver,
-                retry_divergence_cap=retry_divergence_cap,
-                retry_on_cycles=retry_on_cycles,
-                retry_on_alpha=retry_on_alpha,
-                retry_beta_factor=retry_beta_factor,
+                retry=retry,
                 on_retry=on_retry,
-                retry_cycles_limit=retry_cycles_limit,
             )
             state = result.state
             control_state = result.control_state
