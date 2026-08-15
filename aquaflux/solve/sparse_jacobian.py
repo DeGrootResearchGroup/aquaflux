@@ -36,6 +36,18 @@ import numpy as np
 import scipy.sparse as sp
 
 
+def _index_dtype(bound: int) -> type[np.signedinteger]:
+    """The narrowest signed integer type holding every value up to ``bound``.
+
+    The arrays this module builds carry one entry per Jacobian nonzero — tens of millions on a
+    three-dimensional coupled mesh — and several are live at once while the de-compression is assembled,
+    so the width of an index is the difference between a peak of a few hundred megabytes and several
+    gigabytes. Every such array here has a bound known before it is formed, which is what lets the type
+    be chosen up front and the wide form never materialize.
+    """
+    return np.int32 if bound < np.iinfo(np.int32).max else np.int64
+
+
 class BlockColouring:
     """A cell-block sparsity pattern and a probing colouring for a field-major block Jacobian.
 
@@ -440,7 +452,7 @@ def _saturation_colouring(conflict: sp.csr_matrix, n: int) -> np.ndarray:
     return colour
 
 
-def block_stencil_gather_map(plan: ColumnProbePlan) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def block_stencil_gather_map(plan: ColumnProbePlan) -> ProbeGather:
     """Precompute the fixed field-major CSR structure and a gather map from the probe responses to it.
 
     The sparsity pattern and the coloured probes are fixed (they depend only on the mesh graph), so the
@@ -473,37 +485,52 @@ def block_stencil_gather_map(plan: ColumnProbePlan) -> tuple[np.ndarray, np.ndar
     n_fields = plan.n_fields
     nf = n_fields * n
     rows_i, cols_i = plan.pattern_rows, plan.pattern_cols  # cell-block (i, j) coordinates
-    # Expand each cell-block (i, j) to its n_fields x n_fields DOF entries and, for each, the flat index of
-    # the probe response that supplies it. Shapes broadcast over (block, a-field, b-field).
-    ri = rows_i[:, None, None]
-    cj = cols_i[:, None, None]
-    a = np.arange(n_fields)[None, :, None]
-    b = np.arange(n_fields)[None, None, :]
-    # The probe that carries column field b of column cell j, per (block, b) — each column field has its
-    # own colouring, so this is a lookup per field rather than one shared colour array.
-    probe = (np.asarray(plan.probe_base)[:, None] + plan.colour[:, cols_i]).T[:, None, :]
     shape = (
         rows_i.shape[0],
         n_fields,
         n_fields,
     )  # (block, a-field, b-field), the entry grid per block
-    row_dof = np.broadcast_to(a * n + ri, shape).ravel()  # a*n + i
-    col_dof = np.broadcast_to(b * n + cj, shape).ravel()  # b*n + j
-    # (probe index for (b, colour_b[j])) * nf + row_dof -> the flat index into responses.ravel()
-    source = np.broadcast_to(probe * nf + (a * n + ri), shape)
-    # An entry outside its column's own reach reads the zero row the materialize appends, not that
-    # column's response -- the response there holds a different cell's near coupling.
     zero_slot = plan.n_probes * nf
-    source = np.where(np.broadcast_to(plan.in_reach.T[:, None, :], shape), source, zero_slot)
-    flat_src = source.ravel()
-    # Sort into CSR order by carrying flat_src as the data; there are no duplicate (row_dof, col_dof), so
-    # `tocsr` only reorders (never sums), and its data is the gather map in CSR order.
-    csr = sp.coo_matrix((flat_src.astype(np.float64), (row_dof, col_dof)), shape=(nf, nf)).tocsr()
-    if csr.nnz != flat_src.size:  # a collision would corrupt the map by summing two sources
+    # Every index formed here is bounded by `zero_slot`, so the whole build runs in 32-bit wherever
+    # that fits -- which is every mesh this path is used on.
+    index_dtype = _index_dtype(zero_slot)
+    # Expand each cell-block (i, j) to its n_fields x n_fields DOF entries and, for each, the flat index of
+    # the probe response that supplies it. Shapes broadcast over (block, a-field, b-field).
+    ri = rows_i.astype(index_dtype)[:, None, None]
+    cj = cols_i.astype(index_dtype)[:, None, None]
+    a = np.arange(n_fields, dtype=index_dtype)[None, :, None]
+    b = np.arange(n_fields, dtype=index_dtype)[None, None, :]
+    # The probe that carries column field b of column cell j, per (block, b) — each column field has its
+    # own colouring, so this is a lookup per field rather than one shared colour array.
+    probe = (
+        np.asarray(plan.probe_base, dtype=index_dtype)[:, None]
+        + plan.colour[:, cols_i].astype(index_dtype)
+    ).T[:, None, :]
+    row_dof_2d = a * index_dtype(n) + ri  # (block, a-field, 1): the row degree of freedom a*n + i
+    # (probe index for (b, colour_b[j])) * nf + row_dof -> the flat index into responses.ravel()
+    source = probe * index_dtype(nf) + row_dof_2d  # materializes the full (block, a, b) grid
+    # An entry outside its column's own reach reads the zero row the materialize appends, not that
+    # column's response -- the response there holds a different cell's near coupling. Written into
+    # `source` rather than into a copy of it, which at this size is a whole second grid.
+    # Inverted before it is broadcast, not after: negating the broadcast view would materialize the
+    # full grid again, where negating the per-(block, column-field) mask costs one entry per block.
+    np.copyto(
+        source,
+        index_dtype(zero_slot),
+        where=np.broadcast_to((~plan.in_reach).T[:, None, :], shape),
+    )
+    row_dof = np.broadcast_to(row_dof_2d, shape).ravel()  # a*n + i
+    col_dof = np.broadcast_to(b * index_dtype(n) + cj, shape).ravel()  # b*n + j
+    # Sort into CSR order by carrying the source index as the data; there are no duplicate
+    # (row_dof, col_dof), so `tocsr` only reorders (never sums), and its data is the gather map in CSR
+    # order. The payload stays an integer throughout: routing it through float64 and back, as this once
+    # did, costs four full-length arrays at double the width for no gain.
+    csr = sp.coo_matrix((source.ravel(), (row_dof, col_dof)), shape=(nf, nf)).tocsr()
+    if csr.nnz != source.size:  # a collision would corrupt the map by summing two sources
         raise ValueError(
             "block_stencil_gather_map: duplicate (row, col) in the pattern (bad colouring)."
         )
-    return ProbeGather(csr.indptr, csr.indices, csr.data.astype(np.int64), zero_slot, nf)
+    return ProbeGather(csr.indptr, csr.indices, csr.data, zero_slot, nf)
 
 
 class ProbeGather:
@@ -544,17 +571,24 @@ class ProbeGather:
         self.indices = indices
         self.nnz = int(indices.shape[0])
         self._nf = nf
+        # Narrowed as each array is formed rather than at the end, so the wide form is never one of the
+        # several live at once. A source index is bounded by `zero_slot`, a position by the entry count.
+        # Choosing from the bound also removes a latent wrap: these were narrowed to 32-bit
+        # unconditionally, which is right for every mesh reached so far and silently truncates on one
+        # whose entry count or probe-response index does not fit.
+        index_dtype = _index_dtype(zero_slot)
+        position_dtype = _index_dtype(gather_map.shape[0])
         live = gather_map != zero_slot
-        position = np.flatnonzero(live)
-        source = gather_map[live]
+        position = np.flatnonzero(live).astype(position_dtype, copy=False)
+        source = gather_map[live].astype(index_dtype, copy=False)
         # Group the entries by the probe that supplies them, so a chunk's entries are one contiguous
-        # slice. `int32` throughout: both the entry count and `n_probes * nf` sit well inside its range
-        # on any mesh this path is used for, and at tens of millions of entries the width is the
-        # difference between one array of a few hundred megabytes and two.
-        probe_of = source // nf
+        # slice. The sort permutation is the one remaining array here that must be full width, since
+        # numpy returns an index array; a counting sort over the probe index -- which ranges over a few
+        # hundred values -- would avoid it, at the cost of reordering entries within a probe.
+        probe_of = source // index_dtype(nf)
         by_probe = np.argsort(probe_of, kind="stable")
-        self._position = position[by_probe].astype(np.int32)
-        self._source = source[by_probe].astype(np.int32)
+        self._position = position[by_probe]
+        self._source = source[by_probe]
         # One boundary per probe plus a closing one, so a chunk ending at the last probe still has a
         # `_probe_start[start + count]` to read.
         n_probes = zero_slot // nf

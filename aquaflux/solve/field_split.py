@@ -229,12 +229,28 @@ class BlockTriangularFieldSplit:
             )
         self._leading = leading
         self._trailing = trailing
-        self._coupling = sp.csr_matrix(coupling)
-        # The transpose is formed once at build rather than per apply: `A.T` on a CSR matrix yields a CSC
-        # view whose product then converts on every call, which for a block of this size is a measurable
-        # part of an application that is otherwise two multigrid cycles.
-        self._coupling_transpose = sp.csr_matrix(self._coupling.transpose())
+        self._set_coupling(coupling)
         self._groups = groups
+
+    def _set_coupling(self, coupling: sp.spmatrix) -> None:
+        """Store the retained coupling block, discarding any transpose cached for the previous one."""
+        self._coupling = sp.csr_matrix(coupling)
+        self._coupling_transpose: sp.csr_matrix | None = None
+
+    @property
+    def _transposed_coupling(self) -> sp.csr_matrix:
+        """The coupling block transposed, formed on first use and then cached.
+
+        It must not be re-derived per application: ``A.T`` on a compressed-sparse-row matrix yields a
+        compressed-sparse-column view whose product converts on every call, which for a block of this
+        size is a measurable part of an application that is otherwise two multigrid cycles. Nor should
+        it be formed before anything asks for it, which is what the caching here buys. Only the
+        transpose apply reads it — the adjoint's transpose solve — so a forward march would otherwise
+        carry a second full copy of the coupling block, rebuilt at every refresh, and never touch it.
+        """
+        if self._coupling_transpose is None:
+            self._coupling_transpose = sp.csr_matrix(self._coupling.transpose())
+        return self._coupling_transpose
 
     @property
     def groups(self) -> FieldGroups:
@@ -267,7 +283,7 @@ class BlockTriangularFieldSplit:
         if transpose:
             y_trailing = self._trailing.apply(residual[trail], transpose=True)
             y_leading = self._leading.apply(
-                residual[lead] - self._coupling_transpose @ y_trailing, transpose=True
+                residual[lead] - self._transposed_coupling @ y_trailing, transpose=True
             )
         else:
             y_leading = self._leading.apply(residual[lead])
@@ -327,8 +343,7 @@ class BlockTriangularFieldSplit:
                     f"{type(inverse).__name__} cannot refactor in place, so this split cannot be "
                     "refreshed mid-march; rebuild it instead, or inject an inverse that can."
                 )
-        self._coupling = sp.csr_matrix(self._select_coupling(blocks))
-        self._coupling_transpose = sp.csr_matrix(self._coupling.transpose())
+        self._set_coupling(self._select_coupling(blocks))
 
     def destroy(self) -> None:
         """Release both block inverses' resources, if they hold any."""
@@ -470,8 +485,7 @@ class _TrailingFirstFieldSplit(BlockTriangularFieldSplit):
         # Deliberately not calling the base __init__: its shape check describes the other orientation.
         self._leading = leading
         self._trailing = trailing
-        self._coupling = sp.csr_matrix(coupling)
-        self._coupling_transpose = sp.csr_matrix(self._coupling.transpose())
+        self._set_coupling(coupling)
         self._groups = groups
 
     def _select_coupling(self, blocks):
@@ -499,7 +513,7 @@ class _TrailingFirstFieldSplit(BlockTriangularFieldSplit):
         if transpose:
             y_leading = self._leading.apply(residual[lead], transpose=True)
             y_trailing = self._trailing.apply(
-                residual[trail] - self._coupling_transpose @ y_leading, transpose=True
+                residual[trail] - self._transposed_coupling @ y_leading, transpose=True
             )
         else:
             y_trailing = self._trailing.apply(residual[trail])

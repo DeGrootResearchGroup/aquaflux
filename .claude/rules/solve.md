@@ -238,6 +238,69 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       (uniform) and 6.5e-16 (per-column), i.e. the float64 floor, which is an independent check rather
       than the two paths agreeing with each other.
 
+    - **⚠️ THE GATHER MAP'S OWN CONSTRUCTION PEAKS HIGHER THAN ANYTHING ELSE IN A RUN, and the entry
+      above is about the MATERIALIZE, not the build (measured 2026-08-14).** The de-compression entry
+      says "the peak is the matrix plus one chunk", which is true *per materialize* and was read as
+      though it described the whole path. It does not: `block_stencil_gather_map` plus
+      `ProbeGather.__init__` run **once**, at case construction, and cost **100 bytes per pattern
+      entry** in transient peak. The retained `ProbeGather` is ~12 B/entry, so the recorded "gather map
+      ~1.2 GB" is the *retained* delta and understates the peak by roughly four times.
+
+      *Configuration:* synthetic 14³ = 2744-cell lattice, reach-3 block-stencil pattern, 6 fields,
+      143 464 cell blocks, 5 164 704 entries (`bfs3d`'s shape at ~1/9 its size); peak resident set via
+      `ru_maxrss`, **one arm per process**, 5 interleaved repetitions on an idle machine, minimum
+      reported. The pre-change arm is the previous commit's module imported side by side with the
+      shipped one, so both are the real code rather than a re-typed stand-in. Harness
+      `validation/bfs3d_openfoam/gather_map_memory.py`. ⚠️ The first run of a session reads low (a cold
+      allocator gave 47 B/entry where the same arm repeated at 71) — discard it, as with every other
+      probe in this file.
+
+      | | before | after |
+      |---|---|---|
+      | transient peak | 517 MB (100.1 B/entry) | **339 MB (65.7 B/entry), −34%** |
+      | retained | 62 MB | 62 MB, unchanged |
+      | build time | 0.31 s / 0.26 s | 0.27 s / 0.24 s (**0.85× / 0.93×**) |
+
+      Scaled to `bfs3d`'s 47.2M entries that is roughly **4.7 GB → 3.1 GB**, which makes this the
+      largest single allocation in a run either way — the case build after the blocked wall-distance
+      search is ~850 MB. All five repetitions of the pre-change arm read **100.1 B/entry to the
+      decimal**, and reproduce the value measured earlier while a march was competing for the machine:
+      peak resident set is an allocation high-water mark, so unlike wall clock it is insensitive to
+      contention. Use it, not timing, when a probe must run beside other work.
+
+      Two causes, both incidental rather than structural. The build routed an **integer** index array
+      through `float64` purely to use `coo_matrix.tocsr()` as a sorter and converted back to `int64` —
+      four full-length arrays at double the necessary width — and it applied the out-of-reach mask with
+      `np.where`, allocating a second copy of a grid that can be written in place. Every index here has
+      a bound known before it is formed (`zero_slot = n_probes · nf`), which is what lets the width be
+      chosen up front (`_index_dtype`) so the wide form never materializes. **32-bit is not assumed:**
+      the type falls back to `int64` above `iinfo(int32).max`, which no mesh this path is used on
+      reaches (`bfs3d` is 78M against a 2.1e9 ceiling) but a much larger one would. Choosing from the
+      bound also removed a latent wrap: `ProbeGather` narrowed to `int32` *unconditionally*, which
+      silently truncates on a mesh that does not fit rather than falling back.
+
+      **⚠️ FIXING THE BUILD ALONE WOULD HAVE LEFT MOST OF THIS ON THE TABLE, because
+      `ProbeGather.__init__` has its own ~57 B/entry peak that was HIDDEN under the build's.** Measured
+      per phase before the change: the compressed-sparse-row build 56.0 B/entry and the regrouping
+      ~57 B/entry, the second invisible end to end because it fitted under the first. That is the
+      transferable part — a phase whose peak sits under a larger one cannot be seen from outside, and
+      becomes the ceiling the moment the larger one is reduced — and it is why both were narrowed in
+      one change.
+
+      **Verified identical, not merely convergent.** Against the pre-change module on the same plans:
+      `indptr`, `indices`, `_position`, `_source` and `_probe_start` all `array_equal`, **and** the
+      `scatter` output agrees on random responses — on the uniform-reach path *and* on the
+      `(3,3,3,3,2,2)` per-column path, which is the one that exercises the out-of-reach mask where the
+      in-place write lives. Fast (1043 passed), `slow` (46) and `validation` (18) tiers all green.
+
+      **The one remaining full-width array is the sort permutation**, `np.argsort(probe_of)`, at 8
+      B/entry — numpy returns an index array and there is no narrower form. A counting sort over the
+      probe index (a few hundred values) would remove it, and is admissible because `scatter` writes to
+      unique positions, so the order *within* a probe is free. It was deliberately not taken: it would
+      reorder `_position`/`_source` within each probe, which forfeits the array-for-array equality that
+      makes this change checkable. Take it only with a test that pins the scatter's *result* rather than
+      its index arrays.
+
       **⚠️ Read this before tuning `_PROBE_BATCH_SIZE` against memory.** Most of the peak the batch size
       was being traded against was never the batch: seeds and responses are both `n_probes x nf` and
       neither scaled with `probe_batch_size`. Both are now gone, so the peak is the matrix plus one chunk
@@ -992,6 +1055,13 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       path runs unchanged. `AmgVCycle.refactor`'s pattern re-check is likewise memoized on the index
       arrays' identity, since comparing tens of millions of indices twice per refresh re-confirms
       something fixed by construction.
+    - **Two redundant full copies of the operator's VALUES are gone (2026-08-14).** `_build` wrote
+      `cell_major.data.astype(ScalarType).copy()` — `astype` already returns a fresh array, which is the
+      ownership the persistent `Mat` needs, so the `.copy()` allocated the values a second time — and
+      `refactor` wrote `self._data[:] = cell_major.data.astype(ScalarType)`, whose `astype` builds a full
+      temporary that the assignment then copies out of, on **every** refresh. A slice assignment casts to
+      the destination's type as it copies, so it needs no `astype` at all. Each is one array as long as
+      the Jacobian's nonzeros. Behaviour-identical; not measured.
     - **Already done, do not re-propose:** `refactor` reuses the aggregation and prolongation
       (`pc_gamg_reuse_interpolation` + smoother `reuse_ordering`) and overwrites the operator values in
       place, so only the Galerkin coarse operators and the incomplete-LU factor values recompute.
@@ -1187,6 +1257,16 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       `apply(transpose=True)` reverses the two block solves and uses `Cᵀ` — pinned both as an exact dense
       transpose (unit) and as `⟨y, Mx⟩ = ⟨Mᵀy, x⟩` over real V-cycles on the real coupled Jacobian
       (integration).
+      **`Cᵀ` is formed on FIRST USE, not at build (2026-08-14).** It was built eagerly in both
+      `__init__`s and again in every `refactor`, and it is read **only** by the transpose apply — the
+      adjoint's transpose solve. A forward march therefore carried a second full copy of the coupling
+      block for its whole life, rebuilt at every refresh, and never touched it. It is now cached behind
+      `_transposed_coupling`, with `_set_coupling` the one place that stores a coupling and drops the
+      stale transpose with it (previously two sites set both fields in step, which is the pairing a
+      third site would eventually get wrong). The reason it must not be re-derived *per apply* is
+      unchanged and still recorded on the property: `A.T` on a compressed-sparse-row matrix is a
+      compressed-sparse-column view whose product converts on every call. Not measured — the block's
+      size is known but its share of a march's peak is not.
     **⚠️ A ONE-APPLICATION CONTRACTION RANKED THE TWO ORDERINGS AND WAS WRONG — invalid shortcut 2, in
     miniature, caught in a test rather than a write-up.** On the small coupled channel one application of
     the turbulence-first split leaves ~3× the input residual where flow-first leaves ~0.3×, which reads as
