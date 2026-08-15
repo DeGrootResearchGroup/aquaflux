@@ -3032,22 +3032,35 @@ entirely the *finite difference's* fault — the adjoint barely moves while the 
 | arm at β = 0 (`rtol` 1e-3, otherwise identical) | adjoint applications | derived cycles | per application |
 |---|---|---|---|
 | **PETSc ILU(0) flow block (incumbent)** | **1454** | **12.0** | ~195 ms |
-| native SIMPLE flow block, shipped settings (4 sweeps) | 1696 | 14.0 | ~383 ms |
+| native SIMPLE flow block, shipped settings (**4** sweeps) | 1696 | 14.0 | ~383 ms |
+| native SIMPLE flow block, **8** sweeps | **1696** | **14.0** | ~607 ms |
 
 - **The native flow block does NOT beat the incumbent on the real adjoint** — ~17 % more applications
   *and* ~2× the cost per application, so ~2.3× the work. This is the one arm the native-preconditioner
   programme exists to test and it had never been run; the recorded 7-against-11 zero-shift win is a
   **linear-probe** result at right-hand side `-R`, not this.
-- **The two arms' gradients agree to 9 significant figures** (−3.179366754e+03 against −3.179366759e+03),
-  which is the correctness check behaving exactly as it must: a preconditioner changes how the transpose
-  solve reaches the answer, never where it lands.
-- ⚠️ **Scope: this is the CASE'S SHIPPED native configuration (4 sweeps).** The best recorded zero-shift
-  native arm uses **8 sweeps**; that arm is a separate question.
+- **⚠️ DOUBLING THE SMOOTHER SWEEPS BUYS EXACTLY NOTHING HERE — 1696 applications either way, not one
+  cycle different, at 1.59× the cost per application. So 8 sweeps is STRICTLY DOMINATED by 4 on this
+  operator.** That is worth stating loudly because this file's standing rule is the opposite one —
+  *"never quote an arm at one smoother-sweep count"*, which earned itself twice when a sweep ladder
+  reversed a verdict. On the adjoint's operator the ladder is flat, so the rule's usual remedy (run more
+  sweeps before believing a native arm lost) does not apply.
+  **The setting is verified to have taken effect, which matters because a no-op produces the same
+  identical count:** the coarsening line is unchanged (sweeps do not touch the coarse space, as
+  expected) while the measured per-application cost moves 383 → 607 ms (400→800 applications in 153 s
+  against 243 s). Cost changed, convergence did not.
+- **All three arms' gradients agree to 9–10 significant figures** (−3.179366754e+03 for PETSc and for
+  native-8, −3.179366759e+03 for native-4), which is the correctness check behaving exactly as it must:
+  a preconditioner changes how the transpose solve reaches the answer, never where it lands.
 - ⚠️ **Applications, not cycles, and not wall clock.** A cycle count is a fair proxy only when the
-  candidates share a per-application cost, and these two explicitly do not — the same trap that nearly
+  candidates share a per-application cost, and these arms explicitly do not — the same trap that nearly
   killed the field split (31 % faster end to end *while taking 11 % more cycles*). Wall clock across
   these runs is **contended** (another session ran a test tier throughout) and is not quotable; the
   application counts are contention-immune.
+- **Untested, and the honest remaining scope:** only the sweep count was varied on the native side. The
+  splitting, `pressure_sweeps`, `omega`, the strength threshold and the level count are all at the
+  case's shipped values, and this says nothing about them. What it does establish is that the *cheapest*
+  lever on that list — more smoothing — is spent.
 
 **⚠️⚠️ DO NOT SIZE AN ADJOINT SOLVE FROM THE ZERO-SHIFT FIGURES BELOW — treat them as stale until
 re-measured.** The 60-restart budget that failed was chosen *from* them (11 cycles at uniform reach, 22
