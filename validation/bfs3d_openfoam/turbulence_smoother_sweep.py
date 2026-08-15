@@ -76,11 +76,10 @@ from aquaflux.solve import (  # noqa: E402
     block_stencil_gather_map,
     build_amg_vcycle,
     native_nodal_inverse,
-    native_per_field_inverse,
     relative_residual_gmres,
     solve_linear,
 )
-from aquaflux.solve.linear import restart_cycles  # noqa: E402
+from aquaflux.solve import restart_cycles  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _coupled_jacobian_plan,
     _coupled_shift_policy,
@@ -245,31 +244,37 @@ def trailing_setup(shifted, groups, arm: str, coupled=None, state=None) -> float
 
 
 def _native_factory(arm: str, coupled=None, state=None):
-    """The JAX-native trailing inverse for a ``native`` arm, or ``None`` for a PETSc-smoother arm.
+    """The JAX-native trailing inverse for a ``nodal`` arm, or ``None`` for a PETSc-smoother arm.
 
-    ``nativeN`` builds one JAX-native hierarchy PER FIELD over that field's own diagonal sub-block of
-    the real Jacobian, composed block-triangularly, at ``N`` V-cycles each (default 1). No host solver
-    and no callback out of the traced solve on this half.
+    ``nodal[N][cM]`` builds ONE block-aware JAX-native hierarchy over the whole trailing group,
+    coarsening whole cells under a per-cell block smoother, at ``N`` V-cycles per apply and a coarse
+    grid of ``M`` equations. No host solver and no callback out of the traced solve on this half.
 
-    The per-field split is not a simplification but the thing that makes it buildable: the native
-    aggregation takes a bare matrix with no block size, so on a two-field block it merges different
-    fields of different cells into one aggregate and manufactures a degenerate coarse row. One field per
-    hierarchy removes that, and the coupling comes back exactly through the block-triangular composition.
+    Being block-aware is what makes it buildable: an aggregation given a bare matrix with no block size
+    merges different fields of different cells into one aggregate and manufactures a degenerate coarse
+    row. Coarsening cells removes that at the source.
+
+    The earlier ``nativeN`` arm built one hierarchy PER FIELD instead, composing them
+    block-triangularly to dodge the same problem. It is gone with the class behind it: a per-field pair
+    is a weaker object than one block-aware hierarchy, so its measurements never transferred to the
+    thing that replaced it.
     """
     if not _is_native(arm):
         return None
     # `nodal[N][cM]` is ONE hierarchy over the whole group, coarsening cells with a block smoother:
     # `N` V-cycles per apply (default 1) and a coarse grid of `M` equations (default the builder's own).
-    # `nativeN` is the older one-hierarchy-per-field arrangement it supersedes where it works.
-    if arm.startswith("nodal"):
-        spec = re.fullmatch(r"nodal(\d*)(?:c(\d+))?", arm)
-        if spec is None:
-            raise SystemExit(f"cannot parse the nodal arm {arm!r}; expected nodal[N][cM]")
-        cycles, coarse = spec.groups()
-        return native_nodal_inverse(
-            cycles=int(cycles or 1), **({} if coarse is None else {"max_coarse": int(coarse)})
+    spec = re.fullmatch(r"nodal(\d*)(?:c(\d+))?", arm)
+    if spec is None:
+        raise SystemExit(
+            f"cannot parse the native arm {arm!r}; expected nodal[N][cM]. The older one-hierarchy-"
+            "per-field arm (`nativeN`) is gone with the class behind it: it was superseded by the "
+            "nodal inverse, and its measurements never transferred -- a per-field pair is a weaker "
+            "object than one block-aware hierarchy, so its numbers described a different thing."
         )
-    return native_per_field_inverse(cycles=int(arm.removeprefix("native") or 1))
+    cycles, coarse = spec.groups()
+    return native_nodal_inverse(
+        cycles=int(cycles or 1), **({} if coarse is None else {"max_coarse": int(coarse)})
+    )
 
 
 def run(arm, shifted, groups, n_fields, coupled, state, rhs, op_shift, loose, generator):

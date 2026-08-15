@@ -45,8 +45,8 @@ from aquaflux.solve import (  # noqa: E402
     block_stencil_colouring,
     block_stencil_gather_map,
 )
-from aquaflux.solve.amg_preconditioner import MonolithicAmgPreconditioner  # noqa: E402
-from aquaflux.solve.frozen_operator import symmetrically_equilibrate  # noqa: E402
+from aquaflux.solve import MonolithicAmgPreconditioner  # noqa: E402
+from aquaflux.solve import symmetrically_equilibrate  # noqa: E402
 from aquaflux.solve.multigrid import (  # noqa: E402
     _aggregation_edges,
     _cell_graph,

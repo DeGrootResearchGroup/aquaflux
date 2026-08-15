@@ -97,8 +97,7 @@ class StepReport(NamedTuple):
         offset and is blind within a restart cycle**: a solve that converges in 1, a few, or up to
         ``restart`` matvecs all report ``3``, and it only climbs once a solve genuinely spills past a
         restart cycle. So ``cycles`` is a raw cost primitive, **not** a literal cycle count — read
-        :attr:`restart_cycles` (offset-corrected) for the honest per-step cycle count and
-        :meth:`matvecs` for the matvec estimate. **``0`` means "no measurement", not "free":** a
+        :attr:`restart_cycles` (offset-corrected) for the honest per-step cycle count. **``0`` means "no measurement", not "free":** a
         pseudo-transient step records its count only on acceptance, so a step whose every damping
         attempt was rejected reports ``0`` despite having burned several solves — skip zeros.
     inner_iterations : int
@@ -178,14 +177,6 @@ class StepReport(NamedTuple):
         no-measurement ``cycles = 0`` step stays ``0``).
         """
         return _strip_step_offset(self.cycles, self.inner_iterations)
-
-    def matvecs(self, restart: int) -> int:
-        """Upper-bound matvec estimate: :attr:`restart_cycles` times the GMRES ``restart`` length.
-
-        An upper bound because ``num_steps`` is cycle-granular -- blind within the final partial cycle,
-        which holds anywhere from 1 to ``restart`` matvecs.
-        """
-        return self.restart_cycles * restart
 
 
 class MarchResult(NamedTuple):

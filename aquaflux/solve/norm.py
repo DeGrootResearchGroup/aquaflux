@@ -34,7 +34,8 @@ def block_two_norms(vector: jnp.ndarray, sizes: tuple[int, ...]) -> jnp.ndarray:
 
     Splits ``vector`` into blocks of the given ``sizes`` (in order) and returns their per-block
     2-norms. The single home for the per-field-block magnitudes, shared by :class:`BlockScaledNorm`
-    and the block-relative forward-solve stop (``block_relative_residual_gmres``).
+    -- its one consumer. (An earlier note named a second, ``block_relative_residual_gmres``;
+    no such function was ever written, so the helper was extracted for a caller that never arrived.)
 
     Parameters
     ----------

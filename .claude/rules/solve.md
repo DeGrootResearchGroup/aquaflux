@@ -19,6 +19,18 @@ Governed by the root `CLAUDE.md` Engineering Principles.
   linear solve wrapped so its gradient comes from **implicit differentiation**, not by
   unrolling Krylov iterations onto the tape.
 
+> **⚠️ The guard scanned `aquaflux/` ONLY, and the boundary eroded where it did not look (extended
+> 2026-08-15).** `validation/` held **16** deep imports of names `__all__` already advertises —
+> `restart_cycles`, `MonolithicAmgPreconditioner`, `symmetrically_equilibrate`, the probe-plan types —
+> so "this cannot erode silently" was true of the directory under guard and false next door. Those
+> harnesses are the project's re-adjudication instruments, so a rename inside a preconditioner breaks a
+> *study* rather than a test: the more expensive failure, and the later-discovered one. The rule now
+> enforced over `validation/` is the one needing no API decision — **if the package exports it, import
+> it from the package** — and the harnesses' genuinely-internal reaches are an explicit list
+> (`VALIDATION_INTERNAL_REACHES`) asserted in **both** directions, so an unlisted reach fails and so
+> does a stale entry. Note the guard immediately found four violations an ad-hoc regex sweep had
+> missed, because it parses imports rather than matching lines.
+
 > **`solve/__init__.py` is the API boundary (binding, #48).** Everything consumable from this
 > package is re-exported there, and **library code imports `from aquaflux.solve import …`, never
 > `from aquaflux.solve.<submodule> import …`**. A name absent from `__all__` is internal (reach for it
@@ -1568,7 +1580,9 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       shift. That keeps the full stencil fill and the true source linearizations, and needs **no**
       reparametrization scaling, because the Jacobian is already in the solved variable — the log-ω
       chain factor and its wall-fixation trap simply do not arise. Built as
-      `solve/field_split.PerFieldNativeInverse` / `native_per_field_inverse`, with the two fields
+      `solve/field_split.PerFieldNativeInverse` / `native_per_field_inverse` (**both DELETED 2026-08-15**
+      — see the deletion note in the field-split section; the surviving inverse is `NodalNativeInverse`),
+      with the two fields
       composed block-triangularly (k leading).
       **This corrected a real cost: the wrong explanation was taken as an accepted blocker and sent the
       first implementation down a transport-operator detour** — a 13×-sparser, source-clamped, per-field
@@ -1619,7 +1633,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     built and is what closed the *quality* gap. Read the 2026-08-10 section at the top of this
     IN-PROGRESS group; what remains open there is the positivity limiter, not the preconditioner.
     **The bullet is kept, unedited below, for two reasons that are worth more than the numbers:** it
-    records that `PerFieldNativeInverse` (two per-field hierarchies) is a different and weaker object
+    records that the deleted per-field inverse (two per-field hierarchies) was a different and weaker object
     than the single nodal one now used, so its measurements never transferred; and it is the clearest
     instance in this file of a *cost* attributed to a method when it belonged to a data structure.
 
@@ -1755,7 +1769,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     from "remove the callback".** The second half is a defined enhancement rather than a research
     problem — teach `_aggregate` a block size so it coarsens *cells* as GAMG does, which would let one
     two-field native hierarchy replace the per-field pair and close the quality gap without doubling
-    the cycles. It does nothing about the 2.8×. `PerFieldNativeInverse` is kept in the tree because it
+    the cycles. It does nothing about the 2.8×. **`PerFieldNativeInverse` is GONE (deleted 2026-08-15);**
+    the paragraph below is why it was kept until then, and it
     is tested, transposable, adjoint-legal, and is what a block-aware aggregation would slot into — it
     is **not** wired into the production builder.
 
@@ -2931,13 +2946,21 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     neighbourhood, so it seeded few aggregates and left most vertices to a ragged cleanup pass.
   - `jax.jit` on the native applies (they were dispatching eagerly, ~18 % of apply cost) and
     `indices_are_sorted=True` in `_coo_apply` (CSR→COO is row-sorted by construction).
-  - `PerFieldNativeInverse` / `NodalNativeInverse` (`solve/field_split.py`, over the shared
+  - **There is no `PerFieldNativeInverse` — deleted 2026-08-15 (binding).** It had no production caller
+    (only its own tests and one sweep arm), its own docstring recorded it as superseded by
+    `NodalNativeInverse` wherever that works, and it was never ported onto `NativeHierarchyInverse` — so
+    it had neither `refactor_block` nor `refactor` and `BlockTriangularFieldSplit.refactor` **raised**
+    the first time a march refreshed with it, while being exported from `__all__` as public API. It also
+    re-committed two costs the shared base was written to remove (eager per-field transposes; a fresh
+    closure per apply). Its measurements never transferred to the nodal inverse in any case — a
+    per-field pair is a weaker object than one block-aware hierarchy — so the `nativeN` arm in
+    `turbulence_smoother_sweep.py` went with it, leaving `nodal[N][cM]`.
+  - `NodalNativeInverse` (`solve/field_split.py`, over the shared
     `solve/native_inverse.NativeHierarchyInverse` base), both transposable in
     closed form and fixed linear operators, so adjoint-legal. **⚠️ "Neither is wired into production" was
     wrong — settled from source 2026-08-10.** The nodal inverse is reachable through
     `native_nodal_inverse` and is the `BFS3D_TURBULENCE_INVERSE=native` arm; what is true is that it is not a
-    *default*. `PerFieldNativeInverse` genuinely is unwired — only the tests and `turbulence_smoother_sweep.py`
-    construct it.
+    *default*.
 
   - **`prolongation_smoothing` is its own parameter, no longer welded to `mis_aggregation`.** The old
     flag chose the aggregation *and* the prolongator formula together, so "MIS with and without

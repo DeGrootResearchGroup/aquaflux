@@ -53,7 +53,7 @@ import numpy as np
 # harnesses in this directory do.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from aquaflux.solve.sparse_jacobian import (  # noqa: E402
+from aquaflux.solve import (  # noqa: E402
     ColumnProbePlan,
     ProbeGather,
     block_stencil_colouring,

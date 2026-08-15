@@ -53,7 +53,7 @@ from aquaflux.solve import (  # noqa: E402
     relative_residual_gmres,
     solve_linear,
 )
-from aquaflux.solve.linear import restart_cycles  # noqa: E402
+from aquaflux.solve import restart_cycles  # noqa: E402
 from aquaflux.turbulence import hybrid_initialize  # noqa: E402
 from aquaflux.turbulence.coupled import (  # noqa: E402
     _PROBE_BATCH_SIZE,

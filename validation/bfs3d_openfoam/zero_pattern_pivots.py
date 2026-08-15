@@ -277,7 +277,7 @@ def _assemble_library(jacobian: sp.csr_matrix, shift: np.ndarray, n_fields: int)
     library, and every conclusion drawn from them is about the wrong thing. The fingerprints are what
     settle it, because they compare the arms' **values** rather than only their patterns.
     """
-    from aquaflux.solve.amg_preconditioner import MonolithicAmgPreconditioner
+    from aquaflux.solve import MonolithicAmgPreconditioner
     from aquaflux.solve import equilibrate_cell_major
 
     return equilibrate_cell_major(MonolithicAmgPreconditioner._shifted(jacobian, shift), n_fields)

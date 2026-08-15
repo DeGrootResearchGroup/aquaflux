@@ -280,8 +280,8 @@ def test_residual_ratio_step_differs_from_base_only_in_a_dynamic_beta_leaf() -> 
     assert not jnp.allclose(step_a.relaxation_schedule.beta, step_b.relaxation_schedule.beta)
 
 
-def test_step_report_restart_cycles_and_matvecs_correct_the_num_steps_offset() -> None:
-    """`restart_cycles` strips lineax's +2-per-inner-solve offset; `matvecs` scales by the restart.
+def test_step_report_restart_cycles_corrects_the_num_steps_offset() -> None:
+    """`restart_cycles` strips lineax's +2-per-inner-solve offset.
 
     lineax's `num_steps` (StepReport.cycles) reports 3 for any solve within one 120-restart cycle and is
     summed over the inner Newton iterations for a dual-time step, so the raw number conflates the
@@ -290,13 +290,11 @@ def test_step_report_restart_cycles_and_matvecs_correct_the_num_steps_offset() -
     single = StepReport(step=0, cycles=3, residual_norm=1.0, residual_ratio=1.0, alpha=1.0)
     assert single.inner_iterations == 1  # default: a single-step march has no inner loop
     assert single.restart_cycles == 1  # 3 - 2*1: one ideal restart cycle
-    assert single.matvecs(120) == 120
 
     dual = StepReport(
         step=0, cycles=6, residual_norm=1.0, residual_ratio=1.0, alpha=1.0, inner_iterations=2
     )
     assert dual.restart_cycles == 2  # 6 - 2*2: two inner iters, each an ideal 1-cycle solve
-    assert dual.matvecs(120) == 240
 
     rejected = StepReport(step=0, cycles=0, residual_norm=1.0, residual_ratio=1.0, alpha=1.0)
     assert rejected.restart_cycles == 0  # a no-measurement step stays 0, not negative
