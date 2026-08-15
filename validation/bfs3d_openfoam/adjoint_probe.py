@@ -97,6 +97,17 @@ ADJOINT_MAX_RESTARTS = int(os.environ.get("BFS3D_ADJOINT_SOLVER_MAX_RESTARTS", "
 #: a finite difference in part 2, which is itself only as good as the two solves behind it.
 ADJOINT_RTOL = float(os.environ.get("BFS3D_ADJOINT_SOLVER_RTOL", "1e-10"))
 
+#: Print a line every this many transposed applications, so the transpose solve is not a silent black
+#: box. `0` disables it. Cheap: one modulo per application, against a preconditioner apply.
+ADJOINT_HEARTBEAT = int(os.environ.get("BFS3D_ADJOINT_HEARTBEAT", "100"))
+
+#: Skip the watched forward-only evaluation, which exists to show the objective and its per-step march
+#: and costs a whole solve. A gradient evaluation re-runs the forward solve anyway, so when the
+#: question is the ADJOINT -- sweeping its Krylov settings, say -- that first pass is pure duplicate
+#: cost: it halves the price of every arm to drop it. Keep it for the first run of a configuration,
+#: where the per-step trajectory is what shows the solve reached a root at all.
+SKIP_FORWARD = os.environ.get("BFS3D_ADJOINT_SKIP_FORWARD", "") not in ("", "0")
+
 
 def adjoint_solver():
     """The transpose solve's own GMRES, at a relative-residual stop rather than a componentwise one.
@@ -144,10 +155,12 @@ class TransposeApplyCounter:
         across a gradient evaluation's transpose solve.
     """
 
-    def __init__(self, inner: object) -> None:
+    def __init__(self, inner: object, heartbeat: int = 0) -> None:
         self.inner = inner
         self.transposed = 0
         self.forward = 0
+        self.heartbeat = heartbeat
+        self.started = time.time()
 
     @property
     def n_dofs(self) -> int:
@@ -156,6 +169,20 @@ class TransposeApplyCounter:
     def apply(self, residual, *, transpose: bool = False):
         if transpose:
             self.transposed += 1
+            # A HEARTBEAT, because the transpose solve is otherwise a silent black box for however
+            # long it runs -- it is one linear solve, so it has no steps to report, and a run that is
+            # going nowhere looks exactly like one that is nearly done. The application count is the
+            # analogue of a per-step line: it says the solve is alive, how fast it is spending its
+            # budget, and -- read against the restart length -- roughly which cycle it is in.
+            # ⚠️ It does NOT say whether the residual is falling, so it distinguishes running from
+            # hung, not converging from stagnating.
+            if self.heartbeat and self.transposed % self.heartbeat == 0:
+                print(
+                    f"    [adjoint] {self.transposed} applications "
+                    f"(~cycle {self.transposed / (ADJOINT_RESTART + 1):.1f}) "
+                    f"in {time.time() - self.started:.0f}s",
+                    flush=True,
+                )
         else:
             self.forward += 1
         return self.inner.apply(residual, transpose=transpose)
@@ -183,7 +210,7 @@ def _adjoint_cost(counter: TransposeApplyCounter, forward_before: int) -> str:
     )
 
 
-def count_adjoint_applies(continuation) -> TransposeApplyCounter:
+def count_adjoint_applies(continuation, heartbeat: int = 0) -> TransposeApplyCounter:
     """Install a :class:`TransposeApplyCounter` on ``continuation``'s adjoint preconditioner.
 
     The adjoint factory is a ``TransposedPreconditioner`` wrapping a frozen-transpose factory that holds
@@ -193,7 +220,7 @@ def count_adjoint_applies(continuation) -> TransposeApplyCounter:
     it.
     """
     preconditioner = continuation.adjoint_preconditioner_factory.factory.preconditioner
-    counter = TransposeApplyCounter(preconditioner.factors)
+    counter = TransposeApplyCounter(preconditioner.factors, heartbeat=heartbeat)
     preconditioner.factors = counter
     return counter
 
@@ -318,7 +345,7 @@ def main() -> None:
         leading_inverse=compare.LEADING_INVERSE,
     )
     print(f"  preconditioner built in {time.time() - started:.0f}s", flush=True)
-    counter = count_adjoint_applies(continuation)
+    counter = count_adjoint_applies(continuation, heartbeat=ADJOINT_HEARTBEAT)
     # Every number below is only interpretable against the arm it was taken on, and the flow block is
     # the whole point of the comparison -- so state the bundle here rather than leaving it to be
     # reconstructed from the environment afterwards.
@@ -343,9 +370,14 @@ def main() -> None:
         f"\n  -- forward only, rtol {RTOL:g}, forward_rtol {FORWARD_RTOL:g}, max_steps {MAX_STEPS}",
         flush=True,
     )
-    started = time.time()
-    value = float(objective(1.0))
-    print(f"  forward only: objective {value:.9e}  in {time.time() - started:.0f}s", flush=True)
+    if SKIP_FORWARD:
+        print(
+            "  SKIPPED (BFS3D_ADJOINT_SKIP_FORWARD) -- the gradient re-runs it anyway", flush=True
+        )
+    else:
+        started = time.time()
+        value = float(objective(1.0))
+        print(f"  forward only: objective {value:.9e}  in {time.time() - started:.0f}s", flush=True)
 
     print("\n  -- part 1: does the gradient run, and is it finite?", flush=True)
     forward_applies_before = counter.forward
