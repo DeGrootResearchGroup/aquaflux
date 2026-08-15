@@ -735,6 +735,41 @@ missing from a toctree blocks the merge instead of turning the published site re
 Build locally with `-W` as well when you touch a docstring of a documented subpackage, a
 `docs/` page, or a cross-reference — the CI job is the backstop, not the first line.
 
+**Publishing a subpackage means publishing its whole `__all__`.** Adding a name to
+`PUBLIC_SUBPACKAGES` puts every one of that subpackage's exports on the site, so the export list
+*is* the editorial decision — deliberately, because a second hand-maintained "what to document"
+list in `conf.py` would drift from `__all__`, which is exactly what generating the page removes.
+If a name should not be on the site, take it out of `__all__`. How those exports are *grouped* on
+the page is a separate table, `SUBPACKAGE_GROUPS`, keyed on the module each name is **defined** in
+rather than on the names themselves — so it survives names being added, and it cannot hide one: an
+unlisted module still gets a group headed by its own name. Extend it when a subpackage grows a
+module, and note that `-W` cannot tell you when you forgot — the page stays complete, just less
+tidy. Three things bite when extending the published list; the first two cost a build each to
+rediscover, the third silently reports the wrong answer:
+
+- **A multi-name parameter entry must sit on ONE line.** NumPy style allows
+  `beta0, exponent, beta_floor` followed by an indented description, but the *name* line cannot
+  wrap: docutils reads the continuation as another field and the description as a block quote,
+  giving the `Field list ends without a blank line` / `Unexpected indentation` /
+  `Block quote ends without a blank line` triple, all attributed to the docstring rather than to
+  the wrap. The same triple comes from a prose paragraph left *after* the last entry inside a
+  `Parameters` section — every one of its lines is read as another field name. Such prose belongs
+  above `Parameters`, or in its own section.
+- **A field whose default is a plain function is documented by that function's docstring.**
+  autodoc omits undocumented attributes, which is what keeps the solvers' configuration fields off
+  the site — but an `equinox` field like `residual_norm = field(default=jnp.linalg.norm)` leaves
+  the *function* as the class attribute, so autodoc finds its docstring and publishes third-party
+  prose that need not even be valid reStructuredText. `autodoc_inherit_docstrings` does not reach
+  this (autodoc already forces it off for attributes). `conf.py`'s `_skip_borrowed_member_doc`
+  (`autodoc-skip-member`) drops any class member that is a routine defined outside `aquaflux`,
+  restoring the skip-if-undocumented rule; each such field stays documented by its class's
+  `Attributes` section.
+- **`docs/generated/`, `docs/api.md`, and `docs/_build/` are gitignored build artifacts — delete
+  all three between probe builds.** Stubs written for a previous subpackage set are rebuilt from
+  the leftover files, so a run that looks clean can be clean only about the wrong set of pages,
+  and the warning count means nothing. `rm -rf docs/generated docs/api.md docs/_build` first,
+  every time.
+
 **A Sphinx extension enabled in `conf.py` must be matched by a dependency in the `docs`
 extra.** MyST's `linkify` needs `linkify-it-py` (hence `myst-parser[linkify]`), and its
 absence does not degrade gracefully: the parser raises on the first inline token of the first
