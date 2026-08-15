@@ -1111,3 +1111,77 @@ def test_the_stall_bailout_is_off_when_unset() -> None:
         stop_on_limit_stall=None,
     )
     assert len(result.reports) == 7
+
+
+def test_a_step_control_need_not_drive_the_shift() -> None:
+    """The protocol asks a control for a ready-to-run step, not for a beta ramp.
+
+    So the escalation's requirement must not be levied on every control: a step-agnostic one is
+    legitimate, and gating it would reject the very thing the protocol permits. A control that *does*
+    drive beta and is handed a step without one already fails loudly from its own ``tree_at``.
+    """
+    residual, phi0, _ = _march_and_solver_inputs()
+    result = forward_march(
+        DampedNewtonStep(line_search=6),
+        residual,
+        phi0,
+        max_steps=2,
+        rtol=1e-10,
+        atol=1e-12,
+        step_control=_CountingControl(),
+    )
+    assert result.control_state == 2  # ran, on a step carrying no shift at all
+
+
+def test_the_escalation_refuses_a_step_that_has_no_shift_to_escalate() -> None:
+    """The silent failure the gate replaces: a conforming step that simply never escalated.
+
+    ``DampedNewtonStep`` satisfies ``ForwardStep`` in full -- all four declared methods -- so a march
+    configured to escalate accepted one and then skipped every escalation, because a ``hasattr`` deep
+    in the loop came back False. From the log that is indistinguishable from a march that never needed
+    to escalate, which is the worst way for a safety net to be missing.
+
+    Asked of the policy, because it is the policy's requirement: the tight-solver fallback next door
+    has no such need (see the test below).
+    """
+    residual = _Cubic(jnp.zeros((1,)))
+    for policy in (RetryPolicy(on_cycles=3), RetryPolicy(on_alpha=0.5)):
+        with pytest.raises(TypeError, match="relaxation_schedule"):
+            forward_march(
+                DampedNewtonStep(),
+                residual,
+                jnp.ones((1,)),
+                max_steps=1,
+                rtol=1e-10,
+                atol=1e-12,
+                retry=policy,
+            )
+
+
+def test_the_divergence_retry_works_on_a_step_with_no_shift() -> None:
+    """It re-solves at a tighter tolerance and never touches beta, so it must not demand one.
+
+    This is the path that used to *raise*: announcing the retry read
+    ``active_step.relaxation_schedule`` unguarded, so a step satisfying the forward-step contract in
+    full crashed mid-march. The same contract gap as the test above, failing the opposite way -- one
+    silently did nothing, this one crashed -- which is why gating the escalation must not gate this.
+
+    ``_PoisonUnlessTight`` carries no ``relaxation_schedule`` at all and genuinely diverges under the
+    loose solver, so the retry and its announcement actually fire.
+    """
+    seen: list[tuple[str, float]] = []
+    result = forward_march(
+        _PoisonUnlessTight(),
+        _Cubic(jnp.zeros((1,))),
+        jnp.ones((1,)),
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        solver="loose",
+        retry=RetryPolicy(solver="tight"),
+        on_retry=lambda reason, attempt, beta: seen.append((reason, beta)),
+    )
+
+    assert seen == [("solver", 0.0)]  # announced, with no shift invented for a step that has none
+    assert bool(result.reports[0].diverged_retry)
+    assert result.reports[0].shift == 0.0

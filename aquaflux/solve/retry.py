@@ -102,6 +102,39 @@ class RetryPolicy:
         """Whether either escalation threshold is set, i.e. whether escalation can fire at all."""
         return self.on_cycles is not None or self.on_alpha is not None
 
+    def require_shifted(self, forward_step: ForwardStep) -> None:
+        """Reject a step this policy cannot escalate, at the seam rather than mid-march.
+
+        Escalation raises the pseudo-transient shift, so it needs a step carrying a
+        ``relaxation_schedule`` with a readable ``beta`` -- what
+        :class:`~aquaflux.solve.ShiftedForwardStep` declares and :class:`~aquaflux.solve.ForwardStep`
+        does not. The distinction was once enforced by ``hasattr`` deep in the march loop, which fails
+        **silently**: a :class:`~aquaflux.solve.DampedNewtonStep` satisfies ``ForwardStep`` in full, so
+        a march configured to escalate accepted one and then never escalated -- indistinguishable, from
+        the log, from a march that never needed to.
+
+        It belongs on the policy rather than on the march because it is *this policy's* requirement:
+        the tight-solver fallback next door has no such need, and gating it too would reject steps that
+        work perfectly well with it.
+
+        Raises
+        ------
+        TypeError
+            If ``forward_step`` carries no ``relaxation_schedule`` with a readable ``beta``.
+        """
+        # Checked against the SHIFT specifically, not `isinstance(..., ShiftedForwardStep)`. The
+        # argument is already typed `ForwardStep`, so re-testing those four methods at runtime would
+        # reject a legitimate duck-typed step for a reason that has nothing to do with escalation.
+        schedule = getattr(forward_step, "relaxation_schedule", None)
+        if schedule is None or not hasattr(schedule, "beta"):
+            raise TypeError(
+                "the beta-escalation retry (RetryPolicy.on_cycles / on_alpha) drives the "
+                "pseudo-transient shift strength, so it needs a forward step that carries a "
+                "`relaxation_schedule` with a readable `beta` (a PseudoTransientStep or a "
+                f"DualTimeStep). {type(forward_step).__name__} has none, so the retry would silently "
+                "do nothing. Either use a shifted step, or leave both thresholds unset."
+            )
+
     def with_inner_abort(self, forward_step: ForwardStep) -> ForwardStep:
         """Give ``forward_step`` this policy's discard thresholds, if it can act on them.
 

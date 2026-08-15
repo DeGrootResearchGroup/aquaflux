@@ -427,6 +427,21 @@ class StepControl(Protocol):
         """
 
 
+def _shift_of(forward_step: ForwardStep) -> float | None:
+    """The step's current shift strength, for **reporting**, or ``None`` if it has no shift.
+
+    Reporting must never demand a shift: a plain damped-Newton step legitimately has none, and a march
+    of one is a perfectly ordinary thing to run and to log. This is the read that belongs on every
+    reporting path -- ``StepReport.shift``, and the retry announcement, which reached for
+    ``forward_step.relaxation_schedule`` unguarded and raised ``AttributeError`` on exactly such a step.
+
+    It stays on the march rather than moving to :class:`~aquaflux.solve.RetryPolicy` with the retry
+    decisions: reporting a step's shift is not a retry concern, and the step summary reads it on every
+    step whether or not any retry is configured.
+    """
+    return getattr(getattr(forward_step, "relaxation_schedule", None), "beta", None)
+
+
 def _limit_collapsing(
     previous: StepReport | None, report: StepReport, progress: float = 1e-3
 ) -> bool:
@@ -677,6 +692,16 @@ def forward_march(
     residual_norm_0 = jnp.asarray(norm(residual_fn(phi0)))
     reference = float(residual_norm_0) if reference_norm is None else float(reference_norm)
 
+    # Check the step can support what was ASKED FOR, before the first step rather than during one. The
+    # escalation drives the pseudo-transient shift, which `ForwardStep` does not promise -- see
+    # `RetryPolicy.require_shifted`. Two neighbours are deliberately NOT gated, for opposite reasons:
+    # the tight-solver fallback re-solves and never touches beta, so it works on any step; and a
+    # `step_control` need not drive beta at all (the protocol only asks it to return a ready-to-run
+    # step), while one that does already fails *loudly* from inside itself when its `tree_at` cannot
+    # find the field. Only the escalation failed silently, so only it is gated.
+    if retry.escalates:
+        retry.require_shifted(forward_step)
+
     # Both thresholds are knowable INSIDE a step -- the cost one the moment a solve returns, the
     # step-length one the moment a line search collapses -- but the reaction below only runs once the
     # whole step is back. Push them down to the step so it can stop there and then, rather than
@@ -743,7 +768,6 @@ def forward_march(
             (reason := retry.escalation_reason(outcome, residual_norm, reference)) is not None
             and retries < retry.cycles_limit
             and not converged_at(float(residual_norm))
-            and hasattr(active_step.relaxation_schedule, "beta")
         ):
             retries += 1
             # `RetryPolicy.escalate` SCALES the existing β leaf rather than rebuilding one; its
@@ -786,11 +810,11 @@ def forward_march(
         diverged_retry = retry.solver is not None and retry.has_diverged(residual_norm, reference)
         if diverged_retry:
             if on_retry is not None:
-                on_retry(
-                    "solver",
-                    retries + 1,
-                    float(getattr(active_step.relaxation_schedule, "beta", 0.0)),
-                )
+                # `_shift_of`, not a direct read: the divergence retry needs no shift, so it runs on
+                # steps that have none, and this reported the shift by reaching straight through
+                # `relaxation_schedule` -- raising `AttributeError` on a step that satisfies
+                # `ForwardStep` in full. Unchanged beta here in any case; nothing escalated.
+                on_retry("solver", retries + 1, float(_shift_of(active_step) or 0.0))
             outcome, residual_norm = _march_step(
                 active_step, residual_fn, prestep_state, residual_norm_0, retry.solver
             )
@@ -803,12 +827,7 @@ def forward_march(
         # level (and adapt on from there), so β_min can be driven toward zero and the *controller* decides how
         # large a pseudo-timestep is safe. Only when β was actually escalated, and only for a control that
         # carries β (the dual-time family exposes `carry_beta`); no escalation ⇒ byte-identical.
-        if (
-            retries
-            and step_control is not None
-            and hasattr(step_control, "carry_beta")
-            and hasattr(active_step.relaxation_schedule, "beta")
-        ):
+        if retries and step_control is not None and hasattr(step_control, "carry_beta"):
             control_state = step_control.carry_beta(
                 control_state, float(active_step.relaxation_schedule.beta)
             )
@@ -816,7 +835,7 @@ def forward_march(
         current = float(residual_norm)
         # Not every ForwardStep carries a relaxation schedule (a plain damped-Newton step has none), and
         # a schedule need not expose a readable beta -- report 0 rather than demanding either.
-        step_shift = getattr(getattr(active_step, "relaxation_schedule", None), "beta", None)
+        step_shift = _shift_of(active_step)
         report = StepReport(
             step=len(reports),
             cycles=int(outcome.cycles),
