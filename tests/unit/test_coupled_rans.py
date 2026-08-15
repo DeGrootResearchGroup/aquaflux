@@ -1135,3 +1135,37 @@ def test_a_supplied_step_with_no_builder_is_rejected_when_a_refresh_is_configure
     RefreshPolicy(trigger=object()).require_rebuildable(None)
     RefreshPolicy().require_rebuildable(step)
     RefreshPolicy(trigger=object(), limit=0).require_rebuildable(step)
+
+
+def test_globalization_knobs_still_reach_the_continuation_builder(monkeypatch) -> None:
+    """``grow`` / ``descent_backoff`` / ``descent_test`` are no longer named on ``solve_coupled``, and
+    still arrive at :func:`coupled_continuation` unchanged -- they ride ``**continuation_kwargs``.
+
+    They used to be declared on ``solve_coupled`` *and* forwarded explicitly, while the very same call
+    sites already splatted ``**continuation_kwargs`` into the same function -- so the declarations were
+    pure duplication, costing three parameters on an already-wide signature to buy nothing. Deleting
+    them is call-for-call identical, and this pins that: it is the only thing standing between the
+    deletion and a silently dropped knob.
+    """
+    from aquaflux.turbulence import coupled as coupled_module
+
+    _, coupled = _cavity(4)
+    seen: dict = {}
+
+    def spy(assembler, reference_state, **kwargs):
+        seen.update(kwargs)
+        raise _StopBuild
+
+    monkeypatch.setattr(coupled_module, "coupled_continuation", spy)
+    with pytest.raises(_StopBuild):
+        solve_coupled(coupled, grow=2, descent_backoff=3, descent_test=True, beta0=1.5)
+
+    assert seen["grow"] == 2
+    assert seen["descent_backoff"] == 3
+    assert seen["descent_test"] is True
+    # An ordinary continuation knob rides the same path, so the mechanism is not special-cased.
+    assert seen["beta0"] == 1.5
+
+
+class _StopBuild(Exception):
+    """Aborts ``solve_coupled`` once the continuation build has been observed."""

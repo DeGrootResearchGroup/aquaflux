@@ -6510,6 +6510,13 @@ transfer to any thresholded arm.
     accelerates. Pinned by a trace-counting test (extra steps add zero traces). Note the residual is
     invoked several times *within one trace* (step, line-search ladder, norm), so trace count ≠ compile
     count — assert that further steps add none, not that the total is 1.
+  - **`solve_coupled` does NOT declare `grow` / `descent_backoff` / `descent_test`, and must not be
+    "fixed" to (binding).** They are `coupled_continuation` parameters and reach it through
+    `**continuation_kwargs`, which `solve_coupled` already splats into that same function at both of
+    its build sites. Declaring them as well — which it used to — meant three extra parameters on an
+    already-wide signature forwarding what was forwarded anyway. Their documented home is
+    `coupled_continuation`, where the parameters actually live; pinned call-for-call by
+    `test_globalization_knobs_still_reach_the_continuation_builder`.
   - **The four refresh settings are ONE injected object — `RefreshPolicy` (`solve/refresh.py`),
     exported from `aquaflux.solve` (BUILT).** `trigger` / `limit` / `builder` / `precondition_step`
     were four keyword arguments on `solve_coupled`, meaningless apart: a `limit` with no trigger bounds
