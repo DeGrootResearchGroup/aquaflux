@@ -79,6 +79,7 @@ from aquaflux.solve import (
     CflResidualDualTimeControl,
     InnerIterateCheckpointer,
     MarchLogger,
+    RefreshPolicy,
     RetryPolicy,
     StateCheckpointer,
     combine_observers,
@@ -1274,7 +1275,9 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         rung_residuals.append(coupled_residuals(companion, engine, seed_state))
         return dict(
             continuation=engine,
-            precondition_step=_recording_precondition(refresh) if DUMP_STEP_LIMIT else refresh,
+            refresh=RefreshPolicy(precondition_step=_recording_precondition(refresh))
+            if DUMP_STEP_LIMIT
+            else refresh,
         )
 
     options = (

@@ -325,11 +325,24 @@ class MarchLogger:
         self._needs_headings = True
 
     def on_step(self, report: StepReport) -> None:
-        """``on_step`` callback: log a step with no case metrics (no state is available here)."""
+        """``on_step`` callback: log a step with no case metrics (no state is available here).
+
+        ⚠️ **Wire this OR** :meth:`on_checkpoint`, **never both.** They are two renderings of the same
+        event, not two events -- this one without the injected case metrics, that one with -- and a
+        march calls its ``on_step`` and ``on_checkpoint`` seams **unconditionally on every step**. Give
+        it the same logger for both and every step is logged twice, with this object's step counter and
+        cumulative-cycle total double-counted along with it (measured: 2 steps produce 4 rows and a
+        doubled cumulative). Prefer :meth:`on_checkpoint` wherever a state is available, since it is
+        the strictly more informative of the two.
+        """
         self._log(report, None)
 
     def on_checkpoint(self, report: StepReport, state: Any) -> None:
-        """``on_checkpoint`` callback: log a step and append the injected case metrics."""
+        """``on_checkpoint`` callback: log a step and append the injected case metrics.
+
+        ⚠️ **Wire this OR** :meth:`on_step`, **never both** -- see that method for why. This is the one
+        to prefer: it renders the same row plus the case metrics.
+        """
         self._log(report, state)
 
     def on_inner(

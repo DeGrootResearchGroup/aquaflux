@@ -887,7 +887,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     load-bearing part and the seconds are deleted; re-measure if a cost model needs them.) `spilu` is a hard floor: a *threshold* ILU's fill pattern is
     value-dependent, so the symbolic factorization cannot be frozen and re-used (and scipy exposes no
     symbolic/numeric split), leaving **amortization (refresh less often) as the only cheap lever**. The
-    coupled driver wiring is `coupled_ilut_refreshing_continuation` (a `refresh_builder` for
+    coupled driver wiring is `coupled_ilut_refreshing_continuation` (a `refresh.builder` for
     `solve_coupled` — see `.claude/rules/turbulence.md`); it pairs with a `CoefficientDriftTrigger` so the
     re-factor *leads* the staleness. Pinned by `test_refresh_in_place_repreconditions_the_same_compiled_matvec`
     (unit) and `test_ilut_refreshing_continuation_refreshes_the_same_step_in_place` (integration).
@@ -4317,7 +4317,7 @@ because they cost real time to learn:
   (5.337542799e+04), which is the expected control: the reach is a preconditioner-only approximation and
   cannot move the root.
 - **⚠️ `on_step` CANNOT BE USED UNDER `jax.grad`, and it is the observer that makes a march readable.**
-  `solve_coupled` raises rather than letting it through: `refresh_trigger` / `step_control` / `on_step` /
+  `solve_coupled` raises rather than letting it through: `refresh.trigger` / `step_control` / `on_step` /
   `on_checkpoint` / `precondition_step` / `retry` all drive a forward-only **eager** march that
   steps in Python on concrete residual norms, which a differentiation tracer cannot flow through. The
   adjoint is refresh-independent, so the single-stage solve returns the identical gradient; the cost is
@@ -6313,7 +6313,7 @@ transfer to any thresholded arm.
         so a refresh changes only the forward Krylov count, never the converged state or its IFT adjoint).
         **BUILT** — `forward_march` + `CycleGrowthTrigger` (see the `march.py` section) segment the march
         around the off-jit rebuild, which is required because the traced solve is one `lax.while_loop` and
-        scipy AMG assembly cannot run inside it; `solve_coupled(refresh_trigger=…)` is the driver.
+        scipy AMG assembly cannot run inside it; `solve_coupled(refresh=RefreshPolicy(trigger=…))` is the driver.
         **⚠️ SETTLED FROM THE CODE — the old claim here, "a refresh still forces a full recompile because these
         are non-pytrees hashed by identity", is SUPERSEDED and deleted.** The fix it proposed as hypothetical was
         built: the coarsening structure is value-independent **at this path's `strength_threshold=0`**, and
@@ -6324,7 +6324,7 @@ transfer to any thresholded arm.
         the threshold, not of the level split**, so it does not carry to the native flow block, which runs at
         0.25 and re-partitions on every refresh; that path keeps the cache hit with
         `SmoothedHierarchy.refit` instead (see the flow-block section). What a refresh still costs is the off-jit scipy
-        rebuild plus the one-off retrace of the rebuilt `ForwardStep`, which is why `refresh_limit` still bounds
+        rebuild plus the one-off retrace of the rebuilt `ForwardStep`, which is why `refresh.limit` still bounds
         it. The wall figures once attached to this question (a "~60–240 s" recompile and a "~38 s" refresh) were
         both recorded with no configuration and are deleted with it.
       - **The observed march RETURNS ITS OWN CONVERGED STATE — the traced finishing solve is only the
@@ -6445,6 +6445,22 @@ transfer to any thresholded arm.
 
 ## The observed march — forward_march, triggers, controls, logging
 
+- **⚠️ `MarchLogger.on_step` and `.on_checkpoint` are MUTUALLY EXCLUSIVE renderings of one event —
+  wire one, never both (measured 2026-08-15).** Both call `_log`; they differ only in whether the
+  injected case metrics are appended (`on_checkpoint` has the state, `on_step` does not). But
+  `forward_march` calls its `observer` and `checkpoint` seams **unconditionally on every step**, so
+  handing the same logger to both logs every step **twice** and double-counts the logger's own step
+  and cumulative-cycle totals — measured, 2 steps produce 4 rows and `cum 8` against the correct
+  `cum 4`. The shipped driver wires `on_checkpoint` and deliberately leaves `on_step` unwired; prefer
+  that, since `on_checkpoint` is the strictly more informative of the two. Both docstrings now carry
+  the warning.
+  **This is why the planned "observation bundle" (one `MarchObserver` replacing `on_step` /
+  `on_checkpoint` / `on_retry`) is NOT built and must not be planned from the premise that
+  `MarchLogger` already implements it.** The method names match; the semantics do not. A bundle needs
+  the two renderings reconciled first — one row per step whichever seam fires — which is a change to
+  the log's output format, not a signature refactor.
+
+
 - **`march.py` — BUILT (`forward_march`, `StepReport`/`MarchResult`, `RefreshTrigger`/`CycleGrowthTrigger`):
   the observed, forward-only march that drives a mid-march preconditioner refresh.**
   - **Two marches, ONE decision layer (binding — this is the shape to hold).** `_forward` (traced,
@@ -6494,6 +6510,23 @@ transfer to any thresholded arm.
     accelerates. Pinned by a trace-counting test (extra steps add zero traces). Note the residual is
     invoked several times *within one trace* (step, line-search ladder, norm), so trace count ≠ compile
     count — assert that further steps add none, not that the total is 1.
+  - **The four refresh settings are ONE injected object — `RefreshPolicy` (`solve/refresh.py`),
+    exported from `aquaflux.solve` (BUILT).** `trigger` / `limit` / `builder` / `precondition_step`
+    were four keyword arguments on `solve_coupled`, meaningless apart: a `limit` with no trigger bounds
+    a loop that never runs, a `builder` with no trigger is called once. The derived predicates and the
+    one validation are on the object — `refreshes` (trigger AND budget), `observes` (does this force
+    the eager march), `segments` (= `limit + 1`), `is_last_segment`, and `require_rebuildable`, which
+    raises when a caller-supplied step has no builder to rebuild it with.
+    - **It is a DRIVER-level object and `forward_march` does NOT take it (binding).** The march uses
+      only `trigger` and `precondition_step`; `limit` and `builder` govern the *sequence of segments*,
+      which is the driver's loop. Passing the whole policy down would hand the march two fields it
+      cannot act on — the "smallest sufficient collaborator" rule, and the reason this differs from
+      `RetryPolicy`, which the march consumes whole.
+    - **`NO_REFRESH` is the shared default instance**, byte-identical to the old all-`None` defaults.
+    - **`builder` alone does NOT make a march observed**, and that is deliberate: without a trigger it
+      is called once, for the initial build, which the single-stage solve does just as well. Getting
+      this wrong forces the observed path — with its doubled `max_steps` budget and its ban under
+      `jax.grad` — on a solve that only wanted a custom way to construct its step.
   - **The six retry settings are ONE injected object — `RetryPolicy` (`solve/retry.py`), exported from
     `aquaflux.solve` (BUILT).** `solver` / `divergence_cap` / `on_cycles` / `on_alpha` / `beta_factor` /
     `cycles_limit` used to be six parallel keyword arguments on **both** `forward_march` and
@@ -6757,11 +6790,11 @@ transfer to any thresholded arm.
       a fresh `eddy_viscosity_drift` per segment against that segment's starting state, which *is* the
       state the current preconditioner was frozen at. Carrying one measure across segments would keep
       reporting drift the refresh had already absorbed, so the trigger would re-fire on the next step
-      and burn the whole `refresh_limit` in consecutive steps. Same discipline as the segment-local
+      and burn the whole `refresh.limit` in consecutive steps. Same discipline as the segment-local
       `residual_norm_0`. Pinned by
       `test_the_drift_measure_is_rebased_at_every_refresh`.
     - **CALIBRATED, and the premise validated, on an instrumented cold-IC pitzDaily march (2026-07-25 —
-      this closes #17 for this case).** One logged march with `refresh_trigger=None` + `on_step`, which
+      this closes #17 for this case).** One logged march with no refresh trigger + `on_step`, which
       still records drift because `solve_coupled` observes whenever an observer is supplied:
 
       | step | 5 | 10 | 12 | 14 | **15** | 17 | 19 | 20 | 22 | 23 |
@@ -6781,8 +6814,8 @@ transfer to any thresholded arm.
       conservative — it was inert. Trigger numerics must come from a logged march, not from judgement
       about what sounds safe; the replay procedure exists precisely because that judgement is unreliable.
       Calibrated on **one** geometry, so treat 0.1 as a starting point elsewhere, not a constant.
-    - **END-TO-END RESULT at `threshold = 0.1`, `refresh_limit = 8`, against the logged control (same
-      cold IC, same everything, `refresh_trigger=None`) — a 5–8× cost win, sustained and repeatable:**
+    - **END-TO-END RESULT at `threshold = 0.1`, `refresh.limit = 8`, against the logged control (same
+      cold IC, same everything, no refresh trigger) — a 5–8× cost win, sustained and repeatable:**
 
       | global step | 16 | 18 | 20 | 21 | 22 | 23 |
       |---|---|---|---|---|---|---|
@@ -6791,7 +6824,7 @@ transfer to any thresholded arm.
 
       ~21 s/step versus ~190 s/step, and the refreshed march was simultaneously **ahead on residual**
       (rel 2.67e-2 vs 3.03e-2 at step 23). Three further observations worth keeping:
-      - **A refresh repays itself inside one step, which is why `refresh_limit` can be generous rather than
+      - **A refresh repays itself inside one step, which is why `refresh.limit` can be generous rather than
       hoarded.** The absolute figure that used to sit here, and the "~60–240 s recompile" it was contradicting,
       were both recorded without a configuration and are deleted; the recompile question is settled from the
       code above — a hierarchy refresh is a jit cache hit.
@@ -6819,21 +6852,21 @@ transfer to any thresholded arm.
     solver reports `0` too. A running-minimum baseline of `0` makes `cycles >= growth*0` always true and
     latches the trigger on permanently — so the trigger **ignores zero-count reports** for both the
     baseline and the growth test, and stays disarmed until one positive count exists.
-  - **`refresh_limit` lives on the driver, not the trigger.** That keeps the trigger a **pure function of
+  - **`refresh.limit` lives on the driver, not the trigger.** That keeps the trigger a **pure function of
     one segment's history** — which is what lets `warmup`/`patience` re-apply correctly after each
     refresh, lets it be unit-tested on synthetic histories with no solve, and (the big one) lets it be
-    **calibrated offline**: log one march with `refresh_trigger=None` and an `on_step` observer, then
+    **calibrated offline**: log one march with no refresh trigger and an `on_step` observer, then
     replay candidate parameters against the log. No numeric default here is calibrated — they are chosen
     conservative (late rather than early) and must be set from an instrumented full-mesh run.
   - **Observation does NOT require a refresh (binding — this was a real bug).** `solve_coupled` runs the
     observed pre-march when the caller wants a refresh **or** merely wants to watch
     (`observing = refreshing or on_step or on_checkpoint`). Gating it on the trigger alone makes an
-    *instrumented reference march* — `refresh_trigger=None` plus an observer, which is exactly the run a
+    *instrumented reference march* — no refresh trigger plus an observer, which is exactly the run a
     trigger is calibrated against, and the longest-running one — produce **no output at all** and sit
     silent for hours. Consequence to keep in mind: an observed solve spends `max_steps` on the pre-march
     and `max_steps` again on the finishing solve, so the budget is larger but *split*; instrumenting a
     solve already near its limit can turn a pass into a convergence-guard raise. Pinned by
-    `test_the_march_reports_progress_without_a_refresh_trigger`.
+    `test_the_march_reports_progress_without_a_refresh.trigger`.
   - **`checkpoint` is a SECOND seam, separate from `observer` (binding).** `checkpoint(report, state)`
     carries the state; `observer(report)` carries only numbers. Keeping the state off the report history
     is what keeps a `RefreshTrigger` a pure function that can be replayed offline against a logged march
@@ -7090,7 +7123,7 @@ transfer to any thresholded arm.
     `(state, β)` **every step** (cheap + exact → 1 Krylov iter), the fix for the frozen-LU β-mismatch above;
     `ilut_beta_tracking_refresh` does the same for the ILUT but **gated** (β-move OR staleness cap), because
     the ILUT refactor is expensive (~30–40 s) and approximate — the β-move trigger is what averts the α=0 /
-    no-drift stall a *drift* trigger would hit on an overshoot. Distinct from the trigger's `refresh_builder`
+    no-drift stall a *drift* trigger would hit on an overshoot. Distinct from the trigger's `refresh.builder`
     (which fires occasionally, restarts a *segment*, and returns a *new* step): this fires every step (the
     consumer may itself no-op) and mutates in place. Forward-only (impure), folded into the same `observing`
     gate and `jax.grad` guard as the trigger/control; `None` is byte-identical to before.

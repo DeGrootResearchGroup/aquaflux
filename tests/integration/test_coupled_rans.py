@@ -31,6 +31,7 @@ from aquaflux.flow import (
 from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
+from aquaflux.solve import RefreshPolicy
 from aquaflux.turbulence import (
     LogScalars,
     SSTModel,
@@ -385,7 +386,9 @@ def test_staged_preconditioner_refresh_reaches_the_same_fixed_point(case) -> Non
         omega_ws,
         method="twolevel",
         max_steps=40,
-        refresh_trigger=_RefreshAfter(steps=3),  # march a little, re-freeze, then finish
+        refresh=RefreshPolicy(
+            trigger=_RefreshAfter(steps=3)
+        ),  # march a little, re-freeze, then finish
         **PRECONDITIONER,
     )
 
@@ -415,7 +418,12 @@ def test_staged_refresh_stops_at_the_same_tolerance(case) -> None:
     common = dict(method="twolevel", max_steps=40, rtol=rtol, **PRECONDITIONER)
     single = solve_coupled(coupled, flow_ws, k_ws, omega_ws, **common)
     staged = solve_coupled(
-        coupled, flow_ws, k_ws, omega_ws, refresh_trigger=_RefreshAfter(steps=2), **common
+        coupled,
+        flow_ws,
+        k_ws,
+        omega_ws,
+        refresh=RefreshPolicy(trigger=_RefreshAfter(steps=2)),
+        **common,
     )
 
     def terminal_residual(fields):
@@ -497,7 +505,7 @@ def test_a_refresh_is_observed_as_two_reported_segments(case) -> None:
         omega_ws,
         method="twolevel",
         max_steps=40,
-        refresh_trigger=_RefreshAfter(steps=refresh_after),
+        refresh=RefreshPolicy(trigger=_RefreshAfter(steps=refresh_after)),
         on_step=reports.append,
         **PRECONDITIONER,
     )
@@ -543,7 +551,7 @@ def test_the_drift_measure_is_rebased_at_every_refresh(case) -> None:
         omega_ws,
         method="twolevel",
         max_steps=40,
-        refresh_trigger=_RefreshAfter(steps=4),
+        refresh=RefreshPolicy(trigger=_RefreshAfter(steps=4)),
         on_step=reports.append,
         **PRECONDITIONER,
     )

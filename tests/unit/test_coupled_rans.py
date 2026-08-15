@@ -20,7 +20,13 @@ from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import CycleGrowthTrigger, PseudoTransientStep, ShiftTerm
+from aquaflux.solve import (
+    NO_REFRESH,
+    CycleGrowthTrigger,
+    PseudoTransientStep,
+    RefreshPolicy,
+    ShiftTerm,
+)
 from aquaflux.turbulence import (
     DirectScalars,
     LogScalars,
@@ -314,7 +320,7 @@ def test_refresh_trigger_is_rejected_under_differentiation() -> None:
             coupled.turbulence.molecular_viscosity * nu_scale,
         )
         f, _, _ = solve_coupled(
-            scaled, flow, k, omega, rtol=1e-2, refresh_trigger=CycleGrowthTrigger()
+            scaled, flow, k, omega, rtol=1e-2, refresh=RefreshPolicy(trigger=CycleGrowthTrigger())
         )
         return jnp.sum(f**2)
 
@@ -348,7 +354,7 @@ def test_refresh_trigger_with_an_explicit_continuation_and_no_builder_is_rejecte
             omega,
             rtol=1e-2,
             continuation=PseudoTransientStep(_TrivialShiftPolicy()),
-            refresh_trigger=CycleGrowthTrigger(),
+            refresh=RefreshPolicy(trigger=CycleGrowthTrigger()),
         )
 
 
@@ -1061,3 +1067,71 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
 
     refresh(step, state)  # and the force is spent: one rebuild per rebind, not a stuck flag
     assert len(pc.calls) == 2
+
+
+def test_the_default_refresh_policy_is_the_inert_one() -> None:
+    """``NO_REFRESH`` must stay exactly the settings a single-stage solve had before the policy existed.
+
+    Pinned as *values*: every solve runs this policy unless it says otherwise, so a default moved here
+    silently turns an unobserved solve into an observed one (or the reverse), which changes how
+    ``max_steps`` is spent and whether the solve can be differentiated at all.
+    """
+    assert NO_REFRESH == RefreshPolicy()
+    assert NO_REFRESH.trigger is None
+    assert NO_REFRESH.limit == 1
+    assert NO_REFRESH.builder is None
+    assert NO_REFRESH.precondition_step is None
+    # The default must not refresh and must not force the observed march.
+    assert not NO_REFRESH.refreshes
+    assert not NO_REFRESH.observes
+
+
+def test_a_refresh_needs_both_a_trigger_and_a_budget() -> None:
+    """``refreshes`` is the conjunction: a trigger with no budget refreshes nothing, and vice versa.
+
+    ``limit=0`` is the documented way to disable refreshing while leaving a trigger in place, so
+    reading this as "a trigger is set" would quietly ignore that.
+    """
+    assert RefreshPolicy(trigger=object()).refreshes
+    assert not RefreshPolicy(trigger=object(), limit=0).refreshes
+    assert not RefreshPolicy(limit=5).refreshes
+
+
+def test_a_builder_alone_does_not_make_a_march_observed() -> None:
+    """A builder with no trigger is called once, for the initial build -- which needs no eager march.
+
+    Getting this wrong would silently force the observed path (and its doubled ``max_steps`` budget,
+    and its ban under ``jax.grad``) on a solve that only wanted a custom way to construct its step.
+    """
+    assert not RefreshPolicy(builder=lambda state: state).observes
+    assert RefreshPolicy(trigger=object()).observes
+    assert RefreshPolicy(precondition_step=lambda step, state: None).observes
+
+
+def test_segments_is_one_more_than_the_refresh_budget() -> None:
+    """``limit`` refreshes means ``limit + 1`` segments; the last one must still be marched.
+
+    Off by one here and the freshly refreshed preconditioner is never used by an observed step -- only
+    by the finishing solve -- so the refresh it just paid for buys nothing.
+    """
+    assert RefreshPolicy(limit=0).segments == 1
+    assert RefreshPolicy(limit=3).segments == 4
+    policy = RefreshPolicy(limit=2)
+    assert [policy.is_last_segment(i) for i in range(policy.segments)] == [False, False, True]
+
+
+def test_a_supplied_step_with_no_builder_is_rejected_when_a_refresh_is_configured() -> None:
+    """A refresh rebuilds the step, so a caller-supplied step with no builder leaves nothing to rebuild.
+
+    Silently not refreshing would be the harmful outcome: the solve would run as a single stage while
+    the caller believed it was re-freezing the preconditioner.
+    """
+    step = object()
+    with pytest.raises(ValueError, match="builder"):
+        RefreshPolicy(trigger=object()).require_rebuildable(step)
+
+    # Every way out the message names must actually work.
+    RefreshPolicy(trigger=object(), builder=lambda s: s).require_rebuildable(step)
+    RefreshPolicy(trigger=object()).require_rebuildable(None)
+    RefreshPolicy().require_rebuildable(step)
+    RefreshPolicy(trigger=object(), limit=0).require_rebuildable(step)

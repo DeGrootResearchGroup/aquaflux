@@ -20,6 +20,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
+from aquaflux.solve import RefreshPolicy
 from aquaflux.turbulence import (
     CoupledRANS,
     coupled_lu_continuation,
@@ -200,7 +201,7 @@ def test_lu_beta_tracking_forward_march_converges_to_the_same_fixed_point(case) 
         omega_ws,
         continuation=lu,
         step_control=DualTimeControl(beta_start=0.5, beta_min=0.02),
-        precondition_step=lu_beta_tracking_refresh(coupled),
+        refresh=RefreshPolicy(precondition_step=lu_beta_tracking_refresh(coupled)),
         scaled_norm=True,
         max_steps=60,
     )
@@ -235,7 +236,7 @@ def test_precondition_step_raises_under_jax_grad(case) -> None:
             omega_ws,
             continuation=lu,
             step_control=DualTimeControl(),
-            precondition_step=lu_beta_tracking_refresh(coupled),
+            refresh=RefreshPolicy(precondition_step=lu_beta_tracking_refresh(coupled)),
             max_steps=5,
         )
         return jnp.sum(k**2)
