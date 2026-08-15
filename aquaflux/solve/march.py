@@ -42,8 +42,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import lineax as lx
 
-from .implicit import ForwardStep, _within_tolerance
-from .linear import restart_cycles as _strip_step_offset
+from .forward_step import ForwardStep, StepControl, StepReport, within_tolerance
 from .norm import ResidualNorm
 from .retry import NO_RETRIES, RetryPolicy
 
@@ -82,101 +81,6 @@ def combine_observers(*callbacks: Callable[..., None]) -> Callable[..., None]:
             callback(*args)
 
     return combined
-
-
-class StepReport(NamedTuple):
-    """What one march step cost and where it left the residual.
-
-    Attributes
-    ----------
-    step : int
-        The 0-based index of the step within its march segment.
-    cycles : int
-        The **raw** solver iteration count behind the accepted step, summed over the step's inner Newton
-        iterations (:attr:`inner_iterations`). This is lineax's ``num_steps``, which carries a **+2
-        offset and is blind within a restart cycle**: a solve that converges in 1, a few, or up to
-        ``restart`` matvecs all report ``3``, and it only climbs once a solve genuinely spills past a
-        restart cycle. So ``cycles`` is a raw cost primitive, **not** a literal cycle count — read
-        :attr:`restart_cycles` (offset-corrected) for the honest per-step cycle count. **``0`` means "no measurement", not "free":** a
-        pseudo-transient step records its count only on acceptance, so a step whose every damping
-        attempt was rejected reports ``0`` despite having burned several solves — skip zeros.
-    inner_iterations : int
-        How many inner Newton iterations the step took: the backward-Euler inner-loop count for a
-        :class:`~aquaflux.solve.DualTimeStep` (what the summed :attr:`cycles` is spread over), and ``1``
-        for a single-step (pseudo-transient / damped-Newton) march. Reporting it separately from
-        :attr:`cycles` is what keeps the two costs — nonlinear inner work vs linear solve cost — from
-        being conflated into one misleading number.
-    max_inner_cycles : int
-        The offset-corrected cost of the step's most expensive **single** solve -- the
-        inner-count-invariant difficulty signal, and what the escalation triggers on. ``cycles`` sums
-        over the inner iterations, so a threshold on it is ~6x more sensitive for a 5-iteration step
-        than a 1-iteration one and answers partly a question about nonlinear difficulty rather than
-        conditioning. ``0`` when not measured.
-    binding_limit : float
-        The step cap where it was the **binding** constraint, else ``1``. A small ``alpha`` means
-        either that the direction overshot or that a constraint stopped the step being followed
-        further -- opposite diagnoses, so ``alpha`` alone cannot be acted on or reported honestly.
-    residual_norm : float
-        The residual measure at the state the step produced.
-    residual_ratio : float
-        ``residual_norm`` divided by the march's global reference norm — how far the solve has come,
-        on the same scale for every segment.
-    escalations : int
-        How many times the step was redone with ``beta`` escalated before it was accepted (the
-        escalation bailout). ``0`` for a step taken as-is.
-    diverged_retry : bool
-        Whether the step was redone by the retry policy's tighter solver after diverging. Recorded
-        alongside
-        ``escalations`` because ``cycles`` reports only the **accepted** attempt: without them a redone
-        step is indistinguishable from a cheap one, and a retry mechanism that never fires (because it
-        was left unconfigured) is invisible in the log.
-    shift : float
-        The pseudo-transient shift strength ``beta`` the step was taken at, read from the step's
-        relaxation schedule (``0`` for a schedule that exposes none). Recorded because ``beta`` is what
-        a :class:`StepControl` steers and what a preconditioner's staleness is a function of, so a log
-        or a diagnostic that omits it cannot explain why a step cost what it did -- and every driver
-        that wants it would otherwise wrap the control to capture it.
-    alpha : float
-        The line-search factor of the accepted step: ``1`` if the full shifted step descended, smaller
-        if it was clipped. The step-quality signal a :class:`StepControl` drives the next shift by
-        (``α < 1`` means the step overshot — the shift is too weak). ``1`` for a step with no line
-        search, and for a fully-rejected step.
-    drift : float
-        How far the frozen operator's coefficients have moved since the segment's reference state, as
-        a relative measure, from the march's injected ``drift_measure``. **The staleness signal a
-        :class:`CoefficientDriftTrigger` fires on**, and the one quantity here that reports on the
-        *preconditioner* rather than on the step. ``0.0`` when no measure was supplied — "not
-        measured", like ``cycles = 0``, and it fails closed because a drift trigger compares against a
-        positive threshold.
-
-        It is a **scalar**, deliberately: computing it needs the state, but putting the state on the
-        report would cost the replay property that makes trigger calibration cheap (see
-        ``forward_march``'s ``checkpoint``). Reducing it to a number here keeps a trigger a pure
-        function of numbers while still letting it see the physics.
-    """
-
-    step: int
-    cycles: int
-    residual_norm: float
-    residual_ratio: float
-    alpha: float
-    drift: float = 0.0
-    inner_iterations: int = 1
-    max_inner_cycles: int = 0
-    binding_limit: float = 1.0
-    shift: float = 0.0
-    escalations: int = 0
-    diverged_retry: bool = False
-
-    @property
-    def restart_cycles(self) -> int:
-        """The offset-corrected restart-cycle count.
-
-        ``cycles`` with lineax's +2-per-inner-solve offset removed, so an ideal one-cycle solve reads as
-        ``1`` and a dual-time step as its real total cycles over the inner loop. Clamped at ``0`` (a
-        no-measurement ``cycles = 0`` step stays ``0``).
-        """
-        return _strip_step_offset(self.cycles, self.inner_iterations)
 
 
 class MarchResult(NamedTuple):
@@ -378,44 +282,6 @@ class CoefficientDriftTrigger(eqx.Module):
         if len(history) <= self.warmup:
             return False
         return history[-1].drift >= self.threshold
-
-
-class StepControl(Protocol):
-    """Reshapes the forward step each iteration from the march's own feedback (forward-only).
-
-    Where a :class:`~aquaflux.solve.RelaxationSchedule` is a *memoryless* rule that lives on the
-    differentiable step, a step control is **stateful and reads the previous step's outcome** — the
-    line-search factor α, the cost, the residual — to decide the next step. That feedback is only
-    available *after* a step, and a control may raise under ``jax.grad``, so it lives here on the eager
-    march, alongside :class:`RefreshTrigger`, never on the traced Newton path.
-
-    ``next_step`` returns a ready-to-run :class:`~aquaflux.solve.ForwardStep` (typically ``base_step``
-    with its shift strength replaced, via :class:`~aquaflux.solve.ConstantRelaxation` on a dynamic β
-    leaf so :func:`_march_step` stays a compilation-cache hit) plus its own updated state. The march
-    threads that state and stays ignorant of what the control adjusts, so it works for any
-    ``ForwardStep`` — the control, not the march, knows about β.
-    """
-
-    def next_step(
-        self, base_step: ForwardStep, previous: StepReport | None, state: object
-    ) -> tuple[ForwardStep, object]:
-        # NOTE: the shipped control reshapes the shift strength, so it requires a
-        # `PseudoTransientStep` specifically -- the annotation is wider than the real contract, and
-        # passing a `DampedNewtonStep` raises `AttributeError` inside the march loop rather than
-        # being rejected at the seam. Narrow this if a second, step-agnostic control ever appears.
-        """The step to run next, and the control's carried state.
-
-        Parameters
-        ----------
-        base_step : ForwardStep
-            The march's base step, whose non-shift configuration (preconditioner, line search, norm)
-            the control reuses.
-        previous : StepReport or None
-            The report of the step just taken (``None`` before the first step) — the feedback the
-            control adapts on.
-        state : object
-            The control's own state from the previous call (``None`` on the first call).
-        """
 
 
 def _shift_of(forward_step: ForwardStep) -> float | None:
@@ -709,7 +575,7 @@ def forward_march(
     # driver can continue a stateful control across a refresh instead of restarting it.
 
     def converged_at(residual_norm: float) -> bool:
-        return bool(_within_tolerance(jnp.asarray(residual_norm), reference, rtol, atol))
+        return bool(within_tolerance(jnp.asarray(residual_norm), reference, rtol, atol))
 
     while len(reports) < max_steps and not converged_at(current) and not triggered:
         # A step control reshapes the base step from the previous report (None runs it unchanged, so

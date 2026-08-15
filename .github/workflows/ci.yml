@@ -63,14 +63,18 @@ jobs:
       - name: Install the pinned linters
         run: pip install -e ".[lint]"
 
+      # `docs` is in scope because `docs/conf.py` is real code -- it generates the
+      # API reference from each subpackage's `__all__` -- and nothing else checks
+      # it. Naming the directory rather than the file covers a second docs script
+      # automatically; it is the only Python under `docs/`.
       - name: ruff check
-        run: ruff check aquaflux tests
+        run: ruff check aquaflux tests docs
 
       # Report later failures even when an earlier step already failed -- one red
       # run should show every problem to fix, not just the first.
       - name: ruff format --check
         if: ${{ !cancelled() }}
-        run: ruff format --check aquaflux tests
+        run: ruff format --check aquaflux tests docs
 
       # Canadian spelling gate (custom dictionary; config in pyproject.toml).
       - name: codespell

@@ -5837,7 +5837,9 @@ transfer to any thresholded arm.
           `(β, prev ‖R‖)`). Pinned by `test_dual_time_control_holds_beta_across_a_refresh`.
         - `solve_coupled` **auto-defaults** `step_control=DualTimeControl()` when the march is a
           `DualTimeStep`, is already observing (a refresh or observer is set), and no control was supplied
-          (`_default_dual_time_control(step_control, observing, continuation)`, unit-tested in
+          (`default_dual_time_control(step_control, observing, continuation)`, **in
+          `solve/step_control.py` since 2026-08-15** — it lived in `turbulence/coupled.py` only because the
+          import cycle below made it inexpressible in `solve/`; unit-tested in
           `test_coupled_rans.py`). It is injected **only where a control runs** and **never turns
           observation on**, so the differentiable single-stage solve (guarded `_is_traced`) is untouched;
           pass an explicit control to override. `solve_reynolds_continuation` inherits it (kwarg forward).
@@ -7092,6 +7094,28 @@ transfer to any thresholded arm.
     (which fires occasionally, restarts a *segment*, and returns a *new* step): this fires every step (the
     consumer may itself no-op) and mutates in place. Forward-only (impure), folded into the same `observing`
     gate and `jax.grad` guard as the trigger/control; `None` is byte-identical to before.
+  - **The forward-step CONTRACTS live in `solve/forward_step.py`, not in whichever module needed them
+    first (binding, 2026-08-15).** `ForwardStep`, `ShiftedForwardStep`, `StepOutcome`, `StepReport`,
+    `StepControl`, the `StepFn` callable alias and `within_tolerance` are what travel between the Newton
+    driver, the eager march, the globalization strategies, the step controls and the retry policy. None
+    belongs to any one of them, and every one of them was living wherever it was first written.
+    - **The placement had a cost that came due twice.** `StepControl` was declared in `march.py` with
+      **zero** implementations there, so `step_control.py` had to import `march` — which forbade the
+      reverse, so a defaulting rule about two `solve/` objects could not be written in `solve/` at all
+      and ended up in `turbulence/coupled.py`, a package away. And `implicit.py`, named for the Newton
+      solver, was a de-facto contract module handing `_ForwardStep`, `_within_tolerance` and
+      `backtracking_line_search` across boundaries either privately or absent from `__all__` — which
+      under this package's own boundary rule read as violations.
+    - **`forward_step.py` is a LEAF and must stay one.** It imports `linear`, `norm` and `relaxation`,
+      none of which import it back; `implicit`, `march`, `continuation`, `retry`, `step_control`,
+      `march_log` and `checkpoint` all depend on it. Adding an import here that points at any of those
+      re-creates exactly the cycle it exists to remove.
+    - **What did NOT move, and why.** `backtracking_line_search` stays in `implicit.py`: it is
+      behaviour, not a contract, and moving it would make the contract module carry a line search.
+      `MarchResult` stays in `march.py` — only `forward_march` produces it. The concrete strategies,
+      triggers and controls stay with their own modules; a contract module holds contracts.
+    - The rule the cycle was blocking is now `solve/step_control.py`'s `default_dual_time_control`,
+      beside the controls it chooses between, and exported.
   - **`StepControl` — stateful, feedback-driven step reshaping on the eager march only (binding — the
     twin of `RelaxationSchedule`, deliberately NOT one interface).** A `RelaxationSchedule` is memoryless
     and lives on the differentiable step; a `StepControl` reads the *previous* `StepReport` (α, cost) —

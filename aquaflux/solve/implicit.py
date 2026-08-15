@@ -24,19 +24,18 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 from functools import partial
-from typing import Any, NamedTuple, Protocol, runtime_checkable
+from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import lineax as lx
 
+from .forward_step import ForwardStep, StepFn, StepOutcome, within_tolerance
 from .linear import corrected_cycles as _corrected
 from .linear import default_linear_solver, solve_linear
 from .newton import newton_correction
 from .norm import ResidualNorm
-from .relaxation import RelaxationSchedule
-
 
 # The step a forward-step strategy supplies: given the (single-argument) residual, the current
 # iterate, the starting residual norm, and the linear solver, return the next iterate, **the
@@ -49,135 +48,6 @@ from .relaxation import RelaxationSchedule
 # that ground and gave up -- a cost-only trigger cannot, and would discard a converged step (measured:
 # an inner loop that reached 3.0e-6 against a 1.0e-5 target was thrown away for costing 54 cycles).
 # A step with no inner loop to cut short always reports True.
-class StepOutcome(NamedTuple):
-    """What one forward step produced, what it cost, and how it ended.
-
-    A record rather than a widening tuple: these six values travel together through every stepper and
-    both consumers, and a positional 6-tuple is where a caller silently mis-unpacks one for another.
-
-    Attributes
-    ----------
-    phi : jnp.ndarray
-        The stepped iterate -- the only part that is the step's *result*; the rest is cost and quality.
-    cycles : jnp.ndarray
-        The **raw** solver count summed over the step's inner iterations (lineax's ``num_steps``, with
-        its per-solve offset still in). Total cost, and what a summed cost cap is measured against.
-    alpha : jnp.ndarray
-        The line-search factor: for an inner loop, the **minimum** over its iterations with any
-        non-descending one folded in as ``0``.
-    inner_iterations : jnp.ndarray
-        How many inner iterations ran. ``1`` for a step with no inner loop.
-    reached_target : jnp.ndarray
-        Whether the step ran to its **own** stopping criterion rather than being cut short. A cost-only
-        trigger cannot tell a step that did its job expensively from one that ground and gave up, and
-        would discard the former -- throwing away a good iterate for a shorter step.
-    max_inner_cycles : jnp.ndarray
-        The **offset-corrected** cost of the step's most expensive single solve. This is the
-        inner-count-invariant difficulty signal: the summed :attr:`cycles` grows with how many times the
-        step solved, so a threshold on it is ~6x more sensitive for a 5-iteration step than a
-        1-iteration one, and the same per-solve difficulty trips it or not depending on a count that
-        says nothing about conditioning.
-    binding_limit : jnp.ndarray
-        The step cap **where it was the binding constraint**, else ``1``. A small ``alpha`` has two
-        completely different causes -- the direction overshot (shorten it, escalate the shift) or a
-        constraint bound (the direction is fine, it just cannot be followed that far) -- and they call
-        for opposite responses, so ``alpha`` alone cannot be acted on. Below ``1`` means an injected
-        limit, not the descent test, decided the step length; the value is how tight it was.
-    """
-
-    phi: jnp.ndarray
-    cycles: jnp.ndarray
-    alpha: jnp.ndarray
-    inner_iterations: jnp.ndarray
-    reached_target: jnp.ndarray
-    max_inner_cycles: jnp.ndarray
-    binding_limit: jnp.ndarray
-
-
-_ForwardStep = Callable[
-    [Callable[[jnp.ndarray], jnp.ndarray], jnp.ndarray, jnp.ndarray, lx.AbstractLinearSolver],
-    StepOutcome,
-]
-
-
-class ForwardStep(Protocol):
-    """A globalized Newton forward-step strategy (line search, pseudo-transient continuation, ...).
-
-    The single point of variation in the forward loop: given the residual, the current iterate, the
-    starting residual norm, and the linear solver, a strategy returns the next iterate and the cost
-    of the linear solve that produced it. Every strategy must reduce to the undamped Newton step
-    near the root and impose no shift at the fixed point, so the converged state solves the
-    unshifted ``R = 0`` and the implicit-function-theorem adjoint is independent of which strategy
-    produced the forward path.
-
-    Structural interface only (a ``Protocol``), so the generic solver stays free of any flow
-    specifics. The concrete strategies are :class:`DampedNewtonStep` (the default backtracking line
-    search) and :class:`PseudoTransientStep` (the residual-agnostic pseudo-transient march;
-    :func:`aquaflux.flow.momentum_continuation` configures it for the high-Reynolds flow).
-    """
-
-    def stepper(self) -> _ForwardStep:
-        """The forward step ``(residual_fn, phi, residual_norm_0, solver) -> (phi_next, cycles, alpha, inner_iterations)``.
-
-        ``cycles`` is the restart-cycle count of the linear solve behind the accepted step (its cost,
-        which an observed march reads to detect a stale preconditioner); ``alpha`` is the line-search
-        factor of that step (its quality — ``1`` if the full shifted step descended, smaller if it was
-        clipped, the signal a step controller drives the shift by). There is no variant of this method
-        that drops them; a caller that wants neither writes ``phi, _, _ = step(…)``.
-        """
-
-    def default_solver(self) -> lx.AbstractLinearSolver:
-        """The forward-loop linear solver to use when the caller supplies none (an inexact-Newton
-        default whose tolerances suit this strategy's march)."""
-
-    def norm(self) -> ResidualNorm:
-        """The residual measure ``R -> scalar`` this strategy judges progress by.
-
-        Owns the norm so the outer convergence test and this strategy's own globalization (the
-        line search / switched-evolution-relaxation ramp / divergence guard) use **one** consistent
-        measure. Defaults to the Euclidean norm; a heterogeneous block system returns a
-        :class:`~aquaflux.solve.BlockScaledNorm` so no single large-magnitude block dominates the
-        stopping test or the globalization."""
-
-    def adjoint_preconditioner(
-        self,
-    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None:
-        """The ``state -> M`` preconditioner factory for the adjoint (transpose) solve, or ``None``."""
-
-
-@runtime_checkable
-class ShiftedForwardStep(ForwardStep, Protocol):
-    """A :class:`ForwardStep` whose globalization is a **shift strength an external control can drive**.
-
-    :class:`ForwardStep` says what every strategy must *do*. This says what a strategy must additionally
-    *carry* for the eager march's feedback machinery to work on it: a ``relaxation_schedule`` holding the
-    pseudo-transient shift ``beta`` as a readable, replaceable leaf.
-
-    **Why it is a separate protocol rather than more of `ForwardStep`.** Not every strategy has a shift.
-    :class:`DampedNewtonStep` globalizes by backtracking alone and has no ``relaxation_schedule`` at all,
-    and requiring one of it would be inventing a quantity it does not possess. But
-    :func:`~aquaflux.solve.forward_march`'s beta escalation and every
-    :class:`~aquaflux.solve.StepControl` *do* need one -- they raise beta on a bad step and drive it
-    between steps -- so the requirement is real and belongs written down.
-
-    **What it replaces.** The requirement used to be enforced by ``hasattr`` probes scattered through the
-    march, which fail *silently*: a `DampedNewtonStep` satisfies `ForwardStep` completely, so passing one
-    with ``retry_on_cycles`` set was accepted and then simply never escalated -- a march that quietly
-    declines to escalate looks exactly like one that never needed to. One reporting path was worse still
-    and read ``active_step.relaxation_schedule`` unguarded, so the same conforming step raised
-    ``AttributeError`` mid-march. The march now checks this once, up front, and says which feature needs
-    what.
-
-    Notes
-    -----
-    ``beta`` must be a **dynamic** array leaf, not a static field: the march escalates it by *scaling*
-    the existing leaf so its dtype and weak-type are preserved, which is what keeps the jitted march step
-    a compilation-cache hit rather than recompiling the whole coupled solve on every retry.
-    """
-
-    relaxation_schedule: RelaxationSchedule
-
-
 # Inexact-Newton forward solver: each Newton step's linear solve need only make Newton progress,
 # not be exact — the next step corrects the leftover. A loose relative tolerance cuts the GMRES
 # matvec count per step several-fold; the few extra Newton steps it costs still net a large
@@ -633,7 +503,7 @@ class DampedNewtonStep(eqx.Module):
     # is unchanged.
     residual_norm: ResidualNorm = eqx.field(default=jnp.linalg.norm)
 
-    def stepper(self) -> _ForwardStep:
+    def stepper(self) -> StepFn:
         """The line-searched Newton step ``(residual_fn, phi, ‖R₀‖, solver) -> (phi_next, cycles, alpha, inner_iterations)``."""
         preconditioner = self.preconditioner
         line_search = self.line_search
@@ -665,11 +535,6 @@ class DampedNewtonStep(eqx.Module):
         return self.preconditioner
 
 
-def _within_tolerance(residual_norm, residual_norm_0, rtol, atol):
-    """The Newton stopping test: the residual norm has dropped to the absolute/relative floor."""
-    return residual_norm <= atol + rtol * residual_norm_0
-
-
 def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn, norm_fn):
     """Newton iterate to convergence (``lax.while_loop``); return the converged field or error.
 
@@ -697,7 +562,7 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
 
     def cond(carry):
         _, step, residual_norm = carry
-        return (step < max_steps) & ~_within_tolerance(residual_norm, residual_norm_0, rtol, atol)
+        return (step < max_steps) & ~within_tolerance(residual_norm, residual_norm_0, rtol, atol)
 
     def body(carry):
         phi, step, _ = carry
@@ -716,7 +581,7 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
         return phi, step + 1, norm_fn(residual_fn(phi, theta))
 
     phi, _, residual_norm = jax.lax.while_loop(cond, body, (phi0, 0, residual_norm_0))
-    converged = jnp.isfinite(residual_norm) & _within_tolerance(
+    converged = jnp.isfinite(residual_norm) & within_tolerance(
         residual_norm, residual_norm_0, rtol, atol
     )
     return eqx.error_if(
