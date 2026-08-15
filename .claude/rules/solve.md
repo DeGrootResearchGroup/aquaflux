@@ -1264,6 +1264,26 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       factors is enough to exhaust a workstation — the standing "one heavy probe at a time" rule).
       `refactor`'s rebuild branch calls it too, so the teardown has one home.
 
+- **Three small clones removed (BUILT 2026-08-15), and one deliberately left.**
+  - The SIMPLE smoother's sweep loop is `sweeps_from(level, rhs, guess, count)` in
+    `saddle_multigrid._native_saddle_cycle`. `smooth` and `smooth_zero` each declared the identical
+    10-line `fori_loop` body; they differ only in where they start and how many sweeps that leaves.
+    Bit-identical at 1, 2 and 4 sweeps.
+  - `block_stencil_colouring` calls `frozen_operator.require_valid_graph` instead of re-inlining three
+    of its four checks. That helper takes the caller's name for its messages, which is precisely why it
+    is shared; only the `reach` check is the colouring's own. It also loses its underscore, since it now
+    crosses a module boundary.
+  - `checkpoint._atomically(path, write)` is the one home for write-then-rename. It was written twice —
+    once with the reasoning attached and once without, and the copy without it is the one a reader would
+    have had to reconstruct the argument for. `write` takes a **path**, matching the serializer contract
+    ("write exactly to this path"), so an injected serializer needs no wrapping. Verified that a crashed
+    write leaves **no** file that reads as a checkpoint, which is the whole point of the idiom.
+  - **NOT done: `vanka.colour_patches`' per-vertex Python-set loop**, which duplicates the algorithm
+    `sparse_jacobian._saturation_colouring` vectorizes and whose docstring records the difference as
+    "seconds and minutes" on a high-degree graph. Deliberately skipped: patch relaxation is measured
+    closed on this operator and `vanka.py` is a deletion candidate, so optimizing it is work spent on
+    code slated to go.
+
 ## Measurement discipline for preconditioner probes (BINDING)
 
 - **⚠️ MEASUREMENT DISCIPLINE FOR PRECONDITIONER PROBES (binding — every one of these produced a wrong
@@ -7339,7 +7359,7 @@ transfer to any thresholded arm.
   - **Degenerate-mesh guard (binding — validated where the graph is consumed).** Because the
     hierarchies are built once off-jit and then frozen, a degenerate mesh must fail *there*, not as a
     silently stalling runtime V-cycle. Now that the builders are operator-in, the **graph** check lives
-    with the assembler: `frozen_operator._require_valid_graph` (`n ≥ 1`, matched `owner`/`nb`, in-range
+    with the assembler: `frozen_operator.require_valid_graph` (`n ≥ 1`, matched `owner`/`nb`, in-range
     endpoints) runs inside `convection_diffusion_operator`; the two build loops
     (`_build_aggregation_hierarchy` for smoothed/convection, `build_air_hierarchy` for lAIR) call
     `_require_positive_diagonal` on **every** level's operator diagonal before inverting/freezing it,

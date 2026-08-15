@@ -174,7 +174,7 @@ def symmetrically_equilibrate(a: sp.spmatrix) -> tuple[sp.csr_matrix, np.ndarray
     return scaled, scale
 
 
-def _require_valid_graph(n: int, owner: np.ndarray, nb: np.ndarray, where: str) -> None:
+def require_valid_graph(n: int, owner: np.ndarray, nb: np.ndarray, where: str) -> None:
     """Reject a malformed interior-face graph before it is assembled into an operator.
 
     The frozen operators are assembled and coarsened once, off the jit path, and then held fixed; a
@@ -190,7 +190,8 @@ def _require_valid_graph(n: int, owner: np.ndarray, nb: np.ndarray, where: str) 
     owner, nb : np.ndarray
         Interior-face edge endpoints, shape ``(n_edges,)`` each.
     where : str
-        Caller name, included in the error message.
+        Caller name, included in the error message -- so one validator can serve callers that report
+        their own name, which is why this is shared rather than re-inlined per caller.
 
     Raises
     ------
@@ -252,7 +253,7 @@ def convection_diffusion_operator(
     scipy.sparse.csr_matrix
         The assembled operator, shape ``(n, n)``.
     """
-    _require_valid_graph(n, owner, nb, "convection_diffusion_operator")
+    require_valid_graph(n, owner, nb, "convection_diffusion_operator")
     o, m = np.asarray(owner), np.asarray(nb)
     c = np.asarray(coefficient)
     zero = np.zeros_like(c)
