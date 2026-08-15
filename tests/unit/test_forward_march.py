@@ -18,11 +18,11 @@ import jax
 import jax.numpy as jnp
 import pytest
 from aquaflux.solve import (
-    AlphaTargetingControl,
     CoefficientDriftTrigger,
     ConstantRelaxation,
     CycleGrowthTrigger,
     DampedNewtonStep,
+    DualTimeControl,
     ImplicitNewtonSolver,
     PseudoTransientStep,
     ShiftTerm,
@@ -285,10 +285,14 @@ class _UnitShiftPolicy(eqx.Module):
 def test_step_control_drives_the_march_and_stays_a_cache_hit() -> None:
     """A ``step_control`` reshapes the step each iteration, and the controlled march does not retrace.
 
-    The α-targeting control replaces the base step's schedule with a ``ConstantRelaxation`` on a
-    dynamic β leaf. Two things must hold: β actually changes across steps (the control is doing
-    something), and ``_march_step`` compiles once despite a fresh controlled step object each iteration
-    (the load-bearing cache-hit property — a per-step recompile would dominate a real march).
+    A control replaces the base step's schedule with a ``ConstantRelaxation`` on a dynamic β leaf.
+    Two things must hold: β actually changes across steps (the control is doing something), and
+    ``_march_step`` compiles once despite a fresh controlled step object each iteration (the
+    load-bearing cache-hit property — a per-step recompile would dominate a real march).
+
+    Driven here on a ``PseudoTransientStep`` rather than the dual-time step the Courant control is
+    written for: what is under test is the march's caching across a *reshaped* step, and any control
+    reshapes it the same way, so the simpler base keeps the test about compilation and not physics.
     """
     # A state size no other test uses, so the compiled step cannot already be a module-level cache
     # hit from another test (the compilation cache lives for the whole process).
@@ -300,7 +304,7 @@ def test_step_control_drives_the_march_and_stays_a_cache_hit() -> None:
         relaxation_schedule=SwitchedEvolutionRelaxation(beta0=2.0),
         line_search=8,
     )
-    control = AlphaTargetingControl(beta_start=2.0)
+    control = DualTimeControl(beta_start=2.0)
     common = dict(rtol=1e-12, atol=1e-14, step_control=control)
 
     # One controlled step pays the compilation (which invokes the residual several times per trace).
@@ -758,9 +762,8 @@ def test_march_carries_the_escalated_beta_into_the_control() -> None:
         retry_beta_factor=2.0,
         retry_cycles_limit=3,
     )
-    assert (
-        float(result.control_state) == 4.0
-    )  # the escalated β, carried; not the control's beta_start
+    beta, _memo = result.control_state
+    assert beta == 4.0  # the escalated β, carried; not the control's beta_start
 
 
 class _AlphaFromBeta(eqx.Module):

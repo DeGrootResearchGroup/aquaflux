@@ -204,12 +204,11 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     - **Opt-in `ResidualRatioDualTimeControl`:** ramps β by the steady-residual ratio; safe when that
       residual is a reliable progress signal, but it pins β on the flat `β×travel` pitzDaily plateau
       (the slower arm), so it is not the default.
-    - **Opt-in `AlphaTargetingControl`** (single-step, not dual-time): reshapes β toward the α=1 boundary,
-      the efficiency optimum SER misses (faster to a given residual **when paired with the AMG refresh** —
-      co-designed, a bolder β stales the frozen PC faster; the speed-up figure was measured with no state, β or
-      smoother recorded — re-measure before relying on it). It does **not** converge standalone (stalls rel
-      ~0.03), so it stays opt-in, never a default. Full analysis: the "SER β schedule runs backwards"
-      bullet in `.claude/rules/solve.md`.
+    - **There is no `AlphaTargetingControl` — the single-step α-targeter was DELETED (2026-08-14).** It
+      reshaped β toward the α=1 boundary that SER misses, but it never converged standalone (stalled rel
+      ~0.03), its gains were hand-set placeholders and it had no production caller. The α signal is kept
+      where it is measured to work: in the two *dual-time* controls above. Full analysis: the "SER β
+      schedule runs backwards" bullet in `.claude/rules/solve.md`.
   - **`reuse=` refreshes a stale k/ω preconditioner without changing the compilation signature.**
     `scalar_transport_preconditioner(..., reuse=old)` (threaded through
     `SSTTurbulence.k_preconditioner` / `omega_preconditioner`) re-derives the *values* at a new state on
@@ -1320,7 +1319,8 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     directly via the step-length factor α — the full analysis and data are the "SER β schedule runs
     backwards" bullet in `.claude/rules/solve.md`). **A ~1.9× preconditioner refresh cannot rescue a march
     the schedule is grinding to a halt** — this reorders the priorities: fixing the β schedule (an
-    α-targeting PTC step control) is ahead of calibrating the refresh.
+    α-driven pseudo-transient step control — the dual-time controls are where that direction survives)
+    is ahead of calibrating the refresh.
   - **Preconditioner staleness is the SECONDARY cost, and it is coupled to the β schedule (measured).**
     Over the march the wall time per step also grows several-fold as the recirculation develops and the
     frozen scalar preconditioner degrades — the same post-separation regime where refreshing the k/ω AMGs
