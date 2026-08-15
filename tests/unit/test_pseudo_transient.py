@@ -10,11 +10,14 @@ reusable beyond the coupled flow it was first built for.
 
 from __future__ import annotations
 
+import dataclasses
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
 from aquaflux.solve import (
+    ConstantRelaxation,
     DivergenceGuard,
     ImplicitNewtonSolver,
     MonotoneLineSearch,
@@ -22,6 +25,9 @@ from aquaflux.solve import (
     RelaxedFarFromRoot,
     ShiftTerm,
     SwitchedEvolutionRelaxation,
+    forward_march,
+    positive_block_limit,
+    positive_block_projection,
 )
 from aquaflux.solve.implicit import backtracking_line_search
 
@@ -502,3 +508,84 @@ def test_a_growth_rung_is_never_reached_by_falling_back_onto_it() -> None:
         grow=3,
     )
     assert float(taken) == 4.0
+
+
+class _NegativeRoot(eqx.Module):
+    """A residual whose Newton step drives the first entry straight through zero."""
+
+    def __call__(self, phi: jnp.ndarray) -> jnp.ndarray:
+        return phi - jnp.array([-5.0, 1.0])
+
+
+def _unshifted_step(**overrides) -> PseudoTransientStep:
+    """A pseudo-transient step at zero shift, so the correction is the plain Newton one."""
+    return dataclasses.replace(
+        PseudoTransientStep(
+            UniformShiftPolicy(),
+            relaxation_schedule=ConstantRelaxation(jnp.asarray(0.0)),
+            line_search=6,
+        ),
+        **overrides,
+    )
+
+
+def test_the_positivity_cap_is_available_on_the_pseudo_transient_step() -> None:
+    """The guard protects the *state*, so it cannot depend on which strategy is stepping it.
+
+    It used to live only on :class:`~aquaflux.solve.DualTimeStep`, so choosing the single-step strategy
+    silently gave up a guard whose absence is a recorded march death: two cells of 23040 took ``k``
+    negative and NaN'd the whole residual through a bare ``sqrt``, with every field still finite and
+    nothing in the ordinary stopping tests able to see it.
+    """
+    phi0 = jnp.array([1.0, 2.0])
+    common = dict(max_steps=1, rtol=1e-12, atol=1e-14)
+
+    unguarded = forward_march(_unshifted_step(), _NegativeRoot(), phi0, **common)
+    guarded = forward_march(
+        _unshifted_step(step_limit=positive_block_limit(0, 2, tau=0.99)),
+        _NegativeRoot(),
+        phi0,
+        **common,
+    )
+
+    assert float(unguarded.state[0]) < 0.0  # the unconstrained step really does cross zero
+    assert float(guarded.state[0]) > 0.0  # and the cap holds it back
+    # `tau = 0.99` leaves the binding entry at 1% of its value -- the fraction-to-the-boundary rule.
+    assert float(guarded.state[0]) == pytest.approx(0.01, rel=1e-6)
+
+
+def test_the_per_entry_projection_is_available_too_and_leaves_the_cap_inactive() -> None:
+    """The projection clips each entry's own correction, so the global cap then finds nothing binding.
+
+    Same composition the dual-time step relies on, and the reason both are offered rather than one: a
+    global cap lets a single dead entry throttle every other one, which is what the projection exists
+    to avoid.
+    """
+    phi0 = jnp.array([1.0, 2.0])
+    projected = forward_march(
+        _unshifted_step(step_projection=positive_block_projection(0, 2, tau=0.99)),
+        _NegativeRoot(),
+        phi0,
+        max_steps=1,
+        rtol=1e-12,
+        atol=1e-14,
+    )
+
+    assert float(projected.state[0]) > 0.0  # held positive
+    # The second entry reaches its own root: the projection did not shorten the whole step for it.
+    assert float(projected.state[1]) == pytest.approx(1.0, rel=1e-6)
+    assert float(projected.reports[0].binding_limit) == pytest.approx(1.0)
+
+
+def test_both_default_to_off_and_leave_the_step_untouched() -> None:
+    """Off by default, and byte-identical off -- the guard is opt-in on both strategies."""
+    plain = PseudoTransientStep(UniformShiftPolicy())
+    assert plain.step_limit is None and plain.step_projection is None
+
+    phi0 = jnp.array([1.0, 2.0])
+    common = dict(max_steps=1, rtol=1e-12, atol=1e-14)
+    without = forward_march(_unshifted_step(), _NegativeRoot(), phi0, **common)
+    explicit_none = forward_march(
+        _unshifted_step(step_limit=None, step_projection=None), _NegativeRoot(), phi0, **common
+    )
+    assert jnp.array_equal(without.state, explicit_none.state)

@@ -24,7 +24,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 from functools import partial
-from typing import Any, NamedTuple, Protocol
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 import equinox as eqx
 import jax
@@ -35,6 +35,7 @@ from .linear import corrected_cycles as _corrected
 from .linear import default_linear_solver, solve_linear
 from .newton import newton_correction
 from .norm import ResidualNorm
+from .relaxation import RelaxationSchedule
 
 
 # The step a forward-step strategy supplies: given the (single-argument) residual, the current
@@ -142,6 +143,39 @@ class ForwardStep(Protocol):
         self,
     ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None:
         """The ``state -> M`` preconditioner factory for the adjoint (transpose) solve, or ``None``."""
+
+
+@runtime_checkable
+class ShiftedForwardStep(ForwardStep, Protocol):
+    """A :class:`ForwardStep` whose globalization is a **shift strength an external control can drive**.
+
+    :class:`ForwardStep` says what every strategy must *do*. This says what a strategy must additionally
+    *carry* for the eager march's feedback machinery to work on it: a ``relaxation_schedule`` holding the
+    pseudo-transient shift ``beta`` as a readable, replaceable leaf.
+
+    **Why it is a separate protocol rather than more of `ForwardStep`.** Not every strategy has a shift.
+    :class:`DampedNewtonStep` globalizes by backtracking alone and has no ``relaxation_schedule`` at all,
+    and requiring one of it would be inventing a quantity it does not possess. But
+    :func:`~aquaflux.solve.forward_march`'s beta escalation and every
+    :class:`~aquaflux.solve.StepControl` *do* need one -- they raise beta on a bad step and drive it
+    between steps -- so the requirement is real and belongs written down.
+
+    **What it replaces.** The requirement used to be enforced by ``hasattr`` probes scattered through the
+    march, which fail *silently*: a `DampedNewtonStep` satisfies `ForwardStep` completely, so passing one
+    with ``retry_on_cycles`` set was accepted and then simply never escalated -- a march that quietly
+    declines to escalate looks exactly like one that never needed to. One reporting path was worse still
+    and read ``active_step.relaxation_schedule`` unguarded, so the same conforming step raised
+    ``AttributeError`` mid-march. The march now checks this once, up front, and says which feature needs
+    what.
+
+    Notes
+    -----
+    ``beta`` must be a **dynamic** array leaf, not a static field: the march escalates it by *scaling*
+    the existing leaf so its dtype and weak-type are preserved, which is what keeps the jitted march step
+    a compilation-cache hit rather than recompiling the whole coupled solve on every retry.
+    """
+
+    relaxation_schedule: RelaxationSchedule
 
 
 # Inexact-Newton forward solver: each Newton step's linear solve need only make Newton progress,

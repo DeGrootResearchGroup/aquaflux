@@ -5017,6 +5017,30 @@ transfer to any thresholded arm.
   reintroduce them). Each strategy's shift vanishes at the fixed point, so the converged state and
   the IFT adjoint are strategy-independent. When adding a globalization (e.g. a monotone/forcing
   acceptance), add a `ForwardStep` — do **not** grow a branch in `_forward`.
+  - **`ShiftedForwardStep` is the SECOND contract, and the eager march's beta machinery requires it
+    (binding, 2026-08-15).** `ForwardStep` says what every strategy must *do*; `ShiftedForwardStep`
+    says what one must additionally *carry* — a `relaxation_schedule` holding `beta` as a readable,
+    replaceable **dynamic** leaf. It is separate rather than folded in because not every strategy has
+    a shift: `DampedNewtonStep` globalizes by backtracking alone, and demanding a `relaxation_schedule`
+    of it would be inventing a quantity it does not possess.
+    **What it replaces, and why it matters more than it looks:** the requirement was enforced by
+    `hasattr` probes scattered through `forward_march`, which fail **silently**. A `DampedNewtonStep`
+    satisfies `ForwardStep` in full, so a march configured with `retry_on_cycles` accepted it and then
+    never escalated — from the log, indistinguishable from a march that never needed to. One reporting
+    path failed the *opposite* way and read `active_step.relaxation_schedule` unguarded, so the same
+    conforming step raised `AttributeError` mid-march. `forward_march` now checks **once, before the
+    first step** (`_require_shifted`), naming the feature and what it needs.
+    - **Gate only what is genuinely silent (binding).** The escalation is gated. The divergence retry
+      (`retry_solver` / `retry_divergence_cap`) is **not** — it re-solves at a tighter tolerance and
+      never touches beta, so it works on any step; its *reporting* goes through `_shift_of`, which
+      returns `None` for a step with no shift rather than inventing one. A `StepControl` is **not**
+      gated either: the protocol only asks it to return a ready-to-run step, a step-agnostic one is
+      legitimate (and exercised), and a control that *does* drive beta already fails loudly from its
+      own `tree_at`. Gating those would reject what the protocol permits.
+    - **The runtime check tests the SHIFT, not `isinstance(..., ShiftedForwardStep)`.** The argument is
+      already typed `ForwardStep`, so re-testing those four methods at runtime would reject a
+      legitimate duck-typed step for a reason unrelated to the feature asked for — which it did, on
+      every test double, when first written that way.
 - **`continuation.py` — BUILT (`PseudoTransientStep`, residual-agnostic).** The pseudo-transient
   continuation engine lives **here in `solve/`, not in `flow/`** — it is a `ForwardStep`
   (`stepper`/`default_solver`/`adjoint_preconditioner`) that runs an **injected**
@@ -6805,6 +6829,15 @@ transfer to any thresholded arm.
     - `turbulence.positive_k_limit(coupled)` returns the limiter for a directly-solved `k` and `None`
       for a log-solved one (positive by construction there, so a cap would only throttle);
       `coupled_amg_continuation` wires it automatically.
+    - **BOTH strategies carry `step_limit` / `step_projection` (fixed 2026-08-15).** They were
+      `DualTimeStep` fields only, so choosing `PseudoTransientStep` **silently gave up the guard** —
+      and the guard exists because its absence is a recorded march death (two cells of 23040 took `k`
+      negative and NaN'd the whole residual through a bare `sqrt`, every field still finite, nothing in
+      the ordinary stopping tests able to see it). The guard protects the **state**, not the march: a
+      field that must stay positive must stay positive whichever strategy steps it. `PseudoTransientStep`
+      now applies the identical pair in the identical order — project per entry first, then read the cap,
+      which then finds nothing binding — so the two compose the same way on both. Both default `None`,
+      which is the unconstrained step exactly, so the default path is unchanged.
     - **The cap is GLOBAL, so one entry near zero throttles the whole step** — a real risk on a field
       spanning `1e-5` to `4.5`. Measured, it does not bite, because the escape is not the cap: the cap
       forces `alpha → 0`, `CflResidualDualTimeControl` reads that as "shift too weak" and escalates
