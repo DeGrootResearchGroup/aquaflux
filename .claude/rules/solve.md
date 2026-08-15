@@ -245,6 +245,11 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     make `jax.grad` raise while leaving the forward value bit-identical. That is the property the gap
     destroyed, and an accuracy test cannot see it — the default solver returns the right gradient on a
     2D channel whether or not the argument is wired to anything.
+    **Outcome on the case it was built for:** with this threaded and a budget large enough not to bind,
+    `jax.grad` runs on `bfs3d` for the first time and matches a central finite difference to 1.9e-04 —
+    but the passthrough alone was not sufficient, because the transpose solve needs ~1450 preconditioner
+    applications and the first budget allowed ~900. See *"`jax.grad` RUNS ON THIS CASE"* under the flow
+    block for the costs, the arms, and the finite-difference trap that a loose root sets.
 
 ## Preconditioner — monolithic ILUT
 
@@ -2975,70 +2980,103 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
 
 ## The flow block — native preconditioning of the `[u, v, w, p]` saddle
 
-### ⚠️ EVERY β = 0 NUMBER BELOW IS A *LINEAR PROBE*, AND `jax.grad` STILL DOES NOT RUN ON THIS CASE (2026-08-14)
+### ✅ `jax.grad` RUNS ON THIS CASE, AND IS VALIDATED — the first gradient ever taken here (2026-08-15)
 
 **Read this before citing any zero-shift result in this section as an adjoint result.** The whole
 section is justified by the transpose solve behind every gradient meeting the unshifted operator — but
-that solve is probed here as a **linear** solve, with the right-hand side `-R(state)`, by
-`field_split_probe.py`. The actual adjoint had never been executed. It has now been attempted, and it
-does not yet work. Harness `validation/bfs3d_openfoam/adjoint_probe.py`.
+every other number in it is a **linear probe**, driven by the right-hand side `-R(state)`
+(`field_split_probe.py`). The actual adjoint had never been executed. It now has been, it works, and it
+agrees with a finite difference. Harness `validation/bfs3d_openfoam/adjoint_probe.py`.
 
-*Configuration, both runs:* `state-00067` started from its **physical** fields
-(`coupled.physical_fields`, not `layout.unpack` — the checkpoint holds `log(omega)`), nonlinear `rtol`
-2e-2, `forward_rtol` 0.3, `max_steps` 30, β = 0 throughout, field split, **shipped** column reach
-`(3,3,3,3,2,2)`, PETSc ILU(0)×4 on the flow block, native nodal trailing, `coarse_eq_limit` 2000,
-positivity floor 1e-8, preconditioner built once on concrete parameters. Objective `sum(k^2)`.
+*Configuration, every run below:* `state-00067` started from its **physical** fields
+(`coupled.physical_fields`, not `layout.unpack` — the checkpoint holds `log(omega)`), `forward_rtol`
+0.3, β = 0 throughout, field split, **shipped** column reach `(3,3,3,3,2,2)`, native nodal trailing
+inverse, `coarse_eq_limit` 2000, positivity floor 1e-8, preconditioner built once on concrete
+parameters, adjoint solver `relative_residual_gmres(1e-6, restart=120, max_restarts=150)`. Objective
+`sum(k^2)`; the differentiated parameter scales the molecular viscosity.
 
-| adjoint solver | outcome |
-|---|---|
-| `default_linear_solver()` at lineax's defaults (before the passthrough existed) | `A stagnation in an iterative linear solve has occurred` |
-| **restart 15, `stagnation_iters` 40, `max_restarts` 60, rtol 1e-10** | **stagnation GONE**; `The maximum number of solver steps was reached` |
-| restart 120, `max_restarts` 60, rtol 1e-8 | cancelled mid-solve; **no result** |
+**TWO things blocked it, and only the first was known.**
 
-- **✅ The stagnation was a SOLVER-SETTINGS artifact, and the API gap really was the blocker for it.**
-  Raising the restart/stagnation budget removes that failure mode outright — which is what the error
-  message claimed and what could not be tested until `adjoint_solver` was threaded.
-- **❌ But the transpose solve still does not converge**: it failed to reach rtol 1e-10 within **60
-  restart-15 cycles (~900 matvecs)**. So the API gap was *a* blocker, not *the* blocker, and
-  `jax.grad` on `bfs3d` remains unachieved.
-- **The forward half is a clean control.** Both runs reproduced the recorded forward trajectory **bit
-  for bit** — `sum(k^2)` = **5.337542799e+04**, 22 steps, terminal ratio 0.019, `alpha` 1.000 and β 0 at
-  every step — so the only thing that differed between them and the recorded failure is the adjoint
-  solver.
-- ⚠️ **Wall clock from these runs is VOID** (199 s and 175 s for the identical forward solve, against
-  155 s recorded): another session's pytest ran throughout. Step counts, residuals and the objective are
-  contention-immune and stand.
+1. **The API gap.** `solve_coupled` did not expose `adjoint_solver`, so the transpose solve ran at
+   `default_linear_solver()` = lineax's stock restart and stagnation budget and raised *"A stagnation in
+   an iterative linear solve has occurred. Try increasing `stagnation_iters` or `restart`"* — the remedy
+   the error names was unreachable from the coupled entry point. Threading it (`solve_coupled(
+   adjoint_solver=…)`) removes that failure mode outright.
+2. **The BUDGET, which is the part nobody had measured.** With the knob threaded, the transpose solve
+   needs **~1450 preconditioner applications**; the first attempt gave it 60 restart-15 cycles ≈ 900 and
+   died on `The maximum number of solver steps was reached`. The operator was never intractable — it was
+   under-resourced by ~1.6×, and the budget had been sized from the stale zero-shift figures below.
 
-**⚠️ THE OPEN QUESTION, and it is not covered by anything else in this section: the adjoint's
-right-hand side is NOT `-R`.** It is the cotangent `dL/dphi*`, which for this objective is `2k` —
-**localized in a single field block**, where every linear probe in this file uses the full steady
-residual. A transposed operator driven by a one-block right-hand side is a different problem from the
-one the 11-cycle and 22-cycle figures were measured on, and nothing here bounds it. Settle that before
-concluding anything about whether the *preconditioner* is at fault.
+**THE GRADIENT, and the finite-difference check.** The mismatch at a loose root is severe and is
+entirely the *finite difference's* fault — the adjoint barely moves while the difference walks onto it:
 
-**⚠️⚠️ AND DO NOT SIZE AN ADJOINT SOLVE FROM THE ZERO-SHIFT FIGURES IN THIS SECTION — treat them as
-stale until re-measured.** The 60-restart budget that failed above was chosen *from* those figures (11
-restart cycles at uniform reach, 22 at the shipped one), on the reasoning that 60 leaves ample headroom.
-That reasoning is unsound twice over: those figures are **linear-probe** numbers at a different
-right-hand side, and they predate a great deal of the preconditioner work this section records — the
-smoother, the aggregation, the field split, the trailing inverse and the column reach have all moved
-since parts of them were taken. A budget derived from them is a guess wearing a measurement's clothes.
-**Measure what the transpose solve actually costs, with a budget large enough not to bind, before
-quoting any adjoint cost or ranking any preconditioner on it.**
+| forward root `rtol` | central difference (`eps` 1e-4) | adjoint | gap |
+|---|---|---|---|
+| 2e-2 | −2.5807e+03 | −3.1793295e+03 | **23.2 %** |
+| 1e-3 | −3.1964e+03 | −3.1793668e+03 | 0.53 % |
+| **1e-4** | **−3.1787556e+03** | **−3.1793669e+03** | **1.9e-04 — agrees** |
 
-**Instrumentation that now exists, and the reason it is applications rather than cycles.** The
-restart-cycle count `solve_linear` returns is **discarded inside `_implicit_solve_bwd`**, which has no
-observer, so the adjoint's cost is not reachable from outside. `adjoint_probe.TransposeApplyCounter`
-swaps the host preconditioner's `factors` attribute for a delegating proxy (the same mutation an
-in-place refresh performs, and seen by an already-compiled solve for the same reason — the callback
-reads the attribute rather than capturing it) and counts **transposed** applications. Forward and
-adjoint share one factorization, so counting the transpose is what makes the split exact and free: the
-forward march never applies it. Restart cycles are then *derived*, not measured.
+- **The adjoint is stable to 6e-8 relative across the last two rows** while the difference moves 24 %.
+  So the gradient was right throughout, and every "mismatch" was a difference taken between two solves
+  that were **not at their roots** — the implicit-function-theorem adjoint is only valid at `R = 0`, and
+  a 2 % relative residual is nowhere near it.
+- ⚠️ **A LARGER `eps` MAKES IT WORSE, NOT BETTER — so "the finite difference is noisy" is the wrong
+  mechanism, and the arithmetic that seems to confirm it is a coincidence.** At `rtol` 2e-2 the gap goes
+  **23.2 % at `eps` 1e-4 → 64.2 % at `eps` 1e-3**. Solve *noise* would fall as `1/eps`; what actually
+  happens is that a bigger parameter step moves the two solves' stopping points further apart. The
+  seductive trap: the `eps` 1e-4 discrepancy (599) matches `objective-noise / 2 eps` to three figures,
+  which reads as proof of noise and is not. **Fix the root, not the step size.**
 
-**Not yet run, and both are cheap once the transpose solve converges:** the finite-difference check
-(`BFS3D_ADJOINT_FD=1`), and `BFS3D_FLOW_INVERSE=native` against the PETSc default on the adjoint —
-which is the one arm the whole native-preconditioner programme exists to test, and on which **nothing
-is known**, since both attempts to date used the PETSc default.
+**THE ADJOINT'S COST, measured — and this is the yardstick the campaign lacked.**
+
+| arm at β = 0 (`rtol` 1e-3, otherwise identical) | adjoint applications | derived cycles | per application |
+|---|---|---|---|
+| **PETSc ILU(0) flow block (incumbent)** | **1454** | **12.0** | ~195 ms |
+| native SIMPLE flow block, shipped settings (4 sweeps) | 1696 | 14.0 | ~383 ms |
+
+- **The native flow block does NOT beat the incumbent on the real adjoint** — ~17 % more applications
+  *and* ~2× the cost per application, so ~2.3× the work. This is the one arm the native-preconditioner
+  programme exists to test and it had never been run; the recorded 7-against-11 zero-shift win is a
+  **linear-probe** result at right-hand side `-R`, not this.
+- **The two arms' gradients agree to 9 significant figures** (−3.179366754e+03 against −3.179366759e+03),
+  which is the correctness check behaving exactly as it must: a preconditioner changes how the transpose
+  solve reaches the answer, never where it lands.
+- ⚠️ **Scope: this is the CASE'S SHIPPED native configuration (4 sweeps).** The best recorded zero-shift
+  native arm uses **8 sweeps**; that arm is a separate question.
+- ⚠️ **Applications, not cycles, and not wall clock.** A cycle count is a fair proxy only when the
+  candidates share a per-application cost, and these two explicitly do not — the same trap that nearly
+  killed the field split (31 % faster end to end *while taking 11 % more cycles*). Wall clock across
+  these runs is **contended** (another session ran a test tier throughout) and is not quotable; the
+  application counts are contention-immune.
+
+**⚠️⚠️ DO NOT SIZE AN ADJOINT SOLVE FROM THE ZERO-SHIFT FIGURES BELOW — treat them as stale until
+re-measured.** The 60-restart budget that failed was chosen *from* them (11 cycles at uniform reach, 22
+at the shipped one) on the reasoning that 60 leaves ample headroom. That reasoning is unsound twice
+over: they are **linear-probe** numbers at a different right-hand side, and they predate much of the
+preconditioner work this section records — the smoother, the aggregation, the field split, the trailing
+inverse and the column reach have all moved since parts of them were taken.
+
+**The adjoint's right-hand side is NOT `-R`** — it is the cotangent `dL/dphi*`, here `2k`, **localized in
+a single field block**, where every linear probe in this file uses the full steady residual. That
+difference is why the adjoint's 12 cycles and the probes' 11 are not the same measurement even when the
+numbers look alike.
+
+**Instrumentation, and why it counts applications rather than cycles.** The restart-cycle count
+`solve_linear` returns is **discarded inside `_implicit_solve_bwd`**, which has no observer, so the
+adjoint's cost is unreachable from outside. `adjoint_probe.TransposeApplyCounter` swaps the host
+preconditioner's `factors` attribute for a delegating proxy (the same mutation an in-place refresh
+performs, seen by an already-compiled solve for the same reason — the callback reads the attribute
+rather than capturing it) and counts **transposed** applications. Forward and adjoint share one
+factorization, so counting the transpose makes the split exact and free: the forward march never applies
+it. Cycles are then *derived*, not measured. A heartbeat every N applications makes the solve watchable;
+it separates running from hung, **not** converging from stagnating.
+
+**⚠️ STILL NOT ESTABLISHED: iteration-count independence.** A gradient matching a finite difference shows
+the derivative is *right*, not that it came from the implicit-function-theorem solve rather than a taped
+march. The evidence here is suggestive but incidental — the adjoint held 1454 applications at `rtol` 2e-2
+and 1e-3 while the forward work rose 1070 → 1702 → 1944 — and the designed test is to repeat the gradient
+from a **different starting iterate**, which changes the step count while leaving the root alone. Until
+that runs, do not claim it.
 
 **Standing configuration for every measurement below**, because none of them mean anything without it:
 `bfs3d` `state-00067` (converged, `|R|` 3.586e-06, written at march shift 0.0064), **operator and
