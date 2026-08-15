@@ -1159,6 +1159,25 @@ def coupled_continuation(
         global progress reference was measured against, rather than re-basing toward one at each
         developed refresh state (seam 4). ``None`` (a fresh, non-refresh build) constructs the default
         row-scaled measure (or the block-scaled one when ``block_scaled_norm``).
+    grow : int
+        Extra line-search rungs **above** the full step, each a doubling, so the search may accept
+        ``alpha > 1``. Zero (the default) caps it at the full step. The admissible step is often longer
+        than the full one on a developed field, and a ladder starting at one cannot reach it. A growth
+        rung is only ever reachable by **passing** the acceptance test, never by falling back onto it --
+        the fallback stays capped at the full step, since its job is to avoid a null step rather than to
+        license an excursion.
+    descent_backoff : int
+        Lower the shift strength up to this many times, until the shifted correction actually descends
+        in the residual measure, before the usual escalation ladder runs. Zero (the default) disables
+        it. The shifted correction is not a descent direction by construction -- ``J delta = -R -
+        beta D delta``, whose second term has no fixed sign and worsens with ``beta`` -- and past a
+        critical shift strength every step length raises the measure, so the line search can only pick
+        the least-harmful rung and the march stands still. Escalating there is the wrong direction;
+        this backs off instead. Each backoff costs one shifted solve, which is why it is opt-in.
+    descent_test : bool
+        Reject a correction that does not descend, rather than judging the candidate's norm alone. With
+        the backoff off this surfaces a non-descent direction instead of letting it pass as a step that
+        quietly went nowhere.
     **preconditioner_kwargs
         Forwarded to :meth:`~aquaflux.flow.BlockPreconditioner.build` for the flow block (e.g.
         ``schur_scaling``, ``velocity``). Ignored when ``reuse`` is given, since the flow block is then
@@ -3220,9 +3239,6 @@ def solve_coupled(
     refresh: RefreshPolicy = NO_REFRESH,
     step_control: StepControl | None = None,
     scaled_norm: bool = False,
-    grow: int = 0,
-    descent_backoff: int = 0,
-    descent_test: bool = False,
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     retry: RetryPolicy = NO_RETRIES,
@@ -3318,18 +3334,6 @@ def solve_coupled(
         obtain gradients, drop the refresh and differentiate the single-stage solve with a
         ``continuation`` built on concrete parameters outside ``jax.grad`` -- the adjoint is
         refresh-independent, so the gradient is identical.
-    descent_backoff : int
-        Lower the shift strength up to this many times, until the shifted correction actually descends
-        in the residual measure, before the usual escalation ladder runs. Zero (the default) disables
-        it. The shifted correction is not a descent direction by construction -- ``J delta = -R -
-        beta D delta``, whose second term has no fixed sign and worsens with ``beta`` -- and past a
-        critical shift strength every step length raises the measure, so the line search can only pick
-        the least-harmful rung and the march stands still. Escalating there is the wrong direction;
-        this backs off instead. Each backoff costs one shifted solve, which is why it is opt-in.
-    descent_test : bool
-        Reject a correction that does not descend, rather than judging the candidate's norm alone. With
-        the backoff off this surfaces a non-descent direction instead of letting it pass as a step that
-        quietly went nowhere.
     scaled_norm : bool
         **Rebuild** the default row-equilibrated measure (:class:`~aquaflux.solve.RowScaledNorm`) at the
         start of every outer iteration -- holding it fixed across that iteration's line search -- rather
@@ -3509,9 +3513,6 @@ def solve_coupled(
                 coupled,
                 reference,
                 method=method,
-                grow=grow,
-                descent_backoff=descent_backoff,
-                descent_test=descent_test,
                 **continuation_kwargs,
             )
 
@@ -3602,9 +3603,6 @@ def solve_coupled(
                     method=method,
                     reuse=continuation.shift_policy,
                     residual_norm=base_norm,  # keep the progress measure fixed (seam 4)
-                    grow=grow,
-                    descent_backoff=descent_backoff,
-                    descent_test=descent_test,
                     **continuation_kwargs,
                 )
         # The observed march is never differentiated -- the refresh, step control and per-step norm
