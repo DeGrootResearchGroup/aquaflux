@@ -20,11 +20,31 @@ Engineering Principles.
   `[vel_0..vel_{dim-1}, pressure]` (the system-first layout; `pack`/`unpack` convert to
   `(velocity, pressure)`). Per component the momentum balance is a scalar transport of `u_i`
   — advection (`mdot·u_i`) + viscous diffusion (μ as the coefficient) + pressure force
-  (`p_f n_i A`) — **reusing `AdvectionFlux` and `DiffusionFlux` verbatim**: per component it builds
-  a `FaceContext` (properties `{"viscosity": μ}` via `DiffusionFlux(coefficient="viscosity")`, the
-  component gradient, the boundary velocity) and calls the shared operators' `face_flux(component,
-  context)`; only the pressure term is new. Continuity is `Σ mdot_f = 0`. The whole Jacobian comes
-  from AD; solved by the existing `NewtonSolver` / `ImplicitNewtonSolver`.
+  (`p_f n_i A`) — **and all three are `FaceFluxOperator`s composed by the shared `CellBalance`**,
+  the same object that assembles every scalar transport equation (`.claude/rules/discretization.md`).
+  Per component it builds a `FaceContext` (properties `{"viscosity": μ}` via
+  `DiffusionFlux(coefficient="viscosity")`, the component gradient, the boundary velocity) and hands
+  it to `CellBalance((DiffusionFlux, PressureForce, AdvectionFlux)).residual(component, context)`.
+  Continuity is `Σ mdot_f = 0`. The whole Jacobian comes from AD; solved by the existing
+  `ImplicitNewtonSolver`.
+  - **`PressureForce` (`momentum.py`, exported from `aquaflux.flow`) is the one flow-specific
+    operator.** `p_f n_i A` — the momentum pressure term written as what it is, a surface flux of
+    momentum — carrying the already-reconstructed face pressure as constructor state and the
+    component as a static field, and **ignoring the transported field** (pressure is a different
+    unknown, exactly as `AdvectionFlux` ignores it through `mass_flux`). That loses no coupling:
+    `face_pressure` is a differentiable function of the pressure unknowns, so AD still recovers the
+    full `dR_momentum/dp`. Before this it was added by hand inside `_momentum_residual`, which is
+    what forced the momentum block to open-code the flux sum and scatter instead of composing the
+    shared balance.
+  - **⚠️ The operator order `(diffusion, pressure, advection)` is load-bearing arithmetic, not
+    style.** A `CellBalance` sums in tuple order and floating-point addition is not associative, so
+    reordering perturbs the residual in the last bits — and `bfs3d` march trajectories are compared
+    bit-for-bit across runs (`march_log_compare.py` exists because a trajectory difference was once
+    mis-attributed to a change rather than to the base). This order reproduces the hand-assembled
+    `(diffusion + pressure) + advection` it replaced; the whole refactor was gated on the coupled
+    `bfs3d` residual at `state-00067` being bit-unchanged, not on tests passing.
+  - **`MomentumContinuity` has no `_scatter`** — there is no such method; the balance scatters, and
+    continuity calls `mesh.face_cells.scatter_conservative(mdot)` directly.
   - **One shared assembly per state — `flow_fields` / `residual_from_fields` (binding, #106).** The
     boundary fields, both gradients, the lagged `a_P`, and the Rhie–Chow flux are assembled once by
     the public `flow_fields(state) -> FlowFields`; `residual` = `residual_from_fields(flow_fields(state))`

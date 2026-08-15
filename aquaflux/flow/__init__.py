@@ -19,7 +19,7 @@ from .continuation import (
 from .initialization import bernoulli_pressure, laplace_field, potential_flow
 from .mean_velocity import bulk_velocity_flow_solve
 from .scales import body_force_velocity, characteristic_velocity
-from .momentum import FlowFields, MomentumContinuity, VelocityFields
+from .momentum import FlowFields, MomentumContinuity, PressureForce, VelocityFields
 from .preconditioner import damped_jacobi_solve, pressure_schur_laplacian
 from .rhie_chow import interior_mass_flux, momentum_diagonal
 
@@ -32,6 +32,7 @@ __all__ = [
     "MomentumShiftPolicy",
     "MovingWall",
     "NoSlipWall",
+    "PressureForce",
     "PressureOutlet",
     "VelocityFields",
     "VelocityInlet",

@@ -9,10 +9,12 @@ Per velocity component ``i`` the momentum balance is a scalar transport of ``u_i
 
     R_{u_i} = sum_faces ( mdot_f u_{i,f}  +  p_f n_i A  -  mu (grad u_i . n) A )   ( + accumulation )
 
-— advection of ``u_i`` by the mass flux, a pressure-gradient force, and viscous diffusion. The
-first and last reuse :class:`~aquaflux.discretization.AdvectionFlux` and
+— advection of ``u_i`` by the mass flux, a pressure force, and viscous diffusion. All three are
+face-flux operators summed by a :class:`~aquaflux.discretization.CellBalance`, the same
+composition every scalar transport equation uses: the first and last are
+:class:`~aquaflux.discretization.AdvectionFlux` and
 :class:`~aquaflux.discretization.DiffusionFlux` verbatim (viscosity as the diffusion
-coefficient); only the pressure term is new. Continuity is
+coefficient), and only :class:`PressureForce` is new. Continuity is
 
     R_p = sum_faces mdot_f ,
 
@@ -29,7 +31,14 @@ import equinox as eqx
 import jax.numpy as jnp
 
 from aquaflux.boundary import BoundaryConditions
-from aquaflux.discretization import AdvectionFlux, DiffusionFlux, FaceContext, FixedValueCells
+from aquaflux.discretization import (
+    AdvectionFlux,
+    CellBalance,
+    DiffusionFlux,
+    FaceContext,
+    FaceFluxOperator,
+    FixedValueCells,
+)
 from aquaflux.properties import PropertyModel
 from aquaflux.schemes.interpolation import (
     interpolate_to_face,
@@ -95,6 +104,52 @@ class FlowFields(NamedTuple):
     boundary_pressure: jnp.ndarray  # (n_faces,)
     grad_pressure: jnp.ndarray  # (n_cells, dim)
     mdot: jnp.ndarray  # (n_faces,) Rhie--Chow face mass flux
+
+
+class PressureForce(FaceFluxOperator):
+    """The pressure force on one momentum component as a face flux, ``p_f n_i A``.
+
+    The pressure term of the momentum balance is the surface integral ``∮ p n dA``, so its
+    owner-outward contribution to component ``i`` through a face is ``p_f n_i A`` -- a flux of
+    momentum through that face, and therefore an ordinary
+    :class:`~aquaflux.discretization.FaceFluxOperator` rather than a term the momentum residual has
+    to add by hand. Composing it with the viscous and advective fluxes is what makes each momentum
+    component a plain scalar transport, assembled by the same
+    :class:`~aquaflux.discretization.CellBalance` every other equation uses.
+
+    It does not read the transported field: the pressure is a *different* unknown of the coupled
+    system, carried here as the already-reconstructed face value, exactly as
+    :class:`~aquaflux.discretization.AdvectionFlux` carries its prescribed mass flux. The
+    pressure--velocity coupling is not lost by that -- ``face_pressure`` is a differentiable
+    function of the pressure unknowns, so automatic differentiation of the assembled residual
+    recovers the full ``dR_momentum / dp`` block.
+
+    Attributes
+    ----------
+    face_pressure : jnp.ndarray
+        Pressure at each face's integration point, shape ``(n_faces,)`` -- interpolated (with its
+        skewness correction) on interior faces and taken from the boundary closure on boundary
+        faces, so the force stays second order on a non-orthogonal mesh.
+    component : int
+        Which momentum component this is the force on, indexing the face normal (static).
+    """
+
+    face_pressure: jnp.ndarray
+    component: int = eqx.field(static=True)
+
+    def face_flux(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
+        """Owner-outward pressure force per face, shape ``(n_faces,)``.
+
+        Parameters
+        ----------
+        field : jnp.ndarray
+            The transported velocity component, shape ``(n_cells,)``. Unused -- see the class
+            docstring.
+        context : FaceContext
+            The shared per-face inputs; the face normal and area are gathered from its geometry.
+        """
+        face = context.geometry.face
+        return self.face_pressure * face.normal[:, self.component] * face.area
 
 
 class MomentumContinuity(eqx.Module):
@@ -423,9 +478,6 @@ class MomentumContinuity(eqx.Module):
         )
         return jnp.where(face_cells.interior, interior_pressure, boundary_pressure)
 
-    def _scatter(self, face_flux: jnp.ndarray) -> jnp.ndarray:
-        return self.mesh.face_cells.scatter_conservative(face_flux)
-
     # --- residual ----------------------------------------------------------------------
 
     def _velocity_gradient(
@@ -619,12 +671,16 @@ class MomentumContinuity(eqx.Module):
         """Momentum cell residual per velocity component, shape ``(n_cells, dim)``.
 
         Each component ``u_i`` is a scalar transport — viscous diffusion (viscosity as the
-        coefficient) + the pressure force ``p_f n_i A`` + advection ``mdot_f u_i`` — reusing the
-        shared diffusion and advection operators; only the pressure force is flow-specific. The
-        per-component cell gradient is taken from the shared ``grad_velocity`` reconstruction.
+        coefficient) + the pressure force ``p_f n_i A`` + advection ``mdot_f u_i`` — so all three
+        terms are face-flux operators composed by the same
+        :class:`~aquaflux.discretization.CellBalance` that assembles every other transport
+        equation; only :class:`PressureForce` is flow-specific. The per-component cell gradient is
+        taken from the shared ``grad_velocity`` reconstruction, which is why this forms its own
+        context rather than letting a :class:`~aquaflux.discretization.ResidualAssembler` do it:
+        the velocity gradient is one tensor reconstruction shared across the components, from flow
+        boundary closures that take no gradient.
         """
         viscosity = self.viscosity  # per-cell mu, the momentum diffusion coefficient
-        normal, area = self.geometry.face.normal, self.geometry.face.area
         volume = self.geometry.cell.volume
         # The wall-function effective viscosity, if any, overrides only the shearing-wall boundary
         # faces (None -> plain per-cell coefficient, bit-identical).
@@ -632,9 +688,9 @@ class MomentumContinuity(eqx.Module):
             coefficient="viscosity", boundary_coefficient=self._wall_boundary_viscosity()
         )
         advection = (
-            AdvectionFlux(mass_flux=mdot, scheme=self.advection_scheme)
+            (AdvectionFlux(mass_flux=mdot, scheme=self.advection_scheme),)
             if self.advection_scheme is not None
-            else None
+            else ()
         )
         columns = []
         for i in range(self.mesh.dim):
@@ -646,13 +702,12 @@ class MomentumContinuity(eqx.Module):
                 gradient=grad_velocity[:, i],
                 properties={"viscosity": viscosity},
             )
-            face_flux = (
-                diffusion.face_flux(component, context) + pressure_face * normal[:, i] * area
-            )
-            if advection is not None:
-                face_flux = face_flux + advection.face_flux(component, context)
-            # R = sum(owner-outward flux) - source; the body force is a uniform volume source.
-            columns.append(self._scatter(face_flux) - self.body_force[i] * volume)
+            # A balance sums its operators in tuple order, and floating-point addition is not
+            # associative, so viscous-pressure-advective is the arithmetic, not just the reading
+            # order. Rearranging them perturbs the residual in the last bits.
+            balance = CellBalance((diffusion, PressureForce(pressure_face, i), *advection))
+            # R = balance - source; the body force is a uniform volume source.
+            columns.append(balance.residual(component, context) - self.body_force[i] * volume)
         return jnp.stack(columns, axis=1)
 
     def _continuity_residual(self, mdot: jnp.ndarray, pressure: jnp.ndarray) -> jnp.ndarray:
@@ -661,7 +716,7 @@ class MomentumContinuity(eqx.Module):
         In a closed domain (``pressure_pin`` set) the pinned cell's continuity equation is replaced
         by ``p = pressure_pin_value`` to fix the otherwise-free pressure level.
         """
-        residual = self._scatter(mdot)
+        residual = self.mesh.face_cells.scatter_conservative(mdot)
         if self.pressure_pin is not None:
             fix = FixedValueCells(
                 jnp.array([self.pressure_pin]), jnp.array([self.pressure_pin_value])

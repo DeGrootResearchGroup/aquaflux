@@ -129,14 +129,19 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
     operators over it. **Gather is direct indexing** with the public accessors `owner` /
     `safe_neighbour` (`cell_field[fc.owner]`, `cell_field[fc.safe_neighbour]` — the boundary-safe
     substitution lives in the `safe_neighbour` property); that idiom is used throughout, so there are
-    no `gather_owner`/`gather_neighbour` wrapper methods. The *scatter* side is where the class earns
+    no `gather_owner`/`gather_neighbour` wrapper methods. `n_faces` is a **derived** property
+    (`owner.shape[0]`), so it cannot disagree with the arrays it describes — unlike `n_cells`, which
+    is stored because it is *not* recoverable that way (no face need reference the last cell). It is
+    what a consumer sizes a per-face accumulator at without taking the whole `Mesh` (`CellBalance`'s
+    face-flux sum). Note `FaceNodeConnectivity` stores its own `n_faces` as a static field instead —
+    its CSR row count is a construction input, not a length. The *scatter* side is where the class earns
     its keep: `scatter(owner_contrib, neighbour_contrib)` (auto-masks the neighbour side on boundary
     faces — the *one* place that masking lives), plus conveniences `scatter_conservative(flux)`
     (owner `+`, neighbour `−`; FVM conservation), `scatter_symmetric(contrib)` (both cells `+`; means
     / symmetric coefficients), and `scatter_max`/`scatter_min` (extremum reductions, boundary side
     masked to ∓∞). This is the operator behind **every** `gather → compute → scatter` residual term —
     the mesh geometry (`cell.py`, `quality.py`), the discretization scatter
-    (`ResidualAssembler._scatter` delegates here; flux operators gather owner/neighbour by direct
+    (`CellBalance` delegates its scatter here; flux operators gather owner/neighbour by direct
     indexing on `owner`/`safe_neighbour`), the gradient schemes, and the coupled flow all compose it.
     **Streamwise-periodic** meshes carry a per-face `neighbour_offset` (`None` on an ordinary mesh):
     a displacement-forming operator gathers the neighbour centroid through `fc.neighbour_centroid(cc)`
