@@ -5067,6 +5067,30 @@ transfer to any thresholded arm.
 
 ## Globalization — forward step, continuation, line search
 
+- **`ShiftedStep` is the shared body of the two shifted forward steps (`solve/continuation.py`, BUILT
+  2026-08-15).** `PseudoTransientStep` and `DualTimeStep` differ entirely in `stepper()` — what one
+  *outer step* means — and not at all in how they are configured or interrogated. The eight fields they
+  share (`shift_policy`, `relaxation_schedule`, `line_search`, `step_limit`, `step_projection`,
+  `forward_solver`, `residual_norm`, `adjoint_preconditioner_factory`) and all three `ForwardStep`
+  accessors (`norm`, `default_solver`, `adjoint_preconditioner`) were written out **twice, identically**,
+  field comments included. A subclass now supplies `stepper` plus the fields its own step shape needs.
+  `DampedNewtonStep` is deliberately NOT a subclass: it has no shift, and its `default_solver` returns a
+  different constant, so folding it in would mean inventing a `relaxation_schedule` it does not possess.
+  **Verified as a pure refactor**: no field and no default changed on either class, compared field by
+  field against the previous implementation (`DualTimeStep.line_search` stays **10** against the base's
+  **0** — it redeclares it, which is why that difference has to be checked rather than assumed).
+
+- **`_TrailingFirstFieldSplit` supplies only what differs, and `apply` has ONE body (BUILT 2026-08-15).**
+  The two orderings were mirrored copies — 14 lines differing in 5 — and the copy had dropped the base's
+  explanation of why the transposed coupling is formed once. The class docstring justified the split as
+  avoiding "a branch on ordering inside `apply`, on a path that runs once per Krylov iteration", which is
+  a real cost and the wrong conclusion: the ordering **cannot change after construction**, so
+  `_set_order(first=…)` resolves it there and `apply` reads a pair of `(inverse, dofs)` records. The
+  remaining branch is on `transpose`, which the old body already had — transposing a block-triangular
+  inverse reverses the order and uses `Cᵀ`, and that is the whole of the difference between the four
+  cases it used to spell out. **Bit-identical** across all four (both orderings × both directions), each
+  compared as a full dense action rather than on one vector.
+
 - **Forward globalization is ONE injected strategy — `forward_step: ForwardStep`.** The forward
   Newton loop has a single point of variation: `ImplicitNewtonSolver` takes one `forward_step`
   implementing the `ForwardStep` protocol (`stepper()` → the per-step

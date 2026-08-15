@@ -242,7 +242,94 @@ class DivergenceGuard(eqx.Module):
         )
 
 
-class PseudoTransientStep(eqx.Module):
+class ShiftedStep(eqx.Module):
+    """The configuration and accessors every diagonally-shifted forward step shares.
+
+    :class:`PseudoTransientStep` takes one shifted Newton step per outer iteration;
+    :class:`DualTimeStep` runs an inner Newton loop to convergence on a backward-Euler residual. They
+    differ entirely in ``stepper`` -- what one *outer step* means -- and not at all in how they are
+    configured or interrogated: both are driven by the same shift policy and relaxation schedule, both
+    take the same positivity constraint, both answer the same three questions for the solver that runs
+    them, and all three answers were written out twice, identically.
+
+    So the base holds the eight fields they share and the three accessors, and each subclass supplies
+    ``stepper`` plus the fields its own step shape needs -- the escalation ladder and descent tests for
+    the single-step march, the inner-loop bounds and observability hooks for the dual-time one.
+
+    **Why the accessors are worth sharing even though they are one line each.** They are the
+    :class:`~aquaflux.solve.ForwardStep` contract's answers, so a third strategy that gets one subtly
+    wrong -- returning a fresh norm rather than the configured one, say -- fails somewhere far from the
+    mistake: the convergence test and the globalization would then judge progress by different measures,
+    which is a silent wrong answer rather than an error.
+
+    Attributes
+    ----------
+    shift_policy : ShiftPolicy
+        Supplies the per-state shift diagonal and the preconditioner for the shifted operator.
+    relaxation_schedule : RelaxationSchedule
+        The memoryless rule setting the shift strength ``beta`` from the residual ratio. Data, not
+        static, so an external control can replace ``beta`` on a dynamic leaf and keep the jitted step a
+        compilation-cache hit.
+    line_search : int
+        Backtracking rungs the step may try below the full length (``0`` takes the full step).
+    step_limit, step_projection : callable or None
+        The positivity constraint: a global cap on the step length, and a per-entry clip of the
+        correction. Both guard the *state* rather than the march -- a field that must stay positive must
+        stay positive whichever strategy is stepping it -- which is why they are here rather than on one
+        subclass. Both default ``None``, the unconstrained step exactly.
+    forward_solver : lineax.AbstractLinearSolver or None
+        The shifted-solve Krylov solver, or ``None`` for this march's shared inexact default. Data, not
+        static: a solver configured with a row-scaled stopping measure carries that measure's scale
+        arrays, and equinox rightly warns when arrays go in a static field -- static leaves join the jit
+        cache key by equality, so array-valued ones make the key ill-defined. A solver with no array
+        leaves filters to the static side regardless, so the default path is unchanged.
+    residual_norm : ResidualNorm
+        The measure the outer stopping test and this step's own globalization share. Data, not static,
+        for the same reason: an observed march rebuilds it each outer iteration and swaps it in with
+        ``tree_at``, which is only a cache hit if it rides as data.
+    adjoint_preconditioner_factory : callable or None
+        The ``state -> M`` factory for the converged transpose solve, or ``None`` (static). At the root
+        the operator is the unshifted steady Jacobian, so the adjoint needs no shift.
+    """
+
+    shift_policy: ShiftPolicy
+    relaxation_schedule: RelaxationSchedule = eqx.field(default_factory=SwitchedEvolutionRelaxation)
+    line_search: int = eqx.field(static=True, default=0)
+    step_limit: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
+        static=True, default=None
+    )
+    step_projection: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
+        static=True, default=None
+    )
+    forward_solver: lx.AbstractLinearSolver | None = None
+    residual_norm: ResidualNorm = eqx.field(default=jnp.linalg.norm)
+    adjoint_preconditioner_factory: (
+        Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
+    ) = eqx.field(static=True, default=None)
+
+    def norm(self) -> ResidualNorm:
+        """The residual measure the march and the outer stopping test share (:attr:`residual_norm`)."""
+        return self.residual_norm
+
+    def default_solver(self) -> lx.AbstractLinearSolver:
+        """The injected :attr:`forward_solver` when set, else the shared inexact continuation default.
+
+        A loose relative tolerance with a tight absolute floor and a generous restart/stagnation budget,
+        so the march is not capped short of the nonlinear tolerance and rides out the stiffer shifted
+        operators a graded, high-Reynolds mesh produces.
+        """
+        return (
+            self.forward_solver if self.forward_solver is not None else _INEXACT_CONTINUATION_SOLVER
+        )
+
+    def adjoint_preconditioner(
+        self,
+    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None:
+        """The (unshifted) ``state -> M`` factory for the adjoint solve at the converged state."""
+        return self.adjoint_preconditioner_factory
+
+
+class PseudoTransientStep(ShiftedStep):
     """Pseudo-transient continuation as a :class:`~aquaflux.solve.ForwardStep` (see the module docstring).
 
     The residual-agnostic engine: it forms the switched-evolution-relaxation shift, solves the
@@ -319,25 +406,16 @@ class PseudoTransientStep(eqx.Module):
         (unshifted) preconditioner is the consistent choice.
     """
 
-    shift_policy: ShiftPolicy
-    relaxation_schedule: RelaxationSchedule = eqx.field(default_factory=SwitchedEvolutionRelaxation)
     line_search_growth: LineSearchGrowth = eqx.field(default_factory=MonotoneLineSearch)
     max_escalations: int = eqx.field(static=True, default=6)
     escalation_factor: float = eqx.field(static=True, default=2.0)
     acceptance: StepAcceptance = eqx.field(default_factory=DivergenceGuard)
-    line_search: int = eqx.field(static=True, default=0)
     # The positivity constraint, the same pair `DualTimeStep` carries and applied identically. It lives
     # on both because it guards the *state*, not the march: a field that must stay positive must stay
     # positive whichever strategy is stepping it, and having it on only one meant choosing a strategy
     # silently gave up a guard whose absence is a recorded march death (two cells of 23040 took `k`
     # negative and NaN'd the whole residual through a bare `sqrt`). Both default `None`, which is the
     # unconstrained step exactly.
-    step_limit: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
-        static=True, default=None
-    )
-    step_projection: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
-        static=True, default=None
-    )
     # Data, not static (the same reasoning as `residual_norm` below): a solver configured with a
     # row-scaled stopping measure CARRIES that measure's scale arrays, and equinox rightly warns when
     # arrays are put in a static field -- static leaves take part in the jit cache key by equality, so
@@ -345,7 +423,6 @@ class PseudoTransientStep(eqx.Module):
     # every step. As data the arrays are ordinary traced leaves and the cache key is shape/dtype only.
     # A solver with no array leaves (the default, and any plain-tolerance GMRES) filters to the static
     # side regardless, so this changes nothing for those.
-    forward_solver: lx.AbstractLinearSolver | None = None
     # Not a static field: an observed march rebuilds the measure each outer iteration and swaps it in
     # with `tree_at`, and that is only a compilation-cache hit if the measure rides as data. A plain
     # callable (the default) has no array leaves, so it is filtered to the static side anyway and the
@@ -373,32 +450,6 @@ class PseudoTransientStep(eqx.Module):
     # candidate's norm alone. Independent of the backoff: with the backoff off, this makes a
     # non-descent direction fail so the caller sees it instead of a step that quietly went nowhere.
     descent_test: bool = eqx.field(static=True, default=False)
-    residual_norm: ResidualNorm = eqx.field(default=jnp.linalg.norm)
-    adjoint_preconditioner_factory: (
-        Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
-    ) = eqx.field(static=True, default=None)
-
-    def norm(self) -> ResidualNorm:
-        """The residual measure the march and the outer stopping test share (:attr:`residual_norm`)."""
-        return self.residual_norm
-
-    def default_solver(self) -> lx.AbstractLinearSolver:
-        """The forward-loop solver for the pseudo-transient march when the caller supplies none.
-
-        The injected :attr:`forward_solver` when set, else the shared
-        :data:`_INEXACT_CONTINUATION_SOLVER` — a loose relative tolerance with a tight absolute floor
-        and a generous restart/stagnation budget, so the march is not capped short of the nonlinear
-        tolerance and rides out the stiffer shifted operators a graded, high-Reynolds mesh produces.
-        """
-        return (
-            self.forward_solver if self.forward_solver is not None else _INEXACT_CONTINUATION_SOLVER
-        )
-
-    def adjoint_preconditioner(
-        self,
-    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None:
-        """The (unshifted) ``state -> M`` factory for the adjoint solve at the converged state."""
-        return self.adjoint_preconditioner_factory
 
     def stepper(self) -> _ForwardStep:
         """The accepted shifted-Newton step and its linear solve's cycle count.
@@ -646,7 +697,7 @@ class PseudoTransientStep(eqx.Module):
         return step
 
 
-class DualTimeStep(eqx.Module):
+class DualTimeStep(ShiftedStep):
     """Dual-time (backward-Euler) forward-step strategy: an inner Newton loop per outer timestep.
 
     :class:`PseudoTransientStep` adds the shift ``β d`` to the Jacobian only and measures the bare
@@ -810,8 +861,6 @@ class DualTimeStep(eqx.Module):
         ``None`` (default) is byte-identical. Forward-only.
     """
 
-    shift_policy: ShiftPolicy
-    relaxation_schedule: RelaxationSchedule = eqx.field(default_factory=SwitchedEvolutionRelaxation)
     inner_steps: int = eqx.field(static=True, default=5)
     inner_tol: float = eqx.field(static=True, default=0.05)
     line_search: int = eqx.field(static=True, default=10)
@@ -822,42 +871,15 @@ class DualTimeStep(eqx.Module):
     # every step. As data the arrays are ordinary traced leaves and the cache key is shape/dtype only.
     # A solver with no array leaves (the default, and any plain-tolerance GMRES) filters to the static
     # side regardless, so this changes nothing for those.
-    forward_solver: lx.AbstractLinearSolver | None = None
     # Data, not static (matching PseudoTransientStep): an observed march re-derives the measure each
     # outer iteration and swaps it in with `tree_at`, which needs it to ride as a leaf. The default
     # plain callable has no array leaves, so it filters to the static side and the default is unchanged.
-    residual_norm: ResidualNorm = eqx.field(default=jnp.linalg.norm)
-    adjoint_preconditioner_factory: (
-        Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
-    ) = eqx.field(static=True, default=None)
     inner_observer: Callable[..., None] | None = eqx.field(static=True, default=None)
     refresh_on_cycles: int | None = eqx.field(static=True, default=None)
     inner_refresh: Callable[[jnp.ndarray], None] | None = eqx.field(static=True, default=None)
     cycle_budget: int | None = eqx.field(static=True, default=None)
-    step_limit: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
-        static=True, default=None
-    )
-    step_projection: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
-        static=True, default=None
-    )
     abort_above_inner_cycles: int | None = eqx.field(static=True, default=None)
     abort_below_alpha: float | None = eqx.field(static=True, default=None)
-
-    def norm(self) -> ResidualNorm:
-        """The residual measure the inner loop and the outer stopping test share (:attr:`residual_norm`)."""
-        return self.residual_norm
-
-    def default_solver(self) -> lx.AbstractLinearSolver:
-        """The shifted-solve Krylov solver: the injected :attr:`forward_solver`, else the shared default."""
-        return (
-            self.forward_solver if self.forward_solver is not None else _INEXACT_CONTINUATION_SOLVER
-        )
-
-    def adjoint_preconditioner(
-        self,
-    ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None:
-        """The (unshifted) ``state -> M`` factory for the adjoint solve at the converged state."""
-        return self.adjoint_preconditioner_factory
 
     def stepper(self) -> _ForwardStep:
         """One backward-Euler outer timestep: the inner-converged iterate and its total solve cost.
