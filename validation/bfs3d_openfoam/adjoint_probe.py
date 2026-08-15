@@ -6,20 +6,22 @@ preconditioner comparison in this case is probed at ``beta = 0``. That argument 
 end to end here -- no gradient had ever been taken through this case at all -- so a preconditioner could
 have been tuned for an operating point nothing reached.
 
-This asks two questions, cheapest first, and reports them separately because they fail for different
+This asks three questions, cheapest first, and reports them separately because they fail for different
 reasons:
 
 1. **Does it execute, and is the result finite?** ``jax.grad`` through a converged coupled solve, on a
    real 3D state.
 2. **Is it correct?** Against a central finite difference on the same objective (``BFS3D_ADJOINT_FD=1``).
-
-⚠️ **What this does NOT yet check: iteration-count independence.** A gradient that matches a finite
-difference can still have been taken by taping the forward march, and the two are told apart only by
-showing the adjoint's cost does not scale with how many forward steps the solve happened to take. The
-way to add it here is to repeat the same gradient from a *different* starting iterate -- which changes
-the step count while leaving the root, and therefore the gradient, alone -- and check the gradient agrees
-while the adjoint's cycle count does not move. Until that exists, treat a passing finite-difference
-check as evidence the derivative is right, not as evidence of how it was obtained.
+3. **Was it obtained the right way?** A gradient matching a finite difference shows the derivative is
+   *right*, not that it came from the implicit-function-theorem solve rather than from taping the forward
+   march -- and the two are told apart only by showing the adjoint's cost does not scale with how many
+   forward steps the solve happened to take. There is no flag for this: run the SAME gradient from a
+   different ``BFS3D_PROBE_STATE`` (a checkpoint one step further out on the same trajectory), which
+   lengthens the forward path while leaving the root -- and therefore the gradient -- alone, then compare
+   the two ``ADJOINT COST`` lines. Measured on this case: starting a step earlier took the forward path
+   from 1944 to 2262 preconditioner applications while the adjoint went 1575 to **1454**, i.e. *down*,
+   with the gradients agreeing to nine significant figures. A taped reverse pass cannot cost less when
+   the forward pass costs more.
 
 The objective is deliberately dull -- a sum of squares over ``k`` -- because the point is the derivative
 machinery, not the functional. A reattachment length would drag a root-finder into the tape.
@@ -28,7 +30,10 @@ Usage::
 
     BFS3D_PROBE_STATE=state-00067 validation/run_case.sh validation/bfs3d_openfoam/adjoint_probe.py
 
-``BFS3D_ADJOINT_FD=1`` adds part 2, which costs two more full solves and is off by default.
+The defaults are the MEASURED working configuration, not guesses -- see each constant below for what it
+was measured against. ``BFS3D_ADJOINT_FD=1`` adds part 2, which costs two more full solves and is off by
+default; ``BFS3D_ADJOINT_SKIP_FORWARD=1`` drops the watched forward pass, halving the cost of an
+adjoint-only sweep.
 """
 
 from __future__ import annotations

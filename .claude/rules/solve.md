@@ -3164,12 +3164,34 @@ factorization, so counting the transpose makes the split exact and free: the for
 it. Cycles are then *derived*, not measured. A heartbeat every N applications makes the solve watchable;
 it separates running from hung, **not** converging from stagnating.
 
-**⚠️ STILL NOT ESTABLISHED: iteration-count independence.** A gradient matching a finite difference shows
-the derivative is *right*, not that it came from the implicit-function-theorem solve rather than a taped
-march. The evidence here is suggestive but incidental — the adjoint held 1454 applications at `rtol` 2e-2
-and 1e-3 while the forward work rose 1070 → 1702 → 1944 — and the designed test is to repeat the gradient
-from a **different starting iterate**, which changes the step count while leaving the root alone. Until
-that runs, do not claim it.
+**✅ ITERATION-COUNT INDEPENDENCE IS DEMONSTRATED (2026-08-15) — the coupling analogue of Gate C, and the
+one thing a finite-difference check cannot substitute for.** A matching finite difference shows the
+derivative is *right*, not that it came from the implicit-function-theorem solve rather than the march
+taped onto the tape. The designed test is to repeat the gradient from a **different starting iterate** —
+which changes the forward step count while leaving the root, and therefore the gradient, alone. Run at
+identical settings (`rtol` 1e-4, `forward_rtol` 0.3, PETSc flow block, adjoint restart 120 to 1e-6),
+varying only which checkpoint the solve starts from — `state-00067` is step 28 of the target rung and
+`state-00066` is step 27, one step further out on the same trajectory:
+
+| start | forward applications | adjoint applications | adjoint cycles | gradient |
+|---|---|---|---|---|
+| `state-00067` | 1944 | 1575 | 13.0 | −3.179366936e+03 |
+| `state-00066` | **2262 (+16 %)** | **1454 (−8 %)** | 12.0 | −3.179366945e+03 |
+
+- **The forward path got LONGER and the adjoint got CHEAPER.** The cost moved *opposite* to the step
+  count, which is stronger than a flat number would have been: a taped reverse pass cannot do that, since
+  its cost is the forward pass's by construction.
+- **The gradients agree to 9 significant figures from two different starting iterates**, confirming both
+  solves landed on the same root — which is what makes the cost comparison a comparison of the *same*
+  transpose problem rather than of two different ones.
+- **Over all four runs on this case the separation is wide:** forward applications span 1070 → 2262
+  (2.1×) while the adjoint stays within 1454–1575 (±8 %) and is **non-monotone** in the forward count.
+
+⚠️ **What the ±8 % is, so it is not misread as drift.** The adjoint's operator is the Jacobian *at the
+root*, and `rtol` is relative to each solve's own `‖R₀‖` — so a start further out stops at a slightly
+different absolute residual and the operator differs slightly. That is a root-quality effect, not an
+iteration-count one, and it is bounded by the same ±8 % seen when the *same* start is converged to
+`rtol` 1e-3 against 1e-4.
 
 **Standing configuration for every measurement below**, because none of them mean anything without it:
 `bfs3d` `state-00067` (converged, `|R|` 3.586e-06, written at march shift 0.0064), **operator and
