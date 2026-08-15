@@ -298,15 +298,18 @@ def test_the_field_split_answers_the_native_solve_question_without_raising(group
 
     So this asserts on the attribute access itself. Reading it through ``getattr`` with a default cannot
     tell a working property from a raising one, and would pass against the defect.
+
+    The split is assembled from exact stub block inverses rather than through
+    ``build_block_triangular_field_split``, which builds real V-cycles and so needs ``petsc4py`` -- an
+    *optional* dependency the unit tier does not install. What is under test is which answer the
+    preconditioner gives for its own frozen inverse, and that does not depend on what inverts the
+    blocks.
     """
-    from aquaflux.solve.field_split import (
-        FieldSplitAmgPreconditioner,
-        build_block_triangular_field_split,
-    )
+    from aquaflux.solve.field_split import FieldSplitAmgPreconditioner
 
     n = groups.n_dofs
-    operator = sp.csr_matrix(np.eye(n) * 2.0 + np.eye(n, k=1) * 0.25)
-    split = build_block_triangular_field_split(operator, groups)
+    operator = np.eye(n) * 2.0 + np.eye(n, k=1) * 0.25
+    split = split_for(operator, groups, flow_first=True)
     preconditioner = FieldSplitAmgPreconditioner(split, groups)
 
     assert preconditioner.has_native_solve is False
