@@ -5544,7 +5544,7 @@ transfer to any thresholded arm.
         `coupled_lu_continuation`, so a profiling march can pass one straight through. Pinned by
         `test_dual_time_inner_observer_surfaces_the_trajectory_without_changing_the_step`.
         `DualTimeControl` is the Courant β-ramp (grow the pseudo-timestep while the inner α = 1, shrink
-        when it clips), a `StepControl` on the eager march, sibling to `AlphaTargetingControl`. The step's
+        when it clips), a `StepControl` on the eager march. The step's
         reported α is the **min** inner line-search factor, and an inner step that fails to reduce ‖G‖
         (the line search's non-descent fallback, which otherwise reports α = 1) is folded to **α = 0** so
         the control reads it as struggling and backs off rather than growing — the α-only `StepReport`
@@ -5903,13 +5903,16 @@ transfer to any thresholded arm.
     is needed: approach α=1 *from below* without overshooting, or pair α with a step-productivity signal.
     *(the residual levels quoted for both arms shared the superseded ω-dominated norm — the stall is the
     finding, its depth is not.)*
-    - **PRODUCTIONIZED as an injected strategy pair (the direction is shipped, opt-in).** The β schedule
-      is now the injected `RelaxationSchedule` (SER = `SwitchedEvolutionRelaxation`, the default; see the
-      `continuation.py` bullet), and the α-targeting control is `AlphaTargetingControl`, a `StepControl`
-      on the eager `forward_march` (opt-in via `solve_coupled(step_control=…)`, composes with
-      `refresh_trigger`). It is **never a default** — it does not converge standalone and loses without
-      the refresh — and its numeric gains (`beta_start`/`growth_cap`/`ease`) are placeholders, like the
-      trigger's. The dynamics rework above is the open follow-up. Study harnesses in the scratchpad
+    - **PRODUCTIONIZED as an injected strategy pair (the schedule half is shipped).** The β schedule is
+      the injected `RelaxationSchedule` (SER = `SwitchedEvolutionRelaxation`, the default; see the
+      `continuation.py` bullet). **The α-targeting control itself is DELETED (2026-08-14) — there is no
+      `AlphaTargetingControl`.** It never converged standalone, its gains were hand-set placeholders, it
+      had no production caller, and it was the one control that both lacked `carry_beta` and reset β at a
+      refresh boundary — so a shared `ShiftStrengthControl` base would have had to carry a seam for a
+      member nothing selected. The α signal survives where it is measured to work: inside
+      `DualTimeControl` and `CflResidualDualTimeControl`, which drive the *dual-time* pseudo-timestep.
+      The single-step α-targeting *direction* is unrefuted and unbuilt; rebuild it as a
+      `ShiftStrengthControl` subclass if it is ever wanted. Study harnesses in the scratchpad
       (`beta_sweep.py`, `alpha_probe.py`, `alpha_controller_march.py` = frozen-PC, `alpha_refresh_march.py`
       = the winning arm) remain as the calibration/replay tools.
     - **A PER-BLOCK β (separate shift damping for flow / k / ω) is DOMINATED — measured, do not re-attempt
@@ -6426,9 +6429,11 @@ transfer to any thresholded arm.
       `step_control.next_step` recomputes β from the control's own (floor-ward) trajectory and **re-pays the
       escalation every step** — the observed low-β tail (β pinned at the floor, each step re-escalating). So
       after an escalation `forward_march` seeds the control's carried β with the escalated value via
-      `step_control.carry_beta(state, β)` (the dual-time controls implement it: `DualTimeControl` carries a
-      bare β, the `…Residual…` controls carry `(β, prev_residual)` and keep the residual so the ratio signal
-      is unbroken). The control then continues its grow/brake dynamics *from* the discovered-safe β, so
+      `step_control.carry_beta(state, β)` — **one implementation on `ShiftStrengthControl`, over the shared
+      `(beta, memo)` state, so no control can be missing it** (it once was: the deleted single-step
+      α-targeter had none, and the `hasattr` guard below meant its escalation feedback vanished in
+      silence). The memo is preserved across the seed, so a ratio-keyed control does not lose its
+      reference and misread the next step as a huge reduction. The control then continues its grow/brake dynamics *from* the discovered-safe β, so
       `beta_min` can be driven toward zero and the controller — with escalation as the safety net and the
       carry as the memory — finds how large a timestep each region tolerates, rather than a global floor
       capping it. Only fires when β was actually escalated and the control exposes `carry_beta`; no
@@ -6793,12 +6798,25 @@ transfer to any thresholded arm.
     one `(rn, rn0, α, state) -> (β, state)` interface was rejected: it would union SER's needs with the
     control's (dead α/state args for SER), drag α onto the differentiable core where the line search
     cannot even produce it before the step, and risk the byte-identity of the default path. Four concrete
-    `StepControl`s live in `solve/step_control.py`: **`DualTimeControl`** (the Courant β-ramp, now the
-    **default** for a dual-time observed march — carries β across refreshes, see the DualTimeStep bullet
-    above), **`ResidualRatioDualTimeControl`** (the opt-in residual-keyed alternative),
-    **`CflResidualDualTimeControl`** (see the bullet below), and **`AlphaTargetingControl`** (the
-    single-step α-targeter — experimental, opt-in, does not converge standalone; see the "SER β schedule
-    runs backwards" bullet).
+    `StepControl`s live in `solve/step_control.py`, all three sharing one body: **`DualTimeControl`** (the
+    Courant β-ramp, the **default** for a dual-time observed march — carries β across refreshes, see the
+    DualTimeStep bullet above), **`ResidualRatioDualTimeControl`** (the opt-in residual-keyed
+    alternative), and **`CflResidualDualTimeControl`** (see the bullet below). There is **no
+    `AlphaTargetingControl`** — deleted 2026-08-14, see the "SER β schedule runs backwards" bullet.
+    - **`ShiftStrengthControl` is the shared base, and a subclass supplies ONLY `_adapt` (binding).** It
+      owns the first-step seed, the hold-across-a-refresh rule, the `[beta_min, beta_max]` clamp, the
+      `tree_at` swap of a `ConstantRelaxation` onto a **dynamic** β leaf (the compilation-cache-hit
+      property), and `carry_beta`. The carried state is **`(beta, memo)`** for every control — β is
+      universal and `memo` is whatever the rule remembers (`None` for the memoryless Courant rule, the
+      previous residual for the two ratio rules). **Why it exists:** written three times, the bookkeeping
+      drifted — `carry_beta` was byte-identical in two controls and *absent* from the third, which
+      `forward_march` probes for with `hasattr`, so that control silently dropped its escalation
+      feedback; and the same class reset β at a refresh boundary where the others held it, i.e. the
+      sawtooth defect fixed for `DualTimeControl` never reached it. Both were invisible because each
+      class carried its own `next_step`. The refactor is verified **bit-for-bit** against the previous
+      implementation over 3096 β transitions spanning all three bands, rising/falling/flat residuals, the
+      clamps and both boundary paths. `CflResidualDualTimeControl` reduces exactly to `DualTimeControl`
+      at infinite ratio thresholds, which is now **pinned by a test** rather than asserted in prose.
   - **`CflResidualDualTimeControl` — the combined control, grows on α but brakes on a rising residual
     (built for the 3D inexact-AMG march the α-only control NaNs).** The two single-signal dual-time
     controls fail in **disjoint** ways: `DualTimeControl` grows Δτ on the inner-loop factor α (fast) but
@@ -6814,8 +6832,9 @@ transfer to any thresholded arm.
     hold band between the two ratio thresholds so a noisy plateau does not oscillate — so it grows on α
     through the flat-residual development (the residual-only rule's stall) yet the residual-rise term brakes
     the overshoot the α-only rule is blind to. This is the "pair α with a step-productivity signal" lever the
-    `AlphaTargetingControl` non-convergence ceiling flagged, applied to the dual-time controls. State is
-    `(β, previous residual)`, carried across refreshes like `ResidualRatioDualTimeControl`; opt-in via
+    single-step α-targeter's non-convergence ceiling flagged, applied to the dual-time controls. State is
+    `(β, previous residual)` — the shared `(beta, memo)` carry — across refreshes like
+    `ResidualRatioDualTimeControl`; opt-in via
     `solve_coupled(step_control=…)`. Unit-tested in `test_step_control.py` (grows on α at a flat residual,
     brakes on a rising residual at α = 1, brakes on an inner clip, holds in the band, carries β). The ratio
     thresholds are march-calibrated numbers — set them from a logged march, not intuition (the 3D
