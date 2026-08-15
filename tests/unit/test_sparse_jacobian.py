@@ -8,6 +8,7 @@ import pytest
 import scipy.sparse as sp
 from aquaflux.solve.sparse_jacobian import (
     ColumnProbePlan,
+    _index_dtype,
     block_stencil_colouring,
     block_stencil_gather_map,
     column_probe_plan,
@@ -314,6 +315,55 @@ def test_jacobian_relative_error_flags_too_small_a_reach():
         )
         > 1e-3
     )
+
+
+def test_index_width_is_chosen_from_the_bound_and_widens_when_it_must():
+    """The de-compression's index arrays narrow to 32-bit, but only where the bound allows it.
+
+    They carry one entry per Jacobian nonzero and several are live at once while the map is assembled,
+    so the width sets that build's peak — but a bound that does not fit must widen rather than wrap.
+    Every mesh reached so far is far inside 32-bit, which is exactly why this needs pinning: the wide
+    branch never fires in practice, and a wide branch that never fires is indistinguishable from one
+    that is broken until the day something needs it.
+    """
+    limit = np.iinfo(np.int32).max
+    assert _index_dtype(0) is np.int32
+    assert _index_dtype(limit - 1) is np.int32
+    # At and above the limit the narrow type can no longer hold every value up to the bound.
+    assert _index_dtype(limit) is np.int64
+    assert _index_dtype(4 * limit) is np.int64
+
+    # A bound just inside the limit must still round-trip its largest value, which is the property the
+    # width exists to protect: `np.int32(limit - 1)` is representable, one more is not.
+    assert int(np.array(limit - 1, dtype=_index_dtype(limit - 1))) == limit - 1
+    assert int(np.array(4 * limit, dtype=_index_dtype(4 * limit))) == 4 * limit
+
+
+def test_gather_map_index_arrays_are_narrow_on_a_realistic_pattern():
+    """A real pattern's map is assembled in 32-bit, and its scatter still lands the right values.
+
+    The narrowing is only sound because every index is bounded before it is formed, so this pins the
+    outcome (the dtype) together with the behaviour it must not disturb (what `scatter` writes).
+    """
+    owner, nb = _path_graph(24)
+    plan = ColumnProbePlan.uniform(block_stencil_colouring(owner, nb, 24, 2), 3)
+    gather = block_stencil_gather_map(plan)
+
+    assert gather._source.dtype == np.int32
+    assert gather._position.dtype == np.int32
+
+    # The scatter must place each response element where the map says, unaffected by the width.
+    nf = plan.n_fields * plan.n_cells
+    responses = np.arange(plan.n_probes * nf, dtype=np.float64).reshape(plan.n_probes, nf)
+    data = np.zeros(gather.nnz)
+    for probe in range(plan.n_probes):
+        gather.scatter(data, responses[probe : probe + 1], probe, 1)
+
+    rows = np.repeat(np.arange(gather.indptr.shape[0] - 1), np.diff(gather.indptr))
+    field, cell = np.divmod(gather.indices.astype(np.int64), plan.n_cells)
+    expected = (np.asarray(plan.probe_base)[field] + plan.colour[field, cell]) * nf + rows
+    written = data != 0.0
+    assert np.array_equal(data[written], expected[written].astype(np.float64))
 
 
 def test_rejects_bad_inputs():

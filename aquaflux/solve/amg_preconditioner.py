@@ -223,7 +223,10 @@ class AmgVCycle:
         # and the smoother's ordering are kept -- only the coarse operators and factor values recompute.
         self._indptr = cell_major.indptr.astype(PETSc.IntType)
         self._indices = cell_major.indices.astype(PETSc.IntType)
-        self._data = cell_major.data.astype(PETSc.ScalarType).copy()
+        # `astype` already returns a fresh array, which is the ownership the persistent Mat needs; a
+        # further `.copy()` would allocate the values a second time, and they are as long as the
+        # Jacobian's nonzeros.
+        self._data = cell_major.data.astype(PETSc.ScalarType)
         # The index arrays of the last matrix whose pattern matched, so a repeat refresh from the same
         # fixed-pattern assembler is settled by identity rather than an O(nnz) comparison.
         self._pattern_seen: tuple[np.ndarray, np.ndarray] | None = None
@@ -429,8 +432,10 @@ class AmgVCycle:
             self._build(cell_major)
             return
         # In-place value refresh: the Mat wraps ``self._data``, so overwriting it updates the operator
-        # without re-validating the pattern; re-setting-up reuses the aggregation/ordering.
-        self._data[:] = cell_major.data.astype(self._PETSc.ScalarType)
+        # without re-validating the pattern; re-setting-up reuses the aggregation/ordering. The
+        # assignment casts to the destination's type as it copies, so it needs no `astype` — which
+        # would allocate a full second copy of the values on every refresh.
+        self._data[:] = cell_major.data
         self._mat.assemble()
         self._pc.setOperators(self._mat)
         self._pc.setUp()
