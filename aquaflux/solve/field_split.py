@@ -228,6 +228,20 @@ class BlockTriangularFieldSplit:
         self._trailing = trailing
         self._set_coupling(coupling)
         self._groups = groups
+        self._set_order(first="leading")
+
+    def _set_order(self, *, first: str) -> None:
+        """Fix which group is solved first, once, so ``apply`` never branches on the ordering.
+
+        The two orderings are the same algebra with the groups exchanged, and which one an instance is
+        cannot change after construction -- so resolving it here leaves ``apply`` a single body reading
+        a pair of ``(inverse, degrees-of-freedom)`` records. That answers the objection the two-class
+        split was originally made to avoid -- a branch on ordering on a path that runs once per Krylov
+        iteration -- without paying for the body twice in source.
+        """
+        lead = (self._leading, self._groups.leading)
+        trail = (self._trailing, self._groups.trailing)
+        self._order = (lead, trail) if first == "leading" else (trail, lead)
 
     def _set_coupling(self, coupling: sp.spmatrix) -> None:
         """Store the retained coupling block, discarding any transpose cached for the previous one."""
@@ -275,18 +289,18 @@ class BlockTriangularFieldSplit:
             The preconditioned vector, shape ``(n_dofs,)``.
         """
         residual = np.asarray(residual, dtype=np.float64)
-        lead, trail = self._groups.leading, self._groups.trailing
+        # One body for both orderings and both directions. The solve order is fixed at construction
+        # (`_set_order`); transposing a block-triangular inverse reverses it and uses the transposed
+        # coupling, which is the whole of the difference between the four cases this used to spell out.
+        (first, first_dofs), (second, second_dofs) = (
+            reversed(self._order) if transpose else self._order
+        )
+        coupling = self._transposed_coupling if transpose else self._coupling
         out = np.empty_like(residual)
-        if transpose:
-            y_trailing = self._trailing.apply(residual[trail], transpose=True)
-            y_leading = self._leading.apply(
-                residual[lead] - self._transposed_coupling @ y_trailing, transpose=True
-            )
-        else:
-            y_leading = self._leading.apply(residual[lead])
-            y_trailing = self._trailing.apply(residual[trail] - self._coupling @ y_leading)
-        out[lead] = y_leading
-        out[trail] = y_trailing
+        y_first = first.apply(residual[first_dofs], transpose=transpose)
+        y_second = second.apply(residual[second_dofs] - coupling @ y_first, transpose=transpose)
+        out[first_dofs] = y_first
+        out[second_dofs] = y_second
         return out
 
     def _select_coupling(
@@ -461,9 +475,11 @@ def build_block_triangular_field_split(
 class _TrailingFirstFieldSplit(BlockTriangularFieldSplit):
     """The block-UPPER-triangular sibling: solve the trailing group first, correct the leading one.
 
-    Same algebra with the two groups' roles exchanged. It is a separate class rather than a flag on
-    :class:`BlockTriangularFieldSplit` because the alternative is a branch on ordering inside ``apply``,
-    on a path that runs once per Krylov iteration.
+    Same algebra with the two groups' roles exchanged, so it supplies only what genuinely differs --
+    which triangle of the operator it retains, and which group it solves first. ``apply`` is the base's,
+    reading the order this constructor fixes; it used to be a mirrored copy of the base's body, 14 lines
+    differing in 5, with the base's explanation of why the transposed coupling is formed once dropped
+    from the copy.
     """
 
     def __init__(
@@ -479,45 +495,15 @@ class _TrailingFirstFieldSplit(BlockTriangularFieldSplit):
                 f"coupling is {coupling.shape}, expected {expected} (leading equations by trailing "
                 "unknowns)."
             )
-        # Deliberately not calling the base __init__: its shape check describes the other orientation.
         self._leading = leading
         self._trailing = trailing
         self._set_coupling(coupling)
         self._groups = groups
+        self._set_order(first="trailing")
 
     def _select_coupling(self, blocks):
-        """Trailing-first retains the leading-equations-by-trailing-unknowns block instead."""
+        """The leading-by-trailing block: this ordering retains the OTHER triangle."""
         return blocks[1]
-
-    def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
-        """Apply ``M`` (or ``M^T``), solving the trailing group first.
-
-        Parameters
-        ----------
-        residual : np.ndarray
-            The field-major right-hand side, shape ``(n_dofs,)``.
-        transpose : bool
-            Apply ``M^T`` instead of ``M``.
-
-        Returns
-        -------
-        np.ndarray
-            The preconditioned vector, shape ``(n_dofs,)``.
-        """
-        residual = np.asarray(residual, dtype=np.float64)
-        lead, trail = self._groups.leading, self._groups.trailing
-        out = np.empty_like(residual)
-        if transpose:
-            y_leading = self._leading.apply(residual[lead], transpose=True)
-            y_trailing = self._trailing.apply(
-                residual[trail] - self._transposed_coupling @ y_leading, transpose=True
-            )
-        else:
-            y_trailing = self._trailing.apply(residual[trail])
-            y_leading = self._leading.apply(residual[lead] - self._coupling @ y_trailing)
-        out[lead] = y_leading
-        out[trail] = y_trailing
-        return out
 
 
 class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
