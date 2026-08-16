@@ -308,6 +308,7 @@ backward compatibility becomes a real constraint and the calculus reverses.
 | Linear solves | lineax (fallback `jax.scipy.sparse.linalg`) | JAX-native, implicit differentiation of the solve |
 | Adjoint of the coupled solve | `custom_vjp` around the linear solve | exact, memory-flat gradient independent of iteration count |
 | Transient integration | Diffrax | JAX-native, shared with aquakin |
+| CPU multigrid smoother | **Cython** (`aquaflux/solve/_ilu0.pyx`, built by `setup.py`) | a zero-fill incomplete factorization eliminates a row against every row above it, so it is sequential by nature and cannot be array operations. The package imports without it (a pure-Python twin defines the behaviour and `ilu0.COMPILED` says which is live), so this is a performance dependency, not a hard one. |
 | Mesh | static connectivity arrays + `segment_sum` scatter | XLA-friendly graph/message-passing layout |
 | Eventual model format | YAML → AST (deferred) | the DSL is the **last** layer; not a dependency yet |
 
