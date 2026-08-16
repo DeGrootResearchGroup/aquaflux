@@ -346,3 +346,42 @@ def interior_mass_flux(
     dp = pressure[face_cells.safe_neighbour] - pressure[face_cells.owner]
     damping = (dp - dot(grad_face, d)) / normal_distance
     return (mom_normal - rho_face * d_hat * damping) * face_geometry.area
+
+
+def volume_flux(mass_flux: jnp.ndarray, density: float | jnp.ndarray) -> jnp.ndarray:
+    """The volumetric face flux ``Q_f = mdot_f / rho``, shape ``(n_faces,)``.
+
+    The single definition of the conversion, so every scalar transported by a flow reads the same
+    quantity. Which of the two fluxes a transport equation advects on follows from the units of what
+    it carries, and the two conventions must not be mixed:
+
+    - a **per-unit-volume** quantity (a species concentration in ``kg/m^3`` or ``mol/m^3``, whose
+      balance is ``dC/dt + div(u C) = div(D grad C)``) is carried by the **volumetric** flux;
+    - a **per-unit-mass** quantity (the turbulent kinetic energy ``k`` in ``m^2/s^2``) is likewise
+      written in kinematic form and carried by the volumetric flux, *but* only because the density
+      is constant -- its conservative form is ``d(rho k)/dt + div(rho u k) = ...``, and dividing
+      ``rho`` out of the divergence is what needs ``rho`` uniform.
+
+    The distinction matters when variable density arrives: the concentration equation above is
+    already conservative and stays exact, while the kinematic ``k``/``omega`` form does not.
+
+    **What does depend on constant density either way** is the *discrete* guarantee that a uniform
+    field is preserved: continuity closes on ``sum(mdot_f) = 0`` per cell, so ``sum(Q_f) = 0``
+    follows only while ``rho`` is uniform. The mass flux must therefore come from the Rhie--Chow
+    assembly (:func:`interior_mass_flux`, via :meth:`~aquaflux.flow.MomentumContinuity.mass_flux`)
+    and never be rebuilt as ``(u . n) A`` from cell velocities, which satisfies no discrete
+    continuity at all.
+
+    Parameters
+    ----------
+    mass_flux : jnp.ndarray
+        Owner-outward face mass flux ``mdot_f``, shape ``(n_faces,)``.
+    density : float or jnp.ndarray
+        The (constant) fluid density.
+
+    Returns
+    -------
+    jnp.ndarray
+        The owner-outward volumetric face flux, shape ``(n_faces,)``.
+    """
+    return mass_flux / density

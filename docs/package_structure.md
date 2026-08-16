@@ -102,6 +102,9 @@ cfd/                                  # repo root
 │   │   ├── mean_velocity.py          #   bulk_velocity_flow_solve: the driving body force is a solve unknown, not a feedback loop
 │   │   └── scales.py                 #   characteristic_velocity: the flow's velocity scale, derived from what drives it
 │   │
+│   ├── transport/                    # scalar transport by a converged flow (species, temperature, tracers); the aquakin reaction seam
+│   │   └── scalar.py                 #   ScalarTransport (composes Advection/Diffusion/sources/transient) + effective_diffusivity (D + nu_t/Sc_t)
+│   │
 │   ├── turbulence/                   # k–ω SST closure and the flow–turbulence coupling
 │   │   ├── sst.py                    #   SSTModel: the closure constants and the quantities derived directly from them
 │   │   ├── transport.py              #   assembly of the k and ω transport equations on a configured mesh (ScalarVariableTransform → DirectScalars / LogScalars)
