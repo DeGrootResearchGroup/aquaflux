@@ -887,7 +887,11 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     (The wall-clock breakdown was recorded with no machine, thread count, state or β — the *ratio* is the
     load-bearing part and the seconds are deleted; re-measure if a cost model needs them.) `spilu` is a hard floor: a *threshold* ILU's fill pattern is
     value-dependent, so the symbolic factorization cannot be frozen and re-used (and scipy exposes no
-    symbolic/numeric split), leaving **amortization (refresh less often) as the only cheap lever**. The
+    symbolic/numeric split), leaving **amortization (refresh less often) as the only cheap lever**.
+    ⚠️ **That is a fact about a THRESHOLD ILU and must not be carried to a zero-fill one.** `solve/ilu0.py`
+    takes its pattern from the operator, so its symbolic phase *is* frozen and a refresh repeats only the
+    numeric pass — measured at 0.009 s against `spilu`'s 28.1 s on the same block. The floor is `spilu`'s,
+    not an incomplete factorization's. The
     coupled driver wiring is `coupled_ilut_refreshing_continuation` (a `refresh.builder` for
     `solve_coupled` — see `.claude/rules/turbulence.md`); it pairs with a `CoefficientDriftTrigger` so the
     re-factor *leads* the staleness. Pinned by `test_refresh_in_place_repreconditions_the_same_compiled_matvec`
@@ -4336,17 +4340,86 @@ about — a one-apply contraction, a preconditioned norm, a cycle count at a ben
 an arm whose applied residual is 1e+38. Judge a factorization by what one application does to a real
 residual, never by whether it returned.
 
-**What this leaves.** The native hierarchy is not implicated: PETSc's ILU(0) is a known-good smoother on
-these very levels. So the CPU half needs either PETSc's ILU(0) behind the `_LevelSmoother` seam — which
-reduces the dependency from "AMG + smoother" to "smoother" and is the cheap test of the architecture —
-or a hand-written ILU(0), for which PETSc's source supplies the whole specification: natural ordering, no
-pivoting, no dropping, pattern = `A`'s pattern, no shift. The second is the only one that gains symbolic
-reuse across a refresh (the pattern is fixed, so only values change over a march's ~26 refreshes), which
-`spilu` could never have provided.
+**What this left.** The native hierarchy was never implicated — PETSc's ILU(0) is a known-good smoother on
+these very levels — so the CPU half needed a zero-fill factorization of its own, for which PETSc's source
+supplies the whole specification: natural ordering, no pivoting, no dropping, pattern = `A`'s pattern, no
+shift. That is now built (`solve/ilu0.py` + the compiled `solve/_ilu0.pyx`), and it is what the section
+below measures.
 
 ⚠️ **The equilibrate-and-cell-major step is REQUIRED and is now ours.** It was previously implicit in what
 the host AMG was handed, so it read as that library's property; it is not, and any smoother put behind
-this seam needs it. That much survives whichever factorization wins.
+this seam needs it. That survives the change of factorization.
+
+### ✅ THE NATIVE AGGREGATION BEATS PETSc GAMG — 2.75× FEWER CYCLES AND 1.7× LESS WALL AT β = 0 (2026-08-16)
+
+**This is the measurement the whole host-V-cycle detour existed for, and it had never been taken, because
+until now the smoother had never worked.** `solve/ilu0.py` is the zero-fill factorization the section
+above specifies — the operator's own pattern, natural order, no pivoting, no dropping, no shift — with a
+pure-Python form defining the behaviour and a compiled Cython twin (`_ilu0.pyx`) delivering the speed;
+`ilu0.COMPILED` says which is live. Wired behind `_LevelSmoother`, it replaces `spilu` and leaves the
+equilibrate-and-cell-major preprocessing in place.
+
+*Configuration:* `bfs3d` `state-00067` (converged, ‖R‖ 3.586e-06), **operator and preconditioner both at
+β = 0** — the adjoint's operator — real right-hand side `−R(state)`, **uniform** column reach, GMRES
+restart 15 to rtol 1e-8 on the **TRUE** residual, 60-restart cap, field split flow-first with PETSc ILU(0)
+on the trailing half in every arm. Native arms: `max_coarse` 500, 5 levels, `strength_threshold` 0.25, no
+singleton aggregates, plain aggregation, unsmoothed prolongation. Harness
+`validation/bfs3d_openfoam/field_split_probe.py`, arms `split flow/hostilu{1,2,4}`.
+
+| arm | build | cycles | TRUE rel | solve |
+|---|---|---|---|---|
+| monolithic ILU(0) — *not* the right bar | 3–4 s | 11 | 8.474e-11 | 42 s |
+| **`split flow/ilu0` — the matched incumbent** | 3 s | 11 | 6.393e-11 | **29 s** |
+| **native hierarchy + our ILU(0) ×1** | 6 s | **4** | **2.449e-13** | **17 s** |
+| native hierarchy + our ILU(0) ×2 | 6 s | 6 | 5.939e-11 | 39 s |
+| native hierarchy + our ILU(0) ×4 — smoother-matched | 6 s | **4** | 1.498e-12 | 47 s |
+
+- **The aggregation is not what PETSc was contributing.** Smoother-matched at four sweeps the native
+  hierarchy takes **4 restart cycles against 11** — 2.75× — on the same operator, the same right-hand
+  side and the same trailing inverse. The one thing that differs is the coarsening, and the coarsening is
+  ahead.
+- **At ONE sweep it also wins on wall clock: 17 s against 29 s, 1.7×**, converging **two to four orders
+  deeper** (2.449e-13 against 6.393e-11) while it does so. This is the **first native arm in this campaign
+  to beat the incumbent on time rather than only on cycles**, and it does it at the operating point the
+  native direction's case has always rested on.
+- **Per application the native arm is still the more expensive one** — 4.25 s/cycle against 2.64 — so the
+  standing shape of every native-versus-PETSc result here is unchanged. What changed is that the cycle
+  advantage finally outruns it.
+- **Four sweeps is STRICTLY DOMINATED by one**: identical cycles, 2.8× the solve. Read that with the
+  adjoint's own sweep ladder recorded earlier in this file, which found the same flatness on the SIMPLE
+  smoother — on this operator, extra smoothing buys nothing the coarse grid has not already bought.
+
+⚠️ **THE LADDER IS NON-MONOTONE AND THAT IS NOT EXPLAINED — 4 / 6 / 4 cycles at 1 / 2 / 4 sweeps.** It is
+not run-to-run noise: cycle counts on this case are exactly reproducible (both PETSc controls returned
+their recorded values to every digit in **both** runs, 11 / 8.474e-11 and 11 / 6.393e-11), and the ×2 point
+comes from the first of those runs at otherwise identical settings. A smoother that is *stronger* landing
+on a worse count than one either side of it is the signature of the Krylov space being perturbed rather
+than of the smoother being worse, but nothing here establishes that. **Do not quote a single sweep count
+from this arm**, and do not assume the ×1 optimum transfers to another operator.
+
+⚠️ **SCOPE — this is β = 0, ONE state, and it says nothing about the march.** The forward march floors β
+at 0.05, and an incomplete factorization becomes near-exact as the shift raises diagonal dominance, which
+is exactly where the incumbent's advantage is recorded as largest (at β = 0.1 the incumbent's flow block
+collapses to 2 cycles / 11 s and no multigrid quality catches it). The recorded 4.6× and 3.9× native
+deficits at β = 0.01 and 0.1 were measured against the *SIMPLE*-smoothed traced hierarchy, not this one, so
+they do not describe this arm either — **that ladder has not been re-run with an incomplete-LU smoother and
+is the obvious next measurement.** Nothing here licenses moving `FLOW_INVERSE`.
+
+⚠️ **And a single-state probe is the weaker instrument by this file's own rule**: when the
+preconditioner's *shape* changes, only wall clock over a whole march is honest, and this changes shape.
+The 17-vs-29 s gap is far outside the ~15 % per-application noise floor; the 4.25-vs-2.64 s/cycle
+comparison is much closer to it.
+
+**The refresh cost that motivated writing it is gone, and this is the part that scales.** A zero-fill
+factorization's pattern *is* the operator's, so a refresh repeats only the numeric pass. Measured on a
+92160-dof, 1.8M-nnz block: first build 0.009 s, **refactor 0.009 s**, one solve 1.7 ms — against
+`scipy.spilu`'s **28.1 s** for the same block. The recorded "`spilu` is 88 % of refresh cost and a hard
+floor, so the only lever is refreshing less often" was a statement about a *threshold* ILU, whose fill
+pattern is value-dependent and therefore cannot be reused; it does not apply to this factorization and
+should not be carried to it. ⚠️ The benchmark block is a synthetic at ~20 nnz/row against the real block's
+~227, and the elimination's work is superlinear in density, so **do not extrapolate the 0.009 s** — the
+real per-level cost is inside the 6 s build above, which is 2× PETSc's 3 s and still trivial beside a
+17-second solve.
 
 ### ⛔ THE NATIVE FLOW BLOCK IS STILL NOT FASTER ON A MARCH — and the comparison that said otherwise was unfair
 

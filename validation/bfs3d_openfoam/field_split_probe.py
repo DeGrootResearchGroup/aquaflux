@@ -1685,6 +1685,19 @@ ARMS = (
         "split flow-first, NATIVE hierarchy + host ILU on flow",
         lambda m, g, n: field_split(m, g, n, "hostilu2", "ilu0", flow_first=True),
     ),
+    # ...and the same arm across sweep counts, because one sweep count is not a result about a
+    # smoother. `split flow/ilu0` runs FOUR sweeps, so `hostilu4` is the smoother-matched comparison
+    # and the other two say whether the match is where the arm is at its best.
+    (
+        "split flow/hostilu1",
+        "split flow-first, NATIVE hierarchy + host ILU x1 on flow",
+        lambda m, g, n: field_split(m, g, n, "hostilu1", "ilu0", flow_first=True),
+    ),
+    (
+        "split flow/hostilu4",
+        "split flow-first, NATIVE hierarchy + host ILU x4 on flow",
+        lambda m, g, n: field_split(m, g, n, "hostilu4", "ilu0", flow_first=True),
+    ),
     (
         "split flow/ilu0",
         "split flow-first, ILU(0) both",
