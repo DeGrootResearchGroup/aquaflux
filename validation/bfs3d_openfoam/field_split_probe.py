@@ -135,6 +135,7 @@ import scipy.sparse as sp  # noqa: E402
 from aquaflux.flow.block_preconditioner import BlockPreconditioner  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     FieldGroups,
+    HostVCycleInverse,
     MonolithicAmgPreconditioner,
     NativeSimpleInverse,
     NodalNativeInverse,
@@ -147,9 +148,9 @@ from aquaflux.solve import (  # noqa: E402
     build_convection_hierarchy,
     convection_multigrid_solve,
     relative_residual_gmres,
+    restart_cycles,
     solve_linear,
 )
-from aquaflux.solve import restart_cycles  # noqa: E402
 from aquaflux.solve.multigrid import (  # noqa: E402
     _CsrOperator,
 )
@@ -1430,6 +1431,29 @@ def _leading_inverse(spec):
             )
 
         return build
+    if spec.startswith("hostilu"):
+        # THE NATIVE HIERARCHY WITH AN INCOMPLETE-LU SMOOTHER, on the host. The arm that asks whether
+        # the PETSc AMG can go: the incumbent `ilu0` arm is PETSc's GAMG *and* PETSc's ILU, so a tie
+        # here says the aggregation is not what PETSc was contributing and only the smoother is.
+        # `hostiluN` sets the sweep count; the coarsening surface is the same one the traced native
+        # inverses take, deliberately, so a coarsening choice means the same thing on both paths.
+        sweeps = int(spec.removeprefix("hostilu") or 2)
+
+        def build(block, n_group_fields):
+            return HostVCycleInverse(
+                block,
+                n_group_fields,
+                cycles=1,
+                sweeps=sweeps,
+                max_coarse=500,
+                max_levels=5,
+                strength_threshold=0.25,
+                avoid_singletons=True,
+                aggressive_levels=0,
+                prolongation_smoothing="none",
+            )
+
+        return build
     if spec.startswith("native"):
         damped = spec.endswith("d")
         sweeps = int(spec.removeprefix("native").removesuffix("d") or 4)
@@ -1653,6 +1677,14 @@ ARMS = (
     ("mono/cheb", "monolithic, Chebyshev", lambda m, g, n: monolithic(m, g, n, "chebyshev")),
     ("mono/jac", "monolithic, damped Jacobi", lambda m, g, n: monolithic(m, g, n, "jacobi")),
     # The split itself, both triangles, on the shipped smoother -- does ordering the coupling help at all?
+    # THE PETSC-AMG QUESTION. `split flow/ilu0` is PETSc's GAMG *and* PETSc's ILU; this is the NATIVE
+    # hierarchy with the same class of smoother. A tie says the aggregation was never what PETSc
+    # contributed and the dependency can shrink to the smoother alone.
+    (
+        "split flow/hostilu",
+        "split flow-first, NATIVE hierarchy + host ILU on flow",
+        lambda m, g, n: field_split(m, g, n, "hostilu2", "ilu0", flow_first=True),
+    ),
     (
         "split flow/ilu0",
         "split flow-first, ILU(0) both",

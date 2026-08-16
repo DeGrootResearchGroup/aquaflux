@@ -88,6 +88,7 @@ from .field_split import (
 )
 from .host_preconditioner import HostFactors, HostPreconditioner
 from .native_inverse import NativeHierarchyInverse
+from .host_vcycle import HostVCycleInverse, host_ilu_inverse
 from .refresh_timing import PhaseTimer, RefreshTiming
 from .ilut_preconditioner import MonolithicIlutPreconditioner
 from .lu_preconditioner import MonolithicLuPreconditioner
@@ -192,6 +193,7 @@ __all__ = [
     "ForwardStep",
     "HostFactors",
     "HostPreconditioner",
+    "HostVCycleInverse",
     "ImplicitNewtonSolver",
     "InnerIterateCheckpointer",
     "LineSearchGrowth",
@@ -255,6 +257,7 @@ __all__ = [
     "equilibrate_cell_major",
     "field_change_metrics",
     "forward_march",
+    "host_ilu_inverse",
     "jacobian_relative_error",
     "materialize_block_jacobian",
     "native_nodal_inverse",

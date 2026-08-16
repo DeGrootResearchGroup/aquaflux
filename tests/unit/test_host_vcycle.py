@@ -1,0 +1,165 @@
+"""The host V-cycle over the native hierarchy: does it precondition, and is its transpose exact?
+
+The transpose is the reason this file exists. A V-cycle is symmetric only if its smoother is, and an
+incomplete factorization is not — so ``M^T`` had to be built rather than borrowed, and a mistake there
+is invisible from the forward solve: the march converges perfectly well on ``M`` while every gradient
+taken through ``M^T`` is wrong. The adjoint identity is therefore asserted directly, on a deliberately
+NONSYMMETRIC operator where a wrong transpose cannot coincide with the right one.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+import scipy.sparse as sp
+from aquaflux.solve.host_vcycle import HostVCycleInverse, host_ilu_inverse
+
+
+def _nonsymmetric_block(n_cells: int = 240, n_fields: int = 4, seed: int = 0) -> sp.csr_matrix:
+    """A field-major multi-field operator that is emphatically not symmetric.
+
+    Asymmetry is the point: on a symmetric operator a transposed V-cycle coincides with the forward one,
+    so the adjoint identity would pass for an implementation that ignored ``transpose`` entirely.
+    """
+    rng = np.random.default_rng(seed)
+    rows, cols, vals = [], [], []
+    for cell in range(n_cells):
+        for offset in (0, 1, -1, 2):
+            other = cell + offset
+            if not 0 <= other < n_cells:
+                continue
+            for row_field in range(n_fields):
+                for col_field in range(n_fields):
+                    if offset == 0 and row_field == col_field:
+                        value = 8.0
+                    elif offset == 0:
+                        value = 0.9
+                    else:
+                        # Direction-dependent, so A != A^T by construction.
+                        value = rng.normal() * (0.30 if offset > 0 else 0.05)
+                    rows.append(row_field * n_cells + cell)
+                    cols.append(col_field * n_cells + other)
+                    vals.append(value)
+    return sp.csr_matrix((vals, (rows, cols)), shape=(n_cells * n_fields,) * 2)
+
+
+_SETTINGS = dict(max_coarse=40, max_levels=3, sweeps=2)
+
+
+def test_it_actually_preconditions_the_operator() -> None:
+    """The point of the object: applied as ``M`` it must reduce the TRUE residual ``||A x - b||``.
+
+    Asserted on the true residual rather than a preconditioned norm — the measure that has produced the
+    most retracted verdicts on this operator class.
+    """
+    a = _nonsymmetric_block()
+    inverse = HostVCycleInverse(a, 4, **_SETTINGS)
+    b = np.asarray(np.random.default_rng(1).normal(size=a.shape[0]))
+
+    x = inverse.apply(b)
+
+    assert np.all(np.isfinite(x))
+    assert np.linalg.norm(a @ x - b) / np.linalg.norm(b) < 0.5
+
+
+def test_the_cycle_is_a_fixed_linear_operator() -> None:
+    """``b -> x`` must be LINEAR, or the non-flexible outer GMRES it preconditions is invalid.
+
+    A fixed cycle count, a fixed sweep count and a stationary smoother are what buy this; a
+    Krylov-accelerated smoother would break it silently — the outer solve would still run and would
+    simply converge to the wrong thing.
+    """
+    a = _nonsymmetric_block()
+    inverse = HostVCycleInverse(a, 4, **_SETTINGS)
+    rng = np.random.default_rng(2)
+    u = rng.normal(size=a.shape[0])
+    v = rng.normal(size=a.shape[0])
+
+    combined = inverse.apply(3.0 * u - 2.0 * v)
+    separate = 3.0 * inverse.apply(u) - 2.0 * inverse.apply(v)
+
+    np.testing.assert_allclose(combined, separate, rtol=1e-10, atol=1e-12)
+
+
+@pytest.mark.parametrize("cycles", [1, 2])
+@pytest.mark.parametrize("sweeps", [1, 3])
+def test_the_transpose_is_exact(cycles: int, sweeps: int) -> None:
+    """``<y, M x> == <M^T y, x>`` — the identity the implicit-function-theorem adjoint rests on.
+
+    Swept over cycle and sweep counts because the transposed recursion has to reverse the whole
+    sequence, and an error in the ordering shows up only once there is more than one of something.
+    """
+    a = _nonsymmetric_block()
+    inverse = HostVCycleInverse(a, 4, max_coarse=40, max_levels=3, sweeps=sweeps, cycles=cycles)
+    rng = np.random.default_rng(3)
+    x = rng.normal(size=a.shape[0])
+    y = rng.normal(size=a.shape[0])
+
+    forward = float(y @ inverse.apply(x))
+    transposed = float(inverse.apply(y, transpose=True) @ x)
+
+    assert abs(forward - transposed) <= 1e-9 * max(abs(forward), 1.0)
+
+
+def test_the_transpose_is_not_the_forward_cycle() -> None:
+    """The identity above must not be passing because ``transpose`` is ignored.
+
+    On a nonsymmetric operator ``M`` and ``M^T`` genuinely differ, so this pins that the flag does
+    something — without it, an implementation that returned the forward cycle for both would satisfy
+    every other test in this file.
+    """
+    a = _nonsymmetric_block()
+    inverse = HostVCycleInverse(a, 4, **_SETTINGS)
+    b = np.asarray(np.random.default_rng(4).normal(size=a.shape[0]))
+
+    forward = inverse.apply(b)
+    transposed = inverse.apply(b, transpose=True)
+
+    assert not np.allclose(forward, transposed)
+
+
+def test_refactor_refits_in_place_onto_a_new_operator() -> None:
+    """A mid-march refresh must mutate the object the solve holds, not replace it."""
+    a = _nonsymmetric_block()
+    inverse = HostVCycleInverse(a, 4, **_SETTINGS)
+    b = np.asarray(np.random.default_rng(5).normal(size=a.shape[0]))
+    before = inverse.apply(b)
+
+    inverse.refactor_block((a * 1.7).tocsr())
+    after = inverse.apply(b)
+
+    assert np.all(np.isfinite(after))
+    assert not np.allclose(before, after), "the refresh did not re-fit to the new operator"
+
+
+def test_a_mismatched_block_is_rejected() -> None:
+    """Refreshing onto a differently-sized block raises rather than building something incoherent."""
+    inverse = HostVCycleInverse(_nonsymmetric_block(n_cells=120), 4, **_SETTINGS)
+
+    with pytest.raises(ValueError, match="cannot refactor"):
+        inverse.refactor_block(_nonsymmetric_block(n_cells=80))
+
+
+def test_more_cycles_reduce_the_residual_further() -> None:
+    """Two cycles must beat one, which is the cheapest check that the recursion composes correctly.
+
+    A V-cycle that mis-assembled its coarse-grid correction can still reduce the residual once, by
+    smoothing alone; it stops improving when iterated.
+    """
+    a = _nonsymmetric_block()
+    b = np.asarray(np.random.default_rng(6).normal(size=a.shape[0]))
+
+    def true_residual(cycles: int) -> float:
+        inverse = HostVCycleInverse(a, 4, max_coarse=40, max_levels=3, sweeps=2, cycles=cycles)
+        return float(np.linalg.norm(a @ inverse.apply(b) - b) / np.linalg.norm(b))
+
+    assert true_residual(2) < true_residual(1)
+
+
+def test_the_factory_builds_what_a_field_split_expects() -> None:
+    """``host_ilu_inverse`` returns the ``(block, n_fields) -> inverse`` shape the split calls."""
+    a = _nonsymmetric_block()
+
+    inverse = host_ilu_inverse(**_SETTINGS)(a, 4)
+
+    assert inverse.n_dofs == a.shape[0]

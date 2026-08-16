@@ -4266,6 +4266,72 @@ baseline predates the coarse-solve factorization, the trailing zero-guess peel a
 changes, so the two runs differ in more than this knob. The direction is unambiguous; the decomposition
 is not available from this pair.
 
+### ONE AGGREGATION, TWO APPLIES — and why the CPU half cannot use `scipy` (2026-08-15)
+
+**The two multigrids over this operator were never two methods, only two *applies* of one method.** The
+coarsening in `solve/multigrid.py` is already a host computation in `scipy`; only the apply is traced. So
+a host apply over the *same* hierarchy gives a CPU path relaxed by an incomplete factorization beside the
+traced path relaxed by SIMPLE or Jacobi — one aggregation, one refresh path, one coarse space, and only
+the smoother differing by machine. Built as `solve/host_vcycle.py` (`HostVCycleInverse`,
+`host_ilu_inverse`), satisfying the same `n_dofs` + `apply(residual, transpose=…)` contract as every
+other frozen inverse, so it needs no new plumbing and does not touch the traced path.
+
+**The transpose is BUILT, not borrowed.** A V-cycle is symmetric only if its smoother is, and an
+incomplete factorization is not: `M^T` is the same recursion with the operator, the coarse solve and the
+smoother each transposed and the pre/post smoothing exchanged. Pinned by `<y, M x> == <M^T y, x>` on a
+deliberately NONSYMMETRIC operator, swept over cycle and sweep counts, beside a guard that the flag is
+not simply ignored — on a symmetric fixture the identity would pass for an implementation that returned
+the forward cycle for both.
+
+**⛔ AND `scipy.spilu` CANNOT SUPPLY THE SMOOTHER — this is the finding, and it took four wrong
+hypotheses.** On the `bfs3d` flow block the factorization raises `Factor is exactly singular`, or worse
+returns and applies to NaN. Measured per level, at a state where the shipped PETSc ILU(0) reaches 11
+cycles:
+
+| level | dofs | COLAMD + partial pivoting | NATURAL + diagonal pivoting | ‖A M⁻¹r − r‖/‖r‖ |
+|---|---|---|---|---|
+| 0 | 92160 | exactly singular | 0.96× nnz, `max|U|` **9.44e+23** | **2.046e+38** |
+| 1 | 26828 | exactly singular | 0.96× nnz | 1.020e+01 |
+| 2 | 6540 | exactly singular | 0.97× nnz | 1.340e+00 |
+| 3 | 1448 | ok | 1.00× nnz | 1.100e+00 |
+
+**Every arm on the fine level is unusable and levels 1–2 leave a residual ABOVE one.** What was
+eliminated on the way, each of which looked like the answer first:
+- **not the equilibration.** Every level equilibrates to `|diag|` min = median = **1.00** with **zero**
+  exact zeros — the operator reaching the factorization is perfectly scaled.
+- **not the ordering, and not the pivoting**, though both are real and both are needed: `spilu` applies a
+  COLAMD column permutation and partial pivoting by default, either of which discards the cell-major
+  interleave. Fixing them converts an exception into a returning-but-garbage factor, which is worse.
+- **not a missing pivot shift.** PETSc's `MatILUFactorSymbolic_SeqAIJ` takes a dedicated `ilu0` path at
+  identity permutation, performs **no row pivoting** (pivots are used in place), and applies **no shift**
+  unless `info->shifttype` is set — which `amg_preconditioner.py` does not set. So the incumbent factors
+  this operator **unshifted** and succeeds.
+- **it is the DROPPING.** `spilu` is a drop-tolerance factorization; `scipy` has no level-based ILU(0) at
+  all. Dropping removes what a pivot needed on an operator whose diagonal is a clean 1.0. No parameter
+  recovers ILU(0) from ILUT, because the difference is the algorithm.
+
+⚠️ **"0.96× the operator's nonzeros" IS NOT "effectively ILU(0)" — a reading made here and withdrawn.**
+Matching the nonzero count says nothing about the values, and those values were 1e+23. A size check is
+not a quality check.
+
+⚠️ **AND THE MEASUREMENT LESSON, which is the transferable part: the first survey's success criterion was
+"the factorization did not raise".** That is the same family of weak measure this file already warns
+about — a one-apply contraction, a preconditioned norm, a cycle count at a benign state — and it passed
+an arm whose applied residual is 1e+38. Judge a factorization by what one application does to a real
+residual, never by whether it returned.
+
+**What this leaves.** The native hierarchy is not implicated: PETSc's ILU(0) is a known-good smoother on
+these very levels. So the CPU half needs either PETSc's ILU(0) behind the `_LevelSmoother` seam — which
+reduces the dependency from "AMG + smoother" to "smoother" and is the cheap test of the architecture —
+or a hand-written ILU(0), for which PETSc's source supplies the whole specification: natural ordering, no
+pivoting, no dropping, pattern = `A`'s pattern, no shift. The second is the only one that gains symbolic
+reuse across a refresh (the pattern is fixed, so only values change over a march's ~26 refreshes), which
+`spilu` could never have provided.
+
+⚠️ **The equilibrate-and-cell-major step is REQUIRED and is now ours.** It was previously implicit in what
+the host AMG was handed, so it read as that library's property; it is not, and any smoother put behind
+this seam needs it. That much survives whichever factorization wins.
+
 ### ⛔ THE NATIVE FLOW BLOCK IS STILL NOT FASTER ON A MARCH — and the comparison that said otherwise was unfair
 
 **Read this before quoting any native-versus-incumbent march number.** With the inner tolerance at its
