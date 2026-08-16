@@ -77,13 +77,12 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
 
 ## Known API gaps these cases exposed
 
-- **`positivity_floor` is reachable only from `coupled_amg_continuation`.** The default builder
+- **`positivity_floor` is a parameter of `coupled_amg_continuation` ALONE.** The default builder
   (`coupled_continuation`) and the complete-LU and threshold-ILU builders expose neither it nor the
-  `step_limit` it would be set on — so the k-positivity safeguard the three-dimensional case depends on
-  **cannot be switched on** for the two-dimensional case or for two of the three preconditioner arms. A
-  march that meets the positivity ratchet there has no way out of it. `pitzdaily_openfoam/compare.py`
-  records the value it wants as `POSITIVITY_FLOOR_WANTED` and its banner prints
-  `UNREACHABLE on this builder` rather than a number that is not in force.
+  `step_limit` it would be set on, so a study arm built on one of those cannot switch the k-positivity
+  safeguard on at all, and a march that meets the ratchet there has no way out of it.
+  `pitzdaily_openfoam/compare.py` reaches it only because that case now uses the AMG builder; the
+  symbol there is `K_POSITIVITY_FLOOR`, matching the sibling case so a future diff lines up.
 - **`_mis_aggregate`'s return annotation is stale** — it says `tuple[np.ndarray, int]` and returns
   three values (labels, roots, count). Cost one debugging cycle.
 
