@@ -162,6 +162,44 @@ class NearWallKClosure(eqx.Module):
         )
 
 
+def production_and_limit(nu_t, strain_rate, omega, k, model):
+    """The k-production and its Menter cap, as the residual forms them -- the ONE definition of both.
+
+    ``KProduction.source`` takes ``min`` of these two; a validity check asks which of them is larger.
+    Both need the identical expressions, including the ``maximum(k, 0)`` guard, or a guard could clear
+    a state the residual actually caps (or the reverse). They are therefore built here and nowhere
+    else.
+
+    Parameters
+    ----------
+    nu_t, strain_rate, omega : jnp.ndarray
+        The frozen closure fields, each shape ``(n_cells,)``.
+    k : jnp.ndarray
+        The turbulent kinetic energy the cap is evaluated at, shape ``(n_cells,)``. The residual
+        passes the **solved** field here (frozen when ``explicit_limiter`` is set); a check at a
+        converged state passes that state's ``k``.
+    model : SSTModel
+        Supplies ``beta_star``.
+
+    Returns
+    -------
+    tuple of jnp.ndarray
+        ``(production, limit)``, each shape ``(n_cells,)``.
+
+    Notes
+    -----
+    ``maximum(k, 0)`` is not cosmetic: the cap bounds a non-negative production, so at a transiently
+    negative ``k`` an unclamped limit would win the ``min`` and turn production into a **sink**,
+    deepening the very excursion the limiter exists to damp. A consequence worth knowing when reading
+    a cap-activity measurement: in a cell whose ``k`` has been driven to ~0 the limit collapses to ~0,
+    so *any* positive production exceeds it. "Cap active" there means "``k`` is numerically dead", not
+    "the strain is high".
+    """
+    production = nu_t * strain_rate**2
+    limit = _PRODUCTION_LIMIT_RATIO * model.beta_star * jnp.maximum(k, 0.0) * omega
+    return production, limit
+
+
 class KProduction(VolumeSource):
     """Limited production of turbulent kinetic energy, ``P̃_k = min(ν_t S², 10 β* k ω)``.
 
@@ -204,7 +242,6 @@ class KProduction(VolumeSource):
     near_wall: NearWallKClosure | None = None
 
     def source(self, field: jnp.ndarray, context: FaceContext) -> jnp.ndarray:
-        production = self.nu_t * self.strain_rate**2
         cap_field = jax.lax.stop_gradient(field) if self.explicit_limiter else field
         # The Menter cap `10 β* k ω` is an upper bound on a non-negative production, so it must not be
         # allowed to go negative: at a transiently negative `k` the unclamped limit wins the `min` and
@@ -214,11 +251,8 @@ class KProduction(VolumeSource):
         # model choice: both are off-solution, inactive at convergence where `k > 0`, so the converged
         # field and its sensitivity are untouched. `KDestruction` deliberately keeps the RAW `k`, which is
         # what preserves that row's diagonal.
-        limit = (
-            _PRODUCTION_LIMIT_RATIO
-            * self.model.beta_star
-            * jnp.maximum(cap_field, 0.0)
-            * self.omega
+        production, limit = production_and_limit(
+            self.nu_t, self.strain_rate, self.omega, cap_field, self.model
         )
         limited = jnp.minimum(production, limit)
         if self.near_wall is not None:

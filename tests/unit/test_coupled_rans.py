@@ -9,6 +9,9 @@ tests (:mod:`tests.integration.test_coupled_rans`).
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
+
 import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax
@@ -36,6 +39,9 @@ from aquaflux.turbulence import (
     coupled_fields,
     coupled_residuals,
     eddy_viscosity_drift,
+    hybrid_initialize,
+    production_and_limit,
+    production_cap_active,
 )
 from aquaflux.turbulence.coupled import (
     _COUPLED_FORWARD_SOLVER,
@@ -1169,3 +1175,74 @@ def test_globalization_knobs_still_reach_the_continuation_builder(monkeypatch) -
 
 class _StopBuild(Exception):
     """Aborts ``solve_coupled`` once the continuation build has been observed."""
+
+
+def test_the_production_limiter_defaults_to_the_exact_operator() -> None:
+    """``explicit_production_limiter`` is OFF by default, so the coupled adjoint is exact by default.
+
+    It defaulted to ``True``, which put a ``stop_gradient`` inside the residual of every coupled solve
+    and contradicted ``KProduction``'s own documented contract ("the coupled sensitivity residual uses
+    the exact operator so the adjoint stays exact"). Pinned as a value: a default moved back silently
+    re-arms a hazard whose whole character is that it is invisible -- finite gradients, wrong.
+    """
+    _, coupled = _cavity(4)
+    assert coupled.turbulence.explicit_production_limiter is False
+    assert (
+        inspect.signature(SSTTurbulence.build).parameters["explicit_production_limiter"].default
+        is False
+    )
+
+
+def test_a_root_the_frozen_cap_invalidates_is_refused() -> None:
+    """With the limiter opted into AND the cap active at the root, the solve refuses to return.
+
+    The forward fields would be perfectly good, so nothing else would ever surface this -- the damage
+    is confined to a gradient that comes back finite and wrong. The guard is the only thing standing
+    between that and a published sensitivity.
+    """
+    from aquaflux.turbulence.coupled import _reject_a_root_the_frozen_cap_invalidates
+
+    _, exact = _cavity(4)
+    # `dataclasses.replace`, not `eqx.tree_at`: the flag is a STATIC field, so it lives in the
+    # treedef rather than among the leaves and `tree_at` (which addresses leaves) cannot reach it.
+    frozen = dataclasses.replace(
+        exact,
+        turbulence=dataclasses.replace(exact.turbulence, explicit_production_limiter=True),
+    )
+    flow, k, omega = hybrid_initialize(exact.momentum, exact.turbulence)
+    quiet = exact.state_from_physical(flow, k, omega)
+    # Shrinking omega raises S/omega, which is what the cap actually keys on -- the ratio must clear
+    # sqrt(10 beta*) = 0.949 against an equilibrium value of 0.3, so a hundredfold is what it takes.
+    binding = exact.state_from_physical(flow, k, omega * 1e-2)
+    assert not bool(jnp.any(production_cap_active(exact, quiet)))
+    assert bool(jnp.any(production_cap_active(exact, binding)))
+
+    # The exact operator is never guarded, whatever the cap is doing -- there is nothing frozen.
+    assert _reject_a_root_the_frozen_cap_invalidates(exact, binding) is binding
+
+    # With the limiter opted into: an inactive cap leaves the root alone...
+    jax.block_until_ready(_reject_a_root_the_frozen_cap_invalidates(frozen, quiet))
+    # ...and an active one refuses it, because the gradient through it would be finite and wrong.
+    with pytest.raises(eqx.EquinoxRuntimeError, match="production cap"):
+        jax.block_until_ready(_reject_a_root_the_frozen_cap_invalidates(frozen, binding))
+
+
+def test_the_cap_predicate_is_the_one_the_residual_uses() -> None:
+    """``production_cap_active`` must agree with ``KProduction``'s own ``min``, cell for cell.
+
+    Two spellings of "is the cap active" is exactly how a validity guard comes to clear a state the
+    residual actually caps. They share ``production_and_limit`` so they cannot drift; this pins that
+    they really do agree, rather than trusting the shared call.
+    """
+    _, coupled = _cavity(4)
+    state = coupled.state_from_physical(*hybrid_initialize(coupled.momentum, coupled.turbulence))
+    flow, k, omega = coupled.physical_fields(state)
+    closure = coupled.turbulence.closure_fields(coupled.momentum.velocity_fields(flow), k, omega)
+
+    production, limit = production_and_limit(
+        closure.nu_t, closure.strain_rate, closure.omega, k, coupled.turbulence.model
+    )
+    # Where the mask is True the `min` must take the LIMIT; where False, the production.
+    mask = production_cap_active(coupled, state)
+    assert jnp.array_equal(mask, production > limit)
+    assert jnp.allclose(jnp.where(mask, limit, production), jnp.minimum(production, limit))

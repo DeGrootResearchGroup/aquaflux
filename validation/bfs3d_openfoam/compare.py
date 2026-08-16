@@ -82,6 +82,7 @@ from aquaflux.solve import (
     RefreshPolicy,
     RetryPolicy,
     StateCheckpointer,
+    combine_metrics,
     combine_observers,
     native_nodal_inverse,
     native_saddle_inverse,
@@ -754,6 +755,20 @@ DUMP_STEP_LIMIT_KEEP = int(os.environ.get("BFS3D_DUMP_STEP_LIMIT_KEEP", "12"))
 # default, not another warning. `BFS3D_REFRESH_ON_CYCLES=0` still selects the scheduled cadence for an
 # A/B of the trigger itself.
 REFRESH_ON_CYCLES = int(os.environ.get("BFS3D_REFRESH_ON_CYCLES", "3"))
+#: Freeze the k-production cap's `k` in the Jacobian (`SSTTurbulence.explicit_production_limiter`).
+#: The library default is `True`, so this case ran with it ON until this knob existed.
+#:
+#: It is a FORWARD-solve device -- a Patankar/deferred-correction treatment that keeps the residual
+#: value exact while dropping a destabilizing term from the linearization -- and it is only free if
+#: the cap is INACTIVE at the converged root. Where the cap binds there, the implicit-function-theorem
+#: adjoint linearizes a residual different from the one solved, so the fields are right and the
+#: SENSITIVITY is silently wrong. `KProduction`'s own docstring says the coupled path uses the exact
+#: (unfrozen) operator "so the adjoint stays exact"; the shipped default contradicts it.
+#:
+#: `BFS3D_PRODUCTION_LIMITER=0` runs the exact operator. Either way `cap%` in the march log reports
+#: where the cap WOULD have been frozen, so the arm can be judged rather than assumed.
+PRODUCTION_LIMITER = os.environ.get("BFS3D_PRODUCTION_LIMITER", "1") not in ("0", "false", "False")
+
 #: The β-MISMATCH refresh trigger, as a fraction of the β the V-cycle was last built at. Off by default
 #: (`inf`, a gate that can never fire), which is byte-identical to the configuration every archived
 #: measurement on this case was taken under.
@@ -1019,6 +1034,7 @@ def build_case(model=None, momentum_advection=None, gradient=None):
         density=RHO,
         molecular_viscosity=jnp.full(mesh.n_cells, NU),
         wall_patches=WALLS,
+        explicit_production_limiter=PRODUCTION_LIMITER,
         k_boundary=BoundaryConditions(
             {
                 "inlet": Dirichlet(K_IN),
@@ -1086,7 +1102,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
 
     logger = MarchLogger(
         log_file,
-        metrics=reattachment_metrics(case),
+        metrics=combine_metrics(reattachment_metrics(case), production_cap_metrics(case)),
         fields=coupled_fields(coupled),
         residuals=residuals,
         detail=("inner", "fields", "residuals", "pc"),
@@ -1149,6 +1165,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
         ("k wall BC", K_WALL),
         ("k positivity floor", K_POSITIVITY_FLOOR or "0 (plain rule)"),
+        ("production limiter (frozen cap k)", "on" if PRODUCTION_LIMITER else "OFF (exact operator)"),
         # Beside the floor, because the two are alternative answers to the same failure and a run
         # carrying the projection is a different arm from one carrying only a floor.
         (
@@ -1385,6 +1402,47 @@ def reattachment_metrics(case):
         return {
             "xr/h": float(reattachment_length(centroid, u_x, z_slab=slab)),
             "xr/h_full": float(reattachment_length(centroid, u_x)),
+        }
+
+    return metrics
+
+
+def production_cap_metrics(case):
+    """A ``state -> {"cap%": ..., "S/w": ...}`` metrics callable: where the k-production cap BINDS.
+
+    Reports, per march step, the percentage of cells where ``nu_t S^2 > 10 beta* k omega`` -- i.e.
+    where ``explicit_production_limiter`` freezes the cap's ``k`` and drops that term from the
+    Jacobian. It is a **counter-factual when the limiter is off**: the cap's *value* is taken either
+    way (it is the model), so this says where the linearization WOULD have been frozen, which is
+    exactly what is needed to judge whether the limiter does anything on this case.
+
+    Also reports ``max S/omega``, the scale-free form of the same question. On the unlimited
+    eddy-viscosity branch ``nu_t = k / omega`` the ratio is ``S^2 / (10 beta* omega^2)``, so the cap
+    binds at ``S / omega > sqrt(10 beta*) = 0.949`` independent of ``k``, against an equilibrium
+    boundary-layer value of ``sqrt(beta*) = 0.3``. Logging it means a march that never comes close
+    says so, rather than leaving a zero count to be read as either "never active" or "never checked".
+
+    Parameters
+    ----------
+    case : dict
+        The assembled benchmark from :func:`build_case`.
+
+    Returns
+    -------
+    callable
+        ``state -> mapping``, mapping a packed coupled state to the two diagnostics.
+    """
+    coupled = case["coupled"]
+    beta_star = coupled.turbulence.model.beta_star
+
+    def metrics(state):
+        flow, k, omega = coupled.physical_fields(state)
+        closure = coupled.turbulence.closure_fields(coupled.momentum.velocity_fields(flow), k, omega)
+        active = closure.nu_t * closure.strain_rate**2 > 10.0 * beta_star * k * omega
+        s_over_omega = closure.strain_rate / jnp.maximum(omega, 1e-300)
+        return {
+            "cap%": 100.0 * float(jnp.mean(active)),
+            "S/w": float(jnp.max(s_over_omega)),
         }
 
     return metrics

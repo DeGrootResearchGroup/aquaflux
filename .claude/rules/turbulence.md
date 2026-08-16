@@ -86,8 +86,58 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     closure in the coupled residual. A tiny `_EDDY_VISCOSITY_FLOOR` guards the `1/ν_t` at the `k→0`
     edge only (k/ν_t is finite where the cap bites). The unlimited `α S²` over-stiffened the ω equation
     in high-strain / transient regions — one of the robustness gaps behind the near-wall `k` collapse
-    (#126). `KProduction.explicit_limiter` still freezes *its* cap's solved `k` for the M-matrix
-    forward path; ω needs no such flag (its cap is already field-independent).
+    (#126). ω needs no such flag (its cap is already field-independent).
+  - **⚠️ `explicit_production_limiter` now defaults to `False` (the EXACT operator) — measured
+    2026-08-15, and the old `True` default was a silent adjoint hazard.** The flag freezes the cap's
+    `k` in the **linearization** only (a Patankar / deferred-correction treatment). That is free only
+    while the cap is **inactive at the converged root**; where it binds there, the IFT adjoint
+    linearizes a residual different from the one solved, so the fields are right and the
+    **sensitivity is silently wrong**. `KProduction`'s own docstring had always said the coupled path
+    uses the exact operator "so the adjoint stays exact" — `SSTTurbulence` defaulted the opposite way,
+    and `k_residual` serves both paths from one construction site, so there was no seam by which the
+    coupled residual got the exact operator.
+    - **Measured inert on both cases available.** Turbulent channel (Re 2500, 280 cells): cap active
+      in **0** cells at the root, and the limiter ON/OFF forward solves are **bit-identical**
+      (`0.000e+00` max field difference), gradients identical and both 1.2e-05 from central FD.
+      `bfs3d` (23040 cells, Re 10000, separating), a controlled ON/OFF pair at the shipped bundle
+      (petsc flow inverse, `inner_tol` 0.01): **59 steps / 232 cycles / final ‖R‖ 1.861e-06 in BOTH
+      arms**, `x_r/h` 8.3611, report byte-identical. So the stabilization was buying nothing on either
+      case, forward or adjoint.
+    - **The cap DID bind transiently mid-march on `bfs3d`** — 4 steps of 59, at 0.013–0.065 % of cells
+      (3–15 cells) — and changed nothing, which is what the identical trajectories say. **Why those
+      cells is UNEXPLAINED.** ⚠️ The obvious reading, that they are the numerically-dead-`k` cells
+      whose limit collapses through `maximum(k, 0)`, is **REFUTED by direct test**: at `k = 0` the
+      eddy viscosity is zero too, so production and limit are *both* zero and nothing binds. Peak
+      `S/ω` over that march was 0.5717 against a binding threshold of 0.9487, so the simple
+      unlimited-branch criterion does not explain it either. Settle it by re-running with
+      `BFS3D_CHECKPOINT_KEEP=80` and reading the binding cells; the per-step `cap%` / `S/w` metric is
+      now in the march log (`compare.production_cap_metrics`), so the question is answerable rather
+      than lost.
+    - **The scale-free criterion, worth carrying:** on the unlimited branch `ν_t = k/ω` the ratio is
+      `production/limit = S²/(10 β* ω²)`, so the cap binds at **`S/ω > sqrt(10 β*) = 0.949`**,
+      independent of `k`, against an equilibrium boundary-layer value of `sqrt(β*) = 0.3`. Measured
+      peaks: channel 0.333, `bfs3d` 0.530 at the root. Separation does push it up, and not nearly far
+      enough. (Where Menter's shear limiter is itself active the threshold rises further, to
+      `S/ω > 10 β* F2/a1 ≈ 2.9 F2`.)
+    - **Opting back in is now GUARDED, not merely documented.** `solve_coupled` refuses to return a
+      root reached with the limiter set whose cap is active
+      (`_reject_a_root_the_frozen_cap_invalidates`, an `eqx.error_if` so it fires on the traced
+      `jax.grad` path too). `turbulence.production_cap_active(coupled, state)` reports which cells
+      bind, and `turbulence.production_and_limit` is the ONE definition of the cap's two sides, shared
+      by the residual and the guard so they cannot drift. This is the discipline the positivity floors
+      are already held to, applied to the other stabilization that alters the linearization.
+    - **⚠️ WHO MIGHT STILL WANT IT, so the flip is not read as "the limiter is useless".** The exact
+      derivative of the cap is **indefinite where the cap is active**, and an *unpreconditioned* k
+      solve stagnates there — `test_turbulent_channel.py` documents exactly this, and that the
+      convection-diffusion AMG rescues it (a preconditioned exact-Newton k-solve then converges
+      quadratically to machine precision). The coupled path always carries a preconditioner, which is
+      why the flip is safe there. A bare or badly preconditioned **segregated scalar** solve is the
+      case that may genuinely need the opt-in — and it takes no gradients, so the guard never fires on
+      it. That test keeps `explicit_production_limiter=True` explicitly, so the ON path stays covered.
+    - Harnesses: `validation/production_cap_activity.py` (channel: activity, forward equivalence, and
+      the adjoint against finite differences) and `validation/bfs3d_openfoam/production_cap_activity.py`
+      (root activity from a checkpoint). `BFS3D_PRODUCTION_LIMITER=0` selects the exact operator on the
+      case, and the banner records which arm ran.
 - **`transport.py` — `SSTTurbulence`, `SSTClosureFields`.** Assembles the k and ω scalar
   transport residuals on the flow's Rhie–Chow mass flux, with μ_t a **frozen per-cell field**
   recomputed once per outer sweep.
