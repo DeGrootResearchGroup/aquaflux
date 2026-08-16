@@ -5408,10 +5408,15 @@ transfer to any thresholded arm.
     shift control *and* both retry thresholds, so **not one could start**, under any flow inverse, with
     a `TypeError` whose own message names `DualTimeStep` as acceptable while refusing one. The check
     still precedes any escalation, which is the property it exists for, and with no control
-    `active_step` is the base step so the ungated path is unchanged. Pinned by
-    `test_the_escalation_accepts_a_shift_the_control_installs`, built from the **shipped** pieces (a
-    `PseudoTransientStep` on the default schedule under a `DualTimeControl`) rather than a stub —
-    a stub is what let this through — and verified to fail against the old gate.
+    `active_step` is the base step so the ungated path is unchanged. Pinned in **both** directions by
+    `test_the_escalation_guard_accepts_a_shift_a_step_control_installs` and
+    `test_the_escalation_guard_still_rejects_a_step_that_can_never_escalate` — the pair matters,
+    because a gate can be "fixed" by deleting it and only the second test notices.
+    ⚠️ **This was found by RUNNING a march, not by the suite, and it was the second such break in one
+    sitting** (the other: `compare.py` handed `solve_coupled` a bare `precondition_step` callable where
+    a `RefreshPolicy` was expected, so `refresh.observes` raised before step 1). **No test tier drives
+    this case's own driver**, so a refactor can tighten a seam, take the case out entirely, and leave
+    every gate green. Treat "the fast gate passes" as saying nothing about whether `bfs3d` can march.
     - **Gate only what is genuinely silent (binding).** The escalation is gated. The divergence retry
       (`retry_solver` / `retry_divergence_cap`) is **not** — it re-solves at a tighter tolerance and
       never touches beta, so it works on any step; its *reporting* goes through `_shift_of`, which
