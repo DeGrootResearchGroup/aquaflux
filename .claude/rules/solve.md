@@ -4397,13 +4397,34 @@ on a worse count than one either side of it is the signature of the Krylov space
 than of the smoother being worse, but nothing here establishes that. **Do not quote a single sweep count
 from this arm**, and do not assume the ×1 optimum transfers to another operator.
 
-⚠️ **SCOPE — this is β = 0, ONE state, and it says nothing about the march.** The forward march floors β
-at 0.05, and an incomplete factorization becomes near-exact as the shift raises diagonal dominance, which
-is exactly where the incumbent's advantage is recorded as largest (at β = 0.1 the incumbent's flow block
-collapses to 2 cycles / 11 s and no multigrid quality catches it). The recorded 4.6× and 3.9× native
-deficits at β = 0.01 and 0.1 were measured against the *SIMPLE*-smoothed traced hierarchy, not this one, so
-they do not describe this arm either — **that ladder has not been re-run with an incomplete-LU smoother and
-is the obvious next measurement.** Nothing here licenses moving `FLOW_INVERSE`.
+⚠️ **SCOPE — this is β = 0, and β = 0 is the ONLY shift on this state that discriminates.** Re-run at
+**β = 0.1**, same state and settings, every arm ties and the ranking carries no information:
+
+| arm at β = 0.1 | build | cycles | TRUE rel | solve |
+|---|---|---|---|---|
+| monolithic ILU(0) | 3 s | 2 | 2.605e-14 | 14 s |
+| **`split flow/ilu0` — incumbent** | 3 s | 2 | 3.103e-15 | **11 s** |
+| native + our ILU(0) ×1 | 6 s | 2 | 4.024e-13 | 12 s |
+| native + our ILU(0) ×4 | 5 s | **1** | 2.969e-15 | 22 s |
+
+**Two cycles against two, and 12 s against 11 s is inside the ~15 % per-application noise floor** measured
+elsewhere in this file (the same preconditioner built twice in one quiet process timed 193 and 221 ms). So
+this is the benign-operating-point rule biting on exactly the axis being changed: an easy operator does not
+rank preconditioners, and a tie here is *no information*, not evidence of parity. The incumbent reproduced
+its recorded 2 cycles / 11 s exactly, so the run is sound — it just cannot answer the question.
+
+**One older claim is refuted in wording and upheld in substance.** "At positive shift no multigrid quality
+catches an incomplete factorization" is false as stated — the ×4 native arm takes **1 cycle**, fewer than
+any PETSc arm at any shift on this state. What holds is the cost half: it pays 22 s for that cycle against
+the incumbent's 11 s for two. Quality catches it; wall clock does not.
+
+**So the march regime is still unmeasured, and a step-initial checkpoint cannot measure it.** This file
+already records that all step-initial solves on this case cost ≤ 2 restart cycles while mid-step inner
+iterates reach 15 — the hard operators live in the inner iterates and in the *rejected* attempts, which no
+checkpoint holds. Ranking these arms for the march needs a captured hard inner iterate
+(`BFS3D_INNER_DUMP_ABOVE`) or a whole march, not another β on this state. The recorded 4.6× / 3.9× native
+deficits at β = 0.01 / 0.1 were measured against the *SIMPLE*-smoothed traced hierarchy and do not describe
+this arm either. **Nothing here licenses moving `FLOW_INVERSE`.**
 
 ⚠️ **And a single-state probe is the weaker instrument by this file's own rule**: when the
 preconditioner's *shape* changes, only wall clock over a whole march is honest, and this changes shape.
