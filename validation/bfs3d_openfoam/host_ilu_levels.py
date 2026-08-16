@@ -35,8 +35,10 @@ sys.path.insert(0, str(CASE))
 sys.path.insert(0, str(CASE.parents[1]))
 
 import compare  # noqa: E402
-from aquaflux.solve.frozen_operator import equilibrate_cell_major  # noqa: E402
-from aquaflux.solve.multigrid import build_convection_hierarchy  # noqa: E402
+from aquaflux.solve import (  # noqa: E402
+    build_convection_hierarchy,
+    equilibrate_cell_major,
+)
 from field_split_probe import STATES, load_state, materialize  # noqa: E402
 
 #: The flow block's own coarsening, matching what the host V-cycle asks for.
