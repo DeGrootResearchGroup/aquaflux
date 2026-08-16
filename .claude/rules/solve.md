@@ -4306,9 +4306,25 @@ eliminated on the way, each of which looked like the answer first:
   identity permutation, performs **no row pivoting** (pivots are used in place), and applies **no shift**
   unless `info->shifttype` is set — which `amg_preconditioner.py` does not set. So the incumbent factors
   this operator **unshifted** and succeeds.
-- **it is the DROPPING.** `spilu` is a drop-tolerance factorization; `scipy` has no level-based ILU(0) at
-  all. Dropping removes what a pivot needed on an operator whose diagonal is a clean 1.0. No parameter
-  recovers ILU(0) from ILUT, because the difference is the algorithm.
+- **it is WHICH ENTRIES ARE KEPT — and `drop_tol = 0` does not fix it.** The first wording here said
+  "the dropping", which is imprecise: switching value-based dropping off entirely still fails.
+
+  | level 0 arm (NATURAL, no pivoting) | fill | `max\|U\|` | ‖A M⁻¹r − r‖/‖r‖ |
+  |---|---|---|---|
+  | `drop_tol` 1e-4 | 0.96× nnz | 9.44e+23 | 2.046e+38 |
+  | **`drop_tol` 0 — scipy's closest to ILU(0)** | **0.96× nnz** | 2.46e+04 | **1.028e+08** |
+  | `drop_tol` 0 | 1.91× | 8.56e+83 | NaN |
+  | `drop_tol` 0 | 3.82× | 3.91e+04 | 2.125e+13 |
+
+  **The second row keeps 0.96x the operator's nonzeros — the right COUNT — and is still useless**, which
+  is the whole point: SuperLU chooses *which* entries to keep by magnitude within a memory budget, so it
+  drops pattern entries and keeps fill ones. Same size, **different set**. That is the difference between
+  ILUT and ILU(0), and no parameter closes it. Note also that MORE fill makes level 0 worse rather than
+  better — the signature of a wrong factorization, not an under-resourced one.
+
+  ⚠️ **Read the coarse levels carefully before quoting them.** Levels 1–3 leave residuals of ~1.2–2.9,
+  which is *not* by itself disqualifying for a **smoother** — a smoother damps high-frequency error and
+  need not approximate `A⁻¹` globally. Level 0's 1e+08 is disqualifying, and level 0 is the fine level.
 
 ⚠️ **"0.96× the operator's nonzeros" IS NOT "effectively ILU(0)" — a reading made here and withdrawn.**
 Matching the nonzero count says nothing about the values, and those values were 1e+23. A size check is
