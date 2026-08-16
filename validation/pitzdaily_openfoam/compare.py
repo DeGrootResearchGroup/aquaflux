@@ -223,17 +223,33 @@ K_WALL_BC = _K_WALL_BCS[K_WALL]
 #: 2124 s against 72 and 2893, to the same reattachment length).
 NATIVE_TRAILING = {"max_coarse": COARSE_EQ_LIMIT, "equilibrate": False}
 
-#: ⚠️ REACH 3, AND A REACH-5 DETOUR THAT IS RECORDED HERE BECAUSE IT LOOKED LIKE THE ANSWER.
-#: The probed Jacobian on this mesh is exact only at reach FIVE (relative error against the true
-#: matrix-free product: 1.9e-04 / 2.0e-07 / 4.6e-10 / 1.5e-15 at reach 2/3/4/5), where the sibling case
-#: reaches the floating-point floor at three. That is a real and unexplained measurement -- identical
-#: schemes should not need a longer stencil in two dimensions than in three.
+#: ⚠️ THE PROBED JACOBIAN IS EXACT ONLY AT REACH 5 ON THIS MESH, AND AT REACH 3 ON THE SIBLING'S --
+#: WITH IDENTICAL SCHEMES. The cause is the mesh, not the dimension, and it generalizes.
 #:
-#: It is NOT the cause of anything. Reach 5 diverges step for step with reach 3 (compare the archived
-#: runs), and costs about 35% more per step. It is also affirmatively suspect: a zero-fill incomplete
-#: factorization takes its pattern from the stored one, and reach 5 stores millions of positions at
-#: 1e-10 and below -- the same shape as a padding experiment recorded on the sibling case that cost 58
-#: restart cycles at a true relative residual of 2.3e-02 against 11 cycles to 8.5e-11 without.
+#: `CorrectedGreenGauss` does not compute a gradient in one shot: it solves `A_g G = B phi` by
+#: Richardson sweeps (four, by default), and each sweep extends the gradient's stencil by one ring, so
+#: the residual reaches `sweeps + 1`. But that coupling is weighted entirely by the skewness offset
+#: `D_g,ip = x_f - (x_P + g*d)`. Where it vanishes, `A_g` is diagonal, sweeps two onward add exactly
+#: nothing, and the scheme degenerates to compact Green-Gauss at reach 1.
+#:
+#:      mesh        median skew   max skew   interior faces above 1e-10
+#:      pitzDaily      2.2e-09     7.5e-02       20049 of 24170
+#:      bfs3d          7.0e-15     1.9e-12           0 of 66368
+#:
+#: The sibling is a rectilinear blockMesh, skew-free to roundoff, so its sweeps are INERT; this mesh
+#: has the slanted lower wall and the contraction, so they are not. Confirmed four ways, the cleanest
+#: being that this case with `sweeps=1` floors at reach 3 exactly as the sibling does.
+#:
+#: ⚠️⚠️ SO `stencil_reach = 3` IS A PROPERTY OF SKEW-FREE MESHES, NOT OF THE DISCRETIZATION. Any case
+#: on a genuinely skewed mesh needs `sweeps + 1`, in three dimensions as much as in two. The sibling
+#: gets 3 for free and that is luck, not physics.
+#:
+#: It is kept at 3 here ANYWAY, which needs saying plainly: reach 5 was tried and is step-for-step
+#: identical (same cycles, same alpha, same divergence) at 35% more per step, so it buys nothing. The
+#: error reach 3 leaves is ~2e-07 concentrated in the PRESSURE column -- and because a colouring is
+#: collision-free only for its own pattern, that is corruption of near entries rather than truncation.
+#: Whether that matters here is unresolved. `sweeps=2` would make reach 3 exact, but that changes the
+#: discretization, so it is an option to weigh rather than a fix to apply.
 STENCIL_REACH = int(os.environ.get("PITZ_STENCIL_REACH", "3"))
 
 #: ⚠️ UNIFORM PROBING REACH, deliberately, where the sibling case shortens two columns. Its
