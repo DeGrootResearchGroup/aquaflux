@@ -3150,6 +3150,34 @@ entirely the *finite difference's* fault — the adjoint barely moves while the 
   *and* ~2× the cost per application, so ~2.3× the work. This is the one arm the native-preconditioner
   programme exists to test and it had never been run; the recorded 7-against-11 zero-shift win is a
   **linear-probe** result at right-hand side `-R`, not this.
+- **⚠️⚠️ THE COUNT IS A PROPERTY OF THE COARSENING, NOT THE SMOOTHER — THREE DIFFERENT SMOOTHERS ON THE
+  SAME HIERARCHY ALL GIVE 1696 (measured 2026-08-16).** A fourth arm — the same native hierarchy applied
+  on the host and smoothed by a **zero-fill incomplete factorization** (`solve/ilu0.py`, one sweep,
+  `BFS3D_FLOW_INVERSE=hostilu`) — returns **1696 applications, 14.0 derived cycles**, identical to the
+  SIMPLE-smoothed arm at 4 sweeps and at 8. So on the adjoint's operator and right-hand side, SIMPLE ×4,
+  SIMPLE ×8 and an incomplete factorization ×1 are indistinguishable, and all three sit ~8 % above
+  PETSc's 1575 at the matched `rtol` 1e-4 (see the iteration-count-independence table below for that
+  baseline; the 1454 above is the looser `rtol` 1e-3 root). **What separates the native arms from PETSc
+  here is the aggregation, and ours is the worse one for this right-hand side.**
+  *Configuration:* `state-00067`, β = 0, uniform column reach, `rtol` 1e-4, `forward_rtol` 0.3, adjoint
+  solver `relative_residual_gmres(1e-6, restart=120, max_restarts=150)`, native coarsening
+  `strength_threshold` 0.25 / 5 levels / `max_coarse` 500 / no singletons. Per application **~170 ms**,
+  measured by differencing heartbeats (100→800 applications at a flat 17 s per 100), so this arm is
+  marginally *cheaper* per application than the incumbent's ~195 ms and the ~8 % extra applications make
+  it roughly a wash on wall clock — inside this case's noise floor either way.
+- **⚠️⚠️ AND THIS IS THE CASE THAT PROVES A LINEAR PROBE CANNOT RANK ADJOINT PRECONDITIONERS.** The same
+  two arms, at the same state and the same β = 0, measured through `field_split_probe.py` at right-hand
+  side `−R`: native **4 restart cycles against PETSc's 11**, a 2.75× win. Measured on the actual
+  gradient: **1696 against 1575, a 1.08× loss.** The ranking inverts and the magnitude is out by ~3×.
+  The reason is already recorded a few lines above and is now demonstrated rather than argued: **the
+  adjoint's right-hand side is the cotangent `dL/dphi*`, localized in one field block, not the full
+  steady residual** — and the restart differs too (120 against 15). **Do not promote a `−R` linear probe
+  to an adjoint result, in either direction.**
+- **✅ The gradient is IDENTICAL to every printed digit — −3.179366936e+03 from both arms**, which is the
+  correctness check behaving exactly as it must: a preconditioner changes how the transpose solve reaches
+  the answer, never where it lands. It is also the first end-to-end exercise of the hand-written
+  `HostVCycleInverse` transpose and `Ilu0.solve(transpose=True)` on a real adjoint rather than on a unit
+  fixture, and they reproduce PETSc's gradient exactly.
 - **⚠️ DOUBLING THE SMOOTHER SWEEPS BUYS EXACTLY NOTHING HERE — 1696 applications either way, not one
   cycle different, at 1.59× the cost per application. So 8 sweeps is STRICTLY DOMINATED by 4 on this
   operator.** That is worth stating loudly because this file's standing rule is the opposite one —
@@ -4350,7 +4378,15 @@ below measures.
 the host AMG was handed, so it read as that library's property; it is not, and any smoother put behind
 this seam needs it. That survives the change of factorization.
 
-### ✅ THE NATIVE AGGREGATION BEATS PETSc GAMG — 2.75× FEWER CYCLES AND 1.7× LESS WALL AT β = 0 (2026-08-16)
+### THE NATIVE AGGREGATION BEATS PETSc GAMG ON A LINEAR PROBE AT β = 0 — AND LOSES ON THE ACTUAL ADJOINT (2026-08-16)
+
+**⚠️⚠️ READ THIS FIRST: the win below is a `−R` LINEAR PROBE and it DOES NOT TRANSFER.** The same two arms
+at the same state and shift, measured on the real gradient, come out **1696 adjoint applications against
+PETSc's 1575 — a 1.08× loss, where the probe predicted a 2.75× win.** The ranking inverts. See *"the count
+is a property of the coarsening"* under the `jax.grad` section above for the measurement and the reason
+(the adjoint's right-hand side is the cotangent, localized in one field block, not the steady residual).
+Everything below is still correct about what it measured; it is simply not an adjoint result, and the
+reason it is kept is that it is now this file's cleanest demonstration of the difference.
 
 **This is the measurement the whole host-V-cycle detour existed for, and it had never been taken, because
 until now the smoother had never worked.** `solve/ilu0.py` is the zero-fill factorization the section
