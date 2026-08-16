@@ -290,9 +290,10 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   `refresh_in_place`. Those two genuinely differ (different inputs, different refresh costs) and are
   deliberately **not** unified behind a signature that would be the union of three.
   - **`HostFactors` is the contract, and it is exactly `n_dofs` + `apply(residual, *, transpose=…)`.**
-    That pair was already a real structural contract satisfied by **seven** classes — the three
-    factorizations, `AmgVCycle`, `NativeHierarchyInverse`, both `BlockTriangularFieldSplit`s and
-    `VankaSmoother` — and declared by none, so `matvec` was written out three times byte for byte and
+    That pair was already a real structural contract satisfied by **six** classes — the three
+    factorizations, `AmgVCycle`, `NativeHierarchyInverse` and both `BlockTriangularFieldSplit`s (a
+    seventh, the since-deleted Vanka smoother, satisfied it too) — and declared by none, so `matvec`
+    was written out three times byte for byte and
     `FieldSplitAmgPreconditioner` obtained it by subclassing a *concrete sibling*.
   - **⚠️ Anything a base reads off `self.factors` beyond that pair is a requirement on ALL of them
     (binding).** This is not hypothetical: `has_native_solve` read `self.factors.has_native_solve`,
@@ -4895,6 +4896,11 @@ transfer to any thresholded arm.
       unrelated routes to "ω is the 3D preconditioner lever" is much better evidence than either
       alone, and it also suggests a concrete arm: **leave ω out of the patch**, since a local solve
       cannot resolve a direction the local block does not see.
+
+      ⚠️ **`VankaSmoother` / `VankaPC` / `CellStarPatches` NO LONGER EXIST — the module was deleted
+      2026-08-15 because it never won an arm. If you grepped your way here for one of those names,
+      that is why there is no such symbol; the code is in git history. The measurements below stand
+      as the reason it went, and cannot be re-run without restoring it.**
 
       **RESOLVED, and (1) IS REFUTED — the near-singular blocks are NOT the mechanism.** The test was
       pre-registered (`VankaSmoother(max_patch_gain=...)`: converges ⇒ (1), stagnates ⇒ (2)) and the
