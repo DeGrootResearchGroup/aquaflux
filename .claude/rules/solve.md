@@ -1211,10 +1211,16 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     - **Already done, do not re-propose:** `refactor` reuses the aggregation and prolongation
       (`pc_gamg_reuse_interpolation` + smoother `reuse_ordering`) and overwrites the operator values in
       place, so only the Galerkin coarse operators and the incomplete-LU factor values recompute.
-    - **A Vanka patch smoother is BUILT and installable as a level smoother — `aquaflux/solve/vanka.py`.**
-      Not shipped as a default and **not exported from `aquaflux.solve`**: it exists so the recorded
-      "the coarse space is the wall" verdict can be re-adjudicated (see the low-β bullet below), and it
-      earns a place in the tree only if it wins. Three facts to keep:
+    - **⛔ THE VANKA PATCH SMOOTHER IS DELETED (2026-08-15) — it never won on any arm, and it was kept
+      only on the condition that it would.** It was built to let the "the coarse space is the wall"
+      verdict be re-adjudicated; that re-adjudication happened and went against it (see the low-β
+      bullet below: measured against a *working* coarse space it stagnates on its own, at a state where
+      the shipped incomplete-LU converges in two cycles). It was never exported, never a default, and
+      never beat the incumbent, so it went rather than be carried — the module, its tests and the probe
+      arms are all recoverable from git history if the question ever reopens.
+      **⚠️ Everything below is kept deliberately, as the JUSTIFICATION for that deletion and as the
+      record of what the route costs, and it is no longer re-runnable without restoring the module.**
+      Three facts worth keeping:
       - **Route: PETSc's *shell* preconditioner, not `PCPATCH`.** `PCPATCH` with
         `pc_patch_construct_type = vanka` needs a `DM` the plain-AIJ path does not supply, which is why
         the earlier plan flagged it as a risk. `pc_type python` + `pc_python_type
