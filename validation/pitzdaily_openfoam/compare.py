@@ -181,10 +181,15 @@ FORWARD_MAX_RESTARTS = 14
 
 #: ⚠️ THE VALIDATED SMOOTHER BUNDLE, AND NONE OF IT IS OPTIONAL. These are the library defaults'
 #: opposites, and each was measured on the sibling case at adjoint-grade tolerance:
-#:   * `FILL_LEVELS` 0 -- zero fill. The default ILU(1) DIVERGES at low shift (534 iterations to a true
-#:     relative residual of 3.7 at beta 0.02, where zero-fill takes 97). A pivot census found 303
-#:     negative pivots in the ILU(1) factor and none in ILU(0): the fill is what destroys it, so
-#:     dropping the fill is the fix rather than an approximation.
+#:   * ⚠️ `FILL_LEVELS` **1** HERE, WHERE THE SIBLING CASE USES 0 -- THE TWO RANK THIS OPPOSITELY, AND
+#:     copying the sibling's value is what kept this case from taking a single step. At zero fill the
+#:     level sweep is not a contraction on this leading block: it AMPLIFIES, and the four sweeps below
+#:     compound it (one apply of the split reads 9.88e+05 at one sweep and 1.56e+31 at four). With fill
+#:     1 the same operator takes ONE matvec to the march's stop.
+#:     The discriminator is a pivot census, and it inverts between the cases: this block's ILU(0) has
+#:     NEGATIVE pivots at every shift (27/25/9 of 36675) with min |pivot| some twenty times smaller
+#:     than the sibling's, whose ILU(0) has none at any shift. There the fill produces the negative
+#:     pivots and dropping it is the fix; here dropping it produces them and the fill is the fix.
 #:   * `SWEEPS` 4 -- zero-fill is the weaker smoother, so extra sweeps pay more than they did for
 #:     ILU(1) (390 -> 69 iterations at beta 0.01). The library default of 2 was tuned against ILU(1)
 #:     and does not carry over.
@@ -194,7 +199,7 @@ FORWARD_MAX_RESTARTS = 14
 #:   * `PC_BETA_FLOOR` 0.05 -- the V-cycle is built at `max(beta, floor)` while the march still solves
 #:     at its own shift. The OPERATOR is untouched, so the converged root and the adjoint are
 #:     unchanged, and the mismatch saturates instead of growing as the shift falls.
-FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT, PC_BETA_FLOOR = 0, 4, 2000, 0.05
+FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT, PC_BETA_FLOOR = 1, 4, 2000, 0.05
 
 #: The field split: the `[u, v, p]` saddle and the `[k, omega]` transported pair get their own
 #: hierarchies, because a saddle and an advection-diffusion-reaction pair coarsen differently. Measured
@@ -244,13 +249,21 @@ NATIVE_TRAILING = {"max_coarse": COARSE_EQ_LIMIT, "equilibrate": False}
 #: on a genuinely skewed mesh needs `sweeps + 1`, in three dimensions as much as in two. The sibling
 #: gets 3 for free and that is luck, not physics.
 #:
-#: It is kept at 3 here ANYWAY, which needs saying plainly: reach 5 was tried and is step-for-step
-#: identical (same cycles, same alpha, same divergence) at 35% more per step, so it buys nothing. The
-#: error reach 3 leaves is ~2e-07 concentrated in the PRESSURE column -- and because a colouring is
+#: ⚠️ REACH 5 IS NECESSARY AND NOT SUFFICIENT, AND THAT PAIRING IS THE WHOLE POINT. Measured against
+#: the smoother fill beside it, on the leading block at beta = 2:
+#:
+#:      reach 3 + fill 1   fails  (300 matvecs, true residual 3.36)
+#:      reach 5 + fill 0   fails  (300 matvecs, true residual 3.50)
+#:      reach 5 + fill 1   ONE matvec to the march's stop, ten to 1.7e-09
+#:
+#: Neither alone is worth anything, which is exactly how a one-variable-at-a-time sweep misleads: reach
+#: 5 was measured "step-for-step identical, 35% dearer, buys nothing" and reverted -- a correct
+#: measurement of the wrong pair. Vary these two together or not at all.
+#:
+#: The error reach 3 leaves is ~2e-07 concentrated in the PRESSURE column, which enters the residual
+#: only through gradients and so inherits the sweep-extended stencil undiluted. Because a colouring is
 #: collision-free only for its own pattern, that is corruption of near entries rather than truncation.
-#: Whether that matters here is unresolved. `sweeps=2` would make reach 3 exact, but that changes the
-#: discretization, so it is an option to weigh rather than a fix to apply.
-STENCIL_REACH = int(os.environ.get("PITZ_STENCIL_REACH", "3"))
+STENCIL_REACH = int(os.environ.get("PITZ_STENCIL_REACH", "5"))
 
 #: ⚠️ UNIFORM PROBING REACH, deliberately, where the sibling case shortens two columns. Its
 #: `(3,3,3,3,2,2)` is a SIX-field layout and was measured on that mesh and those schemes; the analogous

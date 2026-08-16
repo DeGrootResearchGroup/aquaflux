@@ -1072,6 +1072,48 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     Worth knowing before adding a second spelling of it: prefer the floor, which is explicit about being
     preconditioner-only.
 
+    **⚠️⚠️ THE FILL RANKING INVERTS BETWEEN CASES — `bfs3d` WANTS ZERO FILL AND `pitzDaily` WANTS ONE,
+    AND COPYING THE VALUE ACROSS STOPS THE OTHER CASE DEAD (measured 2026-08-16).** Everything in the
+    bundle above was measured on `bfs3d`, and this one does not transfer. On the 2D `pitzDaily` leading
+    `[u, v, p]` block, at the cold seed the march fails on, right-preconditioned GMRES on the TRUE
+    residual, matrix exact to 1.5e-15:
+
+    | β | ILU(0) ×4 (the `bfs3d` value) | ILU(1) ×4 |
+    |---|---|---|
+    | 2.0 | one-apply 1.36e+28 → 300 matvecs, true **3.50** | one-apply 7.4e-02 → **1 matvec** to the 0.3 stop, 10 to 1.7e-09 |
+    | 0.5 | one-apply 1.14e+14 → true **0.984** | **1 matvec** |
+
+    **At zero fill the level sweep is not a contraction on that block — it AMPLIFIES, and the sweeps
+    compound it: one apply reads 9.88e+05 at one sweep and 1.56e+31 at four.** Read "more smoothing
+    makes it worse" as the signature; a merely weak smoother improves with sweeps.
+
+    **The discriminator is a pivot census, and it inverts.** `pitzDaily`'s ILU(0) carries **negative
+    pivots at every shift** (27/25/9 of 36675 at β 2/0.5/0), min |pivot| 5.9e-03 — about twenty times
+    smaller than `bfs3d`'s, whose ILU(0) has **zero** negatives at any shift (min |pivot| 1.2e-01 …
+    1.9e-01, median 1.02, max factor entry 8.0). So on one case the FILL produces the bad pivots and
+    dropping it is the fix; on the other, dropping it produces them and the fill is the fix.
+
+    **⚠️ Three mechanisms were refuted on the way, each of which had a plausible story:**
+    - **NOT the pressure/momentum scale split.** The 3D block's split is *comparable or worse* at
+      matched β (pressure min |diag| 3.42e-07 against 2D's 4.19e-05; equilibrated max entry 81.9 at
+      β = 0 against 24.3) and it converges. Decisively: an exact LU of the *same* equilibrated 2D matrix
+      solves it in 1 matvec to 9.9e-15 while ILU(0) of it diverges — two factorizations of one matrix
+      ranking oppositely cannot be a scaling effect.
+    - **NOT the field split.** The monolithic five-field V-cycle fails too (one-apply 1.94e+12).
+    - **NOT the coarse space.** `coarse_eq_limit` 2000 (2 levels, 402 coarse equations) and `None`
+      (4 levels, 27) give **identical** one-apply 1.557e+31.
+    - **NOT a `spilu`-style broken factor.** The 1e+38 resembles the recorded threshold-ILU blow-up but
+      is not one: max |ILU(0) factor entry| is 110–338, not 1e+23. It is stationary-sweep amplification.
+
+    **⚠️ AND THE REACH AND THE FILL MUST BE VARIED TOGETHER.** Neither alone helps on `pitzDaily`:
+    reach 3 + fill 1 fails (300 matvecs, true 3.36), reach 5 + fill 0 fails (true 3.50), reach 5 +
+    fill 1 takes ONE matvec. A one-variable sweep measured reach 5 as "step-for-step identical, 35 %
+    dearer, buys nothing" and it was reverted on that basis — a correct measurement of the wrong pair.
+
+    **⚠️ STILL OPEN: at β = 0 BOTH fills fail on `pitzDaily`** (true 0.458 and 0.434). No march visits
+    that shift (`PC_BETA_FLOOR` 0.05), but it is the adjoint's operator, so a `jax.grad` on this case
+    will meet it.
+
     **PLAIN aggregation, not smoothed — `pc_gamg_agg_nsmooths = 0` (measured, and the largest
     preconditioner win found on this case).** Smoothing the tentative prolongator with a Jacobi step is
     GAMG's default and is right for an M-matrix-like operator; on a strongly indefinite saddle it
