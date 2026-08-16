@@ -103,6 +103,38 @@ def test_permute_cells_remaps_zone_labels() -> None:
     assert renumbered.cell_zones.size("a") == 1 and renumbered.cell_zones.size("c") == 1
 
 
+def test_permute_cells_carries_the_periodic_offset() -> None:
+    """A renumbered periodic mesh is still periodic — the seam's neighbour-image translation
+    survives the relabelling.
+
+    Guards the single argument that carries it. Without it a seam face's neighbour sits a full
+    period away, and the divergence-theorem volume of a boundary-column cell collapses (the
+    two-cell case loses one cell's entire volume) -- silently, since an absent offset is exactly
+    what an ordinary mesh has.
+    """
+    mesh = structured_grid_2d(4, 3, lx=2.0, ly=1.0, periodic=("x",), named_boundaries=True)
+    volume = np.asarray(mesh.geometry().cell.volume)
+    offset = np.asarray(mesh.face_cells.neighbour_offset)
+    perm = np.random.default_rng(4).permutation(mesh.n_cells)
+
+    renumbered = permute_cells(mesh, perm)
+
+    # Faces are not reordered, so the per-face offsets are untouched, not permuted.
+    np.testing.assert_array_equal(np.asarray(renumbered.face_cells.neighbour_offset), offset)
+    # new_volume[perm[old]] = old_volume[old]: every cell keeps its own volume, none collapses.
+    np.testing.assert_allclose(
+        np.asarray(renumbered.geometry().cell.volume), volume[np.argsort(perm)]
+    )
+    assert float(np.max(np.abs(np.asarray(closed_cell_residual(renumbered))))) < 1e-10
+
+
+def test_permute_cells_leaves_a_non_periodic_mesh_offset_free() -> None:
+    """An ordinary mesh gains no offset array from a renumbering (``None`` in, ``None`` out)."""
+    mesh = structured_grid_2d(3, 2)
+    assert mesh.face_cells.neighbour_offset is None
+    assert permute_cells(mesh, np.array([2, 0, 1, 5, 3, 4])).face_cells.neighbour_offset is None
+
+
 def test_permute_cells_rejects_non_bijection() -> None:
     """A non-bijective ``perm`` would silently corrupt the mesh; it is rejected up front."""
     mesh = structured_grid_2d(3, 1)

@@ -288,6 +288,12 @@ def pad_partition(
     owner[:nf] = owner_real
     neighbour[:nf] = nb_real
 
+    # Real faces keep their periodic neighbour-image translation (they keep their order and their
+    # owner/neighbour roles); the padding faces come from no real face and take a zero offset.
+    face_source = np.full(n_faces_local, -1, dtype=np.int64)
+    face_source[:nf] = np.arange(nf)
+    neighbour_offset = local_mesh.face_cells.gather_neighbour_offset(face_source)
+
     # --- geometry -----------------------------------------------------------------------
     # The null cell's centroid anchors the padding geometry; take the first owned cell's centroid
     # so it is a real, finite point inside the domain.
@@ -343,7 +349,9 @@ def pad_partition(
 
     padded_mesh = Mesh(
         node_coords=jnp.asarray(node_coords),
-        face_cells=FaceCellConnectivity(jnp.asarray(owner), jnp.asarray(neighbour), n_local),
+        face_cells=FaceCellConnectivity(
+            jnp.asarray(owner), jnp.asarray(neighbour), n_local, neighbour_offset
+        ),
         face_nodes=FaceNodeConnectivity.from_csr(offsets, indices),
         cell_zones=CellZones(label=jnp.asarray(zone_label), names=local_mesh.cell_zones.names),
         face_patches=FacePatches(label=jnp.asarray(patch_label), names=patch_names),

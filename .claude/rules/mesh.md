@@ -50,7 +50,9 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
   `PartitionedMesh` gathers a local bundle via `LocalPartition.local_geometry(global_geometry)`.
 - `reorder.py` — cell **renumbering**. `permute_cells(mesh, perm)` is the single canonical
   "apply a cell relabelling" transform (remaps owner/neighbour values + zone labels →
-  `P·A·Pᵀ`); the `CellReordering` strategy hierarchy chooses the permutation
+  `P·A·Pᵀ`, and carries the periodic `neighbour_offset` across unchanged — faces are neither
+  reordered nor owner/neighbour-swapped, so the per-face translation passes straight through);
+  the `CellReordering` strategy hierarchy chooses the permutation
   (`IdentityReordering`, `ReverseCuthillMcKee` bandwidth-reduction via scipy,
   `RandomReordering` for worst-case robustness tests). Build-time preprocessing only — not
   part of the differentiable solve.
@@ -149,6 +151,17 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
     one interior face wrapping the last cell to the first with `+L` offset — has the same owner→
     neighbour delta as an ordinary interior face. *Values* (φ, u, p, gradients) are periodic and
     gather unchanged; only *positions* take the offset. Existing meshes (offset `None`) are unchanged.
+    **Every mesh transform that renumbers faces must carry the offset across, via
+    `gather_neighbour_offset(face_index)`** — the offsets in a *new* face numbering, where
+    `face_index[new] = old` and a negative entry (a newly introduced face, e.g. a shard's padding
+    face) takes zero; it returns `None` for a non-periodic relation, so an ordinary mesh never gains
+    an array of zeros. Dropping the offset does **not** raise — an absent offset is exactly what an
+    ordinary mesh has — it silently un-periodises the seam, and the divergence-theorem volume of a
+    boundary-column cell collapses. `permute_cells` (identity on faces), `partition_mesh` (a row
+    subset), and `pad_partition` (real rows then zeros) all did drop it and now carry it, each with
+    its own regression test. **`collapse_extruded_direction` still drops it** — currently
+    unreachable, since no periodic mesh is 3D (only `structured_grid_2d(periodic=…)` builds one and
+    the polyMesh reader emits none); the fix is `gather_neighbour_offset(kept_faces)[:, kept_axes]`.
   - `FaceNodeConnectivity` (obtained as **`mesh.face_nodes`**) — the ragged face→node relation:
     `gather_node_coords`, `perimeter_next`, `reduce_to_faces`, `vertex_mean`; the face-geometry
     schemes (`face.py`) traverse a polygon through these instead of open-coding CSR arithmetic.

@@ -88,6 +88,35 @@ def _line_face_cells() -> FaceCellConnectivity:
     return FaceCellConnectivity(jnp.array([0, 1, 0, 2]), jnp.array([1, 2, -1, -1]), n_cells=3)
 
 
+def _periodic_line_face_cells() -> FaceCellConnectivity:
+    """The 3-cell line closed into a ring: face 3 wraps cell 2 back to cell 0 with a ``+3`` offset."""
+    return FaceCellConnectivity(
+        jnp.array([0, 1, 0, 2]),
+        jnp.array([1, 2, -1, 0]),
+        n_cells=3,
+        neighbour_offset=jnp.array([[0.0], [0.0], [0.0], [3.0]]),
+    )
+
+
+def test_gather_neighbour_offset_selects_and_reorders_faces():
+    """The offsets follow a face renumbering — the row order is the new numbering's."""
+    fc = _periodic_line_face_cells()
+    carried = fc.gather_neighbour_offset(jnp.array([3, 1, 0]))  # the seam face first
+    np.testing.assert_allclose(np.asarray(carried), [[3.0], [0.0], [0.0]])
+
+
+def test_gather_neighbour_offset_zeroes_newly_introduced_faces():
+    """A negative source index marks a face that came from no existing face; it gets no offset."""
+    fc = _periodic_line_face_cells()
+    carried = fc.gather_neighbour_offset(jnp.array([3, -1, -1]))
+    np.testing.assert_allclose(np.asarray(carried), [[3.0], [0.0], [0.0]])
+
+
+def test_gather_neighbour_offset_of_an_ordinary_mesh_stays_none():
+    """A non-periodic relation stays offset-free rather than gaining an array of zeros."""
+    assert _line_face_cells().gather_neighbour_offset(jnp.array([0, 1, 2, 3])) is None
+
+
 def test_face_cells_scatter_masks_neighbour_on_boundary():
     """`scatter` adds owner_contrib for every face but neighbour_contrib only on interior faces."""
     fc = _line_face_cells()

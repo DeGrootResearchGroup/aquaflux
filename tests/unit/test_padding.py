@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, Neumann, ZeroGradient
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler
-from aquaflux.mesh import structured_grid_3d
+from aquaflux.mesh import structured_grid_2d, structured_grid_3d
 from aquaflux.parallel import BlockPartitioner, PaddedLayout, pad_partition, partition_mesh
 from aquaflux.properties import Constant, PropertyModel
 
@@ -146,6 +146,44 @@ def test_real_geometry_survives_padding_unchanged(decomposition, layout):
                 np.asarray(getattr(padded_geometry.face, name))[:n_real_faces],
                 np.asarray(getattr(local_geometry.face, name)),
             )
+
+
+def test_padding_keeps_the_periodic_seam_displacement():
+    """Real faces keep their periodic neighbour-image translation; padding faces take none.
+
+    The padded mesh is likewise handed to operators as an ordinary ``Mesh``, so a seam face must
+    still present the unpadded owner→neighbour displacement. Padding faces come from no real face,
+    so a zero offset is the right one — and it must stay finite, since a ``NaN`` in a discarded row
+    still poisons the cotangent of every row sharing its reduction.
+    """
+    mesh = structured_grid_2d(6, 4, lx=3.0, ly=1.0, periodic=("x",), named_boundaries=True)
+    geometry = mesh.geometry()
+    pmesh = partition_mesh(mesh, BlockPartitioner().partition(mesh, 2))
+    layout = PaddedLayout.from_partitioned(pmesh)
+
+    for p, part in enumerate(pmesh.partitions):
+        local_geometry = part.local_geometry(geometry)
+        local_fc = part.mesh.face_cells
+        local_delta = np.asarray(
+            local_fc.neighbour_centroid(local_geometry.cell.centroid)
+            - local_geometry.cell.centroid[np.asarray(local_fc.owner)]
+        )
+        padded_mesh, padded_geometry = pad_partition(layout, p, part.mesh, local_geometry)
+
+        n_real_faces = int(part.mesh.n_faces)
+        padded_fc = padded_mesh.face_cells
+        padded_offset = np.asarray(padded_fc.neighbour_offset)
+        np.testing.assert_array_equal(
+            padded_offset[:n_real_faces], np.asarray(local_fc.neighbour_offset)
+        )
+        np.testing.assert_array_equal(padded_offset[n_real_faces:], 0.0)
+
+        padded_delta = np.asarray(
+            padded_fc.neighbour_centroid(padded_geometry.cell.centroid)
+            - padded_geometry.cell.centroid[np.asarray(padded_fc.owner)]
+        )
+        np.testing.assert_allclose(padded_delta[:n_real_faces], local_delta)
+        assert np.all(np.isfinite(padded_delta))
 
 
 def test_padding_is_inert_and_finite(decomposition, layout):

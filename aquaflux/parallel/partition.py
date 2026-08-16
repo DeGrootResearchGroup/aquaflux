@@ -273,6 +273,9 @@ def partition_mesh(mesh: Mesh, labels) -> PartitionedMesh:
         lf_nb_global = nb[local_faces]
         lf_interior = interior_mask(lf_nb_global)
         lf_nb = np.where(lf_interior, g2l[np.where(lf_interior, lf_nb_global, 0)], -1)
+        # A periodic seam face keeps its neighbour-image translation: the selection renumbers faces
+        # but preserves each one's owner/neighbour roles, so the offsets are a row subset.
+        lf_offset = mesh.face_cells.gather_neighbour_offset(local_faces)
 
         # Local ragged face-node arrays (compressed-sparse-row: offsets + flat indices)
         # from the selected global faces.
@@ -302,7 +305,7 @@ def partition_mesh(mesh: Mesh, labels) -> PartitionedMesh:
         local_mesh = Mesh(
             node_coords=jnp.asarray(local_node_coords),
             face_cells=FaceCellConnectivity(
-                jnp.asarray(lf_owner), jnp.asarray(lf_nb), n_owned + n_ghost
+                jnp.asarray(lf_owner), jnp.asarray(lf_nb), n_owned + n_ghost, lf_offset
             ),
             face_nodes=FaceNodeConnectivity.from_csr(local_offsets, local_indices),
             cell_zones=local_zones,
