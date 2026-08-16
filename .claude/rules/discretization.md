@@ -51,13 +51,12 @@ Principles.
 - **`face_flux.py` — BUILT.** The face-flux contract, shared by every operator (so `diffusion.py`
   and `advection.py` depend on it, not on each other): `FaceFluxOperator` (the `face_flux(field,
   context)` strategy interface) + `FaceContext` (the shared per-face inputs; see Responsibility).
-  ⚠️ **There is no `gamma` field on the context — it was replaced by `properties` and this entry
-  described the retired shape until 2026-08-16.** `FaceContext.properties` is a
-  `Mapping[str, jnp.ndarray]` carrying the assembler's whole evaluated property map (density,
-  viscosity, conductivity, …), and each operator reads the property it names. That is deliberately
-  **one** context field however many properties exist, so adding a property never changes the
-  context's shape — the reason the properties model landed here rather than widening the context.
-  Keep it single-sourced on the assembler, not baked into `DiffusionFlux` as operator config.
+  `FaceContext.properties` is a `Mapping[str, jnp.ndarray]` carrying the assembler's whole evaluated
+  property map (density, viscosity, conductivity, …), and each operator reads the property it names.
+  That is deliberately **one** context field however many properties exist, so adding a property never
+  changes the context's shape. Keep it single-sourced on the assembler, not baked into `DiffusionFlux`
+  as operator config. (There is no `gamma` field; that is the name to look for if a stale reference
+  turns up.)
 - **`diffusion.py` — BUILT.** `DiffusionFlux` (a `FaceFluxOperator` that gathers phi/grad/gamma/x
   from the context). Its optional **`boundary_coefficient`** field (`(n_faces,)`, default `None`)
   overrides the owner-cell `Gamma` **on boundary faces only** — a surface whose effective transport

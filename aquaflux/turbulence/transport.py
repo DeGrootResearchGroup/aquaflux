@@ -224,10 +224,9 @@ class SSTTurbulence(eqx.Module):
         refuses to return a root reached with this set whose cap is active; see
         :func:`~aquaflux.turbulence.production_cap_active`.
 
-        It defaulted to ``True`` until it was measured. On a turbulent channel and on the 3D
-        backward-facing step the two settings produce **identical** marches -- same step count, same
-        cycle count, same converged fields -- so the stabilization it offers was not, on either case,
-        buying anything the exact operator does not already give.
+        On a turbulent channel and on the 3D backward-facing step the two settings produce
+        **identical** marches -- same step count, same cycle count, same converged fields -- so on
+        both of those the stabilization buys nothing the exact operator does not already give.
 
         **Who still wants it:** a bare or weakly preconditioned *segregated scalar* solve. The exact
         derivative of the cap is indefinite where the cap is active, and far from the solution the cap

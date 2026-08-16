@@ -102,11 +102,10 @@ dependency outside `mesh/` is `BoundaryConditions` (for the patch-binding paddin
 
 The contract the injected assembler must satisfy is **three** members — `residual(field, *,
 gradient_hook=None)`, a `gradient_scheme` attribute (`None` when no gradient is reconstructed), and a
-mesh-bound `boundary`. Both the scalar and coupled-flow assemblers already have these. ⚠️ It was
-recorded here as "exactly two members — `residual(field)` and a mesh-bound `boundary`" until
-2026-08-16; that undercounts twice, and an assembler built to the two-member contract raises
-`AttributeError` at build time (`build_distributed_residual` reads `assemblers[0].gradient_scheme`)
-or `TypeError` on the first residual call (it is invoked as `residual(local_field,
+mesh-bound `boundary`. Both the scalar and coupled-flow assemblers already have these. ⚠️ All three
+are load-bearing: an assembler missing `gradient_scheme` raises `AttributeError` at build time
+(`build_distributed_residual` reads `assemblers[0].gradient_scheme`), and one whose `residual` does not
+accept `gradient_hook` raises `TypeError` on the first call (it is invoked as `residual(local_field,
 gradient_hook=hook)`).
 
 **When adding a distributed capability, extend the injected builder or the layout — never add

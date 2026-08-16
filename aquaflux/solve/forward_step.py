@@ -156,13 +156,13 @@ class ShiftedForwardStep(ForwardStep, Protocol):
     :class:`~aquaflux.solve.StepControl` *do* need one -- they raise beta on a bad step and drive it
     between steps -- so the requirement is real and belongs written down.
 
-    **What it replaces.** The requirement used to be enforced by ``hasattr`` probes scattered through the
-    march, which fail *silently*: a `DampedNewtonStep` satisfies `ForwardStep` completely, so passing one
-    with ``RetryPolicy.on_cycles`` set was accepted and then simply never escalated -- a march that quietly
-    declines to escalate looks exactly like one that never needed to. One reporting path was worse still
-    and read ``active_step.relaxation_schedule`` unguarded, so the same conforming step raised
-    ``AttributeError`` mid-march. The march now checks this once, up front, and says which feature needs
-    what.
+    **Why an explicit up-front check rather than a ``hasattr`` probe at the point of use.** A probe fails
+    *silently*: a `DampedNewtonStep` satisfies `ForwardStep` completely, so passing one with
+    ``RetryPolicy.on_cycles`` set is accepted and then simply never escalates -- and a march that quietly
+    declines to escalate looks exactly like one that never needed to. Reading
+    ``active_step.relaxation_schedule`` unguarded fails the opposite way, raising ``AttributeError``
+    mid-march on a step that conforms. The march therefore checks this once, before the first step, and
+    names which feature needs what.
 
     Notes
     -----

@@ -335,16 +335,16 @@ class OmegaProduction(VolumeSource):
         # The ν_t floor only guards the k → 0 (ν_t → 0) edge; k/ν_t stays finite there (both vanish),
         # so where the cap actually bites it is unaffected.
         #
-        # ⚠️ `k` IS CLAMPED HERE, AND THE FLOOR IS WHY IT ONCE MATTERED. For k > 0 the quotient very
-        # nearly cancels -- ν_t = a₁k / max(a₁ω, S F₂), so k/ν_t is max(a₁ω, S F₂)/a₁, bounded and
-        # independent of k's magnitude -- and the floor never bites. Before `SSTModel.eddy_viscosity`
-        # clamped its own `k`, a negative k broke that cancellation: ν_t went negative,
-        # `maximum(ν_t, 1e-30)` selected the floor instead of ν_t, and the quotient became k·ω/1e-30 --
-        # on a real iterate (k = -2.9e-13, ω = 4.0e5) a cap of ≈ -1e23, which wins the `min` and injects
-        # an ω source of ~1e13. A NaN would at least be caught; that was finite, so it propagated. Both
-        # clamps are in place now: ν_t can no longer follow k's sign, and clamping this numerator gives
-        # cap = 0 at a negative k -- the value the unclamped formula already returns at k = 0 exactly --
-        # so keep the two together. Off-solution and inactive at convergence, where k > 0.
+        # ⚠️ `k` IS CLAMPED HERE, AND THAT CLAMP PAIRS WITH THE ONE IN `SSTModel.eddy_viscosity` --
+        # keep the two together. For k > 0 the quotient very nearly cancels -- ν_t = a₁k / max(a₁ω, S F₂),
+        # so k/ν_t is max(a₁ω, S F₂)/a₁, bounded and independent of k's magnitude -- and the floor never
+        # bites. A negative k breaks that cancellation unless both clamps hold: without the one in
+        # `eddy_viscosity`, ν_t follows k's sign, `maximum(ν_t, 1e-30)` selects the floor, and the
+        # quotient becomes k·ω/1e-30 -- at iterate magnitudes of order (k = -3e-13, ω = 4e5) a cap near
+        # -1e23, which wins the `min` and injects an ω source of ~1e13. A NaN would at least be caught;
+        # that is finite, so it propagates silently. With both clamps the cap is 0 at a negative k --
+        # the value the unclamped formula returns at k = 0 exactly. Off-solution and inactive at
+        # convergence, where k > 0.
         cap = (
             _PRODUCTION_LIMIT_RATIO
             * self.model.beta_star

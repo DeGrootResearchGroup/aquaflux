@@ -579,8 +579,7 @@ class CoupledShiftPolicy(eqx.Module):
         flow, k, omega = self.layout.unpack(phi)
         n_cells = self.layout.n_cells
         # The shift's velocity buckets come from the ASSEMBLER's frozen momentum diagonal, which is all
-        # they ever needed -- the preconditioner used to be asked for them, which is what made a
-        # shift-only policy carry one.
+        # they need -- so a shift-only policy carries no block preconditioner at all.
         convective, dissipative = frozen_momentum_diagonal_parts(self.momentum, flow)
         # The SHIFT's buckets are a separate concern with a different lifetime (see
         # `VelocityShiftParts`), so their source is injected; `None` uses the assembler's own, which is
@@ -1665,16 +1664,16 @@ def _monolithic_shift_source(
     :class:`MonolithicFactorShiftPolicy` takes only ``base.shift_term(phi).diagonal`` -- it supplies its
     own inverse and never calls the block policy's ``make_preconditioner``. So this policy is built
     **without a flow block at all**: the shift's velocity buckets come from the flow assembler's frozen
-    momentum diagonal, which is the whole dependency, and the block preconditioner that used to be built
-    for them contributed two multigrid hierarchies that were never applied.
+    momentum diagonal, which is the whole dependency. Building a block preconditioner to supply them
+    instead would carry two multigrid hierarchies that are never applied.
 
-    Removing them is not only a saving. Their aggregation reads the operator's *values*, so their coarse
-    grids -- and hence the array shapes the policy carried -- moved with the molecular viscosity, and the
-    compiled coupled step is keyed on those shapes: every Reynolds-continuation rung was a fresh
-    compilation of the whole solve, the largest fixed overhead in the three-dimensional march. (Turning
-    the aggregation down to graph-only would have fixed the shapes and is inert in everything read, but
-    it lets the hierarchy refuse to build on a degenerate coarse row -- a failure mode for something with
-    no consumer.)
+    Not building them is not only a saving. Their aggregation reads the operator's *values*, so their
+    coarse grids -- and hence the array shapes the policy would carry -- move with the molecular
+    viscosity, and the compiled coupled step is keyed on those shapes. Carrying them therefore makes
+    every Reynolds-continuation rung a fresh compilation of the whole solve, the largest fixed overhead
+    in a three-dimensional march. (Turning the aggregation down to graph-only would fix the shapes and is
+    inert in everything measured, but it lets the hierarchy refuse to build on a degenerate coarse row --
+    a failure mode for something with no consumer.)
     """
     return _coupled_shift_policy(
         coupled, reference_state, None, shift_basis=shift_basis, build_flow_block=False
@@ -2724,10 +2723,10 @@ def _refresh_branch(*, stale_state: bool, moved_beta: bool, split: bool) -> str:
     ``split`` says whether the cheap branch exists at all (an algebraic-multigrid preconditioner with a
     materialize gate configured). Without it there is one branch, and any trigger means ``"full"``.
 
-    **Why this is a function and not three nested ``if``s at the call site.** It used to be nested — the
-    state question asked *only* when the β question had already said yes — and that made state drift
-    unable to trigger anything at all below the preconditioner's shift floor, where the clamped β never
-    moves so the β question answers "no" forever. That is precisely the low-shift tail where the flow
+    **Why this is a function and not three nested ``if``s at the call site.** Nesting them — asking the
+    state question *only* when the β question has already said yes — leaves state drift unable to trigger
+    anything at all below the preconditioner's shift floor, where the clamped β never moves so the β
+    question answers "no" forever. That is precisely the low-shift tail where the flow
     develops fastest. Measured on a three-dimensional cold march: below the floor 91 % of steps refreshed
     nothing while the eddy viscosity drifted ~20 % per step, and those steps carried ~47 % of the whole
     march's Krylov cost. The decision is small, total, and worth being able to read and test on its own.
