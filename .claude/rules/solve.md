@@ -4244,6 +4244,42 @@ result does not need that care: 33 % of wall alongside a 24 % cycle drop at an i
 region between them is flat to 4 %, so a finer sweep has little to find. `BFS3D_INNER_TOL` and
 `BFS3D_INNER_STEPS` are exposed for anyone who wants to try.
 
+**✅ AND IT TRANSFERS TO THE SHIPPED PATH, WHICH THE THREE MARCHES ABOVE DID NOT TEST (2026-08-15).** All
+three ran the **native** flow block, which the case does *not* default to — so the default this change
+governs (`flow inverse: petsc`) was unmeasured when it was made. It has since been run, on a tree carrying
+this change plus ~20 later merges:
+
+| arm | `inner_tol` | steps | wall | cycles | inner iterations | final ‖R‖ |
+|---|---|---|---|---|---|---|
+| **petsc — the shipped default** | **1e-2** | **59** | **1197 s** | 232 | 155 | 1.861e-06 |
+| petsc — archived baseline | 1e-3 | 67 | 1957 s | — | — | — |
+
+Same root, same `x_r/h` 8.3611. ⚠️ **Do not attribute the whole 39 % to `inner_tol`**: that archived
+baseline predates the coarse-solve factorization, the trailing zero-guess peel and twenty-odd merged
+changes, so the two runs differ in more than this knob. The direction is unambiguous; the decomposition
+is not available from this pair.
+
+### ⛔ THE NATIVE FLOW BLOCK IS STILL NOT FASTER ON A MARCH — and the comparison that said otherwise was unfair
+
+**Read this before quoting any native-versus-incumbent march number.** With the inner tolerance at its
+old 1e-3 the incumbent stood at 1957 s and the native block at 1510 s, which reads as the native arm
+finally winning by 23 %. It is not a comparison: **only the native arm had the `inner_tol` improvement.**
+Given the same change the incumbent gains *more*, and the ordering is unchanged:
+
+| arm at `inner_tol` 1e-2 | steps | wall |
+|---|---|---|
+| **petsc — the shipped default** | **59** | **1197 s** |
+| native, 2 sweeps | 63 | 1510 s |
+
+**The incumbent is 1.26× faster, so `FLOW_INVERSE` stays `petsc`.** The native direction's case rests
+where it always did — on the **adjoint at β = 0**, which is a different operator and where the incumbent's
+advantage (an incomplete factorization becoming near-exact as the shift raises diagonal dominance)
+disappears. That case cannot be closed until `jax.grad` runs on this case at all.
+
+**The general trap, which has now cost two wrong readings in this file:** when a change lands on one arm
+of an A/B, every previously-recorded number for the *other* arm is stale, and comparing across that
+boundary measures the change rather than the arms. Re-measure the baseline before ranking.
+
 ⚠️ **THIS DOES NOT OVERTURN THE RECORDED "TIGHTEN `inner_tol`" FINDING — it bounds it.** Elsewhere in
 this file a *pitzDaily* (2D, ILUT, large-Δτ dual-time) march is recorded as hitting a residual floor and
 over-developing because "at `inner_tol = 0.05` the implicit step is only 5 %-solved, so a large-Δτ
