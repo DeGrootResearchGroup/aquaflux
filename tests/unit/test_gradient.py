@@ -13,6 +13,8 @@ lets the gradient — the highest-risk numerics — be de-risked before any solv
 
 from __future__ import annotations
 
+import warnings
+
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
@@ -28,6 +30,7 @@ from aquaflux.schemes import (
     SweptGradientSolve,
     narrow_gradient_sweeps,
 )
+from aquaflux.schemes import gradient as gradient_module
 
 from tests.support.meshes import columnwise_perturbed_grid_3d, perturbed_grid_2d
 
@@ -563,3 +566,28 @@ def test_a_narrowed_reconstruction_costs_nothing_on_an_orthogonal_mesh() -> None
         rtol=0,
         atol=1e-14,
     )
+
+
+def test_the_underresolved_warning_does_not_fire_at_one_sweep() -> None:
+    """At one sweep the check measures ``rhs / rhs`` — exactly 1 on any mesh, so it says nothing.
+
+    The residual the diagnostic reads is the one entering the *final* update, which at a single sweep
+    is the initial ``rhs - A·0``. Left ungated it warned that the sweeps were under-resolved on a
+    perfectly orthogonal grid, where the reconstruction is exact and the correction is identically
+    zero. A single sweep is the uncorrected Green–Gauss reconstruction, so there is no correction
+    left under-resolved to report.
+    """
+    mesh = structured_grid_2d(6, 6)  # exactly orthogonal: the skewness offset is identically zero
+    geom = mesh.geometry()
+    field, bvals = _linear(geom.cell.centroid), _linear(geom.face.centroid)
+
+    def warnings_from(sweeps):
+        gradient_module._GRADIENT_UNCONVERGED_WARNED = False
+        scheme = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=sweeps))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            scheme.gradients(field, mesh, geom, bvals)
+        return [str(w.message) for w in caught]
+
+    assert warnings_from(1) == []
+    assert warnings_from(4) == []  # and a resolved multi-sweep solve is silent, as it always was

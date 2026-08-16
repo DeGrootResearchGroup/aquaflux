@@ -276,7 +276,8 @@ class SweptGradientSolve(GradientSolve):
         Emit a one-time warning if the relative gradient residual after ``sweeps`` exceeds this
         (default ``5e-2``, i.e. the sweep is clearly stalling — the converged field stays accurate
         well below this, so it flags only a genuinely under-resolved mesh). ``None`` disables the
-        check entirely.
+        check entirely, and it is skipped at ``sweeps=1`` where the measured ratio is exactly 1 on
+        any mesh (see :meth:`solve`), so it would report nothing but its own construction.
     """
 
     sweeps: int = eqx.field(static=True, default=4)
@@ -306,7 +307,12 @@ class SweptGradientSolve(GradientSolve):
         # norm would need an owned-only cross-partition reduction the operator-wrapping seam does not
         # carry; the sweep count is a static, mesh-property-driven choice, so the distributed path
         # drops the (unreliable) diagnostic rather than report a per-partition norm.
-        if operator_hook is None and self.warn_tol is not None:
+        # ...and it is skipped at ONE sweep, where it carries no information rather than a little. The
+        # residual below is the one entering the final update, so at a single sweep it is the initial
+        # `rhs - A·0 = rhs` and the ratio is *exactly* 1 whatever the mesh — it fires on a perfectly
+        # orthogonal grid whose answer is exact. A single sweep is `g = V⁻¹Bφ`, the uncorrected
+        # Green–Gauss reconstruction, so there is no correction being under-resolved to report on.
+        if operator_hook is None and self.warn_tol is not None and self.sweeps > 1:
             # `residual` is rhs - A·x from the last sweep (one apply already spent) — a free,
             # slightly conservative convergence indicator. The host-side warning is gated behind a
             # `lax.cond` on the tolerance so the (host-synchronizing) callback fires *only* when the

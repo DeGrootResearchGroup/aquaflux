@@ -602,9 +602,16 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       residual's at `k + 2` (measured on a small skewed cavity: reach **6** at the shipped `sweeps=4`,
       4 at 2). **So the shipped `SweptGradientSolve(sweeps=4)` and the shipped `stencil_reach=3` are
       mutually inconsistent the moment a mesh is skewed.**
-      - **LATENT TODAY, on every case that exists.** `bfs3d` is orthogonal enough that the skewness
-        offset is ~0 and the correction vanishes, which is the same fact as the recorded "swapping
-        Corrected→Compact Green-Gauss leaves it bit-identical". It bites on the first skewed case.
+      - **⚠️ LATENT ON `bfs3d`, LIVE ON pitzDaily — "latent on every case that exists" was written here
+        and is FALSE (corrected 2026-08-16).** `bfs3d` is skew-free to round-off (0 of 66368 interior
+        faces above 1e-6 relative), which is the same fact as the recorded "swapping Corrected→Compact
+        Green-Gauss leaves it bit-identical". **pitzDaily is not** (11567 of 24170 faces, max 7.5e-2),
+        and it pays for it now: `jacobian_relative_error` against the true jvp is **1.99e-07 at reach 3**
+        there against `bfs3d`'s 2.34e-16, reaching the float64 floor only at **reach 5** — so the shipped
+        `stencil_reach=3` materializes a measurably wrong matrix on a shipped 2D case. The error is
+        carried almost entirely by the **pressure column** (it enters the residual only through
+        gradients), which a whole-matrix `jacobian_relative_error` cannot see — the same
+        collapse-over-row-fields blindness recorded throughout this section.
       - **The fix is to probe a NARROWED residual, not to widen the reach** (the colour count climbs
         11 → 39 → 94 from reach 1 → 3 on `bfs3d`, so reach 6 is not purchasable):
         `CoupledJacobianProbe(gradient_sweeps=n)` / the coupled builders' `probe_gradient_sweeps=n` cap
@@ -617,6 +624,43 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
         is 9.80e-4 at 2 sweeps and 1.004e-3 at both 4 sweeps and the exact solve). A shorter sweep
         *relocates* that mass inward. What the cap buys is that the probe is no longer aliasing — the
         same distinction as everywhere else in this section.
+      - **⚠️ AND THE CAP IS A TRADE, NOT A FREE WIN — it is byte-identical at `None` and a genuine
+        exchange otherwise, because narrowing makes a ZERO-FILL elimination harder.** On pitzDaily, an
+        ILU(0) pivot census of the equilibrated cell-major leading `[u,v,p]` block against the narrowed
+        operator (`hybrid_initialize` seed, field split, same everything else):
+
+        | probe sweeps / reach | negative pivots | min \|pivot\| | nnz |
+        |---|---|---|---|
+        | full (4) / 3 | 7 | 5.02e-02 | 6.32M |
+        | full (4) / 5 | 9 | 2.18e-02 | 13.32M |
+        | 2 / 5 | 34 | 2.76e-02 | 7.34M |
+        | **1 / 3** | **263** | **3.59e-04** | **4.72M** |
+
+        At `sweeps=1` / reach 3 the matrix is **exact to the float64 floor with 2.8× fewer nonzeros**
+        than the reach-5 matrix the case otherwise needs — a bigger prize than the aliasing fix alone —
+        while the negative-pivot count goes 9 → 34 → **263**. That is consistent with the "truncation
+        relocates far coupling inward" finding above: the mass lands on the near entries an incomplete
+        factorization turns into pivots. **So `probe_gradient_sweeps` is preconditioner-family-dependent.**
+        ⚠️ **A pivot census is a PROXY and the direct test — a one-apply or a march at `sweeps=1` — has
+        NOT been run.** This file separately records a case where a pivot census was *identical* across
+        arms that converged five-fold apart, so do not treat it as decisive; here the arms do separate,
+        which is why the direction is worth carrying.
+      - **The family it is FOR is the SIMPLE-smoothed hierarchy, which takes the saving for nothing.**
+        The mechanism is which preconditioners inherit the stored *sparsity*: an incomplete factorization
+        takes its pattern from it, so a corrupted or narrowed pattern gives a correspondingly different
+        factor, while `native_saddle_inverse` relaxes through diagonal and Schur approximations and takes
+        no pattern at all. Measured on pitzDaily, that arm is **reach-insensitive** — the same 71 steps at
+        reach 3 and reach 5, cycles within 3 % (395 vs 408), identical final residual — while the Jacobian
+        halves and the march is 31 % shorter. **The untested pairing worth running is
+        `probe_gradient_sweeps=1` + `stencil_reach=3` + a SIMPLE-smoothed hierarchy:** exact Jacobian,
+        4.72M nonzeros against 13.32M, and a preconditioner indifferent to the pattern.
+      - **⚠️ The ILU fill ranking INVERTS between the two cases, which is why the trade above matters.**
+        `bfs3d` wants zero fill (its ILU(1) diverges at low shift, 303 negative pivots against zero);
+        pitzDaily wants fill 1 — its ILU(0) has negative pivots at every shift and **two independent
+        zero-fill implementations fail identically there** (PETSc ILU(0) and the native
+        `HostVCycleInverse`, both α → 0 by step 3–4), which puts it on the fill rather than on anything
+        PETSc-specific. pitzDaily's converging arms all land `x_r/h` 8.0686, so those are cost
+        comparisons, not accuracy ones.
       - **❌ "Precondition the gradient solve and use GMRES instead" is REFUTED as a reach lever, do not
         re-propose it.** With implicit differentiation the tangent is `A_g⁻¹B`, i.e. the sweep series run
         to round-off — measured reach **9** at 25 % skew and **11** at 40 %, against 5 for `sweeps=4`. It

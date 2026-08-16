@@ -1136,9 +1136,12 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       solve is capped at `n` sweeps — `CoupledJacobianProbe.narrow` is the one place that decides it, and
       the refresh hook re-narrows on `rebind` so a Reynolds rung's companion is capped too. The forward
       matvec keeps the exact `coupled`, so the root and the adjoint are unmoved. **`None` (default) is
-      byte-identical, and this is INERT on `bfs3d`**, whose mesh is orthogonal enough that the correction
-      vanishes — it is a latent trap removed ahead of the first skewed case, not a change to any measured
-      result. Reach/accuracy tables and the refuted "use GMRES instead" alternative are in
+      byte-identical, and this is INERT on `bfs3d`**, whose mesh is skew-free to round-off (0 of 66368
+      interior faces above 1e-6 relative) — so it changes no `bfs3d` result. ⚠️ **It is NOT inert on
+      pitzDaily**, which is skewed enough that reach 3 materializes a measurably wrong matrix there; and
+      the cap is a **trade** rather than a free win, since narrowing makes a zero-fill elimination harder
+      (pitzDaily ILU(0) negative pivots 9 → 263 as the sweeps narrow). Both are in
+      `.claude/rules/solve.md`; do not describe this knob as free. Reach/accuracy tables and the refuted "use GMRES instead" alternative are in
       `.claude/rules/schemes.md` and `.claude/rules/solve.md`; harness
       `validation/gradient_stencil_reach.py`.
       **⚠️ THE DRIFT GATE MUST NOT BE NESTED INSIDE THE β GATE — it was, and a PC-only `beta_floor` then

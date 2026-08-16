@@ -147,11 +147,29 @@ root `CLAUDE.md` Engineering Principles.
     corrupted one. Consumed through `CoupledJacobianProbe(gradient_sweeps=…)` / the coupled builders'
     `probe_gradient_sweeps=`; see `.claude/rules/turbulence.md` and `.claude/rules/solve.md`. **Default
     `None` everywhere is byte-identical.**
-    ⚠️ **This is LATENT on every case shipped today.** `bfs3d` and pitzDaily are orthogonal-enough that the
-    skewness offset is ~0, the correction vanishes, and the sweep count changes neither reach nor value
-    (measured: every shell beyond distance 1 at 1e-16 on an unperturbed grid, matching the recorded
-    "swapping Corrected→Compact Green-Gauss leaves the reach bit-identical"). It bites on the first
-    genuinely skewed case, which is why it was built before one exists rather than after.
+    ⚠️⚠️ **IT IS LATENT ON `bfs3d` AND LIVE ON pitzDaily — an earlier version of this entry said "latent
+    on every case shipped today" and that is FALSE (corrected 2026-08-16).** The two shipped cases run
+    *identical schemes* and differ only in the mesh, and only `bfs3d` is skew-free:
+
+    | mesh | `|skew|/d` median | max | interior faces > 1e-6 |
+    |---|---|---|---|
+    | `bfs3d` | 7.0e-15 | 1.9e-12 | **0 of 66368** |
+    | **pitzDaily** | 2.2e-09 | **7.5e-02** | **11567 of 24170** |
+
+    pitzDaily's distribution is bimodal — most of it is a structured block at round-off, and the slanted
+    lower wall and the contraction carry the tail, whose **maximum skew exceeds a 5 %-perturbed synthetic
+    grid's**. Measured consequence (a `pitzDaily` session, at the `hybrid_initialize` seed):
+    `jacobian_relative_error` against the true matrix-free jvp is **1.99e-07 at reach 3** and only reaches
+    the float64 floor at **reach 5** (1.48e-15), where `bfs3d` is already at 2.34e-16 at reach 3 — and
+    pitzDaily at `sweeps=1` floors at reach 3 exactly as `bfs3d` does, which is what ties the difference to
+    the sweeps rather than to anything else. **So running pitzDaily at the shipped `stencil_reach=3` costs
+    a real, measurable error today; the trap is not hypothetical.** The shortfall is carried almost entirely
+    by the **pressure column**, which enters the residual only through gradients and so inherits the
+    sweep-extended stencil undiluted — read `jacobian_relative_error` per (row field, column field), since
+    one random vector under a global norm cannot see it.
+    ⚠️ `validation/pitzdaily_openfoam/compare.py`'s own docstring still says this mesh is "only mildly
+    non-orthogonal ... reaches the converged corrected-gradient to machine precision in the default few
+    sweeps". Re-adjudicate that before quoting it.
   - **The `GradientSolve.solve(..., operator_hook=None)` distributed seam.** `operator_hook` is an
     optional transform applied to the unknown before **every operator apply**. `SweptGradientSolve`
     honours it — the Richardson sweeps form no global inner product, so a domain-decomposed residual
