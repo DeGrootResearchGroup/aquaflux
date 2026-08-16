@@ -54,8 +54,11 @@ def diagonal_positions(cnp.int32_t[::1] indptr, cnp.int32_t[::1] indices, int n)
                 found = idx
                 break
         if found < 0:
+            # Worded to match the pure-Python reference: the two implementations must be
+            # interchangeable in their failures as well as their results, and a test that pins only
+            # one of them will pass on whichever build happens to be live.
             raise ValueError(
-                f"row {i} has no stored diagonal entry; ILU(0) eliminates in place and cannot "
+                f"row {i} stores no diagonal entry; ILU(0) eliminates in place and cannot "
                 f"introduce one."
             )
         diag[i] = found

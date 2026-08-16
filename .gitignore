@@ -52,3 +52,9 @@ docs/api.md
 # only. These are NOT part of the public repository and must never be committed.
 /reference/
 /reference_codes/
+
+# Compiled extensions and the C Cython generates from `.pyx`. Neither is committed: the generated C
+# would go stale against the `.pyx` beside it, and a checked-in binary is built for one interpreter
+# and one architecture.
+*.so
+aquaflux/solve/_ilu0.c

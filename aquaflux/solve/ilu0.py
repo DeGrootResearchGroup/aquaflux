@@ -1,4 +1,4 @@
-"""Zero-fill incomplete LU: the reference implementation, and the compiled one when it is available.
+"""Zero-fill incomplete LU, in a readable Python form and a compiled one where it has been built.
 
 **What ILU(0) is, stated precisely, because the definition is what the tests check.** Factorize ``A`` as
 ``L U`` restricted to ``A``'s own sparsity pattern: the elimination runs normally but any update landing
@@ -26,7 +26,7 @@ this one.
 
 **The pure-Python reference here is correct but slow, and that is deliberate.** It defines the behaviour
 the compiled extension must reproduce, and it keeps the package importable and testable where no
-compiler is available; :data:`COMPILED` says which one is in use. Do not use the reference on a real
+compiler is available; :data:`COMPILED` says which one is in use. Do not use the Python form on a real
 operator -- some tens of millions of nonzeros through a Python loop is not a slow factorization, it is
 an unusable one.
 """

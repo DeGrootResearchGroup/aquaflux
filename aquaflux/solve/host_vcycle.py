@@ -35,9 +35,9 @@ from collections.abc import Callable
 
 import numpy as np
 import scipy.sparse as sp
-import scipy.sparse.linalg as spla
 
 from .frozen_operator import equilibrate_cell_major
+from .ilu0 import Ilu0
 from .multigrid import SmoothedHierarchy, build_convection_hierarchy
 
 __all__ = ["HostVCycleInverse", "host_ilu_inverse"]
@@ -72,18 +72,13 @@ class _LevelSmoother:
     than a tuning choice: an inner Krylov method makes the cycle a **nonlinear** operator, which the
     non-flexible outer solve and the transposed adjoint both forbid.
 
-    ``scipy``'s incomplete-LU is used directly. It exposes ``solve`` and ``solve(..., 'T')``, so the
-    transposed sweep the adjoint needs costs nothing extra and needs no second factorization.
+    The factorization is :class:`~aquaflux.solve.ilu0.Ilu0` -- zero fill, the operator's own pattern.
+    A refresh re-runs only its numeric pass over the same index arrays, which is what makes a smoother
+    affordable on a path that re-fits tens of times per march, and its transposed solve reads the same
+    stored factor so the adjoint needs no second one.
     """
 
-    def __init__(
-        self,
-        operator: sp.csr_matrix,
-        n_fields: int,
-        sweeps: int,
-        fill_factor: float,
-        drop_tol: float,
-    ):
+    def __init__(self, operator: sp.csr_matrix, n_fields: int, sweeps: int):
         self.sweeps = sweeps
         # ⚠️ EQUILIBRATE AND REORDER TO CELL-MAJOR BEFORE FACTORIZING -- this is not tidying, it is what
         # makes an incomplete factorization possible on this operator at all. Factorized raw and
@@ -97,33 +92,12 @@ class _LevelSmoother:
         # property of that library -- it was a step performed on the way in, and doing it here is what
         # moves the hierarchy without moving the requirement.
         self.operator, self.scale, self.perm = equilibrate_cell_major(operator, n_fields)
-        # `spilu` at a large fill factor and a tight drop tolerance approaches a complete factorization;
-        # at the defaults here it is the zero-fill-like smoother the CPU path wants. It is factorized
-        # once per refresh and applied many times, which is the ratio that makes an incomplete
-        # factorization worth its setup at all.
-        # ⚠️ `permc_spec="NATURAL"` AND `diag_pivot_thresh=0` ARE BOTH LOAD-BEARING, not defaults being
-        # restated. `spilu` applies a COLAMD **column permutation** and partial pivoting unless told
-        # otherwise, and either one discards the cell-major interleave imposed just above -- the very
-        # ordering that keeps the factorization's fill local to a cell. Measured per level on the
-        # `bfs3d` flow block, at a drop tolerance and fill allowance held fixed:
-        #
-        #   level    dofs   COLAMD + partial pivoting   NATURAL + diagonal pivoting
-        #   0       92160   exactly singular            ok, 0.96x the operator's nonzeros
-        #   1       26828   exactly singular            ok, 0.96x
-        #   2        6540   exactly singular            ok, 0.97x
-        #   3        1448   ok                          ok, 1.00x
-        #
-        # The failure is worse on the FINER levels, where a larger block gives the reordering more room
-        # to produce a zero pivot -- so a small test case would not have found this. The surviving arm
-        # produces a factor the size of the operator itself, which is the near-zero-fill smoother this
-        # path exists to provide; relaxing the dropping instead costs ~4.8x the nonzeros and buys nothing.
-        self.factors = spla.spilu(
-            self.operator.tocsc(),
-            drop_tol=drop_tol,
-            fill_factor=fill_factor,
-            permc_spec="NATURAL",
-            diag_pivot_thresh=0.0,
-        )
+        # ZERO-FILL, and that is the whole point. A drop-tolerance factorization is a different
+        # algorithm: it chooses which entries to keep by magnitude within a memory budget, so it
+        # discards pattern entries and keeps fill ones. Measured on this project's flow block that
+        # leaves a factor whose entries reach 1e+23 and an applied residual of 1e+38 -- at the SAME
+        # nonzero count. ILU(0) keeps the operator's own pattern and cannot do that.
+        self.factors = Ilu0(self.operator)
 
     def _apply_inverse(self, residual: np.ndarray, transpose: bool) -> np.ndarray:
         """``M^-1 r`` for a FIELD-MAJOR vector, through the equilibrated cell-major factorization.
@@ -132,9 +106,7 @@ class _LevelSmoother:
         reordered space and the smoother composes with the rest of the cycle unchanged.
         """
         out = np.empty_like(residual)
-        out[self.perm] = self.factors.solve(
-            (self.scale * residual)[self.perm], "T" if transpose else "N"
-        )
+        out[self.perm] = self.factors.solve((self.scale * residual)[self.perm], transpose)
         return self.scale * out
 
     def sweep(self, operator, b: np.ndarray, x: np.ndarray, transpose: bool) -> np.ndarray:
@@ -196,9 +168,6 @@ class HostVCycleInverse:
         non-flexible outer Krylov solve and by the transposed adjoint.
     sweeps : int
         Incomplete-LU sweeps per level, per pre- and post-smooth.
-    fill_factor, drop_tol : float
-        The incomplete factorization's fill allowance and drop tolerance. The defaults are near
-        zero-fill, which is the smoother this path exists to provide.
     **coarsening
         Forwarded to :func:`~aquaflux.solve.multigrid.build_convection_hierarchy` — ``max_levels``,
         ``max_coarse``, ``strength_threshold``, ``avoid_singletons`` and the rest of the same surface
@@ -212,16 +181,12 @@ class HostVCycleInverse:
         *,
         cycles: int = 1,
         sweeps: int = 2,
-        fill_factor: float = 1.0,
-        drop_tol: float = 1e-4,
         **coarsening,
     ) -> None:
         matrix = sp.csr_matrix(block)
         self._n_dofs = matrix.shape[0]
         self._cycles = cycles
         self._sweeps = sweeps
-        self._fill_factor = fill_factor
-        self._drop_tol = drop_tol
         self._build_settings = dict(
             block_size=n_fields,
             mis_aggregation=True,
@@ -245,13 +210,7 @@ class HostVCycleInverse:
                 _HostLevel(
                     operator,
                     _prolongation(level),
-                    _LevelSmoother(
-                        operator,
-                        level.block_size,
-                        self._sweeps,
-                        self._fill_factor,
-                        self._drop_tol,
-                    ),
+                    _LevelSmoother(operator, level.block_size, self._sweeps),
                     None,
                 )
             )

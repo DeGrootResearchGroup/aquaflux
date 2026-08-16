@@ -10,6 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import scipy.sparse as sp
+from aquaflux.solve import ilu0 as ilu0_module
 from aquaflux.solve.ilu0 import COMPILED, Ilu0
 
 
@@ -164,5 +165,49 @@ def test_it_preconditions_better_than_nothing() -> None:
 
 
 def test_the_build_reports_which_implementation_ran() -> None:
-    """``COMPILED`` must say which path is live, so a silently-slow reference cannot go unnoticed."""
+    """``COMPILED`` must say which path is live, so a silently-slow Python fallback cannot go unnoticed."""
     assert isinstance(COMPILED, bool)
+
+
+@pytest.mark.skipif(not COMPILED, reason="the compiled extension is not built in this environment")
+def test_the_compiled_and_reference_paths_agree() -> None:
+    """The two implementations must produce the SAME factor and the same solves, bit for bit.
+
+    This is the load-bearing test of a two-implementation design. The Python form defines the behaviour
+    and the extension delivers the speed, and nothing else in this file would notice them diverging —
+    every other test runs whichever path happens to be built, so a compiled bug and a matching
+    Python bug would both pass in isolation.
+
+    The error messages are pinned by the same reasoning: an environment running the Python form and one
+    running the extension must fail identically, not merely both fail.
+    """
+    a = _nonsymmetric()
+    compiled = Ilu0(a)
+
+    reference = Ilu0.__new__(Ilu0)
+    csr = sp.csr_matrix(a)
+    csr.sort_indices()
+    reference._n = csr.shape[0]
+    reference._indptr = csr.indptr.astype(np.int32)
+    reference._indices = csr.indices.astype(np.int32)
+    reference._diag = ilu0_module._diagonal_positions(
+        reference._indptr, reference._indices, reference._n
+    )
+    reference._data = csr.data.astype(np.float64).copy()
+    ilu0_module._reference_factor(
+        reference._indptr, reference._indices, reference._data, reference._diag, reference._n
+    )
+
+    np.testing.assert_allclose(compiled._data, reference._data, rtol=1e-13, atol=1e-15)
+    np.testing.assert_array_equal(compiled._diag, reference._diag)
+
+    rhs = np.random.default_rng(9).normal(size=a.shape[0])
+    for transpose in (False, True):
+        x = np.array(rhs, copy=True)
+        run = ilu0_module._reference_solve_transpose if transpose else ilu0_module._reference_solve
+        run(
+            reference._indptr, reference._indices, reference._data, reference._diag, x, reference._n
+        )
+        np.testing.assert_allclose(
+            compiled.solve(rhs, transpose=transpose), x, rtol=1e-12, atol=1e-14
+        )
