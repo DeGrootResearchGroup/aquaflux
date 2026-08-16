@@ -168,6 +168,12 @@ class HostVCycleInverse:
         non-flexible outer Krylov solve and by the transposed adjoint.
     sweeps : int
         Incomplete-LU sweeps per level, per pre- and post-smooth.
+
+        ⚠️ More is not reliably better, and this is measured rather than expected: on a coupled
+        velocity--pressure saddle at zero shift the outer restart-cycle count came out **non-monotone**
+        in this argument — 4, 6, 4 at 1, 2 and 4 sweeps — with four sweeps costing 2.8× the solve for
+        the cycle count one sweep already reached. Nothing explains the non-monotonicity, so treat a
+        result taken at a single sweep count as a result about that sweep count only.
     **coarsening
         Forwarded to :func:`~aquaflux.solve.multigrid.build_convection_hierarchy` — ``max_levels``,
         ``max_coarse``, ``strength_threshold``, ``avoid_singletons`` and the rest of the same surface
@@ -287,6 +293,14 @@ def host_ilu_inverse(**settings) -> Callable[[sp.spmatrix, int], HostVCycleInver
     The CPU counterpart of :func:`~aquaflux.solve.saddle_multigrid.native_saddle_inverse` and
     :func:`~aquaflux.solve.field_split.native_nodal_inverse`: same coarsening surface, same contract,
     a sequential smoother instead of a vectorized one.
+
+    Because it smooths a leading flow block the way a host algebraic-multigrid library does — a
+    zero-fill incomplete factorization over an equilibrated cell-major operator — swapping this in for
+    such a library isolates the **coarsening**, which is otherwise the one thing a comparison between
+    them cannot hold fixed. Measured that way on a coupled backward-facing step, the two carry a full
+    three-rung continuation to the same root with the aggregation here taking about a tenth fewer
+    outer restart cycles and paying it back in a dearer application: parity, not a win. Read that as
+    licence to drop the second hierarchy, not as a reason to prefer this one.
 
     Returns
     -------

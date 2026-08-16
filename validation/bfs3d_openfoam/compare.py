@@ -525,12 +525,21 @@ if FLOW_INVERSE == "hostilu":
     #: incomplete factorization instead of SIMPLE relaxation -- so `petsc` against `hostilu` differs in the
     #: coarsening alone, which is what makes it the arm that isolates it.
     #:
-    #: Measured on the converged state at ZERO shift, the adjoint's operator, against the incumbent's 11
-    #: restart cycles / 29 s: 4 cycles / 17 s at one sweep, and 4 cycles / 47 s at four. Two facts to carry
-    #: before changing `sweeps`. The count is NON-MONOTONE in it -- 4 / 6 / 4 at 1 / 2 / 4 -- which nothing
-    #: explains, so a single sweep count is not a result about this smoother. And every arm TIES at a
-    #: positive shift (2 cycles apiece at beta 0.1), so the setting cannot be calibrated on a step-initial
-    #: state: the march's hard operators are its mid-step inner iterates.
+    #: MEASURED ON A FULL MARCH, which is the only honest measure once the preconditioner's shape
+    #: changes: against `petsc` at the same commit on the same machine, 61 steps / 208 cycles / 1246 s
+    #: against 59 / 232 / 1179, to the SAME root (mid-span x_r/h 8.361, full-span 12.53). About a tenth
+    #: fewer cycles, about a twentieth more wall -- parity. Per rung it is sharper than the totals: the
+    #: Re/100 anchor runs identical steps AND identical wall while taking 27% fewer cycles, and the
+    #: TARGET rung -- lowest beta, the hardest operator and the one that grows with the mesh -- wins
+    #: both axes (89 cycles against 105, 482 s against 527). The whole wall deficit is the middle rung,
+    #: where this arm took two extra outer steps while taking FULLER ones (alpha 1.000 where the
+    #: incumbent clipped to 0.566 and 0.803). That is unexplained.
+    #:
+    #: ⚠️ Two cautions before touching `sweeps`. The cycle count is NON-MONOTONE in it -- 4 / 6 / 4 at
+    #: 1 / 2 / 4 on the converged state at zero shift -- so a single sweep count is not a result about
+    #: this smoother. And every arm TIES at a positive shift (2 cycles apiece at beta 0.1), so it
+    #: cannot be calibrated on a step-initial state at all: the march's hard operators are its mid-step
+    #: inner iterates.
     _HOST_FLOW = dict(
         sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", "1")),
         cycles=1,
@@ -1193,7 +1202,10 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
         ("k wall BC", K_WALL),
         ("k positivity floor", K_POSITIVITY_FLOOR or "0 (plain rule)"),
-        ("production limiter (frozen cap k)", "on" if PRODUCTION_LIMITER else "OFF (exact operator)"),
+        (
+            "production limiter (frozen cap k)",
+            "on" if PRODUCTION_LIMITER else "OFF (exact operator)",
+        ),
         # Beside the floor, because the two are alternative answers to the same failure and a run
         # carrying the projection is a different arm from one carrying only a floor.
         (
@@ -1465,7 +1477,9 @@ def production_cap_metrics(case):
 
     def metrics(state):
         flow, k, omega = coupled.physical_fields(state)
-        closure = coupled.turbulence.closure_fields(coupled.momentum.velocity_fields(flow), k, omega)
+        closure = coupled.turbulence.closure_fields(
+            coupled.momentum.velocity_fields(flow), k, omega
+        )
         active = closure.nu_t * closure.strain_rate**2 > 10.0 * beta_star * k * omega
         s_over_omega = closure.strain_rate / jnp.maximum(omega, 1e-300)
         return {

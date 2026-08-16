@@ -1432,9 +1432,15 @@ def _leading_inverse(spec):
 
         return build
     if spec.startswith("hostilu"):
-        # THE NATIVE HIERARCHY WITH AN INCOMPLETE-LU SMOOTHER, on the host. The arm that asks whether
-        # the PETSc AMG can go: the incumbent `ilu0` arm is PETSc's GAMG *and* PETSc's ILU, so a tie
-        # here says the aggregation is not what PETSc was contributing and only the smoother is.
+        # THE NATIVE HIERARCHY WITH AN INCOMPLETE-LU SMOOTHER, on the host. The arm that isolates the
+        # coarsening: the incumbent `ilu0` arm is a host library's GAMG *and* its ILU, while this one
+        # smooths the same way over the same equilibrated cell-major operator, so the two differ in the
+        # aggregation alone.
+        # ⚠️ ANSWERED, AND NOT BY THIS PROBE. At zero shift with right-hand side `-R` this arm reads 4
+        # restart cycles against the incumbent's 11, which looks decisive and is not: on the real
+        # gradient it costs ~8% MORE preconditioner applications, and over a full march it runs ~10%
+        # fewer cycles for ~6% more wall. Three measurements of the real thing say parity; only this
+        # probe says otherwise. Judge a preconditioner here, then believe the march.
         # `hostiluN` sets the sweep count; the coarsening surface is the same one the traced native
         # inverses take, deliberately, so a coarsening choice means the same thing on both paths.
         sweeps = int(spec.removeprefix("hostilu") or 2)
