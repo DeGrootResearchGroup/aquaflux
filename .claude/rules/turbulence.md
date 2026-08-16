@@ -126,14 +126,24 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       bind, and `turbulence.production_and_limit` is the ONE definition of the cap's two sides, shared
       by the residual and the guard so they cannot drift. This is the discipline the positivity floors
       are already held to, applied to the other stabilization that alters the linearization.
-    - **⚠️ WHO MIGHT STILL WANT IT, so the flip is not read as "the limiter is useless".** The exact
-      derivative of the cap is **indefinite where the cap is active**, and an *unpreconditioned* k
-      solve stagnates there — `test_turbulent_channel.py` documents exactly this, and that the
-      convection-diffusion AMG rescues it (a preconditioned exact-Newton k-solve then converges
-      quadratically to machine precision). The coupled path always carries a preconditioner, which is
-      why the flip is safe there. A bare or badly preconditioned **segregated scalar** solve is the
-      case that may genuinely need the opt-in — and it takes no gradients, so the guard never fires on
-      it. That test keeps `explicit_production_limiter=True` explicitly, so the ON path stays covered.
+    - **⚠️ WHO STILL WANTS IT — and this is MEASURED, not inferred. The flip is not "the limiter is
+      useless".** The exact derivative of the cap is **indefinite where the cap is active**, and an
+      *unpreconditioned* k solve stagnates there. Flipping the default **broke
+      `test_sst_transport.py::test_k_equation_solves_to_a_finite_bounded_field`** — a bare
+      `ImplicitNewtonSolver` (no preconditioner, no globalization) on the k equation, which stopped
+      converging inside `max_steps` and raised the convergence guard.
+      **Why, exactly:** at that solve's starting field (`k = 0.01`) the cap is active in **24 of 24
+      cells — 100 %** — so the exact Jacobian carries the indefinite term *everywhere*; at the
+      closure's own `k` it is active in **0**. That is the whole mechanism in two numbers, and it is
+      consistent with every other measurement here: the cap binds **far from the solution and not at
+      it**. `test_turbulent_channel.py` says the same thing from the other side — the
+      convection-diffusion AMG rescues the exact operator, so a *preconditioned* exact-Newton k-solve
+      converges quadratically to machine precision.
+      **So the opt-in has exactly one home: a bare or weakly preconditioned SEGREGATED SCALAR solve.**
+      It takes no gradients, so the validity guard never fires on it. Both tests now opt in explicitly,
+      and the transport one **asserts the cap really is active at its starting field**, so the flag
+      cannot silently become cargo if that ever stops being true. The coupled path always carries a
+      preconditioner *and* takes gradients, which is why the default belongs on the exact operator.
     - Harnesses: `validation/production_cap_activity.py` (channel: activity, forward equivalence, and
       the adjoint against finite differences) and `validation/bfs3d_openfoam/production_cap_activity.py`
       (root activity from a checkpoint). `BFS3D_PRODUCTION_LIMITER=0` selects the exact operator on the

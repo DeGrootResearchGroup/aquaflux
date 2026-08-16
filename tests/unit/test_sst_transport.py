@@ -22,12 +22,13 @@ from aquaflux.turbulence import (
     SSTTurbulence,
     log_layer_shear_rate,
     omega_wall,
+    production_and_limit,
 )
 
 NU = 1e-3
 
 
-def _turbulence():
+def _turbulence(*, explicit_production_limiter=False):
     mesh = structured_grid_2d(6, 4, lx=3.0, ly=1.0, named_boundaries=True)
     geometry = mesh.geometry()
     turb = SSTTurbulence.build(
@@ -39,6 +40,7 @@ def _turbulence():
         density=1.0,
         molecular_viscosity=jnp.full(mesh.n_cells, NU),
         wall_patches=["bottom", "top"],
+        explicit_production_limiter=explicit_production_limiter,
         k_boundary=BoundaryConditions(
             {
                 "left": Dirichlet(0.01),
@@ -95,8 +97,33 @@ def test_k_equation_solves_to_a_finite_bounded_field() -> None:
     Strict positivity is *not* guaranteed by the raw solve (AD-Newton has no discrete maximum
     principle) -- it is secured by the realizability floor the driver applies between sweeps -- so
     this checks only convergence, finiteness, and a sensible magnitude.
+
+    **This is the configuration the production limiter exists for, and the only measured case where
+    it is load-bearing.** The solve is a bare ``ImplicitNewtonSolver`` -- no preconditioner, no
+    globalization -- and the cap is active in EVERY cell at the starting field (asserted below), so
+    with the exact operator the k-Jacobian carries the cap's indefinite derivative everywhere and the
+    unpreconditioned Newton stagnates rather than converging. Opting in drops that term and restores
+    the M-matrix.
+
+    The library default is the exact operator (``False``), because a *coupled* solve always carries a
+    preconditioner and takes gradients, and freezing the cap there silently corrupts the adjoint
+    wherever it binds at the root. Nothing about that default is contradicted here: this solve is
+    unpreconditioned and differentiates nothing.
     """
-    mesh, turb = _turbulence()
+    mesh, turb = _turbulence(explicit_production_limiter=True)
+    exact_closure = _closure(turb)
+    # The premise, pinned: the cap really is active at the starting field. If a future change makes
+    # it inactive here, this test no longer needs the opt-in -- and this assertion is what will say so
+    # rather than leaving the flag as cargo.
+    production, limit = production_and_limit(
+        exact_closure.nu_t,
+        exact_closure.strain_rate,
+        exact_closure.omega,
+        jnp.full(mesh.n_cells, 0.01),
+        turb.model,
+    )
+    assert bool(jnp.all(production > limit))
+
     residual = turb.k_residual(jnp.zeros(mesh.n_faces), _closure(turb))
     k = ImplicitNewtonSolver(max_steps=30).solve(
         lambda phi, _: residual(phi), jnp.full(mesh.n_cells, 0.01), None
