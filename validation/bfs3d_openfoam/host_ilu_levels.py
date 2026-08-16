@@ -96,12 +96,16 @@ def main() -> None:
     # saddle. `permc_spec="NATURAL"` keeps it; `diag_pivot_thresh=0` forces diagonal pivoting.
     # A near-complete row is deliberately absent: a complete LU of a 21M-nonzero 3D block is the fill
     # wall this whole programme exists to avoid, and running one risks the machine for little.
+    # `drop_tol=0` with NATURAL ordering and no pivoting is the CLOSEST scipy gets to ILU(0): no
+    # value-based dropping, no reordering, no row exchanges. It is still not ILU(0) -- SuperLU bounds
+    # fill by the fill_factor rather than by the operator's own pattern, so it may fill positions ILU(0)
+    # would never touch -- but if it produces a usable factor the dependency question is moot, and it
+    # costs one run to find out. This is the arm the first survey never reached.
     grid = [
-        (1e-4, 1.0, "COLAMD", 1.0),
-        (1e-6, 5.0, "COLAMD", 1.0),
-        (1e-4, 1.0, "NATURAL", 1.0),
         (1e-4, 1.0, "NATURAL", 0.0),
-        (1e-6, 5.0, "NATURAL", 0.0),
+        (0.0, 1.0, "NATURAL", 0.0),
+        (0.0, 2.0, "NATURAL", 0.0),
+        (0.0, 4.0, "NATURAL", 0.0),
     ]
     for depth, level in enumerate(hierarchy.levels):
         operator = _to_scipy(level)
