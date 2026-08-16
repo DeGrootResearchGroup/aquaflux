@@ -1,6 +1,9 @@
 # PEP 639 SPDX license metadata needs setuptools >= 77.
 [build-system]
-requires = ["setuptools>=77"]
+# Cython and numpy are BUILD requirements, not runtime ones: the compiled zero-fill incomplete
+# factorization in `aquaflux/solve/_ilu0.pyx` is cythonized here and needs numpy's headers. A wheel
+# carries the built extension, so an installing user needs neither.
+requires = ["setuptools>=77", "Cython>=3.0", "numpy>=1.24"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -143,7 +146,13 @@ ignore = [
 # `-ise`/`-yse` spellings of `-ize`/`-yze` words only; codespell's built-in
 # dictionaries are deliberately not enabled, so it flags nothing else.
 dictionary = "tools/canadian-spelling.dict"
-skip = "*.pyc,.git,build,dist,*.egg-info,.ruff_cache,.pytest_cache"
+# `*.c` is Cython OUTPUT, not source: `aquaflux/solve/_ilu0.c` is generated from the `.pyx` beside it
+# and is gitignored. It has to be skipped rather than ignored, because the gate scans the working tree
+# rather than tracked files -- so once anyone builds the extension, the generated C is there, and it
+# carries Cython's own British spellings ("initialise"). Without this the gate fails for every
+# developer who has built, and in CI, where installing the package generates it before the check runs.
+# Narrow this if hand-written C is ever added; today every `.c` here is generated.
+skip = "*.pyc,*.c,.git,build,dist,*.egg-info,.ruff_cache,.pytest_cache"
 
 [tool.pytest.ini_options]
 markers = [

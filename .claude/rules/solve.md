@@ -887,7 +887,11 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     (The wall-clock breakdown was recorded with no machine, thread count, state or β — the *ratio* is the
     load-bearing part and the seconds are deleted; re-measure if a cost model needs them.) `spilu` is a hard floor: a *threshold* ILU's fill pattern is
     value-dependent, so the symbolic factorization cannot be frozen and re-used (and scipy exposes no
-    symbolic/numeric split), leaving **amortization (refresh less often) as the only cheap lever**. The
+    symbolic/numeric split), leaving **amortization (refresh less often) as the only cheap lever**.
+    ⚠️ **That is a fact about a THRESHOLD ILU and must not be carried to a zero-fill one.** `solve/ilu0.py`
+    takes its pattern from the operator, so its symbolic phase *is* frozen and a refresh repeats only the
+    numeric pass — measured at 0.009 s against `spilu`'s 28.1 s on the same block. The floor is `spilu`'s,
+    not an incomplete factorization's. The
     coupled driver wiring is `coupled_ilut_refreshing_continuation` (a `refresh.builder` for
     `solve_coupled` — see `.claude/rules/turbulence.md`); it pairs with a `CoefficientDriftTrigger` so the
     re-factor *leads* the staleness. Pinned by `test_refresh_in_place_repreconditions_the_same_compiled_matvec`
@@ -3146,6 +3150,34 @@ entirely the *finite difference's* fault — the adjoint barely moves while the 
   *and* ~2× the cost per application, so ~2.3× the work. This is the one arm the native-preconditioner
   programme exists to test and it had never been run; the recorded 7-against-11 zero-shift win is a
   **linear-probe** result at right-hand side `-R`, not this.
+- **⚠️⚠️ THE COUNT IS A PROPERTY OF THE COARSENING, NOT THE SMOOTHER — THREE DIFFERENT SMOOTHERS ON THE
+  SAME HIERARCHY ALL GIVE 1696 (measured 2026-08-16).** A fourth arm — the same native hierarchy applied
+  on the host and smoothed by a **zero-fill incomplete factorization** (`solve/ilu0.py`, one sweep,
+  `BFS3D_FLOW_INVERSE=hostilu`) — returns **1696 applications, 14.0 derived cycles**, identical to the
+  SIMPLE-smoothed arm at 4 sweeps and at 8. So on the adjoint's operator and right-hand side, SIMPLE ×4,
+  SIMPLE ×8 and an incomplete factorization ×1 are indistinguishable, and all three sit ~8 % above
+  PETSc's 1575 at the matched `rtol` 1e-4 (see the iteration-count-independence table below for that
+  baseline; the 1454 above is the looser `rtol` 1e-3 root). **What separates the native arms from PETSc
+  here is the aggregation, and ours is the worse one for this right-hand side.**
+  *Configuration:* `state-00067`, β = 0, uniform column reach, `rtol` 1e-4, `forward_rtol` 0.3, adjoint
+  solver `relative_residual_gmres(1e-6, restart=120, max_restarts=150)`, native coarsening
+  `strength_threshold` 0.25 / 5 levels / `max_coarse` 500 / no singletons. Per application **~170 ms**,
+  measured by differencing heartbeats (100→800 applications at a flat 17 s per 100), so this arm is
+  marginally *cheaper* per application than the incumbent's ~195 ms and the ~8 % extra applications make
+  it roughly a wash on wall clock — inside this case's noise floor either way.
+- **⚠️⚠️ AND THIS IS THE CASE THAT PROVES A LINEAR PROBE CANNOT RANK ADJOINT PRECONDITIONERS.** The same
+  two arms, at the same state and the same β = 0, measured through `field_split_probe.py` at right-hand
+  side `−R`: native **4 restart cycles against PETSc's 11**, a 2.75× win. Measured on the actual
+  gradient: **1696 against 1575, a 1.08× loss.** The ranking inverts and the magnitude is out by ~3×.
+  The reason is already recorded a few lines above and is now demonstrated rather than argued: **the
+  adjoint's right-hand side is the cotangent `dL/dphi*`, localized in one field block, not the full
+  steady residual** — and the restart differs too (120 against 15). **Do not promote a `−R` linear probe
+  to an adjoint result, in either direction.**
+- **✅ The gradient is IDENTICAL to every printed digit — −3.179366936e+03 from both arms**, which is the
+  correctness check behaving exactly as it must: a preconditioner changes how the transpose solve reaches
+  the answer, never where it lands. It is also the first end-to-end exercise of the hand-written
+  `HostVCycleInverse` transpose and `Ilu0.solve(transpose=True)` on a real adjoint rather than on a unit
+  fixture, and they reproduce PETSc's gradient exactly.
 - **⚠️ DOUBLING THE SMOOTHER SWEEPS BUYS EXACTLY NOTHING HERE — 1696 applications either way, not one
   cycle different, at 1.59× the cost per application. So 8 sweeps is STRICTLY DOMINATED by 4 on this
   operator.** That is worth stating loudly because this file's standing rule is the opposite one —
@@ -4266,6 +4298,245 @@ baseline predates the coarse-solve factorization, the trailing zero-guess peel a
 changes, so the two runs differ in more than this knob. The direction is unambiguous; the decomposition
 is not available from this pair.
 
+### ONE AGGREGATION, TWO APPLIES — and why the CPU half cannot use `scipy` (2026-08-15)
+
+**The two multigrids over this operator were never two methods, only two *applies* of one method.** The
+coarsening in `solve/multigrid.py` is already a host computation in `scipy`; only the apply is traced. So
+a host apply over the *same* hierarchy gives a CPU path relaxed by an incomplete factorization beside the
+traced path relaxed by SIMPLE or Jacobi — one aggregation, one refresh path, one coarse space, and only
+the smoother differing by machine. Built as `solve/host_vcycle.py` (`HostVCycleInverse`,
+`host_ilu_inverse`), satisfying the same `n_dofs` + `apply(residual, transpose=…)` contract as every
+other frozen inverse, so it needs no new plumbing and does not touch the traced path.
+
+**The transpose is BUILT, not borrowed.** A V-cycle is symmetric only if its smoother is, and an
+incomplete factorization is not: `M^T` is the same recursion with the operator, the coarse solve and the
+smoother each transposed and the pre/post smoothing exchanged. Pinned by `<y, M x> == <M^T y, x>` on a
+deliberately NONSYMMETRIC operator, swept over cycle and sweep counts, beside a guard that the flag is
+not simply ignored — on a symmetric fixture the identity would pass for an implementation that returned
+the forward cycle for both.
+
+**⛔ AND `scipy.spilu` CANNOT SUPPLY THE SMOOTHER — this is the finding, and it took four wrong
+hypotheses.** On the `bfs3d` flow block the factorization raises `Factor is exactly singular`, or worse
+returns and applies to NaN. Measured per level, at a state where the shipped PETSc ILU(0) reaches 11
+cycles:
+
+| level | dofs | COLAMD + partial pivoting | NATURAL + diagonal pivoting | ‖A M⁻¹r − r‖/‖r‖ |
+|---|---|---|---|---|
+| 0 | 92160 | exactly singular | 0.96× nnz, `max|U|` **9.44e+23** | **2.046e+38** |
+| 1 | 26828 | exactly singular | 0.96× nnz | 1.020e+01 |
+| 2 | 6540 | exactly singular | 0.97× nnz | 1.340e+00 |
+| 3 | 1448 | ok | 1.00× nnz | 1.100e+00 |
+
+**Every arm on the fine level is unusable and levels 1–2 leave a residual ABOVE one.** What was
+eliminated on the way, each of which looked like the answer first:
+- **not the equilibration.** Every level equilibrates to `|diag|` min = median = **1.00** with **zero**
+  exact zeros — the operator reaching the factorization is perfectly scaled.
+- **not the ordering, and not the pivoting**, though both are real and both are needed: `spilu` applies a
+  COLAMD column permutation and partial pivoting by default, either of which discards the cell-major
+  interleave. Fixing them converts an exception into a returning-but-garbage factor, which is worse.
+- **not a missing pivot shift.** PETSc's `MatILUFactorSymbolic_SeqAIJ` takes a dedicated `ilu0` path at
+  identity permutation, performs **no row pivoting** (pivots are used in place), and applies **no shift**
+  unless `info->shifttype` is set — which `amg_preconditioner.py` does not set. So the incumbent factors
+  this operator **unshifted** and succeeds.
+- **it is WHICH ENTRIES ARE KEPT — and `drop_tol = 0` does not fix it.** The first wording here said
+  "the dropping", which is imprecise: switching value-based dropping off entirely still fails.
+
+  | level 0 arm (NATURAL, no pivoting) | fill | `max\|U\|` | ‖A M⁻¹r − r‖/‖r‖ |
+  |---|---|---|---|
+  | `drop_tol` 1e-4 | 0.96× nnz | 9.44e+23 | 2.046e+38 |
+  | **`drop_tol` 0 — scipy's closest to ILU(0)** | **0.96× nnz** | 2.46e+04 | **1.028e+08** |
+  | `drop_tol` 0 | 1.91× | 8.56e+83 | NaN |
+  | `drop_tol` 0 | 3.82× | 3.91e+04 | 2.125e+13 |
+
+  **The second row keeps 0.96x the operator's nonzeros — the right COUNT — and is still useless**, which
+  is the whole point: SuperLU chooses *which* entries to keep by magnitude within a memory budget, so it
+  drops pattern entries and keeps fill ones. Same size, **different set**. That is the difference between
+  ILUT and ILU(0), and no parameter closes it. Note also that MORE fill makes level 0 worse rather than
+  better — the signature of a wrong factorization, not an under-resourced one.
+
+  ⚠️ **Read the coarse levels carefully before quoting them.** Levels 1–3 leave residuals of ~1.2–2.9,
+  which is *not* by itself disqualifying for a **smoother** — a smoother damps high-frequency error and
+  need not approximate `A⁻¹` globally. Level 0's 1e+08 is disqualifying, and level 0 is the fine level.
+
+⚠️ **"0.96× the operator's nonzeros" IS NOT "effectively ILU(0)" — a reading made here and withdrawn.**
+Matching the nonzero count says nothing about the values, and those values were 1e+23. A size check is
+not a quality check.
+
+⚠️ **AND THE MEASUREMENT LESSON, which is the transferable part: the first survey's success criterion was
+"the factorization did not raise".** That is the same family of weak measure this file already warns
+about — a one-apply contraction, a preconditioned norm, a cycle count at a benign state — and it passed
+an arm whose applied residual is 1e+38. Judge a factorization by what one application does to a real
+residual, never by whether it returned.
+
+**What this left.** The native hierarchy was never implicated — PETSc's ILU(0) is a known-good smoother on
+these very levels — so the CPU half needed a zero-fill factorization of its own, for which PETSc's source
+supplies the whole specification: natural ordering, no pivoting, no dropping, pattern = `A`'s pattern, no
+shift. That is now built (`solve/ilu0.py` + the compiled `solve/_ilu0.pyx`), and it is what the section
+below measures.
+
+⚠️ **The equilibrate-and-cell-major step is REQUIRED and is now ours.** It was previously implicit in what
+the host AMG was handed, so it read as that library's property; it is not, and any smoother put behind
+this seam needs it. That survives the change of factorization.
+
+### ✅ THE NATIVE HIERARCHY MARCHES `bfs3d` TO THE SAME ROOT — 10 % FEWER CYCLES, 6 % MORE WALL (2026-08-16)
+
+**The whole-march measurement, which is the only honest one when the preconditioner's SHAPE changes,
+and the first time the hand-written hierarchy and factorization have carried a march rather than a
+single solve.** Two full 3-rung cold marches differing in **one** environment variable
+(`BFS3D_FLOW_INVERSE`), same commit, same machine, back to back, nothing else running:
+
+| | `petsc` (incumbent) | `hostilu` (native AMG + our ILU(0)) |
+|---|---|---|
+| steps | 59 | 61 |
+| **Krylov cycles** | **232** | **208 (−10.3 %)** |
+| wall | **1179 s** | 1246 s (+5.7 %) |
+| final ‖R‖ | 1.861e-06 | 1.858e-06 |
+| preconditioner | 185 s (16 %), probe 131 s | **160 s (13 %), probe 85 s** |
+| mid-span / full-span `x_r/h` | 8.361 / 12.53 | **8.361 / 12.53** |
+
+**Same root, identical reattachment to four figures** — so the arm is correct end to end, which is what
+this run establishes before anything about cost.
+
+**Read it PER RUNG; the totals hide the structure and invert the conclusion:**
+
+| rung | `petsc` steps / cycles / wall | `hostilu` steps / cycles / wall |
+|---|---|---|
+| Re/100 (the easy anchor) | 14 / 44 / **246 s** | 14 / **32** / **246 s** |
+| Re/10 | 24 / 83 / 406 s | 26 / 87 / **518 s** |
+| **target Re (lowest β, hardest)** | 21 / 105 / 527 s | 21 / **89 (−15 %)** / **482 s (−8.5 %)** |
+
+- **Rung 1 is the cleanest controlled comparison available: identical step count AND identical wall
+  (246 s both), with 27 % fewer cycles.** So on that operator the native apply is dearer per cycle by
+  almost exactly the margin its convergence saves — a wash, measured rather than inferred.
+- **On the TARGET rung the native arm wins BOTH axes**, −15 % cycles and −8.5 % wall. That is the low-β
+  end where an incomplete factorization's diagonal-dominance windfall is smallest, and it is the rung
+  that grows with the mesh — so it is the one that matters for scaling.
+- **The entire wall deficit is rung 2**, +112 s, and it is a **trajectory** difference rather than a
+  cost one: the native arm took **2 extra outer steps** there. The two marches agree to 3–4 figures in
+  β and ‖R‖ through step 10 and part on **α** — `hostilu` takes FULL steps (α = 1.000) where `petsc`
+  clips (0.566, 0.803), i.e. it returns the better direction and still ends up needing more steps.
+  Nothing here explains that.
+- **Fewer cycles buys a cheaper preconditioner too**, which is second-order but real: the refresh
+  trigger fires on cycles, so 208 cycles means fewer refreshes, hence 85 s of coloured probe against
+  131 s. The probe is identical work per invocation in both arms — the difference is how many times it
+  ran.
+
+**⚠️ ONE RUN EACH, AND THIS CASE HAS NO MEASURED MARCH-LEVEL NOISE FLOOR.** Cycle counts are
+deterministic and are the load-bearing row; wall clock is not, and +5.7 % on a single pair is not a
+number to lean on. The step-count difference (61 against 59) is a trajectory divergence that could go
+either way under another bundle.
+
+**Consistency with the two single-state measurements is the reassuring part, and it is not automatic.**
+The adjoint put the native arm ~8 % above PETSc in applications while ~14 % cheaper per application (a
+wash); β = 0.1 tied outright; and the march now says −10 % cycles / +6 % wall (a wash). Three
+independent measurements at three operating points all land on parity. **The `−R` linear probe's 2.75×
+win remains the one outlier, and it is the one measurement that is not of the real thing.**
+
+**So: the AMG *can* go native at no cost, and PETSc is no longer load-bearing for the coarsening on
+this case.** What it does not do is go native at a *profit*, so nothing here moves `FLOW_INVERSE`; the
+case for the direction stays what it was — a GPU where SIMPLE relaxation parallelizes and a sequential
+triangular solve does not, which cannot be measured in this CPU-only environment.
+
+### THE NATIVE AGGREGATION BEATS PETSc GAMG ON A LINEAR PROBE AT β = 0 — AND LOSES ON THE ACTUAL ADJOINT (2026-08-16)
+
+**⚠️⚠️ READ THIS FIRST: the win below is a `−R` LINEAR PROBE and it DOES NOT TRANSFER.** The same two arms
+at the same state and shift, measured on the real gradient, come out **1696 adjoint applications against
+PETSc's 1575 — a 1.08× loss, where the probe predicted a 2.75× win.** The ranking inverts. See *"the count
+is a property of the coarsening"* under the `jax.grad` section above for the measurement and the reason
+(the adjoint's right-hand side is the cotangent, localized in one field block, not the steady residual).
+Everything below is still correct about what it measured; it is simply not an adjoint result, and the
+reason it is kept is that it is now this file's cleanest demonstration of the difference.
+
+**This is the measurement the whole host-V-cycle detour existed for, and it had never been taken, because
+until now the smoother had never worked.** `solve/ilu0.py` is the zero-fill factorization the section
+above specifies — the operator's own pattern, natural order, no pivoting, no dropping, no shift — with a
+pure-Python form defining the behaviour and a compiled Cython twin (`_ilu0.pyx`) delivering the speed;
+`ilu0.COMPILED` says which is live. Wired behind `_LevelSmoother`, it replaces `spilu` and leaves the
+equilibrate-and-cell-major preprocessing in place.
+
+*Configuration:* `bfs3d` `state-00067` (converged, ‖R‖ 3.586e-06), **operator and preconditioner both at
+β = 0** — the adjoint's operator — real right-hand side `−R(state)`, **uniform** column reach, GMRES
+restart 15 to rtol 1e-8 on the **TRUE** residual, 60-restart cap, field split flow-first with PETSc ILU(0)
+on the trailing half in every arm. Native arms: `max_coarse` 500, 5 levels, `strength_threshold` 0.25, no
+singleton aggregates, plain aggregation, unsmoothed prolongation. Harness
+`validation/bfs3d_openfoam/field_split_probe.py`, arms `split flow/hostilu{1,2,4}`.
+
+| arm | build | cycles | TRUE rel | solve |
+|---|---|---|---|---|
+| monolithic ILU(0) — *not* the right bar | 3–4 s | 11 | 8.474e-11 | 42 s |
+| **`split flow/ilu0` — the matched incumbent** | 3 s | 11 | 6.393e-11 | **29 s** |
+| **native hierarchy + our ILU(0) ×1** | 6 s | **4** | **2.449e-13** | **17 s** |
+| native hierarchy + our ILU(0) ×2 | 6 s | 6 | 5.939e-11 | 39 s |
+| native hierarchy + our ILU(0) ×4 — smoother-matched | 6 s | **4** | 1.498e-12 | 47 s |
+
+- **The aggregation is not what PETSc was contributing.** Smoother-matched at four sweeps the native
+  hierarchy takes **4 restart cycles against 11** — 2.75× — on the same operator, the same right-hand
+  side and the same trailing inverse. The one thing that differs is the coarsening, and the coarsening is
+  ahead.
+- **At ONE sweep it also wins on wall clock: 17 s against 29 s, 1.7×**, converging **two to four orders
+  deeper** (2.449e-13 against 6.393e-11) while it does so. This is the **first native arm in this campaign
+  to beat the incumbent on time rather than only on cycles**, and it does it at the operating point the
+  native direction's case has always rested on.
+- **Per application the native arm is still the more expensive one** — 4.25 s/cycle against 2.64 — so the
+  standing shape of every native-versus-PETSc result here is unchanged. What changed is that the cycle
+  advantage finally outruns it.
+- **Four sweeps is STRICTLY DOMINATED by one**: identical cycles, 2.8× the solve. Read that with the
+  adjoint's own sweep ladder recorded earlier in this file, which found the same flatness on the SIMPLE
+  smoother — on this operator, extra smoothing buys nothing the coarse grid has not already bought.
+
+⚠️ **THE LADDER IS NON-MONOTONE AND THAT IS NOT EXPLAINED — 4 / 6 / 4 cycles at 1 / 2 / 4 sweeps.** It is
+not run-to-run noise: cycle counts on this case are exactly reproducible (both PETSc controls returned
+their recorded values to every digit in **both** runs, 11 / 8.474e-11 and 11 / 6.393e-11), and the ×2 point
+comes from the first of those runs at otherwise identical settings. A smoother that is *stronger* landing
+on a worse count than one either side of it is the signature of the Krylov space being perturbed rather
+than of the smoother being worse, but nothing here establishes that. **Do not quote a single sweep count
+from this arm**, and do not assume the ×1 optimum transfers to another operator.
+
+⚠️ **SCOPE — this is β = 0, and β = 0 is the ONLY shift on this state that discriminates.** Re-run at
+**β = 0.1**, same state and settings, every arm ties and the ranking carries no information:
+
+| arm at β = 0.1 | build | cycles | TRUE rel | solve |
+|---|---|---|---|---|
+| monolithic ILU(0) | 3 s | 2 | 2.605e-14 | 14 s |
+| **`split flow/ilu0` — incumbent** | 3 s | 2 | 3.103e-15 | **11 s** |
+| native + our ILU(0) ×1 | 6 s | 2 | 4.024e-13 | 12 s |
+| native + our ILU(0) ×4 | 5 s | **1** | 2.969e-15 | 22 s |
+
+**Two cycles against two, and 12 s against 11 s is inside the ~15 % per-application noise floor** measured
+elsewhere in this file (the same preconditioner built twice in one quiet process timed 193 and 221 ms). So
+this is the benign-operating-point rule biting on exactly the axis being changed: an easy operator does not
+rank preconditioners, and a tie here is *no information*, not evidence of parity. The incumbent reproduced
+its recorded 2 cycles / 11 s exactly, so the run is sound — it just cannot answer the question.
+
+**One older claim is refuted in wording and upheld in substance.** "At positive shift no multigrid quality
+catches an incomplete factorization" is false as stated — the ×4 native arm takes **1 cycle**, fewer than
+any PETSc arm at any shift on this state. What holds is the cost half: it pays 22 s for that cycle against
+the incumbent's 11 s for two. Quality catches it; wall clock does not.
+
+**So the march regime is still unmeasured, and a step-initial checkpoint cannot measure it.** This file
+already records that all step-initial solves on this case cost ≤ 2 restart cycles while mid-step inner
+iterates reach 15 — the hard operators live in the inner iterates and in the *rejected* attempts, which no
+checkpoint holds. Ranking these arms for the march needs a captured hard inner iterate
+(`BFS3D_INNER_DUMP_ABOVE`) or a whole march, not another β on this state. The recorded 4.6× / 3.9× native
+deficits at β = 0.01 / 0.1 were measured against the *SIMPLE*-smoothed traced hierarchy and do not describe
+this arm either. **Nothing here licenses moving `FLOW_INVERSE`.**
+
+⚠️ **And a single-state probe is the weaker instrument by this file's own rule**: when the
+preconditioner's *shape* changes, only wall clock over a whole march is honest, and this changes shape.
+The 17-vs-29 s gap is far outside the ~15 % per-application noise floor; the 4.25-vs-2.64 s/cycle
+comparison is much closer to it.
+
+**The refresh cost that motivated writing it is gone, and this is the part that scales.** A zero-fill
+factorization's pattern *is* the operator's, so a refresh repeats only the numeric pass. Measured on a
+92160-dof, 1.8M-nnz block: first build 0.009 s, **refactor 0.009 s**, one solve 1.7 ms — against
+`scipy.spilu`'s **28.1 s** for the same block. The recorded "`spilu` is 88 % of refresh cost and a hard
+floor, so the only lever is refreshing less often" was a statement about a *threshold* ILU, whose fill
+pattern is value-dependent and therefore cannot be reused; it does not apply to this factorization and
+should not be carried to it. ⚠️ The benchmark block is a synthetic at ~20 nnz/row against the real block's
+~227, and the elimination's work is superlinear in density, so **do not extrapolate the 0.009 s** — the
+real per-level cost is inside the 6 s build above, which is 2× PETSc's 3 s and still trivial beside a
+17-second solve.
+
 ### ⛔ THE NATIVE FLOW BLOCK IS STILL NOT FASTER ON A MARCH — and the comparison that said otherwise was unfair
 
 **Read this before quoting any native-versus-incumbent march number.** With the inner tolerance at its
@@ -5184,8 +5455,27 @@ transfer to any thresholded arm.
     satisfies `ForwardStep` in full, so a march configured with `retry_on_cycles` accepted it and then
     never escalated — from the log, indistinguishable from a march that never needed to. One reporting
     path failed the *opposite* way and read `active_step.relaxation_schedule` unguarded, so the same
-    conforming step raised `AttributeError` mid-march. `forward_march` now checks **once, before the
-    first step** (`_require_shifted`), naming the feature and what it needs.
+    conforming step raised `AttributeError` mid-march. `forward_march` now checks **once, on the first
+    iteration, against the step the CONTROL produced** (`RetryPolicy.require_shifted`), naming the
+    feature and what it needs.
+    **⚠️ THE OBJECT CHECKED IS `active_step`, NOT THE STEP HANDED IN, AND THAT IS LOAD-BEARING (fixed
+    2026-08-16).** Checking before the loop looks equivalent and is not: the default schedule is
+    `SwitchedEvolutionRelaxation`, which is **memoryless and exposes no `beta`**, while a
+    `ShiftStrengthControl` swaps a `ConstantRelaxation` (which does) onto the step every iteration. So
+    the readable beta the escalation needs is supplied **by the control**, and a pre-loop gate sees a
+    step that never runs. It rejected the shipped configuration outright — every `bfs3d` march runs a
+    shift control *and* both retry thresholds, so **not one could start**, under any flow inverse, with
+    a `TypeError` whose own message names `DualTimeStep` as acceptable while refusing one. The check
+    still precedes any escalation, which is the property it exists for, and with no control
+    `active_step` is the base step so the ungated path is unchanged. Pinned in **both** directions by
+    `test_the_escalation_guard_accepts_a_shift_a_step_control_installs` and
+    `test_the_escalation_guard_still_rejects_a_step_that_can_never_escalate` — the pair matters,
+    because a gate can be "fixed" by deleting it and only the second test notices.
+    ⚠️ **This was found by RUNNING a march, not by the suite, and it was the second such break in one
+    sitting** (the other: `compare.py` handed `solve_coupled` a bare `precondition_step` callable where
+    a `RefreshPolicy` was expected, so `refresh.observes` raised before step 1). **No test tier drives
+    this case's own driver**, so a refactor can tighten a seam, take the case out entirely, and leave
+    every gate green. Treat "the fast gate passes" as saying nothing about whether `bfs3d` can march.
     - **Gate only what is genuinely silent (binding).** The escalation is gated. The divergence retry
       (`retry_solver` / `retry_divergence_cap`) is **not** — it re-solves at a tighter tolerance and
       never touches beta, so it works on any step; its *reporting* goes through `_shift_of`, which

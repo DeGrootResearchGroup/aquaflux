@@ -77,6 +77,13 @@ cd aquaflux
 pip install -e .
 ```
 
+This builds one small compiled extension — the zero-fill incomplete factorization that
+smooths the multigrid on the CPU path — so a source install needs a C compiler. Cython
+and NumPy's headers are declared as build requirements, so `pip` supplies them; a wheel
+would carry the extension already built. The package imports and runs without it, on a
+pure-Python implementation of the same factorization that is correct but far too slow for
+a real operator, so a build failure degrades performance rather than breaking the install.
+
 > **Note:** `import aquaflux` enables JAX 64-bit (x64) mode process-wide.
 > Finite-volume transport and stiff coupling require double precision, so this is
 > an intentional, documented side effect — other JAX code in the same process

@@ -135,6 +135,7 @@ import scipy.sparse as sp  # noqa: E402
 from aquaflux.flow.block_preconditioner import BlockPreconditioner  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     FieldGroups,
+    HostVCycleInverse,
     MonolithicAmgPreconditioner,
     NativeSimpleInverse,
     NodalNativeInverse,
@@ -147,9 +148,9 @@ from aquaflux.solve import (  # noqa: E402
     build_convection_hierarchy,
     convection_multigrid_solve,
     relative_residual_gmres,
+    restart_cycles,
     solve_linear,
 )
-from aquaflux.solve import restart_cycles  # noqa: E402
 from aquaflux.solve.multigrid import (  # noqa: E402
     _CsrOperator,
 )
@@ -1430,6 +1431,35 @@ def _leading_inverse(spec):
             )
 
         return build
+    if spec.startswith("hostilu"):
+        # THE NATIVE HIERARCHY WITH AN INCOMPLETE-LU SMOOTHER, on the host. The arm that isolates the
+        # coarsening: the incumbent `ilu0` arm is a host library's GAMG *and* its ILU, while this one
+        # smooths the same way over the same equilibrated cell-major operator, so the two differ in the
+        # aggregation alone.
+        # ⚠️ ANSWERED, AND NOT BY THIS PROBE. At zero shift with right-hand side `-R` this arm reads 4
+        # restart cycles against the incumbent's 11, which looks decisive and is not: on the real
+        # gradient it costs ~8% MORE preconditioner applications, and over a full march it runs ~10%
+        # fewer cycles for ~6% more wall. Three measurements of the real thing say parity; only this
+        # probe says otherwise. Judge a preconditioner here, then believe the march.
+        # `hostiluN` sets the sweep count; the coarsening surface is the same one the traced native
+        # inverses take, deliberately, so a coarsening choice means the same thing on both paths.
+        sweeps = int(spec.removeprefix("hostilu") or 2)
+
+        def build(block, n_group_fields):
+            return HostVCycleInverse(
+                block,
+                n_group_fields,
+                cycles=1,
+                sweeps=sweeps,
+                max_coarse=500,
+                max_levels=5,
+                strength_threshold=0.25,
+                avoid_singletons=True,
+                aggressive_levels=0,
+                prolongation_smoothing="none",
+            )
+
+        return build
     if spec.startswith("native"):
         damped = spec.endswith("d")
         sweeps = int(spec.removeprefix("native").removesuffix("d") or 4)
@@ -1653,6 +1683,27 @@ ARMS = (
     ("mono/cheb", "monolithic, Chebyshev", lambda m, g, n: monolithic(m, g, n, "chebyshev")),
     ("mono/jac", "monolithic, damped Jacobi", lambda m, g, n: monolithic(m, g, n, "jacobi")),
     # The split itself, both triangles, on the shipped smoother -- does ordering the coupling help at all?
+    # THE PETSC-AMG QUESTION. `split flow/ilu0` is PETSc's GAMG *and* PETSc's ILU; this is the NATIVE
+    # hierarchy with the same class of smoother. A tie says the aggregation was never what PETSc
+    # contributed and the dependency can shrink to the smoother alone.
+    (
+        "split flow/hostilu",
+        "split flow-first, NATIVE hierarchy + host ILU on flow",
+        lambda m, g, n: field_split(m, g, n, "hostilu2", "ilu0", flow_first=True),
+    ),
+    # ...and the same arm across sweep counts, because one sweep count is not a result about a
+    # smoother. `split flow/ilu0` runs FOUR sweeps, so `hostilu4` is the smoother-matched comparison
+    # and the other two say whether the match is where the arm is at its best.
+    (
+        "split flow/hostilu1",
+        "split flow-first, NATIVE hierarchy + host ILU x1 on flow",
+        lambda m, g, n: field_split(m, g, n, "hostilu1", "ilu0", flow_first=True),
+    ),
+    (
+        "split flow/hostilu4",
+        "split flow-first, NATIVE hierarchy + host ILU x4 on flow",
+        lambda m, g, n: field_split(m, g, n, "hostilu4", "ilu0", flow_first=True),
+    ),
     (
         "split flow/ilu0",
         "split flow-first, ILU(0) both",
