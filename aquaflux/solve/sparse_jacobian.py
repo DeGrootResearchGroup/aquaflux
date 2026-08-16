@@ -35,6 +35,8 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
+from .frozen_operator import require_valid_graph
+
 
 def _index_dtype(bound: int) -> type[np.signedinteger]:
     """The narrowest signed integer type holding every value up to ``bound``.
@@ -345,15 +347,13 @@ def block_stencil_colouring(
     ValueError
         If ``n < 1`` or ``reach < 1``, or the edge endpoints are out of range.
     """
-    if n < 1:
-        raise ValueError(f"block_stencil_colouring: need at least one cell, got n={n}.")
+    # The cell-count and edge-endpoint checks are the same three every consumer of an interior-face
+    # graph needs, and they have a home that takes the caller's name for its messages. Only the reach
+    # is this function's own.
+    require_valid_graph(n, owner, nb, "block_stencil_colouring")
     if reach < 1:
         raise ValueError(f"block_stencil_colouring: reach must be >= 1, got {reach}.")
     owner, nb = np.asarray(owner), np.asarray(nb)
-    if owner.shape != nb.shape:
-        raise ValueError("block_stencil_colouring: owner and nb must have the same shape.")
-    if owner.size and (owner.min() < 0 or owner.max() >= n or nb.min() < 0 or nb.max() >= n):
-        raise ValueError(f"block_stencil_colouring: edge endpoints out of range for n={n} cells.")
 
     ones = np.ones(2 * owner.size + n)
     adjacency = sp.coo_matrix(

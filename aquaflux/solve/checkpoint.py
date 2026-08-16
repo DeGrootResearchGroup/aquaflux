@@ -35,6 +35,25 @@ from .linear import restart_cycles
 __all__ = ["InnerIterateCheckpointer", "StateCheckpointer"]
 
 
+def _atomically(path: Path, write: Callable[[Path], None]) -> None:
+    """Have ``write`` produce a staging file, then rename it into place.
+
+    ``write`` takes a **path**, matching the serializer contract ("write exactly to this path") so an
+    injected serializer needs no wrapping.
+
+    A process killed mid-write would otherwise leave a truncated file that still *reads* as a
+    checkpoint -- and with a small retention count it could be the only one left. The rename is what
+    makes a file either wholly absent or wholly there.
+
+    Shared because a checkpointer that inlines the idiom is a checkpointer that can quietly stop being
+    atomic: it was written twice here, once with this reasoning attached and once without, and the copy
+    without it is the one a reader would have had to reconstruct the argument for.
+    """
+    staging = path.with_suffix(path.suffix + ".partial")
+    write(staging)
+    os.replace(staging, path)
+
+
 def _save_array(path: Path, state: Any, report: StepReport) -> None:
     """Default serializer: the state as one array, with the step's own numbers beside it.
 
@@ -144,11 +163,7 @@ class StateCheckpointer:
         if self._steps % self._every:
             return
         path = self._directory / f"{self._prefix}-{self._steps:05d}.npz"
-        # Write-then-rename: a process killed mid-write would otherwise leave a truncated file that
-        # still reads as a checkpoint, and with a small `keep` it could be the only one left.
-        staging = path.with_suffix(".npz.partial")
-        self._save(staging, state, report)
-        os.replace(staging, path)
+        _atomically(path, lambda staging: self._save(staging, state, report))
         evicted = self._written[0] if len(self._written) == self._written.maxlen else None
         self._written.append(path)
         if evicted is not None and evicted != path:
@@ -235,17 +250,22 @@ class InnerIterateCheckpointer:
         if corrected < self._above:
             return
         path = self._directory / f"{self._prefix}-{self._attempt:05d}-{int(index):02d}.npz"
-        staging = path.with_suffix(".npz.partial")
-        with open(staging, "wb") as handle:
-            np.savez(
-                handle,
-                state=np.asarray(iterate),
-                attempt=self._attempt,
-                inner=int(index),
-                cycles=corrected,
-                alpha=float(alpha),
-                g_before=float(g_before),
-                g_after=float(g_after),
-            )
-        os.replace(staging, path)
+
+        def write(staging: Path) -> None:
+            # A file object, not the path, for the same reason `_save_array` uses one: `np.savez`
+            # appends ".npz" to any path that lacks it, and the staging name deliberately does not
+            # end in ".npz".
+            with open(staging, "wb") as handle:
+                np.savez(
+                    handle,
+                    state=np.asarray(iterate),
+                    attempt=self._attempt,
+                    inner=int(index),
+                    cycles=corrected,
+                    alpha=float(alpha),
+                    g_before=float(g_before),
+                    g_after=float(g_after),
+                )
+
+        _atomically(path, write)
         self.written.append(path)

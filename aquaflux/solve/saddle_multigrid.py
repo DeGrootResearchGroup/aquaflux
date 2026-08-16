@@ -339,13 +339,20 @@ def _native_saddle_cycle(
         The approximate solution, shape ``(n_dofs,)``.
     """
 
-    def smooth(level, rhs, guess):
+    def sweeps_from(level, rhs, guess, count):
+        """``count`` relaxation sweeps from ``guess``, each correcting the residual it is left with.
+
+        The two entry points below differ only in where they start and how many sweeps that leaves, so
+        the sweep itself is written once here -- it was written twice, identically, with the trip count
+        the only thing outside the closure that differed.
+
+        Looped rather than unrolled, for the same reason as the inner pressure sweeps: the graph is what
+        a refresh recompiles, and it is otherwise unrolled over levels x sweeps x inner sweeps. The level
+        dimension has to stay unrolled (each level has its own shapes), so the two sweep dimensions are
+        where the size actually comes from.
+        """
         piece = pieces[level.n]
 
-        # Looped rather than unrolled, for the same reason as the inner pressure sweeps: the graph is
-        # what a refresh recompiles, and it is otherwise unrolled over levels x sweeps x inner sweeps.
-        # The level dimension has to stay unrolled (each level has its own shapes), so the two sweep
-        # dimensions are where the size actually comes from.
         def outer(_, g):
             correction = _simple_correction(
                 piece,
@@ -355,7 +362,10 @@ def _native_saddle_cycle(
             )
             return g + settings.omega * correction
 
-        return jax.lax.fori_loop(0, settings.sweeps, outer, guess)
+        return jax.lax.fori_loop(0, count, outer, guess)
+
+    def smooth(level, rhs, guess):
+        return sweeps_from(level, rhs, guess, settings.sweeps)
 
     def smooth_zero(level, rhs):
         """``smooth`` from a zero iterate, with the first sweep's residual matvec peeled off.
@@ -368,20 +378,10 @@ def _native_saddle_cycle(
         if settings.sweeps <= 0:
             return jnp.zeros_like(rhs)
         piece = pieces[level.n]
-        guess = settings.omega * _simple_correction(
+        peeled = settings.omega * _simple_correction(
             piece, rhs, settings.pressure_sweeps, settings.pressure_omega
         )
-
-        def outer(_, g):
-            correction = _simple_correction(
-                piece,
-                rhs - _operator_matvec(level, g),
-                settings.pressure_sweeps,
-                settings.pressure_omega,
-            )
-            return g + settings.omega * correction
-
-        return jax.lax.fori_loop(0, settings.sweeps - 1, outer, guess)
+        return sweeps_from(level, rhs, peeled, settings.sweeps - 1)
 
     ops = _smoothed_ops(
         smooth, mu=settings.mu, pre_smooth=settings.pre_smooth, smooth_zero=smooth_zero
