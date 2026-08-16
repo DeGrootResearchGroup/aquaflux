@@ -16,6 +16,7 @@ from .gradient import (
     GradientSolve,
     HessianCorrectedGradient,
     SweptGradientSolve,
+    narrow_gradient_sweeps,
 )
 from .interpolation import interpolate_owner_neighbour, interpolation_factor
 from .limiter import Limiter, VenkatakrishnanLimiter
@@ -32,4 +33,5 @@ __all__ = [
     "VenkatakrishnanLimiter",
     "interpolate_owner_neighbour",
     "interpolation_factor",
+    "narrow_gradient_sweeps",
 ]

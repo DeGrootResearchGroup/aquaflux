@@ -103,6 +103,55 @@ root `CLAUDE.md` Engineering Principles.
   unrolled sparse apply. **The default `GradientSolve` for `CorrectedGreenGauss`** (every flow mesh,
   not only skewed ones) — cheap to differentiate inside a nonlinear Newton, where the `GmresGradientSolve`
   nested Krylov+implicit-diff alternative is impractical (see the `CorrectedGreenGauss` note above).
+  - **⚠️ EACH SWEEP COUPLES ONE FURTHER RING, so the sweep count sets the RESIDUAL's stencil reach —
+    and the shipped `sweeps=4` is inconsistent with the shipped `stencil_reach=3` on a skewed mesh
+    (measured 2026-08-16, harness `validation/gradient_stencil_reach.py`).** `A_g` couples a cell to its
+    face neighbours, so `k` sweeps make the reconstruction read `k` cells out; a residual built on it
+    reads `k + 1` (a face flux gathers the gradient of the cells on both sides). Measured exactly, at
+    every skewness, on scalar Laplace on a 12×12 randomly perturbed grid, all-Dirichlet:
+
+    | sweeps | 1 | 2 | 3 | 4 | 8 | exact (GMRES) |
+    |---|---|---|---|---|---|---|
+    | reconstruction reach | 1 | 2 | 3 | 4 | 8 | to round-off |
+    | scalar residual reach | 2 | 3 | 4 | 5 | 9 | 9–11 |
+
+    **`sweeps=1` IS compact Green–Gauss** (`x₁ = V⁻¹Bφ`), correction and all reach included, so the
+    useful range starts at 2. On the coupled RANS residual the base terms carry rings of their own —
+    measured on a 6×6 skewed lid-driven cavity (first-order upwind, `DirectScalars`): reach **6** at
+    `sweeps=4`, **4** at 2, i.e. `sweeps + 2` there. **So a reach is a property of the assembled case
+    and must be measured, never derived from the sweep count.**
+  - **⚠️ TRUNCATING THE SWEEPS DOES NOT REMOVE FAR COUPLING — it FOLDS it onto the last retained shell,
+    and this is the finding that decides the design.** The mass beyond a given distance is set by the
+    **mesh skewness**, not by the sweep count. At 25 % perturbation, `|dR/dφ|` beyond distance 2 is
+    9.80e-4 at 2 sweeps, 1.004e-3 at 4, and 1.004e-3 at the exact solve — flat. Per-ring decay is
+    ~1/37 at 25 % skew, ~1/6.6 at 40 %, ~1/240 at 5 %. Accuracy of the reconstruction against the exact
+    solve, same runs: 3.6e-3 (2 sweeps) / 3.1e-5 (4) / 1.7e-8 (8) at 25 % skew; 1.1e-2 / 9.9e-4 / 2.5e-5
+    at 40 %.
+    **Consequence, and the reason "solve it exactly with GMRES instead" is the WRONG lever:** the exact
+    solve is the sweep series run to round-off, so it has *strictly more* mass past any distance, not
+    less — measured reach 9 at 25 % skew and 11 at 40 %, against 5 for `sweeps=4`. It also does not
+    address why GMRES was rejected as the default (the nested implicit-diff tangent re-entered per jvp,
+    ≈180× on pitzDaily), which a preconditioner inside that solve does not remove.
+  - **`narrow_gradient_sweeps(tree, sweeps)` — BUILT (2026-08-16), the cap, for the PRECONDITIONER only.**
+    Returns a copy of any tree (an assembled case, an assembler, a scheme) with every `SweptGradientSolve`
+    in it capped; it only ever narrows (a solve already at or below the cap is returned by identity), and
+    a `GmresGradientSolve` or `CompactGreenGauss` is untouched. It rebuilds each `equinox.Module` along
+    the path with `dataclasses.replace` rather than `eqx.tree_at`, because `sweeps` is a **static** field
+    and so lives in the treedef, not among the leaves — `tree_at` raises on it (`SweptGradientSolve` is an
+    all-static Module, i.e. an *empty* pytree node, which `where` cannot locate). Every Module in
+    `aquaflux` takes its fields as constructor arguments and none defines `__post_init__` / `__check_init__`,
+    which is what makes `replace` faithful.
+    **Why a cap rather than an exact solve:** a coloured probe recovers the Jacobian to a fixed distance
+    and *folds* whatever lies beyond onto near entries, so probing a narrowed residual gives a matrix that
+    is **exact for the residual it was taken from** — a stated approximation of the operator instead of a
+    corrupted one. Consumed through `CoupledJacobianProbe(gradient_sweeps=…)` / the coupled builders'
+    `probe_gradient_sweeps=`; see `.claude/rules/turbulence.md` and `.claude/rules/solve.md`. **Default
+    `None` everywhere is byte-identical.**
+    ⚠️ **This is LATENT on every case shipped today.** `bfs3d` and pitzDaily are orthogonal-enough that the
+    skewness offset is ~0, the correction vanishes, and the sweep count changes neither reach nor value
+    (measured: every shell beyond distance 1 at 1e-16 on an unperturbed grid, matching the recorded
+    "swapping Corrected→Compact Green-Gauss leaves the reach bit-identical"). It bites on the first
+    genuinely skewed case, which is why it was built before one exists rather than after.
   - **The `GradientSolve.solve(..., operator_hook=None)` distributed seam.** `operator_hook` is an
     optional transform applied to the unknown before **every operator apply**. `SweptGradientSolve`
     honours it — the Richardson sweeps form no global inner product, so a domain-decomposed residual

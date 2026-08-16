@@ -590,6 +590,39 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       (`test_a_short_probed_column_zeroes_its_out_of_reach_entries`,
       `test_per_column_plan_recovers_a_mixed_reach_matrix_exactly_and_more_cheaply`).
 
+      **⚠️ THE OTHER SIDE OF THE SAME TRAP: the RESIDUAL can reach past `stencil_reach`, and then EVERY
+      column aliases — the corrected gradient's sweep count is what moves it (measured 2026-08-16,
+      harness `validation/gradient_stencil_reach.py`).** Everything above is about probing a column
+      *shorter* than the pattern. The converse is a residual assembled so that it reaches *longer* than
+      the pattern, which no `column_reach` choice can fix and which the exactness gate cannot see
+      (`jacobian_relative_error` compares the recovered matrix against the same over-reaching operator on
+      one random vector, and collapses over row fields besides — the blindness recorded above).
+      `CorrectedGreenGauss` applies `A_g` once per Richardson sweep and `A_g` couples a cell to its face
+      neighbours, so **`k` sweeps put a scalar residual's stencil at `k + 1`** and the coupled RANS
+      residual's at `k + 2` (measured on a small skewed cavity: reach **6** at the shipped `sweeps=4`,
+      4 at 2). **So the shipped `SweptGradientSolve(sweeps=4)` and the shipped `stencil_reach=3` are
+      mutually inconsistent the moment a mesh is skewed.**
+      - **LATENT TODAY, on every case that exists.** `bfs3d` is orthogonal enough that the skewness
+        offset is ~0 and the correction vanishes, which is the same fact as the recorded "swapping
+        Corrected→Compact Green-Gauss leaves it bit-identical". It bites on the first skewed case.
+      - **The fix is to probe a NARROWED residual, not to widen the reach** (the colour count climbs
+        11 → 39 → 94 from reach 1 → 3 on `bfs3d`, so reach 6 is not purchasable):
+        `CoupledJacobianProbe(gradient_sweeps=n)` / the coupled builders' `probe_gradient_sweeps=n` cap
+        the sweeps **for the coloured probe only**, leaving the Krylov matvec the exact jvp of the full
+        residual — so the recovered matrix is exact for what it was taken from, and the converged state
+        and its adjoint are untouched. `None` (default) is byte-identical. See
+        `.claude/rules/schemes.md` for `narrow_gradient_sweeps` and the reach/accuracy tables.
+      - **⚠️ Do NOT read the cap as "less far coupling".** Measured, the mass beyond a given distance is
+        set by the **skewness**, not the sweep count (at 25 % perturbation, `|dR/dφ|` beyond distance 2
+        is 9.80e-4 at 2 sweeps and 1.004e-3 at both 4 sweeps and the exact solve). A shorter sweep
+        *relocates* that mass inward. What the cap buys is that the probe is no longer aliasing — the
+        same distinction as everywhere else in this section.
+      - **❌ "Precondition the gradient solve and use GMRES instead" is REFUTED as a reach lever, do not
+        re-propose it.** With implicit differentiation the tangent is `A_g⁻¹B`, i.e. the sweep series run
+        to round-off — measured reach **9** at 25 % skew and **11** at 40 %, against 5 for `sweeps=4`. It
+        moves reach the wrong way, and it does not touch the reason GMRES is not the default (the nested
+        implicit-diff tangent re-entered by every jvp, ≈180× per coupled-residual eval on pitzDaily).
+
       **✅ ROOT CAUSE AND FIX (2026-08-12) — it was NOT the aliasing, and it was NOT the reach. Sparse
       arithmetic was pruning the explicit zeros out of the smoother's pattern.** Two readings of #191
       preceded this and both are refuted; the falsifying harnesses are in `validation/bfs3d_openfoam/`.

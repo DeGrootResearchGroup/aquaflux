@@ -1125,6 +1125,22 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       zero shift: 58 restart cycles at 2.299e-02 against 11 at 8.474e-11), so they are pruned at the
       factorization boundary and the shipped value is `(3,3,3,3,2,2)` — `p` at reach 3, only k and ω
       shortened. Keep the two reaches apart when reasoning; both are in the solve rules.
+      **`probe_gradient_sweeps` is a THIRD knob, and it moves the residual rather than the probe (BUILT
+      2026-08-16).** The two above choose how much of the Jacobian to recover; this one bounds how far the
+      Jacobian *goes*. `CorrectedGreenGauss` couples one further ring per Richardson sweep, so on a skewed
+      mesh the shipped `sweeps=4` puts the coupled residual at reach **6** against a `stencil_reach` of 3 —
+      and a residual reaching past the pattern aliases in **every** column, which no `column_reach` choice
+      fixes and `jacobian_relative_error` cannot see. `CoupledJacobianProbe(gradient_sweeps=n)` (and the
+      `probe_gradient_sweeps=n` keyword on `coupled_amg_continuation`, `amg_beta_tracking_refresh` and the
+      four ILUT/LU builders) materializes the preconditioner from a copy of the residual whose gradient
+      solve is capped at `n` sweeps — `CoupledJacobianProbe.narrow` is the one place that decides it, and
+      the refresh hook re-narrows on `rebind` so a Reynolds rung's companion is capped too. The forward
+      matvec keeps the exact `coupled`, so the root and the adjoint are unmoved. **`None` (default) is
+      byte-identical, and this is INERT on `bfs3d`**, whose mesh is orthogonal enough that the correction
+      vanishes — it is a latent trap removed ahead of the first skewed case, not a change to any measured
+      result. Reach/accuracy tables and the refuted "use GMRES instead" alternative are in
+      `.claude/rules/schemes.md` and `.claude/rules/solve.md`; harness
+      `validation/gradient_stencil_reach.py`.
       **⚠️ THE DRIFT GATE MUST NOT BE NESTED INSIDE THE β GATE — it was, and a PC-only `beta_floor` then
       made it unreachable.** The β gate sees `max(β, beta_floor)`, so below the floor its input is pinned
       and it answers "no change" forever; asking the drift gate only inside it therefore froze the
