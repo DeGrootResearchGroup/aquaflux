@@ -74,6 +74,13 @@ Three correctness facts the builder depends on:
   gather from the global geometry, which is what buys bit-for-bit agreement with serial.
 - **Global owner/neighbour roles are preserved** by the remap, so owner-outward normals stay
   consistent — no re-orientation.
+- **A periodic seam keeps its per-face `neighbour_offset`.** Both face renumberings — the
+  partition's face selection and the padded shard's real-then-padding layout — carry it through
+  `mesh.face_cells.gather_neighbour_offset(face_index)` (padding faces take zero). Both used to drop
+  it, which raises nothing: the local mesh's geometry is *gathered*, so no volume looks wrong, and
+  the loss surfaces only as a wrong owner→neighbour displacement inside whichever operator next
+  reads the seam. Pinned by `test_partition.py::test_local_meshes_keep_the_periodic_seam_displacement`
+  and `test_padding.py::test_padding_keeps_the_periodic_seam_displacement`.
 - **Each local mesh carries its own node set.** `partition_mesh` keeps only the nodes the
   partition's faces touch and remaps the face-node connectivity to local node ids, so a local mesh is
   a genuinely standalone `Mesh` rather than one holding a copy of the whole global node array. This

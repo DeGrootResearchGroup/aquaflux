@@ -147,6 +147,37 @@ class FaceCellConnectivity(eqx.Module):
             return neighbour_centroid
         return neighbour_centroid + self.neighbour_offset
 
+    def gather_neighbour_offset(self, face_index) -> jnp.ndarray | None:
+        """The periodic :attr:`neighbour_offset` carried onto a **new face numbering**.
+
+        A mesh transform that renumbers faces — keeping a subset of them (a partition's local
+        faces) or appending new ones (a shard's inert trailing padding faces) — must carry this
+        per-face translation across with them. Dropping it turns a periodic seam back into a pair
+        of cells a full period apart, and nothing raises:
+        an absent offset is exactly what an ordinary mesh has, so the transformed mesh simply
+        reports wrong owner→neighbour displacements everywhere the seam is read (a boundary-column
+        cell accrues a spurious ``L * A`` of volume, for one).
+
+        Parameters
+        ----------
+        face_index : array_like of int, shape ``(n_new_faces,)``
+            For each face of the new numbering, which face of *this* relation it came from. A
+            negative entry marks a face that came from none of them — a newly introduced face — and
+            takes a zero offset.
+
+        Returns
+        -------
+        jnp.ndarray, shape ``(n_new_faces, dim)``, or None
+            The offsets in the new face numbering, or ``None`` when this relation carries no offset
+            — so a non-periodic mesh stays offset-free rather than gaining an array of zeros.
+        """
+        if self.neighbour_offset is None:
+            return None
+        index = jnp.asarray(face_index)
+        carried = index >= 0
+        gathered = self.neighbour_offset[jnp.where(carried, index, 0)]
+        return jnp.where(_broadcast_face_mask(carried, gathered.ndim), gathered, 0.0)
+
     def combine_face_values(
         self, interior_values: jnp.ndarray, boundary_values: jnp.ndarray
     ) -> jnp.ndarray:

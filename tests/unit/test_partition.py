@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler
-from aquaflux.mesh import structured_grid_3d
+from aquaflux.mesh import structured_grid_2d, structured_grid_3d
 from aquaflux.parallel import AllGatherHaloExchange, PaddedLayout, partition_mesh
 from aquaflux.properties import Constant, PropertyModel
 
@@ -111,6 +111,38 @@ def test_local_meshes_carry_only_their_own_nodes() -> None:
             local_face_coords = l_coords[l_idx[l_off[lf] : l_off[lf + 1]]]
             global_face_coords = g_coords[g_idx[g_off[gf] : g_off[gf + 1]]]
             np.testing.assert_array_equal(local_face_coords, global_face_coords)
+
+
+def test_local_meshes_keep_the_periodic_seam_displacement() -> None:
+    """A decomposed periodic mesh is still periodic on every partition.
+
+    The local mesh claims to be an ordinary ``Mesh`` every operator runs on unchanged, so a seam
+    face must present the same owner→neighbour displacement locally as it does globally. Its
+    geometry is *gathered*, so dropping the per-face translation would not disturb any volume — it
+    would surface only as a wrong displacement inside whichever operator next reads the seam.
+    """
+    mesh = structured_grid_2d(6, 4, lx=3.0, ly=1.0, periodic=("x",), named_boundaries=True)
+    geometry = mesh.geometry()
+    global_fc = mesh.face_cells
+    global_delta = np.asarray(
+        global_fc.neighbour_centroid(geometry.cell.centroid)
+        - geometry.cell.centroid[np.asarray(global_fc.owner)]
+    )
+    pmesh = partition_mesh(mesh, _slab_labels(mesh.n_cells, 2))
+
+    for part in pmesh.partitions:
+        local_fc = part.mesh.face_cells
+        faces_global = np.asarray(part.faces_global)
+        assert local_fc.neighbour_offset is not None
+        np.testing.assert_array_equal(
+            np.asarray(local_fc.neighbour_offset),
+            np.asarray(global_fc.neighbour_offset)[faces_global],
+        )
+        local_centroid = part.local_geometry(geometry).cell.centroid
+        local_delta = np.asarray(
+            local_fc.neighbour_centroid(local_centroid) - local_centroid[np.asarray(local_fc.owner)]
+        )
+        np.testing.assert_allclose(local_delta, global_delta[faces_global])
 
 
 @pytest.mark.parametrize("n_partitions", [2, 3, 4])

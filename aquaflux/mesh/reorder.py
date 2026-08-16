@@ -42,7 +42,9 @@ def permute_cells(mesh: Mesh, perm) -> Mesh:
     connectivity are untouched (faces are not reordered), so the geometry and physics are
     identical up to the relabelling. Concretely the owner/neighbour *values*, the cell-zone
     labels, and (downstream) any per-cell field or the linear system are all mapped by the same
-    permutation, giving the symmetric renumbering ``P·A·Pᵀ`` of the assembled operator.
+    permutation, giving the symmetric renumbering ``P·A·Pᵀ`` of the assembled operator. A periodic
+    mesh's per-face neighbour-image translation is carried across too, so a renumbered seam is
+    still a seam.
 
     A per-cell field ``f`` in the old numbering becomes ``f[argsort(perm)]`` in the new one
     (``new_field[perm[old]] = f[old]``); callers that carry per-cell inputs (e.g. a
@@ -82,7 +84,11 @@ def permute_cells(mesh: Mesh, perm) -> Mesh:
     owner_new = perm[mesh.face_cells.owner]
     # remap interior neighbours through the permutation; keep the boundary sentinel (-1)
     neighbour_new = jnp.where(interior_mask(neighbour), perm[jnp.clip(neighbour, 0)], -1)
-    face_cells = FaceCellConnectivity(owner_new, neighbour_new, mesh.n_cells)
+    # A periodic seam's neighbour-image translation is per *face*, and faces are neither reordered
+    # nor swapped owner-for-neighbour here, so it carries across unchanged.
+    face_cells = FaceCellConnectivity(
+        owner_new, neighbour_new, mesh.n_cells, mesh.face_cells.neighbour_offset
+    )
     zones = eqx.tree_at(lambda z: z.label, mesh.cell_zones, mesh.cell_zones.label[inverse])
     renumbered = eqx.tree_at(
         lambda m: (m.face_cells, m.cell_zones),
