@@ -84,6 +84,7 @@ from aquaflux.solve import (
     StateCheckpointer,
     combine_metrics,
     combine_observers,
+    host_ilu_inverse,
     native_nodal_inverse,
     native_saddle_inverse,
     relative_residual_gmres,
@@ -514,9 +515,34 @@ def _flush_print(message: str) -> None:
 
 
 FLOW_INVERSE = os.environ.get("BFS3D_FLOW_INVERSE", "petsc")
-if FLOW_INVERSE not in ("petsc", "native"):
-    raise SystemExit(f"BFS3D_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'native']")
+if FLOW_INVERSE not in ("petsc", "native", "hostilu"):
+    raise SystemExit(
+        f"BFS3D_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'native', 'hostilu']"
+    )
 LEADING_INVERSE = None
+if FLOW_INVERSE == "hostilu":
+    #: The SAME hierarchy the `native` arm coarsens with, applied on the host and smoothed by a zero-fill
+    #: incomplete factorization instead of SIMPLE relaxation -- so `petsc` against `hostilu` differs in the
+    #: coarsening alone, which is what makes it the arm that isolates it.
+    #:
+    #: Measured on the converged state at ZERO shift, the adjoint's operator, against the incumbent's 11
+    #: restart cycles / 29 s: 4 cycles / 17 s at one sweep, and 4 cycles / 47 s at four. Two facts to carry
+    #: before changing `sweeps`. The count is NON-MONOTONE in it -- 4 / 6 / 4 at 1 / 2 / 4 -- which nothing
+    #: explains, so a single sweep count is not a result about this smoother. And every arm TIES at a
+    #: positive shift (2 cycles apiece at beta 0.1), so the setting cannot be calibrated on a step-initial
+    #: state: the march's hard operators are its mid-step inner iterates.
+    _HOST_FLOW = dict(
+        sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", "1")),
+        cycles=1,
+        strength_threshold=0.25,
+        avoid_singletons=True,
+        aggressive_levels=0,
+        max_levels=5,
+        max_coarse=500,
+        prolongation_smoothing="none",
+    )
+
+    LEADING_INVERSE = host_ilu_inverse(**_HOST_FLOW)
 if FLOW_INVERSE == "native":
     #: The arm measured best on single states: strength-of-connection aggregation with no singleton
     #: aggregates, five levels, a per-cell block velocity splitting and an undamped correction.
@@ -1128,7 +1154,9 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         # under test.
         (
             "flow inverse",
-            FLOW_INVERSE if LEADING_INVERSE is None else f"{FLOW_INVERSE} {_NATIVE_FLOW}",
+            FLOW_INVERSE
+            if LEADING_INVERSE is None
+            else f"{FLOW_INVERSE} {_NATIVE_FLOW if FLOW_INVERSE == 'native' else _HOST_FLOW}",
         ),
         ("turbulence inverse", TURBULENCE_INVERSE),
         # ...and, when a `trailing_inverse` is supplied, it REPLACES the PETSc V-cycle wholesale, so the
