@@ -52,6 +52,7 @@ from .rhie_chow import (
     momentum_diagonal,
     momentum_diagonal_parts,
 )
+from .source import MomentumSource
 from .state import BlockStateLayout
 
 if TYPE_CHECKING:
@@ -187,6 +188,16 @@ class MomentumContinuity(eqx.Module):
         streamwise-periodic channel: with the pressure split ``p = p̃ + G·x`` into a periodic ``p̃``
         and a mean gradient ``G``, the linear part is a constant force ``f = −G``, so a positive
         ``body_force[0]`` drives the flow in ``+x`` (mean gradient ``G = −body_force``). Default zero.
+
+        This is deliberately **not** one of :attr:`sources`, because it is not only a source term: it
+        is the *control variable* of the bulk-velocity-constrained solve
+        (:func:`~aquaflux.flow.bulk_velocity_flow_solve`), which treats it as a coupled unknown,
+        writes it here every residual evaluation, and forms its border column from the analytic
+        ``dR/d(body_force) = −V`` that holds only for a uniform, state-independent force.
+    sources : tuple of MomentumSource
+        Momentum source terms subtracted from the balance (each returns its cell integral,
+        production positive); empty by default. Where buoyancy, porous drag, or a rotating-frame
+        term goes.
     """
 
     mesh: Mesh
@@ -200,6 +211,7 @@ class MomentumContinuity(eqx.Module):
     body_force: jnp.ndarray
     pressure_pin: int | None = eqx.field(static=True)
     pressure_pin_value: float
+    sources: tuple[MomentumSource, ...] = ()
     eddy_viscosity: jnp.ndarray | None = None
     wall_eddy_viscosity: jnp.ndarray | None = None
 
@@ -216,6 +228,7 @@ class MomentumContinuity(eqx.Module):
         pressure_pin: int | None = None,
         pressure_pin_value: float = 0.0,
         body_force=None,
+        sources: tuple[MomentumSource, ...] = (),
     ) -> MomentumContinuity:
         """Build the coupled assembler, precomputing face interpolation geometry.
 
@@ -227,7 +240,10 @@ class MomentumContinuity(eqx.Module):
         a streamwise-periodic channel), where pressure is otherwise defined only up to a constant.
         ``body_force`` is a uniform force per unit volume ``(dim,)`` added to the momentum equation
         (see :attr:`body_force`); default (``None``) is no force. It drives a periodic channel and is
-        the leaf a mass-flow controller updates via ``eqx.tree_at``.
+        the leaf a mass-flow controller updates via ``eqx.tree_at``. ``sources`` is the tuple of
+        :class:`~aquaflux.flow.MomentumSource` terms — buoyancy, porous drag, a rotating-frame term —
+        subtracted from the momentum balance; it is separate from ``body_force`` because that one is
+        also a solve control variable (see :attr:`body_force`), and the two simply add.
         """
         properties.require("viscosity", "density")
         force = jnp.zeros(mesh.dim) if body_force is None else jnp.asarray(body_force)
@@ -258,6 +274,7 @@ class MomentumContinuity(eqx.Module):
             body_force=force,
             pressure_pin=pressure_pin,
             pressure_pin_value=pressure_pin_value,
+            sources=sources,
         )
 
     # --- state layout ------------------------------------------------------------------
@@ -662,9 +679,7 @@ class MomentumContinuity(eqx.Module):
 
     def _momentum_residual(
         self,
-        velocity: jnp.ndarray,
-        grad_velocity: jnp.ndarray,
-        boundary_velocity: jnp.ndarray,
+        kinematic: VelocityFields,
         pressure_face: jnp.ndarray,
         mdot: jnp.ndarray,
     ) -> jnp.ndarray:
@@ -675,11 +690,17 @@ class MomentumContinuity(eqx.Module):
         terms are face-flux operators composed by the same
         :class:`~aquaflux.discretization.CellBalance` that assembles every other transport
         equation; only :class:`PressureForce` is flow-specific. The per-component cell gradient is
-        taken from the shared ``grad_velocity`` reconstruction, which is why this forms its own
+        taken from the shared velocity-gradient reconstruction, which is why this forms its own
         context rather than letting a :class:`~aquaflux.discretization.ResidualAssembler` do it:
         the velocity gradient is one tensor reconstruction shared across the components, from flow
         boundary closures that take no gradient.
+
+        Injected :class:`~aquaflux.flow.MomentumSource` terms are then subtracted at the **vector**
+        level, once the per-component balances are stacked: a momentum source is coupled across
+        components (a rotating-frame term reads the whole velocity), so it is not a per-component
+        quantity and cannot ride in a balance's scalar ``source_operators``.
         """
+        velocity = kinematic.velocity
         viscosity = self.viscosity  # per-cell mu, the momentum diffusion coefficient
         volume = self.geometry.cell.volume
         # The wall-function effective viscosity, if any, overrides only the shearing-wall boundary
@@ -698,8 +719,8 @@ class MomentumContinuity(eqx.Module):
             context = FaceContext(
                 face_cells=self.mesh.face_cells,
                 geometry=self.geometry,
-                boundary_values=boundary_velocity[:, i],
-                gradient=grad_velocity[:, i],
+                boundary_values=kinematic.boundary_velocity[:, i],
+                gradient=kinematic.gradient[:, i],
                 properties={"viscosity": viscosity},
             )
             # A balance sums its operators in tuple order, and floating-point addition is not
@@ -708,7 +729,14 @@ class MomentumContinuity(eqx.Module):
             balance = CellBalance((diffusion, PressureForce(pressure_face, i), *advection))
             # R = balance - source; the body force is a uniform volume source.
             columns.append(balance.residual(component, context) - self.body_force[i] * volume)
-        return jnp.stack(columns, axis=1)
+        residual = jnp.stack(columns, axis=1)
+        # Each injected source returns its cell integral (production positive), so it leaves the
+        # balance as a sink -- the vector counterpart of a CellBalance's scalar source loop.
+        if self.sources:
+            properties = self.properties.evaluate(self.mesh.cell_zones)
+            for source in self.sources:
+                residual = residual - source.source(kinematic, self.geometry, properties)
+        return residual
 
     def _continuity_residual(self, mdot: jnp.ndarray, pressure: jnp.ndarray) -> jnp.ndarray:
         """Continuity cell residual: the net Rhie--Chow mass flux ``Σ mdot_f``, shape ``(n_cells,)``.
@@ -776,13 +804,8 @@ class MomentumContinuity(eqx.Module):
         pressure_face = self._face_pressure(
             fields.pressure, fields.grad_pressure, fields.boundary_pressure
         )
-        kinematic = fields.velocity_fields
         velocity_residual = self._momentum_residual(
-            kinematic.velocity,
-            kinematic.gradient,
-            kinematic.boundary_velocity,
-            pressure_face,
-            fields.mdot,
+            fields.velocity_fields, pressure_face, fields.mdot
         )
         pressure_residual = self._continuity_residual(fields.mdot, fields.pressure)
         return self.pack(velocity_residual, pressure_residual)

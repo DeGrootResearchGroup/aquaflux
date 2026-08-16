@@ -45,6 +45,41 @@ Engineering Principles.
     `bfs3d` residual at `state-00067` being bit-unchanged, not on tests passing.
   - **`MomentumContinuity` has no `_scatter`** — there is no such method; the balance scatters, and
     continuity calls `mesh.face_cells.scatter_conservative(mdot)` directly.
+  - **`source.py` — `MomentumSource` / `UniformBodyForce` (BUILT, #58).** The vector counterpart of
+    `VolumeSource`: volume-integrated force per cell, production positive, subtracted from the
+    balance. Injected as `MomentumContinuity.build(sources=(...))` and applied at the **vector**
+    level in `_momentum_residual`, after the per-component balances are stacked — a momentum source
+    is coupled across components (a rotating-frame term is `−2ρΩ×u`), so it is not a per-component
+    quantity and cannot ride in a `CellBalance`'s scalar `source_operators`.
+    - **It does NOT take a `FaceContext` (binding).** That context carries *one* scalar component's
+      boundary values and reconstructed gradient; a momentum source needs the whole kinematic state
+      (the velocity, and the gradient **tensor** for anything stress-like), so handing it one
+      component's context would be arbitrary. It takes the `VelocityFields` bundle those quantities
+      already travel in, plus `geometry` and the evaluated `properties`.
+    - **Three members, ALL abstract on purpose.** `source` is the term; `face_force` is the
+      face-normal force a *spatially varying* source must expose so the mass flux treats it
+      consistently with the pressure gradient (skip it and the pressure–velocity decoupling
+      Rhie–Chow suppresses reappears in the force); `diagonal` is the contribution to the momentum
+      diagonal, which is assembled **separately from the residual** and feeds the Rhie–Chow damping,
+      the frozen preconditioner and the pseudo-transient shift. Defaults were deliberately *not*
+      given for the last two: a new source inheriting "no face treatment" or "no diagonal" silently
+      would be wrong in exactly the cases that matter. Pin any non-trivial `diagonal` against **AD of
+      the source's own `source`** — the `FixationRow.jacobian_scale` pattern
+      (`test_momentum_source.py` does this for a velocity-dependent drag).
+    - **`face_force` is DECLARED, not implemented — only the `None` (uniform) case exists.** The
+      balanced-force interpolation a non-uniform force needs is deferred with buoyancy; the seam is
+      declared now so the interface cannot be built in a shape that cannot express it.
+  - **⚠️ `body_force` is NOT a `MomentumSource`, and this is deliberate (#58, follow-up filed).** It
+    is also the **control variable** of the bulk-velocity-constrained solve: `bulk_velocity_flow_solve`
+    treats it as a coupled unknown, writes a traced scalar into that array leaf every residual
+    evaluation (`mean_velocity._with_body_force`, `eqx.tree_at` + `.at[dir].set(beta)`), and forms its
+    border column from the **analytic** `a = dR_flow/dβ = −V`, which holds only for a uniform,
+    state-independent force. Migrating it therefore needs the bordered solve to address the driving
+    source *and* to ask it for its own `dR/dβ` instead of assuming `−V` — the same
+    hand-derived-coefficient trap as the row-scaler defect. That is its own change; until it lands,
+    `body_force` and `sources` simply add. Five consumers ride the leaf: the bordered flow solve, the
+    coupled-RANS mass-flow path, `scales.body_force_speed`/`body_force_velocity`, the hybrid IC plug,
+    and two validation cases.
   - **One shared assembly per state — `flow_fields` / `residual_from_fields` (binding, #106).** The
     boundary fields, both gradients, the lagged `a_P`, and the Rhie–Chow flux are assembled once by
     the public `flow_fields(state) -> FlowFields`; `residual` = `residual_from_fields(flow_fields(state))`
@@ -491,7 +526,17 @@ Engineering Principles.
 
 ## Not yet built (follow-ons, in order)
 - **Porous / conjugate interface** (`eps` porosity terms, `addCont` interface branch) — the
-  reference's distinguishing capability.
+  reference's distinguishing capability. **The drag half now has a home**: a `MomentumSource`
+  returning `−(μ/K)u` with the matching `diagonal` (see `source.py` above), so what remains is the
+  porosity in the continuity/transport terms and the interface branch, not the force.
+- **Buoyancy, and with it the balanced-force face treatment.** `MomentumSource.face_force` is
+  declared and returns `None` everywhere today; a spatially varying force must instead be
+  reconstructed to faces consistently with the pressure gradient and enter the mass flux beside it.
+  Note this is a *variable-density* regime, so it comes due alongside the conservative
+  (non-kinematic) forms the flow and the k/ω transport both currently defer. **It does not implicate
+  a species concentration**, whose balance `∂C/∂t + ∇·(uC) = ∇·(D∇C)` carries no density at all and
+  is already conservative as written — only the *discrete* guarantee that a uniform `C` is preserved
+  leans on constant density, through `Σ Q_f = 0` following from continuity's `Σ ṁ_f = 0`.
 - **Transient** momentum (BDF, reusing `TransientTerm`). **Must use a transient-consistent Rhie–Chow:
   subtract the transient component of `a_P` in the mass-flux d-coefficient** — use `a_P^{RC} = a_P −
   ρV/Δt` (spatial only), not the full `a_P`, or the pressure smoothing (and the `-C` block) vanishes as
