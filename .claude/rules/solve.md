@@ -4378,6 +4378,65 @@ below measures.
 the host AMG was handed, so it read as that library's property; it is not, and any smoother put behind
 this seam needs it. That survives the change of factorization.
 
+### ✅ THE NATIVE HIERARCHY MARCHES `bfs3d` TO THE SAME ROOT — 10 % FEWER CYCLES, 6 % MORE WALL (2026-08-16)
+
+**The whole-march measurement, which is the only honest one when the preconditioner's SHAPE changes,
+and the first time the hand-written hierarchy and factorization have carried a march rather than a
+single solve.** Two full 3-rung cold marches differing in **one** environment variable
+(`BFS3D_FLOW_INVERSE`), same commit, same machine, back to back, nothing else running:
+
+| | `petsc` (incumbent) | `hostilu` (native AMG + our ILU(0)) |
+|---|---|---|
+| steps | 59 | 61 |
+| **Krylov cycles** | **232** | **208 (−10.3 %)** |
+| wall | **1179 s** | 1246 s (+5.7 %) |
+| final ‖R‖ | 1.861e-06 | 1.858e-06 |
+| preconditioner | 185 s (16 %), probe 131 s | **160 s (13 %), probe 85 s** |
+| mid-span / full-span `x_r/h` | 8.361 / 12.53 | **8.361 / 12.53** |
+
+**Same root, identical reattachment to four figures** — so the arm is correct end to end, which is what
+this run establishes before anything about cost.
+
+**Read it PER RUNG; the totals hide the structure and invert the conclusion:**
+
+| rung | `petsc` steps / cycles / wall | `hostilu` steps / cycles / wall |
+|---|---|---|
+| Re/100 (the easy anchor) | 14 / 44 / **246 s** | 14 / **32** / **246 s** |
+| Re/10 | 24 / 83 / 406 s | 26 / 87 / **518 s** |
+| **target Re (lowest β, hardest)** | 21 / 105 / 527 s | 21 / **89 (−15 %)** / **482 s (−8.5 %)** |
+
+- **Rung 1 is the cleanest controlled comparison available: identical step count AND identical wall
+  (246 s both), with 27 % fewer cycles.** So on that operator the native apply is dearer per cycle by
+  almost exactly the margin its convergence saves — a wash, measured rather than inferred.
+- **On the TARGET rung the native arm wins BOTH axes**, −15 % cycles and −8.5 % wall. That is the low-β
+  end where an incomplete factorization's diagonal-dominance windfall is smallest, and it is the rung
+  that grows with the mesh — so it is the one that matters for scaling.
+- **The entire wall deficit is rung 2**, +112 s, and it is a **trajectory** difference rather than a
+  cost one: the native arm took **2 extra outer steps** there. The two marches agree to 3–4 figures in
+  β and ‖R‖ through step 10 and part on **α** — `hostilu` takes FULL steps (α = 1.000) where `petsc`
+  clips (0.566, 0.803), i.e. it returns the better direction and still ends up needing more steps.
+  Nothing here explains that.
+- **Fewer cycles buys a cheaper preconditioner too**, which is second-order but real: the refresh
+  trigger fires on cycles, so 208 cycles means fewer refreshes, hence 85 s of coloured probe against
+  131 s. The probe is identical work per invocation in both arms — the difference is how many times it
+  ran.
+
+**⚠️ ONE RUN EACH, AND THIS CASE HAS NO MEASURED MARCH-LEVEL NOISE FLOOR.** Cycle counts are
+deterministic and are the load-bearing row; wall clock is not, and +5.7 % on a single pair is not a
+number to lean on. The step-count difference (61 against 59) is a trajectory divergence that could go
+either way under another bundle.
+
+**Consistency with the two single-state measurements is the reassuring part, and it is not automatic.**
+The adjoint put the native arm ~8 % above PETSc in applications while ~14 % cheaper per application (a
+wash); β = 0.1 tied outright; and the march now says −10 % cycles / +6 % wall (a wash). Three
+independent measurements at three operating points all land on parity. **The `−R` linear probe's 2.75×
+win remains the one outlier, and it is the one measurement that is not of the real thing.**
+
+**So: the AMG *can* go native at no cost, and PETSc is no longer load-bearing for the coarsening on
+this case.** What it does not do is go native at a *profit*, so nothing here moves `FLOW_INVERSE`; the
+case for the direction stays what it was — a GPU where SIMPLE relaxation parallelizes and a sequential
+triangular solve does not, which cannot be measured in this CPU-only environment.
+
 ### THE NATIVE AGGREGATION BEATS PETSc GAMG ON A LINEAR PROBE AT β = 0 — AND LOSES ON THE ACTUAL ADJOINT (2026-08-16)
 
 **⚠️⚠️ READ THIS FIRST: the win below is a `−R` LINEAR PROBE and it DOES NOT TRANSFER.** The same two arms
