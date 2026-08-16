@@ -14,7 +14,10 @@ Nothing here names a physical operator. The caller injects a builder,
 ``assemble(mesh, geometry) -> assembler``, which is applied per partition; this module only needs
 what every assembler already exposes:
 
-- ``assembler.residual(field)`` — the cell residual on that local mesh;
+- ``assembler.residual(field, *, gradient_hook=None)`` — the cell residual on that local mesh,
+  taking the optional per-cell-gradient transform described below;
+- ``assembler.gradient_scheme`` — the injected gradient scheme, or ``None`` when no gradient is
+  reconstructed; read once to decide whether the ghost-gradient exchange is needed at all;
 - ``assembler.boundary`` — the mesh-bound :class:`~aquaflux.boundary.BoundaryConditions`, whose
   per-patch face-index arrays are padded to a common length here (a patch holds a different number
   of faces on each partition, and ``shard_map`` needs uniform shapes).
@@ -228,8 +231,9 @@ def build_distributed_residual(
         local rows agree with the serial residual exactly.
     assemble : callable
         ``assemble(mesh, geometry) -> assembler``, applied once per partition. The assembler must
-        expose ``residual(field)`` and a mesh-bound ``boundary``. Typically a closure over the
-        problem's operators, properties, and boundary closures, e.g.
+        expose ``residual(field, *, gradient_hook=None)``, a ``gradient_scheme`` attribute (``None``
+        when no gradient is reconstructed), and a mesh-bound ``boundary``. Typically a closure
+        over the problem's operators, properties, and boundary closures, e.g.
         ``lambda m, g: ResidualAssembler.build(m, g, properties, operators, boundary)``.
     halo : HaloExchange, optional
         Ghost-cell refresh strategy (default

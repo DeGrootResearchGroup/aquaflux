@@ -7,9 +7,10 @@ needs at large mesh sizes.
 
 Design for a differentiable JAX/GPU pipeline — every hierarchy is **built once, off the jit path,
 and frozen**, then applied under jit as a fixed matrix-free V-cycle (a constant linear operator in
-``b``, so plain left-preconditioned GMRES suffices and the adjoint transposes cleanly). Each level
-carries its operator as a general sparse ``(row, col, val)`` triple and its intergrid transfers as
-sparse operators; the one recursion (:func:`_frozen_v_cycle`) applies the shared operator matvec
+``b``, so plain non-flexible GMRES suffices and the adjoint transposes cleanly — whichever side the
+caller applies it on). Each level carries its operator in compressed-sparse-row (CSR) form
+(:class:`_CsrOperator`, which owns its matvec) and its intergrid transfers as coordinate-form sparse
+operators; the one recursion (:func:`_frozen_v_cycle`) applies the shared operator matvec
 (:func:`_operator_matvec`) and direct coarse solve, and is specialized per family by the injected
 :class:`_VCycleOps` (restriction, prolongation, smoother). The outer fixed-cycle driver every
 ``*_multigrid_solve`` entry point runs is likewise one function (:func:`_fixed_cycle_solve`), so a
@@ -121,7 +122,7 @@ def _cell_graph(a: sp.csr_matrix, block_size: int) -> sp.csr_matrix:
 
     Aggregation on the degree-of-freedom graph is field-blind: with several fields per cell it can put
     one field of cell ``i`` and a *different* field of cell ``j`` into the same aggregate. On a strongly
-    nonsymmetric multi-field operator that produces a degenerate Galerkin (``Rᵀ A P``) row, so the build
+    nonsymmetric multi-field operator that produces a degenerate Galerkin (``Pᵀ A P``) row, so the build
     is then refused for a non-positive coarse diagonal — a failure that reads as though the *fine*
     operator were at fault when the fine operator is clean. Coarsening whole cells removes the cause,
     which is why a nodal aggregation is what a multi-field hierarchy needs.
@@ -173,6 +174,10 @@ def _block_tentative(
         Number of aggregates.
     block_size : int
         Fields per cell, preserved onto the coarse level.
+    orthonormal : bool
+        Scale each aggregate's column by ``1 / sqrt(|aggregate|)`` so every column has unit 2-norm (the
+        piecewise-constant prolongation's QR). Inert on a two-level cycle with an exact coarse solve;
+        see the comment in the body for why it is not inert deeper.
 
     Returns
     -------
@@ -334,9 +339,10 @@ def _square_graph(graph: sp.csr_matrix) -> sp.csr_matrix:
 
     Aggregating on the squared graph makes each aggregate span a cell's neighbours-of-neighbours, which
     coarsens far faster than the plain graph and is what keeps the number of levels low as the mesh
-    grows. It is the standard aggressive-coarsening device and is applied to the **first** level only:
-    deeper levels aggregate on their own plain graph, because by then the operator is dense enough that
-    squaring it again would produce very large, badly-shaped aggregates.
+    grows. It is the standard aggressive-coarsening device and is applied to the **leading**
+    ``aggressive_levels`` levels only (one, where it is enabled at all): deeper levels aggregate on
+    their own plain graph, because by then the operator is dense enough that squaring it again would
+    produce very large, badly-shaped aggregates.
     """
     squared = (graph @ graph).tocsr()
     squared.setdiag(0.0)
@@ -432,7 +438,7 @@ def _reattach_to_adjacent_root(
     Only members move; a root is never stolen from, so no aggregate is emptied and the count is
     unchanged. What changes is aggregate *shape*. Later roots override earlier ones, so a member
     adjacent to several roots ends up with the highest-indexed of them — arbitrary, but the tie has to
-    break somehow and matching the reference's order keeps the two comparable.
+    break somehow, and ascending root order makes the result deterministic.
 
     Parameters
     ----------
@@ -520,7 +526,8 @@ def _aggregate(owner: np.ndarray, nb: np.ndarray, n: int) -> tuple[np.ndarray, i
     Pass 1 forms an aggregate ``{i} ∪ neighbours(i)`` only from a cell ``i`` whose neighbours are all
     still free — giving well-shaped, ~stencil-sized aggregates. Pass 2 attaches each remaining cell to
     an adjacent existing aggregate (rare orphans seed their own). This yields a healthy coarsening
-    ratio (~4× in 2D) with no singletons, which a naive one-pass greedy does not.
+    ratio (~4× in 2D) with far fewer singletons than a naive one-pass greedy — only an orphan with no
+    aggregated neighbour at all ends up alone.
 
     Both passes visit cells in a locality-preserving order (:func:`_rcm_order`) so the greedy seeding
     is robust to the incoming cell numbering — an arbitrary order otherwise degrades the coarse space.
@@ -574,10 +581,11 @@ def _aggregate(owner: np.ndarray, nb: np.ndarray, n: int) -> tuple[np.ndarray, i
 class _SparseLevel(eqx.Module):
     """One smoothed-aggregation level: a general sparse operator + its prolongation, all frozen.
 
-    **The level is split into a static index structure and dynamic values (binding).** Only ``n`` and
-    ``n_coarse`` are static: they size the sparse matvec's output (:func:`_coo_apply`'s ``n_out``), so
-    they must be concrete. Everything else — including ``lam_max``, which is pure arithmetic in the
-    smoothers — rides as a **traced** leaf. That split is what makes a hierarchy *refreshable*:
+    **The level is split into a static index structure and dynamic values (binding).** The static
+    fields are ``n`` and ``n_coarse`` — which size the intergrid transfers' output (:func:`_coo_apply`'s
+    ``n_out``) — ``block_size``, which sizes the smoother's per-cell reshape, and the operator's own
+    ``shape``. Everything else — including ``lam_max``, which is pure arithmetic in the smoothers —
+    rides as a **traced** leaf. That split is what makes a hierarchy *refreshable*:
     re-deriving one at a new operator on the same mesh can yield the identical structure and change only
     these values, so the hierarchy passed as a **jit argument** is a compilation-cache hit rather than a
     rebuild-and-recompile. Keeping ``lam_max`` a Python ``float`` would defeat exactly that (a changed
@@ -593,7 +601,7 @@ class _SparseLevel(eqx.Module):
     values.
     """
 
-    n: int = eqx.field(static=True)  # cells at this level (sizes the matvec output)
+    n: int = eqx.field(static=True)  # degrees of freedom here (block_size * cells)
     operator: _CsrOperator  # the level operator A, in CSR form and owning its matvec
     diagonal: jnp.ndarray  # (n,) diagonal of A
     lam_max: jnp.ndarray  # 0-d: largest eigenvalue of D^-1 A, for the smoother damping
@@ -601,7 +609,7 @@ class _SparseLevel(eqx.Module):
     p_frow: jnp.ndarray | None  # (pnnz,) prolongation fine row (this level); None on coarsest
     p_ccol: jnp.ndarray | None  # (pnnz,) prolongation coarse col (next level)
     p_val: jnp.ndarray | None  # (pnnz,) prolongation value
-    n_coarse: int = eqx.field(static=True)  # next-coarser cell count (0 on coarsest)
+    n_coarse: int = eqx.field(static=True)  # next-coarser degrees of freedom (0 on coarsest)
     # A nodal level additionally carries the inverse of each cell's own dense block. The scalar
     # diagonal cannot smooth a multi-field operator whose within-cell coupling dwarfs it -- a point
     # method discards that coupling entirely -- so the smoother inverts the block instead. Traced,
@@ -631,7 +639,9 @@ class ShapeBudget(NamedTuple):
     Attributes
     ----------
     coarse_cells : tuple of int
-        Aggregates to coarsen into at each level, finest first. Its length fixes the level count.
+        Aggregates to coarsen into at each **coarse** level, finest first. Its length is therefore one
+        fewer than the level count: a budget of ``k`` entries coarsens ``k`` times and then solves the
+        ``k + 1``-th level directly.
     operator_nnz : tuple of int
         Entry-array length for each coarse level's operator, in the same order.
     """
@@ -714,8 +724,14 @@ class SmoothedHierarchy(eqx.Module):
         the partition follows ``|A_ij|`` and moves as the operator develops. Refitting holds the
         coarsening fixed and recomputes only what depends on values: each level's Galerkin operator
         ``Pᵀ A P``, its diagonal (or per-cell block inverse), its spectral estimate, and the coarsest
-        level's dense inverse. Array shapes and static metadata are therefore unchanged by construction,
-        so a refitted hierarchy passed as a jit argument is a compilation-cache hit.
+        level's dense inverse. Array shapes and static metadata are therefore unchanged, so a refitted
+        hierarchy passed as a jit argument is a compilation-cache hit.
+
+        **That holds for a hierarchy coarsened without a** :class:`ShapeBudget`. A refit re-derives each
+        level from the reused prolongations alone: it pads no operator to a budgeted entry count, and it
+        does not re-apply the unit diagonal the budgeted build gives an empty padding aggregate. Refit a
+        budgeted hierarchy and the shapes move (and a structurally empty coarse row can then be
+        rejected); rebuild into the budget instead.
 
         **What is frozen is the interpolation, which is more than the aggregation when the prolongator
         was smoothed.** With ``prolongation_smoothing="none"`` the prolongation is the aggregates'
@@ -844,10 +860,10 @@ def _dense_inverse(a: sp.spmatrix) -> np.ndarray:
     The coarse solve must be an actual solve — an inexact bottom solve leaves the smoothest error in
     and is the dominant cause of mesh-dependent V-cycle degradation — but it need not be a
     *pseudo*-inverse. A pseudo-inverse is a singular value decomposition, which costs roughly an order
-    of magnitude more than a factorization at the same size and grows worse with it: at the largest
-    coarse level this module permits (:data:`_MAX_DENSE_COARSE_DOFS`) the decomposition takes around a
-    hundred seconds against ten for the factorization. That cost is charged at every build and at every
-    mid-march refresh, so it is the largest single term in a hierarchy setup.
+    of magnitude more than a factorization at the same size, and the gap widens with size — so it is
+    worst at the largest coarse level this module permits
+    (:data:`_MAX_DENSE_COARSE_DOFS`). That cost is charged at every build and at every mid-march
+    refresh, so it is the largest single term in a hierarchy setup.
 
     The generality is only needed for a **singular** operator, and this module works to avoid producing
     one: an empty aggregate is given a unit diagonal precisely so the coarse level has no structurally
@@ -1526,7 +1542,9 @@ def _fixed_cycle_solve(levels: tuple, b: jnp.ndarray, cycles: int, ops: _VCycleO
 
     Each pass corrects the current iterate by a V-cycle on the current residual, so with a frozen
     hierarchy and a fixed ``cycles`` the map ``b -> x`` is a constant linear operator — what makes it
-    a valid frozen left preconditioner under plain GMRES, and what lets the adjoint transpose it.
+    a valid frozen preconditioner under plain non-flexible GMRES, and what lets the adjoint transpose
+    it. Being linear, it is equally valid on either side; the caller chooses via
+    ``solve_linear(preconditioner_side=…)``, which defaults to the right.
     Only the level-local ``ops`` differ between the families.
     """
     if cycles <= 0:
@@ -1579,9 +1597,10 @@ def smoothed_multigrid_solve(
     constant-linear inner solve for the SIMPLE pressure Schur.
 
     The hierarchy is frozen (built once off-jit); a fixed cycle count with fixed Chebyshev smoothing
-    and a direct coarse solve makes ``b -> x`` a constant linear operator, so it is a valid frozen left
-    preconditioner under plain GMRES. On a model Poisson the V-cycle contraction is ~0.25 and roughly
-    mesh-independent (256 → 9216 cells).
+    and a direct coarse solve makes ``b -> x`` a constant linear operator, so it is a valid frozen
+    preconditioner under a non-flexible Krylov solve, on either side, and transposable for the adjoint.
+    On a model Poisson the V-cycle contraction is ~0.25 and roughly mesh-independent (256 → 9216
+    cells).
 
     Parameters
     ----------
@@ -1672,7 +1691,8 @@ def build_convection_hierarchy(
     Parameters
     ----------
     a : scipy.sparse matrix
-        The frozen (nonsymmetric) convection-diffusion operator, shape ``(n_cells, n_cells)``.
+        The frozen (nonsymmetric) convection-diffusion operator, shape ``(n_dofs, n_dofs)`` with
+        ``n_dofs = block_size * n_cells``, field-major.
     omega_smooth : float
         Prolongation-smoothing damping factor; the applied damping is ``omega_smooth * 2 / lambda_max``
         (``lambda_max`` of the symmetric part).
@@ -1761,8 +1781,9 @@ def _jacobi_smooth(
     """Damped-Jacobi smoother ``x <- x + alpha D^-1 (b - A x)`` (``sweeps`` times).
 
     Matrix-free and a fixed linear operator. With ``spectral_damping`` the relaxation is
-    ``alpha = omega / lambda_max``, scaled by the per-level ``lambda_max`` (of the symmetric part) so
-    ``omega`` in ``(0, 1]`` is a mesh- and scale-independent damping — the high-frequency-smoothing
+    ``alpha = omega / lambda_max``, scaled by the per-level ``lambda_max`` — which is the estimate for
+    the **true** ``D^-1 A``, not for its symmetric part; the symmetric part only sets the prolongation
+    smoothing at build time — so ``omega`` in ``(0, 1]`` is a mesh- and scale-independent damping — the high-frequency-smoothing
     choice for the M-matrix convection-diffusion operator, where a Chebyshev interval smoother
     (assuming a real spectrum) is not safe.
 
@@ -1839,14 +1860,15 @@ def convection_multigrid_solve(
 
     The hierarchy is frozen (built once off-jit at a reference mass flux); a fixed cycle count with a
     fixed damped-Jacobi smoother and a direct coarse solve makes ``b -> x`` a constant linear operator,
-    so it is a valid frozen left preconditioner under plain GMRES and transposes cleanly for the adjoint.
+    so it is a valid frozen preconditioner under plain non-flexible GMRES (on either side) and
+    transposes cleanly for the adjoint.
 
     Parameters
     ----------
     hierarchy : SmoothedHierarchy
         From :func:`build_convection_hierarchy`.
     b : jnp.ndarray
-        Right-hand side, shape ``(n_cells,)``.
+        Right-hand side, shape ``(n_dofs,)`` — ``block_size * n_cells``, field-major.
     cycles : int
         Number of V-cycles (static).
     sweeps : int
@@ -1865,7 +1887,7 @@ def convection_multigrid_solve(
     Returns
     -------
     jnp.ndarray
-        The approximate solution ``x``, shape ``(n_cells,)``.
+        The approximate solution ``x``, shape ``(n_dofs,)``.
     """
 
     def smoother(level: _SparseLevel, rhs: jnp.ndarray, guess: jnp.ndarray) -> jnp.ndarray:
@@ -2289,8 +2311,9 @@ def air_multigrid_solve(
     solve for a convection-dominated (velocity) block.
 
     The hierarchy is frozen (built once off-jit); a fixed cycle count with fixed FC-Jacobi smoothing
-    and a direct coarse solve makes ``b -> x`` a constant linear operator, so it is a valid frozen left
-    preconditioner under plain GMRES and transposes cleanly for the adjoint.
+    and a direct coarse solve makes ``b -> x`` a constant linear operator, so it is a valid frozen
+    preconditioner under a non-flexible Krylov solve, on either side, and transposes cleanly for the
+    adjoint.
 
     Parameters
     ----------

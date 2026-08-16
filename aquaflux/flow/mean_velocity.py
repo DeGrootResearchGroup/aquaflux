@@ -33,9 +33,9 @@ error.
 **Preconditioning the augmented system (constraint preconditioning).** ``beta`` is a Lagrange
 multiplier, not a function of ``w``, so -- unlike a nested gradient sub-solve -- it cannot be absorbed
 inside the residual; the border is eliminated one layer down, in the **preconditioner**. Given a flow-
-block preconditioner ``M ~ J^{-1}`` (the block-SIMPLE AMG), :func:`_bordered_preconditioner` wraps it
-into a preconditioner for the ``(dim+1) n_cells + 1`` augmented system by Schur-eliminating the scalar
-``beta``:
+block preconditioner ``M ~ J^{-1}`` (the block-SIMPLE algebraic multigrid, AMG),
+:func:`_bordered_preconditioner` wraps it into a preconditioner for the ``(dim+1) n_cells + 1``
+augmented system by Schur-eliminating the scalar ``beta``:
 
     y   = M r_flow
     dbeta = (c^T y - r_beta) / (c^T M a)      # the 1x1 Schur complement c^T J^{-1} a, approximated

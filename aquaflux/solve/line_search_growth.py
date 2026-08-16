@@ -67,9 +67,9 @@ class MonotoneLineSearch(eqx.Module):
 class RelaxedFarFromRoot(eqx.Module):
     """Admit growth while far from the root, restore strict descent inside the basin.
 
-    ``growth = max_growth`` while ``||R|| / ||R_0|| > basin``, easing to ``1`` below it. The transition
-    is smooth in the residual ratio rather than a switch, so the accepted step length does not jump as
-    the march crosses the threshold.
+    ``growth`` is ``1`` at and below ``||R|| / ||R_0|| = basin``, rises through the decade above it, and
+    reaches ``max_growth`` at ``10 * basin`` and beyond. The transition is smooth rather than a switch,
+    so the accepted step length does not jump as the march crosses the threshold.
 
     Attributes
     ----------

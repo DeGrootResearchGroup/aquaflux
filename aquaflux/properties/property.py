@@ -14,10 +14,13 @@ kinds are built here, from least to most spatially resolved:
 A state-dependent kind (a value computed from a field through a formula, e.g. temperature-dependent
 viscosity) is a later addition that consumes the ``fields`` argument.
 
-Property values are **plain scalars**, not wrapped arrays: a property is differentiated by passing
-its value as a traced argument (constructing the property inside the differentiated function), the
-same pattern the boundary Biot number uses — so a property parameter is a first-class sensitivity /
-estimation target with no extra ceremony.
+A :class:`Constant`'s value is a **plain scalar**, not a wrapped array: a property is differentiated
+by passing its value as a traced argument (constructing the property inside the differentiated
+function), the same pattern the boundary Biot number uses — so a property parameter is a first-class
+sensitivity / estimation target with no extra ceremony. (:class:`ZoneConstant` and
+:class:`FieldProperty` hold real arrays, being indexed collections rather than one value; and see
+:meth:`Constant.scaled` for when passing even a scalar as ``jnp.asarray`` matters, for sharing
+compiled code across rescales.)
 """
 
 from __future__ import annotations

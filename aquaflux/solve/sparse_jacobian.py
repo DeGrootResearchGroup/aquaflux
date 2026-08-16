@@ -4,9 +4,9 @@ Some preconditioners need the assembled coupled Jacobian as a sparse matrix rath
 matrix-vector product — an incomplete-factorization (ILU) preconditioner factors the matrix, which a
 matrix-free operator cannot supply. This module recovers that matrix from the *same* residual the
 solver uses, so there is no second, hand-derived assembly to drift from it: it probes the residual's
-directional derivative (one ``jax.jvp`` per colour) and de-compresses the responses into the sparse
-matrix, exploiting the mesh's finite stencil so a handful of probes recover the whole Jacobian instead
-of one probe per degree of freedom.
+directional derivative (one ``jax.jvp`` per colour and column field) and de-compresses the responses
+into the sparse matrix, exploiting the mesh's finite stencil so a handful of probes recover the whole
+Jacobian instead of one probe per degree of freedom.
 
 The state is laid out **field-major** — degree of freedom ``(cell i, field f)`` lives at flat index
 ``f * n_cells + i`` — matching the coupled-state layout the solver packs. The Jacobian's sparsity is
@@ -458,16 +458,18 @@ def block_stencil_gather_map(plan: ColumnProbePlan) -> ProbeGather:
     The sparsity pattern and the coloured probes are fixed (they depend only on the mesh graph), so the
     materialize's de-compression -- which probe response each Jacobian entry reads -- is the same every
     time; only the response *values* change. This precomputes, once, the **full-pattern** CSR structure
-    (``indptr``, ``indices``) and a flat index ``gather_map`` such that a materialize is a single gather
-    ``data = responses.ravel()[gather_map]`` (no per-materialize scatter loop, no CSR re-sort). The full
+    (``indptr``, ``indices``) and the de-compression that fills it, sorted so that each probe chunk's
+    entries are one contiguous slice (:meth:`ProbeGather.scatter`) -- so a materialize needs no CSR
+    re-sort and never holds the full response array. The full
     pattern (no ``eliminate_zeros``) makes the structure truly fixed, which is exactly what an in-place
     preconditioner refactor needs; an aggregation multigrid tolerates the explicit zeros (a
     strength-of-connection coarsening ignores a zero coupling). An incomplete/complete factorization does
     **not** -- an explicit zero is fill -- so this path is for the multigrid preconditioner only.
 
     Degree of freedom ``(cell i, field f)`` is the flat index ``f * n_cells + i``; the probe for
-    ``(colour c, field b)`` is index ``probe_base[b] + c`` (the order :meth:`ColumnProbePlan.seeds`
-    builds them), so the response element feeding entry ``(row_dof = a n + i, col_dof = b n + j)`` is
+    ``(colour c, field b)`` is index ``probe_base[b] + c`` (the order
+    :meth:`ColumnProbePlan.seed_block` builds them), so the response element feeding entry
+    ``(row_dof = a n + i, col_dof = b n + j)`` is
     ``responses[probe_base[b] + colour[b][j]][a n + i]``, i.e. flat index
     ``(probe_base[b] + colour[b][j]) * (n_fields n) + row_dof``.
 
@@ -761,8 +763,9 @@ def jacobian_relative_error(
     """Relative error of a materialized Jacobian against the operator on a random vector.
 
     The cheap guard that the colouring's ``reach`` covers the true stencil: too small a reach silently
-    drops the far couplings, which shows up here as a large error. A faithful materialization returns
-    the finite-difference / floating-point floor (``~1e-7`` or below for a smooth residual).
+    drops the far couplings, which shows up here as a large error. Both sides are exact forward-mode
+    derivatives (the probe is a ``jax.jvp``, not a difference quotient), so a faithful materialization
+    returns the floating-point round-off floor.
 
     Parameters
     ----------

@@ -156,7 +156,7 @@ class ShiftTerm(NamedTuple):
         with zeros on the degrees of freedom that receive no shift. The step scales it by the
         relaxation to form the shift ``β d`` added to the Jacobian diagonal.
     make_preconditioner : callable
-        ``relaxation -> M`` giving the frozen left preconditioner ``M`` (a matvec approximating the
+        ``relaxation -> M`` giving the frozen preconditioner ``M`` (a matvec approximating the
         *shifted* operator's inverse) for a given ``β``, or ``None`` for an unpreconditioned solve.
         Passed the same ``β`` the diagonal is scaled by, so ``M`` inverts the same shifted operator.
     """
@@ -368,6 +368,25 @@ class PseudoTransientStep(ShiftedStep):
         :class:`DivergenceGuard` (accept unless the candidate is non-finite or exceeds
         ``divergence_cap × ‖R₀‖``) — the divergence guard the non-monotone march needs. Swap in a
         monotone / sufficient-decrease or forcing rule without touching the escalation loop.
+    grow : int
+        Rungs the backtracking ladder may try **above** the full step, i.e.
+        ``α = 2**grow, …, 2, 1, 1/2, …`` (static). ``0`` (the default) is the one-sided ladder that
+        starts at the full step. The admissible step is often longer than the full one, and a ladder
+        starting at ``1`` cannot express that — so a march reporting ``α = 1`` every step may simply
+        never have been asked whether more was allowed. A growth rung is only ever reachable by
+        passing the acceptance test; the no-admissible-rung fallback is capped at the full step.
+    descent_backoff : int
+        The most times ``β`` may be **divided** by :attr:`escalation_factor` until the correction
+        descends in the measure, before the escalation ladder starts from there (static). ``0`` (the
+        default) is off, because each backoff costs one shifted solve. It answers the opposite failure
+        to escalation: the shifted direction satisfies ``J δ = −R − β D δ``, whose second term has no
+        fixed sign and grows with ``β``, so where no step length along the direction can help, more
+        damping makes the direction strictly worse.
+    descent_test : bool
+        Reject a correction that does not descend in the measure, rather than judging it on the
+        candidate's norm alone (static, default ``False``). Independent of :attr:`descent_backoff`:
+        with the backoff off, this makes a non-descent direction fail visibly instead of yielding a
+        step that quietly went nowhere.
     line_search : int
         Maximum backtracking step-halvings applied to the shifted correction *before* the step is
         judged (static). ``0`` (the default) takes the full shifted step ``φ + δ``, so escalating
@@ -387,7 +406,8 @@ class PseudoTransientStep(ShiftedStep):
         operator needs a larger Krylov subspace to converge without restarting can pass a
         larger-``restart`` GMRES here; ``None`` uses the shared default.
     residual_norm : ResidualNorm
-        The residual measure ``R -> scalar`` the march judges progress by (static, default the
+        The residual measure ``R -> scalar`` the march judges progress by (data, not static — see
+        :class:`ShiftedStep`; default the
         Euclidean norm): the switched-evolution-relaxation ramp ``β = β₀(‖R‖/‖R₀‖)^p``, the line
         search, and the acceptance/divergence guard all use it, and :class:`ImplicitNewtonSolver`
         reads it (via :meth:`norm`) for the outer stopping test, so one measure governs the whole
@@ -455,7 +475,7 @@ class PseudoTransientStep(ShiftedStep):
     def stepper(self) -> StepFn:
         """The accepted shifted-Newton step and its linear solve's cycle count.
 
-        ``(residual_fn, φ, ‖R₀‖, solver) -> (φ_next, cycles, alpha, inner_iterations)``. ``cycles`` is the
+        ``(residual_fn, φ, ‖R₀‖, solver) -> StepOutcome``. ``cycles`` is the
         raw solver count of the **accepted** attempt's shifted linear solve — the cost of the step that
         was actually taken, not the sum over rejected escalation attempts; ``inner_iterations`` is ``1``
         (a single-step attempt has no inner loop); ``alpha`` is that attempt's
@@ -501,7 +521,7 @@ class PseudoTransientStep(ShiftedStep):
             phi: jnp.ndarray,
             residual_norm_0: jnp.ndarray,
             solver: lx.AbstractLinearSolver,
-        ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        ) -> StepOutcome:
             residual = residual_fn(phi)
             residual_norm = norm(residual)
             term = policy.shift_term(phi)  # base diagonal + β -> M, from the same iterate
@@ -885,7 +905,7 @@ class DualTimeStep(ShiftedStep):
     def stepper(self) -> StepFn:
         """One backward-Euler outer timestep: the inner-converged iterate and its total solve cost.
 
-        ``(residual_fn, φ, ‖R₀‖, solver) -> (φ_next, cycles, alpha, inner_iterations)``. The reference
+        ``(residual_fn, φ, ‖R₀‖, solver) -> StepOutcome``. The reference
         ``φⁿ`` is ``φ``; ``cycles`` is the **summed** raw solver count over the inner Newton iterations
         and ``inner_iterations`` is that count (so a consumer can recover the per-solve cost); ``alpha``
         is the **smallest** inner line-search factor (``1`` when every inner step took the full length, smaller
@@ -920,7 +940,7 @@ class DualTimeStep(ShiftedStep):
             phi: jnp.ndarray,
             residual_norm_0: jnp.ndarray,
             solver: lx.AbstractLinearSolver,
-        ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        ) -> StepOutcome:
             reference = phi  # φⁿ, held across the inner loop
             # ‖R(φⁿ)‖ = ‖G(φⁿ)‖: the transient term β d (φ − φⁿ) is zero at the anchor, so the honest
             # steady residual at the anchor and the inner loop's starting G-norm are the same number.

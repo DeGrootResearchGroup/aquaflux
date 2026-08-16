@@ -1,7 +1,7 @@
-"""Layer-0 residual substrate: gather → compute → scatter assembly of `R(state, params)`.
+"""The residual substrate: gather, compute the face flux, scatter to cells — `R(state, params)`.
 
 The residual is assembled by `segment_sum` scatter over face→cell index arrays from
-injected per-operator flux/source closures; the Jacobian and adjoint come from AD.
+injected per-operator flux/source strategy objects; the Jacobian and adjoint come from AD.
 No hand-derived linearization coefficients live here.
 """
 

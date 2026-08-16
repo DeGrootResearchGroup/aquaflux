@@ -7,8 +7,8 @@ to the fixed point. This module assembles the same physics as **one residual ove
 strain ``S(u)``, and the Rhie--Chow mass flux ``mdot(u, p)`` are live functions of the state, so a
 single Newton solve sees the exact cross-block coupling.
 
-Why monolithic, when the segregated loop already converges? Two reasons, both in the turbulence
-design note (S5): a monolithic Newton reaches **quadratic** coupled convergence the Picard loop
+Why monolithic, when the segregated loop already converges? Two reasons: a monolithic Newton reaches
+**quadratic** coupled convergence the Picard loop
 cannot, and -- handed to :class:`~aquaflux.solve.ImplicitNewtonSolver` -- it yields the **exact
 coupled adjoint** as a single transpose solve on the unfrozen ``R_coupled`` at the converged state.
 The segregated loop is retained as a robust startup pre-smoother / fallback, not the sensitivity
@@ -154,9 +154,10 @@ class ScalarVariableTransform(eqx.Module):
 class DirectScalars(ScalarVariableTransform):
     """The identity parametrization: the solved unknown *is* the physical field (``phi = w``).
 
-    Positivity is not structural here -- it is carried by the pseudo-transient shift and the
-    realizability floor -- so a full Newton step can transiently violate ``omega > 0`` on a stiff
-    high-Reynolds case. The historical default; use :class:`LogScalars` where that matters.
+    Positivity is not structural here -- it is carried by the pseudo-transient shift, the divergence
+    guard, and (for ``k``) the fraction-to-the-boundary step limiter :func:`positive_k_limit` -- so a
+    full Newton step can transiently violate ``omega > 0`` on a stiff high-Reynolds case. The
+    historical default; use :class:`LogScalars` where that matters.
     """
 
     def to_physical(self, w: jnp.ndarray) -> jnp.ndarray:
@@ -279,8 +280,9 @@ class CoupledRANS(eqx.Module):
     Attributes
     ----------
     momentum : MomentumContinuity
-        The flow assembler; its molecular ``viscosity`` property is overwritten by ``mu_eff`` each
-        evaluation (the molecular viscosity comes from ``turbulence``).
+        The flow assembler; it owns the molecular viscosity and receives the closure's kinematic
+        ``nu_t`` each evaluation, forming ``mu_eff = mu + rho nu_t`` itself (the molecular viscosity in
+        its property model is left intact, so re-applying ``nu_t`` never accumulates).
     turbulence : SSTTurbulence
         The k-omega SST closure and equation assembler.
     k_transform, omega_transform : ScalarVariableTransform
@@ -494,7 +496,8 @@ class CoupledShiftPolicy(eqx.Module):
 
     Composes the three subsystems' pseudo-transient choices block-diagonally: the momentum block's
     ``a_P`` velocity shift + block-SIMPLE preconditioner (:class:`~aquaflux.flow.MomentumShiftPolicy`),
-    and the k and omega transport-operator shift diagonals + convection-diffusion AMGs
+    and the k and omega transport-operator shift diagonals + convection-diffusion algebraic-multigrid
+    (AMG) preconditioners
     (:class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy`). The full-state shift diagonal is
     ``[a_P on u, 0 on p, d_k on k, d_omega on omega]`` and the preconditioner is the block-diagonal
     matvec gluing the flow preconditioner to the two scalar AMGs.
@@ -540,8 +543,10 @@ class CoupledShiftPolicy(eqx.Module):
         ``None`` for an unpreconditioned (identity) scalar block.
     velocity_shift_parts : VelocityShiftParts or None
         Where the velocity shift's two diagonal buckets come from. ``None`` (default) takes them from
-        the frozen flow preconditioner -- live in velocity, frozen in viscosity -- which is the
-        historical behaviour. Pass :class:`LiveViscosityVelocityParts` to form them at the current
+        the flow **assembler's** frozen momentum diagonal
+        (:func:`~aquaflux.flow.frozen_momentum_diagonal_parts`) -- live in velocity, frozen in
+        viscosity -- which is the historical behaviour and needs no preconditioner, so a shift-only
+        policy works on this path. Pass :class:`LiveViscosityVelocityParts` to form them at the current
         effective viscosity instead. **Carried across a refresh**, since it is a configuration choice
         rather than frozen state.
     shift_basis : ShiftBasis
@@ -797,7 +802,8 @@ _COUPLED_FORWARD_SOLVER = relative_residual_gmres(
     1e-2, restart=120, stagnation_iters=40, max_restarts=15
 )
 
-# The monolithic ILUT preconditions the whole coupled saddle with an incomplete factorization that
+# The monolithic threshold incomplete-LU (ILUT) preconditions the whole coupled saddle with an
+# incomplete factorization that
 # forms the true Schur coupling through its fill, so the preconditioned operator's spectrum is tightly
 # clustered and the Krylov solve reaches the 1% stop within a handful of vectors -- the large
 # 120-vector subspace the block-triangular preconditioner needs is pure waste here. A restarted GMRES
@@ -817,7 +823,8 @@ _COUPLED_ILUT_FORWARD_SOLVER = relative_residual_gmres(
 # amortizes dispatch over more probes; the coloured probes run in ceil(n_probes / this) fused passes
 # instead of an n_probes-call Python loop.
 #
-# Measured on the 3D backward-facing step (399 probes, 47.2M nonzeros), wall / peak against the batch:
+# Measured on the 3D backward-facing step (399 probes; 47.2M structural nonzeros in the fixed sparsity
+# pattern, of which ~38.7-39.0M are live at any one state), wall / peak against the batch:
 #
 #     batch      1      2      4      8     16     32
 #     wall    11.7    8.4    6.7    5.9    5.8    6.5   s
@@ -1002,8 +1009,9 @@ def coupled_scaled_norm(
     ----------
     coupled : CoupledRANS
         The coupled assembler, for the layout and the physical fields.
-    shift_policy : CoupledShiftPolicy
-        The policy whose base shift diagonal supplies the per-row diagonals.
+    shift_policy : ShiftPolicy
+        Any policy whose base shift diagonal supplies the per-row diagonals -- the block
+        :class:`CoupledShiftPolicy`, or a :class:`MonolithicFactorShiftPolicy` wrapping one.
     state : jnp.ndarray
         The coupled state the scales are measured at, shape ``((dim + 3) n_cells,)``.
 
@@ -1148,6 +1156,11 @@ def coupled_continuation(
         under-relaxation), unchanged from the historical shift. Pass
         ``LocalCourantBasis(dissipative_weight=0.0)`` for a local convective time step on the transport
         blocks (pressure keeps its zero shift either way).
+    velocity_shift_parts : VelocityShiftParts or None
+        Where the velocity shift's two diagonal buckets come from (see :class:`CoupledShiftPolicy`).
+        ``None`` (default) takes them from the flow assembler's frozen momentum diagonal; pass
+        :class:`LiveViscosityVelocityParts` to form them at the current effective viscosity instead.
+        Ignored when ``reuse`` is given, which carries the reused policy's own choice.
     reuse : CoupledShiftPolicy, optional
         An existing policy to **refresh** at ``reference_state`` instead of building one from scratch:
         the k/omega AMGs are re-derived on their reused coarsening while the flow block is carried over
@@ -1179,6 +1192,10 @@ def coupled_continuation(
         Reject a correction that does not descend, rather than judging the candidate's norm alone. With
         the backoff off this surfaces a non-descent direction instead of letting it pass as a step that
         quietly went nowhere.
+    inner_observer : callable or None
+        A per-inner-iteration profiling hook forwarded to the built dual-time step (only used when
+        ``inner_steps > 1``); see :class:`~aquaflux.solve.DualTimeStep`. ``None`` (default) leaves the
+        step byte-identical. Forward-only -- do not set it on a differentiated solve.
     **preconditioner_kwargs
         Forwarded to :meth:`~aquaflux.flow.BlockPreconditioner.build` for the flow block (e.g.
         ``schur_scaling``, ``velocity``). Ignored when ``reuse`` is given, since the flow block is then
@@ -1271,9 +1288,10 @@ def _coupled_shift_policy(
 
     ``reuse`` **refreshes** an existing policy at a new (more developed) ``reference_state`` rather than
     building one from scratch. The scalar k/omega AMGs are re-derived on their reused coarsening
-    (:func:`~aquaflux.turbulence.preconditioner.scalar_transport_preconditioner`'s ``reuse=`` -- worth
-    ~2.4x in outer Krylov cycles on a separated backward-facing-step state), and the shift's **transport
-    time scale is rebuilt** at the new state. **Carried over from ``reuse`` untouched**: the flow block
+    (:func:`~aquaflux.turbulence.preconditioner.scalar_transport_preconditioner`'s ``reuse=`` -- the
+    coarse space stays valid while its operators are re-derived, so the shifted solve stops paying for
+    a coarsening fitted to a flow that has since separated), and the shift's **transport time scale is
+    rebuilt** at the new state. **Carried over from ``reuse`` untouched**: the flow block
     (re-freezing it at the developed state was measured no help and slightly harmful, and it is the
     expensive half) and the shift's **coordinate factor** ``jacobian_scale``.
 
@@ -1317,8 +1335,8 @@ def _coupled_shift_policy(
     # The coupled flow block uses the convection-aware velocity AMG + MSIMPLER Schur, not the viscous-
     # smoothed / SIMPLE default: a RANS case is high-Reynolds, and the Peclet-blind smoothed velocity
     # block with the ``a_P`` Schur produces a poor momentum-block direction once the flow separates
-    # (the shifted Newton direction was measured only ~40% aligned with the true one on the developed
-    # pitzDaily field, stalling the march). The convection block's convective linearization and the
+    # (the shifted Newton direction it returns drifts away from the true one on a developed separated
+    # field, and the march stalls). The convection block's convective linearization and the
     # MSIMPLER Schur's velocity-independent scaling both stay valid frozen at the cold initial state
     # (the reference), so no per-sweep refresh is needed. Overridable via preconditioner_kwargs.
     # `build_flow_block=False` leaves it out entirely: a monolithically preconditioned step reads this
@@ -1446,33 +1464,35 @@ def _is_traced(pytree: object) -> bool:
 
 class MonolithicFactorShiftPolicy(eqx.Module):
     """A coupled :class:`~aquaflux.solve.ShiftPolicy` that preconditions the whole ``[flow, k, omega]``
-    saddle with one monolithic factorization of the assembled coupled Jacobian, in place of the
+    saddle with one monolithic inverse of the assembled coupled Jacobian, in place of the
     block-diagonal composition.
 
     Reuses :class:`CoupledShiftPolicy`'s pseudo-transient shift diagonal -- the physics, the same
     velocity ``a_P`` and k/omega transport diagonals -- but replaces its block-diagonal preconditioner
-    with a single monolithic factorization of the assembled coupled Jacobian, which forms the true
-    pressure Schur coupling through its fill rather than approximating it. The factorization is either
-    an incomplete threshold-ILU (:class:`~aquaflux.solve.MonolithicIlutPreconditioner`, a handful of
-    Krylov cycles) or a complete LU (:class:`~aquaflux.solve.MonolithicLuPreconditioner`, exact, one
-    cycle) -- this policy is agnostic to which, needing only the shared callback-matvec interface. On a
-    convection-dominated collocated Rhie--Chow RANS saddle either reaches the forward tolerance where the
-    block-triangular preconditioner needs hundreds of cycles.
+    with a single monolithic inverse of the assembled coupled Jacobian, which forms the true
+    pressure Schur coupling rather than approximating it. That inverse is an incomplete threshold-ILU
+    (:class:`~aquaflux.solve.MonolithicIlutPreconditioner`, a handful of Krylov cycles), a complete LU
+    (:class:`~aquaflux.solve.MonolithicLuPreconditioner`, exact, one cycle), or a multigrid V-cycle
+    (:class:`~aquaflux.solve.MonolithicAmgPreconditioner`, bounded memory on a large three-dimensional
+    mesh) -- this policy is agnostic to which, needing only the shared callback-matvec interface. On a
+    convection-dominated collocated Rhie--Chow RANS saddle any of them reaches the forward tolerance
+    where the block-triangular preconditioner needs hundreds of cycles.
 
-    The factorization is frozen at a reference state and shift (built off the jit path by
-    :func:`coupled_ilut_continuation` / :func:`coupled_lu_continuation`). Unlike the block
+    The inverse is frozen at a reference state and shift (built off the jit path by
+    :func:`coupled_ilut_continuation` / :func:`coupled_lu_continuation` /
+    :func:`coupled_amg_continuation`). Unlike the block
     preconditioner's live ``a_P`` rescaling it does not track the developing state; being a far stronger
     preconditioner it tolerates that freezing at a cost of a few extra cycles, and the shift vanishes at
-    the root so the frozen factorization never changes the converged solution or its adjoint. Because it
-    is a host object (``scipy`` / UMFPACK) it rides as a **static** field rather than a traced pytree
-    leaf, and is applied inside the jitted Krylov solve through the callback matvec.
+    the root so the frozen inverse never changes the converged solution or its adjoint. Because it
+    is a host object (``scipy`` / UMFPACK / PETSc) it rides as a **static** field rather than a traced
+    pytree leaf, and is applied inside the jitted Krylov solve through the callback matvec.
 
     Attributes
     ----------
     base : CoupledShiftPolicy
         The block policy supplying the pseudo-transient shift diagonal.
-    preconditioner : MonolithicIlutPreconditioner or MonolithicLuPreconditioner
-        The frozen coupled factorization (a static field). Any object exposing the ``matvec`` /
+    preconditioner : MonolithicIlutPreconditioner, MonolithicLuPreconditioner or MonolithicAmgPreconditioner
+        The frozen coupled inverse (a static field). Any object exposing the ``matvec`` /
         ``matvec(transpose=True)`` callback interface works.
     """
 
@@ -1489,7 +1509,8 @@ class MonolithicFactorShiftPolicy(eqx.Module):
         V-cycle) instead returns a **tagged full-solve** the step applies directly on the host -- the
         multigrid V-cycle is only a *moderate* inverse, so the JAX-side Krylov with it as a per-matvec
         callback needs tens of iterations, where PETSc's own GMRES driving the same V-cycle natively
-        reaches the 1% stop in ~1 iteration (measured, ~60x faster per step). The forward-only native solve
+        reaches the 1% stop in far fewer -- each JAX-side matvec pays a host round-trip that the native
+        path does not, so the cost gap is wider than the iteration gap. The forward-only native solve
         does not touch the differentiable path: the adjoint uses the single-V-cycle transpose below.
 
         Parameters
@@ -1594,8 +1615,8 @@ class CoupledJacobianProbe:
         The collision-free colouring and per-column reach the coloured directional-derivative probe
         runs, which is what fixes how many probes a materialize costs.
     structure : ProbeGather
-        The fixed compressed-sparse-row structure -- a row-pointer array plus a flat column-index array
-        -- together with the ordering that scatters the probe responses into it, so a materialize
+        The fixed compressed-sparse-row (CSR) structure -- a row-pointer array plus a flat column-index
+        array -- together with the ordering that scatters the probe responses into it, so a materialize
         de-compresses by one gather rather than a scatter loop and a re-sort.
     """
 
@@ -1642,15 +1663,6 @@ def _monolithic_shift_source(
     want exactly the same thing from it and had each written the call out.
 
     :class:`MonolithicFactorShiftPolicy` takes only ``base.shift_term(phi).diagonal`` -- it supplies its
-    own inverse and never calls the block policy's ``make_preconditioner``. So the block preconditioner
-    inside this policy is a **diagonal source**, and its velocity and pressure-Schur multigrid
-    hierarchies are built here and then never applied. That costs two multigrid setups per build, and it
-    is also what makes a Reynolds-continuation rung recompile the whole coupled solve: those hierarchies
-    aggregate along strong connections, which reads the operator's *values*, so their coarse grids --
-    and hence the array shapes this policy carries -- move with the molecular viscosity, and the
-    compiled step is keyed on them.
-
-    :class:`MonolithicFactorShiftPolicy` takes only ``base.shift_term(phi).diagonal`` -- it supplies its
     own inverse and never calls the block policy's ``make_preconditioner``. So this policy is built
     **without a flow block at all**: the shift's velocity buckets come from the flow assembler's frozen
     momentum diagonal, which is the whole dependency, and the block preconditioner that used to be built
@@ -1674,7 +1686,7 @@ def _frozen_shift_diagonal(base: CoupledShiftPolicy, beta: float, state: jnp.nda
 
     ``beta`` scales the base policy's shift diagonal; the ``stop_gradient`` keeps the frozen
     factorization off the differentiation path. Shared by the initial build and every in-place refresh,
-    for both the ILUT and complete-LU preconditioners.
+    for the ILUT, complete-LU and multigrid preconditioners alike.
     """
     return np.asarray(beta * jax.lax.stop_gradient(base.shift_term(state).diagonal))
 
@@ -1706,13 +1718,14 @@ def _monolithic_factor_step(
     step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
 ) -> ForwardStep:
-    """Assemble the pseudo-transient / dual-time step around a frozen monolithic factorization.
+    """Assemble the pseudo-transient / dual-time step around a frozen monolithic preconditioner.
 
-    The shared tail of :func:`coupled_ilut_continuation` and :func:`coupled_lu_continuation`: it glues the
-    already-built ``preconditioner`` (ILUT or complete-LU) to the block shift ``base`` via a
+    The shared tail of :func:`coupled_ilut_continuation`, :func:`coupled_lu_continuation` and
+    :func:`coupled_amg_continuation`: it glues the already-built ``preconditioner`` (ILUT, complete-LU
+    or multigrid V-cycle) to the block shift ``base`` via a
     :class:`MonolithicFactorShiftPolicy`, picks the row-equilibrated progress measure, and returns a
     :class:`~aquaflux.solve.DualTimeStep` (``inner_steps > 1``) or :class:`~aquaflux.solve.PseudoTransientStep`.
-    The two builders differ only in how they construct ``preconditioner``.
+    The three builders differ only in how they construct ``preconditioner``.
     """
     policy = MonolithicFactorShiftPolicy(base, preconditioner)
     if residual_norm is None:
@@ -1849,16 +1862,22 @@ def coupled_ilut_continuation(
     residual_norm : ResidualNorm, optional
         An explicit progress measure (overrides ``block_scaled_norm``); ``solve_coupled`` passes the
         march's initial measure here on every refresh.
+    inner_observer : callable or None
+        A per-inner-iteration profiling hook forwarded to the built dual-time step (only used when
+        ``inner_steps > 1``); see :class:`~aquaflux.solve.DualTimeStep`. ``None`` (default) leaves the
+        step byte-identical. Forward-only -- do not set it on a differentiated solve.
 
     Returns
     -------
     ForwardStep
-        The :class:`~aquaflux.solve.PseudoTransientStep` to hand ``solve_coupled`` as ``continuation``.
+        The step to hand ``solve_coupled`` as ``continuation`` -- a
+        :class:`~aquaflux.solve.PseudoTransientStep`, or a :class:`~aquaflux.solve.DualTimeStep` when
+        ``inner_steps > 1``.
     """
     # The base block policy supplies the pseudo-transient shift diagonal (the same velocity a_P + k/omega
     # transport diagonals); its scalar AMGs are skipped (`method=None`) since the ILUT preconditions every
-    # block. The flow block is still assembled as the a_P source -- a lightweight shift-diagonal-only
-    # policy is a follow-up optimization.
+    # block. No flow block is built either (`_monolithic_shift_source`): the shift's velocity buckets come
+    # straight from the assembler's frozen momentum diagonal, which is the whole dependency.
     base = _monolithic_shift_source(coupled, reference_state, shift_basis)
     plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
     frozen = jax.lax.stop_gradient(reference_state)
@@ -2055,11 +2074,17 @@ def coupled_lu_continuation(
     inner_steps, inner_tol, forward_solver, block_scaled_norm, shift_basis, residual_norm
         The dual-time, linear-solve, and measure parameters, exactly as in
         :func:`coupled_ilut_continuation`.
+    inner_observer : callable or None
+        A per-inner-iteration profiling hook forwarded to the built dual-time step (only used when
+        ``inner_steps > 1``); see :class:`~aquaflux.solve.DualTimeStep`. ``None`` (default) leaves the
+        step byte-identical. Forward-only -- do not set it on a differentiated solve.
 
     Returns
     -------
     ForwardStep
-        The step to hand ``solve_coupled`` as ``continuation``.
+        The step to hand ``solve_coupled`` as ``continuation`` -- a
+        :class:`~aquaflux.solve.PseudoTransientStep`, or a :class:`~aquaflux.solve.DualTimeStep` when
+        ``inner_steps > 1``.
     """
     base = _monolithic_shift_source(coupled, reference_state, shift_basis)
     plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
@@ -2142,7 +2167,7 @@ def coupled_amg_continuation(
     The multigrid counterpart of :func:`coupled_ilut_continuation` / :func:`coupled_lu_continuation`: it
     materializes the coupled Jacobian at ``reference_state`` (compressed graph-coloured probing -- one
     source of truth, no re-derived assembly), adds the pseudo-transient shift at ``amg_beta``, and builds a
-    single smoothed-aggregation V-cycle for it (:class:`~aquaflux.solve.MonolithicAmgPreconditioner`), all
+    single plain-aggregation V-cycle for it (:class:`~aquaflux.solve.MonolithicAmgPreconditioner`), all
     off the jit path. Unlike the two factorizations it keeps the heavy fill off the fine grid -- the only
     exact solve is a direct LU on the small coarsest grid -- so its memory stays bounded and its setup is
     seconds where the incomplete factorization's ``spilu`` runs for minutes on a distance-3 three-dimensional
@@ -2193,6 +2218,13 @@ def coupled_amg_continuation(
         (default) keeps PETSc's default (~50); a larger value grows the coarse-level direct solve so it
         inverts more of the saddle's global pressure coupling exactly — a stronger V-cycle (and stronger
         transpose V-cycle, so it helps the adjoint too) at a bounded, sub-linearly-growing coarse-solve cost.
+    native_forward_solve : bool
+        EXPERIMENTAL. Run the forward Krylov natively in the host multigrid library, its operator a shell
+        over the exact Jacobian-vector product, instead of applying the frozen V-cycle per matvec through
+        the JAX-side Krylov. The mechanism is validated (native speed, correct step direction, exact
+        Newton), but the march currently converges more slowly per step than the default path, whose
+        near-exact steps the pseudo-transient globalization implicitly leans on. ``False`` (default) is
+        the JAX-side path. Incompatible with ``field_split``.
     beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search
         The pseudo-transient schedule and guard parameters, exactly as in
         :func:`coupled_ilut_continuation`.
@@ -2219,10 +2251,33 @@ def coupled_amg_continuation(
         ``forward_rtol`` a solve can reach its target early in a cycle and go on building vectors, and a
         restart-*cycle* count cannot see that, since such a solve reports one cycle at any length. Ignored
         when an explicit ``forward_solver`` is given.
+    forward_max_restarts : int
+        Restart-cycle cap of that default solver (``60``), and the **only** bound on a single running
+        solve: ``cycle_budget`` and the march's abort threshold are tested between inner iterations, so
+        neither can stop a solve already in progress. Two constraints on any value chosen for it. ⚠️ It
+        is in raw ``lineax`` restarts, which carry a fixed ``+2`` per solve, while ``retry.on_cycles`` is
+        in corrected cycles (:func:`~aquaflux.solve.restart_cycles`), so a corrected cap of ``c`` is
+        ``forward_max_restarts = c + 2``. ⚠️ And the corrected count must stay **strictly above**
+        ``retry.on_cycles``: the march's test is ``max_inner_cycles > retry.on_cycles``, so a cap landing
+        exactly on the threshold does not trip the retry and the step accepts the truncated,
+        non-converged direction instead of escalating. Ignored when an explicit ``forward_solver`` is
+        given.
     inner_observer : callable or None
         A per-inner-iteration profiling hook forwarded to the built dual-time step (only used when
         ``inner_steps > 1``); see :class:`~aquaflux.solve.DualTimeStep`. ``None`` (default) leaves the step
         byte-identical. Forward-only — do not set it on a differentiated solve.
+    refresh_on_cycles : int or None
+        Fire the dual-time loop's ``inner_refresh`` hook once an inner solve has cost this many restart
+        cycles, forwarded to the built :class:`~aquaflux.solve.DualTimeStep` (only used when
+        ``inner_steps > 1``). The rule that triggers the refresh is also the one that forgives the abort
+        the step would otherwise be discarded by, so the two live together on the loop. ``None``
+        (default) never fires it. Forward-only.
+    inner_refresh : callable or None
+        ``(iterate) -> None``, the mid-step preconditioner rebuild ``refresh_on_cycles`` fires --
+        :func:`amg_beta_tracking_refresh`'s ``refresh_at`` attribute. Rebuilding between inner
+        iterations keeps the step's progress, where the alternative reaction (abort the step and
+        escalate the shift) discards both the work and the pseudo-timestep. ``None`` (default) leaves
+        the step byte-identical. Forward-only -- it mutates the preconditioner in place.
     cycle_budget : int or None
         A cap on the dual-time inner loop's accumulated linear-solve count, forwarded to the built
         :class:`~aquaflux.solve.DualTimeStep` (only used when ``inner_steps > 1``). It cuts off a primary
@@ -2255,11 +2310,12 @@ def coupled_amg_continuation(
         coupled adjoint are untouched. Incompatible with ``native_forward_solve``.
     trailing_smoother_sweeps : int
         Level-smoother sweeps on the ``[k, omega]`` half of the split, **one** by default against
-        ``smoother_sweeps``' four on the saddle. The transported scalars are a much easier operator than
+        ``smoother_sweeps``' two on the saddle. The transported scalars are a much easier operator than
         the pressure-velocity block and do not need the same smoothing: measured over a whole
-        Reynolds-continuation march on a three-dimensional backward-facing step, dropping four sweeps to
-        one took 1959 s to 1636 s on an otherwise step-for-step identical trajectory, to the same
-        reattachment length. Requires ``field_split=True``.
+        Reynolds-continuation march on a three-dimensional backward-facing step running the saddle at
+        four sweeps, dropping the scalars from four to one cut ~17 % of the wall on an otherwise
+        step-for-step identical trajectory, to the same reattachment length. Requires
+        ``field_split=True``.
     leading_options, trailing_options : dict or None
         Extra multigrid options for one half of the split only, so the saddle and the scalars can be
         smoothed differently. The two halves are not the same kind of equation, and the shipped defaults
@@ -2613,8 +2669,9 @@ def _materialize_gate(
         Re-materialize when the drift since the last materialize exceeds this. ``None`` disables the drift
         trigger (then only the step cap fires).
     materialize_every : int or None
-        Force a materialize after this many refreshes without one (the staleness cap). ``None`` disables the
-        cap (then only the drift trigger fires).
+        Force a materialize after this many **steps** without one (the staleness cap) -- steps, not
+        refreshes, because this gate is consulted once per step whatever branch the refresh then takes.
+        ``None`` disables the cap (then only the drift trigger fires).
 
     Returns
     -------
@@ -2740,6 +2797,20 @@ def _beta_tracking_refresh(
     refresh_kwargs : dict, optional
         Extra keyword arguments forwarded to the preconditioner's ``refresh_in_place`` (e.g. the ILUT's
         ``fill_factor`` / ``drop_tol``). ``None`` forwards none (the complete LU takes no extra options).
+    materialize_every : int or None
+        Force a full re-materialize after this many steps without one -- the step-count arm of the
+        materialize gate (:func:`_materialize_gate`). ``None`` (default) disables that arm.
+    materialize_drift : float or None
+        Re-materialize once the eddy viscosity has drifted by more than this fraction since the last one
+        -- the state-staleness arm of the same gate. ``None`` (default) disables it. With **both** arms
+        ``None`` there is no gate, so every refresh is a full re-materialize.
+    beta_floor : float
+        A lower bound on the shift strength the **preconditioner** is refreshed at: it is built at
+        ``max(beta, beta_floor)`` while the march keeps solving at its own ``beta``. ``0.0`` (default)
+        tracks ``beta`` exactly.
+    observer : callable, optional
+        ``(timing: RefreshTiming) -> None``, called on each refresh with which branch ran, its total
+        seconds, and its per-phase costs. ``None`` (default) elides the call.
     probe : CoupledJacobianProbe, optional
         A shared colouring plan and de-compression map, when the caller already has one -- see the
         parameter of :func:`coupled_amg_continuation`. ``None`` (default) builds one from
@@ -2897,16 +2968,15 @@ def _beta_tracking_refresh(
 
         The march's expensive inner solves are **stale-preconditioner** effects, not hard operators: at
         the hardest solve of a three-dimensional coupled march a preconditioner rebuilt at that very
-        iterate converged in **one** cycle where the march's own took fifteen. Refreshing here — between
-        inner iterations, after the line search and before the next solve — keeps the step's progress,
-        where the alternative reaction (abort the step and escalate β) discards both the work and the
-        pseudo-timestep.
+        iterate converged in an order of magnitude fewer cycles than the march's own. Refreshing here —
+        between inner iterations, after the line search and before the next solve — keeps the step's
+        progress, where the alternative reaction (abort the step and escalate β) discards both the work
+        and the pseudo-timestep.
 
-        Costs are what make this worth doing as a *replacement* for a scheduled refresh rather than an
-        addition to one: on that march the schedule spent 21 % of the wall keeping a preconditioner fresh
-        that 83 % of solves did not need, and the right interval is regime-dependent in a way no fixed
-        cadence can track (one step of staleness is free at a large shift and triples the cost at a small
-        one).
+        Reacting is also what makes this worth doing as a *replacement* for a scheduled refresh rather
+        than an addition to one: a fixed cadence pays on every step to protect the minority that needs
+        it, and the right interval is regime-dependent in a way no fixed cadence can track (one step of
+        staleness is nearly free at a large shift and dominates the solve at a small one).
         """
         if "step" not in bound_step:
             return
@@ -3109,13 +3179,11 @@ def amg_beta_tracking_refresh(
     A dual-time march ramps the pseudo-transient shift ``β`` down to develop the recirculation (e.g.
     0.5 → 0.02), and a V-cycle frozen at ``amg_beta`` degrades sharply as ``β`` leaves that value: the
     coarse operators and level smoother approximate ``J + amg_beta·d``, not the ``J + β·d`` actually solved,
-    so the outer Krylov count explodes at low ``β`` (measured on the ``bfs3d`` coupled march: ~20 cycles per
-    solve at ``β ≈ 0.5`` rising to ~250–285 at ``β ≈ 0.07``, with the per-step wall going from ~60 s to
-    ~16–19 min). Rebuilding the V-cycle at the step's ``(state, β)`` restores the matched ~20-cycle solve.
-    The rebuild (~tens of seconds: a graph-coloured Jacobian probe plus the smoothed-aggregation setup) is
-    far cheaper than the hundreds of extra matvecs a stale V-cycle costs at low ``β``, each of which is a
-    full Jacobian-vector product — so it re-factors **every step** (like the cheap complete-LU hook, not the
-    gated incomplete-LU one).
+    so the outer Krylov count climbs by an order of magnitude over such a ramp, and the per-step wall with
+    it. Rebuilding the V-cycle at the step's ``(state, β)`` restores the matched cheap solve. The rebuild
+    (a graph-coloured Jacobian probe plus the aggregation setup) is far cheaper than the extra matvecs a
+    stale V-cycle costs at low ``β``, each of which is a full Jacobian-vector product — so it re-factors
+    **every step** (like the cheap complete-LU hook, not the gated incomplete-LU one).
 
     Reads ``β`` from the step's shift schedule (a :class:`~aquaflux.solve.ConstantRelaxation` set by a
     :class:`~aquaflux.solve.DualTimeControl`) and rebuilds the step's :class:`MonolithicFactorShiftPolicy`
@@ -3154,7 +3222,7 @@ def amg_beta_tracking_refresh(
         Jacobian -- since ``β`` and the per-cell shift ``d`` touch only the diagonal, this skips the
         coloured-probe materialization (the dominant refresh cost) while keeping the shift matched. It is the
         step-count arm of the materialize gate (:func:`_materialize_gate`): a full re-materialize is forced
-        after ``K`` shift-only refreshes as a staleness cap. Prefer ``materialize_drift`` (a state-staleness
+        after ``K`` steps without one as a staleness cap. Prefer ``materialize_drift`` (a state-staleness
         trigger) as the primary control and keep ``materialize_every`` as a large safety cap.
     materialize_drift : float or None
         The **state-staleness** trigger for the full re-materialize (the drift arm of the materialize gate).
@@ -3178,13 +3246,16 @@ def amg_beta_tracking_refresh(
         steps with no β-move (state development at a near-constant ``β``). Ignored when ``beta_rel_change``
         is ``None``.
     observer : callable, optional
-        ``(kind, seconds) -> None``, called once per step with what this hook actually did --
+        ``(timing: RefreshTiming) -> None``, called on each refresh with what this hook actually did --
         ``"full"`` (re-materialized the Jacobian and re-factored), ``"shift"`` (cheap shift-only
-        refresh) or ``"none"`` (the gate declined; the standing factorization was reused) -- and how
-        long it took. Forward-only instrumentation for a march being profiled: without it, which branch
-        ran is invisible, and a study is left inferring preconditioner behaviour from wall-clock, which
-        is exactly how a per-step refresh cost gets mistaken for a fixed overhead. ``None`` (default)
-        elides the call.
+        refresh), ``"none"`` (the gate declined; the standing factorization was reused) or ``"inner"``
+        (the mid-step ``refresh_at`` rebuild) -- together with how long it took and what each phase of
+        it cost. Forward-only instrumentation for a march being profiled: without it, which branch ran
+        is invisible, and a study is left inferring preconditioner behaviour from wall-clock, which is
+        exactly how a per-step refresh cost gets mistaken for a fixed overhead. The per-phase split
+        matters for the same reason: a refresh dominated by the coloured probe and one dominated by the
+        multigrid setup take the same wall time and call for opposite fixes. ``None`` (default) elides
+        the call.
     beta_floor : float
         A lower bound on the shift strength the **preconditioner** is built at: the V-cycle is refreshed at
         ``max(β, beta_floor)`` while the march keeps solving at its own ``β``. As ``β`` falls the shift's
@@ -3322,7 +3393,8 @@ def solve_coupled(
     by the pseudo-transient :func:`coupled_continuation` step -- the coupled counterpart of the flow
     block's :func:`~aquaflux.flow.reused_flow_solve`. Reverse-differentiable through the converged state
     by the coupled implicit-function-theorem adjoint (a single transpose solve on the unfrozen
-    ``R_coupled``), the exact sensitivity the design note (S5) prescribes.
+    ``R_coupled``) -- the exact coupled sensitivity, rather than a differentiation of the segregated
+    Picard iteration.
 
     Parameters
     ----------
@@ -3371,9 +3443,11 @@ def solve_coupled(
 
         With a trigger set the solve runs as a sequence of **observed segments**
         (:func:`~aquaflux.solve.forward_march`): each steps until the trigger fires, the preconditioner
-        is re-derived at the state reached, and the next segment continues from there -- then a real
-        :class:`~aquaflux.solve.ImplicitNewtonSolver` solve finishes and produces the result. Segments
-        exist because the rebuild is off-jit work that cannot run inside a traced loop.
+        is re-derived at the state reached, and the next segment continues from there. A traced
+        :class:`~aquaflux.solve.ImplicitNewtonSolver` solve then finishes **only if** the observed march
+        stopped short of the tolerance in its own measure; a march that reached it returns that state
+        directly (see ``on_step`` / ``on_checkpoint``). Segments exist because the rebuild is off-jit
+        work that cannot run inside a traced loop.
 
         This solve supplies the trigger's staleness measure itself (:func:`eddy_viscosity_drift`,
         ``nu_t`` being what the frozen k/omega transport operators are assembled from), **re-based at
@@ -3384,9 +3458,10 @@ def solve_coupled(
         relative to where a segment began, so a segment handed a new state must measure its **own**
         reference residual; carrying the pre-refresh reference across -- to keep the ramp "continuous",
         which looks like the more principled choice -- makes ``beta`` mean something measured against a
-        state the march has left. Two corrections worth keeping: a refresh **carries** the
-        pseudo-transient shift diagonals rather than rebuilding them (rebuilding them at a developed
-        state was measured to freeze the march), so the justification is *not* that a grown ``d`` needs
+        state the march has left. Two corrections worth keeping: a refresh **rebuilds** the shift's
+        transport time scale at the developed state while **carrying** its coordinate factor
+        ``d(phi)/d(w)`` frozen (rebuilding the whole product was measured to freeze the march), so the
+        justification is *not* that a grown ``d`` needs
         a fresh ``beta``; and with refreshes every few steps the residual ratio never falls far below
         one, so **``beta`` stays pinned near ``beta0``** for the whole march instead of ramping down --
         a different damping level has to come from ``beta0``, not from expecting the ramp to find it.
@@ -3439,9 +3514,10 @@ def solve_coupled(
         a root -- which it reports by raising. Raise ``max_steps`` when instrumenting a solve that was
         already near its limit.
 
-        **Why:** the frozen scalar preconditioners go stale as the flow separates. On a separated
-        backward-facing-step state, re-freezing them cut the shifted solve from 30 to 13 outer Krylov
-        cycles (~2.4x); the flow block does *not* go stale and is carried over untouched. The refresh
+        **Why:** the frozen scalar preconditioners go stale as the flow separates. Their coarse space
+        was fitted to the pre-separation operator, so re-deriving them at the developed state cuts the
+        shifted solve's outer Krylov count; the flow block does *not* go stale and is carried over
+        untouched. The refresh
         costs one extra compilation of the shifted solve, which that saving repays within a step or two
         at mesh sizes where this matters. The win appears only once the flow separates -- refreshing at
         a pre-separation state buys nothing and can cost. :class:`~aquaflux.solve.CycleGrowthTrigger`
@@ -3469,8 +3545,9 @@ def solve_coupled(
         chosen for a residual that no longer applies.
 
         Two corrections to note, because earlier versions of this docstring stated both wrongly. First,
-        a refresh **carries** the pseudo-transient shift diagonals rather than rebuilding them
-        (rebuilding them at a developed state was measured to freeze the march), so the justification
+        a refresh **rebuilds** the shift's transport time scale at the developed state while
+        **carrying** its coordinate factor ``d(phi)/d(w)`` frozen (rebuilding the whole product was
+        measured to freeze the march), so the justification
         is *not* that a grown ``d`` must be paired with a fresh ``beta``. Second, the consequence of
         the segment-local reference is easy to miss and matters more than the rule itself: with
         refreshes every few steps the residual ratio never falls far below one, so **``beta`` stays
@@ -3793,8 +3870,8 @@ def mass_flow_coupled_continuation(
     the mass-flow constraint (:class:`_MassFlowBorderedPolicy`), so it drives the augmented
     ``[flow..., k, omega, beta]`` system where ``beta`` is a Lagrange multiplier for ``<U_dir> =
     target``. Parameters are :func:`coupled_continuation`'s (including ``beta_floor`` / ``line_search`` /
-    ``forward_solver`` / ``block_scaled_norm``); ``flow_direction`` selects the constrained velocity
-    component. ``block_scaled_norm`` here extends the same block-scaled measure with the constraint dof.
+    ``forward_solver`` / ``block_scaled_norm`` / ``shift_basis`` / ``velocity_shift_parts``);
+    ``flow_direction`` selects the constrained velocity component. ``block_scaled_norm`` here extends the same block-scaled measure with the constraint dof.
     """
     # No `reuse` here: the mass-flow-constrained path has no staged-refresh driver (there is no
     # a refresh on `solve_coupled_mass_flow`), so a policy is always built from scratch. Thread

@@ -861,9 +861,17 @@ have produced confidently wrong measurements. A later audit found a **binding de
 **Run this before every commit that renames, deletes, moves, or re-values anything:**
 
 ```
-git diff --cached | grep -E "^-" | grep -oE "\b_?[A-Za-z][A-Za-z0-9_]{3,}\b" | sort -u > /tmp/touched
+git diff --cached | grep -E "^-" | grep -oE "\b_?[A-Za-z][A-Za-z0-9_]{3,}\b" \
+  | grep -E "_|[a-z][A-Z]" | sort -u > /tmp/touched
 grep -rnFf /tmp/touched CLAUDE.md .claude/rules/ README.md docs/
 ```
+
+The `_|[a-z][A-Z]` filter keeps only words shaped like code (an underscore or an internal capital).
+Without it a prose-heavy diff reports ~70 ordinary English words and the output is too long to read —
+which is not hypothetical: a real orphan (`retry_on_cycles`) survived in `.claude/rules/solve.md`
+behind exactly that noise. **The cost is a blind spot: a renamed all-lowercase single word.** That is
+what the "grep for the CLAIM, not only for the symbol" rule above is for — this identifier grep is
+the cheap half of the check, never the whole of it.
 
 Then, for every hit, decide: still true / update / **delete**. Concretely:
 
@@ -925,8 +933,12 @@ After **every code change**, before considering the task complete, review and ac
      (`CLAUDE.md` / `.claude/`), the internal design notes, or the author's own papers. This grep
      must come back **empty** for any `.py` you touched:
      ```
-     grep -rniE "c\+\+|fortran|\.claude|claude\.md|reference code|the reference|degroot|\.hpp|\.f90|-design-note|briefing\.md|MeshObjectGroup" aquaflux tests --include="*.py"
+     grep -rniE "c\+\+|fortran|\.claude|claude\.md|reference code|the reference|degroot|\.hpp|\.f90|design.note|briefing\.md|MeshObjectGroup" aquaflux tests --include="*.py"
      ```
+     (`design.note` rather than `-design-note`: the hyphenated form missed "the design note (S5)",
+     which sat in two shipped docstrings for months. `the reference` is deliberately noisy — most hits
+     are the legitimate "the reference state/operator/diagonal" — so read them, don't skim past them;
+     that is how "matching the reference's order" survived.)
      (Third-party author-year citations like "Ghia et al. (1982)" or "Venkatakrishnan (1993)"
      are fine and won't trip this pattern.)
    - **README / docs surface:** the same reference ban covers the other public-facing files.
@@ -967,6 +979,19 @@ After **every code change**, before considering the task complete, review and ac
    change silently made FALSE elsewhere, which is the larger and more dangerous set. When you rename
    a symbol, change a signature/default, move a file, add a dependency, or change behaviour, update
    each of these that applies (grep the repo for the old name/path to find every mention):
+   - **The docstrings and comments in the `.py` files** — both in the code you changed *and in
+     every other module that describes the same behaviour*. In-code prose sits closest to the
+     change and is the first thing a reader trusts, so a false claim there is the most expensive
+     kind; it is also the only item on this list that no other item covers. The trap is the
+     second half: one component's behaviour is typically restated in several modules, and a
+     change updates only the file it edits. **Grep for the claim, not only for the symbol** —
+     this class of drift renames nothing, so the Stale-Record Check's identifier grep is blind
+     to it by construction. (Commit `e6bc18e` switched the linear solve from left- to
+     right-preconditioning in `solve/linear.py` *alone*. `solve/multigrid.py`,
+     `flow/preconditioner.py`, `solve/continuation.py` and `solve/implicit.py` went on calling
+     it a "left preconditioner" for two weeks — correct prose on the day it was written, false
+     the day the default moved, and invisible to every check we had because "left" is an
+     English word, not an identifier.)
    - **The matching `.claude/rules/*.md`** — the per-subsystem design record: binding decisions,
      interfaces, class/function names, file paths, and `BUILT` / `Not yet built` status. Inline
      the fact rather than pointing at any private note.

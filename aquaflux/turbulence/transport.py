@@ -228,13 +228,15 @@ class SSTTurbulence(eqx.Module):
         backward-facing step the two settings produce **identical** marches -- same step count, same
         cycle count, same converged fields -- so the stabilization it offers was not, on either case,
         buying anything the exact operator does not already give.
-        How the k-production limiter is linearized for the forward k-solve (static). ``True``
-        (default) freezes the cap's ``k`` (:attr:`KProduction.explicit_limiter`), giving an M-matrix
-        the k-solve converges on unpreconditioned -- a robust modified-Newton step. ``False`` keeps
-        the exact Jacobian, whose active cap is indefinite: it needs the scalar preconditioner (which
-        rescues it) but then converges quadratically. The converged field is the same either way (the
-        residual value is identical); only the forward path differs, so the coupled adjoint (built on
-        the exact residual) is unaffected.
+
+        **Who still wants it:** a bare or weakly preconditioned *segregated scalar* solve. The exact
+        derivative of the cap is indefinite where the cap is active, and far from the solution the cap
+        is active almost everywhere -- on the k-equation unit case it binds in 24 of 24 cells at the
+        starting field and in 0 at the closure's own ``k`` -- so an unpreconditioned k-solve stalls on
+        the exact operator and converges on the frozen one. A preconditioned solve does not need it
+        (the convection-diffusion multigrid rescues the exact operator, which then converges
+        quadratically), and the coupled path always carries a preconditioner *and* takes gradients,
+        which is why the default belongs on the exact operator.
     """
 
     model: SSTModel
@@ -277,7 +279,9 @@ class SSTTurbulence(eqx.Module):
             owner cells become the ``omega`` fixation set.
         explicit_production_limiter : bool
             Linearization of the k-production limiter for the forward solve (see the class
-            attribute); ``True`` (default) is the robust unpreconditioned-solvable choice.
+            attribute); ``False`` (default) is the exact operator. ``True`` is the robust choice for a
+            bare or weakly preconditioned segregated scalar solve, and only for one -- it makes the
+            adjoint wrong wherever the cap is active at the root.
 
         The remaining arguments are stored directly (see the class attributes).
         """

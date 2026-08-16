@@ -81,7 +81,8 @@ Three correctness facts the builder depends on:
   and shipped to every device; without the remap the global node array would be replicated P times
   for data the sharded residual never reads (geometry is gathered, not recomputed from nodes). The
   padded node array is therefore ragged and `pad_partition` pads it to `n_nodes_max` with copies of
-  node 0 (referenced by nothing — padded faces list no nodes).
+  node 0 (referenced by nothing that matters — the padded face-node incidences all point *at* node 0,
+  so its value is inert; they do not list "no nodes").
 
 ## Decided: the per-device body runs a real assembler — never a re-implementation
 
@@ -99,8 +100,14 @@ passed to `shard_map` as a sharded input; the per-device body refreshes the halo
 `assembler.residual(...)`. `parallel/` therefore names **no** physical operator, and its only
 dependency outside `mesh/` is `BoundaryConditions` (for the patch-binding padding below).
 
-The contract the injected assembler must satisfy is exactly two members — `residual(field)` and a
-mesh-bound `boundary`. Both the scalar and coupled-flow assemblers already have these.
+The contract the injected assembler must satisfy is **three** members — `residual(field, *,
+gradient_hook=None)`, a `gradient_scheme` attribute (`None` when no gradient is reconstructed), and a
+mesh-bound `boundary`. Both the scalar and coupled-flow assemblers already have these. ⚠️ It was
+recorded here as "exactly two members — `residual(field)` and a mesh-bound `boundary`" until
+2026-08-16; that undercounts twice, and an assembler built to the two-member contract raises
+`AttributeError` at build time (`build_distributed_residual` reads `assemblers[0].gradient_scheme`)
+or `TypeError` on the first residual call (it is invoked as `residual(local_field,
+gradient_hook=hook)`).
 
 **When adding a distributed capability, extend the injected builder or the layout — never add
 physics to `parallel/`.** If you find yourself importing an operator here, the seam is wrong.

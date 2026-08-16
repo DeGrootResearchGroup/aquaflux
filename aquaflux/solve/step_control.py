@@ -97,7 +97,7 @@ class ShiftStrengthControl(eqx.Module):
         """β held inside ``[beta_min, beta_max]``, as a plain ``float``.
 
         Kept a method rather than inlined per rule because the bound is the same for every control and
-        this was one of the four verbatim copies the base exists to remove.
+        this was one of the three verbatim copies the base exists to remove.
         """
         return float(min(max(beta, self.beta_min), self.beta_max))
 

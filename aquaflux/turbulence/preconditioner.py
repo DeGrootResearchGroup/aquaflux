@@ -9,8 +9,9 @@ This builds a frozen nonsymmetric aggregation multigrid on the scalar's ``viscou
 operator -- the same reduction the velocity block uses -- and applies it as a matrix-free V-cycle
 preconditioner. The three ingredients the multigrid builder needs are read straight off the transport:
 
-* the diffusion face coefficient ``Gamma_face * A / (d . n)`` from the effective diffusivity
-  ``Gamma = nu + sigma nu_t`` (interpolated to faces exactly as the diffusion flux forms it),
+* the flux-continuous diffusion conductance ``Gamma_P * A / denom`` from the effective diffusivity
+  ``Gamma = nu + sigma nu_t`` -- the owner coefficient over the flux-continuous denominator, exactly
+  the conductance the k/omega residual's diffusion flux carries, so the two cannot drift,
 * the convective volume flux ``mdot / rho`` per face, and
 * the reaction-plus-boundary diagonal -- the part of the true diagonal the interior stencil does not
   supply (the local source terms' linearization and the Dirichlet boundary stiffness) -- got in a

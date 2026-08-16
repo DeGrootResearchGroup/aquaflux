@@ -8,7 +8,7 @@ functions are injected, so the driver is testable on a trivial analytic residual
 **This module is the package's API boundary: everything the rest of the library (or a user) may
 consume from `solve` is re-exported here, and consumers import from `aquaflux.solve`, not from its
 submodules.** A name absent from `__all__` is internal — reach for it only from that submodule's own
-unit tests. The surface is three groups:
+unit tests. The surface is five groups:
 
 * **The Newton driver, the single step, and the linear solve** — `ImplicitNewtonSolver` (the
   driver: converges, globalizes, and carries the implicit-function-theorem adjoint), `newton_step`
@@ -20,8 +20,9 @@ unit tests. The surface is three groups:
   stock componentwise test over-solve; the default is the Euclidean norm, and passing the row-scaled
   `RowScaledNorm` makes the stop weigh every field block comparably instead of letting the
   largest-magnitude block — `omega` on the coupled saddle — decide alone).
-* **Forward globalization** — the `ForwardStep` strategies `DampedNewtonStep` and
-  `PseudoTransientStep`, with the `ShiftPolicy` / `ShiftTerm` / `StepAcceptance` seams a caller
+* **Forward globalization** — the `ForwardStep` strategies `DampedNewtonStep`,
+  `PseudoTransientStep` and `DualTimeStep`, with the `ShiftPolicy` / `ShiftTerm` / `StepAcceptance`
+  seams a caller
   implements and the default `DivergenceGuard`, and the injected `ResidualNorm` the strategy judges
   progress by (default the Euclidean norm; `BlockScaledNorm` scales each block of a heterogeneous
   state by its own reference magnitude so no single large-magnitude block dominates the convergence

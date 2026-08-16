@@ -250,9 +250,13 @@ class SweptGradientSolve(GradientSolve):
     differentiates only through a handful of matvecs, not through a full inner GMRES (which made the
     :class:`GmresGradientSolve` alternative impractical there).
 
-    Because ``A_g`` is volume-dominated the iteration converges in very few sweeps — the default
-    ``sweeps=4`` reproduces the exact solve to machine precision on mild-to-moderate skew and stays
-    well within discretization error even on aggressively irregular grids. A too-skewed mesh needs
+    Because ``A_g`` is volume-dominated the iteration converges in few sweeps, and the count needed is
+    set by the **skewness, not the mesh size** — which is what makes the fixed-sweep apply ``O(n)``. The
+    default ``sweeps=4`` stays well within discretization error but is **not** the exact solve: on a
+    randomly perturbed 16x16 grid the relative departure from :class:`GmresGradientSolve` is ~3e-7 at 5%
+    perturbation and ~3e-4 at 20%, reaching the floating-point floor at ~12 sweeps (5%) and ~20 (20%).
+    That is why the tests asserting machine-precision properties of the *discretization* pin the exact
+    solve rather than this one. A too-skewed mesh needs
     more; rather than pay for a data-dependent stop (which would defeat the cheap unrolled
     differentiation), the residual the last sweep already computed is checked against ``warn_tol`` and
     a **warning** is emitted once if the sweeps are under-resolved — a diagnostic, not a termination.

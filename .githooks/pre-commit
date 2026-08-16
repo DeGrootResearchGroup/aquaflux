@@ -2,11 +2,14 @@
 #
 # Pre-commit hook: keep the docs that describe the code from drifting.
 #
-# Whenever a commit changes library or test code, the files that *describe* that
+# Whenever a commit changes library or test code, the prose that *describes* that
 # code must move with it, in the same change (the Post-Change Checklist
-# "Documentation sync" item): the matching .claude/rules/*.md, CLAUDE.md,
-# README.md, and any affected docs/ page. This is how MaterialModel -> PropertyModel,
-# structured_grid_2d(perturb=), and "git/CI not set up" went stale.
+# "Documentation sync" item): the docstrings and comments in the .py files
+# themselves, the matching .claude/rules/*.md, CLAUDE.md, README.md, and any
+# affected docs/ page. This is how MaterialModel -> PropertyModel,
+# structured_grid_2d(perturb=), and "git/CI not set up" went stale -- and how four
+# modules went on describing a "left preconditioner" for two weeks after the linear
+# solve switched to right-preconditioning in one file.
 #
 # This hook does NOT block -- whether a given change needs a doc update is a
 # judgement a script cannot make -- it just surfaces the rule at the moment you
@@ -22,8 +25,11 @@ set -euo pipefail
 # Only remind when the staged change actually touches Python code (added, copied,
 # modified, or renamed) -- a docs/config-only commit needs no reminder.
 if git diff --cached --name-only --diff-filter=ACMR | grep -qE '^(aquaflux|tests)/.*\.py$'; then
-  echo "pre-commit reminder: this commit changes code -- did you update the docs that" >&2
-  echo "describe it, in this same commit? (Post-Change Checklist -> Documentation sync)" >&2
+  echo "pre-commit reminder: this commit changes code -- did you update the prose that" >&2
+  echo "describes it, in this same commit? (Post-Change Checklist -> Documentation sync)" >&2
+  echo "  - the docstrings/comments in the .py files -- AND in other modules that describe" >&2
+  echo "    the same behaviour; grep for the CLAIM, not only for the symbol, since this" >&2
+  echo "    kind of drift renames nothing and the removed-identifier check below misses it" >&2
   echo "  - the matching .claude/rules/*.md (names, signatures, file paths, BUILT status)" >&2
   echo "  - CLAUDE.md (architecture / public API / package structure / deps / workflow)" >&2
   echo "  - README.md and any affected docs/ page" >&2
@@ -34,23 +40,32 @@ fi
 # files, where it auto-loads into context and is served to the next reader as current
 # fact. Three wrong facts were lifted out of these files by grep in a single session
 # this way. Surface the specific identifiers this commit REMOVED that still appear.
+#
+# The second grep keeps only words shaped like code -- containing an underscore or an
+# internal capital (`retry_on_cycles`, `make_preconditioner`, `MeshObjectGroup`). Without
+# it a prose-heavy commit reports ~70 ordinary English words ("aligned", "appears",
+# "general"), and a reminder that long is one nobody reads: a real orphan
+# (`retry_on_cycles`) sat in the rules unnoticed behind exactly that noise. A renamed
+# all-lowercase single word is the acknowledged blind spot -- the Stale-Record Check in
+# CLAUDE.md is the backstop, and it asks you to grep for the CLAIM, not just the symbol.
 removed=$(git diff --cached -U0 -- 'aquaflux/*.py' 'tests/*.py' 'validation/*.py' \
   | grep -E '^-' | grep -v '^---' \
-  | grep -oE '\b_?[A-Za-z][A-Za-z0-9_]{5,}\b' | sort -u || true)
+  | grep -oE '\b_?[A-Za-z][A-Za-z0-9_]{5,}\b' \
+  | grep -E '_|[a-z][A-Z]' | sort -u || true)
 if [ -n "$removed" ]; then
   # Only names the commit does not still define somewhere -- a moved line is not a rename.
   kept=$(git diff --cached -U0 | grep -E '^\+' | grep -v '^+++' || true)
   stale=""
   for name in $removed; do
     printf '%s' "$kept" | grep -q "$name" && continue
-    hit=$(grep -rlF "$name" CLAUDE.md .claude/rules/ README.md 2>/dev/null | head -3 || true)
+    hit=$(grep -rlF "$name" CLAUDE.md .claude/rules/ README.md docs/ 2>/dev/null | head -3 || true)
     [ -n "$hit" ] && stale="$stale  $name -> $(printf '%s' "$hit" | tr '\n' ' ')
 "
   done
   if [ -n "$stale" ]; then
     echo "" >&2
     echo "pre-commit reminder: identifiers this commit REMOVES still appear in the" >&2
-    echo "Claude-facing files. Update or DELETE them (never strikethrough -- grep" >&2
+    echo "documentation. Update or DELETE them (never strikethrough -- grep" >&2
     echo "cannot see tildes). See CLAUDE.md -> Stale-Record Check." >&2
     printf '%s' "$stale" >&2
   fi

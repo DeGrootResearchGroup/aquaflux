@@ -409,9 +409,11 @@ def build_block_triangular_field_split(
     smoother_sweeps : int
         Level-smoother sweeps on the **leading** block. Four is the measured default for a
         pressure-velocity saddle, where the sweeps are load-bearing: Jacobi-class smoothers do not
-        converge on that block at all, so it is the half that needs the incomplete-LU work.
+        converge on that block at all, so it is the half that needs the incomplete-LU work. Ignored
+        when ``leading_inverse`` supplies that block's inverse directly.
     trailing_smoother_sweeps : int
-        Level-smoother sweeps on the **trailing** block, defaulting to **one** rather than four. The two
+        Level-smoother sweeps on the **trailing** block, defaulting to **one** rather than four, and
+        ignored when ``trailing_inverse`` supplies that block's inverse directly. The two
         halves are not the same kind of equation and do not want the same amount of smoothing: the
         trailing group is a transported-scalar pair with a genuine diagonal, a far easier operator than
         the saddle, and the extra sweeps buy nothing on it. Measured on a three-dimensional
@@ -738,6 +740,16 @@ class NodalNativeInverse(NativeHierarchyInverse):
         non-flexible outer Krylov and by the transposed adjoint solve.
     sweeps : int
         Smoother sweeps per level.
+    aggressive_levels : int
+        Levels coarsened on the **squared** graph, starting from the finest. ``1`` (default) is the
+        aggressive first level the defaults note below describes.
+    prolongation_smoothing : str
+        Which prolongator the hierarchy builds — ``"none"`` (default, the unsmoothed tentative
+        prolongation), ``"symmetric-part"`` or ``"standard"``.
+    spectral_damping : bool
+        Scale the smoother's relaxation by the level's largest eigenvalue estimate. ``False``
+        (default) is the undamped sweep the note below explains; it also selects ``omega``'s meaning,
+        which is why the two travel together.
     equilibrate : bool
         Coarsen the operator rescaled to a unit-magnitude diagonal; see the note below.
 

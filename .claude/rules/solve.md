@@ -5181,7 +5181,8 @@ transfer to any thresholded arm.
     of it would be inventing a quantity it does not possess.
     **What it replaces, and why it matters more than it looks:** the requirement was enforced by
     `hasattr` probes scattered through `forward_march`, which fail **silently**. A `DampedNewtonStep`
-    satisfies `ForwardStep` in full, so a march configured with `retry_on_cycles` accepted it and then
+    satisfies `ForwardStep` in full, so a march configured with `RetryPolicy.on_cycles` (then the loose
+    `retry_on_cycles` argument, since folded into the policy) accepted it and then
     never escalated — from the log, indistinguishable from a march that never needed to. One reporting
     path failed the *opposite* way and read `active_step.relaxation_schedule` unguarded, so the same
     conforming step raised `AttributeError` mid-march. `forward_march` now checks **once, before the

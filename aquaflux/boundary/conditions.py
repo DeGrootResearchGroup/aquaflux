@@ -9,7 +9,7 @@ composes naturally with the residual substrate and with automatic differentiatio
 Each closure is written in terms of the owner cell value ``phi_P``, the owner cell gradient
 ``grad phi_P`` (for the non-orthogonal correction), the displacement ``d = x_ip - x_P`` from
 the owner centroid to the face centroid, the owner-outward unit normal ``n``, and the
-diffusion coefficient ``Gamma_P``. All share the tangential correction
+diffusion coefficient ``Gamma_P``. The three flux-type closures share the tangential correction
 
     corr = grad phi_P . (d - (d . n) n)
 
@@ -17,10 +17,11 @@ which extrapolates the owner value along the face-tangential offset; it vanishes
 face centroid lies on the cell-centroid normal (an orthogonal grid), so on orthogonal
 meshes every closure below reduces to its gradient-free form.
 
-The four closures (``a = d . n`` is the normal distance owner-centroid → face):
+The closures (``a = d . n`` is the normal distance owner-centroid → face):
 
 ======================  ===========================================================
 Dirichlet (value)       ``phi_ip = value``
+Dirichlet (field)       ``phi_ip = field_fn(x_ip)``
 Zero-gradient           ``phi_ip = phi_P + corr``
 Neumann (flux ``q``)    ``phi_ip = phi_P + corr - (q / Gamma_P) a``
 Convective (h, Tinf)    ``phi_ip = (phi_P + corr + (h/Gamma_P) a Tinf) / (1 + (h/Gamma_P) a)``

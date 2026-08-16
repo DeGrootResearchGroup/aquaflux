@@ -429,8 +429,8 @@ class MarchLogger:
         Matches the hook :func:`~aquaflux.solve.forward_march` calls just before a redo
         (``on_retry=logger.on_retry``). Without it a log shows the same step's work two or three times
         with nothing between the blocks, leaving a reader to infer the trigger from the numbers -- and
-        the three triggers (a step cut short on cost, a diverged step, a too-loose linear solve) call
-        for completely different responses.
+        the four triggers (a step cut short on cost, a collapsed step length, a diverged step, a
+        too-loose linear solve) call for completely different responses.
 
         Written whatever ``detail`` says: a repeated step is not a diagnostic, it is the log failing to
         explain itself. The attempt number also titles the block that follows.
@@ -455,8 +455,9 @@ class MarchLogger:
         "  G is the implicit timestep's own residual, R + beta*d*(phi - phi_n); the inner loop drives",
         "  it to zero. R is the STEADY residual at the stepped state -- the march's convergence measure.",
         "  Driving G to zero does not drive R to zero: the two terms cancel there,",
-        "  leaving R = -beta*d*(phi - phi_n). So a step's R is NOT its last 'G out'; it is the residual",
-        "  the next step starts from, and appears there as inner-0's 'G in'.",
+        "  leaving R = -beta*d*(phi - phi_n). So a step's R is NOT its last 'G out'; it measures the",
+        "  state the next step starts from, which that step's inner-0 'G in' measures in the NEXT",
+        "  iteration's row scales -- the same state, not the same number.",
     )
 
     def _open_block(self) -> None:
