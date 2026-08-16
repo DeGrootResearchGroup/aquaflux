@@ -1,0 +1,11 @@
+pitzDaily, ? cells; stop rtol 1e-06, max 200 steps
+arm         steps  cycles   wall(s)          |R|  x_r/h
+
+UMFPACK V6.3.7 (Nov 1, 2025): ERROR: out of memory
+
+lu         FAILED: Error: error code 76
+[0] PCSetUp() at /private/var/folders/h4/v617l5h97zj_b7qcl2r7n76w0000gn/T/pi
+ilut       FAILED: RuntimeError: [0]: matrix is singular at line 148 in file ../scipy/sparse/linalg/_dsolve/SuperLU/SRC/ilu
+/opt/homebrew/lib/python3.13/site-packages/numpy/linalg/_linalg.py:2406: RuntimeWarning: invalid value encountered in det
+  r = _umath_linalg.det(a, signature=signature)
+hostilu    FAILED: ValueError: coarsest level has 10197 degrees of freedom, above the 8192 that may be inverted densely (

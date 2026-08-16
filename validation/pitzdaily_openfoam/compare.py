@@ -61,8 +61,16 @@ Run (after ``run_of.sh``) from the repo root:
 from __future__ import annotations
 
 import re
+import sys
 import time
 from pathlib import Path
+
+# Running a script puts the SCRIPT's directory on `sys.path`, not the working directory, so
+# `python3 validation/pitzdaily_openfoam/compare.py` from the repo root cannot find `aquaflux` unless it
+# is separately installed. Add the repo root explicitly so the documented invocation works against a
+# plain checkout -- this case had no such bootstrap, so it could not be run through the case launcher
+# at all, which is one reason it was left behind while the sibling case was developed.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
@@ -73,7 +81,20 @@ from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, Veloci
 from aquaflux.io import read_openfoam
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
-from aquaflux.turbulence import CoupledRANS, LogScalars, SSTModel, SSTTurbulence, solve_coupled
+from aquaflux.solve import (
+    CflResidualDualTimeControl,
+    MarchLogger,
+    RetryPolicy,
+    relative_residual_gmres,
+)
+from aquaflux.turbulence import (
+    CoupledRANS,
+    LogScalars,
+    SSTModel,
+    SSTTurbulence,
+    coupled_fields,
+    solve_coupled,
+)
 
 HERE = Path(__file__).resolve().parent
 RUNS = HERE / "runs" / "kwsst"
@@ -94,6 +115,62 @@ STEP_X, STEP_Y = 0.0, 0.0  # the step lip; the lower wall drops to y = -0.0254 f
 # (aquaflux's SST is wall-resolving), so it converges to an engineering tolerance rather than machine
 # zero; the cap is generous so the march exits on the tolerance, not the count.
 MAX_STEPS, RTOL = 200, 1e-6
+
+# ---------------------------------------------------------------------------------------------
+# The march configuration.
+#
+# ⚠️ THIS CASE RAN FOR A LONG TIME ON A SINGLE-STEP PSEUDO-TRANSIENT MARCH WITH NO DUAL-TIME INNER
+# LOOP, NO COURANT CONTROL, NO RETRY LADDER AND NO PER-STEP LOG. All of that was built and calibrated
+# on the three-dimensional case and never carried back here, so this case could not benefit from any
+# of it -- and, worse, a timing taken from it measured the globalization rather than whatever was
+# being studied. Under the old configuration the cold march is a documented reachability crawl,
+# needing on the order of eight hundred outer steps to develop the recirculation against a two
+# hundred step cap: it could not converge however long it was left.
+#
+# The values below are the three-dimensional case's, because that is where each was measured. Two are
+# load-bearing enough to name:
+#
+#   * `POSITIVITY_FLOOR` -- without it the step limiter's room is a purely RELATIVE quantity, so a
+#     numerically dead cell ratchets the global step cap by a factor of a hundred per step until the
+#     march is taking no step at all while every field still reads finite.
+#   * `scaled_norm` -- the coupled Euclidean residual is very nearly all omega, so a march judged on
+#     it cannot see the flow converge. The row-scaled measure judges every equation comparably.
+# ---------------------------------------------------------------------------------------------
+
+#: The dual-time inner loop. `inner_tol` 1e-2 rather than a tighter value: measured on the
+#: three-dimensional case, 1e-3 bought nothing over 1e-2 while costing a third of the march.
+INNER_STEPS, INNER_TOL = 5, 1e-2
+
+#: ⚠️ NOT REACHABLE ON THIS PATH, and recorded here because the gap is the finding rather than the
+#: number. A floor buys the step limiter out of a numerically dead cell instead of letting one cell
+#: ratchet the global step cap toward zero -- but `positivity_floor` is a parameter of
+#: `coupled_amg_continuation` ALONE. The default builder this case uses (`coupled_continuation`), and
+#: the complete-LU and threshold-ILU builders beside it, expose neither it nor the `step_limit` it
+#: would be set on. So the safeguard the three-dimensional case depends on cannot be switched on here
+#: without a library change, and a march that meets the ratchet has no way to escape it.
+#: The value the three-dimensional case ships, for when that is fixed:
+POSITIVITY_FLOOR_WANTED = 1e-8
+
+#: The inexact-Newton stop per inner linear solve, in the row-scaled measure, and the Krylov restart.
+FORWARD_RTOL, FORWARD_RESTART = 0.3, 15
+
+#: A cost cap on the inner loop, so a doomed attempt is cut short rather than run to a stagnation.
+CYCLE_BUDGET = 42
+
+#: Grow the pseudo-timestep while the inner line search is comfortable; brake on a clipped step or a
+#: rising residual. Without a control beta never ramps and the march cannot develop at all.
+CONTROL = CflResidualDualTimeControl(
+    beta_start=0.5, beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25
+)
+
+#: Redo a step whose solve was expensive, whose line search collapsed, or that diverged -- escalating
+#: the shift first, and falling back to a tighter Krylov solve only for a divergence damping cannot fix.
+RETRY = RetryPolicy(
+    solver=relative_residual_gmres(1e-4, restart=40),
+    on_cycles=10,
+    on_alpha=0.01,
+    beta_factor=2.0,
+)
 
 
 # --- OpenFOAM ascii internalField parsing (nonuniform scalar / vector list) ---
@@ -239,7 +316,7 @@ def build_case(model=None):
     return dict(coupled=coupled, momentum=momentum, turbulence=turbulence, geom=geom)
 
 
-def solve_aquaflux(**solve_kwargs):
+def solve_aquaflux(*, log_path=None, **solve_kwargs):
     """Solve the coupled RANS system on the imported OpenFOAM mesh; return fields + geometry.
 
     Parameters
@@ -256,8 +333,51 @@ def solve_aquaflux(**solve_kwargs):
         case["turbulence"],
         case["geom"],
     )
-    solve_options = dict(max_steps=MAX_STEPS, rtol=RTOL) | solve_kwargs
-    flow, k, omega = solve_coupled(coupled, **solve_options)
+    # One line per outer step, flushed, to `log_path` or stdout. A march nobody can read until it
+    # finishes costs its whole wall time to tell you something it knew in the third minute -- and a
+    # crawling march is indistinguishable from a hung one without it.
+    log_file = open(log_path, "w") if log_path is not None else sys.stdout
+    logger = MarchLogger(
+        log_file,
+        fields=coupled_fields(coupled),
+        detail=("inner", "fields"),
+        rtol=RTOL,
+        atol=0.0,
+    )
+    # Every run states the configuration it was taken under, in its own log, before any result: a
+    # number whose configuration is not written beside it cannot be re-adjudicated later, which is
+    # worse than being wrong, because a wrong finding gets corrected and an unanchored one gets cited.
+    logger.note("[configuration]")
+    for _name, _value in (
+        ("dual-time inner steps / tol", f"{INNER_STEPS} / {INNER_TOL}"),
+        ("k positivity floor", "UNREACHABLE on this builder (see POSITIVITY_FLOOR_WANTED)"),
+        ("inner forward rtol (row-scaled) / restart", f"{FORWARD_RTOL} / {FORWARD_RESTART}"),
+        ("cycle budget", CYCLE_BUDGET),
+        ("retry on cycles / alpha", f"{RETRY.on_cycles} / {RETRY.on_alpha}"),
+        ("step control", type(CONTROL).__name__),
+        ("stop (rtol, atol)", f"{RTOL}, 0.0"),
+    ):
+        logger.note(f"  {_name}: {_value}")
+
+    solve_options = (
+        dict(
+            max_steps=MAX_STEPS,
+            rtol=RTOL,
+            inner_steps=INNER_STEPS,
+            inner_tol=INNER_TOL,
+            step_control=CONTROL,
+            retry=RETRY,
+            scaled_norm=True,  # rebuild the row scales each outer step
+            on_checkpoint=logger.on_checkpoint,
+            on_retry=logger.on_retry,
+        )
+        | solve_kwargs
+    )
+    try:
+        flow, k, omega = solve_coupled(coupled, **solve_options)
+    finally:
+        if log_file is not sys.stdout:
+            log_file.close()
     velocity, pressure = momentum.unpack(flow)
     nu_t = turbulence.closure_fields(momentum.velocity_fields(flow), k, omega).nu_t
     return dict(

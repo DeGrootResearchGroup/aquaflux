@@ -36,6 +36,34 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -qE '^(aquaflux|tests
   echo "Docs and code land together. (Not blocking; 'git commit --no-verify' to skip.)" >&2
 fi
 
+# The verification cases run for tens of minutes each, so no tier drives them: a change to
+# the library's public surface can break every one of them and leave the whole suite green.
+# That is not hypothetical -- one case was found broken three ways at once (a settings object
+# introduced while the case still passed a bare callable, a guard tightened onto a step the
+# case does not hand it, and no sys.path bootstrap at all), and none of it failed anything.
+#
+# `tests/unit/test_validation_api.py` catches the STATIC half automatically and runs in the
+# fast gate: names that no longer exist, keywords no longer accepted. It cannot catch a
+# SEMANTIC break -- a parameter that still exists and now means something else, a type that
+# changed under an unchanged name, a default that moved -- and it is blind wherever a
+# callable takes `**kwargs`, which includes `solve_coupled`, the main entry point.
+#
+# So this reminder covers the half that needs judgement. It does not block: whether a given
+# API change reaches these cases is exactly the judgement a script cannot make.
+if git diff --cached --name-only --diff-filter=ACMR | grep -qE '^aquaflux/.*\.py$'; then
+  echo "" >&2
+  echo "pre-commit reminder: this commit changes the LIBRARY, and the verification cases are" >&2
+  echo "not run by any test tier -- a break in them fails nothing until someone spends an hour" >&2
+  echo "discovering it. If this change touches a signature, a default, a settings object or a" >&2
+  echo "type, check it against the cases that call it:" >&2
+  for case in validation/*/compare.py; do
+    [ -e "$case" ] && echo "  - $case" >&2
+  done
+  echo "The static half (names, accepted keywords) is checked by" >&2
+  echo "tests/unit/test_validation_api.py; the semantic half is this reminder." >&2
+  echo "(Not blocking; 'git commit --no-verify' to skip.)" >&2
+fi
+
 # The Stale-Record Check: a rename/delete leaves the OLD name readable in the rules
 # files, where it auto-loads into context and is served to the next reader as current
 # fact. Three wrong facts were lifted out of these files by grep in a single session

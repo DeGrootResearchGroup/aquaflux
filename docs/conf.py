@@ -61,6 +61,8 @@ SUBPACKAGE_GROUPS = {
                 "field_split",
                 "native_inverse",
                 "saddle_multigrid",
+                "host_vcycle",
+                "ilu0",
             ],
         ),
         ("Multigrid hierarchies", ["multigrid", "frozen_operator"]),

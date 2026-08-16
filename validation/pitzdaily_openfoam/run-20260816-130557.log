@@ -1,0 +1,11 @@
+pitzDaily, ? cells; stop rtol 1e-06, max 200 steps
+arm         steps  cycles   wall(s)          |R|  x_r/h
+lu         FAILED: EquinoxRuntimeError: Above is the stack outside of JIT. Below is the stack inside of JIT:
+
+equinox.EquinoxRunti
+[0]PETSC ERROR: ------------------------------------------------------------------------
+[0]PETSC ERROR: Caught signal number 15 Terminate: Some process (or the batch system) has told this process to end
+[0]PETSC ERROR: Try option -start_in_debugger or -on_error_attach_debugger
+[0]PETSC ERROR: or see https://petsc.org/release/faq/#valgrind and https://petsc.org/release/faq/
+[0]PETSC ERROR: configure using --with-debugging=yes, recompile, link, and run 
+[0]PETSC ERROR: to get more information on the crash.
