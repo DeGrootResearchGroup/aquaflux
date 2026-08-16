@@ -290,9 +290,10 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   `refresh_in_place`. Those two genuinely differ (different inputs, different refresh costs) and are
   deliberately **not** unified behind a signature that would be the union of three.
   - **`HostFactors` is the contract, and it is exactly `n_dofs` + `apply(residual, *, transpose=…)`.**
-    That pair was already a real structural contract satisfied by **seven** classes — the three
-    factorizations, `AmgVCycle`, `NativeHierarchyInverse`, both `BlockTriangularFieldSplit`s and
-    `VankaSmoother` — and declared by none, so `matvec` was written out three times byte for byte and
+    That pair was already a real structural contract satisfied by **six** classes — the three
+    factorizations, `AmgVCycle`, `NativeHierarchyInverse` and both `BlockTriangularFieldSplit`s (a
+    seventh, the since-deleted Vanka smoother, satisfied it too) — and declared by none, so `matvec`
+    was written out three times byte for byte and
     `FieldSplitAmgPreconditioner` obtained it by subclassing a *concrete sibling*.
   - **⚠️ Anything a base reads off `self.factors` beyond that pair is a requirement on ALL of them
     (binding).** This is not hypothetical: `has_native_solve` read `self.factors.has_native_solve`,
@@ -1211,10 +1212,16 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     - **Already done, do not re-propose:** `refactor` reuses the aggregation and prolongation
       (`pc_gamg_reuse_interpolation` + smoother `reuse_ordering`) and overwrites the operator values in
       place, so only the Galerkin coarse operators and the incomplete-LU factor values recompute.
-    - **A Vanka patch smoother is BUILT and installable as a level smoother — `aquaflux/solve/vanka.py`.**
-      Not shipped as a default and **not exported from `aquaflux.solve`**: it exists so the recorded
-      "the coarse space is the wall" verdict can be re-adjudicated (see the low-β bullet below), and it
-      earns a place in the tree only if it wins. Three facts to keep:
+    - **⛔ THE VANKA PATCH SMOOTHER IS DELETED (2026-08-15) — it never won on any arm, and it was kept
+      only on the condition that it would.** It was built to let the "the coarse space is the wall"
+      verdict be re-adjudicated; that re-adjudication happened and went against it (see the low-β
+      bullet below: measured against a *working* coarse space it stagnates on its own, at a state where
+      the shipped incomplete-LU converges in two cycles). It was never exported, never a default, and
+      never beat the incumbent, so it went rather than be carried — the module, its tests and the probe
+      arms are all recoverable from git history if the question ever reopens.
+      **⚠️ Everything below is kept deliberately, as the JUSTIFICATION for that deletion and as the
+      record of what the route costs, and it is no longer re-runnable without restoring the module.**
+      Three facts worth keeping:
       - **Route: PETSc's *shell* preconditioner, not `PCPATCH`.** `PCPATCH` with
         `pc_patch_construct_type = vanka` needs a `DM` the plain-AIJ path does not supply, which is why
         the earlier plan flagged it as a risk. `pc_type python` + `pc_python_type
@@ -4244,6 +4251,42 @@ result does not need that care: 33 % of wall alongside a 24 % cycle drop at an i
 region between them is flat to 4 %, so a finer sweep has little to find. `BFS3D_INNER_TOL` and
 `BFS3D_INNER_STEPS` are exposed for anyone who wants to try.
 
+**✅ AND IT TRANSFERS TO THE SHIPPED PATH, WHICH THE THREE MARCHES ABOVE DID NOT TEST (2026-08-15).** All
+three ran the **native** flow block, which the case does *not* default to — so the default this change
+governs (`flow inverse: petsc`) was unmeasured when it was made. It has since been run, on a tree carrying
+this change plus ~20 later merges:
+
+| arm | `inner_tol` | steps | wall | cycles | inner iterations | final ‖R‖ |
+|---|---|---|---|---|---|---|
+| **petsc — the shipped default** | **1e-2** | **59** | **1197 s** | 232 | 155 | 1.861e-06 |
+| petsc — archived baseline | 1e-3 | 67 | 1957 s | — | — | — |
+
+Same root, same `x_r/h` 8.3611. ⚠️ **Do not attribute the whole 39 % to `inner_tol`**: that archived
+baseline predates the coarse-solve factorization, the trailing zero-guess peel and twenty-odd merged
+changes, so the two runs differ in more than this knob. The direction is unambiguous; the decomposition
+is not available from this pair.
+
+### ⛔ THE NATIVE FLOW BLOCK IS STILL NOT FASTER ON A MARCH — and the comparison that said otherwise was unfair
+
+**Read this before quoting any native-versus-incumbent march number.** With the inner tolerance at its
+old 1e-3 the incumbent stood at 1957 s and the native block at 1510 s, which reads as the native arm
+finally winning by 23 %. It is not a comparison: **only the native arm had the `inner_tol` improvement.**
+Given the same change the incumbent gains *more*, and the ordering is unchanged:
+
+| arm at `inner_tol` 1e-2 | steps | wall |
+|---|---|---|
+| **petsc — the shipped default** | **59** | **1197 s** |
+| native, 2 sweeps | 63 | 1510 s |
+
+**The incumbent is 1.26× faster, so `FLOW_INVERSE` stays `petsc`.** The native direction's case rests
+where it always did — on the **adjoint at β = 0**, which is a different operator and where the incumbent's
+advantage (an incomplete factorization becoming near-exact as the shift raises diagonal dominance)
+disappears. That case cannot be closed until `jax.grad` runs on this case at all.
+
+**The general trap, which has now cost two wrong readings in this file:** when a change lands on one arm
+of an A/B, every previously-recorded number for the *other* arm is stale, and comparing across that
+boundary measures the change rather than the arms. Re-measure the baseline before ranking.
+
 ⚠️ **THIS DOES NOT OVERTURN THE RECORDED "TIGHTEN `inner_tol`" FINDING — it bounds it.** Elsewhere in
 this file a *pitzDaily* (2D, ILUT, large-Δτ dual-time) march is recorded as hitting a residual floor and
 over-developing because "at `inner_tol = 0.05` the implicit step is only 5 %-solved, so a large-Δτ
@@ -4853,6 +4896,11 @@ transfer to any thresholded arm.
       unrelated routes to "ω is the 3D preconditioner lever" is much better evidence than either
       alone, and it also suggests a concrete arm: **leave ω out of the patch**, since a local solve
       cannot resolve a direction the local block does not see.
+
+      ⚠️ **`VankaSmoother` / `VankaPC` / `CellStarPatches` NO LONGER EXIST — the module was deleted
+      2026-08-15 because it never won an arm. If you grepped your way here for one of those names,
+      that is why there is no such symbol; the code is in git history. The measurements below stand
+      as the reason it went, and cannot be re-run without restoring it.**
 
       **RESOLVED, and (1) IS REFUTED — the near-singular blocks are NOT the mechanism.** The test was
       pre-registered (`VankaSmoother(max_patch_gain=...)`: converges ⇒ (1), stagnates ⇒ (2)) and the

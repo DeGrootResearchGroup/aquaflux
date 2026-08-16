@@ -520,6 +520,11 @@ if FLOW_INVERSE == "native":
     #: The arm measured best on single states: strength-of-connection aggregation with no singleton
     #: aggregates, five levels, a per-cell block velocity splitting and an undamped correction.
     #:
+    #: ⚠️ ``sweeps`` is **2, not the 4 the single-state probes chose**: on a MARCH fewer sweeps win, 2533 s
+    #: against 3044 s (-16.8 % wall for +34.6 % cycles), because the apply cost dominates strongly enough
+    #: that buying cheapness with convergence pays. Every native march on record uses 2; the default said
+    #: 4 for a while, which handed the opt-in the measured-worse setting.
+    #:
     #: Two settings are exposed to the environment because a march is a different operating point from
     #: the state the rest were chosen on. ``BFS3D_FLOW_SWEEPS`` -- the sweep count was calibrated at zero
     #: shift, the adjoint's operator, and every shift the march runs at makes the block easier, so the
@@ -527,7 +532,7 @@ if FLOW_INVERSE == "native":
     #: aggregation reads values, so each refresh re-coarsens and retraces the compiled cycle; frozen, the
     #: partition is the one derived at the first build and reused for the whole march.
     _NATIVE_FLOW = dict(
-        sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", "4")),
+        sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", "2")),
         pressure_sweeps=2,
         strength_threshold=0.25,
         avoid_singletons=True,

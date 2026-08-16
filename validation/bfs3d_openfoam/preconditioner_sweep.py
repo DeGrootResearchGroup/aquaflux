@@ -106,13 +106,6 @@ def march_solver(coupled, policy, state):
 #: letting one run to thousands of matrix-vector products costs more than every healthy arm together.
 STUDY_SOLVER = relative_residual_gmres(1e-6, restart=15, stagnation_iters=40, max_restarts=60)
 
-#: The Vanka patch smoother, installed on every multigrid level below the coarse direct solve -- which
-#: on this case's two-level hierarchy is the fine level alone. Reached by class path through PETSc's
-#: shell preconditioner, so it needs no ``DM`` (the patch smoothers PETSc ships do).
-_VANKA = {
-    "mg_levels_pc_type": "python",
-    "mg_levels_pc_python_type": "aquaflux.solve.vanka.VankaPC",
-}
 
 #: The variants to compare. ``{}`` is the shipped bundle; anything else overrides it through the
 #: ``extra_options`` seam. Keep the shipped arm first as the control.
@@ -126,19 +119,15 @@ _VANKA = {
 #: * **sweeps** -- more of the *shipped* smoother, costing nothing new. If cycles keep falling as the
 #:   sweep count rises, the smoother is not yet saturated and cannot be the binding constraint; if they
 #:   plateau, the error that survives is in the coarse space's blind spot.
-#: * **vanka** -- a genuinely different smoother, relaxing whole velocity-pressure patches exactly
-#:   instead of pointwise, which is the standard answer to a saddle point's missing pressure diagonal.
-#:   The widest patch is deliberately over-strong: if even that leaves the cycle count where the
-#:   shipped smoother does, the smoother is not the lever. Two caveats belong with any result from
-#:   these arms, because both make this smoother weaker than the textbook one: it recombines the
-#:   patches *additively* where the classical sweep is multiplicative, and it truncates each patch to
-#:   the strongest few neighbours because this Jacobian's continuity row spans some fifty cells.
+#:   (A Vanka patch arm sat here once and is gone: measured against a working coarse space it stagnated
+#:   on its own at a state where the shipped incomplete-LU converges in two cycles, so it was deleted
+#:   rather than carried. The implementation is recoverable from git history if the question reopens.)
 #:
 #: A third arm attacks the coarse space directly, by **degrading** it: replacing the coarse direct LU
 #: with a Jacobi sweep. That is the decisive control for the whole question, and it reads in both
 #: directions. If degrading the coarse solve barely changes the cycle count, the coarse correction is
 #: not load-bearing here -- and then a smoother plateau *cannot* be blamed on the coarse space, so a
-#: Vanka tie only means Vanka is no better than incomplete-LU. If it wrecks the cycle count, the coarse
+#: tie between smoothers only means the new one is no better than incomplete-LU. If it wrecks the cycle count, the coarse
 #: grid is doing real work and a plateau does point there. (Raising ``coarse_eq_limit`` instead would
 #: measure nothing: the hierarchy is already two levels, so its single aggregation step has already
 #: landed under the limit and a larger limit cannot make it stop any sooner. That is why the recorded
