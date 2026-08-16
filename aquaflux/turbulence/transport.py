@@ -212,6 +212,21 @@ class SSTTurbulence(eqx.Module):
         The scalar boundary closures for each field (Dirichlet inlet / wall, zero-gradient outlet;
         the omega wall is imposed by cell fixation, so its wall closure is a placeholder).
     explicit_production_limiter : bool
+        Freeze the k-production cap's ``k`` in the **linearization** (a Patankar / deferred-correction
+        treatment): production keeps its exact value, but the term is dropped from the Jacobian
+        wherever the cap is active. ``False`` (default) is the exact operator.
+
+        **Opt in only for a forward solve, and only knowingly.** Where the cap is active at the
+        converged state, the implicit-function-theorem adjoint linearizes a residual different from
+        the one solved -- the fields are right and the **sensitivity is silently wrong**, with a
+        perfectly finite gradient coming back. :func:`~aquaflux.turbulence.solve_coupled` therefore
+        refuses to return a root reached with this set whose cap is active; see
+        :func:`~aquaflux.turbulence.production_cap_active`.
+
+        It defaulted to ``True`` until it was measured. On a turbulent channel and on the 3D
+        backward-facing step the two settings produce **identical** marches -- same step count, same
+        cycle count, same converged fields -- so the stabilization it offers was not, on either case,
+        buying anything the exact operator does not already give.
         How the k-production limiter is linearized for the forward k-solve (static). ``True``
         (default) freezes the cap's ``k`` (:attr:`KProduction.explicit_limiter`), giving an M-matrix
         the k-solve converges on unpreconditioned -- a robust modified-Newton step. ``False`` keeps
@@ -234,7 +249,7 @@ class SSTTurbulence(eqx.Module):
     wall_faces: jnp.ndarray
     k_boundary: BoundaryConditions
     omega_boundary: BoundaryConditions
-    explicit_production_limiter: bool = eqx.field(static=True, default=True)
+    explicit_production_limiter: bool = eqx.field(static=True, default=False)
 
     @classmethod
     def build(
@@ -250,7 +265,7 @@ class SSTTurbulence(eqx.Module):
         k_boundary: BoundaryConditions,
         omega_boundary: BoundaryConditions,
         *,
-        explicit_production_limiter: bool = True,
+        explicit_production_limiter: bool = False,
     ) -> SSTTurbulence:
         """Build the assembler, deriving the wall distance and wall-adjacent cell set.
 

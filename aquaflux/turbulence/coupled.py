@@ -94,6 +94,7 @@ from aquaflux.solve import (
 
 from .initialization import hybrid_initialize
 from .preconditioner import ScalarTransportPreconditioner, ScaledScalarPreconditioner
+from .sources import production_and_limit
 
 # The default pseudo-time shift basis (full operator diagonal = uniform under-relaxation), held as a
 # module singleton so it is not reconstructed in each function's argument defaults.
@@ -3223,6 +3224,76 @@ def amg_beta_tracking_refresh(
     )
 
 
+def production_cap_active(coupled: CoupledRANS, state: jnp.ndarray) -> jnp.ndarray:
+    """Per-cell mask: where the k-production cap binds at ``state``.
+
+    The cap is ``min(nu_t S^2, 10 beta* k omega)``, and with
+    ``SSTTurbulence.explicit_production_limiter`` set its ``k`` is frozen in the Jacobian. Wherever
+    this mask is ``True`` at a **converged** state, that freezing has removed a real term from the
+    linearization, so the implicit-function-theorem adjoint no longer differentiates the residual
+    that was solved.
+
+    Uses :func:`~aquaflux.turbulence.production_and_limit`, the same expressions the residual forms,
+    so this cannot clear a state the residual actually caps.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled assembler.
+    state : jnp.ndarray
+        A packed coupled state, shape ``(layout.size,)``.
+
+    Returns
+    -------
+    jnp.ndarray
+        Boolean per cell, shape ``(n_cells,)``.
+
+    Notes
+    -----
+    A cell whose ``k`` has been driven to ~0 reports ``True`` for an arithmetic reason rather than a
+    physical one: the limit carries ``maximum(k, 0)``, so it collapses to ~0 there and any positive
+    production exceeds it. That is still a real Jacobian difference, but it is not "the strain is
+    high" -- see :func:`~aquaflux.turbulence.production_and_limit`.
+    """
+    flow, k, omega = coupled.physical_fields(state)
+    closure = coupled.turbulence.closure_fields(coupled.momentum.velocity_fields(flow), k, omega)
+    production, limit = production_and_limit(
+        closure.nu_t, closure.strain_rate, closure.omega, k, coupled.turbulence.model
+    )
+    return production > limit
+
+
+def _reject_a_root_the_frozen_cap_invalidates(
+    coupled: CoupledRANS, state: jnp.ndarray
+) -> jnp.ndarray:
+    """Refuse a converged state whose adjoint the frozen production cap has invalidated.
+
+    A no-op unless ``explicit_production_limiter`` is set -- which is opt-in, and off by default. With
+    it set, the returned state is guarded by :func:`equinox.error_if` on the cap being active
+    anywhere: the forward fields would be perfectly good, and the **gradient through them silently
+    wrong**, which is precisely the failure that must not be shipped quietly.
+
+    The same discipline the positivity floors are held to -- a stabilization that alters the
+    linearization is free only while it is inactive at the root, and something has to check rather
+    than assume. ``error_if`` (not a Python ``if``) because the check must fire on the traced
+    ``jax.grad`` path too, which is the only path where the damage is real.
+    """
+    if not coupled.turbulence.explicit_production_limiter:
+        return state
+    return eqx.error_if(
+        state,
+        jnp.any(production_cap_active(coupled, state)),
+        "the coupled solve converged to a root at which the k-production cap is ACTIVE while "
+        "`explicit_production_limiter=True`, so the cap's `k` is frozen in the Jacobian there. The "
+        "fields are fine; any gradient taken through this root is NOT -- the "
+        "implicit-function-theorem adjoint would linearize a different residual from the one solved, "
+        "and would return a finite, wrong sensitivity. Build the turbulence with "
+        "`explicit_production_limiter=False` (the default) for the exact operator, or, if the "
+        "stabilization is genuinely needed for this forward solve, take no gradient through the "
+        "result. `aquaflux.turbulence.production_cap_active` reports which cells bind.",
+    )
+
+
 def solve_coupled(
     coupled: CoupledRANS,
     flow: jnp.ndarray | None = None,
@@ -3618,7 +3689,9 @@ def solve_coupled(
         # march, unchanged).
         final_measure = norm_builder(state) if norm_builder is not None else base_norm
         if float(final_measure(coupled.residual(state))) <= atol + rtol * reference_norm:
-            return coupled.physical_fields(state)
+            return coupled.physical_fields(
+                _reject_a_root_the_frozen_cap_invalidates(coupled, state)
+            )
         # Hand the finishing solve the *absolute* target measured at the initial state, so a refreshed
         # solve stops exactly where an unrefreshed one would. A relative tolerance would be measured
         # against whatever residual the pre-march reached, silently tightening the solve by that factor
@@ -3634,7 +3707,7 @@ def solve_coupled(
         forward_step=continuation,
     )
     solved = solver.solve(lambda s, c: c.residual(s), state, coupled)
-    return coupled.physical_fields(solved)
+    return coupled.physical_fields(_reject_a_root_the_frozen_cap_invalidates(coupled, solved))
 
 
 class _MassFlowBorderedPolicy(eqx.Module):

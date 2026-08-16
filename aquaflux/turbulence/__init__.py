@@ -32,6 +32,7 @@ from .boundary import (
 from .continuation import ScalarShiftPolicy, scalar_pseudo_transient_solve
 from .diagnostics import coupled_equation_names, coupled_fields, coupled_residuals
 from .coupled import (
+    production_cap_active,
     positive_k_limit,
     positive_k_projection,
     CoupledJacobianProbe,
@@ -72,6 +73,7 @@ from .reynolds import (
     solve_reynolds_continuation,
 )
 from .sources import (
+    production_and_limit,
     KDestruction,
     KProduction,
     NearWallKClosure,
@@ -137,6 +139,8 @@ __all__ = [
     "omega_wall_value",
     "positive_k_limit",
     "positive_k_projection",
+    "production_and_limit",
+    "production_cap_active",
     "scalar_pseudo_transient_solve",
     "scalar_transport_preconditioner",
     "scalar_transport_shift_diagonal",
