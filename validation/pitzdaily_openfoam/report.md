@@ -10,7 +10,7 @@ Green-Gauss gradients). U_in = 10 m/s, nu = 1e-5 (Re ~ 25000 on the 25.4 mm inle
 | quantity | aquaflux | OpenFOAM |
 |---|---|---|
 | reattachment length x_r/h (lower wall) | 8.07 | 7.74 |
-| peak nu_t/nu | 417 | 423 |
+| peak nu_t/nu | 418 | 423 |
 | rel. L2 U_x error (cell-for-cell) | 0.019 | -- |
 | rel. L2 U_y error (cell-for-cell) | 0.010 | -- |
 

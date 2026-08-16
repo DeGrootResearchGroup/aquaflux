@@ -89,6 +89,7 @@ from aquaflux.solve import (
     RetryPolicy,
     host_ilu_inverse,
     native_nodal_inverse,
+    native_saddle_inverse,
     relative_residual_gmres,
 )
 from aquaflux.turbulence import (
@@ -224,6 +225,7 @@ if K_WALL not in _K_WALL_BCS:
     raise SystemExit(f"PITZ_K_WALL={K_WALL!r} is not one of {sorted(_K_WALL_BCS)}")
 K_WALL_BC = _K_WALL_BCS[K_WALL]
 
+
 #: ⚠️ WHICH INVERSE THE LEADING `[u, v, p]` BLOCK GETS, and a prediction worth recording before it is
 #: run. `petsc` (default) is the host GAMG V-cycle smoothed by PETSc's incomplete factorization, at the
 #: `FILL_LEVELS` above. `hostilu` is this package's own hierarchy smoothed by its own factorization --
@@ -234,8 +236,33 @@ K_WALL_BC = _K_WALL_BCS[K_WALL]
 #: the mechanism is the fill rather than anything belonging to PETSc -- and it says that this package's
 #: host V-cycle cannot serve a case needing fill until its factorization grows one.
 FLOW_INVERSE = os.environ.get("PITZ_FLOW_INVERSE", "petsc")
-if FLOW_INVERSE not in ("petsc", "hostilu"):
-    raise SystemExit(f"PITZ_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'hostilu']")
+if FLOW_INVERSE not in ("petsc", "native", "hostilu"):
+    raise SystemExit(
+        f"PITZ_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'native', 'hostilu']"
+    )
+
+#: `native` -- the sibling case's own alternative: a differentiable-framework multigrid over the
+#: `[u, v, p]` saddle relaxed by SIMPLE sweeps rather than by an incomplete factorization. It is the
+#: interesting arm here for two reasons. A SIMPLE sweep relaxes through diagonal and Schur
+#: approximations, so unlike an incomplete factorization it does not take its pattern from the stored
+#: sparsity -- which is why it may answer to the probe's reach quite differently. And the fill that
+#: decides the ILU arms does not apply to it at all.
+#:
+#: ⚠️ The settings are the sibling's and are NOT established here. That case ranks a smoother knob
+#: oppositely (see `FILL_LEVELS`) and coarsens about three times per level where this one manages
+#: seven, so `strength_threshold` and `sweeps` in particular are open questions on this mesh rather
+#: than values to trust. `PITZ_FLOW_SWEEPS` is exposed for that reason.
+NATIVE_FLOW = dict(
+    sweeps=int(os.environ.get("PITZ_FLOW_SWEEPS", "2")),
+    pressure_sweeps=2,
+    strength_threshold=0.25,
+    avoid_singletons=True,
+    aggressive_levels=0,
+    max_levels=5,
+    max_coarse=500,
+    block_splitting=True,
+    omega=1.0,
+)
 #: Settings deliberately NOT ported from the sibling study: this case ranks a smoother knob oppositely,
 #: so its sweeps and threshold are its own question rather than a value to copy.
 HOST_FLOW = dict(
@@ -248,7 +275,13 @@ HOST_FLOW = dict(
     max_coarse=500,
     prolongation_smoothing="none",
 )
-LEADING_INVERSE = host_ilu_inverse(**HOST_FLOW) if FLOW_INVERSE == "hostilu" else None
+LEADING_INVERSE = (
+    host_ilu_inverse(**HOST_FLOW)
+    if FLOW_INVERSE == "hostilu"
+    else native_saddle_inverse(**NATIVE_FLOW)
+    if FLOW_INVERSE == "native"
+    else None
+)
 
 #: The trailing `[k, omega]` block's inverse: the differentiable-framework nodal hierarchy, which the
 #: sibling case defaults to after a controlled pair measured it ahead of the host V-cycle (67 steps and

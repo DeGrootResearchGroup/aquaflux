@@ -1093,6 +1093,39 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     1.9e-01, median 1.02, max factor entry 8.0). So on one case the FILL produces the bad pivots and
     dropping it is the fix; on the other, dropping it produces them and the fill is the fix.
 
+    **✅ AND THE SIMPLE-SMOOTHED HIERARCHY ESCAPES BOTH THE FILL AND THE REACH — the fastest arm on
+    `pitzDaily`, at HALF the Jacobian (2026-08-16).** Same case, same everything but the leading
+    inverse and the probe's reach; three Reynolds rungs; `x_r/h` identical to four decimals in every
+    converging arm, so this is a cost comparison and not an accuracy one:
+
+    | leading inverse | reach 3 | reach 5 |
+    |---|---|---|
+    | PETSc **ILU(1)** | **fails** (300 matvecs, true 3.36) | converges — 74 steps, 321 cycles, **628 s** |
+    | PETSc **ILU(0)** | fails | fails (α 0.000, NaN by step 4) |
+    | our **ILU(0)** (`hostilu`) | fails | fails (α 0.000, inf by step 3) |
+    | **native SIMPLE** | **converges — 71 steps, 395 cycles, 550 s** | converges — 71, 408, 799 s |
+
+    **SIMPLE is REACH-INSENSITIVE, and that is the load-bearing observation.** Between reach 3 and
+    reach 5 it takes the **same 71 steps**, cycles within 3 % (395 against 408) and a final residual
+    identical to four figures (5.095e-06 against 5.097e-06) — while the Jacobian halves (6.3M nonzeros
+    against 13.3M) and the march is **31 % shorter**. It simply absorbs the ~2e-07 perturbation that a
+    short reach leaves in the pressure column.
+
+    **The mechanism is which preconditioners inherit the stored SPARSITY.** An incomplete
+    factorization takes its pattern from it, so a corrupted pattern gives a corrupted factor and
+    ILU(1) *requires* reach 5 here. SIMPLE relaxes through diagonal and Schur approximations and takes
+    no pattern at all, so the same corruption is merely a slightly wrong operator. **Shortening the
+    reach is free for SIMPLE and fatal for an ILU** — which is the argument for the reach as a
+    preconditioner-family choice rather than a case constant.
+
+    At reach 3 SIMPLE also beats the incumbent outright, 550 s against 628 s (12 %).
+
+    ⚠️ **One run per arm, and this case has no measured march-level noise floor.** The step counts and
+    cycle counts are deterministic and carry the result; the 12 % wall margin over PETSc is the softer
+    number. ⚠️ **And SIMPLE's own settings are still the sibling case's** (`strength_threshold` 0.25,
+    2 sweeps, 5 levels) on a mesh that coarsens about 3× per level where that one manages 24×, so the
+    arm is not at its best here — `PITZ_FLOW_SWEEPS` and the threshold are unexplored.
+
     **✅ CONFIRMED ON A SECOND, INDEPENDENT ZERO-FILL IMPLEMENTATION — the mechanism is the FILL, not
     PETSc (2026-08-16).** `HostVCycleInverse` is this package's own hierarchy smoothed by its own
     `Ilu0`: different coarsening, different factorization code, different language even. Run as the
