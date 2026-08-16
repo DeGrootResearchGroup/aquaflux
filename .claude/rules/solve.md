@@ -1093,6 +1093,21 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     1.9e-01, median 1.02, max factor entry 8.0). So on one case the FILL produces the bad pivots and
     dropping it is the fix; on the other, dropping it produces them and the fill is the fix.
 
+    **✅ CONFIRMED ON A SECOND, INDEPENDENT ZERO-FILL IMPLEMENTATION — the mechanism is the FILL, not
+    PETSc (2026-08-16).** `HostVCycleInverse` is this package's own hierarchy smoothed by its own
+    `Ilu0`: different coarsening, different factorization code, different language even. Run as the
+    leading inverse on `pitzDaily` it fails identically to PETSc's zero-fill smoother — step 1 alpha
+    0.000 with the residual above its own starting value, step 2 at the shift ceiling, **non-finite by
+    step 3** — while PETSc's ILU(1) converges the same case in 74 steps and 628 s. Two implementations
+    agreeing in failure, against one differing only in fill, is what puts this on two legs rather than
+    one.
+
+    **⚠️ CONSEQUENCE FOR TAKING PETSc OFF THIS PATH: `Ilu0` IS ZERO-FILL BY CONSTRUCTION AND HAS NO
+    FILL PARAMETER**, so `HostVCycleInverse` cannot serve a case that needs one. That is a concrete,
+    specifiable gap rather than a mystery: a level-of-fill incomplete factorization is what the host
+    V-cycle would need before it can replace the incumbent everywhere. Note the gap is invisible from
+    the case that motivated the host V-cycle, whose block wants exactly zero fill.
+
     **⚠️ Three mechanisms were refuted on the way, each of which had a plausible story:**
     - **NOT the pressure/momentum scale split.** The 3D block's split is *comparable or worse* at
       matched β (pressure min |diag| 3.42e-07 against 2D's 4.19e-05; equilibrated max entry 81.9 at

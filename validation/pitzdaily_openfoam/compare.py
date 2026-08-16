@@ -87,6 +87,7 @@ from aquaflux.solve import (
     MarchLogger,
     RefreshPolicy,
     RetryPolicy,
+    host_ilu_inverse,
     native_nodal_inverse,
     relative_residual_gmres,
 )
@@ -222,6 +223,32 @@ K_WALL = os.environ.get("PITZ_K_WALL", "zerogradient")
 if K_WALL not in _K_WALL_BCS:
     raise SystemExit(f"PITZ_K_WALL={K_WALL!r} is not one of {sorted(_K_WALL_BCS)}")
 K_WALL_BC = _K_WALL_BCS[K_WALL]
+
+#: ⚠️ WHICH INVERSE THE LEADING `[u, v, p]` BLOCK GETS, and a prediction worth recording before it is
+#: run. `petsc` (default) is the host GAMG V-cycle smoothed by PETSc's incomplete factorization, at the
+#: `FILL_LEVELS` above. `hostilu` is this package's own hierarchy smoothed by its own factorization --
+#: which is ZERO-FILL by construction and has no fill parameter at all.
+#:
+#: Since zero fill is measured to AMPLIFY on this block (see `FILL_LEVELS`), `hostilu` is expected to
+#: fail here exactly as PETSc's zero-fill smoother did. If it does, that is a clean confirmation that
+#: the mechanism is the fill rather than anything belonging to PETSc -- and it says that this package's
+#: host V-cycle cannot serve a case needing fill until its factorization grows one.
+FLOW_INVERSE = os.environ.get("PITZ_FLOW_INVERSE", "petsc")
+if FLOW_INVERSE not in ("petsc", "hostilu"):
+    raise SystemExit(f"PITZ_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'hostilu']")
+#: Settings deliberately NOT ported from the sibling study: this case ranks a smoother knob oppositely,
+#: so its sweeps and threshold are its own question rather than a value to copy.
+HOST_FLOW = dict(
+    sweeps=int(os.environ.get("PITZ_FLOW_SWEEPS", "1")),
+    cycles=1,
+    strength_threshold=0.0,
+    avoid_singletons=True,
+    aggressive_levels=0,
+    max_levels=10,
+    max_coarse=500,
+    prolongation_smoothing="none",
+)
+LEADING_INVERSE = host_ilu_inverse(**HOST_FLOW) if FLOW_INVERSE == "hostilu" else None
 
 #: The trailing `[k, omega]` block's inverse: the differentiable-framework nodal hierarchy, which the
 #: sibling case defaults to after a controlled pair measured it ahead of the host V-cycle (67 steps and
@@ -499,6 +526,10 @@ def solve_aquaflux(*, log_path=None, **solve_kwargs):
         ("smoother fill / sweeps / coarse limit", f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"),
         ("preconditioner beta floor", PC_BETA_FLOOR),
         ("field split / trailing sweeps", f"{FIELD_SPLIT} / {TRAILING_SWEEPS}"),
+        (
+            "flow inverse",
+            FLOW_INVERSE if LEADING_INVERSE is None else f"{FLOW_INVERSE} {HOST_FLOW}",
+        ),
         ("trailing inverse", "native nodal" if FIELD_SPLIT else "n/a"),
         ("probe stencil reach", STENCIL_REACH),
         ("probe column reach", COLUMN_REACH or "uniform"),
@@ -562,6 +593,7 @@ def solve_aquaflux(*, log_path=None, **solve_kwargs):
             coarse_eq_limit=COARSE_EQ_LIMIT,
             field_split=FIELD_SPLIT,
             trailing_smoother_sweeps=TRAILING_SWEEPS,
+            leading_inverse=LEADING_INVERSE if FIELD_SPLIT else None,
             trailing_inverse=native_nodal_inverse(**NATIVE_TRAILING) if FIELD_SPLIT else None,
             inner_observer=logger.on_inner,
         )
