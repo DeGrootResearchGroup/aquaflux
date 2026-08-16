@@ -5396,8 +5396,22 @@ transfer to any thresholded arm.
     satisfies `ForwardStep` in full, so a march configured with `retry_on_cycles` accepted it and then
     never escalated — from the log, indistinguishable from a march that never needed to. One reporting
     path failed the *opposite* way and read `active_step.relaxation_schedule` unguarded, so the same
-    conforming step raised `AttributeError` mid-march. `forward_march` now checks **once, before the
-    first step** (`_require_shifted`), naming the feature and what it needs.
+    conforming step raised `AttributeError` mid-march. `forward_march` now checks **once, on the first
+    iteration, against the step the CONTROL produced** (`RetryPolicy.require_shifted`), naming the
+    feature and what it needs.
+    **⚠️ THE OBJECT CHECKED IS `active_step`, NOT THE STEP HANDED IN, AND THAT IS LOAD-BEARING (fixed
+    2026-08-16).** Checking before the loop looks equivalent and is not: the default schedule is
+    `SwitchedEvolutionRelaxation`, which is **memoryless and exposes no `beta`**, while a
+    `ShiftStrengthControl` swaps a `ConstantRelaxation` (which does) onto the step every iteration. So
+    the readable beta the escalation needs is supplied **by the control**, and a pre-loop gate sees a
+    step that never runs. It rejected the shipped configuration outright — every `bfs3d` march runs a
+    shift control *and* both retry thresholds, so **not one could start**, under any flow inverse, with
+    a `TypeError` whose own message names `DualTimeStep` as acceptable while refusing one. The check
+    still precedes any escalation, which is the property it exists for, and with no control
+    `active_step` is the base step so the ungated path is unchanged. Pinned by
+    `test_the_escalation_accepts_a_shift_the_control_installs`, built from the **shipped** pieces (a
+    `PseudoTransientStep` on the default schedule under a `DualTimeControl`) rather than a stub —
+    a stub is what let this through — and verified to fail against the old gate.
     - **Gate only what is genuinely silent (binding).** The escalation is gated. The divergence retry
       (`retry_solver` / `retry_divergence_cap`) is **not** — it re-solves at a tighter tolerance and
       never touches beta, so it works on any step; its *reporting* goes through `_shift_of`, which
