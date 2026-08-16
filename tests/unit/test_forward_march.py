@@ -1185,3 +1185,84 @@ def test_the_divergence_retry_works_on_a_step_with_no_shift() -> None:
     assert seen == [("solver", 0.0)]  # announced, with no shift invented for a step that has none
     assert bool(result.reports[0].diverged_retry)
     assert result.reports[0].shift == 0.0
+
+
+class _UnshiftedStep(eqx.Module):
+    """A step whose schedule carries no readable ``beta`` -- what a builder hands over BEFORE a control.
+
+    This is not a contrived shape: the dual-time builders return exactly this, a
+    ``SwitchedEvolutionRelaxation`` with no ``beta``, and rely on a ``StepControl`` to swap in a
+    ``ConstantRelaxation`` per iteration.
+    """
+
+    relaxation_schedule: SwitchedEvolutionRelaxation = SwitchedEvolutionRelaxation()
+
+    def stepper(self):
+        def step(residual_fn, phi, residual_norm_0, solver):
+            return _outcome(phi, 40)  # held: never converges, so the escalation would fire
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def default_solver(self):
+        return None
+
+
+class _InstallsBeta(eqx.Module):
+    """A ``StepControl`` that installs a readable ``beta``, as the dual-time controls do."""
+
+    def next_step(self, base, previous, state):
+        return _CyclesFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0))), state
+
+
+def test_the_escalation_guard_accepts_a_shift_a_step_control_installs() -> None:
+    """A base step with no readable ``beta`` is fine when a ``StepControl`` installs one.
+
+    The regression this pins: the guard was applied to the BASE step before the loop, where the
+    dual-time family always fails it -- its builder hands over a ``SwitchedEvolutionRelaxation`` and
+    the control swaps in a ``ConstantRelaxation`` per iteration. That rejected the shipped coupled
+    configuration outright, and the flagship 3D validation case died on its first step with a
+    ``TypeError`` naming a step type the message itself listed as acceptable.
+
+    Checking the step that will actually run -- after the control has shaped it -- is what makes the
+    guard mean what it says.
+    """
+    # The base step genuinely FAILS the guard -- which is what makes this a regression test rather
+    # than a tautology: applied here, as it was, it rejects the march outright.
+    with pytest.raises(TypeError, match="relaxation_schedule"):
+        RetryPolicy(on_cycles=10).require_shifted(_UnshiftedStep())
+
+    residual = _Cubic(jnp.zeros((1,)))
+    result = forward_march(
+        _UnshiftedStep(),
+        residual,
+        jnp.ones((1,)),
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        step_control=_InstallsBeta(),
+        retry=RetryPolicy(on_cycles=10, beta_factor=2.0, cycles_limit=2),
+    )
+    # It ran, and the escalation actually fired -- the guard let through a step that can escalate.
+    assert int(result.reports[0].escalations) > 0
+
+
+def test_the_escalation_guard_still_rejects_a_step_that_can_never_escalate() -> None:
+    """With no control to install one, a step carrying no ``beta`` is rejected -- loudly, not silently.
+
+    This is the failure the guard exists for: a ``DampedNewtonStep`` satisfies ``ForwardStep`` in full,
+    so a march configured to escalate used to accept one and then never escalate, indistinguishable in
+    the log from a march that never needed to.
+    """
+    with pytest.raises(TypeError, match="relaxation_schedule"):
+        forward_march(
+            DampedNewtonStep(line_search=0),
+            _Cubic(jnp.zeros((1,))),
+            jnp.ones((1,)),
+            max_steps=1,
+            rtol=1e-10,
+            atol=1e-12,
+            retry=RetryPolicy(on_cycles=10),
+        )

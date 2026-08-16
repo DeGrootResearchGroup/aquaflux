@@ -549,16 +549,6 @@ def forward_march(
     residual_norm_0 = jnp.asarray(norm(residual_fn(phi0)))
     reference = float(residual_norm_0) if reference_norm is None else float(reference_norm)
 
-    # Check the step can support what was ASKED FOR, before the first step rather than during one. The
-    # escalation drives the pseudo-transient shift, which `ForwardStep` does not promise -- see
-    # `RetryPolicy.require_shifted`. Two neighbours are deliberately NOT gated, for opposite reasons:
-    # the tight-solver fallback re-solves and never touches beta, so it works on any step; and a
-    # `step_control` need not drive beta at all (the protocol only asks it to return a ready-to-run
-    # step), while one that does already fails *loudly* from inside itself when its `tree_at` cannot
-    # find the field. Only the escalation failed silently, so only it is gated.
-    if retry.escalates:
-        retry.require_shifted(forward_step)
-
     # Both thresholds are knowable INSIDE a step -- the cost one the moment a solve returns, the
     # step-length one the moment a line search collapses -- but the reaction below only runs once the
     # whole step is back. Push them down to the step so it can stop there and then, rather than
@@ -593,6 +583,22 @@ def forward_march(
             active_step, control_state = step_control.next_step(
                 active_step, reports[-1] if reports else None, control_state
             )
+        # Check the step can support what was ASKED FOR -- loudly, and once. The escalation drives the
+        # pseudo-transient shift, which `ForwardStep` does not promise (see `RetryPolicy.require_shifted`);
+        # the `hasattr` this replaces sat in the escalation's own loop condition and failed **silently**,
+        # so a march configured to escalate simply never did.
+        #
+        # It must run HERE, on `active_step`, not on the base step before the loop. A `StepControl` is
+        # what INSTALLS the readable shift on the dual-time family: the builder hands over a step whose
+        # schedule is a `SwitchedEvolutionRelaxation` (which has no `beta`), and the control swaps in a
+        # `ConstantRelaxation` (which does) at this point of every iteration. Checking before the loop
+        # therefore rejects the shipped coupled configuration -- a step that would have escalated
+        # perfectly well -- while checking here sees what the escalation will actually be handed.
+        # Two neighbours are deliberately NOT gated, for opposite reasons: the tight-solver fallback
+        # re-solves and never touches beta, so it works on any step; and a control that drives beta
+        # already fails loudly from inside itself when its `tree_at` cannot find the field.
+        if retry.escalates and not reports:
+            retry.require_shifted(active_step)
         if precondition_step is not None:
             # Refresh the step's (frozen, host) preconditioner from the state and shift strength this
             # step is about to run at -- e.g. re-factoring a complete LU at the current (state, β) so it

@@ -117,6 +117,12 @@ class RetryPolicy:
         the tight-solver fallback next door has no such need, and gating it too would reject steps that
         work perfectly well with it.
 
+        ⚠️ **Apply it to the step that will actually run, after any ``StepControl`` has shaped it --
+        never to the base step before the march.** A control is what *installs* the readable shift on
+        the dual-time family: the builder hands over a schedule with no ``beta`` and the control swaps
+        in one that has it, per iteration. Checked too early, this rejects the shipped coupled
+        configuration outright.
+
         Raises
         ------
         TypeError
