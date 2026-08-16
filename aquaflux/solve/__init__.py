@@ -174,6 +174,7 @@ from .step_control import (
 )
 
 __all__ = [
+    "COMPILED",
     "NO_REFRESH",
     "NO_RETRIES",
     "AirHierarchy",
@@ -195,7 +196,6 @@ __all__ = [
     "ForwardStep",
     "HostFactors",
     "HostPreconditioner",
-    "COMPILED",
     "HostVCycleInverse",
     "Ilu0",
     "ImplicitNewtonSolver",
