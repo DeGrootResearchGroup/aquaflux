@@ -21,7 +21,7 @@ from .mean_velocity import bulk_velocity_flow_solve
 from .scales import body_force_velocity, characteristic_velocity
 from .momentum import FlowFields, MomentumContinuity, PressureForce, VelocityFields
 from .preconditioner import damped_jacobi_solve, pressure_schur_laplacian
-from .rhie_chow import interior_mass_flux, momentum_diagonal
+from .rhie_chow import interior_mass_flux, momentum_diagonal, volume_flux
 
 __all__ = [
     "BlockPreconditioner",
@@ -49,4 +49,5 @@ __all__ = [
     "potential_flow",
     "pressure_schur_laplacian",
     "reused_flow_solve",
+    "volume_flux",
 ]

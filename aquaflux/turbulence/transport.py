@@ -34,6 +34,7 @@ from aquaflux.discretization import (
     FixedValueCells,
     ResidualAssembler,
 )
+from aquaflux.flow import volume_flux
 from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import FieldProperty, PropertyModel
 from aquaflux.solve import LocalCourantBasis, ShiftBasis
@@ -329,8 +330,14 @@ class SSTTurbulence(eqx.Module):
         return eqx.tree_at(lambda t: t.molecular_viscosity, self, self.molecular_viscosity * factor)
 
     def _volume_flux(self, mdot: jnp.ndarray) -> jnp.ndarray:
-        """The volume face flux ``mdot / rho`` the kinematic transport advects on."""
-        return mdot / self.density
+        """The volumetric face flux the kinematic ``k``/``omega`` transport advects on.
+
+        Shared with every other scalar carried by the flow (see
+        :func:`~aquaflux.flow.volume_flux`), so the conversion has one definition. The
+        constant-density caveat in this module's docstring is about writing ``k`` and ``omega`` in
+        kinematic form at all, not about this conversion.
+        """
+        return volume_flux(mdot, self.density)
 
     def _diffusivity(
         self, nu_t: jnp.ndarray, f1: jnp.ndarray, inner: float, outer: float
