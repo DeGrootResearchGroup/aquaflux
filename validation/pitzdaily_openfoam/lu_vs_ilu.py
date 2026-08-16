@@ -37,12 +37,10 @@ sys.path.insert(0, str(HERE.parents[1]))
 import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
-    CflResidualDualTimeControl,
     MarchLogger,
-    RetryPolicy,
+    RefreshPolicy,
     host_ilu_inverse,
     native_nodal_inverse,
-    relative_residual_gmres,
     restart_cycles,
 )
 from aquaflux.turbulence import (  # noqa: E402
@@ -55,29 +53,20 @@ from aquaflux.turbulence import (  # noqa: E402
 )
 
 #: Matches the case's own stopping test, so an arm is not flattered by a looser bar than its rivals.
-MAX_STEPS, RTOL = compare.MAX_STEPS, compare.RTOL
+#: ⚠️ ATOL TOO. The case's bar moved from a relative `RTOL` to an absolute `ATOL`; importing only
+#: `RTOL` leaves the stopping test `|R| <= 0`, so every arm silently runs the full step cap and
+#: the comparison measures the cap rather than the preconditioners.
+MAX_STEPS, RTOL, ATOL = compare.MAX_STEPS, compare.RTOL, compare.ATOL
 
-#: ⚠️ THE MARCH MACHINERY, TAKEN FROM THE THREE-DIMENSIONAL CASE RATHER THAN FROM THIS ONE.
-#: This case's own driver predates all of it: it runs a SINGLE-STEP pseudo-transient march with no
-#: dual-time inner loop, no Courant control, no retry ladder and no per-step log. That configuration
-#: is a documented reachability crawl here -- on the order of eight hundred outer steps to develop the
-#: bubble -- so a preconditioner comparison run under it measures the globalization, not the
-#: preconditioner, and takes hours doing it. The values below are what the three-dimensional case
-#: ships, which is where every one of them was calibrated.
-INNER_STEPS, INNER_TOL = 5, 1e-2
-CYCLE_BUDGET = 42
-FORWARD_RTOL, FORWARD_RESTART = 0.3, 15
-RETRY = RetryPolicy(
-    solver=relative_residual_gmres(1e-4, restart=40),
-    on_cycles=10,
-    on_alpha=0.01,
-    beta_factor=2.0,
-)
-#: The Courant control: grow the pseudo-timestep while the inner line search is comfortable, brake on
-#: a clipped step or a rising residual. Without it beta never ramps and the march cannot develop.
-CONTROL = CflResidualDualTimeControl(
-    beta_start=0.5, beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25
-)
+#: The march configuration is the CASE's, imported rather than restated. It used to be a second copy
+#: here, which is how two files that must agree stop agreeing: the case is what a reader runs and what
+#: every other study inherits, so an arm measured against a private copy of its settings is measuring
+#: a configuration nobody else uses.
+INNER_STEPS, INNER_TOL = compare.INNER_STEPS, compare.INNER_TOL
+CYCLE_BUDGET = compare.CYCLE_BUDGET
+FORWARD_RTOL, FORWARD_RESTART = compare.FORWARD_RTOL, compare.FORWARD_RESTART
+RETRY = compare.RETRY
+CONTROL = compare.CONTROL
 DUAL_TIME = dict(inner_steps=INNER_STEPS, inner_tol=INNER_TOL)
 
 #: The flow block's settings from the three-dimensional study, where they were measured. Carried here
@@ -200,6 +189,7 @@ def run(name, build, coupled, start):
         continuation=continuation,
         max_steps=MAX_STEPS,
         rtol=RTOL,
+        atol=ATOL,
         # The three seams the three-dimensional case drives its march with. Without `step_control`
         # the shift never ramps and this case crawls; without `retry` a bad step can only be absorbed
         # rather than escalated out of.
@@ -207,10 +197,16 @@ def run(name, build, coupled, start):
         retry=RETRY,
         on_step=watch,
         on_checkpoint=logger.on_checkpoint,
-        **({"precondition_step": precondition_step} if precondition_step is not None else {}),
+        # ⚠️ THROUGH A RefreshPolicy. `solve_coupled` ends in `**continuation_kwargs`, so a bare
+        # `precondition_step=` is SWALLOWED rather than rejected and the refresh never runs.
+        **(
+            {"refresh": RefreshPolicy(precondition_step=precondition_step)}
+            if precondition_step
+            else {}
+        ),
     )
     wall = time.perf_counter() - began
-    residual = float(jnp.linalg.norm(coupled.residual(coupled.pack_state(flow, k, omega))))
+    residual = float(jnp.linalg.norm(coupled.residual(coupled.state_from_physical(flow, k, omega))))
     cycles = sum(int(restart_cycles(r.cycles, max(int(r.inner_iterations), 1))) for r in steps)
     return dict(arm=name, steps=len(steps), cycles=cycles, wall=wall, residual=residual, flow=flow)
 

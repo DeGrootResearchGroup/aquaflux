@@ -1,0 +1,152 @@
+OpenFOAM: 12225 cells, Ux in [-2.716, 10.299]
+[configuration]
+  dual-time inner steps / tol: 5 / 0.01
+  k positivity floor: 1e-08
+  inner forward rtol (row-scaled) / restart: 0.3 / 15
+  cycle budget: 42
+  retry on cycles / alpha: 10 / 0.01
+  step control: CflResidualDualTimeControl
+  Reynolds continuation points: 2
+  k wall BC: zerogradient
+  preconditioner refresh: on 3 restart cycles (mid-step)
+  smoother fill / sweeps / coarse limit: 0 / 4 / 2000
+  preconditioner beta floor: 0.05
+  field split / trailing sweeps: True / 1
+  trailing inverse: native nodal
+  probe stencil reach: 5
+  probe column reach: uniform
+  forward restart / max restarts: 15 / 14
+  k positivity projection: False
+  stop (rtol, atol): 0.0, 1e-05
+[point 1/3 (Re/100)]
+
+  G is the implicit timestep's own residual, R + beta*d*(phi - phi_n); the inner loop drives
+  it to zero. R is the STEADY residual at the stepped state -- the march's convergence measure.
+  Driving G to zero does not drive R to zero: the two terms cancel there,
+  leaving R = -beta*d*(phi - phi_n). So a step's R is NOT its last 'G out'; it is the residual
+  the next step starts from, and appears there as inner-0's 'G in'.
+
+    +- step 1 ------------------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  8.714e-02 |  1.078e-01 |  1.236 | 0.000 |
+    +-------+------+------------+------------+--------+-------+
+  -> redo step 1 (attempt 2): cycles, beta -> 1.0000
+
+    +- step 1  attempt 2 -------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  8.714e-02 |  1.488e-01 |  1.708 | 0.013 |
+    +-------+------+------------+------------+--------+-------+
+  -> redo step 1 (attempt 3): cycles, beta -> 2.0000
+
+    +- step 1  attempt 3 -------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  8.714e-02 |  1.074e-01 |  1.232 | 0.001 |
+    +-------+------+------------+------------+--------+-------+
+
+reference |R0| = 8.7142e-02, stopping at |R| <= 1.000e-05
+
++= summary stats =============================================+
+| step |   t(s) |   beta | in | cyc |         R | a_min | flg |
++------+--------+--------+----+-----+-----------+-------+-----+
+|    1 |     70 | 2.0000 |  1 |  12 | 1.099e-01 | 0.000 | Le2 |
++=============================================================+
+| field       |   rel. change |         resid |          rate |
++-------------+---------------+---------------+---------------+
+| u           |            -- |            -- |            -- |
+| v           |            -- |            -- |            -- |
+| p           |            -- |            -- |            -- |
+| k           |            -- |            -- |            -- |
+| omega       |            -- |            -- |            -- |
+| nut         |            -- |            -- |            -- |
++=============================================================+
+| pc inner 2.0s (probe 1.2 assemble 0.0 refactor 0.7)         |
+| limit 1.44e-03                                              |
+| cum 12                                                      |
++=============================================================+
+
+    +- step 2 ------------------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  1.069e-01 |  1.461e+01 | 136.654 | 0.004 |
+    +-------+------+------------+------------+--------+-------+
+  -> redo step 2 (attempt 2): cycles, beta -> 8.0000
+
+    +- step 2  attempt 2 -------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  1.069e-01 |  2.203e-01 |  2.061 | 0.007 |
+    +-------+------+------------+------------+--------+-------+
+  -> redo step 2 (attempt 3): cycles, beta -> 16.0000
+
+    +- step 2  attempt 3 -------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  1.069e-01 |  4.033e-01 |  3.772 | 0.001 |
+    +-------+------+------------+------------+--------+-------+
+
++= summary stats =============================================+
+| step |   t(s) |   beta | in | cyc |         R | a_min | flg |
++------+--------+--------+----+-----+-----------+-------+-----+
+|    2 |    104 | 16.0000 |  1 |  12 | 4.167e-01 | 0.000 | Le2 |
++=============================================================+
+| field       |   rel. change |         resid |          rate |
++-------------+---------------+---------------+---------------+
+| u           |     6.492e-02 |            -- |            -- |
+| v           |     3.305e-01 |            -- |            -- |
+| p           |     9.542e+00 |            -- |            -- |
+| k           |     3.666e-02 |            -- |            -- |
+| omega       |     6.532e-05 |            -- |            -- |
+| nut         |     2.106e-01 |            -- |            -- |
++=============================================================+
+| pc inner 2.0s (probe 1.2 assemble 0.0 refactor 0.8)         |
+| limit 1.08e-03                                              |
+| cum 24                                                      |
++=============================================================+
+
+    +- step 3 ------------------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  3.606e-01 |  1.629e+00 |  4.516 | 0.001 |
+    +-------+------+------------+------------+--------+-------+
+  -> redo step 3 (attempt 2): cycles, beta -> 8.0000
+
+    +- step 3  attempt 2 -------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  3.606e-01 |  4.270e-01 |  1.184 | 0.000 |
+    +-------+------+------------+------------+--------+-------+
+  -> redo step 3 (attempt 3): cycles, beta -> 16.0000
+
+    +- step 3  attempt 3 -------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  3.606e-01 |  4.393e-01 |  1.218 | 0.010 |
+    +-------+------+------------+------------+--------+-------+
+
++= summary stats =============================================+
+| step |   t(s) |   beta | in | cyc |         R | a_min | flg |
++------+--------+--------+----+-----+-----------+-------+-----+
+|    3 |    138 | 16.0000 |  1 |  12 | 4.038e-01 | 0.000 | Le2 |
++=============================================================+
+| field       |   rel. change |         resid |          rate |
++-------------+---------------+---------------+---------------+
+| u           |     3.112e-02 |            -- |            -- |
+| v           |     1.817e-01 |            -- |            -- |
+| p           |     7.520e-01 |            -- |            -- |
+| k           |     2.321e-02 |            -- |            -- |
+| omega       |     5.127e-05 |            -- |            -- |
+| nut         |     7.745e-02 |            -- |            -- |
++=============================================================+
+| pc inner 2.0s (probe 1.2 assemble 0.0 refactor 0.8)         |
+| limit 1.03e-02                                              |
+| cum 36                                                      |
++=============================================================+
+[0]PETSC ERROR: ------------------------------------------------------------------------
+[0]PETSC ERROR: Caught signal number 15 Terminate: Some process (or the batch system) has told this process to end
+[0]PETSC ERROR: Try option -start_in_debugger or -on_error_attach_debugger
+[0]PETSC ERROR: or see https://petsc.org/release/faq/#valgrind and https://petsc.org/release/faq/
+[0]PETSC ERROR: configure using --with-debugging=yes, recompile, link, and run 
+[0]PETSC ERROR: to get more information on the crash.

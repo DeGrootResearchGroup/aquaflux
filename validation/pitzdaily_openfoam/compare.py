@@ -60,6 +60,7 @@ Run (after ``run_of.sh``) from the repo root:
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import time
@@ -84,16 +85,21 @@ from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
 from aquaflux.solve import (
     CflResidualDualTimeControl,
     MarchLogger,
+    RefreshPolicy,
     RetryPolicy,
+    native_nodal_inverse,
     relative_residual_gmres,
 )
 from aquaflux.turbulence import (
+    CoupledJacobianProbe,
     CoupledRANS,
     LogScalars,
     SSTModel,
     SSTTurbulence,
+    amg_beta_tracking_refresh,
+    coupled_amg_continuation,
     coupled_fields,
-    solve_coupled,
+    solve_reynolds_continuation,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -114,7 +120,13 @@ STEP_X, STEP_Y = 0.0, 0.0  # the step lip; the lower wall drops to y = -0.0254 f
 # The coupled Newton march budget. This is a stiff, separating, high-Re case on a wall-function mesh
 # (aquaflux's SST is wall-resolving), so it converges to an engineering tolerance rather than machine
 # zero; the cap is generous so the march exits on the tolerance, not the count.
-MAX_STEPS, RTOL = 200, 1e-6
+#: ⚠️ AN ABSOLUTE BAR, MATCHING THE SIBLING CASE: `rtol = 0` so the test is `|R| <= atol` outright.
+#: A RELATIVE tolerance means each Reynolds rung targets a fraction of its OWN starting residual, so
+#: the cheap anchor rung -- whose only job is to hand the next one a warm start -- is asked for a
+#: harder solve than the target rung ever needs. Run briefly with `rtol = 1e-6` here, rung 1's target
+#: came out at 8.7e-08 against the 1e-05 the sibling case asks of any rung.
+MAX_STEPS = 150  # per continuation rung
+RTOL, ATOL = 0.0, 1e-5
 
 # ---------------------------------------------------------------------------------------------
 # The march configuration.
@@ -137,22 +149,99 @@ MAX_STEPS, RTOL = 200, 1e-6
 #     it cannot see the flow converge. The row-scaled measure judges every equation comparably.
 # ---------------------------------------------------------------------------------------------
 
+#: ⚠️ REYNOLDS CONTINUATION, BECAUSE A COLD SOLVE AT THE TARGET REYNOLDS NUMBER DOES NOT REACH THE
+#: ROOT IN ANY REASONABLE NUMBER OF STEPS. Measured on this case without it: the march is perfectly
+#: healthy -- full steps, line search never clipping -- and contracts a steady 2.7% per outer step,
+#: which needs about 490 steps to reach the stopping tolerance against a 200-step cap. It is not a
+#: solver in difficulty; it is a solver correctly integrating a long transient, which is precisely the
+#: reachability problem continuation exists to short-circuit. Each rung starts from the previous one's
+#: converged field, so the expensive target rung begins near its own root instead of at a cold start.
+#:
+#: `N_POINTS` is the number of INTERMEDIATE rungs: 2 gives Re/100, Re/10, target, matching the
+#: three-dimensional case.
+N_POINTS = int(os.environ.get("PITZ_N_POINTS", "2"))
+
 #: The dual-time inner loop. `inner_tol` 1e-2 rather than a tighter value: measured on the
 #: three-dimensional case, 1e-3 bought nothing over 1e-2 while costing a third of the march.
 INNER_STEPS, INNER_TOL = 5, 1e-2
 
-#: ⚠️ NOT REACHABLE ON THIS PATH, and recorded here because the gap is the finding rather than the
-#: number. A floor buys the step limiter out of a numerically dead cell instead of letting one cell
-#: ratchet the global step cap toward zero -- but `positivity_floor` is a parameter of
-#: `coupled_amg_continuation` ALONE. The default builder this case uses (`coupled_continuation`), and
-#: the complete-LU and threshold-ILU builders beside it, expose neither it nor the `step_limit` it
-#: would be set on. So the safeguard the three-dimensional case depends on cannot be switched on here
-#: without a library change, and a march that meets the ratchet has no way to escape it.
-#: The value the three-dimensional case ships, for when that is fixed:
-POSITIVITY_FLOOR_WANTED = 1e-8
+#: Buys the step limiter out of a numerically dead cell instead of letting one cell ratchet the
+#: global step cap toward zero. ⚠️ Reachable only because this case uses `coupled_amg_continuation`:
+#: it is a parameter of that builder ALONE, and the default, complete-LU and threshold-ILU builders
+#: expose neither it nor the `step_limit` it would be set on.
+K_POSITIVITY_FLOOR = 1e-8
 
 #: The inexact-Newton stop per inner linear solve, in the row-scaled measure, and the Krylov restart.
+#: `FORWARD_MAX_RESTARTS` bounds a single solve: past the retry threshold the attempt is going to be
+#: discarded anyway, so running it to a stagnation is work thrown away. Strictly above the threshold,
+#: because the march's test is `>`, and a cap landing exactly on it would accept a truncated direction
+#: instead of escalating.
 FORWARD_RTOL, FORWARD_RESTART = 0.3, 15
+FORWARD_MAX_RESTARTS = 14
+
+#: ⚠️ THE VALIDATED SMOOTHER BUNDLE, AND NONE OF IT IS OPTIONAL. These are the library defaults'
+#: opposites, and each was measured on the sibling case at adjoint-grade tolerance:
+#:   * `FILL_LEVELS` 0 -- zero fill. The default ILU(1) DIVERGES at low shift (534 iterations to a true
+#:     relative residual of 3.7 at beta 0.02, where zero-fill takes 97). A pivot census found 303
+#:     negative pivots in the ILU(1) factor and none in ILU(0): the fill is what destroys it, so
+#:     dropping the fill is the fix rather than an approximation.
+#:   * `SWEEPS` 4 -- zero-fill is the weaker smoother, so extra sweeps pay more than they did for
+#:     ILU(1) (390 -> 69 iterations at beta 0.01). The library default of 2 was tuned against ILU(1)
+#:     and does not carry over.
+#:   * `COARSE_EQ_LIMIT` 2000 -- the default coarsens to ~50 equations, whose direct solve captures
+#:     only the crudest global mode, and the indefinite saddle's wall is exactly that global pressure
+#:     coupling. `None` stalls at every low shift. Not optional.
+#:   * `PC_BETA_FLOOR` 0.05 -- the V-cycle is built at `max(beta, floor)` while the march still solves
+#:     at its own shift. The OPERATOR is untouched, so the converged root and the adjoint are
+#:     unchanged, and the mismatch saturates instead of growing as the shift falls.
+FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT, PC_BETA_FLOOR = 0, 4, 2000, 0.05
+
+#: The field split: the `[u, v, p]` saddle and the `[k, omega]` transported pair get their own
+#: hierarchies, because a saddle and an advection-diffusion-reaction pair coarsen differently. Measured
+#: 31% faster end to end on the sibling case -- while taking MORE Krylov cycles, because two smaller
+#: V-cycles plus one sparse coupling product apply far more cheaply than one six-field V-cycle.
+FIELD_SPLIT = os.environ.get("PITZ_FIELD_SPLIT", "1") not in ("", "0")
+TRAILING_SWEEPS = 1
+
+#: Clip each cell's own correction rather than scaling the whole step by the worst cell. Off by
+#: default and byte-identical off; it removes a failure mode rather than buying speed.
+POSITIVITY_PROJECTION = os.environ.get("PITZ_K_POSITIVITY_PROJECTION", "") not in ("", "0")
+
+#: ⚠️ THE WALL CONDITION ON `k`, AND IT IS A CHOICE OF PROBLEM RATHER THAN OF SOLVER. Turbulent
+#: fluctuations vanish at a no-slip wall, so `k -> 0` and `Dirichlet(0)` is the textbook condition --
+#: but it makes a DIFFERENT discrete problem from the zero-gradient one, with its own reattachment
+#: length, so the two cannot be compared and a number from one is not a target for the other. The
+#: sibling case runs zero-gradient, and this case is the same geometry, so it runs zero-gradient too.
+_K_WALL_BCS = {"dirichlet": Dirichlet(0.0), "zerogradient": ZeroGradient()}
+K_WALL = os.environ.get("PITZ_K_WALL", "zerogradient")
+if K_WALL not in _K_WALL_BCS:
+    raise SystemExit(f"PITZ_K_WALL={K_WALL!r} is not one of {sorted(_K_WALL_BCS)}")
+K_WALL_BC = _K_WALL_BCS[K_WALL]
+
+#: The trailing `[k, omega]` block's inverse: the differentiable-framework nodal hierarchy, which the
+#: sibling case defaults to after a controlled pair measured it ahead of the host V-cycle (67 steps and
+#: 2124 s against 72 and 2893, to the same reattachment length).
+NATIVE_TRAILING = {"max_coarse": COARSE_EQ_LIMIT, "equilibrate": False}
+
+#: ⚠️ REACH 3, AND A REACH-5 DETOUR THAT IS RECORDED HERE BECAUSE IT LOOKED LIKE THE ANSWER.
+#: The probed Jacobian on this mesh is exact only at reach FIVE (relative error against the true
+#: matrix-free product: 1.9e-04 / 2.0e-07 / 4.6e-10 / 1.5e-15 at reach 2/3/4/5), where the sibling case
+#: reaches the floating-point floor at three. That is a real and unexplained measurement -- identical
+#: schemes should not need a longer stencil in two dimensions than in three.
+#:
+#: It is NOT the cause of anything. Reach 5 diverges step for step with reach 3 (compare the archived
+#: runs), and costs about 35% more per step. It is also affirmatively suspect: a zero-fill incomplete
+#: factorization takes its pattern from the stored one, and reach 5 stores millions of positions at
+#: 1e-10 and below -- the same shape as a padding experiment recorded on the sibling case that cost 58
+#: restart cycles at a true relative residual of 2.3e-02 against 11 cycles to 8.5e-11 without.
+STENCIL_REACH = int(os.environ.get("PITZ_STENCIL_REACH", "3"))
+
+#: ⚠️ UNIFORM PROBING REACH, deliberately, where the sibling case shortens two columns. Its
+#: `(3,3,3,3,2,2)` is a SIX-field layout and was measured on that mesh and those schemes; the analogous
+#: five-field value here is unmeasured, and the record is emphatic that shortening the pressure column
+#: diverged that case at step one. Uniform reach costs more probes and is always correct, so it is what
+#: this case uses until someone measures the shortened one HERE.
+COLUMN_REACH = None
 
 #: A cost cap on the inner loop, so a doomed attempt is cut short rather than run to a stagnation.
 CYCLE_BUDGET = 42
@@ -162,6 +251,21 @@ CYCLE_BUDGET = 42
 CONTROL = CflResidualDualTimeControl(
     beta_start=0.5, beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25
 )
+
+#: ⚠️ REFRESH THE FROZEN PRECONDITIONER, ON SOLVE COST, EXACTLY AS THE THREE-DIMENSIONAL CASE DOES.
+#: Frozen at the cold reference state for a whole march, the preconditioner goes stale precisely as the
+#: recirculation forms -- which is the one thing a cold march is for. The symptom is unmistakable once
+#: known, and was observed here before this was wired: the solve cost climbs while the step length
+#: stays healthy, the control lowers the shift, the now-expensive solve trips the retry ladder, the
+#: ladder puts the shift back, and the march enters a limit cycle with the residual flat. Five steps at
+#: 14-18 cycles a solve moved the residual from 3.404e-03 to 3.441e-03 -- backwards.
+#:
+#: The trigger is the COST itself: a solve that reaches this many restart cycles rebuilds the
+#: preconditioner at the iterate it was handed, and the inner loop carries on rather than the step
+#: being discarded. Capped at one refresh per step. Reacting to cost rather than predicting staleness
+#: is deliberate: a diagnostic on the sibling case refuted every cheap STATIC predictor of a bad step,
+#: so detect-then-react is the honest design.
+REFRESH_ON_CYCLES = int(os.environ.get("PITZ_REFRESH_ON_CYCLES", "3"))
 
 #: Redo a step whose solve was expensive, whose line search collapsed, or that diverged -- escalating
 #: the shift first, and falling back to a tighter Krylov solve only for a divergence damping cannot fix.
@@ -267,7 +371,7 @@ def build_case(model=None):
     momentum = MomentumContinuity.build(
         mesh,
         geom,
-        PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
+        PropertyModel({"viscosity": Constant(jnp.asarray(RHO * NU)), "density": Constant(RHO)}),
         grad,
         BoundaryConditions(
             {
@@ -279,6 +383,10 @@ def build_case(model=None):
         ),
         advection_scheme=momentum_upwind,
     )
+    # ⚠️ MATCHES THE SIBLING CASE'S LINEARIZATION. With the limiter left implicit the Jacobian
+    # carries the k-production cap's own derivative, which is destabilizing; freezing it is the
+    # Patankar treatment the sibling case runs. The library default is False, so omitting this
+    # silently gave the two cases DIFFERENT Newton operators on the same physics.
     turbulence = SSTTurbulence.build(
         model,
         mesh,
@@ -288,12 +396,13 @@ def build_case(model=None):
         density=RHO,
         molecular_viscosity=jnp.full(mesh.n_cells, NU),
         wall_patches=WALLS,
+        explicit_production_limiter=True,
         k_boundary=BoundaryConditions(
             {
                 "inlet": Dirichlet(K_IN),
                 "outlet": ZeroGradient(),
-                "upperWall": Dirichlet(0.0),
-                "lowerWall": Dirichlet(0.0),
+                "upperWall": K_WALL_BC,
+                "lowerWall": K_WALL_BC,
             }
         ),
         omega_boundary=BoundaryConditions(
@@ -340,9 +449,9 @@ def solve_aquaflux(*, log_path=None, **solve_kwargs):
     logger = MarchLogger(
         log_file,
         fields=coupled_fields(coupled),
-        detail=("inner", "fields"),
+        detail=("inner", "fields", "pc"),
         rtol=RTOL,
-        atol=0.0,
+        atol=ATOL,
     )
     # Every run states the configuration it was taken under, in its own log, before any result: a
     # number whose configuration is not written beside it cannot be re-adjudicated later, which is
@@ -350,23 +459,96 @@ def solve_aquaflux(*, log_path=None, **solve_kwargs):
     logger.note("[configuration]")
     for _name, _value in (
         ("dual-time inner steps / tol", f"{INNER_STEPS} / {INNER_TOL}"),
-        ("k positivity floor", "UNREACHABLE on this builder (see POSITIVITY_FLOOR_WANTED)"),
+        ("k positivity floor", K_POSITIVITY_FLOOR),
         ("inner forward rtol (row-scaled) / restart", f"{FORWARD_RTOL} / {FORWARD_RESTART}"),
         ("cycle budget", CYCLE_BUDGET),
         ("retry on cycles / alpha", f"{RETRY.on_cycles} / {RETRY.on_alpha}"),
         ("step control", type(CONTROL).__name__),
-        ("stop (rtol, atol)", f"{RTOL}, 0.0"),
+        ("Reynolds continuation points", N_POINTS),
+        ("k wall BC", K_WALL),
+        ("preconditioner refresh", f"on {REFRESH_ON_CYCLES} restart cycles (mid-step)"),
+        ("smoother fill / sweeps / coarse limit", f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"),
+        ("preconditioner beta floor", PC_BETA_FLOOR),
+        ("field split / trailing sweeps", f"{FIELD_SPLIT} / {TRAILING_SWEEPS}"),
+        ("trailing inverse", "native nodal" if FIELD_SPLIT else "n/a"),
+        ("probe stencil reach", STENCIL_REACH),
+        ("probe column reach", COLUMN_REACH or "uniform"),
+        ("forward restart / max restarts", f"{FORWARD_RESTART} / {FORWARD_MAX_RESTARTS}"),
+        ("k positivity projection", POSITIVITY_PROJECTION),
+        ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
     ):
         logger.note(f"  {_name}: {_value}")
+
+    # The refresh hook, built ONCE and pointed at each rung in turn. Its scheduled cadences are
+    # switched OFF so the cycle trigger REPLACES them rather than adding to them: as an addition the
+    # trigger was measured break-even on the sibling case, as a replacement it was the largest saving
+    # on that march. ⚠️ `beta_rel_change=None` does NOT switch the schedule off -- it removes the gate,
+    # and a missing gate means "refresh every step". Off means a gate that exists and never fires.
+    # Built once and shared by the engine and the refresh hook: the coloured-probe plan is the single
+    # largest allocation this case makes, and building it twice doubles that for nothing.
+    probe = CoupledJacobianProbe.build(
+        coupled, stencil_reach=STENCIL_REACH, column_reach=COLUMN_REACH
+    )
+    refresh = amg_beta_tracking_refresh(
+        coupled,
+        probe=probe,
+        beta_rel_change=float("inf"),
+        refresh_every=10**9,
+        materialize_drift=None,
+        materialize_every=None,
+        beta_floor=PC_BETA_FLOOR,
+        observer=logger.on_refresh,
+    )
+    #: One preconditioner shared across rungs, handed back for the next: only the viscosity changes
+    #: between them, so a rung needs the V-cycle FITTED to it, not a fresh object.
+    shared_preconditioner: list = []
+
+    def point_setup(companion, seed_state, point):
+        """Configure each Reynolds rung, re-fitting the one preconditioner to it.
+
+        Only the molecular viscosity changes between rungs, so a rung needs its own residual assembler
+        and its own row scales -- both ordinary data -- but not its own V-cycle. It needs that V-cycle
+        *fitted to it*, which is what `rebind` arranges, and which is a different thing from rebuilding
+        the object (that would only cost a compilation).
+        """
+        logger.note(f"[{point.label}]")
+        refresh.rebind(companion)
+        engine = coupled_amg_continuation(
+            companion,
+            seed_state,
+            inner_steps=INNER_STEPS,
+            inner_tol=INNER_TOL,
+            probe=probe,
+            cycle_budget=CYCLE_BUDGET,
+            forward_rtol=FORWARD_RTOL,
+            forward_restart=FORWARD_RESTART,
+            forward_max_restarts=FORWARD_MAX_RESTARTS,
+            refresh_on_cycles=REFRESH_ON_CYCLES or None,
+            inner_refresh=refresh.refresh_at if REFRESH_ON_CYCLES else None,
+            positivity_floor=K_POSITIVITY_FLOOR,
+            positivity_projection=POSITIVITY_PROJECTION,
+            preconditioner=shared_preconditioner[0] if shared_preconditioner else None,
+            smoother_fill_levels=FILL_LEVELS,
+            smoother_sweeps=SWEEPS,
+            coarse_eq_limit=COARSE_EQ_LIMIT,
+            field_split=FIELD_SPLIT,
+            trailing_smoother_sweeps=TRAILING_SWEEPS,
+            trailing_inverse=native_nodal_inverse(**NATIVE_TRAILING) if FIELD_SPLIT else None,
+            inner_observer=logger.on_inner,
+        )
+        shared_preconditioner[:] = [engine.shift_policy.preconditioner]
+        return dict(continuation=engine, refresh=RefreshPolicy(precondition_step=refresh))
 
     solve_options = (
         dict(
             max_steps=MAX_STEPS,
             rtol=RTOL,
-            inner_steps=INNER_STEPS,
-            inner_tol=INNER_TOL,
+            atol=ATOL,
+            intermediate_rtol=None,  # every rung stops at the same ABSOLUTE bar
+            intermediate_atol=ATOL,
             step_control=CONTROL,
             retry=RETRY,
+            point_setup=point_setup,
             scaled_norm=True,  # rebuild the row scales each outer step
             on_checkpoint=logger.on_checkpoint,
             on_retry=logger.on_retry,
@@ -374,7 +556,7 @@ def solve_aquaflux(*, log_path=None, **solve_kwargs):
         | solve_kwargs
     )
     try:
-        flow, k, omega = solve_coupled(coupled, **solve_options)
+        flow, k, omega = solve_reynolds_continuation(coupled, N_POINTS, **solve_options)
     finally:
         if log_file is not sys.stdout:
             log_file.close()

@@ -1,0 +1,11 @@
+OpenFOAM: 12225 cells, Ux in [-2.716, 10.299]
+[configuration]
+  dual-time inner steps / tol: 5 / 0.01
+  k positivity floor: UNREACHABLE on this builder (see POSITIVITY_FLOOR_WANTED)
+  inner forward rtol (row-scaled) / restart: 0.3 / 15
+  cycle budget: 42
+  retry on cycles / alpha: 10 / 0.01
+  step control: CflResidualDualTimeControl
+  Reynolds continuation points: 2
+  preconditioner refresh: drift > 0.1, limit 8
+  stop (rtol, atol): 1e-06, 0.0
