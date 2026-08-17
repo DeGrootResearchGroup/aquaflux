@@ -13,8 +13,9 @@ from nothing. It is the Fluent-style "hybrid initialization" specialized to the 
   interior does not start laminar (the interpolant otherwise collapses toward the wall ``k = 0`` -- see
   below);
 - **omega** -- its boundary-propagated interior value raised, at every cell's own wall distance, to the
-  same near-wall closure the residual imposes at the wall: the adaptive blend
-  ``sqrt(omega_vis^2 + omega_log^2)`` (``omega_vis = 6 nu / (beta_1 y^2)``). That profile is the exact
+  same near-wall closure the residual imposes at the wall: the adaptive power-mean blend of the
+  viscous and log branches (``sqrt(omega_vis^2 + omega_log^2)`` at the default exponent, with
+  ``omega_vis = 6 nu / (beta_1 y^2)``). That profile is the exact
   solution of the near-wall balance ``nu d2(omega)/dy2 = beta_1 omega^2``, so each near-wall cell starts
   on the same analytical decay curve; a Laplace-smoothed ``omega`` instead over-diffuses the large wall
   value into the interior, while setting only the wall cells leaves a cliff to the flat interpolant that
@@ -141,8 +142,8 @@ def hybrid_initialize(
     k = jnp.maximum(k, k_floor)
 
     # Seed the near-wall omega profile on EVERY cell, at its own wall distance, using the SAME closure
-    # the residual imposes at the wall (`omega_wall`) -- the adaptive blend
-    # sqrt(omega_vis^2 + omega_log^2), not the viscous branch alone. Matching the closure is the whole
+    # the residual imposes at the wall (`omega_wall`) -- the adaptive power-mean blend of the viscous
+    # and log branches, not the viscous branch alone. Matching the closure is the whole
     # point: where the seed and the wall condition disagree, the wall-adjacent cells start off their own
     # boundary condition and carry a large initial omega residual, which is exactly what this seeding is
     # meant to remove. The two agree as y+ -> 0 (the blend reduces to the viscous 6 nu / (beta_1 y^2)),

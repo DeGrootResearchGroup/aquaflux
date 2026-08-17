@@ -8,7 +8,9 @@ that captures the **pressure Schur complement** ``S = -C - D F^{-1} G``: with a 
 block-diagonal preconditioner with the exact Schur gives GMRES convergence in <= 3 iterations).
 
 This module builds the SIMPLE approximation, whose defining move is to replace ``F^{-1}`` by its
-diagonal -- which is exactly the momentum diagonal ``a_P`` the flow solver already computes and lags.
+diagonal -- which is exactly the momentum diagonal ``a_P`` the flow residual already computes. The
+residual **differentiates** ``a_P``; it is frozen here, on the preconditioner's side, because a
+preconditioner must be a constant operator.
 The pressure Schur is then the compact Rhie--Chow **pressure Laplacian** with face coefficient
 ``c_f = rho (V/a_P)_f A_f / (d.n)_f`` -- the same ``d = V/a_P`` coefficient the Rhie--Chow mass flux
 uses (:mod:`aquaflux.flow.rhie_chow`).
@@ -16,9 +18,12 @@ uses (:mod:`aquaflux.flow.rhie_chow`).
 Everything here is a **frozen** (``stop_gradient``-ed) linear operator: the preconditioner only
 accelerates the Krylov iteration and, by the implicit-function-theorem adjoint of the converged
 solve, leaves the solution and its gradient untouched (see ``tests/unit/test_preconditioning.py``).
-The inner Schur solve is a **fixed** number of damped-Jacobi sweeps, so the whole preconditioner is a
-constant linear operator and plain (left-preconditioned) GMRES suffices -- no FGMRES needed. A
-mesh-independent inner solve (multigrid) is the scalable upgrade.
+These are the low-level Schur coefficient, Laplacian and damped-Jacobi kernels. The *composed*
+preconditioner, and the smoothed-aggregation multigrid V-cycle it uses as the mesh-independent inner
+Schur solve, live in :mod:`aquaflux.flow.block_preconditioner`. Either inner solve runs a **fixed**
+number of sweeps or cycles rather than iterating to a tolerance, which is what makes the whole
+preconditioner a constant linear operator: plain non-flexible GMRES then suffices -- no FGMRES needed
+-- and the operator transposes for the adjoint.
 """
 
 from __future__ import annotations
@@ -91,9 +96,10 @@ def pressure_schur_laplacian(
     Each interior face contributes a symmetric coupling with coefficient
     ``c_f = rho (V/a_P)_f A_f / (d.n)_f`` (``(V/a_P)_f`` the interpolated Rhie--Chow ``d`` coefficient),
     giving the M-matrix Laplacian ``(Ŝ p)_P = sum_f c_f (p_P - p_N)`` with diagonal ``sum_f c_f`` and
-    off-diagonal ``-c_f``. Boundary faces carry no pressure--pressure coupling (a no-flux/velocity
-    wall does not couple pressures), which is exact for the closed all-wall domains this first cut
-    targets; pressure-outlet coupling is a later addition.
+    off-diagonal ``-c_f``. A no-flux/velocity wall face carries no pressure--pressure coupling, so a
+    closed all-wall domain is left with the pure-Neumann interior Laplacian (regularized by
+    ``pressure_pin``); a pressure-fixing face contributes to its owner's diagonal only, through
+    ``boundary_diagonal`` below (the boundary pressure is prescribed, so there is no off-diagonal term).
 
     The coefficients are ``stop_gradient``-ed: ``Ŝ`` is a frozen preconditioner operator, not part of
     the AD Jacobian.
@@ -109,7 +115,7 @@ def pressure_schur_laplacian(
     normal_distance : jnp.ndarray
         Owner-to-neighbour normal distance ``d.n`` per face, shape ``(n_faces,)``.
     a_p : jnp.ndarray
-        Momentum diagonal per cell, shape ``(n_cells,)`` (already lagged/frozen by the caller).
+        Momentum diagonal per cell, shape ``(n_cells,)`` (already frozen by the caller).
     rho : jnp.ndarray
         Density.
     pressure_pin : int, optional
@@ -168,9 +174,10 @@ def damped_jacobi_solve(
 
     Each sweep is ``x <- x + omega D^{-1} (rhs - A x)``. A fixed sweep count (no convergence check)
     makes the map ``rhs -> x`` a fixed linear operator with frozen coefficients, so it can serve as a
-    left preconditioner under plain GMRES (a *variable*, convergence-based inner would instead require
-    FGMRES). This is the placeholder inner solve; a fixed-cycle multigrid is the mesh-independent
-    upgrade.
+    preconditioner under plain non-flexible GMRES (a *variable*, convergence-based inner would instead
+    require FGMRES). The composed preconditioner's inner Schur solve is the mesh-independent
+    fixed-cycle multigrid in :mod:`aquaflux.flow.block_preconditioner`; this kernel is the simpler
+    smoother that shares the fixed-operator property.
 
     Parameters
     ----------

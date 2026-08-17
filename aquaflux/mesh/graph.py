@@ -27,7 +27,7 @@ from .mesh import Mesh
 
 
 def cell_adjacency_coo(mesh: Mesh) -> coo_matrix:
-    """Symmetric cell--cell adjacency graph from interior faces (COO, unit weights).
+    """Symmetric cell--cell adjacency graph from interior faces (COO, one entry per face endpoint).
 
     Two cells are adjacent when an interior face separates them; the graph is the sparsity
     pattern of the assembled cell operator. It is what bandwidth-reducing reordering acts on and
@@ -44,7 +44,10 @@ def cell_adjacency_coo(mesh: Mesh) -> coo_matrix:
     Returns
     -------
     scipy.sparse.coo_matrix, shape ``(n_cells, n_cells)``
-        Symmetric adjacency with unit weights (one entry per interior-face endpoint pair).
+        Symmetric adjacency, one entry per interior-face endpoint pair. Entries are **not**
+        deduplicated: two cells joined by several interior faces (a periodic seam on a two-cell
+        row, say) contribute one entry per face, which any conversion that sums duplicates —
+        ``tocsr()`` among them — coalesces into a single entry weighted by that face count.
     """
     o, m, _ = mesh.face_cells.interior_edges()
     rows = np.concatenate([o, m])
@@ -61,6 +64,12 @@ def cell_adjacency_csr(mesh: Mesh) -> tuple[np.ndarray, np.ndarray]:
     ``adj_neighbours[adj_offsets[c] : adj_offsets[c + 1]]``. The CSR view of the same
     :func:`cell_adjacency_coo` graph (interior faces only; boundary faces couple no cells).
 
+    One entry per *distinct* adjacent cell pair: the conversion to compressed-sparse-row sums
+    duplicate coordinate entries, so two cells joined by several interior faces (a periodic seam on
+    a two-cell row, say) appear once here, carrying the number of faces joining them as their weight
+    rather than a unit weight. The graph is shorter than twice the interior-face count whenever any
+    such pair exists.
+
     Build-time only: returns numpy CSR arrays built via SciPy, so call it during mesh
     preprocessing, not inside a ``jit``/``grad`` trace.
 
@@ -73,8 +82,9 @@ def cell_adjacency_csr(mesh: Mesh) -> tuple[np.ndarray, np.ndarray]:
     -------
     adj_offsets : numpy.ndarray of int, shape ``(n_cells + 1,)``
         CSR row pointers (base 0).
-    adj_neighbours : numpy.ndarray of int, shape ``(2 * n_interior_faces,)``
-        Neighbour cell index per graph edge.
+    adj_neighbours : numpy.ndarray of int, shape ``(2 * n_distinct_adjacent_cell_pairs,)``
+        Neighbour cell index per graph edge (each pair appearing once in each direction). Equal to
+        ``2 * n_interior_faces`` only when no two cells share more than one interior face.
     """
     graph = cell_adjacency_coo(mesh).tocsr()
     graph.sort_indices()

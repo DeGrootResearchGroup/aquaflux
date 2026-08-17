@@ -167,7 +167,9 @@ class FlowBoundary(eqx.Module):
         grad_pressure_owner : jnp.ndarray
             Owner pressure gradient per face, shape ``(n, dim)``.
         d_coeff_owner : jnp.ndarray
-            Owner Rhie--Chow coefficient ``V / a_P`` per face, shape ``(n,)``.
+            Owner **per-component** Rhie--Chow coefficient ``V / a_P`` per face, shape ``(n, dim)``.
+            A closure projects it onto the face normal as ``sum_i n_i^2 (V/a_P_i)``, which reduces to
+            the scalar ``V/a_P`` for an isotropic ``a_P``.
         normal : jnp.ndarray
             Owner-outward unit normals, shape ``(n, dim)``.
         area : jnp.ndarray

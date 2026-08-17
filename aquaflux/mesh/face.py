@@ -181,8 +181,6 @@ class EdgeFaceGeometry(FaceGeometryScheme):
         node_coords: jnp.ndarray,
         face_nodes: FaceNodeConnectivity,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        # A 2D face is an edge with exactly two nodes, so the per-incidence node gather reshapes
-        # cleanly to the two endpoints of each face.
         # A 2D face is an edge with exactly two nodes (enforced by ``Mesh.validate``), so the
         # per-incidence node gather reshapes cleanly to the two endpoints of each face.
         verts = face_nodes.gather_node_coords(node_coords).reshape(face_nodes.n_faces, 2, -1)

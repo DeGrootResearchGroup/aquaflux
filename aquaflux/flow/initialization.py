@@ -1,9 +1,9 @@
 """Cheap field initializers -- a scalar Laplace solve and a potential-flow velocity.
 
 A good initial condition is what lets the monolithic coupled Newton solve (and, less critically, the
-segregated loop) start from nothing. The two building blocks here are both **single linear SPD
-solves**, multigrid-preconditioned so they stay robust on the high-aspect-ratio cells of a
-wall-resolved mesh, so they cost a fraction of one nonlinear iteration:
+segregated loop) start from nothing. The two building blocks here are both **single linear
+symmetric-positive-definite (SPD) solves**, multigrid-preconditioned so they stay robust on the
+high-aspect-ratio cells of a wall-resolved mesh, so they cost a fraction of one nonlinear iteration:
 
 - :func:`laplace_field` solves ``div(Gamma grad phi) = 0`` for the boundary-value harmonic field --
   the smooth interpolant of a scalar's boundary data into the interior.
@@ -168,13 +168,13 @@ def laplace_field(
 def bernoulli_pressure(momentum: MomentumContinuity, velocity: jnp.ndarray) -> jnp.ndarray:
     """The closed-form potential-flow (Bernoulli) pressure for a velocity, anchored at the outlet.
 
-    A velocity initializer (:func:`potential_flow`) leaves the pressure at zero, but the coupled
-    momentum balance of that velocity implies a substantial pressure field (the dynamic head), so a
-    coupled Newton solve otherwise has to build the *entire* pressure from nothing in its first
-    step -- a large pressure correction that the shared step length must then throttle, starving the
-    other equations. For an irrotational velocity ``u = grad phi`` the exact pressure is Bernoulli's
-    ``p + ½ρ|u|² = const``: low where the flow is fast, high where it is slow. Seeding it removes the
-    dynamic-head part of that first-step correction.
+    A bare velocity initializer would leave the pressure at zero, but the coupled momentum balance of
+    that velocity implies a substantial pressure field (the dynamic head), so a coupled Newton solve
+    would then have to build the *entire* pressure from nothing in its first step -- a large pressure
+    correction that the shared step length must throttle, starving the other equations. For an
+    irrotational velocity ``u = grad phi`` the exact pressure is Bernoulli's ``p + ½ρ|u|² = const``:
+    low where the flow is fast, high where it is slow. Seeding it removes the dynamic-head part of
+    that first-step correction, which is why :func:`potential_flow` returns this rather than ``p = 0``.
 
     It is the **dynamic** pressure the momentum residual carries (the explicit ``ρ``). The constant is
     fixed by **anchoring the mean pressure over the pressure-outlet cells to zero**, so the seed is
@@ -227,7 +227,8 @@ def potential_flow(
     Solves ``div(grad phi) = 0`` with a boundary condition per patch derived from the flow closures --
     a ``Neumann`` prescribing ``d(phi)/dn = u_in . n`` at a :class:`~aquaflux.flow.VelocityInlet`, a
     ``Dirichlet`` reference at a :class:`~aquaflux.flow.PressureOutlet`, and no penetration
-    (``ZeroGradient``) at every wall -- then returns the flat flow state ``[grad phi, p=0]``. The result
+    (``ZeroGradient``) at every wall -- then returns the flat flow state ``[grad phi, p]``, with ``p``
+    the :func:`bernoulli_pressure` seed consistent with that velocity. The result
     is irrotational, divergence-free, and matches the through-flow, so it is a far better start than a
     uniform plug for anything but a straight duct, at the cost of one linear solve.
 

@@ -6,7 +6,7 @@ bordered by the constraint ``<U_dir> - U_bar = 0``. This is the companion of
 :mod:`test_coupled_periodic_channel` (fixed body force, floating bulk velocity): here the force floats
 and the bulk velocity is held fixed.
 
-It checks the three properties that make the constrained coupled solve the design-note target engine:
+It checks the three properties that make the constrained coupled solve the sensitivity engine:
 
 * it holds the bulk velocity **by construction** while converging the unfrozen coupled residual to
   machine precision, from the exactly-uniform hybrid initial condition -- with a genuinely turbulent,

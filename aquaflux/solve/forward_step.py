@@ -44,8 +44,8 @@ __all__ = [
 class StepOutcome(NamedTuple):
     """What one forward step produced, what it cost, and how it ended.
 
-    A record rather than a widening tuple: these six values travel together through every stepper and
-    both consumers, and a positional 6-tuple is where a caller silently mis-unpacks one for another.
+    A record rather than a widening tuple: these seven values travel together through every stepper and
+    both consumers, and a positional 7-tuple is where a caller silently mis-unpacks one for another.
 
     Attributes
     ----------
@@ -109,13 +109,14 @@ class ForwardStep(Protocol):
     """
 
     def stepper(self) -> StepFn:
-        """The forward step ``(residual_fn, phi, residual_norm_0, solver) -> (phi_next, cycles, alpha, inner_iterations)``.
+        """The forward step ``(residual_fn, phi, residual_norm_0, solver) -> StepOutcome``.
 
-        ``cycles`` is the restart-cycle count of the linear solve behind the accepted step (its cost,
-        which an observed march reads to detect a stale preconditioner); ``alpha`` is the line-search
-        factor of that step (its quality — ``1`` if the full shifted step descended, smaller if it was
-        clipped, the signal a step controller drives the shift by). There is no variant of this method
-        that drops them; a caller that wants neither writes ``phi, _, _ = step(…)``.
+        ``StepOutcome.cycles`` is the restart-cycle count of the linear solve behind the accepted step
+        (its cost, which an observed march reads to detect a stale preconditioner);
+        ``StepOutcome.alpha`` is the line-search factor of that step (its quality — ``1`` if the full
+        shifted step descended, smaller if it was clipped, the signal a step controller drives the
+        shift by). There is no variant of this method that drops them; a caller that wants only the
+        iterate writes ``outcome = step(…)`` and reads ``outcome.phi``.
         """
 
     def default_solver(self) -> lx.AbstractLinearSolver:
@@ -143,7 +144,10 @@ class ShiftedForwardStep(ForwardStep, Protocol):
 
     :class:`ForwardStep` says what every strategy must *do*. This says what a strategy must additionally
     *carry* for the eager march's feedback machinery to work on it: a ``relaxation_schedule`` holding the
-    pseudo-transient shift ``beta`` as a readable, replaceable leaf.
+    pseudo-transient shift ``beta`` as a readable, replaceable leaf. The schedule that exposes such a
+    leaf is :class:`~aquaflux.solve.ConstantRelaxation`, which a :class:`StepControl` swaps in once per
+    iteration; the :class:`~aquaflux.solve.SwitchedEvolutionRelaxation` a shifted step is built with by
+    default computes ``beta`` from the residual ratio and exposes nothing to read or replace.
 
     **Why it is a separate protocol rather than more of `ForwardStep`.** Not every strategy has a shift.
     :class:`DampedNewtonStep` globalizes by backtracking alone and has no ``relaxation_schedule`` at all,
@@ -152,13 +156,13 @@ class ShiftedForwardStep(ForwardStep, Protocol):
     :class:`~aquaflux.solve.StepControl` *do* need one -- they raise beta on a bad step and drive it
     between steps -- so the requirement is real and belongs written down.
 
-    **What it replaces.** The requirement used to be enforced by ``hasattr`` probes scattered through the
-    march, which fail *silently*: a `DampedNewtonStep` satisfies `ForwardStep` completely, so passing one
-    with ``retry_on_cycles`` set was accepted and then simply never escalated -- a march that quietly
-    declines to escalate looks exactly like one that never needed to. One reporting path was worse still
-    and read ``active_step.relaxation_schedule`` unguarded, so the same conforming step raised
-    ``AttributeError`` mid-march. The march now checks this once, up front, and says which feature needs
-    what.
+    **Why an explicit up-front check rather than a ``hasattr`` probe at the point of use.** A probe fails
+    *silently*: a `DampedNewtonStep` satisfies `ForwardStep` completely, so passing one with
+    ``RetryPolicy.on_cycles`` set is accepted and then simply never escalates -- and a march that quietly
+    declines to escalate looks exactly like one that never needed to. Reading
+    ``active_step.relaxation_schedule`` unguarded fails the opposite way, raising ``AttributeError``
+    mid-march on a step that conforms. The march therefore checks this once, before the first step, and
+    names which feature needs what.
 
     Notes
     -----

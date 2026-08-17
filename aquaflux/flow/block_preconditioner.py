@@ -1,15 +1,15 @@
 """Block SIMPLE preconditioner for the coupled pressure--velocity Newton solve.
 
-Composes a **velocity-block solve** with a **pressure-Schur inner solve** into the left
-preconditioner ``M ≈ J⁻¹`` that :func:`~aquaflux.solve.newton.newton_step` applies to the coupled
-saddle-point system. Both the Schur inner solve (:class:`InnerSchurSolver`) and the velocity solve
+Composes a **velocity-block solve** with a **pressure-Schur inner solve** into the preconditioner
+``M ≈ J⁻¹`` that :func:`~aquaflux.solve.newton.newton_step` applies to the coupled saddle-point
+system (on the right, its default). Both the Schur inner solve (:class:`InnerSchurSolver`) and the velocity solve
 (:class:`VelocityBlockSolver`) are **swappable strategies**, built once off the jit path from the
 assembler's frozen geometry and applied per Newton iterate at the current momentum diagonal ``a_P``.
 Every coefficient is ``stop_gradient``-ed, so ``M`` only accelerates the Krylov iteration — it never
 perturbs the converged solution or its adjoint.
 
 The inner pressure Schur is a **smoothed-aggregation multigrid** (:class:`SmoothedAmgSchur`,
-mesh-independent V-cycle contraction ~0.25), paired with a velocity-block AMG
+mesh-independent V-cycle contraction ~0.25), paired with a velocity-block algebraic multigrid (AMG)
 (:class:`SmoothedAmgVelocity` on the viscous operator, or :class:`SmoothedAmgConvectionVelocity` on
 the convection-diffusion operator) and the block-triangular ``D·δu`` coupling. Both strategy families
 are abstract interfaces (:class:`InnerSchurSolver` / :class:`VelocityBlockSolver`), the seam a new
@@ -605,19 +605,19 @@ class FlowBlocks(eqx.Module):
 
 
 # The commutator Schur inverts `P_γ` **twice** per apply, so its inversion error compounds — unlike
-# the scaled-Laplacian Schurs, which invert theirs once. A single V-cycle is too inexact and the whole
-# approximation breaks down: measured on a convection-dominated channel, one cycle fails to converge at
-# all, while four or more converge in *fewer* outer iterations than either scaled-Laplacian Schur. This
-# is the floor the strategy enforces on the shared V-cycle count.
+# the scaled-Laplacian Schurs, which invert theirs once. A single V-cycle leaves `P_γ⁻¹` inexact enough
+# that the compounded error destroys the approximation outright rather than merely degrading it, so the
+# strategy enforces this floor on the shared V-cycle count.
 _COMMUTATOR_MIN_V_CYCLES = 4
 
 
 def _spectral_radius(matvec: Callable[[np.ndarray], np.ndarray], n: int, iterations: int) -> float:
     """Dominant eigenvalue magnitude of a linear operator, by power iteration (off the jit path).
 
-    Used to size the two scalar parameters of the stabilized least-squares-commutator Schur. A plain
-    power iteration is enough: both scalars only set the *balance* between the preconditioner's two
-    additive parts, so a few significant figures suffice, and it needs no eigensolver dependency.
+    Used to size ``alpha``, one of the two scalar parameters of the stabilized
+    least-squares-commutator Schur. A plain power iteration is enough: both scalars only set the
+    *balance* between the preconditioner's two additive parts, so a few significant figures suffice,
+    and it needs no eigensolver dependency.
     """
     rng = np.random.default_rng(0)
     v = rng.standard_normal(n)
@@ -671,13 +671,12 @@ class StabilizedLscSchur(InnerSchurSolver):
     Cost, relative to the scaled-Laplacian Schur: two multigrid solves and three residual
     linearizations per apply, against one solve.
 
-    **Where this pays, and where it does not — measured, so choose deliberately.** On an *isolated*
-    flow saddle it is the stronger approximation, as intended: 9 outer GMRES iterations against the
-    scaled-Laplacian Schur's 15 on a Reynolds-1e4 channel. On the **coupled** flow--turbulence solve it
-    is dramatically worse — at a developed, separated backward-facing-step state one shifted solve took
-    96 restart cycles / 526 s against the scaled-Laplacian Schur's 13 cycles / 38.9 s, both solves
-    converged to a relative linear residual near 2e-9, and roughly 2.9x slower on a coupled channel at
-    an identical residual trajectory. The reason the isolated win does not carry over: with a
+    **Where this pays, and where it does not — choose deliberately.** On an *isolated* flow saddle it
+    is the stronger approximation, as intended, and takes measurably fewer outer GMRES iterations than
+    the scaled-Laplacian Schur once the flow is convection-dominated. On the **coupled**
+    flow--turbulence solve it is dramatically worse on both counts — several times the restart cycles
+    *and* several times the wall time, at a developed, separated state, with both solves genuinely
+    converged. The reason the isolated win does not carry over: with a
     block-*diagonal* preconditioner and a pseudo-transient shift, the coupled iteration is not limited
     by the quality of the flow block's Schur approximation, so improving it buys nothing while costing
     several times more per apply. **Prefer ``"msimpler"`` for a coupled solve; reach for this only when
@@ -731,7 +730,8 @@ class StabilizedLscSchur(InnerSchurSolver):
         gamma, alpha : float, optional
             Override the calibrated scalars (for a parameter study). ``None`` calibrates them.
         power_iterations : int
-            Power-iteration count for the two spectral radii.
+            Power-iteration count for the spectral radius that sizes ``alpha``. The radius sizing
+            ``gamma`` is not computed here -- it arrives as ``momentum_radius``.
         """
         import scipy.sparse as sp
 
@@ -975,8 +975,8 @@ class BlockPreconditioner(eqx.Module):
             not help. ``"lsc"`` instead builds the approximation from the momentum operator itself
             (:class:`StabilizedLscSchur`, the stabilized least-squares commutator) — markedly dearer per
             apply (two multigrid solves plus three residual linearizations, against one solve), and
-            stronger on an **isolated** flow saddle, but **measured far worse on a coupled
-            flow--turbulence solve** (see :class:`StabilizedLscSchur`, which carries the numbers).
+            stronger on an **isolated** flow saddle, but **far worse on a coupled flow--turbulence
+            solve** (see :class:`StabilizedLscSchur` for why).
             **Use ``"msimpler"`` for a coupled solve.**
         msimpler_scale : float, optional
             The MSIMPLER scale ``k`` (only for ``schur_scaling="msimpler"``). It sets the Schur

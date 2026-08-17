@@ -109,6 +109,9 @@ class Mesh(eqx.Module):
         face_patches : dict of {str: indices}, optional
             Named face patches overlaying the default ``"interior"`` / ``"boundary"`` split
             (boundary patches for BCs; interior patches for baffles / named interfaces).
+        neighbour_offset : array-like, optional
+            Per-face periodic-image translation of the neighbour centroid, as in
+            :meth:`from_csr`. Omit for a non-periodic mesh.
         """
         offsets = [0]
         flat: list[int] = []

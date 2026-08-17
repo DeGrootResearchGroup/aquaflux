@@ -20,12 +20,14 @@ which balances the momentum/continuity row scales and interleaves the pressure a
 so the aggregation and the level smoother see a well-scaled block operator.
 
 The V-cycle is built with PETSc's aggregation multigrid (``PCGAMG``): a **direct LU coarse solve** and a
-**stationary zero-fill incomplete-LU level smoother**, over **plain (unsmoothed) aggregation**. Each of
-those three is a measured choice against this indefinite saddle rather than a default — fill in the
-smoother produces negative pivots as the pseudo-transient shift falls, smoothing the prolongator degrades
-the coarse correction (both measured on the coupled backward-facing step), and a Krylov-accelerated
+**stationary incomplete-LU level smoother**, over **plain (unsmoothed) aggregation**. Each of those three
+is a measured choice against this indefinite saddle rather than a default — smoothing the prolongator
+degrades the coarse correction (measured on the coupled backward-facing step), and a Krylov-accelerated
 smoother would make the operator nonlinear, which the outer Krylov solve and the adjoint transpose cannot
-use. It is a host object, built once off the jit path at a reference state and shift and
+use. The smoother's fill is the caller's (``smoother_fill_levels``, default one level of fill): which
+level wins depends on the pseudo-transient shift, and **zero fill is the validated choice for a march
+living at a low shift**, where one level of fill acquires negative pivots and diverges (see
+:func:`build_amg_vcycle`). It is a host object, built once off the jit path at a reference state and shift and
 applied inside the jitted Krylov solve through ``jax.pure_callback`` — exactly like the ILUT and LU. Because
 PETSc supplies the multigrid it is the one member of the family that requires the optional ``petsc``
 dependency; there is no pure-SciPy algebraic-multigrid fallback.
@@ -247,7 +249,8 @@ class AmgVCycle:
         self._configure()
         self._x = self._mat.createVecRight()
         self._b = self._mat.createVecLeft()
-        # A KSP driving the same GAMG V-cycle as a *native* full solve (GMRES, 1% stop): the whole Krylov
+        # A KSP driving the same GAMG V-cycle as a *native* full solve (GMRES, stopping at
+        # `solve_rtol`): the whole Krylov
         # loop and the V-cycle applies run on the host, so a march step pays one JAX round-trip rather than
         # one per matvec (JAX-side GMRES with the V-cycle as a per-matvec callback is far slower). The
         # operator is a *shell* over the EXACT Jacobian-vector product (:meth:`_shell_mult`, calling the
@@ -279,13 +282,14 @@ class AmgVCycle:
         y.setArray(self.scale[self.perm] * jw[self.perm])  # D P (J + beta d) w -> cell-major
 
     def _configure(self) -> None:
-        """A smoothed-aggregation V-cycle: direct-LU coarse solve, stationary ILU level smoother."""
+        """A plain-aggregation V-cycle: direct-LU coarse solve, stationary ILU level smoother."""
         PETSc = self._PETSc
         opts = PETSc.Options()
         p = self._prefix
-        # A stationary (Richardson) incomplete-LU smoother -- one level of fill reaches the tolerance on
-        # the indefinite saddle where zero-fill stalls; a Krylov-accelerated smoother would make the
-        # V-cycle a nonlinear operator, which the outer GMRES and the adjoint transpose cannot use.
+        # A stationary (Richardson) incomplete-LU smoother, at the caller's fill level
+        # (`smoother_fill_levels`; see `build_amg_vcycle` for which level wins at which shift). A
+        # Krylov-accelerated smoother would make the V-cycle a nonlinear operator, which the outer
+        # GMRES and the adjoint transpose cannot use.
         for key, value in {
             "pc_type": "gamg",
             "pc_gamg_type": "agg",
@@ -369,12 +373,12 @@ class AmgVCycle:
     def solve_exact(
         self, matvec: Callable[[np.ndarray], np.ndarray], rhs: np.ndarray, shift: np.ndarray
     ) -> np.ndarray:
-        """Native host forward solve ``(J + beta d) delta = rhs`` to the 1% stop, with the EXACT ``J``.
+        """Native host forward solve ``(J + beta d) delta = rhs`` with the EXACT ``J``.
 
         Runs PETSc's own GMRES + GAMG entirely on the host, its operator a shell over the exact
         Jacobian-vector product ``matvec`` (the jvp at the current iterate) plus the pseudo-time shift --
-        so the solve is true-Newton and reaches the inexact-Newton tolerance in ~1 iteration (measured),
-        without the per-matvec JAX round-trip a JAX-side Krylov with the V-cycle as a callback would pay.
+        so the solve is true-Newton -- without the per-matvec JAX round-trip a JAX-side Krylov with the
+        V-cycle as a callback would pay. It stops on the KSP's relative tolerance, ``solve_rtol``.
         The GAMG hierarchy is coarsened from the frozen materialized matrix (a strong preconditioner
         tolerates the state/shift drift). Impure (drives host PETSc state), so it is a **forward-only**
         path -- never on a differentiated solve; the adjoint uses the differentiable single-V-cycle
@@ -519,6 +523,9 @@ def build_amg_vcycle(
         Also assemble the native host exact-Jacobian forward solve (:meth:`AmgVCycle.solve_exact`), whose
         operator is a shell over the exact jvp supplied per solve. ``False`` builds the single-V-cycle
         apply only (the frozen preconditioner and adjoint path).
+    extra_options : dict, optional
+        PETSc options applied to the V-cycle **after** the defaults above, so a study can vary an
+        aggregation or smoother setting without editing them. ``None`` keeps the defaults as they are.
 
     Returns
     -------
@@ -719,8 +726,9 @@ class MonolithicAmgPreconditioner(HostPreconditioner):
         (colour, field) -- the expensive part of a refresh; e.g. ~670 probes on a 23k-cell reach-3 bfs3d
         mesh). ``batched_matvec`` (built once, reused) runs the probes as a few batched passes rather than a
         per-probe loop (~1.6x on that mesh); ``probe_batch_size`` chunks the batch for memory. ``structure``
-        (from ``block_stencil_gather_map``, built once) de-compresses by a single gather into the fixed
-        full-pattern CSR instead of a scatter loop + re-sort (multigrid-only -- it keeps explicit zeros)."""
+        (a ``ProbeGather`` from ``block_stencil_gather_map``, built once) fills the fixed full-pattern CSR
+        one probe-chunk at a time instead of a scatter loop + re-sort (multigrid-only -- it keeps explicit
+        zeros)."""
         from .sparse_jacobian import materialize_block_jacobian
 
         return materialize_block_jacobian(
@@ -818,10 +826,13 @@ class MonolithicAmgPreconditioner(HostPreconditioner):
         probe_batch_size : int or None
             The batched-probe chunk size (simultaneous tangents), to bound peak memory; ``None`` runs all
             probes in one batch.
-        structure : tuple of np.ndarray or None
-            A precomputed ``(indptr, indices, gather_map)`` (:func:`~aquaflux.solve.sparse_jacobian.block_stencil_gather_map`)
-            so the materialize de-compresses by one gather into the fixed full-pattern CSR instead of a
-            scatter loop + re-sort. Built once and reused across refreshes.
+        structure : ProbeGather or None
+            A precomputed fixed-pattern CSR structure and its de-compression
+            (:func:`~aquaflux.solve.sparse_jacobian.block_stencil_gather_map`), so the materialize fills
+            the fixed full-pattern CSR one probe-chunk at a time instead of a scatter loop + re-sort.
+            Built once and reused across refreshes.
+        extra_options : dict, optional
+            PETSc options for the V-cycle, applied after the defaults (see :func:`build_amg_vcycle`).
 
         Returns
         -------
@@ -958,13 +969,13 @@ class MonolithicAmgPreconditioner(HostPreconditioner):
         return self.has_native_solve
 
     def exact_solve(self, phi: jnp.ndarray, rhs: jnp.ndarray, shift: jnp.ndarray) -> jnp.ndarray:
-        """The full inexact-Newton correction ``delta`` solving ``(J(phi) + shift) delta = rhs`` to ~1%.
+        """The full inexact-Newton correction ``delta`` solving ``(J(phi) + shift) delta = rhs``.
 
         Runs PETSc's GMRES + native GAMG V-cycle entirely on the host, its operator a shell over the EXACT
-        jvp linearized at ``phi`` (so the solve is true-Newton) -- reaching the tolerance in ~1 iteration
-        (measured) without the per-matvec JAX round-trip a JAX-side Krylov with the V-cycle as a callback
-        would pay. One JAX ``pure_callback`` per step, carrying ``phi``/``rhs``/``shift`` in and ``delta``
-        out; the exact jvp is evaluated eagerly inside the callback. Forward-only (drives host PETSc state);
+        jvp linearized at ``phi`` (so the solve is true-Newton), stopping on the KSP's relative tolerance
+        (``solve_rtol``) without the per-matvec JAX round-trip a JAX-side Krylov with the V-cycle as a
+        callback would pay. One JAX ``pure_callback`` per step, carrying ``phi``/``rhs``/``shift`` in and
+        ``delta`` out; the exact jvp is evaluated eagerly inside the callback. Forward-only (drives host PETSc state);
         the adjoint uses the differentiable single-V-cycle :meth:`matvec` transpose.
         """
         shape = jax.ShapeDtypeStruct((self.factors.n_dofs,), jnp.float64)

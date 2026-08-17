@@ -157,8 +157,9 @@ def bulk_velocity(
 ) -> jnp.ndarray:
     """Volume-averaged velocity component ``Sigma(u_dir V) / Sigma(V)`` for a flow state.
 
-    The mean (bulk) velocity a mass-flow-controlled periodic channel targets. Reads the cell
-    volumes from the assembler's geometry, so it is the same average the controller drives.
+    The mean (bulk) velocity a mass-flow-driven periodic channel targets. Reads the cell volumes from
+    the assembler's geometry, so it is the same average a bulk-velocity-constrained flow solve
+    (:func:`~aquaflux.flow.bulk_velocity_flow_solve`) holds to its target.
     """
     velocity, _ = momentum.unpack(flow)
     volume = momentum.geometry.cell.volume

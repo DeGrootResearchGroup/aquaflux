@@ -20,8 +20,10 @@ def graded_nodes(n: int, length: float, growth: float, *, both_sides: bool = Tru
     """Node coordinates on ``[0, length]`` with geometric cell growth (finest at the wall(s)).
 
     Returns ``n + 1`` monotonically increasing positions whose cell sizes follow a geometric
-    progression: adjacent cells differ by the factor ``growth``, with the *smallest* cells at the
-    boundary and coarsening inward. This is the wall-normal grading a wall-resolved boundary layer
+    progression: adjacent cells differ by the factor ``growth`` moving inward from a wall, with the
+    *smallest* cells at the boundary and coarsening inward. With ``both_sides`` the progression
+    mirrors at the centre, so the two central cells are the same size rather than differing by
+    ``growth``. This is the wall-normal grading a wall-resolved boundary layer
     needs — a small ``y`` at the wall (so ``y+ < 1`` for the near-wall cell) without paying a uniform
     fine spacing across the whole channel.
 

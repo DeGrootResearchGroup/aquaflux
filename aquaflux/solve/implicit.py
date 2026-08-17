@@ -37,17 +37,9 @@ from .linear import default_linear_solver, solve_linear
 from .newton import newton_correction
 from .norm import ResidualNorm
 
-# The step a forward-step strategy supplies: given the (single-argument) residual, the current
-# iterate, the starting residual norm, and the linear solver, return the next iterate, **the
-# restart-cycle count of the linear solve that produced it, and the line-search factor alpha**. The
-# count and alpha are the step's cost/quality, not part of its result: an observed march watches the
-# count rise to detect a frozen preconditioner going stale and reads alpha to control the shift, while
-# the plain Newton loop drops both at the call site.
-# (superseded by StepOutcome below) The fifth value is `reached_target`: whether the step ran to its OWN stopping criterion rather than
-# being cut short. It exists so an observed march can tell a step that did its job expensively from one
-# that ground and gave up -- a cost-only trigger cannot, and would discard a converged step (measured:
-# an inner loop that reached 3.0e-6 against a 1.0e-5 target was thrown away for costing 54 cycles).
-# A step with no inner loop to cut short always reports True.
+# What a forward step returns, and what each value is for, is documented on `StepOutcome` and the
+# `StepFn` alias in `forward_step.py`, which is where both are defined.
+#
 # Inexact-Newton forward solver: each Newton step's linear solve need only make Newton progress,
 # not be exact — the next step corrects the leftover. A loose relative tolerance cuts the GMRES
 # matvec count per step several-fold; the few extra Newton steps it costs still net a large
@@ -286,9 +278,9 @@ def backtracking_line_search(
     grow=0,
     max_alpha=jnp.inf,
 ):
-    """Backtrack the step length: the largest ``alpha`` in ``{1, 1/2, ..., 1/2**steps}`` with
-    ``norm(R(phi + alpha delta)) < reference_norm``, falling back to the smallest rung if none reduces
-    the residual.
+    """Backtrack the step length: the largest ``alpha`` in ``{2**grow, ..., 1, ..., 1/2**steps}`` with
+    ``norm(R(phi + alpha delta)) < reference_norm``, falling back to the longest finite rung no longer
+    than the full step if none is admissible.
 
     The ladder is walked by a ``lax.while_loop`` that **stops at the first (largest) reducing rung**,
     so a step whose full length already descends (the common case near the root) costs a single
@@ -333,6 +325,12 @@ def backtracking_line_search(
         controlled growth far from the root admits those steps. Near the root the monotone test is
         wanted again, for the terminal quadratic phase -- hence a *schedule* rather than a constant
         (see :class:`~aquaflux.solve.LineSearchGrowth`).
+    grow : int, optional
+        Rungs of *doubling* added above ``alpha = 1``, so the ladder starts at ``2**grow`` (default
+        ``0`` -- the ladder starts at the full step). The admissible step is often longer than the
+        full step, and a ladder starting at one cannot reach it. A growth rung is only ever reachable
+        by **passing** the acceptance test: the fallback taken when nothing is admissible is capped at
+        the full step, so it can never land on one.
     max_alpha : float or jnp.ndarray, optional
         An upper bound on the step fraction, applied to **every** rung including the growth rungs.
         The seam for a constraint the residual cannot express: a field that must stay positive gives
@@ -448,11 +446,11 @@ def _damped_newton_step(
     adjoint depends solely on the converged state, so it stays gradient-transparent. ``norm`` is the
     residual measure the search is judged by (default Euclidean).
 
-    Returns ``(phi_next, cycles, alpha, inner_iterations, reached_target)`` — the stepped iterate,
-    the raw solver count
-    of the one linear solve behind it, the line-search factor, and ``inner_iterations = 1`` (a single
-    Newton step has no inner loop). The line search itself costs only residual evaluations, so the
-    step's linear-solve cost is exactly that single solve's.
+    Returns a :class:`~aquaflux.solve.StepOutcome` carrying the stepped iterate, the raw solver count
+    of the one linear solve behind it, the line-search factor, ``inner_iterations = 1`` (a single
+    Newton step has no inner loop), ``reached_target = True``, the offset-corrected cost of that one
+    solve, and an unbinding ``binding_limit`` of ``1``. The line search itself costs only residual
+    evaluations, so the step's linear-solve cost is exactly that single solve's.
     """
     delta, r, cycles = newton_correction(
         residual_fn, phi, solver=solver, preconditioner=preconditioner
@@ -479,7 +477,7 @@ class DampedNewtonStep(eqx.Module):
     Attributes
     ----------
     preconditioner : callable or None
-        A factory ``phi -> M`` giving the left preconditioner ``M`` (a matvec approximating
+        A factory ``phi -> M`` giving the preconditioner ``M`` (a matvec approximating
         ``J^{-1}``) for each Newton step's linear solve, built at the current iterate (e.g.
         :meth:`aquaflux.flow.BlockPreconditioner.factory`). Used for the forward steps and,
         transposed, for the adjoint (transpose) solve, so gradients are mesh-independent too.
@@ -504,7 +502,7 @@ class DampedNewtonStep(eqx.Module):
     residual_norm: ResidualNorm = eqx.field(default=jnp.linalg.norm)
 
     def stepper(self) -> StepFn:
-        """The line-searched Newton step ``(residual_fn, phi, ‖R₀‖, solver) -> (phi_next, cycles, alpha, inner_iterations)``."""
+        """The line-searched Newton step ``(residual_fn, phi, ‖R₀‖, solver) -> StepOutcome``."""
         preconditioner = self.preconditioner
         line_search = self.line_search
         norm = self.residual_norm
@@ -550,8 +548,9 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
     the Euclidean norm.
 
     The loop can exit without converging in two ways: it exhausts ``max_steps`` short of tolerance,
-    or the residual norm becomes non-finite (``NaN``/``Inf``), which makes the ``residual_norm > tol``
-    test ``False`` and exits at once. Both leave a field that does *not* solve ``R = 0``. The
+    or the residual norm becomes non-finite (``NaN``/``Inf``), which :func:`within_tolerance` never
+    satisfies, so the loop runs out its whole step budget. Both leave a field that does *not* solve
+    ``R = 0``. The
     implicit-function-theorem adjoint linearizes the residual at whatever field this returns, so a
     non-converged field would yield a **silently wrong gradient** — the transpose solve is still
     well-posed and raises no ``NaN``. Guard against that here: if the terminal residual is non-finite
@@ -667,11 +666,15 @@ class TransposedPreconditioner:
 
 
 def _adjoint_preconditioner(preconditioner, phi_star, example):
-    """Transpose ``M^T`` of the forward preconditioner, as a left preconditioner for the adjoint.
+    """Transpose ``M^T`` of the forward preconditioner, for the adjoint's transpose solve.
 
     The forward ``M = preconditioner(phi*)`` approximates ``J^{-1}``; the adjoint solves the
-    transpose system ``J^T lambda = v``, whose consistent left preconditioner is ``M^T ~ J^{-T}``,
-    obtained by transposing the (linear) preconditioner matvec with :func:`jax.linear_transpose`.
+    transpose system ``J^T lambda = v``, for which ``M^T ~ J^{-T}`` is the consistent
+    preconditioner, obtained by transposing the (linear) preconditioner matvec with
+    :func:`jax.linear_transpose`. It is applied on whichever side
+    :func:`~aquaflux.solve.linear.solve_linear` defaults to (the right), which is a different
+    bracketing from transposing the forward *preconditioned operator* — the two have the same
+    spectrum, so this changes the Krylov residual measured, not the converged gradient.
     It is mesh-independent wherever ``M`` is -- the adjoint GMRES iteration count stays flat under
     refinement instead of growing with the system size. ``None`` in, ``None`` out. A
     :class:`TransposedPreconditioner` factory already returns ``M^T`` (a callback preconditioner that
@@ -703,7 +706,7 @@ def _implicit_solve_bwd(
     # residual norm, so it is unused here.
     del norm_fn
     phi_star, theta = residuals
-    # Transpose Jacobian solve: (dR/dphi)^T lambda = cotangent, left-preconditioned by M^T so the
+    # Transpose Jacobian solve: (dR/dphi)^T lambda = cotangent, preconditioned by M^T so the
     # adjoint solve is mesh-independent (unpreconditioned it grows with the system size). This solve
     # sets the gradient accuracy, so it uses the (tight) adjoint solver, not the inexact forward one.
     _, vjp_phi = jax.vjp(lambda p: residual_fn(p, theta), phi_star)

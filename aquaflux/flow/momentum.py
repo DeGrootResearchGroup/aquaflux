@@ -7,9 +7,10 @@ system is solved by the same Newton / implicit-diff machinery as a scalar field.
 
 Per velocity component ``i`` the momentum balance is a scalar transport of ``u_i``:
 
-    R_{u_i} = sum_faces ( mdot_f u_{i,f}  +  p_f n_i A  -  mu (grad u_i . n) A )   ( + accumulation )
+    R_{u_i} = sum_faces ( mdot_f u_{i,f}  +  p_f n_i A  -  mu (grad u_i . n) A )  -  f_i V
 
-— advection of ``u_i`` by the mass flux, a pressure force, and viscous diffusion. All three are
+— advection of ``u_i`` by the mass flux, a pressure force, and viscous diffusion, less the volume
+integral of any body force / injected momentum source ``f_i``. The first three are
 face-flux operators summed by a :class:`~aquaflux.discretization.CellBalance`, the same
 composition every scalar transport equation uses: the first and last are
 :class:`~aquaflux.discretization.AdvectionFlux` and
@@ -19,8 +20,9 @@ coefficient), and only :class:`PressureForce` is new. Continuity is
     R_p = sum_faces mdot_f ,
 
 with ``mdot_f`` the Rhie--Chow mass flux, which couples pressure implicitly and prevents
-checkerboarding. The mass flux and the lagged momentum diagonal ``a_P`` come from
-:mod:`aquaflux.flow.rhie_chow`; the Jacobian of the whole coupled residual comes from AD.
+checkerboarding. The mass flux and the momentum diagonal ``a_P`` (differentiated here, and lagged
+only in the mass-flux estimate its convective term uses) come from :mod:`aquaflux.flow.rhie_chow`;
+the Jacobian of the whole coupled residual comes from AD.
 """
 
 from __future__ import annotations
@@ -65,7 +67,7 @@ class VelocityFields(NamedTuple):
     """The kinematic velocity state: cell values, boundary-face values, and the cell gradient.
 
     The part of a flow state that is a pure function of the velocity unknowns -- no pressure, no
-    lagged ``a_P``, no Rhie--Chow flux -- and the whole of what a turbulence closure reads from the
+    ``a_P``, no Rhie--Chow flux -- and the whole of what a turbulence closure reads from the
     flow. It is produced both by the lightweight :meth:`MomentumContinuity.velocity_fields` (before a
     mass flux is even defined) and, as part of :class:`FlowFields`, by the full assembly, so a
     consumer takes this one bundle rather than three arrays that always travel together.
@@ -93,8 +95,8 @@ class FlowFields(NamedTuple):
     Returned by :meth:`MomentumContinuity.flow_fields`, so a caller that needs several of these
     quantities at one state (a coupled residual wanting both the residual and the mass flux, a
     segregated sweep wanting both the velocity fields and the mass flux) assembles them **once**
-    and reads the fields it needs, rather than re-deriving the boundary fields, gradients, lagged
-    ``a_P``, and Rhie--Chow flux per accessor.
+    and reads the fields it needs, rather than re-deriving the boundary fields, gradients, ``a_P``,
+    and Rhie--Chow flux per accessor.
 
     The kinematic half is the nested :class:`VelocityFields`, which is also what the lightweight
     :meth:`MomentumContinuity.velocity_fields` returns on its own.
@@ -171,9 +173,15 @@ class MomentumContinuity(eqx.Module):
         turbulence closure's contribution rides separately in :attr:`eddy_viscosity`, and
         :attr:`viscosity` combines the two.
     eddy_viscosity : jnp.ndarray or None
-        Per-cell **kinematic** eddy viscosity ``nu_t`` from a RANS closure, shape ``(n_cells,)``, or
-        ``None`` for laminar flow. Set with :meth:`with_eddy_viscosity`. A differentiable leaf, so a
-        coupled residual that computes ``nu_t`` from ``(k, omega)`` differentiates through it.
+        Per-cell **kinematic** eddy viscosity ``nu_t`` from a Reynolds-averaged Navier--Stokes (RANS)
+        closure, shape ``(n_cells,)``, or ``None`` for laminar flow. Set with
+        :meth:`with_eddy_viscosity`. A differentiable leaf, so a coupled residual that computes
+        ``nu_t`` from ``(k, omega)`` differentiates through it.
+    wall_eddy_viscosity : jnp.ndarray or None
+        Per-face **kinematic** wall-function eddy viscosity ``nu_t,wall``, shape ``(n_faces,)``
+        (meaningful on shearing-wall faces), or ``None`` for resolved walls. Also set with
+        :meth:`with_eddy_viscosity`; it overrides the momentum wall-face diffusion coefficient with
+        ``mu + rho nu_t,wall`` (see :meth:`_wall_boundary_viscosity`).
     gradient_scheme : GradientScheme
         Reconstruction for the velocity and pressure gradients.
     advection_scheme : AdvectionScheme or None
@@ -183,6 +191,12 @@ class MomentumContinuity(eqx.Module):
         The named per-patch flow closures, resolved to their boundary-face indices.
     interp_factor, normal_distance : jnp.ndarray
         Face interpolation factor ``g`` and normal distance ``d . n`` (precomputed geometry).
+    pressure_pin : int or None
+        Cell whose continuity equation is replaced by ``p = pressure_pin_value`` (static). Required
+        for a closed domain (all-wall, no pressure outlet), where the pressure level is otherwise
+        free; ``None`` for a domain with a pressure outlet.
+    pressure_pin_value : float
+        The pressure imposed at :attr:`pressure_pin`.
     body_force : jnp.ndarray
         Uniform body force per unit volume ``(dim,)``, added to the momentum equation. Drives a
         streamwise-periodic channel: with the pressure split ``p = p̃ + G·x`` into a periodic ``p̃``
@@ -759,7 +773,7 @@ class MomentumContinuity(eqx.Module):
         consumer that needs more than one of them at a single state -- the residual and ``mdot`` in a
         coupled solve, the velocity gradient and ``mdot`` in a segregated sweep -- calls this **once**
         and reads the fields it needs (via :meth:`residual_from_fields`, :attr:`FlowFields.mdot`,
-        :attr:`FlowFields.velocity_fields`), so the boundary fields, gradients, lagged ``a_P``, and
+        :attr:`FlowFields.velocity_fields`), so the boundary fields, gradients, ``a_P``, and
         Rhie--Chow flux are assembled a single time instead of once per accessor.
 
         Parameters
@@ -771,8 +785,8 @@ class MomentumContinuity(eqx.Module):
         boundary_velocity, boundary_pressure = self._boundary_fields(velocity, pressure)
         grad_velocity = self._velocity_gradient(velocity, boundary_velocity)
 
-        # Rhie--Chow coupling: the pressure gradient, the lagged momentum diagonal a_P, and the mass
-        # flux mdot that couples pressure implicitly into both continuity and advection.
+        # Rhie--Chow coupling: the pressure gradient, the momentum diagonal a_P, and the mass flux
+        # mdot that couples pressure implicitly into both continuity and advection.
         grad_pressure = self.gradient_scheme.gradients(
             pressure, self.mesh, self.geometry, boundary_pressure
         )

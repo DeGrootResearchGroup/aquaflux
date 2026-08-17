@@ -93,8 +93,8 @@ def block_approximate_inverse(f_block, n_cells, n_fields, frobenius):
     ``frobenius`` selects the block generalization of the Frobenius-optimal diagonal. Minimizing
     ``||I - M F||_F`` over block-diagonal ``M`` decouples by cell: with ``R_i`` the cell's row block of
     ``F``, the minimizer is ``M_i = F_ii^T (R_i R_i^T)^-1``. At one field per cell this reduces exactly to
-    ``F_ii / ||F_i||^2``, which is the diagonal form measured to be worth four orders as a velocity
-    predictor -- so the block version should not be built without it.
+    ``F_ii / ||F_i||^2``, the diagonal form that carries the derived per-row under-relaxation which decides
+    whether the sweep contracts at all -- so the block version should not be built without it.
 
     Parameters
     ----------
@@ -174,8 +174,9 @@ def _simple_pieces(
     nv = (block_size - 1) * n_cells
     # The approximate velocity inverse the whole relaxation is built on. Jacobi (`1 / F_ii`) is what
     # this smoother used when it amplified; the Frobenius-optimal diagonal is the same object with a
-    # derived per-row relaxation, which is measured to be worth 25x in a flat setting on this operator
-    # -- and an under-relaxed sweep is exactly what an amplifying one is missing.
+    # derived per-row relaxation, and an under-relaxed sweep is exactly what an amplifying one is
+    # missing -- so the change is qualitative rather than a matter of degree: under Jacobi more sweeps
+    # make the residual worse, under this one they make it better.
     f_inverse = _diagonal_approximate_inverse(
         a[:nv, :nv].tocsr(), frobenius, row_sum=simplec, label=" (velocity)"
     )
@@ -400,8 +401,8 @@ def _diagonal_approximate_inverse(
 
     Written for the velocity block but specific to nothing about it -- the derivation reads only the
     rows of whatever matrix it is handed, so it applies equally to the Schur complement, whose own
-    relaxation faces the same choice and whose diagonal is a **worse** approximation to its inverse
-    (the Schur here carries some 300 nonzeros per row against the flow block's 227).
+    relaxation faces the same choice and whose diagonal is a **worse** approximation to its inverse,
+    because the Schur is denser per row than the flow block it is formed from.
 
     Jacobi takes ``1 / F_ii``. The Frobenius-optimal diagonal instead minimizes ``||I - F~^-1 F||_F``,
     which for a diagonal unknown decouples row by row and has the closed form ``F_ii / ||F_i||^2``.
@@ -477,6 +478,10 @@ class NativeSimpleInverse(NativeHierarchyInverse):
         The damped-Jacobi sweeps used for the Schur solve inside one SIMPLE sweep, and their damping.
     omega : float
         Relaxation applied to the whole SIMPLE correction.
+    frobenius, schur_frobenius, aggressive_levels, orthonormal, avoid_singletons, block_splitting, simplec, mu, pre_smooth, prolongation_smoothing, equilibrate
+        The splitting and coarsening choices, each documented by the comment on its own line of the
+        signature below; ``prolongation_smoothing`` and ``equilibrate`` are passed through to
+        :func:`~aquaflux.solve.multigrid.build_convection_hierarchy`.
     """
 
     def __init__(
@@ -653,7 +658,7 @@ def native_saddle_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
     rather than being restated here. The settings worth knowing about are ``strength_threshold`` (at
     zero the aggregation reads no operator values at all and coarsens across the stiff direction, which
     on a wall-graded mesh is the difference between a working hierarchy and one that stalls) and the
-    pair ``levels``/``max_coarse``, which have to move together: a strength threshold makes aggregates
+    pair ``max_levels``/``max_coarse``, which have to move together: a strength threshold makes aggregates
     *smaller*, so it enlarges the coarse grid, and the coarsest level is inverted densely.
 
     Parameters

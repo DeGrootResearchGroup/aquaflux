@@ -2,7 +2,7 @@
 
 Each polyMesh file's payload is a counted list ``N ( … )`` whose element grammar differs by file:
 a ``vectorField`` of points, a ragged ``faceList``, a ``labelList`` of owners/neighbours, a
-``polyBoundaryMesh`` dictionary, or a ``cellZones`` list of labelled sets. The four parsers here are
+``polyBoundaryMesh`` dictionary, or a ``cellZones`` list of labelled sets. The five parsers here are
 build-time free functions over the comment-stripped body string (:mod:`.foamfile` supplies it), each
 sharing :func:`_list_envelope` for the common ``N ( … )`` frame and its count check. The file kind is
 known statically at every call site, so these stay plain functions rather than a parser hierarchy.

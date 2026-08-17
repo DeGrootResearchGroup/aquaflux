@@ -18,7 +18,8 @@ normal derivative in terms of cell-centred quantities:
     denom = (D_P . n) - (Gamma_P / Gamma_N)(D_N . n),
 
 where ``D_P = x_ip - x_P`` and ``D_N = x_ip - x_N`` are the owner/neighbour centroid →
-face-centroid displacements. The face flux is then ``Gamma_P (grad phi|_ip . n) A``, which —
+face-centroid displacements. The owner-outward face flux is then ``-Gamma_P (grad phi|_ip . n) A``
+(Fourier's law: flux is *down*-gradient), which —
 by construction of ``denom`` from the continuity condition — is the single conservative flux
 both cells share (owner ``+``, neighbour ``-``).
 
@@ -32,7 +33,7 @@ hand-derived coefficients.
 
 At a boundary face the neighbour side is replaced by the weak boundary value ``phi_ip``
 supplied by a :class:`~aquaflux.boundary.conditions.BoundaryCondition`, giving the
-one-sided flux ``Gamma_P (phi_ip - phi_P - corr_P) / (D_P . n) A``.
+one-sided flux ``-Gamma_P (phi_ip - phi_P - corr_P) / (D_P . n) A``.
 
 An optional per-face ``boundary_coefficient`` overrides ``Gamma_P`` on boundary faces only, for a
 surface whose effective transport coefficient differs from its owner cell's — a wall-function eddy

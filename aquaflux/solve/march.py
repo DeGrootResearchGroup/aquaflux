@@ -13,12 +13,13 @@ Python loop, :func:`forward_march` — that steps the **same** injected
 :class:`~aquaflux.solve.ForwardStep`, judges convergence with the **same** tolerance test, and
 measures progress with the **same** residual norm, but observes every step and may stop early.
 
-**The eager march never returns the answer.** It is a pure accelerator: a driver uses it to reach a
-better-preconditioned state, and then finishes with a real ``ImplicitNewtonSolver.solve()``, which
-owns the convergence guard, the ``custom_vjp``, and the returned field. That is why
-:func:`forward_march` deliberately has **no** non-convergence guard of its own — stopping short is
-its purpose, and a state it hands back is an intermediate, never a result. Keeping the guard in one
-place means a march that ends short of a root can never be mistaken for a converged one.
+**The eager march's state is an answer only when it reports ``converged``.** Short of that it is a
+pure accelerator: a driver uses it to reach a better-preconditioned state, and then finishes with a
+real ``ImplicitNewtonSolver.solve()``, which owns the convergence guard, the ``custom_vjp``, and the
+returned field. That is why :func:`forward_march` deliberately has **no** non-convergence guard of
+its own — stopping short is its purpose, and a state it hands back carries no guarantee beyond what
+:attr:`MarchResult.converged` states. Keeping the guard in one place means a march that ends short of
+a root can never be mistaken for a converged one.
 
 **Two reference residual norms, and conflating them breaks the march.** Each call to
 :func:`forward_march` computes its own ``residual_norm_0`` from the state it is handed, and passes
@@ -42,7 +43,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import lineax as lx
 
-from .forward_step import ForwardStep, StepControl, StepReport, within_tolerance
+from .forward_step import ForwardStep, StepControl, StepOutcome, StepReport, within_tolerance
 from .norm import ResidualNorm
 from .retry import NO_RETRIES, RetryPolicy
 
@@ -367,8 +368,8 @@ def _march_step(
     phi: jnp.ndarray,
     residual_norm_0: jnp.ndarray,
     solver: lx.AbstractLinearSolver,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """One observed step: the next state, its raw cycle count, line-search factor, inner-iteration count, and new residual norm.
+) -> tuple[StepOutcome, jnp.ndarray]:
+    """One observed step: the step's :class:`StepOutcome`, and the residual norm at the state it produced.
 
     Compiled as a unit, and — this is the load-bearing part — ``forward_step`` and ``residual_fn``
     are **arguments, not captured values**, so repeated steps hit the compilation cache instead of
@@ -419,9 +420,10 @@ def forward_march(
     the same path on the same problem.
 
     **This function may return a state that does not solve the residual, without raising** — that is
-    the point of a march that can stop early. It carries no convergence guard; the caller must
-    finish with an ``ImplicitNewtonSolver.solve()``, which does, and which produces the actual
-    result and its adjoint. Do not differentiate through this march.
+    the point of a march that can stop early. It carries no convergence guard, so a caller must read
+    :attr:`MarchResult.converged` before treating the state as a result; a march that stopped short
+    must be finished with an ``ImplicitNewtonSolver.solve()``, which does carry the guard, and which
+    produces the result and its adjoint. Do not differentiate through this march.
 
     Parameters
     ----------
@@ -480,6 +482,13 @@ def forward_march(
         at — the same discipline as the segment-local damping reference. Measuring drift from a state
         older than the last refresh would report movement that has already been absorbed and refresh
         again immediately.
+    norm_builder : callable, optional
+        ``state -> ResidualNorm``, re-deriving the residual measure at the state each outer iteration
+        starts from and holding it for that whole iteration — every trial step of the line search, the
+        acceptance test and the reported norm. Rebuilding it per trial step instead would let a
+        candidate win by shrinking its own denominator rather than its residual. The segment reference
+        the damping schedule ramps against is taken in this same measure, so the ratio divides two
+        comparably-scaled quantities. ``None`` (the default) uses ``forward_step.norm()`` throughout.
     precondition_step : callable, optional
         ``(active_step, state) -> None``, called before each step (after the control has set the shift
         strength on ``active_step``) to refresh that step's frozen host preconditioner from the current
@@ -509,6 +518,15 @@ def forward_march(
         original retry). Each escalation re-matches the preconditioner through ``precondition_step``;
         the divergence retry does not, because the factorization is already fresh at this
         ``(state, β)`` and only the Krylov tolerance is at fault.
+    stop_on_limit_stall : int or None
+        End the segment after this many **consecutive** steps that are constraint-bound, narrowing, and
+        not reducing the residual (see :func:`_limit_collapsing`), default ``3``. That pattern is a
+        fraction-to-the-boundary lock-up, and it does not recover on its own: the cap shrinks by a fixed
+        factor per step for as long as the march is allowed to run, so without this the segment spends
+        its entire ``max_steps`` budget taking arithmetically null steps. Ending it hands the caller a
+        state that is honestly unconverged instead, which the finishing solve reports. ``None`` disables
+        the test. The count is deliberately not ``1``: an isolated capped step is an ordinary short step,
+        and a pseudo-transient path is allowed to be non-monotone.
     on_retry : callable, optional
         ``(reason, attempt, beta) -> None``, called immediately before a step is redone. ``reason`` is
         ``"cycles"`` (the cost trigger, and the step was cut short), ``"alpha"`` (the step-length
@@ -521,15 +539,6 @@ def forward_march(
         the real shift from ``retry.beta_factor``, which is exactly what a log must not have to guess.
         Without it a log shows a step's work twice with nothing saying why, leaving a reader to infer
         the trigger from the numbers. ``None`` (default) elides the call.
-    stop_on_limit_stall : int or None
-        End the segment after this many **consecutive** steps that are constraint-bound, narrowing, and
-        not reducing the residual (see :func:`_limit_collapsing`), default ``3``. That pattern is a
-        fraction-to-the-boundary lock-up, and it does not recover on its own: the cap shrinks by a fixed
-        factor per step for as long as the march is allowed to run, so without this the segment spends
-        its entire ``max_steps`` budget taking arithmetically null steps. Ending it hands the caller a
-        state that is honestly unconverged instead, which the finishing solve reports. ``None`` disables
-        the test. The count is deliberately not ``1``: an isolated capped step is an ordinary short step,
-        and a pseudo-transient path is allowed to be non-monotone.
 
     Returns
     -------

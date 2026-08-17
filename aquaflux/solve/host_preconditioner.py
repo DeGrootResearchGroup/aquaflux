@@ -9,10 +9,11 @@ matrix and not at all in how it is *applied*: each holds a frozen factorization,
 call time so an in-place refresh re-preconditions the already-compiled solve.
 
 **The contract was real and unnamed.** ``matvec`` needs exactly two things of whatever it wraps -- how
-many degrees of freedom it spans, and how to apply it (or its transpose) to a host vector -- and seven
-classes in this package already provide precisely that pair: the three factorizations above, the
-V-cycle itself, the framework-native hierarchy inverse, both block-triangular field splits, and the
-Vanka smoother. Nothing declared it, so each wrapper re-derived it: ``matvec`` was written out three
+many degrees of freedom it spans, and how to apply it (or its transpose) to a host vector -- and six
+classes in this package already provide precisely that pair: the three frozen inverses above (the
+threshold-ILU factors, the complete-LU factors and the V-cycle), the framework-native hierarchy
+inverse, and both block-triangular field splits. Nothing declared it, so each wrapper re-derived it:
+``matvec`` was written out three
 times, byte for byte, and the field split obtained it by *subclassing a concrete sibling* rather than a
 contract. :class:`HostFactors` is that pair, written down.
 
@@ -39,8 +40,8 @@ class HostFactors(Protocol):
 
     Deliberately the smallest pair that :meth:`HostPreconditioner.matvec` needs, so that everything able
     to serve as a preconditioner's frozen inverse can satisfy it -- a triangular factorization, a
-    complete factorization, a multigrid V-cycle, a block-triangular composition of any of those, or a
-    patch smoother. Anything richer belongs on the concrete class, not here.
+    complete factorization, a multigrid V-cycle, or a block-triangular composition of any of those.
+    Anything richer belongs on the concrete class, not here.
     """
 
     @property

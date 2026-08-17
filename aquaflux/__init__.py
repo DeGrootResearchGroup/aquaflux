@@ -62,6 +62,7 @@ __version__ = "0.0.0"
 
 __all__ = ["__version__"]
 
-# NOTE: the public API surface is intentionally empty at this pre-code scaffold
-# stage. Export symbols here as subsystems land (mesh, discretization, solve),
-# keeping this file's import order compatible with the x64 enablement above.
+# NOTE: the root package deliberately re-exports nothing but ``__version__``; import
+# from the subpackages instead (``aquaflux.mesh``, ``aquaflux.discretization``,
+# ``aquaflux.solve``, ...). Any name exported here must keep this file's import order
+# compatible with the x64 enablement above.

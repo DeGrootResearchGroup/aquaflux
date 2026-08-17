@@ -45,7 +45,7 @@ def closed_cell_residual(mesh: Mesh) -> jnp.ndarray:
 
 
 def face_planarity(mesh: Mesh) -> jnp.ndarray:
-    """Per-face planarity ratio ``|S| / sum_i|triangle_i|`` in ``(0, 1]``.
+    """Per-face planarity ratio ``|S| / sum_i|triangle_i|`` in ``[0, 1]``.
 
     ``1.0`` means perfectly planar; smaller means more warped (``1 - ratio`` is the warp
     fraction). This is a near-free byproduct of the centre-fan geometry — a cheap first
