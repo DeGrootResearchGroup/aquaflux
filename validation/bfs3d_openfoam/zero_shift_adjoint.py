@@ -29,6 +29,13 @@ uniformly is what makes them comparable.
   state written by a differently configured case cannot be silently measured against this one;
 * one preconditioner in memory at a time -- the Jacobian is a couple of gigabytes a copy.
 
+⚠️ **The recorded result below was taken with the `petsc` leading inverse**, which was this case's
+default when it was measured: the field split converged at zero shift in 116 applications forward
+(`6.07e-09`) and 117 transposed (`2.67e-09`), and at its shipped floor in 105 / 104. The default has
+since moved to `hostilu`, so a fresh run measures a **different arm** unless `BFS3D_FLOW_INVERSE=petsc`
+is set. Whether the host V-cycle preconditions the zero-shift operator as well is UNMEASURED, and it is
+the first thing to re-run here.
+
 Usage -- the checkpoint path is the one argument::
 
     validation/run_case.sh validation/bfs3d_openfoam/zero_shift_adjoint.py <state-000NN.npz>
@@ -153,9 +160,14 @@ def main() -> None:
         materialize_block_jacobian(lambda v: C._jacobian_matvec(coupled, frozen, v), plan).tocsr(),
         np.zeros(int(state.shape[0])),
     )
+    # ⚠️ The leading inverse is named because it MOVED under this harness: the case's default flipped
+    # from `petsc` to `hostilu`, so a result recorded without it cannot be told apart from a result for
+    # the other arm. Everything the arms below depend on is printed, so a log is self-describing.
     print(
         f"{a.shape[0]} dofs, uniform reach {REACH}, nnz {a.nnz / 1e6:.2f} M; zero shift; "
-        f"gmres rtol {RTOL}, restart {RESTART}",
+        f"gmres rtol {RTOL}, restart {RESTART}; "
+        f"leading inverse {compare.FLOW_INVERSE}, trailing {compare.TURBULENCE_INVERSE}, "
+        f"smoother fill {compare.FILL_LEVELS}, sweeps {compare.SWEEPS}",
         flush=True,
     )
 
