@@ -415,20 +415,23 @@ CHECKPOINT_KEEP = int(os.environ.get("PITZ_CHECKPOINT_KEEP", "3"))
 #: Redo a step whose solve was expensive, whose line search collapsed, or that diverged -- escalating
 #: the shift first, and falling back to a tighter Krylov solve only for a divergence damping cannot fix.
 #:
-#: ⚠️ **`on_cycles` IS AN ARM-SPECIFIC CALIBRATION, AND ESCALATING ON IT CAN RUN AS POSITIVE FEEDBACK
-#: HERE.** The rule "an expensive solve means the step is too stiff, so raise the shift" assumes a
-#: larger shift makes the solve cheaper. On this case it does the opposite (see `BETA_START`), so a
-#: threshold set below an arm's *healthy* cycle count starts a loop that runs the wrong way: more
-#: cycles -> higher beta -> a harder block -> more cycles. Observed with the zero-fill smoother under
-#: the reverse-Cuthill-McKee cell order, which needs about 12 cycles at the second Reynolds rung
-#: against this threshold of 10: three consecutive redos fired with reason `cycles`, taking beta
-#: 0.5 -> 1.0 -> 1.33 -> 2.67, and only then did the step diverge. Set it above what the arm in use
-#: actually needs, and read a `cycles` escalation as a statement about the threshold before reading it
-#: as one about the step.
+#: ⚠️ **`abort_above_cycles` IS A COST BUDGET, NOT A DIAGNOSIS — set it ABOVE what the installed
+#: preconditioner costs when it is healthy.** Crossing it stops the dual-time inner loop and redoes the
+#: step at the SAME shift on the refreshed preconditioner; it no longer escalates (that is `on_alpha`'s
+#: job alone). Set too low it truncates convergence a step is in the middle of achieving: with the
+#: zero-fill smoother under the reverse-Cuthill-McKee cell order, whose healthy cost at the second
+#: Reynolds rung is about 12, a threshold of 10 cut step 29 off after three inner iterations where a
+#: fourth would have accepted it -- and, under the previous design where the same number also escalated,
+#: took beta 0.5 -> 1.0 -> 1.33 -> 2.67 before the step diverged. It must also stay strictly below
+#: `CYCLE_BUDGET`, which truncates a grinding solve and relies on this redo to discard the partial
+#: iterate.
+#: ⚠️ The default is UNCHANGED at 10, which suits the shipped `petsc` arm. The zero-fill `hostilu`
+#: arm wants ~25; it is set per run rather than here, because raising it for every arm would change
+#: the incumbent's behaviour on evidence that was never gathered for it.
 RETRY_ON_CYCLES = int(os.environ.get("PITZ_RETRY_ON_CYCLES", "10"))
 RETRY = RetryPolicy(
     solver=relative_residual_gmres(1e-4, restart=40),
-    on_cycles=RETRY_ON_CYCLES,
+    abort_above_cycles=RETRY_ON_CYCLES,
     on_alpha=0.01,
     beta_factor=2.0,
 )

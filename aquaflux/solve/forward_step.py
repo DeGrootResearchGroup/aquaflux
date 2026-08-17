@@ -158,7 +158,7 @@ class ShiftedForwardStep(ForwardStep, Protocol):
 
     **Why an explicit up-front check rather than a ``hasattr`` probe at the point of use.** A probe fails
     *silently*: a `DampedNewtonStep` satisfies `ForwardStep` completely, so passing one with
-    ``RetryPolicy.on_cycles`` set is accepted and then simply never escalates -- and a march that quietly
+    ``RetryPolicy.on_alpha`` set is accepted and then simply never escalates -- and a march that quietly
     declines to escalate looks exactly like one that never needed to. Reading
     ``active_step.relaxation_schedule`` unguarded fails the opposite way, raising ``AttributeError``
     mid-march on a step that conforms. The march therefore checks this once, before the first step, and

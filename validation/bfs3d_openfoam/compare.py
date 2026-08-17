@@ -1375,7 +1375,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             on_retry=logger.on_retry,
             retry=RetryPolicy(
                 solver=relative_residual_gmres(1e-4, restart=40),
-                on_cycles=RETRY_ON_CYCLES_SCALED,
+                abort_above_cycles=RETRY_ON_CYCLES_SCALED,
                 on_alpha=RETRY_ON_ALPHA,
                 beta_factor=RETRY_BETA_FACTOR,
             ),
