@@ -1983,11 +1983,81 @@ is a **mis-calibration rather than a fault**: `on_cycles = 10` was set for the P
 this arm's healthy cost at rung 2 is about 12 — so the ladder fires on an arm that is working. **Read a
 `cycles` escalation as a statement about the threshold before reading it as one about the step.**
 
-`PITZ_RETRY_ON_CYCLES` and `PITZ_BETA_START` are now exposed for exactly these two tests. Both are
-untried as of this entry; raising the threshold above the arm's healthy cost is the more targeted of the
-two, since it removes the loop's trigger rather than only its starting point. This also re-frames the
-independently recorded `beta_start = 4` run being **worse** than `beta_start = 0.5`: consistent with β
-being the wrong direction on this case rather than with anything about the preconditioner.
+**✅ AND RAISING THE THRESHOLD CARRIES THE WHOLE CASE — the zero-fill host smoother now marches
+`pitzDaily` end to end (2026-08-17).** One variable changed from the run above, `PITZ_RETRY_ON_CYCLES`
+10 → 25, everything else identical (`hostilu`, `rcm`, reach 5, `beta_start` 0.5, `Ilu0` compiled;
+log `run-20260817-111002.log`). The 12-cycle solve at step 29 that previously triggered the first
+escalation is simply accepted, and the march never looks back:
+
+| step | threshold **10** | threshold **25** |
+|---|---|---|
+| 29 | β **1.0** (escalated on `cycles`), R 5.53e-02 | β **0.50**, R 4.55e-02 |
+| 30 | β **2.67**, α **0.000**, R **rising** 1.00e-01 | β **0.33**, α 1.000, R 2.96e-02 |
+| 31 | β **16.0**, R **inf** | β **0.22**, α 1.000, R 2.19e-02 |
+| … | dead | converges, 3 rungs |
+
+**Result: 82 steps, 466 cycles, 743 s, `x_r/h` = 8.0686 against OpenFOAM's 7.7409.** Seven retries, every
+one on `alpha` and **none on `cycles`** — with the spurious trigger gone, only genuine line-search retries
+remain, and their β escalations stay inside the 0.04–0.16 band this block finds easy.
+
+**The root is the same one.** `x_r/h` 8.0686 matches the native-SIMPLE arm to four decimals
+(`nut_peak` 417.54 against 417.51), so this is a cost and robustness result, not an accuracy one — two
+very different preconditioners landing on one converged state.
+
+⚠️ **It is the SLOWEST of the three working arms, and it is not a recommendation to change a default:**
+
+| arm on `pitzDaily` | steps | cycles | wall |
+|---|---|---|---|
+| native SIMPLE, reach 3 | 71 | 395 | **550 s** |
+| PETSc ILU(1), reach 5 | 74 | 321 | 628 s |
+| **`hostilu` + `rcm`, reach 5, threshold 25** | 82 | 466 | 743 s |
+
+⚠️ **And the three are NOT a controlled comparison.** This arm ran `retry.on_cycles` 25 where the other
+two ran 10, and the SIMPLE arm ran reach 3 where the other two ran reach 5 (it is reach-insensitive; an
+ILU is not). One run each, and this case has no measured march-level noise floor. What the row
+establishes is **that a zero-fill host smoother now completes this case at all**, which it could not
+before at any setting — not where it places on cost. A matched re-run of all three at one threshold is
+the obvious follow-up, and it is untried.
+
+⚠️ **This is also the first attributable `hostilu` wall time on this case**, because it is the first run
+recorded as having the compiled kernel live (see the kernel-provenance warning elsewhere in this file).
+
+This also re-frames the independently recorded `beta_start = 4` run being **worse** than
+`beta_start = 0.5`: consistent with β being the wrong direction on this case rather than with anything
+about the preconditioner. `PITZ_BETA_START` remains untried in the low direction.
+
+**🛑 OPEN DESIGN QUESTION: `retry.on_cycles` IS AN ABSOLUTE COUNT, SO IT IS NOW KNOWN TO BE
+ARM-DEPENDENT — and that conflicts with this project's knob-free-robustness goal.** The fix above works
+by re-tuning a constant per arm, which is a workaround, not a design. A cycle count is
+`preconditioner strength × operator difficulty`, and working preconditioners on one case differ by
+several-fold in their natural cost, so **any constant encodes an assumption about which one is
+installed.** Four directions, none tried:
+
+1. **Make the trigger relative to the arm's own history** — an anomaly test against a running median of
+   recent accepted solves (say 3×) rather than against a constant. Self-calibrating; needs a cold-start
+   rule for the first few steps, where there is no history and the march is at its most fragile.
+2. **Trigger on the cycle BUDGET instead.** A solve that exhausts `cycle_budget` was truncated and its
+   direction is genuinely suspect; one that finished under it converged. That is a resource decision
+   rather than a diagnosis, so it does not need per-arm calibration — but it is blunt, firing only at
+   the extreme.
+3. **Make the criterion dimensionless: cost per unit residual reduction**, not cost alone. The rule
+   wants "this step is going badly", and many cycles that buy a large drop is not that. Something like
+   `cycles / log(‖G_in‖/‖G_out‖)` measures what is actually wanted; the present rule reads the numerator
+   only.
+4. **⚠️ Question whether a COST signal should drive the β ladder at all — the sharpest of the four.**
+   A high cycle count is evidence about the **preconditioner** (stale factorization, weak smoother), not
+   about the **step's stiffness**, and this case already routes it to the right responder:
+   `refresh_on_cycles = 3` rebuilds the frozen preconditioner on exactly this signal. Sending the same
+   observation to β-escalation as well conflates two diagnoses — and on this case the escalation is not
+   even monotone in the right direction. The honest stiffness signal is **α**, which is dimensionless
+   and needs no calibration.
+
+**And there is weak evidence for (4) already.** In the converging run above no solve ever reached 25
+cycles, so the cycles trigger **never fired** — that run is observationally what "no cycles trigger for
+this arm" looks like, and it converged on `alpha` retries alone. ⚠️ Weak because it is one arm on one
+case, and because removing the trigger is not free: a budget-truncated solve would return a poor
+direction, α would collapse on the *following* step, and the retry would come one wasted step later
+rather than immediately. That is the trade to measure, not a reason to dismiss it.
 
 **Two structural observations worth keeping:**
 - **`pointwise_rowlength` is EXACTLY `cell_major_rowlength`** — identical at all six points, not merely
