@@ -1,0 +1,9 @@
+state = state-00071.npz: step 21, euclidean |R| 1.9479e-02, 14829x below this case's self-start, march recorded 5.0950e-06 (SCALED measure, not comparable)
+pitzDaily, 61125 dofs, reach 5, nnz 13.58 M; zero shift; gmres rtol 1e-08, restart 30; leading inverse petsc, smoother fill 1, sweeps 4
+arms: split0, splitfloor
+field split @ beta=0  (built in 11.3s)
+  field split @ beta=0       M   applies   326  true |r|/|b| 2.341e-09    21.7s  info   0  converged
+  field split @ beta=0       Mt  applies   299  true |r|/|b| 9.829e-09    28.3s  info   0  converged
+field split @ floor 0.05  (built in 6.5s)
+  field split @ floor 0.05   M   applies   205  true |r|/|b| 7.386e-09    13.7s  info   0  converged
+  field split @ floor 0.05   Mt  applies   213  true |r|/|b| 6.534e-09    20.0s  info   0  converged

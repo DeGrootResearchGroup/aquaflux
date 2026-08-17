@@ -41,6 +41,7 @@ be re-adjudicated later.
 from __future__ import annotations
 
 import gc
+import os
 import sys
 import time
 from pathlib import Path
@@ -131,47 +132,111 @@ def field_split_arm(coupled, state, beta):
     )
 
 
+#: How far below the case's own self-start a state must sit to count as converged FOR THIS CASE.
+GATE = 100.0
+
+
+def load_state(coupled, seed, path: Path | None):
+    """A checkpoint gated against this case's OWN self-start, or the self-start itself.
+
+    ⚠️ **Do not gate against a checkpoint's recorded ``residual_norm``.** That is whatever measure the
+    march was steered by, and this case marches with ``scaled_norm=True`` -- a row-equilibrated norm,
+    not a Euclidean one. Comparing the two rejects a perfectly good state (on the sibling case the same
+    checkpoint records ``2.64e-06`` and computes ``1.04e-03``, a factor of 395 that is entirely the
+    change of measure). Comparing against the SELF-START in one norm is immune, because both ends move
+    together, while a genuine configuration mismatch still moves the residual by orders and trips it.
+    """
+    start = float(jnp.linalg.norm(coupled.residual(seed)))
+    if path is None:
+        print(
+            f"state = hybrid_initialize, |R| {start:.4e} -- the case's cold self-start, NOT the "
+            f"converged root. The adjoint's operator is the root's; at a cold start this Jacobian is "
+            f"nearly singular and no arm's result here transfers. Pass a checkpoint to fix that.",
+            flush=True,
+        )
+        return seed
+    data = np.load(path)
+    state = jnp.asarray(data["state"])
+    here = float(jnp.linalg.norm(coupled.residual(state)))
+    if not np.isfinite(here) or here * GATE > start:
+        raise SystemExit(
+            f"{path.name} leaves |R| {here:.4e} against this case's self-start {start:.4e} -- not "
+            f"converged by a factor of {GATE:g}. Either it was written by a different configuration, "
+            f"or it is a mid-march state; either way the operator below is not the adjoint's."
+        )
+    recorded = f", march recorded {float(data['residual_norm']):.4e} (SCALED measure, not comparable)"
+    print(
+        f"state = {path.name}: step {int(data['step'])}, euclidean |R| {here:.4e}, "
+        f"{start / here:.0f}x below this case's self-start{recorded}",
+        flush=True,
+    )
+    return state
+
+
 def main() -> None:
+    # The blessed launcher runs a script with NO arguments and passes settings as environment, so the
+    # state has to arrive that way to be launchable through it; argv stays for a direct invocation.
+    named = os.environ.get("PITZ_ZERO_SHIFT_STATE") or (sys.argv[1] if len(sys.argv) > 1 else "")
+    path = Path(named) if named else None
     case = compare.build_case()
     coupled = case["coupled"]
-    state = coupled.state_from_physical(*hybrid_initialize(case["momentum"], case["turbulence"]))
+    seed = coupled.state_from_physical(*hybrid_initialize(case["momentum"], case["turbulence"]))
+    state = load_state(coupled, seed, path)
     if not bool(jnp.all(jnp.isfinite(coupled.residual(state)))):
         raise SystemExit("starting residual not finite -- nothing below would mean anything")
 
     rhs = -np.asarray(coupled.residual(state), dtype=np.float64)
     a = build_operator(coupled, state, compare.STENCIL_REACH)
+    # The leading inverse is named because it is env-selected and the sibling case's moved under an
+    # identical harness: a result recorded without it cannot be told apart from the other arm's.
     print(
         f"pitzDaily, {a.shape[0]} dofs, reach {compare.STENCIL_REACH}, nnz {a.nnz / 1e6:.2f} M; "
-        f"state = hybrid_initialize (NOT the converged root -- see the module docstring); "
-        f"zero shift; gmres rtol {RTOL}, restart {RESTART}",
+        f"zero shift; gmres rtol {RTOL}, restart {RESTART}; "
+        f"leading inverse {compare.FLOW_INVERSE}, smoother fill {compare.FILL_LEVELS}, "
+        f"sweeps {compare.SWEEPS}",
         flush=True,
     )
 
     arms = {
-        "field split @ beta=0": lambda: field_split_arm(coupled, state, 0.0),
-        f"field split @ floor {compare.PC_BETA_FLOOR}": lambda: field_split_arm(
-            coupled, state, compare.PC_BETA_FLOOR
+        "split0": ("field split @ beta=0", lambda: field_split_arm(coupled, state, 0.0)),
+        "splitfloor": (
+            f"field split @ floor {compare.PC_BETA_FLOOR}",
+            lambda: field_split_arm(coupled, state, compare.PC_BETA_FLOOR),
         ),
-        "ILUT @ beta=0": lambda: coupled_ilut_continuation(
-            coupled,
-            state,
-            ilut_beta=0.0,
-            stencil_reach=compare.STENCIL_REACH,
-            inner_steps=compare.INNER_STEPS,
-            inner_tol=compare.INNER_TOL,
+        "ilut": (
+            "ILUT @ beta=0",
+            lambda: coupled_ilut_continuation(
+                coupled,
+                state,
+                ilut_beta=0.0,
+                stencil_reach=compare.STENCIL_REACH,
+                inner_steps=compare.INNER_STEPS,
+                inner_tol=compare.INNER_TOL,
+            ),
         ),
-        "complete LU @ beta=0": lambda: coupled_lu_continuation(
-            coupled,
-            state,
-            lu_beta=0.0,
-            stencil_reach=compare.STENCIL_REACH,
-            backend="scipy",
-            inner_steps=compare.INNER_STEPS,
-            inner_tol=compare.INNER_TOL,
+        "lu": (
+            "complete LU @ beta=0",
+            lambda: coupled_lu_continuation(
+                coupled,
+                state,
+                lu_beta=0.0,
+                stencil_reach=compare.STENCIL_REACH,
+                backend="scipy",
+                inner_steps=compare.INNER_STEPS,
+                inner_tol=compare.INNER_TOL,
+            ),
         ),
     }
+    # Selectable because the arms are NOT equally expensive: a complete LU of this operator carries a
+    # 174 M-nonzero factor, and on a machine that cannot hold it the cheap field-split arms still answer
+    # the question the study is for. `PITZ_ARMS=split0,splitfloor` runs those alone.
+    wanted = [k for k in os.environ.get("PITZ_ARMS", "").split(",") if k] or list(arms)
+    unknown = [k for k in wanted if k not in arms]
+    if unknown:
+        raise SystemExit(f"PITZ_ARMS: no such arm {unknown} (have {list(arms)})")
+    print(f"arms: {', '.join(wanted)}", flush=True)
 
-    for label, build in arms.items():
+    for label, build in (arms[k] for k in wanted):
         try:
             began = time.perf_counter()
             engine = build()

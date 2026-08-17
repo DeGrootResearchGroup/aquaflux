@@ -36,14 +36,17 @@ since moved to `hostilu`, so a fresh run measures a **different arm** unless `BF
 is set. Whether the host V-cycle preconditions the zero-shift operator as well is UNMEASURED, and it is
 the first thing to re-run here.
 
-Usage -- the checkpoint path is the one argument::
+Usage -- the checkpoint arrives as ENVIRONMENT, because the blessed launcher runs a script with no
+arguments and forwards none; argv works for a direct invocation::
 
-    validation/run_case.sh validation/bfs3d_openfoam/zero_shift_adjoint.py <state-000NN.npz>
+    BFS3D_ZERO_SHIFT_STATE=checkpoints/state-000NN.npz \
+        validation/run_case.sh validation/bfs3d_openfoam/zero_shift_adjoint.py
 """
 
 from __future__ import annotations
 
 import gc
+import os
 import sys
 import time
 from pathlib import Path
@@ -144,9 +147,13 @@ def measure(label, factors, a, rhs, transpose):
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        raise SystemExit("usage: zero_shift_adjoint.py <state-000NN.npz>")
-    path = Path(sys.argv[1])
+    named = os.environ.get("BFS3D_ZERO_SHIFT_STATE") or (sys.argv[1] if len(sys.argv) > 1 else "")
+    if not named:
+        raise SystemExit(
+            "no state given. Set BFS3D_ZERO_SHIFT_STATE=<state-000NN.npz> (the launcher forwards no "
+            "arguments), or pass the path directly when running this script yourself."
+        )
+    path = Path(named)
 
     case = compare.build_case()
     coupled = case["coupled"]

@@ -1235,9 +1235,34 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     fill 1 takes ONE matvec. A one-variable sweep measured reach 5 as "step-for-step identical, 35 %
     dearer, buys nothing" and it was reverted on that basis — a correct measurement of the wrong pair.
 
-    **⚠️ STILL OPEN: at β = 0 BOTH fills fail on `pitzDaily`** (true 0.458 and 0.434). No march visits
-    that shift (`PC_BETA_FLOOR` 0.05), but it is the adjoint's operator, so a `jax.grad` on this case
-    will meet it.
+    **✅ RESOLVED (2026-08-17) — the β = 0 failure was the STATE, not the preconditioner, and the
+    adjoint is safe on both cases.** An earlier entry here reported that both fills fail at zero shift on
+    `pitzDaily` and left it open; it recorded no state, and it was measured at the cold self-start.
+    Re-measured at the **converged root** (`state-00071`, reach 5, fill 1, `petsc` leading inverse, true
+    residual through GMRES at rtol 1e-8), the shipped field split **converges**:
+
+    | case / arm | forward `M` | transpose `Mᵀ` |
+    |---|---|---|
+    | `pitzDaily` field split @ β = 0 | 326 applies, **2.34e-09** | 299, **9.83e-09** |
+    | `pitzDaily` field split @ floor 0.05 | 205 applies, **7.39e-09** | 213, **6.53e-09** |
+    | `bfs3d` field split @ β = 0 (`petsc` leading) | 116 applies, **6.07e-09** | 117, **2.67e-09** |
+    | `bfs3d` field split @ floor 0.05 | 105 applies, **6.54e-09** | 104, **6.72e-09** |
+
+    On both cases the **floored** preconditioner is cheaper than the one built at β = 0, so the shipped
+    pairing is not merely adequate at zero shift, it is the better one.
+
+    **⚠️ The trap this cost, which is the part worth keeping: a zero-shift measurement is meaningless
+    without its state.** At `pitzDaily`'s cold self-start the same field split *diverges* to 100–800×
+    the right-hand side — and that is not a preconditioner property, because the cold Jacobian is nearly
+    singular there (smallest pivot `1.3e-12` against a matrix 1-norm of `278`) and **a complete LU of it
+    is not an accurate inverse either** (one apply `7.8e-04`). The control is monotone: as β goes
+    2 → 0.05 → 0, one-apply accuracy degrades `7.4e-15 → 7.8e-11 → 7.8e-04`. So the pseudo-transient
+    shift is not only globalization — it is what makes this Jacobian factorizable at all. Harnesses:
+    `validation/pitzdaily_openfoam/zero_shift_arms.py`, `validation/bfs3d_openfoam/zero_shift_adjoint.py`.
+
+    **Consequence: nothing selects the monolithic ILUT or complete LU for the adjoint**, which was the
+    last regime either had. Both are already dominated on the forward march, the LU does not fit in 3D,
+    and no validation case selects the ILUT. That closes the case for deleting them.
 
     **PLAIN aggregation, not smoothed — `pc_gamg_agg_nsmooths = 0` (measured, and the largest
     preconditioner win found on this case).** Smoothing the tentative prolongator with a Jacobi step is
