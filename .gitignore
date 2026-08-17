@@ -58,3 +58,6 @@ docs/api.md
 # and one architecture.
 *.so
 aquaflux/solve/_ilu0.c
+
+# Case-runner logs: one per run, timestamped; artifacts of a measurement, not sources.
+validation/**/run-*.log

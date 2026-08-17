@@ -654,13 +654,515 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
         halves and the march is 31 % shorter. **The untested pairing worth running is
         `probe_gradient_sweeps=1` + `stencil_reach=3` + a SIMPLE-smoothed hierarchy:** exact Jacobian,
         4.72M nonzeros against 13.32M, and a preconditioner indifferent to the pattern.
-      - **⚠️ The ILU fill ranking INVERTS between the two cases, which is why the trade above matters.**
-        `bfs3d` wants zero fill (its ILU(1) diverges at low shift, 303 negative pivots against zero);
-        pitzDaily wants fill 1 — its ILU(0) has negative pivots at every shift and **two independent
-        zero-fill implementations fail identically there** (PETSc ILU(0) and the native
-        `HostVCycleInverse`, both α → 0 by step 3–4), which puts it on the fill rather than on anything
+      - **🛑🛑 SCOPE BANNER — READ BEFORE CITING ANY ZERO-FILL RESULT BELOW. THE 2026-08-16 SWEEPS ARE
+        MONOLITHIC AND THE CASE IS FIELD-SPLIT, SO THEY DO NOT DESCRIBE THE SHIPPED PRECONDITIONER.**
+        `validation/pitzdaily_openfoam/ilu0_remedy_sweep.py` and its siblings build **one `AmgVCycle`
+        over all five fields interleaved cell-major**. The pitzDaily case runs `field_split=True`, and
+        with `FLOW_INVERSE = "petsc"` (its default) the split sends:
+        - the **`[u, v, p]` saddle** to the PETSc AMG V-cycle — *this* is the only block `FILL_LEVELS`
+          governs, and the only place an incomplete factorization happens at all;
+        - the **`[k, omega]` pair** to `native_nodal_inverse`, **which is not an ILU**.
+
+        Three consequences, all binding:
+        1. **Every arm in the sweeps below — the fill ladder, the orderings, the shifts, the reach arms,
+           `condest`, the diagonal-dominance census — was measured on a preconditioner this case does not
+           use.** They are results about a monolithic five-field ILU. Do not quote them as properties of
+           pitzDaily's solver.
+        2. **The `omega` findings from that work are irrelevant to this case**, because no ILU ever
+           factorizes an `omega` row here. The 2026-08-16 census reporting "100 % of `omega` rows are not
+           diagonally dominant, median ~5×, tail past 400×" is a fact about a matrix the shipped
+           preconditioner never factorizes. It is **not** evidence for the ω-is-the-lever thread.
+        3. **A "field split would fix it" hypothesis is already refuted by the case itself** — pitzDaily
+           *is* split and still sets `FILL_LEVELS = 1`. Whatever forces fill 1 does so **inside the
+           `[u, v, p]` block**.
+
+        **What survives, correctly scoped to that block:** the same census puts `p` at **0 % of rows
+        non-dominant at every shift** and `u` at **61 % (β = 0.5) rising to 95 % (β = 0)**, with `v`
+        between. So the saddle is not where this block is weak — the **streamwise momentum rows** are,
+        and momentum advection here is `LimitedUpwind` (second order), which is the regime Elman (1986)
+        identifies for incomplete-factorization instability. **The open, correctly-posed question is
+        therefore: within `[u, v, p]` alone, does ILU(0) become viable if the preconditioner's operator
+        uses first-order upwind advection while the Krylov operator stays the exact second-order
+        Jacobian?** That keeps fill at zero and is the substitution the frozen AMG operator already makes
+        elsewhere for this reason. **Not measured.**
+      - **⚠️ The ILU fill ranking INVERTS between the two cases** — `bfs3d` wants zero fill (its ILU(1)
+        diverges at low shift, 303 negative pivots against zero), pitzDaily wants fill 1, where **two
+        independent zero-fill implementations fail identically** (PETSc ILU(0) and the native
+        `HostVCycleInverse`, both α → 0 by step 3–4), putting it on the fill rather than on anything
         PETSc-specific. pitzDaily's converging arms all land `x_r/h` 8.0686, so those are cost
-        comparisons, not accuracy ones.
+        comparisons, not accuracy ones. ⚠️ Both cases set `field_split=True`, so this comparison is
+        between two **flow-block** factorizations — which is the one thing about it the monolithic sweeps
+        above cannot speak to.
+        **⚠️⚠️ BUT THE SKEWNESS AND THE PROBE ALIASING ARE NOT WHY, AND AN EARLIER VERSION OF THIS ENTRY
+        IMPLIED THEY WERE (corrected 2026-08-16; two independent measurements, one reproduced by hand).**
+        A one-variable skewness sweep — coupled RANS on `perturbed_grid_2d`, 384 cells, pitzDaily's whole
+        scheme bundle, *only* the interior-node displacement moving, PETSc GMRES(30) at
+        `KSP_NORM_UNPRECONDITIONED` with the true residual recomputed in `scipy` — is **flat to the
+        iteration** across and beyond pitzDaily's own skewness:
+
+        | perturbation | 0.0 | 0.05 | 0.3 |
+        |---|---|---|---|
+        | max \|skew\|/d | 1.5e-13 | **9.3e-2** (above pitzDaily's 7.5e-2) | 5.4e-1 |
+        | ILU(0) its, β = 0 / 0.05 / 0.5 | 17 / 16 / 14 | **17 / 16 / 14** | cap / cap / 18 |
+        | ILU(1) its, β = 0 / 0.05 / 0.5 | 11 / 10 / 9 | 10 / 10 / 9 | cap / cap / 13 |
+
+        The first amplitude that breaks anything is **4× pitzDaily's max**, and there *both fills fail
+        identically* — so it is not fill-selective at any amplitude. Independently: swapping
+        `CorrectedGreenGauss`→`CompactGreenGauss` on pitzDaily takes the reach-3 probe error on the
+        **pressure column** from 6.3e-7 to **2.6e-16** — the matrix becomes exact, no aliasing left — and
+        the fill ranking does not move (β = 0.05: ILU(0) 208→177, ILU(1) 52→52).
+        **So the reach finding above stands on its own** (pitzDaily really does materialize a wrong
+        matrix at reach 3) **and explains nothing about the fill ranking.** Keep the two apart.
+        **⚠️ NOR IS IT THE PIVOTS, which is the account this file carried.** At the *developed* state
+        (the OpenFOAM time-accurate field on the same mesh) **both factorizations have zero negative
+        pivots and identical min |pivot| ≈ 2.7e-1 … 3.2e-1 at every β** — and still converge **12×
+        apart** (β = 0: ILU(0) caps at 1.9e-4, ILU(1) 479; β = 0.05: ILU(0) caps, ILU(1) 52). The
+        recorded "pitzDaily's ILU(0) has negative pivots at every shift" is real at the *cold seed* only,
+        and is a coincidence: remove the negative pivots entirely and the gap **widens**. This is the
+        third entry in this file where a pivot census was measured blind to what separates the arms.
+        **And the literature says the same thing from theory, which is why the census keeps failing us
+        here:** Chow & Saad (*J. Comput. Appl. Math.* 86(2), 1997) found that unstable triangular solves
+        — `‖L⁻¹‖` large — **occur without the presence of small pivots**, and proposed
+        `condest = ‖(LU)⁻¹e‖_∞` (one triangular solve on the all-ones vector) as the trigger instead.
+        Elman (*Math. Comp.* 47, 1986) is the origin for convection-dominated problems: ILU fails through
+        *instability of the factors*, not through pivot loss. **So stop censusing pivots on this operator
+        and measure `condest` per fill level.**
+        **⚠️⚠️ "NEGATIVE PIVOTS AT EVERY SHIFT" ALSO NEVER TESTED A SHIFT ON THE ROWS THAT MATTER — two
+        source-verified facts (2026-08-16).** (i) `CoupledShiftPolicy`'s base diagonal is **identically
+        zero on the continuity row** (`turbulence/coupled.py`: `self.momentum.pack(…, jnp.zeros(n_cells))`,
+        and the comment says so — "0 on pressure"). The operator is then equilibrated to a unit diagonal,
+        so raising β changes the *velocity/k/ω* rows' relative dominance and leaves the pressure row
+        exactly as it was; the PC-only `beta_floor` inherits the same blind spot. (ii) **PETSc's `PCILU`
+        defaults to `MAT_SHIFT_NONE`** — verified by `pc.view()`, which prints no shift line for `ilu`
+        while `icc` prints "using Manteuffel shift [POSITIVE_DEFINITE]" — and the default `zeropivot` is
+        **2.22e-14**, so `NONZERO` and `INBLOCKS` (whose triggers are `|pivot| ≤ zeropivot·rowsum` and
+        `|pivot| ≤ zeropivot`) are **inert** against pitzDaily's min |pivot| of 5e-2. **A
+        factorization-level shift is the only mechanism in the stack that can reach the continuity row,
+        and it has never been switched on** (`extra_options={"mg_levels_pc_factor_shift_type":
+        "positive_definite"}`, no code change).
+        **⚠️ BUT DO NOT REACH FOR THE SHIFT FIRST — the primary sources rank a scalar diagonal shift LAST
+        for an indefinite matrix, and say why.** Chow & Saad (§5, read from the UMSI-97-95 preprint) reject
+        it outright: a shift `A + αI` "may shift the eigenvalues of A arbitrarily close to the origin", and
+        **a shift of α may *decrease* the magnitude of the pivot** — their remedy is instead a *dynamic,
+        per-row, sign-following* perturbation (replace any pivot below a threshold by the threshold
+        **carrying the pivot's own sign**), which is the same sign-awareness IFPACK ships as
+        `sgn(a_ii)·α`. Manteuffel's existence theorem assumes positive definiteness, which this operator
+        lacks, and Saad's Fig. 10.18 shows the iteration-vs-shift curve is U-shaped with **both** endpoints
+        of the obvious search wrong (the diagonally-dominant shift is "too large in general"; the smallest
+        admissible one is "not a viable alternative"). The published ranking for this matrix class is
+        **nonsymmetric permutation + two-sided scaling first** (Benzi's Table V: ILUT solves 0 of 5, ILUTP
+        still fails 2 of 5, **MC64 + ILUT solves 5 of 5** at modest fill; Konshin–Olshanskii–Vassilevski
+        independently call two-side Sinkhorn scaling "the most important" remedy for Navier–Stokes), then
+        constraint-aware **ordering**, then pivoting, then sign-following perturbation, then the shift.
+      - **⚠️⚠️ THE MOST ACTIONABLE THEORY RESULT: ELMAN (1986) PROVES ILU's STABILITY IS A MESH-PÉCLET
+        CONDITION ON THE *DISCRETIZATION*, AND THAT FIRST-ORDER UPWINDING REMOVES IT ENTIRELY.** Verified
+        against the primary (Math. Comp. 47(175):191–217, Table 1 and §4), on `−Δu + 2P₁u_x + 2P₂u_y`
+        with `p_i = P_i h` the cell Péclet numbers:
+
+        | discretization | ILU | MILU |
+        |---|---|---|
+        | centred, co-signed convection | stable ⟺ `p₁p₂ ≤ 1` | **unconditionally stable** |
+        | centred, opposite-signed (recirculating / cross-flow) | `p ≤ 2+√3` | unstable already at `\|p\| > 1` |
+        | **first-order upwind** | **always stable** | **always stable** |
+
+        His Table 1 is the same story empirically: ILU *fails* on `P₁=P₂=50` where MILU takes 7 iterations,
+        and MILU *fails* on `P₁=−50, P₂=50` where ILU takes 32 — each failure coinciding with an indefinite
+        symmetric part of the preconditioned operator, though `A`'s own symmetric part is the definite
+        Laplacian. **So "which fill is right" may be the wrong question and "what is the probed operator's
+        cell Péclet number" the right one.**
+        **This bears directly on a seam this codebase already has, and on an asymmetry nobody has read as
+        one.** `frozen_operator.convection_diffusion_operator` **always upwinds first order** — a deliberate
+        preconditioner-only choice, recorded in `CLAUDE.md` as what makes it an M-matrix a hierarchy can
+        coarsen — so the *block* preconditioner factorizes an operator Elman proves is unconditionally
+        stable. The **monolithic AMG path does not**: it materializes the *true* Jacobian by coloured
+        probing, which carries pitzDaily's Venkatakrishnan-limited **second-order** upwind reconstruction —
+        squarely in the regime where Elman's bound bites, and pitzDaily's recirculation is exactly the
+        opposite-signed case with the tighter `2+√3` limit. **The experiment this suggests is cheap and
+        architecturally free: probe a FIRST-ORDER-UPWIND variant of the residual for the preconditioner
+        only** — the identical seam `probe_gradient_sweeps` uses (`CoupledJacobianProbe.narrow`), with the
+        Krylov matvec still the exact jvp, so the root and the adjoint are untouched. **Not yet run.** Note
+        it also predicts the case split: whichever case sits at higher cell Péclet in its probed operator is
+        the one whose zero-fill factorization goes unstable.
+      - **❌❌ BLOCK ILU(0) AT `bs = n_fields` IS REFUTED — by a published measurement on EXACTLY this
+        problem class, which settles the repo's two contradictory memory notes.** Chapman, Saad & Wigton
+        (TR umsi-96-14, 1996; *Int. J. Numer. Meth. Fluids* 33(6):767–788, 2000) ran precisely this
+        substitution on Barth's **2D Navier–Stokes-with-turbulence Jacobians at block size 5**, verbatim:
+        *"ILU(k) with padded blocks gives virtually identical results to BILU(k). This is to be expected,
+        as the underlying preconditioners are the same in exact arithmetic."* Their tables: where point
+        ILU(0) works, BILU(0) matches within 1 %; **where point ILU(0) fails, BILU(0) fails identically.**
+        Independently reproduced here on a synthetic bs=5 operator — the two preconditioners' action
+        agrees to **5.6e-16** — which is expected, since this codebase's stored pattern is already a union
+        of *dense per-cell blocks* in cell-major order, and for such a pattern point and block ILU(0)
+        coincide. So "BILU was properly refuted" and "block-ILU(0) is the predicted fix" are both
+        explicable: blocking buys **only** intra-block partial pivoting, not a cure for the saddle.
+        Blocking *does* win for **threshold** ILU, which is a different method. Two residues worth
+        knowing: BAIJ storage makes CSW's *padding* free (a block is dense by definition), which is a
+        genuinely different object from what ships, since `AmgVCycle._live` prunes stored zeros — but CSW
+        measured padded vs unpadded as similar, and unpadded *better* on one case; and PETSc's
+        fixed-block-size kernels carry a maintainer's own warning that the bs=5-adjacent un-permutation
+        code "may also be buggy". **Shipping it is also blocked**: PCGAMG rejects a SeqBAIJ `Pmat`
+        outright (`No method creategraph for Mat of type seqbaij`), and the level-PC workaround is
+        incompatible with `refactor`'s `setUp()` on every refresh. **Do not build this.**
+      - **✅ WHAT CSW MEASURED INSTEAD IS THE LARGEST EFFECT IN THEIR TABLES, AND IT IS THE LEVER THIS
+        CODEBASE ALREADY HAS A SEAM FOR: build the preconditioner from a WIDER SOURCE STENCIL.** Same
+        paper, same bs=5 N-S+turbulence matrices: building BILU(0) from the **distance-2** matrix instead
+        of distance-1 took BARTHT2A from **545 → 62** GMRES steps and turned the **failing** BARTHS2A into
+        **73**. That maps directly onto the reach-3-vs-reach-5 question here, and pitzDaily's reach-3
+        matrix is separately measured to be *wrong in the pressure column* (1.99e-07). ⚠️
+        Counter-evidence to put in the same table: `probe_gradient_sweeps=1` gives a float64-exact matrix
+        at 4.72M nnz with **263** negative pivots, so *exactness* is not the mechanism and *sparsity* is.
+      - **❌ CSW'S WIDER-STENCIL RESULT HAS NOW BEEN TESTED HERE, AND IT DOES NOT TRANSFER: THE DIRECTION
+        REVERSES WITH THE SHIFT (2026-08-16).** The full text was read and their numbers above are
+        accurate as quoted. But their comparison is between *two genuine discretizations*, and it is run
+        at one operating point; ours is a shift-parameterized family, and across it the sign of the effect
+        is not stable. Same sweep, same state, same everything but the reach the **preconditioner** is
+        built from (the Krylov operator is the exact Jacobian-vector product in every arm):
+
+        | β | PC at reach 5 (matched) | PC at reach 3 (narrowed) |
+        |---|---|---|
+        | 0.5 | 38 cycles, 3.63e+00 — **fails** | **3 cycles, 3.8e-11** |
+        | 0.05 | **1 cycle, 2.3e-11** | 38 cycles, 3.08e-01 — **fails** |
+        | 0 | 38, 9.99e-01 — fails | 38, 1.68e+00 — fails |
+
+        At β = 0.05 CSW's direction holds and the matched stencil is the one that works; **at β = 0.5 it
+        is exactly inverted**, and the narrowed preconditioner is the only zero-fill arm that converges.
+        Neither reach spans the shift range a march traverses, so "match the preconditioner's stencil to
+        the operator" is **not** a fix here, and neither is its opposite.
+      - **⚠️ AND THE REACH ARMS ARE NOT ONE-VARIABLE — do not read the table above as isolating the
+        smoother's pattern.** The aggregation is built from the same materialized matrix, so a reach-3 arm
+        also carries a different coarse space; the coarse size is visibly different (1615 against 670).
+        Smoother pattern and coarse space move together in those arms, and nothing run so far separates
+        them. The observation (the answer flips with reach) stands; the *mechanism* does not follow from
+        it. Separating them needs an arm that narrows only the smoother's factorization pattern while
+        holding the hierarchy fixed, which has not been built.
+      - **⚠️⚠️ READ THE TWO SUBSECTIONS ABOVE AND BELOW AT THEIR OWN REACH — the sweep below shows the
+        answer FLIPS with it, so a number from one is not comparable with a number from the other.**
+        Everything in the root-cause subsection above (the fill ladder, the compact-vs-corrected arms, the
+        developed-state pivot comparison, the ordering and GAMG-size arms) was measured at
+        **`stencil_reach=3`**, where pitzDaily's matrix is known to be *wrong in the pressure column*
+        (1.99e-07). The sweep below runs at **reach 5**, where it is exact (1.50e-15). At reach 5 and
+        β = 0.05, ILU(0) converges in **one cycle** — so the flat statement "pitzDaily wants fill 1" holds
+        at reach 3 and **not** at reach 5, and the root-cause subsection's conclusion that zero fill is an
+        insufficient approximation of the saddle is **confounded by the reach it was measured at**. It is
+        not thereby refuted: the developed-state arm there (zero negative pivots, 12× apart) is a
+        different and still-unexplained observation. **Both are kept, both are labelled; do not merge
+        them, and do not cite either without its reach and its state.**
+      - **✅ THE SWEEP HAS NOW BEEN RUN, AND NOTHING IS A FIX (2026-08-16). Every candidate that rescues
+        one shift breaks another, and the shipped cell-major order is the best single choice.** Harness:
+        `validation/pitzdaily_openfoam/ilu0_remedy_sweep.py` (kept in the repository so this can be
+        re-asked). Configuration, stated in full because two of these have moved before: the case's own
+        **self-start** seed (potential-flow + Laplace-smoothed turbulence, `‖R‖` 2.8629e+02), real
+        right-hand side `−R(state)`, reach **5** unless stated, `smoother_sweeps=4`,
+        `coarse_eq_limit=2000`, plain aggregation, **operator and V-cycle at the SAME β — no PC-only
+        floor**, restarted GMRES(15) to rtol 1e-6 on the **true** residual, 38-cycle cap. `38` below
+        always means the cap, i.e. a failure.
+
+        | arm | β = 0.5 | β = 0.05 | β = 0 |
+        |---|---|---|---|
+        | ILU(1) ×4 — control | **1** cyc, 1.8e-15 | **1**, 1.8e-11 | 38, 1.95e+01 |
+        | ILU(0) ×4 — control | 38, 3.63e+00 | **1**, 2.3e-11 | 38, 9.99e-01 |
+        | ILU(0) `shift_type nonzero` (1e-4, 1e-2) | 38, 3.63e+00 | 1 | 38, 9.99e-01 |
+        | ILU(0) `shift_type inblocks` | 38, 3.63e+00 | 1 | 38, 9.99e-01 |
+        | ILU(0) `shift_type positive_definite` | 38, **1.01e-05** | 38, 1.92e-01 | 38, 2.18e-01 |
+        | ILU(0) ×1 / ×8 / ×16 | 9.9e+01 / 8.6e+00 / 1.00e+00 | 7 cyc / 2 cyc / 38, 4.09e+02 | 9.99e-01 / 1.37e+00 / 1.40e+00 |
+        | ILU(0) order `rcm` | 38, 2.27e+05 | 3 cyc | 38, 5.40e+01 |
+        | ILU(0) order `nd` | **19**, 8.3e-08 | 38, 3.8e-08 | 38, 1.36e+00 |
+        | ILU(0) order `qmd` | **4**, 2.0e-12 | 38, 1.35e+01 | 38, 1.38e+00 |
+        | ILU(0) order `rowlength` | **1**, 6.2e-14 | 8 cyc | 38, 1.52e+00 |
+        | ILU(0) no equilibration | 38, 1.01e+00 | 1 | 38, 9.99e-01 |
+        | ILU(0) reach 3 | **3**, 3.8e-11 | 38, 3.08e-01 | 38, 1.68e+00 |
+        | ILU(1) reach 3 | 38, 4.79e-05 | 4 cyc | 38, 3.16e+00 |
+        | block ILU(0) ×4 / ×8 (BAIJ level operator) | 1.56e+00 / 1.08e+00 | 1 / 1 | 2.24e+00 / 1.36e+00 |
+
+        What that settles:
+        - **The ORDERING is the one lever with a real effect, and it is a trade, not a fix.** At β = 0.5
+          `rowlength` **ties ILU(1) exactly** (1 cycle) and `qmd` takes 4, from a control that diverges —
+          the largest swing anywhere in the sweep, and consistent with the published ranking above putting
+          permutation ahead of the shift. But the *same* orderings wreck β = 0.05, where the shipped
+          cell-major order converges in one cycle and `qmd` **diverges** (1.35e+01) — so no single ordering
+          is admissible for a march that crosses both. `rcm` is the worst arm in the whole sweep at
+          β = 0.5 (2.27e+05), which matters because RCM is what the MC64 literature pairs its permutation
+          with: **do not carry RCM over from that recipe untested.**
+        - **The factorization shift is inert or blunt.** `nonzero` and `inblocks` are **bit-identical to
+          the control at every β** — confirming from the outside that their triggers never fire here.
+          `positive_definite` does reach: negative pivots 34 → **0**, and β = 0.5 improves 3.63 → 1.01e-05.
+          It still does not converge, and it **degrades a healthy factorization** (β = 0.05, 1 cycle → cap
+          at 1.92e-01), leaving every pivot at ≈ 1.9e-02 — the over-shift Chow & Saad warn about, observed.
+        - **ILU(0) is AMPLIFYING here, not weak.** Sweeps are non-monotone at every β (β = 0.5:
+          9.9e+01 → 3.63 → 8.56 → 1.00 for 1/4/8/16), and at β = 0.05 sixteen sweeps **diverge** a system
+          four sweeps solve in one cycle. More smoother is the wrong direction.
+        - **The equilibration is exonerated.** Removing it is neutral at β = 0.05 and no better elsewhere,
+          with the same negative-pivot count — it is not what makes the zero-fill pivots small.
+        - **Block ILU(0) does not rescue it either**, matching Chapman–Saad–Wigton above: better than point
+          ILU(0) at β = 0.5 (1.56 vs 3.63) but still a failure, and *worse* at β = 0 (2.24 vs 1.00).
+        - **⚠️ "pitzDaily's ILU(0) has negative pivots at every shift" is FALSE at this seed and the
+          entry saying so should not be read as covering β = 0.05.** The counts are 34 / **4** / 6 at
+          β = 0.5 / 0.05 / 0, and at β = 0.05 the zero-fill control **converges in one cycle** — at this
+          state the zero-fill failure is a *large*-shift phenomenon, the opposite of `bfs3d`.
+        - **⚠️ β = 0 at the COLD SEED discriminates nothing: every arm fails, ILU(1) included** (1.95e+01,
+          the worst control in the table). That is a property of the unshifted Jacobian at a seed nowhere
+          near the root, **not** of the adjoint's operator, which is taken at a converged state. Do not
+          cite the β = 0 column as an adjoint result.
+        - **Not run:** any `bfs3d` cross-check — the brief's precondition was a candidate that succeeds on
+          pitzDaily, and none does; a developed pitzDaily state (only the self-start was probed, so every
+          row above is seed-specific, and the developed-state measurement two bullets up already shows the
+          pivots behave differently there); MC64's maximum-product **permutation**, which the sweep never
+          touched (its accompanying plain two-sided scaling is separately demoted by CSW's Table IV — see
+          the next bullet — but the permutation is a different mechanism and stands); the
+          first-order-upwind probed operator Elman's bound points at; and — the highest-value gap, since
+          every ordering swept here is saddle-blind — a **static-deferring** order that pushes the small
+          diagonals (the pressure rows) to the end of the elimination. (The `condest` ranking **has** since
+          been run, and is refuted — two bullets down.)
+      - **✅ THE CSW FULL TEXT WAS READ (2026-08-16). Every number quoted from it above checks out. What
+        it adds is an INSTRUMENT, not a remedy — and it independently corroborates two of this sweep's
+        negative results.** Scope first, because the transfer is partial: their matrices are *compressible*
+        N-S with an energy equation, so they share our **block size 5, our turbulence row, and our
+        distance-1/distance-2 stencil question**, but they have **no incompressible saddle and no weak
+        pressure block**. Nothing about the (p,p) block transfers from them.
+        - **The instrument: `condest = ‖(LU)⁻¹e‖∞`**, `e` the vector of ones — one forward-and-back
+          substitution, **no Krylov solve**. CSW score every factorization in the paper by it and decline
+          to even attempt arms above 1e20. It measures the thing a pivot census structurally cannot: an
+          incomplete factorization fails by its triangular *recurrences growing*, which happens with no
+          small pivot anywhere. That is the exact blind spot this sweep hit — 34 negative pivots at
+          β = 0.5 against 4 at β = 0.05, with the 4-pivot arm being the one that converges.
+        - **⚠️ IT IS NECESSARY, NOT SUFFICIENT, AND CSW SHOW BOTH WAYS IT MISLEADS.** Their Table XVIII
+          perturbs the diagonal blocks (SVD, smallest singular values lifted): `condest` falls in *every*
+          test, and on the N-S-with-turbulence matrices convergence gets **worse** — BARTHT1A 94 steps →
+          fails, BARTHT2A 545 → 449 → fails. Their banded-ILU experiment does the same thing (`condest`
+          under 1e4, convergence stalls at ~600 steps). **So a low `condest` may never be read as a
+          verdict**; it is a filter for the arms that cannot work, not a ranking of the ones that can.
+        - **✅ Which independently corroborates our `positive_definite` arm.** Ours: pivots 34 → 0,
+          β = 0.5 improves 3.63 → 1.01e-05 but still fails, and it *degrades* the healthy β = 0.05 arm
+          from 1 cycle to a cap. That is Table XVIII's shape exactly, on the closest published matrix
+          class. **Our result is the published behaviour of diagonal perturbation, not a PETSc artifact** —
+          stop treating it as a suspicious local finding.
+        - **✅ And corroborates the block-ILU refutation** already recorded above, from the same tables.
+        - **⚠️ IT ALSO DEMOTES THE MC64 PLAN'S SCALING HALF — read the next bullet against this.** CSW's
+          Table IV is the controlled test of row-then-column 2-norm scaling under ILU(0): it helps on
+          three matrices, **hurts on two**, and tracks the change in *normality* `‖AᵀA − AAᵀ‖/‖AAᵀ‖`
+          rather than anything about the pivots; they report it produced no significant change elsewhere
+          and left the rest of the paper unscaled. Our own `no equilibration` arm agrees (neutral at
+          β = 0.05, no better anywhere). **Plain two-sided scaling is not the lever here.** This says
+          nothing about MC64's *permutation*, which is a different mechanism and remains untested.
+        - **Their conclusion on dropping strategy, which bears on the ILUT path:** for the BARTH matrices
+          *"the threshold dropping method is not suitable … it is beneficial to keep all entries in the L
+          and U factors that correspond to the ILU(0) pattern"*, and level-of-fill beats threshold by more
+          as the entries per row grow. Recorded as a caution, **not** transferred: our ILUT results are on
+          a different matrix and are not contradicted by this.
+        - **The question this motivated — and it is now ANSWERED, negatively; see the next bullet.** The
+          sweep's own finding is that **the winning configuration moves with β and no static choice spans
+          a march**, so a per-matrix *selector* is the only shape a fix can take, and `condest` was the
+          first candidate instrument for one costing no solve. The falsifiable form was: does
+          `argmin condest` pick the arm that converges, at each β? **It does not**, and neither does any
+          threshold or window on it.
+        - **❌❌ MEASURED, AND `condest` CARRIES NO USABLE SIGNAL ON THIS PROBLEM (2026-08-16). Do not
+          build a selector on it, and do not re-run this.** Every arm above was rebuilt with
+          `ILU0_SWEEP_CONDEST_ONLY=1` and its `condest` joined against the cycle counts already in the
+          table — same harness, same self-start state (`‖R‖` 2.8629e+02), same reach 5, same
+          `smoother_sweeps=4`, `coarse_eq_limit=2000`, plain aggregation, operator and V-cycle at the same
+          β. The factorizations reproduce **bit-for-bit** (every pivot census identical to the earlier
+          run), so the join is legitimate.
+
+          | arm | β=0.5 condest | β=0.5 | β=0.05 condest | β=0.05 |
+          |---|---|---|---|---|
+          | ILU(1) control | 5.92e+03 | **1** | 2.72e+07 | **1** |
+          | ILU(0) control | 1.14e+08 | fail 3.63 | 2.43e+07 | **1** |
+          | ILU(0) ×16 | 1.14e+08 | fail | **2.43e+07** | **diverges 4.09e+02** |
+          | shift posdef | 1.72e-01 | fail | 1.46e-01 | fail |
+          | order rcm | 2.13e+05 | **diverges 2.3e+05** | 5.21e+07 | **3** |
+          | order nd | 2.99e+03 | 19 | 3.07e+04 | fail |
+          | order qmd | 2.61e+03 | 4 | 1.06e+05 | fail |
+          | order rowlength | 4.21e+03 | **1** | 4.10e+04 | 8 |
+          | no equilibration | 4.09e+10 | fail | **1.15e+08** | **1** |
+          | ILU(0) reach 3 | 6.07e+04 | 3 | 2.42e+07 | fail |
+
+          **Four independent ways it fails, any one of which is disqualifying:**
+          1. **Same `condest`, opposite outcome, same β.** At β=0.05 the ILU(0) control and ×16 share
+             **one factorization** (2.43e+07) and land on 1 cycle and *divergence*. `condest` scores the
+             factor and is blind by construction to how the smoother is applied — and to the coarse space,
+             which the reach arms move.
+          2. **The threshold is not stable across β.** `no equilibration` converges in 1 cycle at
+             **1.15e+08** (β=0.05); the ILU(0) control fails at **1.14e+08** (β=0.5) — the same value to
+             two figures, opposite outcomes, same case and state.
+          3. **The sign of the correlation reverses between blocks.** At β=0.5 the *lowest*-condest ILU(0)
+             orderings converge (qmd 2.61e+03 → 4) and the highest fail; at β=0.05 the lowest fail
+             (nd 3.07e+04) and the highest converges (rcm 5.21e+07 → 3). `rcm` is the same arm at
+             **2.13e+05 diverging** and **5.21e+07 converging**.
+          4. **No window exists at β=0.05, two-sided or otherwise.** At β=0.5 a band [2.6e+03, 5.9e+03]
+             does separate the like-for-like arms perfectly, which is why this looked promising mid-run;
+             at β=0.05 failing arms at 3.07e+04 and 1.06e+05 **bracket** a converging arm at 4.10e+04.
+             ⚠️ Do not cite the β=0.5 band on its own — it is real and it is an artifact of one shift.
+        - **✅ The ONE robust reading, and it is worth keeping: `condest ≪ 1` means the shift has
+          over-damped the factor into uselessness.** `positive_definite` measures **1.72e-01 / 1.46e-01 /
+          1.42e-01** at β = 0.5 / 0.05 / 0 and **fails at all three**, with min pivot = median pivot
+          (≈1.9e-02), i.e. the whole diagonal flattened to one constant. `LU` is then large, `(LU)⁻¹` is
+          small and perfectly stable, and it approximates nothing — the preconditioned system gets tiny
+          eigenvalues and stalls. This is CSW's Table XVIII effect reproduced on our matrix, and it makes
+          their framing precise: they require `LU` to be an **accurate** representation of `A` *and*
+          `(LU)⁻¹` to be well conditioned. `condest` tests only the second. **A one-sided
+          over-stabilization check is all it is good for here.**
+        - **Harness note:** `getFactorMatrix` raises PETSc error 56 on a Python PC, so the two
+          `block ILU(0)` arms report no census. That is the instrument not reaching inside a custom PC,
+          **not** a result about those arms.
+      - **✅✅ HILUCSI (Chen, Ghai & Jiao, arXiv:1911.10139, 2019) EXPLAINS THE `condest` FAILURE ABOVE,
+        AND SUPPLIES THE ONE ORDERING FAMILY THIS SWEEP NEVER TESTED. Read in full 2026-08-16.** A
+        multilevel incomplete-LDU with mixed symmetric/unsymmetric processing, benchmarked on 2D and 3D
+        Navier–Stokes and on symmetric saddle-point systems from Stokes and mixed Poisson.
+        - **⚠️ Why our `condest` measurement came back useless, stated as a published mechanism.** Their
+          §3.2 derives `ρ(AM⁻¹ − I) ≤ ‖M⁻¹‖·‖δ_A‖`, so what must be bounded is `‖M⁻¹‖`, achieved by
+          bounding the norms of **`D⁻¹`, `L⁻¹` AND `U⁻¹`** — and they state flatly that bounding `‖L⁻¹‖`
+          and `‖U⁻¹‖` **alone is insufficient**, attributing HILUCSI's robustness advantage over ILUPACK
+          to exactly that difference. Our `condest = ‖(LU)⁻¹e‖∞` is precisely the insufficient quantity:
+          it omits the diagonal. **So the negative result above is the predicted one**, and the repair
+          (score `κ(D)` alongside it — the census already reports min and median pivot) is cheap and
+          untested.
+        - **⚠️ SCOPE — our refutation is of `condest` as an ARM SELECTOR, not of `condest` as a dropping
+          threshold.** ILUPACK and HILUCSI use it *inside* the factorization to decide what to drop or
+          defer (ILUPACK's default `κ = 5`); we scored finished factorizations with it and ranked them.
+          Those are different uses and our measurement says nothing about the second. Do not cite the
+          refutation against inverse-based dropping.
+        - **⚠️ Their Definition 1 names the criterion our architecture actually needs, with a caveat that
+          must travel with it.** `M` is accurate if `ρ(AM⁻¹ − I) ≤ ρ₀`; and *"it is unnecessary for `ρ₀`
+          to be less than 1 for the convergence of a KSP method. However … if `ρ₀ < 1`, then `M` can be
+          used in place of a stationary iterative method as a smoother in multigrid methods."* Our ILU is
+          a **stationary Richardson smoother inside a V-cycle**, so it is held to the stronger standard,
+          which is a candidate explanation for the sweep's "ILU(0) is amplifying, not weak" (×16 diverges
+          a system ×4 solves in one cycle). **⚠️ Do NOT go measure `ρ` naively:** a multigrid smoother is
+          *not* required to contract the smooth modes — that is the coarse space's job — and this project
+          has already retracted one conclusion built on a smoother spectral radius that turned out to be
+          the largest, smoothest eigenmode. The criterion is suggestive here, not directly applicable.
+        - **✅ THE ACTIONABLE GAP: static deferring is a SADDLE-AWARE SYMMETRIC permutation, and every
+          ordering this sweep tested was saddle-blind.** RCM, ND, QMD and rowlength are all
+          bandwidth- or fill-reducing and know nothing about which rows are the pressure rows. HILUCSI
+          instead *"symmetrically permutes the zero and tiny diagonal entries to the lower-right corner,
+          to be factorized in the next level"*, reporting it *"improves robustness and efficiency …
+          especially for (nearly) symmetric saddle-point problems"* and removes the need for 2×2 pivots,
+          because *"zero or tiny pivots tend to lead to fast growth of `‖L⁻¹‖∞` and `‖U⁻¹‖₁`"*. It being
+          **symmetric** is what makes it admissible here, where an unsymmetric row permutation is not.
+          Our Rhie–Chow (p,p) block is nonzero so we have no *zero* diagonals, but we do have small ones
+          and the probe already localizes the bad pivots to the **pressure rows**. **This is the cheapest
+          untested high-value arm on the list** and it fits the existing `assemble()` permutation seam.
+        - **✅ It also revives MC64 in a form our recorded objection does not cover.** The objection above
+          is that an unsymmetric row permutation breaks the cell-block structure `setBlockSize(n_fields)`
+          needs. HILUCSI §2.4 uses the **symmetrized** HSL_MC64 (`P_r = P_c`, `D̃_r = D̃_c = √(D_r D_c)`),
+          which is a symmetric permutation. Re-examine the objection against that form; do not carry it
+          over unexamined.
+        - **⚠️ AND A DIRECT N-S DATA POINT AGAINST TUNING `condest`:** on PR02R, a 2D Navier–Stokes
+          matrix, SuperLU's ILUTP fails and ILUPACK fails **"regardless of how we tuned condest"**, while
+          HILUCSI succeeds. Independent of our own sweep, on our own equation set.
+        - **❌ What it does NOT do is rescue ILU(0).** HILUCSI is a *multilevel* ILU whose levels come
+          from deferring; it replaces zero-fill single-level ILU rather than repairing it. Adopting it
+          wholesale is a different architecture from the GAMG V-cycle that ships (and their own listed
+          limitation is that it is serial and not block-aware for vector-valued PDEs). Take the ordering
+          idea and the `D⁻¹` correction; do not read this as a drop-in.
+      - **✅ THE STRONGEST PUBLISHED PRECEDENT FOR THIS EXACT FAILURE MODE IS MC64 + SCALING.** Benzi
+        (*J. Comput. Phys.* 182, 2002, §3.3) on **LNS3937, a linearized Navier–Stokes matrix**: *"Because
+        of zero pivots, ILUT cannot solve any of these problems. Even for large amounts of fill, ILUT with
+        partial pivoting (ILUTP) still cannot solve LNS3937 … After preprocessing with the maximum
+        diagonal product permutation and corresponding scalings, all these problems can be easily
+        solved by ILUT"* — 24 iterations, with RCM as the accompanying symmetric permutation. Duff & Koster
+        (*SIMAX* 20(4) 1999; 22(4) 2001). ⚠️ For us an unsymmetric row permutation **breaks the cell-block
+        structure GAMG's `setBlockSize(n_fields)` aggregation depends on**, so it would have to be applied
+        to the smoother alone. ⚠️ The symmetrized HSL_MC64 form (`P_r = P_c`) that HILUCSI uses is a
+        **symmetric** permutation, so re-examine that objection against it rather than carrying it over.
+      - **✅✅ THE MC64 PRE-CHECK HAS BEEN RUN, AND ITS OWN PREMISE WAS WRONG: THE WEAK ROWS ARE `omega`
+        AND `u`, NOT `p` (2026-08-16).** This entry previously said *"if the pressure rows already carry
+        their maximum on the diagonal after equilibration, MC64 has nothing to fix"*. The pressure rows
+        **do** carry it — and the gate passes anyway, on the transport rows. Harness:
+        `validation/pitzdaily_openfoam/mc64_precheck.py`, no solve. Configuration: pitzDaily, 12225 cells,
+        5 fields, the case's own self-start seed (`‖R‖` 2.8629e+02), reach 5, the matrix **as the smoother
+        factorizes it** (shift, symmetric square-root-diagonal equilibration, cell-major reorder). The
+        ratio is (largest off-diagonal magnitude)/|diagonal| per row; equilibration puts every diagonal at
+        magnitude 1, so it reads as `|a_ij| / sqrt(d_ii·d_jj)` — a scale-free coupling strength. Percent
+        is the share of that field's 12225 rows whose diagonal is **beaten**:
+
+          | β | u | v | p | k | omega |
+          |---|---|---|---|---|---|
+          | 0.5 | 60.9 % (med 1.09) | 1.4 % | **0.0 %** (med 0.50) | 0.0 % | **100 %** (med 4.71, max 341) |
+          | 0.05 | 93.4 % (med 1.43) | 27.9 % | **0.0 %** (med 0.50) | 0.6 % | **100 %** (med 5.65, max 406) |
+          | 0 | 95.2 % (med 1.48) | 39.1 % | **0.0 %** (med 0.50) | 1.8 % | **100 %** (med 5.79, max 415) |
+
+        - **The pressure rows are diagonally dominant at every shift** — 0, 1 and 4 rows of 12225 beaten,
+          median ratio 0.50 throughout. **This matrix is not weak at the saddle.** A large amount of
+          effort recorded in this file is aimed at the (p,p) block and the Schur complement; on this case
+          that is not where the zero-fill elimination is in trouble.
+        - **`omega` is the weakest field by a wide margin** — *every* row at *every* shift, median
+          coupling ~5× its own diagonal and a tail past 400×. This is a **third independent leg** for the
+          recorded "ω is the problem field", the other two being the per-field V-cycle smoothing
+          measurement and the near-null-direction analysis of the worst per-cell blocks. Three different
+          quantities, same field.
+        - **The u/v asymmetry is physical, which is what makes the measurement credible:** 60.9 % against
+          1.4 % at β = 0.5 in a predominantly streamwise flow is convection beating diffusion in the
+          streamwise coupling — a high cell Péclet number, exactly the regime Elman (1986) identifies as
+          where an incomplete factorization goes unstable, and where first-order upwinding restores it.
+        - **⚠️⚠️ BUT DIAGONAL DOMINANCE DOES NOT EXPLAIN THE β-DEPENDENT FAILURE, AND MUST NOT BE CITED AS
+          IF IT DID.** Dominance degrades **monotonically** as the shift falls (u: 60.9 → 93.4 → 95.2 %),
+          while ILU(0)'s outcome is **non-monotone** (β = 0.5 fails, β = 0.05 converges in one cycle,
+          β = 0 fails). The *least* dominant of the two solvable shifts is the one that converges. So this
+          probe localizes **where** the matrix is weak; it is the third quantity in a row — after the pivot
+          census and `condest` — that fails to track the outcome. **The β-dependence remains unexplained.**
+        - **Consequence for MC64:** it has genuine work to do (~7.4k–11.6k `u` rows and all 12.2k `omega`
+          rows), so it is no longer speculative — but it would act mostly on **`omega`**, and since
+          dominance does not predict convergence here, a dominance-based argument is not a prediction that
+          it will help. Try it as an experiment, not as a fix.
+        - **And it promotes a cheaper, better-targeted candidate that keeps fill at zero:** build the
+          preconditioner's operator with **first-order upwind advection** while the Krylov operator stays
+          the exact second-order Jacobian. That is what Elman's bound prescribes for these rows, it is the
+          same preconditioner-only substitution seam the reach narrowing already uses, and this codebase
+          **already upwinds first-order in the frozen AMG operator for exactly this reason**. Untested on
+          the coupled smoother.
+      - **⚠️ ORDERING IS DEMOTED to a rate lever, and Duff & Meurant explains our OWN measurement.** No
+        paper was found in which a reordering converts a *breaking* ILU into a non-breaking one; where
+        breakdown is provably impossible (M-matrices) it holds for **every** symmetric permutation. The
+        RCM recommendation (Benzi, Szyld & van Duin, *SISC* 20(5), 1999) is explicitly scoped to *"if some
+        amount of fill-in is allowed"*. **At zero fill the classic result runs the other way**: Duff &
+        Meurant (*BIT* 29, 1989) found fill-reducing orderings *significantly worse* than natural for
+        no-fill IC, because *"the average size of the fill-ins is much larger, so that the norm of the
+        remainder matrix `R = A − L̄L̄ᵀ` ends up being larger"* — which is exactly the shape of this repo's
+        own finding that pitzDaily's ILU(0) converges under the mesh's own ordering and **caps under RCM,
+        streamwise and random**. Streamline/downwind ordering additionally does not transfer: it needs an
+        acyclic digraph, and recirculation is the whole point of this case. **Corollary: report
+        `‖A − LU‖_F` alongside the pivots — Duff & Meurant say that, not the pivots, is what tracks the
+        iteration count at zero fill.**
+      - **❌ MILU / Gustafsson is CLOSED for this operator — do not spend a run on it.** The `O(h⁻¹)`
+        condition-number result is proven only for the **perturbed** method (`Ae + τh²e = LUe`, τ > 0;
+        Dupont–Kendall–Rachford 1968, Gustafsson 1978, unperturbed case later by Beauwens) on **symmetric
+        M-matrix elliptic** operators, and Elman's table above shows it is *worse than ILU* in the
+        opposite-signed convection regime pitzDaily's recirculation occupies. Structurally it is wrong here
+        twice over: the discrete gradient/divergence rows **already have zero row sums**, so compensation on
+        them adds nothing (Wubs & Thies), and unperturbed MILU is singular exactly when `A` is (Notay 1992),
+        so a closed-domain constant-pressure null mode is transferred into the preconditioner by
+        construction. The revealed preference agrees — Ifpack2 `RILUK` relax value defaults to 0, MATLAB's
+        `milu` defaults off, hypre has no such option, and **PETSc has no MILU parameter at all**. A grep of
+        Benzi–Golub–Liesen's 137-page saddle-point survey finds **zero** occurrences of "MILU", "modified
+        incomplete", "Gustafsson" or "Dupont".
+      - **What it IS, as far as measured: zero fill is an insufficient APPROXIMATION of pitzDaily's
+        velocity–pressure saddle, at healthy pivots** — a smoothing-quality deficit, not a breakdown.
+        Supporting: the fill ladder's whole jump is 0→1 (ILU(0) caps, ILU(1) 52, ILU(2) 25, ILU(3) 21 at
+        the developed state, β = 0.05); the unresolved ILU(0) residual sits in `v` 3.7e-3, `p` 2.2e-3,
+        `u` 1.0e-3 against `k` 1.0e-4, `ω` 2.0e-4; the **`[u,v,p]` slice alone reproduces the entire
+        gap** (ILU(0) cap / ILU(1) 52) while `[k,ω]` alone is healthy (16 / 11), so **a field split does
+        not rescue it**; and the failure is **delocalized** — the worst 200 rows match the mesh median on
+        skewness (1.24e-4 vs 3.15e-4, i.e. *lower* than typical), wall adjacency (0 vs 0) and aspect
+        ratio (1.65 vs 1.66). Two things make it fatal rather than merely expensive: ILU(0) converges
+        **only under the mesh's own cell ordering** (208 its; RCM, streamwise and random all cap, while
+        ILU(1) converges under all four), so it is riding on an accident; and **the multigrid cannot
+        repair it** — on a clean orthogonal channel GAMG makes the smoother choice irrelevant and
+        size-independent (ILU(0)×4 3/5/6 against ILU(1)×4 3/8/11 at 384/3456/13824 cells), where on
+        pitzDaily the same two arms are **87 against 19**.
+      - **⚠️ WHY `bfs3d` IS THE OPPOSITE IS STILL UNEXPLAINED — and the leading hypothesis is REFUTED by
+        its own measurement.** Cell anisotropy looked decisive in a controlled sweep (grading a
+        zero-skew channel under a fixed poor ordering: ILU(0) 36 → 43 → 178 → 329 its as median aspect
+        ratio goes 2.7 → 10.4, while ILU(1) holds 18 → 16). But measured on the two shipped meshes
+        (geometry only), the per-cell conductance ratio is median **1.72** on pitzDaily and **8.59** on
+        `bfs3d` — **`bfs3d` is 5× the more anisotropic mesh and is the case where zero fill works**, so
+        anisotropy points the wrong way. Two candidates remain undistinguished: the 3D distance-3
+        stencil's density (280 nnz/row against pitzDaily's 122, so ILU(1) fill there is far denser and
+        its 303 negative pivots may be a fill-explosion with no 2D analogue), and Reynolds number, which
+        was not swept. **The experiment that separates them: this same single-state probe — PETSc ILU(0)
+        vs ILU(1), unpreconditioned norm, true residual, equilibrated cell-major operator at matched β —
+        on a `bfs3d` checkpoint, reading the residual per field block and the factor nnz.** Not yet run
+        (the `bfs3d` case build is ~7 GB and the machine was shared).
       - **❌ "Precondition the gradient solve and use GMRES instead" is REFUTED as a reach lever, do not
         re-propose it.** With implicit differentiation the tangent is `A_g⁻¹B`, i.e. the sweep series run
         to round-off — measured reach **9** at 25 % skew and **11** at 40 %, against 5 for `sweeps=4`. It
