@@ -200,7 +200,9 @@ PID=$!
   echo "commit=$(git rev-parse --short HEAD 2>/dev/null || echo '-')"
   # The case settings, verbatim. Two runs differing only in an environment variable have otherwise
   # produced logs identical to the character, leaving launch order as the only way to tell them apart.
-  env | grep -E '^(BFS3D|AQUAFLUX)_' | sort | sed 's/^/env: /' || true
+  # Every prefix a case reads its settings from belongs here: one that is missing does not announce
+  # itself, it just silently drops the one line that says what the run was testing.
+  env | grep -E '^(BFS3D|AQUAFLUX|ILU0_SWEEP|PROBE)_' | sort | sed 's/^/env: /' || true
 } > "$RUN_FILE"
 
 # Appended to the run's OWN log, not only printed, so the warning travels with the artifact it

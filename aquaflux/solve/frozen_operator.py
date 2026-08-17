@@ -350,8 +350,21 @@ def equilibrate_cell_major(
       momentum and continuity rows differ in scale by more than an order of magnitude, and this balances
       them so the incomplete pivots (or the smoother's) stay well conditioned.
     * **Cell-major reordering** — interleave the per-cell fields ``[u, v, (w,) p, k, omega]`` (rather than
-      all of one field then the next), which keeps the pressure among the velocity unknowns so the saddle
-      does not present a zero pivot, and groups each cell's degrees of freedom into a contiguous block.
+      all of one field then the next), so each cell's degrees of freedom occupy a contiguous block and a
+      pressure unknown is eliminated among the velocity unknowns of its own cell rather than after all of
+      them.
+
+    ⚠️ **On why the interleaving helps, be careful what is claimed.** An earlier version of this docstring
+    said it "keeps the pressure among the velocity unknowns so the saddle does not present a zero pivot".
+    That is stronger than anything demonstrated, and the literature does not support it as stated: the
+    published saddle-point incomplete factorizations that report *stable* factorizations number velocity
+    first and pressure last — the opposite grouping — because eliminating the velocities first fills the
+    pressure diagonal before it is reached (Konshin, Olshanskii & Vassilevski, *SIAM J. Sci. Comput.*
+    37(5), 2015). What *is* proven is narrower and is about pairing rather than grouping: for F-matrices,
+    an ordering in which each pressure node is eliminated together with a connected velocity node is
+    numerically stable (de Niet & Wubs, *IMA J. Numer. Anal.* 29(1), 2009), and cell-major is a coarse
+    approximation of that. Neither result covers a Rhie–Chow (p,p) block, which is nonzero here, so this
+    ordering is a reasonable default rather than a guaranteed one.
 
     Parameters
     ----------
