@@ -1235,9 +1235,64 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     fill 1 takes ONE matvec. A one-variable sweep measured reach 5 as "step-for-step identical, 35 %
     dearer, buys nothing" and it was reverted on that basis — a correct measurement of the wrong pair.
 
-    **⚠️ STILL OPEN: at β = 0 BOTH fills fail on `pitzDaily`** (true 0.458 and 0.434). No march visits
-    that shift (`PC_BETA_FLOOR` 0.05), but it is the adjoint's operator, so a `jax.grad` on this case
-    will meet it.
+    **✅ RESOLVED (2026-08-17) — the β = 0 failure was the STATE, not the preconditioner, and the
+    adjoint is safe on both cases.** An earlier entry here reported that both fills fail at zero shift on
+    `pitzDaily` and left it open; it recorded no state, and it was measured at the cold self-start.
+    Re-measured at the **converged root** (`state-00071`, reach 5, fill 1, `petsc` leading inverse, true
+    residual through GMRES at rtol 1e-8), the shipped field split **converges**:
+
+    | case / arm | forward `M` | transpose `Mᵀ` |
+    |---|---|---|
+    | `pitzDaily` field split @ β = 0 | 326 applies, **2.34e-09** | 299, **9.83e-09** |
+    | `pitzDaily` field split @ floor 0.05 | 205 applies, **7.39e-09** | 213, **6.53e-09** |
+    | `bfs3d` field split @ β = 0 (`petsc` leading) | 116 applies, **6.07e-09** | 117, **2.67e-09** |
+    | `bfs3d` field split @ floor 0.05 | 105 applies, **6.54e-09** | 104, **6.72e-09** |
+
+    On both cases the **floored** preconditioner is cheaper than the one built at β = 0, so the shipped
+    pairing is not merely adequate at zero shift, it is the better one.
+
+    **⚠️ The trap this cost, which is the part worth keeping: a zero-shift measurement is meaningless
+    without its state.** At `pitzDaily`'s cold self-start the same field split *diverges* to 100–800×
+    the right-hand side — and that is not a preconditioner property, because the cold Jacobian is nearly
+    singular there (smallest pivot `1.3e-12` against a matrix 1-norm of `278`) and **a complete LU of it
+    is not an accurate inverse either** (one apply `7.8e-04`). The control is monotone: as β goes
+    2 → 0.05 → 0, one-apply accuracy degrades `7.4e-15 → 7.8e-11 → 7.8e-04`. So the pseudo-transient
+    shift is not only globalization — it is what makes this Jacobian factorizable at all. Harnesses:
+    `validation/pitzdaily_openfoam/zero_shift_arms.py`, `validation/bfs3d_openfoam/zero_shift_adjoint.py`.
+
+    **Consequence: nothing selects the monolithic ILUT or complete LU for the adjoint**, which was the
+    last regime either had. Both are already dominated on the forward march, the LU does not fit in 3D,
+    and no validation case selects the ILUT. That closes the case for deleting them.
+
+    **What a deletion is giving up, measured, so the decision is not made on a guess (2026-08-17).** The
+    complete LU *does* work on `pitzDaily` and needs no PETSc — SciPy SuperLU alone, at the
+    `hybrid_initialize` state, 61125 dofs:
+
+    | probe | matrix nnz | materialize (**every arm pays**) | factor (**the LU's own**) | factor L+U | peak RSS | ‖Ax−b‖/‖b‖ |
+    |---|---|---|---|---|---|---|
+    | reach 5, full sweeps | 13.32 M | 6.0 s | **72.7 s** | 174.0 M | 3.60 GB | 1.35e-09 |
+    | reach 3, `sweeps=1` | 4.72 M | 2.8 s | **17.9 s** | 89.8 M | 3.14 GB | 4.96e-10 |
+
+    So it is **86–92 % factorization** — essentially all cost the field split does not pay — and 4.5 GB
+    peak for a 12 k-cell 2D mesh, which is why it stays 2D-only whatever else is true. ⚠️ The often-cited
+    "UMFPACK is ~26× faster than the threshold-ILU" is a **PETSc-only** figure; on SuperLU the record
+    already says it is no faster to factor than the ILUT, and these timings agree. Eliminating PETSc
+    therefore *weakens* the complete LU's case rather than strengthening it.
+
+    **⚠️ Narrowing the probe's gradient sweeps helps a COMPLETE factorization and hurts a ZERO-FILL one —
+    opposite signs, same knob.** At `probe_gradient_sweeps=1` the LU's factor cost falls 4.1× (72.7 → 17.9 s)
+    on an exactly-probed matrix, while an ILU(0) pivot census on the equilibrated leading block goes
+    **9 → 34 → 263** negative pivots at full / 2 / 1 sweeps, minimum |pivot| falling `2.18e-02 → 3.59e-04`.
+    ⚠️ And measured against the **true** Jacobian rather than the narrowed one, `sweeps=1` at reach 3 is
+    `1.07e-03` away where the *aliased* full-sweep probe at the same reach is only `1.99e-07` — so
+    narrowing trades a small structured corruption for a larger smooth approximation on this mesh. It is a
+    preconditioner-family-dependent knob, not a free win: right where sweeps are inert (`bfs3d`, skew-free),
+    questionable where they are live (`pitzDaily`).
+
+    **Naming trap for whoever does the deletion: `_COUPLED_ILUT_FORWARD_SOLVER` is the default forward
+    solver on the COMPLETE-LU path too**, not only the ILUT's — `_monolithic_factor_step` falls back to it
+    for both. Deleting the ILUT without renaming it leaves a solver named after a preconditioner that no
+    longer exists.
 
     **PLAIN aggregation, not smoothed — `pc_gamg_agg_nsmooths = 0` (measured, and the largest
     preconditioner win found on this case).** Smoothing the tentative prolongator with a Jacobi step is

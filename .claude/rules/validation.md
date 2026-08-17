@@ -83,6 +83,16 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
   safeguard on at all, and a march that meets the ratchet there has no way out of it.
   `pitzdaily_openfoam/compare.py` reaches it only because that case now uses the AMG builder; the
   symbol there is `K_POSITIVITY_FLOOR`, matching the sibling case so a future diff lines up.
+- **⚠️ WORSE THAN A KNOB GAP: the complete-LU and threshold-ILU builders march with NO k-positivity
+  limiter AT ALL.** `coupled_amg_continuation` passes `step_limit=positive_k_limit(coupled, floor=…)`
+  **unconditionally**, so that arm always carries the safeguard; `coupled_lu_continuation` and
+  `coupled_ilut_continuation` call the same `_monolithic_factor_step` tail without `step_limit` or
+  `step_projection`, which therefore default to `None`. That is a **behavioural** difference between the
+  arms, not a settings one, so an LU-versus-AMG march comparison is confounded until it is fixed — and
+  k positivity in 2 cells of 23040 was the rung-3 wall on the sibling case. The tail already accepts all
+  four parameters (`refresh_on_cycles`, `inner_refresh`, `cycle_budget`, `step_limit`/`step_projection`);
+  the two builders simply do not forward them. `forward_rtol`/`restart`/`max_restarts` ARE reachable, via
+  `forward_solver=`.
 - **`_mis_aggregate`'s return annotation is stale** — it says `tuple[np.ndarray, int]` and returns
   three values (labels, roots, count). Cost one debugging cycle.
 
@@ -106,3 +116,31 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
   author does not know what it is measuring; the mesh size decided the whole question in that instance.
 - **A setting the banner prints must be a setting that is in force.** Printing an intended value that
   the builder never received is worse than printing nothing.
+- **⚠️ Do NOT gate a loaded checkpoint on its own recorded `residual_norm`.** That number is whatever
+  measure the march was *steered* by, and both cases march with `scaled_norm=True` — a row-equilibrated
+  norm, not a Euclidean one. Comparing the two rejects a perfectly good state: `bfs3d`'s `state-00069`
+  records `2.64e-06` and computes `1.04e-03` under `jnp.linalg.norm`, a factor of **395** that is
+  entirely the change of measure. Gate against the case's **own self-start** in whichever single norm
+  the harness uses — both ends then move together, and a genuine configuration mismatch (which moves the
+  residual by orders) still trips it.
+- **A saved `.npz` is not necessarily a checkpoint.** `pitzdaily_openfoam/ilu0_remedy_state.npz` is the
+  case's *self-start*, cached only so repeated runs skip rebuilding it. Measuring "at the converged root"
+  against it silently answers a different question — and the two differ enormously: at the self-start the
+  zero-shift coupled Jacobian is nearly singular (smallest pivot `1.3e-12` against a matrix 1-norm of
+  `278`), so even a complete LU is not an accurate inverse of it, while at a converged root the shipped
+  field split solves the same zero-shift operator to `6e-09`. Read what wrote a state before trusting it.
+- **`bfs3d`'s shipped `COLUMN_REACH = (3,3,3,3,2,2)` is licensed for the FIELD SPLIT ONLY.** A flow-first
+  split never applies `dR_flow/dturb`, so it never touches the shortened k/ω columns. A **monolithic**
+  factorization (ILUT, complete LU) does apply them, and a short colouring does not truncate a column —
+  it folds far couplings onto near entries. Probe every arm at a uniform reach whenever a monolithic arm
+  is in the comparison, or the arms are not being compared on the same matrix.
+
+## Recovering a converged state (both cases)
+
+Both `compare.py` files take `checkpoint_dir` and write a rolling per-step state through the shared
+`StateCheckpointer` + `combine_observers` (`PITZ_CHECKPOINT_KEEP` / `BFS3D_CHECKPOINT_KEEP`, default 3;
+`main()` writes to `<case>/checkpoints/`). This matters because **a converged state otherwise exists only
+inside the process that computed it** — and the adjoint's operator is the Jacobian at that root, which is
+the one operator a march never exercises, since the continuation ramps the shift and the preconditioner
+is additionally floored. Without a checkpoint, every question about the zero-shift operator costs a full
+re-march to ask. The `zero_shift_arms.py` / `zero_shift_adjoint.py` harnesses are the consumers.
