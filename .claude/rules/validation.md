@@ -83,6 +83,16 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
   safeguard on at all, and a march that meets the ratchet there has no way out of it.
   `pitzdaily_openfoam/compare.py` reaches it only because that case now uses the AMG builder; the
   symbol there is `K_POSITIVITY_FLOOR`, matching the sibling case so a future diff lines up.
+- **⚠️ WORSE THAN A KNOB GAP: the complete-LU and threshold-ILU builders march with NO k-positivity
+  limiter AT ALL.** `coupled_amg_continuation` passes `step_limit=positive_k_limit(coupled, floor=…)`
+  **unconditionally**, so that arm always carries the safeguard; `coupled_lu_continuation` and
+  `coupled_ilut_continuation` call the same `_monolithic_factor_step` tail without `step_limit` or
+  `step_projection`, which therefore default to `None`. That is a **behavioural** difference between the
+  arms, not a settings one, so an LU-versus-AMG march comparison is confounded until it is fixed — and
+  k positivity in 2 cells of 23040 was the rung-3 wall on the sibling case. The tail already accepts all
+  four parameters (`refresh_on_cycles`, `inner_refresh`, `cycle_budget`, `step_limit`/`step_projection`);
+  the two builders simply do not forward them. `forward_rtol`/`restart`/`max_restarts` ARE reachable, via
+  `forward_solver=`.
 - **`_mis_aggregate`'s return annotation is stale** — it says `tuple[np.ndarray, int]` and returns
   three values (labels, roots, count). Cost one debugging cycle.
 
