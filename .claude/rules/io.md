@@ -76,7 +76,9 @@ Binary polyMesh; `faceZones`/`pointZones`; `.gz` compression / multi-region case
 - **Assemble** — `assemble` on a hand-built `PolyMeshData` (`tests/support/polymesh.py`
   `two_cube_polymesh_data`; `tests/unit/test_openfoam_assemble.py`), no files.
 - **Collapse** — file-free: collapse `structured_grid_3d(nx, ny, 1)` and match
-  `structured_grid_2d(nx, ny)` up to renumbering (`tests/unit/test_collapse.py`).
+  `structured_grid_2d(nx, ny)` up to renumbering (`tests/unit/test_collapse.py`), plus a hand-built
+  periodic slab pinning that the seam's `neighbour_offset` survives the face renumbering (the reader
+  emits no offsets, so that path is unreachable from io today).
 - **Orchestrate** — end-to-end on committed ASCII fixtures (`tests/fixtures/polymesh_3d_two_cubes`,
   `tests/fixtures/polymesh_2d_slab`), cross-checked against the structured generators
   (`tests/unit/test_openfoam_reader.py`).
