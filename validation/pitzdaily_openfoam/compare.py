@@ -87,6 +87,8 @@ from aquaflux.solve import (
     MarchLogger,
     RefreshPolicy,
     RetryPolicy,
+    StateCheckpointer,
+    combine_observers,
     host_ilu_inverse,
     native_nodal_inverse,
     native_saddle_inverse,
@@ -325,6 +327,16 @@ NATIVE_TRAILING = {"max_coarse": COARSE_EQ_LIMIT, "equilibrate": False}
 #: collision-free only for its own pattern, that is corruption of near entries rather than truncation.
 STENCIL_REACH = int(os.environ.get("PITZ_STENCIL_REACH", "5"))
 
+#: Cap the gradient's Richardson sweeps FOR THE PROBE ONLY. The sweeps are what carry the stencil out
+#: on a skewed mesh, so narrowing them shortens the reach the residual needs -- and only the
+#: preconditioner's materialize sees the narrowed copy, the Krylov matvec keeping the exact jvp of the
+#: full residual, so the converged state and its adjoint are untouched. `None` is byte-identical.
+PROBE_GRADIENT_SWEEPS = (
+    int(os.environ["PITZ_PROBE_GRADIENT_SWEEPS"])
+    if os.environ.get("PITZ_PROBE_GRADIENT_SWEEPS")
+    else None
+)
+
 #: ⚠️ UNIFORM PROBING REACH, deliberately, where the sibling case shortens two columns. Its
 #: `(3,3,3,3,2,2)` is a SIX-field layout and was measured on that mesh and those schemes; the analogous
 #: five-field value here is unmeasured, and the record is emphatic that shortening the pressure column
@@ -355,6 +367,12 @@ CONTROL = CflResidualDualTimeControl(
 #: is deliberate: a diagnostic on the sibling case refuted every cheap STATIC predictor of a bad step,
 #: so detect-then-react is the honest design.
 REFRESH_ON_CYCLES = int(os.environ.get("PITZ_REFRESH_ON_CYCLES", "3"))
+
+#: How many per-step state checkpoints to keep, when `solve_aquaflux` is given a `checkpoint_dir`.
+#: A rolling few is enough for the usual purpose -- recovering the CONVERGED state, which no other
+#: artifact of a run preserves. Raise it to keep a whole trajectory (~0.5 MB per step here) when a
+#: study needs the march's own intermediate states rather than its endpoint.
+CHECKPOINT_KEEP = int(os.environ.get("PITZ_CHECKPOINT_KEEP", "3"))
 
 #: Redo a step whose solve was expensive, whose line search collapsed, or that diverged -- escalating
 #: the shift first, and falling back to a tighter Krylov solve only for a divergence damping cannot fix.
@@ -514,11 +532,18 @@ def build_case(model=None):
     return dict(coupled=coupled, momentum=momentum, turbulence=turbulence, geom=geom)
 
 
-def solve_aquaflux(*, log_path=None, **solve_kwargs):
+def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
     """Solve the coupled RANS system on the imported OpenFOAM mesh; return fields + geometry.
 
     Parameters
     ----------
+    log_path : str or Path, optional
+        Write the per-step march log here instead of to stdout.
+    checkpoint_dir : str or Path, optional
+        Write a rolling state checkpoint per step here. Worth setting for any long run: without it a
+        converged state exists only inside the process that computed it, so any later study of the
+        converged operator -- the adjoint's, in particular, which is the one the march itself never
+        exercises -- has to re-run the whole march to ask its question.
     **solve_kwargs
         Forwarded to :func:`~aquaflux.turbulence.solve_coupled`, overriding the defaults set here.
         This is the seam a solver study uses to instrument or reconfigure the march -- an ``on_step``
@@ -565,6 +590,7 @@ def solve_aquaflux(*, log_path=None, **solve_kwargs):
         ),
         ("trailing inverse", "native nodal" if FIELD_SPLIT else "n/a"),
         ("probe stencil reach", STENCIL_REACH),
+        ("probe gradient sweeps", PROBE_GRADIENT_SWEEPS or "full (4)"),
         ("probe column reach", COLUMN_REACH or "uniform"),
         ("forward restart / max restarts", f"{FORWARD_RESTART} / {FORWARD_MAX_RESTARTS}"),
         ("k positivity projection", POSITIVITY_PROJECTION),
@@ -580,7 +606,10 @@ def solve_aquaflux(*, log_path=None, **solve_kwargs):
     # Built once and shared by the engine and the refresh hook: the coloured-probe plan is the single
     # largest allocation this case makes, and building it twice doubles that for nothing.
     probe = CoupledJacobianProbe.build(
-        coupled, stencil_reach=STENCIL_REACH, column_reach=COLUMN_REACH
+        coupled,
+        stencil_reach=STENCIL_REACH,
+        column_reach=COLUMN_REACH,
+        gradient_sweeps=PROBE_GRADIENT_SWEEPS,
     )
     refresh = amg_beta_tracking_refresh(
         coupled,
@@ -612,6 +641,7 @@ def solve_aquaflux(*, log_path=None, **solve_kwargs):
             inner_steps=INNER_STEPS,
             inner_tol=INNER_TOL,
             probe=probe,
+            probe_gradient_sweeps=PROBE_GRADIENT_SWEEPS,
             cycle_budget=CYCLE_BUDGET,
             forward_rtol=FORWARD_RTOL,
             forward_restart=FORWARD_RESTART,
@@ -633,6 +663,12 @@ def solve_aquaflux(*, log_path=None, **solve_kwargs):
         shared_preconditioner[:] = [engine.shift_policy.preconditioner]
         return dict(continuation=engine, refresh=RefreshPolicy(precondition_step=refresh))
 
+    checkpoints = (
+        StateCheckpointer(checkpoint_dir, every=1, keep=CHECKPOINT_KEEP)
+        if checkpoint_dir is not None
+        else None
+    )
+
     solve_options = (
         dict(
             max_steps=MAX_STEPS,
@@ -644,7 +680,11 @@ def solve_aquaflux(*, log_path=None, **solve_kwargs):
             retry=RETRY,
             point_setup=point_setup,
             scaled_norm=True,  # rebuild the row scales each outer step
-            on_checkpoint=logger.on_checkpoint,
+            on_checkpoint=(
+                logger.on_checkpoint
+                if checkpoints is None
+                else combine_observers(logger.on_checkpoint, checkpoints.on_checkpoint)
+            ),
             on_retry=logger.on_retry,
         )
         | solve_kwargs
@@ -697,7 +737,7 @@ def main():
     )
 
     t0 = time.time()
-    aq = solve_aquaflux()
+    aq = solve_aquaflux(checkpoint_dir=HERE / "checkpoints")
     print(
         f"aquaflux coupled solve: {time.time() - t0:.0f}s, "
         f"Ux in [{aq['U'][:, 0].min():.3f}, {aq['U'][:, 0].max():.3f}]",
