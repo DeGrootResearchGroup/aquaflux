@@ -1189,6 +1189,17 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       factorization preconditioners report no phases (empty tuple), which the record documents as valid.
       Differencing the same 56-step march gave probe ≈ 14.6 s of a 23.0 s `full` (63 %) against 8.4 s for
       `shift` — consistent with the older ~40-of-60 s reading, and the reason the probe is the lever.
+    - **⚠️ EVERY refresh between two step rows is counted and summed, because more than one fires
+      (fixed 2026-08-17).** `on_refresh` used to *overwrite* its record, which was safe only while the
+      hook ran once per step. A rebuild triggered by solve cost (`refresh_on_cycles`) fires **inside** a
+      step, and a **retried** step runs its inner loop again, so several land between step rows — six in
+      one observed step. The old rendering therefore showed one refresh per step however many fired, and
+      printed one refresh's seconds as the step's whole preconditioner cost: on that step,
+      `pc inner 15.2s` for what was really **65.4 s, 22 % of a 301 s step** rather than 5 %. Seconds and
+      phases now sum across the step and a branch that ran more than once is marked `Nx` —
+      `pc full inner 3x none 2x 65.4s (probe 11.8 assemble 0.5 refactor 52.0)`. A single refresh renders
+      exactly as before. **Any refresh-versus-step cost comparison drawn from a log written before this
+      fix understates the refresh side, by however many refreshes that step happened to fire.**
     - **The per-refresh sparse-matrix work is precomputed (`ShiftedCellMajorOperator`).** The `assemble`
       phase — add `β d` to the diagonal, symmetrically equilibrate, reorder to cell-major — was a sparse
       add plus two sparse products plus two fancy-index permutations, each allocating and re-sorting a

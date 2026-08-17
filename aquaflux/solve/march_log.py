@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import sys
 import time
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import IO, Any
 
 import numpy as np
@@ -281,7 +281,11 @@ class MarchLogger:
         # the rate is only meaningful over consecutive logged steps, so its state belongs to the
         # thing that is called once per step, in order.
         self._previous_residuals: dict[str, float] = {}
-        self._refresh: RefreshTiming | None = None
+        # EVERY refresh since the last step row, not the latest one. A mid-step rebuild
+        # (`refresh_on_cycles`) can fire more than once inside a step -- once per retried attempt -- and
+        # keeping only the last both under-counts them and under-reports their total cost, which is the
+        # one number a reader needs to judge whether refreshing is paying for itself.
+        self._refreshes: list[RefreshTiming] = []
         self._rtol = rtol
         self._atol = atol
         self._clock = time.monotonic if clock is None else clock
@@ -408,10 +412,17 @@ class MarchLogger:
     def on_refresh(self, timing: RefreshTiming) -> None:
         """``observer`` callback for a β-tracking preconditioner refresh: record what it did.
 
-        Matches the hook :func:`~aquaflux.turbulence.amg_beta_tracking_refresh` calls once per step
+        Matches the hook :func:`~aquaflux.turbulence.amg_beta_tracking_refresh` calls
         (``observer=logger.on_refresh``). The record names the branch — ``"full"``, ``"shift"`` or
         ``"none"`` — its total, and each part's own cost; it rides on the *next* step row, since that is
         the step it was built for.
+
+        **Every call accumulates; they are not overwritten.** A refresh triggered by solve cost
+        (``refresh_on_cycles``) fires *inside* a step, and a step that is retried runs its inner loop
+        again, so several can land between two step rows. Keeping only the latest reported one refresh
+        per step whatever happened -- which reads as "the trigger barely fires" and, worse, reports one
+        refresh's seconds as the step's whole preconditioner cost. Both of those are conclusions a
+        reader would otherwise draw from the log and act on.
 
         Without this the log records only how long a step took, and which branch ran has to be guessed
         from wall-clock -- which is how a cost that is really an occasional expensive re-materialize
@@ -421,7 +432,7 @@ class MarchLogger:
         No-ops unless ``"pc"`` is in ``detail``.
         """
         if "pc" in self._detail:
-            self._refresh = timing
+            self._refreshes.append(timing)
 
     def on_retry(self, reason: str, attempt: int, beta: float) -> None:
         """``on_retry`` callback: announce that the step about to be repeated is being redone, and why.
@@ -666,8 +677,8 @@ class MarchLogger:
         self._write(self._step_table.rule(fill="=", segmented=False))
         lines = []
         if "pc" in self._detail:
-            lines.append(self._refresh_line(self._refresh))
-            self._refresh = None
+            lines.append(self._refresh_line(self._refreshes))
+            self._refreshes = []
         if columns:
             lines.append("  ".join(f"{name} {value:.4g}" for name, value in columns.items()))
         if report.binding_limit < 1.0:
@@ -678,22 +689,36 @@ class MarchLogger:
         self._write(self._step_table.rule(fill="=", segmented=False))
 
     @staticmethod
-    def _refresh_line(timing: RefreshTiming | None) -> str:
-        """The preconditioner aside: which branch ran, its total, and where the total went.
+    def _refresh_line(timings: Sequence[RefreshTiming]) -> str:
+        """The preconditioner aside: which branches ran, how many, their total, and where it went.
 
         A refresh that reports phases renders them in the order they ran, so the expensive part is read
         off directly rather than inferred by differencing two runs. Any wall time the phases do not
         account for is shown as ``other``, since a breakdown that silently fails to add up is worse than
         no breakdown -- it reads as complete.
+
+        Several refreshes can land between two step rows (see :meth:`on_refresh`), so seconds and phases
+        are **summed** across them and a branch that ran more than once is marked ``Nx``. A single
+        refresh renders exactly as it always did, which keeps one refresh per step -- still the common
+        case -- reading as a plain statement rather than as a count of one.
         """
-        if timing is None:
+        if not timings:
             return "pc -"
-        line = f"pc {timing.kind} {timing.seconds:.1f}s"
-        if not timing.phases:
+        counts: dict[str, int] = {}
+        for timing in timings:
+            counts[timing.kind] = counts.get(timing.kind, 0) + 1
+        label = " ".join(kind if n == 1 else f"{kind} {n}x" for kind, n in counts.items())
+        line = f"pc {label} {sum(t.seconds for t in timings):.1f}s"
+        phases: dict[str, float] = {}
+        for timing in timings:
+            for name, seconds in timing.phases:
+                phases[name] = phases.get(name, 0.0) + seconds
+        if not phases:
             return line
-        parts = [f"{name} {seconds:.1f}" for name, seconds in timing.phases]
-        if timing.unattributed >= _UNATTRIBUTED_FLOOR:
-            parts.append(f"other {timing.unattributed:.1f}")
+        parts = [f"{name} {seconds:.1f}" for name, seconds in phases.items()]
+        unattributed = sum(t.unattributed for t in timings)
+        if unattributed >= _UNATTRIBUTED_FLOOR:
+            parts.append(f"other {unattributed:.1f}")
         return f"{line} ({' '.join(parts)})"
 
     @staticmethod

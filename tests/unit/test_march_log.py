@@ -302,6 +302,43 @@ def test_the_preconditioner_column_is_reported_once_for_the_step_it_preceded() -
     assert second == "pc -"
 
 
+def test_several_refreshes_inside_one_step_are_all_counted_and_their_cost_summed() -> None:
+    """A mid-step rebuild fires per retried attempt, so more than one can land between step rows.
+
+    Keeping only the latest reported one refresh per step whatever happened, and reported a single
+    refresh's seconds as the step's whole preconditioner cost -- so a reader costing refresh against
+    step time got an answer several times too small, in the direction that makes refreshing look free.
+    """
+    logger, buffer = _log(detail=("pc",))
+    for _ in range(3):
+        logger.on_refresh(RefreshTiming("inner", 15.0, (("probe", 2.0), ("refactor", 13.0))))
+    logger.on_step(_report())
+
+    line = next(line for line in _asides(buffer) if line.startswith("pc"))
+    assert line == "pc inner 3x 45.0s (probe 6.0 refactor 39.0)"
+
+
+def test_refreshes_of_different_branches_in_one_step_are_reported_separately() -> None:
+    """Which branch ran is the diagnosis; collapsing two branches into one count would hide it."""
+    logger, buffer = _log(detail=("pc",))
+    logger.on_refresh(RefreshTiming("full", 20.0))
+    logger.on_refresh(RefreshTiming("shift", 0.5))
+    logger.on_refresh(RefreshTiming("shift", 0.5))
+    logger.on_step(_report())
+
+    line = next(line for line in _asides(buffer) if line.startswith("pc"))
+    assert line == "pc full shift 2x 21.0s"
+
+
+def test_a_lone_refresh_still_reads_as_a_statement_rather_than_a_count_of_one() -> None:
+    """One refresh per step stays the common case; marking it ``1x`` would be noise on every step."""
+    logger, buffer = _log(detail=("pc",))
+    logger.on_refresh(RefreshTiming("full", 27.0))
+    logger.on_step(_report())
+
+    assert next(line for line in _asides(buffer) if line.startswith("pc")) == "pc full 27.0s"
+
+
 def test_the_refresh_line_breaks_the_cost_down_by_phase() -> None:
     """Two refreshes of equal length can have opposite causes; the total alone cannot say which.
 
