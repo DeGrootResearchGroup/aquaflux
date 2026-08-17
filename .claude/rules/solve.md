@@ -4475,6 +4475,15 @@ and the first time the hand-written hierarchy and factorization have carried a m
 single solve.** Two full 3-rung cold marches differing in **one** environment variable
 (`BFS3D_FLOW_INVERSE`), same commit, same machine, back to back, nothing else running:
 
+**⚠️ `hostilu` IS NOW `bfs3d`'s DEFAULT LEADING INVERSE (2026-08-16), so "the incumbent" changed meaning
+on that date.** Every measurement in this file that says "the incumbent" of the `bfs3d` **leading** block
+without naming an arm was taken against **PETSc ILU(0)** and should be read that way; `BFS3D_FLOW_INVERSE=petsc`
+still selects it. The flip was made on the **dependency**, not on the numbers — the table immediately below
+is parity, and nothing here claims the host V-cycle is the better preconditioner. It carries the same
+coarsening without an optional PETSc build, and the leading block was the last part of this case needing one.
+⚠️ It does **not** generalize to `pitzDaily`, where `hostilu` FAILS outright (that case needs a fill level
+`Ilu0` cannot supply — see the fill-inversion entry above), so that case keeps `petsc`.
+
 | | `petsc` (incumbent) | `hostilu` (native AMG + our ILU(0)) |
 |---|---|---|
 | steps | 59 | 61 |
