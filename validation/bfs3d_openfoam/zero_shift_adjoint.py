@@ -60,9 +60,9 @@ import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
-from aquaflux.solve import native_nodal_inverse  # noqa: E402
-from aquaflux.solve.sparse_jacobian import (  # noqa: E402
+from aquaflux.solve import (  # noqa: E402
     materialize_block_jacobian,
+    native_nodal_inverse,
     shifted_jacobian,
 )
 from aquaflux.turbulence import coupled_amg_continuation, hybrid_initialize  # noqa: E402
