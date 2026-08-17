@@ -194,6 +194,27 @@ class Ilu0:
         """Entries in the factor — the operator's own, since nothing is filled and nothing dropped."""
         return int(self._data.size)
 
+    @property
+    def pivots(self) -> np.ndarray:
+        """The factor's diagonal — the value each elimination step divided by, shape ``(n,)``.
+
+        Stored **as the pivot itself**, not as its reciprocal. That is worth stating because the other
+        incomplete factorization this project compares against stores the reciprocal (its triangular
+        solve multiplies rather than divides), so a census written for one and pointed at the other
+        reports the inverse of what it claims.
+
+        A negative pivot on an operator equilibrated to a unit-magnitude diagonal means the
+        factorization is not an approximate inverse of anything, and a tiny one means the triangular
+        solves will amplify. **Both are proxies for a cycle count and neither is a substitute:** this
+        project records a census that came back identical across arms whose cycle counts differed
+        five-fold, and one whose sign of correlation reversed with the shift.
+
+        Exposed because consumers were reading the diagonal of the *operator* handed to the
+        factorization instead — which, after the symmetric square-root equilibration every caller
+        applies, is identically ±1 and so reports a flat, meaningless census that looks like a result.
+        """
+        return self._data[self._diag]
+
     def refactor(self, values: np.ndarray) -> None:
         """Re-run the numeric phase on new values over the SAME pattern.
 

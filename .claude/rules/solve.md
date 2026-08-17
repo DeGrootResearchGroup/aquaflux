@@ -265,8 +265,12 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
 
 ## Preconditioner — the frozen host family (shared contract)
 
-- **`cell_major_permutation` / `equilibrate_cell_major` live in `frozen_operator.py`, NOT in the ILUT
-  (binding, moved 2026-08-15).** They are the reorder half of one transform whose rescale half
+- **`equilibrate_cell_major` / `equilibrate_ordered` live in `frozen_operator.py`, NOT in the ILUT
+  (binding, moved 2026-08-15). ⚠️ `cell_major_permutation` moved AGAIN on 2026-08-17, to the new
+  `solve/ordering.py`** — it is one elimination ordering among several now, and sat in `frozen_operator`
+  only because that is where it was first written. `frozen_operator` imports it (one direction, no
+  cycle); nothing re-exports it from its old home, so a stale import fails loudly.
+  They are the reorder half of one transform whose rescale half
   (`symmetrically_equilibrate`, `equilibration_scale`, `apply_symmetric_scale`, `row_chunks`) was
   already there, and every consumer applies the two together -- a factorization or a coarsening wants
   the matrix both unit-diagonal and grouped by cell.
@@ -1467,8 +1471,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     Frozen at a reference state+shift like the AMG blocks; being far stronger it tolerates the freezing at
     a few extra cycles, and the shift vanishes at the root so it never changes the converged state or its
     adjoint. `IlutFactors`/`factorize_ilut` are the pure host core (testable without JAX); the JAX
-    wrapper is thin. `cell_major_permutation`/`equilibrate_cell_major` are **not** the ILUT's -- they
-    live in `frozen_operator.py`; see the placement note below.
+    wrapper is thin. `equilibrate_cell_major` is **not** the ILUT's -- it lives in `frozen_operator.py`
+    (and `cell_major_permutation` in `solve/ordering.py`); see the placement note below.
   - **Adjoint transpose wiring — `TransposedPreconditioner` (in `implicit.py`, binding).** The generic
     adjoint machinery `_adjoint_preconditioner` derives `Mᵀ` from the forward `M` with
     `jax.linear_transpose` — which works for a traceable AMG V-cycle but **cannot transpose a
@@ -1735,20 +1739,30 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     2 sweeps, 5 levels) on a mesh that coarsens about 3× per level where that one manages 24×, so the
     arm is not at its best here — `PITZ_FLOW_SWEEPS` and the threshold are unexplored.
 
-    **✅ CONFIRMED ON A SECOND, INDEPENDENT ZERO-FILL IMPLEMENTATION — the mechanism is the FILL, not
-    PETSc (2026-08-16).** `HostVCycleInverse` is this package's own hierarchy smoothed by its own
-    `Ilu0`: different coarsening, different factorization code, different language even. Run as the
-    leading inverse on `pitzDaily` it fails identically to PETSc's zero-fill smoother — step 1 alpha
-    0.000 with the residual above its own starting value, step 2 at the shift ceiling, **non-finite by
-    step 3** — while PETSc's ILU(1) converges the same case in 74 steps and 628 s. Two implementations
-    agreeing in failure, against one differing only in fill, is what puts this on two legs rather than
-    one.
+    **✅ CONFIRMED ON A SECOND, INDEPENDENT ZERO-FILL IMPLEMENTATION (2026-08-16).**
+    `HostVCycleInverse` is this package's own hierarchy smoothed by its own `Ilu0`: different
+    coarsening, different factorization code, different language even. Run as the leading inverse on
+    `pitzDaily` it fails identically to PETSc's zero-fill smoother — step 1 alpha 0.000 with the
+    residual above its own starting value, step 2 at the shift ceiling, **non-finite by step 3** —
+    while PETSc's ILU(1) converges the same case in 74 steps and 628 s.
 
-    **⚠️ CONSEQUENCE FOR TAKING PETSc OFF THIS PATH: `Ilu0` IS ZERO-FILL BY CONSTRUCTION AND HAS NO
-    FILL PARAMETER**, so `HostVCycleInverse` cannot serve a case that needs one. That is a concrete,
-    specifiable gap rather than a mystery: a level-of-fill incomplete factorization is what the host
-    V-cycle would need before it can replace the incumbent everywhere. Note the gap is invisible from
-    the case that motivated the host V-cycle, whose block wants exactly zero fill.
+    **🛑 BUT ITS CONCLUSION — "the mechanism is the FILL" — WAS WRONG, AND THE ERROR IS INSTRUCTIVE
+    (corrected 2026-08-17).** The two implementations were NOT "differing only in fill". They also
+    **shared the elimination ordering**: at the time both took it from `equilibrate_cell_major` --
+    cell-major over the mesh's own cell order. (The host V-cycle now takes an injected ordering through
+    `equilibrate_ordered` and defaults to that same one, so the confound is a choice rather than a
+    given.) Fill and order were confounded, and the confound is the one that
+    mattered — **on this block the ordering is the larger lever, and the shipped cell order is the
+    thing that fails.** Two independent implementations agreeing is evidence about a *shared* cause;
+    it does not identify which shared thing is the cause, and here the argument named the wrong one.
+    See *"Ordering, not fill, is what fails zero-fill on `pitzDaily`"* below for the measurements.
+
+    **⚠️ THEREFORE THE CONSEQUENCE DRAWN FROM IT IS ALSO WITHDRAWN.** It said `Ilu0` is zero-fill by
+    construction with no fill parameter, so `HostVCycleInverse` "cannot serve a case that needs one" —
+    and offered a level-of-fill factorization as the specifiable gap. `pitzDaily` is not shown to need
+    fill. It is shown to need a different cell order, which the host V-cycle now takes
+    (`aquaflux/solve/ordering.py`). A level-of-fill `Ilu0` may still be wanted some day; this case is
+    no longer the evidence for it.
 
     **⚠️ Three mechanisms were refuted on the way, each of which had a plausible story:**
     - **NOT the pressure/momentum scale split.** The 3D block's split is *comparable or worse* at
@@ -1825,6 +1839,163 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     solver on the COMPLETE-LU path too**, not only the ILUT's — `_monolithic_factor_step` falls back to it
     for both. Deleting the ILUT without renaming it leaves a solver named after a preconditioner that no
     longer exists.
+
+### ⭐ Ordering, not fill, is what fails zero-fill on `pitzDaily` (2026-08-17)
+
+**The correctly-scoped question.** Everything above was measured MONOLITHICALLY — one V-cycle over all
+five fields — and the case is FIELD SPLIT. The split sends `[u, v, p]` to the V-cycle whose level
+smoother is the incomplete factorization (the only block a fill level governs) and `[k, omega]` to
+`native_nodal_inverse`, which is not a factorization at all, **so no `k` or `omega` row is ever
+eliminated by an ILU in the shipped solver.** Everything in this section is on `[u, v, p]` alone, taken
+from the assembled operator by the same `FieldGroups` the split uses.
+
+This **agrees with** the zero-shift resolution immediately above rather than competing with it. That one
+found the β = 0 failure was the *state* — at the converged root the shipped split converges. This one
+finds that on the *split block* β = 0 converges under most orderings **even at the cold self-start**, the
+shipped order included. Both point the same way: the recorded "both fills fail at β = 0" was monolithic,
+and neither the adjoint's operator nor the split's block is the thing that was failing.
+
+*Configuration (all arms):* `pitzDaily`, 12225 cells; flow block 36675 of 61125 dofs, **reach 5** (the
+exact one on this mesh), block nnz 6.44 M; symmetric sqrt-diagonal equilibration ON; `Ilu0` **zero
+fill**, `COMPILED=True`; real right-hand side `-R(state)[leading]`; operator and factorization at the
+**same** β (no preconditioner-only floor). Judged on the **TRUE** relative residual from
+right-preconditioned GMRES, rtol 1e-8, restart 30, ≤ 20 restarts (so 621 applies = hit the cap).
+Two states: the case's **self-start** (`|R|` 2.89e+02 — where the `hostilu` march dies at step 1 *under
+the shipped cell order*) and
+the **converged root** (`R` 5.095e-06; marched with the *native SIMPLE* leading inverse at reach 3,
+which is reach-insensitive — the state is a root of the exact residual either way, and it is re-probed
+here at reach 5 because an ILU inherits the stored pattern).
+Harness: `validation/pitzdaily_openfoam/flow_block_ordering.py`.
+
+⚠️ **The converged root is a GITIGNORED run artifact, not a checked-in fixture.** It was
+`validation/pitzdaily_openfoam/checkpoints/state-00071.npz`, written by `StateCheckpointer` during a
+full march; `checkpoints/` is ignored, so that file is not in the repository and will not be in a fresh
+clone. To re-adjudicate the converged-root half of this table, **re-run the case to regenerate it** —
+`PITZ_FLOW_INVERSE=native validation/run_case.sh validation/pitzdaily_openfoam/compare.py`, about nine
+minutes — and the harness picks it up automatically. Absent one it prints a line saying so and measures
+the self-start only, so a run missing the artifact reports a *smaller* table rather than a wrong one.
+
+GMRES applications; **FAIL** = stalled above 1e-6 true:
+
+| cell ordering | self-start β 0.5 | β 0.05 | β 0 | root β 0.5 | β 0.05 | β 0 |
+|---|---|---|---|---|---|---|
+| `cell_major` — **SHIPPED** | **FAIL** | 55 | 125 | **FAIL** | 80 | 404 |
+| `cell_major_rowlength` | **113** | 152 | 140 | **121** | 58 | 275 |
+| `cell_major_rcm` | 140 | **32** | **55** | **FAIL** | **51** | **66** |
+| `pointwise_rowlength` | 113 | 152 | 140 | 121 | 58 | 275 |
+| `pointwise_rcm` | 203 | 32 | 52 | **FAIL** | 51 | 63 |
+| `mc64_symmetric` (permutation only) | **FAIL** | 58 | 107 | **FAIL** | 77 | 339 |
+| `defer_small_diagonal` 1 % / 5 % | **FAIL** | 61 / 93 | 125 / 152 | **FAIL** | 89 / 164 | 308 / 435 |
+| `cell_major_reversed` — **CONTROL** | **FAIL** | 60 | 104 | **FAIL** | 66 | 362 |
+| `field_major` | 460 | **FAIL** | **FAIL** | **FAIL** | **FAIL** | **FAIL** |
+| `pressure_last` | 586 | **FAIL** | **FAIL** | **FAIL** | **FAIL** | **FAIL** |
+| `pressure_first` | **FAIL** | **FAIL** | **FAIL** | **FAIL** | **FAIL** | **FAIL** |
+
+- **The shipped cell order is the failure, and it fails exactly where the march starts.** At β = 0.5 —
+  the march's own `beta0` — the shipped order **amplifies from the FIRST stationary sweep** (true
+  residual ×5.53 after one, ×2.17e+03 after two, ×5.97e+08 after four) and stalls GMRES. Two other
+  cell orders converge on the identical matrix. That is a one-variable change: same block, same
+  equilibration, same zero fill, same factorization code.
+- **`cell_major_reversed` is the control that makes this a result.** Merely relabelling the cells the
+  other way round fails just like the shipped order, so the wins are not "any permutation shakes it
+  loose" — RCM and row-length are doing something specific.
+- **Neither winner spans everything, and the failing corners differ.** Row-length is the only ordering
+  that converges at all six points. RCM is much the better where it works (2–6× fewer applies at every
+  small-β point) and fails only at **converged root + β = 0.5** — a corner no march and no adjoint
+  visits, since β is small by the time the state is converged. The two (state, β) pairs that actually
+  occur are hot-state/large-β and converged-state/small-β, and RCM handles both.
+- **⚠️ The stationary-sweep contraction does NOT predict the Krylov verdict — a FOURTH quantity that
+  fails to rank these arms**, after `condest`, diagonal dominance and the pivot census. It fails in
+  *both* directions: at root β = 0.5 the shipped order's sweeps **contract** (2.65e-2, 2.29e-2, 5.74e-2)
+  and GMRES still stalls at 3.25e-4; at self-start β = 0.5 RCM's sweeps **amplify** (2.7e-1 → 1.18e+01
+  → 2.67e+04) and GMRES converges in 140. Report both, rank on neither, and settle it on a march.
+- **⚠️ NO PIVOT CENSUS WAS OBTAINED IN THIS RUN — the harness measured the wrong array.** It read the
+  diagonal of the equilibrated *operator* rather than the *factor*, and the symmetric square-root
+  equilibration forces that to magnitude exactly 1, so it reported "zero negatives, min |pivot| 1.00"
+  for all twelve orderings at all six points — including arms that diverge by 1e+59. That is an
+  artifact of the transform, not a property of any factorization, and it must not be read as one.
+  Fixed by exposing `Ilu0.pivots` (the stored diagonal *is* the pivot here — unlike PETSc, which
+  stores its reciprocal) and pointing the harness at it; re-runnable cheaply with
+  `FLOW_BLOCK_CENSUS_ONLY=1`. **The verdicts in the table above are unaffected** — they are true
+  residuals and never touched the census. The pre-existing monolithic census
+  (`compare.py`'s `FILL_LEVELS` note: 27/25/9 negative pivots of 36675 at the three shifts) is the only
+  measured census on this block and it stands, but it was taken monolithically and under cell-major, so
+  it says nothing about the other orderings.
+
+**⚠️ The saddle-point literature's ordering is WRONG for zero fill, and the reason is structural.**
+`pressure_last` — velocities first, pressure last, the Konshin/Olshanskii/Vassilevski direction — fails
+at five of six points, and `pressure_first` is catastrophic everywhere (a sweep growing by 1e+59 in one
+application). This does **not** contradict that literature: what makes pressure-last work is that
+eliminating the velocities **fills** the pressure block with the Schur complement, and a zero-fill
+factorization discards precisely that fill, leaving the pressure block to be eliminated against its own
+bare, near-singular Rhie–Chow diagonal. Pressure-last is an ordering for a factorization that KEEPS
+fill. Do not port it to `Ilu0`; if a level-of-fill `Ilu0` is ever built, re-ask it there.
+
+**Two well-motivated leads measured out, so they need not be re-tried:**
+- **HILUCSI static deferring** (Chen, Ghai & Jiao, arXiv:1911.10139 — symmetrically permute the
+  smallest-diagonal rows to the lower-right, criterion taken PRE-equilibration since the equilibration
+  forces every nonzero diagonal to magnitude 1): never better than the shipped order at any point, and
+  clearly worse at 5 %. It does not rescue β = 0.5.
+- **MC64 symmetrized, PERMUTATION ONLY** (`min_weight_full_bipartite_matching` on `−log|a_ij|`, applied
+  as `P_r = P_c`): essentially a no-op — bit-identical sweep numbers to the shipped order at β = 0.5,
+  because the diagonal is already the matched entry in nearly every row. It also costs 70–150 s to
+  build. ⚠️ This is not a test of MC64: the method's other half is the pair of dual potentials that
+  rescale the matched matrix, and `scipy` does not expose them.
+
+**✅ AND IT CARRIES A REYNOLDS RUNG ON THE REAL MARCH — the block-level result is not an artifact of
+measuring a block.** `PITZ_FLOW_INVERSE=hostilu PITZ_FLOW_ORDER=rcm`, reach 5, `beta_start` 0.5, fill/
+sweeps/coarse 1/4/2000 (the `hostilu` path ignores the fill), field split on, trailing `native_nodal`,
+`Ilu0` **compiled**, 3 Reynolds points, log `run-20260817-101242.log`:
+
+| | shipped `natural` order | `rcm` order |
+|---|---|---|
+| step 1 | α = 0.000, residual ABOVE its start | α = **1.000**, R 5.69e-02 |
+| steps 1–4 | β at the ceiling by 2, **non-finite by step 3** | full steps, β relaxing 0.5 → 0.148 |
+| rung 1 (Re/100) | never reached | **converged, 28 steps, 270 s, R 7.25e-06** |
+
+So the ordering turns a march that dies at step 3 into one that completes an entire continuation rung at
+full Newton steps. **That is the headline, and it is the answer to "can a zero-fill smoother work on this
+case": yes.**
+
+**🛑 BUT IT DOES NOT CARRY THE WHOLE CASE, AND WHERE IT STOPS IS THE INFORMATIVE PART.** Rung 2 (Re/10)
+retried at step 29 (β → 1.0, recovered), then step 30 clipped to α = 0.000, step 31 diverged twice with
+the ladder escalating β → 8 → 16 and reported `inf`, and steps 31–32 ground with α ≈ 0. **At the point of
+failure the linear solves were healthy — 12 cycles each — while α collapsed.** A preconditioner that
+returns a 12-cycle solve is not the thing failing; the line search is. Run stopped by hand at step 32.
+
+**🛑 AND THE MECHANISM IS NAMED IN THE LOG: `retry.on_cycles` IS POSITIVE FEEDBACK ON THIS CASE.** The
+retry ladder escalates β when a solve costs more than `on_cycles` restart cycles, on the usual reasoning
+that a stiffer pseudo-timestep makes the block easier. **On this case that implication is false** — under
+`rcm` the block takes 140 applications at β = 0.5, 32 at 0.05 and 55 at 0 — so the rule closes a loop
+that runs the wrong way: *more cycles → higher β → a harder block → more cycles.* The log gives each
+redo's reason, and the first three are all `cycles`, not divergence:
+
+```
+step 29 attempt 2: cycles,   beta -> 1.0000
+step 30 attempt 2: cycles,   beta -> 1.3333
+step 30 attempt 3: cycles,   beta -> 2.6667
+step 31 attempt 2: diverged, beta -> 8.0000
+step 31 attempt 3: diverged, beta -> 16.0000
+```
+
+The divergence is the *consequence* of three cycle-triggered escalations, not the cause. And the trigger
+is a **mis-calibration rather than a fault**: `on_cycles = 10` was set for the PETSc ILU(1) arm, while
+this arm's healthy cost at rung 2 is about 12 — so the ladder fires on an arm that is working. **Read a
+`cycles` escalation as a statement about the threshold before reading it as one about the step.**
+
+`PITZ_RETRY_ON_CYCLES` and `PITZ_BETA_START` are now exposed for exactly these two tests. Both are
+untried as of this entry; raising the threshold above the arm's healthy cost is the more targeted of the
+two, since it removes the loop's trigger rather than only its starting point. This also re-frames the
+independently recorded `beta_start = 4` run being **worse** than `beta_start = 0.5`: consistent with β
+being the wrong direction on this case rather than with anything about the preconditioner.
+
+**Two structural observations worth keeping:**
+- **`pointwise_rowlength` is EXACTLY `cell_major_rowlength`** — identical at all six points, not merely
+  close. The coloured probe assembles against a fixed block pattern, so every row of a cell has the same
+  stored nonzero count, and a stable sort by row length therefore groups them by cell on its own.
+- **Preserving the cell blocks helps RCM**: applied per-cell it beats the pointwise form at the hard
+  point (140 against 203 at self-start β = 0.5) and ties elsewhere. Consistent with the interleave being
+  load-bearing, which the two field-major arms confirm from the other side.
 
     **PLAIN aggregation, not smoothed — `pc_gamg_agg_nsmooths = 0` (measured, and the largest
     preconditioner win found on this case).** Smoothing the tentative prolongator with a Jacobi step is
@@ -5156,8 +5327,29 @@ without naming an arm was taken against **PETSc ILU(0)** and should be read that
 still selects it. The flip was made on the **dependency**, not on the numbers — the table immediately below
 is parity, and nothing here claims the host V-cycle is the better preconditioner. It carries the same
 coarsening without an optional PETSc build, and the leading block was the last part of this case needing one.
-⚠️ It does **not** generalize to `pitzDaily`, where `hostilu` FAILS outright (that case needs a fill level
-`Ilu0` cannot supply — see the fill-inversion entry above), so that case keeps `petsc`.
+⚠️ **CORRECTED 2026-08-17 — the reason given here was wrong.** This said `hostilu` fails on `pitzDaily`
+because "that case needs a fill level `Ilu0` cannot supply". It does not: it needs a different **cell
+elimination order**, and `hostilu` marches that case once given one (`PITZ_FLOW_ORDER=rcm`). See
+*"Ordering, not fill, is what fails zero-fill on `pitzDaily`"* above. The `pitzDaily` default is still
+`petsc` pending the cost comparison, but not for this reason.
+
+⚠️ **THE WALL-CLOCK COLUMN BELOW CANNOT BE ATTRIBUTED, because nothing recorded which `Ilu0` kernel was
+live.** `Ilu0` falls back to a pure-Python twin of its compiled kernel when the extension is not built,
+and it does so **silently**. The `.so` is gitignored, so it belongs to a checkout rather than a branch
+and every fresh worktree starts without one; no worktree on this machine carried it as of 2026-08-17,
+and no run log before that date printed `ilu0.COMPILED`. Some `hostilu` runs *were* compiled (the
+author confirms at least one), so the point is not that these numbers are wrong — it is that **there is
+no way to tell which are which**, which is the unfalsifiable state this file's measurement rule exists
+to prevent. **The step and cycle counts are unaffected either way**: the two kernels compute the
+identical factorization, pinned by `test_the_compiled_and_reference_paths_agree` (rtol 1e-13) — a test
+that is skipped when the extension is absent and had therefore never run on this machine until it was
+built. Re-time the wall column before quoting it; the counts stand.
+
+**Fixed structurally rather than noted (2026-08-17):** `tools/build_ext.sh` builds the extension in a
+checkout in about a second (it caches one shared build environment under `~/.cache/aquaflux`, so it
+does not need Cython in the runtime interpreter — a PEP-668 system Python refuses that);
+`validation/run_case.sh` warns at launch when it is missing; and both cases' banners print the live
+kernel, so every run from this date carries the answer in its own log.
 
 | | `petsc` (incumbent) | `hostilu` (native AMG + our ILU(0)) |
 |---|---|---|

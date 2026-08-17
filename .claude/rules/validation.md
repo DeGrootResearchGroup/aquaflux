@@ -110,6 +110,15 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
 - **Do not copy a wiring idiom from a test without checking the case matches.** The `pack_state` error
   above came from `tests/integration/test_coupled_lu.py`, where it is correct — that fixture builds
   `CoupledRANS` with no transform.
+- **⚠️ A PIVOT CENSUS MUST READ THE FACTOR, NOT THE OPERATOR HANDED TO IT.** Every consumer here
+  symmetrically equilibrates before factorizing, which forces the *operator's* diagonal to magnitude
+  exactly 1 — so a census written as `matrix.diagonal()` reports "zero negative pivots, min |pivot|
+  1.00" for every arm at every shift, including arms whose sweep diverges by 1e+59. It looks like a
+  finding ("the pivots are all healthy, so it is not a pivot problem") and it is a measurement of the
+  conditioning transform. This shipped in a sweep on 2026-08-17 and a conclusion was drawn from it
+  before being retracted. Use `Ilu0.pivots`, which exists for this; and note it stores the pivot
+  itself where PETSc stores its **reciprocal**, so a census ported between the two reports the inverse
+  of what it claims.
 - **Print one line per outer step, flushed.** A harness that collects reports and prints at the end is
   indistinguishable from a hung one, and cost thirty minutes of a run that could not have converged.
 - **State the operating point before measuring.** A harness whose banner prints `? cells` is one whose

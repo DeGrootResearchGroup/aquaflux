@@ -302,14 +302,31 @@ def load_state(coupled, path: Path | None):
     return state
 
 
-def jacobian(coupled, state, reach, _cache={}):  # noqa: B006 - a deliberate per-process memo
+def jacobian(coupled, state, reach, cache):
     """The materialized field-major Jacobian at one stencil reach, plus its fixed pattern.
 
-    Memoized because the coloured probe is the dominant cost of a build and every arm at a given reach
+    Cached because the coloured probe is the dominant cost of a build and every arm at a given reach
     wants the identical matrix -- sharing it also makes it impossible for two arms to differ for any
     reason other than the options under test.
+
+    ⚠️ **The cache is the CALLER's, keyed on reach alone, and that is why it cannot live here.** The
+    matrix depends on the state as much as on the reach, so a module-level memo would serve the first
+    state's Jacobian to every later one -- silently, since a matrix of the right shape and pattern is
+    indistinguishable from the right one. A caller measuring several states holds one cache per state
+    and drops it when it moves on, which also keeps a single materialized Jacobian in memory.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The residual whose Jacobian is probed.
+    state : jnp.ndarray
+        The state to linearize at, shape ``(n_dofs,)``.
+    reach : int
+        Stencil reach of the coloured probe.
+    cache : dict
+        Caller-owned ``{reach: (matrix, structure)}``, valid for ``state`` only.
     """
-    if reach not in _cache:
+    if reach not in cache:
         plan = _coupled_jacobian_plan(coupled, reach)
         structure = block_stencil_gather_map(plan)
         matrix = MonolithicAmgPreconditioner._materialize_jacobian(
@@ -319,11 +336,11 @@ def jacobian(coupled, state, reach, _cache={}):  # noqa: B006 - a deliberate per
             _PROBE_BATCH_SIZE,
             structure,
         )
-        _cache[reach] = (matrix, structure)
-    return _cache[reach]
+        cache[reach] = (matrix, structure)
+    return cache[reach]
 
 
-def assemble(coupled, state, arm: Arm, shift: np.ndarray, n_fields: int):
+def assemble(coupled, state, arm: Arm, shift: np.ndarray, n_fields: int, cache: dict):
     """The ``(matrix, scale, perm)`` triple the V-cycle is built from, for one arm at one shift.
 
     With ``arm.equilibrate`` the shipped transform runs: add the shift to the diagonal, symmetrically
@@ -331,7 +348,7 @@ def assemble(coupled, state, arm: Arm, shift: np.ndarray, n_fields: int):
     reorder run and the equilibration factor is one -- which is what lets the run say whether the
     zero-fill pivots are small because of the operator or because of the transform applied to it.
     """
-    matrix, structure = jacobian(coupled, state, arm.reach)
+    matrix, structure = jacobian(coupled, state, arm.reach, cache)
     if arm.equilibrate:
         return ShiftedCellMajorOperator(structure.indptr, structure.indices, n_fields).assemble(
             matrix.data, shift
@@ -393,11 +410,11 @@ def smoother_factor_census(vcycle: AmgVCycle) -> dict:
     }
 
 
-def run_arm(coupled, state, arm: Arm, shift: np.ndarray, rhs, n_fields: int) -> None:
+def run_arm(coupled, state, arm: Arm, shift: np.ndarray, rhs, n_fields: int, cache: dict) -> None:
     """Build one V-cycle and solve the REAL system with it; report cycles and the TRUE residual."""
     t0 = time.time()
     try:
-        cell_major, scale, perm = assemble(coupled, state, arm, shift, n_fields)
+        cell_major, scale, perm = assemble(coupled, state, arm, shift, n_fields, cache)
         vcycle = AmgVCycle(
             cell_major,
             scale,
@@ -473,6 +490,7 @@ def main():
     coupled = compare.build_case()["coupled"]
     n_fields = coupled.layout.dim + 3
     state = load_state(coupled, state_path)
+    cache = {}  # this state's materialized Jacobians, by reach (see `jacobian`)
     base = _monolithic_shift_source(coupled, state, _DEFAULT_SHIFT_BASIS)
     rhs = -coupled.residual(state)
     for beta in BETAS:
@@ -483,7 +501,7 @@ def main():
             flush=True,
         )
         for arm in arms:
-            run_arm(coupled, state, arm, shift, rhs, n_fields)
+            run_arm(coupled, state, arm, shift, rhs, n_fields, cache)
 
 
 if __name__ == "__main__":

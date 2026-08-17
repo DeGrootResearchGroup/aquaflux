@@ -32,6 +32,8 @@ import itertools
 import numpy as np
 import scipy.sparse as sp
 
+from .ordering import CellMajor
+
 #: Target nonzeros per row-chunk in :func:`apply_symmetric_scale`. Bounds the transient allocation
 #: there to a few megabytes rather than the size of the matrix's values; small enough to stay in
 #: cache, large enough that the per-chunk NumPy overhead is negligible.
@@ -309,62 +311,105 @@ def decouple_dof(a: sp.csr_matrix, index: int) -> sp.csr_matrix:
 # by the AMG at 3D -- load-bearing for two preconditioners with nothing to do with it.
 
 
-def cell_major_permutation(n_cells: int, n_fields: int) -> np.ndarray:
-    """Permutation from cell-major to field-major degree-of-freedom ordering.
+def equilibrate_ordered(
+    matrix: sp.spmatrix, n_fields: int, ordering
+) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
+    """Symmetrically equilibrate an assembled coupled block matrix and reorder it for elimination.
 
-    The state is stored **field-major** — degree of freedom ``(cell i, field f)`` at ``f * n + i``.
-    An incomplete factorization of the indefinite saddle is well conditioned in **cell-major** order —
-    ``(cell i, field f)`` at ``i * n_fields + f`` — which interleaves the pressure among the velocity
-    unknowns. This returns ``perm`` with ``perm[i * n_fields + f] = f * n + i``, so ``A[perm][:, perm]``
-    reorders a field-major matrix into cell-major, and ``x[perm]`` / scatter-by-``perm`` map vectors
-    across the two orderings.
+    The two conditioning transforms the indefinite Rhie--Chow saddle needs before *any* incomplete
+    factorization or multigrid smoother acts on it, shared by :func:`factorize_ilut` and the multigrid
+    preconditioners so they precondition the identical operator:
+
+    * **Symmetric square-root-diagonal equilibration** ``D A D`` with ``D = diag(1/sqrt(|diag A|))`` — the
+      momentum and continuity rows differ in scale by more than an order of magnitude, and this balances
+      them so the incomplete pivots (or the smoother's) stay well conditioned.
+    * **Reordering** by the injected elimination ordering (see :mod:`~aquaflux.solve.ordering`). For a
+      zero-fill factorization this is not a detail: it decides which entries the elimination discards,
+      and changing only the order has been measured to move a stationary sweep on this operator class
+      from amplifying the residual to contracting it.
+
+    ⚠️ **The ordering is handed the RAW matrix, not the equilibrated one, and that is deliberate.** The
+    equilibration divides every row by ``sqrt(|diag|)``, so every nonzero diagonal comes out at magnitude
+    exactly one — a value-based ordering criterion (deferring the rows with the smallest diagonal, say)
+    cannot be expressed on the equilibrated matrix at all, and one read off it would be selecting on
+    floating-point noise. The permutation is a symmetric relabelling either way, so a pattern-based
+    ordering is unaffected by the choice.
 
     Parameters
     ----------
-    n_cells : int
-        Number of cells.
+    matrix : scipy.sparse matrix
+        The assembled **field-major** coupled Jacobian (already shifted), shape ``(n_fields * n, ...)``.
     n_fields : int
         Degrees of freedom per cell.
+    ordering : EliminationOrdering
+        The elimination order, as ``permutation(matrix, n_fields) -> np.ndarray``.
 
     Returns
     -------
-    np.ndarray
-        The permutation, shape ``(n_fields * n_cells,)``.
+    reordered : scipy.sparse.csr_matrix
+        The equilibrated matrix ``(D A D)`` reordered by ``perm``, with canonical (sorted) indices.
+    scale : np.ndarray
+        The equilibration ``diag(D)``, shape ``(n_dofs,)`` — applied to a field-major vector before, and
+        after, the reordered solve/apply.
+    perm : np.ndarray
+        The elimination permutation, shape ``(n_dofs,)``.
+
+    Raises
+    ------
+    ValueError
+        If ``matrix`` is not square or its size is not a multiple of ``n_fields``.
     """
-    perm = np.empty(n_fields * n_cells, dtype=np.int64)
-    for f in range(n_fields):
-        perm[f::n_fields] = f * n_cells + np.arange(n_cells)
-    return perm
+    if matrix.shape[0] != matrix.shape[1]:
+        raise ValueError(f"equilibrate_ordered: matrix must be square, got {matrix.shape}.")
+    n_dofs = matrix.shape[0]
+    if n_dofs % n_fields != 0:
+        raise ValueError(
+            f"equilibrate_ordered: matrix size {n_dofs} is not a multiple of n_fields={n_fields}."
+        )
+    equilibrated, scale = symmetrically_equilibrate(matrix)
+    perm = ordering.permutation(matrix, n_fields)
+    reordered = equilibrated[perm][:, perm].tocsr()
+    # Canonical form, because the permutation above leaves each row's column indices OUT OF ORDER and a
+    # consumer that assumes ascending indices then reads the wrong entries. PETSc's AIJ format is exactly
+    # such a consumer: handed this matrix unsorted, a point-block-Jacobi preconditioner returns NaN in
+    # most entries while a point-Jacobi one is unaffected -- a diagonal scan does not care about column
+    # order, a block extraction does. That asymmetry looks precisely like a broken block method and is
+    # not, so the ordering is established here rather than left to each caller to remember. `sort_indices`
+    # is a no-op on an already-canonical matrix, so callers that sort defensively cost nothing.
+    reordered.sort_indices()
+    return reordered, scale, perm
 
 
 def equilibrate_cell_major(
     matrix: sp.spmatrix, n_fields: int
 ) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
-    """Symmetrically equilibrate an assembled coupled block matrix and reorder it to cell-major.
+    """:func:`equilibrate_ordered` at the cell-major interleave — the default for a coupled block.
 
-    The two conditioning transforms the indefinite Rhie--Chow saddle needs before *any* incomplete
-    factorization or multigrid smoother acts on it, shared by :func:`factorize_ilut` and the multigrid
-    preconditioner so both precondition the identical operator:
-
-    * **Symmetric square-root-diagonal equilibration** ``D A D`` with ``D = diag(1/sqrt(|diag A|))`` — the
-      momentum and continuity rows differ in scale by more than an order of magnitude, and this balances
-      them so the incomplete pivots (or the smoother's) stay well conditioned.
-    * **Cell-major reordering** — interleave the per-cell fields ``[u, v, (w,) p, k, omega]`` (rather than
-      all of one field then the next), so each cell's degrees of freedom occupy a contiguous block and a
-      pressure unknown is eliminated among the velocity unknowns of its own cell rather than after all of
-      them.
+    Interleaves the per-cell fields ``[u, v, (w,) p, k, omega]`` (rather than all of one field then the
+    next), so each cell's degrees of freedom occupy a contiguous block and a pressure unknown is
+    eliminated among the velocity unknowns of its own cell rather than after all of them.
 
     ⚠️ **On why the interleaving helps, be careful what is claimed.** An earlier version of this docstring
     said it "keeps the pressure among the velocity unknowns so the saddle does not present a zero pivot".
-    That is stronger than anything demonstrated, and the literature does not support it as stated: the
-    published saddle-point incomplete factorizations that report *stable* factorizations number velocity
-    first and pressure last — the opposite grouping — because eliminating the velocities first fills the
-    pressure diagonal before it is reached (Konshin, Olshanskii & Vassilevski, *SIAM J. Sci. Comput.*
-    37(5), 2015). What *is* proven is narrower and is about pairing rather than grouping: for F-matrices,
-    an ordering in which each pressure node is eliminated together with a connected velocity node is
-    numerically stable (de Niet & Wubs, *IMA J. Numer. Anal.* 29(1), 2009), and cell-major is a coarse
-    approximation of that. Neither result covers a Rhie–Chow (p,p) block, which is nonzero here, so this
-    ordering is a reasonable default rather than a guaranteed one.
+    That is stronger than anything demonstrated. The published saddle-point incomplete factorizations
+    that report *stable* factorizations number velocity first and pressure last — the opposite grouping —
+    because eliminating the velocities first fills the pressure diagonal before it is reached (Konshin,
+    Olshanskii & Vassilevski, *SIAM J. Sci. Comput.* 37(5), 2015). What *is* proven is narrower and is
+    about pairing rather than grouping: for F-matrices, an ordering in which each pressure node is
+    eliminated together with a connected velocity node is numerically stable (de Niet & Wubs, *IMA J.
+    Numer. Anal.* 29(1), 2009), and cell-major is a coarse approximation of that.
+
+    **Measured on a coupled velocity--pressure saddle at zero fill, the interleave wins and pressure-last
+    loses badly** — which is consistent with both results above rather than in tension with them, because
+    what makes pressure-last work is the Schur fill that eliminating the velocities creates, and a
+    zero-fill factorization discards exactly that fill. All-of-one-field-then-the-next failed at five of
+    six shift/state combinations tried, and putting the pressures first was catastrophic (a stationary
+    sweep growing by 1e+59 in one application). Read the ordering as sound *for zero fill* and as an open
+    question for a factorization that keeps fill.
+
+    ⚠️ **But the CELL ORDER within the interleave is a real and unexploited lever**, and the mesh's own
+    storage order — what this function uses — is measurably not the best one. See
+    :mod:`~aquaflux.solve.ordering`, and :func:`equilibrate_ordered` for the seam that takes another.
 
     Parameters
     ----------
@@ -378,32 +423,14 @@ def equilibrate_cell_major(
     cell_major : scipy.sparse.csr_matrix
         The equilibrated, cell-major matrix ``(D A D)`` reordered by ``perm``.
     scale : np.ndarray
-        The equilibration ``diag(D)``, shape ``(n_dofs,)`` — applied to a field-major vector before, and
-        after, the reordered solve/apply.
+        The equilibration ``diag(D)``, shape ``(n_dofs,)``.
     perm : np.ndarray
-        The cell-major permutation, shape ``(n_dofs,)`` (see :func:`cell_major_permutation`).
+        The cell-major permutation, shape ``(n_dofs,)`` (see
+        :func:`~aquaflux.solve.ordering.cell_major_permutation`).
 
     Raises
     ------
     ValueError
         If ``matrix`` is not square or its size is not a multiple of ``n_fields``.
     """
-    if matrix.shape[0] != matrix.shape[1]:
-        raise ValueError(f"equilibrate_cell_major: matrix must be square, got {matrix.shape}.")
-    n_dofs = matrix.shape[0]
-    if n_dofs % n_fields != 0:
-        raise ValueError(
-            f"equilibrate_cell_major: matrix size {n_dofs} is not a multiple of n_fields={n_fields}."
-        )
-    equilibrated, scale = symmetrically_equilibrate(matrix)
-    perm = cell_major_permutation(n_dofs // n_fields, n_fields)
-    reordered = equilibrated[perm][:, perm].tocsr()
-    # Canonical form, because the permutation above leaves each row's column indices OUT OF ORDER and a
-    # consumer that assumes ascending indices then reads the wrong entries. PETSc's AIJ format is exactly
-    # such a consumer: handed this matrix unsorted, a point-block-Jacobi preconditioner returns NaN in
-    # most entries while a point-Jacobi one is unaffected -- a diagonal scan does not care about column
-    # order, a block extraction does. That asymmetry looks precisely like a broken block method and is
-    # not, so the ordering is established here rather than left to each caller to remember. `sort_indices`
-    # is a no-op on an already-canonical matrix, so callers that sort defensively cost nothing.
-    reordered.sort_indices()
-    return reordered, scale, perm
+    return equilibrate_ordered(matrix, n_fields, CellMajor())

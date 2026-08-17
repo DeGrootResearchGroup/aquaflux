@@ -36,9 +36,10 @@ from collections.abc import Callable
 import numpy as np
 import scipy.sparse as sp
 
-from .frozen_operator import equilibrate_cell_major
+from .frozen_operator import equilibrate_ordered
 from .ilu0 import Ilu0
 from .multigrid import SmoothedHierarchy, build_convection_hierarchy
+from .ordering import CellMajor, EliminationOrdering
 
 __all__ = ["HostVCycleInverse", "host_ilu_inverse"]
 
@@ -78,20 +79,26 @@ class _LevelSmoother:
     stored factor so the adjoint needs no second one.
     """
 
-    def __init__(self, operator: sp.csr_matrix, n_fields: int, sweeps: int):
+    def __init__(
+        self, operator: sp.csr_matrix, n_fields: int, sweeps: int, ordering: EliminationOrdering
+    ):
         self.sweeps = sweeps
-        # ⚠️ EQUILIBRATE AND REORDER TO CELL-MAJOR BEFORE FACTORIZING -- this is not tidying, it is what
-        # makes an incomplete factorization possible on this operator at all. Factorized raw and
-        # field-major, the saddle's weak continuity diagonal produces an exactly singular factor and the
-        # smoother raises outright (observed on the `bfs3d` flow block). Two effects, both needed:
-        # symmetric equilibration balances momentum rows against continuity rows, which differ by more
-        # than an order of magnitude; the cell-major interleave puts each cell's own fields adjacent, so
-        # the factorization's fill stays local to a cell instead of spanning a whole field block.
+        # ⚠️ EQUILIBRATE AND REORDER BEFORE FACTORIZING -- this is not tidying, it is what makes an
+        # incomplete factorization possible on this operator at all. Factorized raw and field-major, the
+        # saddle's weak continuity diagonal produces an exactly singular factor and the smoother raises
+        # outright (observed on the `bfs3d` flow block). Two effects, both needed: symmetric
+        # equilibration balances momentum rows against continuity rows, which differ by more than an
+        # order of magnitude; the interleave puts each cell's own fields adjacent, so the factorization's
+        # fill stays local to a cell instead of spanning a whole field block.
         #
         # The host AMG this path replaces was handed exactly the same preprocessing, so it was never a
         # property of that library -- it was a step performed on the way in, and doing it here is what
         # moves the hierarchy without moving the requirement.
-        self.operator, self.scale, self.perm = equilibrate_cell_major(operator, n_fields)
+        #
+        # The ORDER the cells are visited in is injected rather than fixed, because at zero fill it
+        # decides which entries the elimination discards and is worth as much as any other single choice
+        # on this operator (see `aquaflux.solve.ordering`).
+        self.operator, self.scale, self.perm = equilibrate_ordered(operator, n_fields, ordering)
         # ZERO-FILL, and that is the whole point. A drop-tolerance factorization is a different
         # algorithm: it chooses which entries to keep by magnitude within a memory budget, so it
         # discards pattern entries and keeps fill ones. Measured on this project's flow block that
@@ -166,6 +173,18 @@ class HostVCycleInverse:
     cycles : int
         V-cycles per application. Fixed, so ``b -> x`` stays a linear map — required by the
         non-flexible outer Krylov solve and by the transposed adjoint.
+    ordering : EliminationOrdering or None
+        The order each level's smoother eliminates its unknowns in
+        (:mod:`~aquaflux.solve.ordering`). ``None`` (default) is
+        :class:`~aquaflux.solve.ordering.CellMajor` over the mesh's own cell order — the historical
+        behaviour.
+
+        ⚠️ **This is not a tuning knob of the usual kind.** A zero-fill factorization keeps only the
+        operator's own entries, so the elimination order decides which couplings it discards. Measured
+        on a coupled velocity--pressure saddle, changing nothing but this took a stationary sweep from
+        growing the residual 5.5× in one application to shrinking it, and took the Krylov solve it
+        preconditions from stalling to converging. The default is the *cheapest* order, not the best
+        one.
     sweeps : int
         Incomplete-LU sweeps per level, per pre- and post-smooth.
 
@@ -187,12 +206,14 @@ class HostVCycleInverse:
         *,
         cycles: int = 1,
         sweeps: int = 2,
+        ordering: EliminationOrdering | None = None,
         **coarsening,
     ) -> None:
         matrix = sp.csr_matrix(block)
         self._n_dofs = matrix.shape[0]
         self._cycles = cycles
         self._sweeps = sweeps
+        self._ordering = CellMajor() if ordering is None else ordering
         self._build_settings = dict(
             block_size=n_fields,
             mis_aggregation=True,
@@ -216,7 +237,7 @@ class HostVCycleInverse:
                 _HostLevel(
                     operator,
                     _prolongation(level),
-                    _LevelSmoother(operator, level.block_size, self._sweeps),
+                    _LevelSmoother(operator, level.block_size, self._sweeps, self._ordering),
                     None,
                 )
             )
