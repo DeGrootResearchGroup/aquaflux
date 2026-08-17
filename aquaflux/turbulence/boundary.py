@@ -103,10 +103,10 @@ def omega_wall(nu: jnp.ndarray, d: jnp.ndarray, k: jnp.ndarray, model: SSTModel)
     layer -- but with a blend *shape* set by ``p``. The exponent is a genuine model choice, and
     different RANS codes pick different values in the buffer layer where the two branches are
     comparable: ``p = 2`` is the quadrature blend ``sqrt(omega_vis**2 + omega_log**2)`` (Menter,
-    2003); ``p -> inf`` is the ``max(omega_vis, omega_log)`` blend (the OpenFOAM ``omegaWallFunction``
-    default); ``p ~ 1.3`` with a calibrated ``C ~ 1/3`` is the softer correlation blend Ansys Fluent
-    fits to flatten the wall shear across ``y+``. At ``p = 2, C = 1`` this is exactly the Menter
-    quadrature form.
+    2003); ``p -> inf`` approaches ``max(omega_vis, omega_log)``, the smooth proxy for a hard branch
+    switch at the laminar/log crossover; ``p ~ 1.3`` with a calibrated ``C ~ 1/3`` is the softer
+    correlation blend Ansys Fluent fits to flatten the wall shear across ``y+``. At ``p = 2, C = 1``
+    this is exactly the Menter quadrature form.
 
     The value is computed by factoring out the larger branch,
     ``m [ (omega_vis/m)**p + (omega_log/m)**p ]**(1/p)`` with ``m = max(omega_vis, omega_log)``, so
@@ -201,21 +201,25 @@ def nut_wall(nu: jnp.ndarray, d: jnp.ndarray, k: jnp.ndarray, model: SSTModel) -
     convergence). Being the wall-face value it is applied through the momentum diffusion's boundary
     coefficient, not as a cell eddy viscosity -- the interior closure stays ``nu_t = k / omega``.
 
+    Elementwise in its inputs, so a caller may gather them per wall-adjacent cell or, as the momentum
+    wall-face closure does, per wall **face** at each face's owner cell (a corner cell owns more than
+    one wall face, so the two counts differ).
+
     Parameters
     ----------
     nu : jnp.ndarray
-        Kinematic (molecular) viscosity at the wall-adjacent cells, shape ``(n_wall,)``.
+        Kinematic (molecular) viscosity at the wall-adjacent cells.
     d : jnp.ndarray
-        Wall distance of those cells (centroid to wall), shape ``(n_wall,)``.
+        Wall distance of those cells (centroid to wall).
     k : jnp.ndarray
-        Turbulent kinetic energy at those cells, shape ``(n_wall,)``.
+        Turbulent kinetic energy at those cells.
     model : SSTModel
         The model constants (reads ``beta_star``, ``kappa``, ``e_wall``, ``wall_y_star_lam``).
 
     Returns
     -------
     jnp.ndarray
-        The wall-face eddy viscosity ``nu_t,wall`` per wall-adjacent cell, shape ``(n_wall,)``.
+        The wall-face eddy viscosity ``nu_t,wall``, matching the shape of its inputs.
     """
     y_star = wall_y_star(nu, d, k, model)
     y_lam = model.wall_y_star_lam

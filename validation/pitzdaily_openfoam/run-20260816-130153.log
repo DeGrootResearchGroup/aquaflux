@@ -1,0 +1,5 @@
+pitzDaily, ? cells; stop rtol 1e-06, max 200 steps
+arm         steps  cycles   wall(s)          |R|  x_r/h
+/opt/homebrew/lib/python3.13/site-packages/numpy/linalg/_linalg.py:2406: RuntimeWarning: invalid value encountered in det
+  r = _umath_linalg.det(a, signature=signature)
+hostilu    FAILED: LinAlgError: SVD did not converge

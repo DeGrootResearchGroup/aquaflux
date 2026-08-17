@@ -88,7 +88,7 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
   two planar patches) into a genuine `dim == 2` `Mesh`. Infers the extruded axis from the two named
   caps, dedups coincident front/back nodes, reduces each extruded side quad to its 2D edge, drops the
   caps, and carries owner/neighbour + `n_cells` + `cell_zones` through 1:1 while re-indexing the
-  surviving patches (`eqx.tree_at`-free — rebuilds via `Mesh.from_csr`, which validates). It is a
+  surviving patches and carrying the periodic `neighbour_offset` onto the kept faces (`eqx.tree_at`-free — rebuilds via `Mesh.from_csr`, which validates). It is a
   **mesh** transform, not an io/OpenFOAM one: the reader (`aquaflux/io/`) only *detects* the `empty`
   patches and calls it, so the collapse is reusable and unit-tested file-free (collapse
   `structured_grid_3d(nx, ny, 1)` → matches `structured_grid_2d(nx, ny)`). Build-time only (eager
@@ -157,11 +157,16 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
     face) takes zero; it returns `None` for a non-periodic relation, so an ordinary mesh never gains
     an array of zeros. Dropping the offset does **not** raise — an absent offset is exactly what an
     ordinary mesh has — it silently un-periodises the seam, and the divergence-theorem volume of a
-    boundary-column cell collapses. `permute_cells` (identity on faces), `partition_mesh` (a row
-    subset), and `pad_partition` (real rows then zeros) all did drop it and now carry it, each with
-    its own regression test. **`collapse_extruded_direction` still drops it** — currently
-    unreachable, since no periodic mesh is 3D (only `structured_grid_2d(periodic=…)` builds one and
-    the polyMesh reader emits none); the fix is `gather_neighbour_offset(kept_faces)[:, kept_axes]`.
+    boundary-column cell collapses. **All four face-renumbering transforms carry it now**, each with
+    its own regression test: `permute_cells` (identity on faces), `partition_mesh` (a row subset),
+    `pad_partition` (real rows then zeros), and `collapse_extruded_direction` (a kept-face subset,
+    then projected onto the surviving axes — `gather_neighbour_offset(kept_faces)[:, kept_axes]`; the
+    dropped component is necessarily zero, since a periodic extruded axis would have no boundary faces
+    to be the caps the collapse removes). The collapse one is still *unreachable in production* — no
+    periodic mesh is 3D (only `structured_grid_2d(periodic=…)` builds one and the polyMesh reader
+    emits none) — so its test hand-builds a periodic extruded slab
+    (`tests/unit/test_collapse.py::_periodic_extruded_slab`); that helper is the thing to reuse if a
+    3D periodic generator is ever added.
   - `FaceNodeConnectivity` (obtained as **`mesh.face_nodes`**) — the ragged face→node relation:
     `gather_node_coords`, `perimeter_next`, `reduce_to_faces`, `vertex_mean`; the face-geometry
     schemes (`face.py`) traverse a polygon through these instead of open-coding CSR arithmetic.

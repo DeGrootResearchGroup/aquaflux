@@ -15,6 +15,40 @@ Named, swappable, independently tested numerics: face interpolation, gradient
 reconstruction, non-orthogonal correction, (eventually) Rhie–Chow. Governed by the
 root `CLAUDE.md` Engineering Principles.
 
+## ⚠️ The swept gradient sets the JACOBIAN'S STENCIL, and only on a skewed mesh (measured 2026-08-16)
+
+**`CorrectedGreenGauss` solves `A_g G = B phi` by Richardson sweeps (`SweptGradientSolve`, four by
+default), and every sweep extends the gradient's stencil by one ring — so the coupled residual reaches
+`sweeps + 1`.** That is invisible on a rectilinear mesh and decisive on a skewed one, because the
+sweep coupling is weighted entirely by the skewness offset `D_g,ip = x_f - (x_P + g*d)`: where it
+vanishes, `A_g` is diagonal, sweeps two onward add exactly nothing, and the scheme degenerates to
+compact Green-Gauss at reach 1.
+
+Measured on the two validation meshes, with **identical schemes** on both:
+
+| mesh | median skew | max skew | interior faces > 1e-10 | probed Jacobian exact at |
+|---|---|---|---|---|
+| `pitzdaily_openfoam` | 2.2e-09 | **7.5e-02** | 20049 of 24170 | **reach 5** |
+| `bfs3d_openfoam` | 7.0e-15 | 1.9e-12 | **0 of 66368** | **reach 3** |
+
+Confirmed four ways: both reach ladders; the same 2D case at `sweeps=1` floors at reach 3 exactly as
+the 3D one does; a one-hot column probe (immune to colour aliasing) shows one ring per sweep; and a
+scheme-level isolation on synthetic meshes gives gradient reach 1/1/1/1/1 rectilinear against 1/2/3/4/5
+skewed. The error a short reach leaves is carried by the **pressure column**, which is what one would
+expect — pressure enters the residual only through gradients, so it inherits the extended stencil
+undiluted.
+
+**⚠️ CONSEQUENCE (binding for any new case): `stencil_reach = 3` is a property of a SKEW-FREE MESH, not
+of this discretization.** A case on a genuinely skewed mesh needs `sweeps + 1`, in three dimensions as
+much as in two. `bfs3d` gets 3 for free because its blockMesh is rectilinear to roundoff; do not read
+its value as a default. Check with `jacobian_relative_error` on the case's own mesh — it costs a minute
+and the failure it prevents is a preconditioner built on a matrix that is not the Jacobian.
+
+**⚠️ Incidental defect, do not misread it:** `SweptGradientSolve`'s `warn_tol` diagnostic fires
+**unconditionally at `sweeps=1`**, because it measures the residual from before the last update, which
+at one sweep is the right-hand side itself (relative 1.0). It was observed firing on the skew-free mesh
+whose offsets are 1e-12. That warning is not evidence of non-orthogonality.
+
 ## Responsibility
 - Reconstruction/interpolation/gradient/**limiting** **strategy classes** (each an `equinox.Module`
   implementing a scheme `Protocol`), each a **small single-responsibility class with a

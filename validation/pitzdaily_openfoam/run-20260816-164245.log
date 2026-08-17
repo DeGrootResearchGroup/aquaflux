@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/Users/ctdegroot/cfd/.claude/worktrees/sad-poincare-95e917/validation/pitzdaily_openfoam/compare.py", line 250, in <module>
+    LEADING_INVERSE = host_ilu_inverse(**HOST_FLOW) if FLOW_INVERSE == "hostilu" else None
+                      ^^^^^^^^^^^^^^^^
+NameError: name 'host_ilu_inverse' is not defined

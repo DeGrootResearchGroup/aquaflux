@@ -5,12 +5,13 @@ because a cell's continuity balance never sees its own pressure. Rhie--Chow inte
 this by adding a pressure-difference term to the interpolated face velocity, scaled by the
 momentum "d" coefficient ``V / a_P`` (cell volume over the momentum-matrix diagonal):
 
-    u_f . n = interp(u) . n  -  (V/a_P)_f [ (p_N - p_P)/(d.n)  -  interp(grad p) . n ],
+    u_f . n = interp(u) . n  -  (V/a_P)_f [ (p_N - p_P)  -  interp(grad p) . d ] / (d.n),
 
 so the face flux ``mdot_f = rho (u_f . n) A`` depends on the *compact* pressure difference and
 couples pressure implicitly in continuity — the extra term is the difference between the compact
 and the interpolated pressure gradient, which vanishes as the mesh resolves, so consistency is
-preserved.
+preserved. Both jumps are taken along the owner→neighbour vector ``d`` (not projected on the face
+normal), so they are the same directional derivative and cancel exactly on a linear pressure field.
 
 ``a_P`` is the diagonal of the momentum equation (viscous + convective central coefficient, plus
 transient). Its convective part uses a velocity-flux *estimate* for the mass flux (not the
@@ -121,8 +122,9 @@ def momentum_diagonal(
         Per-face owner diagonal contribution on boundary faces (zero on interior faces), shape
         ``(n_faces,)`` — each patch's :meth:`~aquaflux.flow.boundary.FlowBoundary.momentum_diagonal_coefficient`,
         so a zero-gradient outlet drops the viscous term and a wall drops the convective one. When
-        omitted, every boundary face contributes the full interior-style ``viscous + max(mdot, 0)``
-        (the leading-order form; only the pure geometry/unit tests rely on this default).
+        omitted, every boundary face contributes the full interior-style ``viscous + max(mdot, 0)``:
+        that plain all-faces form is what the frozen preconditioner and the pseudo-transient shift are
+        built from (a forward-path stabilization scale, never the residual's operator coefficient).
 
     Returns
     -------

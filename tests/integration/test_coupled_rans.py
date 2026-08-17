@@ -2,8 +2,8 @@
 
 The unfrozen residual ``R(u, p, k, omega)`` is solved as **one** Newton system (globalized by the
 coupled pseudo-transient continuation), self-started from the hybrid initial condition -- no
-segregated pre-smooth. These check the three properties that make it the design note's target
-engine (S5): it converges the coupled system to
+segregated pre-smooth. These check the three properties that make it the sensitivity engine, rather
+than the segregated loop: it converges the coupled system to
 machine precision with the turbulence field positive and healthy; the coupled fixed point is the
 *same* state the segregated Picard loop converges to; and -- handed to the implicit solver -- it
 yields the exact coupled adjoint (a single transpose solve on the unfrozen residual), matching finite

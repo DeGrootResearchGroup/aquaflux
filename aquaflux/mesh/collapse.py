@@ -12,7 +12,9 @@ format has no genuine 2D mode. :func:`collapse_extruded_direction` removes it, r
 - every remaining face is an extruded side quad, which reduces to the 2D edge joining its two
   distinct in-plane endpoints;
 - owner/neighbour, the cell count, and the cell zones carry through unchanged (cells are 1:1),
-  and the surviving face patches are re-indexed onto the reduced face numbering.
+  the surviving face patches are re-indexed onto the reduced face numbering, and a
+  streamwise-periodic seam keeps its neighbour-image translation, projected onto the two
+  surviving axes.
 
 This is a build-time preprocessing transform (eager numpy, then a validated rebuild), not part of
 the differentiable solve — it changes the mesh topology, not any field. It is written against the
@@ -89,7 +91,7 @@ def collapse_extruded_direction(mesh: Mesh, removed_patch_names: Sequence[str]) 
         raise ValueError(f"capping patches {removed} contain no faces")
 
     extruded_axis = _extruded_axis(removed, cap_faces, offsets, indices, node_coords, tolerance)
-    kept_axes = [axis for axis in range(3) if axis != extruded_axis]
+    kept_axes = np.array([axis for axis in range(3) if axis != extruded_axis])
 
     node_map, new_coords = _collapse_nodes(node_coords[:, kept_axes], tolerance)
 
@@ -99,6 +101,13 @@ def collapse_extruded_direction(mesh: Mesh, removed_patch_names: Sequence[str]) 
     edge_offsets = np.arange(kept_faces.size + 1) * 2
     owner = np.asarray(mesh.face_cells.owner)[kept_faces]
     neighbour = np.asarray(mesh.face_cells.neighbour)[kept_faces]
+    # A streamwise-periodic seam must survive the face renumbering: its per-face neighbour-image
+    # translation is carried onto the kept faces and projected onto the two surviving axes. The
+    # dropped component is necessarily zero — a periodic extruded axis would have no boundary
+    # faces to serve as the caps this transform removes.
+    offset = mesh.face_cells.gather_neighbour_offset(kept_faces)
+    if offset is not None:
+        offset = offset[:, kept_axes]
 
     return Mesh.from_csr(
         new_coords,
@@ -109,6 +118,7 @@ def collapse_extruded_direction(mesh: Mesh, removed_patch_names: Sequence[str]) 
         n_cells=mesh.n_cells,
         cell_zones=_carry_cell_zones(mesh),
         face_patches=_carry_face_patches(mesh, removed, kept_faces),
+        neighbour_offset=offset,
     )
 
 

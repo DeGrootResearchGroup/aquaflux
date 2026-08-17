@@ -9,7 +9,8 @@ drives them both depend on it, not on each other.
 
 :class:`FaceContext` carries only what is genuinely shared across operators or expensive to form
 once: the connectivity and geometry, the weak boundary face values, the reconstructed cell
-gradient (a linear solve, so formed once and reused), and the per-cell diffusion coefficient.
+gradient (a linear solve, so formed once and reused), and the evaluated per-cell property map
+(density, viscosity, conductivity, ...), from which each operator reads the property it names.
 Each operator **gathers its own owner/neighbour inputs** from it — ``field[context.face_cells.owner]``
 and friends — so an operator never pays to gather another operator's fields (a diffusion-only
 solve never forms an advection limiter, for instance). That per-operator gather also makes each

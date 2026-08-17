@@ -116,7 +116,7 @@ def scalar_pseudo_transient_solve(
     :class:`~aquaflux.solve.PseudoTransientStep` engine *is* adjoint-transparent -- its shift and
     preconditioner are frozen and vanish at the fixed point -- so the exact coupled sensitivity is the
     fully-coupled ``R(u, p, k, omega)`` implicit-function-theorem adjoint (threading the closure fields
-    as ``theta``), the deferred monolithic-coupling step, not this segregated forward march.
+    as ``theta``) of :func:`~aquaflux.turbulence.solve_coupled`, not this segregated forward march.
 
     Parameters
     ----------
@@ -135,9 +135,10 @@ def scalar_pseudo_transient_solve(
     Returns
     -------
     callable
-        ``solve_scalar(residual, state, policy) -> state``. Reverse-differentiable through the
-        converged scalar solve by the implicit-function-theorem adjoint (the ``jit`` and the shift are
-        transparent to it).
+        ``solve_scalar(residual, state, policy) -> state``. Forward-only: the residual is a bare
+        ``phi -> R`` with its closure fields baked in, so there are no differentiable parameters and
+        differentiating through it raises rather than silently dropping the coupling gradient (see
+        above).
     """
 
     @eqx.filter_jit

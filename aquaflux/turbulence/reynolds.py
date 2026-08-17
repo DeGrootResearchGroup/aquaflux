@@ -130,7 +130,7 @@ def solve_reynolds_continuation(
     schedule: ReynoldsSchedule | None = None,
     intermediate_rtol: float | None = 1e-2,
     intermediate_atol: float | None = None,
-    point_setup: Callable[[CoupledRANS, jnp.ndarray], dict] | None = None,
+    point_setup: Callable[[CoupledRANS, jnp.ndarray, ReynoldsPoint], dict] | None = None,
     **solve_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system by Reynolds-number continuation, returning the target-Re root.
@@ -188,7 +188,7 @@ def solve_reynolds_continuation(
         seed is materialized from :func:`~aquaflux.turbulence.hybrid_initialize` here, so the built
         continuation freezes at the same state the solve starts from). Typical use::
 
-            point_setup=lambda comp, state: {
+            point_setup=lambda comp, state, point: {
                 "continuation": coupled_lu_continuation(comp, state, inner_steps=..., inner_tol=...),
                 "precondition_step": lu_beta_tracking_refresh(comp),
             }

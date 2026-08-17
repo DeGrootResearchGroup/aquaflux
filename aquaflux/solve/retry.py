@@ -135,10 +135,13 @@ class RetryPolicy:
         if schedule is None or not hasattr(schedule, "beta"):
             raise TypeError(
                 "the beta-escalation retry (RetryPolicy.on_cycles / on_alpha) drives the "
-                "pseudo-transient shift strength, so it needs a forward step that carries a "
-                "`relaxation_schedule` with a readable `beta` (a PseudoTransientStep or a "
-                f"DualTimeStep). {type(forward_step).__name__} has none, so the retry would silently "
-                "do nothing. Either use a shifted step, or leave both thresholds unset."
+                "pseudo-transient shift strength, so it needs a forward step whose "
+                "`relaxation_schedule` exposes a readable `beta` -- a ConstantRelaxation, which a "
+                "StepControl swaps onto a PseudoTransientStep or a DualTimeStep each iteration. The "
+                "default SwitchedEvolutionRelaxation those steps are built with exposes none, so "
+                f"constructing one is not enough on its own. {type(forward_step).__name__} has no "
+                "readable `beta`, so the retry would silently do nothing. Either run the step under "
+                "a step control, or leave both thresholds unset."
             )
 
     def with_inner_abort(self, forward_step: ForwardStep) -> ForwardStep:

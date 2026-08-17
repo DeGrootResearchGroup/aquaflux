@@ -514,7 +514,13 @@ def _flush_print(message: str) -> None:
     print(message, flush=True)
 
 
-FLOW_INVERSE = os.environ.get("BFS3D_FLOW_INVERSE", "petsc")
+#: ⚠️ THE DEFAULT IS `hostilu`, NOT `petsc`, AND THE REASON IS THE DEPENDENCY RATHER THAN THE NUMBERS.
+#: The two are at parity on a full march (the entry below has the per-rung breakdown), so nothing here
+#: claims the host V-cycle is the better preconditioner. What it is, is the same coarsening without an
+#: optional PETSc build: the leading block was the last part of this case that required one, and a
+#: default nobody selects is a default nobody maintains. `BFS3D_FLOW_INVERSE=petsc` restores the
+#: incumbent, and both arms stay measured and runnable so the pair can be re-adjudicated.
+FLOW_INVERSE = os.environ.get("BFS3D_FLOW_INVERSE", "hostilu")
 if FLOW_INVERSE not in ("petsc", "native", "hostilu"):
     raise SystemExit(
         f"BFS3D_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'native', 'hostilu']"

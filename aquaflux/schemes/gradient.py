@@ -253,15 +253,16 @@ class SweptGradientSolve(GradientSolve):
     differentiates only through a handful of matvecs, not through a full inner GMRES (which made the
     :class:`GmresGradientSolve` alternative impractical there).
 
-    Because ``A_g`` is volume-dominated the iteration converges in few sweeps, and the count it needs
-    is set by the **skewness, not the mesh size** — which is what makes the fixed-sweep apply ``O(n)``.
-    The default ``sweeps=4`` is well inside discretization error but is **not** the exact solve: on a
-    randomly perturbed grid its departure from :class:`GmresGradientSolve` runs ~2e-8 at 5 %
-    perturbation, ~3e-5 at 25 % and ~1e-3 at 40 %, each sweep buying roughly another order. A
-    too-skewed mesh needs more; rather than pay for a data-dependent stop (which would defeat the
-    cheap unrolled differentiation), the residual the last sweep already computed is checked against
-    ``warn_tol`` and a **warning** is emitted once if the sweeps are under-resolved — a diagnostic, not
-    a termination.
+    Because ``A_g`` is volume-dominated the iteration converges in few sweeps, and the count needed is
+    set by the **skewness, not the mesh size** — which is what makes the fixed-sweep apply ``O(n)``. The
+    default ``sweeps=4`` stays well within discretization error but is **not** the exact solve: on a
+    randomly perturbed 16x16 grid the relative departure from :class:`GmresGradientSolve` is ~3e-7 at 5%
+    perturbation and ~3e-4 at 20%, reaching the floating-point floor at ~12 sweeps (5%) and ~20 (20%).
+    That is why the tests asserting machine-precision properties of the *discretization* pin the exact
+    solve rather than this one. A too-skewed mesh needs more; rather than pay for a data-dependent stop
+    (which would defeat the cheap unrolled differentiation), the residual the last sweep already
+    computed is checked against ``warn_tol`` and a **warning** is emitted once if the sweeps are
+    under-resolved — a diagnostic, not a termination.
 
     **The count also sets how far a residual built on this reaches across the cell graph**, because
     each sweep applies ``A_g`` and ``A_g`` couples a cell to its face neighbours. That is a constraint

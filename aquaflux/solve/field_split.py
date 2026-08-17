@@ -409,9 +409,11 @@ def build_block_triangular_field_split(
     smoother_sweeps : int
         Level-smoother sweeps on the **leading** block. Four is the measured default for a
         pressure-velocity saddle, where the sweeps are load-bearing: Jacobi-class smoothers do not
-        converge on that block at all, so it is the half that needs the incomplete-LU work.
+        converge on that block at all, so it is the half that needs the incomplete-LU work. Ignored
+        when ``leading_inverse`` supplies that block's inverse directly.
     trailing_smoother_sweeps : int
-        Level-smoother sweeps on the **trailing** block, defaulting to **one** rather than four. The two
+        Level-smoother sweeps on the **trailing** block, defaulting to **one** rather than four, and
+        ignored when ``trailing_inverse`` supplies that block's inverse directly. The two
         halves are not the same kind of equation and do not want the same amount of smoothing: the
         trailing group is a transported-scalar pair with a genuine diagonal, a far easier operator than
         the saddle, and the extra sweeps buy nothing on it. Measured on a three-dimensional
@@ -477,9 +479,8 @@ class _TrailingFirstFieldSplit(BlockTriangularFieldSplit):
 
     Same algebra with the two groups' roles exchanged, so it supplies only what genuinely differs --
     which triangle of the operator it retains, and which group it solves first. ``apply`` is the base's,
-    reading the order this constructor fixes; it used to be a mirrored copy of the base's body, 14 lines
-    differing in 5, with the base's explanation of why the transposed coupling is formed once dropped
-    from the copy.
+    reading the order this constructor fixes -- the ordering cannot change after construction, so
+    resolving it here keeps a single ``apply`` body rather than two mirrored ones.
     """
 
     def __init__(
@@ -713,12 +714,10 @@ def _native_nodal_cycle(
 class NodalNativeInverse(NativeHierarchyInverse):
     """A block inverse from ONE JAX-native hierarchy over the whole group, coarsening cells.
 
-    It replaced an earlier arrangement of one hierarchy PER FIELD, composed block-triangularly, which
-    existed only because the aggregation used to be field-blind and could be handed a single field at a
-    time. Given a block size it coarsens **cells**, so one hierarchy spans the group and the cross-field
-    coupling sits inside the operator being coarsened rather than approximated away outside it -- which
-    is why the per-field pair was a weaker object, why its measurements never transferred, and why it
-    has since been deleted.
+    Given a block size it coarsens **cells**, so one hierarchy spans the whole group and the cross-field
+    coupling sits inside the operator being coarsened rather than being approximated away outside it.
+    That is what makes it stronger than a per-field hierarchy composed block-triangularly, and why a
+    measurement taken on such a pair does not transfer here.
 
     Two things have to change together and neither suffices alone — measured, both refused otherwise:
     the aggregation must coarsen cells, and the level smoother must invert each cell's dense block
@@ -738,6 +737,16 @@ class NodalNativeInverse(NativeHierarchyInverse):
         non-flexible outer Krylov and by the transposed adjoint solve.
     sweeps : int
         Smoother sweeps per level.
+    aggressive_levels : int
+        Levels coarsened on the **squared** graph, starting from the finest. ``1`` (default) is the
+        aggressive first level the defaults note below describes.
+    prolongation_smoothing : str
+        Which prolongator the hierarchy builds — ``"none"`` (default, the unsmoothed tentative
+        prolongation), ``"symmetric-part"`` or ``"standard"``.
+    spectral_damping : bool
+        Scale the smoother's relaxation by the level's largest eigenvalue estimate. ``False``
+        (default) is the undamped sweep the note below explains; it also selects ``omega``'s meaning,
+        which is why the two travel together.
     equilibrate : bool
         Coarsen the operator rescaled to a unit-magnitude diagonal; see the note below.
 
@@ -753,10 +762,9 @@ class NodalNativeInverse(NativeHierarchyInverse):
 
     **``equilibrate`` rescales each cell block to a unit-magnitude diagonal**, which leaves the per-cell
     block triangular with a determinant of exactly one, so the block solve cannot meet a singular block.
-    That was the original reason for the default: raw, a developed state of the coupled turbulence block
-    produced blocks the build rejected, aborting a march at a refresh. The rejection test has since been
-    replaced by a row-norm (Hadamard) determinant bound, which is invariant under rescaling any row or
-    column, so the rescaling is no longer what keeps the build safe.
+    It is **not** what keeps the build safe, though: the singularity test is a row-norm (Hadamard)
+    determinant bound, which is invariant under rescaling any row or column, so it reaches the same
+    verdict either way.
 
     **It is not a free choice on a marched solve, and better conditioning is not the deciding property.**
     Rescaling is close to a similarity transform on the Jacobi-preconditioned operator, so the smoother

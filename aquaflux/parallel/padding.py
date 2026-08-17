@@ -328,7 +328,8 @@ def pad_partition(
     # --- nodes --------------------------------------------------------------------------
     # Node counts are ragged across partitions (each carries only its own nodes), so the node
     # coordinates are padded to a common count with copies of node 0 — a real, finite point. The
-    # padding nodes are referenced by nothing (padded faces list no nodes), so their value is inert.
+    # padding nodes are referenced by nothing (the padded face-node incidences below all point at
+    # node 0), so their value is inert.
     node_coords_real = np.asarray(local_mesh.node_coords)
     node_coords = np.tile(node_coords_real[0], (layout.n_nodes_max, 1))
     node_coords[: node_coords_real.shape[0]] = node_coords_real
