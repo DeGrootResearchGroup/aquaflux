@@ -1072,6 +1072,96 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     Worth knowing before adding a second spelling of it: prefer the floor, which is explicit about being
     preconditioner-only.
 
+    **⚠️⚠️ THE FILL RANKING INVERTS BETWEEN CASES — `bfs3d` WANTS ZERO FILL AND `pitzDaily` WANTS ONE,
+    AND COPYING THE VALUE ACROSS STOPS THE OTHER CASE DEAD (measured 2026-08-16).** Everything in the
+    bundle above was measured on `bfs3d`, and this one does not transfer. On the 2D `pitzDaily` leading
+    `[u, v, p]` block, at the cold seed the march fails on, right-preconditioned GMRES on the TRUE
+    residual, matrix exact to 1.5e-15:
+
+    | β | ILU(0) ×4 (the `bfs3d` value) | ILU(1) ×4 |
+    |---|---|---|
+    | 2.0 | one-apply 1.36e+28 → 300 matvecs, true **3.50** | one-apply 7.4e-02 → **1 matvec** to the 0.3 stop, 10 to 1.7e-09 |
+    | 0.5 | one-apply 1.14e+14 → true **0.984** | **1 matvec** |
+
+    **At zero fill the level sweep is not a contraction on that block — it AMPLIFIES, and the sweeps
+    compound it: one apply reads 9.88e+05 at one sweep and 1.56e+31 at four.** Read "more smoothing
+    makes it worse" as the signature; a merely weak smoother improves with sweeps.
+
+    **The discriminator is a pivot census, and it inverts.** `pitzDaily`'s ILU(0) carries **negative
+    pivots at every shift** (27/25/9 of 36675 at β 2/0.5/0), min |pivot| 5.9e-03 — about twenty times
+    smaller than `bfs3d`'s, whose ILU(0) has **zero** negatives at any shift (min |pivot| 1.2e-01 …
+    1.9e-01, median 1.02, max factor entry 8.0). So on one case the FILL produces the bad pivots and
+    dropping it is the fix; on the other, dropping it produces them and the fill is the fix.
+
+    **✅ AND THE SIMPLE-SMOOTHED HIERARCHY ESCAPES BOTH THE FILL AND THE REACH — the fastest arm on
+    `pitzDaily`, at HALF the Jacobian (2026-08-16).** Same case, same everything but the leading
+    inverse and the probe's reach; three Reynolds rungs; `x_r/h` identical to four decimals in every
+    converging arm, so this is a cost comparison and not an accuracy one:
+
+    | leading inverse | reach 3 | reach 5 |
+    |---|---|---|
+    | PETSc **ILU(1)** | **fails** (300 matvecs, true 3.36) | converges — 74 steps, 321 cycles, **628 s** |
+    | PETSc **ILU(0)** | fails | fails (α 0.000, NaN by step 4) |
+    | our **ILU(0)** (`hostilu`) | fails | fails (α 0.000, inf by step 3) |
+    | **native SIMPLE** | **converges — 71 steps, 395 cycles, 550 s** | converges — 71, 408, 799 s |
+
+    **SIMPLE is REACH-INSENSITIVE, and that is the load-bearing observation.** Between reach 3 and
+    reach 5 it takes the **same 71 steps**, cycles within 3 % (395 against 408) and a final residual
+    identical to four figures (5.095e-06 against 5.097e-06) — while the Jacobian halves (6.3M nonzeros
+    against 13.3M) and the march is **31 % shorter**. It simply absorbs the ~2e-07 perturbation that a
+    short reach leaves in the pressure column.
+
+    **The mechanism is which preconditioners inherit the stored SPARSITY.** An incomplete
+    factorization takes its pattern from it, so a corrupted pattern gives a corrupted factor and
+    ILU(1) *requires* reach 5 here. SIMPLE relaxes through diagonal and Schur approximations and takes
+    no pattern at all, so the same corruption is merely a slightly wrong operator. **Shortening the
+    reach is free for SIMPLE and fatal for an ILU** — which is the argument for the reach as a
+    preconditioner-family choice rather than a case constant.
+
+    At reach 3 SIMPLE also beats the incumbent outright, 550 s against 628 s (12 %).
+
+    ⚠️ **One run per arm, and this case has no measured march-level noise floor.** The step counts and
+    cycle counts are deterministic and carry the result; the 12 % wall margin over PETSc is the softer
+    number. ⚠️ **And SIMPLE's own settings are still the sibling case's** (`strength_threshold` 0.25,
+    2 sweeps, 5 levels) on a mesh that coarsens about 3× per level where that one manages 24×, so the
+    arm is not at its best here — `PITZ_FLOW_SWEEPS` and the threshold are unexplored.
+
+    **✅ CONFIRMED ON A SECOND, INDEPENDENT ZERO-FILL IMPLEMENTATION — the mechanism is the FILL, not
+    PETSc (2026-08-16).** `HostVCycleInverse` is this package's own hierarchy smoothed by its own
+    `Ilu0`: different coarsening, different factorization code, different language even. Run as the
+    leading inverse on `pitzDaily` it fails identically to PETSc's zero-fill smoother — step 1 alpha
+    0.000 with the residual above its own starting value, step 2 at the shift ceiling, **non-finite by
+    step 3** — while PETSc's ILU(1) converges the same case in 74 steps and 628 s. Two implementations
+    agreeing in failure, against one differing only in fill, is what puts this on two legs rather than
+    one.
+
+    **⚠️ CONSEQUENCE FOR TAKING PETSc OFF THIS PATH: `Ilu0` IS ZERO-FILL BY CONSTRUCTION AND HAS NO
+    FILL PARAMETER**, so `HostVCycleInverse` cannot serve a case that needs one. That is a concrete,
+    specifiable gap rather than a mystery: a level-of-fill incomplete factorization is what the host
+    V-cycle would need before it can replace the incumbent everywhere. Note the gap is invisible from
+    the case that motivated the host V-cycle, whose block wants exactly zero fill.
+
+    **⚠️ Three mechanisms were refuted on the way, each of which had a plausible story:**
+    - **NOT the pressure/momentum scale split.** The 3D block's split is *comparable or worse* at
+      matched β (pressure min |diag| 3.42e-07 against 2D's 4.19e-05; equilibrated max entry 81.9 at
+      β = 0 against 24.3) and it converges. Decisively: an exact LU of the *same* equilibrated 2D matrix
+      solves it in 1 matvec to 9.9e-15 while ILU(0) of it diverges — two factorizations of one matrix
+      ranking oppositely cannot be a scaling effect.
+    - **NOT the field split.** The monolithic five-field V-cycle fails too (one-apply 1.94e+12).
+    - **NOT the coarse space.** `coarse_eq_limit` 2000 (2 levels, 402 coarse equations) and `None`
+      (4 levels, 27) give **identical** one-apply 1.557e+31.
+    - **NOT a `spilu`-style broken factor.** The 1e+38 resembles the recorded threshold-ILU blow-up but
+      is not one: max |ILU(0) factor entry| is 110–338, not 1e+23. It is stationary-sweep amplification.
+
+    **⚠️ AND THE REACH AND THE FILL MUST BE VARIED TOGETHER.** Neither alone helps on `pitzDaily`:
+    reach 3 + fill 1 fails (300 matvecs, true 3.36), reach 5 + fill 0 fails (true 3.50), reach 5 +
+    fill 1 takes ONE matvec. A one-variable sweep measured reach 5 as "step-for-step identical, 35 %
+    dearer, buys nothing" and it was reverted on that basis — a correct measurement of the wrong pair.
+
+    **⚠️ STILL OPEN: at β = 0 BOTH fills fail on `pitzDaily`** (true 0.458 and 0.434). No march visits
+    that shift (`PC_BETA_FLOOR` 0.05), but it is the adjoint's operator, so a `jax.grad` on this case
+    will meet it.
+
     **PLAIN aggregation, not smoothed — `pc_gamg_agg_nsmooths = 0` (measured, and the largest
     preconditioner win found on this case).** Smoothing the tentative prolongator with a Jacobi step is
     GAMG's default and is right for an M-matrix-like operator; on a strongly indefinite saddle it
@@ -4384,6 +4474,15 @@ this seam needs it. That survives the change of factorization.
 and the first time the hand-written hierarchy and factorization have carried a march rather than a
 single solve.** Two full 3-rung cold marches differing in **one** environment variable
 (`BFS3D_FLOW_INVERSE`), same commit, same machine, back to back, nothing else running:
+
+**⚠️ `hostilu` IS NOW `bfs3d`'s DEFAULT LEADING INVERSE (2026-08-16), so "the incumbent" changed meaning
+on that date.** Every measurement in this file that says "the incumbent" of the `bfs3d` **leading** block
+without naming an arm was taken against **PETSc ILU(0)** and should be read that way; `BFS3D_FLOW_INVERSE=petsc`
+still selects it. The flip was made on the **dependency**, not on the numbers — the table immediately below
+is parity, and nothing here claims the host V-cycle is the better preconditioner. It carries the same
+coarsening without an optional PETSc build, and the leading block was the last part of this case needing one.
+⚠️ It does **not** generalize to `pitzDaily`, where `hostilu` FAILS outright (that case needs a fill level
+`Ilu0` cannot supply — see the fill-inversion entry above), so that case keeps `petsc`.
 
 | | `petsc` (incumbent) | `hostilu` (native AMG + our ILU(0)) |
 |---|---|---|

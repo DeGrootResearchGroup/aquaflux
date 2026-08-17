@@ -90,6 +90,7 @@ from .field_split import (
 from .host_preconditioner import HostFactors, HostPreconditioner
 from .native_inverse import NativeHierarchyInverse
 from .host_vcycle import HostVCycleInverse, host_ilu_inverse
+from .ilu0 import COMPILED, Ilu0
 from .refresh_timing import PhaseTimer, RefreshTiming
 from .ilut_preconditioner import MonolithicIlutPreconditioner
 from .lu_preconditioner import MonolithicLuPreconditioner
@@ -173,6 +174,7 @@ from .step_control import (
 )
 
 __all__ = [
+    "COMPILED",
     "NO_REFRESH",
     "NO_RETRIES",
     "AirHierarchy",
@@ -195,6 +197,7 @@ __all__ = [
     "HostFactors",
     "HostPreconditioner",
     "HostVCycleInverse",
+    "Ilu0",
     "ImplicitNewtonSolver",
     "InnerIterateCheckpointer",
     "LineSearchGrowth",

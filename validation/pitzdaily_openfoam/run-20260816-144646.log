@@ -1,0 +1,220 @@
+OpenFOAM: 12225 cells, Ux in [-2.716, 10.299]
+[configuration]
+  dual-time inner steps / tol: 5 / 0.01
+  k positivity floor: 1e-08
+  inner forward rtol (row-scaled) / restart: 0.3 / 15
+  cycle budget: 42
+  retry on cycles / alpha: 10 / 0.01
+  step control: CflResidualDualTimeControl
+  Reynolds continuation points: 2
+  preconditioner refresh: on 3 restart cycles (mid-step)
+  smoother fill / sweeps / coarse limit: 0 / 4 / 2000
+  preconditioner beta floor: 0.05
+  field split / trailing sweeps: True / 1
+  trailing inverse: native nodal
+  probe column reach: uniform
+  forward restart / max restarts: 15 / 14
+  k positivity projection: False
+  stop (rtol, atol): 1e-06, 1e-08
+[point 1/3 (Re/100)]
+
+  G is the implicit timestep's own residual, R + beta*d*(phi - phi_n); the inner loop drives
+  it to zero. R is the STEADY residual at the stepped state -- the march's convergence measure.
+  Driving G to zero does not drive R to zero: the two terms cancel there,
+  leaving R = -beta*d*(phi - phi_n). So a step's R is NOT its last 'G out'; it is the residual
+  the next step starts from, and appears there as inner-0's 'G in'.
+
+    +- step 1 ------------------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  8.743e-02 |  9.728e-02 |  1.113 | 0.000 |
+    +-------+------+------------+------------+--------+-------+
+  -> redo step 1 (attempt 2): cycles, beta -> 1.0000
+
+    +- step 1  attempt 2 -------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  8.743e-02 |  9.160e-02 |  1.048 | 0.001 |
+    +-------+------+------------+------------+--------+-------+
+  -> redo step 1 (attempt 3): cycles, beta -> 2.0000
+
+    +- step 1  attempt 3 -------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  8.743e-02 |  9.526e-02 |  1.090 | 0.001 |
+    +-------+------+------------+------------+--------+-------+
+
+reference |R0| = 8.7428e-02, stopping at |R| <= 8.743e-08
+
++= summary stats =============================================+
+| step |   t(s) |   beta | in | cyc |         R | a_min | flg |
++------+--------+--------+----+-----+-----------+-------+-----+
+|    1 |     53 | 2.0000 |  1 |  12 | 9.510e-02 | 0.000 | Le2 |
++=============================================================+
+| field       |   rel. change |         resid |          rate |
++-------------+---------------+---------------+---------------+
+| u           |            -- |            -- |            -- |
+| v           |            -- |            -- |            -- |
+| p           |            -- |            -- |            -- |
+| k           |            -- |            -- |            -- |
+| omega       |            -- |            -- |            -- |
+| nut         |            -- |            -- |            -- |
++=============================================================+
+| pc inner 0.8s (probe 0.6 assemble 0.0 refactor 0.2)         |
+| limit 1.41e-03                                              |
+| cum 12                                                      |
++=============================================================+
+
+    +- step 2 ------------------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  9.400e-02 |  1.283e-01 |  1.365 | 0.009 |
+    +-------+------+------------+------------+--------+-------+
+  -> redo step 2 (attempt 2): cycles, beta -> 8.0000
+
+    +- step 2  attempt 2 -------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  9.400e-02 |  3.874e-01 |  4.121 | 0.005 |
+    +-------+------+------------+------------+--------+-------+
+  -> redo step 2 (attempt 3): cycles, beta -> 16.0000
+
+    +- step 2  attempt 3 -------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |   12 |  9.400e-02 |  3.109e-01 |  3.307 | 0.010 |
+    +-------+------+------------+------------+--------+-------+
+
++= summary stats =============================================+
+| step |   t(s) |   beta | in | cyc |         R | a_min | flg |
++------+--------+--------+----+-----+-----------+-------+-----+
+|    2 |     74 | 16.0000 |  1 |  12 | 3.285e-01 | 0.000 | Le2 |
++=============================================================+
+| field       |   rel. change |         resid |          rate |
++-------------+---------------+---------------+---------------+
+| u           |     6.704e-02 |            -- |            -- |
+| v           |     3.453e-01 |            -- |            -- |
+| p           |     6.239e+00 |            -- |            -- |
+| k           |     2.821e-02 |            -- |            -- |
+| omega       |     1.975e-04 |            -- |            -- |
+| nut         |     4.360e-02 |            -- |            -- |
++=============================================================+
+| pc inner 0.8s (probe 0.6 assemble 0.0 refactor 0.2)         |
+| limit 9.53e-03                                              |
+| cum 24                                                      |
++=============================================================+
+
+    +- step 3 ------------------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |    1 |  2.694e-01 |        nan |    nan | 0.001 |
+    +-------+------+------------+------------+--------+-------+
+  -> redo step 3 (attempt 2): diverged, beta -> 8.0000
+
+    +- step 3  attempt 2 -------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |    1 |  2.694e-01 |        nan |    nan | 0.001 |
+    +-------+------+------------+------------+--------+-------+
+  -> redo step 3 (attempt 3): diverged, beta -> 16.0000
+
+    +- step 3  attempt 3 -------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |    1 |  2.694e-01 |        nan |    nan | 0.001 |
+    +-------+------+------------+------------+--------+-------+
+  -> redo step 3 (attempt 4): solver, beta 16.0000 unchanged
+
+    +- step 3  attempt 4 -------------------------------------+
+    | inner |  cyc |       G in |      G out |   rate | alpha |
+    +-------+------+------------+------------+--------+-------+
+    |     0 |    1 |  2.694e-01 |        nan |    nan | 0.001 |
+    +-------+------+------------+------------+--------+-------+
+
++= summary stats =============================================+
+| step |   t(s) |   beta | in | cyc |         R | a_min | flg |
++------+--------+--------+----+-----+-----------+-------+-----+
+|    3 |     90 | 16.0000 |  1 |   1 |       nan | 0.000 | e2R |
++=============================================================+
+| field       |   rel. change |         resid |          rate |
++-------------+---------------+---------------+---------------+
+| u           |            -- |            -- |            -- |
+| v           |            -- |            -- |            -- |
+| p           |            -- |            -- |            -- |
+| k           |            -- |            -- |            -- |
+| omega       |            -- |            -- |            -- |
+| nut         |            -- |            -- |            -- |
++=============================================================+
+| pc none 0.0s                                                |
+| cum 25                                                      |
++=============================================================+
+Traceback (most recent call last):
+  File "/Users/ctdegroot/cfd/.claude/worktrees/sad-poincare-95e917/aquaflux/turbulence/reynolds.py", line 282, in solve_reynolds_continuation
+    flow, k, omega = _point_solve(companion, seed, ramp_kwargs, point)
+                     ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ctdegroot/cfd/.claude/worktrees/sad-poincare-95e917/aquaflux/turbulence/reynolds.py", line 273, in _point_solve
+    return solve_coupled(
+        assembler, *seed_fields, **{**base_kwargs, **point_setup(assembler, packed, point)}
+    )
+  File "/Users/ctdegroot/cfd/.claude/worktrees/sad-poincare-95e917/aquaflux/turbulence/coupled.py", line 3709, in solve_coupled
+    solved = solver.solve(lambda s, c: c.residual(s), state, coupled)
+  File "/opt/homebrew/lib/python3.13/site-packages/equinox/_module/_prebuilt.py", line 46, in __call__
+    return self.__func__(self.__self__, *args, **kwargs)
+           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ctdegroot/cfd/.claude/worktrees/sad-poincare-95e917/aquaflux/solve/implicit.py", line 808, in solve
+    return _implicit_solve(
+        residual_fn,
+    ...<9 lines>...
+        forward.norm(),
+    )
+  File "/Users/ctdegroot/cfd/.claude/worktrees/sad-poincare-95e917/aquaflux/solve/implicit.py", line 612, in _implicit_solve
+    return _forward(
+        residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_step_fn, norm_fn
+    )
+  File "/Users/ctdegroot/cfd/.claude/worktrees/sad-poincare-95e917/aquaflux/solve/implicit.py", line 587, in _forward
+    return eqx.error_if(
+           ~~~~~~~~~~~~^
+        phi,
+        ^^^^
+    ...<5 lines>...
+        "globalization (e.g. pseudo-transient continuation for a high-Reynolds flow).",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+EquinoxRuntimeError: Above is the stack outside of JIT. Below is the stack inside of JIT:
+
+equinox.EquinoxRuntimeError: ImplicitNewtonSolver did not converge: the Newton residual norm did not reach atol + rtol*||R0|| within max_steps, or became non-finite. The implicit-function-theorem adjoint is only valid at a converged root, so the returned field and any gradient built on it would be silently wrong. Raise max_steps, loosen the tolerances, or use a stronger globalization (e.g. pseudo-transient continuation for a high-Reynolds flow).
+
+-------------------
+
+An error occurred during the runtime of your JAX program.
+
+1) Setting the environment variable `EQX_ON_ERROR=breakpoint` is usually the most useful
+way to debug such errors. This can be interacted with using most of the usual commands
+for the Python debugger: `u` and `d` to move up and down frames, the name of a variable
+to print its value, etc.
+
+2) You may also like to try setting `JAX_DISABLE_JIT=1`. This will mean that you can
+(mostly) inspect the state of your program as if it was normal Python.
+
+3) See `https://docs.kidger.site/equinox/api/debug/` for more suggestions.
+
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/ctdegroot/cfd/.claude/worktrees/sad-poincare-95e917/validation/pitzdaily_openfoam/compare.py", line 684, in <module>
+    main()
+    ~~~~^^
+  File "/Users/ctdegroot/cfd/.claude/worktrees/sad-poincare-95e917/validation/pitzdaily_openfoam/compare.py", line 574, in main
+    aq = solve_aquaflux()
+  File "/Users/ctdegroot/cfd/.claude/worktrees/sad-poincare-95e917/validation/pitzdaily_openfoam/compare.py", line 527, in solve_aquaflux
+    flow, k, omega = solve_reynolds_continuation(coupled, N_POINTS, **solve_options)
+                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ctdegroot/cfd/.claude/worktrees/sad-poincare-95e917/aquaflux/turbulence/reynolds.py", line 284, in solve_reynolds_continuation
+    raise RuntimeError(
+    ...<4 lines>...
+    ) from exc
+RuntimeError: Reynolds-continuation point 1 of 2 (molecular viscosity scaled by 100, i.e. Reynolds number reduced by 100x) failed to converge. Increase n_points for a gentler ramp, or check the case at this Reynolds number directly.
