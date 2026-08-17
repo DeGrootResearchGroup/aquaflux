@@ -53,6 +53,7 @@ from aquaflux.flow.mean_velocity import (
     _constraint_vectors,
     _with_body_force,
 )
+from aquaflux.schemes import narrow_gradient_sweeps
 from aquaflux.solve import (
     NO_REFRESH,
     NO_RETRIES,
@@ -1621,6 +1622,7 @@ class CoupledJacobianProbe:
 
     plan: ColumnProbePlan
     structure: ProbeGather
+    gradient_sweeps: int | None = None
 
     @classmethod
     def build(
@@ -1628,6 +1630,7 @@ class CoupledJacobianProbe:
         coupled: CoupledRANS,
         stencil_reach: int = 3,
         column_reach: Sequence[int] | None = None,
+        gradient_sweeps: int | None = None,
     ) -> CoupledJacobianProbe:
         """Colour the cell graph at these reaches and precompute the de-compression for it.
 
@@ -1643,6 +1646,10 @@ class CoupledJacobianProbe:
             while the assembled pattern stays at ``stencil_reach``. Exact only for a column that
             genuinely carries nothing further out; measure it for the case rather than assuming it.
             ``None`` (default) probes every column at ``stencil_reach``.
+        gradient_sweeps : int, optional
+            Probe a copy of the residual whose corrected-gradient solve is capped at this many
+            Richardson sweeps, rather than the residual itself. See :meth:`narrow`. ``None`` (default)
+            probes the residual as it stands.
 
         Returns
         -------
@@ -1650,7 +1657,53 @@ class CoupledJacobianProbe:
             The shared probe.
         """
         plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
-        return cls(plan, block_stencil_gather_map(plan))
+        return cls(plan, block_stencil_gather_map(plan), gradient_sweeps)
+
+    def narrow(self, coupled: CoupledRANS) -> CoupledRANS:
+        """The assembler this probe differentiates -- ``coupled``, or a reduced-sweep copy of it.
+
+        The colouring recovers couplings out to ``stencil_reach`` and no further, and a residual that
+        reaches beyond it has its far entries **folded onto near ones** rather than dropped (a
+        colouring is collision-free only for the pattern it was built at). A corrected-gradient
+        reconstruction is the term most able to reach past a fixed distance: each of its Richardson
+        sweeps couples one further ring wherever the mesh is skewed, so ``n`` sweeps put the residual's
+        stencil at ``n + 1`` (the reconstruction reads ``n`` cells out, and a face flux gathers the
+        gradient of the cells on both sides). Capping the sweeps for the probe alone leaves the matrix exact
+        for the residual it was taken from, which is a stated approximation of the operator rather than
+        a corrupted matrix.
+
+        Choose the cap from the case: it is the *whole* stencil that has to fit inside
+        ``stencil_reach``, and the gradient is only one of the terms feeding it (in the coupled RANS
+        residual the eddy viscosity's strain-rate dependence spends a ring of its own). Measure the
+        reach rather than deriving it from the sweep count alone.
+
+        The narrowed copy reaches the **preconditioner only** -- the solve's operator stays the exact
+        Jacobian--vector product of ``coupled`` -- so neither the converged state nor its adjoint moves.
+        On an orthogonal mesh the skewness correction vanishes identically and this is a no-op in value
+        as well as in reach.
+
+        Parameters
+        ----------
+        coupled : CoupledRANS
+            The assembler whose Jacobian is being materialized. Passed per call rather than held,
+            because a refresh hook is rebound across Reynolds-continuation rungs.
+
+        Returns
+        -------
+        CoupledRANS
+            The narrowed copy, or ``coupled`` itself when no cap was asked for.
+        """
+        return _probed_assembler(coupled, self.gradient_sweeps)
+
+
+def _probed_assembler(coupled: CoupledRANS, gradient_sweeps: int | None) -> CoupledRANS:
+    """``coupled``, or the reduced-sweep copy a preconditioner's coloured probe differentiates.
+
+    Shared by :meth:`CoupledJacobianProbe.narrow` and by the factorization builders, which materialize
+    the same Jacobian without needing the probe's de-compression map. See that method for what the cap
+    is for and how to choose it.
+    """
+    return coupled if gradient_sweeps is None else narrow_gradient_sweeps(coupled, gradient_sweeps)
 
 
 def _monolithic_shift_source(
@@ -1778,6 +1831,7 @@ def coupled_ilut_continuation(
     ilut_beta: float = 2.0,
     stencil_reach: int = 3,
     column_reach: Sequence[int] | None = None,
+    probe_gradient_sweeps: int | None = None,
     fill_factor: float = 30.0,
     drop_tol: float = 1e-6,
     beta0: float = 2.0,
@@ -1833,6 +1887,12 @@ def coupled_ilut_continuation(
         assembled with, so measure it for the case rather than assuming it
         (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
         probes every column at ``stencil_reach``.
+    probe_gradient_sweeps : int, optional
+        Materialize the preconditioner's Jacobian from a copy of the residual whose corrected-gradient
+        solve is capped at this many Richardson sweeps, so its stencil fits inside the reach the
+        colouring recovers -- see :meth:`CoupledJacobianProbe.narrow`. The solve's own operator is
+        unchanged, so the converged state and its adjoint are too. ``None`` (default) probes the
+        residual as it stands.
     fill_factor, drop_tol : float
         The incomplete-factorization fill controls (see
         :func:`~aquaflux.solve.ilut_preconditioner.factorize_ilut`). ``drop_tol = 1e-6`` keeps the small
@@ -1879,10 +1939,13 @@ def coupled_ilut_continuation(
     # straight from the assembler's frozen momentum diagonal, which is the whole dependency.
     base = _monolithic_shift_source(coupled, reference_state, shift_basis)
     plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
+    # What the coloured probe differentiates -- `coupled` unless a narrower gradient stencil was asked
+    # for, so the residual's reach fits inside the colouring's. The solve keeps the exact `coupled`.
+    probed = _probed_assembler(coupled, probe_gradient_sweeps)
     frozen = jax.lax.stop_gradient(reference_state)
 
     def matvec(v):
-        return _jacobian_matvec(coupled, frozen, v)
+        return _jacobian_matvec(probed, frozen, v)
 
     preconditioner = MonolithicIlutPreconditioner.build(
         matvec,
@@ -1918,6 +1981,7 @@ def coupled_ilut_refreshing_continuation(
     ilut_beta: float = 2.0,
     stencil_reach: int = 3,
     column_reach: Sequence[int] | None = None,
+    probe_gradient_sweeps: int | None = None,
     fill_factor: float = 30.0,
     drop_tol: float = 1e-6,
     **continuation_kwargs: object,
@@ -1953,6 +2017,12 @@ def coupled_ilut_refreshing_continuation(
     ilut_beta, stencil_reach, fill_factor, drop_tol : float / int
         As in :func:`coupled_ilut_continuation`. Used for **both** the initial build and every in-place
         refresh, so the two stay consistent.
+    probe_gradient_sweeps : int, optional
+        Cap the corrected-gradient sweeps of the residual the preconditioner's Jacobian is
+        materialized from, so its stencil fits inside the reach the colouring recovers -- see
+        :meth:`CoupledJacobianProbe.narrow`. Used for **both** the initial build and every
+        in-place refresh, so the two stay consistent. ``None`` (default) probes the residual as
+        it stands.
     **continuation_kwargs
         Forwarded to :func:`coupled_ilut_continuation` for the initial build (``inner_steps``,
         ``inner_tol``, ``forward_solver``, ``shift_basis``, ``beta0``, ...).
@@ -1963,11 +2033,14 @@ def coupled_ilut_refreshing_continuation(
         ``state -> ForwardStep`` as described.
     """
     plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
+    # What the coloured probe differentiates -- `coupled` unless a narrower gradient stencil was asked
+    # for, so the residual's reach fits inside the colouring's. The solve keeps the exact `coupled`.
+    probed = _probed_assembler(coupled, probe_gradient_sweeps)
 
     # `frozen` as a traced argument (not closed over) so this jvp-matvec compiles once and every refresh
     # reuses it, rather than a fresh lambda recompiling each time.
     def matvec_at(frozen, v):
-        return _jacobian_matvec(coupled, frozen, v)
+        return _jacobian_matvec(probed, frozen, v)
 
     held: dict[str, ForwardStep] = {}
 
@@ -1979,6 +2052,7 @@ def coupled_ilut_refreshing_continuation(
                 ilut_beta=ilut_beta,
                 stencil_reach=stencil_reach,
                 column_reach=column_reach,
+                probe_gradient_sweeps=probe_gradient_sweeps,
                 fill_factor=fill_factor,
                 drop_tol=drop_tol,
                 **continuation_kwargs,
@@ -2006,6 +2080,7 @@ def coupled_lu_continuation(
     lu_beta: float = 2.0,
     stencil_reach: int = 3,
     column_reach: Sequence[int] | None = None,
+    probe_gradient_sweeps: int | None = None,
     backend: str = "auto",
     beta0: float = 2.0,
     exponent: float = 1.0,
@@ -2063,6 +2138,12 @@ def coupled_lu_continuation(
         assembled with, so measure it for the case rather than assuming it
         (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
         probes every column at ``stencil_reach``.
+    probe_gradient_sweeps : int, optional
+        Materialize the preconditioner's Jacobian from a copy of the residual whose corrected-gradient
+        solve is capped at this many Richardson sweeps, so its stencil fits inside the reach the
+        colouring recovers -- see :meth:`CoupledJacobianProbe.narrow`. The solve's own operator is
+        unchanged, so the converged state and its adjoint are too. ``None`` (default) probes the
+        residual as it stands.
     backend : {'auto', 'umfpack', 'scipy'}
         The complete-LU backend (see :func:`~aquaflux.solve.lu_preconditioner.factorize_lu`). ``'auto'``
         uses UMFPACK (the fast path, via the optional ``petsc`` dependency) when available, else SciPy
@@ -2087,10 +2168,13 @@ def coupled_lu_continuation(
     """
     base = _monolithic_shift_source(coupled, reference_state, shift_basis)
     plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
+    # What the coloured probe differentiates -- `coupled` unless a narrower gradient stencil was asked
+    # for, so the residual's reach fits inside the colouring's. The solve keeps the exact `coupled`.
+    probed = _probed_assembler(coupled, probe_gradient_sweeps)
     frozen = jax.lax.stop_gradient(reference_state)
 
     def matvec(v):
-        return _jacobian_matvec(coupled, frozen, v)
+        return _jacobian_matvec(probed, frozen, v)
 
     preconditioner = MonolithicLuPreconditioner.build(
         matvec,
@@ -2126,6 +2210,7 @@ def coupled_amg_continuation(
     amg_beta: float = 2.0,
     stencil_reach: int = 3,
     column_reach: Sequence[int] | None = None,
+    probe_gradient_sweeps: int | None = None,
     smoother_fill_levels: int = 1,
     smoother_sweeps: int = 2,
     coarse_eq_limit: int | None = None,
@@ -2203,6 +2288,12 @@ def coupled_amg_continuation(
         assembled with, so measure it for the case rather than assuming it
         (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
         probes every column at ``stencil_reach``.
+    probe_gradient_sweeps : int, optional
+        Materialize the preconditioner's Jacobian from a copy of the residual whose corrected-gradient
+        solve is capped at this many Richardson sweeps, so its stencil fits inside the reach the
+        colouring recovers -- see :meth:`CoupledJacobianProbe.narrow`. The solve's own operator is
+        unchanged, so the converged state and its adjoint are too. ``None`` (default) probes the
+        residual as it stands.
     smoother_fill_levels : int
         Incomplete-LU fill levels of the stationary level smoother (``1`` = ILU(1), ``0`` = ILU(0)). The
         smoother must stay **stationary** -- a Krylov-accelerated one makes the V-cycle nonlinear, so it
@@ -2427,16 +2518,22 @@ def coupled_amg_continuation(
     # are mesh-fixed, so a caller building several steps over one case (a Reynolds continuation, or a step
     # and its refresh hook) supplies one shared `probe` and nothing here is rebuilt.
     if probe is None:
-        probe = CoupledJacobianProbe.build(coupled, stencil_reach, column_reach)
+        probe = CoupledJacobianProbe.build(
+            coupled, stencil_reach, column_reach, probe_gradient_sweeps
+        )
     plan, structure = probe.plan, probe.structure
     frozen = jax.lax.stop_gradient(reference_state)
+    # What the coloured probe differentiates: `coupled` itself, or the reduced-sweep copy the probe asks
+    # for so the residual's stencil fits inside the reach the colouring recovers. The forward solve below
+    # keeps the exact `coupled`, so this reaches the preconditioner and nothing else.
+    probed = probe.narrow(coupled)
 
     def matvec(v):
-        return _jacobian_matvec(coupled, frozen, v)
+        return _jacobian_matvec(probed, frozen, v)
 
     # Batched jvp so the coloured materialize probes run as a few fused passes, not a per-probe loop.
     def batched_matvec(seeds):
-        return _batched_jacobian_matvec(coupled, frozen, seeds)
+        return _batched_jacobian_matvec(probed, frozen, seeds)
 
     # `native_forward_solve` (EXPERIMENTAL, opt-in) runs the forward Krylov natively in PETSc, its operator
     # a shell over the exact jvp (true Newton, not a frozen Jacobian) -- the native GMRES + GAMG reaches its
@@ -2531,6 +2628,7 @@ def coupled_lu_refreshing_continuation(
     lu_beta: float = 2.0,
     stencil_reach: int = 3,
     column_reach: Sequence[int] | None = None,
+    probe_gradient_sweeps: int | None = None,
     backend: str = "auto",
     **continuation_kwargs: object,
 ) -> Callable[[jnp.ndarray], ForwardStep]:
@@ -2554,6 +2652,12 @@ def coupled_lu_refreshing_continuation(
         The coupled residual assembler.
     lu_beta, stencil_reach, backend : float / int / str
         As in :func:`coupled_lu_continuation`. Used for both the initial build and every in-place refresh.
+    probe_gradient_sweeps : int, optional
+        Cap the corrected-gradient sweeps of the residual the preconditioner's Jacobian is
+        materialized from, so its stencil fits inside the reach the colouring recovers -- see
+        :meth:`CoupledJacobianProbe.narrow`. Used for **both** the initial build and every
+        in-place refresh, so the two stay consistent. ``None`` (default) probes the residual as
+        it stands.
     **continuation_kwargs
         Forwarded to :func:`coupled_lu_continuation` for the initial build.
 
@@ -2563,9 +2667,12 @@ def coupled_lu_refreshing_continuation(
         ``state -> ForwardStep`` as described.
     """
     plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
+    # What the coloured probe differentiates -- `coupled` unless a narrower gradient stencil was asked
+    # for, so the residual's reach fits inside the colouring's. The solve keeps the exact `coupled`.
+    probed = _probed_assembler(coupled, probe_gradient_sweeps)
 
     def matvec_at(frozen, v):
-        return _jacobian_matvec(coupled, frozen, v)
+        return _jacobian_matvec(probed, frozen, v)
 
     held: dict[str, ForwardStep] = {}
 
@@ -2577,6 +2684,7 @@ def coupled_lu_refreshing_continuation(
                 lu_beta=lu_beta,
                 stencil_reach=stencil_reach,
                 column_reach=column_reach,
+                probe_gradient_sweeps=probe_gradient_sweeps,
                 backend=backend,
                 **continuation_kwargs,
             )
@@ -2756,6 +2864,7 @@ def _beta_tracking_refresh(
     coupled: CoupledRANS,
     stencil_reach: int,
     column_reach: Sequence[int] | None = None,
+    probe_gradient_sweeps: int | None = None,
     *,
     gate: Callable[[float], bool] | None = None,
     refresh_kwargs: dict[str, object] | None = None,
@@ -2791,6 +2900,12 @@ def _beta_tracking_refresh(
         assembled with, so measure it for the case rather than assuming it
         (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
         probes every column at ``stencil_reach``.
+    probe_gradient_sweeps : int, optional
+        Materialize the preconditioner's Jacobian from a copy of the residual whose corrected-gradient
+        solve is capped at this many Richardson sweeps, so its stencil fits inside the reach the
+        colouring recovers -- see :meth:`CoupledJacobianProbe.narrow`. The solve's own operator is
+        unchanged, so the converged state and its adjoint are too. ``None`` (default) probes the
+        residual as it stands.
     gate : callable, optional
         ``should_refresh(beta: float) -> bool``. ``None`` means always refresh.
     refresh_kwargs : dict, optional
@@ -2823,7 +2938,9 @@ def _beta_tracking_refresh(
     """
     refresh_kwargs = {} if refresh_kwargs is None else refresh_kwargs
     if probe is None:
-        probe = CoupledJacobianProbe.build(coupled, stencil_reach, column_reach)
+        probe = CoupledJacobianProbe.build(
+            coupled, stencil_reach, column_reach, probe_gradient_sweeps
+        )
     plan, structure = probe.plan, probe.structure
 
     # WHICH case this hook currently refreshes for, in a mutable binding rather than closed over, so
@@ -2833,19 +2950,23 @@ def _beta_tracking_refresh(
     # across a rung boundary, since the preconditioner rides in a static field compared by identity.
     # Both probes below take the assembler as an argument to a module-level jitted function, so swapping
     # it changes no compilation key of theirs either.
-    bound: dict[str, CoupledRANS] = {"coupled": coupled}
+    # `"probed"` is what the coloured probe differentiates, which is the assembler itself unless the probe
+    # asks for a reduced-sweep copy (`CoupledJacobianProbe.narrow`). It is stored beside the companion
+    # rather than derived per call so a rebind narrows once; the drift measure below deliberately reads
+    # `"coupled"`, since it reports the real case's eddy viscosity and not the preconditioner's stand-in.
+    bound: dict[str, CoupledRANS] = {"coupled": coupled, "probed": probe.narrow(coupled)}
 
     # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
     # reuses it, rather than a fresh lambda recompiling each step.
     def matvec_at(frozen, v):
-        return _jacobian_matvec(bound["coupled"], frozen, v)
+        return _jacobian_matvec(bound["probed"], frozen, v)
 
     # Batched form (vmapped over the tangent) so the coloured probes of a full materialize run as a few
     # fused passes rather than a Python loop of separate calls. Built once (state-independent, `frozen` a
     # traced argument) so it compiles a single time and every materialize reuses it. Used only by the AMG
     # preconditioner's `refresh_in_place`.
     def batched_matvec_at(frozen, seeds):
-        return _batched_jacobian_matvec(bound["coupled"], frozen, seeds)
+        return _batched_jacobian_matvec(bound["probed"], frozen, seeds)
 
     # The β-diagonal split's materialize gate (built once): decides per refresh whether to re-materialize
     # the Jacobian or only re-add the shift. `None` when neither trigger is set (then every refresh is a
@@ -3017,6 +3138,7 @@ def _beta_tracking_refresh(
             The assembler the following segment solves.
         """
         bound["coupled"] = companion
+        bound["probed"] = probe.narrow(companion)
         forced_full["pending"] = True
         if materialize_gate is not None:
             materialize_gate.reset()
@@ -3031,6 +3153,7 @@ def lu_beta_tracking_refresh(
     *,
     stencil_reach: int = 3,
     column_reach: Sequence[int] | None = None,
+    probe_gradient_sweeps: int | None = None,
 ) -> Callable[[ForwardStep, jnp.ndarray], None]:
     """A ``precondition_step`` for :func:`solve_coupled` that re-factors the complete LU at the current β.
 
@@ -3071,13 +3194,19 @@ def lu_beta_tracking_refresh(
         assembled with, so measure it for the case rather than assuming it
         (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
         probes every column at ``stencil_reach``.
+    probe_gradient_sweeps : int, optional
+        Materialize the preconditioner's Jacobian from a copy of the residual whose corrected-gradient
+        solve is capped at this many Richardson sweeps, so its stencil fits inside the reach the
+        colouring recovers -- see :meth:`CoupledJacobianProbe.narrow`. The solve's own operator is
+        unchanged, so the converged state and its adjoint are too. ``None`` (default) probes the
+        residual as it stands.
 
     Returns
     -------
     callable
         ``precondition_step(active_step, state) -> None``.
     """
-    return _beta_tracking_refresh(coupled, stencil_reach, column_reach)
+    return _beta_tracking_refresh(coupled, stencil_reach, column_reach, probe_gradient_sweeps)
 
 
 def ilut_beta_tracking_refresh(
@@ -3085,6 +3214,7 @@ def ilut_beta_tracking_refresh(
     *,
     stencil_reach: int = 3,
     column_reach: Sequence[int] | None = None,
+    probe_gradient_sweeps: int | None = None,
     fill_factor: float = 30.0,
     drop_tol: float = 1e-6,
     refresh_every: int = 5,
@@ -3132,6 +3262,12 @@ def ilut_beta_tracking_refresh(
         assembled with, so measure it for the case rather than assuming it
         (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
         probes every column at ``stencil_reach``.
+    probe_gradient_sweeps : int, optional
+        Materialize the preconditioner's Jacobian from a copy of the residual whose corrected-gradient
+        solve is capped at this many Richardson sweeps, so its stencil fits inside the reach the
+        colouring recovers -- see :meth:`CoupledJacobianProbe.narrow`. The solve's own operator is
+        unchanged, so the converged state and its adjoint are too. ``None`` (default) probes the
+        residual as it stands.
     fill_factor, drop_tol : float
         The ILUT factorization controls, used for every in-place refresh (as in
         :func:`coupled_ilut_continuation`).
@@ -3150,6 +3286,7 @@ def ilut_beta_tracking_refresh(
         coupled,
         stencil_reach,
         column_reach,
+        probe_gradient_sweeps,
         gate=_staleness_beta_gate(refresh_every=refresh_every, beta_rel_change=beta_rel_change),
         refresh_kwargs={"fill_factor": fill_factor, "drop_tol": drop_tol},
     )
@@ -3160,6 +3297,7 @@ def amg_beta_tracking_refresh(
     *,
     stencil_reach: int = 3,
     column_reach: Sequence[int] | None = None,
+    probe_gradient_sweeps: int | None = None,
     materialize_every: int | None = None,
     materialize_drift: float | None = None,
     beta_rel_change: float | None = None,
@@ -3213,6 +3351,12 @@ def amg_beta_tracking_refresh(
         assembled with, so measure it for the case rather than assuming it
         (``validation/bfs3d_openfoam/probe_reach_audit.py`` reports it per column). ``None`` (default)
         probes every column at ``stencil_reach``.
+    probe_gradient_sweeps : int, optional
+        Materialize the preconditioner's Jacobian from a copy of the residual whose corrected-gradient
+        solve is capped at this many Richardson sweeps, so its stencil fits inside the reach the
+        colouring recovers -- see :meth:`CoupledJacobianProbe.narrow`. The solve's own operator is
+        unchanged, so the converged state and its adjoint are too. ``None`` (default) probes the
+        residual as it stands.
     materialize_every : int or None
         Enables the **β-diagonal split**. ``None`` (default) re-materializes the Jacobian on every refresh
         (the original behaviour). A value ``K > 1`` re-materializes only every ``K`` steps and, in between,
@@ -3285,6 +3429,7 @@ def amg_beta_tracking_refresh(
         coupled,
         stencil_reach,
         column_reach,
+        probe_gradient_sweeps,
         gate=gate,
         materialize_every=materialize_every,
         materialize_drift=materialize_drift,

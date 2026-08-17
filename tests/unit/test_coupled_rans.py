@@ -16,13 +16,14 @@ import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import DifferenceRow, FirstOrderUpwind, LogRatioRow
 from aquaflux.flow import MomentumContinuity, MovingWall, NoSlipWall
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CompactGreenGauss
+from aquaflux.schemes import CompactGreenGauss, CorrectedGreenGauss, SweptGradientSolve
 from aquaflux.solve import (
     NO_REFRESH,
     CycleGrowthTrigger,
@@ -46,6 +47,7 @@ from aquaflux.turbulence import (
 from aquaflux.turbulence.coupled import (
     _COUPLED_FORWARD_SOLVER,
     _COUPLED_ILUT_FORWARD_SOLVER,
+    CoupledJacobianProbe,
     CoupledRANS,
     CoupledRANSLayout,
     LiveViscosityVelocityParts,
@@ -55,6 +57,9 @@ from aquaflux.turbulence.coupled import (
     coupled_scaled_norm,
     solve_coupled,
 )
+
+from tests.support.meshes import perturbed_grid_2d
+from tests.unit.test_gradient import _cell_graph_distance
 
 RHO, NU, U_LID = 1.0, 1e-2, 1.0
 WALLS = ("top", "bottom", "left", "right")
@@ -75,14 +80,15 @@ def test_layout_round_trips_and_sizes() -> None:
     assert jnp.array_equal(oo, omega)
 
 
-def _cavity(n=6):
-    mesh = structured_grid_2d(n, n, lx=1.0, ly=1.0, named_boundaries=True)
+def _cavity(n=6, mesh=None, gradient=None):
+    mesh = structured_grid_2d(n, n, lx=1.0, ly=1.0, named_boundaries=True) if mesh is None else mesh
+    gradient = CompactGreenGauss() if gradient is None else gradient
     geometry = mesh.geometry()
     momentum = MomentumContinuity.build(
         mesh,
         geometry,
         PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
-        CompactGreenGauss(),
+        gradient,
         BoundaryConditions(
             {
                 "top": MovingWall(velocity=(U_LID, 0.0)),
@@ -98,7 +104,7 @@ def _cavity(n=6):
         SSTModel(),
         mesh,
         geometry,
-        CompactGreenGauss(),
+        gradient,
         FirstOrderUpwind(),
         density=RHO,
         molecular_viscosity=jnp.full(mesh.n_cells, NU),
@@ -1037,7 +1043,6 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
     things, and both are asserted: the Jacobian probe starts reporting the NEW companion's derivative,
     and the next refresh is a full re-materialize whatever the gates make of it.
     """
-    from types import SimpleNamespace
 
     import numpy as np
     from aquaflux.turbulence.coupled import _beta_tracking_refresh, _staleness_beta_gate
@@ -1045,7 +1050,9 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
     state = jnp.linspace(1.0, 2.0, 5)
     diagonal = jnp.full(5, 2.0)
     tangent = jnp.ones(5)
-    probe = SimpleNamespace(plan=object(), structure=object())
+    # The real probe (its plan and gather map are unused here), not a lookalike: `_beta_tracking_refresh`
+    # asks it which assembler to differentiate, which only the class itself can answer.
+    probe = CoupledJacobianProbe(plan=object(), structure=object())
 
     pc = _RecordingPreconditioner()
     step = _stub_step(pc, beta=0.5, diagonal=diagonal)
@@ -1246,3 +1253,68 @@ def test_the_cap_predicate_is_the_one_the_residual_uses() -> None:
     mask = production_cap_active(coupled, state)
     assert jnp.array_equal(mask, production > limit)
     assert jnp.allclose(jnp.where(mask, limit, production), jnp.minimum(production, limit))
+
+
+# --- the probe's gradient-sweep cap ------------------------------------------------------
+
+
+def _skewed_corrected_cavity(n=6, sweeps=4):
+    """A cavity on a skewed mesh whose gradients carry the non-orthogonal correction."""
+    mesh = perturbed_grid_2d(n, n, perturb=0.25, seed=1, named_boundaries=True)
+    scheme = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=sweeps, warn_tol=None))
+    return _cavity(mesh=mesh, gradient=scheme)
+
+
+def test_an_uncapped_probe_differentiates_the_assembler_itself() -> None:
+    """The default is the residual as it stands -- returned by identity, so nothing downstream moves."""
+    _, coupled = _skewed_corrected_cavity()
+    probe = CoupledJacobianProbe.build(coupled, stencil_reach=2)
+    assert probe.gradient_sweeps is None
+    assert probe.narrow(coupled) is coupled
+
+
+def test_a_capped_probe_narrows_every_gradient_solve_in_the_case() -> None:
+    """Both blocks reconstruct gradients, and the cap has to reach the momentum block and the closure."""
+    _, coupled = _skewed_corrected_cavity(sweeps=4)
+    probed = CoupledJacobianProbe.build(coupled, stencil_reach=2, gradient_sweeps=2).narrow(coupled)
+    assert coupled.momentum.gradient_scheme.solver.sweeps == 4  # the case itself is untouched
+    assert probed.momentum.gradient_scheme.solver.sweeps == 2
+    assert probed.turbulence.gradient_scheme.solver.sweeps == 2
+
+
+def test_capping_the_probe_shrinks_the_reach_of_the_jacobian_it_materializes() -> None:
+    """The point of the cap: the residual the probe differentiates fits inside a shorter reach.
+
+    A colouring recovers couplings only out to the distance it was built at, and folds anything
+    further onto the entries it does keep. Measured on a velocity column of the coupled Jacobian:
+    capping the sweeps at two takes its stencil from six cells to four. The sweeps are not the only
+    term feeding that reach -- this cavity's remaining terms carry two rings of their own -- which is
+    why a cap is chosen by measuring the case rather than by subtracting one from a target.
+    """
+    mesh, coupled = _skewed_corrected_cavity(sweeps=4)
+    state = _healthy_state(mesh, coupled)
+    probed = CoupledJacobianProbe.build(coupled, stencil_reach=4, gradient_sweeps=2).narrow(coupled)
+    distance = _cell_graph_distance(mesh)
+
+    def reach(case):
+        seed = jnp.zeros_like(state).at[0].set(1.0)  # perturb cell 0's u, read where it lands
+        response = jnp.abs(jax.jvp(case.residual, (state,), (seed,))[1][: mesh.n_cells])
+        live = np.asarray(response > 1e-13 * response.max())
+        return int(distance[0][live].max())
+
+    assert reach(coupled) == 6
+    assert reach(probed) == 4
+
+
+def test_the_cap_leaves_the_residual_itself_alone() -> None:
+    """It is the preconditioner's stand-in, so the solved equations must not move."""
+    mesh, coupled = _skewed_corrected_cavity(sweeps=4)
+    state = _healthy_state(mesh, coupled)
+    probed = CoupledJacobianProbe.build(coupled, stencil_reach=3, gradient_sweeps=2).narrow(coupled)
+    assert not bool(jnp.array_equal(coupled.residual(state), probed.residual(state)))  # arms differ
+    np.testing.assert_array_equal(
+        np.asarray(coupled.residual(state)),
+        np.asarray(
+            _cavity(mesh=mesh, gradient=coupled.momentum.gradient_scheme)[1].residual(state)
+        ),
+    )

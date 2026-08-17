@@ -21,9 +21,10 @@ gradient later removes).
 from __future__ import annotations
 
 import abc
+import dataclasses
 import warnings
 from collections.abc import Callable
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import equinox as eqx
 import jax
@@ -39,6 +40,8 @@ if TYPE_CHECKING:
 
 
 _GRADIENT_UNCONVERGED_WARNED = False
+
+_Tree = TypeVar("_Tree")
 
 
 def _warn_gradient_unconverged(sweeps: int, tol: float) -> None:
@@ -256,10 +259,15 @@ class SweptGradientSolve(GradientSolve):
     randomly perturbed 16x16 grid the relative departure from :class:`GmresGradientSolve` is ~3e-7 at 5%
     perturbation and ~3e-4 at 20%, reaching the floating-point floor at ~12 sweeps (5%) and ~20 (20%).
     That is why the tests asserting machine-precision properties of the *discretization* pin the exact
-    solve rather than this one. A too-skewed mesh needs
-    more; rather than pay for a data-dependent stop (which would defeat the cheap unrolled
-    differentiation), the residual the last sweep already computed is checked against ``warn_tol`` and
-    a **warning** is emitted once if the sweeps are under-resolved — a diagnostic, not a termination.
+    solve rather than this one. A too-skewed mesh needs more; rather than pay for a data-dependent stop
+    (which would defeat the cheap unrolled differentiation), the residual the last sweep already
+    computed is checked against ``warn_tol`` and a **warning** is emitted once if the sweeps are
+    under-resolved — a diagnostic, not a termination.
+
+    **The count also sets how far a residual built on this reaches across the cell graph**, because
+    each sweep applies ``A_g`` and ``A_g`` couples a cell to its face neighbours. That is a constraint
+    on anything assembling an operator by coloured probing at a fixed distance, and
+    :func:`narrow_gradient_sweeps` is how such a consumer caps it without touching the solve.
 
     Attributes
     ----------
@@ -269,7 +277,8 @@ class SweptGradientSolve(GradientSolve):
         Emit a one-time warning if the relative gradient residual after ``sweeps`` exceeds this
         (default ``5e-2``, i.e. the sweep is clearly stalling — the converged field stays accurate
         well below this, so it flags only a genuinely under-resolved mesh). ``None`` disables the
-        check entirely.
+        check entirely, and it is skipped at ``sweeps=1`` where the measured ratio is exactly 1 on
+        any mesh (see :meth:`solve`), so it would report nothing but its own construction.
     """
 
     sweeps: int = eqx.field(static=True, default=4)
@@ -299,7 +308,12 @@ class SweptGradientSolve(GradientSolve):
         # norm would need an owned-only cross-partition reduction the operator-wrapping seam does not
         # carry; the sweep count is a static, mesh-property-driven choice, so the distributed path
         # drops the (unreliable) diagnostic rather than report a per-partition norm.
-        if operator_hook is None and self.warn_tol is not None:
+        # ...and it is skipped at ONE sweep, where it carries no information rather than a little. The
+        # residual below is the one entering the final update, so at a single sweep it is the initial
+        # `rhs - A·0 = rhs` and the ratio is *exactly* 1 whatever the mesh — it fires on a perfectly
+        # orthogonal grid whose answer is exact. A single sweep is `g = V⁻¹Bφ`, the uncorrected
+        # Green–Gauss reconstruction, so there is no correction being under-resolved to report on.
+        if operator_hook is None and self.warn_tol is not None and self.sweeps > 1:
             # `residual` is rhs - A·x from the last sweep (one apply already spent) — a free,
             # slightly conservative convergence indicator. The host-side warning is gated behind a
             # `lax.cond` on the tolerance so the (host-synchronizing) callback fires *only* when the
@@ -316,6 +330,94 @@ class SweptGradientSolve(GradientSolve):
                 lambda: None,
             )
         return x
+
+
+def narrow_gradient_sweeps(tree: _Tree, sweeps: int) -> _Tree:
+    """Copy ``tree`` with every :class:`SweptGradientSolve` inside it capped at ``sweeps``.
+
+    **What this is for: capping how far a residual's Jacobian reaches on the cell graph.** Each
+    Richardson sweep applies ``A_g`` once, and ``A_g`` couples a cell to its face neighbours — so an
+    ``n``-sweep reconstruction reads cell values ``n`` cells away, and a residual built on it reads
+    them ``n + 1`` cells away (a face flux gathers the gradient of the cells on both sides), wherever
+    the mesh is skewed enough for the correction to be live. On an orthogonal mesh the correction
+    vanishes and the extra sweeps have nothing to add, so narrowing is free there — in reach exactly,
+    and in value to round-off.
+
+    That matters to a preconditioner assembled by **coloured probing**, which recovers the Jacobian
+    over the cell graph out to a fixed distance. Where the residual reaches further than the probe
+    does, the far couplings are not dropped: a colouring is collision-free only for the pattern it
+    was built at, so two same-coloured cells can both couple to one row and the whole response is
+    charged to whichever of them lies inside the pattern. The far entry is **folded onto a near one**,
+    which perturbs entries the factorization turns into pivots rather than merely omitting small
+    terms. Probing a narrowed copy instead keeps the recovered matrix exact for the residual it was
+    taken from, leaving a bounded, stated approximation in place of a corrupted one.
+
+    The narrowed copy is for the **preconditioner only**. The solve's own operator stays the exact
+    Jacobian--vector product of the full residual, so neither the converged state nor its adjoint is
+    affected — a preconditioner changes how a Krylov solve gets to the answer, never where it lands.
+
+    Parameters
+    ----------
+    tree : Any
+        Any object holding gradient schemes — an assembled case, a residual assembler, a scheme.
+        Traversed through ``equinox.Module`` fields and through tuples and lists; anything else is
+        returned as it stands.
+    sweeps : int
+        The sweep ceiling. A solve already at or below it is left alone (and returned by identity),
+        so this only ever **narrows** — it cannot hand a preconditioner a wider stencil than the
+        residual it approximates.
+
+    Returns
+    -------
+    Any
+        The rewritten tree, of the same type as ``tree``; ``tree`` itself when it holds no swept
+        solve above the ceiling.
+
+    Raises
+    ------
+    ValueError
+        If ``sweeps`` is below one. A single sweep is ``g = V⁻¹ B phi``, the uncorrected
+        Green–Gauss reconstruction, and there is nothing narrower to ask for.
+
+    Examples
+    --------
+    >>> scheme = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=4))
+    >>> narrow_gradient_sweeps(scheme, 2).solver.sweeps
+    2
+    >>> narrow_gradient_sweeps(scheme, 8) is scheme  # never widens
+    True
+    """
+    if sweeps < 1:
+        raise ValueError(f"narrow_gradient_sweeps: sweeps must be at least 1, got {sweeps}.")
+
+    def rewrite(node: object) -> object:
+        if isinstance(node, SweptGradientSolve):
+            if node.sweeps <= sweeps:
+                return node
+            return SweptGradientSolve(sweeps=sweeps, warn_tol=node.warn_tol)
+        if isinstance(node, eqx.Module):
+            # `sweeps` is a static field, so it lives in the pytree's structure rather than among its
+            # leaves and `tree_at` cannot reach it; rebuilding each Module along the path is how a
+            # static field is replaced. Every Module here takes its fields as constructor arguments,
+            # which is what makes `dataclasses.replace` faithful.
+            changed = {}
+            for field in dataclasses.fields(node):
+                if not field.init:  # not a constructor argument, so `replace` cannot carry it
+                    continue
+                value = getattr(node, field.name)
+                rewritten = rewrite(value)
+                if rewritten is not value:
+                    changed[field.name] = rewritten
+            return dataclasses.replace(node, **changed) if changed else node
+        if isinstance(node, tuple | list):
+            rewritten = [rewrite(item) for item in node]
+            if all(new is old for new, old in zip(rewritten, node, strict=True)):
+                return node
+            # A named tuple takes its entries positionally; a plain tuple or list takes the sequence.
+            return type(node)(*rewritten) if hasattr(node, "_fields") else type(node)(rewritten)
+        return node
+
+    return rewrite(tree)
 
 
 class CorrectedGreenGauss(GradientScheme):

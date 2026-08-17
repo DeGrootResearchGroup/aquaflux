@@ -13,6 +13,8 @@ lets the gradient — the highest-risk numerics — be de-risked before any solv
 
 from __future__ import annotations
 
+import warnings
+
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
@@ -26,7 +28,9 @@ from aquaflux.schemes import (
     GmresGradientSolve,
     HessianCorrectedGradient,
     SweptGradientSolve,
+    narrow_gradient_sweeps,
 )
+from aquaflux.schemes import gradient as gradient_module
 
 from tests.support.meshes import columnwise_perturbed_grid_3d, perturbed_grid_2d
 
@@ -460,3 +464,130 @@ def test_hessian_3d_is_differentiable() -> None:
     sens = jax.grad(loss)(_quad_3d(geom.cell.centroid))
     assert sens.shape == (mesh.n_cells,)
     assert not bool(jnp.any(jnp.isnan(sens)))
+
+
+# --- narrowing the sweep count, and what it does to the Jacobian's reach ----------------
+
+
+def _cell_graph_distance(mesh) -> np.ndarray:
+    """All-pairs graph distance over the interior-face cell graph (breadth-first per source)."""
+    owner, nb, _ = mesh.face_cells.interior_edges()
+    owner, nb = np.asarray(owner), np.asarray(nb)
+    adjacency: list[list[int]] = [[] for _ in range(mesh.n_cells)]
+    for a, b in zip(owner, nb, strict=True):
+        adjacency[int(a)].append(int(b))
+        adjacency[int(b)].append(int(a))
+    distance = np.full((mesh.n_cells, mesh.n_cells), mesh.n_cells, dtype=int)
+    for source in range(mesh.n_cells):
+        distance[source, source] = 0
+        frontier, step = [source], 0
+        while frontier:
+            step += 1
+            reached = []
+            for u in frontier:
+                for v in adjacency[u]:
+                    if distance[source, v] > step:
+                        distance[source, v] = step
+                        reached.append(v)
+            frontier = reached
+    return distance
+
+
+def test_narrow_gradient_sweeps_only_ever_narrows() -> None:
+    """A cap at or above a solve's own count leaves it alone, and returns the tree by identity."""
+    scheme = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=4, warn_tol=None))
+    assert narrow_gradient_sweeps(scheme, 2).solver.sweeps == 2
+    assert (
+        narrow_gradient_sweeps(scheme, 2).solver.warn_tol is None
+    )  # the rest of the solve survives
+    assert narrow_gradient_sweeps(scheme, 4) is scheme
+    assert narrow_gradient_sweeps(scheme, 8) is scheme
+
+
+def test_narrow_gradient_sweeps_leaves_other_solves_untouched() -> None:
+    """Only the swept solve has a sweep count; a Krylov or one-shot reconstruction is returned as is."""
+    gmres = CorrectedGreenGauss(solver=GmresGradientSolve())
+    compact = CompactGreenGauss()
+    assert narrow_gradient_sweeps(gmres, 1) is gmres
+    assert narrow_gradient_sweeps(compact, 1) is compact
+
+
+def test_narrow_gradient_sweeps_reaches_into_a_tree() -> None:
+    """It rewrites every swept solve it finds, through Module fields and through sequences."""
+    nested = (CorrectedGreenGauss(), CompactGreenGauss())
+    narrowed = narrow_gradient_sweeps(nested, 1)
+    assert narrowed[0].solver.sweeps == 1
+    assert isinstance(narrowed[1], CompactGreenGauss)
+
+
+def test_narrow_gradient_sweeps_rejects_a_count_below_one() -> None:
+    with pytest.raises(ValueError, match="at least 1"):
+        narrow_gradient_sweeps(CorrectedGreenGauss(), 0)
+
+
+@pytest.mark.parametrize("sweeps", [1, 2, 3, 4])
+def test_each_sweep_couples_one_further_ring_on_a_skewed_mesh(sweeps: int) -> None:
+    """The property the cap exists to control: the reconstruction reaches exactly ``sweeps`` cells.
+
+    Each Richardson sweep applies the correction operator once, and that operator couples a cell to
+    its face neighbours — so the reconstruction widens by one ring per sweep wherever the skewness
+    correction is live. Measured here on the reconstruction alone (no physics involved): the graph
+    distance of the furthest nonzero of ``d(gradient)/d(field)``. A residual built on it is one ring
+    wider again, since a face flux reads the gradient of the cells on both sides.
+    """
+    mesh = perturbed_grid_2d(6, 6, perturb=0.25, seed=1)
+    geom = mesh.geometry()
+    scheme = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=sweeps, warn_tol=None))
+    bvals = _linear(geom.face.centroid)
+
+    def reconstruct(field):
+        return scheme.gradients(field, mesh, geom, bvals)[:, 0]
+
+    jacobian = np.abs(np.asarray(jax.jacfwd(reconstruct)(_linear(geom.cell.centroid))))
+    live = jacobian > 1e-13 * jacobian.max()
+    assert int(_cell_graph_distance(mesh)[live].max()) == sweeps
+
+
+def test_a_narrowed_reconstruction_costs_nothing_on_an_orthogonal_mesh() -> None:
+    """Where the mesh is orthogonal the correction vanishes, so the extra sweeps have nothing to add.
+
+    Agreement is to round-off rather than bit-exact: the sweeps converge immediately, and each further
+    one re-applies an update that is zero only up to the floating-point error of forming it.
+    """
+    mesh = structured_grid_2d(6, 6)
+    geom = mesh.geometry()
+    field, bvals = _linear(geom.cell.centroid), _linear(geom.face.centroid)
+    full = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=4, warn_tol=None))
+    narrowed = narrow_gradient_sweeps(full, 2)
+    assert narrowed.solver.sweeps == 2  # the arms really do differ
+    np.testing.assert_allclose(
+        np.asarray(narrowed.gradients(field, mesh, geom, bvals)),
+        np.asarray(full.gradients(field, mesh, geom, bvals)),
+        rtol=0,
+        atol=1e-14,
+    )
+
+
+def test_the_underresolved_warning_does_not_fire_at_one_sweep() -> None:
+    """At one sweep the check measures ``rhs / rhs`` — exactly 1 on any mesh, so it says nothing.
+
+    The residual the diagnostic reads is the one entering the *final* update, which at a single sweep
+    is the initial ``rhs - A·0``. Left ungated it warned that the sweeps were under-resolved on a
+    perfectly orthogonal grid, where the reconstruction is exact and the correction is identically
+    zero. A single sweep is the uncorrected Green–Gauss reconstruction, so there is no correction
+    left under-resolved to report.
+    """
+    mesh = structured_grid_2d(6, 6)  # exactly orthogonal: the skewness offset is identically zero
+    geom = mesh.geometry()
+    field, bvals = _linear(geom.cell.centroid), _linear(geom.face.centroid)
+
+    def warnings_from(sweeps):
+        gradient_module._GRADIENT_UNCONVERGED_WARNED = False
+        scheme = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=sweeps))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            scheme.gradients(field, mesh, geom, bvals)
+        return [str(w.message) for w in caught]
+
+    assert warnings_from(1) == []
+    assert warnings_from(4) == []  # and a resolved multi-sweep solve is silent, as it always was
