@@ -1,0 +1,46 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | uvReactorSozzi2006: velocity initial / BCs
+   \\    /   O peration     |
+    \\  /    A nd           |
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       volVectorField;
+    object      U;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 1 -1 0 0 0 0];
+
+// 25 GPM through a 1.91 cm pipe -> |U| = 5.51 m/s; flow enters at x=1.739
+// and travels in -x toward the body, so inlet velocity vector = (-5.51, 0, 0).
+internalField   uniform (0 0 0);
+
+boundaryField
+{
+    inlet
+    {
+        type            fixedValue;
+        value           uniform (-5.51 0 0);
+    }
+
+    outlet
+    {
+        type            zeroGradient;
+    }
+
+    bodyWall
+    {
+        type            noSlip;
+    }
+
+    lampWall
+    {
+        type            noSlip;
+    }
+}
+
+// ************************************************************************* //

@@ -1,0 +1,8 @@
+# Regenerable mesh/case artifacts; of_case/ (the case template) is tracked except its generated
+# mesh and the surface triangulation make_geometry.py derives from the STEP file.
+of_case/constant/polyMesh/
+of_case/constant/triSurface/
+of_case/constant/extendedFeatureEdgeMesh/
+of_case/log.*
+of_case/out.foam
+__pycache__/

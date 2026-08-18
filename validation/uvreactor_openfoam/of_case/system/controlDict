@@ -1,0 +1,86 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | uvReactorSozzi2006: PIMPLE + LTS pseudo-transient
+   \\    /   O peration     |
+    \\  /    A nd           |
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+solver          incompressibleFluid;
+
+// LTS pseudo-time: deltaT and endTime are bookkeeping units; what
+// matters is the number of outer iterations the solver runs and how
+// far the residuals drop. With PIMPLE + localEuler, the per-cell
+// pseudo-step is set by maxCo in fvSolution. residualControl in
+// fvSolution will stop the run early once tolerances are met.
+startFrom       latestTime;
+startTime       0;
+
+// Pressure-drop converged by ~iter 1000 on the level-3 mesh.
+// residualControl in fvSolution triggers early stop once tolerances
+// are met; this endTime is the safety cap.
+stopAt          endTime;
+endTime         1000;
+
+deltaT          1;
+
+writeControl    runTime;
+writeInterval   200;
+purgeWrite      2;
+
+// aquaflux's OpenFOAM reader is ASCII-only.
+writeFormat     ascii;
+writePrecision  8;
+writeCompression off;
+timeFormat      general;
+timePrecision   6;
+
+runTimeModifiable true;
+
+functions
+{
+    // Area-averaged kinematic pressure on inlet and outlet patches,
+    // logged every iteration. Their difference is the kinematic
+    // pressure drop across the reactor, an integral measure of
+    // convergence that is independent of solver-residual normalisation.
+    // The .dat files end up under
+    //   postProcessing/{inletPressure,outletPressure}/0/surfaceFieldValue.dat
+    inletPressure
+    {
+        type            surfaceFieldValue;
+        libs            ("libfieldFunctionObjects.so");
+        executeControl  timeStep;
+        executeInterval 1;
+        writeControl    timeStep;
+        writeInterval   1;
+        writeFields     no;
+        log             yes;
+        patch           inlet;
+        operation       areaAverage;
+        fields          (p);
+    }
+
+    outletPressure
+    {
+        type            surfaceFieldValue;
+        libs            ("libfieldFunctionObjects.so");
+        executeControl  timeStep;
+        executeInterval 1;
+        writeControl    timeStep;
+        writeInterval   1;
+        writeFields     no;
+        log             yes;
+        patch           outlet;
+        operation       areaAverage;
+        fields          (p);
+    }
+}
+
+// ************************************************************************* //

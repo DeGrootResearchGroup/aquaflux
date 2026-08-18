@@ -1,0 +1,68 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | uvReactorSozzi2006: PIMPLE + LTS solver settings
+   \\    /   O peration     |
+    \\  /    A nd           |
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      fvSolution;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+solvers
+{
+    "p.*"
+    {
+        solver          GAMG;
+        smoother        DIC;
+        tolerance       1e-7;
+        relTol          0.01;
+    }
+
+    "(U|k|epsilon).*"
+    {
+        solver          smoothSolver;
+        smoother        symGaussSeidel;
+        tolerance       1e-6;
+        relTol          0.1;
+    }
+}
+
+PIMPLE
+{
+    nNonOrthogonalCorrectors 0;
+    nCorrectors             2;
+
+    // LTS: clip per-cell pseudo-time step at maxCo. Smaller maxCo gives
+    // a slower-but-more-stable march to steady state; 1.0 is the
+    // pitzDailyLTS default and is conservative enough for strong jets.
+    maxCo                   1.0;
+    rDeltaTSmoothingCoeff   0.1;
+    maxDeltaT               1.0;
+
+    // Stop when all listed fields have initial residuals below their
+    // tolerance for an entire outer iteration. Note: OpenFOAM's
+    // "Initial residual" is normalised by the initial residual of the
+    // outer iteration, not by an integral mass flux as in Fluent, so
+    // these thresholds aren't directly comparable to Fluent's 1e-5.
+    // The pressure-drop monitor in controlDict.functions provides an
+    // independent integral check on convergence.
+    //
+    // Thresholds chosen against the observed residual plateau on this
+    // mesh (Uy and k plateau near 6e-4, p near 2e-3, eps near 2e-4).
+    // Tighter values won't actually fire early-stop because the
+    // residuals oscillate above them indefinitely; the integral
+    // pressure-drop monitor confirms convergence by then.
+    residualControl
+    {
+        U               1e-3;
+        p               5e-3;
+        "(k|epsilon)"   1e-3;
+    }
+}
+
+// ************************************************************************* //
