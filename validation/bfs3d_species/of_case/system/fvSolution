@@ -1,0 +1,47 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      fvSolution;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Only the tracer is solved for (the flow is frozen -- see controlDict), so `s` is the only entry
+// the run needs. The tolerance is well below the level the cross-code comparison resolves, so a
+// difference between the codes is transport rather than an unconverged linear solve.
+
+solvers
+{
+    s
+    {
+        solver          smoothSolver;
+        smoother        symGaussSeidel;
+        tolerance       1e-12;
+        relTol          0;
+    }
+}
+
+// The `functions` solver is still a run-time solver module and reads its time control from here,
+// even though it solves no flow equations of its own -- without this it exits before the first step.
+PIMPLE
+{
+    nCorrectors              1;
+    nNonOrthogonalCorrectors 0;
+}
+
+relaxationFactors
+{
+    equations
+    {
+        s               0.9;
+    }
+}
+
+// ************************************************************************* //
