@@ -179,7 +179,7 @@ whose offsets are 1e-12. That warning is not evidence of non-orthogonality.
     and *folds* whatever lies beyond onto near entries, so probing a narrowed residual gives a matrix that
     is **exact for the residual it was taken from** — a stated approximation of the operator instead of a
     corrupted one. Consumed through `CoupledJacobianProbe(gradient_sweeps=…)` / the coupled builders'
-    `probe_gradient_sweeps=`; see `.claude/rules/turbulence.md` and `.claude/rules/solve.md`. **Default
+    `probe_gradient_sweeps=`; see `.claude/rules/turbulence.md` and `.claude/rules/solve-direct-preconditioners.md`. **Default
     `None` everywhere is byte-identical.**
     ⚠️⚠️ **IT IS LATENT ON `bfs3d` AND LIVE ON pitzDaily — an earlier version of this entry said "latent
     on every case shipped today" and that is FALSE (corrected 2026-08-16).** The two shipped cases run

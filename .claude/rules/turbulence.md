@@ -74,7 +74,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
   A lagged `ν_t` would make the whole operator reach 2 and roughly halve the probe, but it is a
   quasi-Newton linearization — and the reach-2 *pattern* is separately measured to break the multigrid
   hierarchy, so it is not a free lever. Harness `validation/bfs3d_openfoam/column_reach_probe.py`; the
-  probe-cost side is in `.claude/rules/solve.md`.
+  probe-cost side is in `.claude/rules/solve-direct-preconditioners.md`.
 - **`sources.py`** — the k and ω production / destruction / cross-diffusion terms as
   `VolumeSourceFn` volume-source operators (the transport equations reuse the shared advection
   and diffusion flux operators; only the sources are turbulence-specific).
@@ -167,7 +167,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
   `scalar_transport_preconditioner` returns a **`ScalarTransportPreconditioner`** strategy
   (`ConvectionAmgPreconditioner` / `AirAmgPreconditioner`) rather than the old opaque `lambda phi: solve`.
   These are plain frozen dataclasses, **not `equinox.Module`s** — see the binding note in
-  `.claude/rules/solve.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
+  `.claude/rules/solve-globalization.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
   `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output factor — the
   reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a frozen dataclass.
   - **`solve_coupled(refresh=RefreshPolicy(trigger=…))` segments the march to re-freeze the preconditioner — and a refresh
@@ -247,7 +247,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     march through — needed because a multi-hour coupled march that prints nothing cannot be told from a
     hung one, and this case's documented failure mode is a march that keeps stepping while the residual
     creeps *upward*. Only the observed segments call back; the finishing solve is traced. See the
-    `march.py` bullets in `.claude/rules/solve.md` for why observation is not gated on the trigger and why
+    `march.py` bullets in `.claude/rules/solve-march.md` for why observation is not gated on the trigger and why
     the state rides a separate seam from the report history.
   - **`solve_coupled(step_control=…)` — the dual-time march DEFAULTS to the `DualTimeControl` Courant
     ramp; other controls are opt-in.** A `StepControl` reshapes the shift strength β each observed step
@@ -262,7 +262,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       control, and carrying a full cold ramp to the target Reynolds number (step counts measured on pitzDaily,
       configuration not recorded — re-measure before relying on them). The injection never turns
       observation on, so the differentiable single-stage solve is untouched. See the DualTimeStep bullet
-      in `.claude/rules/solve.md`.
+      in `.claude/rules/solve-march.md`.
     - **Opt-in `ResidualRatioDualTimeControl`:** ramps β by the steady-residual ratio; safe when that
       residual is a reliable progress signal, but it pins β on the flat `β×travel` pitzDaily plateau
       (the slower arm), so it is not the default.
@@ -270,7 +270,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       reshaped β toward the α=1 boundary that SER misses, but it never converged standalone (stalled rel
       ~0.03), its gains were hand-set placeholders and it had no production caller. The α signal is kept
       where it is measured to work: in the two *dual-time* controls above. Full analysis: the "SER β
-      schedule runs backwards" bullet in `.claude/rules/solve.md`.
+      schedule runs backwards" bullet in `.claude/rules/solve-globalization-log.md`.
   - **`reuse=` refreshes a stale k/ω preconditioner without changing the compilation signature.**
     `scalar_transport_preconditioner(..., reuse=old)` (threaded through
     `SSTTurbulence.k_preconditioner` / `omega_preconditioner`) re-derives the *values* at a new state on
@@ -654,7 +654,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     verified three ways: (1) the closure reproduces OF's `ν_t = 422` *exactly* when fed OF's own converged
     `k`,`ω`; (2) the "flat ν_t ≈ 85" is the **inlet** value `k_in/ω_in`, not a cap (interior ν_t is *below*
     inlet — under-developed); (3) `x_r`,`k` climb *monotonically* toward OF as the march progresses, stalling
-    only at rel ~0.05 (the SER-schedule convergence problem — see `.claude/rules/solve.md`). On the clean field
+    only at rel ~0.05 (the SER-schedule convergence problem — see `.claude/rules/solve-globalization-log.md`). On the clean field
     aquaflux accepts the **bulk** to `|R|/ω ~2e-6`; the only residual is the near-wall fixed-cell blend
     difference above. (`compare.py` was also silently broken — it called the renamed `momentum.velocity_gradient`;
     fixed to `turbulence.closure_fields(...).nu_t`, so the cell-for-cell profile comparison had *never actually
@@ -741,7 +741,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     then dominates a homogeneous linear row and `k` decays; raising Re reverses both (weight median
     5.6e-20 → 1.9e-10 → 1.000 across the three rungs). **Anchoring a ladder below the Reynolds number at
     which the wall function turns itself on manufactures a near-wall `k` trough.** Full account in
-    `.claude/rules/solve.md`.
+    `.claude/rules/solve-amg-multigrid.md`.
 
     ❌ **REFUTED — the "ω is exactly 10×, i.e. still at its 60ν seed" lead.** That ω is `6ν/(β₁d²)` at the
     *rung's own* viscosity to 16 digits; the 10× compared a rung-2 state against the target-Re formula.
@@ -765,7 +765,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     direction keeps demanding a `k` change of ~1e-13 while `k` itself has been ratcheted down to 1e-22
     against a mesh median of 2.97e-02. **The root there is `+1.99e-14` — positive**; the constraint is
     active because the iterate sits eight decades below its own root, not because no root exists. (Full
-    measurement, and the step-length lock-up it causes, in `.claude/rules/solve.md`.)
+    measurement, and the step-length lock-up it causes, in `.claude/rules/solve-amg-multigrid.md`.)
 
     **❌ The first suspicion — that a three-wall-face cell takes several times the destruction against
     one cell's worth of production, because the two terms are reduced over a cell's wall faces
@@ -891,7 +891,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     `k = -3.3e-4`, every field finite, only the derived `nu_t` NaN.
     `coupled_amg_continuation` therefore wires `positive_k_limit(coupled)` — the fraction-to-the-boundary
     cap — automatically for a directly-solved `k`, and passes `None` for a log-solved one, where
-    positivity is already structural and a cap would only throttle. See `.claude/rules/solve.md`.
+    positivity is already structural and a cap would only throttle. See `.claude/rules/solve-march.md`.
     **`log(k+1)` does not fix this**: `k = e^w − 1` bounds `k > −1`, not `k > 0`, so the failure above is
     still reachable. It is regular at the wall (unlike `log k`) but that solves the other problem, not
     this one.
@@ -907,7 +907,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     used to be escalating β — a *full re-solve* — and escalating β (16/64) still did **not** descend
     (rel ≈ 1.0 → the full-mesh march *stalled*, which had been misread as "slow, compute-heavy"). A
     **backtracking line search** on the one β₀ solve finds α≈¼ → rel≈0.48 (residual halved), so
-    `coupled_continuation` sets `line_search=_COUPLED_LINE_SEARCH` (see `.claude/rules/solve.md`); β
+    `coupled_continuation` sets `line_search=_COUPLED_LINE_SEARCH` (see `.claude/rules/solve-globalization.md`); β
     escalation stays the fallback for a bad *direction*, not an overshoot. With it the full-mesh solve
     **descends** (rel 1.0 → 0.48 → 0.44 → 0.31 → 0.20 → ~0.18 over ~6 steps) instead of *stalling at
     rel 1.0* — the case is now solvable at all, a correctness fix, not just speed. **(2) The shifted
@@ -918,14 +918,14 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     was STALE (corrected 2026-07-28).** `_COUPLED_FORWARD_SOLVER` now stops on a global 2-norm relative
     residual (`relative_residual_gmres`, ~1% per inexact-Newton step): it reproduces the over-solving
     march's `x_r/h` trajectory to 3-4 significant figures per step with no log-`ω` divergence, at ~4×
-    fewer matvecs. See the `forward_solver` bullet in `.claude/rules/solve.md` for the mechanism
+    fewer matvecs. See the `forward_solver` bullet in `.claude/rules/solve-globalization.md` for the mechanism
     (`lineax`'s componentwise stop plus the near-zero-right-hand-side ω wall-fixation rows pinned it to
     the absolute `atol=1e-10` floor, ~9 orders past the requested 1e-3) and the two-arm refutation.
   - **The march's default residual measure is the row-equilibrated `RowScaledNorm` (`coupled_scaled_norm`),
     NOT the plain Euclidean ‖R‖.** The Euclidean coupled residual is dominated by the `ω` block (`ω` O(1e5),
     `k` O(1e-3)), so it barely moves while the flow develops and *mis-ranks* states — a converged field can
     score worse than a badly wrong one, and a step collapsing `k` is accepted (see the mis-ranking warning
-    in `.claude/rules/solve.md`). `RowScaledNorm` divides each row by its own diagonal and each block by its
+    in `.claude/rules/solve-globalization-log.md`). `RowScaledNorm` divides each row by its own diagonal and each block by its
     field magnitude, reporting a fractional change per equation, so steering and the stopping test judge
     every block comparably. `coupled_continuation` / `coupled_ilut_continuation` build it by default;
     `block_scaled_norm=True` selects the coarser one-scale-per-block `BlockScaledNorm` (`_coupled_residual_norm`),
@@ -937,7 +937,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     is REQUIRED for the case to be judged correctly. **When a march refreshes, the measure is held fixed at
     the initial state** — `solve_coupled` passes `coupled_continuation(residual_norm=base_norm)` on every
     refresh rather than rebuilding it at the developed state, or the self-normalising scales would re-base and
-    the convergence test become unreachable (#156 seam 4; see `.claude/rules/solve.md`). `scaled_norm=True`
+    the convergence test become unreachable (#156 seam 4; see `.claude/rules/solve-globalization-log.md`). `scaled_norm=True`
     opts the *observed* march into rebuilding the row scales per outer step (finer, more expensive).
   - **`beta_floor` (SER lower bound) is available but off by default (a measured wash).** Bounding
     `β = max(beta_floor, β₀(‖R‖/‖R₀‖)^p)` keeps each late shifted solve out of the ill-conditioned low-`β`
@@ -946,7 +946,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     Newton steps), so it defaults to `0`; wired through `coupled_continuation` for further evaluation. The
     settled coupled-solve cost is the diagonal-block-preconditioner weakness at high Reynolds number, **not**
     the residual measure, `β` floor, or missing cross-coupling (a block-triangular preconditioner was worse
-    — non-convergent on recirculating pitzDaily). See `.claude/rules/solve.md`.
+    — non-convergent on recirculating pitzDaily). See `.claude/rules/solve-globalization-log.md`.
   - **The coupled flow block uses the convection-aware AMG + MSIMPLER Schur, not the smoothed/SIMPLE
     default (`_coupled_shift_policy`).** A RANS case is high-Reynolds, and the default
     `BlockPreconditioner.build` config (viscous-**smoothed** velocity AMG, which is Peclet-blind, + the
@@ -963,15 +963,15 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     anything slightly *worse* (same caveat as above: no β, tolerance or norm recorded). It is **not** the
     flow↔turbulence cross-coupling (the block-*diagonal* preconditioner with the right config is already
     nearly aligned on its own — a block-triangular coupling was
-    built, measured, and is worse; see `.claude/rules/solve.md`). **The k/ω *scalar* AMGs are the
+    built, measured, and is worse; see `.claude/rules/solve-globalization-log.md`). **The k/ω *scalar* AMGs are the
     exception: they do go stale, and refreshing them alone once the flow separates cuts the outer cycle count
     materially** (configuration not recorded — re-measure before relying on the size) — the one staleness
     lever that pays; see the staleness bullet in
-    `.claude/rules/solve.md`. Overridable via `preconditioner_kwargs`.
+    `.claude/rules/solve-globalization-log.md`. Overridable via `preconditioner_kwargs`.
   - **`coupled_ilut_continuation` — the monolithic-ILUT alternative to the block-triangular PC (BUILT).**
     A drop-in for `solve_coupled(continuation=…)` that preconditions the whole `[flow, k, ω]` saddle with
     one incomplete-LU factorization of the assembled coupled Jacobian (`MonolithicIlutPreconditioner`,
-    `.claude/rules/solve.md`) instead of the block-diagonal SIMPLE composition. It **forms the true
+    `.claude/rules/solve-direct-preconditioners.md`) instead of the block-diagonal SIMPLE composition. It **forms the true
     pressure Schur through the factorization's fill** rather than approximating it — the block PC's
     measured wall is the Schur *approximation* (the "Stage 3" note above / `.claude/rules/flow.md`), which
     the ILUT sidesteps: on the coupled RANS saddle it reaches the forward tolerance in a small number of
@@ -987,7 +987,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     raises. The factorization is a host `scipy` object so it rides as a **static**
     field and is applied via `jax.pure_callback`, with the adjoint's `Mᵀ` supplied directly through a
     `TransposedPreconditioner` (the generic `jax.linear_transpose` machinery cannot transpose a callback —
-    `.claude/rules/solve.md`). **Its forward solver is `_COUPLED_ILUT_FORWARD_SOLVER` (restart-10),
+    `.claude/rules/solve-direct-preconditioners.md`). **Its forward solver is `_COUPLED_ILUT_FORWARD_SOLVER` (restart-10),
     NOT the block path's restart-120 `_COUPLED_FORWARD_SOLVER`:** the ILUT clusters the preconditioned
     spectrum so tightly that the 1% stop is reached within ~5–10 vectors, and `lineax` GMRES only tests
     convergence at each restart boundary (its sole mid-cycle exit is exact Arnoldi breakdown, which does
@@ -1007,12 +1007,12 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     for `solve_coupled` that re-factors the ILUT **in place in the SAME continuation object**
     (`MonolithicIlutPreconditioner.refresh_in_place`), so the jitted march-step is a compilation cache hit
     (no recompile) — pair it with a `CoefficientDriftTrigger` so the re-factor leads the staleness. This
-    is impure and **forward-march only** (never differentiate through it); see `.claude/rules/solve.md`
+    is impure and **forward-march only** (never differentiate through it); see `.claude/rules/solve-direct-preconditioners.md`
     for the mechanism (static preconditioner field + callback reads `self.factors` at call time) and the
     cost split (in-place refresh ~44 s vs ~72 s rebuild; the residual is ~88 % `spilu`, a hard floor). The
     builder still assembles the (unused) block AMG as the `a_P` source (a lightweight shift-diagonal-only
     policy is the tracked cleanup). The heavy ILUT fill is
-    the 3D-scalability caveat (parked ILUT-as-smoother variant, `.claude/rules/solve.md`). **Per-step wall
+    the 3D-scalability caveat (parked ILUT-as-smoother variant, `.claude/rules/solve-direct-preconditioners.md`). **Per-step wall
     (restart-10, measured on a pitzDaily cold march): the ILUT is CHEAPER per pseudo-timestep than the
     block PC, reverting the earlier "ILUT is more expensive per step" verdict, which was a restart-120
     artifact (see the restart note above).** Its build is the more expensive of the two (`spilu`
@@ -1030,7 +1030,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     default needs a selector seam, not a swap (tracked).
   - **`coupled_lu_continuation` / `coupled_lu_refreshing_continuation` — the COMPLETE-LU counterpart, the
     preferred coupled PC on 2D/moderate meshes (BUILT).** Same drop-in as the ILUT builders but factors the
-    coupled Jacobian *completely* (`MonolithicLuPreconditioner`, `.claude/rules/solve.md`), so the
+    coupled Jacobian *completely* (`MonolithicLuPreconditioner`, `.claude/rules/solve-direct-preconditioners.md`), so the
     preconditioner is exact and the Krylov solve converges in **one** iteration. With the UMFPACK backend
     (optional `petsc4py` dep, `backend="auto"|"umfpack"|"scipy"`) it factors the developed pitzDaily
     coupled Jacobian in **~1.2 s vs the ILUT's ~32 s (~26×)**, exact, verified on the real forward operator
@@ -1042,12 +1042,12 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     (`tests/integration/test_coupled_lu.py`, run under the `scipy` backend so CI needs no optional dep —
     the complete factorization is exact regardless of backend). **SCOPE: a 2D / moderate-mesh tool** — the
     complete LU's fill (`O(n^{4/3})` in 3D) is a memory wall past ~10⁴ 3D cells (measured), so large 3D
-    stays on the ILUT / block / rank-structured-direct paths (`.claude/rules/solve.md`). Prefer it over the
+    stays on the ILUT / block / rank-structured-direct paths (`.claude/rules/solve-direct-preconditioners.md`). Prefer it over the
     ILUT where the mesh is 2D/moderate (faster *and* exact); the ILUT remains for its 3D-fill headroom and
     is still the differentiable default until a selector seam lands.
   - **`coupled_amg_continuation` — the ALGEBRAIC-MULTIGRID counterpart, the coupled PC for large 3D
     (BUILT).** Same drop-in as the ILUT/LU builders but preconditions with one smoothed-aggregation
-    multigrid V-cycle (`MonolithicAmgPreconditioner`, `.claude/rules/solve.md`) instead of a factorization —
+    multigrid V-cycle (`MonolithicAmgPreconditioner`, `.claude/rules/solve-amg-multigrid.md`) instead of a factorization —
     a **direct-LU coarse solve** keeps the heavy fill on only the small coarsest grid, so it builds in
     ~seconds with bounded memory where both factorizations hit the 3D wall (the complete LU's fill OOMs; the
     ILUT's `spilu` on the distance-3 3D Jacobian — measured 38.7M nnz on `bfs3d` — runs >7.5 min). Shares
@@ -1067,7 +1067,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     on the low-shift operator the march's tail runs at, at one extra cheap incomplete-LU back-solve each. (The
     sweep figures once quoted here were measured at ILU(1), where the optimum was two sweeps; the validated
     `bfs3d` bundle is ILU(0) × 4 and the ILU(1) numbers do not carry over — see the zero-fill smoother bullet
-    in `.claude/rules/solve.md`.) This is the coupled
+    in `.claude/rules/solve-amg-multigrid.md`.) This is the coupled
     preconditioner the first 3D validation case (`validation/bfs3d_openfoam`) runs on.
   - **`amg_beta_tracking_refresh` — rebuild the V-cycle as β drifts, the enabler of the 3D
     dual-time march (BUILT).** The AMG sibling of `lu_beta_tracking_refresh` / `ilut_beta_tracking_refresh`.
@@ -1109,7 +1109,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       state, β or preconditioner bundle — re-measure before relying on its size); the right lever is a
       *cheaper* materialize, not a rarer one — hence the `sparse_jacobian` speedups (batched probe,
       gather de-compression, the saturation colouring and the per-column reach; see the
-      materialize-efficiency bullet in `.claude/rules/solve.md`), which `coupled_amg_continuation` and the
+      materialize-efficiency bullet in `.claude/rules/solve-amg-multigrid.md`), which `coupled_amg_continuation` and the
       refresh wire in (built once, reused). **DON'T lower `stencil_reach` to 2 to cheapen it** — reach-2 is
       numerically near-exact at *every* state, but GAMG(reach-2) DIVERGES as a preconditioner. ⚠️ The
       mechanism once given here — the ILU(1) smoother's pattern-dependent fill — **does not survive**:
@@ -1141,8 +1141,8 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       pitzDaily**, which is skewed enough that reach 3 materializes a measurably wrong matrix there; and
       the cap is a **trade** rather than a free win, since narrowing makes a zero-fill elimination harder
       (pitzDaily ILU(0) negative pivots 9 → 263 as the sweeps narrow). Both are in
-      `.claude/rules/solve.md`; do not describe this knob as free. Reach/accuracy tables and the refuted "use GMRES instead" alternative are in
-      `.claude/rules/schemes.md` and `.claude/rules/solve.md`; harness
+      `.claude/rules/solve-direct-preconditioners.md`; do not describe this knob as free. Reach/accuracy tables and the refuted "use GMRES instead" alternative are in
+      `.claude/rules/schemes.md` and `.claude/rules/solve-direct-preconditioners.md`; harness
       `validation/gradient_stencil_reach.py`.
       **⚠️ THE DRIFT GATE MUST NOT BE NESTED INSIDE THE β GATE — it was, and a PC-only `beta_floor` then
       made it unreachable.** The β gate sees `max(β, beta_floor)`, so below the floor its input is pinned
@@ -1151,7 +1151,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       drifted ~20 % per step, and those steps carried 47 % of the march's Krylov cost. The decision is now
       the pure `_refresh_branch(stale_state, moved_beta, split)`: drift ⇒ `full` regardless of β, β move
       alone ⇒ `shift`, neither ⇒ `none`. Because the materialize gate is now consulted **every step**,
-      `materialize_every` counts steps rather than refreshes. Full data in `.claude/rules/solve.md`.
+      `materialize_every` counts steps rather than refreshes. Full data in `.claude/rules/solve-amg-multigrid.md`.
       The `assemble` half of the refresh is also precomputed now (`ShiftedCellMajorOperator`), and the
       observer receives a `RefreshTiming` with per-phase costs instead of one aggregate — so "the
       materialize is ~half the refresh" is measured per run rather than inferred.
@@ -1250,7 +1250,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       archived logs took 1, which read as a regression and cost hours of bisection. It was not: those
       logs were produced on a *different branch*, and the base being worked on carried a
       `COLUMN_REACH` with **pressure at reach 2**, which corrupts that column and poisons the operator
-      the preconditioner is fitted to (since fixed on the case; `.claude/rules/solve.md` carries it).
+      the preconditioner is fitted to (since fixed on the case; `.claude/rules/solve-direct-preconditioners.md` carries it).
       Three arms — the change, the change with the old driver, and the
       **untouched base** — came out identical to the digit, which is what identified the base rather
       than the change; restoring pressure to reach 3 then reproduced the archived trajectory exactly
@@ -1286,7 +1286,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       Two things spoil them, and the second was found afterwards: the anchor's cold field is not a state
       the target rung ever occupies (its real seed is a converged Re/10 root), **and** the run inherited
       the case's then-current `COLUMN_REACH` with **pressure at reach 2** (since fixed), which corrupts
-      that column and poisons the operator being solved (see `.claude/rules/solve.md`). That is why both arms fail so
+      that column and poisons the operator being solved (see `.claude/rules/solve-direct-preconditioners.md`). That is why both arms fail so
       badly at the lower viscosities — at 1× ν the true residual ends *above* the initial guess.
       Neither spoiler touches the **comparison**, which holds the state, the operator and the reach fixed
       and varies only the hierarchy's provenance — and the arms agree *to the digit*, which is a stronger
@@ -1301,9 +1301,9 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     smoother fill recorded — re-measure.) `coarse_eq_limit` (`pc_gamg_coarse_eq_limit`, threaded through
     the `coupled_amg_continuation` builder) sets the direct-LU coarse-grid size; raising it to 2000 is a
     large cut in the outer cycle count on the hard `bfs3d` state — for the figure with its β and bundle
-    use the `coarse_eq_limit` bullet in `.claude/rules/solve.md` rather than repeating an unanchored
+    use the `coarse_eq_limit` bullet in `.claude/rules/solve-amg-multigrid.md` rather than repeating an unanchored
     number here. The experimental native-PETSc forward path and the FGMRES-forward
-      optimization remain follow-ups (`.claude/rules/solve.md`).
+      optimization remain follow-ups (`.claude/rules/solve-amg-multigrid.md`).
   - **`lu_beta_tracking_refresh` — re-factor the LU at the current β EVERY step (the correct LU treatment
     for a dual-time march; BUILT).** A frozen LU is exact only for the β it was factored at; a dual-time
     march's β ramps (0.5 → 0.005), so a factorization frozen at `lu_beta` mis-preconditions the operator
@@ -1313,7 +1313,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     shrugs off the β-mismatch at a few cycles) while the LU is *exact-and-brittle*. Since the LU factor is
     cheap (~1 s), the fix is to re-factor at the current `(state, β)` **every step**:
     `lu_beta_tracking_refresh(coupled)` returns a `precondition_step(active_step, state)` (the
-    `forward_march` seam, `.claude/rules/solve.md`) that reads β from the step's `ConstantRelaxation` (set
+    `forward_march` seam, `.claude/rules/solve-march.md`) that reads β from the step's `ConstantRelaxation` (set
     by a `DualTimeControl`) and `refresh_in_place`s the LU at `J(state)+β·d(state)` — exact each step (1
     iter), robust through overshoots. Measured: `solve_coupled(continuation=coupled_lu_continuation(...),
     step_control=DualTimeControl(...), precondition_step=lu_beta_tracking_refresh(coupled))` **completes
@@ -1370,7 +1370,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       tolerance leaves the inexact δ non-finite on the stiff operator, where the exact LU's δ is finite),
       so the fix is to **redo the diverged step at a tighter linear solve**, same state, same (fresh)
       factors: `forward_march`/`solve_coupled` take a `retry.solver` that recovers only a non-finite step
-      (see the `retry.solver` bullet in `.claude/rules/solve.md`). Measured: with the loose ILUT default +
+      (see the `retry.solver` bullet in `.claude/rules/solve-march.md`). Measured: with the loose ILUT default +
       `retry=RetryPolicy(solver=relative_residual_gmres(1e-4, restart=40))`, the aggressive-control ramp runs rung-1
       steps 1–7 on the cheap loose solver and *only* the diverged overshoot step retries tight, recovering
       to the exact-LU value and tracking the LU on — the state-adaptive alternative to tightening every
@@ -1398,14 +1398,14 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     efficiency-optimal β *rises* (≈2 at rel 0.38, ≥5 at rel 0.05), so in the tail SER runs at β ~50× too
     low, where the full Newton step overshoots ~33× and the line search claws back ~0.4%/step (diagnosed
     directly via the step-length factor α — the full analysis and data are the "SER β schedule runs
-    backwards" bullet in `.claude/rules/solve.md`). **A ~1.9× preconditioner refresh cannot rescue a march
+    backwards" bullet in `.claude/rules/solve-globalization-log.md`). **A ~1.9× preconditioner refresh cannot rescue a march
     the schedule is grinding to a halt** — this reorders the priorities: fixing the β schedule (an
     α-driven pseudo-transient step control — the dual-time controls are where that direction survives)
     is ahead of calibrating the refresh.
   - **Preconditioner staleness is the SECONDARY cost, and it is coupled to the β schedule (measured).**
     Over the march the wall time per step also grows several-fold as the recirculation develops and the
     frozen scalar preconditioner degrades — the same post-separation regime where refreshing the k/ω AMGs
-    cuts the outer cycle count (staleness bullet in `.claude/rules/solve.md`). Neither figure was recorded
+    cuts the outer cycle count (staleness bullet in `.claude/rules/solve-globalization-log.md`). Neither figure was recorded
     with its state or its preconditioner bundle, so re-measure before relying on either.
     Driving a refresh **from the march** is BUILT:
     `solve_coupled(refresh=RefreshPolicy(trigger=CoefficientDriftTrigger(…)))`. **The β coupling that motivated it:** a
@@ -1415,7 +1415,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     `drift_measure` against the same trigger, needing no new trigger. The threshold is **calibrated on an
     instrumented cold-IC pitzDaily march** (`threshold = 0.1`, firing where the cycle count has just
     doubled off its floor and the bubble has formed) — the table, and the validation that drift really
-    does track cost, are in `.claude/rules/solve.md`. One geometry, so re-calibrate by offline replay
+    does track cost, are in `.claude/rules/solve-march.md`. One geometry, so re-calibrate by offline replay
     on a new case rather than assuming it transfers.
   - **The slope limiter is NOT implicated (measured — do not re-derive this).** pitzDaily is the first
     case that genuinely exercises `LimitedUpwind` (Poiseuille / cavity / smooth channels never activate a
