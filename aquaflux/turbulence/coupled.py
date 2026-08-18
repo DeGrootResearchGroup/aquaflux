@@ -1563,7 +1563,10 @@ class FrozenTransposeFactory:
 
 
 def _coupled_jacobian_plan(
-    coupled: CoupledRANS, stencil_reach: int, column_reach: Sequence[int] | None = None
+    coupled: CoupledRANS,
+    stencil_reach: int,
+    column_reach: Sequence[int] | None = None,
+    active_rows: np.ndarray | None = None,
 ):
     """The probing plan for materializing the coupled Jacobian (a mesh-fixed quantity).
 
@@ -1575,15 +1578,23 @@ def _coupled_jacobian_plan(
     columns close inside a shorter reach follows from the schemes the residual was assembled with, so
     it must be measured for a given case rather than assumed. ``None`` (default) probes every column at
     ``stencil_reach``.
+
+    ``active_rows`` excludes field-pair blocks from the pattern entirely, for a caller that already
+    knows some sub-block of the materialized Jacobian will never be read -- see
+    :meth:`~aquaflux.solve.FieldGroups.active_rows`. ``None`` (default) wants every block.
     """
     n_cells = coupled.momentum.mesh.n_cells
     owner, nb, _ = coupled.momentum.mesh.face_cells.interior_edges()
     owner, nb = np.asarray(owner), np.asarray(nb)
     if column_reach is None:
         return ColumnProbePlan.uniform(
-            block_stencil_colouring(owner, nb, n_cells, stencil_reach), coupled.layout.dim + 3
+            block_stencil_colouring(owner, nb, n_cells, stencil_reach),
+            coupled.layout.dim + 3,
+            active_rows=active_rows,
         )
-    return column_probe_plan(owner, nb, n_cells, column_reach, stencil_reach)
+    return column_probe_plan(
+        owner, nb, n_cells, column_reach, stencil_reach, active_rows=active_rows
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1625,6 +1636,8 @@ class CoupledJacobianProbe:
         stencil_reach: int = 3,
         column_reach: Sequence[int] | None = None,
         gradient_sweeps: int | None = None,
+        *,
+        active_rows: np.ndarray | None = None,
     ) -> CoupledJacobianProbe:
         """Colour the cell graph at these reaches and precompute the de-compression for it.
 
@@ -1644,13 +1657,20 @@ class CoupledJacobianProbe:
             Probe a copy of the residual whose corrected-gradient solve is capped at this many
             Richardson sweeps, rather than the residual itself. See :meth:`narrow`. ``None`` (default)
             probes the residual as it stands.
+        active_rows : np.ndarray, optional
+            Exclude field-pair blocks from the materialized pattern entirely -- for a probe built
+            specifically to feed one consumer that is known never to read some sub-block of the
+            Jacobian, such as a :class:`~aquaflux.solve.BlockTriangularFieldSplit`'s dropped triangle
+            (:meth:`~aquaflux.solve.FieldGroups.active_rows`). ``None`` (default, and the only sound
+            choice for a probe that might be shared with a monolithic consumer) wants every block, and
+            is byte-identical to a probe built without this argument.
 
         Returns
         -------
         CoupledJacobianProbe
             The shared probe.
         """
-        plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
+        plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach, active_rows)
         return cls(plan, block_stencil_gather_map(plan), gradient_sweeps)
 
     def narrow(self, coupled: CoupledRANS) -> CoupledRANS:
@@ -2274,12 +2294,32 @@ def coupled_amg_continuation(
             stagnation_iters=40,
             max_restarts=forward_max_restarts,
         )
+    # The partition a field split fits, needed here (not only below) because it decides which
+    # off-diagonal triangle a probe built for it never has to store -- see `active_rows` just below.
+    # Building it costs nothing and is unused when `field_split` is false.
+    groups = FieldGroups(
+        n_cells=coupled.layout.n_cells,
+        n_leading_fields=coupled.layout.dim + 1,  # u, v, w, p -- the saddle
+        n_trailing_fields=2,  # k, omega -- the transported scalars
+    )
     # The colouring plan and the fixed CSR structure + gather map that de-compresses a probe into it. Both
     # are mesh-fixed, so a caller building several steps over one case (a Reynolds continuation, or a step
     # and its refresh hook) supplies one shared `probe` and nothing here is rebuilt.
     if probe is None:
         probe = CoupledJacobianProbe.build(
-            coupled, stencil_reach, column_reach, probe_gradient_sweeps
+            coupled,
+            stencil_reach,
+            column_reach,
+            probe_gradient_sweeps,
+            # A block-triangular split never reads the triangle it drops, at any state, so a probe
+            # built here specifically for one need not materialize that block at all -- it is a
+            # fifth or more of the pattern on a coupled RANS mesh (measured on a three-dimensional
+            # backward-facing step) and pure waste otherwise: computed, stored, and thrown away by
+            # `FieldGroups.blocks` the moment the split is fitted. `flow_first` matches
+            # `FieldSplitAmgPreconditioner.build`'s own (unexposed) default ordering; if that default
+            # ever becomes a parameter here, this must move with it. `None` when not splitting, so a
+            # monolithic build (which DOES read every block) is unaffected.
+            active_rows=groups.active_rows() if field_split else None,
         )
     plan, structure = probe.plan, probe.structure
     frozen = jax.lax.stop_gradient(reference_state)
@@ -2327,11 +2367,7 @@ def coupled_amg_continuation(
                 matvec,
                 plan,
                 shift,
-                FieldGroups(
-                    n_cells=coupled.layout.n_cells,
-                    n_leading_fields=coupled.layout.dim + 1,  # u, v, w, p -- the saddle
-                    n_trailing_fields=2,  # k, omega -- the transported scalars
-                ),
+                groups,
                 trailing_smoother_sweeps=trailing_smoother_sweeps,
                 leading_options=leading_options,
                 trailing_options=trailing_options,

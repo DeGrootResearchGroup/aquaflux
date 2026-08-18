@@ -174,6 +174,21 @@ already cost someone a wrong conclusion elsewhere in this file:
 every arm. ⚠️ It, and five sibling probes, were dead on arrival until 2026-08-14 on a positional unpack —
 if it fails at startup again, check that first rather than the numerics.
 
+### The materialize used to be monolithic in a way that wasted a quarter of it — now fixed
+
+**Found while checking whether the trailing-block fix above was the only scaling wall on this path; it
+was not, and it is now closed too — see `.claude/rules/solve-field-split.md` for the measurement, the
+mechanism, and the tests.** `FieldSplitAmgPreconditioner` materializes the whole six-field coupled
+Jacobian with one coloured jvp probe and slices the four field-pair blocks out of it; on `bfs3d` at
+23040 cells, the block that gets sliced out and discarded (`∂R_flow/∂turb`, never applied by a
+flow-first split) was **22 % of the total stored nonzeros (10.5M of 47.2M)**. `ColumnProbePlan` now
+takes an `active_rows` table (`solve/sparse_jacobian.py`) excluding a field-pair block from the pattern
+**before** it is built, derived from the partition itself
+(`FieldGroups.active_rows`, `solve/field_split.py`) and threaded through automatically wherever this case
+builds its own probe under `field_split=True`. Confirmed on the real mesh through the real production
+call: `nnz` **47.209M → 36.718M (−22.2 %)**, and the resulting preconditioner's `apply()` — forward and
+transpose — is bit-identical to the unrestricted build's.
+
 ## Current configuration (check here FIRST — the library and the case deliberately differ)
 
 **The library defaults and the validated `bfs3d` case bundle are not the same, and conflating them is a
