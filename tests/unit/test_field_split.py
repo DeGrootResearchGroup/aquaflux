@@ -99,6 +99,46 @@ class TestFieldGroups:
         with pytest.raises(ValueError, match="describes"):
             groups.blocks(sp.eye(groups.n_dofs + 1, format="csr"))
 
+    def test_active_rows_excludes_exactly_the_triangle_a_flow_first_split_drops(self, groups):
+        active = groups.active_rows(flow_first=True)
+        assert active.shape == (groups.n_fields, groups.n_fields)
+        nl = groups.n_leading_fields
+        assert not active[:nl, nl:].any()  # leading rows <- trailing columns: dropped
+        assert active[:nl, :nl].all()  # leading diagonal: kept
+        assert active[nl:, nl:].all()  # trailing diagonal: kept
+        assert active[nl:, :nl].all()  # trailing rows <- leading columns: the RETAINED coupling
+
+    def test_active_rows_excludes_the_other_triangle_when_trailing_leads(self, groups):
+        active = groups.active_rows(flow_first=False)
+        nl = groups.n_leading_fields
+        assert not active[nl:, :nl].any()  # trailing rows <- leading columns: dropped
+        assert active[:nl, nl:].all()  # the OTHER triangle is now the one retained
+
+    def test_active_rows_and_default_flow_first_agree(self, groups):
+        assert np.array_equal(groups.active_rows(), groups.active_rows(flow_first=True))
+
+    @pytest.mark.parametrize("flow_first", [True, False])
+    def test_the_dropped_block_never_reaches_the_splits_own_apply(
+        self, groups, operator, flow_first
+    ):
+        """The whole point of ``active_rows``: zeroing the block it excludes must not move the split's
+        output at all, since :class:`BlockTriangularFieldSplit` never reads it either way."""
+        split = split_for(operator, groups, flow_first=flow_first)
+        baseline = as_matrix(split, groups.n_dofs)
+
+        active = groups.active_rows(flow_first=flow_first)
+        zeroed = operator.copy()
+        for a in range(groups.n_fields):
+            for b in range(groups.n_fields):
+                if not active[a, b]:
+                    a_rows = slice(a * groups.n_cells, (a + 1) * groups.n_cells)
+                    b_cols = slice(b * groups.n_cells, (b + 1) * groups.n_cells)
+                    zeroed[a_rows, b_cols] = 0.0
+        assert not np.array_equal(zeroed, operator), "the fixture must actually populate that block"
+
+        split_on_zeroed = split_for(zeroed, groups, flow_first=flow_first)
+        np.testing.assert_allclose(as_matrix(split_on_zeroed, groups.n_dofs), baseline)
+
 
 class TestBlockTriangularAlgebra:
     @pytest.mark.parametrize("flow_first", [True, False])

@@ -128,6 +128,15 @@ class ColumnProbePlan:
         Per column field and pattern entry, whether that entry lies within the column's own reach;
         shape ``(n_fields, n_blocks)``. Entries outside it are **forced to zero** rather than read from
         a response — see the note below.
+    active_rows : np.ndarray
+        Per row field and column field, whether that field-pair block is wanted at all;
+        shape ``(n_fields, n_fields)``, indexed ``[row_field, column_field]``. Unlike ``in_reach`` (a
+        graph-distance question, decided per pattern entry) this is a **static** declaration from the
+        consumer -- some structural sub-block of the assembled matrix that consumer will never read,
+        whatever the mesh or the state. An excluded pair is not merely zeroed: :func:`block_stencil_gather_map`
+        removes it from the stored pattern entirely, so it costs neither the materialize's de-compression
+        nor the assembled matrix's memory. ``True`` everywhere by default (every block wanted, which is
+        the only sound default for a plan a consumer's identity is unknown to).
 
     Notes
     -----
@@ -148,6 +157,7 @@ class ColumnProbePlan:
         n_colours: tuple[int, ...],
         reach: tuple[int, ...],
         in_reach: np.ndarray | None = None,
+        active_rows: np.ndarray | None = None,
     ) -> None:
         self.n_cells = n_cells
         self.n_fields = n_fields
@@ -158,6 +168,9 @@ class ColumnProbePlan:
         self.reach = reach
         self.in_reach = (
             np.ones((n_fields, pattern_rows.shape[0]), dtype=bool) if in_reach is None else in_reach
+        )
+        self.active_rows = (
+            np.ones((n_fields, n_fields), dtype=bool) if active_rows is None else active_rows
         )
         base, total = [], 0
         for count in n_colours:
@@ -173,7 +186,9 @@ class ColumnProbePlan:
         )
 
     @classmethod
-    def uniform(cls, colouring: BlockColouring, n_fields: int) -> ColumnProbePlan:
+    def uniform(
+        cls, colouring: BlockColouring, n_fields: int, active_rows: np.ndarray | None = None
+    ) -> ColumnProbePlan:
         """Probe every column field at one reach — the plan a single :class:`BlockColouring` describes."""
         return cls(
             colouring.n_cells,
@@ -183,6 +198,7 @@ class ColumnProbePlan:
             np.broadcast_to(colouring.colour, (n_fields, colouring.n_cells)),
             (colouring.n_colours,) * n_fields,
             (colouring.reach,) * n_fields,
+            active_rows=active_rows,
         )
 
     def probe(self, index: int) -> tuple[int, int]:
@@ -236,6 +252,7 @@ def column_probe_plan(
     n: int,
     column_reach: Sequence[int],
     pattern_reach: int | None = None,
+    active_rows: np.ndarray | None = None,
 ) -> ColumnProbePlan:
     """A probing plan giving each column field its own stencil reach.
 
@@ -265,6 +282,9 @@ def column_probe_plan(
     pattern_reach : int, optional
         The reach the assembly pattern covers. ``None`` (default) uses the widest column reach. Must be
         at least that, since a column cannot be probed beyond the pattern it is assembled into.
+    active_rows : np.ndarray, optional
+        Forwarded to :class:`ColumnProbePlan` — see its own docstring. ``None`` (default) wants every
+        row/column field pair, byte-identical to a plan built without it.
 
     Returns
     -------
@@ -311,6 +331,7 @@ def column_probe_plan(
         tuple(by_reach[r].n_colours for r in reaches),
         reaches,
         in_reach,
+        active_rows=active_rows,
     )
 
 
@@ -523,11 +544,23 @@ def block_stencil_gather_map(plan: ColumnProbePlan) -> ProbeGather:
     )
     row_dof = np.broadcast_to(row_dof_2d, shape).ravel()  # a*n + i
     col_dof = np.broadcast_to(b * index_dtype(n) + cj, shape).ravel()  # b*n + j
+    source = source.ravel()
+    # A row/column field pair a consumer declared it will never read (`active_rows`) is not a reach
+    # question -- it is true at every cell-block, for every state, for the life of the plan -- so it is
+    # dropped from the pattern outright rather than routed to the zero-fill sentinel `in_reach` uses.
+    # That difference matters: an `in_reach` zero is KEPT (a fixed pattern an in-place refactor needs),
+    # while an `active_rows`-excluded entry never had anywhere to be refactored INTO, because no consumer
+    # of this plan ever reads it. Filtering here, before the sparsity is built, is what keeps the saving
+    # out of the assembled matrix's own memory rather than only out of its values.
+    active = plan.active_rows
+    if not active.all():
+        keep = np.broadcast_to(active[None, :, :], shape).ravel()
+        source, row_dof, col_dof = source[keep], row_dof[keep], col_dof[keep]
     # Sort into CSR order by carrying the source index as the data; there are no duplicate
     # (row_dof, col_dof), so `tocsr` only reorders (never sums), and its data is the gather map in CSR
     # order. The payload stays an integer throughout: routing it through float64 and back, as this once
     # did, costs four full-length arrays at double the width for no gain.
-    csr = sp.coo_matrix((source.ravel(), (row_dof, col_dof)), shape=(nf, nf)).tocsr()
+    csr = sp.coo_matrix((source, (row_dof, col_dof)), shape=(nf, nf)).tocsr()
     if csr.nnz != source.size:  # a collision would corrupt the map by summing two sources
         raise ValueError(
             "block_stencil_gather_map: duplicate (row, col) in the pattern (bad colouring)."
@@ -740,6 +773,8 @@ def materialize_block_jacobian(
     for (b, c), response in zip(probes, responses, strict=True):
         block_rows, block_cols = group_blocks[(b, c)]
         for a in range(n_fields):
+            if not plan.active_rows[a, b]:  # a block this plan's consumer will never read
+                continue
             rows_out.append(a * n + block_rows)
             cols_out.append(b * n + block_cols)
             vals_out.append(response[a * n + block_rows])

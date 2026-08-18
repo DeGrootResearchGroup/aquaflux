@@ -80,6 +80,7 @@ from aquaflux.solve import (
 )
 from aquaflux.solve import (
     CflResidualDualTimeControl,
+    FieldGroups,
     InnerIterateCheckpointer,
     MarchLogger,
     RefreshPolicy,
@@ -1274,7 +1275,25 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
     # The probe (colouring plan + gather map) depends on the mesh alone, so a rung was additionally
     # building the single largest allocation this case makes -- twice, once for the engine and once for
     # the refresh hook beside it.
-    probe = CoupledJacobianProbe.build(coupled, column_reach=COLUMN_REACH)
+    #
+    # Under the field split, the `[u,v,w,p] <- [k,omega]` triangle is never applied (the split retains
+    # only the other one) -- so a probe built for it excludes that block from the pattern outright,
+    # rather than materializing and discarding it. Measured on this mesh: 22% of the stored pattern
+    # (10.5M of 47.2M nonzeros) is exactly this block. `FIELD_SPLIT=False` runs the monolithic V-cycle,
+    # which reads every block, so the probe there is unrestricted.
+    probe = CoupledJacobianProbe.build(
+        coupled,
+        column_reach=COLUMN_REACH,
+        active_rows=(
+            FieldGroups(
+                n_cells=coupled.layout.n_cells,
+                n_leading_fields=coupled.layout.dim + 1,
+                n_trailing_fields=2,
+            ).active_rows()
+            if FIELD_SPLIT
+            else None
+        ),
+    )
     # With the cycle trigger on, the scheduled cadences are switched OFF so it REPLACES them: as an
     # addition it is break-even, as a replacement it is the largest saving measured on this march.
     # CAREFUL: `beta_rel_change=None` does NOT switch the schedule off -- it removes the gate, and a

@@ -226,6 +226,107 @@ def test_materialize_recovers_a_known_block_matrix_exactly():
     assert (materialized - k).nnz == 0 or abs(materialized - k).max() < 1e-12
 
 
+def test_active_rows_defaults_to_every_block_and_is_byte_identical():
+    """No ``active_rows`` argument anywhere must reproduce exactly what this module did before it existed."""
+    rng = np.random.default_rng(8)
+    n, nvar, reach = 10, 4, 2
+    k, colouring = _random_block_matrix(n, nvar, reach, rng)
+    plan = ColumnProbePlan.uniform(colouring, nvar)
+    assert plan.active_rows.shape == (nvar, nvar)
+    assert plan.active_rows.all()
+
+    loop = materialize_block_jacobian(_matvec_of(k), plan)
+    gathered = materialize_block_jacobian(
+        _matvec_of(k), plan, structure=block_stencil_gather_map(plan)
+    )
+    assert (loop - k).nnz == 0 or abs(loop - k).max() < 1e-12
+    assert (gathered - k).nnz == 0 or abs(gathered - k).max() < 1e-12
+
+
+def test_active_rows_removes_a_block_from_the_pattern_not_just_its_values():
+    """An excluded (row field, column field) block must be gone from the STORED pattern.
+
+    This is the whole point of the mechanism: a reach-based exclusion (``in_reach``) keeps the position
+    as an explicit zero because some consumer's in-place refactor needs a fixed pattern; a field-pair
+    exclusion is a static declaration that no consumer will EVER read that block, so it is dropped
+    outright and must show up as a smaller ``nnz`` -- not merely as zero values at the same positions.
+    """
+    rng = np.random.default_rng(9)
+    n, nvar, reach = 10, 4, 2
+    k, colouring = _random_block_matrix(n, nvar, reach, rng)
+    full_plan = ColumnProbePlan.uniform(colouring, nvar)
+
+    # Exclude row field 0's coupling to column field 3 -- an arbitrary off-diagonal block that is
+    # genuinely dense in this fixture (every pattern entry gets a random value), so its removal must be
+    # visible in the nonzero count.
+    active = np.ones((nvar, nvar), dtype=bool)
+    active[0, 3] = False
+    excluded_block_nnz = k[0 * n : 1 * n, 3 * n : 4 * n].nnz
+    assert excluded_block_nnz > 0, "the fixture must actually populate the block being excluded"
+
+    restricted_plan = ColumnProbePlan.uniform(colouring, nvar, active_rows=active)
+    assert (
+        restricted_plan.n_probes == full_plan.n_probes
+    )  # excluding a ROW never changes probe count
+
+    full = materialize_block_jacobian(_matvec_of(k), full_plan)
+    restricted = materialize_block_jacobian(_matvec_of(k), restricted_plan)
+    assert restricted.nnz == full.nnz - excluded_block_nnz
+
+    # Every OTHER block is untouched.
+    dense_full, dense_restricted = full.toarray(), restricted.toarray()
+    keep = np.ones((nvar * n, nvar * n), dtype=bool)
+    keep[0 * n : 1 * n, 3 * n : 4 * n] = False
+    assert np.array_equal(dense_full[keep], dense_restricted[keep])
+    assert not dense_restricted[0 * n : 1 * n, 3 * n : 4 * n].any()
+
+
+def test_active_rows_agrees_between_the_scatter_and_gather_paths():
+    """The per-probe loop and the cached-structure gather must exclude the identical block."""
+    import jax
+
+    rng = np.random.default_rng(10)
+    n, nvar, reach = 10, 4, 2
+    k, colouring = _random_block_matrix(n, nvar, reach, rng)
+    dense = jnp.asarray(k.toarray())
+
+    def matvec(v):
+        return dense @ v
+
+    active = np.ones((nvar, nvar), dtype=bool)
+    active[2, 1] = False
+    plan = ColumnProbePlan.uniform(colouring, nvar, active_rows=active)
+
+    scatter = materialize_block_jacobian(matvec, plan)
+    gather = materialize_block_jacobian(
+        matvec, plan, batched_matvec=jax.vmap(matvec), structure=block_stencil_gather_map(plan)
+    )
+    assert scatter.nnz == gather.nnz
+    assert abs(scatter - gather).max() < 1e-14
+    assert not scatter.toarray()[2 * n : 3 * n, 1 * n : 2 * n].any()
+
+
+def test_active_rows_composes_with_a_per_column_reach():
+    """A short column reach and a field-pair exclusion are independent masks and must compose correctly.
+
+    An entry can be dropped for either reason -- out of its column's reach, or in an excluded block -- and
+    the result must agree with applying both restrictions by hand.
+    """
+    n, column_reach = 12, (2, 3)
+    k = _mixed_reach_matrix(n, column_reach, np.random.default_rng(12))
+    owner, nb = _path_graph(n)
+
+    active = np.array([[True, False], [True, True]])  # row 0 <- col 1 excluded
+    plan = column_probe_plan(owner, nb, n, column_reach, pattern_reach=3, active_rows=active)
+    materialized = materialize_block_jacobian(
+        _matvec_of(k), plan, structure=block_stencil_gather_map(plan)
+    ).toarray()
+
+    reference = k.toarray()
+    reference[0 * n : 1 * n, 1 * n : 2 * n] = 0.0  # the excluded block
+    assert np.allclose(materialized, reference, atol=1e-12)
+
+
 def test_batched_probing_matches_the_per_probe_loop():
     """Batched probing (the coloured probes share one linearization, applied to stacked seeds) recovers
     exactly the per-probe loop's Jacobian -- it is a pure speedup, not an approximation. Checked both in

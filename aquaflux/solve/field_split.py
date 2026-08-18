@@ -167,6 +167,38 @@ class FieldGroups:
             matrix[trail, :][:, trail],
         )
 
+    def active_rows(self, *, flow_first: bool = True) -> np.ndarray:
+        """Which field-pair blocks a block-triangular split over this partition ever applies.
+
+        A block-triangular inverse (:class:`BlockTriangularFieldSplit`) forms one diagonal V-cycle per
+        group plus **one** off-diagonal triangle -- the other is never read, whatever the operator or the
+        state. This is that fact as the ``(n_fields, n_fields)`` boolean table
+        :class:`~aquaflux.solve.sparse_jacobian.ColumnProbePlan`'s ``active_rows`` wants, so a caller
+        materializing a Jacobian specifically to feed a split can drop the unread triangle from the
+        pattern before it is ever built rather than slicing it away afterward.
+
+        Parameters
+        ----------
+        flow_first : bool
+            Which group :func:`build_block_triangular_field_split` solves first -- must match that call's
+            own ``flow_first``, since the two describe the SAME ordering choice and a mismatch would
+            exclude the triangle the split actually keeps rather than the one it drops. ``True``
+            (default) matches that function's own default: solve the leading group first, retain
+            trailing-by-leading, drop leading-by-trailing.
+
+        Returns
+        -------
+        np.ndarray
+            ``[row_field, column_field]``, ``True`` everywhere except the dropped off-diagonal triangle.
+        """
+        active = np.ones((self.n_fields, self.n_fields), dtype=bool)
+        nl = self.n_leading_fields
+        if flow_first:
+            active[:nl, nl:] = False  # leading rows <- trailing columns: never applied
+        else:
+            active[nl:, :nl] = False  # trailing rows <- leading columns: never applied
+        return active
+
 
 class BlockTriangularFieldSplit:
     """A block-triangular approximate inverse over a two-group field partition.
