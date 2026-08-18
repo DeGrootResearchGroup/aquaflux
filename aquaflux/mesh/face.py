@@ -50,7 +50,9 @@ Face node-lists are stored ragged, in compressed-sparse-row (CSR) form. The trav
 face's perimeter, and how to sum per-triangle contributions into faces — is owned by
 :class:`~aquaflux.mesh.connectivity.FaceNodeConnectivity`, so a scheme here writes only the
 polygon math. That traversal is enumerated once at build time (its per-face count is
-data-dependent), so ``unoriented_geometry`` is eager, not jittable (geometry is computed once per mesh).
+data-dependent); ``unoriented_geometry`` itself is plain array arithmetic over the already-
+enumerated traversal, and :meth:`~aquaflux.mesh.Mesh.geometry` runs it as part of one
+compiled call.
 """
 
 from __future__ import annotations
