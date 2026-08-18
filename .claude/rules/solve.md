@@ -53,7 +53,7 @@ testability seam. Everything subsystem-specific moved out:
 
 | File | `paths:` | Covers |
 |---|---|---|
-| `solve-direct-preconditioners.md` | `ilut_preconditioner.py`, `lu_preconditioner.py`, `ilu0.py`, `_ilu0.pyx` | The monolithic ILUT and complete-LU preconditioner families, and their shared frozen-host contract |
+| `solve-direct-preconditioners.md` | `lu_preconditioner.py`, `ilu0.py`, `_ilu0.pyx` | The monolithic complete-LU preconditioner (and the now-deleted ILUT it once shared a family with), and the shared frozen-host contract |
 | `solve-amg-multigrid.md` | `amg_preconditioner.py`, `multigrid.py`, `native_inverse.py`, `host_vcycle.py` | The monolithic AMG coupled PC, the JAX-native multigrid, faithful smoothed aggregation, and `multigrid.py`'s own binding decisions |
 | `solve-flow-block.md` | `saddle_multigrid.py`, `shift_basis.py` | Native preconditioning of the `[u, v, w, p]` saddle — current status only |
 | `solve-flow-block-log.md` | *(none — reference only)* | The full dated investigation behind the flow block, including qualified/retracted findings |
@@ -191,14 +191,18 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 | probe column reach | `column_reach=None` (uniform) | **(3,3,3,3,2,2)** | `compare.py` `COLUMN_REACH` |
 | dual-time inner tol | `inner_tol=0.05` | **1e-2** | `compare.py` `INNER_TOL` |
 
-**The three coupled forward solvers — always name which path you mean.** There is no
+**The two coupled forward solvers — always name which path you mean.** There is no
 `_COUPLED_AMG_FORWARD_SOLVER` symbol.
 
 | path | stop | norm | restart |
 |---|---|---|---|
 | `coupled_amg_continuation` (3D `bfs3d`) | `forward_rtol = 0.3` | **row-scaled** `coupled_scaled_norm` | 15 |
 | `_COUPLED_FORWARD_SOLVER` (block-SIMPLE 2D) | `1e-2` | global 2-norm | 120 |
-| `_COUPLED_ILUT_FORWARD_SOLVER` (2D ILUT) | `1e-2` | global 2-norm | 10 |
+
+`_COUPLED_FACTORIZATION_FORWARD_SOLVER` (`1e-2`, global 2-norm, restart 10) is `coupled_lu_continuation`'s
+default — a small-restart GMRES matched to an exact factorization. (It was named
+`_COUPLED_ILUT_FORWARD_SOLVER` while the now-deleted monolithic ILUT was its other consumer; renamed
+when that preconditioner was removed as dominated — see `solve-direct-preconditioners.md`.)
 
 **Preconditioning side: RIGHT** (`solve_linear`'s default, taken by `_shifted_solve`), so the Krylov
 residual is the **true** residual `b − Ax`. No solution-accuracy bound follows from the stop. `left` is
@@ -391,7 +395,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
        rejected attempts are recorded, read them out of `march.log` (`redo step N (attempt 2): …` plus
        the per-inner table above it) and name the state and β explicitly.
   5. **A probe driven by the WRONG "march" solver — there are two, and they look interchangeable.**
-     `_COUPLED_ILUT_FORWARD_SOLVER` is 1 % in a plain 2-norm at restart 10; the coupled **AMG** builder's
+     `_COUPLED_FACTORIZATION_FORWARD_SOLVER` (the complete-LU path's default) is 1 % in a plain 2-norm at
+     restart 10; the coupled **AMG** builder's
      default (what `bfs3d` actually runs) is `forward_rtol` = **0.3** in the **row-scaled**
      `coupled_scaled_norm` at restart **15**. Reaching for the first while believing it is the second was
      done twice in one session — once in a sweep's self-check arm, once when adding a `forward_solver`

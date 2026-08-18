@@ -67,8 +67,8 @@ paths:
       `AmgVCycle` has, so on the split the inherited property RAISED (fixed 2026-08-14 by an explicit
       `has_native_solve = False` override; a split never forms the whole shifted operator, so there is no
       native solve to offer).** It went unseen for the reason worth carrying: **both call sites ask
-      through `getattr(pc, "is_exact_native", False)` — the right spelling for the ILUT and LU, which
-      genuinely lack the attribute — and a `getattr` default swallows an `AttributeError` raised *inside*
+      through `getattr(pc, "is_exact_native", False)` — the right spelling for the complete LU, which
+      genuinely lacks the attribute — and a `getattr` default swallows an `AttributeError` raised *inside*
       a property body exactly as it swallows a missing name.** The value it produced was accidentally the
       correct `False`, so nothing failed. Two consequences: a test of such a property must read it
       **directly**, never through `getattr` with a default (a `getattr` test passes against the defect —

@@ -1,9 +1,9 @@
 """Unit tests for the monolithic complete-LU preconditioner (host factorization + apply + refactor).
 
-The complete-LU counterpart of the ILUT preconditioner: a *complete* factorization, so its apply is the
-operator's exact inverse (a Krylov solve converges in one iteration). These exercise the host factorization
-directly on small matrices with the always-available SciPy (SuperLU) backend -- no coupled solve, no
-optional dependency -- checking the exact forward/transpose solves and the in-place numeric refactor.
+A *complete* factorization, so its apply is the operator's exact inverse (a Krylov solve converges in
+one iteration). These exercise the host factorization directly on small matrices with the always-available
+SciPy (SuperLU) backend -- no coupled solve, no optional dependency -- checking the exact forward/transpose
+solves and the in-place numeric refactor.
 """
 
 from __future__ import annotations

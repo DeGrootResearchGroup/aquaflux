@@ -1,17 +1,14 @@
 """A monolithic algebraic-multigrid preconditioner for the coupled saddle-point Newton solve.
 
-The third member of the monolithic-factorization family, beside
-:mod:`~aquaflux.solve.ilut_preconditioner` (incomplete-LU) and :mod:`~aquaflux.solve.lu_preconditioner`
-(complete LU). Both of those factor the assembled coupled Jacobian directly; their fill is the wall in
-three dimensions — a complete LU's is ``O(n^{4/3})`` (out of memory past a few ``10^4`` 3D cells) and even
-the threshold-ILU's is several times the operator's own, which for a distance-3 three-dimensional stencil
-(hundreds of nonzeros per row) makes the incomplete factorization itself run for minutes. This
-preconditioner keeps the heavy fill off the fine grid entirely: it is one **algebraic-multigrid V-cycle**
-whose only exact (direct-LU) solve is on the small coarsest grid, so the memory stays bounded and the setup
-is a matter of seconds where the incomplete factorization took minutes.
+The sibling of :mod:`~aquaflux.solve.lu_preconditioner` (complete LU), which factors the assembled
+coupled Jacobian directly; its fill is the wall in three dimensions — ``O(n^{4/3})``, out of memory past
+a few ``10^4`` 3D cells. This preconditioner keeps the heavy fill off the fine grid entirely: it is one
+**algebraic-multigrid V-cycle** whose only exact (direct-LU) solve is on the small coarsest grid, so the
+memory stays bounded and the setup is a matter of seconds where a complete factorization would be out of
+memory.
 
 The V-cycle is a **fixed linear operator** — a single application, not an inner Krylov solve — so it is a
-drop-in for the same callback-matvec interface the ILUT and LU preconditioners expose (and, being linear
+drop-in for the same callback-matvec interface the LU preconditioner exposes (and, being linear
 and transposable, it serves the adjoint's transpose solve through the multigrid's own transpose, with no
 flexible outer Krylov needed). It preconditions the **equilibrated, cell-major** coupled matrix (the same
 conditioning transform every host preconditioner uses,
@@ -28,7 +25,7 @@ use. The smoother's fill is the caller's (``smoother_fill_levels``, default one 
 level wins depends on the pseudo-transient shift, and **zero fill is the validated choice for a march
 living at a low shift**, where one level of fill acquires negative pivots and diverges (see
 :func:`build_amg_vcycle`). It is a host object, built once off the jit path at a reference state and shift and
-applied inside the jitted Krylov solve through ``jax.pure_callback`` — exactly like the ILUT and LU. Because
+applied inside the jitted Krylov solve through ``jax.pure_callback`` — exactly like the complete LU. Because
 PETSc supplies the multigrid it is the one member of the family that requires the optional ``petsc``
 dependency; there is no pure-SciPy algebraic-multigrid fallback.
 """
@@ -89,7 +86,6 @@ class AmgVCycle:
     """A frozen algebraic-multigrid V-cycle on the equilibrated, cell-major coupled matrix.
 
     A pure host object (PETSc, no JAX) — the algebraic-multigrid counterpart of
-    :class:`~aquaflux.solve.ilut_preconditioner.IlutFactors` /
     :class:`~aquaflux.solve.lu_preconditioner.LuFactors`. :meth:`apply` runs **one** V-cycle
     (``M ~= A^{-1}``, a fixed linear operator, not an inner solve); with ``transpose=True`` it runs the
     multigrid's transpose V-cycle (``M^T``), which the adjoint's transpose linear solve needs. The
@@ -677,7 +673,6 @@ class MonolithicAmgPreconditioner(HostPreconditioner):
     """The coupled algebraic-multigrid preconditioner as JAX matvecs, wrapping a frozen :class:`AmgVCycle`.
 
     The algebraic-multigrid counterpart of
-    :class:`~aquaflux.solve.ilut_preconditioner.MonolithicIlutPreconditioner` /
     :class:`~aquaflux.solve.lu_preconditioner.MonolithicLuPreconditioner`, with the identical interface
     (:meth:`build`, :meth:`refresh_in_place`, :meth:`matvec`) so it is a drop-in for the coupled
     continuation's :class:`~aquaflux.turbulence.MonolithicFactorShiftPolicy`. Not an

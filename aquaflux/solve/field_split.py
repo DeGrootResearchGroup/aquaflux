@@ -1,7 +1,7 @@
 """A block-triangular field-split preconditioner for the coupled flow-plus-transport Newton solve.
 
 The monolithic preconditioners in this package (:mod:`~aquaflux.solve.amg_preconditioner`,
-:mod:`~aquaflux.solve.ilut_preconditioner`, :mod:`~aquaflux.solve.lu_preconditioner`) treat the coupled
+:mod:`~aquaflux.solve.lu_preconditioner`) treat the coupled
 Jacobian as one undifferentiated block. That is the right default, but it forces every field to share a
 single multigrid hierarchy and a single level smoother — and the six fields of a Reynolds-averaged solve
 are not one kind of equation. Four of them, ``[u, v, w, p]``, form a pressure-velocity saddle; the other

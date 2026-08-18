@@ -21,17 +21,17 @@ paths:
 ## Preconditioner — monolithic AMG (the coupled PC)
 
 - **Monolithic ALGEBRAIC-MULTIGRID preconditioner — BUILT (`amg_preconditioner.py`), the coupled PC for
-  large 3D.** The third member of the family: instead of factoring the assembled coupled Jacobian it applies
+  large 3D.** The sibling of the complete LU: instead of factoring the assembled coupled Jacobian it applies
   **one smoothed-aggregation multigrid V-cycle** (`MonolithicAmgPreconditioner`, PETSc `PCGAMG`) whose only
   exact solve is a **direct LU on the small coarsest grid**, so the heavy fill never lives on the fine grid.
-  This is the answer to both factorizations' 3D wall: the complete LU's fill OOMs (`O(n^{4/3})`), and the
-  threshold-ILU's `spilu` is *prohibitively slow to build* on a distance-3 3D coupled Jacobian — measured on
-  the 23k-cell `bfs3d` case the assembled Jacobian is **38.7M nnz (~280/row)** and a single `spilu` at
-  `fill_factor=30` ran **>7.5 min and never finished** (RSS <2 GB — the 3D wall here is *time*, not memory,
-  and the earlier "~11 min XLA compile" reading was a CPU-contention artifact; on idle CPU the probe compile
-  is fast and `spilu` dominates). The V-cycle instead **builds in ~seconds with bounded memory** and scales.
+  This is the answer to the complete LU's 3D wall: its fill OOMs (`O(n^{4/3})`), where the V-cycle
+  **builds in ~seconds with bounded memory** and scales. (A monolithic threshold-ILU factorization was
+  tried as a third family member and was measured to hit the same wall from the time side instead — its
+  `spilu` on the 23k-cell `bfs3d` case's 38.7M-nnz, ~280-nnz/row Jacobian ran **>7.5 min and never
+  finished** at `fill_factor=30`, RSS <2 GB — before being deleted as dominated by these two; see
+  `solve-direct-preconditioners.md`.)
   - **The V-cycle is a fixed LINEAR operator (one `pc.apply`, not an inner Krylov solve), so it is a
-    drop-in for the same callback-matvec interface as the ILUT/LU and — being linear and transposable —
+    drop-in for the same callback-matvec interface as the complete LU and — being linear and transposable —
     serves the adjoint's transpose solve through the multigrid's own transpose (`pc.applyTranspose`), with
     no flexible outer Krylov.** It preconditions the **equilibrated, cell-major** matrix via the shared
     `equilibrate_cell_major` (**in `frozen_operator.py`** -- the one home for the sqrt-diagonal
@@ -56,11 +56,11 @@ paths:
     moved; re-measure, and read it with the superseding low-β result below). A Krylov-accelerated (GMRES)
     smoother is a few iterations *faster* but makes the V-cycle **nonlinear** — it
     needs flexible GMRES and has no clean transpose, so it is a deferred forward-only optimization, **not** the
-    adjoint path. ⚠️ **Name the forward solver's PATH — there are three and they differ.**
+    adjoint path. ⚠️ **Name the forward solver's PATH — there are two and they differ.**
     `coupled_amg_continuation` builds its own inline: `forward_rtol = 0.3` in the **row-scaled**
     `coupled_scaled_norm`, `restart=15`, `max_restarts=60`. (`_COUPLED_FORWARD_SOLVER`, block-SIMPLE 2D:
-    `relative_residual_gmres(1e-2)`, 2-norm, restart 120. `_COUPLED_ILUT_FORWARD_SOLVER`, 2D ILUT: 1e-2
-    2-norm, restart 10.) There is no `_COUPLED_AMG_FORWARD_SOLVER` symbol.
+    `relative_residual_gmres(1e-2)`, 2-norm, restart 120. `_COUPLED_FACTORIZATION_FORWARD_SOLVER`, the
+    complete-LU path's default: 1e-2 2-norm, restart 10.) There is no `_COUPLED_AMG_FORWARD_SOLVER` symbol.
   - **Per-step cost tuning (measured): `smoother_sweeps=2` default and the forward restart 15 (from 40).**
     The restart-15 forward loop stops as soon as the ~1% inexact-Newton tolerance is met instead of running
     out a 40-vector subspace (the dominant per-step saving). The **smoother-sweeps knob is the second lever,
@@ -74,7 +74,8 @@ paths:
     cheap extra sweep for far fewer outer iterations is a large net win — `sweeps=2` is the sweet spot
     (`sweeps=3` helps a little more at low shift but costs at high shift). Adding *fill* to the smoother
     (`smoother_fill_levels`) instead would cut iterations too, but it is the expensive incomplete-factorization
-    build the ILUT hits in three dimensions; sweeps add smoother work without that build cost, and the
+    build that made a monolithic threshold-ILU factorization unaffordable in three dimensions (above);
+    sweeps add smoother work without that build cost, and the
     coarsening choice (selective vs smoothed-aggregation) is a minor knob by comparison — but do not read that
     as covering `pc_gamg_agg_nsmooths`: plain-vs-smoothed *prolongator* smoothing is measured below as the
     largest preconditioner win found on this case. (The whole-march wall figure that used to sit here
@@ -254,9 +255,11 @@ paths:
     shift is not only globalization — it is what makes this Jacobian factorizable at all. Harnesses:
     `validation/pitzdaily_openfoam/zero_shift_arms.py`, `validation/bfs3d_openfoam/zero_shift_adjoint.py`.
 
-    **Consequence: nothing selects the monolithic ILUT or complete LU for the adjoint**, which was the
-    last regime either had. Both are already dominated on the forward march, the LU does not fit in 3D,
-    and no validation case selects the ILUT. That closes the case for deleting them.
+    **Consequence: nothing selected the monolithic ILUT or complete LU for the adjoint**, which was the
+    last regime either had. Both were already dominated on the forward march and the LU does not fit in
+    3D. **The ILUT is deleted (2026-08-18)** — see `solve-direct-preconditioners.md`; no validation case
+    selected it and nothing else did either. The complete LU's case is evaluated separately below and was
+    NOT closed the same way — it still has a measured niche.
 
     **What a deletion is giving up, measured, so the decision is not made on a guess (2026-08-17).** The
     complete LU *does* work on `pitzDaily` and needs no PETSc — SciPy SuperLU alone, at the
@@ -269,8 +272,8 @@ paths:
 
     So it is **86–92 % factorization** — essentially all cost the field split does not pay — and 4.5 GB
     peak for a 12 k-cell 2D mesh, which is why it stays 2D-only whatever else is true. ⚠️ The often-cited
-    "UMFPACK is ~26× faster than the threshold-ILU" is a **PETSc-only** figure; on SuperLU the record
-    already says it is no faster to factor than the ILUT, and these timings agree. Eliminating PETSc
+    "UMFPACK is ~26× faster than a threshold incomplete LU" is a **PETSc-only** figure; on SuperLU it is
+    no faster to factor than a threshold-ILU alternative would have been. Eliminating PETSc
     therefore *weakens* the complete LU's case rather than strengthening it.
 
     **⚠️ Narrowing the probe's gradient sweeps helps a COMPLETE factorization and hurts a ZERO-FILL one —
@@ -283,10 +286,10 @@ paths:
     preconditioner-family-dependent knob, not a free win: right where sweeps are inert (`bfs3d`, skew-free),
     questionable where they are live (`pitzDaily`).
 
-    **Naming trap for whoever does the deletion: `_COUPLED_ILUT_FORWARD_SOLVER` is the default forward
-    solver on the COMPLETE-LU path too**, not only the ILUT's — `_monolithic_factor_step` falls back to it
-    for both. Deleting the ILUT without renaming it leaves a solver named after a preconditioner that no
-    longer exists.
+    **✅ Done: the ILUT deletion renamed its forward solver.** `_COUPLED_ILUT_FORWARD_SOLVER` was the
+    default forward solver on the complete-LU path too (`_monolithic_factor_step` fell back to it for
+    both), so deleting the ILUT without renaming it would have left a solver named after a preconditioner
+    that no longer exists. It is now `_COUPLED_FACTORIZATION_FORWARD_SOLVER`.
 
 ### ⭐ Ordering, not fill, is what fails zero-fill on `pitzDaily` (2026-08-17)
 
@@ -1616,7 +1619,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   - fast gate **967 passed / 1 skipped** (899 unit `-n auto`, 68 integration `-n 1`);
   - `test_coupled_rans` + `test_coupled_amg` + `test_coupled_field_split` + `test_reynolds_continuation`
     — 33 tests, 18 of them `slow` — **33 passed**;
-  - `test_coupled_lu` + `test_coupled_ilut` — **15 passed**. These two matter and were nearly missed:
+  - `test_coupled_lu` + `test_coupled_ilut` (the latter since deleted along with the ILUT it tested;
+    see `solve-direct-preconditioners.md`) — **15 passed**. These two matter and were nearly missed:
     they drive `forward_march` with `step_control` + `precondition_step`, so they pick up
     `stop_on_limit_stall` exactly as the four above do, and they are in neither the fast gate nor the
     list a first pass would think to run;
@@ -1962,7 +1966,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 ## The coupled AMG builder
 
 - **Coupled builder `coupled_amg_continuation`** (`.claude/rules/turbulence.md`) shares
-  `MonolithicFactorShiftPolicy` + `_monolithic_factor_step` with the ILUT/LU. Verified: converges to the
+  `MonolithicFactorShiftPolicy` + `_monolithic_factor_step` with the complete LU. Verified: converges to the
   block PC's fixed point AND passes the **coupled-adjoint FD gate** (the transpose V-cycle serves the
   gradient), `tests/integration/test_coupled_amg.py`; V-cycle mechanics in `tests/unit/test_amg_preconditioner.py`.
   Follow-ups: a refreshing/β-tracking variant (the frozen build serves the forward + adjoint; a developing
