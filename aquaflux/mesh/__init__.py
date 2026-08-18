@@ -12,6 +12,7 @@ from .collapse import collapse_extruded_direction
 from .connectivity import (
     FaceCellConnectivity,
     FaceNodeConnectivity,
+    index_dtype,
     interior_mask,
 )
 from .distance import distance_to_patches
@@ -62,6 +63,7 @@ __all__ = [
     "face_geometry_scheme",
     "face_planarity",
     "graded_nodes",
+    "index_dtype",
     "interior_mask",
     "permute_cells",
     "structured_grid_2d",

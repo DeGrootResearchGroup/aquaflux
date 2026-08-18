@@ -37,6 +37,35 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
   (already-assembled CSR arrays, avoiding the per-face Python loop) — `from_faces` flattens its
   ragged input and delegates to it, so the zone/patch build + `validate()` live in one place, and
   generators that know the connectivity as arrays (`structured_grid_2d`/`_3d`) call it directly.
+  **`from_csr` narrows `owner`/`neighbour` to `index_dtype(n_cells)`** (see `connectivity.py`
+  below), only when the input is already integer-typed — a non-integer input must still reach
+  `validate()`'s dtype check unchanged, not be silently rounded into a passing one.
+  **`validate()`'s degenerate-face-node check reuses `face_nodes.face_of_incidence`** instead of
+  recomputing the identical face-per-incidence array from scratch (it used to rebuild it via
+  `np.repeat(np.arange(n_faces), counts)`, immediately before the check that consumes it, when
+  `FaceNodeConnectivity.from_csr` had already built and stored the same array moments earlier).
+  **`geometry()` runs its face/cell arithmetic as one `equinox.filter_jit`-compiled call
+  (`_fused_geometry`), not eagerly.** Eager execution dispatches each of the pipeline's roughly
+  twenty elementwise/gather steps separately, each materializing its own full-size buffer; the 3D
+  centre-fan decomposition runs several incidences per face (a quad face gives four), so the
+  unfused peak is several times the size of the final per-face outputs. The face-node perimeter
+  traversal the pipeline consumes is still enumerated eagerly, once, in `FaceNodeConnectivity.
+  from_csr` (its per-face count is data-dependent); what changed is only the arithmetic that runs
+  over that already-enumerated traversal.
+  - **Measured together, on a synthetic 1,000,000-cell structured hex mesh (4 named wall
+    patches), stage-by-stage peak RSS across `structured_grid_3d` + `Mesh.from_csr` +
+    `geometry()`, one clean process per arm, macOS/arm64, JAX 0.10.2, x64 enabled** (harness not
+    in the repository): mesh construction's own delta **1944.7 MB → 1137.2 MB**, `geometry()`'s
+    own delta **2432.8 MB → 1210.9 MB** (close to an isolated eager-vs-jit comparison of
+    2204.7 MB → 1109.2 MB taken on `geometry()`'s arithmetic alone), cumulative peak through
+    `geometry()` **4521.4 MB → 2492.2 MB**, roughly a 45% cut. ⚠️ The next stage
+    (`SSTTurbulence.build`) is excluded from that cumulative figure on purpose: peak RSS is a
+    process-wide, monotonically-increasing high-water mark, not a per-call measurement, so a
+    "delta after this call" can smear onto whichever call next triggers the allocator to grow —
+    an earlier probe attributed a further +2543 MB to this stage and a same-scale repeat of the
+    identical call sequence reproduced none of it, so that particular attribution is noise, not a
+    real per-stage cost. Only the two figures kept here (mesh construction, `geometry()`) held up
+    across repeats. One run per arm even for those; re-measure before citing a tighter number.
 - `geometry.py` — **`MeshGeometry`**: the bundled `{face: FaceGeometry, cell: CellGeometry}` product
   `Mesh.geometry()` returns (was a bare 2-tuple). It travels together through every consumer
   (`ResidualAssembler`, the gradient/interpolation/limiter schemes, `MomentumContinuity`, the
@@ -121,6 +150,14 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
   - **The residency question this raised is settled: nothing leaks.** After the fix `jax.live_arrays()`
     totals **17.6 MB** while resident sits at 811 MB, so the gap is allocator retention of freed pages,
     not held buffers — and it is now bounded by the smaller peak.
+  - **⚠️ OPEN: the block count itself scales with cells × wall faces, not cells alone, and gets slow
+    at a large mesh with more than a couple of wall patches (filed as a GitHub issue, not yet fixed).**
+    The block size is `_SEARCH_WORKING_BYTES // per_cell`, and `per_cell` grows with the target-face
+    count, so more wall patches shrink the block and multiply the block count. Measured on a synthetic
+    1,000,000-cell mesh with 4 wall patches (40,000 combined wall faces): block size 23, **43,479
+    blocks**, one `distance_to_patches` call costing **77 s** wall clock — bounded memory, unbounded
+    block count. `bfs3d`'s own 23,040 cells / 4,736 wall faces never shows this (too few blocks to
+    matter), which is presumably why it went uncaught until a bigger mesh was being scoped.
 - `groups.py` — `LabelledGroups` base → `CellZones` / `FacePatches`. Named **partitions**
   of cells (zones) and faces (patches) — the SoA analogue of the C++ `MeshObjectGroup`
   `name→group` maps. See `docs/mesh_zones_and_patches.md` for the full design.

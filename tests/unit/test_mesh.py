@@ -697,6 +697,18 @@ def test_rejects_non_integer_indices() -> None:
         Mesh.from_faces(nodes, faces, [0.0, 0.0, 0.0, 0.0], neighbour, n_cells=1)
 
 
+def test_owner_and_neighbour_are_int32_on_a_small_mesh() -> None:
+    """A mesh well within `int32` range stores owner/neighbour at that narrower width.
+
+    Nothing about the mesh's *values* would catch a regression back to the platform-default
+    width, so the dtype itself is pinned directly.
+    """
+    nodes, faces, owner, neighbour = _unit_square_2d()
+    mesh = Mesh.from_faces(nodes, faces, owner, neighbour, n_cells=1)
+    assert mesh.face_cells.owner.dtype == jnp.int32
+    assert mesh.face_cells.neighbour.dtype == jnp.int32
+
+
 def test_rejects_2d_face_that_is_not_an_edge() -> None:
     """A 2D face must be a 2-node edge; a 3-node face would break the edge scheme's reshape."""
     nodes = jnp.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])

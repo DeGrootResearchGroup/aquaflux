@@ -8,13 +8,16 @@ the standard layout for variable-length rows — so faces are arbitrary polygons
 :class:`~aquaflux.mesh.cell.CellGeometry` in dependency order, returning a bundled
 :class:`~aquaflux.mesh.geometry.MeshGeometry`.
 
-``geometry()`` is a **build-time, eager** call (run once per mesh, not inside the jitted
-solve): the 3D face triangulation enumerates a data-dependent number of triangles, so it is
-not itself jittable. Its outputs (static geometry) are what flow into the differentiable
-residual. Geometry is a *derived product*, not stored on the mesh — it is a pure function of
-the (differentiable) node coordinates, and recomputing it keeps node-position gradients correct
-and avoids a stale cache under cell renumbering / partitioning (see
-:class:`~aquaflux.mesh.geometry.MeshGeometry`).
+``geometry()`` is a **build-time** call (run once per mesh, not inside the jitted solve). The
+face-node perimeter traversal it consumes is enumerated eagerly, once, when the mesh is built
+(:meth:`~aquaflux.mesh.connectivity.FaceNodeConnectivity.from_csr`), because each face's node
+count is data-dependent; the geometry arithmetic over that traversal is then run as one
+``equinox.filter_jit``-compiled call, so its elementwise and gather steps fuse into a single pass
+instead of each materializing its own full-size intermediate. Its outputs (static geometry) are
+what flow into the differentiable residual. Geometry is a *derived product*, not stored on the
+mesh — it is a pure function of the (differentiable) node coordinates, and recomputing it keeps
+node-position gradients correct and avoids a stale cache under cell renumbering / partitioning
+(see :class:`~aquaflux.mesh.geometry.MeshGeometry`).
 
 The bulky per-face displacement vectors used by the diffusion flux (``x_ip - x_owner``,
 ``x_ip - x_neighbour``) are deliberately *not* stored — they are cheap gathers from the cell
@@ -28,7 +31,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from . import cell, face, groups
-from .connectivity import FaceCellConnectivity, FaceNodeConnectivity, interior_mask
+from .connectivity import FaceCellConnectivity, FaceNodeConnectivity, index_dtype, interior_mask
 from .geometry import MeshGeometry
 
 
@@ -174,7 +177,18 @@ class Mesh(eqx.Module):
             a non-periodic mesh; a streamwise-periodic mesh passes ``+L`` along the periodic axis on
             its seam wrap faces and zero elsewhere.
         """
+        # Owner and neighbour hold cell indices (neighbour's `-1` boundary sentinel aside), so
+        # `n_cells` bounds both -- narrower than the platform-default width `jnp.asarray` would
+        # otherwise give a plain Python/NumPy input on a mesh of a few million cells. Narrowed
+        # only when the input is already integer-typed: a non-integer input must reach
+        # `validate()`'s dtype check unchanged rather than be silently rounded into one.
+        owner = jnp.asarray(owner)
         neighbour = jnp.asarray(neighbour)
+        dtype = index_dtype(n_cells)
+        if jnp.issubdtype(owner.dtype, jnp.integer):
+            owner = owner.astype(dtype)
+        if jnp.issubdtype(neighbour.dtype, jnp.integer):
+            neighbour = neighbour.astype(dtype)
         zones = (
             groups.CellZones.from_dict(n_cells, cell_zones)
             if cell_zones
@@ -184,7 +198,7 @@ class Mesh(eqx.Module):
         offset = None if neighbour_offset is None else jnp.asarray(neighbour_offset)
         mesh = cls(
             node_coords=jnp.asarray(node_coords),
-            face_cells=FaceCellConnectivity(jnp.asarray(owner), neighbour, n_cells, offset),
+            face_cells=FaceCellConnectivity(owner, neighbour, n_cells, offset),
             face_nodes=FaceNodeConnectivity.from_csr(face_node_offsets, face_node_indices),
             cell_zones=zones,
             face_patches=patches,
@@ -246,8 +260,10 @@ class Mesh(eqx.Module):
 
         # A face that lists the same node twice is degenerate (zero area → NaN normal). Detect a
         # repeated (face, node) incidence: unique pairs fewer than incidences means some face
-        # repeats a node. O(n log n), build-time only.
-        inc_face = np.repeat(np.arange(n_faces), counts)
+        # repeats a node. O(n log n), build-time only. `face_of_incidence` is already exactly
+        # this face-per-incidence array, built once by `FaceNodeConnectivity.from_csr` -- reused
+        # here rather than recomputed.
+        inc_face = np.asarray(self.face_nodes.face_of_incidence)
         if np.unique(np.stack([inc_face, idx], axis=1), axis=0).shape[0] != idx.shape[0]:
             raise ValueError(
                 "a face lists the same node more than once (degenerate, zero-area face)"
@@ -323,7 +339,7 @@ class Mesh(eqx.Module):
         return self.face_cells.n_cells
 
     def geometry(self) -> MeshGeometry:
-        """Compute the derived face and cell geometry (build-time, eager).
+        """Compute the derived face and cell geometry (build-time, jit-compiled).
 
         Wires the computation in dependency order: the dimension's face-geometry strategy
         gives area/centroid and a node-order normal; the approximate cell centroids orient the
@@ -342,12 +358,29 @@ class Mesh(eqx.Module):
             (volumes, centroids).
         """
         scheme = face.face_geometry_scheme(self.dim)
-        face_nodes = self.face_nodes
-        face_cells = self.face_cells
-        area, centroid, node_order_normal = scheme.unoriented_geometry(self.node_coords, face_nodes)
-        approx = cell.CellGeometry.approx_centroids(centroid, face_cells)
-        normal = scheme.orient_owner_outward(node_order_normal, centroid, approx[face_cells.owner])
+        return _fused_geometry(scheme, self.node_coords, self.face_nodes, self.face_cells, self.dim)
 
-        face_geometry = face.FaceGeometry(area=area, centroid=centroid, normal=normal)
-        cell_geometry = cell.CellGeometry.from_faces(face_geometry, face_cells, self.dim)
-        return MeshGeometry(face=face_geometry, cell=cell_geometry)
+
+@eqx.filter_jit
+def _fused_geometry(
+    scheme: face.FaceGeometryScheme,
+    node_coords: jnp.ndarray,
+    face_nodes: FaceNodeConnectivity,
+    face_cells: FaceCellConnectivity,
+    dim: int,
+) -> MeshGeometry:
+    """The face/cell geometry pipeline of :meth:`Mesh.geometry`, compiled as one call.
+
+    Run eagerly, this pipeline's roughly twenty elementwise and gather steps — the 3D centre-fan
+    decomposition runs several incidences per face — would each dispatch and materialize its own
+    full-size buffer separately. Compiling it as one call lets those steps fuse instead, module-
+    level so the compiled program is a cache hit across calls rather than a fresh closure every
+    time.
+    """
+    area, centroid, node_order_normal = scheme.unoriented_geometry(node_coords, face_nodes)
+    approx = cell.CellGeometry.approx_centroids(centroid, face_cells)
+    normal = scheme.orient_owner_outward(node_order_normal, centroid, approx[face_cells.owner])
+
+    face_geometry = face.FaceGeometry(area=area, centroid=centroid, normal=normal)
+    cell_geometry = cell.CellGeometry.from_faces(face_geometry, face_cells, dim)
+    return MeshGeometry(face=face_geometry, cell=cell_geometry)

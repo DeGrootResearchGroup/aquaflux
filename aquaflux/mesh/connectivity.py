@@ -29,6 +29,29 @@ from jax.ops import segment_max, segment_min, segment_sum
 from aquaflux.vectors import scale
 
 
+def index_dtype(bound: int) -> type[np.signedinteger]:
+    """The narrowest signed integer type holding every value up to ``bound``.
+
+    Connectivity carries several arrays sized per face or per face-node incidence, so on a
+    mesh of a few million cells the width of an index is the difference between a few hundred
+    megabytes and a gigabyte or more, and nothing about the values themselves needs the extra
+    range. The bound is always known from a shape or a value already in hand before the array
+    is formed, which is what lets the width be chosen up front rather than inherited from
+    whatever the platform default happens to be.
+
+    Parameters
+    ----------
+    bound : int
+        An upper bound (exclusive) on every value the array will hold.
+
+    Returns
+    -------
+    type
+        ``numpy.int32`` if it can represent every value up to ``bound``, else ``numpy.int64``.
+    """
+    return np.int32 if bound < np.iinfo(np.int32).max else np.int64
+
+
 def interior_mask(neighbour):
     """Boolean per-face mask, ``True`` on interior faces.
 
@@ -339,7 +362,8 @@ class FaceNodeConnectivity(eqx.Module):
     schemes express only the polygon math (edge normal, centre-fan triangles).
 
     The perimeter maps are enumerated once at build time (numpy, because the per-face node count
-    is data-dependent), matching how face geometry is a once-per-mesh eager computation.
+    is data-dependent) — a build-time-only cost, like the compiled geometry arithmetic that
+    consumes them.
 
     Attributes
     ----------
@@ -398,15 +422,26 @@ class FaceNodeConnectivity(eqx.Module):
                 f"face_node_offsets[-1] ({int(offsets[-1])}) must equal "
                 f"len(face_node_indices) ({indices.shape[0]})"
             )
-        counts = offsets[1:] - offsets[:-1]  # nodes per face
-        n_faces = counts.shape[0]
+        n_faces = offsets.shape[0] - 1
         total = indices.shape[0]
+        # Every array formed below holds a face index (< n_faces), an incidence index (< total),
+        # or a node index (the largest value already in `indices`) -- so this single bound covers
+        # all of them, and one dtype keeps every arithmetic mix between the arrays same-width.
+        node_bound = int(indices.max()) + 1 if indices.size else 1
+        dtype = index_dtype(max(total, n_faces, node_bound))
+        # Narrowed only when already integer-typed: `Mesh.validate` rejects a non-integer
+        # `face_node_indices`, and a `.astype` here would silently round it into a passing one.
+        if np.issubdtype(offsets.dtype, np.integer):
+            offsets = offsets.astype(dtype)
+        if np.issubdtype(indices.dtype, np.integer):
+            indices = indices.astype(dtype)
+        counts = offsets[1:] - offsets[:-1]  # nodes per face
 
         # One perimeter edge (hence one incidence) per face-vertex, wrapping the last back to the
         # first: the incidence's own node is the edge start, next_incidence's node the edge end.
-        inc_face = np.repeat(np.arange(n_faces), counts)  # face of each incidence
+        inc_face = np.repeat(np.arange(n_faces, dtype=dtype), counts)  # face of each incidence
         starts = offsets[:-1][inc_face]
-        local = np.arange(total) - starts  # position of the incidence within its face
+        local = np.arange(total, dtype=dtype) - starts  # position of the incidence within its face
         next_pos = starts + (local + 1) % counts[inc_face]  # wrap to the face's first node
         return cls(
             offsets=jnp.asarray(offsets),

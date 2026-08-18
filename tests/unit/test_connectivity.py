@@ -12,6 +12,7 @@ import numpy as np
 from aquaflux.mesh import (
     FaceCellConnectivity,
     FaceNodeConnectivity,
+    index_dtype,
     interior_mask,
 )
 
@@ -211,3 +212,30 @@ def test_face_nodes_vertex_mean():
     means = fn.vertex_mean(coords)
     np.testing.assert_allclose(np.asarray(means[0]), [1 / 3, 1 / 3])  # triangle 0,1,2
     np.testing.assert_allclose(np.asarray(means[1]), [5 / 4, 3 / 4])  # quad 1,2,3,4
+
+
+def test_face_nodes_arrays_are_int32_on_a_small_mesh():
+    """A mesh well within `int32` range stores its CSR/incidence arrays at that width.
+
+    Every array `FaceNodeConnectivity.from_csr` forms holds a face, incidence, or node index, so
+    narrowing them cuts a large mesh's connectivity memory roughly in half; a small mesh like this
+    one is the case that most needs pinning, since nothing about its *values* would catch a
+    regression back to the platform-default width.
+    """
+    fn = _tri_quad_face_nodes()
+    for name in ("offsets", "face_node_indices", "face_of_incidence", "next_incidence", "counts"):
+        assert getattr(fn, name).dtype == jnp.int32, name
+
+
+# --------------------------------------------------------------------------------- index_dtype
+
+
+def test_index_dtype_picks_int32_up_to_its_max():
+    assert index_dtype(0) is np.int32
+    assert index_dtype(1_000_000) is np.int32
+    assert index_dtype(np.iinfo(np.int32).max - 1) is np.int32
+
+
+def test_index_dtype_upgrades_to_int64_beyond_int32_max():
+    assert index_dtype(np.iinfo(np.int32).max) is np.int64
+    assert index_dtype(np.iinfo(np.int32).max + 1) is np.int64
