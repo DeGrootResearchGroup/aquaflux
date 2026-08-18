@@ -128,6 +128,24 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
 - `cell.py` — `CellGeometry` (volume, centroid) with `from_faces(...)` and
   `approx_centroids(...)`; a single class (the C++ `Cell<T,N>` is dimension-generic, not
   specialized), computed by the divergence theorem.
+  - **⚠️ `from_faces` accumulates in coordinates local to each cell, not the mesh's raw (global)
+    ones — a numerical-conditioning fix, not a formula change (measured 2026-08-17).** The
+    divergence-theorem sum is exact and origin-independent for the true integral, but each
+    per-face term is `O(|x_ip|)` while a cell's own volume/centroid offset is `O(cell size)`; for
+    a cell small relative to its distance from the origin the sum is near-total cancellation, and
+    the centroid formula (which multiplies the flux by `x_ip` a second time) can lose enough
+    precision to land outside the cell it describes. A real snappyHexMesh CAD mesh whose cells run
+    ~1e-3 m at ~1.7 m from the origin hit this directly: 0.84% of interior faces had a corrupted
+    owner centroid, enough to flip `D_P.n` negative and crash the AMG diagonal-positivity guard,
+    even though the cell's own closed-cell residual and face-normal orientation were both exactly
+    correct — the corruption was purely in the centroid's floating-point conditioning. `from_faces`
+    now takes `approx_centroid` (the same array `approx_centroids` already computes to orient
+    normals, reused rather than recomputed) as the per-cell local reference point: each face's
+    contribution is formed relative to *its own cell's* reference (owner and neighbour use their
+    own, not a shared one), summed, then shifted back by that same reference point. Verified on
+    the same mesh: bad-`D_P.n` faces (interior and boundary) go from 40,915/14,232 to zero: full
+    scale, not a hand-picked example. A synthetic small-far-from-origin cube pins the mechanism
+    (`tests/unit/test_cell_centroid_accurate_far_from_origin`).
 - `distance.py` — `distance_to_patches(mesh, geometry, patch_names)`: per-cell distance to the nearest
   face centroid among named boundary patches — the geometric field the near-wall turbulence closures
   need, computed once at build time from the static geometry. Nearest-face-*centroid*, an approximation
