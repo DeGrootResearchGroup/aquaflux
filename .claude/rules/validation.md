@@ -15,8 +15,8 @@ Two kinds of file, with the same failure mode:
 
 - **Cases** (`*/compare.py`) — a full scientific run against a reference solution. Tens of minutes each.
 - **Harnesses** (everything else) — single-state probes that measure one question and print a table.
-  These are the project's **re-adjudication instruments**: most numbers in `.claude/rules/solve.md`
-  were measured with one, and a finding whose harness no longer runs cannot be re-asked, only cited.
+  These are the project's **re-adjudication instruments**: most numbers in the `.claude/rules/solve*.md`
+  files were measured with one, and a finding whose harness no longer runs cannot be re-asked, only cited.
 
 **Nothing in any test tier drives these files.** They are too slow for CI and for the fast gate, so
 the suite is green whether or not a single one of them still works. That is the whole problem this
