@@ -348,7 +348,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
        `max_inner_cycles` for exactly this, and `StateCheckpointer` now serializes it (with
        `inner_iterations`) so a later study can rank without re-parsing the log.
      - **A step's record describes only its ACCEPTED attempt, and the hardest operators live in the
-       REJECTED ones.** A solve that blows past `retry.on_cycles` gets the step redone at an escalated
+       REJECTED ones.** A solve that blows past `retry.abort_above_cycles` gets the step redone (at an unchanged
        β, and the retry then succeeds easily — so the record shows the *easy* attempt. Same march: step
        50's hardest solve is **15 cycles at β = 0.0293** with α collapsing to 0, in attempt 1; the step
        reports **3 cycles at β = 0.0585**. That is also why the escalated attempts are where the

@@ -567,7 +567,7 @@ been applied to the two outer sites.
 (fixed).** `cycle_budget` and `abort_above_inner_cycles` are both tested in `DualTimeStep`'s `cond`,
 i.e. **between** inner iterations, so neither can stop a solve already running — and neither bounded any
 of the 41–45 cycle solves in the archived marches. Meanwhile `forward_march` discards an attempt whose
-worst solve passes `retry.on_cycles` without reaching target, so a solve at 11 corrected cycles has
+worst solve passes `retry.abort_above_cycles` without reaching target, so a solve at 11 corrected cycles has
 already determined its work will be thrown away.
 
 Measured over **671 solves across three marches**: no accepted attempt exceeded **9** corrected cycles,
@@ -575,15 +575,15 @@ discarded ones ran **39–45**, and the distribution is **empty between**. The a
 recoverable work at ~404 s of a 2533 s march.
 
 **Two traps decide the constant, and both rule out the obvious choice of 10:**
-- **`max_restarts` is in RAW `lineax` restarts** (a fixed +2 per solve); `retry.on_cycles` is in
+- **`max_restarts` is in RAW `lineax` restarts** (a fixed +2 per solve); `retry.abort_above_cycles` is in
   **corrected** cycles. A corrected cap of 12 is `max_restarts = 14`.
-- **The march's test is `max_inner_cycles > retry.on_cycles`, STRICTLY.** A cap landing exactly on the
-  threshold does not trip the retry, so the step **accepts the truncated, non-converged direction**
-  instead of escalating β — turning a doomed attempt into a bad accepted step. The corrected cap must
-  be strictly above the threshold.
+- **The march's test is `max_inner_cycles > retry.abort_above_cycles`, STRICTLY.** A cap landing exactly
+  on the threshold does not trip the redo, so the step **accepts the truncated, non-converged
+  direction** instead of re-running it on the refreshed preconditioner — turning a doomed attempt into a
+  bad accepted step. The corrected cap must be strictly above the threshold.
 
 Shipped as `coupled_amg_continuation(forward_max_restarts=…)`, library default unchanged at 60; the case
-derives it as `retry.on_cycles + 4` from a single scaled constant so the two cannot drift.
+derives it as `retry.abort_above_cycles + 4` from a single scaled constant so the two cannot drift.
 ⚠️ **The 671-solve distribution describes UNCAPPED solves.** Whether a truncated direction ever needs an
 extra escalation rung is not answerable from it, and the first capped march is the first evidence.
 
@@ -1058,8 +1058,29 @@ without naming an arm was taken against **PETSc ILU(0)** and should be read that
 still selects it. The flip was made on the **dependency**, not on the numbers — the table immediately below
 is parity, and nothing here claims the host V-cycle is the better preconditioner. It carries the same
 coarsening without an optional PETSc build, and the leading block was the last part of this case needing one.
-⚠️ It does **not** generalize to `pitzDaily`, where `hostilu` FAILS outright (that case needs a fill level
-`Ilu0` cannot supply — see the fill-inversion entry above), so that case keeps `petsc`.
+⚠️ **CORRECTED 2026-08-17 — the reason given here was wrong.** This said `hostilu` fails on `pitzDaily`
+because "that case needs a fill level `Ilu0` cannot supply". It does not: it needs a different **cell
+elimination order**, and `hostilu` marches that case once given one (`PITZ_FLOW_ORDER=rcm`). See
+*"Ordering, not fill, is what fails zero-fill on `pitzDaily`"* above. The `pitzDaily` default is still
+`petsc` pending the cost comparison, but not for this reason.
+
+⚠️ **THE WALL-CLOCK COLUMN BELOW CANNOT BE ATTRIBUTED, because nothing recorded which `Ilu0` kernel was
+live.** `Ilu0` falls back to a pure-Python twin of its compiled kernel when the extension is not built,
+and it does so **silently**. The `.so` is gitignored, so it belongs to a checkout rather than a branch
+and every fresh worktree starts without one; no worktree on this machine carried it as of 2026-08-17,
+and no run log before that date printed `ilu0.COMPILED`. Some `hostilu` runs *were* compiled (the
+author confirms at least one), so the point is not that these numbers are wrong — it is that **there is
+no way to tell which are which**, which is the unfalsifiable state this file's measurement rule exists
+to prevent. **The step and cycle counts are unaffected either way**: the two kernels compute the
+identical factorization, pinned by `test_the_compiled_and_reference_paths_agree` (rtol 1e-13) — a test
+that is skipped when the extension is absent and had therefore never run on this machine until it was
+built. Re-time the wall column before quoting it; the counts stand.
+
+**Fixed structurally rather than noted (2026-08-17):** `tools/build_ext.sh` builds the extension in a
+checkout in about a second (it caches one shared build environment under `~/.cache/aquaflux`, so it
+does not need Cython in the runtime interpreter — a PEP-668 system Python refuses that);
+`validation/run_case.sh` warns at launch when it is missing; and both cases' banners print the live
+kernel, so every run from this date carries the answer in its own log.
 
 | | `petsc` (incumbent) | `hostilu` (native AMG + our ILU(0)) |
 |---|---|---|
