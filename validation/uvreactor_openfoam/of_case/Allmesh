@@ -1,0 +1,15 @@
+#!/bin/sh
+cd "${0%/*}" || exit 1
+set -e
+
+. "$WM_PROJECT_DIR/bin/tools/RunFunctions"
+
+# Regenerate STL geometry if missing
+if [ ! -f constant/triSurface/bodyWall.stl ]; then
+    python3 make_geometry.py
+fi
+
+runApplication blockMesh
+runApplication surfaceFeatures
+runApplication snappyHexMesh -overwrite
+runApplication checkMesh

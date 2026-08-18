@@ -1,0 +1,191 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | uvReactorSozzi2006: snap onto STL
+   \\    /   O peration     |
+    \\  /    A nd           |
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      snappyHexMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+castellatedMesh true;
+snap            true;
+addLayers       false;
+
+geometry
+{
+    bodyWall
+    {
+        type triSurfaceMesh;
+        file "bodyWall.stl";
+    }
+    lampWall
+    {
+        type triSurfaceMesh;
+        file "lampWall.stl";
+    }
+    inlet
+    {
+        type triSurfaceMesh;
+        file "inlet.stl";
+    }
+    outlet
+    {
+        type triSurfaceMesh;
+        file "outlet.stl";
+    }
+
+    // Geometric volumes used to refine the pipe INTERIORS — without these,
+    // the bulk pipe cells stay at background level (~7.5 mm), giving only
+    // ~5 cells across the 19-mm pipe diameter and a poor velocity profile.
+    // Slightly oversized in radius (12 mm vs the 9.55 mm pipe radius) so
+    // the cylinder fully envelops the pipe wall on the case-coords side.
+    inletInterior
+    {
+        type   searchableCylinder;
+        point1 (0.880 0 0);
+        point2 (1.745 0 0);
+        radius 0.012;
+    }
+    outletInterior
+    {
+        type   searchableCylinder;
+        point1 (0.0477 0 0.040);
+        point2 (0.0477 0 0.895);
+        radius 0.012;
+    }
+};
+
+castellatedMeshControls
+{
+    maxLocalCells       1000000;
+    maxGlobalCells      4000000;
+    minRefinementCells  10;
+    maxLoadUnbalance    0.1;
+    nCellsBetweenLevels 3;
+
+    features
+    (
+        { file "bodyWall.eMesh"; level 3; }
+        { file "lampWall.eMesh"; level 3; }
+        { file "inlet.eMesh";    level 2; }
+        { file "outlet.eMesh";   level 2; }
+    );
+
+    refinementSurfaces
+    {
+        // Walls: level 3 (~1 mm first cell, first-cell centre ~0.5 mm).
+        // Combined with nutUSpaldingWallFunction this drives y+ across
+        // the viscous sublayer in stagnation regions while still being
+        // valid in the higher-velocity jet impingement zones.
+        bodyWall
+        {
+            level (3 3);
+            patchInfo { type wall; }
+        }
+        lampWall
+        {
+            level (3 3);
+            patchInfo { type wall; }
+        }
+        inlet
+        {
+            level (2 2);
+            patchInfo { type patch; }
+        }
+        outlet
+        {
+            level (2 2);
+            patchInfo { type patch; }
+        }
+    }
+
+    resolveFeatureAngle 30;
+
+    // Refine the pipe interiors so the developing flow profile is
+    // adequately resolved. Without this, only ~5 cells span the pipe
+    // diameter; level 2 (~1.9 mm cells) gives ~10 cells across,
+    // matching the wall-cell scale set by the level-3 surface
+    // refinement and giving smooth transition into the body annulus.
+    refinementRegions
+    {
+        inletInterior
+        {
+            mode    inside;
+            levels  ((1.0 2));
+        }
+        outletInterior
+        {
+            mode    inside;
+            levels  ((1.0 2));
+        }
+    }
+
+    // Inside the body annulus, between lamp and outer wall, near the axial
+    // midpoint. Confirmed: distance from x-axis = 0.025 > R_LAMP=0.01 and
+    // < R_BODY=0.0445; well clear of the perpendicular outlet pipe at
+    // (0.8509, 0, .).
+    locationInMesh (0.4445 0 0.025);
+
+    allowFreeStandingZoneFaces true;
+}
+
+snapControls
+{
+    nSmoothPatch        3;
+    tolerance           2.0;
+    nSolveIter          30;
+    nRelaxIter          5;
+    nFeatureSnapIter    10;
+    implicitFeatureSnap false;
+    explicitFeatureSnap true;
+    multiRegionFeatureSnap false;
+}
+
+addLayersControls
+{
+    relativeSizes true;
+    layers {}
+    expansionRatio 1.0;
+    finalLayerThickness 0.5;
+    minThickness 0.1;
+    nGrow 0;
+    featureAngle 60;
+    nRelaxIter 5;
+    nSmoothSurfaceNormals 1;
+    nSmoothNormals 3;
+    nSmoothThickness 10;
+    maxFaceThicknessRatio 0.5;
+    maxThicknessToMedialRatio 0.3;
+    minMedianAxisAngle 90;
+    nBufferCellsNoExtrude 0;
+    nLayerIter 50;
+}
+
+meshQualityControls
+{
+    maxNonOrtho 65;
+    maxBoundarySkewness 20;
+    maxInternalSkewness 4;
+    maxConcave 80;
+    minVol 1e-13;
+    minTetQuality 1e-15;
+    minArea -1;
+    minTwist 0.02;
+    minDeterminant 0.001;
+    minFaceWeight 0.02;
+    minVolRatio 0.01;
+    minTriangleTwist -1;
+    nSmoothScale 4;
+    errorReduction 0.75;
+}
+
+writeFlags ();
+mergeTolerance 1e-6;
+
+// ************************************************************************* //
