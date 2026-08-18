@@ -596,6 +596,30 @@ Engineering Principles.
   it is not the coupled default and is not the cure for coupled cost. PCD remains deprioritized
   independently (finite-element boundary recipes that do not transfer to FVM). Full numbers and the
   matching "what a preconditioner can and cannot change" rule are in `.claude/rules/solve-globalization-log.md`.
+- **⚠️ SCOPE (binding, corrected 2026-08-18): "msimpler beats lsc/SIMPLE" above described
+  `coupled_continuation`'s block-diagonal preconditioner, which neither flagship validation case runs and
+  which no longer defaults to MSIMPLER — do not cite it as current evidence for either architecture.**
+  Neither `validation/bfs3d_openfoam/compare.py` nor `validation/pitzdaily_openfoam/compare.py` reaches
+  `coupled_continuation` at all (both build `coupled_amg_continuation(...)` explicitly, whose
+  `_monolithic_shift_source` builds the shift policy with `build_flow_block=False` — no
+  `BlockPreconditioner`, hence no `schur_scaling`, regardless of `FIELD_SPLIT`/`FLOW_INVERSE`). And where
+  MSIMPLER was tested directly against a flagship-scale operator, in the field-split leading-inverse role
+  the current architecture actually uses, it was dominated: `validation/bfs3d_openfoam/field_split_probe.py`'s
+  `split msimpler/ilu0` arm is part of the "FLAT block preconditioners are CLOSED on this case" family in
+  `.claude/rules/solve-flow-block-log.md` (2.554e-06 TRUE relative residual at the 58-restart-cycle cap,
+  where the shipped hierarchical leading inverses converge in ~10 cycles), and a tighter,
+  single-variable-changed measurement (`msimpler_swap_probe.py`, same file, "MSIMPLER swapped in for the
+  SHIPPED leading inverse") that holds the shipped trailing inverse fixed instead of pairing it with an
+  unshipped `ilu0` one shows both arms now converge but MSIMPLER costs ~8-9x the cycles (6→53 at the
+  adjoint operator, 5→40 at the march's own shift). **`_coupled_shift_policy` no longer hardcodes
+  `schur_scaling="msimpler"` as of this date** — it was never necessary at the scale that policy is
+  actually used at either: dropping it in favour of `BlockPreconditioner`'s own default reaches the
+  identical fixed point on every small (hundreds-of-cells) unit/integration fixture that used to pin it,
+  up to Re 20000 (see `.claude/rules/turbulence.md`'s matching entry for the full list). What survives
+  unqualified: MSIMPLER as the better of `BlockPreconditioner`'s own `schur_scaling` options for a
+  *standalone flow-only* solve where plain SIMPLE's inner GMRES genuinely stalls
+  (`tests/integration/test_channel_high_reynolds.py`, laminar, 384–3072 cells). It is no longer anyone's
+  default.
 - **Fully-AD `a_P`** — a possible refinement (the diffusion Gate-C / limiter pattern), not yet needed.
 - **Gradient-scheme cost — largely solved (use `SweptGradientSolve`).** The *per-matvec* and
   *compile* cost of the nested corrected-gradient solve (distinct from the outer iteration count) is

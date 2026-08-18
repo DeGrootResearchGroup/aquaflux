@@ -1328,16 +1328,27 @@ def _coupled_shift_policy(
         coupled.momentum.velocity_fields(flow_ref), k_ref, omega_ref
     )
     momentum = coupled.momentum.with_eddy_viscosity(closure.nu_t)
-    # The coupled flow block uses the convection-aware velocity AMG + MSIMPLER Schur, not the viscous-
-    # smoothed / SIMPLE default: a RANS case is high-Reynolds, and the Peclet-blind smoothed velocity
-    # block with the ``a_P`` Schur produces a poor momentum-block direction once the flow separates
-    # (the shifted Newton direction it returns drifts away from the true one on a developed separated
-    # field, and the march stalls). The convection block's convective linearization and the
-    # MSIMPLER Schur's velocity-independent scaling both stay valid frozen at the cold initial state
-    # (the reference), so no per-sweep refresh is needed. Overridable via preconditioner_kwargs.
-    # `build_flow_block=False` leaves it out entirely: a monolithically preconditioned step reads this
-    # policy for its shift diagonal and supplies its own inverse, so the two multigrid hierarchies here
-    # would be built and never applied.
+    # The coupled flow block uses the convection-aware velocity AMG, not the viscous-smoothed default:
+    # a RANS case is high-Reynolds, and the Peclet-blind smoothed velocity block produces a poor
+    # momentum-block direction once the flow separates (the shifted Newton direction it returns drifts
+    # away from the true one on a developed separated field, and the march stalls). The convection
+    # block's convective linearization stays valid frozen at the cold initial state (the reference), so
+    # no per-sweep refresh is needed. Overridable via preconditioner_kwargs. `build_flow_block=False`
+    # leaves it out entirely: a monolithically preconditioned step reads this policy for its shift
+    # diagonal and supplies its own inverse, so the block built here would never be applied.
+    #
+    # The pressure Schur is left at BlockPreconditioner's own default (a_P-scaled SIMPLE), not the
+    # MSIMPLER scaling this used to hardcode. MSIMPLER was chosen believing it necessary for a
+    # convection-dominated coupled solve; it is not, at the scale this block-diagonal preconditioner is
+    # actually used at -- swapping it for the default reaches the identical converged fixed point on
+    # every fixture this path is exercised by (residual and fields agree to machine precision). Where a
+    # Schur choice genuinely matters (a real, large, separated case), this whole block-diagonal
+    # preconditioner is dominated by the field-split / monolithic-AMG preconditioners the flagship
+    # validation cases use instead (`coupled_amg_continuation`), so tuning the Schur here buys nothing
+    # a real case would ever see. MSIMPLER remains available (`schur_scaling="msimpler"` via
+    # preconditioner_kwargs, or directly through `BlockPreconditioner`) for the one regime it is not
+    # dominated in: a standalone, flow-only, convection-dominated solve, where the plain SIMPLE Schur's
+    # inner solve can stall outright.
     block = (
         None
         if not build_flow_block
@@ -1347,7 +1358,6 @@ def _coupled_shift_policy(
             momentum,
             **{
                 "velocity": "convection",
-                "schur_scaling": "msimpler",
                 # Aggregate the velocity/Schur AMGs along strong connections. A no-op on a low-aspect-
                 # ratio mesh (this pitzDaily case), but the fix that keeps the V-cycle contracting once
                 # the near-wall cells are strongly stretched (wall-resolved / skewed meshes), where

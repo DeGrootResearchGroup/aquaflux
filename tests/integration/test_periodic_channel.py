@@ -107,7 +107,7 @@ def test_block_preconditioned_solve_converges_on_the_periodic_mesh() -> None:
     has no residual decay to relax its damping against and marches the full viscous transient instead.
     """
     _, geometry, assembler, _ = _solve(6, 32)
-    solve_flow = reused_flow_solve(assembler, schur_scaling="msimpler", velocity="convection")
+    solve_flow = reused_flow_solve(assembler, velocity="convection")
     state = solve_flow(assembler, potential_flow(assembler))
 
     assert float(jnp.linalg.norm(assembler.residual(state))) < 1e-10

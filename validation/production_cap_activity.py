@@ -60,7 +60,7 @@ from aquaflux.turbulence import (
 RHO, U_IN, H, L = 1.0, 1.0, 1.0, 4.0
 NU = 4e-4  # Re = U H / nu = 2500 -- genuinely turbulent, so k stays clear of its floor
 INTENSITY, LENGTH_SCALE = 0.05, 0.07 * H
-PRECONDITIONER = {"schur_scaling": "msimpler", "velocity": "convection"}
+PRECONDITIONER = {"velocity": "convection"}
 
 
 def build_case(nu=NU, *, explicit_limiter: bool):

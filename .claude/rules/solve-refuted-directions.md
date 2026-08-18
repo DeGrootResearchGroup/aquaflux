@@ -399,6 +399,15 @@ load-bearing status of the flow block itself is in `solve-flow-block.md`.
 - **Flat block preconditioners (no hierarchy, no coarse-grid correction) — CLOSED on this case.** Every
   arm tried loses to a hierarchy. See `solve-flow-block-log.md` § "FLAT block preconditioners are CLOSED
   on this case".
+- **`schur_scaling="msimpler"` as the `bfs3d` LEADING inverse — DOMINATED even under a controlled,
+  single-variable swap against the shipped bundle (2026-08-18).** Swapping only the leading inverse for
+  `BlockPreconditioner(schur_scaling="msimpler")`, with the shipped trailing inverse
+  (`compare.TRAILING_INVERSE`, native nodal) held fixed — unlike the flat-PC arm above, which paired it
+  with an unshipped `ilu0` trailing — both arms converge, but MSIMPLER costs ~8-9x the shipped bundle's
+  Krylov cycles (6→53 at the adjoint operator, 5→40 at the march's own shift) at the case's real
+  converged root. This is also the reachability-scale answer to the "is MSIMPLER worth pursuing on the
+  flow block at all" question `field_split_probe.py`'s `block_simple_arms` docstring poses: no. See
+  `solve-flow-block-log.md` § "MSIMPLER swapped in for the SHIPPED leading inverse, trailing held fixed".
 - **Smoothed aggregation on the flow saddle, under the SIMPLE smoother — REFUTED.** See
   `solve-flow-block-log.md` § "Smoothed aggregation on the flow saddle — REFUTED under the SIMPLE
   smoother".
