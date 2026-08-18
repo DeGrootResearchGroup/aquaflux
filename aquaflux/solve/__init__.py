@@ -71,10 +71,20 @@ from .continuation import (
     ShiftTerm,
     StepAcceptance,
 )
-from .frozen_operator import (
+from .ordering import (
+    AscendingRowLengthCells,
+    CellMajor,
+    CellOrder,
+    EliminationOrdering,
+    NaturalCells,
+    ReverseCuthillMcKeeCells,
+    cell_graph,
     cell_major_permutation,
+)
+from .frozen_operator import (
     convection_diffusion_operator,
     equilibrate_cell_major,
+    equilibrate_ordered,
     decouple_dof,
     symmetrically_equilibrate,
 )
@@ -152,7 +162,7 @@ from .newton import newton_step
 from .norm import BlockScaledNorm, ResidualNorm, RowScaledNorm
 from .relaxation import ConstantRelaxation, RelaxationSchedule, SwitchedEvolutionRelaxation
 from .refresh import NO_REFRESH, RefreshPolicy
-from .retry import NO_RETRIES, RetryPolicy
+from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
 from .shift_basis import LocalCourantBasis, ShiftBasis, VelocityShiftParts
 from .sparse_jacobian import (
     BlockColouring,
@@ -175,13 +185,17 @@ from .step_control import (
 
 __all__ = [
     "COMPILED",
+    "ESCALATING_REASONS",
     "NO_REFRESH",
     "NO_RETRIES",
     "AirHierarchy",
     "AmgVCycle",
+    "AscendingRowLengthCells",
     "BlockColouring",
     "BlockScaledNorm",
     "BlockTriangularFieldSplit",
+    "CellMajor",
+    "CellOrder",
     "CflResidualDualTimeControl",
     "CoefficientDriftTrigger",
     "ColumnProbePlan",
@@ -191,6 +205,7 @@ __all__ = [
     "DivergenceGuard",
     "DualTimeControl",
     "DualTimeStep",
+    "EliminationOrdering",
     "FieldGroups",
     "FieldSplitAmgPreconditioner",
     "ForwardStep",
@@ -210,6 +225,7 @@ __all__ = [
     "MonotoneLineSearch",
     "NativeHierarchyInverse",
     "NativeSimpleInverse",
+    "NaturalCells",
     "NodalNativeInverse",
     "PhaseTimer",
     "PositiveBlockLimit",
@@ -224,6 +240,7 @@ __all__ = [
     "ResidualNorm",
     "ResidualRatioDualTimeControl",
     "RetryPolicy",
+    "ReverseCuthillMcKeeCells",
     "RowScaledNorm",
     "ShapeBudget",
     "ShiftBasis",
@@ -249,6 +266,7 @@ __all__ = [
     "build_block_triangular_field_split",
     "build_convection_hierarchy",
     "build_smoothed_hierarchy",
+    "cell_graph",
     "cell_major_permutation",
     "column_probe_plan",
     "combine_metrics",
@@ -259,6 +277,7 @@ __all__ = [
     "default_dual_time_control",
     "default_linear_solver",
     "equilibrate_cell_major",
+    "equilibrate_ordered",
     "field_change_metrics",
     "forward_march",
     "host_ilu_inverse",

@@ -76,6 +76,9 @@ from aquaflux.io import read_openfoam
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
 from aquaflux.solve import (
+    COMPILED as ILU0_COMPILED,
+)
+from aquaflux.solve import (
     CflResidualDualTimeControl,
     InnerIterateCheckpointer,
     MarchLogger,
@@ -1173,6 +1176,16 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             if LEADING_INVERSE is None
             else f"{FLOW_INVERSE} {_NATIVE_FLOW if FLOW_INVERSE == 'native' else _HOST_FLOW}",
         ),
+        # ⚠️ WHICH incomplete-LU IMPLEMENTATION IS LIVE, because the two differ by orders of magnitude
+        # in speed and nothing recorded which one a run used. `Ilu0` ships a pure-Python reference twin
+        # of its compiled kernel and falls back to it silently when the extension is not built; the two
+        # compute the identical factorization (pinned by a unit test), so a CONVERGENCE result is the
+        # same either way, but a WALL-CLOCK one taken on the fallback is not a preconditioner
+        # measurement at all. Printing it is what makes such a number falsifiable later.
+        (
+            "host ILU kernel",
+            "compiled" if ILU0_COMPILED else "PURE PYTHON (fallback -- timings void)",
+        ),
         ("turbulence inverse", TURBULENCE_INVERSE),
         # ...and, when a `trailing_inverse` is supplied, it REPLACES the PETSc V-cycle wholesale, so the
         # two smoother settings below are never read. Marking them is the same rule as the note above:
@@ -1362,7 +1375,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             on_retry=logger.on_retry,
             retry=RetryPolicy(
                 solver=relative_residual_gmres(1e-4, restart=40),
-                on_cycles=RETRY_ON_CYCLES_SCALED,
+                abort_above_cycles=RETRY_ON_CYCLES_SCALED,
                 on_alpha=RETRY_ON_ALPHA,
                 beta_factor=RETRY_BETA_FACTOR,
             ),

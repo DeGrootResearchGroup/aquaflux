@@ -265,8 +265,12 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
 
 ## Preconditioner — the frozen host family (shared contract)
 
-- **`cell_major_permutation` / `equilibrate_cell_major` live in `frozen_operator.py`, NOT in the ILUT
-  (binding, moved 2026-08-15).** They are the reorder half of one transform whose rescale half
+- **`equilibrate_cell_major` / `equilibrate_ordered` live in `frozen_operator.py`, NOT in the ILUT
+  (binding, moved 2026-08-15). ⚠️ `cell_major_permutation` moved AGAIN on 2026-08-17, to the new
+  `solve/ordering.py`** — it is one elimination ordering among several now, and sat in `frozen_operator`
+  only because that is where it was first written. `frozen_operator` imports it (one direction, no
+  cycle); nothing re-exports it from its old home, so a stale import fails loudly.
+  They are the reorder half of one transform whose rescale half
   (`symmetrically_equilibrate`, `equilibration_scale`, `apply_symmetric_scale`, `row_chunks`) was
   already there, and every consumer applies the two together -- a factorization or a coarsening wants
   the matrix both unit-diagonal and grouped by cell.
@@ -1467,8 +1471,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     Frozen at a reference state+shift like the AMG blocks; being far stronger it tolerates the freezing at
     a few extra cycles, and the shift vanishes at the root so it never changes the converged state or its
     adjoint. `IlutFactors`/`factorize_ilut` are the pure host core (testable without JAX); the JAX
-    wrapper is thin. `cell_major_permutation`/`equilibrate_cell_major` are **not** the ILUT's -- they
-    live in `frozen_operator.py`; see the placement note below.
+    wrapper is thin. `equilibrate_cell_major` is **not** the ILUT's -- it lives in `frozen_operator.py`
+    (and `cell_major_permutation` in `solve/ordering.py`); see the placement note below.
   - **Adjoint transpose wiring — `TransposedPreconditioner` (in `implicit.py`, binding).** The generic
     adjoint machinery `_adjoint_preconditioner` derives `Mᵀ` from the forward `M` with
     `jax.linear_transpose` — which works for a traceable AMG V-cycle but **cannot transpose a
@@ -1735,20 +1739,30 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     2 sweeps, 5 levels) on a mesh that coarsens about 3× per level where that one manages 24×, so the
     arm is not at its best here — `PITZ_FLOW_SWEEPS` and the threshold are unexplored.
 
-    **✅ CONFIRMED ON A SECOND, INDEPENDENT ZERO-FILL IMPLEMENTATION — the mechanism is the FILL, not
-    PETSc (2026-08-16).** `HostVCycleInverse` is this package's own hierarchy smoothed by its own
-    `Ilu0`: different coarsening, different factorization code, different language even. Run as the
-    leading inverse on `pitzDaily` it fails identically to PETSc's zero-fill smoother — step 1 alpha
-    0.000 with the residual above its own starting value, step 2 at the shift ceiling, **non-finite by
-    step 3** — while PETSc's ILU(1) converges the same case in 74 steps and 628 s. Two implementations
-    agreeing in failure, against one differing only in fill, is what puts this on two legs rather than
-    one.
+    **✅ CONFIRMED ON A SECOND, INDEPENDENT ZERO-FILL IMPLEMENTATION (2026-08-16).**
+    `HostVCycleInverse` is this package's own hierarchy smoothed by its own `Ilu0`: different
+    coarsening, different factorization code, different language even. Run as the leading inverse on
+    `pitzDaily` it fails identically to PETSc's zero-fill smoother — step 1 alpha 0.000 with the
+    residual above its own starting value, step 2 at the shift ceiling, **non-finite by step 3** —
+    while PETSc's ILU(1) converges the same case in 74 steps and 628 s.
 
-    **⚠️ CONSEQUENCE FOR TAKING PETSc OFF THIS PATH: `Ilu0` IS ZERO-FILL BY CONSTRUCTION AND HAS NO
-    FILL PARAMETER**, so `HostVCycleInverse` cannot serve a case that needs one. That is a concrete,
-    specifiable gap rather than a mystery: a level-of-fill incomplete factorization is what the host
-    V-cycle would need before it can replace the incumbent everywhere. Note the gap is invisible from
-    the case that motivated the host V-cycle, whose block wants exactly zero fill.
+    **🛑 BUT ITS CONCLUSION — "the mechanism is the FILL" — WAS WRONG, AND THE ERROR IS INSTRUCTIVE
+    (corrected 2026-08-17).** The two implementations were NOT "differing only in fill". They also
+    **shared the elimination ordering**: at the time both took it from `equilibrate_cell_major` --
+    cell-major over the mesh's own cell order. (The host V-cycle now takes an injected ordering through
+    `equilibrate_ordered` and defaults to that same one, so the confound is a choice rather than a
+    given.) Fill and order were confounded, and the confound is the one that
+    mattered — **on this block the ordering is the larger lever, and the shipped cell order is the
+    thing that fails.** Two independent implementations agreeing is evidence about a *shared* cause;
+    it does not identify which shared thing is the cause, and here the argument named the wrong one.
+    See *"Ordering, not fill, is what fails zero-fill on `pitzDaily`"* below for the measurements.
+
+    **⚠️ THEREFORE THE CONSEQUENCE DRAWN FROM IT IS ALSO WITHDRAWN.** It said `Ilu0` is zero-fill by
+    construction with no fill parameter, so `HostVCycleInverse` "cannot serve a case that needs one" —
+    and offered a level-of-fill factorization as the specifiable gap. `pitzDaily` is not shown to need
+    fill. It is shown to need a different cell order, which the host V-cycle now takes
+    (`aquaflux/solve/ordering.py`). A level-of-fill `Ilu0` may still be wanted some day; this case is
+    no longer the evidence for it.
 
     **⚠️ Three mechanisms were refuted on the way, each of which had a plausible story:**
     - **NOT the pressure/momentum scale split.** The 3D block's split is *comparable or worse* at
@@ -1825,6 +1839,320 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     solver on the COMPLETE-LU path too**, not only the ILUT's — `_monolithic_factor_step` falls back to it
     for both. Deleting the ILUT without renaming it leaves a solver named after a preconditioner that no
     longer exists.
+
+### ⭐ Ordering, not fill, is what fails zero-fill on `pitzDaily` (2026-08-17)
+
+**The correctly-scoped question.** Everything above was measured MONOLITHICALLY — one V-cycle over all
+five fields — and the case is FIELD SPLIT. The split sends `[u, v, p]` to the V-cycle whose level
+smoother is the incomplete factorization (the only block a fill level governs) and `[k, omega]` to
+`native_nodal_inverse`, which is not a factorization at all, **so no `k` or `omega` row is ever
+eliminated by an ILU in the shipped solver.** Everything in this section is on `[u, v, p]` alone, taken
+from the assembled operator by the same `FieldGroups` the split uses.
+
+This **agrees with** the zero-shift resolution immediately above rather than competing with it. That one
+found the β = 0 failure was the *state* — at the converged root the shipped split converges. This one
+finds that on the *split block* β = 0 converges under most orderings **even at the cold self-start**, the
+shipped order included. Both point the same way: the recorded "both fills fail at β = 0" was monolithic,
+and neither the adjoint's operator nor the split's block is the thing that was failing.
+
+*Configuration (all arms):* `pitzDaily`, 12225 cells; flow block 36675 of 61125 dofs, **reach 5** (the
+exact one on this mesh), block nnz 6.44 M; symmetric sqrt-diagonal equilibration ON; `Ilu0` **zero
+fill**, `COMPILED=True`; real right-hand side `-R(state)[leading]`; operator and factorization at the
+**same** β (no preconditioner-only floor). Judged on the **TRUE** relative residual from
+right-preconditioned GMRES, rtol 1e-8, restart 30, ≤ 20 restarts (so 621 applies = hit the cap).
+Two states: the case's **self-start** (`|R|` 2.89e+02 — where the `hostilu` march dies at step 1 *under
+the shipped cell order*) and
+the **converged root** (`R` 5.095e-06; marched with the *native SIMPLE* leading inverse at reach 3,
+which is reach-insensitive — the state is a root of the exact residual either way, and it is re-probed
+here at reach 5 because an ILU inherits the stored pattern).
+Harness: `validation/pitzdaily_openfoam/flow_block_ordering.py`.
+
+⚠️ **The converged root is a GITIGNORED run artifact, not a checked-in fixture.** It was
+`validation/pitzdaily_openfoam/checkpoints/state-00071.npz`, written by `StateCheckpointer` during a
+full march; `checkpoints/` is ignored, so that file is not in the repository and will not be in a fresh
+clone. To re-adjudicate the converged-root half of this table, **re-run the case to regenerate it** —
+`PITZ_FLOW_INVERSE=native validation/run_case.sh validation/pitzdaily_openfoam/compare.py`, about nine
+minutes — and the harness picks it up automatically. Absent one it prints a line saying so and measures
+the self-start only, so a run missing the artifact reports a *smaller* table rather than a wrong one.
+
+GMRES applications; **FAIL** = stalled above 1e-6 true:
+
+| cell ordering | self-start β 0.5 | β 0.05 | β 0 | root β 0.5 | β 0.05 | β 0 |
+|---|---|---|---|---|---|---|
+| `cell_major` — **SHIPPED** | **FAIL** | 55 | 125 | **FAIL** | 80 | 404 |
+| `cell_major_rowlength` | **113** | 152 | 140 | **121** | 58 | 275 |
+| `cell_major_rcm` | 140 | **32** | **55** | **FAIL** | **51** | **66** |
+| `pointwise_rowlength` | 113 | 152 | 140 | 121 | 58 | 275 |
+| `pointwise_rcm` | 203 | 32 | 52 | **FAIL** | 51 | 63 |
+| `mc64_symmetric` (permutation only) | **FAIL** | 58 | 107 | **FAIL** | 77 | 339 |
+| `defer_small_diagonal` 1 % / 5 % | **FAIL** | 61 / 93 | 125 / 152 | **FAIL** | 89 / 164 | 308 / 435 |
+| `cell_major_reversed` — **CONTROL** | **FAIL** | 60 | 104 | **FAIL** | 66 | 362 |
+| `field_major` | 460 | **FAIL** | **FAIL** | **FAIL** | **FAIL** | **FAIL** |
+| `pressure_last` | 586 | **FAIL** | **FAIL** | **FAIL** | **FAIL** | **FAIL** |
+| `pressure_first` | **FAIL** | **FAIL** | **FAIL** | **FAIL** | **FAIL** | **FAIL** |
+
+- **The shipped cell order is the failure, and it fails exactly where the march starts.** At β = 0.5 —
+  the march's own `beta0` — the shipped order **amplifies from the FIRST stationary sweep** (true
+  residual ×5.53 after one, ×2.17e+03 after two, ×5.97e+08 after four) and stalls GMRES. Two other
+  cell orders converge on the identical matrix. That is a one-variable change: same block, same
+  equilibration, same zero fill, same factorization code.
+- **`cell_major_reversed` is the control that makes this a result.** Merely relabelling the cells the
+  other way round fails just like the shipped order, so the wins are not "any permutation shakes it
+  loose" — RCM and row-length are doing something specific.
+- **Neither winner spans everything, and the failing corners differ.** Row-length is the only ordering
+  that converges at all six points. RCM is much the better where it works (2–6× fewer applies at every
+  small-β point) and fails only at **converged root + β = 0.5** — a corner no march and no adjoint
+  visits, since β is small by the time the state is converged. The two (state, β) pairs that actually
+  occur are hot-state/large-β and converged-state/small-β, and RCM handles both.
+- **⚠️ The stationary-sweep contraction does NOT predict the Krylov verdict — a FOURTH quantity that
+  fails to rank these arms**, after `condest`, diagonal dominance and the pivot census. It fails in
+  *both* directions: at root β = 0.5 the shipped order's sweeps **contract** (2.65e-2, 2.29e-2, 5.74e-2)
+  and GMRES still stalls at 3.25e-4; at self-start β = 0.5 RCM's sweeps **amplify** (2.7e-1 → 1.18e+01
+  → 2.67e+04) and GMRES converges in 140. Report both, rank on neither, and settle it on a march.
+- **⚠️ THE FIRST CENSUS WAS AN ARTIFACT — the harness read the diagonal of the equilibrated *operator*
+  rather than the *factor*, and the symmetric square-root equilibration forces that to magnitude
+  exactly 1.** It reported "zero negatives, min |pivot| 1.00" for all twelve orderings at all six
+  points, including arms that diverge by 1e+59. Fixed by exposing `Ilu0.pivots` (the stored diagonal
+  *is* the pivot there — unlike PETSc, which stores its reciprocal); re-runnable with
+  `FLOW_BLOCK_CENSUS_ONLY=1`. The verdicts above never touched it.
+
+- **⭐ AND THE REAL CENSUS IS A FIFTH FAILED PREDICTOR — it reproduces `condest`'s exact failure mode:
+  THE SIGN OF THE CORRELATION REVERSES WITH THE SHIFT.** Negative pivots of the ILU(0) factor, at the
+  self-start, against the verdicts in the table above (same state, same matrix, so this is a fair join):
+
+  | ordering | β 0.5 verdict / neg | β 0.05 verdict / neg | β 0 verdict / neg |
+  |---|---|---|---|
+  | `cell_major` | **FAIL** / 22 | 55 / 3 | 125 / 9 |
+  | `cell_major_rcm` | 140 / 12 | **32** / 3 | **55** / 1 |
+  | `cell_major_rowlength` | **113** / 1 | 152 / **11** | 140 / 5 |
+  | `cell_major_reversed` | **FAIL** / 20 | 60 / 9 | 104 / 2 |
+  | `field_major` | 460 / **0** | **FAIL** / 1 | **FAIL** / 1 |
+  | `pressure_last` | 586 / **0** | **FAIL** / 4 | **FAIL** / 13 |
+  | `pressure_first` | **FAIL** / 5815 | **FAIL** / 7292 | **FAIL** / 7138 |
+
+  At **β = 0.5** it looks predictive: every failing arm carries 20+ negatives and every converging one
+  carries 12 or fewer. At **β = 0.05 and 0 it inverts** — `field_major` fails with **one** negative
+  pivot and a comfortable min |pivot| of 2e-01, while `cell_major_rowlength` converges with **eleven**.
+  A quantity whose correlation changes sign between operating points cannot select an arm, which is
+  precisely what was already recorded for `condest`.
+
+  **So: `condest`, diagonal dominance, stationary-sweep contraction, and now the pivot census have each
+  failed to rank these arms. Nothing cheap computable at BUILD time has yet predicted the verdict on
+  this operator class** — which is the standing argument for settling an ordering question on a
+  true-residual solve rather than on a factor inspection.
+
+  Two consistency checks fall out of it: `defer_small_diagonal` at 1 % and 5 % has a census **identical
+  to `cell_major`** at every point, and `mc64_symmetric` is identical to it at β = 0.5 — corroborating
+  from the factor's side that both are near-no-ops here, which their verdicts already implied.
+
+  ⚠️ *Census configuration:* the root half was taken at `state-00082.npz`, a **different** converged
+  root from the `state-00071.npz` the verdict table used (the case checkpoints on a rolling keep-3 and
+  the later marches replaced it). Both are converged to ~5e-06, but they are not the same matrix, so
+  only the self-start columns are joined above. The harness now takes the **latest** checkpoint rather
+  than a hard-coded name, which is what made this visible instead of silent.
+
+
+**⚠️ The saddle-point literature's ordering is WRONG for zero fill, and the reason is structural.**
+`pressure_last` — velocities first, pressure last, the Konshin/Olshanskii/Vassilevski direction — fails
+at five of six points, and `pressure_first` is catastrophic everywhere (a sweep growing by 1e+59 in one
+application). This does **not** contradict that literature: what makes pressure-last work is that
+eliminating the velocities **fills** the pressure block with the Schur complement, and a zero-fill
+factorization discards precisely that fill, leaving the pressure block to be eliminated against its own
+bare, near-singular Rhie–Chow diagonal. Pressure-last is an ordering for a factorization that KEEPS
+fill. Do not port it to `Ilu0`; if a level-of-fill `Ilu0` is ever built, re-ask it there.
+
+**Two well-motivated leads measured out, so they need not be re-tried:**
+- **HILUCSI static deferring** (Chen, Ghai & Jiao, arXiv:1911.10139 — symmetrically permute the
+  smallest-diagonal rows to the lower-right, criterion taken PRE-equilibration since the equilibration
+  forces every nonzero diagonal to magnitude 1): never better than the shipped order at any point, and
+  clearly worse at 5 %. It does not rescue β = 0.5.
+- **MC64 symmetrized, PERMUTATION ONLY** (`min_weight_full_bipartite_matching` on `−log|a_ij|`, applied
+  as `P_r = P_c`): essentially a no-op — bit-identical sweep numbers to the shipped order at β = 0.5,
+  because the diagonal is already the matched entry in nearly every row. It also costs 70–150 s to
+  build. ⚠️ This is not a test of MC64: the method's other half is the pair of dual potentials that
+  rescale the matched matrix, and `scipy` does not expose them.
+
+**✅ AND IT CARRIES A REYNOLDS RUNG ON THE REAL MARCH — the block-level result is not an artifact of
+measuring a block.** `PITZ_FLOW_INVERSE=hostilu PITZ_FLOW_ORDER=rcm`, reach 5, `beta_start` 0.5, fill/
+sweeps/coarse 1/4/2000 (the `hostilu` path ignores the fill), field split on, trailing `native_nodal`,
+`Ilu0` **compiled**, 3 Reynolds points, log `run-20260817-101242.log`:
+
+| | shipped `natural` order | `rcm` order |
+|---|---|---|
+| step 1 | α = 0.000, residual ABOVE its start | α = **1.000**, R 5.69e-02 |
+| steps 1–4 | β at the ceiling by 2, **non-finite by step 3** | full steps, β relaxing 0.5 → 0.148 |
+| rung 1 (Re/100) | never reached | **converged, 28 steps, 270 s, R 7.25e-06** |
+
+So the ordering turns a march that dies at step 3 into one that completes an entire continuation rung at
+full Newton steps. **That is the headline, and it is the answer to "can a zero-fill smoother work on this
+case": yes.**
+
+**🛑 BUT IT DOES NOT CARRY THE WHOLE CASE, AND WHERE IT STOPS IS THE INFORMATIVE PART.** Rung 2 (Re/10)
+retried at step 29 (β → 1.0, recovered), then step 30 clipped to α = 0.000, step 31 diverged twice with
+the ladder escalating β → 8 → 16 and reported `inf`, and steps 31–32 ground with α ≈ 0. **At the point of
+failure the linear solves were healthy — 12 cycles each — while α collapsed.** A preconditioner that
+returns a 12-cycle solve is not the thing failing; the line search is. Run stopped by hand at step 32.
+
+**🛑 AND THE MECHANISM IS NAMED IN THE LOG: THE COST THRESHOLD IS POSITIVE FEEDBACK ON THIS CASE.**
+(Spelled `retry.on_cycles` at the time; there is no such field now — it is `retry.abort_above_cycles`
+and it no longer escalates, which is what this section led to.) The
+retry ladder escalates β when a solve costs more than `on_cycles` restart cycles, on the usual reasoning
+that a stiffer pseudo-timestep makes the block easier. **On this case that implication is false** — under
+`rcm` the block takes 140 applications at β = 0.5, 32 at 0.05 and 55 at 0 — so the rule closes a loop
+that runs the wrong way: *more cycles → higher β → a harder block → more cycles.* The log gives each
+redo's reason, and the first three are all `cycles`, not divergence:
+
+```
+step 29 attempt 2: cycles,   beta -> 1.0000
+step 30 attempt 2: cycles,   beta -> 1.3333
+step 30 attempt 3: cycles,   beta -> 2.6667
+step 31 attempt 2: diverged, beta -> 8.0000
+step 31 attempt 3: diverged, beta -> 16.0000
+```
+
+The divergence is the *consequence* of three cycle-triggered escalations, not the cause. And the trigger
+is a **mis-calibration rather than a fault**: `on_cycles = 10` was set for the PETSc ILU(1) arm, while
+this arm's healthy cost at rung 2 is about 12 — so the ladder fires on an arm that is working. **Read a
+`cycles` escalation as a statement about the threshold before reading it as one about the step.**
+
+**✅ AND RAISING THE THRESHOLD CARRIES THE WHOLE CASE — the zero-fill host smoother now marches
+`pitzDaily` end to end (2026-08-17).** One variable changed from the run above, `PITZ_RETRY_ON_CYCLES`
+10 → 25, everything else identical (`hostilu`, `rcm`, reach 5, `beta_start` 0.5, `Ilu0` compiled;
+log `run-20260817-111002.log`). The 12-cycle solve at step 29 that previously triggered the first
+escalation is simply accepted, and the march never looks back:
+
+| step | threshold **10** | threshold **25** |
+|---|---|---|
+| 29 | β **1.0** (escalated on `cycles`), R 5.53e-02 | β **0.50**, R 4.55e-02 |
+| 30 | β **2.67**, α **0.000**, R **rising** 1.00e-01 | β **0.33**, α 1.000, R 2.96e-02 |
+| 31 | β **16.0**, R **inf** | β **0.22**, α 1.000, R 2.19e-02 |
+| … | dead | converges, 3 rungs |
+
+**Result: 82 steps, 466 cycles, 743 s, `x_r/h` = 8.0686 against OpenFOAM's 7.7409.** Seven retries, every
+one on `alpha` and **none on `cycles`** — with the spurious trigger gone, only genuine line-search retries
+remain, and their β escalations stay inside the 0.04–0.16 band this block finds easy.
+
+**The root is the same one.** `x_r/h` 8.0686 matches the native-SIMPLE arm to four decimals
+(`nut_peak` 417.54 against 417.51), so this is a cost and robustness result, not an accuracy one — two
+very different preconditioners landing on one converged state.
+
+⚠️ **It is the SLOWEST of the three working arms, and it is not a recommendation to change a default:**
+
+| arm on `pitzDaily` | steps | cycles | wall |
+|---|---|---|---|
+| native SIMPLE, reach 3 | 71 | 395 | **550 s** |
+| PETSc ILU(1), reach 5 | 74 | 321 | 628 s |
+| **`hostilu` + `rcm`, reach 5, threshold 25** | 82 | 466 | 743 s |
+
+⚠️ **And the three are NOT a controlled comparison.** This arm ran the cost threshold at 25 where the other
+two ran 10, and the SIMPLE arm ran reach 3 where the other two ran reach 5 (it is reach-insensitive; an
+ILU is not). One run each, and this case has no measured march-level noise floor. What the row
+establishes is **that a zero-fill host smoother now completes this case at all**, which it could not
+before at any setting — not where it places on cost. A matched re-run of all three at one threshold is
+the obvious follow-up, and it is untried.
+
+⚠️ **This is also the first attributable `hostilu` wall time on this case**, because it is the first run
+recorded as having the compiled kernel live (see the kernel-provenance warning elsewhere in this file).
+
+This also re-frames the independently recorded `beta_start = 4` run being **worse** than
+`beta_start = 0.5`: consistent with β being the wrong direction on this case rather than with anything
+about the preconditioner. `PITZ_BETA_START` remains untried in the low direction.
+
+### ✅ RESOLVED — the cost guard and the shift escalation are now separate responses (2026-08-17)
+
+**Binding, and it changed shipped behaviour on both cases.** `RetryPolicy.on_cycles` was one number
+doing two jobs: it stopped the dual-time inner loop *and* escalated β. It is now
+**`abort_above_cycles`**, a cost guard only. `retry_reason` returns `"diverged" | "alpha" | "cycles"`,
+and `ESCALATING_REASONS = {"diverged", "alpha"}` — one home, read by both the march and the log — says
+which of them raise the shift. A `"cycles"` retry **redoes the step at the shift it already had**, on
+the factorization the dual-time loop's mid-step refresh has by then rebuilt.
+
+- **Why cost must not escalate.** A cycle count says the frozen preconditioner is struggling with this
+  operator, not that the step is stiff. The march already has the right response — `refresh_on_cycles`
+  rebuilds it mid-step — and escalating on the same observation additionally assumes a stiffer operator
+  is an easier one, which is false on this case (140 applications at β 0.5 against 32 at 0.05).
+  **Stiffness is what `on_alpha` measures, and a step length is dimensionless**, so it needs no per-arm
+  calibration. The abort threshold remains a number, but it is now a *resource* decision rather than a
+  diagnosis.
+- **⚠️ The redo is capped at ONE per step** (`redone_on_fresh` in `march.py`). It differs from the first
+  attempt only in starting on the refreshed factorization, so a second at the same shift would repeat
+  it exactly — burning the escalation budget on identical attempts and spinning to `cycles_limit` every
+  step.
+- **⚠️ `cycle_budget` DEPENDS on this redo and would otherwise silently accept a bad iterate.** It
+  deliberately truncates a grinding solve and returns a partial, non-converged iterate *expecting it to
+  be discarded*. Pair it with `abort_above_cycles < cycle_budget` or the truncation is simply accepted.
+  That pairing was the reason the two jobs were fused in the first place, and it is what made "just
+  delete the cost trigger" wrong.
+- **`escalates` now means `on_alpha is not None`**, so a cost-only policy needs no readable β leaf and
+  `require_shifted` no longer rejects one.
+
+**✅ `bfs3d` RE-MARCHED UNDER THE SPLIT, AND IT IS UNCHANGED TO EVERY RECORDED FIGURE (2026-08-17).**
+Shipped defaults, `hostilu`, `Ilu0` compiled, `abort_above_cycles` 10, `cycle_budget` 42; log
+`bfs3d_openfoam/march.log`:
+
+| | recorded (pre-split) | re-marched (post-split) |
+|---|---|---|
+| steps | 61 | **61** |
+| Krylov cycles | 208 | **208** |
+| final ‖R‖ | 1.858e-06 | **1.858e-06** |
+| mid-span / full-span `x_r/h` | 8.361 / 12.53 | **8.3611 / 12.53** |
+
+**And the reason it is unchanged is the useful part: this case never takes the cost path at all.** Its
+two retries are both `alpha`, so there was no `cycles` escalation for the split to remove. The
+behaviour change is therefore confined to configurations where a solve actually exceeds the budget
+without reaching target — on the evidence so far, `pitzDaily` under the zero-fill smoother, which is
+where the defect was found. ⚠️ Wall was 1408 s against a recorded 1246 s, which is the soft number: one
+run each, different machine conditions, and the recorded figure has no kernel provenance (this one is
+logged as compiled).
+
+**The reasoning that produced this, kept because it generalizes.** The problem was that
+the cost threshold is an absolute count and therefore **arm-dependent**, which conflicts with this
+project's knob-free-robustness goal: a cycle count is `preconditioner strength × operator difficulty`,
+so **any constant encodes an assumption about which preconditioner is installed.** Four directions were
+written down; (4) is what shipped, and the other three remain available if the abort threshold itself
+proves to need calibrating:
+
+1. **Make the trigger relative to the arm's own history** — an anomaly test against a running median of
+   recent accepted solves (say 3×) rather than against a constant. Self-calibrating; needs a cold-start
+   rule for the first few steps, where there is no history and the march is at its most fragile.
+2. **Trigger on the cycle BUDGET instead.** A solve that exhausts `cycle_budget` was truncated and its
+   direction is genuinely suspect; one that finished under it converged. That is a resource decision
+   rather than a diagnosis, so it does not need per-arm calibration — but it is blunt, firing only at
+   the extreme.
+3. **Make the criterion dimensionless: cost per unit residual reduction**, not cost alone. The rule
+   wants "this step is going badly", and many cycles that buy a large drop is not that. Something like
+   `cycles / log(‖G_in‖/‖G_out‖)` measures what is actually wanted; the present rule reads the numerator
+   only.
+4. **✅ SHIPPED — a COST signal does not drive the β ladder at all.**
+   A high cycle count is evidence about the **preconditioner** (stale factorization, weak smoother), not
+   about the **step's stiffness**, and this case already routes it to the right responder:
+   `refresh_on_cycles = 3` rebuilds the frozen preconditioner on exactly this signal. Sending the same
+   observation to β-escalation as well conflates two diagnoses — and on this case the escalation is not
+   even monotone in the right direction. The honest stiffness signal is **α**, which is dimensionless
+   and needs no calibration.
+
+**⚠️ AND `on_cycles` DID TWO JOBS — the discovery that shaped the fix.** Besides triggering the
+β-escalating retry, `RetryPolicy.thresholded_step` pushes it down as `abort_above_inner_cycles`, which
+**cuts the dual-time inner loop short** the moment a solve exceeds it (`retry.py`). It does not truncate
+the Krylov solve — the log shows the over-threshold solves running their full 12 cycles — it stops the
+step taking further inner iterations. So on the failing run, step 29 ran 3 inners and was discarded;
+on the converging one the identical first two inners (`1.663e-01 → 7.841e-03 → 3.865e-03`, bit-identical)
+were followed by a 4th and the step was accepted. The threshold therefore withheld *convergence the step
+was in the middle of achieving* and then escalated β for the trouble.
+
+**There is weak evidence for (4) already.** In the converging run no solve reached 25 cycles, so the
+trigger **never fired** — that run is observationally what "no cycles trigger for this arm" looks like,
+and it converged on `alpha` retries alone. ⚠️ Weak because it is one arm on one case. And removing the
+trigger outright would **not** have been a pure subtraction — it would have taken the early abort with
+it, which `cycle_budget` depends on. That is why what shipped splits the two rather than deleting one.
+
+**Two structural observations worth keeping:**
+- **`pointwise_rowlength` is EXACTLY `cell_major_rowlength`** — identical at all six points, not merely
+  close. The coloured probe assembles against a fixed block pattern, so every row of a cell has the same
+  stored nonzero count, and a stable sort by row length therefore groups them by cell on its own.
+- **Preserving the cell blocks helps RCM**: applied per-cell it beats the pointwise form at the hard
+  point (140 against 203 at self-start β = 0.5) and ties elsewhere. Consistent with the interleave being
+  load-bearing, which the two field-major arms confirm from the other side.
 
     **PLAIN aggregation, not smoothed — `pc_gamg_agg_nsmooths = 0` (measured, and the largest
     preconditioner win found on this case).** Smoothing the tentative prolongator with a Jacobi step is
@@ -2117,7 +2445,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
        `max_inner_cycles` for exactly this, and `StateCheckpointer` now serializes it (with
        `inner_iterations`) so a later study can rank without re-parsing the log.
      - **A step's record describes only its ACCEPTED attempt, and the hardest operators live in the
-       REJECTED ones.** A solve that blows past `retry.on_cycles` gets the step redone at an escalated
+       REJECTED ones.** A solve that blows past `retry.abort_above_cycles` gets the step redone (at an unchanged
        β, and the retry then succeeds easily — so the record shows the *easy* attempt. Same march: step
        50's hardest solve is **15 cycles at β = 0.0293** with α collapsing to 0, in attempt 1; the step
        reports **3 cycles at β = 0.0585**. That is also why the escalated attempts are where the
@@ -4665,7 +4993,7 @@ been applied to the two outer sites.
 (fixed).** `cycle_budget` and `abort_above_inner_cycles` are both tested in `DualTimeStep`'s `cond`,
 i.e. **between** inner iterations, so neither can stop a solve already running — and neither bounded any
 of the 41–45 cycle solves in the archived marches. Meanwhile `forward_march` discards an attempt whose
-worst solve passes `retry.on_cycles` without reaching target, so a solve at 11 corrected cycles has
+worst solve passes `retry.abort_above_cycles` without reaching target, so a solve at 11 corrected cycles has
 already determined its work will be thrown away.
 
 Measured over **671 solves across three marches**: no accepted attempt exceeded **9** corrected cycles,
@@ -4673,15 +5001,15 @@ discarded ones ran **39–45**, and the distribution is **empty between**. The a
 recoverable work at ~404 s of a 2533 s march.
 
 **Two traps decide the constant, and both rule out the obvious choice of 10:**
-- **`max_restarts` is in RAW `lineax` restarts** (a fixed +2 per solve); `retry.on_cycles` is in
+- **`max_restarts` is in RAW `lineax` restarts** (a fixed +2 per solve); `retry.abort_above_cycles` is in
   **corrected** cycles. A corrected cap of 12 is `max_restarts = 14`.
-- **The march's test is `max_inner_cycles > retry.on_cycles`, STRICTLY.** A cap landing exactly on the
-  threshold does not trip the retry, so the step **accepts the truncated, non-converged direction**
-  instead of escalating β — turning a doomed attempt into a bad accepted step. The corrected cap must
-  be strictly above the threshold.
+- **The march's test is `max_inner_cycles > retry.abort_above_cycles`, STRICTLY.** A cap landing exactly
+  on the threshold does not trip the redo, so the step **accepts the truncated, non-converged
+  direction** instead of re-running it on the refreshed preconditioner — turning a doomed attempt into a
+  bad accepted step. The corrected cap must be strictly above the threshold.
 
 Shipped as `coupled_amg_continuation(forward_max_restarts=…)`, library default unchanged at 60; the case
-derives it as `retry.on_cycles + 4` from a single scaled constant so the two cannot drift.
+derives it as `retry.abort_above_cycles + 4` from a single scaled constant so the two cannot drift.
 ⚠️ **The 671-solve distribution describes UNCAPPED solves.** Whether a truncated direction ever needs an
 extra escalation rung is not answerable from it, and the first capped march is the first evidence.
 
@@ -5156,8 +5484,29 @@ without naming an arm was taken against **PETSc ILU(0)** and should be read that
 still selects it. The flip was made on the **dependency**, not on the numbers — the table immediately below
 is parity, and nothing here claims the host V-cycle is the better preconditioner. It carries the same
 coarsening without an optional PETSc build, and the leading block was the last part of this case needing one.
-⚠️ It does **not** generalize to `pitzDaily`, where `hostilu` FAILS outright (that case needs a fill level
-`Ilu0` cannot supply — see the fill-inversion entry above), so that case keeps `petsc`.
+⚠️ **CORRECTED 2026-08-17 — the reason given here was wrong.** This said `hostilu` fails on `pitzDaily`
+because "that case needs a fill level `Ilu0` cannot supply". It does not: it needs a different **cell
+elimination order**, and `hostilu` marches that case once given one (`PITZ_FLOW_ORDER=rcm`). See
+*"Ordering, not fill, is what fails zero-fill on `pitzDaily`"* above. The `pitzDaily` default is still
+`petsc` pending the cost comparison, but not for this reason.
+
+⚠️ **THE WALL-CLOCK COLUMN BELOW CANNOT BE ATTRIBUTED, because nothing recorded which `Ilu0` kernel was
+live.** `Ilu0` falls back to a pure-Python twin of its compiled kernel when the extension is not built,
+and it does so **silently**. The `.so` is gitignored, so it belongs to a checkout rather than a branch
+and every fresh worktree starts without one; no worktree on this machine carried it as of 2026-08-17,
+and no run log before that date printed `ilu0.COMPILED`. Some `hostilu` runs *were* compiled (the
+author confirms at least one), so the point is not that these numbers are wrong — it is that **there is
+no way to tell which are which**, which is the unfalsifiable state this file's measurement rule exists
+to prevent. **The step and cycle counts are unaffected either way**: the two kernels compute the
+identical factorization, pinned by `test_the_compiled_and_reference_paths_agree` (rtol 1e-13) — a test
+that is skipped when the extension is absent and had therefore never run on this machine until it was
+built. Re-time the wall column before quoting it; the counts stand.
+
+**Fixed structurally rather than noted (2026-08-17):** `tools/build_ext.sh` builds the extension in a
+checkout in about a second (it caches one shared build environment under `~/.cache/aquaflux`, so it
+does not need Cython in the runtime interpreter — a PEP-668 system Python refuses that);
+`validation/run_case.sh` warns at launch when it is missing; and both cases' banners print the live
+kernel, so every run from this date carries the answer in its own log.
 
 | | `petsc` (incumbent) | `hostilu` (native AMG + our ILU(0)) |
 |---|---|---|
@@ -7672,7 +8021,8 @@ transfer to any thresholded arm.
     `solve_coupled`, and they are meaningless apart: a `beta_factor` with no threshold escalates nothing,
     a `cycles_limit` bounds a loop that never runs. The three decisions taken from them read three or
     four each, so they are **methods on the policy** rather than free functions taking a subset —
-    `escalation_reason` (was `_escalation_reason`), `has_diverged` (was `_has_diverged`),
+    `retry_reason` (named `escalation_reason` until the 2026-08-17 split; before that
+    `_escalation_reason`), `has_diverged` (was `_has_diverged`),
     `with_inner_abort` (was `_with_inner_abort`), plus `escalate`, which exists solely to keep the
     "scale the β leaf, never rebuild it from a float" rule in one place (rebuilding changes the leaf's
     dtype/weak type and recompiles the whole coupled solve on every retry).
@@ -7708,7 +8058,11 @@ transfer to any thresholded arm.
     (`test_march_retries_a_diverged_step_with_the_tighter_solver`, `test_march_does_not_retry_a_finite_step`).
     On 2D the exact LU is cheaper *and* robust for free, so this is really a 3D-readiness lever (where the
     LU's fill is the wall and the ILUT is the only option).
-  - **Reactive β-escalation bailout — `retry.on_cycles` ESCALATES β for a bad step, tried BEFORE the tight
+  - **⚠️ SUPERSEDED 2026-08-17: THE COST THRESHOLD NO LONGER ESCALATES, and the field is now
+    `retry.abort_above_cycles`; `retry.on_cycles` does not exist. Escalation is `retry.on_alpha` alone —
+    see "the cost guard and the shift escalation are now separate responses". The entry below describes
+    the design before that split.**
+  - **Reactive β-escalation bailout — the cost threshold ESCALATED β for a bad step, tried BEFORE the tight
     divergence retry (BUILT).** A step goes bad two ways — a *finite-but-expensive* solve (count `> N`) or a
     *non-finite* one — and on the stiff low-β saddle **both have the same cheap cure: more damping.** A
     larger β lifts the correction out of the NaN regime *and* cuts the cycle count (a stronger pseudo-time
@@ -7719,10 +8073,10 @@ transfer to any thresholded arm.
     re-applying `precondition_step` at the new β so a β-tracking refresh re-shifts), up to
     `retry.cycles_limit` times or until it converges/drops below `N`. It reads β off
     `active_step.relaxation_schedule.beta` (a `ConstantRelaxation` / `DualTimeStep`), so it requires a
-    readable β and is inert on the default switched-evolution schedule. an unset `retry.on_cycles` (the default) is
+    readable β and is inert on the default switched-evolution schedule. an unset threshold (the default) is
     **byte-identical** (and a diverged step then falls straight to `retry.solver`, the pre-reorder
     behaviour). Forward-only; threaded through `solve_coupled(retry=RetryPolicy(on_cycles=…))`. Pinned by
-    `test_forward_march.py` (`test_march_escalates_beta_on_a_cycle_count_spike`,
+    `test_forward_march.py` (`test_a_cycle_spike_redoes_the_step_ONCE_and_does_NOT_escalate`,
     `…_does_not_escalate_below_the_cycle_cap`, `…_escalates_beta_before_the_tight_divergence_retry`,
     `…_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergence`).
     - **The escalation must keep `_march_step` a compile-cache HIT (binding — a measured recompile
@@ -7749,7 +8103,7 @@ transfer to any thresholded arm.
       grind was wasted work the escalation superseded. Reordered, the escalation fires first on the NaN,
       recovers the step cheaply, and the tight `retry.solver` fires only as a **fallback** for a non-finite
       step escalation could *not* fix — the genuine inexact-ILUT case (loose Krylov → non-finite δ that a
-      tighter Krylov, not more damping, cures), where `retry.on_cycles` is typically `None` anyway so
+      tighter Krylov, not more damping, cures), where the cost threshold is typically `None` anyway so
       escalation is absent and the divergence retry is the sole, original mechanism.
     - **This is the PROACTIVE β-mismatch refresh's reactive twin** — the refresh
       (`amg_beta_tracking_refresh(beta_rel_change=…)`, `.claude/rules/turbulence.md`) re-freezes the PC
@@ -7771,7 +8125,7 @@ transfer to any thresholded arm.
       budget (`cond` gains `& (cycles < cycle_budget)`, elided at trace time when `None`), so a grinding
       primary is cut after ~one over-budget inner iteration and the partial iterate is handed to the
       escalation, which redoes it at a larger β where it converges cheaply. **Pair it with
-      `retry.on_cycles < cycle_budget`** so a capped primary's reported count trips the escalation (else the
+      `retry.abort_above_cycles < cycle_budget`** so a capped primary's reported count trips the redo (else the
       partial non-converged step would be accepted). Good steps converge well under the budget, so they are
       byte-identical; only a grinding primary hits it. `cycle_budget=None` (default) is unbounded and
       byte-identical. Threaded through `coupled_amg_continuation(cycle_budget=…)` (and the shared
@@ -7787,11 +8141,11 @@ transfer to any thresholded arm.
       **26 / 56 / 59** cycles, entering their last inner having spent only 14 / 17 / 16. The budget did
       bind — just a whole stagnating solve too late.
     - **`DualTimeStep(abort_above_inner_cycles=…)` — stop the moment the attempt is KNOWN to be
-      discarded (BUILT).** `retry.on_cycles` is a **per-solve** quantity, so the instant one solve
+      discarded (BUILT).** `retry.abort_above_cycles` is a **per-solve** quantity, so the instant one solve
       exceeds it with the inner target unmet, `forward_march` is going to bin the whole attempt and redo
       it at a larger β. Yet the check lived only in `forward_march`, *after* the step returned — so the
       step kept running inner iterations whose results were already destined for the bin. The same
-      predicate now sits in the inner loop's `cond`, and `forward_march` pushes its own `retry.on_cycles`
+      predicate now sits in the inner loop's `cond`, and `forward_march` pushes its own `retry.abort_above_cycles`
       down via `RetryPolicy.with_inner_abort` (using `dataclasses.replace`, not `eqx.tree_at` — the field is static,
       so it is in the treedef, not among the leaves), so there is **one** number rather than two to keep
       in step.
@@ -7848,7 +8202,7 @@ transfer to any thresholded arm.
       Both halves are now built and are the same predicate in two places, as the cost bailout already is:
       **`forward_march(retry=RetryPolicy(on_alpha=α))`** escalates β (reason `"alpha"` on `on_retry`), and it is pushed
       into **`DualTimeStep.abort_below_alpha`** by `RetryPolicy.with_inner_abort` so the inner loop exits at the
-      collapse instead of iterating on. `RetryPolicy.escalation_reason` now owns which of the three reasons applies,
+      collapse instead of iterating on. `RetryPolicy.retry_reason` now owns which of the three reasons applies,
       so the decision and the string reported for it cannot disagree.
       **Both cost and step-length reasons require the target unmet; divergence does not** — a non-finite
       residual is not a result to keep because the loop happened to meet its tolerance. Both `None`
@@ -8032,7 +8386,7 @@ transfer to any thresholded arm.
     whether the step was redone: `cycles` counts only the **accepted** attempt, so a redone step is
     indistinguishable from a cheap one, **and a retry mechanism left unconfigured never announces its
     absence** — which is not hypothetical (a bfs3d march ran with `cycle_budget` set but
-    `retry.on_cycles` at its `None` default, so the beta-escalation never fired and nothing in the log
+    the cost threshold at its `None` default, so the beta-escalation never fired and nothing in the log
     said so; the cap exists to trip that trigger).
     The logger also reports the **reference norm and the stopping target**: the test is
     `‖R‖ <= atol + rtol·‖R₀‖`, and the march reports `‖R‖` and `‖R‖/‖R₀‖` but not `‖R₀‖`, so the target
@@ -8080,10 +8434,10 @@ transfer to any thresholded arm.
       cost-only escalation cannot tell an expensive success from a grind and **discards the success**:
       measured, an inner loop that reached `‖G‖ = 3.0e-6` against a `1.0e-5` target was thrown away for
       costing 54 raw cycles, wasting the work *and* replacing it with a shorter step. `forward_march`
-      now escalates only when `cycles > retry.on_cycles` **and not** `reached_target`.
+      now fires only when `cycles > retry.abort_above_cycles` **and not** `reached_target`.
     - **`max_inner_cycles`** — the offset-corrected cost of the step's most expensive SINGLE solve, and
-      what `retry.on_cycles` now triggers on. A **summed** threshold is not a difficulty signal: it
-      grows with how many times the step solved, so at `retry.on_cycles = 40` a 5-inner step trips at 6
+      what `retry.abort_above_cycles` triggers on. A **summed** threshold is not a difficulty signal: it
+      grows with how many times the step solved, so at a threshold of 40 a 5-inner step trips at 6
       corrected cycles per solve and a 1-inner step at 38 — a 6× difference in sensitivity decided by a
       count that says nothing about conditioning. (Measured impact on one 63-step march: the two
       triggers agree on 62 steps and disagree on one — the expensive step, which per-inner catches and
@@ -8147,7 +8501,8 @@ transfer to any thresholded arm.
     state" is then lying. Skip a non-finite report, or do not claim "good".
   - **`on_retry(reason, attempt, beta)` — say WHY a step is being redone (BUILT).** `forward_march`
   calls it immediately before a redo with `"diverged"`, `"cycles"` or `"alpha"` — the three
-  `RetryPolicy.escalation_reason` returns, all cured by escalating β — or `"solver"` for the tight-Krylov
+  `RetryPolicy.retry_reason` returns (⚠️ only `"diverged"`/`"alpha"` escalate β since 2026-08-17;
+  `"cycles"` redoes at the same shift) — or `"solver"` for the tight-Krylov
   divergence retry. Without it a log shows the same step's work two or three times with nothing between
   the blocks, and the four reasons call for completely different responses. `MarchLogger.on_retry`
   writes the explanation between the abandoned attempt's block and the retry's, and numbers the attempt.

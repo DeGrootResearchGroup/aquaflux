@@ -45,7 +45,7 @@ import lineax as lx
 
 from .forward_step import ForwardStep, StepControl, StepOutcome, StepReport, within_tolerance
 from .norm import ResidualNorm
-from .retry import NO_RETRIES, RetryPolicy
+from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
 
 
 def combine_observers(*callbacks: Callable[..., None]) -> Callable[..., None]:
@@ -620,10 +620,13 @@ def forward_march(
         outcome, residual_norm = _march_step(
             active_step, residual_fn, prestep_state, residual_norm_0, solver
         )
-        # A step can go bad three ways -- a non-finite / diverging correction, a finite solve whose cost
-        # spikes past `retry.on_cycles`, or a step length collapsed to `retry.on_alpha` -- and on the
-        # stiff low-β saddle ALL THREE have the same cheap cure: MORE damping. The policy owns which of
-        # them applies. Escalate β FIRST (redo from the pre-step state at `β *= retry.beta_factor`,
+        # A step can go bad three ways -- a non-finite / diverging correction, a step length collapsed
+        # to `retry.on_alpha`, or a solve truncated by `retry.abort_above_cycles` -- and they DO NOT
+        # share one response. The first two are stiffness and are cured by MORE damping; the third is a
+        # statement about the frozen preconditioner, whose cure is a FRESH one (the dual-time loop's
+        # mid-step refresh has already built it by the time the step returns), so it is redone at the
+        # shift it already had. `RetryPolicy.retry_reason` names the reason and `ESCALATING_REASONS`
+        # says which of them raise β. Escalate β FIRST (redo from the pre-step state at `β *= retry.beta_factor`,
         # re-matching the frozen preconditioner via `precondition_step`), because a larger β lifts the
         # correction out of the non-finite regime, cuts the cycle count AND shortens the implicit step until
         # it fits inside whatever was clipping it, and it is far cheaper than the tight-Krylov divergence
@@ -636,23 +639,41 @@ def forward_march(
         # otherwise it no-ops and a diverged step falls straight through to the divergence retry. Both
         # thresholds `None` (the default) is byte-identical.
         retries = 0
+        redone_on_fresh = False
         while (
-            (reason := retry.escalation_reason(outcome, residual_norm, reference)) is not None
+            (reason := retry.retry_reason(outcome, residual_norm, reference)) is not None
             and retries < retry.cycles_limit
             and not converged_at(float(residual_norm))
         ):
+            escalating = reason in ESCALATING_REASONS
+            if not escalating:
+                # The fresh-preconditioner redo is worth exactly ONE attempt. It differs from the first
+                # only in starting on the factorization the mid-step refresh rebuilt, so a second redo
+                # at the same shift on the same factorization would repeat it exactly -- burning the
+                # escalation budget on identical attempts and, with no other reason ever firing,
+                # spinning to `cycles_limit` every step.
+                if redone_on_fresh:
+                    break
+                redone_on_fresh = True
             retries += 1
             # `RetryPolicy.escalate` SCALES the existing β leaf rather than rebuilding one; its
             # docstring carries why (a rebuilt leaf's dtype/weak type need not match, and any mismatch
             # recompiles the whole coupled solve on every retry).
-            escalated = retry.escalate(active_step.relaxation_schedule.beta)
+            escalated = (
+                retry.escalate(active_step.relaxation_schedule.beta)
+                if escalating
+                else _shift_of(active_step)
+            )
             # Report the escalated β, and so only once it exists: `on_retry` promises the shift the
             # retried attempt will RUN at. Reporting the pre-escalation leaf here instead left the one
             # consumer reconstructing it as `beta * 2` -- correct only at the default `beta_factor`,
             # and wrong at every other, in the log a long march is read back from.
             if on_retry is not None:
-                on_retry(reason, retries, float(escalated))
-            active_step = eqx.tree_at(lambda s: s.relaxation_schedule.beta, active_step, escalated)
+                on_retry(reason, retries, float(escalated or 0.0))
+            if escalating:
+                active_step = eqx.tree_at(
+                    lambda s: s.relaxation_schedule.beta, active_step, escalated
+                )
             if precondition_step is not None:
                 # Re-match the preconditioner to the escalated β. Whether this actually rebuilds is the
                 # HOOK'S decision, not this call's: a gated refresh may judge the move too small to be

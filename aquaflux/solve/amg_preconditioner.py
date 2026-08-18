@@ -50,12 +50,12 @@ import scipy.sparse as sp
 
 from .frozen_operator import (
     apply_symmetric_scale,
-    cell_major_permutation,
     equilibrate_cell_major,
     equilibration_scale,
     row_chunks,
 )
 from .host_preconditioner import HostPreconditioner
+from .ordering import cell_major_permutation
 from .refresh_timing import PhaseTimer
 
 # A process-unique options prefix per V-cycle, so several preconditioners' PETSc options never collide.

@@ -22,16 +22,36 @@ import lineax as lx
 
 from .forward_step import ForwardStep, StepOutcome
 
+#: Retry reasons whose response is to RAISE the pseudo-transient shift. The others redo the step at the
+#: shift it already had: ``"cycles"`` because the cure for an expensive solve is a fresh preconditioner
+#: rather than a stiffer operator, and ``"solver"`` because a tighter Krylov tolerance is the cure for an
+#: under-solved correction. Kept here, in one place, because the march decides whether to escalate and
+#: the log decides whether to print ``beta -> x`` or ``beta x unchanged``, and the two disagreeing would
+#: put a shift in the log that the march never ran.
+ESCALATING_REASONS = frozenset({"diverged", "alpha"})
+
 
 @dataclasses.dataclass(frozen=True)
 class RetryPolicy:
     """When an observed march redoes a step, and how.
 
-    The default policy retries nothing (both thresholds ``None``, no tighter solver), which is
-    byte-identical to a march that never retries. Set ``on_cycles`` and/or ``on_alpha`` to enable the
-    shift escalation; set ``solver`` to enable the tight-Krylov divergence fallback. The two are
-    independent and compose — with both set, escalation is tried first and the tighter solve catches
-    what it could not fix.
+    The default policy retries nothing and aborts nothing (every threshold ``None``, no tighter
+    solver), which is byte-identical to a march that never retries. Set ``on_alpha`` to enable the
+    shift escalation; set ``abort_above_cycles`` to bound what one step may spend; set ``solver`` to
+    enable the tight-Krylov divergence fallback. All three are independent and compose.
+
+    ⚠️ **A COST GUARD AND AN ESCALATION TRIGGER ARE DIFFERENT RESPONSES AND ARE DELIBERATELY NOT ONE
+    NUMBER.** They were, once: a single ``on_cycles`` both stopped the inner loop and escalated the
+    shift, and that conflation is a recorded defect rather than a tidiness complaint. A restart-cycle
+    count is ``preconditioner strength × operator difficulty``, so any constant encodes an assumption
+    about *which preconditioner is installed* — and the march already has the right response to a
+    growing cycle count, which is to **refresh the frozen preconditioner** (a ``RefreshPolicy``
+    trigger, fired mid-step). Escalating the shift on the same observation additionally assumed a
+    bigger shift makes the block easier, which is not even true on every case: measured on a
+    two-dimensional coupled saddle the flow block wants **140** Krylov applications at ``beta`` 0.5
+    against **32** at 0.05, so "expensive, therefore stiffen" closed a loop that ran the wrong way and
+    drove a working march to a non-finite residual in three steps. Stiffness is what ``on_alpha``
+    measures, and a step length is dimensionless — it needs no per-arm calibration.
 
     A **value object**, not a bundle of loose numbers: the six settings are meaningless apart (a
     ``beta_factor`` with no threshold escalates nothing; a ``cycles_limit`` bounds a loop that never
@@ -55,10 +75,18 @@ class RetryPolicy:
         tight cap is the wrong default because the residual legitimately *rises* while a flow develops
         under a pseudo-time march, so a finite cap false-fires on exactly the progress it should leave
         alone.
-    on_cycles : int or None
-        Per-solve restart-cycle threshold. A step whose most expensive single solve exceeds it, without
-        having reached its own stopping criterion, is redone at a larger shift. ``None`` (default)
-        disables the cost reason.
+    abort_above_cycles : int or None
+        Per-solve restart-cycle budget. Once a solve exceeds it the step stops taking further inner
+        iterations and is judged on what it has: a **cost guard**, not a diagnosis. It does **not**
+        escalate the shift and does not by itself discard the step — an aborted step that is finite and
+        whose line search held is accepted, and the step control adapts to the rate it achieved.
+        ``None`` (default) leaves the inner loop bounded only by its own iteration count.
+
+        The abort is what stops a hopeless step spending its whole inner budget before ``on_alpha``
+        catches it. ⚠️ But set it **above** what the installed preconditioner costs when it is
+        *healthy*, or it truncates convergence a step is in the middle of achieving: on the case above,
+        a threshold of 10 against an arm whose healthy cost was 12 cut the step off after three inner
+        iterations, where a fourth would have accepted it.
 
         **Per solve, never summed.** A summed threshold grows with how many times the step solved, so
         the same per-solve difficulty trips it or not depending on an inner-iteration count that says
@@ -92,15 +120,19 @@ class RetryPolicy:
 
     solver: lx.AbstractLinearSolver | None = None
     divergence_cap: float = float("inf")
-    on_cycles: int | None = None
+    abort_above_cycles: int | None = None
     on_alpha: float | None = None
     beta_factor: float = 2.0
     cycles_limit: int = 2
 
     @property
     def escalates(self) -> bool:
-        """Whether either escalation threshold is set, i.e. whether escalation can fire at all."""
-        return self.on_cycles is not None or self.on_alpha is not None
+        """Whether escalation can fire at all -- i.e. whether the step-length threshold is set.
+
+        The cycle budget is deliberately absent: it bounds cost and never escalates (see the class
+        docstring). A policy with only ``abort_above_cycles`` set still needs no readable shift.
+        """
+        return self.on_alpha is not None
 
     def require_shifted(self, forward_step: ForwardStep) -> None:
         """Reject a step this policy cannot escalate, at the seam rather than mid-march.
@@ -134,25 +166,30 @@ class RetryPolicy:
         schedule = getattr(forward_step, "relaxation_schedule", None)
         if schedule is None or not hasattr(schedule, "beta"):
             raise TypeError(
-                "the beta-escalation retry (RetryPolicy.on_cycles / on_alpha) drives the "
+                "the beta-escalation retry (RetryPolicy.on_alpha) drives the "
                 "pseudo-transient shift strength, so it needs a forward step whose "
                 "`relaxation_schedule` exposes a readable `beta` -- a ConstantRelaxation, which a "
                 "StepControl swaps onto a PseudoTransientStep or a DualTimeStep each iteration. The "
                 "default SwitchedEvolutionRelaxation those steps are built with exposes none, so "
                 f"constructing one is not enough on its own. {type(forward_step).__name__} has no "
                 "readable `beta`, so the retry would silently do nothing. Either run the step under "
-                "a step control, or leave both thresholds unset."
+                "a step control, or leave `on_alpha` unset."
             )
 
     def with_inner_abort(self, forward_step: ForwardStep) -> ForwardStep:
-        """Give ``forward_step`` this policy's discard thresholds, if it can act on them.
+        """Give ``forward_step`` this policy's stopping thresholds, if it can act on them.
 
-        A step that runs an inner loop can stop the moment it crosses one of them, because crossing
-        either with the target unmet is exactly what makes the march discard the attempt: a solve
-        costing more than :attr:`on_cycles`, or a step length fallen to :attr:`on_alpha`. Pushing them
-        down is what keeps each threshold **one** number rather than two that must be kept in step. A
-        step with no inner loop has nothing to stop and is returned unchanged -- as is any step when
-        neither threshold is set, so the default path is byte-identical.
+        A step that runs an inner loop can stop the moment it crosses one, rather than iterating on
+        inside a loop that will not help: a solve costing more than :attr:`abort_above_cycles`, or a
+        step length fallen to :attr:`on_alpha`. A step with no inner loop has nothing to stop and is
+        returned unchanged -- as is any step when neither threshold is set, so the default path is
+        byte-identical.
+
+        ⚠️ **The two mean different things once the loop has stopped, and that asymmetry is the point
+        of keeping them separate.** Crossing :attr:`on_alpha` is a diagnosis: the step is going nowhere
+        and the march discards the attempt and escalates. Crossing :attr:`abort_above_cycles` is only a
+        budget: the step keeps whatever it achieved and is judged on its merits, because a cycle count
+        says how hard the *preconditioner* is finding this operator, not how stiff the step is.
 
         Apply once per march rather than per iteration: the thresholds are constant for the segment,
         and a step whose static fields are rewritten every iteration would be a fresh compilation key
@@ -172,8 +209,10 @@ class RetryPolicy:
         # the treedef rather than among the leaves and `tree_at` (which addresses leaves) cannot reach
         # them.
         fields = {}
-        if self.on_cycles is not None and hasattr(forward_step, "abort_above_inner_cycles"):
-            fields["abort_above_inner_cycles"] = self.on_cycles
+        if self.abort_above_cycles is not None and hasattr(
+            forward_step, "abort_above_inner_cycles"
+        ):
+            fields["abort_above_inner_cycles"] = self.abort_above_cycles
         if self.on_alpha is not None and hasattr(forward_step, "abort_below_alpha"):
             fields["abort_below_alpha"] = self.on_alpha
         return dataclasses.replace(forward_step, **fields) if fields else forward_step
@@ -206,16 +245,27 @@ class RetryPolicy:
             and (float(residual_norm) > self.divergence_cap * reference)
         )
 
-    def escalation_reason(
+    def retry_reason(
         self, outcome: StepOutcome, residual_norm: jnp.ndarray, reference: float
     ) -> str | None:
-        """Why this step should be redone at a larger shift, or ``None`` to accept it as taken.
+        """Why this step should be redone, or ``None`` to accept it as taken.
 
-        The three ways a step goes bad, and the reason they share one response: a **diverged**
-        correction (non-finite, or past :attr:`divergence_cap`), a **costly** solve that did not reach
-        its target, and a step length **collapsed** by the descent test. All three are cured by more
-        damping -- a larger shift lifts the correction out of the non-finite regime, cuts the cycle
-        count, and shortens the implicit step until it fits inside whatever bound was clipping it.
+        The three ways a step goes bad, and **they do not share one response**: a **diverged**
+        correction (non-finite, or past :attr:`divergence_cap`), a step length **collapsed** by the
+        descent test, and a **truncated** solve that hit :attr:`abort_above_cycles` without reaching
+        its target.
+
+        The first two are stiffness, and more damping is the cure -- a larger shift lifts the
+        correction out of the non-finite regime and shortens the implicit step until it fits inside
+        whatever bound was clipping it. They are in :data:`ESCALATING_REASONS`.
+
+        The third is **not** stiffness, and this is the distinction the class docstring is about. A
+        solve that ran long says the frozen preconditioner is struggling with this operator, and the
+        cure is a **fresh preconditioner**, which the dual-time loop's mid-step refresh has already
+        built by the time the step returns. So ``"cycles"`` redoes the step at the shift it already
+        had, on the factorization that refresh produced. Raising the shift instead assumes a stiffer
+        operator is an easier one, which is not true on every case, and closed a divergent loop on the
+        one where it is false.
 
         Cost and step length are only reasons when the step **missed its own stopping criterion**.
         Redoing a step that met it discards a good iterate and replaces it with a shorter one, whatever
@@ -236,17 +286,18 @@ class RetryPolicy:
         Returns
         -------
         str or None
-            ``"diverged"``, ``"cycles"``, ``"alpha"``, or ``None`` to keep the step. Both thresholds
-            ``None`` disables escalation entirely, leaving a diverged step to the tight-Krylov retry.
+            ``"diverged"``, ``"alpha"``, or ``None`` to keep the step. There is deliberately no
+            ``"cycles"`` reason: a cycle count is answered by refreshing the preconditioner and by
+            :attr:`abort_above_cycles`, never by stiffening the shift (see the class docstring).
+            ``on_alpha`` unset disables escalation entirely, leaving a diverged step to the
+            tight-Krylov retry.
         """
-        if not self.escalates:
+        if not self.escalates and self.abort_above_cycles is None:
             return None
-        if self.has_diverged(residual_norm, reference):
+        if self.escalates and self.has_diverged(residual_norm, reference):
             return "diverged"
         if bool(outcome.reached_target):
             return None
-        if self.on_cycles is not None and int(outcome.max_inner_cycles) > self.on_cycles:
-            return "cycles"
         # ...and step length is a reason WHATEVER collapsed it, including an injected constraint. That
         # is not an oversight: gating it on `binding_limit == 1` was tried and is a regression.
         # MEASURED -- the one escalation of an entire coupled RANS march fired at a step whose cap was
@@ -268,8 +319,16 @@ class RetryPolicy:
         # decaying by that same fixed factor per clipped step, so the collapse restarts a fixed number
         # of decades later. That failure is not this predicate's to catch -- the march's stall guard
         # ends the segment instead.
-        if self.on_alpha is not None and float(outcome.alpha) <= self.on_alpha:
+        if self.escalates and self.on_alpha is not None and float(outcome.alpha) <= self.on_alpha:
             return "alpha"
+        # Last, and deliberately last: a step that merely cost too much is the weakest of the three
+        # signals, and the other two are about the iterate rather than about its price. Redone at the
+        # SAME shift (see this method's docstring and `ESCALATING_REASONS`).
+        if (
+            self.abort_above_cycles is not None
+            and int(outcome.max_inner_cycles) > self.abort_above_cycles
+        ):
+            return "cycles"
         return None
 
     def escalate(self, beta: jnp.ndarray) -> jnp.ndarray:

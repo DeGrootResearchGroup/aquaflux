@@ -83,10 +83,17 @@ from aquaflux.io import read_openfoam
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
 from aquaflux.solve import (
+    COMPILED as ILU0_COMPILED,
+)
+from aquaflux.solve import (
+    AscendingRowLengthCells,
+    CellMajor,
     CflResidualDualTimeControl,
     MarchLogger,
+    NaturalCells,
     RefreshPolicy,
     RetryPolicy,
+    ReverseCuthillMcKeeCells,
     StateCheckpointer,
     combine_observers,
     host_ilu_inverse,
@@ -194,6 +201,14 @@ FORWARD_MAX_RESTARTS = 14
 #:     NEGATIVE pivots at every shift (27/25/9 of 36675) with min |pivot| some twenty times smaller
 #:     than the sibling's, whose ILU(0) has none at any shift. There the fill produces the negative
 #:     pivots and dropping it is the fix; here dropping it produces them and the fill is the fix.
+#:     ⚠️ **EVERY NUMBER IN THIS BULLET WAS TAKEN UNDER THE MESH'S OWN CELL ORDER, AND THAT IS THE
+#:     VARIABLE THAT ACTUALLY DECIDES IT.** Re-measured on this case's `[u, v, p]` block at reach 5,
+#:     changing nothing but the order the same matrix is eliminated in: at zero fill the shipped order
+#:     amplifies a stationary sweep 5.5x in one application and stalls the Krylov solve, while a
+#:     reverse-Cuthill-McKee or ascending-row-length CELL order contracts it and converges in ~113-140
+#:     applications. So "zero fill amplifies on this block" is true of this ordering, not of zero fill;
+#:     `FILL_LEVELS = 1` remains right for the PETSc path, whose ordering is its own separate option,
+#:     but it is no longer evidence that the block needs fill. See `PITZ_FLOW_ORDER`.
 #:   * `SWEEPS` 4 -- zero-fill is the weaker smoother, so extra sweeps pay more than they did for
 #:     ILU(1) (390 -> 69 iterations at beta 0.01). The library default of 2 was tuned against ILU(1)
 #:     and does not carry over.
@@ -228,15 +243,26 @@ if K_WALL not in _K_WALL_BCS:
 K_WALL_BC = _K_WALL_BCS[K_WALL]
 
 
-#: ⚠️ WHICH INVERSE THE LEADING `[u, v, p]` BLOCK GETS, and a prediction worth recording before it is
-#: run. `petsc` (default) is the host GAMG V-cycle smoothed by PETSc's incomplete factorization, at the
-#: `FILL_LEVELS` above. `hostilu` is this package's own hierarchy smoothed by its own factorization --
-#: which is ZERO-FILL by construction and has no fill parameter at all.
+#: ⚠️ WHICH INVERSE THE LEADING `[u, v, p]` BLOCK GETS. `petsc` (default) is the host GAMG V-cycle
+#: smoothed by PETSc's incomplete factorization, at the `FILL_LEVELS` above. `hostilu` is this package's
+#: own hierarchy smoothed by its own factorization -- which is ZERO-FILL by construction and has no fill
+#: parameter at all.
 #:
-#: Since zero fill is measured to AMPLIFY on this block (see `FILL_LEVELS`), `hostilu` is expected to
-#: fail here exactly as PETSc's zero-fill smoother did. If it does, that is a clean confirmation that
-#: the mechanism is the fill rather than anything belonging to PETSc -- and it says that this package's
-#: host V-cycle cannot serve a case needing fill until its factorization grows one.
+#: ⚠️ **`hostilu` was predicted to fail here because zero fill was measured to amplify on this block,
+#: and it did -- but the diagnosis was incomplete: the amplification is a property of the ELIMINATION
+#: ORDER, not of the fill level alone.** Measured on this case's `[u, v, p]` block at the exact reach,
+#: with nothing changed but the order the same matrix is eliminated in, a zero-fill factorization goes
+#: from amplifying the residual 5.5x in one stationary sweep (and stalling the Krylov solve it
+#: preconditions) to contracting it and converging in ~113 applications. So a zero-fill smoother is not
+#: ruled out on this case; the mesh's own cell order is. See `PITZ_FLOW_ORDER`.
+FLOW_ORDER = os.environ.get("PITZ_FLOW_ORDER", "natural")
+_FLOW_ORDERS = {
+    "natural": NaturalCells,
+    "rcm": ReverseCuthillMcKeeCells,
+    "rowlength": AscendingRowLengthCells,
+}
+if FLOW_ORDER not in _FLOW_ORDERS:
+    raise SystemExit(f"PITZ_FLOW_ORDER={FLOW_ORDER!r} is not one of {sorted(_FLOW_ORDERS)}")
 FLOW_INVERSE = os.environ.get("PITZ_FLOW_INVERSE", "petsc")
 if FLOW_INVERSE not in ("petsc", "native", "hostilu"):
     raise SystemExit(
@@ -270,6 +296,9 @@ NATIVE_FLOW = dict(
 HOST_FLOW = dict(
     sweeps=int(os.environ.get("PITZ_FLOW_SWEEPS", "1")),
     cycles=1,
+    # The order the zero-fill smoother eliminates in -- the largest single lever measured on this
+    # block, and the reason `hostilu` is worth re-running here at all (see `FLOW_ORDER`).
+    ordering=CellMajor(_FLOW_ORDERS[FLOW_ORDER]()),
     strength_threshold=0.0,
     avoid_singletons=True,
     aggressive_levels=0,
@@ -349,8 +378,17 @@ CYCLE_BUDGET = 42
 
 #: Grow the pseudo-timestep while the inner line search is comfortable; brake on a clipped step or a
 #: rising residual. Without a control beta never ramps and the march cannot develop at all.
+#:
+#: `beta_start` is exposed because the usual intuition about it RUNS BACKWARDS ON THIS CASE. A larger
+#: shift adds to the diagonal and normally buys conditioning; here it costs it. Measured on the
+#: `[u, v, p]` block at the self-start, a zero-fill factorization under the reverse-Cuthill-McKee cell
+#: order takes 140 Krylov applications at beta 0.5, **32** at 0.05 and 55 at 0. The retry ladder
+#: escalates beta on a bad step, so a struggling march is driven the wrong way -- which is worth
+#: knowing before reading an escalation as evidence about the preconditioner. Override per run so the
+#: value lands in the run record; the default is unchanged.
+BETA_START = float(os.environ.get("PITZ_BETA_START", "0.5"))
 CONTROL = CflResidualDualTimeControl(
-    beta_start=0.5, beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25
+    beta_start=BETA_START, beta_min=0.005, grow=1.5, backoff=2.0, grow_above=0.5, backoff_below=0.25
 )
 
 #: ⚠️ REFRESH THE FROZEN PRECONDITIONER, ON SOLVE COST, EXACTLY AS THE THREE-DIMENSIONAL CASE DOES.
@@ -376,9 +414,24 @@ CHECKPOINT_KEEP = int(os.environ.get("PITZ_CHECKPOINT_KEEP", "3"))
 
 #: Redo a step whose solve was expensive, whose line search collapsed, or that diverged -- escalating
 #: the shift first, and falling back to a tighter Krylov solve only for a divergence damping cannot fix.
+#:
+#: ⚠️ **`abort_above_cycles` IS A COST BUDGET, NOT A DIAGNOSIS — set it ABOVE what the installed
+#: preconditioner costs when it is healthy.** Crossing it stops the dual-time inner loop and redoes the
+#: step at the SAME shift on the refreshed preconditioner; it no longer escalates (that is `on_alpha`'s
+#: job alone). Set too low it truncates convergence a step is in the middle of achieving: with the
+#: zero-fill smoother under the reverse-Cuthill-McKee cell order, whose healthy cost at the second
+#: Reynolds rung is about 12, a threshold of 10 cut step 29 off after three inner iterations where a
+#: fourth would have accepted it -- and, under the previous design where the same number also escalated,
+#: took beta 0.5 -> 1.0 -> 1.33 -> 2.67 before the step diverged. It must also stay strictly below
+#: `CYCLE_BUDGET`, which truncates a grinding solve and relies on this redo to discard the partial
+#: iterate.
+#: ⚠️ The default is UNCHANGED at 10, which suits the shipped `petsc` arm. The zero-fill `hostilu`
+#: arm wants ~25; it is set per run rather than here, because raising it for every arm would change
+#: the incumbent's behaviour on evidence that was never gathered for it.
+RETRY_ON_CYCLES = int(os.environ.get("PITZ_RETRY_ON_CYCLES", "10"))
 RETRY = RetryPolicy(
     solver=relative_residual_gmres(1e-4, restart=40),
-    on_cycles=10,
+    abort_above_cycles=RETRY_ON_CYCLES,
     on_alpha=0.01,
     beta_factor=2.0,
 )
@@ -577,7 +630,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("inner forward rtol (row-scaled) / restart", f"{FORWARD_RTOL} / {FORWARD_RESTART}"),
         ("cycle budget", CYCLE_BUDGET),
         ("retry on cycles / alpha", f"{RETRY.on_cycles} / {RETRY.on_alpha}"),
-        ("step control", type(CONTROL).__name__),
+        ("step control", f"{type(CONTROL).__name__} (beta_start {BETA_START})"),
         ("Reynolds continuation points", N_POINTS),
         ("k wall BC", K_WALL),
         ("preconditioner refresh", f"on {REFRESH_ON_CYCLES} restart cycles (mid-step)"),
@@ -586,7 +639,23 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("field split / trailing sweeps", f"{FIELD_SPLIT} / {TRAILING_SWEEPS}"),
         (
             "flow inverse",
-            FLOW_INVERSE if LEADING_INVERSE is None else f"{FLOW_INVERSE} {HOST_FLOW}",
+            FLOW_INVERSE
+            if LEADING_INVERSE is None
+            # The ordering object prints as a bare repr, which says nothing; name the order instead --
+            # a banner line that cannot be read against a recorded measurement is not worth printing.
+            else f"{FLOW_INVERSE} {HOST_FLOW | {'ordering': f'cell-major/{FLOW_ORDER}'}}"
+            if FLOW_INVERSE == "hostilu"
+            else f"{FLOW_INVERSE} {NATIVE_FLOW}",
+        ),
+        # ⚠️ WHICH incomplete-LU IMPLEMENTATION IS LIVE, because the two differ by orders of magnitude
+        # in speed and nothing recorded which one a run used. `Ilu0` ships a pure-Python reference twin
+        # of its compiled kernel and falls back to it silently when the extension is not built; the two
+        # compute the identical factorization (pinned by a unit test), so a CONVERGENCE result is the
+        # same either way, but a WALL-CLOCK one taken on the fallback is not a preconditioner
+        # measurement at all. Printing it is what makes such a number falsifiable later.
+        (
+            "host ILU kernel",
+            "compiled" if ILU0_COMPILED else "PURE PYTHON (fallback -- timings void)",
         ),
         ("trailing inverse", "native nodal" if FIELD_SPLIT else "n/a"),
         ("probe stencil reach", STENCIL_REACH),

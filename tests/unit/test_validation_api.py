@@ -178,4 +178,4 @@ def test_the_checker_actually_catches_a_break() -> None:
     assert bound == {"RetryPolicy": ("aquaflux.solve", "RetryPolicy")}
     accepted = _accepted_keywords(_resolve(*bound["RetryPolicy"]))
     assert accepted is not None and "no_such_parameter" not in accepted
-    assert "on_cycles" in accepted  # and it reads the real signature, not an empty set
+    assert "abort_above_cycles" in accepted  # and it reads the real signature, not an empty set
