@@ -62,8 +62,9 @@ cfd/                                  # repo root
 │   │   ├── reader.py                 #   MeshReader(eqx.Module) strategy: read() → Mesh (format-agnostic seam)
 │   │   └── openfoam/                 #   OpenFOAM polyMesh reader (ASCII): read_openfoam() / OpenFOAMReader
 │   │       ├── records.py            #     FoamPatch / CellZone / PolyMeshData value records
-│   │       ├── foamfile.py           #     FoamFile envelope: comment strip, header dict, ASCII/binary detection
+│   │       ├── foamfile.py           #     FoamFile envelope: comment strip, header dict, ASCII/binary detection; read_foam_body() is the one file->body entry
 │   │       ├── grammar.py            #     body parsers (points/faces/labels/boundary/cellZones) sharing one list envelope
+│   │       ├── fields.py             #     read a scalar field written on an imported mesh (phi, nut): parse_scalar_field (pure) + read_surface_scalar_field (faces, placed by index, ordering checked) + read_volume_scalar_field (cells)
 │   │       ├── assembler.py          #     assemble(PolyMeshData) → Mesh: neighbour pad, n_cells, patches/zones, from_csr
 │   │       └── reader.py             #     OpenFOAMReader: file I/O; parse → assemble → collapse (empty-patch 2D)
 │   │
