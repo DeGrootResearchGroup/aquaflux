@@ -81,6 +81,37 @@ consequences worth carrying:
 - **Mutation-check a test that claims to catch a specific error** — feed it the wrong quantity and
   confirm it fails. Both of the above were found that way, after the tests were green.
 
+## The cross-code case — `validation/bfs3d_species` (aquaflux side BUILT)
+
+A passive tracer on the 3D backward-facing step, compared against an OpenFOAM `scalarTransport` run.
+Three things about it are worth carrying, because each was a decision rather than a detail:
+
+- **Two arms, under DIFFERENT names, because the FLOW does not agree between the codes** (`x_r/h`
+  8.36 vs 7.24). A species comparison on each code's own flow is dominated by the flow difference and
+  can attribute nothing. So: a **same-flux** arm (both codes on OpenFOAM's own `phi` *and* its `nut`,
+  isolating the scalar discretization) and an **own-flow** arm (each on its own, the honest end-to-end
+  number). They differ *only* in the flux and `ν_t`, so their difference is the flow's contribution.
+- **`Sc_t = 1` there, not the 0.7 default.** OpenFOAM's `scalarTransport` with no `D` entry uses the
+  momentum transport model's `ν + ν_t`, so matching it means `turbulent_number=1.0`. Every number the
+  case reports is a number at `Sc_t = 1` — which is exactly the "say which value it was taken at"
+  obligation above, discharged.
+- **The injector has ONE definition** (`injector.injected_value`), from which the OpenFOAM case's
+  inlet values are *generated* as an explicit `nonuniform List<scalar>`. Two implementations of one
+  profile would drift, and a drifted injector is indistinguishable from a transport discrepancy. Its
+  edges are tapered rather than sharp: at a jump the leading cross-code difference is limiter
+  tie-breaking at one cell, not the transport being measured.
+
+⚠️ **A steady tracer at this Reynolds number NEEDS a preconditioner** — measured, not anticipated. An
+unpreconditioned solve does not converge: away from the shear layer `ν_t` falls to `~4e-11`, so `Γ` is
+essentially molecular and the cell Péclet number reaches order `10³`. The fix is to reuse
+`turbulence.scalar_transport_preconditioner` (the frozen convection-diffusion V-cycle already built
+for k/ω), which then converges in 10 s at 23040 cells to `|Σ R| = 8.2e-15`.
+- 📌 **That function's home is a placement smell now that it has a second, non-turbulence consumer.**
+  It is generic scalar transport living in `aquaflux/turbulence/preconditioner.py` because that is
+  where the first caller was. Moving it to `aquaflux/transport/` would be the honest placement; it is
+  a public-API change touching the flagship turbulence path, so it has NOT been done — it is recorded
+  here rather than silently carried.
+
 ## Not yet built
 
 - **Multi-species / reacting systems (the aquakin coupling).** A reaction network couples N species

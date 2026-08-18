@@ -1,0 +1,76 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Passive-tracer transport on the FROZEN converged backward-facing-step flow.
+//
+// `solver functions` runs the function objects and nothing else: U, p, k, omega and phi are read
+// from the starting time and are never solved for again. That is what makes the flow genuinely
+// frozen -- restarting the flow solver instead would keep advancing it, and this case's steady
+// SIMPLE run limit-cycles at ~1e-3 rather than converging, so "a few more iterations" would move
+// the very flux the comparison is meant to hold fixed.
+//
+// Time here is an iteration counter, not physics: with `ddtSchemes steadyState` each step is one
+// relaxed steady solve of the tracer equation, so `endTime - startTime` is the number of outer
+// iterations the scalar gets to converge in.
+
+solver          functions;
+
+// `functions` runs the function objects and solves nothing itself -- its momentum predictor and
+// pressure corrector are empty. It still needs to know which solver's FIELDS to construct, so that
+// U, p and the momentum transport model (hence nuEff) exist for the tracer to be transported on.
+subSolver       incompressibleFluid;
+
+startFrom       startTime;
+startTime       2000;
+stopAt          endTime;
+endTime         2600;
+deltaT          1;
+
+writeControl    timeStep;
+writeInterval   600;
+purgeWrite      1;
+
+writeFormat     ascii;
+writePrecision  8;
+writeCompression off;
+timeFormat      general;
+timePrecision   6;
+runTimeModifiable false;
+
+functions
+{
+    scalarTransport
+    {
+        type            scalarTransport;
+        libs            ("libsolverFunctionObjects.so");
+
+        field           s;
+        schemesField    s;
+
+        // The diffusivity, stated explicitly rather than left to a default: `viscosity` builds it
+        // from the momentum transport model as `alphal * nu + alphat * nut`, so alphat is exactly
+        // the RECIPROCAL of a turbulent Schmidt number. Both coefficients at 1 therefore means
+        // Gamma = nu + nut, i.e. Sc_t = 1 -- and aquaflux is given
+        // `effective_diffusivity(nu, nut, turbulent_number=1.0)`, the same quantity. The two codes
+        // then transport under one diffusivity rather than under two Schmidt conventions.
+        diffusivity     viscosity;
+        alphal          1;
+        alphat          1;
+
+        writeControl    writeTime;
+    }
+}
+
+// ************************************************************************* //

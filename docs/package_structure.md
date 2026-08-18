@@ -35,6 +35,7 @@ cfd/                                  # repo root
 ├── validation/                       # runnable scientific cases (not the pytest tiers)
 │   ├── run_case.sh                   #   the blessed long-run launcher: unbuffered log, memory pre-flight, run-file record
 │   ├── bfs3d_openfoam/               #   3D backward-facing step vs OpenFOAM + conditioning/preconditioner probes
+│   ├── bfs3d_species/                #   passive tracer on that flow vs OpenFOAM: same-flux and own-flow arms
 │   ├── pitzdaily_openfoam/           #   2D pitzDaily vs OpenFOAM
 │   ├── turbulent_channel/            #   turbulent channel vs the analytical log law
 │   └── turbulent_channel_openfoam/   #   turbulent channel vs OpenFOAM

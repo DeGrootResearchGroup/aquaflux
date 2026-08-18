@@ -135,6 +135,30 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
   it folds far couplings onto near entries. Probe every arm at a uniform reach whenever a monolithic arm
   is in the comparison, or the arms are not being compared on the same matrix.
 
+## `bfs3d_species` — the newest case, and what it depends on
+
+A passive tracer on `bfs3d_openfoam`'s flow (see `.claude/rules/transport.md` for the two-arm design
+and the `Sc_t = 1` choice). Its dependency structure is unusual and is the thing to know:
+
+- **It carries NO mesh and NO flow of its own.** `of_case/run_of.sh` assembles a scratch case from
+  `bfs3d_openfoam/of_case`'s `polyMesh` and converged time directory, and `compare.py` loads that
+  case's `build_case` **by path** (`importlib`), because both cases have a module named `compare` and
+  a plain `import compare` resolves by whichever path order happens to be in force.
+- **Its own-flow arm reads the flow case's rolling checkpoint** rather than re-marching. ⚠️ That
+  checkpoint predates the production-limiter default moving OFF, so it is *not* a root of today's
+  coupled residual. This does not invalidate the arm: what a transported scalar needs of a flux is
+  that it close discretely, which `compare.py` measures directly rather than inferring from the
+  state's residual.
+- **`tests/integration/test_bfs3d_species.py` is the one test that reaches into `validation/`.** Every
+  test there skips when the case data is absent, since none of it is in the repository. It pins the
+  properties the comparison rests on — sub-patch injection, conservation on the imported flux,
+  boundedness, mixing — so a break shows up as a failure rather than as a meaningless log.
+
+⚠️ **Do not edit files under `validation/` while the fast gate is running.**
+`tests/unit/test_validation_api.py` statically reads every case, so it will parse a half-written file
+and fail for a reason that has nothing to do with the change under test. This happened once and cost a
+28-minute gate run.
+
 ## Recovering a converged state (both cases)
 
 Both `compare.py` files take `checkpoint_dir` and write a rolling per-step state through the shared
