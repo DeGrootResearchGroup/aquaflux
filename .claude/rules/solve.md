@@ -437,13 +437,43 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
       `(3,3,3,3,2,2)` per-column path, which is the one that exercises the out-of-reach mask where the
       in-place write lives. Fast (1043 passed), `slow` (46) and `validation` (18) tiers all green.
 
-      **The one remaining full-width array is the sort permutation**, `np.argsort(probe_of)`, at 8
-      B/entry — numpy returns an index array and there is no narrower form. A counting sort over the
-      probe index (a few hundred values) would remove it, and is admissible because `scatter` writes to
-      unique positions, so the order *within* a probe is free. It was deliberately not taken: it would
-      reorder `_position`/`_source` within each probe, which forfeits the array-for-array equality that
-      makes this change checkable. Take it only with a test that pins the scatter's *result* rather than
-      its index arrays.
+      **✅ THE SORT PERMUTATION IS GONE — grouped via a `scipy.sparse` COO→CSR conversion instead of
+      `np.argsort` (BUILT).** `np.argsort(probe_of)` forced a full-entry-count `int64` array regardless
+      of every other array's chosen width — the one remaining full-width allocation the narrowing above
+      could not reach, since numpy's `argsort` has no narrower output form. Treating `probe_of` as the
+      row index of a throwaway `scipy.sparse.coo_matrix` (shape `(n_probes, nf)`) and converting to CSR
+      makes the grouping a counting sort over `probe_of`'s own range — a few hundred values — done in
+      `scipy`'s compiled conversion rather than a numpy-level sort of the whole entry count; `grouped.
+      indptr` is exactly `_probe_start`, so the separate `np.searchsorted` call is gone too. Order
+      *within* a probe is free (`scatter` writes to unique positions), so the unstable grouping this
+      gives is exact, not an approximation, and there are no duplicate `(probe, position)` pairs to sum
+      (`position` values are already unique) — the same "no duplicates, so `tocsr` only reorders" property
+      `block_stencil_gather_map`'s own `coo_matrix(...).tocsr()` call already relies on.
+      **Verified by scatter *output*, not index-array equality — the check this entry itself said would
+      be needed once this was taken.** A byte-for-byte copy of the pre-change `__init__` run
+      side by side with the new one on the identical `gather_map` input, at a real reach-3, 6-field,
+      27,000-cell pattern (`n_probes=582`, 56,272,032 pattern entries): `scatter()` on random responses
+      agrees **to the last bit** (`max abs diff = 0.0`) between the two, while the old code's `by_probe`
+      permutation alone is a measured **450.2 MB `int64` array that the new code never forms at all** —
+      exactly `8 B × 56,272,032`, the full predicted size, at a scale where `_source`/`_position`
+      together (each now `int32`) retain 450.2 MB total, i.e. removing this one array is worth as much
+      as everything `ProbeGather` otherwise keeps, combined. Fast-gate `sparse_jacobian`/`amg_precondi-
+      tioner`/`ilut_preconditioner`/`lu_preconditioner`/`frozen_operator_scaling` unit tests and the
+      not-slow `coupled_amg`/`coupled_field_split`/`coupled_rans` integration tests all pass unchanged
+      (harness not in the repository for the old-vs-new comparison script; the dtype/scatter-output
+      tests that *are* in the repository, `test_gather_map_index_arrays_are_narrow_on_a_realistic_
+      pattern` and `test_gather_de_compression_matches_the_scatter_loop`, needed no changes and still
+      pass — they were already output-based rather than index-array-based).
+      **Why this matters at production scale, not just as a percentage:** an independent scaling
+      investigation (synthetic cubic lattices, reach 3, 6 fields, up to 262,144 cells, array-level
+      `.nbytes` accounting to stay immune to the RSS/allocator noise recorded throughout this file) found
+      this array's *share* of the gather-map build's transient peak growing from ~11–12% at `bfs3d`-scale
+      (≤27,000 cells) to **91.5% of the transient at 262,144 cells**, extrapolating to **~17.6 GB at
+      1,000,000 cells** — a number the 27,000-cell measurement above independently corroborates by simple
+      linear scaling (450.2 MB × ~37 ≈ 16.7 GB). So this lever, recorded here for a long time as a minor
+      deferred optimization, is at 1M-cell scale the single largest identifiable, deterministically-
+      quantifiable transient contributor to the gather-map build — comparable in size to the entire
+      retained `ProbeGather` structure itself.
 
       **⚠️ Read this before tuning `_PROBE_BATCH_SIZE` against memory.** Most of the peak the batch size
       was being traded against was never the batch: seeds and responses are both `n_probes x nf` and

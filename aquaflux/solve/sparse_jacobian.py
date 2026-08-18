@@ -584,17 +584,25 @@ class ProbeGather:
         position = np.flatnonzero(live).astype(position_dtype, copy=False)
         source = gather_map[live].astype(index_dtype, copy=False)
         # Group the entries by the probe that supplies them, so a chunk's entries are one contiguous
-        # slice. The sort permutation is the one remaining array here that must be full width, since
-        # numpy returns an index array; a counting sort over the probe index -- which ranges over a few
-        # hundred values -- would avoid it, at the cost of reordering entries within a probe.
-        probe_of = source // index_dtype(nf)
-        by_probe = np.argsort(probe_of, kind="stable")
-        self._position = position[by_probe]
-        self._source = source[by_probe]
-        # One boundary per probe plus a closing one, so a chunk ending at the last probe still has a
-        # `_probe_start[start + count]` to read.
+        # slice. Grouped by a `scipy.sparse` COO -> CSR conversion rather than `np.argsort`: treating
+        # `probe_of` as the row index of a throwaway sparse matrix makes the grouping a counting sort
+        # over `probe_of`'s own range -- a few hundred values -- so it never forms the full-entry-count
+        # index array `np.argsort` is forced to return (numpy has no narrower form for a sort
+        # permutation). Order within a probe is free -- `scatter` below writes each entry to a unique
+        # position regardless of it -- so the unstable grouping a counting sort gives is exact, not an
+        # approximation; there are no duplicate (probe, position) pairs (`position` values are already
+        # unique), so the conversion only reorders and never sums.
         n_probes = zero_slot // nf
-        self._probe_start = np.searchsorted(probe_of[by_probe], np.arange(n_probes + 1))
+        probe_of = source // index_dtype(nf)
+        grouped = sp.coo_matrix(
+            (source, (probe_of, position)), shape=(n_probes, gather_map.shape[0])
+        ).tocsr()
+        self._source = grouped.data
+        self._position = grouped.indices.astype(position_dtype, copy=False)
+        # One boundary per probe plus a closing one, so a chunk ending at the last probe still has a
+        # `_probe_start[start + count]` to read -- exactly a CSR row-pointer array, which the conversion
+        # above already produces.
+        self._probe_start = grouped.indptr.astype(index_dtype, copy=False)
 
     def scatter(self, data: np.ndarray, responses: np.ndarray, start: int, count: int) -> None:
         """Fill every entry fed by probes ``[start, start + count)`` from that chunk's responses.
