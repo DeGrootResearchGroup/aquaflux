@@ -11,6 +11,12 @@ paths:
 > Split out of `solve.md` (2026-08-18) to keep routine `aquaflux/solve/` work from loading the
 > full monolithic-ILUT and complete-LU investigation narrative. See `solve.md` for the package-wide
 > contracts, current configuration, and binding decisions this file assumes.
+>
+> **This file has no `-log.md` sibling yet — current facts and dated investigation entries sit
+> together.** If you are about to push it past ~1,800 lines, split it first: peel the dated/historical
+> content into a new `solve-direct-preconditioners-log.md` (no `paths:` frontmatter) and leave a
+> current-status summary here, following the pattern in `solve-flow-block.md` /
+> `solve-flow-block-log.md`. See `solve.md`'s "Where new content goes".
 
 ## Preconditioner — the frozen host family (shared contract)
 

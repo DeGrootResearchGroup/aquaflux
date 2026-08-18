@@ -15,6 +15,10 @@ paths:
 > these architecture/binding statements — several rounds of measurement on the residual-measure
 > choice, the shift basis, and the SER schedule, some later corrected or superseded — is preserved in
 > `solve-globalization-log.md`; read it before re-proposing something that sounds already tried.
+>
+> **Adding new content: a dated measurement or investigation step goes in `solve-globalization-log.md`,
+> not here.** Update this file's architecture/binding prose only when an investigation reaches a
+> durable verdict (see `solve.md`'s "Where new content goes").
 
 ## Globalization — forward step, continuation, line search
 

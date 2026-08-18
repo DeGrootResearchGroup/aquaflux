@@ -11,6 +11,12 @@ paths:
 > Split out of `solve.md` (2026-08-18) to keep routine `aquaflux/solve/` work from loading the full
 > AMG/multigrid investigation narrative. See `solve.md` for the package-wide contracts, current
 > configuration, and general binding decisions this file assumes.
+>
+> **⚠️ This file is already past this project's ~1,800-line outer bound (2,088 lines as of 2026-08-18)
+> and has no `-log.md` sibling.** Split it on its next substantial edit: peel the dated/historical
+> content into a new `solve-amg-multigrid-log.md` (no `paths:` frontmatter) and leave a current-status
+> summary here, following the pattern in `solve-flow-block.md` / `solve-flow-block-log.md`. See
+> `solve.md`'s "Where new content goes".
 
 ## Preconditioner — monolithic AMG (the coupled PC)
 

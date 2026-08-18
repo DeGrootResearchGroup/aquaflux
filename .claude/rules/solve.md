@@ -69,6 +69,41 @@ that findings belong in tracked files, not memory) but deliberately kept out of 
 routine solver work does not pay for the full investigation history. Read them deliberately: before
 re-investigating a subsystem, or before proposing an idea that might already be closed.
 
+## Where new content goes (binding — read before adding a finding)
+
+The table above says where content *is*; this says where NEW content *goes*, so the split does not
+silently regrow into another 8,500-line file. Four rules:
+
+1. **Route by the file you are documenting, not by where the last entry on the topic happened to
+   land.** Find the row above whose `paths:` covers the `.py` file your change touches, and write
+   there. A finding that is genuinely package-wide (the Newton driver, the linear-solve contract, an
+   adjoint/implicit-diff decision) belongs in this core file; everything else belongs in its subsystem
+   file, never here "for visibility" — that is exactly how this file reached 8,510 lines the first time.
+2. **Topic file vs. `-log.md`: durable fact here, dated investigation there.** `solve-flow-block.md` and
+   `solve-globalization.md` model this — copy the pattern, do not just read past it. A new **durable**
+   fact (what is built, what the shipped default is, a binding decision) goes in the topic file. A new
+   **dated** entry (a measurement, a probe result, an investigation step — anything that reads "on
+   DATE we found X") goes in the matching `-log.md` file instead. When an investigation in a `-log.md`
+   file reaches a durable verdict, update the topic file's "current status" paragraph to match and
+   point at the `-log.md` entry for the full trail — do not duplicate the trail into the topic file.
+3. **No `-log.md` sibling yet does not mean dated entries are welcome in the topic file — it means one
+   has not been needed yet.** `solve-direct-preconditioners.md`, `solve-amg-multigrid.md`,
+   `solve-field-split.md`, and `solve-march.md` currently hold both current facts and investigation
+   history together. **The moment one of them is next edited after crossing ~1,800 lines** (roughly
+   `turbulence.md`'s 1,779 — the largest still-unsplit rule file in the project, and a reasonable outer
+   bound not to exceed), split it the same way as part of that change: peel its dated/historical content
+   into a new `<name>-log.md` sibling with no `paths:` frontmatter, add it to the table above, and leave
+   a synthesized current-status paragraph behind, mirroring rule 2. Do not wait for someone to notice
+   the file is huge — that is what happened to this file the first time. **`solve-amg-multigrid.md` is
+   already past this bound (2,088 lines as of 2026-08-18)** — it is the one candidate that should be
+   split on its next substantial edit rather than waited on further.
+4. **Closing or refuting a direction is not done until `solve-refuted-directions.md` has an entry for
+   it, added in the SAME change.** One short paragraph — what was tried, on what case/state, why it
+   lost — plus a pointer to wherever the full detail lives (a topic file, a `-log.md` file, or inline
+   in the ledger itself if it is short enough to need no pointer). The ledger is the thing a future
+   contributor actually greps before re-proposing an idea; a refutation that lives only in a `-log.md`
+   file's prose will not be found by that search.
+
 ## How to read this file (and every file above)
 
 This file, and the ones it splits into, accumulate. Three rules make a `grep` hit trustworthy:
