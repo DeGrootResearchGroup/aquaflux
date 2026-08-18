@@ -2345,12 +2345,12 @@ def coupled_amg_continuation(
         Restart-cycle cap of that default solver (``60``), and the **only** bound on a single running
         solve: ``cycle_budget`` and the march's abort threshold are tested between inner iterations, so
         neither can stop a solve already in progress. Two constraints on any value chosen for it. ⚠️ It
-        is in raw ``lineax`` restarts, which carry a fixed ``+2`` per solve, while ``retry.on_cycles`` is
+        is in raw ``lineax`` restarts, which carry a fixed ``+2`` per solve, while ``retry.abort_above_cycles`` is
         in corrected cycles (:func:`~aquaflux.solve.restart_cycles`), so a corrected cap of ``c`` is
         ``forward_max_restarts = c + 2``. ⚠️ And the corrected count must stay **strictly above**
-        ``retry.on_cycles``: the march's test is ``max_inner_cycles > retry.on_cycles``, so a cap landing
-        exactly on the threshold does not trip the retry and the step accepts the truncated,
-        non-converged direction instead of escalating. Ignored when an explicit ``forward_solver`` is
+        ``retry.abort_above_cycles``: the march's test is ``max_inner_cycles > retry.abort_above_cycles``, so a cap landing
+        exactly on the threshold does not trip the redo and the step accepts the truncated,
+        non-converged direction instead of re-running it on a fresh preconditioner. Ignored when an explicit ``forward_solver`` is
         given.
     inner_observer : callable or None
         A per-inner-iteration profiling hook forwarded to the built dual-time step (only used when
@@ -2373,7 +2373,8 @@ def coupled_amg_continuation(
         :class:`~aquaflux.solve.DualTimeStep` (only used when ``inner_steps > 1``). It cuts off a primary
         solve grinding on a stiff low-β operator after ~``cycle_budget`` matvecs instead of the full
         ``inner_steps`` into the restart cap; pair it with ``solve_coupled``'s β-escalation
-        (``retry.on_cycles < cycle_budget``), which redoes the capped step at a larger β. ``None`` (default)
+        (``retry.abort_above_cycles < cycle_budget``), which redoes the capped step at the SAME β on
+        the refreshed preconditioner. ``None`` (default)
         is unbounded and byte-identical. Forward-only.
     positivity_floor : float
         Absolute room in ``k`` given to every cell by the step limiter, so a cell whose ``k`` is
@@ -2495,13 +2496,13 @@ def coupled_amg_continuation(
     # ``forward_max_restarts`` is the ONLY bound on a single running solve: ``cycle_budget`` and
     # ``abort_above_inner_cycles`` are tested between inner iterations, so neither can stop a solve
     # already in progress. Left generous, a solve whose attempt is already doomed -- one that has passed
-    # the march's ``retry.on_cycles`` without reaching target -- keeps running to the cap, and that work
+    # the march's ``retry.abort_above_cycles`` without reaching target -- keeps running to the cap, and that work
     # is discarded when the step is redone at a larger shift.
     #
-    # ⚠️ It is in RAW ``lineax`` restarts, which carry a fixed +2 per solve, while ``retry.on_cycles`` is
+    # ⚠️ It is in RAW ``lineax`` restarts, which carry a fixed +2 per solve, while ``retry.abort_above_cycles`` is
     # in CORRECTED cycles (:func:`restart_cycles`). So a corrected cap of ``c`` is ``max_restarts = c + 2``.
-    # ⚠️ And it must leave the corrected count STRICTLY ABOVE ``retry.on_cycles``: the march's test is
-    # ``max_inner_cycles > retry.on_cycles``, so a cap landing exactly on the threshold does not trip the
+    # ⚠️ And it must leave the corrected count STRICTLY ABOVE ``retry.abort_above_cycles``: the march's test is
+    # ``max_inner_cycles > retry.abort_above_cycles``, so a cap landing exactly on it does not trip the
     # retry and the step ACCEPTS the truncated, non-converged direction instead of escalating.
     # ``forward_restart``
     # exists so that length can be varied on its own -- passing a whole ``forward_solver`` to do it would

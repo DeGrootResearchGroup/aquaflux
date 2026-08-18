@@ -13,6 +13,18 @@ on:
     types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
+  schedule:
+    # Weekly (Mon 07:23 UTC): refresh `.test_durations` so the slow/validation
+    # pytest-split shards stay duration-balanced as tests are added. Only the
+    # refresh-durations / commit-durations jobs run on this event; every other job
+    # is gated off it.
+    - cron: "23 7 * * 1"
+  # Manual trigger for the same refresh (e.g. to populate the durations
+  # immediately instead of waiting for the weekly cron). Note that GitHub only
+  # registers this trigger from the DEFAULT branch, which is why the refresh job
+  # additionally accepts a PR label below -- that is the only way to populate the
+  # file from a branch before it has merged.
+  workflow_dispatch:
 
 # Concurrency, by event:
 #  - a PR `labeled` event gets its OWN group (`fullci-<ref>`), separate from the
@@ -43,7 +55,9 @@ jobs:
   # same set of commands the local pre-push hook runs (.githooks/pre-push).
   lint:
     name: ruff
-    if: github.event.action != 'labeled'
+    if: >-
+      github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+      && github.event.action != 'labeled'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -91,7 +105,9 @@ jobs:
   # runtime dependencies as well as the Sphinx toolchain.
   docs:
     name: docs build
-    if: github.event.action != 'labeled'
+    if: >-
+      github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+      && github.event.action != 'labeled'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -121,7 +137,9 @@ jobs:
   # Two interpreters, since a unit-level regression can be version-specific.
   unit:
     name: unit tests (py${{ matrix.python-version }})
-    if: github.event.action != 'labeled'
+    if: >-
+      github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+      && github.event.action != 'labeled'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -156,11 +174,16 @@ jobs:
   # ceiling). They are homogeneous, so pytest-split's even-by-count partition
   # balances memory as well as time: each of the 6 shards runs ~1/6 of the set in
   # a fresh process (peak a few GB), and `-n 1` keeps a shard from holding several
-  # heavy solves at once. The per-shard jobs are not the required check -- the
-  # `fast-gate` aggregator below is.
+  # heavy solves at once. These fast tests are deliberately NOT recorded in
+  # `.test_durations` (only the heterogeneous slow/validation tiers are), so this
+  # partition stays even-by-count -- duration-balancing them could pile many fast
+  # solves into one shard and unbalance memory. The per-shard jobs are not the
+  # required check -- the `fast-gate` aggregator below is.
   integration:
     name: integration tests (py${{ matrix.python-version }} shard ${{ matrix.group }}/6)
-    if: github.event.action != 'labeled'
+    if: >-
+      github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+      && github.event.action != 'labeled'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -194,7 +217,10 @@ jobs:
   fast-gate:
     name: fast gate
     needs: [lint, docs, unit, integration]
-    if: always() && github.event.action != 'labeled'
+    if: >-
+      always() && github.event_name != 'schedule'
+      && github.event_name != 'workflow_dispatch'
+      && github.event.action != 'labeled'
     runs-on: ubuntu-latest
     steps:
       - name: Require the always-on gates to pass
@@ -218,6 +244,19 @@ jobs:
   # regression the fast gate cannot catch surfaces within minutes of landing, and
   # on a PR carrying the `full-ci` label (the opt-in pre-merge check). Sharded
   # `-n 1` for the same accumulated-memory reason as the integration tier.
+  #
+  # These tests are heterogeneous -- a 21 s scheme check next to a 242 s adjoint
+  # continuation -- so pytest-split partitions them by recorded duration from the
+  # committed `.test_durations`, which the refresh job below keeps current. A test
+  # with no recorded duration gets the fallback average.
+  #
+  # Balancing by DURATION rather than by count is not a nicety. With no durations
+  # pytest-split splits evenly by count over the whole collected set, so adding a
+  # test anywhere shifts the boundaries and can migrate the expensive tests onto
+  # whichever shard is already heaviest. That happened: eight unrelated unit tests
+  # moved two ~106 s adjoint tests off the lightest shard (15:53) onto the heaviest
+  # (20:58), which then needed ~24.5 min of tests plus ~5 min of setup and was
+  # killed at the 30-minute ceiling.
   slow:
     name: slow suite (shard ${{ matrix.group }}/3)
     if: >-
@@ -250,15 +289,31 @@ jobs:
         # each single-process (`-n 1`) shard runs fewer tests and accumulates less
         # XLA compilation memory before the runner ceiling -- a 2-shard process
         # aborted part way through the coupled/segregated solves.
-        run: >-
-          pytest -m "slow and not validation" -q -n 1
-          --splits 3 --group ${{ matrix.group }}
-          --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
+        run: |
+          set +e
+          pytest -m "slow and not validation" -q -n 1 \
+            --splits 3 --group ${{ matrix.group }} \
+            --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
+          ec=$?
+          # Exit 5 = pytest collected no tests. pytest-split's duration-based
+          # partition front-loads the groups, so as `.test_durations` skews a
+          # trailing shard can go empty; every test still runs in another shard.
+          # Treat "no tests collected" as a pass -- a real failure exits non-5.
+          if [ "$ec" -eq 5 ]; then
+            echo "Empty shard ${{ matrix.group }} (no tests collected); treating as pass."
+            exit 0
+          fi
+          exit $ec
 
   # ---- Validation suite (against analytical/published solutions) --------------
   # The heaviest tests in the repo: run serially in one process they reach ~16 GB
-  # (the runner ceiling). Split across 5 fresh processes, each shard's ~3 tests
-  # peak ~2 GB. Same triggers as the slow tier.
+  # (the runner ceiling). Split across 5 fresh processes so each holds only a
+  # slice. Same triggers as the slow tier. Like the slow tier, pytest-split
+  # partitions these by recorded duration from `.test_durations` so each shard's
+  # wall time is balanced; the counts are uneven by design (a shard of many cheap
+  # tests balances one of a few heavy solves, and the cheap tests are also the
+  # lower-memory ones). The duration split front-loads, so a trailing shard can be
+  # empty -- the run step treats that (pytest exit 5) as a pass.
   validation:
     name: validation suite (shard ${{ matrix.group }}/5)
     if: >-
@@ -284,7 +339,189 @@ jobs:
         run: pip install -e ".[test]"
 
       - name: Run validation suite shard
+        run: |
+          set +e
+          pytest -m "validation" -q -n 1 \
+            --splits 5 --group ${{ matrix.group }} \
+            --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
+          ec=$?
+          # Exit 5 = pytest collected no tests. pytest-split's duration-based
+          # partition front-loads the groups, so as `.test_durations` skews a
+          # trailing shard can go empty; every test still runs in another shard.
+          # Treat "no tests collected" as a pass -- a real failure exits non-5.
+          if [ "$ec" -eq 5 ]; then
+            echo "Empty shard ${{ matrix.group }} (no tests collected); treating as pass."
+            exit 0
+          fi
+          exit $ec
+
+  # ---- Refresh of .test_durations (schedule / manual / opt-in on a PR) ---------
+  # The slow (3) and validation (5) jobs pytest-split-shard by `.test_durations`;
+  # as tests are added the file drifts (a test with no recorded duration gets the
+  # fallback average), so the shards lose their duration balance. This job
+  # re-records every slow/validation test's duration.
+  #
+  # It runs `slow or validation` ACROSS SHARDS with `--store-durations` (each shard
+  # records its own slice -- recording the whole set in one process would OOM the
+  # runner, the same reason the suites are sharded in the first place), uploads the
+  # per-shard files, and the commit job merges them into a complete
+  # `.test_durations`. A complete, disjoint partition, so every test is recorded
+  # exactly once and stale entries (tests no longer slow/validation) are pruned.
+  # 8 shards keeps each fresh process to a handful of tests -- bounded memory on
+  # the 16 GB runner even though the union spans the heaviest tests in the repo.
+  #
+  # THE PR LABEL IS THE BOOTSTRAP PATH, and it is not redundant with
+  # `workflow_dispatch`: GitHub only registers `workflow_dispatch` from the DEFAULT
+  # branch, so before this workflow has merged there is no way to dispatch it on a
+  # branch. Without the label a first population would need the infrastructure
+  # merged, then a dispatch, then a second merge -- with the shards still
+  # count-balanced (and therefore still able to time out) throughout. Labelling a
+  # PR `refresh-durations` records the file on that branch instead, so the
+  # infrastructure and its data land together.
+  #
+  # The PR path fires on the `labeled` ACTION only, not merely on the label being
+  # present: this is eight jobs of up to an hour, so it should run when someone asks
+  # for it and not again on every subsequent push while the label happens to still
+  # be attached. Re-run it by removing and re-applying the label.
+  refresh-durations:
+    name: refresh test-durations (shard ${{ matrix.group }}/8)
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request' && github.event.action == 'labeled'
+          && contains(github.event.pull_request.labels.*.name, 'refresh-durations'))
+    runs-on: ubuntu-latest
+    # Generous ceiling: this job records into fresh per-shard paths, so its own
+    # split is even-by-count (unbalanced) -- a shard can bunch several heavy tests
+    # and run longer than a duration-balanced steady-state shard.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package and test dependencies
+        run: pip install -e ".[test]"
+
+      - name: Record this shard's durations
         run: >-
-          pytest -m "validation" -q -n 1
-          --splits 5 --group ${{ matrix.group }}
-          --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
+          pytest -m "slow or validation" -q -n 1
+          --splits 8 --group ${{ matrix.group }}
+          --store-durations --durations-path durations-${{ matrix.group }}.json
+          --timeout=1200 --timeout-method=thread --max-worker-restart=0
+
+      - name: Upload shard durations
+        uses: actions/upload-artifact@v4
+        with:
+          name: durations-${{ matrix.group }}
+          path: durations-${{ matrix.group }}.json
+          if-no-files-found: error
+
+  # ---- Commit the refreshed durations (schedule / manual only) ----------------
+  # Deliberately NOT run for the `refresh-durations` PR label: on a PR the point is
+  # to land the file in that PR, so the artifacts are downloaded and committed by
+  # hand (`gh run download`, then commit `.test_durations`). Opening a second,
+  # bot-authored PR against main from a feature branch's run would target the wrong
+  # base and race the PR being prepared.
+  commit-durations:
+    name: open .test_durations refresh PR
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: refresh-durations          # only proceed on a COMPLETE set (all shards ok)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write                 # write .test_durations via the Contents API
+      pull-requests: write            # open the PR
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all shard durations
+        uses: actions/download-artifact@v4
+        with:
+          pattern: durations-*
+          path: _durations
+          merge-multiple: true
+
+      - name: Merge into .test_durations
+        run: |
+          python - <<'PY'
+          import glob, json
+          combined = {}
+          for f in sorted(glob.glob("_durations/durations-*.json")):
+              combined.update(json.load(open(f)))
+          if not combined:
+              raise SystemExit("no shard durations found -- aborting")
+          # Match the committed format exactly (sorted keys, indent=4) so an
+          # unchanged set is a no-op diff.
+          with open(".test_durations", "w") as fh:
+              json.dump(dict(sorted(combined.items())), fh, indent=4)
+          print(f"merged {len(combined)} test durations")
+          PY
+
+      - name: Open / update the refresh PR if changed
+        # `main` is branch-protected, so this does NOT push to it: it puts the
+        # change on a single rolling `ci/refresh-test-durations` branch and opens
+        # one PR you merge. Two GITHUB_TOKEN limitations shape HOW:
+        #   1. The token may not push a *branch* whose tree carries the repo's
+        #      workflow files (a new branch "introduces" .github/workflows/* and
+        #      the token lacks the un-grantable `workflows` permission). So the
+        #      commit is made through the GitHub Contents API, which writes ONLY
+        #      .test_durations and never pushes workflow content -- no PAT needed.
+        #   2. Opening a PR from the token needs the repo setting "Allow GitHub
+        #      Actions to create and approve pull requests" (Settings -> Actions
+        #      -> General). If it is off, `gh pr create` fails -- so that failure
+        #      is non-fatal: the branch is still updated and you open the PR once
+        #      by hand (or enable the setting and it auto-opens thereafter).
+        # CI does not run on a bot-authored PR, so merge it with your admin bypass
+        # (it touches only .test_durations).
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- .test_durations; then
+            echo "No change to .test_durations -- nothing to do."
+            exit 0
+          fi
+          repo="$GITHUB_REPOSITORY"
+          branch="ci/refresh-test-durations"
+          base_sha="$(git rev-parse HEAD)"   # the checked-out main commit
+
+          # Point the rolling branch at the current main (create, or reset if it
+          # already exists) so the PR diff is exactly this run's durations change.
+          if gh api "repos/$repo/git/refs/heads/$branch" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$repo/git/refs/heads/$branch" \
+              -f sha="$base_sha" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$repo/git/refs" \
+              -f ref="refs/heads/$branch" -f sha="$base_sha" >/dev/null
+          fi
+
+          # Commit ONLY .test_durations onto the branch via the Contents API.
+          file_sha="$(gh api "repos/$repo/contents/.test_durations?ref=$branch" --jq .sha)"
+          gh api -X PUT "repos/$repo/contents/.test_durations" \
+            -f message="ci: refresh .test_durations" \
+            -f content="$(base64 -w0 .test_durations)" \
+            -f branch="$branch" \
+            -f sha="$file_sha" >/dev/null
+          echo "Updated $branch with the refreshed durations."
+
+          # Open the PR if one isn't already open. Non-fatal if the repo setting
+          # blocks Actions from creating PRs (see note above).
+          if [ -n "$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')" ]; then
+            echo "Refresh PR already open; its branch was updated in place."
+          elif gh pr create --base main --head "$branch" \
+              --title "ci: refresh .test_durations" \
+              --body "Automated refresh of the pytest-split durations that balance the slow/validation shards. **Metadata-only** (only \`.test_durations\` changes), so it is safe to merge. Opened by the \`refresh-durations\` job via the GitHub API; CI does not run on bot-authored PRs, so merge with your admin override."; then
+            echo "Opened the refresh PR."
+          else
+            echo "::warning::Branch '$branch' was updated but the PR could not be "\
+              "opened automatically. Enable 'Allow GitHub Actions to create and "\
+              "approve pull requests' (Settings -> Actions -> General), or open a "\
+              "PR from '$branch' by hand once -- later runs reuse it."
+          fi

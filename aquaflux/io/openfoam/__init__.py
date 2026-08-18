@@ -7,9 +7,13 @@ mesh. The public entry points are :class:`OpenFOAMReader` and the :func:`read_op
 
 from __future__ import annotations
 
+from .fields import parse_scalar_field, read_surface_scalar_field, read_volume_scalar_field
 from .reader import OpenFOAMReader, read_openfoam
 
 __all__ = [
     "OpenFOAMReader",
+    "parse_scalar_field",
     "read_openfoam",
+    "read_surface_scalar_field",
+    "read_volume_scalar_field",
 ]

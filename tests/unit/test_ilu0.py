@@ -211,3 +211,44 @@ def test_the_compiled_and_reference_paths_agree() -> None:
         np.testing.assert_allclose(
             compiled.solve(rhs, transpose=transpose), x, rtol=1e-12, atol=1e-14
         )
+
+
+def test_pivots_are_the_factor_diagonal_not_the_operator_diagonal() -> None:
+    """``pivots`` must read the FACTOR, which is the whole reason the accessor exists.
+
+    A census that reads the *operator's* diagonal instead looks like it works and is worthless: every
+    caller here equilibrates first, which forces that diagonal to magnitude exactly 1, so such a census
+    reports a flat "min |pivot| = 1.00" for every arm however badly the factorization behaves. That
+    exact mistake produced a retracted finding, so the distinction is pinned rather than trusted.
+    """
+    import scipy.sparse as sp
+
+    n = 40
+    rng = np.random.default_rng(3)
+    matrix = sp.random(n, n, density=0.2, random_state=7, format="lil")
+    matrix.setdiag(rng.uniform(2.0, 4.0, n))
+    matrix = matrix.tocsr()
+
+    pivots = Ilu0(matrix).pivots
+
+    assert pivots.shape == (n,)
+    # The elimination changes the diagonal, so the factor's pivots are NOT the operator's diagonal.
+    assert not np.allclose(pivots, matrix.diagonal())
+    # And they are the pivots themselves, not their reciprocals: a diagonally dominant operator like
+    # this one keeps them near the original diagonal's magnitude rather than near its inverse.
+    assert np.all(pivots > 0.0)
+    assert np.median(pivots) > 1.0
+
+
+def test_pivots_track_a_factorization_refresh() -> None:
+    """A refresh re-runs the numeric phase, so the census must follow the new values."""
+    import scipy.sparse as sp
+
+    n = 30
+    matrix = sp.diags([np.full(n, 3.0), np.full(n - 1, -1.0), np.full(n - 1, -1.0)], [0, 1, -1])
+    factors = Ilu0(sp.csr_matrix(matrix))
+    before = factors.pivots.copy()
+
+    factors.refactor(sp.csr_matrix(matrix * 2.5).data)
+
+    assert not np.allclose(before, factors.pivots)

@@ -15,8 +15,8 @@ Two kinds of file, with the same failure mode:
 
 - **Cases** (`*/compare.py`) — a full scientific run against a reference solution. Tens of minutes each.
 - **Harnesses** (everything else) — single-state probes that measure one question and print a table.
-  These are the project's **re-adjudication instruments**: most numbers in `.claude/rules/solve.md`
-  were measured with one, and a finding whose harness no longer runs cannot be re-asked, only cited.
+  These are the project's **re-adjudication instruments**: most numbers in the `.claude/rules/solve*.md`
+  files were measured with one, and a finding whose harness no longer runs cannot be re-asked, only cited.
 
 **Nothing in any test tier drives these files.** They are too slow for CI and for the fast gate, so
 the suite is green whether or not a single one of them still works. That is the whole problem this
@@ -110,6 +110,15 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
 - **Do not copy a wiring idiom from a test without checking the case matches.** The `pack_state` error
   above came from `tests/integration/test_coupled_lu.py`, where it is correct — that fixture builds
   `CoupledRANS` with no transform.
+- **⚠️ A PIVOT CENSUS MUST READ THE FACTOR, NOT THE OPERATOR HANDED TO IT.** Every consumer here
+  symmetrically equilibrates before factorizing, which forces the *operator's* diagonal to magnitude
+  exactly 1 — so a census written as `matrix.diagonal()` reports "zero negative pivots, min |pivot|
+  1.00" for every arm at every shift, including arms whose sweep diverges by 1e+59. It looks like a
+  finding ("the pivots are all healthy, so it is not a pivot problem") and it is a measurement of the
+  conditioning transform. This shipped in a sweep on 2026-08-17 and a conclusion was drawn from it
+  before being retracted. Use `Ilu0.pivots`, which exists for this; and note it stores the pivot
+  itself where PETSc stores its **reciprocal**, so a census ported between the two reports the inverse
+  of what it claims.
 - **Print one line per outer step, flushed.** A harness that collects reports and prints at the end is
   indistinguishable from a hung one, and cost thirty minutes of a run that could not have converged.
 - **State the operating point before measuring.** A harness whose banner prints `? cells` is one whose
@@ -134,6 +143,30 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
   factorization (ILUT, complete LU) does apply them, and a short colouring does not truncate a column —
   it folds far couplings onto near entries. Probe every arm at a uniform reach whenever a monolithic arm
   is in the comparison, or the arms are not being compared on the same matrix.
+
+## `bfs3d_species` — the newest case, and what it depends on
+
+A passive tracer on `bfs3d_openfoam`'s flow (see `.claude/rules/transport.md` for the two-arm design
+and the `Sc_t = 1` choice). Its dependency structure is unusual and is the thing to know:
+
+- **It carries NO mesh and NO flow of its own.** `of_case/run_of.sh` assembles a scratch case from
+  `bfs3d_openfoam/of_case`'s `polyMesh` and converged time directory, and `compare.py` loads that
+  case's `build_case` **by path** (`importlib`), because both cases have a module named `compare` and
+  a plain `import compare` resolves by whichever path order happens to be in force.
+- **Its own-flow arm reads the flow case's rolling checkpoint** rather than re-marching. ⚠️ That
+  checkpoint predates the production-limiter default moving OFF, so it is *not* a root of today's
+  coupled residual. This does not invalidate the arm: what a transported scalar needs of a flux is
+  that it close discretely, which `compare.py` measures directly rather than inferring from the
+  state's residual.
+- **`tests/integration/test_bfs3d_species.py` is the one test that reaches into `validation/`.** Every
+  test there skips when the case data is absent, since none of it is in the repository. It pins the
+  properties the comparison rests on — sub-patch injection, conservation on the imported flux,
+  boundedness, mixing — so a break shows up as a failure rather than as a meaningless log.
+
+⚠️ **Do not edit files under `validation/` while the fast gate is running.**
+`tests/unit/test_validation_api.py` statically reads every case, so it will parse a half-written file
+and fail for a reason that has nothing to do with the change under test. This happened once and cost a
+28-minute gate run.
 
 ## Recovering a converged state (both cases)
 

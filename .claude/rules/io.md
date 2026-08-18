@@ -39,17 +39,31 @@ Three pure seams so ~80% of the logic tests with no filesystem (separate I/O fro
     `FoamFile { … }` header dict from the body, and `is_binary` (gates ASCII vs binary in **one**
     place).
   - `grammar.py` — the body-grammar **free functions** (`parse_vector_list` / `parse_scalar_list` /
-    `parse_face_list` / `parse_boundary` / `parse_cell_zones`), sharing one `_list_envelope` for the
+    `parse_face_list` / `parse_boundary` / `parse_cell_zones`), sharing one `list_envelope` for the
     `N ( … )` frame + count-check. **Deliberately not a Strategy hierarchy** — the file kind is
     known statically at every call site, so parser-polymorphism would vary over nothing.
   - `assembler.py` — `assemble(PolyMeshData) -> Mesh` (pure, file-free): pad the interior-only
     neighbour with the `-1` sentinel (relies on OpenFOAM's upper-triangular ordering — interior
     faces first), derive `n_cells = max(owner, neighbour) + 1`, map boundary patches →
     `face_patches` and cellZones → `cell_zones`, then `Mesh.from_csr`.
-  - `reader.py` — `OpenFOAMReader(MeshReader)` + `read_openfoam(path)`. The **only** file I/O
-    (`_read_field` centralizes missing-file + binary handling). `read()` = assemble the faithful 3D
-    mesh, then collapse when `empty` patches are present. Accepts a case dir (resolves
-    `constant/polyMesh`) or the polyMesh dir directly.
+  - `reader.py` — `OpenFOAMReader(MeshReader)` + `read_openfoam(path)`. `read()` = assemble the
+    faithful 3D mesh, then collapse when `empty` patches are present. Accepts a case dir (resolves
+    `constant/polyMesh`) or the polyMesh dir directly. `_read_field` handles the *optional*-file
+    case and delegates the rest to `foamfile.read_foam_body`.
+  - **`foamfile.read_foam_body(path)` is the one place a file on disk becomes a parseable body**,
+    so the ASCII-only limitation is enforced once. It lives beside the `is_binary` predicate it
+    uses. **`reader.py` is NOT the package's only file I/O** — `fields.py` reads files too; what is
+    centralized is the *binary gate*, and its home is `read_foam_body`.
+  - `fields.py` — **reading a scalar field written on an already-imported mesh** (`phi` above all).
+    `parse_scalar_field(body, n_internal, patch_sizes)` is pure and tests on snippets;
+    `read_surface_scalar_field(path, mesh)` places the values on the mesh's faces, and
+    `read_volume_scalar_field(path, mesh)` reads a `volScalarField`'s internal block onto cells.
+    **The two are asymmetric on purpose.** A face field needs the ordering guard below; a cell field
+    does not, because `assemble` derives cell indices from the `owner`/`neighbour` labels it reads,
+    so a cell's index is OpenFOAM's own by construction rather than by convention. The cell reader
+    also returns the internal block *only*: a `volScalarField`'s `boundaryField` holds **face**
+    values, a different quantity on a different index space, so concatenating them as the surface
+    reader does would produce something no consumer wants.
 
 ## Binding decisions
 - **A polyMesh is always 3D; a 2D case is one cell thick between two `empty` patches.** The reader
@@ -65,6 +79,23 @@ Three pure seams so ~80% of the logic tests with no filesystem (separate I/O fro
   normally empty — this is only a leniency, not a reinterpretation.) Overlaps / out-of-range patch
   ranges are still rejected by `FacePatches.from_dict`.
 - **ASCII only (first cut).** `format binary;` → `NotImplementedError` (detected, never misread).
+- **A field is placed by INDEX, and the correspondence is CHECKED rather than assumed (binding).**
+  OpenFOAM orders faces interior-first, then boundary faces grouped by patch in `boundary`-file
+  order, each patch contiguous; `assemble` carries `owner` through unchanged and never renumbers, so
+  aquaflux face `i` *is* OpenFOAM face `i`. That is an inherited convention this package cannot
+  enforce, and getting it wrong yields a **plausible field rather than an error** — so
+  `read_surface_scalar_field` verifies the interior faces really are the leading block and each
+  named patch is a contiguous ascending range, and raises naming the mismatch.
+  - **A collapsed 2D case cannot be read this way** and is refused by that same guard: the
+    `empty`-patch collapse rebuilds the mesh through `from_csr` and renumbers.
+  - ⚠️ **`face_patches` carries the automatic `interior` and `boundary` patches, which no field file
+    writes.** `interior` holds the interior faces (already the internal block) and must be skipped;
+    a non-empty `boundary` means boundary faces no named patch claimed, so there is nowhere to read
+    their values from — that raises. Treating every named patch as a boundary patch was a real bug
+    here, caught because the placement test encodes each face's own index in its value.
+  - **A `uniform X` and a `nonuniform List<scalar>` entry occur in the same file** — a wall's flux
+    is written `uniform 0` while an inlet's is a full list — so a reader handling only the list form
+    fails on most of the boundary.
 
 ## Deferred (additive; no seam changes)
 Binary polyMesh; `faceZones`/`pointZones`; `.gz` compression / multi-region cases; **mesh writing**
@@ -82,3 +113,34 @@ Binary polyMesh; `faceZones`/`pointZones`; `.gz` compression / multi-region case
 - **Orchestrate** — end-to-end on committed ASCII fixtures (`tests/fixtures/polymesh_3d_two_cubes`,
   `tests/fixtures/polymesh_2d_slab`), cross-checked against the structured generators
   (`tests/unit/test_openfoam_reader.py`).
+- **Fields** — `tests/unit/test_openfoam_fields.py`: the parser on snippets, and placement end to
+  end on the two-cube fixture with a field whose **each value encodes its own face index**, so any
+  permutation shows up as a mismatch rather than as a plausible field. The ordering guard is tested
+  by feeding it a *generated* grid, which genuinely is not interior-first (its `left` patch occupies
+  faces 0–2 while the interior starts at 3) — a standing counter-example, not a contrived one.
+
+## The interior placement is MEASURED, not only argued (bfs3d, 2026-08-17)
+
+The unit tests pin the *structure* (interior block leads, patches contiguous, lengths agree) on a
+two-cube fixture. Whether values land on the right faces **within** the interior block needs a real
+mesh's connectivity, so it is measured by `validation/bfs3d_openfoam/phi_placement.py` — kept in the
+repository precisely so the question can be re-asked rather than only cited.
+
+**Measured on** `validation/bfs3d_openfoam/of_case`, the steady `kOmegaSST` run's `2000/phi`; 23040
+cells, 71872 faces (66368 internal + 5504 boundary), 3D, uncollapsed. No solver defaults are involved
+— this is a mesh build and two scatters, so it does not expire when a solver default moves.
+
+- **Boundary placement.** Inlet net flux is exactly `-4.000000e-03` m³/s = `U_in x A` = `10 x (0.01 x
+  0.04)`; all three wall patches are exactly zero; net imbalance `1.15e-06` (`2.9e-04` of throughput)
+  is OpenFOAM's own continuity error.
+- **Interior placement.** The conservative scatter of `phi` on aquaflux's connectivity gives a max
+  per-cell imbalance of `1.96e-08` m³/s = **`4.9e-06` of the domain flow rate** — the reference's own
+  convergence level. A seeded permutation of the interior block (the mutation control, and the whole
+  point) gives `2.3e-02`, **4.7e+03x worse**. Placement CONFIRMED.
+- ⚠️ **Do NOT normalize a continuity error by the cell's own throughput.** It looks like the natural
+  measure and it is a trap: in the recirculation and side-wall corners a cell's throughput falls to
+  ~2% of median, so the reference's fixed absolute error divides up into a 2.2e-02 "relative" error
+  that reads as a failure. Checked, not assumed — the worst-ratio cells carry `3–9e-09` absolute,
+  *below* the global max of `1.96e-08`, so it is entirely the denominator. Normalize by the domain
+  flow rate; report the local ratio only as a distribution, whose *spread* is what would reveal a
+  genuine mis-placement (local, hence a cluster) as opposed to diffuse reference error.

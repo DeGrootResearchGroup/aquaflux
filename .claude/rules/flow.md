@@ -434,7 +434,7 @@ Engineering Principles.
   aggregation coarsens across the stiff wall-normal direction and stalls; `θ=0` is byte-identical to the
   historical build, and the coupled RANS path turns it on at `0.25` (a no-op on low-AR pitzDaily, the
   payoff is the wall-resolved regime). Full evidence + the value-dependence/refresh caveat live in the
-  AMG section of `.claude/rules/solve.md`. The dominated Stage-1 fallbacks
+  AMG section of `.claude/rules/solve-amg-multigrid.md`. The dominated Stage-1 fallbacks
   (`AggregationSchur`/`inner="multigrid"`, `DampedJacobiSchur`/`inner="jacobi"`, `DiagonalVelocity`) and
   the geometric coefficient-flow multigrid they used were **deleted** as superseded (see root `CLAUDE.md`
   Principle 0); there is no `inner=` selector — the smoothed AMG is the one pressure Schur. **The
@@ -595,7 +595,7 @@ Engineering Principles.
   Schur's quality, so improving it buys nothing. The strategy stays available for a flow-only solve;
   it is not the coupled default and is not the cure for coupled cost. PCD remains deprioritized
   independently (finite-element boundary recipes that do not transfer to FVM). Full numbers and the
-  matching "what a preconditioner can and cannot change" rule are in `.claude/rules/solve.md`.
+  matching "what a preconditioner can and cannot change" rule are in `.claude/rules/solve-globalization-log.md`.
 - **Fully-AD `a_P`** — a possible refinement (the diffusion Gate-C / limiter pattern), not yet needed.
 - **Gradient-scheme cost — largely solved (use `SweptGradientSolve`).** The *per-matvec* and
   *compile* cost of the nested corrected-gradient solve (distinct from the outer iteration count) is

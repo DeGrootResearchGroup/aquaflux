@@ -1,0 +1,4247 @@
+/*---------------------------------------------------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+Build  : 13-441953dfbb42
+Exec   : foamRun
+Date   : Aug 18 2026
+Time   : 16:04:51
+Host   : "5bc7ecee9f01"
+PID    : 200
+I/O    : uncollated
+Case   : /work/validation/bfs3d_species/of_case
+nProcs : 1
+sigFpe : Floating point exception trapping - not supported on this platform
+fileModificationChecking : Monitoring run-time modified files using timeStampMaster (fileModificationSkew 10)
+allowSystemOperations : Allowing user-supplied system call operations
+
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+Create time
+
+Create mesh for time = 2000
+
+Selecting solver functions
+Selecting solver incompressibleFluid
+Selecting viscosity model constant
+Selecting turbulence model type RAS
+    Selecting RAS turbulence model kOmegaSST
+        Selecting generalised Newtonian model Newtonian
+No MRF models present
+
+Selecting patchDistMethod meshWave
+
+PIMPLE: No convergence criteria found
+
+
+PIMPLE: Operating solver in steady-state mode with 1 outer corrector
+PIMPLE: Operating solver in SIMPLE mode
+
+
+
+Starting time loop
+
+Time = 2001s
+
+ExecutionTime = 0.201223 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 1, Final residual = 9.3405561e-13, No Iterations 17
+
+Time = 2002s
+
+ExecutionTime = 0.216898 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.21133911, Final residual = 6.6540028e-13, No Iterations 19
+
+Time = 2003s
+
+ExecutionTime = 0.233115 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.16160616, Final residual = 6.7238574e-13, No Iterations 36
+
+Time = 2004s
+
+ExecutionTime = 0.258688 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.10523206, Final residual = 9.7577212e-13, No Iterations 33
+
+Time = 2005s
+
+ExecutionTime = 0.280342 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.083892997, Final residual = 9.0239285e-13, No Iterations 28
+
+Time = 2006s
+
+ExecutionTime = 0.301257 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.067074491, Final residual = 5.211417e-13, No Iterations 23
+
+Time = 2007s
+
+ExecutionTime = 0.317411 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.056612883, Final residual = 6.409026e-13, No Iterations 23
+
+Time = 2008s
+
+ExecutionTime = 0.334112 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.049164863, Final residual = 7.4651241e-13, No Iterations 24
+
+Time = 2009s
+
+ExecutionTime = 0.350691 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.043161976, Final residual = 8.369966e-13, No Iterations 25
+
+Time = 2010s
+
+ExecutionTime = 0.371994 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.039020527, Final residual = 9.0419815e-13, No Iterations 26
+
+Time = 2011s
+
+ExecutionTime = 0.390255 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0351428, Final residual = 9.2828005e-13, No Iterations 27
+
+Time = 2012s
+
+ExecutionTime = 0.410801 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0321374, Final residual = 9.1835232e-13, No Iterations 28
+
+Time = 2013s
+
+ExecutionTime = 0.432405 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.030013391, Final residual = 8.9567868e-13, No Iterations 29
+
+Time = 2014s
+
+ExecutionTime = 0.452228 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.028106548, Final residual = 8.4503982e-13, No Iterations 30
+
+Time = 2015s
+
+ExecutionTime = 0.472349 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.026360014, Final residual = 7.8069726e-13, No Iterations 31
+
+Time = 2016s
+
+ExecutionTime = 0.492646 s  ClockTime = 0 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.024221434, Final residual = 6.8404001e-13, No Iterations 32
+
+Time = 2017s
+
+ExecutionTime = 0.519424 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.022638768, Final residual = 6.0108712e-13, No Iterations 33
+
+Time = 2018s
+
+ExecutionTime = 0.542465 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.021285429, Final residual = 9.0336233e-13, No Iterations 33
+
+Time = 2019s
+
+ExecutionTime = 0.563701 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.020176279, Final residual = 7.7628116e-13, No Iterations 34
+
+Time = 2020s
+
+ExecutionTime = 0.58612 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.019160895, Final residual = 6.6174598e-13, No Iterations 35
+
+Time = 2021s
+
+ExecutionTime = 0.609046 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.01829172, Final residual = 9.6016091e-13, No Iterations 35
+
+Time = 2022s
+
+ExecutionTime = 0.632486 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.017479167, Final residual = 8.0729137e-13, No Iterations 36
+
+Time = 2023s
+
+ExecutionTime = 0.660112 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.016765524, Final residual = 6.8195981e-13, No Iterations 37
+
+Time = 2024s
+
+ExecutionTime = 0.687619 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.016112532, Final residual = 9.556106e-13, No Iterations 37
+
+Time = 2025s
+
+ExecutionTime = 0.711467 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.015527852, Final residual = 8.0432358e-13, No Iterations 38
+
+Time = 2026s
+
+ExecutionTime = 0.736408 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.014940003, Final residual = 6.7245103e-13, No Iterations 39
+
+Time = 2027s
+
+ExecutionTime = 0.761388 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.014435764, Final residual = 9.1890242e-13, No Iterations 39
+
+Time = 2028s
+
+ExecutionTime = 0.787151 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.013935324, Final residual = 7.6815532e-13, No Iterations 40
+
+Time = 2029s
+
+ExecutionTime = 0.818737 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.01352336, Final residual = 6.4401905e-13, No Iterations 41
+
+Time = 2030s
+
+ExecutionTime = 0.8466 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.013060746, Final residual = 8.5574428e-13, No Iterations 41
+
+Time = 2031s
+
+ExecutionTime = 0.873545 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.012694793, Final residual = 7.1056659e-13, No Iterations 42
+
+Time = 2032s
+
+ExecutionTime = 0.901788 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.01225324, Final residual = 9.221236e-13, No Iterations 42
+
+Time = 2033s
+
+ExecutionTime = 0.930754 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.011951048, Final residual = 7.5979123e-13, No Iterations 43
+
+Time = 2034s
+
+ExecutionTime = 0.961674 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.011566464, Final residual = 9.661768e-13, No Iterations 43
+
+Time = 2035s
+
+ExecutionTime = 0.990092 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.011305439, Final residual = 7.8768459e-13, No Iterations 44
+
+Time = 2036s
+
+ExecutionTime = 1.017737 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.010972107, Final residual = 9.8387509e-13, No Iterations 44
+
+Time = 2037s
+
+ExecutionTime = 1.045191 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.010733043, Final residual = 7.8944923e-13, No Iterations 45
+
+Time = 2038s
+
+ExecutionTime = 1.075911 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.010426824, Final residual = 9.6542361e-13, No Iterations 45
+
+Time = 2039s
+
+ExecutionTime = 1.108607 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.010200336, Final residual = 7.6300063e-13, No Iterations 46
+
+Time = 2040s
+
+ExecutionTime = 1.137752 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0099093792, Final residual = 9.1393851e-13, No Iterations 46
+
+Time = 2041s
+
+ExecutionTime = 1.166802 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.009713506, Final residual = 7.1464752e-13, No Iterations 47
+
+Time = 2042s
+
+ExecutionTime = 1.196076 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0094553869, Final residual = 8.4391328e-13, No Iterations 47
+
+Time = 2043s
+
+ExecutionTime = 1.230301 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0092695198, Final residual = 9.9634165e-13, No Iterations 47
+
+Time = 2044s
+
+ExecutionTime = 1.262142 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0090368338, Final residual = 7.7133323e-13, No Iterations 48
+
+Time = 2045s
+
+ExecutionTime = 1.292201 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0088557507, Final residual = 9.0263246e-13, No Iterations 48
+
+Time = 2046s
+
+ExecutionTime = 1.323714 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0086454809, Final residual = 6.947012e-13, No Iterations 49
+
+Time = 2047s
+
+ExecutionTime = 1.354169 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0084569372, Final residual = 8.0079585e-13, No Iterations 49
+
+Time = 2048s
+
+ExecutionTime = 1.391399 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0082410228, Final residual = 9.1086473e-13, No Iterations 49
+
+Time = 2049s
+
+ExecutionTime = 1.421959 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0080611675, Final residual = 6.9315953e-13, No Iterations 50
+
+Time = 2050s
+
+ExecutionTime = 1.454514 s  ClockTime = 1 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0078401847, Final residual = 7.7686925e-13, No Iterations 50
+
+Time = 2051s
+
+ExecutionTime = 1.485444 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0076520867, Final residual = 8.6864242e-13, No Iterations 50
+
+Time = 2052s
+
+ExecutionTime = 1.522076 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0074232951, Final residual = 9.5866443e-13, No Iterations 50
+
+Time = 2053s
+
+ExecutionTime = 1.554129 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0072283031, Final residual = 7.1351254e-13, No Iterations 51
+
+Time = 2054s
+
+ExecutionTime = 1.586233 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0070038177, Final residual = 7.8099012e-13, No Iterations 51
+
+Time = 2055s
+
+ExecutionTime = 1.617952 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0067945778, Final residual = 8.503734e-13, No Iterations 51
+
+Time = 2056s
+
+ExecutionTime = 1.650522 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0065615794, Final residual = 9.187875e-13, No Iterations 51
+
+Time = 2057s
+
+ExecutionTime = 1.687613 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0063479401, Final residual = 9.8913624e-13, No Iterations 51
+
+Time = 2058s
+
+ExecutionTime = 1.71977 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0060975993, Final residual = 7.1914294e-13, No Iterations 52
+
+Time = 2059s
+
+ExecutionTime = 1.75246 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0058982076, Final residual = 7.6708259e-13, No Iterations 52
+
+Time = 2060s
+
+ExecutionTime = 1.785666 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0056296249, Final residual = 8.0390014e-13, No Iterations 52
+
+Time = 2061s
+
+ExecutionTime = 1.825055 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0054352266, Final residual = 8.4762179e-13, No Iterations 52
+
+Time = 2062s
+
+ExecutionTime = 1.859361 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0051611946, Final residual = 8.7382443e-13, No Iterations 52
+
+Time = 2063s
+
+ExecutionTime = 1.893398 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0049682179, Final residual = 9.0940708e-13, No Iterations 52
+
+Time = 2064s
+
+ExecutionTime = 1.925172 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0046826789, Final residual = 9.2317851e-13, No Iterations 52
+
+Time = 2065s
+
+ExecutionTime = 1.96397 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.004486252, Final residual = 9.4888685e-13, No Iterations 52
+
+Time = 2066s
+
+ExecutionTime = 1.998879 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0042051925, Final residual = 9.5368309e-13, No Iterations 52
+
+Time = 2067s
+
+ExecutionTime = 2.032738 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.004009666, Final residual = 9.6913101e-13, No Iterations 52
+
+Time = 2068s
+
+ExecutionTime = 2.066638 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0037451923, Final residual = 9.6354525e-13, No Iterations 52
+
+Time = 2069s
+
+ExecutionTime = 2.104089 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0035395798, Final residual = 9.693136e-13, No Iterations 52
+
+Time = 2070s
+
+ExecutionTime = 2.138301 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0032919443, Final residual = 9.5398363e-13, No Iterations 52
+
+Time = 2071s
+
+ExecutionTime = 2.171293 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0030878798, Final residual = 9.4452492e-13, No Iterations 52
+
+Time = 2072s
+
+ExecutionTime = 2.205979 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0028515304, Final residual = 9.1597743e-13, No Iterations 52
+
+Time = 2073s
+
+ExecutionTime = 2.240746 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0026620655, Final residual = 9.0098231e-13, No Iterations 52
+
+Time = 2074s
+
+ExecutionTime = 2.282158 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0024436795, Final residual = 8.6457077e-13, No Iterations 52
+
+Time = 2075s
+
+ExecutionTime = 2.315992 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0022666792, Final residual = 8.3501944e-13, No Iterations 52
+
+Time = 2076s
+
+ExecutionTime = 2.348749 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0020725402, Final residual = 7.91825e-13, No Iterations 52
+
+Time = 2077s
+
+ExecutionTime = 2.383459 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0019137292, Final residual = 7.4975838e-13, No Iterations 52
+
+Time = 2078s
+
+ExecutionTime = 2.421707 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0017397827, Final residual = 6.9885068e-13, No Iterations 52
+
+Time = 2079s
+
+ExecutionTime = 2.453983 s  ClockTime = 2 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0016009959, Final residual = 9.6310426e-13, No Iterations 51
+
+Time = 2080s
+
+ExecutionTime = 2.487586 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0014533024, Final residual = 8.7321979e-13, No Iterations 51
+
+Time = 2081s
+
+ExecutionTime = 2.519696 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0013346755, Final residual = 8.0019619e-13, No Iterations 51
+
+Time = 2082s
+
+ExecutionTime = 2.560181 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0012117847, Final residual = 7.1660196e-13, No Iterations 51
+
+Time = 2083s
+
+ExecutionTime = 2.592162 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0011147247, Final residual = 9.6850683e-13, No Iterations 50
+
+Time = 2084s
+
+ExecutionTime = 2.623607 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0010158812, Final residual = 8.3807888e-13, No Iterations 50
+
+Time = 2085s
+
+ExecutionTime = 2.654926 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00093822106, Final residual = 7.1462956e-13, No Iterations 50
+
+Time = 2086s
+
+ExecutionTime = 2.691484 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00086050996, Final residual = 8.7376547e-13, No Iterations 49
+
+Time = 2087s
+
+ExecutionTime = 2.724148 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0007995647, Final residual = 7.2422963e-13, No Iterations 49
+
+Time = 2088s
+
+ExecutionTime = 2.756619 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00074434875, Final residual = 9.0085297e-13, No Iterations 48
+
+Time = 2089s
+
+ExecutionTime = 2.788955 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00069979845, Final residual = 7.6976382e-13, No Iterations 48
+
+Time = 2090s
+
+ExecutionTime = 2.822139 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00065950412, Final residual = 9.8239127e-13, No Iterations 47
+
+Time = 2091s
+
+ExecutionTime = 2.859696 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00062814606, Final residual = 8.5832093e-13, No Iterations 47
+
+Time = 2092s
+
+ExecutionTime = 2.892787 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00060025741, Final residual = 7.2459895e-13, No Iterations 47
+
+Time = 2093s
+
+ExecutionTime = 2.927385 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00057865372, Final residual = 9.1404107e-13, No Iterations 46
+
+Time = 2094s
+
+ExecutionTime = 2.956818 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00055831534, Final residual = 7.6912351e-13, No Iterations 46
+
+Time = 2095s
+
+ExecutionTime = 2.994433 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00054159234, Final residual = 9.7171967e-13, No Iterations 45
+
+Time = 2096s
+
+ExecutionTime = 3.027682 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0005270692, Final residual = 8.3148403e-13, No Iterations 45
+
+Time = 2097s
+
+ExecutionTime = 3.060366 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00051400432, Final residual = 7.1982598e-13, No Iterations 45
+
+Time = 2098s
+
+ExecutionTime = 3.092473 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00050392214, Final residual = 9.3011696e-13, No Iterations 44
+
+Time = 2099s
+
+ExecutionTime = 3.120341 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00049151002, Final residual = 8.3022021e-13, No Iterations 44
+
+Time = 2100s
+
+ExecutionTime = 3.155605 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0004842203, Final residual = 7.4258225e-13, No Iterations 44
+
+Time = 2101s
+
+ExecutionTime = 3.186243 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00047454846, Final residual = 6.8167532e-13, No Iterations 44
+
+Time = 2102s
+
+ExecutionTime = 3.215127 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00046894838, Final residual = 9.3087089e-13, No Iterations 43
+
+Time = 2103s
+
+ExecutionTime = 3.244337 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00045934426, Final residual = 8.8225879e-13, No Iterations 43
+
+Time = 2104s
+
+ExecutionTime = 3.272274 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00045504811, Final residual = 8.4207348e-13, No Iterations 43
+
+Time = 2105s
+
+ExecutionTime = 3.304963 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00044688339, Final residual = 8.1939169e-13, No Iterations 43
+
+Time = 2106s
+
+ExecutionTime = 3.333078 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0004430891, Final residual = 7.9634319e-13, No Iterations 43
+
+Time = 2107s
+
+ExecutionTime = 3.362013 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00043371568, Final residual = 7.8095578e-13, No Iterations 43
+
+Time = 2108s
+
+ExecutionTime = 3.389555 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00042979106, Final residual = 7.6891142e-13, No Iterations 43
+
+Time = 2109s
+
+ExecutionTime = 3.420763 s  ClockTime = 3 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00042147435, Final residual = 7.6874152e-13, No Iterations 43
+
+Time = 2110s
+
+ExecutionTime = 3.456197 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00041824511, Final residual = 7.710134e-13, No Iterations 43
+
+Time = 2111s
+
+ExecutionTime = 3.486027 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00040942489, Final residual = 7.748814e-13, No Iterations 43
+
+Time = 2112s
+
+ExecutionTime = 3.518881 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00040643512, Final residual = 7.7400462e-13, No Iterations 43
+
+Time = 2113s
+
+ExecutionTime = 3.548084 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00039735166, Final residual = 7.8395128e-13, No Iterations 43
+
+Time = 2114s
+
+ExecutionTime = 3.583616 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00039472022, Final residual = 7.823726e-13, No Iterations 43
+
+Time = 2115s
+
+ExecutionTime = 3.614098 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00038442771, Final residual = 7.8646015e-13, No Iterations 43
+
+Time = 2116s
+
+ExecutionTime = 3.643683 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00038293074, Final residual = 7.8744021e-13, No Iterations 43
+
+Time = 2117s
+
+ExecutionTime = 3.673486 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00037302099, Final residual = 7.9128002e-13, No Iterations 43
+
+Time = 2118s
+
+ExecutionTime = 3.701286 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00037141085, Final residual = 7.9036321e-13, No Iterations 43
+
+Time = 2119s
+
+ExecutionTime = 3.733106 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00036074531, Final residual = 7.9438613e-13, No Iterations 43
+
+Time = 2120s
+
+ExecutionTime = 3.76316 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00035849031, Final residual = 7.9294567e-13, No Iterations 43
+
+Time = 2121s
+
+ExecutionTime = 3.7913 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00034858582, Final residual = 7.9545535e-13, No Iterations 43
+
+Time = 2122s
+
+ExecutionTime = 3.820697 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00034634779, Final residual = 7.9093768e-13, No Iterations 43
+
+Time = 2123s
+
+ExecutionTime = 3.848329 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00033631535, Final residual = 7.9887261e-13, No Iterations 43
+
+Time = 2124s
+
+ExecutionTime = 3.880655 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00033453562, Final residual = 7.9404526e-13, No Iterations 43
+
+Time = 2125s
+
+ExecutionTime = 3.909952 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00032448054, Final residual = 7.9351878e-13, No Iterations 43
+
+Time = 2126s
+
+ExecutionTime = 3.937225 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00032236262, Final residual = 7.8602941e-13, No Iterations 43
+
+Time = 2127s
+
+ExecutionTime = 3.965576 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00031212775, Final residual = 7.8338882e-13, No Iterations 43
+
+Time = 2128s
+
+ExecutionTime = 3.992658 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00031018642, Final residual = 7.7428548e-13, No Iterations 43
+
+Time = 2129s
+
+ExecutionTime = 4.025355 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0003008862, Final residual = 7.7188883e-13, No Iterations 43
+
+Time = 2130s
+
+ExecutionTime = 4.05585 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00029887292, Final residual = 7.6007716e-13, No Iterations 43
+
+Time = 2131s
+
+ExecutionTime = 4.082906 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.000289258, Final residual = 7.5669296e-13, No Iterations 43
+
+Time = 2132s
+
+ExecutionTime = 4.111664 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00028645297, Final residual = 7.4251448e-13, No Iterations 43
+
+Time = 2133s
+
+ExecutionTime = 4.140198 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00027766566, Final residual = 7.3776649e-13, No Iterations 43
+
+Time = 2134s
+
+ExecutionTime = 4.17434 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00027605635, Final residual = 7.2285707e-13, No Iterations 43
+
+Time = 2135s
+
+ExecutionTime = 4.206358 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00026699635, Final residual = 7.1632447e-13, No Iterations 43
+
+Time = 2136s
+
+ExecutionTime = 4.233287 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00026586782, Final residual = 7.0134511e-13, No Iterations 43
+
+Time = 2137s
+
+ExecutionTime = 4.261582 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0002562363, Final residual = 6.9290292e-13, No Iterations 43
+
+Time = 2138s
+
+ExecutionTime = 4.288552 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00025443503, Final residual = 6.7643254e-13, No Iterations 43
+
+Time = 2139s
+
+ExecutionTime = 4.32263 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00024556588, Final residual = 9.8765742e-13, No Iterations 42
+
+Time = 2140s
+
+ExecutionTime = 4.355503 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00024415718, Final residual = 9.6119127e-13, No Iterations 42
+
+Time = 2141s
+
+ExecutionTime = 4.388475 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00023623832, Final residual = 9.4810287e-13, No Iterations 42
+
+Time = 2142s
+
+ExecutionTime = 4.417053 s  ClockTime = 4 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00023559689, Final residual = 9.2155888e-13, No Iterations 42
+
+Time = 2143s
+
+ExecutionTime = 4.445638 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00022719606, Final residual = 9.0778028e-13, No Iterations 42
+
+Time = 2144s
+
+ExecutionTime = 4.472141 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00022527529, Final residual = 8.8012098e-13, No Iterations 42
+
+Time = 2145s
+
+ExecutionTime = 4.499541 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00021793548, Final residual = 8.6692667e-13, No Iterations 42
+
+Time = 2146s
+
+ExecutionTime = 4.533776 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00021683647, Final residual = 8.3891181e-13, No Iterations 42
+
+Time = 2147s
+
+ExecutionTime = 4.561479 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00020980971, Final residual = 8.2595707e-13, No Iterations 42
+
+Time = 2148s
+
+ExecutionTime = 4.588122 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00020937801, Final residual = 7.9848404e-13, No Iterations 42
+
+Time = 2149s
+
+ExecutionTime = 4.614694 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00020197828, Final residual = 7.853742e-13, No Iterations 42
+
+Time = 2150s
+
+ExecutionTime = 4.641463 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00020026716, Final residual = 7.56946e-13, No Iterations 42
+
+Time = 2151s
+
+ExecutionTime = 4.671902 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00019399309, Final residual = 7.4534333e-13, No Iterations 42
+
+Time = 2152s
+
+ExecutionTime = 4.701313 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00019298189, Final residual = 7.1718588e-13, No Iterations 42
+
+Time = 2153s
+
+ExecutionTime = 4.729012 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00018714319, Final residual = 7.0731472e-13, No Iterations 42
+
+Time = 2154s
+
+ExecutionTime = 4.755519 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00018675519, Final residual = 6.7993985e-13, No Iterations 42
+
+Time = 2155s
+
+ExecutionTime = 4.782149 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00018022326, Final residual = 9.904626e-13, No Iterations 41
+
+Time = 2156s
+
+ExecutionTime = 4.810282 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00017931292, Final residual = 9.534021e-13, No Iterations 41
+
+Time = 2157s
+
+ExecutionTime = 4.839807 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00017334101, Final residual = 9.3799487e-13, No Iterations 41
+
+Time = 2158s
+
+ExecutionTime = 4.865878 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00017306571, Final residual = 9.0122611e-13, No Iterations 41
+
+Time = 2159s
+
+ExecutionTime = 4.896527 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00016765961, Final residual = 8.8848128e-13, No Iterations 41
+
+Time = 2160s
+
+ExecutionTime = 4.922602 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00016780504, Final residual = 8.4645418e-13, No Iterations 41
+
+Time = 2161s
+
+ExecutionTime = 4.951113 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00016188188, Final residual = 8.3639599e-13, No Iterations 41
+
+Time = 2162s
+
+ExecutionTime = 4.982443 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00016107982, Final residual = 8.0181319e-13, No Iterations 41
+
+Time = 2163s
+
+ExecutionTime = 5.009341 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00015598864, Final residual = 7.9317264e-13, No Iterations 41
+
+Time = 2164s
+
+ExecutionTime = 5.036578 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00015622989, Final residual = 7.6024428e-13, No Iterations 41
+
+Time = 2165s
+
+ExecutionTime = 5.062569 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00015111237, Final residual = 7.518842e-13, No Iterations 41
+
+Time = 2166s
+
+ExecutionTime = 5.08943 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00015149542, Final residual = 7.2101287e-13, No Iterations 41
+
+Time = 2167s
+
+ExecutionTime = 5.120794 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00014634199, Final residual = 7.1405782e-13, No Iterations 41
+
+Time = 2168s
+
+ExecutionTime = 5.149243 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00014611345, Final residual = 6.8455678e-13, No Iterations 41
+
+Time = 2169s
+
+ExecutionTime = 5.175426 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00014125858, Final residual = 6.7854982e-13, No Iterations 41
+
+Time = 2170s
+
+ExecutionTime = 5.201954 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0001417312, Final residual = 9.6239537e-13, No Iterations 40
+
+Time = 2171s
+
+ExecutionTime = 5.228228 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00013705774, Final residual = 9.5534767e-13, No Iterations 40
+
+Time = 2172s
+
+ExecutionTime = 5.257238 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00013824438, Final residual = 9.1590622e-13, No Iterations 40
+
+Time = 2173s
+
+ExecutionTime = 5.285151 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00013314865, Final residual = 9.0974587e-13, No Iterations 40
+
+Time = 2174s
+
+ExecutionTime = 5.310106 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00013333756, Final residual = 8.7107815e-13, No Iterations 40
+
+Time = 2175s
+
+ExecutionTime = 5.337451 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00012904202, Final residual = 8.6640522e-13, No Iterations 40
+
+Time = 2176s
+
+ExecutionTime = 5.363022 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00012998259, Final residual = 8.3075145e-13, No Iterations 40
+
+Time = 2177s
+
+ExecutionTime = 5.390251 s  ClockTime = 5 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00012534554, Final residual = 8.2642923e-13, No Iterations 40
+
+Time = 2178s
+
+ExecutionTime = 5.417136 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00012618075, Final residual = 7.9032495e-13, No Iterations 40
+
+Time = 2179s
+
+ExecutionTime = 5.443359 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00012164134, Final residual = 7.887693e-13, No Iterations 40
+
+Time = 2180s
+
+ExecutionTime = 5.470196 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00012148699, Final residual = 7.5475714e-13, No Iterations 40
+
+Time = 2181s
+
+ExecutionTime = 5.495418 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00011623303, Final residual = 7.5285401e-13, No Iterations 40
+
+Time = 2182s
+
+ExecutionTime = 5.522349 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0001179638, Final residual = 7.2003484e-13, No Iterations 40
+
+Time = 2183s
+
+ExecutionTime = 5.552096 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00011311263, Final residual = 7.1959698e-13, No Iterations 40
+
+Time = 2184s
+
+ExecutionTime = 5.579503 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00011514062, Final residual = 6.8795807e-13, No Iterations 40
+
+Time = 2185s
+
+ExecutionTime = 5.606181 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00011042459, Final residual = 6.8809297e-13, No Iterations 40
+
+Time = 2186s
+
+ExecutionTime = 5.632676 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00011159186, Final residual = 9.7325791e-13, No Iterations 39
+
+Time = 2187s
+
+ExecutionTime = 5.657715 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0001076003, Final residual = 9.7511713e-13, No Iterations 39
+
+Time = 2188s
+
+ExecutionTime = 5.688429 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.0001098989, Final residual = 9.3087133e-13, No Iterations 39
+
+Time = 2189s
+
+ExecutionTime = 5.713495 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00010640731, Final residual = 9.3325065e-13, No Iterations 39
+
+Time = 2190s
+
+ExecutionTime = 5.73856 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00010660797, Final residual = 8.8935225e-13, No Iterations 39
+
+Time = 2191s
+
+ExecutionTime = 5.763617 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00010112133, Final residual = 8.9272141e-13, No Iterations 39
+
+Time = 2192s
+
+ExecutionTime = 5.788489 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00010302291, Final residual = 8.511318e-13, No Iterations 39
+
+Time = 2193s
+
+ExecutionTime = 5.81724 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 9.8790823e-05, Final residual = 8.5502181e-13, No Iterations 39
+
+Time = 2194s
+
+ExecutionTime = 5.845035 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 0.00010069346, Final residual = 8.1130405e-13, No Iterations 39
+
+Time = 2195s
+
+ExecutionTime = 5.869668 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 9.7248193e-05, Final residual = 8.1925701e-13, No Iterations 39
+
+Time = 2196s
+
+ExecutionTime = 5.894714 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 9.9427533e-05, Final residual = 7.7622112e-13, No Iterations 39
+
+Time = 2197s
+
+ExecutionTime = 5.919306 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 9.545811e-05, Final residual = 7.8365008e-13, No Iterations 39
+
+Time = 2198s
+
+ExecutionTime = 5.946186 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 9.6769182e-05, Final residual = 7.4150911e-13, No Iterations 39
+
+Time = 2199s
+
+ExecutionTime = 5.975597 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 9.3758026e-05, Final residual = 7.4995445e-13, No Iterations 39
+
+Time = 2200s
+
+ExecutionTime = 6.003475 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 9.4149482e-05, Final residual = 7.0909867e-13, No Iterations 39
+
+Time = 2201s
+
+ExecutionTime = 6.029452 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 8.9669464e-05, Final residual = 7.1676027e-13, No Iterations 39
+
+Time = 2202s
+
+ExecutionTime = 6.054523 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 9.1931991e-05, Final residual = 6.7709407e-13, No Iterations 39
+
+Time = 2203s
+
+ExecutionTime = 6.079044 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 8.8104793e-05, Final residual = 6.8707399e-13, No Iterations 39
+
+Time = 2204s
+
+ExecutionTime = 6.110988 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 8.9881213e-05, Final residual = 9.5916221e-13, No Iterations 38
+
+Time = 2205s
+
+ExecutionTime = 6.137806 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 8.6325804e-05, Final residual = 9.7378553e-13, No Iterations 38
+
+Time = 2206s
+
+ExecutionTime = 6.163441 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 8.8497848e-05, Final residual = 9.1631583e-13, No Iterations 38
+
+Time = 2207s
+
+ExecutionTime = 6.190034 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 8.5365609e-05, Final residual = 9.3155603e-13, No Iterations 38
+
+Time = 2208s
+
+ExecutionTime = 6.215738 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 8.7942698e-05, Final residual = 8.7448931e-13, No Iterations 38
+
+Time = 2209s
+
+ExecutionTime = 6.244197 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 8.4807702e-05, Final residual = 8.8986491e-13, No Iterations 38
+
+Time = 2210s
+
+ExecutionTime = 6.272863 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 8.4386205e-05, Final residual = 8.3027475e-13, No Iterations 38
+
+Time = 2211s
+
+ExecutionTime = 6.297607 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 8.0132869e-05, Final residual = 8.4736257e-13, No Iterations 38
+
+Time = 2212s
+
+ExecutionTime = 6.322926 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 8.2666757e-05, Final residual = 7.9174493e-13, No Iterations 38
+
+Time = 2213s
+
+ExecutionTime = 6.347431 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.9193279e-05, Final residual = 8.0907055e-13, No Iterations 38
+
+Time = 2214s
+
+ExecutionTime = 6.373697 s  ClockTime = 6 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 8.1648e-05, Final residual = 7.5517711e-13, No Iterations 38
+
+Time = 2215s
+
+ExecutionTime = 6.401195 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.8162577e-05, Final residual = 7.7389406e-13, No Iterations 38
+
+Time = 2216s
+
+ExecutionTime = 6.426867 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 8.029161e-05, Final residual = 7.1974276e-13, No Iterations 38
+
+Time = 2217s
+
+ExecutionTime = 6.452589 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.7377924e-05, Final residual = 7.3774972e-13, No Iterations 38
+
+Time = 2218s
+
+ExecutionTime = 6.478288 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.9630405e-05, Final residual = 6.8597848e-13, No Iterations 38
+
+Time = 2219s
+
+ExecutionTime = 6.502227 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.6873735e-05, Final residual = 7.0530136e-13, No Iterations 38
+
+Time = 2220s
+
+ExecutionTime = 6.530673 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.7526583e-05, Final residual = 9.6844385e-13, No Iterations 37
+
+Time = 2221s
+
+ExecutionTime = 6.555302 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.313047e-05, Final residual = 9.985504e-13, No Iterations 37
+
+Time = 2222s
+
+ExecutionTime = 6.57913 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.528185e-05, Final residual = 9.2305403e-13, No Iterations 37
+
+Time = 2223s
+
+ExecutionTime = 6.604394 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.2039285e-05, Final residual = 9.5362216e-13, No Iterations 37
+
+Time = 2224s
+
+ExecutionTime = 6.627997 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.4722157e-05, Final residual = 8.7711845e-13, No Iterations 37
+
+Time = 2225s
+
+ExecutionTime = 6.652262 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.1541967e-05, Final residual = 9.093747e-13, No Iterations 37
+
+Time = 2226s
+
+ExecutionTime = 6.680564 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.4036782e-05, Final residual = 8.3495741e-13, No Iterations 37
+
+Time = 2227s
+
+ExecutionTime = 6.704974 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.0925099e-05, Final residual = 8.6853115e-13, No Iterations 37
+
+Time = 2228s
+
+ExecutionTime = 6.728423 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.3182764e-05, Final residual = 7.9427922e-13, No Iterations 37
+
+Time = 2229s
+
+ExecutionTime = 6.752431 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.0707091e-05, Final residual = 8.2744073e-13, No Iterations 37
+
+Time = 2230s
+
+ExecutionTime = 6.776068 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.1527779e-05, Final residual = 7.5594599e-13, No Iterations 37
+
+Time = 2231s
+
+ExecutionTime = 6.800586 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.7754848e-05, Final residual = 7.9018157e-13, No Iterations 37
+
+Time = 2232s
+
+ExecutionTime = 6.831661 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 7.0480945e-05, Final residual = 7.1864329e-13, No Iterations 37
+
+Time = 2233s
+
+ExecutionTime = 6.858042 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.6745692e-05, Final residual = 7.5274465e-13, No Iterations 37
+
+Time = 2234s
+
+ExecutionTime = 6.881507 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.8856683e-05, Final residual = 6.8349824e-13, No Iterations 37
+
+Time = 2235s
+
+ExecutionTime = 6.905569 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.6016708e-05, Final residual = 7.1892167e-13, No Iterations 37
+
+Time = 2236s
+
+ExecutionTime = 6.929171 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.8988238e-05, Final residual = 9.6481212e-13, No Iterations 36
+
+Time = 2237s
+
+ExecutionTime = 6.951822 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.627928e-05, Final residual = 6.855442e-13, No Iterations 37
+
+Time = 2238s
+
+ExecutionTime = 6.979512 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.8923512e-05, Final residual = 9.1786949e-13, No Iterations 36
+
+Time = 2239s
+
+ExecutionTime = 7.006742 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.6184213e-05, Final residual = 9.7408206e-13, No Iterations 36
+
+Time = 2240s
+
+ExecutionTime = 7.031377 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.6979807e-05, Final residual = 8.7342332e-13, No Iterations 36
+
+Time = 2241s
+
+ExecutionTime = 7.063479 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.3007677e-05, Final residual = 9.2984088e-13, No Iterations 36
+
+Time = 2242s
+
+ExecutionTime = 7.086467 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.5762451e-05, Final residual = 8.3136484e-13, No Iterations 36
+
+Time = 2243s
+
+ExecutionTime = 7.110124 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.2610841e-05, Final residual = 8.9074282e-13, No Iterations 36
+
+Time = 2244s
+
+ExecutionTime = 7.140654 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.5634224e-05, Final residual = 7.9211831e-13, No Iterations 36
+
+Time = 2245s
+
+ExecutionTime = 7.16478 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.2482796e-05, Final residual = 8.5173923e-13, No Iterations 36
+
+Time = 2246s
+
+ExecutionTime = 7.190173 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.4640593e-05, Final residual = 7.5603813e-13, No Iterations 36
+
+Time = 2247s
+
+ExecutionTime = 7.21338 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.1845492e-05, Final residual = 8.1676325e-13, No Iterations 36
+
+Time = 2248s
+
+ExecutionTime = 7.236123 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.4762342e-05, Final residual = 7.198381e-13, No Iterations 36
+
+Time = 2249s
+
+ExecutionTime = 7.262181 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.2575196e-05, Final residual = 7.8217234e-13, No Iterations 36
+
+Time = 2250s
+
+ExecutionTime = 7.288856 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.3574855e-05, Final residual = 6.8739135e-13, No Iterations 36
+
+Time = 2251s
+
+ExecutionTime = 7.314514 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.9771893e-05, Final residual = 7.5048009e-13, No Iterations 36
+
+Time = 2252s
+
+ExecutionTime = 7.342414 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.2465495e-05, Final residual = 9.7486963e-13, No Iterations 35
+
+Time = 2253s
+
+ExecutionTime = 7.370584 s  ClockTime = 7 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.9145198e-05, Final residual = 7.1934368e-13, No Iterations 36
+
+Time = 2254s
+
+ExecutionTime = 7.393931 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.2000722e-05, Final residual = 9.3268504e-13, No Iterations 35
+
+Time = 2255s
+
+ExecutionTime = 7.419493 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.9259954e-05, Final residual = 6.9138074e-13, No Iterations 36
+
+Time = 2256s
+
+ExecutionTime = 7.444777 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.2441601e-05, Final residual = 8.8952168e-13, No Iterations 35
+
+Time = 2257s
+
+ExecutionTime = 7.467256 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.9341854e-05, Final residual = 9.8591582e-13, No Iterations 35
+
+Time = 2258s
+
+ExecutionTime = 7.492228 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.1631381e-05, Final residual = 8.4997482e-13, No Iterations 35
+
+Time = 2259s
+
+ExecutionTime = 7.515761 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.9525148e-05, Final residual = 9.4821839e-13, No Iterations 35
+
+Time = 2260s
+
+ExecutionTime = 7.538205 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 6.061074e-05, Final residual = 8.1113037e-13, No Iterations 35
+
+Time = 2261s
+
+ExecutionTime = 7.56536 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.6784853e-05, Final residual = 9.0914659e-13, No Iterations 35
+
+Time = 2262s
+
+ExecutionTime = 7.590855 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.9732505e-05, Final residual = 7.7521444e-13, No Iterations 35
+
+Time = 2263s
+
+ExecutionTime = 7.614177 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.6567356e-05, Final residual = 8.745192e-13, No Iterations 35
+
+Time = 2264s
+
+ExecutionTime = 7.637866 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.9553937e-05, Final residual = 7.3965215e-13, No Iterations 35
+
+Time = 2265s
+
+ExecutionTime = 7.660288 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.6681543e-05, Final residual = 8.3809666e-13, No Iterations 35
+
+Time = 2266s
+
+ExecutionTime = 7.682814 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.9349315e-05, Final residual = 7.0636917e-13, No Iterations 35
+
+Time = 2267s
+
+ExecutionTime = 7.710474 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.666518e-05, Final residual = 8.0566786e-13, No Iterations 35
+
+Time = 2268s
+
+ExecutionTime = 7.736053 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.9907131e-05, Final residual = 6.7340397e-13, No Iterations 35
+
+Time = 2269s
+
+ExecutionTime = 7.758892 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.7418615e-05, Final residual = 7.731857e-13, No Iterations 35
+
+Time = 2270s
+
+ExecutionTime = 7.783071 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.8274315e-05, Final residual = 9.6208602e-13, No Iterations 34
+
+Time = 2271s
+
+ExecutionTime = 7.805713 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.4484859e-05, Final residual = 7.428598e-13, No Iterations 35
+
+Time = 2272s
+
+ExecutionTime = 7.83159 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.7801825e-05, Final residual = 9.1665191e-13, No Iterations 34
+
+Time = 2273s
+
+ExecutionTime = 7.860274 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.4822079e-05, Final residual = 7.1377616e-13, No Iterations 35
+
+Time = 2274s
+
+ExecutionTime = 7.889716 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.750661e-05, Final residual = 8.7413078e-13, No Iterations 34
+
+Time = 2275s
+
+ExecutionTime = 7.911565 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.4548661e-05, Final residual = 6.8694553e-13, No Iterations 35
+
+Time = 2276s
+
+ExecutionTime = 7.93436 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.7396978e-05, Final residual = 8.3426847e-13, No Iterations 34
+
+Time = 2277s
+
+ExecutionTime = 7.958035 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.4693106e-05, Final residual = 9.8283549e-13, No Iterations 34
+
+Time = 2278s
+
+ExecutionTime = 7.979852 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.7408292e-05, Final residual = 7.9623383e-13, No Iterations 34
+
+Time = 2279s
+
+ExecutionTime = 8.006106 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.5530776e-05, Final residual = 9.4700285e-13, No Iterations 34
+
+Time = 2280s
+
+ExecutionTime = 8.030966 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.6836692e-05, Final residual = 7.5913415e-13, No Iterations 34
+
+Time = 2281s
+
+ExecutionTime = 8.052875 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.2875671e-05, Final residual = 9.0966861e-13, No Iterations 34
+
+Time = 2282s
+
+ExecutionTime = 8.075663 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.561044e-05, Final residual = 7.2487109e-13, No Iterations 34
+
+Time = 2283s
+
+ExecutionTime = 8.098797 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.2610088e-05, Final residual = 8.7661118e-13, No Iterations 34
+
+Time = 2284s
+
+ExecutionTime = 8.120725 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.5850946e-05, Final residual = 6.9174764e-13, No Iterations 34
+
+Time = 2285s
+
+ExecutionTime = 8.14743 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.3105475e-05, Final residual = 8.4313986e-13, No Iterations 34
+
+Time = 2286s
+
+ExecutionTime = 8.170741 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.6182758e-05, Final residual = 9.9227376e-13, No Iterations 33
+
+Time = 2287s
+
+ExecutionTime = 8.192604 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.3483485e-05, Final residual = 8.1276633e-13, No Iterations 34
+
+Time = 2288s
+
+ExecutionTime = 8.214726 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.6452698e-05, Final residual = 9.4845736e-13, No Iterations 33
+
+Time = 2289s
+
+ExecutionTime = 8.238351 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.3985827e-05, Final residual = 7.8296368e-13, No Iterations 34
+
+Time = 2290s
+
+ExecutionTime = 8.260825 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.4967811e-05, Final residual = 9.0858548e-13, No Iterations 33
+
+Time = 2291s
+
+ExecutionTime = 8.284248 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1485903e-05, Final residual = 7.557806e-13, No Iterations 34
+
+Time = 2292s
+
+ExecutionTime = 8.30883 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.4731568e-05, Final residual = 8.7024306e-13, No Iterations 33
+
+Time = 2293s
+
+ExecutionTime = 8.331195 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1740376e-05, Final residual = 7.2879262e-13, No Iterations 34
+
+Time = 2294s
+
+ExecutionTime = 8.352923 s  ClockTime = 8 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.431178e-05, Final residual = 8.3546386e-13, No Iterations 33
+
+Time = 2295s
+
+ExecutionTime = 8.376167 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1579633e-05, Final residual = 7.0374592e-13, No Iterations 34
+
+Time = 2296s
+
+ExecutionTime = 8.398698 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.4772423e-05, Final residual = 8.0131987e-13, No Iterations 33
+
+Time = 2297s
+
+ExecutionTime = 8.421245 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.2339363e-05, Final residual = 6.7921531e-13, No Iterations 34
+
+Time = 2298s
+
+ExecutionTime = 8.449444 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.5068149e-05, Final residual = 7.7027526e-13, No Iterations 33
+
+Time = 2299s
+
+ExecutionTime = 8.471932 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.271944e-05, Final residual = 9.8023494e-13, No Iterations 33
+
+Time = 2300s
+
+ExecutionTime = 8.493847 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.4026194e-05, Final residual = 7.4090557e-13, No Iterations 33
+
+Time = 2301s
+
+ExecutionTime = 8.515903 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0402905e-05, Final residual = 9.4635952e-13, No Iterations 33
+
+Time = 2302s
+
+ExecutionTime = 8.537506 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.3397272e-05, Final residual = 7.1305592e-13, No Iterations 33
+
+Time = 2303s
+
+ExecutionTime = 8.559093 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0412135e-05, Final residual = 9.1646054e-13, No Iterations 33
+
+Time = 2304s
+
+ExecutionTime = 8.586152 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.3883438e-05, Final residual = 6.8587482e-13, No Iterations 33
+
+Time = 2305s
+
+ExecutionTime = 8.608548 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0832838e-05, Final residual = 8.8575744e-13, No Iterations 33
+
+Time = 2306s
+
+ExecutionTime = 8.630157 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.3483907e-05, Final residual = 9.9704949e-13, No Iterations 32
+
+Time = 2307s
+
+ExecutionTime = 8.653766 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1116939e-05, Final residual = 8.5864405e-13, No Iterations 33
+
+Time = 2308s
+
+ExecutionTime = 8.676156 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.4341919e-05, Final residual = 9.6095466e-13, No Iterations 32
+
+Time = 2309s
+
+ExecutionTime = 8.696812 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1976291e-05, Final residual = 8.3093033e-13, No Iterations 33
+
+Time = 2310s
+
+ExecutionTime = 8.722118 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.3417893e-05, Final residual = 9.2725553e-13, No Iterations 32
+
+Time = 2311s
+
+ExecutionTime = 8.743998 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9690324e-05, Final residual = 8.0592036e-13, No Iterations 33
+
+Time = 2312s
+
+ExecutionTime = 8.765768 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.2653412e-05, Final residual = 8.9636061e-13, No Iterations 32
+
+Time = 2313s
+
+ExecutionTime = 8.786538 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9679385e-05, Final residual = 7.8006093e-13, No Iterations 33
+
+Time = 2314s
+
+ExecutionTime = 8.808548 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.2667642e-05, Final residual = 8.6636916e-13, No Iterations 32
+
+Time = 2315s
+
+ExecutionTime = 8.829243 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0386199e-05, Final residual = 7.5819581e-13, No Iterations 33
+
+Time = 2316s
+
+ExecutionTime = 8.852304 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.3656864e-05, Final residual = 8.3687916e-13, No Iterations 32
+
+Time = 2317s
+
+ExecutionTime = 8.876295 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0993377e-05, Final residual = 7.3570977e-13, No Iterations 33
+
+Time = 2318s
+
+ExecutionTime = 8.898683 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.2184264e-05, Final residual = 8.1049836e-13, No Iterations 32
+
+Time = 2319s
+
+ExecutionTime = 8.919295 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8864427e-05, Final residual = 7.1530737e-13, No Iterations 33
+
+Time = 2320s
+
+ExecutionTime = 8.942664 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.2325117e-05, Final residual = 7.8426825e-13, No Iterations 32
+
+Time = 2321s
+
+ExecutionTime = 8.963484 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9741733e-05, Final residual = 6.942606e-13, No Iterations 33
+
+Time = 2322s
+
+ExecutionTime = 8.984915 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.2733739e-05, Final residual = 7.6058969e-13, No Iterations 32
+
+Time = 2323s
+
+ExecutionTime = 9.01105 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.98377e-05, Final residual = 6.7617282e-13, No Iterations 33
+
+Time = 2324s
+
+ExecutionTime = 9.036141 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.2656651e-05, Final residual = 7.3714549e-13, No Iterations 32
+
+Time = 2325s
+
+ExecutionTime = 9.057572 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0540621e-05, Final residual = 9.8483734e-13, No Iterations 32
+
+Time = 2326s
+
+ExecutionTime = 9.078506 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1980109e-05, Final residual = 7.1554288e-13, No Iterations 32
+
+Time = 2327s
+
+ExecutionTime = 9.099609 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8619296e-05, Final residual = 9.6011503e-13, No Iterations 32
+
+Time = 2328s
+
+ExecutionTime = 9.120988 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.2223761e-05, Final residual = 6.9543011e-13, No Iterations 32
+
+Time = 2329s
+
+ExecutionTime = 9.143793 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9313347e-05, Final residual = 9.3606133e-13, No Iterations 32
+
+Time = 2330s
+
+ExecutionTime = 9.172881 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1944959e-05, Final residual = 6.7651958e-13, No Iterations 32
+
+Time = 2331s
+
+ExecutionTime = 9.197179 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9318985e-05, Final residual = 9.1511478e-13, No Iterations 32
+
+Time = 2332s
+
+ExecutionTime = 9.218479 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.2535786e-05, Final residual = 9.9847012e-13, No Iterations 31
+
+Time = 2333s
+
+ExecutionTime = 9.239037 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0270797e-05, Final residual = 8.9279265e-13, No Iterations 32
+
+Time = 2334s
+
+ExecutionTime = 9.260939 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1970118e-05, Final residual = 9.7376444e-13, No Iterations 31
+
+Time = 2335s
+
+ExecutionTime = 9.281303 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8413822e-05, Final residual = 8.7276872e-13, No Iterations 32
+
+Time = 2336s
+
+ExecutionTime = 9.304043 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.125926e-05, Final residual = 9.5004335e-13, No Iterations 31
+
+Time = 2337s
+
+ExecutionTime = 9.329748 s  ClockTime = 9 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8502138e-05, Final residual = 8.5326679e-13, No Iterations 32
+
+Time = 2338s
+
+ExecutionTime = 9.352972 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1466077e-05, Final residual = 9.2795468e-13, No Iterations 31
+
+Time = 2339s
+
+ExecutionTime = 9.373383 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9117138e-05, Final residual = 8.3596154e-13, No Iterations 32
+
+Time = 2340s
+
+ExecutionTime = 9.395034 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.2465111e-05, Final residual = 9.0767649e-13, No Iterations 31
+
+Time = 2341s
+
+ExecutionTime = 9.415673 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0159076e-05, Final residual = 8.1829935e-13, No Iterations 32
+
+Time = 2342s
+
+ExecutionTime = 9.435982 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1131092e-05, Final residual = 8.8915282e-13, No Iterations 31
+
+Time = 2343s
+
+ExecutionTime = 9.461227 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7784186e-05, Final residual = 8.0233886e-13, No Iterations 32
+
+Time = 2344s
+
+ExecutionTime = 9.484758 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1094521e-05, Final residual = 8.712365e-13, No Iterations 31
+
+Time = 2345s
+
+ExecutionTime = 9.505451 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8268371e-05, Final residual = 7.8622917e-13, No Iterations 32
+
+Time = 2346s
+
+ExecutionTime = 9.527958 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1459983e-05, Final residual = 8.5449717e-13, No Iterations 31
+
+Time = 2347s
+
+ExecutionTime = 9.551474 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8678769e-05, Final residual = 7.7249071e-13, No Iterations 32
+
+Time = 2348s
+
+ExecutionTime = 9.572701 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1620861e-05, Final residual = 8.3794916e-13, No Iterations 31
+
+Time = 2349s
+
+ExecutionTime = 9.598907 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9377981e-05, Final residual = 7.5757293e-13, No Iterations 32
+
+Time = 2350s
+
+ExecutionTime = 9.622665 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.2142328e-05, Final residual = 8.2301282e-13, No Iterations 31
+
+Time = 2351s
+
+ExecutionTime = 9.643459 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9947948e-05, Final residual = 7.4417484e-13, No Iterations 32
+
+Time = 2352s
+
+ExecutionTime = 9.664324 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1590863e-05, Final residual = 8.0877872e-13, No Iterations 31
+
+Time = 2353s
+
+ExecutionTime = 9.685721 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7781594e-05, Final residual = 7.3052434e-13, No Iterations 32
+
+Time = 2354s
+
+ExecutionTime = 9.70616 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0548544e-05, Final residual = 7.9539914e-13, No Iterations 31
+
+Time = 2355s
+
+ExecutionTime = 9.726482 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7562757e-05, Final residual = 7.184685e-13, No Iterations 32
+
+Time = 2356s
+
+ExecutionTime = 9.751845 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0969666e-05, Final residual = 7.8229488e-13, No Iterations 31
+
+Time = 2357s
+
+ExecutionTime = 9.773647 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8477607e-05, Final residual = 7.0571608e-13, No Iterations 32
+
+Time = 2358s
+
+ExecutionTime = 9.794461 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1339782e-05, Final residual = 7.7080673e-13, No Iterations 31
+
+Time = 2359s
+
+ExecutionTime = 9.817225 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8510662e-05, Final residual = 6.9446599e-13, No Iterations 32
+
+Time = 2360s
+
+ExecutionTime = 9.838927 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1372922e-05, Final residual = 7.6003016e-13, No Iterations 31
+
+Time = 2361s
+
+ExecutionTime = 9.859301 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9296969e-05, Final residual = 6.827492e-13, No Iterations 32
+
+Time = 2362s
+
+ExecutionTime = 9.883979 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0758933e-05, Final residual = 7.5013989e-13, No Iterations 31
+
+Time = 2363s
+
+ExecutionTime = 9.90543 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7573402e-05, Final residual = 6.7285272e-13, No Iterations 32
+
+Time = 2364s
+
+ExecutionTime = 9.92787 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0914401e-05, Final residual = 7.4048413e-13, No Iterations 31
+
+Time = 2365s
+
+ExecutionTime = 9.948114 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7894144e-05, Final residual = 6.6256971e-13, No Iterations 32
+
+Time = 2366s
+
+ExecutionTime = 9.96904 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0602861e-05, Final residual = 7.3229971e-13, No Iterations 31
+
+Time = 2367s
+
+ExecutionTime = 9.989002 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8119446e-05, Final residual = 9.8702751e-13, No Iterations 31
+
+Time = 2368s
+
+ExecutionTime = 10.009042 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1449414e-05, Final residual = 7.2389079e-13, No Iterations 31
+
+Time = 2369s
+
+ExecutionTime = 10.035254 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9289863e-05, Final residual = 9.7338319e-13, No Iterations 31
+
+Time = 2370s
+
+ExecutionTime = 10.05762 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1109747e-05, Final residual = 7.1634457e-13, No Iterations 31
+
+Time = 2371s
+
+ExecutionTime = 10.079794 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7529975e-05, Final residual = 9.6211045e-13, No Iterations 31
+
+Time = 2372s
+
+ExecutionTime = 10.100188 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0330362e-05, Final residual = 7.0868093e-13, No Iterations 31
+
+Time = 2373s
+
+ExecutionTime = 10.121859 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7642998e-05, Final residual = 9.4979594e-13, No Iterations 31
+
+Time = 2374s
+
+ExecutionTime = 10.141959 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0658803e-05, Final residual = 7.0180561e-13, No Iterations 31
+
+Time = 2375s
+
+ExecutionTime = 10.16267 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8377851e-05, Final residual = 9.3905183e-13, No Iterations 31
+
+Time = 2376s
+
+ExecutionTime = 10.18825 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1883068e-05, Final residual = 6.9488231e-13, No Iterations 31
+
+Time = 2377s
+
+ExecutionTime = 10.209095 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9621148e-05, Final residual = 9.2729235e-13, No Iterations 31
+
+Time = 2378s
+
+ExecutionTime = 10.229351 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0666328e-05, Final residual = 6.88584e-13, No Iterations 31
+
+Time = 2379s
+
+ExecutionTime = 10.252469 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6997584e-05, Final residual = 9.177182e-13, No Iterations 31
+
+Time = 2380s
+
+ExecutionTime = 10.274846 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0243458e-05, Final residual = 6.8307651e-13, No Iterations 31
+
+Time = 2381s
+
+ExecutionTime = 10.29499 s  ClockTime = 10 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7546124e-05, Final residual = 9.073219e-13, No Iterations 31
+
+Time = 2382s
+
+ExecutionTime = 10.318862 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0514477e-05, Final residual = 6.7869155e-13, No Iterations 31
+
+Time = 2383s
+
+ExecutionTime = 10.340749 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7925093e-05, Final residual = 8.9926602e-13, No Iterations 31
+
+Time = 2384s
+
+ExecutionTime = 10.360905 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1015079e-05, Final residual = 6.7474366e-13, No Iterations 31
+
+Time = 2385s
+
+ExecutionTime = 10.380999 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8829489e-05, Final residual = 8.8979861e-13, No Iterations 31
+
+Time = 2386s
+
+ExecutionTime = 10.402089 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0417931e-05, Final residual = 6.7126184e-13, No Iterations 31
+
+Time = 2387s
+
+ExecutionTime = 10.422141 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7079185e-05, Final residual = 8.8242139e-13, No Iterations 31
+
+Time = 2388s
+
+ExecutionTime = 10.4433 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0455082e-05, Final residual = 6.677585e-13, No Iterations 31
+
+Time = 2389s
+
+ExecutionTime = 10.46793 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7734776e-05, Final residual = 8.7443731e-13, No Iterations 31
+
+Time = 2390s
+
+ExecutionTime = 10.490869 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0574976e-05, Final residual = 6.6489373e-13, No Iterations 31
+
+Time = 2391s
+
+ExecutionTime = 10.511044 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8179363e-05, Final residual = 8.6755758e-13, No Iterations 31
+
+Time = 2392s
+
+ExecutionTime = 10.531695 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1221949e-05, Final residual = 6.6202537e-13, No Iterations 31
+
+Time = 2393s
+
+ExecutionTime = 10.551981 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9238883e-05, Final residual = 8.6012907e-13, No Iterations 31
+
+Time = 2394s
+
+ExecutionTime = 10.572159 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0449964e-05, Final residual = 6.5986007e-13, No Iterations 31
+
+Time = 2395s
+
+ExecutionTime = 10.593737 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6791301e-05, Final residual = 8.5361274e-13, No Iterations 31
+
+Time = 2396s
+
+ExecutionTime = 10.618434 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9970714e-05, Final residual = 9.9604575e-13, No Iterations 30
+
+Time = 2397s
+
+ExecutionTime = 10.638902 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.712118e-05, Final residual = 8.4651436e-13, No Iterations 31
+
+Time = 2398s
+
+ExecutionTime = 10.658991 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0309173e-05, Final residual = 9.9199225e-13, No Iterations 30
+
+Time = 2399s
+
+ExecutionTime = 10.680579 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7862014e-05, Final residual = 8.3976712e-13, No Iterations 31
+
+Time = 2400s
+
+ExecutionTime = 10.701034 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1098008e-05, Final residual = 9.8838683e-13, No Iterations 30
+
+Time = 2401s
+
+ExecutionTime = 10.720754 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8366418e-05, Final residual = 8.3235668e-13, No Iterations 31
+
+Time = 2402s
+
+ExecutionTime = 10.745184 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1111243e-05, Final residual = 9.8577255e-13, No Iterations 30
+
+Time = 2403s
+
+ExecutionTime = 10.76875 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9084315e-05, Final residual = 8.259214e-13, No Iterations 31
+
+Time = 2404s
+
+ExecutionTime = 10.790164 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0612545e-05, Final residual = 9.8263911e-13, No Iterations 30
+
+Time = 2405s
+
+ExecutionTime = 10.811376 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.725602e-05, Final residual = 8.1905314e-13, No Iterations 31
+
+Time = 2406s
+
+ExecutionTime = 10.833851 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.016562e-05, Final residual = 9.8087758e-13, No Iterations 30
+
+Time = 2407s
+
+ExecutionTime = 10.853987 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7053441e-05, Final residual = 8.1293813e-13, No Iterations 31
+
+Time = 2408s
+
+ExecutionTime = 10.876314 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0000732e-05, Final residual = 9.7943534e-13, No Iterations 30
+
+Time = 2409s
+
+ExecutionTime = 10.902345 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7430893e-05, Final residual = 8.0634672e-13, No Iterations 31
+
+Time = 2410s
+
+ExecutionTime = 10.923718 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0391933e-05, Final residual = 9.7907219e-13, No Iterations 30
+
+Time = 2411s
+
+ExecutionTime = 10.943361 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8106236e-05, Final residual = 8.0116083e-13, No Iterations 31
+
+Time = 2412s
+
+ExecutionTime = 10.963633 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1424491e-05, Final residual = 9.7802773e-13, No Iterations 30
+
+Time = 2413s
+
+ExecutionTime = 10.98365 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9276463e-05, Final residual = 7.9607393e-13, No Iterations 31
+
+Time = 2414s
+
+ExecutionTime = 11.003939 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0003487e-05, Final residual = 9.7788802e-13, No Iterations 30
+
+Time = 2415s
+
+ExecutionTime = 11.026173 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6504536e-05, Final residual = 7.9186422e-13, No Iterations 31
+
+Time = 2416s
+
+ExecutionTime = 11.049724 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9985843e-05, Final residual = 9.7703747e-13, No Iterations 30
+
+Time = 2417s
+
+ExecutionTime = 11.072236 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7103917e-05, Final residual = 7.8701519e-13, No Iterations 31
+
+Time = 2418s
+
+ExecutionTime = 11.092598 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0220364e-05, Final residual = 9.7643246e-13, No Iterations 30
+
+Time = 2419s
+
+ExecutionTime = 11.1146 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7639502e-05, Final residual = 7.8431845e-13, No Iterations 31
+
+Time = 2420s
+
+ExecutionTime = 11.135432 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0573835e-05, Final residual = 9.7562957e-13, No Iterations 30
+
+Time = 2421s
+
+ExecutionTime = 11.155999 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.798841e-05, Final residual = 7.8029325e-13, No Iterations 31
+
+Time = 2422s
+
+ExecutionTime = 11.182994 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.100315e-05, Final residual = 9.7529295e-13, No Iterations 30
+
+Time = 2423s
+
+ExecutionTime = 11.204003 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9076768e-05, Final residual = 7.777784e-13, No Iterations 31
+
+Time = 2424s
+
+ExecutionTime = 11.225313 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0641719e-05, Final residual = 9.7495687e-13, No Iterations 30
+
+Time = 2425s
+
+ExecutionTime = 11.246181 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.692707e-05, Final residual = 7.7437739e-13, No Iterations 31
+
+Time = 2426s
+
+ExecutionTime = 11.267095 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9788127e-05, Final residual = 9.754905e-13, No Iterations 30
+
+Time = 2427s
+
+ExecutionTime = 11.286676 s  ClockTime = 11 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7135958e-05, Final residual = 7.724002e-13, No Iterations 31
+
+Time = 2428s
+
+ExecutionTime = 11.311101 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0473652e-05, Final residual = 9.7575713e-13, No Iterations 30
+
+Time = 2429s
+
+ExecutionTime = 11.333175 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.780672e-05, Final residual = 7.6955836e-13, No Iterations 31
+
+Time = 2430s
+
+ExecutionTime = 11.354264 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0736108e-05, Final residual = 9.7697689e-13, No Iterations 30
+
+Time = 2431s
+
+ExecutionTime = 11.373916 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.825011e-05, Final residual = 7.6772795e-13, No Iterations 31
+
+Time = 2432s
+
+ExecutionTime = 11.394358 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1234259e-05, Final residual = 9.7814563e-13, No Iterations 30
+
+Time = 2433s
+
+ExecutionTime = 11.413715 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9134627e-05, Final residual = 7.6502458e-13, No Iterations 31
+
+Time = 2434s
+
+ExecutionTime = 11.434526 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0059618e-05, Final residual = 9.792491e-13, No Iterations 30
+
+Time = 2435s
+
+ExecutionTime = 11.458989 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.657047e-05, Final residual = 7.6365725e-13, No Iterations 31
+
+Time = 2436s
+
+ExecutionTime = 11.484231 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9952802e-05, Final residual = 9.8019488e-13, No Iterations 30
+
+Time = 2437s
+
+ExecutionTime = 11.50602 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6809854e-05, Final residual = 7.610846e-13, No Iterations 31
+
+Time = 2438s
+
+ExecutionTime = 11.526443 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9566298e-05, Final residual = 9.8127196e-13, No Iterations 30
+
+Time = 2439s
+
+ExecutionTime = 11.547938 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7066806e-05, Final residual = 7.5972019e-13, No Iterations 31
+
+Time = 2440s
+
+ExecutionTime = 11.568289 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0515587e-05, Final residual = 9.8204702e-13, No Iterations 30
+
+Time = 2441s
+
+ExecutionTime = 11.587518 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8177794e-05, Final residual = 7.5723791e-13, No Iterations 31
+
+Time = 2442s
+
+ExecutionTime = 11.61132 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.108174e-05, Final residual = 9.8279528e-13, No Iterations 30
+
+Time = 2443s
+
+ExecutionTime = 11.634215 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8764117e-05, Final residual = 7.5610405e-13, No Iterations 31
+
+Time = 2444s
+
+ExecutionTime = 11.656257 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0161011e-05, Final residual = 9.8355223e-13, No Iterations 30
+
+Time = 2445s
+
+ExecutionTime = 11.676032 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6740131e-05, Final residual = 7.5313302e-13, No Iterations 31
+
+Time = 2446s
+
+ExecutionTime = 11.69771 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9949588e-05, Final residual = 9.8495191e-13, No Iterations 30
+
+Time = 2447s
+
+ExecutionTime = 11.717505 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7382577e-05, Final residual = 7.51535e-13, No Iterations 31
+
+Time = 2448s
+
+ExecutionTime = 11.737952 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0555888e-05, Final residual = 9.8613088e-13, No Iterations 30
+
+Time = 2449s
+
+ExecutionTime = 11.763177 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7845064e-05, Final residual = 7.4833714e-13, No Iterations 31
+
+Time = 2450s
+
+ExecutionTime = 11.784627 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.063227e-05, Final residual = 9.8820347e-13, No Iterations 30
+
+Time = 2451s
+
+ExecutionTime = 11.804235 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8364279e-05, Final residual = 7.4639512e-13, No Iterations 31
+
+Time = 2452s
+
+ExecutionTime = 11.824296 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.038848e-05, Final residual = 9.897101e-13, No Iterations 30
+
+Time = 2453s
+
+ExecutionTime = 11.843896 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7101534e-05, Final residual = 7.4327763e-13, No Iterations 31
+
+Time = 2454s
+
+ExecutionTime = 11.863984 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0326107e-05, Final residual = 9.9158836e-13, No Iterations 30
+
+Time = 2455s
+
+ExecutionTime = 11.884357 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7588091e-05, Final residual = 7.4167808e-13, No Iterations 31
+
+Time = 2456s
+
+ExecutionTime = 11.909562 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0491237e-05, Final residual = 9.9361822e-13, No Iterations 30
+
+Time = 2457s
+
+ExecutionTime = 11.931976 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7913958e-05, Final residual = 7.3864298e-13, No Iterations 31
+
+Time = 2458s
+
+ExecutionTime = 11.952481 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0959579e-05, Final residual = 9.9556969e-13, No Iterations 30
+
+Time = 2459s
+
+ExecutionTime = 11.97259 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8942139e-05, Final residual = 7.3766477e-13, No Iterations 31
+
+Time = 2460s
+
+ExecutionTime = 11.99542 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0607921e-05, Final residual = 9.9671591e-13, No Iterations 30
+
+Time = 2461s
+
+ExecutionTime = 12.015651 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7040471e-05, Final residual = 7.3534933e-13, No Iterations 31
+
+Time = 2462s
+
+ExecutionTime = 12.038636 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.965785e-05, Final residual = 9.9783273e-13, No Iterations 30
+
+Time = 2463s
+
+ExecutionTime = 12.063294 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6698764e-05, Final residual = 7.3472274e-13, No Iterations 31
+
+Time = 2464s
+
+ExecutionTime = 12.085224 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.992965e-05, Final residual = 9.9867294e-13, No Iterations 30
+
+Time = 2465s
+
+ExecutionTime = 12.105354 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7541153e-05, Final residual = 7.3304529e-13, No Iterations 31
+
+Time = 2466s
+
+ExecutionTime = 12.126603 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0656976e-05, Final residual = 9.9993728e-13, No Iterations 30
+
+Time = 2467s
+
+ExecutionTime = 12.146099 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8100824e-05, Final residual = 7.3326464e-13, No Iterations 31
+
+Time = 2468s
+
+ExecutionTime = 12.16658 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1035824e-05, Final residual = 6.5506478e-13, No Iterations 31
+
+Time = 2469s
+
+ExecutionTime = 12.193205 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8940338e-05, Final residual = 7.3222073e-13, No Iterations 31
+
+Time = 2470s
+
+ExecutionTime = 12.218202 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9883165e-05, Final residual = 6.5541841e-13, No Iterations 31
+
+Time = 2471s
+
+ExecutionTime = 12.238432 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6520917e-05, Final residual = 7.32503e-13, No Iterations 31
+
+Time = 2472s
+
+ExecutionTime = 12.261167 s  ClockTime = 12 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0051262e-05, Final residual = 6.5584128e-13, No Iterations 31
+
+Time = 2473s
+
+ExecutionTime = 12.282389 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6951835e-05, Final residual = 7.3128297e-13, No Iterations 31
+
+Time = 2474s
+
+ExecutionTime = 12.302571 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9879799e-05, Final residual = 6.5626393e-13, No Iterations 31
+
+Time = 2475s
+
+ExecutionTime = 12.327707 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7410723e-05, Final residual = 7.3151155e-13, No Iterations 31
+
+Time = 2476s
+
+ExecutionTime = 12.349074 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.060103e-05, Final residual = 6.5669192e-13, No Iterations 31
+
+Time = 2477s
+
+ExecutionTime = 12.370875 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.800647e-05, Final residual = 7.300081e-13, No Iterations 31
+
+Time = 2478s
+
+ExecutionTime = 12.390952 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1014761e-05, Final residual = 6.5745115e-13, No Iterations 31
+
+Time = 2479s
+
+ExecutionTime = 12.411935 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8752167e-05, Final residual = 7.2952832e-13, No Iterations 31
+
+Time = 2480s
+
+ExecutionTime = 12.432245 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0290305e-05, Final residual = 6.5797767e-13, No Iterations 31
+
+Time = 2481s
+
+ExecutionTime = 12.452489 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6834719e-05, Final residual = 7.2810096e-13, No Iterations 31
+
+Time = 2482s
+
+ExecutionTime = 12.477472 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0032435e-05, Final residual = 6.5874445e-13, No Iterations 31
+
+Time = 2483s
+
+ExecutionTime = 12.499763 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7440419e-05, Final residual = 7.2729571e-13, No Iterations 31
+
+Time = 2484s
+
+ExecutionTime = 12.520271 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0630657e-05, Final residual = 6.5936479e-13, No Iterations 31
+
+Time = 2485s
+
+ExecutionTime = 12.542257 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7913085e-05, Final residual = 7.2566915e-13, No Iterations 31
+
+Time = 2486s
+
+ExecutionTime = 12.563258 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0714377e-05, Final residual = 6.6034423e-13, No Iterations 31
+
+Time = 2487s
+
+ExecutionTime = 12.583394 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8498918e-05, Final residual = 7.2489934e-13, No Iterations 31
+
+Time = 2488s
+
+ExecutionTime = 12.605009 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0548987e-05, Final residual = 6.6100719e-13, No Iterations 31
+
+Time = 2489s
+
+ExecutionTime = 12.629021 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7259425e-05, Final residual = 7.2304617e-13, No Iterations 31
+
+Time = 2490s
+
+ExecutionTime = 12.650028 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0104595e-05, Final residual = 6.6173731e-13, No Iterations 31
+
+Time = 2491s
+
+ExecutionTime = 12.670101 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7117991e-05, Final residual = 7.2268154e-13, No Iterations 31
+
+Time = 2492s
+
+ExecutionTime = 12.690962 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0032916e-05, Final residual = 6.6235648e-13, No Iterations 31
+
+Time = 2493s
+
+ExecutionTime = 12.711434 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7638098e-05, Final residual = 7.2108201e-13, No Iterations 31
+
+Time = 2494s
+
+ExecutionTime = 12.731732 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0706256e-05, Final residual = 6.6310874e-13, No Iterations 31
+
+Time = 2495s
+
+ExecutionTime = 12.754873 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8574938e-05, Final residual = 7.2085251e-13, No Iterations 31
+
+Time = 2496s
+
+ExecutionTime = 12.776835 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0263106e-05, Final residual = 6.6340472e-13, No Iterations 31
+
+Time = 2497s
+
+ExecutionTime = 12.798106 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6863913e-05, Final residual = 7.2010351e-13, No Iterations 31
+
+Time = 2498s
+
+ExecutionTime = 12.818303 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9616252e-05, Final residual = 6.6363903e-13, No Iterations 31
+
+Time = 2499s
+
+ExecutionTime = 12.840293 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6850762e-05, Final residual = 7.206558e-13, No Iterations 31
+
+Time = 2500s
+
+ExecutionTime = 12.860617 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0226197e-05, Final residual = 6.6332085e-13, No Iterations 31
+
+Time = 2501s
+
+ExecutionTime = 12.881061 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7887297e-05, Final residual = 7.2015054e-13, No Iterations 31
+
+Time = 2502s
+
+ExecutionTime = 12.906388 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1093551e-05, Final residual = 6.6302404e-13, No Iterations 31
+
+Time = 2503s
+
+ExecutionTime = 12.928705 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8664946e-05, Final residual = 7.2111591e-13, No Iterations 31
+
+Time = 2504s
+
+ExecutionTime = 12.949768 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0210892e-05, Final residual = 6.6246568e-13, No Iterations 31
+
+Time = 2505s
+
+ExecutionTime = 12.97305 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.681048e-05, Final residual = 7.2094877e-13, No Iterations 31
+
+Time = 2506s
+
+ExecutionTime = 12.995246 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9904209e-05, Final residual = 6.6189437e-13, No Iterations 31
+
+Time = 2507s
+
+ExecutionTime = 13.015189 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7414398e-05, Final residual = 7.221193e-13, No Iterations 31
+
+Time = 2508s
+
+ExecutionTime = 13.038667 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0819123e-05, Final residual = 6.6113399e-13, No Iterations 31
+
+Time = 2509s
+
+ExecutionTime = 13.062799 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.816181e-05, Final residual = 7.2234277e-13, No Iterations 31
+
+Time = 2510s
+
+ExecutionTime = 13.085174 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.094234e-05, Final residual = 6.6105867e-13, No Iterations 31
+
+Time = 2511s
+
+ExecutionTime = 13.105382 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8970796e-05, Final residual = 7.2302495e-13, No Iterations 31
+
+Time = 2512s
+
+ExecutionTime = 13.125874 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0332909e-05, Final residual = 6.6078439e-13, No Iterations 31
+
+Time = 2513s
+
+ExecutionTime = 13.145943 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6849155e-05, Final residual = 7.224207e-13, No Iterations 31
+
+Time = 2514s
+
+ExecutionTime = 13.165825 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.00928e-05, Final residual = 6.611443e-13, No Iterations 31
+
+Time = 2515s
+
+ExecutionTime = 13.192071 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.697639e-05, Final residual = 7.2238216e-13, No Iterations 31
+
+Time = 2516s
+
+ExecutionTime = 13.214003 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0131686e-05, Final residual = 6.6151536e-13, No Iterations 31
+
+Time = 2517s
+
+ExecutionTime = 13.235406 s  ClockTime = 13 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7614856e-05, Final residual = 7.2119082e-13, No Iterations 31
+
+Time = 2518s
+
+ExecutionTime = 13.256067 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0368938e-05, Final residual = 6.6219733e-13, No Iterations 31
+
+Time = 2519s
+
+ExecutionTime = 13.277458 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7908349e-05, Final residual = 7.2019365e-13, No Iterations 31
+
+Time = 2520s
+
+ExecutionTime = 13.297526 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1123301e-05, Final residual = 6.6348736e-13, No Iterations 31
+
+Time = 2521s
+
+ExecutionTime = 13.319596 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8963849e-05, Final residual = 7.1801464e-13, No Iterations 31
+
+Time = 2522s
+
+ExecutionTime = 13.34743 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9819109e-05, Final residual = 6.6523372e-13, No Iterations 31
+
+Time = 2523s
+
+ExecutionTime = 13.369376 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6378371e-05, Final residual = 7.1706309e-13, No Iterations 31
+
+Time = 2524s
+
+ExecutionTime = 13.390361 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9823864e-05, Final residual = 6.6676134e-13, No Iterations 31
+
+Time = 2525s
+
+ExecutionTime = 13.41402 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.715567e-05, Final residual = 7.1426466e-13, No Iterations 31
+
+Time = 2526s
+
+ExecutionTime = 13.43416 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0219259e-05, Final residual = 6.6860623e-13, No Iterations 31
+
+Time = 2527s
+
+ExecutionTime = 13.454855 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7354908e-05, Final residual = 7.1369961e-13, No Iterations 31
+
+Time = 2528s
+
+ExecutionTime = 13.481467 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0364794e-05, Final residual = 6.7011269e-13, No Iterations 31
+
+Time = 2529s
+
+ExecutionTime = 13.504177 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7977641e-05, Final residual = 7.1153387e-13, No Iterations 31
+
+Time = 2530s
+
+ExecutionTime = 13.524962 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1111836e-05, Final residual = 6.7142601e-13, No Iterations 31
+
+Time = 2531s
+
+ExecutionTime = 13.545599 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.91829e-05, Final residual = 7.1120229e-13, No Iterations 31
+
+Time = 2532s
+
+ExecutionTime = 13.566664 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0377712e-05, Final residual = 6.7182261e-13, No Iterations 31
+
+Time = 2533s
+
+ExecutionTime = 13.587293 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6669014e-05, Final residual = 7.1014791e-13, No Iterations 31
+
+Time = 2534s
+
+ExecutionTime = 13.612385 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9510935e-05, Final residual = 6.7182904e-13, No Iterations 31
+
+Time = 2535s
+
+ExecutionTime = 13.636034 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6740029e-05, Final residual = 7.105503e-13, No Iterations 31
+
+Time = 2536s
+
+ExecutionTime = 13.659059 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0207461e-05, Final residual = 6.7155422e-13, No Iterations 31
+
+Time = 2537s
+
+ExecutionTime = 13.679449 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7676506e-05, Final residual = 7.1007058e-13, No Iterations 31
+
+Time = 2538s
+
+ExecutionTime = 13.700694 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0852738e-05, Final residual = 6.7094934e-13, No Iterations 31
+
+Time = 2539s
+
+ExecutionTime = 13.720851 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8239819e-05, Final residual = 7.1154571e-13, No Iterations 31
+
+Time = 2540s
+
+ExecutionTime = 13.740892 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0965663e-05, Final residual = 6.6990657e-13, No Iterations 31
+
+Time = 2541s
+
+ExecutionTime = 13.76513 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8878747e-05, Final residual = 7.1178284e-13, No Iterations 31
+
+Time = 2542s
+
+ExecutionTime = 13.79392 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0051838e-05, Final residual = 6.6916308e-13, No Iterations 31
+
+Time = 2543s
+
+ExecutionTime = 13.814522 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6705839e-05, Final residual = 7.1304449e-13, No Iterations 31
+
+Time = 2544s
+
+ExecutionTime = 13.835189 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0343697e-05, Final residual = 6.6819262e-13, No Iterations 31
+
+Time = 2545s
+
+ExecutionTime = 13.857912 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7321056e-05, Final residual = 7.1354596e-13, No Iterations 31
+
+Time = 2546s
+
+ExecutionTime = 13.879404 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9858245e-05, Final residual = 6.6752935e-13, No Iterations 31
+
+Time = 2547s
+
+ExecutionTime = 13.899437 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7079959e-05, Final residual = 7.1479271e-13, No Iterations 31
+
+Time = 2548s
+
+ExecutionTime = 13.92562 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0177302e-05, Final residual = 6.6682066e-13, No Iterations 31
+
+Time = 2549s
+
+ExecutionTime = 13.949622 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7912686e-05, Final residual = 7.1486851e-13, No Iterations 31
+
+Time = 2550s
+
+ExecutionTime = 13.972272 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0984276e-05, Final residual = 6.6654203e-13, No Iterations 31
+
+Time = 2551s
+
+ExecutionTime = 13.99358 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8836612e-05, Final residual = 7.161061e-13, No Iterations 31
+
+Time = 2552s
+
+ExecutionTime = 14.016649 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0098081e-05, Final residual = 6.6625087e-13, No Iterations 31
+
+Time = 2553s
+
+ExecutionTime = 14.037347 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6737692e-05, Final residual = 7.1600894e-13, No Iterations 31
+
+Time = 2554s
+
+ExecutionTime = 14.059052 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.969581e-05, Final residual = 6.6601198e-13, No Iterations 31
+
+Time = 2555s
+
+ExecutionTime = 14.08475 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6831664e-05, Final residual = 7.167594e-13, No Iterations 31
+
+Time = 2556s
+
+ExecutionTime = 14.106919 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0248167e-05, Final residual = 6.658471e-13, No Iterations 31
+
+Time = 2557s
+
+ExecutionTime = 14.127493 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7553914e-05, Final residual = 7.1664363e-13, No Iterations 31
+
+Time = 2558s
+
+ExecutionTime = 14.147891 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0415258e-05, Final residual = 6.6565108e-13, No Iterations 31
+
+Time = 2559s
+
+ExecutionTime = 14.168807 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8057139e-05, Final residual = 7.172503e-13, No Iterations 31
+
+Time = 2560s
+
+ExecutionTime = 14.189108 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1097959e-05, Final residual = 6.6536926e-13, No Iterations 31
+
+Time = 2561s
+
+ExecutionTime = 14.212186 s  ClockTime = 14 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9071391e-05, Final residual = 7.1649124e-13, No Iterations 31
+
+Time = 2562s
+
+ExecutionTime = 14.235379 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0269723e-05, Final residual = 6.6529968e-13, No Iterations 31
+
+Time = 2563s
+
+ExecutionTime = 14.256225 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6631986e-05, Final residual = 7.1730846e-13, No Iterations 31
+
+Time = 2564s
+
+ExecutionTime = 14.276825 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9760038e-05, Final residual = 6.6512796e-13, No Iterations 31
+
+Time = 2565s
+
+ExecutionTime = 14.297269 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6905702e-05, Final residual = 7.1637348e-13, No Iterations 31
+
+Time = 2566s
+
+ExecutionTime = 14.317304 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0100452e-05, Final residual = 6.6554795e-13, No Iterations 31
+
+Time = 2567s
+
+ExecutionTime = 14.338488 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7645987e-05, Final residual = 7.1639656e-13, No Iterations 31
+
+Time = 2568s
+
+ExecutionTime = 14.36295 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0892281e-05, Final residual = 6.6584824e-13, No Iterations 31
+
+Time = 2569s
+
+ExecutionTime = 14.385921 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8148009e-05, Final residual = 7.1541487e-13, No Iterations 31
+
+Time = 2570s
+
+ExecutionTime = 14.40616 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.088491e-05, Final residual = 6.6634278e-13, No Iterations 31
+
+Time = 2571s
+
+ExecutionTime = 14.42732 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.888457e-05, Final residual = 7.155422e-13, No Iterations 31
+
+Time = 2572s
+
+ExecutionTime = 14.448981 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0409166e-05, Final residual = 6.6695054e-13, No Iterations 31
+
+Time = 2573s
+
+ExecutionTime = 14.469476 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7025602e-05, Final residual = 7.1420099e-13, No Iterations 31
+
+Time = 2574s
+
+ExecutionTime = 14.494351 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9870088e-05, Final residual = 6.6796644e-13, No Iterations 31
+
+Time = 2575s
+
+ExecutionTime = 14.518503 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6727983e-05, Final residual = 7.1403625e-13, No Iterations 31
+
+Time = 2576s
+
+ExecutionTime = 14.540084 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9723581e-05, Final residual = 6.6864492e-13, No Iterations 31
+
+Time = 2577s
+
+ExecutionTime = 14.561054 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7213811e-05, Final residual = 7.1226566e-13, No Iterations 31
+
+Time = 2578s
+
+ExecutionTime = 14.582709 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0256832e-05, Final residual = 6.6950519e-13, No Iterations 31
+
+Time = 2579s
+
+ExecutionTime = 14.602963 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7902213e-05, Final residual = 7.1169823e-13, No Iterations 31
+
+Time = 2580s
+
+ExecutionTime = 14.624198 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1198153e-05, Final residual = 6.7032116e-13, No Iterations 31
+
+Time = 2581s
+
+ExecutionTime = 14.648688 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9145812e-05, Final residual = 7.1056737e-13, No Iterations 31
+
+Time = 2582s
+
+ExecutionTime = 14.670948 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9963519e-05, Final residual = 6.7090259e-13, No Iterations 31
+
+Time = 2583s
+
+ExecutionTime = 14.690901 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6406205e-05, Final residual = 7.10007e-13, No Iterations 31
+
+Time = 2584s
+
+ExecutionTime = 14.712989 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9895848e-05, Final residual = 6.7181299e-13, No Iterations 31
+
+Time = 2585s
+
+ExecutionTime = 14.733489 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6991873e-05, Final residual = 7.0847903e-13, No Iterations 31
+
+Time = 2586s
+
+ExecutionTime = 14.753336 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0060216e-05, Final residual = 6.7235148e-13, No Iterations 31
+
+Time = 2587s
+
+ExecutionTime = 14.778417 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7539444e-05, Final residual = 7.0909759e-13, No Iterations 31
+
+Time = 2588s
+
+ExecutionTime = 14.802597 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0457902e-05, Final residual = 6.727826e-13, No Iterations 31
+
+Time = 2589s
+
+ExecutionTime = 14.823124 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7891141e-05, Final residual = 7.0753406e-13, No Iterations 31
+
+Time = 2590s
+
+ExecutionTime = 14.844698 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.091437e-05, Final residual = 6.7284841e-13, No Iterations 31
+
+Time = 2591s
+
+ExecutionTime = 14.86492 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9034486e-05, Final residual = 7.0780599e-13, No Iterations 31
+
+Time = 2592s
+
+ExecutionTime = 14.884981 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0605218e-05, Final residual = 6.7313059e-13, No Iterations 31
+
+Time = 2593s
+
+ExecutionTime = 14.906207 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.6859592e-05, Final residual = 7.0708118e-13, No Iterations 31
+
+Time = 2594s
+
+ExecutionTime = 14.933316 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.9729595e-05, Final residual = 6.7307942e-13, No Iterations 31
+
+Time = 2595s
+
+ExecutionTime = 14.955202 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7053302e-05, Final residual = 7.0802839e-13, No Iterations 31
+
+Time = 2596s
+
+ExecutionTime = 14.975412 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0418135e-05, Final residual = 6.727819e-13, No Iterations 31
+
+Time = 2597s
+
+ExecutionTime = 14.997021 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.7644596e-05, Final residual = 7.076401e-13, No Iterations 31
+
+Time = 2598s
+
+ExecutionTime = 15.017247 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.0535288e-05, Final residual = 6.7217256e-13, No Iterations 31
+
+Time = 2599s
+
+ExecutionTime = 15.036859 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 4.8081695e-05, Final residual = 7.0929815e-13, No Iterations 31
+
+Time = 2600s
+
+ExecutionTime = 15.060444 s  ClockTime = 15 s
+
+scalarTransport execute:
+smoothSolver:  Solving for s, Initial residual = 5.1099585e-05, Final residual = 6.7170852e-13, No Iterations 31
+
+End
+

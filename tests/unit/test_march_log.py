@@ -464,7 +464,7 @@ def test_on_retry_explains_why_a_step_is_repeated() -> None:
     """
     logger, buffer = _log(detail=("inner",))
     logger.on_inner(0, 1.0e-2, 3.3e-3, 5, 1.0)
-    logger.on_retry("cycles", 1, 0.0694)  # the march hands over the ESCALATED beta
+    logger.on_retry("cycles", 1, 0.0694)  # the march hands over the beta the redo will run at
     logger.on_inner(0, 1.0e-2, 3.3e-3, 3, 1.0)
 
     lines = buffer.getvalue().splitlines()
@@ -502,6 +502,31 @@ def test_the_solver_retry_does_not_claim_an_escalation_it_did_not_perform() -> N
     assert "solver" in line and "0.2500" in line
     assert "unchanged" in line
     assert "->" not in line.split("solver", 1)[1]  # no escalation arrow after the reason
+
+
+def test_a_cycle_redo_reports_beta_as_unchanged_too() -> None:
+    """A costly solve is redone on a FRESH preconditioner at the shift it already had, so the line
+    must not claim an escalation either -- the same failure the solver line above was fixed for.
+
+    Which reasons raise the shift is read from ``ESCALATING_REASONS`` rather than restated here, so a
+    march that stopped escalating on cost and a log that kept saying it did cannot drift apart.
+    """
+    logger, buffer = _log()
+    logger.on_retry("cycles", 1, 0.125)
+
+    line = next(line for line in buffer.getvalue().splitlines() if "redo step" in line)
+    assert "cycles" in line and "0.1250" in line
+    assert "unchanged" in line
+    assert "->" not in line.split("cycles", 1)[1]
+
+
+def test_an_alpha_redo_still_reports_an_escalation() -> None:
+    """The one reason that DOES raise the shift must still say so, or the pair above proves nothing."""
+    logger, buffer = _log()
+    logger.on_retry("alpha", 1, 0.5)
+
+    line = next(line for line in buffer.getvalue().splitlines() if "redo step" in line)
+    assert "beta -> 0.5000" in line and "unchanged" not in line
 
 
 def test_the_attempt_counter_resets_between_steps() -> None:

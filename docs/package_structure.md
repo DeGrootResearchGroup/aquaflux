@@ -35,6 +35,7 @@ cfd/                                  # repo root
 ├── validation/                       # runnable scientific cases (not the pytest tiers)
 │   ├── run_case.sh                   #   the blessed long-run launcher: unbuffered log, memory pre-flight, run-file record
 │   ├── bfs3d_openfoam/               #   3D backward-facing step vs OpenFOAM + conditioning/preconditioner probes
+│   ├── bfs3d_species/                #   passive tracer on that flow vs OpenFOAM: same-flux and own-flow arms
 │   ├── pitzdaily_openfoam/           #   2D pitzDaily vs OpenFOAM
 │   ├── turbulent_channel/            #   turbulent channel vs the analytical log law
 │   └── turbulent_channel_openfoam/   #   turbulent channel vs OpenFOAM
@@ -62,8 +63,9 @@ cfd/                                  # repo root
 │   │   ├── reader.py                 #   MeshReader(eqx.Module) strategy: read() → Mesh (format-agnostic seam)
 │   │   └── openfoam/                 #   OpenFOAM polyMesh reader (ASCII): read_openfoam() / OpenFOAMReader
 │   │       ├── records.py            #     FoamPatch / CellZone / PolyMeshData value records
-│   │       ├── foamfile.py           #     FoamFile envelope: comment strip, header dict, ASCII/binary detection
+│   │       ├── foamfile.py           #     FoamFile envelope: comment strip, header dict, ASCII/binary detection; read_foam_body() is the one file->body entry
 │   │       ├── grammar.py            #     body parsers (points/faces/labels/boundary/cellZones) sharing one list envelope
+│   │       ├── fields.py             #     read a scalar field written on an imported mesh (phi, nut): parse_scalar_field (pure) + read_surface_scalar_field (faces, placed by index, ordering checked) + read_volume_scalar_field (cells)
 │   │       ├── assembler.py          #     assemble(PolyMeshData) → Mesh: neighbour pad, n_cells, patches/zones, from_csr
 │   │       └── reader.py             #     OpenFOAMReader: file I/O; parse → assemble → collapse (empty-patch 2D)
 │   │
@@ -142,6 +144,7 @@ cfd/                                  # repo root
 │   │   ├── saddle_multigrid.py       #   NativeSimpleInverse: a JAX-native multigrid over the flow saddle, smoothed by SIMPLE relaxation
 │   │   ├── host_vcycle.py            #   HostVCycleInverse: the same hierarchy applied on the host, smoothed by an incomplete factorization
 │   │   ├── ilu0.py                   #   Ilu0: zero-fill incomplete LU on the operator's own pattern, refreshable without repeating the symbolic phase
+│   │   ├── ordering.py               #   CellMajor + cell-order strategies: which order an incomplete factorization eliminates in, which at zero fill decides what it discards
 │   │   ├── _ilu0.pyx                 #   the compiled elimination and triangular solves behind Ilu0 (sequential by nature, so not array operations)
 │   │   ├── sparse_jacobian.py        #   materialize_block_jacobian: the sparse Jacobian by compressed graph-coloured probing
 │   │   └── refresh_timing.py         #   RefreshTiming: what a preconditioner refresh did, and what each part cost

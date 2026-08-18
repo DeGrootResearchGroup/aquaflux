@@ -34,7 +34,7 @@ Checklist still governs).
 | `.claude/rules/schemes.md` | `aquaflux/schemes/**` | first-class swappable numerics: face interpolation, gradient reconstruction, non-orthogonal correction |
 | `.claude/rules/boundary.md` | `aquaflux/boundary/**` | weak boundary-face-value closures (BC = special face interpolator); the shared per-patch fold |
 | `.claude/rules/properties.md` | `aquaflux/properties/**` | physical property model (density/viscosity/conductivity): `Property` (constant / per-zone / calculated) collected in a `PropertyModel`, decoupled from the numerics |
-| `.claude/rules/solve.md` | `aquaflux/solve/**` | Newton on the residual, linear solve with implicit differentiation / `custom_vjp`, the preconditioner risk |
+| `.claude/rules/solve.md` | `aquaflux/solve/**` | Newton on the residual, linear solve with implicit differentiation / `custom_vjp`, the preconditioner risk. Split by subsystem into narrower-scoped siblings (`solve-direct-preconditioners.md`, `solve-amg-multigrid.md`, `solve-flow-block.md`, `solve-field-split.md`, `solve-globalization.md`, `solve-march.md`, plus reference-only `-log.md`/`solve-refuted-directions.md` files with no `paths:`) — see `solve.md`'s own "Index — where the detail lives" |
 | `.claude/rules/flow.md` | `aquaflux/flow/**` | coupled p–U block: momentum (reusing advection/diffusion) + Rhie–Chow continuity, differentiated `a_P` (frozen only in the preconditioner), monolithic AD-Jacobian solve |
 | `.claude/rules/turbulence.md` | `aquaflux/turbulence/**` | k–ω SST closure + the segregated flow–turbulence loop: segregated forward / coupled adjoint, outer-loop globalization, positivity-floor adjoint honesty |
 | `.claude/rules/transport.md` | `aquaflux/transport/**` | scalar transport by a converged flow (species, temperature, tracers): why a concentration rides the *volumetric* flux, the effective-diffusivity convention, sub-patch injection without a mesh change — the aquakin reaction seam |
@@ -53,6 +53,9 @@ findable in one place rather than reconstructed from three sections hundreds of 
 **Before the first branch or the first test run**
 1. `git fetch origin`, and check `git log --oneline HEAD..origin/main` is empty — branching from a
    stale base is the failure this prevents (*Start from an up-to-date main*).
+1b. `tools/build_ext.sh` — the compiled incomplete factorization is a gitignored artifact, so a fresh
+   worktree starts without it and silently falls back to a pure-Python twin. Costs a second; without it
+   every timing you take is incomparable to every other (*Use the blessed command*).
 
 **While working**
 2. Run long solves with `validation/run_case.sh <script.py>`; run tests with `tools/fastgate.sh`
@@ -310,14 +313,14 @@ backward compatibility becomes a real constraint and the calculus reverses.
 | Linear solves | lineax (fallback `jax.scipy.sparse.linalg`) | JAX-native, implicit differentiation of the solve |
 | Adjoint of the coupled solve | `custom_vjp` around the linear solve | exact, memory-flat gradient independent of iteration count |
 | Transient integration | Diffrax | JAX-native, shared with aquakin |
-| CPU multigrid smoother | **Cython** (`aquaflux/solve/_ilu0.pyx`, built by `setup.py`) | a zero-fill incomplete factorization eliminates a row against every row above it, so it is sequential by nature and cannot be array operations. The package imports without it (a pure-Python twin defines the behaviour and `ilu0.COMPILED` says which is live), so this is a performance dependency, not a hard one. |
+| CPU multigrid smoother | **Cython** (`aquaflux/solve/_ilu0.pyx`, built by `tools/build_ext.sh`) | a zero-fill incomplete factorization eliminates a row against every row above it, so it is sequential by nature and cannot be array operations. The package imports without it (a pure-Python twin defines the behaviour and `ilu0.COMPILED` says which is live), so this is a performance dependency, not a hard one. **⚠️ But the fallback is SILENT and the artifact is gitignored, so every fresh worktree starts on the Python twin** — which is why timings must never be compared across checkouts without checking. Run `tools/build_ext.sh` once per checkout (idempotent; it caches one shared build environment under `~/.cache/aquaflux`, so it does not need Cython in the runtime interpreter — a PEP-668 system Python refuses that). `validation/run_case.sh` warns when it is missing, and both cases' banners print the live kernel. |
 | Mesh | static connectivity arrays + `segment_sum` scatter | XLA-friendly graph/message-passing layout |
 | Eventual model format | YAML → AST (deferred) | the DSL is the **last** layer; not a dependency yet |
 
 The coupled-block preconditioner is the **top research risk**. The first build-on candidate
 to evaluate is `jaxamg` — do not assume it; verify its adjoint is implicit-diff and that it
 preconditions a *block* system. (See `.claude/rules/solve.md` for the chosen block-triangular
-SIMPLE-type direction and the known traps.)
+SIMPLE-type direction, and `.claude/rules/solve-amg-multigrid.md` for the known traps.)
 
 ---
 
@@ -369,6 +372,15 @@ knows nothing about meshes or fluxes. The first-order-upwind stencil is the **pr
 choice, not the model's — whatever scheme the residual uses for advection, the frozen operator always
 upwinds first-order, because that is what makes it an M-matrix an aggregation hierarchy can coarsen —
 which is why it is a solver concern and holds no mesh, field, or `jax` import.
+
+**How an incomplete factorization orders its elimination is an injected strategy, `aquaflux/solve/ordering.py`.**
+`EliminationOrdering` (`CellMajor`, over a `CellOrder` — `NaturalCells` / `ReverseCuthillMcKeeCells` /
+`AscendingRowLengthCells`) is consumed through `equilibrate_ordered`, and `cell_major_permutation` lives
+here rather than beside the equilibration it used to share a file with. This is a strategy family and not
+a knob because **at zero fill the ordering decides which couplings the factorization discards**: measured
+on a coupled velocity–pressure saddle, changing only the cell order took a stationary sweep from
+amplifying the residual to contracting it, and the Krylov solve it preconditions from stalling to
+converging. The default is the mesh's own cell order — the cheapest, and measurably not the best.
 
 ```
 Mesh (SoA topology) + FaceGeometry/CellGeometry            (classes)
@@ -579,6 +591,7 @@ Three operations have one correct invocation. Use it.
 | run a validation case or any long solve | `validation/run_case.sh <script.py> [--wait]` |
 | see what a long run is doing | `validation/run_case.sh --status` · `tail -f <its log>` |
 | run a test tier | `tools/fastgate.sh [fast \| slow \| validation \| all]` |
+| make a checkout fast (once per checkout, before timing anything) | `tools/build_ext.sh` |
 
 Each exists because the hand-rolled version fails *silently* — it produces a plausible answer that is
 wrong and says nothing about it. `pytest … | tail -n` reports the exit status of `tail`, which is `0`
@@ -973,6 +986,20 @@ After **every code change**, before considering the task complete, review and ac
    test is `@pytest.mark.validation`): the fast gate exercises the *mechanism* elsewhere but never
    that call path, so grep for the changed symbol across `-m slow`/`-m validation` tests and run the
    ones that hit it. Don't assume "unit + fast integration green" means safe to merge.
+
+   **⚠️ The slow/validation shards are balanced by `.test_durations`, and a stale one silently
+   unbalances them.** Those tiers are heterogeneous (a 21 s scheme check beside a 242 s adjoint
+   continuation), so `pytest-split` partitions them by recorded duration. With **no** durations it
+   splits evenly by **count**, and then adding a test *anywhere* shifts the boundaries and can
+   migrate the expensive tests onto whichever shard is already heaviest — which is not hypothetical:
+   eight unrelated unit tests moved two ~106 s adjoint tests off the lightest slow shard (15:53) onto
+   the heaviest (20:58), which then needed ~24.5 min of tests plus ~5 min of setup and was **killed
+   at the 30-minute ceiling**. The failure looks exactly like a regression in the change under test
+   and is not one. A weekly cron (plus `workflow_dispatch`) re-records the file and opens a
+   metadata-only PR; label a PR **`refresh-durations`** to record it on that branch instead, which is
+   the only way to populate it before the workflow has merged (`workflow_dispatch` is registered from
+   the default branch only). The fast integration tier is deliberately **not** duration-balanced —
+   those tests are homogeneous, and an even-by-count split balances their memory too.
 
 4. **Documentation sync (binding — this is how the docs stop drifting).** A code change is
    **not complete** until every file that *describes* the changed code is updated in the **same

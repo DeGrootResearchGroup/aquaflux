@@ -40,6 +40,7 @@ from ..text_table import Column, TextTable
 from .forward_step import StepReport
 from .linear import restart_cycles
 from .refresh_timing import RefreshTiming
+from .retry import ESCALATING_REASONS
 
 #: Below this many seconds an unattributed remainder is measurement noise, not a missing phase, and
 #: reporting it would only add a column of zeros to every refresh line.
@@ -447,14 +448,18 @@ class MarchLogger:
         explain itself. The attempt number also titles the block that follows.
 
         ``beta`` is reported as the march hands it over -- the shift the retried attempt will run at --
-        and never recomputed here. The two retries differ in whether that shift moved at all: the three
-        escalation reasons raise it (``beta -> x``), while ``"solver"`` retries at a tighter Krylov
-        tolerance and leaves it alone (``beta x unchanged``). Saying "->" on the solver line would claim
-        an escalation the march did not perform.
+        and never recomputed here. Retries differ in whether that shift moved at all, and which do is
+        read from :data:`~aquaflux.solve.retry.ESCALATING_REASONS` rather than restated here: the
+        stiffness reasons raise it (``beta -> x``), while ``"solver"`` (a tighter Krylov tolerance) and
+        ``"cycles"`` (a redo on the refreshed preconditioner) leave it alone (``beta x unchanged``).
+        Saying "->" on either would claim an escalation the march did not perform -- and this file
+        restating the list is exactly how the log and the march would come to disagree.
         """
         self._close_block()  # the abandoned attempt's block ends here, before the explanation
         self._attempt = int(attempt) + 1
-        shift = f"beta {beta:.4f} unchanged" if reason == "solver" else f"beta -> {beta:.4f}"
+        shift = (
+            f"beta -> {beta:.4f}" if reason in ESCALATING_REASONS else f"beta {beta:.4f} unchanged"
+        )
         self._write(
             f"  -> redo step {self._steps + 1} (attempt {self._attempt}): {reason}, {shift}"
         )

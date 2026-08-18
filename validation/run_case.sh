@@ -171,6 +171,20 @@ if [ "$FORCE" -eq 0 ]; then
   fi
 fi
 
+# The compiled zero-fill incomplete factorization, which the coupled preconditioner's CPU path spends
+# most of its time in. It is a gitignored artifact, so it belongs to a CHECKOUT and a fresh worktree
+# starts without it -- and `aquaflux.solve.ilu0` then falls back to its pure-Python reference twin
+# WITHOUT SAYING SO. Nothing breaks and no number changes; only the wall clock does, by orders of
+# magnitude, which quietly turns a preconditioner comparison into a comparison of two languages. This
+# warns rather than refuses, because a run that only wants step and cycle counts is unaffected -- those
+# are identical either way. Never fails the launch: a warning is not a gate.
+if ! python3 -c 'from aquaflux.solve.ilu0 import COMPILED; raise SystemExit(0 if COMPILED else 1)' \
+     >/dev/null 2>&1; then
+  printf 'run_case: WARNING -- the compiled incomplete factorization is NOT built in this checkout.\n' >&2
+  printf '          Timings from this run are not comparable to any other; step and cycle counts are\n' >&2
+  printf '          unaffected. Build it with:  tools/build_ext.sh\n' >&2
+fi
+
 # --- launch ----------------------------------------------------------------------------------------
 STAMP=$(date +%Y%m%d-%H%M%S)
 STARTED_AT=$(date "+%Y-%m-%d %H:%M:%S")
