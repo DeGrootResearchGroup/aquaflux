@@ -987,6 +987,20 @@ After **every code change**, before considering the task complete, review and ac
    that call path, so grep for the changed symbol across `-m slow`/`-m validation` tests and run the
    ones that hit it. Don't assume "unit + fast integration green" means safe to merge.
 
+   **⚠️ The slow/validation shards are balanced by `.test_durations`, and a stale one silently
+   unbalances them.** Those tiers are heterogeneous (a 21 s scheme check beside a 242 s adjoint
+   continuation), so `pytest-split` partitions them by recorded duration. With **no** durations it
+   splits evenly by **count**, and then adding a test *anywhere* shifts the boundaries and can
+   migrate the expensive tests onto whichever shard is already heaviest — which is not hypothetical:
+   eight unrelated unit tests moved two ~106 s adjoint tests off the lightest slow shard (15:53) onto
+   the heaviest (20:58), which then needed ~24.5 min of tests plus ~5 min of setup and was **killed
+   at the 30-minute ceiling**. The failure looks exactly like a regression in the change under test
+   and is not one. A weekly cron (plus `workflow_dispatch`) re-records the file and opens a
+   metadata-only PR; label a PR **`refresh-durations`** to record it on that branch instead, which is
+   the only way to populate it before the workflow has merged (`workflow_dispatch` is registered from
+   the default branch only). The fast integration tier is deliberately **not** duration-balanced —
+   those tests are homogeneous, and an even-by-count split balances their memory too.
+
 4. **Documentation sync (binding — this is how the docs stop drifting).** A code change is
    **not complete** until every file that *describes* the changed code is updated in the **same
    change** — docs move with code, never "fix it later." **Run the Stale-Record Check above first:**
