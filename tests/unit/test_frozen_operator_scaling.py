@@ -18,11 +18,11 @@ import pytest
 import scipy.sparse as sp
 from aquaflux.solve.frozen_operator import (
     apply_symmetric_scale,
-    cell_major_permutation,
     equilibration_scale,
     row_chunks,
     symmetrically_equilibrate,
 )
+from aquaflux.solve.ordering import cell_major_permutation
 
 
 def _matrix_with_explicit_zeros() -> sp.csr_matrix:

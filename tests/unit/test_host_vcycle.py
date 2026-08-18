@@ -13,6 +13,11 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 from aquaflux.solve.host_vcycle import HostVCycleInverse, host_ilu_inverse
+from aquaflux.solve.ordering import (
+    AscendingRowLengthCells,
+    CellMajor,
+    ReverseCuthillMcKeeCells,
+)
 
 
 def _nonsymmetric_block(
@@ -226,3 +231,73 @@ def test_the_factory_builds_what_a_field_split_expects() -> None:
     inverse = host_ilu_inverse(**_SETTINGS)(a, 4)
 
     assert inverse.n_dofs == a.shape[0]
+
+
+def test_the_default_ordering_is_unchanged() -> None:
+    """Omitting ``ordering`` must be bit-identical to passing the cell-major default.
+
+    Every recorded measurement of this smoother was taken before the ordering became injectable, so a
+    default that moved would silently invalidate all of them while every other test still passed.
+    """
+    a = _nonsymmetric_block()
+    b = np.asarray(np.random.default_rng(7).normal(size=a.shape[0]))
+
+    implicit = HostVCycleInverse(a, 4, **_SETTINGS).apply(b)
+    explicit = HostVCycleInverse(a, 4, ordering=CellMajor(), **_SETTINGS).apply(b)
+
+    np.testing.assert_array_equal(implicit, explicit)
+
+
+def test_a_non_default_ordering_changes_the_cycle() -> None:
+    """The injected ordering must reach the factorization rather than being accepted and dropped.
+
+    Without this, a smoother that ignored the argument would satisfy every other test here — including
+    the adjoint identity below, which would then simply be re-checking the default.
+    """
+    a = _lattice_block()
+    b = np.asarray(np.random.default_rng(8).normal(size=a.shape[0]))
+
+    default = HostVCycleInverse(a, 2, max_coarse=64, max_levels=3, sweeps=1).apply(b)
+    reordered = HostVCycleInverse(
+        a, 2, max_coarse=64, max_levels=3, sweeps=1, ordering=CellMajor(ReverseCuthillMcKeeCells())
+    ).apply(b)
+
+    assert not np.allclose(default, reordered)
+
+
+@pytest.mark.parametrize(
+    "cells", [ReverseCuthillMcKeeCells(), AscendingRowLengthCells()], ids=lambda c: type(c).__name__
+)
+def test_the_transpose_is_exact_under_a_reordered_elimination(cells) -> None:
+    """``<y, M x> == <M^T y, x>`` must survive a non-default ordering — the gradient depends on it.
+
+    The transposed cycle undoes the permutation around each smoother application, so an ordering that
+    was applied on the way in but not undone on the way out would leave the FORWARD solve perfectly
+    healthy and every gradient silently wrong. That is the one failure mode this whole object is
+    written to make impossible, and it has to be re-asserted for each order rather than assumed from
+    the default.
+    """
+    a = _nonsymmetric_block()
+    inverse = HostVCycleInverse(a, 4, ordering=CellMajor(cells), **_SETTINGS)
+    rng = np.random.default_rng(9)
+    x = rng.normal(size=a.shape[0])
+    y = rng.normal(size=a.shape[0])
+
+    forward = float(y @ inverse.apply(x))
+    transposed = float(inverse.apply(y, transpose=True) @ x)
+
+    assert abs(forward - transposed) <= 1e-9 * max(abs(forward), 1.0)
+
+
+def test_a_reordered_smoother_still_preconditions_the_operator() -> None:
+    """A reordered elimination must remain a working approximate inverse, on the TRUE residual."""
+    a = _lattice_block()
+    b = np.asarray(np.random.default_rng(10).normal(size=a.shape[0]))
+
+    inverse = HostVCycleInverse(
+        a, 2, max_coarse=64, max_levels=3, sweeps=1, ordering=CellMajor(ReverseCuthillMcKeeCells())
+    )
+    x = inverse.apply(b)
+
+    assert np.all(np.isfinite(x))
+    assert np.linalg.norm(a @ x - b) / np.linalg.norm(b) < 0.5

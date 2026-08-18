@@ -53,6 +53,9 @@ findable in one place rather than reconstructed from three sections hundreds of 
 **Before the first branch or the first test run**
 1. `git fetch origin`, and check `git log --oneline HEAD..origin/main` is empty — branching from a
    stale base is the failure this prevents (*Start from an up-to-date main*).
+1b. `tools/build_ext.sh` — the compiled incomplete factorization is a gitignored artifact, so a fresh
+   worktree starts without it and silently falls back to a pure-Python twin. Costs a second; without it
+   every timing you take is incomparable to every other (*Use the blessed command*).
 
 **While working**
 2. Run long solves with `validation/run_case.sh <script.py>`; run tests with `tools/fastgate.sh`
@@ -310,7 +313,7 @@ backward compatibility becomes a real constraint and the calculus reverses.
 | Linear solves | lineax (fallback `jax.scipy.sparse.linalg`) | JAX-native, implicit differentiation of the solve |
 | Adjoint of the coupled solve | `custom_vjp` around the linear solve | exact, memory-flat gradient independent of iteration count |
 | Transient integration | Diffrax | JAX-native, shared with aquakin |
-| CPU multigrid smoother | **Cython** (`aquaflux/solve/_ilu0.pyx`, built by `setup.py`) | a zero-fill incomplete factorization eliminates a row against every row above it, so it is sequential by nature and cannot be array operations. The package imports without it (a pure-Python twin defines the behaviour and `ilu0.COMPILED` says which is live), so this is a performance dependency, not a hard one. |
+| CPU multigrid smoother | **Cython** (`aquaflux/solve/_ilu0.pyx`, built by `tools/build_ext.sh`) | a zero-fill incomplete factorization eliminates a row against every row above it, so it is sequential by nature and cannot be array operations. The package imports without it (a pure-Python twin defines the behaviour and `ilu0.COMPILED` says which is live), so this is a performance dependency, not a hard one. **⚠️ But the fallback is SILENT and the artifact is gitignored, so every fresh worktree starts on the Python twin** — which is why timings must never be compared across checkouts without checking. Run `tools/build_ext.sh` once per checkout (idempotent; it caches one shared build environment under `~/.cache/aquaflux`, so it does not need Cython in the runtime interpreter — a PEP-668 system Python refuses that). `validation/run_case.sh` warns when it is missing, and both cases' banners print the live kernel. |
 | Mesh | static connectivity arrays + `segment_sum` scatter | XLA-friendly graph/message-passing layout |
 | Eventual model format | YAML → AST (deferred) | the DSL is the **last** layer; not a dependency yet |
 
@@ -369,6 +372,15 @@ knows nothing about meshes or fluxes. The first-order-upwind stencil is the **pr
 choice, not the model's — whatever scheme the residual uses for advection, the frozen operator always
 upwinds first-order, because that is what makes it an M-matrix an aggregation hierarchy can coarsen —
 which is why it is a solver concern and holds no mesh, field, or `jax` import.
+
+**How an incomplete factorization orders its elimination is an injected strategy, `aquaflux/solve/ordering.py`.**
+`EliminationOrdering` (`CellMajor`, over a `CellOrder` — `NaturalCells` / `ReverseCuthillMcKeeCells` /
+`AscendingRowLengthCells`) is consumed through `equilibrate_ordered`, and `cell_major_permutation` lives
+here rather than beside the equilibration it used to share a file with. This is a strategy family and not
+a knob because **at zero fill the ordering decides which couplings the factorization discards**: measured
+on a coupled velocity–pressure saddle, changing only the cell order took a stationary sweep from
+amplifying the residual to contracting it, and the Krylov solve it preconditions from stalling to
+converging. The default is the mesh's own cell order — the cheapest, and measurably not the best.
 
 ```
 Mesh (SoA topology) + FaceGeometry/CellGeometry            (classes)
@@ -579,6 +591,7 @@ Three operations have one correct invocation. Use it.
 | run a validation case or any long solve | `validation/run_case.sh <script.py> [--wait]` |
 | see what a long run is doing | `validation/run_case.sh --status` · `tail -f <its log>` |
 | run a test tier | `tools/fastgate.sh [fast \| slow \| validation \| all]` |
+| make a checkout fast (once per checkout, before timing anything) | `tools/build_ext.sh` |
 
 Each exists because the hand-rolled version fails *silently* — it produces a plausible answer that is
 wrong and says nothing about it. `pytest … | tail -n` reports the exit status of `tail`, which is `0`
