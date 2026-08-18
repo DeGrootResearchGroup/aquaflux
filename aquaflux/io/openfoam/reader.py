@@ -20,7 +20,7 @@ from aquaflux.io.reader import MeshReader
 from aquaflux.mesh import Mesh, collapse_extruded_direction
 
 from .assembler import assemble
-from .foamfile import is_binary, parse_foamfile
+from .foamfile import read_foam_body
 from .grammar import (
     parse_boundary,
     parse_cell_zones,
@@ -85,15 +85,10 @@ class OpenFOAMReader(MeshReader):
             if required:
                 raise FileNotFoundError(f"polyMesh file not found: {path}")
             return None
-        foam = parse_foamfile(path.read_text())
-        if is_binary(foam):
-            raise NotImplementedError(
-                f"{path} is in binary format; only ASCII polyMesh files are supported"
-            )
-        return parser(foam.body)
+        return parser(read_foam_body(path))
 
     def read_polymesh(self) -> PolyMeshData:
-        """Read and parse the polyMesh files into raw arrays and records (the only file I/O).
+        """Read and parse the polyMesh files into raw arrays and records (this class's only file I/O).
 
         Returns
         -------

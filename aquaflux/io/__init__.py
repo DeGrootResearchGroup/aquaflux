@@ -9,11 +9,18 @@ convenience.
 
 from __future__ import annotations
 
-from .openfoam import OpenFOAMReader, read_openfoam
+from .openfoam import (
+    OpenFOAMReader,
+    read_openfoam,
+    read_surface_scalar_field,
+    read_volume_scalar_field,
+)
 from .reader import MeshReader
 
 __all__ = [
     "MeshReader",
     "OpenFOAMReader",
     "read_openfoam",
+    "read_surface_scalar_field",
+    "read_volume_scalar_field",
 ]
