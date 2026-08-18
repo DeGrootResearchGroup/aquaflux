@@ -343,7 +343,8 @@ class Mesh(eqx.Module):
 
         Wires the computation in dependency order: the dimension's face-geometry strategy
         gives area/centroid and a node-order normal; the approximate cell centroids orient the
-        normals owner-outward; then the exact cell volume/centroid follow.
+        normals owner-outward and give the exact cell volume/centroid accumulation its local
+        reference point (see :class:`~aquaflux.mesh.cell.CellGeometry`).
 
         Geometry is returned as a fresh :class:`~aquaflux.mesh.geometry.MeshGeometry` product
         rather than stored on the mesh: it is a pure function of the (differentiable) node
@@ -382,5 +383,5 @@ def _fused_geometry(
     normal = scheme.orient_owner_outward(node_order_normal, centroid, approx[face_cells.owner])
 
     face_geometry = face.FaceGeometry(area=area, centroid=centroid, normal=normal)
-    cell_geometry = cell.CellGeometry.from_faces(face_geometry, face_cells, dim)
+    cell_geometry = cell.CellGeometry.from_faces(face_geometry, face_cells, dim, approx)
     return MeshGeometry(face=face_geometry, cell=cell_geometry)

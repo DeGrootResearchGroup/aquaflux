@@ -615,9 +615,72 @@ def test_cell_geometry_matches_direct_call() -> None:
     mesh = _two_unit_cubes()
     geom = mesh.geometry()
     face_geom, cell_geom = geom.face, geom.cell
-    direct = CellGeometry.from_faces(face_geom, mesh.face_cells, mesh.dim)
+    approx = CellGeometry.approx_centroids(face_geom.centroid, mesh.face_cells)
+    direct = CellGeometry.from_faces(face_geom, mesh.face_cells, mesh.dim, approx)
     assert jnp.allclose(direct.volume, cell_geom.volume)
     assert jnp.allclose(direct.centroid, cell_geom.centroid)
+
+
+def _small_cube_far_from_origin() -> Mesh:
+    """A cube of side ``1e-3`` translated ``~1e6`` from the origin: tiny relative to its offset.
+
+    The scale/offset ratio a real mesh in engineering coordinates (a full-scale geometry, not
+    normalized to the origin) can reach for its smallest cells: `centroid = (offset + side/2)` is
+    ``O(cell size)`` smaller than `offset` itself, so recovering it from a naive sum of
+    `O(|offset|)`-sized per-face terms needs the sum to cancel almost completely.
+    """
+    scale = 1e-3
+    offset = jnp.array([1.7e6, -5.1e5, 3.2e5])
+    nodes = (
+        jnp.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ]
+        )
+        * scale
+        + offset
+    )
+    faces = [
+        [0, 1, 2, 3],
+        [4, 5, 6, 7],
+        [0, 1, 5, 4],
+        [3, 2, 6, 7],
+        [0, 3, 7, 4],
+        [1, 2, 6, 5],
+    ]
+    owner = [0, 0, 0, 0, 0, 0]
+    neighbour = [-1, -1, -1, -1, -1, -1]
+    return Mesh.from_faces(nodes, faces, owner, neighbour, n_cells=1)
+
+
+def test_cell_centroid_accurate_far_from_origin() -> None:
+    """A tiny cell far from the coordinate origin still gets an accurate centroid.
+
+    Summing per-face terms of size `O(|offset|)` to recover a quantity of size `O(cell size)`
+    is a near-total cancellation: done in the mesh's raw (global) coordinates, the rounding error
+    in each term is `O(|offset| * eps)`, which the division by the tiny volume then amplifies to
+    an error many cell-widths across -- for this offset and cell size, the uncorrected formula
+    misplaces the centroid by roughly 40 cell-widths, nowhere near the cell itself. Recentring the
+    accumulation on the cell's own local reference point first keeps every term `O(cell size)`,
+    so the error stays at the coordinates' own floating-point representation floor instead.
+    """
+    mesh = _small_cube_far_from_origin()
+    geom = mesh.geometry()
+    scale = 1e-3
+    offset = jnp.array([1.7e6, -5.1e5, 3.2e5])
+    expected_centroid = offset + 0.5 * scale
+    expected_volume = scale**3
+
+    assert jnp.isclose(geom.cell.volume[0], expected_volume, rtol=1e-6)
+    relative_error = jnp.linalg.norm(geom.cell.centroid[0] - expected_centroid) / scale
+    assert relative_error < 1e-3
 
 
 def test_geometry_returns_bundled_mesh_geometry() -> None:
