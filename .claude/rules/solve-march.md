@@ -9,6 +9,11 @@ paths:
 
 > Split out of `solve.md` (2026-08-18). See `solve.md` for the package-wide contracts, current
 > configuration, and binding decisions this file assumes.
+>
+> **This file has no `-log.md` sibling yet.** If you are about to push it past ~1,800 lines, split it
+> first: peel the dated/historical content into a new `solve-march-log.md` (no `paths:` frontmatter) and
+> leave a current-status summary here, following the pattern in `solve-flow-block.md` /
+> `solve-flow-block-log.md`. See `solve.md`'s "Where new content goes".
 
 ## The observed march — forward_march, triggers, controls, logging
 

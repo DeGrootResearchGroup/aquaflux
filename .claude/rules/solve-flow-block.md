@@ -19,6 +19,10 @@ investigation between those two points — several rounds of "found a win", each
 retracted by a tighter measurement — is preserved in full in `solve-flow-block-log.md`; read it before
 proposing to revisit the native flow block, so a re-litigated idea is not mistaken for a new one.
 
+**Adding new content: a dated measurement or investigation step goes in `solve-flow-block-log.md`, not
+here.** Update the current-status paragraph above only when an investigation reaches a durable verdict
+(see `solve.md`'s "Where new content goes").
+
 ## The flow block — native preconditioning of the `[u, v, w, p]` saddle
 
 ### ✅ `jax.grad` RUNS ON THIS CASE, AND IS VALIDATED — the first gradient ever taken here (2026-08-15)

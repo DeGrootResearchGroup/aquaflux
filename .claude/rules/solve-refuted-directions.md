@@ -8,6 +8,12 @@
 > have been tried on `bfs3d` — check here first. Each entry below states what was tried, on what
 > case/state, and why it lost; full investigation detail is via the parent-file link at the top of
 > the corresponding topic entry.
+>
+> **Write, don't just read: add an entry here in the SAME change that refutes or closes a direction.**
+> One short paragraph — what was tried, on what case/state, and why it lost — plus a pointer to the
+> full detail wherever it lives (a topic file, a `-log.md` file, or inline here if it is short enough
+> to need no pointer). This ledger is what a future contributor actually greps before re-proposing an
+> idea; a refutation that lives only in a `-log.md` file's prose will not be found by that search.
 
 ## Low-β directions already measured out — CLOSED, do not re-litigate
 
