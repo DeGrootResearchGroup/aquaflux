@@ -1909,18 +1909,48 @@ GMRES applications; **FAIL** = stalled above 1e-6 true:
   *both* directions: at root β = 0.5 the shipped order's sweeps **contract** (2.65e-2, 2.29e-2, 5.74e-2)
   and GMRES still stalls at 3.25e-4; at self-start β = 0.5 RCM's sweeps **amplify** (2.7e-1 → 1.18e+01
   → 2.67e+04) and GMRES converges in 140. Report both, rank on neither, and settle it on a march.
-- **⚠️ NO PIVOT CENSUS WAS OBTAINED IN THIS RUN — the harness measured the wrong array.** It read the
-  diagonal of the equilibrated *operator* rather than the *factor*, and the symmetric square-root
-  equilibration forces that to magnitude exactly 1, so it reported "zero negatives, min |pivot| 1.00"
-  for all twelve orderings at all six points — including arms that diverge by 1e+59. That is an
-  artifact of the transform, not a property of any factorization, and it must not be read as one.
-  Fixed by exposing `Ilu0.pivots` (the stored diagonal *is* the pivot here — unlike PETSc, which
-  stores its reciprocal) and pointing the harness at it; re-runnable cheaply with
-  `FLOW_BLOCK_CENSUS_ONLY=1`. **The verdicts in the table above are unaffected** — they are true
-  residuals and never touched the census. The pre-existing monolithic census
-  (`compare.py`'s `FILL_LEVELS` note: 27/25/9 negative pivots of 36675 at the three shifts) is the only
-  measured census on this block and it stands, but it was taken monolithically and under cell-major, so
-  it says nothing about the other orderings.
+- **⚠️ THE FIRST CENSUS WAS AN ARTIFACT — the harness read the diagonal of the equilibrated *operator*
+  rather than the *factor*, and the symmetric square-root equilibration forces that to magnitude
+  exactly 1.** It reported "zero negatives, min |pivot| 1.00" for all twelve orderings at all six
+  points, including arms that diverge by 1e+59. Fixed by exposing `Ilu0.pivots` (the stored diagonal
+  *is* the pivot there — unlike PETSc, which stores its reciprocal); re-runnable with
+  `FLOW_BLOCK_CENSUS_ONLY=1`. The verdicts above never touched it.
+
+- **⭐ AND THE REAL CENSUS IS A FIFTH FAILED PREDICTOR — it reproduces `condest`'s exact failure mode:
+  THE SIGN OF THE CORRELATION REVERSES WITH THE SHIFT.** Negative pivots of the ILU(0) factor, at the
+  self-start, against the verdicts in the table above (same state, same matrix, so this is a fair join):
+
+  | ordering | β 0.5 verdict / neg | β 0.05 verdict / neg | β 0 verdict / neg |
+  |---|---|---|---|
+  | `cell_major` | **FAIL** / 22 | 55 / 3 | 125 / 9 |
+  | `cell_major_rcm` | 140 / 12 | **32** / 3 | **55** / 1 |
+  | `cell_major_rowlength` | **113** / 1 | 152 / **11** | 140 / 5 |
+  | `cell_major_reversed` | **FAIL** / 20 | 60 / 9 | 104 / 2 |
+  | `field_major` | 460 / **0** | **FAIL** / 1 | **FAIL** / 1 |
+  | `pressure_last` | 586 / **0** | **FAIL** / 4 | **FAIL** / 13 |
+  | `pressure_first` | **FAIL** / 5815 | **FAIL** / 7292 | **FAIL** / 7138 |
+
+  At **β = 0.5** it looks predictive: every failing arm carries 20+ negatives and every converging one
+  carries 12 or fewer. At **β = 0.05 and 0 it inverts** — `field_major` fails with **one** negative
+  pivot and a comfortable min |pivot| of 2e-01, while `cell_major_rowlength` converges with **eleven**.
+  A quantity whose correlation changes sign between operating points cannot select an arm, which is
+  precisely what was already recorded for `condest`.
+
+  **So: `condest`, diagonal dominance, stationary-sweep contraction, and now the pivot census have each
+  failed to rank these arms. Nothing cheap computable at BUILD time has yet predicted the verdict on
+  this operator class** — which is the standing argument for settling an ordering question on a
+  true-residual solve rather than on a factor inspection.
+
+  Two consistency checks fall out of it: `defer_small_diagonal` at 1 % and 5 % has a census **identical
+  to `cell_major`** at every point, and `mc64_symmetric` is identical to it at β = 0.5 — corroborating
+  from the factor's side that both are near-no-ops here, which their verdicts already implied.
+
+  ⚠️ *Census configuration:* the root half was taken at `state-00082.npz`, a **different** converged
+  root from the `state-00071.npz` the verdict table used (the case checkpoints on a rolling keep-3 and
+  the later marches replaced it). Both are converged to ~5e-06, but they are not the same matrix, so
+  only the self-start columns are joined above. The harness now takes the **latest** checkpoint rather
+  than a hard-coded name, which is what made this visible instead of silent.
+
 
 **⚠️ The saddle-point literature's ordering is WRONG for zero fill, and the reason is structural.**
 `pressure_last` — velocities first, pressure last, the Konshin/Olshanskii/Vassilevski direction — fails

@@ -37,14 +37,14 @@ identical across arms whose cycle counts differed five-fold, so it never decides
   point the failure under investigation actually occupies;
 * the **converged root**, which is the operator a ``jax.grad`` meets: the shift has vanished by
   construction there, so zero shift is the adjoint's operating point and no march measurement speaks
-  to it. It is read from ``checkpoints/state-00071.npz`` — a run artifact written by a full march, not
+  to it. It is the **latest** ``checkpoints/state-*.npz`` — a run artifact written by a full march, not
   a checked-in fixture, and ``checkpoints/`` is untracked. Regenerate it by running the case
   (``PITZ_FLOW_INVERSE=native validation/run_case.sh validation/pitzdaily_openfoam/compare.py``).
   Absent, this reports the self-start half only and says so, rather than quietly measuring something
   else.
 
-⚠️ **The converged root was marched with the SIMPLE-smoothed block preconditioner at stencil reach 3,
-and it is re-probed here at reach 5.** That preconditioner is reach-insensitive -- it relaxes through
+⚠️ **Whichever march wrote that checkpoint chose its own stencil reach, and this re-probes at reach 5
+regardless.** A SIMPLE-smoothed block preconditioner, for instance, is reach-insensitive -- it relaxes through
 diagonal and Schur approximations and inherits no sparsity pattern, so a short reach is merely a
 slightly wrong operator to it -- which is why the run that produced this state could afford reach 3. An
 incomplete factorization is the opposite: it takes its pattern from the stored entries, so a corrupted
@@ -417,8 +417,13 @@ def states(coupled):
     confident, completely wrong story about the method.
     """
     found = [("self-start", monolithic.load_state(coupled, None))]
-    root = CASE / "checkpoints" / "state-00071.npz"
-    if root.exists():
+    # The LATEST checkpoint, never a hard-coded filename. The case checkpoints on a rolling keep-N, so
+    # naming one pins this harness to a file the next march deletes -- which happened, and cost the
+    # converged-root half of a sweep. Highest step number wins; the directory is untracked, so a fresh
+    # clone simply has none.
+    saved = sorted((CASE / "checkpoints").glob("state-*.npz"))
+    root = saved[-1] if saved else CASE / "checkpoints" / "(none)"
+    if saved:
         state = jnp.asarray(np.load(root)["state"])
         if not bool(jnp.all(jnp.isfinite(coupled.residual(state)))):
             raise SystemExit(
