@@ -1619,7 +1619,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   - fast gate **967 passed / 1 skipped** (899 unit `-n auto`, 68 integration `-n 1`);
   - `test_coupled_rans` + `test_coupled_amg` + `test_coupled_field_split` + `test_reynolds_continuation`
     — 33 tests, 18 of them `slow` — **33 passed**;
-  - `test_coupled_lu` + `test_coupled_ilut` — **15 passed**. These two matter and were nearly missed:
+  - `test_coupled_lu` + `test_coupled_ilut` (the latter since deleted along with the ILUT it tested;
+    see `solve-direct-preconditioners.md`) — **15 passed**. These two matter and were nearly missed:
     they drive `forward_march` with `step_control` + `precondition_step`, so they pick up
     `stop_on_limit_stall` exactly as the four above do, and they are in neither the fast gate nor the
     list a first pass would think to run;
