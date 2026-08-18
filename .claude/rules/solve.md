@@ -65,53 +65,67 @@ deliberately reversed. See `CLAUDE.md` → **Stale-Record Check**.
 
 ## ⏳ DEFERRED TO A BIGGER MESH — read this before scaling the case up
 
-**Everything in this file is measured on `bfs3d` at 23040 cells, and one open question is deferred
-*specifically* until that number grows. It is recorded here rather than buried because the trigger is a
-new case, not a new idea, and whoever builds that case is the one who needs to know.**
+**Everything in this file is measured on `bfs3d` at 23040 cells. Two open scaling questions are deferred
+*specifically* until that number grows. They are recorded here rather than buried because the trigger is
+a new case, not a new idea, and whoever builds that case is the one who needs to know.**
 
-### The trailing `[k, ω]` block's coarse grid does not scale, and nothing on this mesh can show it
+### ✅ BUILT AND SHIPPED (2026-08-18): the trailing `[k, ω]` block now coarsens deeper by default
 
-**The cycle case for improving the trailing block is CLOSED — three independent measurements agree
-there is nothing left there** (2026-08-14): the ablation says its *quality* buys nothing coupled (a
-near-exact factorization is worse than the shipped inverse); the ordering measurement says its *retained*
-coupling is worth two cycles; and the block norms say its *discarded* coupling is 0.09 % of the diagonal
-blocks. **Do not go looking for coupled cycles in that half again.**
+**Superseded: the trailing hierarchy is no longer capped at 2 levels on the shipped `bfs3d` bundle.**
+`compare.py`'s `NATIVE_TRAILING` now defaults to `max_levels=20, max_coarse=200, strength_threshold=0.25,
+aggressive_levels=0, frozen_coarsening=True` (the library's own `NodalNativeInverse`/`NativeHierarchyInverse`
+class defaults are unchanged — this is a case-bundle default, not a library one; see the Current
+configuration table above). A block-alone probe on the converged root's zero-shift operator (the hardest
+case: every arm at the old 2-level default shows no real residual reduction after 50+ restart cycles)
+reached rtol 1e-8 in 11 cycles once depth, plain (non-aggressive) coarsening and the strength threshold
+were combined together — depth or the threshold alone did nothing. A full 3-rung march at these settings
+reproduced the shipped root exactly (`x_r/h` 8.3611, 59 steps).
 
-**What remains is a pure scaling argument, and it is unfalsifiable at this size.** The trailing hierarchy
-runs 2 levels, so its coarse grid grows **linearly** with the mesh while its coarsest solve is a **dense
-inverse — cubic to build, quadratic to store, and rebuilt at every refresh**:
+Of the three conditions the deepening work was originally gated on:
+1. **Sweeping `max_levels` and `strength_threshold` together** — done; the shipped bundle sets both.
+2. **Per-row-field normalization of `_cell_graph`'s edge weights — STILL UNBUILT.** The raw threshold
+   (this block's ω rows sit ~8 orders above its k rows) was used AS-IS in the measurement above and did
+   not visibly misbehave there, but that is one state at one threshold value, not a refutation of the
+   theoretical risk. Build the normalization before trusting this bundle broadly, and re-check whether it
+   changes anything once built.
+3. **Pairing the threshold with `frozen_coarsening` (or `shape_headroom`) to keep the refresh
+   compilation-cache hit** — done and load-bearing: without it, a full march's combined (leading + trailing)
+   refactor cost measured ~50 s per refresh; frozen, ~4 s, stable across every refresh in a 3-rung march.
 
-| cells | trailing coarse dofs | status |
+**What is still genuinely deferred:** this is validated at 23040 cells only. The coarse-dof-growth
+argument that motivated the work is unchanged —
+
+| cells | trailing coarse dofs at the OLD 2-level default | status |
 |---|---|---|
-| 23040 (`bfs3d` today) | ~438 | free — invisible in any measurement here |
+| 23040 (`bfs3d` today) | ~438 | free |
 | ~230k | ~4400 | the dense solve starts to dominate the refresh |
 | — | **8192** | `_MAX_DENSE_COARSE_DOFS` **raises outright** |
 
-**So the symptom, when it comes, is a refresh that grows superlinearly with the mesh, or an outright
-raise from `_MAX_DENSE_COARSE_DOFS`. If you are reading this because you hit one of those, this is the
-entry you want.**
+— and nothing has yet measured whether the deepened bundle's own coarse-dof count stays bounded as cells
+grow, only that it does at this one size (176–200 coarse dofs across a few threshold/depth combinations
+measured here). Re-run the block-alone probe (`validation/bfs3d_openfoam/trailing_depth_probe.py`) on
+whatever bigger mesh triggers this section, and complete item 2 above first if the raw threshold ever
+does misbehave there.
 
-**The fix is to let the trailing block coarsen deeper, and both knobs now exist** — 197's shared
-`NativeHierarchyInverse` base gave it `strength_threshold` and `max_levels`, which it previously lacked
-(that absence was an accident of a duplicated seam, not a decision). Three conditions, each of which has
-already cost someone a wrong conclusion elsewhere in this file:
+### ⚠️ NOT YET ADDRESSED: field-split's full-Jacobian materialization is a SEPARATE, likely LARGER wall
 
-1. **Sweep `max_levels` and `strength_threshold` TOGETHER, never separately.** A threshold coarsens
-   *less*, so it enlarges the coarse grid. Testing one at the old 2-level cap reproduces the flow block's
-   original failure and refutes the transfer for the wrong reason.
-2. **Normalize `_cell_graph`'s edge weights per row-field first (UNBUILT).** It weights each cell edge by
-   the **sum** of `|A_ij|` over the block, and this block's ω rows sit ~8 orders above its k rows — so a
-   raw threshold there is an **ω-only** strength measure. This is the same collapse-over-row-fields
-   failure that let a column-reach audit approve a configuration which then diverged the march, and that
-   made the trailing bound arm unreadable for a day.
-3. **A nonzero threshold forfeits the refresh compilation-cache hit** unless paired with
-   `frozen_coarsening` or `shape_headroom`, because the aggregation then reads values. Safe for a
-   single-state sweep, which never refreshes; **not** obviously safe in a march, and the binding decision
-   keeping the k/ω path at θ = 0 in a march is unchanged.
-
-**The harness is `validation/bfs3d_openfoam/trailing_hierarchy_sweep.py`**, which runs the block alone at
-every arm. ⚠️ It, and five sibling probes, were dead on arrival until 2026-08-14 on a positional unpack —
-if it fails at startup again, check that first rather than the numerics.
+**Deepening the trailing hierarchy does not touch this, and it may dominate at 1M cells regardless of
+what the trailing block does.** `FieldSplitAmgPreconditioner.build`/`refresh_in_place` materialize the
+**entire** coupled Jacobian once (all `dim+3` fields, reach-3 stencil — 94 colours, 38.7M nnz at `bfs3d`'s
+23040 cells) and slice the leading and trailing blocks out of that one matrix; this is what field-split
+costs regardless of either block's own hierarchy depth. Scaling the measured `bfs3d` figures linearly by
+cell count to 1M cells (~43×) gives roughly 2 billion nonzeros and, going by this project's own
+~2 GB-per-copy figure at 23040 cells, on the order of tens of GB per copy — plausibly larger than the
+dense-coarse-solve wall this section used to be about. The scalar block-diagonal preconditioner path
+(`coupled_continuation`'s default `CoupledShiftPolicy`, `method="twolevel"`/`"air"`) avoids this
+entirely — it builds each field's operator analytically from ~one JVP, no colouring, no full-Jacobian
+storage — but was moved away from on this case because the cheaper composition was measured insufficient
+at `bfs3d`'s Reynolds number (see the flow-block preconditioning section). A genuinely cheaper route,
+scoped but unbuilt: probe the `[k, ω]` Jacobian on its own (a 2-field colouring, which closes at stencil
+reach 2 rather than the 3 the velocity-coupled full system needs) instead of slicing it from the full
+materialization — this would keep the true k↔ω coupling (measured to matter: a real-Jacobian per-field
+inverse beat an analytic stand-in 5× on cycles) without paying for the leading block or the
+flow↔turbulence coupling blocks at all.
 
 ## Current configuration (check here FIRST — the library and the case deliberately differ)
 
@@ -129,6 +143,8 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 | stencil reach | `stencil_reach=3` | 3 | — |
 | probe column reach | `column_reach=None` (uniform) | **(3,3,3,3,2,2)** | `compare.py` `COLUMN_REACH` |
 | dual-time inner tol | `inner_tol=0.05` | **1e-2** | `compare.py` `INNER_TOL` |
+| flow (leading) inverse | `AmgVCycle` (PETSc) | **`NativeSimpleInverse`** (`FLOW_INVERSE="native"`) | `compare.py` |
+| trailing hierarchy depth | `NativeHierarchyInverse` class default: `max_levels=2, strength_threshold=0.0, aggressive_levels=1` | **`max_levels=20, max_coarse=200, strength_threshold=0.25, aggressive_levels=0, frozen_coarsening=True`** | `compare.py` `NATIVE_TRAILING` |
 
 **The three coupled forward solvers — always name which path you mean.** There is no
 `_COUPLED_AMG_FORWARD_SOLVER` symbol.
@@ -5150,14 +5166,17 @@ and the first time the hand-written hierarchy and factorization have carried a m
 single solve.** Two full 3-rung cold marches differing in **one** environment variable
 (`BFS3D_FLOW_INVERSE`), same commit, same machine, back to back, nothing else running:
 
-**⚠️ `hostilu` IS NOW `bfs3d`'s DEFAULT LEADING INVERSE (2026-08-16), so "the incumbent" changed meaning
-on that date.** Every measurement in this file that says "the incumbent" of the `bfs3d` **leading** block
-without naming an arm was taken against **PETSc ILU(0)** and should be read that way; `BFS3D_FLOW_INVERSE=petsc`
-still selects it. The flip was made on the **dependency**, not on the numbers — the table immediately below
-is parity, and nothing here claims the host V-cycle is the better preconditioner. It carries the same
-coarsening without an optional PETSc build, and the leading block was the last part of this case needing one.
-⚠️ It does **not** generalize to `pitzDaily`, where `hostilu` FAILS outright (that case needs a fill level
-`Ilu0` cannot supply — see the fill-inversion entry above), so that case keeps `petsc`.
+**⚠️ SUPERSEDED (2026-08-18) — `bfs3d`'s default leading inverse moved again, to `native`.** `hostilu`
+was the default from 2026-08-16 to 2026-08-18; every measurement in this file that says "the incumbent"
+of the `bfs3d` **leading** block without naming an arm was taken against **PETSc ILU(0)** and should be
+read that way. The second flip, to the JAX-native SIMPLE-smoothed hierarchy (`NativeSimpleInverse`), was
+made for robustness (an incomplete-LU factorization's sensitivity to elimination order has repeatedly
+produced arms differing by orders of magnitude on this operator — see the `hostilu` A/B further down) and
+for a route to a GPU, not for speed: a full-march A/B against a matched `hostilu` run reached the
+identical root (`x_r/h` 8.3611) at 349 cumulative cycles / 1782 s against 208 / 1403 s. `BFS3D_FLOW_INVERSE=hostilu`
+/ `petsc` still select the two PETSc-backed arms. ⚠️ Neither `hostilu` nor `native` generalizes to
+`pitzDaily`, where `hostilu` FAILS outright (that case needs a fill level `Ilu0` cannot supply — see the
+fill-inversion entry above), so that case keeps `petsc`.
 
 | | `petsc` (incumbent) | `hostilu` (native AMG + our ILU(0)) |
 |---|---|---|
