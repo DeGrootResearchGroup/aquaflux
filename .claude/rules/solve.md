@@ -2148,8 +2148,11 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 
 **Two structural observations worth keeping:**
 - **`pointwise_rowlength` is EXACTLY `cell_major_rowlength`** — identical at all six points, not merely
-  close. The coloured probe assembles against a fixed block pattern, so every row of a cell has the same
-  stored nonzero count, and a stable sort by row length therefore groups them by cell on its own.
+  close. ⚠️ **The identity is measured; the explanation for it is NOT.** The reasoning offered is that
+  the coloured probe assembles against a fixed block pattern, so every row of a cell would carry the
+  same stored nonzero count and a stable sort by row length would then group them by cell on its own —
+  but the per-row counts were never checked, so read that as a conjecture that fits rather than as a
+  verified mechanism.
 - **Preserving the cell blocks helps RCM**: applied per-cell it beats the pointwise form at the hard
   point (140 against 203 at self-start β = 0.5) and ties elsewhere. Consistent with the interleave being
   load-bearing, which the two field-major arms confirm from the other side.
