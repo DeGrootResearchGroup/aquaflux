@@ -1,11 +1,15 @@
 """Does anything but a monolithic factorization solve this case at ZERO shift?
 
-The question this settles is whether the threshold-ILU and the complete LU still have a regime.
-Both are dominated on the forward march -- the field-split multigrid marches this case faster than
-either -- so the only place a monolithic factorization can still earn its keep is the **adjoint**,
-which is the one solve that meets the Jacobian with no pseudo-transient shift to make it diagonally
-dominant. If the field split handles zero shift, nothing selects the other two and they can go; if it
-does not, whichever survives here is what every ``jax.grad`` on this case depends on.
+The question this settles is whether the complete LU still has a regime. It is dominated on the
+forward march -- the field-split multigrid marches this case faster -- so the only place a monolithic
+factorization can still earn its keep is the **adjoint**, which is the one solve that meets the
+Jacobian with no pseudo-transient shift to make it diagonally dominant. If the field split handles
+zero shift, nothing selects the complete LU and it can go; if it does not, whichever survives here is
+what every ``jax.grad`` on this case depends on.
+
+(A threshold-incomplete-LU arm used to run alongside the complete LU here; it was removed once the
+family verdict settled that it was dominated by both the complete LU at 2D and the field-split
+multigrid at 3D, with no case selecting it.)
 
 **Why zero shift is the whole question.** A march never visits it: the shift is what the continuation
 ramps, and the preconditioner is additionally floored (``compare.PC_BETA_FLOOR``) so it is never even
@@ -62,7 +66,6 @@ from aquaflux.solve import (  # noqa: E402
 )
 from aquaflux.turbulence import (  # noqa: E402
     coupled_amg_continuation,
-    coupled_ilut_continuation,
     coupled_lu_continuation,
     hybrid_initialize,
 )
@@ -164,7 +167,9 @@ def load_state(coupled, seed, path: Path | None):
             f"converged by a factor of {GATE:g}. Either it was written by a different configuration, "
             f"or it is a mid-march state; either way the operator below is not the adjoint's."
         )
-    recorded = f", march recorded {float(data['residual_norm']):.4e} (SCALED measure, not comparable)"
+    recorded = (
+        f", march recorded {float(data['residual_norm']):.4e} (SCALED measure, not comparable)"
+    )
     print(
         f"state = {path.name}: step {int(data['step'])}, euclidean |R| {here:.4e}, "
         f"{start / here:.0f}x below this case's self-start{recorded}",
@@ -202,17 +207,6 @@ def main() -> None:
         "splitfloor": (
             f"field split @ floor {compare.PC_BETA_FLOOR}",
             lambda: field_split_arm(coupled, state, compare.PC_BETA_FLOOR),
-        ),
-        "ilut": (
-            "ILUT @ beta=0",
-            lambda: coupled_ilut_continuation(
-                coupled,
-                state,
-                ilut_beta=0.0,
-                stencil_reach=compare.STENCIL_REACH,
-                inner_steps=compare.INNER_STEPS,
-                inner_tol=compare.INNER_TOL,
-            ),
         ),
         "lu": (
             "complete LU @ beta=0",

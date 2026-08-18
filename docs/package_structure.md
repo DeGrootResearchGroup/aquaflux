@@ -116,7 +116,7 @@ cfd/                                  # repo root
 │   │   ├── continuation.py           #   pseudo-transient continuation for the (k, ω) scalar transport solves
 │   │   ├── reynolds.py               #   solve_reynolds_continuation: reach a high-Reynolds root through easier lower-Re ones
 │   │   ├── initialization.py         #   hybrid_initialize: potential velocity + smoothed turbulence initial condition
-│   │   ├── preconditioner.py         #   convection-diffusion AMG for the scalar transport solves; the coupled *_continuation builders (AMG / ILUT / LU)
+│   │   ├── preconditioner.py         #   convection-diffusion AMG for the scalar transport solves; the coupled *_continuation builders (AMG / LU)
 │   │   └── diagnostics.py            #   named physical fields of a coupled state, for march-log reporting
 │   │
 │   ├── solve/                        # Newton on the residual, the differentiated linear solve, and the AMG that preconditions it
@@ -135,7 +135,6 @@ cfd/                                  # repo root
 │   │   ├── multigrid.py              #   matrix-free algebraic multigrid for the inner solves (smoothed/plain aggregation, AIR; scipy RAP off the jit path)
 │   │   ├── frozen_operator.py        #   convection_diffusion_operator / decouple_dof: the one assembler of the frozen operator every AMG consumer coarsens
 │   │   ├── amg_preconditioner.py     #   MonolithicAmgPreconditioner for the coupled saddle-point solve
-│   │   ├── ilut_preconditioner.py    #   MonolithicIlutPreconditioner (threshold incomplete LU)
 │   │   ├── lu_preconditioner.py      #   MonolithicLuPreconditioner (complete sparse LU)
 │   │   ├── field_split.py            #   BlockTriangularFieldSplit: block-triangular field-split preconditioning for flow-plus-transport
 │   │   ├── native_inverse.py         #   NativeHierarchyInverse: the shared body of a JAX-native block inverse (hierarchy, in-place refresh, transpose)

@@ -56,7 +56,6 @@ SUBPACKAGE_GROUPS = {
             [
                 "host_preconditioner",
                 "amg_preconditioner",
-                "ilut_preconditioner",
                 "lu_preconditioner",
                 "field_split",
                 "native_inverse",

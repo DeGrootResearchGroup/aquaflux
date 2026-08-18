@@ -1,16 +1,26 @@
 ---
 paths:
-  - "aquaflux/solve/ilut_preconditioner.py"
   - "aquaflux/solve/lu_preconditioner.py"
+  - "aquaflux/solve/sparse_jacobian.py"
   - "aquaflux/solve/ilu0.py"
   - "aquaflux/solve/_ilu0.pyx"
 ---
 
-# Rules — `aquaflux/solve/` direct preconditioners (ILUT, complete-LU)
+# Rules — `aquaflux/solve/` direct preconditioners (complete-LU) and Jacobian materialization
 
 > Split out of `solve.md` (2026-08-18) to keep routine `aquaflux/solve/` work from loading the
-> full monolithic-ILUT and complete-LU investigation narrative. See `solve.md` for the package-wide
-> contracts, current configuration, and binding decisions this file assumes.
+> full complete-LU and coupled-Jacobian-materialization investigation narrative. See `solve.md` for
+> the package-wide contracts, current configuration, and binding decisions this file assumes.
+>
+> **The monolithic ILUT preconditioner (`ilut_preconditioner.py`) was DELETED (2026-08-18) — dominated
+> by the complete LU at 2D and by the algebraic multigrid at 3D, per its own docstring and per the
+> "nothing selects the monolithic ILUT or complete LU for the adjoint" finding in
+> `solve-amg-multigrid.md`, and selected by no shipped case bundle.** `MonolithicIlutPreconditioner`,
+> `IlutFactors`, `factorize_ilut` and the coupled builders `coupled_ilut_continuation` /
+> `coupled_ilut_refreshing_continuation` / `ilut_beta_tracking_refresh` no longer exist; the shared
+> `_beta_tracking_refresh` skeleton and `MonolithicFactorShiftPolicy` they used are unchanged and now
+> serve only the complete LU and the algebraic multigrid. If you are looking for any of those symbols,
+> they are gone rather than renamed — the code is in git history.
 >
 > **This file has no `-log.md` sibling yet — current facts and dated investigation entries sit
 > together.** If you are about to push it past ~1,800 lines, split it first: peel the dated/historical
@@ -20,39 +30,35 @@ paths:
 
 ## Preconditioner — the frozen host family (shared contract)
 
-- **`equilibrate_cell_major` / `equilibrate_ordered` live in `frozen_operator.py`, NOT in the ILUT
-  (binding, moved 2026-08-15). ⚠️ `cell_major_permutation` moved AGAIN on 2026-08-17, to the new
+- **`equilibrate_cell_major` / `equilibrate_ordered` live in `frozen_operator.py` (binding, moved
+  2026-08-15). ⚠️ `cell_major_permutation` moved AGAIN on 2026-08-17, to the new
   `solve/ordering.py`** — it is one elimination ordering among several now, and sat in `frozen_operator`
   only because that is where it was first written. `frozen_operator` imports it (one direction, no
   cycle); nothing re-exports it from its old home, so a stale import fails loudly.
   They are the reorder half of one transform whose rescale half
   (`symmetrically_equilibrate`, `equilibration_scale`, `apply_symmetric_scale`, `row_chunks`) was
   already there, and every consumer applies the two together -- a factorization or a coarsening wants
-  the matrix both unit-diagonal and grouped by cell.
-  - **Three of the four consumers were never the ILUT**, and the V-cycle uses them *more* than it does
-    (7 references against 4). They sat in `ilut_preconditioner.py` only because the threshold ILU
-    needed them first.
-  - **The concrete cost that removes:** the ILUT is the family member most likely to be deleted --
-    dominated by the complete LU at 2D and by the AMG at 3D, per its own docstring -- and deleting it
-    would have taken the monolithic AMG and the field split down with it. Those two sibling imports
-    are gone; nothing outside the ILUT's own module imports from it but `MonolithicIlutPreconditioner`.
-  - **Both are now exported from `aquaflux.solve`.** They were internal by `__all__` yet deep-imported
-    by three study harnesses, i.e. public in practice and unguarded in principle; the harnesses now
+  the matrix both unit-diagonal and grouped by cell. Consumed by the multigrid V-cycle
+  (`amg_preconditioner.py`, `host_vcycle.py`) and the block field split (`field_split.py`); the complete
+  LU needs neither (its own fill-reducing pivoting and ordering already handle the indefinite saddle).
+  - **Both are exported from `aquaflux.solve`.** They were internal by `__all__` yet deep-imported
+    by study harnesses, i.e. public in practice and unguarded in principle; the harnesses now
     take them from the package surface. The permutation's unit test moved with the function, into
     `test_frozen_operator_scaling.py` beside the rescale half it belongs with.
 
 
-- **The three host preconditioners share ONE application path and ONE declared contract —
-  `solve/host_preconditioner.py` (BUILT, 2026-08-14).** The ILUT, the complete LU and the AMG V-cycle
+- **The host preconditioners share ONE application path and ONE declared contract —
+  `solve/host_preconditioner.py` (BUILT, 2026-08-14).** The complete LU and the AMG V-cycle
   differ entirely in how the inverse is *fitted* and not at all in how it is *applied*, so
   `HostPreconditioner` owns `__init__` and `matvec()` and each subclass supplies only `build` /
   `refresh_in_place`. Those two genuinely differ (different inputs, different refresh costs) and are
-  deliberately **not** unified behind a signature that would be the union of three.
+  deliberately **not** unified behind a signature that would be the union of both.
   - **`HostFactors` is the contract, and it is exactly `n_dofs` + `apply(residual, *, transpose=…)`.**
-    That pair was already a real structural contract satisfied by **six** classes — the three
-    factorizations, `AmgVCycle`, `NativeHierarchyInverse` and both `BlockTriangularFieldSplit`s (a
-    seventh, the since-deleted Vanka smoother, satisfied it too) — and declared by none, so `matvec`
-    was written out three times byte for byte and
+    That pair is a real structural contract satisfied by **five** classes — the complete-LU factors,
+    `AmgVCycle`, `NativeHierarchyInverse` and both `BlockTriangularFieldSplit`s (two further members, the
+    monolithic ILUT and the Vanka smoother, have since been deleted, both dominated on every arm
+    measured) — and declared by none of them individually, so `matvec` would otherwise be written out
+    once per class and
     `FieldSplitAmgPreconditioner` obtained it by subclassing a *concrete sibling*.
   - **⚠️ Anything a base reads off `self.factors` beyond that pair is a requirement on ALL of them
     (binding).** This is not hypothetical: `has_native_solve` read `self.factors.has_native_solve`,
@@ -64,37 +70,29 @@ paths:
     (`test_the_base_asks_its_factors_for_nothing_beyond_the_declared_contract`) — read off the source
     rather than exercised, because the failure is a lookup that is *never taken* on the paths a test
     would naturally drive, which is why the original went unseen.
-  - **The pseudo-transient shift has one home: `sparse_jacobian.shifted_jacobian`.** All three added
-    `β d` before factoring, and they **disagreed**: the AMG used a pattern-preserving `setdiag` while
-    the ILUT and LU used `a + sp.diags(shift)` — the form the AMG's own docstring says is wrong, since
-    a sparse *addition* stores only entries whose result is nonzero and so drops the explicit zeros a
-    fixed-pattern probe deliberately kept. Benign only because the ILUT and LU never pass `structure=`;
-    it would have become a silent divergence the moment either took the fixed-pattern path, which is
-    the cheap one. **Measured:** the two spellings are identical in values *and* pattern on a full
+  - **The pseudo-transient shift has one home: `sparse_jacobian.shifted_jacobian`.** Every host
+    preconditioner adds `β d` before factoring, and two spellings once disagreed: a pattern-preserving
+    `setdiag` against `a + sp.diags(shift)` — the latter is wrong, since a sparse *addition* stores only
+    entries whose result is nonzero and so drops the explicit zeros a fixed-pattern probe deliberately
+    kept. **Measured:** the two spellings are identical in values *and* pattern on a full
     diagonal and on a matrix with diagonal entries missing (both create them), and differ only where
-    explicit zeros are stored — so adopting `setdiag` everywhere is a verified **no-op** for the ILUT
-    and LU and a correctness fix in general. The whole refactor is **bit-identical** end to end: an
-    ILUT and an LU built and refreshed under both implementations return byte-equal `matvec` and
-    transpose output.
+    explicit zeros are stored — so adopting `setdiag` everywhere is a correctness fix in general. The
+    whole refactor is **bit-identical** end to end: a complete LU built and refreshed under both
+    implementations returns byte-equal `matvec` and transpose output.
 
-## Preconditioner — monolithic ILUT
+## Materializing the coupled Jacobian (`sparse_jacobian.py`)
 
-- **Monolithic ILUT preconditioner — BUILT (`sparse_jacobian.py` + `ilut_preconditioner.py`).** An
-  incomplete-LU (threshold ILU) factorization of the **assembled coupled Jacobian**, the alternative to
-  the block-triangular SIMPLE preconditioner for the coupled saddle. The block PC approximates the
-  pressure Schur; the ILUT **forms the true Schur coupling `B F⁻¹ G` through its fill** instead — measured
-  on the coupled RANS saddle it reaches the forward tolerance in a handful of GMRES cycles where the block
-  PC needs hundreds (the block PC's wall is the Schur *approximation*, not its inversion — see the Stage-3
-  note in `.claude/rules/flow.md`). Three ingredients are each load-bearing and measured: **enough fill**
-  (zero-fill ILU(0) drops exactly the Schur-forming fill → a singular factor; `drop_tol=1e-6` — not
-  `fill_factor` — is the binding control, keeps it); **symmetric √-diagonal equilibration** (the momentum
-  and continuity rows differ in scale by orders of magnitude, which otherwise gives near-singular pivots —
-  a ratio was measured but its case and state were not recorded, so re-measure before quoting a number); and
-  **cell-major ordering** (interleave `[u,v,p,k,ω]` per cell so the indefinite saddle factors without a
-  zero pressure pivot). The distance-1 *truncation* of the operator is catastrophic — the coupled saddle
-  is intrinsically distance-2 (Rhie–Chow) and the fill is essential, so this is **not** a compact-operator
-  play.
-  - **`sparse_jacobian.py`** materializes the coupled Jacobian from the *same* residual the solver uses
+**This section documents `sparse_jacobian.py`'s coloured-probe materialization of the coupled Jacobian —
+shared infrastructure consumed today by the complete LU and (mostly) by the monolithic algebraic
+multigrid.** It originally grew up beside the now-deleted monolithic ILUT (the alternative to the
+block-triangular SIMPLE preconditioner for the coupled saddle, which formed the true Schur coupling
+`B F⁻¹ G` through its incomplete-LU fill rather than approximating it); that preconditioner is gone
+(dominated by the complete LU at 2D and by the algebraic multigrid at 3D, per its own docstring and per
+the "nothing selects the monolithic ILUT or complete LU for the adjoint" finding in
+`solve-amg-multigrid.md`), but the Jacobian-materialization machinery below did not go with it — the
+complete LU and the AMG's coloured probe both still depend on it.
+
+- **`sparse_jacobian.py`** materializes the coupled Jacobian from the *same* residual the solver uses
     (no re-derived assembly): `block_stencil_colouring(owner, nb, n, reach)` (pure NumPy — the cell-block
     pattern at a stencil `reach` and a collision-free CPR colouring, the conflict graph is the pattern
     squared) then `materialize_block_jacobian(matvec, plan)` (one `jax.jvp` per colour×column-field).
@@ -217,7 +215,7 @@ paths:
       exactly `8 B × 56,272,032`, the full predicted size, at a scale where `_source`/`_position`
       together (each now `int32`) retain 450.2 MB total, i.e. removing this one array is worth as much
       as everything `ProbeGather` otherwise keeps, combined. Fast-gate `sparse_jacobian`/`amg_precondi-
-      tioner`/`ilut_preconditioner`/`lu_preconditioner`/`frozen_operator_scaling` unit tests and the
+      tioner`/`lu_preconditioner`/`frozen_operator_scaling` unit tests and the
       not-slow `coupled_amg`/`coupled_field_split`/`coupled_rans` integration tests all pass unchanged
       (harness not in the repository for the old-vs-new comparison script; the dtype/scatter-output
       tests that *are* in the repository, `test_gather_map_index_arrays_are_narrow_on_a_realistic_
@@ -733,11 +731,12 @@ paths:
           and left the rest of the paper unscaled. Our own `no equilibration` arm agrees (neutral at
           β = 0.05, no better anywhere). **Plain two-sided scaling is not the lever here.** This says
           nothing about MC64's *permutation*, which is a different mechanism and remains untested.
-        - **Their conclusion on dropping strategy, which bears on the ILUT path:** for the BARTH matrices
+        - **Their conclusion on dropping strategy, which bears on any threshold-ILU choice here:** for the
+          BARTH matrices
           *"the threshold dropping method is not suitable … it is beneficial to keep all entries in the L
           and U factors that correspond to the ILU(0) pattern"*, and level-of-fill beats threshold by more
-          as the entries per row grow. Recorded as a caution, **not** transferred: our ILUT results are on
-          a different matrix and are not contradicted by this.
+          as the entries per row grow. Recorded as a caution, **not** transferred: our own incomplete-LU
+          results are on a different matrix and are not contradicted by this.
         - **The question this motivated — and it is now ANSWERED, negatively; see the next bullet.** The
           sweep's own finding is that **the winning configuration moves with β and no static choice spans
           a march**, so a per-matrix *selector* is the only shape a fix can take, and `condest` was the
@@ -1074,7 +1073,7 @@ paths:
       there — are not.
     - **Materialize efficiency — two shipped speedups, both AMG-path-only, bit-identical (BUILT).** The
       probe dominates a refresh, so `materialize_block_jacobian` takes two optional accelerators the AMG
-      preconditioner passes (LU/ILUT keep the plain loop, which any NumPy matvec supports). **(1) Batched
+      preconditioner passes (the complete LU keeps the plain loop, which any NumPy matvec supports). **(1) Batched
       probing** — `batched_matvec` (a `jax.vmap` of the jvp, **built once and reused** so it compiles a
       single time; `probe_batch_size` chunks it for memory) runs the coloured probes as a few fused passes
       instead of a Python loop of separate calls. Measured 22.4→14.0 s (~1.6×) on `bfs3d` — modest because
@@ -1220,71 +1219,18 @@ paths:
       nnz decay" in the pattern was a conflation of a *pattern* count with a *live* count — the live
       Jacobian holds ~38.7–39.0M nnz throughout, roughly constant. The reach-3 requirement above rests on
       the padding experiment, which is sound; it does not rest on any decay.
-  - **`ilut_preconditioner.py` — `MonolithicIlutPreconditioner`.** Built off the jit path (`scipy.spilu`);
-    a **host** object, so it is **not** an `equinox.Module` — it rides as a static field and is applied
-    inside the jitted Krylov solve through `jax.pure_callback` (`.matvec()` / `.matvec(transpose=True)`).
-    Frozen at a reference state+shift like the AMG blocks; being far stronger it tolerates the freezing at
-    a few extra cycles, and the shift vanishes at the root so it never changes the converged state or its
-    adjoint. `IlutFactors`/`factorize_ilut` are the pure host core (testable without JAX); the JAX
-    wrapper is thin. `equilibrate_cell_major` is **not** the ILUT's -- it lives in `frozen_operator.py`
-    (and `cell_major_permutation` in `solve/ordering.py`); see the placement note below.
-  - **Adjoint transpose wiring — `TransposedPreconditioner` (in `implicit.py`, binding).** The generic
-    adjoint machinery `_adjoint_preconditioner` derives `Mᵀ` from the forward `M` with
-    `jax.linear_transpose` — which works for a traceable AMG V-cycle but **cannot transpose a
-    `jax.pure_callback`** (and `jax.custom_transpose` is absent in the pinned JAX). So a preconditioner
-    that supplies its own transpose wraps its `state → Mᵀ` factory in `TransposedPreconditioner`, and
-    `_adjoint_preconditioner` applies it directly rather than transposing. The ILUT's `Mᵀ` is the same
-    factorization with `ilu.solve(trans='T')`. Pinned by the coupled-adjoint FD gate
-    (`tests/integration/test_coupled_ilut.py`); the plain-callable path (every AMG preconditioner) is
-    unchanged.
-  - **Cheap in-place mid-march refresh — `refresh_in_place` (BUILT; forward-march only).** The frozen
-    ILUT goes stale as the flow develops — the shifted solve slows, and on a low-shift dual-time path it
-    can NaN. `MonolithicIlutPreconditioner.refresh_in_place(matvec, plan, shift_diagonal,
-    …)` re-materializes and re-factors at the developed state and swaps `self.factors` **in place**. Two
-    facts make this a **compilation cache hit** rather than a recompile: the preconditioner is a *static*
-    field of `MonolithicFactorShiftPolicy` (so its identity is the jit treedef, unchanged by mutating its
-    factors), and `matvec()` reads `self.factors` **at callback time** (not captured), so the mutation is
-    seen by the already-compiled solve. `build` and `refresh_in_place` share one form-and-factor path
-    (`_factor`). **This is sound only because the forward march is NEVER differentiated** — the mutation
-    is impure and would corrupt the adjoint's transpose solve (which reads the same `self.factors`), so
-    it is forward-march only; the converged root and its adjoint are refresh-independent anyway (the shift
-    vanishes at the root). Measured on pitzDaily: the in-place refresh removes a large fixed overhead per
-    refresh (a march-step recompile, a base-policy rebuild and a jvp recompile), leaving only the intrinsic
-    materialize + factor — of which **`spilu` is the overwhelming majority** and the coloured-probe
-    materialize a small remainder, so a sparser (cheaper-materialize) stencil would save almost nothing.
-    (The wall-clock breakdown was recorded with no machine, thread count, state or β — the *ratio* is the
-    load-bearing part and the seconds are deleted; re-measure if a cost model needs them.) `spilu` is a hard floor: a *threshold* ILU's fill pattern is
-    value-dependent, so the symbolic factorization cannot be frozen and re-used (and scipy exposes no
-    symbolic/numeric split), leaving **amortization (refresh less often) as the only cheap lever**.
-    ⚠️ **That is a fact about a THRESHOLD ILU and must not be carried to a zero-fill one.** `solve/ilu0.py`
-    takes its pattern from the operator, so its symbolic phase *is* frozen and a refresh repeats only the
-    numeric pass — measured at 0.009 s against `spilu`'s 28.1 s on the same block. The floor is `spilu`'s,
-    not an incomplete factorization's. The
-    coupled driver wiring is `coupled_ilut_refreshing_continuation` (a `refresh.builder` for
-    `solve_coupled` — see `.claude/rules/turbulence.md`); it pairs with a `CoefficientDriftTrigger` so the
-    re-factor *leads* the staleness. Pinned by `test_refresh_in_place_repreconditions_the_same_compiled_matvec`
-    (unit) and `test_ilut_refreshing_continuation_refreshes_the_same_step_in_place` (integration).
-  - **Scope / follow-ups (MVP).** The heavy fill is affordable at 2D /
-    moderate mesh sizes but is the weak point at large 3D — the **monolithic AMG V-cycle**
-    (`amg_preconditioner.py`, below) is the built scaling path (its direct-LU coarse solve is what tames the
-    naive monolithic V-cycle's coarse-grid-correction instability on the indefinite saddle). The coupled builder still assembles the
-    unused block AMG as the `a_P` source — a lightweight shift-diagonal-only policy would remove that. The
-    coupled integration (`coupled_ilut_continuation`) lives in `.claude/rules/turbulence.md`.
-
 ## Preconditioner — monolithic complete-LU
 
 - **Monolithic COMPLETE-LU preconditioner — BUILT (`lu_preconditioner.py`), the preferred 2D/moderate
-  coupled preconditioner.** The sibling of the ILUT: it factors the assembled coupled Jacobian
+  coupled preconditioner.** It factors the assembled coupled Jacobian
   *completely* (`MonolithicLuPreconditioner`), so it is the operator's **exact** inverse and a Krylov
-  solve converges in **one** iteration. Measured on the developed pitzDaily coupled Jacobian (61k dof):
-  UMFPACK factors it in **~1.2 s vs the ILUT's ~32 s (~26×)**, exact (1 GMRES iter vs 2–4), verified on
-  the real forward operator and the β=0 adjoint (true-residual checked). Because the fill is pattern-determined it is also **state-robust**
-  (no `drop_tol` tail that shifts with the flow). Same interface as the ILUT — now shared rather than
-  restated, via `HostPreconditioner` (`build` / `refresh_in_place`
-  / `matvec`), a host object applied via `pure_callback`, riding as a static field; the adjoint reuses the
-  factorization's transpose. **No equilibration / cell-major reordering** (unlike the ILUT — the complete
-  factorization's own pivoting + fill-reducing ordering handle the indefinite saddle on the raw
-  field-major matrix; equilibrating + cell-major actually *hurt* it, measured).
+  solve converges in **one** iteration. Verified on the real forward operator and the β=0 adjoint
+  (true-residual checked). Because the fill is pattern-determined it is also **state-robust**
+  (no drop-tolerance tail that shifts with the flow). Built on `HostPreconditioner` (`build` /
+  `refresh_in_place` / `matvec`), a host object applied via `pure_callback`, riding as a static field;
+  the adjoint reuses the factorization's transpose. **No equilibration / cell-major reordering** — the
+  complete factorization's own pivoting + fill-reducing ordering handle the indefinite saddle on the raw
+  field-major matrix; equilibrating + cell-major actually *hurt* it, measured.
   - **Pluggable backend (`factorize_lu(backend=…)`):** `"umfpack"` (SuiteSparse via the optional
     `petsc4py` dep) is the fast path — a fill-reducing (nested-dissection/AMD) ordering + a multifrontal
     BLAS-3 numeric kernel. A refresh **re-factors from scratch** (NOT a fixed-pattern numeric-only
@@ -1292,36 +1238,31 @@ paths:
     are exactly zero at the cold reference become nonzero — so a frozen-pattern refactor is both wrong and
     a shape error; the full factor is fast enough (~1 s at 2D/moderate) that re-analysing each refresh is
     cheap. `"scipy"` (`scipy.sparse.linalg.splu`, SuperLU) is the always-available fallback: exact and
-    correct (what the tests run under) but, lacking nested dissection, no faster to factor than the ILUT.
+    correct (what the tests run under) but, lacking nested dissection, slower to factor than UMFPACK.
     `"auto"` (default) picks UMFPACK when importable, else SciPy. So the module imports with no optional
-    dependency; the 26× is opt-in via `pip install aquaflux[petsc]`.
+    dependency; the faster factorization is opt-in via `pip install aquaflux[petsc]`.
   - **SCOPE — a 2D / moderate-mesh tool (binding).** A complete LU's fill is `O(n log n)` in 2D but
     `O(n^{4/3})` in 3D, so **memory is the wall in 3D** — measured (synthetic block grids): 2D factor time
     ~`dof^1.37` (comfortable to ~10⁵ cells, seconds, <10 GB), but 3D hit **out-of-memory at ~10⁴ cells**.
-    So this preconditioner is the fast, exact choice for 2D / moderate meshes; large 3D still needs the
-    ILUT / block / (parked) multigrid-smoothed paths, or a **rank-structured direct solver** (MUMPS-BLR /
-    STRUMPACK — the fill-taming way to keep this exact-factor paradigm in 3D, reachable via the same PETSc
-    dep). It does **not** dominate the ILUT everywhere; it is an additional strategy, best at 2D/moderate.
-  - **Why the ILUT's "spilu is a hard floor" is not the whole story (measured, corrected):** the ILUT
-    floor is against reducing *fill* (a sparser threshold stencil saves little) — a different lever than
-    switching to a *complete* factorization with a fill-reducing ordering + fast kernel, which is what
-    breaks the floor here. A separately-tried level-based ILU(k) via PETSc looked faster but was a
-    **preconditioned-norm artifact** (PETSc's KSP converges on ‖Mr‖, not the true ‖Ax−b‖); it is weaker,
-    not stronger — always verify the TRUE residual.
+    So this preconditioner is the fast, exact choice for 2D / moderate meshes; large 3D needs the
+    algebraic multigrid path (`amg_preconditioner.py`, below), or a **rank-structured direct solver**
+    (MUMPS-BLR / STRUMPACK — the fill-taming way to keep this exact-factor paradigm in 3D, reachable via
+    the same PETSc dep).
+  - **A level-based ILU(k) via PETSc, tried as a cheaper alternative, was a MEASUREMENT ARTIFACT.** It
+    looked faster but was a **preconditioned-norm artifact** (PETSc's KSP converges on ‖Mr‖, not the true
+    ‖Ax−b‖); it is weaker, not stronger — always verify the TRUE residual.
   - **FROZEN is wrong for the β-ramping dual-time march — track β (binding, measured).** A complete LU is
     *exact* only for the operator it factored, `J + β d`. In a dual-time march β ramps (0.5 → 0.005), so a
     factorization frozen at one β **mis-preconditions** the operator actually solved — measured on rung2:
     a LU frozen at β = 0.05 needs 25 / 111 / 217 / **474** GMRES iters at β = 0.1 / 0.5 / 1 / 2 (vs **1**
     when factored at the matching β), and on a real cold ramp the frozen LU **NaN'd** on the overshot
-    low-β state (215 cycles → failure). This is the *opposite* of the ILUT, whose *approximate*
-    factorization tolerates the β-mismatch at a few extra cycles — so the ILUT's frozen + drift-refresh
-    design does **not** carry over to the exact LU. The fix, because the LU factor is cheap (~1 s), is to
+    low-β state (215 cycles → failure). Because the LU factor is cheap (~1 s), the fix is to
     **re-factor at the current `(state, β)` every step** (`forward_march`'s `precondition_step` seam +
     `lu_beta_tracking_refresh`, `.claude/rules/turbulence.md`): exact each step (1 Krylov iter), and robust
     through overshoots (measured: completes the cold ramp where the frozen LU failed, cyc ≤ 18). The
     finishing solve and adjoint keep the last frozen factorization (exact enough at the converged β → 0).
   - **Coupled builders (`coupled_lu_continuation` / `coupled_lu_refreshing_continuation`, and the
     β-tracking `lu_beta_tracking_refresh`) live in `.claude/rules/turbulence.md`;** they share the
-    `MonolithicFactorShiftPolicy` and the `_monolithic_factor_step` builder tail with the ILUT (one
-    implementation, parameterized by the factorization).
+    `MonolithicFactorShiftPolicy` and the `_monolithic_factor_step` builder tail with the algebraic
+    multigrid (one implementation, parameterized by the factorization).
 

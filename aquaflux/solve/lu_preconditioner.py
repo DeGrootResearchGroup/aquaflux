@@ -1,34 +1,31 @@
 """A monolithic *complete* sparse-LU preconditioner for the coupled saddle-point Newton solve.
 
-The sibling of :mod:`~aquaflux.solve.ilut_preconditioner`. Where the ILUT factors the coupled Jacobian
-*incompletely* (threshold dropping) and reaches the Krylov tolerance in a handful of cycles, this factors
-it *completely*, so the preconditioner is the operator's exact inverse and a Krylov solve converges in a
-single iteration. On a moderate two-dimensional mesh a good multifrontal LU (UMFPACK) factors the coupled
-Jacobian roughly an order of magnitude faster than the threshold-ILU costs — because it uses a
-fill-reducing ordering and a dense-block (BLAS-3) numeric kernel rather than paying the ILU's
-drop-tolerance and pivoting-search overhead — while being exact rather than approximate.
+This factors the assembled coupled Jacobian *completely*, so the preconditioner is the operator's exact
+inverse and a Krylov solve converges in a single iteration. On a moderate two-dimensional mesh a good
+multifrontal LU (UMFPACK) factors the coupled Jacobian quickly, using a fill-reducing ordering
+and a dense-block (BLAS-3) numeric kernel.
 
-Unlike the ILUT, the complete factorization needs **no equilibration and no cell-major reordering**: the
+The complete factorization needs **no equilibration and no cell-major reordering**: the
 solver's own pivoting and fill-reducing ordering handle the indefinite saddle directly on the raw
 field-major matrix. The apply is therefore a plain triangular solve (``M = A^{-1}``); the adjoint's
 transpose solve reuses the same factorization with a transposed solve.
 
 **Scope — a two-dimensional / moderate-mesh tool.** A complete LU's fill grows as ``O(n log n)`` in 2D
 but ``O(n^{4/3})`` in 3D, so its memory becomes the wall on large three-dimensional meshes (a few times
-``10^4`` cells in 3D on a workstation). There it must give way to the incomplete / multigrid-smoothed
-paths (or a rank-structured direct solver); this class is the fast, exact preconditioner where the mesh
+``10^4`` cells in 3D on a workstation). There it must give way to the multigrid-smoothed path (or a
+rank-structured direct solver); this class is the fast, exact preconditioner where the mesh
 is two-dimensional or moderate.
 
 **Factorization backend (host, off the jit path).** The factorization is a host object, built once at a
-reference state and applied inside the jitted Krylov solve through ``jax.pure_callback`` — exactly like
-the ILUT. Two backends implement the same small interface:
+reference state and applied inside the jitted Krylov solve through ``jax.pure_callback``. Two backends
+implement the same small interface:
 
 * ``"umfpack"`` — UMFPACK (SuiteSparse) via ``petsc4py``, the fast path. A mid-march refresh rebuilds the
   factorization from scratch (the coupled Jacobian's sparsity grows as the flow develops, so a
   fixed-pattern numeric-only refactor would be wrong) -- cheap because the full factorization is fast.
   Requires the optional ``petsc`` dependency.
 * ``"scipy"`` — ``scipy.sparse.linalg.splu`` (SuperLU), always available. Exact and correct but without a
-  fill-reducing nested-dissection ordering it is not faster to factor than the ILUT; it is the fallback
+  fill-reducing nested-dissection ordering it is slower to factor than UMFPACK; it is the fallback
   so the class works with no optional dependency, and it is what the tests run under.
 
 ``"auto"`` (the default) uses UMFPACK when ``petsc4py`` with a working UMFPACK is importable, else SciPy.
@@ -51,7 +48,7 @@ class _LuBackend:
 
     Concrete backends (:class:`_ScipyLuBackend`, :class:`_PetscUmfpackBackend`) implement the same three
     operations so :class:`LuFactors` is backend-agnostic. All operate on the **raw field-major** matrix —
-    no equilibration or reordering, unlike the ILUT.
+    no equilibration or reordering.
     """
 
     n_dofs: int
@@ -73,7 +70,7 @@ class _ScipyLuBackend(_LuBackend):
 
     def _factor(self, matrix: sp.spmatrix) -> None:
         # A small diagonal-pivot threshold keeps the indefinite saddle's factorization non-singular
-        # without full partial pivoting, matching the ILUT's guard.
+        # without full partial pivoting.
         self._lu = spla.splu(matrix.tocsc(), diag_pivot_thresh=0.1)
 
     def solve(self, rhs: np.ndarray, *, transpose: bool) -> np.ndarray:
@@ -182,8 +179,7 @@ def _make_backend(matrix: sp.spmatrix, backend: str) -> _LuBackend:
 class LuFactors:
     """A frozen complete-LU factorization of the coupled Jacobian and its forward/transpose apply.
 
-    A pure host object (no JAX), the complete-LU counterpart of
-    :class:`~aquaflux.solve.ilut_preconditioner.IlutFactors`. It applies ``M = A^{-1}`` (or ``M^T``) by a
+    A pure host object (no JAX). It applies ``M = A^{-1}`` (or ``M^T``) by a
     triangular solve on the raw field-major vector — no equilibration or reordering, because the complete
     factorization handles the saddle directly. Wraps a pluggable :class:`_LuBackend`.
 
@@ -249,10 +245,9 @@ def factorize_lu(matrix: sp.spmatrix, *, backend: str = "auto") -> LuFactors:
 class MonolithicLuPreconditioner(HostPreconditioner):
     """The coupled complete-LU preconditioner as JAX matvecs, wrapping a frozen :class:`LuFactors`.
 
-    The complete-LU counterpart of
-    :class:`~aquaflux.solve.ilut_preconditioner.MonolithicIlutPreconditioner`, with the identical
-    interface (:meth:`build`, :meth:`refresh_in_place`, :meth:`matvec`) so it is a drop-in for the coupled
-    continuation. Not an :class:`equinox.Module`: the factorization is a host object, held by a caller and
+    Shares its interface (:meth:`build`, :meth:`refresh_in_place`, :meth:`matvec`) with
+    :class:`~aquaflux.solve.amg_preconditioner.MonolithicAmgPreconditioner`, so it is a drop-in for the
+    coupled continuation. Not an :class:`equinox.Module`: the factorization is a host object, held by a caller and
     captured in the ``jax.pure_callback`` closure rather than threaded through the jit as a traced
     argument. Because the factors are frozen (their coefficients ``stop_gradient``-ed by the solver), the
     callback is never differentiated: the forward solve calls ``M`` and the adjoint's transpose solve

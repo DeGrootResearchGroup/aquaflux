@@ -38,7 +38,7 @@ from aquaflux.turbulence.coupled import (
     _jacobian_matvec,
 )
 
-from tests.integration.test_coupled_ilut import _channel
+from tests.integration.test_coupled_lu import _channel
 
 
 @pytest.fixture(scope="module")
@@ -176,7 +176,7 @@ def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
     """
     from aquaflux.turbulence import coupled_amg_continuation, solve_coupled
 
-    from tests.integration.test_coupled_ilut import _channel
+    from tests.integration.test_coupled_lu import _channel
 
     momentum, turbulence = _channel()
     coupled = CoupledRANS.build(momentum, turbulence)

@@ -87,10 +87,9 @@ from aquaflux.turbulence.coupled import (  # noqa: E402
 def march_solver(coupled, policy, state):
     """The forward solver the coupled AMG march actually runs, rebuilt for the self-check arm.
 
-    Not the coupled *ILUT* path's solver, which is a different object -- 1 % in a plain 2-norm at
-    restart 10 against this one's 30 % in a row-scaled norm at restart 15. Reaching for the wrong one is
-    easy and it does not announce itself: at a state where both converge in a single cycle the check
-    still passes, and reports a validation it did not perform.
+    A different coupled path's solver is a different object with a different stop and restart length.
+    Reaching for the wrong one is easy and it does not announce itself: at a state where both converge
+    in a single cycle the check still passes, and reports a validation it did not perform.
     """
     return relative_residual_gmres(
         0.3,

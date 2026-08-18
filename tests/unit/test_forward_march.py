@@ -728,7 +728,7 @@ def test_march_escalates_beta_before_the_tight_divergence_retry() -> None:
 def test_march_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergence() -> None:
     """If β-escalation does not lift the step out of the non-finite regime -- the inexact-PC failure only a
     tighter Krylov solve fixes -- the divergence retry still fires as the fallback, so the reorder never
-    loses the ILUT recovery it front-runs."""
+    loses the recovery it front-runs."""
     residual = _Cubic(jnp.zeros((1,)))
     phi0 = jnp.ones((1,))
     # threshold unreachable by 0.5 -> 1.0 -> 2.0, so every escalation stays non-finite; only "tight" recovers.

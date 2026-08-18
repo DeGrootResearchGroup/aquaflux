@@ -127,7 +127,7 @@ paths:
       march uses all six, so the object is the smallest sufficient collaborator there. Do not extend this
       to arguments a callee does not need in full.
   - **Reactive divergence retry — `retry.solver` recovers a step an INEXACT preconditioner poisons,
-    without tightening every step (BUILT).** An *inexact* preconditioner (the threshold-ILU) can return a
+    without tightening every step (BUILT).** An *inexact* preconditioner can return a
     non-finite correction on the stiff operator an aggressive Courant overshoot produces, where the
     *exact* complete-LU returns a finite one — the loose default Krylov tolerance is what leaves that
     correction too inaccurate. `forward_march(retry=RetryPolicy(solver=…, divergence_cap=inf))` redoes a diverged
@@ -135,20 +135,21 @@ paths:
     `RetryPolicy.has_diverged` (non-finite, or `> divergence_cap·reference` — default `inf`, i.e. non-finite only,
     because the residual legitimately *rises* during development via `β×travel`, so a tight cap would
     false-fire on the reachability descent). **The preconditioner is NOT re-refreshed on retry** — under a
-    β-tracking refresh (`ilut_beta_tracking_refresh`, `.claude/rules/turbulence.md`) the factor is already
+    β-tracking refresh (`lu_beta_tracking_refresh`, `.claude/rules/turbulence.md`) the factor is already
     fresh at this `(state, β)`, and re-factoring the deterministic factorization at the same point is a
     no-op; the failure is an under-converged *Krylov* solve, not a stale PC, so only the Krylov tolerance
     is tightened. This is orthogonal to the refresh *gating*: the retry recovers a diverged step whatever
-    cadence the ILUT was refreshed at. One retry: a still-diverged
+    cadence the preconditioner was refreshed at. One retry: a still-diverged
     step breaks as before. Default a policy with no `retry.solver` is **byte-identical**, and the exact-LU path never
-    triggers it. **Why it beats tightening every step:** measured on the aggressive pitzDaily ILUT ramp,
+    triggers it. **Why it beats tightening every step:** measured on an aggressive pitzDaily ramp with an
+    inexact monolithic-factorization preconditioner (since deleted; see `solve-direct-preconditioners.md`),
     rung-1 steps 1–7 ran on the cheap loose solver and *only* the diverged step 8 retried tight —
     recovering to the exact-LU value (ratio 9.72e-2) and tracking the LU on — instead of paying the tight
     solve on every step. Threaded through `solve_coupled(retry=RetryPolicy(solver=…))`; forward-only (raises under
     `jax.grad`, same guard as the refresh/control). Pinned by `test_forward_march.py`
     (`test_march_retries_a_diverged_step_with_the_tighter_solver`, `test_march_does_not_retry_a_finite_step`).
     On 2D the exact LU is cheaper *and* robust for free, so this is really a 3D-readiness lever (where the
-    LU's fill is the wall and the ILUT is the only option).
+    LU's fill is the wall and the algebraic multigrid is the option).
   - **⚠️ SUPERSEDED 2026-08-17: THE COST THRESHOLD NO LONGER ESCALATES, and the field is now
     `retry.abort_above_cycles`; `retry.on_cycles` does not exist. Escalation is `retry.on_alpha` alone —
     see `solve-amg-multigrid.md`'s "the cost guard and the shift escalation are now separate responses".
@@ -193,8 +194,8 @@ paths:
       and *then* the β-escalation re-damped the same step to a clean ~5-cycle solve — so the entire tight
       grind was wasted work the escalation superseded. Reordered, the escalation fires first on the NaN,
       recovers the step cheaply, and the tight `retry.solver` fires only as a **fallback** for a non-finite
-      step escalation could *not* fix — the genuine inexact-ILUT case (loose Krylov → non-finite δ that a
-      tighter Krylov, not more damping, cures), where the cost threshold is typically `None` anyway so
+      step escalation could *not* fix — the genuine inexact-preconditioner case (loose Krylov → non-finite δ
+      that a tighter Krylov, not more damping, cures), where the cost threshold is typically `None` anyway so
       escalation is absent and the divergence retry is the sole, original mechanism.
     - **This is the PROACTIVE β-mismatch refresh's reactive twin** — the refresh
       (`amg_beta_tracking_refresh(beta_rel_change=…)`, `.claude/rules/turbulence.md`) re-freezes the PC
@@ -220,7 +221,7 @@ paths:
       partial non-converged step would be accepted). Good steps converge well under the budget, so they are
       byte-identical; only a grinding primary hits it. `cycle_budget=None` (default) is unbounded and
       byte-identical. Threaded through `coupled_amg_continuation(cycle_budget=…)` (and the shared
-      `_monolithic_factor_step`, so the ILUT/LU steps can take it too); forward-only, like the escalation it
+      `_monolithic_factor_step`, so the LU steps can take it too); forward-only, like the escalation it
       feeds. This is Agent C's "small-budget primary + inner abort" realized as an inner-loop cost cap rather
       than a non-attainment flag threaded through every solve layer — same effect (a doomed primary costs
       ~`cycle_budget` matvecs, not `inner_steps ×` a stagnation), far smaller blast radius. Pinned by
@@ -706,8 +707,9 @@ paths:
     compilation-cache hit. Two consumers (`.claude/rules/turbulence.md`), sharing one
     `_beta_tracking_refresh` skeleton: `lu_beta_tracking_refresh` re-factors the complete LU at the current
     `(state, β)` **every step** (cheap + exact → 1 Krylov iter), the fix for the frozen-LU β-mismatch above;
-    `ilut_beta_tracking_refresh` does the same for the ILUT but **gated** (β-move OR staleness cap), because
-    the ILUT refactor is expensive (~30–40 s) and approximate — the β-move trigger is what averts the α=0 /
+    `amg_beta_tracking_refresh` re-materializes the V-cycle **gated** (β-move OR staleness cap) instead,
+    because rebuilding it is far more expensive and only an approximate preconditioner to begin with — the
+    β-move trigger is what averts the α=0 /
     no-drift stall a *drift* trigger would hit on an overshoot. Distinct from the trigger's `refresh.builder`
     (which fires occasionally, restarts a *segment*, and returns a *new* step): this fires every step (the
     consumer may itself no-op) and mutates in place. Forward-only (impure), folded into the same `observing`

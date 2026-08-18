@@ -102,7 +102,6 @@ from .native_inverse import NativeHierarchyInverse
 from .host_vcycle import HostVCycleInverse, host_ilu_inverse
 from .ilu0 import COMPILED, Ilu0
 from .refresh_timing import PhaseTimer, RefreshTiming
-from .ilut_preconditioner import MonolithicIlutPreconditioner
 from .lu_preconditioner import MonolithicLuPreconditioner
 from .forward_step import (
     ForwardStep,
@@ -220,7 +219,6 @@ __all__ = [
     "MarchLogger",
     "MarchResult",
     "MonolithicAmgPreconditioner",
-    "MonolithicIlutPreconditioner",
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
     "NativeHierarchyInverse",

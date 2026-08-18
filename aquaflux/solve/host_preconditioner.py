@@ -1,21 +1,18 @@
 """The contract every frozen host preconditioner satisfies, and the JAX wrapper it shares.
 
-Three preconditioners in this package hand a jitted Krylov solve an approximate ``A^-1`` computed on the
-**host**: the threshold-ILU (:mod:`~aquaflux.solve.ilut_preconditioner`), the complete LU
-(:mod:`~aquaflux.solve.lu_preconditioner`) and the algebraic-multigrid V-cycle
+Two preconditioners in this package hand a jitted Krylov solve an approximate ``A^-1`` computed on the
+**host**: the complete LU (:mod:`~aquaflux.solve.lu_preconditioner`) and the algebraic-multigrid V-cycle
 (:mod:`~aquaflux.solve.amg_preconditioner`). They differ entirely in how the inverse is *fitted* to the
 matrix and not at all in how it is *applied*: each holds a frozen factorization, exposes it as a
 ``residual -> M residual`` callable through :func:`jax.pure_callback`, and reads that factorization at
 call time so an in-place refresh re-preconditions the already-compiled solve.
 
-**The contract was real and unnamed.** ``matvec`` needs exactly two things of whatever it wraps -- how
-many degrees of freedom it spans, and how to apply it (or its transpose) to a host vector -- and six
-classes in this package already provide precisely that pair: the three frozen inverses above (the
-threshold-ILU factors, the complete-LU factors and the V-cycle), the framework-native hierarchy
-inverse, and both block-triangular field splits. Nothing declared it, so each wrapper re-derived it:
-``matvec`` was written out three
-times, byte for byte, and the field split obtained it by *subclassing a concrete sibling* rather than a
-contract. :class:`HostFactors` is that pair, written down.
+**The contract is real and named.** ``matvec`` needs exactly two things of whatever it wraps -- how
+many degrees of freedom it spans, and how to apply it (or its transpose) to a host vector -- and five
+classes in this package already provide precisely that pair: the two frozen inverses above (the
+complete-LU factors and the V-cycle), the framework-native hierarchy inverse, and both block-triangular
+field splits. :class:`HostFactors` is that pair, written down, rather than each wrapper re-deriving
+``matvec`` on its own.
 
 **Naming it also closes a class of silent failure.** A base that reads anything off ``self.factors``
 beyond this pair is making an assumption only some factorizations satisfy -- which is how a
