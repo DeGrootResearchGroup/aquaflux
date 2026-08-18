@@ -692,12 +692,12 @@ def forward_march(
                 active_step, residual_fn, prestep_state, residual_norm_0, solver
             )
         # Divergence retry -- the FALLBACK for a non-finite correction β-escalation could not fix. An
-        # inexact preconditioner (a threshold-ILU) can return a non-finite correction where the loose
+        # inexact preconditioner can return a non-finite correction where the loose
         # default Krylov tolerance left it too inaccurate; the cure there is a tighter Krylov solve, not
         # more damping (the factors are already fresh at this (state, β), so re-preconditioning is a no-op).
         # This fires only if the step is STILL diverged after the escalation loop -- or if escalation was
-        # unavailable (no threshold set, or no β leaf: the pure-ILUT configuration, where it is the sole
-        # and original retry) -- redoing the SAME step from the SAME pre-step state with `retry.solver`.
+        # unavailable (no threshold set, or no β leaf) -- redoing the SAME step from the SAME pre-step
+        # state with `retry.solver`.
         # One retry; a still-diverged step breaks below as it would without a retry. A policy with no
         # `solver` (the default) is byte-identical, and the exact-LU path never triggers this.
         diverged_retry = retry.solver is not None and retry.has_diverged(residual_norm, reference)

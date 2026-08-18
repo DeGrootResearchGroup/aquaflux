@@ -1,0 +1,28 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | uvReactorSozzi2006: extract feature edges from STL
+   \\    /   O peration     |
+    \\  /    A nd           |
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      surfaceFeaturesDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+surfaces
+(
+    "bodyWall.stl"
+    "lampWall.stl"
+    "inlet.stl"
+    "outlet.stl"
+);
+
+includedAngle 150;
+
+writeObj yes;
+
+// ************************************************************************* //

@@ -305,10 +305,9 @@ def decouple_dof(a: sp.csr_matrix, index: int) -> sp.csr_matrix:
 # consumer applies the two together -- a factorization or a coarsening wants the matrix both
 # unit-diagonal and grouped by cell, and `equilibrate_cell_major` below is exactly that pair.
 #
-# They lived in `ilut_preconditioner.py` because the threshold ILU needed them first, but three of the
-# four consumers are elsewhere and the multigrid V-cycle uses them more than the ILUT does. That made
-# the ILUT -- the family member most likely to be deleted, being dominated by the complete LU at 2D and
-# by the AMG at 3D -- load-bearing for two preconditioners with nothing to do with it.
+# Consumed by the multigrid V-cycle (`amg_preconditioner.py`, `host_vcycle.py`) and the block field
+# split (`field_split.py`); the complete LU needs neither (its own fill-reducing pivoting and ordering
+# already handle the indefinite saddle).
 
 
 def equilibrate_ordered(
@@ -316,9 +315,9 @@ def equilibrate_ordered(
 ) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
     """Symmetrically equilibrate an assembled coupled block matrix and reorder it for elimination.
 
-    The two conditioning transforms the indefinite Rhie--Chow saddle needs before *any* incomplete
-    factorization or multigrid smoother acts on it, shared by :func:`factorize_ilut` and the multigrid
-    preconditioners so they precondition the identical operator:
+    The two conditioning transforms the indefinite Rhie--Chow saddle needs before a zero-fill
+    factorization or multigrid smoother acts on it, shared by the multigrid preconditioners and the
+    block field split so they precondition the identical operator:
 
     * **Symmetric square-root-diagonal equilibration** ``D A D`` with ``D = diag(1/sqrt(|diag A|))`` — the
       momentum and continuity rows differ in scale by more than an order of magnitude, and this balances

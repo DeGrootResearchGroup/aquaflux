@@ -1,0 +1,63 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | uvReactorSozzi2006: background mesh
+   \\    /   O peration     |
+    \\  /    A nd           |
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+scale   1;
+
+// Bounding box covering the body (x in [0, 0.889]), the long axial inlet pipe
+// (x in [0.889, 1.739]), and the perpendicular outlet pipe (z up to 0.8945).
+// 1 cm of margin on all sides. snappyHexMesh trims everything outside the fluid.
+//
+// Background cell size: 8 mm. Surface refinement to level 2 brings near-wall
+// cells to ~2 mm.
+
+vertices
+(
+    (-0.05 -0.05 -0.05)   // 0
+    ( 1.79 -0.05 -0.05)   // 1
+    ( 1.79  0.05 -0.05)   // 2
+    (-0.05  0.05 -0.05)   // 3
+    (-0.05 -0.05  0.91)   // 4
+    ( 1.79 -0.05  0.91)   // 5
+    ( 1.79  0.05  0.91)   // 6
+    (-0.05  0.05  0.91)   // 7
+);
+
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) (230 13 120) simpleGrading (1 1 1)
+);
+
+edges ();
+
+boundary
+(
+    boundingBox
+    {
+        type patch;
+        faces
+        (
+            (0 1 2 3)
+            (4 5 6 7)
+            (0 3 7 4)
+            (1 2 6 5)
+            (0 1 5 4)
+            (3 2 6 7)
+        );
+    }
+);
+
+mergePatchPairs ();
+
+// ************************************************************************* //

@@ -45,15 +45,15 @@ from aquaflux.turbulence import (
     production_cap_active,
 )
 from aquaflux.turbulence.coupled import (
+    _COUPLED_FACTORIZATION_FORWARD_SOLVER,
     _COUPLED_FORWARD_SOLVER,
-    _COUPLED_ILUT_FORWARD_SOLVER,
     CoupledJacobianProbe,
     CoupledRANS,
     CoupledRANSLayout,
     LiveViscosityVelocityParts,
     _row_jacobian_scale,
     coupled_continuation,
-    coupled_ilut_continuation,
+    coupled_lu_continuation,
     coupled_scaled_norm,
     solve_coupled,
 )
@@ -127,26 +127,28 @@ def _healthy_state(mesh, coupled, seed=0):
     return coupled.pack_state(flow, k, omega)
 
 
-def test_ilut_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None:
-    """The ILUT continuation defaults to a small-restart GMRES; the block one keeps the large restart.
+def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None:
+    """The complete-LU continuation defaults to a small-restart GMRES; the block one keeps the large one.
 
     A restarted GMRES tests its stop only at each restart boundary, so the restart size should match how
-    many vectors the preconditioner actually needs. The monolithic ILUT clusters the preconditioned
-    spectrum so the 1% stop is reached within a handful of vectors, so it uses a small restart; the
+    many vectors the preconditioner actually needs. The monolithic complete LU is the operator's exact
+    inverse, so the 1% stop is reached within a handful of vectors and it uses a small restart; the
     block-triangular preconditioner needs a large subspace per cycle. The two must not share a default.
     """
-    assert _COUPLED_ILUT_FORWARD_SOLVER.restart == 10
+    assert _COUPLED_FACTORIZATION_FORWARD_SOLVER.restart == 10
     assert _COUPLED_FORWARD_SOLVER.restart == 120
 
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
-    ilut_step = coupled_ilut_continuation(coupled, state)
+    lu_step = coupled_lu_continuation(coupled, state, backend="scipy")
     block_step = coupled_continuation(coupled, state, method=None)
-    # Each built step carries the solver it will run; the ILUT's is the small-restart one by default.
-    assert ilut_step.forward_solver.restart == 10
+    # Each built step carries the solver it will run; the LU's is the small-restart one by default.
+    assert lu_step.forward_solver.restart == 10
     assert block_step.forward_solver.restart == 120
-    # An explicit forward_solver still overrides the ILUT default.
-    override = coupled_ilut_continuation(coupled, state, forward_solver=_COUPLED_FORWARD_SOLVER)
+    # An explicit forward_solver still overrides the LU default.
+    override = coupled_lu_continuation(
+        coupled, state, backend="scipy", forward_solver=_COUPLED_FORWARD_SOLVER
+    )
     assert override.forward_solver.restart == 120
 
 
@@ -354,7 +356,7 @@ def test_refresh_trigger_with_an_explicit_continuation_and_no_builder_is_rejecte
     rejected and the error names the supported alternatives. The guard is on the argument combination
     and fires before the continuation is ever stepped, so a trivial step object is sufficient here --
     no preconditioner needs to be built. (Supplying ``refresh_builder`` lifts the restriction, since the
-    builder is how the refresh rebuilds -- exercised by the ILUT refresh integration tests.)
+    builder is how the refresh rebuilds -- exercised by the complete-LU refresh integration tests.)
     """
     mesh, coupled = _cavity()
     flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
@@ -966,6 +968,58 @@ def test_the_probe_is_the_same_for_every_reynolds_rung() -> None:
     assert probe.plan.n_fields == scaled.plan.n_fields
     assert np.array_equal(probe.structure.indptr, scaled.structure.indptr)
     assert np.array_equal(probe.structure.indices, scaled.structure.indices)
+
+
+def test_staleness_beta_gate_fires_on_first_call_beta_move_and_staleness_cap() -> None:
+    """The β-tracking gate re-factors on the first step, on a β move past the threshold, or at the
+    staleness cap -- and skips otherwise, so an expensive re-factor is paid only when it pays off.
+
+    Pure logic, no solver: the gate is the whole novelty of a gated β-tracking refresh (the refactor
+    mechanism itself is shared machinery), so it earns a fast, isolated test.
+    """
+    from aquaflux.turbulence.coupled import _staleness_beta_gate
+
+    gate = _staleness_beta_gate(refresh_every=3, beta_rel_change=0.25)
+    assert gate(1.0) is True  # first call always fires (nothing factored yet)
+    assert gate(1.1) is False  # +10% < 25%, 1 step since -> reuse
+    assert gate(1.2) is False  # +20% < 25% (vs last-refresh 1.0), 2 steps since -> reuse
+    assert gate(1.0) is True  # 3 steps since -> staleness cap fires (state-development bound)
+    assert (
+        gate(1.4) is True
+    )  # +40% > 25% vs last-refresh 1.0 -> β-move fires (the anti-stall trigger)
+    assert gate(1.4) is False  # unchanged, 1 step since -> reuse
+
+
+def test_materialize_gate_fires_on_drift_and_the_step_cap() -> None:
+    """The β-diagonal split's materialize gate re-materializes the Jacobian only when the coefficient has
+    drifted past the threshold since the last materialize, or at the step cap -- so the expensive full
+    re-probe is reserved for a genuinely stale Jacobian and the cheap shift-only refresh carries the rest.
+
+    Pure logic with an injected synthetic drift measure (``drift = |state - reference|``): the gate's
+    decision -- first-call seeding without a redundant materialize, drift-move, step-cap, and re-basing the
+    reference at every materialize -- is the whole novelty; the materialize itself is shared machinery.
+    """
+    from aquaflux.turbulence.coupled import _materialize_gate
+
+    def drift_factory(reference):
+        ref = float(reference)
+        return lambda state: abs(float(state) - ref)
+
+    # Drift only: seed at the first state (no redundant materialize), then fire on a >0.5 move, re-basing.
+    gate = _materialize_gate(drift_factory, materialize_drift=0.5, materialize_every=None)
+    assert (
+        gate(jnp.asarray(0.0)) is False
+    )  # first call seeds the reference; Jacobian is fresh from build
+    assert gate(jnp.asarray(0.3)) is False  # drift 0.3 < 0.5 -> shift-only
+    assert (
+        gate(jnp.asarray(0.6)) is True
+    )  # drift 0.6 > 0.5 -> materialize, re-base reference to 0.6
+    assert gate(jnp.asarray(0.7)) is False  # drift 0.1 vs 0.6 -> shift-only (re-based, not vs 0.0)
+    assert gate(jnp.asarray(1.2)) is True  # drift 0.6 vs 0.6 -> materialize again
+
+    # Step cap only (no drift trigger): fire every 3rd refresh regardless of state.
+    cap = _materialize_gate(drift_factory, materialize_drift=None, materialize_every=3)
+    assert [cap(jnp.asarray(0.0)) for _ in range(6)] == [False, False, True, False, False, True]
 
 
 def test_the_materialize_gate_forgets_its_reference_on_reset() -> None:

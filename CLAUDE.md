@@ -584,7 +584,7 @@ So: `LabelledGroups`, `cell-centred`, `neighbour` (already used throughout).
 
 ### Use the blessed command; do not hand-roll it (binding)
 
-Three operations have one correct invocation. Use it.
+Four operations have one correct invocation. Use it.
 
 | to do this | run this |
 |---|---|
@@ -592,12 +592,15 @@ Three operations have one correct invocation. Use it.
 | see what a long run is doing | `validation/run_case.sh --status` · `tail -f <its log>` |
 | run a test tier | `tools/fastgate.sh [fast \| slow \| validation \| all]` |
 | make a checkout fast (once per checkout, before timing anything) | `tools/build_ext.sh` |
+| build the Sphinx docs locally, the same strict way CI does | `tools/build_docs.sh` |
 
 Each exists because the hand-rolled version fails *silently* — it produces a plausible answer that is
 wrong and says nothing about it. `pytest … | tail -n` reports the exit status of `tail`, which is `0`
 whatever pytest did. A case launched with a bare `python … &` dies with its parent, or outlives a
 cancellation you believe succeeded. `pgrep -f <script>` matches the watcher's own command line, so a
-waiter waits on itself forever. Every one of those has happened here and cost hours.
+waiter waits on itself forever. A hand-rolled `sphinx-build` that skips deleting the gitignored
+`docs/generated`/`docs/api.md`/`docs/_build` first can report a clean build that is clean about the
+*previous* run's set of pages. Every one of those has happened here and cost hours.
 
 `run_case.sh` puts in one place everything the surrounding rules used to ask you to remember:
 unbuffered output **redirected, never piped**, to a timestamped log; the machine held awake; a
@@ -744,14 +747,20 @@ aquakin: `pydata-sphinx-theme`, autodoc + napoleon (NumPy docstrings), and an AP
 (`docs/api.md`) **generated at build time** from each documented subpackage's `__all__`
 (`conf.py` `_write_api_page` / `PUBLIC_SUBPACKAGES`) — so it never drifts from the public
 surface. Read the Docs builds it (`.readthedocs.yaml`, `fail_on_warning: true`), so every
-cross-reference must resolve and every page must sit in a toctree. Build locally with the
-`docs` extra (`pip install -e ".[docs]"`, then `cd docs && make html`, or
-`sphinx-build -b html -W docs docs/_build/html` to match the strict RTD build).
-**CI builds the docs on every PR** — the `docs` job runs the same `-W` build Read the Docs
-runs, and the required `fast gate` depends on it, so a broken cross-reference or a page
-missing from a toctree blocks the merge instead of turning the published site red afterwards.
-Build locally with `-W` as well when you touch a docstring of a documented subpackage, a
-`docs/` page, or a cross-reference — the CI job is the backstop, not the first line.
+cross-reference must resolve and every page must sit in a toctree. **Build locally with
+`tools/build_docs.sh`** (see the "Use the blessed command" table above) — it runs the same
+`sphinx-build -b html -W docs docs/_build/html` Read the Docs and CI run, deleting the gitignored
+`docs/generated`/`docs/api.md`/`docs/_build` first so a stale run cannot pass by describing the
+previous set of pages. It exists because a plain `pip install -e ".[docs]"` cannot be relied on here:
+the docs toolchain is not a runtime dependency, and a PEP-668-managed system Python refuses to
+install it, the identical wall `tools/build_ext.sh` routes around. It reuses that script's cached
+build environment (`~/.cache/aquaflux/build-venv`) rather than pip-installing aquaflux itself; where a
+normal editable install is available, `pip install -e ".[docs]"` then `cd docs && make html` works
+too. **CI builds the docs on every PR** — the `docs` job runs the same `-W` build Read the Docs runs,
+and the required `fast gate` depends on it, so a broken cross-reference or a page missing from a
+toctree blocks the merge instead of turning the published site red afterwards. Run
+`tools/build_docs.sh` as well when you touch a docstring of a documented subpackage, a `docs/` page,
+or a cross-reference — the CI job is the backstop, not the first line.
 
 **Publishing a subpackage means publishing its whole `__all__`.** Adding a name to
 `PUBLIC_SUBPACKAGES` puts every one of that subpackage's exports on the site, so the export list

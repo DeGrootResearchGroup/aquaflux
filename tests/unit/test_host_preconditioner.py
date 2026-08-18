@@ -1,7 +1,7 @@
 """Unit tests for the frozen host preconditioner contract and its shared JAX wrapper.
 
 Structural rather than numerical: what each concrete preconditioner *computes* is pinned by its own
-test module, and what is pinned here is that the three share one application path and one declared
+test module, and what is pinned here is that the two share one application path and one declared
 contract. The failure these guard against is a future divergence -- someone re-adding a private
 ``matvec``, or a base reaching for a capability only some factorizations have, which is exactly how a
 ``has_native_solve`` lookup came to raise on the field split while a ``getattr`` default hid it.
@@ -16,12 +16,10 @@ from aquaflux.solve import (
     HostFactors,
     HostPreconditioner,
     MonolithicAmgPreconditioner,
-    MonolithicIlutPreconditioner,
     MonolithicLuPreconditioner,
 )
 
 FAMILY = (
-    MonolithicIlutPreconditioner,
     MonolithicLuPreconditioner,
     MonolithicAmgPreconditioner,
 )
@@ -48,7 +46,7 @@ class _Doubling:
 
 
 def test_every_host_preconditioner_shares_one_application_path() -> None:
-    """`matvec` was written out three times, byte for byte. It is now written once."""
+    """`matvec` was written out separately per family member. It is now written once."""
     for cls in FAMILY:
         assert issubclass(cls, HostPreconditioner)
         assert "matvec" not in vars(cls), (
@@ -100,7 +98,6 @@ def test_the_real_factor_types_satisfy_the_declared_contract() -> None:
     contract, and that does not depend on what inverts its blocks.
     """
     from aquaflux.solve.field_split import BlockTriangularFieldSplit, FieldGroups
-    from aquaflux.solve.ilut_preconditioner import factorize_ilut
     from aquaflux.solve.lu_preconditioner import factorize_lu
 
     n = 12
@@ -115,7 +112,6 @@ def test_the_real_factor_types_satisfy_the_declared_contract() -> None:
     )
 
     for factors in (
-        factorize_ilut(operator, 2),
         factorize_lu(operator, backend="scipy"),
         split,
     ):

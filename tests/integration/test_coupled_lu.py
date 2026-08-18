@@ -1,12 +1,12 @@
 """Integration: the monolithic complete-LU-preconditioned coupled RANS Newton solve on a turbulent channel.
 
-The complete-LU counterpart of :mod:`tests.integration.test_coupled_ilut`. The coupled continuation's
-block-triangular SIMPLE preconditioner is replaced by a single *complete* LU factorization of the assembled
-coupled Jacobian (:func:`~aquaflux.turbulence.coupled_lu_continuation`). These check the same two
-properties that make it a usable drop-in: handed to ``solve_coupled`` it converges the monolithic Newton
-to the **same** fixed point the block preconditioner reaches, and -- built once outside ``jax.grad`` on
-concrete parameters -- it yields the exact coupled adjoint matching finite differences. The channel setup
-is shared with the ILUT integration test (one source of truth).
+The coupled continuation's block-triangular SIMPLE preconditioner is replaced by a single *complete* LU
+factorization of the assembled coupled Jacobian (:func:`~aquaflux.turbulence.coupled_lu_continuation`).
+These check the two properties that make it a usable drop-in: handed to ``solve_coupled`` it converges
+the monolithic Newton to the **same** fixed point the block preconditioner reaches, and -- built once
+outside ``jax.grad`` on concrete parameters -- it yields the exact coupled adjoint matching finite
+differences. The channel setup (``_channel``, ``PRECONDITIONER``) is the one source of truth shared with
+the AMG and field-split integration tests.
 
 Run under the always-available SciPy (SuperLU) backend so no optional dependency is needed; the complete
 factorization is exact regardless of backend, so these correctness/adjoint properties are backend-independent
@@ -20,19 +20,83 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
+from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
+from aquaflux.discretization import FirstOrderUpwind
+from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
+from aquaflux.mesh import graded_nodes, structured_grid_2d
+from aquaflux.properties import Constant, PropertyModel
+from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import RefreshPolicy
 from aquaflux.turbulence import (
     CoupledRANS,
+    SSTModel,
+    SSTTurbulence,
     coupled_lu_continuation,
     coupled_lu_refreshing_continuation,
     hybrid_initialize,
+    inlet_k,
+    inlet_omega,
     lu_beta_tracking_refresh,
     solve_coupled,
 )
 
-from tests.integration.test_coupled_ilut import PRECONDITIONER, _channel
-
 BACKEND = "scipy"  # always available; exact, so backend-independent correctness
+
+RHO, U_IN, H, L = 1.0, 1.0, 1.0, 4.0
+NU = 4e-4  # Re = U H / nu = 2500
+INTENSITY, LENGTH_SCALE = 0.05, 0.07 * H
+PRECONDITIONER = {"schur_scaling": "msimpler", "velocity": "convection"}
+
+
+def _channel(nx=20, ny=14, growth=1.2):
+    y_nodes = graded_nodes(ny, H, growth)
+    mesh = structured_grid_2d(nx, ny, lx=L, ly=H, named_boundaries=True, y_nodes=y_nodes)
+    geometry = mesh.geometry()
+    model = SSTModel()
+    k_in = float(inlet_k(jnp.array(U_IN), INTENSITY))
+    omega_in = float(inlet_omega(jnp.array(k_in), LENGTH_SCALE, model))
+    momentum = MomentumContinuity.build(
+        mesh,
+        geometry,
+        PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
+        CompactGreenGauss(),
+        BoundaryConditions(
+            {
+                "left": VelocityInlet(velocity=(U_IN, 0.0)),
+                "right": PressureOutlet(pressure=0.0),
+                "bottom": NoSlipWall(),
+                "top": NoSlipWall(),
+            }
+        ),
+        advection_scheme=FirstOrderUpwind(),
+    )
+    turbulence = SSTTurbulence.build(
+        model,
+        mesh,
+        geometry,
+        CompactGreenGauss(),
+        FirstOrderUpwind(),
+        density=RHO,
+        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        wall_patches=["bottom", "top"],
+        k_boundary=BoundaryConditions(
+            {
+                "left": Dirichlet(k_in),
+                "right": ZeroGradient(),
+                "bottom": Dirichlet(0.0),
+                "top": Dirichlet(0.0),
+            }
+        ),
+        omega_boundary=BoundaryConditions(
+            {
+                "left": Dirichlet(omega_in),
+                "right": ZeroGradient(),
+                "bottom": ZeroGradient(),
+                "top": ZeroGradient(),
+            }
+        ),
+    )
+    return momentum, turbulence
 
 
 @pytest.fixture(scope="module")

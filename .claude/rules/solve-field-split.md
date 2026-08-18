@@ -67,8 +67,8 @@ paths:
       `AmgVCycle` has, so on the split the inherited property RAISED (fixed 2026-08-14 by an explicit
       `has_native_solve = False` override; a split never forms the whole shifted operator, so there is no
       native solve to offer).** It went unseen for the reason worth carrying: **both call sites ask
-      through `getattr(pc, "is_exact_native", False)` — the right spelling for the ILUT and LU, which
-      genuinely lack the attribute — and a `getattr` default swallows an `AttributeError` raised *inside*
+      through `getattr(pc, "is_exact_native", False)` — the right spelling for the complete LU, which
+      genuinely lacks the attribute — and a `getattr` default swallows an `AttributeError` raised *inside*
       a property body exactly as it swallows a missing name.** The value it produced was accidentally the
       correct `False`, so nothing failed. Two consequences: a test of such a property must read it
       **directly**, never through `getattr` with a default (a `getattr` test passes against the defect —
@@ -443,6 +443,62 @@ paths:
     *loses* there. What the measurement argues for is a **`β = 0` adjoint-only** preconditioner seam
     (`ForwardStep.adjoint_preconditioner()` already exists as the natural home), plus the JAX-native k/ω
     hierarchy the damped-Jacobi result unlocks. Both are unbuilt.
+  - **✅ THE MONOLITHIC MATERIALIZE NO LONGER STORES THE BLOCK IT THROWS AWAY — BUILT AND VERIFIED
+    (2026-08-18).** `FieldSplitAmgPreconditioner.build`/`refresh_in_place` still call the inherited
+    `_materialize_jacobian` **once**, over all six fields — that has not changed, and could not without a
+    rectangular (unequal row/column field count) Jacobian probe, which this machinery does not have. What
+    changed is which *pattern* that one materialize is asked to fill.
+    `ColumnProbePlan`/`column_probe_plan` (`solve/sparse_jacobian.py`) gained `active_rows`, a static
+    `(n_fields, n_fields)` table `[row_field, column_field]` a caller supplies when it already knows some
+    field-pair block will never be read, whatever the mesh or the state — unlike `in_reach` (a per-entry,
+    reach-based question), which is why the two are separate mechanisms and stay so. Excluded pairs are
+    filtered out of the pattern **before** `block_stencil_gather_map` builds the CSR structure
+    (`aquaflux/solve/sparse_jacobian.py`), not zeroed after — so the reduction is in the assembled
+    `nnz`, the retained `ProbeGather`, and the gather map's own construction cost, not only in the values.
+    `FieldGroups.active_rows(flow_first=…)` (`solve/field_split.py`) derives the table straight from the
+    partition a `BlockTriangularFieldSplit` already carries: `True` everywhere except the one triangle
+    that ordering's `apply()` never reads. `CoupledJacobianProbe.build(..., active_rows=…)` and
+    `_coupled_jacobian_plan` thread it through; `coupled_amg_continuation` derives it automatically
+    (`groups.active_rows()`) whenever it builds its own probe under `field_split=True`, and
+    `validation/bfs3d_openfoam/compare.py`'s shared, once-built `probe` does the same when
+    `BFS3D_FIELD_SPLIT` is set, since that probe is built externally and handed in rather than left to the
+    builder's own default. `None` (the default with no `groups`/`active_rows` given) is byte-identical to
+    the pre-existing behaviour — pinned in `tests/unit/test_sparse_jacobian.py`
+    (`test_active_rows_defaults_to_every_block_and_is_byte_identical`,
+    `test_active_rows_removes_a_block_from_the_pattern_not_just_its_values`,
+    `test_active_rows_agrees_between_the_scatter_and_gather_paths`,
+    `test_active_rows_composes_with_a_per_column_reach`) and `tests/unit/test_field_split.py`
+    (`TestFieldGroups::test_the_dropped_block_never_reaches_the_splits_own_apply`, which zeroes the
+    excluded block by hand and checks the split's own `apply()` — forward and transpose — does not move).
+
+    **Confirmed end to end on `bfs3d`, on the real mesh, through the real production call
+    (`CoupledJacobianProbe.build` → `FieldSplitAmgPreconditioner.build`), not a standalone probe script:**
+    structural `nnz` fell **47.209M → 36.718M, a 22.2 % reduction**, matching the measurement below to
+    three figures, and the resulting preconditioner's `apply()` — **forward and transpose** — is
+    `0.000e+00` different from the unrestricted build's, on a random right-hand side. The adjoint path
+    matters here specifically: this preconditioner also serves `jax.grad` through a coupled solve, via the
+    same transpose `apply()`, so a change that touched only the forward direction would not have been
+    enough.
+
+    **The block, before the fix.** Measured on `bfs3d` (23040 cells, hybrid initial field,
+    `BFS3D_COLUMN_REACH=(3,3,3,3,2,2)`, `stencil_reach=3`; a standalone reproduction of the fix's own
+    starting point is `validation/bfs3d_openfoam/trailing_scoped_probe.py --arm full`):
+
+    | block | nnz | share |
+    |---|---|---|
+    | leading diag `[u,v,w,p] <- [u,v,w,p]` | 20.982M | 44.4 % |
+    | trailing diag `[k,ω] <- [k,ω]` | 5.245M | 11.1 % |
+    | retained coupling `[k,ω] <- [u,v,w,p]` (applied every step) | 10.491M | 22.2 % |
+    | **dropped coupling `[u,v,w,p] <- [k,ω]`** (was sliced out and never applied) | **10.491M** | **22.2 %** |
+
+    A *count* of stored positions, not the Frobenius-norm magnitude `field_coupling.py` reports below —
+    that measure found the same block at 0.09 % of the operator's norm, which is why it read as
+    negligible; the two questions are different, and only the entry count bears on materialize memory.
+    **Extrapolated to 1,000,000 cells** (43.4× `bfs3d`, nnz assumed to scale linearly with cell count,
+    which the shipped discretization's reach-limited stencils make reasonable away from boundaries): the
+    block that no longer has to be built would have been on the order of 450M stored entries and, at the
+    per-entry transient costs measured for this same gather-map machinery elsewhere in this file
+    (65.7–100 B/entry), on the order of 10–30 GB of a single materialize's peak.
   - **⚠️⚠️ `trailing_smoother_sweeps` DOES NOT REACH AN INJECTED TRAILING INVERSE, SO THE NATIVE ARM
     SHIPS AT FOUR SWEEPS, NOT ONE (verified in source, 2026-08-14).** In
     `build_block_triangular_field_split` the injected inverse is called as
@@ -602,30 +658,39 @@ paths:
       smoother.
 
 
-## ⚠️ NOT YET ADDRESSED: the full-Jacobian materialization is a scaling wall this split does not touch
+## ⚠️ PARTIALLY ADDRESSED: the full-Jacobian materialization is a scaling wall, one block of it now fixed
 
-**Deepening either block's own hierarchy does not fix this, and it may dominate memory at a
-1M-cell target regardless.** `FieldSplitAmgPreconditioner.build` / `refresh_in_place`
-(`aquaflux/solve/amg_preconditioner.py`, driven from `aquaflux/turbulence/coupled.py`'s
-`_monolithic_shift_source` / `CoupledJacobianProbe`) materialize the **entire** coupled Jacobian —
-all `dim+3` fields, reach-3 stencil (94 colours, 38.7M nnz at `bfs3d`'s 23040 cells) — once, and
-`build_block_triangular_field_split` slices the leading and trailing blocks out of that one matrix.
-This is what field-split costs regardless of either block's own coarsening depth (see the trailing
-hierarchy's own scalability note in `solve-amg-multigrid.md`, which this is deliberately separate
-from).
+**Deepening either block's own hierarchy does not fix this on its own, and it may dominate memory at a
+1M-cell target regardless of how deep either goes.** `FieldSplitAmgPreconditioner.build` /
+`refresh_in_place` (`aquaflux/solve/amg_preconditioner.py`, driven from `aquaflux/turbulence/coupled.py`'s
+`_monolithic_shift_source` / `CoupledJacobianProbe`) materialize the coupled Jacobian with **one**
+coloured-probe pass over all `dim+3` fields at reach 3, and `build_block_triangular_field_split` slices
+the field-pair blocks out of that one matrix. This is what field-split costs regardless of either block's
+own coarsening depth (see the trailing hierarchy's own scalability note in `solve-amg-multigrid.md`,
+which this is deliberately separate from).
 
-Scaling the measured `bfs3d` figures linearly by cell count to 1M cells (~43×) gives on the order of
-2 billion nonzeros and, going by this project's own working figure of ~2 GB per live copy at 23040
-cells (JAX/BCOO overhead and transient probe buffers, not just the ~570 MB of raw CSR storage),
-plausibly tens of GB per copy — likely larger than the trailing hierarchy's now-fixed dense-coarse-
-solve wall ever was.
+**✅ One quarter of it is now fixed (2026-08-18, see the `active_rows` entry above in this file).** The
+dropped coupling block `[u,v,w,p] ← [k,ω]` — sliced out and discarded by every flow-first split, never
+applied — is no longer materialized at all: `nnz` fell 47.209M → 36.718M (−22.2 %) on `bfs3d`, verified
+bit-identical on the split's own `apply()` (forward and transpose). Scaling *that* fix's own 1M-cell
+extrapolation, the block it removed would have been ~450M stored entries on its own.
+
+**What is still open — the two diagonal blocks and the one coupling block field-split still keeps
+(`[u,v,w,p]` diagonal 44.4 %, `[k,ω]` diagonal 11.1 %, retained coupling `[k,ω] ← [u,v,w,p]` 22.2 % —
+77.8 % of the original, ~28.6M nnz on `bfs3d`) are all still materialized through the SAME single
+reach-3, 6-field colouring.** Scaling that remainder linearly by cell count to 1M cells still gives on
+the order of 1.2 billion nonzeros and, going by this project's own working figure of ~2 GB per live copy
+at 23040 cells for the *unreduced* materialize (JAX/BCOO overhead and transient probe buffers, not just
+raw CSR storage), plausibly several to tens of GB per copy — likely still larger than the trailing
+hierarchy's now-fixed dense-coarse-solve wall ever was, just smaller than before this fix.
 
 The scalar block-diagonal preconditioner path (`coupled_continuation`'s default `CoupledShiftPolicy`,
-`method="twolevel"`/`"air"`) avoids this entirely — each field's operator is built analytically from
-~one JVP, no colouring, no full-Jacobian storage — but `bfs3d` moved away from it because the cheaper
-composition was measured insufficient at this case's Reynolds number (see the flow-block
-preconditioning notes). **A genuinely cheaper route, scoped but UNBUILT:** probe the `[k, ω]`
-Jacobian on its own — a 2-field colouring, which closes at stencil reach 2 rather than the 3 the
+`method="twolevel"`/`"air"`) avoids materializing any Jacobian at all — each field's operator is built
+analytically from ~one JVP, no colouring, no full-Jacobian storage — but `bfs3d` moved away from it
+because the cheaper composition was measured insufficient at this case's Reynolds number (see the
+flow-block preconditioning notes). **A genuinely cheaper route beyond the `active_rows` fix, scoped but
+UNBUILT:** probe the `[k, ω]` Jacobian on its own — a 2-field colouring, which closes at stencil reach 2
+rather than the 3 the
 full velocity-coupled system needs (`turbulence.md` documents `ν_t`'s dependence on the strain rate
 `S(∇u)` as exactly what pushes the velocity columns to reach 3; k and ω enter pointwise and do not
 need it) — instead of slicing it out of the full materialization. This would keep the true k↔ω

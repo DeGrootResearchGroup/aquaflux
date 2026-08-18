@@ -927,7 +927,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     score worse than a badly wrong one, and a step collapsing `k` is accepted (see the mis-ranking warning
     in `.claude/rules/solve-globalization-log.md`). `RowScaledNorm` divides each row by its own diagonal and each block by its
     field magnitude, reporting a fractional change per equation, so steering and the stopping test judge
-    every block comparably. `coupled_continuation` / `coupled_ilut_continuation` build it by default;
+    every block comparably. `coupled_continuation` / `coupled_lu_continuation` build it by default;
     `block_scaled_norm=True` selects the coarser one-scale-per-block `BlockScaledNorm` (`_coupled_residual_norm`),
     and `residual_norm=jnp.linalg.norm` recovers the plain Euclidean measure. (`mass_flow_coupled_continuation`
     still defaults to Euclidean — its bordered `[flow, k, ω, β]` state needs a constraint-aware row-scaled
@@ -968,89 +968,67 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     materially** (configuration not recorded — re-measure before relying on the size) — the one staleness
     lever that pays; see the staleness bullet in
     `.claude/rules/solve-globalization-log.md`. Overridable via `preconditioner_kwargs`.
-  - **`coupled_ilut_continuation` — the monolithic-ILUT alternative to the block-triangular PC (BUILT).**
-    A drop-in for `solve_coupled(continuation=…)` that preconditions the whole `[flow, k, ω]` saddle with
-    one incomplete-LU factorization of the assembled coupled Jacobian (`MonolithicIlutPreconditioner`,
-    `.claude/rules/solve-direct-preconditioners.md`) instead of the block-diagonal SIMPLE composition. It **forms the true
-    pressure Schur through the factorization's fill** rather than approximating it — the block PC's
-    measured wall is the Schur *approximation* (the "Stage 3" note above / `.claude/rules/flow.md`), which
-    the ILUT sidesteps: on the coupled RANS saddle it reaches the forward tolerance in a small number of
-    GMRES cycles where the block PC needs orders of magnitude more (cycle counts recorded with no β, rtol
-    or state — re-measure before relying on them). `MonolithicFactorShiftPolicy` **reuses `CoupledShiftPolicy`'s
+  - **`coupled_lu_continuation` / `coupled_lu_refreshing_continuation` — the COMPLETE-LU coupled PC, the
+    preferred coupled PC on 2D/moderate meshes (BUILT).** A drop-in for `solve_coupled(continuation=…)`
+    that preconditions the whole `[flow, k, ω]` saddle by factoring the assembled coupled Jacobian
+    *completely* (`MonolithicLuPreconditioner`, `.claude/rules/solve-direct-preconditioners.md`), instead of
+    the block-diagonal SIMPLE composition, so the preconditioner is the operator's exact inverse and a
+    Krylov solve converges in **one** iteration. It **forms the true pressure Schur through the
+    factorization's fill** rather than approximating it — the block PC's measured wall is the Schur
+    *approximation* (the "Stage 3" note above / `.claude/rules/flow.md`), which the complete factorization
+    sidesteps. `MonolithicFactorShiftPolicy` **reuses `CoupledShiftPolicy`'s
     pseudo-transient shift diagonal** (the physics — same velocity `a_P` + k/ω transport diagonals) and
-    swaps only the preconditioner. It takes **only that diagonal**, so all three monolithic builders
+    swaps only the preconditioner. It takes **only that diagonal**, so both monolithic builders
     construct their base through `_monolithic_shift_source`, which builds the policy with
     `flow_preconditioner=None` — the shift's velocity buckets come straight from the assembler
     (`flow.frozen_momentum_diagonal_parts`), and the block preconditioner that used to be built for them
     contributed two never-applied multigrid hierarchies whose value-dependent coarsening recompiled the
     coupled solve at every Reynolds rung. Asking a shift-only policy for a composed preconditioner
-    raises. The factorization is a host `scipy` object so it rides as a **static**
+    raises. The factorization is a host object so it rides as a **static**
     field and is applied via `jax.pure_callback`, with the adjoint's `Mᵀ` supplied directly through a
     `TransposedPreconditioner` (the generic `jax.linear_transpose` machinery cannot transpose a callback —
-    `.claude/rules/solve-direct-preconditioners.md`). **Its forward solver is `_COUPLED_ILUT_FORWARD_SOLVER` (restart-10),
-    NOT the block path's restart-120 `_COUPLED_FORWARD_SOLVER`:** the ILUT clusters the preconditioned
-    spectrum so tightly that the 1% stop is reached within ~5–10 vectors, and `lineax` GMRES only tests
+    `.claude/rules/solve-direct-preconditioners.md`). **Its forward solver is
+    `_COUPLED_FACTORIZATION_FORWARD_SOLVER` (restart-10),
+    NOT the block path's restart-120 `_COUPLED_FORWARD_SOLVER`:** an exact factorization clusters the preconditioned
+    spectrum so tightly that the 1% stop is reached within a handful of vectors, and `lineax` GMRES only tests
     convergence at each restart boundary (its sole mid-cycle exit is exact Arnoldi breakdown, which does
-    not fire while the residual is merely small), so a 120-vector restart pays ~120 ILUT back-solves per
-    cycle where a small restart stops as soon as it has converged. Measured on pitzDaily: restart-10 gives a
-    **bit-identical march trajectory** to restart-120 at a much lower per-step wall (the ILUT apply is a host
-    `pure_callback` triangular solve, so wasted matvecs dominate the step; the wall-clock ratio was recorded
-    with no machine or thread count — re-measure before relying on it). The two
+    not fire while the residual is merely small), so a 120-vector restart pays many wasted back-solves per
+    cycle where a small restart stops as soon as it has converged. The two
     solvers are tuned oppositely on purpose — the block PC genuinely needs a large subspace per cycle, the
-    ILUT needs a small one. Verified: `solve_coupled(continuation=coupled_ilut_continuation(...))`
+    exact factorization needs a small one. Verified: `solve_coupled(continuation=coupled_lu_continuation(...))`
     converges to the **same fixed point** as the block PC and passes the **coupled-adjoint FD gate**
-    (`tests/integration/test_coupled_ilut.py`). **Cheap in-place mid-march refresh —
-    `coupled_ilut_refreshing_continuation` (BUILT, forward-march only).** For a differentiable solve the
+    (`tests/integration/test_coupled_lu.py`, run under the `scipy` backend so CI needs no optional dep —
+    the complete factorization is exact regardless of backend). With the UMFPACK backend
+    (optional `petsc4py` dep, `backend="auto"|"umfpack"|"scipy"`) it factors the developed pitzDaily
+    coupled Jacobian quickly, exact (1 GMRES iter), verified on the real forward operator
+    and the β=0 adjoint. **Cheap in-place mid-march refresh —
+    `coupled_lu_refreshing_continuation` (BUILT, forward-march only).** For a differentiable solve the
     factorization is frozen at the reference state (state drift costs only a few cycles, and freezing
     keeps the adjoint valid). For a long developing march it instead goes stale — on a low-shift dual-time
-    path it can NaN — so `coupled_ilut_refreshing_continuation(coupled, …)` returns a `refresh.builder`
-    for `solve_coupled` that re-factors the ILUT **in place in the SAME continuation object**
-    (`MonolithicIlutPreconditioner.refresh_in_place`), so the jitted march-step is a compilation cache hit
+    path it can NaN — so `coupled_lu_refreshing_continuation(coupled, …)` returns a `refresh.builder`
+    for `solve_coupled` that re-factors the LU **in place in the SAME continuation object**
+    (`MonolithicLuPreconditioner.refresh_in_place`), so the jitted march-step is a compilation cache hit
     (no recompile) — pair it with a `CoefficientDriftTrigger` so the re-factor leads the staleness. This
     is impure and **forward-march only** (never differentiate through it); see `.claude/rules/solve-direct-preconditioners.md`
-    for the mechanism (static preconditioner field + callback reads `self.factors` at call time) and the
-    cost split (in-place refresh ~44 s vs ~72 s rebuild; the residual is ~88 % `spilu`, a hard floor). The
-    builder still assembles the (unused) block AMG as the `a_P` source (a lightweight shift-diagonal-only
-    policy is the tracked cleanup). The heavy ILUT fill is
-    the 3D-scalability caveat (parked ILUT-as-smoother variant, `.claude/rules/solve-direct-preconditioners.md`). **Per-step wall
-    (restart-10, measured on a pitzDaily cold march): the ILUT is CHEAPER per pseudo-timestep than the
-    block PC, reverting the earlier "ILUT is more expensive per step" verdict, which was a restart-120
-    artifact (see the restart note above).** Its build is the more expensive of the two (`spilu`
-    dominates), so total wall crosses over after a modest number of steps, and a cold pitzDaily march is
-    long enough that the ILUT wins total forward wall too. (Every wall-clock figure in this bullet was
-    recorded with no machine, thread count or solver bundle — re-measure before relying on any of them.)
-    It is a reasonable default for a *differentiable* coupled solve on a 2D/moderate mesh — but it is
-    **NOT** the only PC with a working β=0 coupled adjoint: `coupled_lu_continuation` and
-    `coupled_amg_continuation` both pass the coupled-adjoint finite-difference gate with shipped tests
-    (`test_coupled_lu.py::test_lu_adjoint_matches_finite_difference`,
-    `test_coupled_amg.py::test_amg_adjoint_matches_finite_difference`), so the earlier "only PC that
-    solves the β=0 adjoint at all" claim is refuted and deleted. It does **not** shorten the reachability crawl (a
-    per-step-cost + adjoint-correctness lever, not a globalization one). NOTE: it is not yet
-    `solve_coupled`'s default — the two continuations have different parameter surfaces, so making it the
-    default needs a selector seam, not a swap (tracked).
-  - **`coupled_lu_continuation` / `coupled_lu_refreshing_continuation` — the COMPLETE-LU counterpart, the
-    preferred coupled PC on 2D/moderate meshes (BUILT).** Same drop-in as the ILUT builders but factors the
-    coupled Jacobian *completely* (`MonolithicLuPreconditioner`, `.claude/rules/solve-direct-preconditioners.md`), so the
-    preconditioner is exact and the Krylov solve converges in **one** iteration. With the UMFPACK backend
-    (optional `petsc4py` dep, `backend="auto"|"umfpack"|"scipy"`) it factors the developed pitzDaily
-    coupled Jacobian in **~1.2 s vs the ILUT's ~32 s (~26×)**, exact, verified on the real forward operator
-    and the β=0 adjoint. It **shares the ILUT's machinery** —
-    `MonolithicFactorShiftPolicy` (generalized from the old `MonolithicIlutShiftPolicy`; agnostic to which
-    factorization) and the `_monolithic_factor_step` builder tail — one implementation, parameterized by
-    the preconditioner. Verified: `solve_coupled(continuation=coupled_lu_continuation(...))` reaches the
-    **same fixed point** as the block/ILUT PCs and passes the **coupled-adjoint FD gate**
-    (`tests/integration/test_coupled_lu.py`, run under the `scipy` backend so CI needs no optional dep —
-    the complete factorization is exact regardless of backend). **SCOPE: a 2D / moderate-mesh tool** — the
+    for the mechanism (static preconditioner field + callback reads `self.factors` at call time). It is a
+    reasonable default for a *differentiable* coupled solve on a 2D/moderate mesh — but it is
+    **NOT** the only PC with a working β=0 coupled adjoint: `coupled_amg_continuation`
+    also passes the coupled-adjoint finite-difference gate with a shipped test
+    (`test_coupled_amg.py::test_amg_adjoint_matches_finite_difference`). It does **not** shorten the
+    reachability crawl (a per-step-cost + adjoint-correctness lever, not a globalization one). NOTE: it is
+    not yet `solve_coupled`'s default — the two continuations have different parameter surfaces, so making
+    it the default needs a selector seam, not a swap (tracked).
+  - **SCOPE: a 2D / moderate-mesh tool** — the
     complete LU's fill (`O(n^{4/3})` in 3D) is a memory wall past ~10⁴ 3D cells (measured), so large 3D
-    stays on the ILUT / block / rank-structured-direct paths (`.claude/rules/solve-direct-preconditioners.md`). Prefer it over the
-    ILUT where the mesh is 2D/moderate (faster *and* exact); the ILUT remains for its 3D-fill headroom and
-    is still the differentiable default until a selector seam lands.
+    stays on the algebraic-multigrid path (`.claude/rules/solve-direct-preconditioners.md`).
   - **`coupled_amg_continuation` — the ALGEBRAIC-MULTIGRID counterpart, the coupled PC for large 3D
-    (BUILT).** Same drop-in as the ILUT/LU builders but preconditions with one smoothed-aggregation
+    (BUILT).** Same drop-in as the LU builder but preconditions with one smoothed-aggregation
     multigrid V-cycle (`MonolithicAmgPreconditioner`, `.claude/rules/solve-amg-multigrid.md`) instead of a factorization —
     a **direct-LU coarse solve** keeps the heavy fill on only the small coarsest grid, so it builds in
-    ~seconds with bounded memory where both factorizations hit the 3D wall (the complete LU's fill OOMs; the
-    ILUT's `spilu` on the distance-3 3D Jacobian — measured 38.7M nnz on `bfs3d` — runs >7.5 min). Shares
+    ~seconds with bounded memory where the complete LU hits the 3D wall (its fill OOMs; a monolithic
+    threshold-incomplete-LU factorization was tried and measured to hit the same wall from the time side
+    instead — its `spilu` on the distance-3 3D Jacobian — measured 38.7M nnz on `bfs3d` — ran >7.5 min and
+    never finished, before being deleted as dominated). Shares
     `MonolithicFactorShiftPolicy` + `_monolithic_factor_step`; it builds its forward solver **inline** —
     `forward_rtol = 0.3` measured in the **row-scaled** `coupled_scaled_norm`, `restart=15`,
     `max_restarts=60` (there is no `_COUPLED_AMG_FORWARD_SOLVER` symbol; the row-scaled stop is the
@@ -1070,7 +1048,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     in `.claude/rules/solve-amg-multigrid.md`.) This is the coupled
     preconditioner the first 3D validation case (`validation/bfs3d_openfoam`) runs on.
   - **`amg_beta_tracking_refresh` — rebuild the V-cycle as β drifts, the enabler of the 3D
-    dual-time march (BUILT).** The AMG sibling of `lu_beta_tracking_refresh` / `ilut_beta_tracking_refresh`.
+    dual-time march (BUILT).** The AMG sibling of `lu_beta_tracking_refresh`.
     A dual-time march ramps β down to develop the recirculation, and a V-cycle frozen at `amg_beta` degrades
     sharply as β leaves that value (measured on the `bfs3d` cold march: an order-of-magnitude rise in outer
     cycles per solve, and the march stalling, as β fell — but that run's smoother fill, sweeps, aggregation and
@@ -1078,8 +1056,8 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     on the counts). Re-materializing the Jacobian and rebuilding the GAMG at the step's `(state, β)` restores
     the matched cheap solve — the ~tens-of-seconds rebuild is far cheaper than the hundreds of extra
     Jacobian-vector-product matvecs a stale V-cycle costs. This is the only β-tracking that carries the 3D
-    case: the complete LU's factorization is out of memory and the ILUT's `spilu` is prohibitively slow to
-    build there. Same forward-only contract as the LU/ILUT hooks (raises under `jax.grad`); pass it to
+    case: the complete LU's factorization is out of memory there. Same forward-only contract as the LU
+    hook (raises under `jax.grad`); pass it to
     `solve_coupled(refresh=RefreshPolicy(precondition_step=…))` (or a `solve_reynolds_continuation` `point_setup`) with a
     `coupled_amg_continuation` step and a `DualTimeControl`.
     - **The refresh cadence is GATED, not every-step (measured on the developed-low-β tail).** Refreshing
@@ -1090,9 +1068,12 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       signal for this hook is
       **β itself** (a V-cycle's degradation is a function of the β-mismatch, above), so with
       `beta_rel_change` set the refresh fires when `|β − β_last|/β_last` exceeds it (`_staleness_beta_gate`,
-      shared with the ILUT hook), OR after `refresh_every` steps as a development backstop — the same two-
-      pronged gate as `ilut_beta_tracking_refresh`, and the β-move prong is what catches an overshoot / rung
-      restart before the solve stalls. Default (`beta_rel_change=None`) keeps the every-step behaviour.
+      shared with the shift-tracking mechanism above), OR after `refresh_every` steps as a development
+      backstop, and the β-move prong is what catches an overshoot / rung
+      restart before the solve stalls. **Why a β-move trigger, not a drift trigger, for this job:** a
+      badly mismatched frozen factorization collapses the line search (α→0), which freezes the state and
+      hence every drift measure taken on it — so a drift trigger cannot fire on exactly the failure mode
+      a β-move trigger is watching for. Default (`beta_rel_change=None`) keeps the every-step behaviour.
     - **Cheaper refresh — the β-diagonal split, drift-gated (`materialize_drift` / `materialize_every`).** The
       shifted operator is `J(state) + β·d(state)`; between two refreshes at the same developed state only β (and
       the shift diagonal) has moved, and re-materializing `J` by graph-coloured probing is ~half the refresh
@@ -1132,7 +1113,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       and a residual reaching past the pattern aliases in **every** column, which no `column_reach` choice
       fixes and `jacobian_relative_error` cannot see. `CoupledJacobianProbe(gradient_sweeps=n)` (and the
       `probe_gradient_sweeps=n` keyword on `coupled_amg_continuation`, `amg_beta_tracking_refresh` and the
-      four ILUT/LU builders) materializes the preconditioner from a copy of the residual whose gradient
+      LU builders) materializes the preconditioner from a copy of the residual whose gradient
       solve is capped at `n` sweeps — `CoupledJacobianProbe.narrow` is the one place that decides it, and
       the refresh hook re-narrows on `rebind` so a Reynolds rung's companion is capped too. The forward
       matvec keeps the exact `coupled`, so the root and the adjoint are unmoved. **`None` (default) is
@@ -1309,9 +1290,9 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     march's β ramps (0.5 → 0.005), so a factorization frozen at `lu_beta` mis-preconditions the operator
     actually solved — measured: frozen@0.05 needs 25/111/217/**474** GMRES iters at β=0.1/0.5/1/2 (vs
     **1** matched), and it **NaN'd** on a real cold ramp's overshot low-β state (215 cycles → failure).
-    The ILUT's frozen + drift-refresh design does NOT carry over, because the ILUT is *approximate* (it
-    shrugs off the β-mismatch at a few cycles) while the LU is *exact-and-brittle*. Since the LU factor is
-    cheap (~1 s), the fix is to re-factor at the current `(state, β)` **every step**:
+    An approximate factorization can shrug off a β-mismatch at a few extra cycles; the exact LU is
+    *exact-and-brittle* instead, so a frozen-and-occasionally-refreshed design does not suit it. Since the
+    LU factor is cheap (~1 s), the fix is to re-factor at the current `(state, β)` **every step**:
     `lu_beta_tracking_refresh(coupled)` returns a `precondition_step(active_step, state)` (the
     `forward_march` seam, `.claude/rules/solve-march.md`) that reads β from the step's `ConstantRelaxation` (set
     by a `DualTimeControl`) and `refresh_in_place`s the LU at `J(state)+β·d(state)` — exact each step (1
@@ -1325,58 +1306,6 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     solve). Requires a `DualTimeControl` (β must be a readable constant); raises with the fix if paired
     with the default switched-evolution schedule. Pinned in `tests/integration/test_coupled_lu.py`
     (exact-at-current-β, cold-march convergence to the block PC's root, grad-guard).
-  - **`ilut_beta_tracking_refresh` — β-track the ILUT refresh instead of freezing it (BUILT; the 3D
-    fallback's globalization robustness).** The frozen `coupled_ilut_refreshing_continuation` above is
-    frozen at ONE `ilut_beta` while the march's β ramps 2.0 → 0.02, so it is mismatched during the low-β
-    cruise and worst at a rung restart or a dual-time overshoot (measured: a stale factor drove the cold
-    pitzDaily ramp's rung-1 overshoot to **cyc 346** and stalled). β-tracking follows the same idea as the
-    LU hook — but the ILUT differs on two axes that shape the design: its threshold factorization is
-    **expensive** (`spilu` ~30–40 s, value-dependent fill so no cheap symbolic-reuse refactor) and only
-    **approximate** (a few Krylov iters even when matched). So it is NOT re-factored every step (the LU's
-    cadence); it is **gated** (`_staleness_beta_gate`): re-factor when β has moved by more than
-    `beta_rel_change` (default 0.25) since the last refresh, OR after `refresh_every` (default 5) steps.
-    The **β-move** trigger is load-bearing — it is what catches an overshoot/rung-restart *before* the
-    line search stalls; a *drift* trigger cannot, because a badly mismatched factor collapses α→0, so the
-    state stops moving, its coefficients stop drifting, and a drift trigger never fires (the α=0 / no-drift
-    stall the LU sidesteps by refreshing every step). The step-count cap is the complementary staleness
-    bound for state development at a near-constant β. `ilut_beta_tracking_refresh(coupled, …)` returns a
-    `precondition_step(active_step, state)` (the same `forward_march` seam as the LU hook); it **shares the
-    `_beta_tracking_refresh` skeleton** with `lu_beta_tracking_refresh` (one β-read + shift + in-place
-    refactor, parameterized by the gate and the `refresh_in_place` kwargs — the LU passes `gate=None` =
-    always). **Forward-march only** (impure host re-factor; raises under `jax.grad`); the finishing solve
-    and adjoint keep the last frozen factorization, exact enough at β → 0 — so for a *differentiable* solve
-    use the plain `coupled_ilut_continuation` (no `precondition_step`), whose root and adjoint are
-    refresh-independent. **Role:** this makes the ILUT *more robust* through a ramping β — but NOT as
-    robust as the exact LU, and NOT *competitive* with it on 2D. Measured on the cold pitzDaily ramp
-    (shipped-default `DualTimeControl`): β-tracking clears rung 0 clean (cyc 2–5) and develops rung 1's
-    recirculation bubble to `x_r/h` 8.7 — well past where the **frozen** ILUT ground at cyc 346 — but it
-    then **NaN'd at the rung-1 overshoot** (step 15, α→0) where the LU completes. Two combined causes: the
-    approximate factorization is less robust through a hard dual-time overshoot than the exact LU (it NaN'd
-    even on the step where the gate had just re-factored), and the overshoot itself is a `DualTimeControl`
-    globalization fragility the LU tolerates *because* it is exact (the control-tuning follow-up owns it).
-    Also secondary: the β-move/step-count gate can skip a refresh exactly at an overshoot (α clipping moves
-    β little), spiking cyc (a 255-cyc step was observed then recovered) — a struggle-triggered refresh
-    (refactor when cyc is high / α clips) is a candidate refinement. Even β-tracked the ILUT's refactor is
-    ~10–40× the LU's and it is approximate, so on 2D/moderate the complete LU wins on both speed *and*
-    robustness. The ILUT's payoff is the **3D fallback**, where the LU's fill is a memory wall and the ILUT
-    is what carries the solve; β-tracking is the forward-march robustness it needs *there*. Pinned in
-    `tests/integration/test_coupled_ilut.py` (the pure gate logic as a fast test; the gated in-place
-    refactor; cold-march convergence to the block PC's root).
-    - **The rung-1 overshoot NaN is fixed by a tighter SOLVE, not a refresh — `solve_coupled(retry=RetryPolicy(solver=…))`
-      (BUILT).** The NaN above is the ILUT's *approximation* at the stiff operator the overshoot creates:
-      it NaN'd *even on the step the gate had just re-factored*, so a "struggle-triggered refresh" (the
-      candidate refinement mused above) cannot help — re-factoring the deterministic ILUT at the same
-      `(state, β)` is a no-op. The failure is an under-converged *Krylov* solve (the loose default
-      tolerance leaves the inexact δ non-finite on the stiff operator, where the exact LU's δ is finite),
-      so the fix is to **redo the diverged step at a tighter linear solve**, same state, same (fresh)
-      factors: `forward_march`/`solve_coupled` take a `retry.solver` that recovers only a non-finite step
-      (see the `retry.solver` bullet in `.claude/rules/solve-march.md`). Measured: with the loose ILUT default +
-      `retry=RetryPolicy(solver=relative_residual_gmres(1e-4, restart=40))`, the aggressive-control ramp runs rung-1
-      steps 1–7 on the cheap loose solver and *only* the diverged overshoot step retries tight, recovering
-      to the exact-LU value and tracking the LU on — the state-adaptive alternative to tightening every
-      step. Orthogonal to and composes with the refresh gating. This is the ILUT-side other half of the
-      overshoot robustness the LU gets free from being exact; the `DualTimeControl` overshoot itself is
-      still a globalization fragility (the control-tuning follow-up owns it).
   - **RETIRED — "the k equation drift is the remaining limiter": the stall no longer reproduces (measured
     2026-07-22).** This bullet used to record that past rel ~0.09 the direct-`k` residual grew (rel 1 →
     ~5×) and re-stalled the march, and named high-Reynolds `k` stability as the open follow-up. **It

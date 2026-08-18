@@ -2,10 +2,10 @@
 
 The coupled continuation's block-triangular SIMPLE preconditioner is replaced by a single
 algebraic-multigrid V-cycle of the assembled coupled Jacobian (:func:`coupled_amg_continuation`) -- the
-scaling path for large three-dimensional meshes, where the complete LU's fill is out of memory and the
-threshold-ILU's factorization is prohibitively slow to build. These check the two properties that make it
-a usable drop-in: handed to ``solve_coupled`` it converges the monolithic Newton to the **same** fixed
-point the block preconditioner reaches, and -- built once outside ``jax.grad`` on concrete parameters --
+scaling path for large three-dimensional meshes, where the complete LU's fill is out of memory. These
+check the two properties that make it a usable drop-in: handed to ``solve_coupled`` it converges the
+monolithic Newton to the **same** fixed point the block preconditioner reaches, and -- built once
+outside ``jax.grad`` on concrete parameters --
 it yields the exact coupled adjoint (a single transpose solve on the unfrozen residual, preconditioned by
 the V-cycle's *transpose*, which the multigrid supplies directly), matching finite differences. The
 V-cycle needs PETSc, so the module is skipped where ``petsc4py`` is unavailable.
@@ -31,7 +31,7 @@ from aquaflux.turbulence import (
     solve_coupled,
 )
 
-from tests.integration.test_coupled_ilut import PRECONDITIONER, _channel
+from tests.integration.test_coupled_lu import PRECONDITIONER, _channel
 
 
 @pytest.fixture(scope="module")

@@ -1,0 +1,52 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | uvReactorSozzi2006: turbulent kinematic viscosity
+   \\    /   O peration     |
+    \\  /    A nd           |
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       volScalarField;
+    object      nut;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// nut_inlet = Cmu * k^2 / eps = 0.09 * 0.4555^2 / 37.83 = 4.94e-4 m^2/s
+dimensions      [0 2 -1 0 0 0 0];
+
+internalField   uniform 4.94e-4;
+
+boundaryField
+{
+    inlet
+    {
+        type            calculated;
+        value           uniform 4.94e-4;
+    }
+
+    outlet
+    {
+        type            calculated;
+        value           uniform 4.94e-4;
+    }
+
+    bodyWall
+    {
+        // Spalding's continuous wall function: smooth blend across the
+        // viscous sublayer (y+ < 5), buffer layer (5 < y+ < 30), and
+        // log-law region (y+ > 30). Tolerates the wide y+ range we
+        // observed (1.5 -> 547 across the body wall).
+        type            nutUSpaldingWallFunction;
+        value           uniform 0;
+    }
+
+    lampWall
+    {
+        type            nutUSpaldingWallFunction;
+        value           uniform 0;
+    }
+}
+
+// ************************************************************************* //

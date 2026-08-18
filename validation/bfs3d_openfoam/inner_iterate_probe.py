@@ -177,9 +177,8 @@ def solve_with(label, coupled, state, pc_state, beta, plan, structure, n_fields)
     # right-hand side is that transient residual, not the steady one.
     rhs = -coupled.residual(state)
     started = time.time()
-    # The march's OWN forward solver: 30 % in the row-scaled measure at restart 15. The coupled ILUT
-    # path's solver is a different object (1 % in a plain 2-norm at restart 10) and reaching for it
-    # measures a solve this march never performs.
+    # The march's OWN forward solver: 30 % in the row-scaled measure at restart 15. A different
+    # coupled path's forward solver would measure a solve this march never performs.
     solver = relative_residual_gmres(
         0.3,
         norm=coupled_scaled_norm(coupled, base, state),

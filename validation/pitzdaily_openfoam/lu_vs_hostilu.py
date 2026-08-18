@@ -7,15 +7,18 @@ the dependency is carried for one regime, and the question is what is actually l
 if a factorization that needs no such build marches this case about as fast, the exact LU is a
 strategy to delete rather than a dependency to keep.
 
-The arms are the exact LU against the two PETSc-free alternatives, because "is the LU worth keeping"
+The arms are the exact LU against the PETSc-free alternative, because "is the LU worth keeping"
 is a question about what would REPLACE it:
 
 * ``lu``      -- the complete LU, re-factored every step. Frozen it mis-preconditions a ramping
                  shift badly (measured: 1 Krylov iteration at the matching shift against 474 two
                  doublings away), so a fair arm gives it the per-step refresh it is designed around.
-* ``ilut``    -- the threshold incomplete LU, ``scipy`` only. The historical 2D alternative.
 * ``hostilu`` -- the field split whose blocks are a native hierarchy smoothed by this package's own
                  zero-fill factorization. No optional dependency at all.
+
+(A threshold incomplete-LU arm, ``ilut``, used to run alongside these two; it was removed once the
+family verdict settled that it was dominated by both the complete LU at 2D and the field-split
+multigrid at 3D, with no case selecting it.)
 
 **Judge on WALL CLOCK, not on Krylov cycles.** The arms have different per-application costs by
 construction -- an exact factorization converges in one iteration and pays for it in the factor --
@@ -45,7 +48,6 @@ from aquaflux.solve import (  # noqa: E402
 )
 from aquaflux.turbulence import (  # noqa: E402
     coupled_amg_continuation,
-    coupled_ilut_continuation,
     coupled_lu_continuation,
     hybrid_initialize,
     lu_beta_tracking_refresh,
@@ -125,7 +127,7 @@ def _require_finite(coupled, state) -> None:
 
 
 def _arms(coupled, reference_state):
-    """The three continuations, each with the refresh policy it is designed around."""
+    """The two continuations, each with the refresh policy it is designed around."""
 
     def lu():
         return (
@@ -134,9 +136,6 @@ def _arms(coupled, reference_state):
             # march, so a frozen factor preconditions a system nothing is solving. Cheap to redo.
             lu_beta_tracking_refresh(coupled),
         )
-
-    def ilut():
-        return coupled_ilut_continuation(coupled, reference_state, **DUAL_TIME), None
 
     def hostilu():
         return (
@@ -154,7 +153,7 @@ def _arms(coupled, reference_state):
             None,
         )
 
-    return {"lu": lu, "ilut": ilut, "hostilu": hostilu}
+    return {"lu": lu, "hostilu": hostilu}
 
 
 def run(name, build, coupled, start):
