@@ -185,18 +185,27 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
   - `FaceCellConnectivity` (obtained as **`mesh.face_cells`**) — the face→cell relation and the
     operators over it. **Gather is direct indexing** with the public accessors `owner` /
     `safe_neighbour` (`cell_field[fc.owner]`, `cell_field[fc.safe_neighbour]` — the boundary-safe
-    substitution lives in the `safe_neighbour` property); that idiom is used throughout, so there are
-    no `gather_owner`/`gather_neighbour` wrapper methods. `n_faces` is a **derived** property
-    (`owner.shape[0]`), so it cannot disagree with the arrays it describes — unlike `n_cells`, which
-    is stored because it is *not* recoverable that way (no face need reference the last cell). It is
-    what a consumer sizes a per-face accumulator at without taking the whole `Mesh` (`CellBalance`'s
-    face-flux sum). Note `FaceNodeConnectivity` stores its own `n_faces` as a static field instead —
-    its CSR row count is a construction input, not a length. The *scatter* side is where the class earns
-    its keep: `scatter(owner_contrib, neighbour_contrib)` (auto-masks the neighbour side on boundary
-    faces — the *one* place that masking lives), plus conveniences `scatter_conservative(flux)`
-    (owner `+`, neighbour `−`; FVM conservation), `scatter_symmetric(contrib)` (both cells `+`; means
-    / symmetric coefficients), and `scatter_max`/`scatter_min` (extremum reductions, boundary side
-    masked to ∓∞). This is the operator behind **every** `gather → compute → scatter` residual term —
+    substitution); that idiom is used throughout, so there are no `gather_owner`/`gather_neighbour`
+    wrapper methods. **`interior` and `safe_neighbour` are stored fields, computed once in
+    `__post_init__`, not properties recomputed on every access (issue #109, fixed 2026-08-18)** — a
+    recomputed property folds away outside a loop but not inside a traced `while_loop` body (a
+    Krylov matvec), where the compare-plus-select used to run on every iteration instead of once.
+    `n_faces` is still a **derived** property (`owner.shape[0]`), so it cannot disagree with the
+    arrays it describes — unlike `n_cells`, which is stored because it is *not* recoverable that way
+    (no face need reference the last cell). It is what a consumer sizes a per-face accumulator at
+    without taking the whole `Mesh` (`CellBalance`'s face-flux sum). Note `FaceNodeConnectivity`
+    stores its own `n_faces` as a static field instead — its CSR row count is a construction input,
+    not a length. The *scatter* side is where the class earns its keep:
+    `scatter(owner_contrib, neighbour_contrib)`, `scatter_conservative(flux)` (owner `+`, neighbour
+    `−`; FVM conservation), `scatter_symmetric(contrib)` (both cells `+`; means / symmetric
+    coefficients), and `scatter_max`/`scatter_min` (extremum reductions). **None of the four masks
+    the boundary neighbour side with a `jnp.where` any more (issue #109).** A boundary face's
+    neighbour-side scatter index is redirected to a trash row one past the last real cell — a stored
+    field computed once alongside `interior`/`safe_neighbour` — and every scatter reduces with
+    `num_segments = n_cells + 1` then slices `[:n_cells]` away — the boundary contribution is
+    excluded structurally by which segment it lands in, not by its value, so no identity element
+    (`0`, `∓∞`) and no extra `(n_faces, ...)` masked array are needed. This is the operator behind
+    **every** `gather → compute → scatter` residual term —
     the mesh geometry (`cell.py`, `quality.py`), the discretization scatter
     (`CellBalance` delegates its scatter here; flux operators gather owner/neighbour by direct
     indexing on `owner`/`safe_neighbour`), the gradient schemes, and the coupled flow all compose it.

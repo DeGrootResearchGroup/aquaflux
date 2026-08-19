@@ -156,6 +156,55 @@ def test_face_cells_scatter_broadcasts_vector_contributions():
     np.testing.assert_allclose(np.asarray(result[:, 1]), [-4, -1, -2])
 
 
+def test_face_cells_scatter_ignores_boundary_neighbour_contribution_entirely():
+    """A boundary face's neighbour_contrib is excluded structurally, not by its value.
+
+    NaN on the boundary-face entries is the strong version of the existing masking test: any
+    off-by-one in the trash-row redirect would poison a real cell's sum, where a merely-large
+    finite value might accidentally still look plausible.
+    """
+    fc = _line_face_cells()  # faces 0,1 interior; faces 2,3 boundary
+    owner_contrib = jnp.array([1.0, 2.0, 3.0, 4.0])
+    neighbour_contrib = jnp.array([10.0, 20.0, jnp.nan, jnp.nan])
+    result = fc.scatter(owner_contrib, neighbour_contrib)
+    assert not bool(jnp.any(jnp.isnan(result)))
+    np.testing.assert_allclose(np.asarray(result), [4, 12, 24])
+
+
+def test_face_cells_scatter_max_and_min_ignore_boundary_neighbour_contribution():
+    """The extremum scatters exclude a boundary face's neighbour side the same structural way.
+
+    Using +/-inf on the boundary-face entries would corrupt the max/min if they leaked in through
+    the old identity-masked path or a broken trash-row redirect; excluded structurally, they never
+    reach a real cell's reduction regardless of magnitude.
+    """
+    fc = _line_face_cells()  # owner=[0,1,0,2], neighbour=[1,2,-1,-1]
+    owner_contrib = jnp.array([1.0, 2.0, 3.0, 4.0])
+    neighbour_contrib = jnp.array([10.0, 20.0, jnp.inf, jnp.inf])
+    # cell0: owner faces {0,2} -> {1,3}; neighbour face {} (boundary at face2 excluded) -> max is 3
+    # cell1: owner face {1} -> {2}; neighbour face {0} -> {10}; max is 10
+    # cell2: owner face {3} -> {4}; neighbour face {1} -> {20}; max is 20
+    got_max = fc.scatter_max(owner_contrib, neighbour_contrib)
+    np.testing.assert_allclose(np.asarray(got_max), [3, 10, 20])
+
+    neighbour_contrib_min = jnp.array([10.0, 20.0, -jnp.inf, -jnp.inf])
+    got_min = fc.scatter_min(owner_contrib, neighbour_contrib_min)
+    # cell0: owner {1,3} -> min 1; cell1: owner {2}, neighbour {10} -> min 2; cell2: owner {4}, neighbour {20} -> min 4
+    np.testing.assert_allclose(np.asarray(got_min), [1, 2, 4])
+
+
+def test_interior_and_safe_neighbour_are_stored_not_recomputed():
+    """`interior`/`safe_neighbour` are fields computed once at construction, not properties.
+
+    Two accesses of a recomputed property would return distinct array objects each time; a stored
+    field returns the same one, which is the property this change exists to establish -- outside a
+    loop XLA folds the difference away, but inside a traced ``while_loop`` body it does not.
+    """
+    fc = _line_face_cells()
+    assert fc.interior is fc.interior
+    assert fc.safe_neighbour is fc.safe_neighbour
+
+
 def test_combine_face_values_takes_interior_then_boundary():
     """Interior faces get the interior values; boundary faces get the boundary values."""
     fc = _line_face_cells()  # faces 0,1 interior; faces 2,3 boundary

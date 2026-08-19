@@ -79,20 +79,20 @@ class VenkatakrishnanLimiter(Limiter):
         face_geometry, cell_geometry = geometry.face, geometry.cell
         owner = face_cells.owner
         neighbour = face_cells.safe_neighbour
-        interior = face_cells.interior
         phi = field
 
         # Stencil extrema over each cell and its interior-face neighbours: each cell takes the
         # extremum of the adjacent cells' values (owner ← neighbour's phi, neighbour ← owner's),
-        # via the connectivity's boundary-masked max/min scatter.
+        # via the connectivity's max/min scatter, which excludes a boundary face's neighbour side
+        # structurally.
         phi_max = jnp.maximum(phi, face_cells.scatter_max(phi[neighbour], phi[owner]))
         phi_min = jnp.minimum(phi, face_cells.scatter_min(phi[neighbour], phi[owner]))
 
         eps2 = cell_geometry.volume * self.k**3  # eps^2 = vol K^3 (Venkatakrishnan softening)
         x_face = face_geometry.centroid
 
-        def face_limiter(cell, active):
-            """Venkatakrishnan psi for each face as seen from ``cell`` (inf where inactive)."""
+        def face_limiter(cell):
+            """Venkatakrishnan psi for each face as seen from ``cell``."""
             delta_minus = dot(gradient[cell], x_face - cell_geometry.centroid[cell])
             # Regularize away from zero, treating zero as positive (sign of +1 at x == 0) so a
             # vanishing increment (constant field) gives psi -> 1 rather than 0/0.
@@ -106,11 +106,12 @@ class VenkatakrishnanLimiter(Limiter):
             denominator = (
                 headroom**2 + 2.0 * delta_minus**2 + headroom * delta_minus + e2
             ) * delta_minus
-            return jnp.where(active, numerator / denominator, jnp.inf)
+            return numerator / denominator
 
-        # Per-cell limiter = min over the cell's incident faces (owner side always, neighbour side
-        # interior only — the connectivity masks the boundary neighbour to +inf).
-        psi = face_cells.scatter_min(
-            face_limiter(owner, jnp.ones_like(interior)), face_limiter(neighbour, interior)
-        )
+        # Per-cell limiter = min over the cell's incident faces. Neither side needs masking: the
+        # owner is a real cell on every face, and the connectivity's scatter_min already excludes a
+        # boundary face's neighbour side from the reduction, whatever value face_limiter gives it
+        # there (a boundary face reads safe_neighbour == owner, so its neighbour-side value is just
+        # a harmless second copy of the owner-side one, discarded before it can matter).
+        psi = face_cells.scatter_min(face_limiter(owner), face_limiter(neighbour))
         return jnp.clip(psi, 0.0, 1.0)
