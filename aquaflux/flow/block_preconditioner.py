@@ -898,6 +898,103 @@ def _scaled_momentum_radius(
     return magnitude
 
 
+def _build_schur(
+    schur_scaling: str,
+    geometry: _SchurGeometry,
+    owner_e: np.ndarray,
+    nb_e: np.ndarray,
+    interior: np.ndarray,
+    n_cells: int,
+    v_cycles: int,
+    strength_threshold: float,
+    assembler: MomentumContinuity,
+    reference_state: jnp.ndarray | None,
+    mass_diagonal: jnp.ndarray,
+    schur_mass_diagonal: jnp.ndarray | None,
+) -> InnerSchurSolver:
+    """The pressure-Schur strategy :meth:`BlockPreconditioner.build`'s ``schur_scaling`` selects."""
+    if schur_scaling == "lsc":
+        reference_a_p = _isotropic_momentum_diagonal(assembler, reference_state)
+        return StabilizedLscSchur.build(
+            geometry,
+            owner_e,
+            nb_e,
+            interior,
+            n_cells,
+            v_cycles,
+            mass_diagonal,
+            reference_a_p,
+            _scaled_momentum_radius(assembler, reference_state, mass_diagonal),
+        )
+    return SmoothedAmgSchur.build(
+        geometry,
+        owner_e,
+        nb_e,
+        interior,
+        n_cells,
+        v_cycles,
+        reference_diagonal=schur_mass_diagonal,
+        strength_threshold=strength_threshold,
+    )
+
+
+def _build_velocity_block(
+    velocity: str,
+    velocity_geometry: _VelocityGeometry,
+    owner_e: np.ndarray,
+    nb_e: np.ndarray,
+    interior: np.ndarray,
+    n_cells: int,
+    v_cycles: int,
+    strength_threshold: float,
+    assembler: MomentumContinuity,
+    reference_state: jnp.ndarray | None,
+) -> VelocityBlockSolver:
+    """The velocity-block strategy :meth:`BlockPreconditioner.build`'s ``velocity`` selects."""
+    if velocity not in ("convection", "convection-air"):
+        return SmoothedAmgVelocity.build(
+            velocity_geometry,
+            owner_e,
+            nb_e,
+            interior,
+            n_cells,
+            v_cycles,
+            strength_threshold=strength_threshold,
+        )
+    # The reference mass flux is assembler behaviour (the Rhie--Chow flux operator), so it is
+    # computed here and handed to the strategy, keeping the velocity build assembler-free.
+    reference_mdot = jax.lax.stop_gradient(assembler.mass_flux(reference_state))
+    if float(jnp.max(jnp.abs(reference_mdot))) == 0.0:
+        # No convective scale to freeze the hierarchy at: the convection-diffusion operator
+        # collapses to the viscous one, so this block silently becomes the cheaper `velocity=
+        # "smoothed"` it was chosen over. Warn rather than fail — the build is still valid,
+        # just not the Peclet-aware accelerator that was asked for.
+        warnings.warn(
+            "velocity block "
+            f"{velocity!r} was requested but the reference state carries no mass flux, so "
+            "its convective linearization is zero and the block reduces to the viscous "
+            "'smoothed' one. The domain neither prescribes a velocity at any patch nor "
+            "carries a body force to size one from. Pass an explicit reference_state (e.g. a "
+            "uniform flow at the bulk velocity a mass-flow controller targets) to restore the "
+            "convection-aware block.",
+            RuntimeWarning,
+            # One frame deeper than a warning raised directly in `BlockPreconditioner.build` would
+            # be, so this still attributes to *its* caller rather than to `build` itself.
+            stacklevel=3,
+        )
+    return SmoothedAmgConvectionVelocity.build(
+        velocity_geometry,
+        owner_e,
+        nb_e,
+        interior,
+        n_cells,
+        v_cycles,
+        reference_mdot,
+        method="air" if velocity == "convection-air" else "twolevel",
+        strength_threshold=strength_threshold,
+    )
+
+
 # --- the composed preconditioner -------------------------------------------------------
 
 
@@ -1030,78 +1127,41 @@ class BlockPreconditioner(eqx.Module):
         # rescaling — leaving this None keeps `apply_at` from applying either.
         schur_mass_diagonal = mass_diagonal if schur_scaling == "msimpler" else None
 
-        schur: InnerSchurSolver
-        if schur_scaling == "lsc":
-            if reference_state is None:
-                reference_state = _characteristic_reference_state(assembler)
-            reference_a_p = _isotropic_momentum_diagonal(assembler, reference_state)
-            schur = StabilizedLscSchur.build(
-                geometry,
-                owner_e,
-                nb_e,
-                interior,
-                n_cells,
-                v_cycles,
-                mass_diagonal,
-                reference_a_p,
-                _scaled_momentum_radius(assembler, reference_state, mass_diagonal),
-            )
-        else:
-            schur = SmoothedAmgSchur.build(
-                geometry,
-                owner_e,
-                nb_e,
-                interior,
-                n_cells,
-                v_cycles,
-                reference_diagonal=schur_mass_diagonal,
-                strength_threshold=strength_threshold,
-            )
+        # Both strategy selections below may need a representative flow state; resolve it once, the
+        # first time either wants it, rather than each independently re-deriving it from the boundary
+        # conditions.
+        if reference_state is None and (
+            schur_scaling == "lsc" or velocity in ("convection", "convection-air")
+        ):
+            reference_state = _characteristic_reference_state(assembler)
+
+        schur = _build_schur(
+            schur_scaling,
+            geometry,
+            owner_e,
+            nb_e,
+            interior,
+            n_cells,
+            v_cycles,
+            strength_threshold,
+            assembler,
+            reference_state,
+            mass_diagonal,
+            schur_mass_diagonal,
+        )
         velocity_geometry = _VelocityGeometry.of(assembler)
-        velocity_block: VelocityBlockSolver
-        if velocity in ("convection", "convection-air"):
-            if reference_state is None:
-                reference_state = _characteristic_reference_state(assembler)
-            # The reference mass flux is assembler behaviour (the Rhie--Chow flux operator), so it is
-            # computed here and handed to the strategy, keeping the velocity build assembler-free.
-            reference_mdot = jax.lax.stop_gradient(assembler.mass_flux(reference_state))
-            if float(jnp.max(jnp.abs(reference_mdot))) == 0.0:
-                # No convective scale to freeze the hierarchy at: the convection-diffusion operator
-                # collapses to the viscous one, so this block silently becomes the cheaper `velocity=
-                # "smoothed"` it was chosen over. Warn rather than fail — the build is still valid,
-                # just not the Peclet-aware accelerator that was asked for.
-                warnings.warn(
-                    "velocity block "
-                    f"{velocity!r} was requested but the reference state carries no mass flux, so "
-                    "its convective linearization is zero and the block reduces to the viscous "
-                    "'smoothed' one. The domain neither prescribes a velocity at any patch nor "
-                    "carries a body force to size one from. Pass an explicit reference_state (e.g. a "
-                    "uniform flow at the bulk velocity a mass-flow controller targets) to restore the "
-                    "convection-aware block.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-            velocity_block = SmoothedAmgConvectionVelocity.build(
-                velocity_geometry,
-                owner_e,
-                nb_e,
-                interior,
-                n_cells,
-                v_cycles,
-                reference_mdot,
-                method="air" if velocity == "convection-air" else "twolevel",
-                strength_threshold=strength_threshold,
-            )
-        else:
-            velocity_block = SmoothedAmgVelocity.build(
-                velocity_geometry,
-                owner_e,
-                nb_e,
-                interior,
-                n_cells,
-                v_cycles,
-                strength_threshold=strength_threshold,
-            )
+        velocity_block = _build_velocity_block(
+            velocity,
+            velocity_geometry,
+            owner_e,
+            nb_e,
+            interior,
+            n_cells,
+            v_cycles,
+            strength_threshold,
+            assembler,
+            reference_state,
+        )
         return cls(
             assembler,
             schur,
