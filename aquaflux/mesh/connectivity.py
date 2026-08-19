@@ -86,6 +86,12 @@ class FaceCellConnectivity(eqx.Module):
     cells. This object owns the storage-layout mechanics — the boundary convention, the
     owner-outward sign, and the ``segment_sum`` scatter — so operators express only the physics.
 
+    :attr:`interior`, :attr:`safe_neighbour` and the internal scatter index are pure functions of
+    :attr:`owner` / :attr:`neighbour`, computed once in :meth:`__post_init__` rather than as
+    properties recomputed on every access. Outside a loop XLA folds a recomputed property away, so
+    the two are equivalent there; **inside** a traced ``while_loop`` body (a Krylov matvec, say)
+    they do not fold, and the compare-plus-select would run on every iteration instead of once.
+
     Attributes
     ----------
     owner : jnp.ndarray of int, shape ``(n_faces,)``
@@ -99,12 +105,35 @@ class FaceCellConnectivity(eqx.Module):
         as seen from the owner — nonzero only on the wrap faces of a periodic seam, ``+L`` along the
         periodic axis (see :meth:`neighbour_centroid`). ``None`` (the default) means a zero offset
         everywhere: an ordinary non-periodic mesh, stored without allocating the array.
+    interior : jnp.ndarray of bool, shape ``(n_faces,)``
+        ``True`` on interior faces. Computed once at construction; never pass this explicitly —
+        it is derived from :attr:`neighbour` in :meth:`__post_init__`.
+    safe_neighbour : jnp.ndarray of int, shape ``(n_faces,)``
+        Neighbour index with boundary faces substituted by their owner (an always-in-range gather
+        index: ``field[fc.owner]`` / ``field[fc.safe_neighbour]``, the boundary-safe idiom used
+        throughout). A boundary face reads as ``owner == neighbour``. Computed once at
+        construction; never pass this explicitly.
     """
 
     owner: jnp.ndarray
     neighbour: jnp.ndarray
     n_cells: int = eqx.field(static=True)
     neighbour_offset: jnp.ndarray | None = None
+    interior: jnp.ndarray = None
+    safe_neighbour: jnp.ndarray = None
+    _neighbour_scatter_index: jnp.ndarray = None
+
+    def __post_init__(self) -> None:
+        interior = interior_mask(self.neighbour)
+        object.__setattr__(self, "interior", interior)
+        object.__setattr__(self, "safe_neighbour", jnp.where(interior, self.neighbour, self.owner))
+        # A boundary face's contribution must never land on a real cell (it has no neighbour to
+        # scatter to), so redirect it to a trash row one past the last real cell -- `scatter`
+        # slices that row away, which excludes the boundary contribution structurally, with no
+        # select and no extra `(n_faces, ...)` masked array.
+        object.__setattr__(
+            self, "_neighbour_scatter_index", jnp.where(interior, self.neighbour, self.n_cells)
+        )
 
     @property
     def n_faces(self) -> int:
@@ -116,32 +145,6 @@ class FaceCellConnectivity(eqx.Module):
         residual's face-flux sum, for instance — without reaching back to the whole ``Mesh``.
         """
         return self.owner.shape[0]
-
-    @property
-    def interior(self) -> jnp.ndarray:
-        """Boolean per-face mask, ``True`` on interior faces, shape ``(n_faces,)``."""
-        return interior_mask(self.neighbour)
-
-    @property
-    def safe_neighbour(self) -> jnp.ndarray:
-        """Neighbour index with boundary faces substituted by their owner, shape ``(n_faces,)``.
-
-        On a boundary face the neighbour index (``< 0``) is not a valid cell, so it cannot index a
-        per-cell array. Substituting the *owner* gives an always-in-range index: a gather
-        ``field[safe_neighbour]`` then reads the owner's own value (a boundary face reads as
-        ``owner == neighbour``), and a scatter of a boundary contribution — which callers mask to
-        zero — lands harmlessly on the owner. Interior entries are unchanged.
-
-        The substitution is only *correct* because callers mask the boundary face's contribution to
-        zero (interior faces alone couple two cells): the substituted index makes the operation
-        **valid** (in range), the caller's mask makes it **correct**. Substituting the owner rather
-        than an arbitrary in-range index (e.g. ``0``) is deliberate — it makes the degenerate
-        boundary face read as ``owner == neighbour``, the meaningful value where the neighbour is
-        used unmasked (a boundary face is not a zone interface, its neighbour value equals the
-        owner's, etc.). Gather several fields off it without recomputing the substitution each time
-        (``field[conn.safe_neighbour]``).
-        """
-        return jnp.where(self.interior, self.neighbour, self.owner)
 
     def neighbour_centroid(self, cell_centroid: jnp.ndarray) -> jnp.ndarray:
         """Neighbour cell centroids gathered per face, shifted to their **periodic image**.
@@ -234,9 +237,11 @@ class FaceCellConnectivity(eqx.Module):
         """Scatter per-face contributions to cells: owner gets ``owner_contrib``, its interior
         neighbour gets ``neighbour_contrib``.
 
-        The neighbour contribution is masked to zero on boundary faces (which have no neighbour)
-        — the one place that masking is written. The owner contribution is scattered for every
-        face, boundary faces included.
+        A boundary face has no neighbour, so its ``neighbour_contrib`` must not land on a real
+        cell; it is excluded structurally rather than masked — every boundary face's scatter index
+        points one row past the last real cell, and that trash row is sliced away after the
+        reduction, so this never materializes a masked ``(n_faces, ...)`` array or runs a select.
+        The owner contribution is scattered for every face, boundary faces included.
 
         Parameters
         ----------
@@ -248,11 +253,11 @@ class FaceCellConnectivity(eqx.Module):
         jnp.ndarray
             Per-cell sum, shape ``(n_cells, ...)``.
         """
-        mask = _broadcast_face_mask(self.interior, neighbour_contrib.ndim)
-        neigh = jnp.where(mask, neighbour_contrib, 0.0)
-        return segment_sum(owner_contrib, self.owner, self.n_cells) + segment_sum(
-            neigh, self.safe_neighbour, self.n_cells
-        )
+        owner_sum = segment_sum(owner_contrib, self.owner, self.n_cells)
+        neighbour_sum = segment_sum(
+            neighbour_contrib, self._neighbour_scatter_index, self.n_cells + 1
+        )[: self.n_cells]
+        return owner_sum + neighbour_sum
 
     def scatter_conservative(self, face_flux: jnp.ndarray) -> jnp.ndarray:
         """Scatter an owner-outward face flux conservatively: owner ``+flux``, neighbour ``−flux``.
@@ -296,10 +301,10 @@ class FaceCellConnectivity(eqx.Module):
     ) -> jnp.ndarray:
         """Per-cell **maximum** of per-face contributions (owner always; interior neighbour only).
 
-        The extremum counterpart of :meth:`scatter`: the boundary neighbour side is masked to the
-        max identity ``-inf`` (as :meth:`scatter` masks it to the sum identity ``0``), so the
-        boundary convention still lives in one place. Used to gather stencil maxima (e.g. a slope
-        limiter's neighbourhood range).
+        The extremum counterpart of :meth:`scatter`: the boundary neighbour side is excluded the
+        same structural way (its own trash-row scatter target, sliced away), so the boundary
+        convention still lives in one place and needs no identity element or select. Used to
+        gather stencil maxima (e.g. a slope limiter's neighbourhood range).
 
         Parameters
         ----------
@@ -311,29 +316,30 @@ class FaceCellConnectivity(eqx.Module):
         jnp.ndarray
             Per-cell maximum, shape ``(n_cells, ...)``.
         """
-        return self._scatter_extremum(
-            owner_contrib, neighbour_contrib, -jnp.inf, segment_max, jnp.maximum
-        )
+        return self._scatter_extremum(owner_contrib, neighbour_contrib, segment_max, jnp.maximum)
 
     def scatter_min(
         self, owner_contrib: jnp.ndarray, neighbour_contrib: jnp.ndarray
     ) -> jnp.ndarray:
-        """Per-cell **minimum** of per-face contributions (neighbour side masked to ``+inf``).
+        """Per-cell **minimum** of per-face contributions (interior neighbour only).
 
         The min counterpart of :meth:`scatter_max`; see it for the convention.
         """
-        return self._scatter_extremum(
-            owner_contrib, neighbour_contrib, jnp.inf, segment_min, jnp.minimum
-        )
+        return self._scatter_extremum(owner_contrib, neighbour_contrib, segment_min, jnp.minimum)
 
-    def _scatter_extremum(self, owner_contrib, neighbour_contrib, identity, segment, combine):
-        """Shared core of :meth:`scatter_max` / :meth:`scatter_min` (reducer + boundary identity)."""
-        mask = _broadcast_face_mask(self.interior, neighbour_contrib.ndim)
-        neigh = jnp.where(mask, neighbour_contrib, identity)
-        return combine(
-            segment(owner_contrib, self.owner, self.n_cells),
-            segment(neigh, self.safe_neighbour, self.n_cells),
-        )
+    def _scatter_extremum(self, owner_contrib, neighbour_contrib, segment, combine):
+        """Shared core of :meth:`scatter_max` / :meth:`scatter_min` (reducer + boundary exclusion).
+
+        Whatever value a boundary face's ``neighbour_contrib`` carries, its scatter index routes it
+        to the trash row (see :meth:`scatter`), which this slices away before combining with the
+        owner side — so, unlike the old masked form, no identity element (``±inf``) is needed here:
+        the boundary face's contribution to the *real* cells is excluded structurally, not by value.
+        """
+        owner_result = segment(owner_contrib, self.owner, self.n_cells)
+        neighbour_result = segment(
+            neighbour_contrib, self._neighbour_scatter_index, self.n_cells + 1
+        )[: self.n_cells]
+        return combine(owner_result, neighbour_result)
 
     def interior_edges(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Interior faces as a numpy edge list ``(owner, neighbour, face_index)``.

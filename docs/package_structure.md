@@ -48,7 +48,7 @@ cfd/                                  # repo root
 │   ├── mesh/                         # Mesh container + face/cell geometry + connectivity (2D and 3D)
 │   │   ├── mesh.py                   #   Mesh(eqx.Module): SoA coords + connectivity objects + zones/patches; from_faces(), from_csr() (vectorized, no per-face Python loop), validate(), geometry() → MeshGeometry
 │   │   ├── geometry.py               #   MeshGeometry: the {face, cell} bundle geometry() returns (derived on demand from node_coords, never stored — keeps grad-through-node-positions correct, no stale cache)
-│   │   ├── connectivity.py           #   FaceCellConnectivity (gather_owner/gather_neighbour/interior + scatter/scatter_conservative/scatter_symmetric/max/min) + FaceNodeConnectivity (ragged CSR) + interior_mask
+│   │   ├── connectivity.py           #   FaceCellConnectivity (owner/safe_neighbour/interior + scatter/scatter_conservative/scatter_symmetric/max/min) + FaceNodeConnectivity (ragged CSR) + interior_mask
 │   │   ├── face.py                   #   FaceGeometry + FaceGeometryScheme → EdgeFaceGeometry (2D) / PolygonFaceGeometry (3D, centre-fan)
 │   │   ├── cell.py                   #   CellGeometry: volume, centroid (divergence theorem, dim-general)
 │   │   ├── groups.py                 #   LabelledGroups base → CellZones / FacePatches (named partitions; derived interfaces)

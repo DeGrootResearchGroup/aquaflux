@@ -341,8 +341,8 @@ code.
 **The Layer-0 residual substrate is the foundation.** Everything reduces to a discrete
 cell residual `R(state, params)` assembled by **gather → compute → scatter**. The
 gather/scatter *mechanics* are not open-coded per operator: they are the one
-**connectivity API** — `mesh.face_cells` (`FaceCellConnectivity`: `gather_owner` /
-`gather_neighbour`, `scatter` / `scatter_conservative` / `scatter_symmetric`) and
+**connectivity API** — `mesh.face_cells` (`FaceCellConnectivity`: direct indexing on `owner` /
+`safe_neighbour`, `scatter` / `scatter_conservative` / `scatter_symmetric`) and
 `mesh.face_nodes` (`FaceNodeConnectivity`) — that owns the SoA `segment_sum` over
 face→cell / face→node index arrays and the boundary convention. Operators, schemes, BCs,
 and even the mesh geometry *compose* it, so each writes only physics/math (Principle 2;
@@ -385,7 +385,7 @@ converging. The default is the mesh's own cell order — the cheapest, and measu
 ```
 Mesh (SoA topology) + FaceGeometry/CellGeometry            (classes)
    → operator strategies (DiffusionFlux, ...) consuming injected scheme strategies
-   → mesh.face_cells.gather_* → compute flux → mesh.face_cells.scatter_*
+   → mesh.face_cells.owner/safe_neighbour → compute flux → mesh.face_cells.scatter_*
    → cell residual R(state, params)
    → AD (jvp / vjp / IFT) → Jacobian / adjoint
    → Newton + implicit-diff linear solve → converged state (and its exact adjoint)
