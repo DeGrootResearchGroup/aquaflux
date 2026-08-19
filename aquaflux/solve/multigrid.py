@@ -617,6 +617,14 @@ class _SparseLevel(eqx.Module):
     # because it sizes the reshape.
     block_inverse: jnp.ndarray | None = None  # (n_cells, b, b), or None for a scalar level
     block_size: int = eqx.field(static=True, default=1)
+    # `1.0 / diagonal`, derived in `__post_init__` rather than at every smoother apply: `diagonal`
+    # is a build-time frozen constant, so its reciprocal is one too, and re-dividing it inside a
+    # traced smoother body (called once per V-cycle visit to this level, many times per solve)
+    # repeats the same n-element divide for no reason a build-time field does not already remove.
+    inv_diagonal: jnp.ndarray = None  # (n,) 1.0 / diagonal
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "inv_diagonal", 1.0 / self.diagonal)
 
 
 class ShapeBudget(NamedTuple):
@@ -1446,7 +1454,7 @@ def _chebyshev_smooth(
     lo, hi = level.lam_max * lo_frac, level.lam_max * 1.05
     centre, half_width = 0.5 * (hi + lo), 0.5 * (hi - lo)
     sigma = centre / half_width  # theta / delta > 1
-    inv_diagonal = 1.0 / level.diagonal
+    inv_diagonal = level.inv_diagonal
 
     residual = b - _operator_matvec(level, x)
     increment = (inv_diagonal * residual) / centre  # first step: (1 / theta) D^-1 r
@@ -1805,9 +1813,8 @@ def _jacobi_smooth(
     """
     alpha = omega / level.lam_max if spectral_damping else omega
     if level.block_inverse is None:
-        inv_diagonal = 1.0 / level.diagonal
         for _ in range(sweeps):
-            x = x + alpha * inv_diagonal * (b - _operator_matvec(level, x))
+            x = x + alpha * level.inv_diagonal * (b - _operator_matvec(level, x))
         return x
     for _ in range(sweeps):
         x = x + alpha * _apply_block_inverse(level, b - _operator_matvec(level, x))
@@ -1839,8 +1846,10 @@ def _jacobi_smooth_zero(
     alpha = omega / level.lam_max if spectral_damping else omega
     if level.block_inverse is None:
         # Written in the order `_jacobi_smooth`'s own first sweep evaluates it -- `alpha * inv * b`
-        # rather than `alpha * (b / diagonal)` -- so the peel cannot move a rounding.
-        x = alpha * (1.0 / level.diagonal) * b
+        # rather than `alpha * (b / diagonal)` -- so the peel cannot move a rounding. Reading the
+        # same stored `inv_diagonal` both places makes that bit-identical by construction rather
+        # than by two separately-evaluated (if mathematically equal) divisions.
+        x = alpha * level.inv_diagonal * b
     else:
         x = alpha * _apply_block_inverse(level, b)
     return _jacobi_smooth(level, b, x, sweeps - 1, omega, spectral_damping)
@@ -1949,6 +1958,12 @@ class _AirLevel(eqx.Module):
     p_val: jnp.ndarray | None  # (pnnz,) prolongation value
     coarse_inv: jnp.ndarray | None  # dense inverse (coarsest level only); None otherwise
     n_coarse: int = eqx.field(static=True)  # next-coarser cell count (0 on coarsest)
+    # `1.0 / diagonal`, derived in `__post_init__` rather than at every FC-Jacobi sweep -- see
+    # `_SparseLevel.inv_diagonal`, the same reasoning.
+    inv_diagonal: jnp.ndarray = None  # (n,) 1.0 / diagonal
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "inv_diagonal", 1.0 / self.diagonal)
 
 
 class AirHierarchy(eqx.Module):
@@ -2278,11 +2293,15 @@ def _fc_jacobi(
     operator. The F-relaxation is the reduction-based smoother that suppresses the F-point error the
     ideal restriction is built to eliminate.
     """
-    inv_diagonal = 1.0 / level.diagonal
+    # `mask * inv_diagonal` is the same product on every sweep of its own loop -- `omega` is a
+    # solve-time argument (not baked into the frozen level), so it is folded in here too, once per
+    # call, rather than once per sweep.
+    f_scale = omega * level.f_mask * level.inv_diagonal
+    c_scale = omega * level.c_mask * level.inv_diagonal
     for _ in range(f_iters):
-        x = x + omega * level.f_mask * inv_diagonal * (b - _operator_matvec(level, x))
+        x = x + f_scale * (b - _operator_matvec(level, x))
     for _ in range(c_iters):
-        x = x + omega * level.c_mask * inv_diagonal * (b - _operator_matvec(level, x))
+        x = x + c_scale * (b - _operator_matvec(level, x))
     return x
 
 
