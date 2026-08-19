@@ -151,31 +151,61 @@ All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
   need, computed once at build time from the static geometry. Nearest-face-*centroid*, an approximation
   to the true surface distance that is essentially exact for a wall-adjacent cell and loosens far from
   the wall.
-  - **⚠️ The search is BLOCKED over cells, and the whole-array form it replaced was the single largest
-    allocation in a 3D build (measured 2026-08-11).** `centroid[:, None, :] - target[None, :, :]` is a
-    dense cell-by-target-face structure: on `bfs3d` (23040 cells, 4736 wall faces) that is 109M entries,
-    and because `norm_squared` materializes its own product under eager JAX **~6.1 GB was live at
-    once** — `build_case` peaked at **6889 MB**, against ~5 MB of retained mesh and geometry. Blocked at
-    a 64 MB working set it peaks at **850 MB, an 8.1× cut**, and the result is **bit-identical**
-    (verified on 300 real cells against the unblocked form): each cell's nearest face is independent of
-    every other cell's, so a block boundary reorders and drops nothing.
-  - **A spatial index would be asymptotically better and is deliberately NOT used.** `scipy.cKDTree`
-    needs concrete coordinates, and these may be **tracers** — geometry is derived from `node_coords` on
-    demand precisely so gradients w.r.t. node positions chain through, and a differentiated build
-    reaches here with traced centroids. The problem was memory, not search cost, and blocking fixes
-    memory without giving that up. Pinned by
-    `test_distance.py::test_distance_is_differentiable_through_node_positions`.
-  - **The residency question this raised is settled: nothing leaks.** After the fix `jax.live_arrays()`
-    totals **17.6 MB** while resident sits at 811 MB, so the gap is allocator retention of freed pages,
-    not held buffers — and it is now bounded by the smaller peak.
-  - **⚠️ OPEN: the block count itself scales with cells × wall faces, not cells alone, and gets slow
-    at a large mesh with more than a couple of wall patches (filed as a GitHub issue, not yet fixed).**
-    The block size is `_SEARCH_WORKING_BYTES // per_cell`, and `per_cell` grows with the target-face
-    count, so more wall patches shrink the block and multiply the block count. Measured on a synthetic
-    1,000,000-cell mesh with 4 wall patches (40,000 combined wall faces): block size 23, **43,479
-    blocks**, one `distance_to_patches` call costing **77 s** wall clock — bounded memory, unbounded
-    block count. `bfs3d`'s own 23,040 cells / 4,736 wall faces never shows this (too few blocks to
-    matter), which is presumably why it went uncaught until a bigger mesh was being scoped.
+  - **The nearest-target search DISPATCHES on whether the centroids are concrete or traced (issue #240,
+    fixed 2026-08-19) — a k-d tree for the ordinary eager build, a blocked `jnp` search only as a
+    fallback under differentiation.** The two searches used to be one: a single blocked `jnp` search run
+    unconditionally, on the reasoning that a spatial index needs concrete coordinates and geometry may
+    carry **tracers** (a differentiated build, gradients w.r.t. node positions). That reasoning is still
+    correct for the traced case, but it does not apply to the overwhelmingly common one: an ordinary
+    eager case build never differentiates through mesh construction, so its centroids are concrete and a
+    `scipy.spatial.cKDTree` applies cleanly. `_nearest_squared_distance` checks
+    `isinstance(x, jax.core.Tracer)` on both arrays (`_is_traced`, a local helper — this is a one-line
+    type predicate, not a formula, so it is not shared with the differently-scoped `_is_traced` in
+    `turbulence/coupled.py`) and routes to `_nearest_squared_distance_concrete` (the tree, queried with
+    `workers=-1` for a parallel search) or `_nearest_squared_distance_traced` (the blocked `jnp` search,
+    unchanged in spirit). **Measured on a synthetic 1,000,000-cell mesh with 4 wall patches (40,000
+    combined wall faces), the exact configuration the issue was filed against**: the concrete path took
+    **4.2–4.6 s** end to end through `distance_to_patches` (tree build ~6 ms, parallel query the rest)
+    against the blocked search's **61–77 s** on the same machine — a ~15× cut, and what "minutes at scale"
+    in the issue's own title actually meant. Exact to floating-point rounding against the brute-force
+    form on every case checked, including bit-identical on the standard test mesh (a k-d tree
+    nearest-neighbour query finds the true nearest point by a smarter search, not an approximate one).
+    Pinned by `test_distance.py::test_concrete_search_matches_the_whole_array_form` and
+    `test_concrete_inputs_use_the_kdtree_path_and_traced_inputs_do_not` (the latter pins the *dispatch*,
+    not just the numbers — a regression that swapped the two branches would still pass an
+    equivalence-only test on any input small enough not to time out, since `scipy` would simply never be
+    handed a Tracer to fail loudly on). `jax.grad` alone (no `jit`) is already enough to trigger the
+    traced branch — confirmed directly (`isinstance(x, jax.core.Tracer)` is `True` under a bare
+    `jax.grad`, not only under `jax.jit`) — which is what
+    `test_distance.py::test_distance_is_differentiable_through_node_positions` exercises.
+  - **The traced fallback's blocked search is now run through a single compiled `jax.lax.map` loop,
+    not a Python loop building one XLA program per block and feeding a large `jnp.concatenate`.** The
+    two are numerically identical — each cell's nearest target is independent of every other cell's, so
+    a block boundary reorders and drops nothing (`_nearest_squared_distance_traced` still pads to a whole
+    number of blocks by repeating the last cell, discarded by the final slice) — but a Python loop's
+    per-block trace-and-dispatch, and a concatenate over as many operands as there are blocks, is what
+    the issue's own evidence showed compiling for over 5 minutes when embedded in a larger jitted
+    computation (`[Compiling module jit_concatenate for CPU] Very slow compile? ... 5m5.656426s`).
+    `jax.lax.map` compiles the per-block body once and loops it on-device (built on `scan`), so the
+    compiled program's size no longer grows with the block count — pinned by
+    `test_distance.py::test_block_count_does_not_grow_the_compiled_program`, which checks the jaxpr's
+    own equation count stays flat as the forced block count rises two orders of magnitude. **This does
+    NOT reduce the traced path's raw eager wall-clock time — measured slightly WORSE** (the same
+    1,000,000-cell/4-patch configuration cost ~97–102 s through `jax.lax.map` against the Python loop's
+    61–77 s; block size made no difference across a 64 MB–8 GB sweep, so the traced brute-force search is
+    compute-bound, not dispatch-overhead-bound, at that scale). That regression does not matter in
+    practice: the traced path is reached only by an actually-differentiated build, which is rare and
+    already expensive relative to an ordinary case assembly, and unlike the concrete path it was never
+    the one the issue's "impact" section described as paid "repeatedly" per Reynolds-continuation rung.
+  - **The blocking mechanics themselves — the memory bound, the padding, the working-set sizing — are
+    unchanged from the original fix (measured 2026-08-11) and now apply only to the traced path.**
+    `centroid[:, None, :] - target[None, :, :]` is a dense cell-by-target-face structure: on `bfs3d`
+    (23040 cells, 4736 wall faces) that is 109M entries, and because `norm_squared` materializes its own
+    product under eager JAX ~6.1 GB would be live at once. Blocked at a 64 MB working set it peaks at
+    ~850 MB, an 8.1× cut, computing exactly the same numbers in the same order. That residency figure
+    (and the `jax.live_arrays()` check that nothing leaks beyond it) was taken when this was the only
+    search path there was; it has not been re-measured since the concrete path stopped exercising it, but
+    nothing about the traced path's memory behaviour changed.
 - `groups.py` — `LabelledGroups` base → `CellZones` / `FacePatches`. Named **partitions**
   of cells (zones) and faces (patches) — the SoA analogue of the C++ `MeshObjectGroup`
   `name→group` maps. See `docs/mesh_zones_and_patches.md` for the full design.
