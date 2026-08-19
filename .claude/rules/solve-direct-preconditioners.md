@@ -112,6 +112,33 @@ paths:
       it needed no re-validation of anything downstream. Colour counts on this mesh: reach 1 **16 → 11**,
       reach 2 **60 → 39**, reach 3 **112 → 94**. Pinned by
       `test_saturation_colouring_uses_fewer_colours_than_degree_ordering` on a 3D lattice.
+    - **Vertex selection is a BUCKET QUEUE, not a full scan — the scan alone was quadratic (issue
+      #243, fixed 2026-08-18).** `_saturation_colouring` used to pick the next vertex by
+      `np.argmax(rank)` on every one of the `n` rounds — an `O(n)` scan repeated `n` times, `O(n²)`
+      total, even though the neighbour-update half of the same round was already degree-bounded and
+      vectorized. `rank` is bounded by `degree.max() * (degree.max() + 2)`, a property of the mesh's
+      *local* connectivity and not of `n`, so a doubly-linked-list bucket per reachable rank value
+      turns extraction into an `O(1)`-amortized pop and a rank increase into an `O(1)` unlink/relink,
+      giving `O(n + m)` total for `m` conflict-graph edges. **Measured on synthetic cubic-lattice
+      conflict graphs at stencil reach 3 (plain Python lists for the bucket linked lists, not numpy
+      arrays — this loop is scalar-access-bound and numpy's per-element scalar wrapping loses to plain
+      list indexing here):** ~2× SLOWER than the scan at `bfs3d`'s own scale (21,952-cell cubic lattice:
+      old 0.53 s, bucket-queue 1.08 s) but **crosses over and wins by the scale the issue actually
+      reports the scan dominating** (262,144 cells, full `block_stencil_colouring` pipeline: old 18.3 s,
+      bucket-queue 15.7 s; the pure colouring step alone: old 17.3 s, bucket-queue 10.8 s, ~1.6×
+      faster). So this is a deliberate trade: a modest, bounded regression at the project's current
+      working scale in exchange for removing what would otherwise become the dominant cost well before
+      a million-cell mesh. **Ties within a bucket are broken by recency of eligibility, not by vertex
+      index** — a different, still-deterministic choice from the old `np.argmax`'s first-occurrence
+      convention, so the two algorithms can colour the same graph in a different order; this does not
+      change collision-freedom or the colour count in any way that matters (`test_sparse_jacobian.py`'s
+      `test_saturation_colouring_is_valid_and_comparable_on_*` tests validity and a colour-count bound
+      against the old full-scan implementation, kept in the test file as a reference, not equality with
+      it). *(The wall-clock figures above name only the mesh size, reach and Python-list-vs-array
+      choice — no case, preconditioner or machine load; re-measure before treating the exact seconds
+      as load-bearing. The qualitative crossover — worse below roughly 100k–200k cells, better above —
+      is the reproducible part, and it lands where the issue's own synthetic-scaling evidence put the
+      `O(n²)` term starting to dominate.)*
     - **✅ SEEDS ARE BUILT ONE CHUNK AT A TIME, not all at once (BUILT, 2026-08-11).** The probe seeds
       are `n_probes x n_fields x n_cells` floats — **441 MB on `bfs3d` at 399 probes, 624 MB at 564** —
       and the old code materialized the whole set before chunking it, holding it for the entire

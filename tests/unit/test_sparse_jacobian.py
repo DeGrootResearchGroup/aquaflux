@@ -9,6 +9,7 @@ import scipy.sparse as sp
 from aquaflux.solve.sparse_jacobian import (
     ColumnProbePlan,
     _index_dtype,
+    _saturation_colouring,
     block_stencil_colouring,
     block_stencil_gather_map,
     column_probe_plan,
@@ -107,6 +108,112 @@ def test_saturation_colouring_uses_fewer_colours_than_degree_ordering():
     coo = conflict.tocoo()
     off_diagonal = coo.row != coo.col
     assert not np.any(c.colour[coo.row[off_diagonal]] == c.colour[coo.col[off_diagonal]])
+
+
+def _naive_saturation_colouring(conflict, n):
+    """A full-scan reference: the algorithm before its vertex selection became a bucket-queue pop.
+
+    Kept only as a test-side reference, never as production logic. It selects the next vertex by
+    ``np.argmax`` over the whole rank array on every round, which is what made the real
+    ``_saturation_colouring`` quadratic -- this is a comparison baseline for *validity and colour
+    count*, not a literal step-by-step oracle: the bucket queue breaks a rank tie by recency of
+    eligibility rather than by ``np.argmax``'s smallest-index convention, so the two algorithms can
+    colour the same graph in a different order and are not expected to agree vertex-for-vertex.
+    """
+    indptr, indices = conflict.indptr, conflict.indices
+    degree = np.diff(indptr).astype(np.int64)
+    colour = np.full(n, -1, dtype=np.int64)
+    n_words = int(degree.max()) // 64 + 2 if n else 1
+    taken = np.zeros((n, n_words), dtype=np.uint64)
+    saturation = np.zeros(n, dtype=np.int64)
+    tie = int(degree.max()) + 1 if n else 1
+    rank = saturation * tie + degree
+
+    for _ in range(n):
+        vertex = int(np.argmax(rank))
+        for word in range(n_words):
+            free = ~int(taken[vertex, word]) & ((1 << 64) - 1)
+            if free:
+                chosen = word * 64 + (free & -free).bit_length() - 1
+                break
+        colour[vertex] = chosen
+        rank[vertex] = -1
+
+        neighbours = indices[indptr[vertex] : indptr[vertex + 1]]
+        word, bit = chosen // 64, np.uint64(1) << np.uint64(chosen % 64)
+        previous = taken[neighbours, word]
+        taken[neighbours, word] = previous | bit
+        gained = neighbours[(previous & bit) == 0]
+        gained = gained[colour[gained] < 0]
+        saturation[gained] += 1
+        rank[gained] = saturation[gained] * tie + degree[gained]
+    return colour
+
+
+def _random_symmetric_conflict_graph(n, edge_prob, rng):
+    """A random undirected graph (no self-loops), as an ``(n, n)`` CSR conflict matrix."""
+    dense = rng.random((n, n)) < edge_prob
+    dense = np.triu(dense, k=1)
+    dense = dense | dense.T
+    return sp.csr_matrix(dense.astype(np.float64))
+
+
+def _assert_valid_and_comparable(conflict, n, actual):
+    """Shared assertions: a valid colouring, no worse (within a small margin) than the reference.
+
+    The bucket queue's tie-break differs from the full-scan reference's (recency of eligibility, not
+    smallest vertex index), so per-vertex agreement is not the contract -- collision-freedom and
+    colour count are. A small slack (rather than requiring ``<=``) accommodates the arbitrary tie-break
+    occasionally costing a colour on a small or symmetric graph, as measured on lattice conflict
+    graphs of a few thousand vertices; it should never be large, since both are the same saturation-
+    degree greedy differing only in which tied vertex goes first.
+    """
+    coo = conflict.tocoo()
+    off_diagonal = coo.row != coo.col
+    assert not np.any(actual[coo.row[off_diagonal]] == actual[coo.col[off_diagonal]]), (
+        "colour collision on a conflict edge"
+    )
+    if n == 0:
+        return
+    naive = _naive_saturation_colouring(conflict, n)
+    n_colours = int(actual.max()) + 1
+    n_naive = int(naive.max()) + 1
+    assert n_colours <= n_naive + 2, (
+        f"bucket-queue colouring used {n_colours} colours against the full-scan reference's {n_naive}"
+    )
+
+
+@pytest.mark.parametrize("n, edge_prob", [(0, 0.0), (1, 0.0), (2, 1.0), (30, 0.3), (60, 0.08)])
+def test_saturation_colouring_is_valid_and_comparable_on_random_graphs(n, edge_prob):
+    """The bucket-queue selection must still produce a valid, similarly-good colouring.
+
+    A graph dense enough for frequent saturation/degree ties (here as low as 8 % edge probability) is
+    what actually exercises the tie-break machinery, not a sparse, mostly-unique-rank graph.
+    """
+    rng = np.random.default_rng(hash((n, edge_prob)) % (2**32))
+    conflict = _random_symmetric_conflict_graph(n, edge_prob, rng)
+    actual = _saturation_colouring(conflict, n)
+    _assert_valid_and_comparable(conflict, n, actual)
+
+
+def test_saturation_colouring_is_valid_and_comparable_on_a_lattice_conflict_graph():
+    """The realistic case: the squared cell-graph a coupled RANS Jacobian actually colours.
+
+    A lattice's bulk cells share one interior degree, so this is the graph most likely to exercise
+    the tie-break machinery -- most vertices start out tied with many others.
+    """
+    owner, nb, n = _lattice_graph(4, 4, 5)
+    pattern = sp.csr_matrix(
+        (
+            np.ones(2 * owner.size + n),
+            (np.r_[owner, nb, np.arange(n)], np.r_[nb, owner, np.arange(n)]),
+        ),
+        shape=(n, n),
+    )
+    conflict = (pattern.T @ pattern).tocsr()
+    conflict.data[:] = 1.0
+    actual = _saturation_colouring(conflict, n)
+    _assert_valid_and_comparable(conflict, n, actual)
 
 
 def _random_block_matrix(n, nvar, reach, rng):

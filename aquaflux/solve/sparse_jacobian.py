@@ -403,6 +403,23 @@ def _saturation_colouring(conflict: sp.csr_matrix, n: int) -> np.ndarray:
     — the difference between seconds and minutes on a graph whose vertices have hundreds of
     neighbours.
 
+    Picking the next vertex is a **bucket queue** over `rank`, not a full scan for the maximum: a
+    scan costs ``O(n)`` on every one of the ``n`` rounds, quadratic overall, even though the rest of
+    the round (updating the coloured vertex's neighbours) is already degree-bounded and vectorized —
+    it is the scan alone that made the whole colouring quadratic. `rank` is bounded by
+    ``degree.max() * (degree.max() + 2)``, a property of the mesh's *local* connectivity and not of
+    ``n``, so a bucket per possible rank value, each a doubly linked list of the vertices currently at
+    that rank, turns "extract the uncoloured vertex of maximum rank" into an ``O(1)``-amortized pop: a
+    pointer at the highest occupied bucket only ever moves down, except when a vertex's rank grows
+    past it, and both the total downward drift and the total number of such jumps are bounded by the
+    (``n``-independent) bucket range plus the total number of rank increases — so extracting all ``n``
+    vertices costs ``O(n + m)`` for ``m`` conflict-graph edges, matching the already-vectorized half of
+    the round instead of dominating it. Moving a vertex to a new bucket when its rank grows is an
+    ``O(1)`` unlink-and-relink using the same linked-list pointers. Ties within a bucket are broken by
+    which vertex became eligible for it most recently, not by vertex index — an arbitrary but
+    deterministic choice among genuine ties, which does not change the colouring's validity or its
+    quality relative to plain degree ordering (see the module's tests).
+
     Any collision-free colouring de-compresses the probe responses to the same matrix, so this choice
     changes what a materialize *costs* and not what it returns.
 
@@ -421,34 +438,78 @@ def _saturation_colouring(conflict: sp.csr_matrix, n: int) -> np.ndarray:
     indptr, indices = conflict.indptr, conflict.indices
     degree = np.diff(indptr).astype(np.int64)
     colour = np.full(n, -1, dtype=np.int64)
+    max_degree = int(degree.max()) if n else 0
     # Greedy never needs more than max-degree + 1 colours, so this bitset can never overflow.
-    n_words = int(degree.max()) // _WORD + 2 if n else 1
+    n_words = max_degree // _WORD + 2 if n else 1
     taken = np.zeros((n, n_words), dtype=np.uint64)  # colours held by each vertex's neighbours
     saturation = np.zeros(n, dtype=np.int64)  # popcount of `taken`, maintained incrementally
-    # One scalar ranking both keys: saturation dominates, degree breaks ties, -1 marks "already done".
-    tie = int(degree.max()) + 1 if n else 1
-    rank = saturation * tie + degree
+    # One scalar ranking both keys: saturation dominates, degree breaks ties.
+    tie = max_degree + 1 if n else 1
+    degree_list = degree.tolist()
+
+    # One bucket per reachable rank value: `bucket_head[r]` is the vertex at the head of rank r's
+    # list (-1 if empty), `bucket_next`/`bucket_prev` its doubly linked neighbours within that list
+    # (plain Python lists, not numpy arrays -- this loop is scalar-access-bound, and list indexing
+    # avoids numpy's per-element scalar-wrapping overhead). `top` is the highest bucket known to
+    # possibly be non-empty; it only moves down (in the pop loop below) or up (when a push lands
+    # above it), never re-scanning the whole range.
+    bucket_head = [-1] * (tie * max_degree + max_degree + 1)
+    bucket_next = [-1] * n
+    bucket_prev = [-1] * n
+    top = 0
+    for vertex, rank in enumerate(degree_list):  # initial rank = degree (saturation is 0)
+        head = bucket_head[rank]
+        bucket_next[vertex] = head
+        if head >= 0:
+            bucket_prev[head] = vertex
+        bucket_head[rank] = vertex
+        if rank > top:
+            top = rank
 
     for _ in range(n):
-        vertex = int(np.argmax(rank))
+        while bucket_head[top] < 0:
+            top -= 1
+        vertex = bucket_head[top]
+        following = bucket_next[vertex]
+        bucket_head[top] = following
+        if following >= 0:
+            bucket_prev[following] = -1
+
         for word in range(n_words):
             free = ~int(taken[vertex, word]) & _FULL_WORD
             if free:
                 chosen = word * _WORD + (free & -free).bit_length() - 1
                 break
         colour[vertex] = chosen
-        rank[vertex] = -1
 
         neighbours = indices[indptr[vertex] : indptr[vertex + 1]]
         word, bit = chosen // _WORD, np.uint64(1) << np.uint64(chosen % _WORD)
         previous = taken[neighbours, word]
         taken[neighbours, word] = previous | bit
         # Only a neighbour that did not already see this colour becomes more saturated -- and a
-        # neighbour that is already coloured must keep rank -1 so it is never selected again.
+        # neighbour that is already coloured must never be moved between buckets.
         gained = neighbours[(previous & bit) == 0]
         gained = gained[colour[gained] < 0]
+        old_ranks = (saturation[gained] * tie + degree[gained]).tolist()
         saturation[gained] += 1
-        rank[gained] = saturation[gained] * tie + degree[gained]
+        new_ranks = (saturation[gained] * tie + degree[gained]).tolist()
+
+        for v, r_old, r_new in zip(gained.tolist(), old_ranks, new_ranks, strict=True):
+            p, following = bucket_prev[v], bucket_next[v]
+            if p >= 0:
+                bucket_next[p] = following
+            else:
+                bucket_head[r_old] = following
+            if following >= 0:
+                bucket_prev[following] = p
+            head = bucket_head[r_new]
+            bucket_next[v] = head
+            bucket_prev[v] = -1
+            if head >= 0:
+                bucket_prev[head] = v
+            bucket_head[r_new] = v
+            if r_new > top:
+                top = r_new
     return colour
 
 
