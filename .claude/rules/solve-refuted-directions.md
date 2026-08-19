@@ -409,10 +409,13 @@ load-bearing status of the flow block itself is in `solve-flow-block.md`.
 - **Block-CSR sparse matvec — REFUTED; JAX's own primitives are already at the limit for this case.** See
   `solve-flow-block-log.md` § "The sparse matvec is at the limit of what JAX's primitives give —
   block-CSR REFUTED".
-- **The native flow block winning on a real march — NOT established, and one earlier "10% fewer cycles"
-  reading was an unfair A/B (only one arm had received a since-shipped tuning change).** The honest,
-  current verdict — `FLOW_INVERSE` stays `petsc` — is in `solve-flow-block.md` itself, not archived here,
-  because it is the live default, not a dead idea. Read it before re-proposing the native block as a win.
+- **The native flow block winning on a real march (on SPEED) — NOT established, and one earlier "10%
+  fewer cycles" reading was an unfair A/B (only one arm had received a since-shipped tuning change).**
+  ⚠️ The speed verdict stands, but `FLOW_INVERSE` is nonetheless `bfs3d`'s DEFAULT as of 2026-08-18 — the
+  case for it moved to robustness (incomplete-LU's elimination-order sensitivity) and GPU-readiness, not
+  a reversal of this measurement. The full current verdict is in `solve-flow-block.md` itself, not
+  archived here, because it is the live default, not a dead idea. Read it before re-proposing the native
+  block as a *speed* win — that specific claim is still refuted.
 
 ## Globalization (forward step, continuation, line search) — closed investigations
 

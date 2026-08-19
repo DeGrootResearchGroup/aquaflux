@@ -425,12 +425,21 @@ if TURBULENCE_INVERSE not in _TURBULENCE_INVERSES:
         f"BFS3D_TURBULENCE_INVERSE={TURBULENCE_INVERSE!r} is not one of {list(_TURBULENCE_INVERSES)}"
     )
 #: The native inverse's own settings, kept here rather than left to the class defaults so the banner can
-#: print them and a later reader can tell two runs apart. `max_coarse` is the one deliberate departure
-#: from the class default: the coarse grid is grown to match the host V-cycle's own coarse-equation
-#: limit, since a coarse grid big enough to invert the global coupling exactly is worth a great deal on
-#: this operator.
+#: print them and a later reader can tell two runs apart.
+#:
+#: ⚠️ THE DEFAULT COARSENS DEEPER THAN THE CLASS'S OWN TWO LEVELS, AND THE REASON IS SCALING RATHER THAN
+#: THIS MESH. At 23040 cells the shipped two-level, single-aggressive-coarsening hierarchy's coarse grid
+#: (~450 dofs) is a non-issue; at a mesh two orders of magnitude larger the same construction's coarse
+#: grid grows roughly linearly while its coarsest solve stays a dense direct factorization, which is
+#: cubic to build and quadratic to store. A block-alone probe on the converged root's own zero-shift
+#: operator (the hardest, most discriminating case: every arm here has no real residual reduction after
+#: 50+ restart cycles UNLESS the strength threshold is on) reached rtol 1e-8 in 11 cycles once depth,
+#: plain (non-aggressive) coarsening and a strength threshold were combined -- and a full 3-rung march at
+#: these settings reproduced the shipped bundle's exact root (`x_r/h` 8.3611) in 59 steps. `max_coarse`
+#: here is deliberately independent of `COARSE_EQ_LIMIT` (which also sizes the flow block's own coarse
+#: grid): this arm wants a SMALL coarse grid, since the point is bounding the dense coarse solve at a
+#: much larger mesh, not matching the host V-cycle's global-coupling capacity.
 NATIVE_TRAILING = {
-    "max_coarse": COARSE_EQ_LIMIT,
     # Kept off by default, and kept exposed. With NO positivity floor this flag decides whether the case
     # converges at all: an otherwise-identical pair of marches came out opposite, the rescaled one losing
     # its line-search factor on the middle rung and stalling with the residual frozen. But that turned out
@@ -444,6 +453,26 @@ NATIVE_TRAILING = {
     # that converges every rung and one that stalls. `BFS3D_NATIVE_EQUILIBRATE=1` selects the rescaled
     # arm for an A/B of the flag itself.
     "equilibrate": os.environ.get("BFS3D_NATIVE_EQUILIBRATE", "0") not in ("", "0"),
+    # Deepened past the class's own two levels -- see the module docstring above this dict for the full
+    # rationale and the full-march measurement. `BFS3D_NATIVE_MAX_LEVELS=2 BFS3D_NATIVE_MAX_COARSE=2000
+    # BFS3D_NATIVE_STRENGTH_THRESHOLD=0.0 BFS3D_NATIVE_AGGRESSIVE_LEVELS=1` restores the class's own
+    # (pre-scaling) two-level, single-aggressive-coarsening arm for re-adjudicating the trade.
+    "max_levels": int(os.environ.get("BFS3D_NATIVE_MAX_LEVELS", "20")),
+    "max_coarse": int(os.environ.get("BFS3D_NATIVE_MAX_COARSE", "200")),
+    "strength_threshold": float(os.environ.get("BFS3D_NATIVE_STRENGTH_THRESHOLD", "0.25")),
+    "aggressive_levels": int(os.environ.get("BFS3D_NATIVE_AGGRESSIVE_LEVELS", "0")),
+    # Measured to make no clear difference on this block once the strength threshold is on (a matched
+    # A/B on the same hard state converged in 5 cycles without it against 11 with it), unlike the flow
+    # saddle where it was worth ~1.7x. Off by default; `BFS3D_NATIVE_AVOID_SINGLETONS=1` turns it on.
+    "avoid_singletons": os.environ.get("BFS3D_NATIVE_AVOID_SINGLETONS", "0") not in ("", "0"),
+    # A nonzero `strength_threshold` reads the operator's values, so a plain refresh re-coarsens from
+    # scratch and can move the hierarchy's shapes -- retracing the compiled cycle every refresh (the
+    # `BFS3D_FLOW_FROZEN_COARSENING` comment on the flow inverse below names the same mechanism, and the
+    # same measurement: without this ON, a full march's refactor cost on this block ran ~50 s per refresh
+    # against ~4 s frozen). On by default at the coarse-space-quality cost
+    # `NativeHierarchyInverse.frozen_coarsening` documents; `BFS3D_NATIVE_FROZEN_COARSENING=0` re-coarsens
+    # every refresh for re-adjudicating that trade.
+    "frozen_coarsening": os.environ.get("BFS3D_NATIVE_FROZEN_COARSENING", "1") not in ("", "0"),
 }
 #: Write every trailing sub-block to disk just BEFORE its inverse is built, keeping only the last.
 #: The build refuses a singular cell block, and that refusal fires from a mid-step refresh whose
@@ -499,15 +528,19 @@ TRAILING_INVERSE = (
 )
 
 
-#: `BFS3D_FLOW_INVERSE=native` replaces the LEADING (flow saddle) block's host V-cycle with the JAX-native
-#: SIMPLE-smoothed hierarchy, which is the arm the native-preconditioner work has been measuring on single
-#: states. Off by default: it is a measurement seam, not a shipped default, and on single states it costs
-#: more wall clock than the incumbent even where it converges in fewer cycles.
+#: `BFS3D_FLOW_INVERSE=native` selects the LEADING (flow saddle) block's JAX-native SIMPLE-smoothed
+#: hierarchy in place of the host V-cycle. `petsc`/`hostilu` still select the two PETSc-backed arms for
+#: comparison.
 #:
-#: ⚠️ `BFS3D_REFRESH_ON_CYCLES` must be raised alongside it. The refresh fires when a solve REACHES the
-#: threshold, and 3 is calibrated to an incomplete-LU that runs two cycles per solve; a preconditioner
-#: that healthily takes six or seven would trip it on essentially every step and the march would measure
-#: the trigger rather than the preconditioner.
+#: ⚠️ `BFS3D_REFRESH_ON_CYCLES` may want raising alongside it (UNVALIDATED, flagged not fixed): the
+#: refresh fires when a solve REACHES the threshold, and the shipped `3` is calibrated to an
+#: incomplete-LU that runs two cycles per solve. A full-march A/B (this default vs a matched `hostilu`
+#: run) measured the native flow arm at 349 cumulative cycles / 1782 s against 208 / 1403 s, same root
+#: (`x_r/h` 8.3611 both) -- some of that gap is plausibly the refresh threshold tripping on this
+#: hierarchy's ordinary 4-9-cycle solves rather than on genuine staleness, and some is plausibly the
+#: native hierarchy's own per-apply cost away from zero shift, which prior single-state measurements put
+#: at several times an incomplete-LU sweep. Neither is isolated yet -- re-tune `REFRESH_ON_CYCLES`
+#: against this bundle before trusting either explanation.
 def _flush_print(message: str) -> None:
     """Send a preconditioner's build record to the run log, flushed so it lands in order.
 
@@ -518,13 +551,19 @@ def _flush_print(message: str) -> None:
     print(message, flush=True)
 
 
-#: ⚠️ THE DEFAULT IS `hostilu`, NOT `petsc`, AND THE REASON IS THE DEPENDENCY RATHER THAN THE NUMBERS.
-#: The two are at parity on a full march (the entry below has the per-rung breakdown), so nothing here
-#: claims the host V-cycle is the better preconditioner. What it is, is the same coarsening without an
-#: optional PETSc build: the leading block was the last part of this case that required one, and a
-#: default nobody selects is a default nobody maintains. `BFS3D_FLOW_INVERSE=petsc` restores the
-#: incumbent, and both arms stay measured and runnable so the pair can be re-adjudicated.
-FLOW_INVERSE = os.environ.get("BFS3D_FLOW_INVERSE", "hostilu")
+#: ⚠️ THE DEFAULT IS `native`, NOT AN INCOMPLETE-LU ARM, AND THE REASON IS ROBUSTNESS RATHER THAN SPEED.
+#: An incomplete-LU factorization is sensitive to the elimination ORDER in a way that has repeatedly
+#: produced arms differing by orders of magnitude on this operator (measured: the same ILU(0) construction
+#: takes 1 cycle under one cell ordering and fails to converge in 38 under another, on the same block).
+#: The native SIMPLE-smoothed hierarchy has no ordering dependence and no sequential triangular solve
+#: (batched per-cell/per-level dense solves and sparse matvecs only), so it is also the only one of the
+#: three arms with a route to a GPU. A full-march A/B at this default against a matched `hostilu` run
+#: reached the identical root (`x_r/h` 8.3611) at a real wall-clock cost (349 cumulative cycles / 1782 s
+#: against 208 / 1403 s) -- native is not the faster arm here, it is the one that does not depend on an
+#: elimination order this case has already been bitten by, and the one this project's GPU direction needs.
+#: `BFS3D_FLOW_INVERSE=hostilu` / `petsc` restore the two PETSc-backed arms, and both stay measured and
+#: runnable so the comparison can be re-adjudicated.
+FLOW_INVERSE = os.environ.get("BFS3D_FLOW_INVERSE", "native")
 if FLOW_INVERSE not in ("petsc", "native", "hostilu"):
     raise SystemExit(
         f"BFS3D_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'native', 'hostilu']"
@@ -577,6 +616,12 @@ if FLOW_INVERSE == "native":
     #: march may not need four. ``BFS3D_FLOW_FROZEN_COARSENING`` -- at this strength threshold the
     #: aggregation reads values, so each refresh re-coarsens and retraces the compiled cycle; frozen, the
     #: partition is the one derived at the first build and reused for the whole march.
+    #:
+    #: ⚠️ `frozen_coarsening` defaults ON, unlike the class it wraps. Without it a full march's refactor
+    #: cost was measured at ~50 s per refresh (the retrace this docstring warns about, not the hierarchy's
+    #: own build cost -- an isolated single build of the same recipe took ~1 s); frozen, it stayed at
+    #: ~4 s across every refresh in a full 3-rung march. `BFS3D_FLOW_FROZEN_COARSENING=0` restores the
+    #: class default (re-coarsen every refresh) for re-adjudicating the trade against coarse-space quality.
     _NATIVE_FLOW = dict(
         sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", "2")),
         pressure_sweeps=2,
@@ -587,7 +632,7 @@ if FLOW_INVERSE == "native":
         max_coarse=500,
         block_splitting=True,
         omega=1.0,
-        frozen_coarsening=os.environ.get("BFS3D_FLOW_FROZEN_COARSENING", "") not in ("", "0"),
+        frozen_coarsening=os.environ.get("BFS3D_FLOW_FROZEN_COARSENING", "1") not in ("", "0"),
         shape_headroom=(
             float(os.environ["BFS3D_FLOW_SHAPE_HEADROOM"])
             if os.environ.get("BFS3D_FLOW_SHAPE_HEADROOM")

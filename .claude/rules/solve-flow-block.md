@@ -11,10 +11,17 @@ paths:
 
 ## The flow block — native preconditioning of the `[u, v, w, p]` saddle
 
-**Current status (2026-08-18): the native path is BUILT and validated for differentiation, but is
-NOT the shipped default on a march — `FLOW_INVERSE` stays `petsc`.** The two subsections kept here are
-the durable ones: that `jax.grad` runs and is validated through this block, and the final honest
-verdict on why the native hierarchy does not currently win end to end. The full chronological
+**Current status (2026-08-18): the native path is `bfs3d`'s DEFAULT leading-block inverse
+(`FLOW_INVERSE="native"`), and the reason is robustness rather than speed — the measurement below,
+that the native arm is not faster on a march, still stands.** An incomplete-LU factorization's
+sensitivity to elimination order has repeatedly produced arms differing by orders of magnitude on this
+operator (see `solve-flow-block-log.md`'s `pitzDaily` entries), and the native hierarchy is also the
+only one of the arms with a route to a GPU. A full-march A/B against a matched `hostilu` (PETSc) run
+reached the identical root (`x_r/h` 8.3611) at a real wall-clock cost (349 cumulative cycles / 1782 s
+against 208 / 1403 s) — this default was chosen accepting that cost, not disputing the measurement
+below. `BFS3D_FLOW_INVERSE=hostilu` / `petsc` restore the two PETSc-backed arms. The two subsections
+kept here are the durable ones: that `jax.grad` runs and is validated through this block, and the
+honest verdict on why the native hierarchy does not win on speed end to end. The full chronological
 investigation between those two points — several rounds of "found a win", each later qualified or
 retracted by a tighter measurement — is preserved in full in `solve-flow-block-log.md`; read it before
 proposing to revisit the native flow block, so a re-litigated idea is not mistaken for a new one.
@@ -288,10 +295,13 @@ Given the same change the incumbent gains *more*, and the ordering is unchanged:
 | **petsc — the shipped default** | **59** | **1197 s** |
 | native, 2 sweeps | 63 | 1510 s |
 
-**The incumbent is 1.26× faster, so `FLOW_INVERSE` stays `petsc`.** The native direction's case rests
-where it always did — on the **adjoint at β = 0**, which is a different operator and where the incumbent's
-advantage (an incomplete factorization becoming near-exact as the shift raises diagonal dominance)
-disappears. That case cannot be closed until `jax.grad` runs on this case at all.
+**The incumbent is 1.26× faster on this measurement, and that ranking is unchanged.** ⚠️ **`FLOW_INVERSE`
+moved to `native` anyway on 2026-08-18** — not because this measurement was overturned, but because the
+case for it stopped being about speed: an incomplete-LU factorization's elimination-order sensitivity
+and the lack of a GPU route outweighed the wall-clock cost once `jax.grad` was validated through the
+block (below). The native direction's speed case still rests where it always did — on the **adjoint at
+β = 0**, which is a different operator and where the incumbent's advantage (an incomplete factorization
+becoming near-exact as the shift raises diagonal dominance) disappears.
 
 **The general trap, which has now cost two wrong readings in this file:** when a change lands on one arm
 of an A/B, every previously-recorded number for the *other* arm is stale, and comparing across that

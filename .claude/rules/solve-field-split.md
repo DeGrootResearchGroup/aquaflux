@@ -657,3 +657,45 @@ paths:
       out level for `ilu0x1` (21 vs 19 events), which is what licensed attributing its saving to the
       smoother.
 
+
+## ⚠️ PARTIALLY ADDRESSED: the full-Jacobian materialization is a scaling wall, one block of it now fixed
+
+**Deepening either block's own hierarchy does not fix this on its own, and it may dominate memory at a
+1M-cell target regardless of how deep either goes.** `FieldSplitAmgPreconditioner.build` /
+`refresh_in_place` (`aquaflux/solve/amg_preconditioner.py`, driven from `aquaflux/turbulence/coupled.py`'s
+`_monolithic_shift_source` / `CoupledJacobianProbe`) materialize the coupled Jacobian with **one**
+coloured-probe pass over all `dim+3` fields at reach 3, and `build_block_triangular_field_split` slices
+the field-pair blocks out of that one matrix. This is what field-split costs regardless of either block's
+own coarsening depth (see the trailing hierarchy's own scalability note in `solve-amg-multigrid.md`,
+which this is deliberately separate from).
+
+**✅ One quarter of it is now fixed (2026-08-18, see the `active_rows` entry above in this file).** The
+dropped coupling block `[u,v,w,p] ← [k,ω]` — sliced out and discarded by every flow-first split, never
+applied — is no longer materialized at all: `nnz` fell 47.209M → 36.718M (−22.2 %) on `bfs3d`, verified
+bit-identical on the split's own `apply()` (forward and transpose). Scaling *that* fix's own 1M-cell
+extrapolation, the block it removed would have been ~450M stored entries on its own.
+
+**What is still open — the two diagonal blocks and the one coupling block field-split still keeps
+(`[u,v,w,p]` diagonal 44.4 %, `[k,ω]` diagonal 11.1 %, retained coupling `[k,ω] ← [u,v,w,p]` 22.2 % —
+77.8 % of the original, ~28.6M nnz on `bfs3d`) are all still materialized through the SAME single
+reach-3, 6-field colouring.** Scaling that remainder linearly by cell count to 1M cells still gives on
+the order of 1.2 billion nonzeros and, going by this project's own working figure of ~2 GB per live copy
+at 23040 cells for the *unreduced* materialize (JAX/BCOO overhead and transient probe buffers, not just
+raw CSR storage), plausibly several to tens of GB per copy — likely still larger than the trailing
+hierarchy's now-fixed dense-coarse-solve wall ever was, just smaller than before this fix.
+
+The scalar block-diagonal preconditioner path (`coupled_continuation`'s default `CoupledShiftPolicy`,
+`method="twolevel"`/`"air"`) avoids materializing any Jacobian at all — each field's operator is built
+analytically from ~one JVP, no colouring, no full-Jacobian storage — but `bfs3d` moved away from it
+because the cheaper composition was measured insufficient at this case's Reynolds number (see the
+flow-block preconditioning notes). **A genuinely cheaper route beyond the `active_rows` fix, scoped but
+UNBUILT:** probe the `[k, ω]` Jacobian on its own — a 2-field colouring, which closes at stencil reach 2
+rather than the 3 the
+full velocity-coupled system needs (`turbulence.md` documents `ν_t`'s dependence on the strain rate
+`S(∇u)` as exactly what pushes the velocity columns to reach 3; k and ω enter pointwise and do not
+need it) — instead of slicing it out of the full materialization. This would keep the true k↔ω
+coupling (a real-Jacobian-based per-field inverse measured 5× fewer cycles than an analytic
+decoupled stand-in on this operator family) without paying for the leading block or the
+flow↔turbulence coupling blocks at all. Not the same idea as the deleted `PerFieldNativeInverse`
+(2026-08-15): that built per-field hierarchies with no cross-field coupling, but still sliced its
+operator from the shared full materialization, so it never saved this cost.

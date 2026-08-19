@@ -1064,6 +1064,17 @@ elimination order**, and `hostilu` marches that case once given one (`PITZ_FLOW_
 *"Ordering, not fill, is what fails zero-fill on `pitzDaily`"* above. The `pitzDaily` default is still
 `petsc` pending the cost comparison, but not for this reason.
 
+⚠️ **SUPERSEDED 2026-08-18 — `bfs3d`'s default leading inverse moved again, to `native`.** `hostilu` was
+the default from 2026-08-16 to 2026-08-18; every measurement in this file that says "the incumbent" of
+the `bfs3d` leading block without naming an arm was taken against **PETSc ILU(0)**, as the paragraph
+above already says, and that reading is unaffected. The second flip, to the JAX-native SIMPLE-smoothed
+hierarchy (`NativeSimpleInverse`), was made for robustness — an incomplete-LU factorization's
+sensitivity to elimination order (the same class of issue the `pitzDaily` correction just above is
+about) has repeatedly produced arms differing by orders of magnitude on this operator — and for a route
+to a GPU, not for speed: a full-march A/B against a matched `hostilu` run reached the identical root
+(`x_r/h` 8.3611) at 349 cumulative cycles / 1782 s against 208 / 1403 s. `BFS3D_FLOW_INVERSE=hostilu` /
+`petsc` still select the two PETSc-backed arms, and both stay measured and runnable.
+
 ⚠️ **THE WALL-CLOCK COLUMN BELOW CANNOT BE ATTRIBUTED, because nothing recorded which `Ilu0` kernel was
 live.** `Ilu0` falls back to a pure-Python twin of its compiled kernel when the extension is not built,
 and it does so **silently**. The `.so` is gitignored, so it belongs to a checkout rather than a branch

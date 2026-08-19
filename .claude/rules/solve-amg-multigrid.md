@@ -1948,12 +1948,29 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   2. Then, if still short: sparse-LU coarse solve (ours is a dense inverse, `_dense_inverse`),
      QR-orthonormalized
      tentative columns (inert at 2 levels, not deeper), and Chebyshev with the SA-cached bounds.
-  3. **Scalability, independent of all the above and unaddressed:** the convection hierarchy is capped
-     at 2 levels (`_CONVECTION_LEVELS`) with a **dense inverse** coarse solve. At a 77× ratio that is
-     ~26k coarse dofs and 5.4 GB to store at 1M cells — infeasible. Depth now *builds* (3 levels, no
-     refusal) via the new `max_levels` argument, so the fix is cheap once the method itself works.
+  3. **✅ SCALABILITY — BUILT AND SHIPPED as `bfs3d`'s trailing-block default (2026-08-18).** The
+     convection hierarchy was capped at 2 levels (`_CONVECTION_LEVELS`) with a **dense inverse** coarse
+     solve — at a 77× ratio that is ~26k coarse dofs and 5.4 GB to store at 1M cells, infeasible.
+     `compare.py`'s `NATIVE_TRAILING` now defaults `native_nodal_inverse` to `max_levels=20,
+     max_coarse=200, strength_threshold=0.25, aggressive_levels=0, frozen_coarsening=True`. Depth or
+     the threshold *alone* did nothing on a block-alone probe of the converged root's zero-shift
+     operator (every arm at the old 2-level default shows no real residual reduction after 50+ restart
+     cycles); combined, the same probe reached rtol 1e-8 in 11 cycles, and a full 3-rung march at this
+     bundle reproduced the shipped root exactly (`x_r/h` 8.3611, 59 steps). `frozen_coarsening` is
+     load-bearing, not optional decoration: a nonzero threshold reads the operator's values, so a plain
+     refresh re-coarsens from scratch and can move the hierarchy's shapes, retracing the compiled cycle
+     every refresh — measured ~50 s per refresh unfrozen against ~4 s frozen, stable across a full march.
      PETSc reaches only 2 levels here because it coarsens until under `coarse_eq_limit`; our
-     `max_coarse` is NOT the equivalent knob and has no effect at 2 levels.
+     `max_coarse` is NOT the equivalent knob and has no effect while `max_levels` binds first.
+     **Still open:** this is validated at `bfs3d`'s 23040 cells only, and the per-row-field
+     normalization of `_cell_graph`'s edge weights (this block's ω rows sit ~8 orders above its k rows,
+     so a raw threshold risks reading as an ω-only strength measure) remains unbuilt — the shipped
+     bundle uses the raw threshold as-is and it did not visibly misbehave at this size, which is not the
+     same as having ruled the risk out at a much larger one. Re-run
+     `validation/bfs3d_openfoam/trailing_depth_probe.py` on whatever bigger mesh next triggers this.
+     **A separate, likely LARGER wall this does not touch:** `FieldSplitAmgPreconditioner` materializes
+     the *entire* coupled Jacobian (all fields, reach 3) to slice out this block regardless of its own
+     depth — see the field-split scaling note in `solve-field-split.md`.
 
   **Local PETSc source** for continuing the port (shallow sparse clone, may need re-cloning):
   `src/ksp/pc/impls/gamg/{agg,gamg}.c` and `src/mat/graphops/coarsen/impls/misk/misk.c` — note
@@ -2081,18 +2098,31 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   correctly allowed. This one build-time guard is why the runtime smoothers (`_chebyshev_smooth`,
   `_jacobi_smooth`, `_fc_jacobi`) and the block-preconditioner rescales, which invert the frozen
   diagonal / the positive momentum `a_P`, need no per-apply floor.
-- **The damped-Jacobi convection hierarchy is TWO-LEVEL by design (binding — do not add a depth
-  knob).** `build_convection_hierarchy(a)` builds exactly a smoothed fine level + a single **direct**
-  (dense inverse) coarse solve. **`max_levels` exists** (`multigrid.py`, default
-  `_CONVECTION_LEVELS = 2`); raising it re-opens the defect below, so leave it at 2. On the fine level the
+- **⚠️ NARROWED (2026-08-18): the defect below is specific to a PLAIN (untresholded) deep coarsening,
+  not to depth itself — a strength-thresholded deep hierarchy does not reproduce it.** The prohibition
+  below was against adding a depth knob at all; `NativeHierarchyInverse`'s shared base (#197) exposed
+  `max_levels`/`strength_threshold` since, and `bfs3d`'s trailing-block bundle now ships
+  `max_levels=20, strength_threshold=0.25` (case-level override, library default unchanged — see the
+  scalability item earlier in this file). Depth *alone* (`strength_threshold=0`, the untresholded case
+  this bullet is about) reproduces the original failure exactly, measured directly: no real residual
+  reduction after 50+ restart cycles on the same operator this bullet's ρ(S) ≈ 1.0–1.36 was measured on.
+  Depth *combined with* the threshold reached rtol 1e-8 in 11 cycles. So the reasoning below — why a
+  coarse-of-coarse operator from *structural* coarsening is pathological — still stands and still governs
+  the library default; what changed is that it is no longer the last word on depth in general.
+- **The damped-Jacobi convection hierarchy defaults to TWO-LEVEL (binding for the library default; NOT
+  for every consumer — see the note just above).** `build_convection_hierarchy(a)` builds exactly a
+  smoothed fine level + a single **direct** (dense inverse) coarse solve at its own defaults.
+  **`max_levels` exists** (`multigrid.py`, default `_CONVECTION_LEVELS = 2`); raising it *alone* (with
+  `strength_threshold` left at its structural default) re-opens the defect below. On the fine level the
   upwind operator is a diagonally dominant M-matrix, so one damping factor `ω/λ_max` contracts
-  (`_jacobi_smooth`, ρ ≈ 0.7 at high cell Peclet). A *deeper* Galerkin recursion is deliberately not
-  built: a coarse-of-coarse operator of a strongly convection-dominated problem acquires
-  near-imaginary-axis eigenvalues that **no single-factor damped-Jacobi smoother can damp** — the
-  smoother becomes non-contractive (measured ρ(S) ≈ 1.0–1.36 on such levels), so the coarse level
-  must be an exact solve. Deep, mesh-independent convection coarsening is the job of the
-  reduction-based lAIR hierarchy (`build_air_hierarchy` + `_fc_jacobi`) instead. Both
-  production callers (the flow `SmoothedAmgConvectionVelocity` two-level path and the turbulence
-  preconditioner) already used two levels, so this is behaviour-neutral; the deep damped-Jacobi
-  build it removed was dominated on both ends (worse than two-level shallow, worse than lAIR deep)
-  and was the sole source of the non-contractive-smoother defect.
+  (`_jacobi_smooth`, ρ ≈ 0.7 at high cell Peclet). A *deeper* Galerkin recursion over a **structural**
+  (value-blind) coarsening is what was found broken: a coarse-of-coarse operator of a strongly
+  convection-dominated problem acquires near-imaginary-axis eigenvalues that **no single-factor
+  damped-Jacobi smoother can damp** — the smoother becomes non-contractive (measured ρ(S) ≈ 1.0–1.36 on
+  such levels), so the coarse level must be an exact solve there. Deep, mesh-independent convection
+  coarsening is the job of the reduction-based lAIR hierarchy (`build_air_hierarchy` + `_fc_jacobi`)
+  where a strength threshold is not wanted. Library defaults are unchanged and both original production
+  callers (the flow `SmoothedAmgConvectionVelocity` two-level path and the segregated turbulence
+  preconditioner) still use two levels; the deep-and-untresholded damped-Jacobi build that motivated this
+  bullet was dominated on both ends (worse than two-level shallow, worse than lAIR deep) and was the sole
+  source of the non-contractive-smoother defect.

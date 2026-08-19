@@ -781,6 +781,11 @@ class NodalNativeInverse(NativeHierarchyInverse):
         which is why the two travel together.
     equilibrate : bool
         Coarsen the operator rescaled to a unit-magnitude diagonal; see the note below.
+    avoid_singletons : bool
+        Attach a maximal-independent-set aggregate with no free neighbour to an adjacent one instead of
+        leaving it standing alone. ``False`` (default, byte-identical off) matches the class's original
+        behaviour. A nonzero ``strength_threshold`` prunes edges before aggregation and so is more prone
+        to stranding vertices this way; see :func:`~aquaflux.solve.multigrid.build_convection_hierarchy`.
 
     Notes
     -----
@@ -820,11 +825,13 @@ class NodalNativeInverse(NativeHierarchyInverse):
         prolongation_smoothing: str = "none",
         spectral_damping: bool = False,
         equilibrate: bool = True,
+        avoid_singletons: bool = False,
         **hierarchy_settings,
     ) -> None:
         self._aggressive_levels = aggressive_levels
         self._prolongation_smoothing = prolongation_smoothing
         self._equilibrate = equilibrate
+        self._avoid_singletons = avoid_singletons
         # The cycle's static half, built once: it never changes over this inverse's life, so a refresh
         # cannot move the compilation key through it.
         self._smoother = _NodalSmoother(
@@ -845,6 +852,7 @@ class NodalNativeInverse(NativeHierarchyInverse):
             "aggressive_levels": self._aggressive_levels,
             "prolongation_smoothing": self._prolongation_smoothing,
             "equilibrate": self._equilibrate,
+            "avoid_singletons": self._avoid_singletons,
         }
 
     def smoother(self) -> _NodalSmoother:
