@@ -22,6 +22,7 @@ from aquaflux.solve.multigrid import (
     _chebyshev_smooth,
     _CsrOperator,
     _dense_inverse,
+    _fc_jacobi,
     _jacobi_smooth,
     _jacobi_smooth_zero,
     _lair_restriction,
@@ -345,6 +346,72 @@ def test_chebyshev_smoother_matches_the_scaled_chebyshev_polynomial() -> None:
         max_abs = float(np.max(np.abs(realized)))
         assert max_abs < 1.0  # every mode in the band is damped, not amplified
         assert np.allclose(realized, analytic, atol=1e-10)  # exactly the min-max polynomial
+
+
+# --- precomputed inverse diagonals (issue #110) -----------------------------------------
+
+
+def test_sparse_level_inv_diagonal_matches_the_reciprocal_diagonal() -> None:
+    """``inv_diagonal`` is exactly ``1.0 / diagonal``, derived once at construction."""
+    owner, nb, ncell = _poisson(8)
+    hierarchy = build_smoothed_hierarchy(
+        convection_diffusion_operator(owner, nb, np.ones(owner.shape[0]), ncell)
+    )
+    for level in hierarchy.levels:
+        np.testing.assert_array_equal(
+            np.asarray(level.inv_diagonal), np.asarray(1.0 / level.diagonal)
+        )
+
+
+def test_air_level_inv_diagonal_matches_the_reciprocal_diagonal() -> None:
+    """The lAIR level carries the same derived reciprocal, for the FC-Jacobi smoother."""
+    owner, nb, visc, mdot, n, bd = _convective_grid(8, mu=1e-2, speed=1.0)
+    hierarchy = build_air_hierarchy(_operator(owner, nb, visc, mdot, n, bd))
+    for level in hierarchy.levels:
+        np.testing.assert_array_equal(
+            np.asarray(level.inv_diagonal), np.asarray(1.0 / level.diagonal)
+        )
+
+
+def test_smoother_bodies_never_close_over_the_raw_diagonal() -> None:
+    """Chebyshev, damped-Jacobi and FC-Jacobi read the precomputed reciprocal, never re-divide it.
+
+    Regression for the frozen-diagonal recomputation: each smoother used to compute
+    ``1.0 / level.diagonal`` (or, for FC-Jacobi, ``omega * mask * (1.0 / level.diagonal)``) inside its
+    own body on every call, even though the diagonal is a build-time constant. A smoother traced in
+    isolation closes over ``level``'s arrays as jaxpr constants, so checking which of ``diagonal`` /
+    ``inv_diagonal`` actually appears among them is a direct check of the acceptance criterion ("no
+    n-element divide in the smoother bodies") that does not confuse this with the other, unrelated
+    divides these smoothers legitimately still perform (e.g. Chebyshev's own scalar-derived step
+    scaling) — a blanket "no ``div`` primitive at all" check would flag those too.
+    """
+    owner, nb, ncell = _poisson(6)
+    smoothed = build_smoothed_hierarchy(
+        convection_diffusion_operator(owner, nb, np.ones(owner.shape[0]), ncell)
+    )
+    fine = smoothed.levels[0]
+    b, x = jnp.zeros(fine.n), jnp.ones(fine.n)
+
+    chebyshev_jaxpr = jax.make_jaxpr(lambda b, x: _chebyshev_smooth(fine, b, x, 3, 0.25))(b, x)
+    jacobi_jaxpr = jax.make_jaxpr(lambda b, x: _jacobi_smooth(fine, b, x, 2, 0.8))(b, x)
+    jacobi_zero_jaxpr = jax.make_jaxpr(lambda b: _jacobi_smooth_zero(fine, b, 2, 0.8))(b)
+    for name, jaxpr in (
+        ("chebyshev", chebyshev_jaxpr),
+        ("jacobi", jacobi_jaxpr),
+        ("jacobi_zero", jacobi_zero_jaxpr),
+    ):
+        consts = jaxpr.consts
+        assert not any(c is fine.diagonal for c in consts), f"{name} closes over the raw diagonal"
+        assert any(c is fine.inv_diagonal for c in consts), f"{name} does not read inv_diagonal"
+
+    o, nb2, visc, mdot, n, bd = _convective_grid(6, mu=1e-2, speed=1.0)
+    air = build_air_hierarchy(_operator(o, nb2, visc, mdot, n, bd))
+    air_fine = air.levels[0]
+    b2, x2 = jnp.zeros(air_fine.n), jnp.ones(air_fine.n)
+    fc_jacobi_jaxpr = jax.make_jaxpr(lambda b, x: _fc_jacobi(air_fine, b, x, 2, 2, 0.8))(b2, x2)
+    consts = fc_jacobi_jaxpr.consts
+    assert not any(c is air_fine.diagonal for c in consts), "fc_jacobi closes over the raw diagonal"
+    assert any(c is air_fine.inv_diagonal for c in consts), "fc_jacobi does not read inv_diagonal"
 
 
 # --- convection-diffusion (nonsymmetric) aggregation ------------------------------------

@@ -2098,6 +2098,34 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   correctly allowed. This one build-time guard is why the runtime smoothers (`_chebyshev_smooth`,
   `_jacobi_smooth`, `_fc_jacobi`) and the block-preconditioner rescales, which invert the frozen
   diagonal / the positive momentum `a_P`, need no per-apply floor.
+- **`_coo_apply`'s sorted-segments promise is now per-call, not blanket (issue #110's first finding,
+  fixed 2026-08-13 in `60806e8`, independently of the issue).** `sorted_segments` (default `True`)
+  states whether the COO row array is non-decreasing; it is a promise, not a hint — a backend that
+  acts on it returns silently wrong output if it is false. A frozen operator taken from `scipy.sparse`
+  CSR is row-major and satisfies the default; the smoothed-aggregation **restriction** is the
+  prolongation applied transposed, so its segment ids are the prolongation's COLUMN array, which a
+  row-major COO does not leave sorted — `_smoothed_ops`'s `restrict` passes `sorted_segments=False`
+  for exactly this. lAIR's restriction/prolongation are each an **independent** `scipy.sparse` CSR
+  matrix (never a transpose of another), so their COO round-trip is sorted by construction and
+  `_air_ops` uses the default correctly as-is — checked, not merely assumed. `_operator_matvec` itself
+  does not go through `_coo_apply` at all: every level's own operator applies via `_CsrOperator`
+  (`BCSR` matmul), a proper CSR primitive that needs no sortedness hint.
+- **Frozen level diagonals are inverted ONCE, in `__post_init__`, not on every smoother apply (issue
+  #110's second finding, fixed 2026-08-18).** `_SparseLevel`/`_AirLevel` both carry `inv_diagonal`
+  (`1.0 / diagonal`), derived automatically the moment either is constructed — the same
+  `__post_init__` + `object.__setattr__` pattern `FaceCellConnectivity` uses for `interior` /
+  `safe_neighbour` (issue #109), so every existing constructor call site (the builders, `refit`, and
+  the one hand-built test level) gets it for free without passing it explicitly.
+  `_chebyshev_smooth`/`_jacobi_smooth`/`_jacobi_smooth_zero` read `level.inv_diagonal` instead of
+  re-dividing; `_fc_jacobi` additionally hoists `omega * mask * inv_diagonal` out of its per-sweep
+  loops (computed once per call instead of once per sweep) — `omega` stays a **solve-time** argument
+  rather than a build-time field, since it is chosen per `air_multigrid_solve` call and is not itself
+  a frozen property of the hierarchy; baking it into `_AirLevel` would mean a different `omega` needs
+  a different hierarchy, which is a real behaviour change this fix does not make. Verified two ways
+  in `test_multigrid.py`: `inv_diagonal` matches `1.0 / diagonal` exactly on both level kinds, and each
+  smoother's jaxpr, traced in isolation, closes over `inv_diagonal` as a constant and never over the
+  raw `diagonal` (checked via `ClosedJaxpr.consts`, which distinguishes this from Chebyshev's other,
+  unrelated scalar-derived divides that a blanket "no `div` primitive" check would have flagged too).
 - **⚠️ NARROWED (2026-08-18): the defect below is specific to a PLAIN (untresholded) deep coarsening,
   not to depth itself — a strength-thresholded deep hierarchy does not reproduce it.** The prohibition
   below was against adding a depth knob at all; `NativeHierarchyInverse`'s shared base (#197) exposed
