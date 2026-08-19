@@ -195,7 +195,9 @@ class SSTTurbulence(eqx.Module):
     advection_scheme : AdvectionScheme
         The k / omega convection scheme (e.g. first-order upwind).
     density : float
-        The (constant) fluid density, used to form the volume flux ``mdot / rho``.
+        The (constant) fluid density, used to form the volume flux ``mdot / rho``. Independent of
+        the flow assembler's own (per-cell) density -- :meth:`~aquaflux.turbulence.CoupledRANS.build`
+        checks the two agree, since nothing else does and a mismatch is otherwise silent.
     molecular_viscosity : jnp.ndarray
         Kinematic molecular viscosity ``nu`` per cell, shape ``(n_cells,)``.
     wall_distance : jnp.ndarray

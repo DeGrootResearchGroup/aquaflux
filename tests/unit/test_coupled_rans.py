@@ -127,6 +127,50 @@ def _healthy_state(mesh, coupled, seed=0):
     return coupled.pack_state(flow, k, omega)
 
 
+def test_coupled_build_rejects_a_turbulence_density_that_disagrees_with_the_flow_assembler() -> (
+    None
+):
+    """SSTTurbulence.density and the flow PropertyModel's density are two independent numbers.
+
+    Nothing else checks that a caller supplied the same value to both -- if they disagree, the
+    k/omega volume flux (mdot / density) is silently wrong by that ratio in every SST consumer
+    while the flow block solves fine, since it never reads SSTTurbulence.density at all.
+    """
+    mesh = structured_grid_2d(4, 4, lx=1.0, ly=1.0, named_boundaries=True)
+    geometry = mesh.geometry()
+    gradient = CompactGreenGauss()
+    momentum = MomentumContinuity.build(
+        mesh,
+        geometry,
+        PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)}),
+        gradient,
+        BoundaryConditions(
+            {
+                "top": MovingWall(velocity=(U_LID, 0.0)),
+                "bottom": NoSlipWall(),
+                "left": NoSlipWall(),
+                "right": NoSlipWall(),
+            }
+        ),
+        advection_scheme=FirstOrderUpwind(),
+        pressure_pin=0,
+    )
+    turbulence = SSTTurbulence.build(
+        SSTModel(),
+        mesh,
+        geometry,
+        gradient,
+        FirstOrderUpwind(),
+        density=998.0,  # deliberately different from the flow assembler's RHO = 1.0
+        molecular_viscosity=jnp.full(mesh.n_cells, NU),
+        wall_patches=list(WALLS),
+        k_boundary=BoundaryConditions({w: Dirichlet(0.0) for w in WALLS}),
+        omega_boundary=BoundaryConditions({w: ZeroGradient() for w in WALLS}),
+    )
+    with pytest.raises(ValueError, match="does not match the flow assembler's density"):
+        CoupledRANS.build(momentum, turbulence)
+
+
 def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None:
     """The complete-LU continuation defaults to a small-restart GMRES; the block one keeps the large one.
 
