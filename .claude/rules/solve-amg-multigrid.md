@@ -2062,8 +2062,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     every AR, mesh-independent** — the difference between a converging and a non-converging solve at
     AR≥100 (`test_multigrid.py::test_strength_of_connection_aggregation_fixes_an_anisotropic_operator`).
     **`θ=0` (default) is byte-identical to the historical isotropic build.** It is turned **on (θ=0.25)
-    for the coupled flow block** (`_coupled_shift_policy`: the convection velocity AMG + MSIMPLER Schur),
-    which is frozen at the reference state so the value-dependence costs no refresh; it is a **no-op on
+    for the coupled flow block** (`_coupled_shift_policy`: the convection velocity AMG), which is frozen
+    at the reference state so the value-dependence costs no refresh; it is a **no-op on
     the low-aspect-ratio pitzDaily case**, and the payoff is the future wall-resolved / skewed regime.
     It does **not** apply to the reduction-based `air`/`lsc` blocks (already strength-based), and the
     refreshed scalar k/ω AMGs stay `θ=0` to keep their refresh cache-hit — a value-refresh (à la

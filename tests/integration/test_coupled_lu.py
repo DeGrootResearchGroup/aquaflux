@@ -45,7 +45,7 @@ BACKEND = "scipy"  # always available; exact, so backend-independent correctness
 RHO, U_IN, H, L = 1.0, 1.0, 1.0, 4.0
 NU = 4e-4  # Re = U H / nu = 2500
 INTENSITY, LENGTH_SCALE = 0.05, 0.07 * H
-PRECONDITIONER = {"schur_scaling": "msimpler", "velocity": "convection"}
+PRECONDITIONER = {"velocity": "convection"}
 
 
 def _channel(nx=20, ny=14, growth=1.2):

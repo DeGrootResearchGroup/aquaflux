@@ -39,6 +39,56 @@ Two sub-results worth keeping:
 path passes none and falls back to a characteristic uniform flow at the fastest patch velocity. They were
 therefore *flattered* relative to the shipped object, and still failed.
 
+### MSIMPLER swapped in for the SHIPPED leading inverse, trailing held fixed — DOMINATED, ~8-9x more cycles (2026-08-18)
+
+**The table above pairs MSIMPLER with an `ilu0` trailing inverse, which `bfs3d` does not ship — its
+`TURBULENCE_INVERSE` default is `"native"` (`compare.TRAILING_INVERSE = native_nodal_inverse(
+**compare.NATIVE_TRAILING)`), so that comparison changed two things relative to the shipped bundle at
+once. This measurement changes exactly one.** Two arms, same materialized Jacobian, same field-split
+wiring, same trailing inverse, same column reach, same state — only the leading (flow-saddle) inverse
+swapped:
+
+- **shipped** — `compare.LEADING_INVERSE` (`host_ilu_inverse` at the case's own settings: `sweeps=1,
+  cycles=1, strength_threshold=0.25, avoid_singletons=True, aggressive_levels=0, max_levels=5,
+  max_coarse=500, prolongation_smoothing="none"` — the actual shipped default as of this run,
+  `BFS3D_FLOW_INVERSE=hostilu`).
+- **msimpler** — `BlockPreconditioner.build(momentum, velocity="convection",
+  schur_scaling="msimpler", strength_threshold=0.25)`, built from the real assembler + eddy viscosity
+  at the probed state, exactly as `field_split_probe.block_simple_arms` constructs its `msimpler` arm.
+
+Both paired with the SAME trailing inverse, `compare.TRAILING_INVERSE` (`NodalNativeInverse` at
+`compare.NATIVE_TRAILING`: `max_coarse=COARSE_EQ_LIMIT, equilibrate=False`).
+
+*Configuration:* `bfs3d`, state `state-00059` from a full shipped 3-rung cold march completed the same
+day (`nervous-tereshkova-bf3a80`, converged: step 20 of the target rung, `|R|` 1.830e-06, march shift
+0.0050, mid-span `x_r/h` 8.36 against OpenFOAM's 7.24) — the converged root, i.e. the adjoint's operator
+at zero shift, plus the march's own operating shift for completeness. Field split, column reach
+`(3,3,3,3,2,2)` (the case's shipped default), real right-hand side `-R(state)`, GMRES restart 15 to
+rtol 1e-8 on the TRUE residual, cap 60 restarts. Harness:
+`validation/bfs3d_openfoam/msimpler_swap_probe.py`.
+
+| operator | arm | cycles | TRUE rel |
+|---|---|---|---|
+| zero shift (adjoint operator) | **shipped (hostilu + native trailing)** | **6** | 1.986e-11 |
+| zero shift (adjoint operator) | msimpler (native trailing, all else shipped) | **53** | 3.250e-09 |
+| march shift β=0.0050 | **shipped** | **5** | 1.186e-11 |
+| march shift β=0.0050 | msimpler | **40** | 3.384e-09 |
+
+**Both arms converge this time** (unlike the flat-PC table above, which hit the 58-cycle cap under the
+mismatched `ilu0` trailing) — matching MSIMPLER with the trailing inverse the case actually ships is
+enough for it to reach a real, if far looser, tolerance. But swapped in for the shipped leading inverse
+with every other setting held fixed, it costs **8.8x the cycles at the adjoint operator and 8x at the
+march's own shift**. This is the controlled, single-variable-changed version of the question
+`field_split_probe.py`'s own `block_simple_arms` docstring poses ("is MSIMPLER worth pursuing on the flow
+block at all") and it answers it: no — not against the current field-split architecture, at the shipped
+trailing inverse, at the case's own hard state. Do not re-propose `schur_scaling="msimpler"` as the
+`bfs3d` leading inverse without a new measurement that changes one of these conditions. **Consequence
+(same day): `_coupled_shift_policy`'s `BlockPreconditioner.build` no longer hardcodes
+`schur_scaling="msimpler"`** — combined with the small-fixture check in `.claude/rules/turbulence.md`
+(dropping it reaches the identical fixed point on every unit/integration fixture that used to pin it),
+this measurement removed the last reason to keep it as anyone's default; see that file's entry for the
+current, corrected `_coupled_shift_policy`.
+
 ### Coarsening rate and depth — measured, and the direction that helps is the wrong one
 
 Native nodal hierarchy over the flow block, SIMPLE smoother at the settings above, 4 sweeps, 20-cycle cap:

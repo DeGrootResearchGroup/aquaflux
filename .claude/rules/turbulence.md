@@ -947,27 +947,49 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     settled coupled-solve cost is the diagonal-block-preconditioner weakness at high Reynolds number, **not**
     the residual measure, `β` floor, or missing cross-coupling (a block-triangular preconditioner was worse
     — non-convergent on recirculating pitzDaily). See `.claude/rules/solve-globalization-log.md`.
-  - **The coupled flow block uses the convection-aware AMG + MSIMPLER Schur, not the smoothed/SIMPLE
-    default (`_coupled_shift_policy`).** A RANS case is high-Reynolds, and the default
-    `BlockPreconditioner.build` config (viscous-**smoothed** velocity AMG, which is Peclet-blind, + the
-    **SIMPLE** `a_P` Schur, which degrades with convection) produces a poor momentum-block direction once
-    the flow separates. Measured on the developed pitzDaily field (shifted Newton direction vs the true
-    one): smoothed+SIMPLE gives a direction badly misaligned with the true Newton step and the march
-    stalls at rel ~0.18, while **`velocity="convection"` + `schur_scaling="msimpler"`** is nearly aligned
-    *and* cuts the shifted solve by roughly an order of magnitude in GMRES cycles (the cosines and cycle
-    counts were recorded with no β, tolerance or norm — re-measure before relying on them). Both stay
-    valid **frozen at the cold initial state**
-    (MSIMPLER's Schur is velocity-independent; the convection linearization is Peclet-robust), so **the
-    FLOW block needs no reference refresh** — verified two ways: an IC-frozen direction is as well aligned
-    as a plateau-rebuilt one, and refreshing the flow block alone at a separated pitzDaily state is if
-    anything slightly *worse* (same caveat as above: no β, tolerance or norm recorded). It is **not** the
-    flow↔turbulence cross-coupling (the block-*diagonal* preconditioner with the right config is already
-    nearly aligned on its own — a block-triangular coupling was
-    built, measured, and is worse; see `.claude/rules/solve-globalization-log.md`). **The k/ω *scalar* AMGs are the
-    exception: they do go stale, and refreshing them alone once the flow separates cuts the outer cycle count
-    materially** (configuration not recorded — re-measure before relying on the size) — the one staleness
-    lever that pays; see the staleness bullet in
-    `.claude/rules/solve-globalization-log.md`. Overridable via `preconditioner_kwargs`.
+  - **The coupled flow block uses the convection-aware velocity AMG, not the viscous-smoothed default
+    (`_coupled_shift_policy`).** A RANS case is high-Reynolds, and the default `BlockPreconditioner.build`
+    velocity config (viscous-**smoothed** AMG, which is Peclet-blind) produces a poor momentum-block
+    direction once the flow separates. Measured on the developed pitzDaily field (shifted Newton direction
+    vs the true one): smoothed gives a direction badly misaligned with the true Newton step and the march
+    stalls at rel ~0.18, while **`velocity="convection"`** is nearly aligned. The convection block's
+    linearization stays valid **frozen at the cold initial state**, so **the flow block needs no reference
+    refresh** — verified two ways: an IC-frozen direction is as well aligned as a plateau-rebuilt one, and
+    refreshing the flow block alone at a separated pitzDaily state is if anything slightly *worse*. It is
+    **not** the flow↔turbulence cross-coupling (the block-*diagonal* preconditioner with the right config
+    is already nearly aligned on its own — a block-triangular coupling was built, measured, and is worse;
+    see `.claude/rules/solve-globalization-log.md`). **The k/ω *scalar* AMGs are the exception: they do go
+    stale, and refreshing them alone once the flow separates cuts the outer cycle count materially**
+    (configuration not recorded — re-measure before relying on the size) — the one staleness lever that
+    pays; see the staleness bullet in `.claude/rules/solve-globalization-log.md`. Overridable via
+    `preconditioner_kwargs`.
+  - **⚠️ THE PRESSURE SCHUR NO LONGER HARDCODES `schur_scaling="msimpler"` (fixed 2026-08-18) — it was
+    never necessary at the scale this policy is actually used at, and is dominated where it matters.**
+    Superseded finding, kept for the trap: this bullet used to pair `velocity="convection"` with
+    `schur_scaling="msimpler"`, on the belief that a RANS-scale coupled solve needed MSIMPLER's
+    velocity-independent Schur to avoid the plain SIMPLE `a_P` Schur degrading under convection — cutting
+    the shifted solve by roughly an order of magnitude in GMRES cycles on a developed pitzDaily state (no
+    β, tolerance or norm recorded — unfalsifiable, and superseded regardless). Two things closed it: (1)
+    neither flagship case (`bfs3d`, `pitzDaily`) reaches this policy at all — both build
+    `coupled_amg_continuation(...)` explicitly, whose `_monolithic_shift_source` constructs the shift
+    policy with `build_flow_block=False`, so no `BlockPreconditioner` — hence no `schur_scaling` — is ever
+    built, regardless of `FIELD_SPLIT`/`FLOW_INVERSE`; this policy is only reached by `solve_coupled`'s
+    zero-config fallback and by small (hundreds-of-cells) unit/integration fixtures. (2) On EVERY one of
+    those small fixtures (`test_coupled_rans.py`, `test_coupled_mass_flow.py`, `test_coupled_lu.py`,
+    `test_coupled_periodic_channel.py`, `test_periodic_channel.py`, `production_cap_activity.py` — Re up
+    to 20000), dropping `schur_scaling="msimpler"` in favour of `BlockPreconditioner`'s own default reaches
+    the identical converged fixed point (fields and residual agree to the arms' own tight tolerances; the
+    shift vanishes at the root so a Schur choice cannot move it). And on `bfs3d`'s real coupled Jacobian, a
+    controlled single-variable swap (`validation/bfs3d_openfoam/msimpler_swap_probe.py`, at the converged
+    root, everything but the leading inverse held at the shipped bundle) shows MSIMPLER costs ~8-9x the
+    shipped bundle's Krylov cycles (6→53 at the adjoint operator, 5→40 at the march's own shift) — see
+    `.claude/rules/solve-flow-block-log.md` § "MSIMPLER swapped in for the SHIPPED leading inverse". So
+    `_coupled_shift_policy` now leaves `schur_scaling` at `BlockPreconditioner`'s own default; `velocity=
+    "convection"` is unaffected and stays. `schur_scaling="msimpler"` remains a real, non-dominated option
+    of `BlockPreconditioner` for a **standalone, flow-only, convection-dominated** solve — see
+    `tests/integration/test_channel_high_reynolds.py::test_msimpler_schur_reaches_beyond_the_simple_schur`,
+    where plain SIMPLE's inner GMRES genuinely stalls and MSIMPLER converges — just not for a coupled RANS
+    solve at any scale this project has measured.
   - **`coupled_lu_continuation` / `coupled_lu_refreshing_continuation` — the COMPLETE-LU coupled PC, the
     preferred coupled PC on 2D/moderate meshes (BUILT).** A drop-in for `solve_coupled(continuation=…)`
     that preconditions the whole `[flow, k, ω]` saddle by factoring the assembled coupled Jacobian

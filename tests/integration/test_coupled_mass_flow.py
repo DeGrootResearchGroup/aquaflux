@@ -47,7 +47,7 @@ RHO, U_B, H = 1.0, 1.0, 2.0  # target bulk velocity U_B along x
 RE_B, NY, GROWTH, BETA0 = 20000, 48, 1.13, 0.004
 NU = U_B * H / RE_B  # 1e-4
 K_FLOOR = 1e-8  # the hybrid IC's floor; asserted strictly inactive at the converged state
-PRECONDITIONER = {"schur_scaling": "msimpler", "velocity": "convection"}
+PRECONDITIONER = {"velocity": "convection"}
 MAX_STEPS = 300
 
 

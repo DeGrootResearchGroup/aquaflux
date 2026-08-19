@@ -54,7 +54,7 @@ FLOW_MAX_STEPS = 300
 RHO, U_IN, H, L = 1.0, 1.0, 1.0, 4.0
 NU = 4e-4  # Re = U H / nu = 2500
 INTENSITY, LENGTH_SCALE = 0.05, 0.07 * H
-PRECONDITIONER = {"schur_scaling": "msimpler", "velocity": "convection"}
+PRECONDITIONER = {"velocity": "convection"}
 
 
 def _channel(nx=28, ny=20, growth=1.2):
