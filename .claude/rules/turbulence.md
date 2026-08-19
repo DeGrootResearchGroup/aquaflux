@@ -866,7 +866,23 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
   rows are `FixedValueCells`. `CoupledRANS.build` pre-resolves the k/ω boundaries (via
   `turbulence.resolve_boundaries()`, the shared idempotent bind the segregated driver also uses) so the
   per-eval assembler rebuild's `resolve` is an idempotent no-op (else a dynamic-shape `nonzero` on
-  traced mesh labels breaks the jit). **`CoupledRANS.residual` assembles the Rhie–Chow flow fields once
+  traced mesh labels breaks the jit). **`CoupledRANS.build` now checks the two densities agree (issue
+  #157's second finding, fixed 2026-08-18).** `SSTTurbulence.density` (a scalar, used to form the k/ω
+  volume flux `mdot / density`) and `MomentumContinuity.density` (a per-cell array from the flow's
+  `PropertyModel`) are supplied to two independent builders that never see each other, so nothing
+  previously caught a caller passing a different value to each — the flow block never reads
+  `SSTTurbulence.density`, so it solves fine either way, and the k/ω equations silently solve the wrong
+  Peclet regime (a 998× density error, say, gives a 998× wrong volume flux in **both** scalar residuals,
+  **both** frozen AMGs, and **both** pseudo-transient shift diagonals, with no other symptom). `build`
+  now raises `ValueError` unless `turbulence.density` is close (`jnp.isclose`) to every cell of
+  `momentum.density` — which also catches a non-uniform flow density, since a scalar cannot match a
+  non-constant array. This is a build-time-only check (plain Python, not `eqx.error_if`): `build` is
+  eager setup code on the same footing as `SSTTurbulence.build`'s own wall-distance reconstruction, never
+  called from inside a differentiated residual, so it does not need to survive tracing the way the
+  forward-march's mid-solve guards do. Pinned by
+  `test_coupled_build_rejects_a_turbulence_density_that_disagrees_with_the_flow_assembler`; every
+  existing case and test already passes one `RHO` literal to both builders, so this is silent-until-now,
+  not a behaviour change for any of them. **`CoupledRANS.residual` assembles the Rhie–Chow flow fields once
   (#106):** it builds the `closure` first and takes `nu_t` from it (rather than a separate
   `eddy_viscosity` recomputing the same strain), then one `momentum.flow_fields(flow)` feeds both
   `residual_from_fields` and the `mdot` the scalars advect on — was 3× `_flow_fields` per eval, ~1.85×
