@@ -9,6 +9,15 @@ If you only want the short answer: build
 {func}`~aquaflux.turbulence.coupled_amg_continuation` for a coupled flow-plus-turbulence
 solve, and read the rest of this page when one of them stops converging.
 
+```{note}
+The flow examples below continue from `cavity`, the lid-driven-cavity assembler built in
+[Steady-state solving](steady_state_solving.md), and from the `mesh` and `geometry` it was
+built on; `assembler` stands for any {class}`~aquaflux.flow.MomentumContinuity`. The coupled
+examples continue from a `coupled` system you have already assembled, and `reference_state`
+is a representative flow to freeze the preconditioner at — usually the state you are starting
+the march from.
+```
+
 ## Why any of this is necessary
 
 For a scalar diffusion problem an unpreconditioned Krylov method works, just slowly: the
@@ -88,17 +97,30 @@ that operator, built by
 {func}`~aquaflux.turbulence.scalar_transport_preconditioner`:
 
 ```python
+import jax.numpy as jnp
+from aquaflux.flow import volume_flux
 from aquaflux.turbulence import scalar_transport_preconditioner
+
+rho = 1.0                                               # the flow's constant density
+flux = volume_flux(cavity.mass_flux(flow_state), rho)
 
 precond = scalar_transport_preconditioner(
     mesh,
     geometry,
-    diffusivity,        # per-cell, the effective diffusivity
-    volume_flux,        # per-face volumetric flux from the converged flow
-    residual_fn,        # phi -> residual, used to freeze the linearization
-    reference,          # the field to freeze at
+    jnp.full(mesh.n_cells, 1e-3),   # per-cell effective diffusivity
+    flux,                           # per-face volumetric flux
+    transport.residual(flux),       # phi -> residual, at that flux
+    jnp.zeros(mesh.n_cells),        # the field to freeze the linearization at
 )
 ```
+
+`flow_state` is a converged flow and `transport` a
+{class}`~aquaflux.transport.ScalarTransport` assembler. Note where the flux comes from: a
+concentration rides the **volumetric** flux, so it is the flow's mass flux divided by density
+({func}`~aquaflux.flow.volume_flux`), not the mass flux itself. That conversion takes the
+**scalar** density, since a scalar written in kinematic form assumes a constant one. And
+{meth}`ScalarTransport.residual <aquaflux.transport.ScalarTransport.residual>` takes that flux
+and *returns* the `phi -> residual` closure, which is what gets frozen.
 
 It returns a {class}`~aquaflux.turbulence.ScalarTransportPreconditioner`, which is a
 `phi -> M` factory of the shape the solvers expect.
@@ -214,6 +236,31 @@ low-aspect-ratio mesh. It makes the coarsening depend on the operator's *values*
 than only its sparsity, so prefer it where the hierarchy is frozen — as this one is —
 rather than repeatedly refreshed.
 
+### Setting these from a continuation
+
+You rarely build the preconditioner by hand. {func}`~aquaflux.flow.momentum_continuation` and
+{func}`~aquaflux.flow.reused_flow_solve` forward any extra keyword straight to
+{meth}`BlockPreconditioner.build <aquaflux.flow.BlockPreconditioner.build>`, so every option
+above is settable where you already are:
+
+```python
+from aquaflux.flow import momentum_continuation
+from aquaflux.solve import ImplicitNewtonSolver
+
+continuation = momentum_continuation(
+    assembler,
+    beta0=2.0,                  # continuation's own argument
+    velocity="convection",      # from here on, the preconditioner's
+    schur_scaling="msimple",
+    composition="simpler",
+    strength_threshold=0.25,
+)
+solver = ImplicitNewtonSolver(max_steps=120, forward_step=continuation)
+```
+
+The continuation also hands the same preconditioner to the adjoint solve, so the gradient is
+preconditioned without any further arrangement.
+
 ## Coupled flow and turbulence
 
 Once the turbulence model is solved together with the flow, the system carries six fields
@@ -291,7 +338,7 @@ from aquaflux.solve import (
 
 groups = FieldGroups(n_cells=mesh.n_cells, n_leading_fields=4, n_trailing_fields=2)
 split = build_block_triangular_field_split(
-    matrix,
+    matrix,          # the assembled six-field Jacobian, as a scipy sparse matrix
     groups,
     leading_inverse=native_saddle_inverse(strength_threshold=0.25, max_levels=5),
     trailing_inverse=native_nodal_inverse(max_coarse=200),
@@ -401,10 +448,22 @@ count and nothing else — not the converged state, not the gradient.
 {func}`~aquaflux.solve.solve_linear` takes a preconditioner for any matrix-free system:
 
 ```python
+import jax
+import jax.numpy as jnp
 from aquaflux.solve import solve_linear
 
-x, cost = solve_linear(matvec, b, preconditioner=m)
+a = jnp.array([[4.0, 1.0], [1.0, 3.0]])
+diagonal_inverse = 1.0 / jnp.diag(a)                     # a Jacobi preconditioner
+
+x, cost = solve_linear(
+    lambda v: a @ v,
+    jnp.array([1.0, 2.0]),
+    preconditioner=lambda r: diagonal_inverse * r,
+)
 ```
+
+`cost` is the solver's own iteration count, which is what you watch when tuning — see
+[When it is not working](#when-it-is-not-working).
 
 It preconditions on the **right** by default. That choice matters for more than symmetry:
 with right preconditioning the residual the Krylov method measures and stops on is the
