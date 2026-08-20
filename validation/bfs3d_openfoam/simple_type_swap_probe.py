@@ -1,32 +1,35 @@
-"""Does MSIMPLER win as a drop-in for the bfs3d case's actual shipped leading inverse?
+"""Does a SIMPLE-type block preconditioner win as a drop-in for bfs3d's shipped leading inverse?
 
-Every prior measurement of ``schur_scaling="msimpler"`` on this case's real operator
-(``field_split_probe.py``'s ``split msimpler/ilu0`` family) paired it with an ``ilu0`` trailing
-inverse, which is not what ``bfs3d`` ships -- the case's ``TURBULENCE_INVERSE`` default is
-``"native"`` (``compare.TRAILING_INVERSE = native_nodal_inverse(**compare.NATIVE_TRAILING)``). So
-that comparison changed two things at once relative to the shipped bundle: the leading inverse AND
-the trailing one.
+Every prior measurement of the mass-scaled Schur on this case's real operator
+(``field_split_probe.py``'s ``split msimple/ilu0`` family, and the first version of this probe)
+tested the **lower block-triangular** composition -- one velocity solve, one Schur solve. That is
+Klaij & Vuik (2013)'s MSIMPLE minus its closing velocity update, not their MSIMPLER: the pressure
+prediction that distinguishes the ``R`` variants was not implemented at the time, and it is the axis
+the paper measures the convergence benefit on. So the recorded ~8-9x cycle penalty was measured
+against a method the name did not describe.
 
-This probe changes exactly one thing. Two arms, at the SAME materialized Jacobian, the SAME shift,
-the SAME field-split wiring, and the SAME trailing inverse (``compare.TRAILING_INVERSE``, i.e.
-``NodalNativeInverse`` at the case's own settings):
+This probe changes exactly one thing per arm. Every arm shares the SAME materialized Jacobian, the
+SAME shift, the SAME field-split wiring, and the SAME trailing inverse (``compare.TRAILING_INVERSE``,
+i.e. ``NodalNativeInverse`` at the case's own settings) -- so only the leading (flow-saddle) inverse
+differs:
 
-* **shipped** -- ``compare.LEADING_INVERSE`` (``host_ilu_inverse`` at the case's own settings, the
-  actual default the case ships as of this run).
-* **msimpler** -- the SAME construction ``field_split_probe.block_simple_arms`` uses for its
-  ``msimpler`` arm (``BlockPreconditioner.build(momentum, velocity="convection",
-  schur_scaling="msimpler", strength_threshold=0.25)``, built from the real assembler + eddy
-  viscosity at the probed state, exactly as the shipped coupled shift policy does it), but paired
-  with the shipped trailing inverse instead of ``ilu0``.
+* **shipped** -- ``compare.LEADING_INVERSE``, whatever the case ships as of this run.
+* **msimple/<composition>** -- ``BlockPreconditioner.build(momentum, velocity="convection",
+  schur_scaling="msimple", composition=..., strength_threshold=0.25)``, built from the real assembler
+  and eddy viscosity at the probed state exactly as the shipped coupled shift policy does it, over
+  every composition in ``COMPOSITIONS``. ``composition="simpler"`` is the paper's **MSIMPLER**;
+  ``"triangular"`` is what every earlier measurement actually tested.
 
 Method matches ``field_split_probe.py`` throughout: the TRUE residual through GMRES (never a
-preconditioned norm), the REAL right-hand side ``-R(state)``, one materialization shared by both
-arms, GMRES restart 15 to ``field_split_probe.RTOL`` on the true residual, capped at
-``field_split_probe.MAX_RESTARTS`` restarts.
+preconditioned norm), the REAL right-hand side ``-R(state)``, one materialization shared by every
+arm, GMRES restart 15 to ``field_split_probe.RTOL`` on the true residual, capped at
+``field_split_probe.MAX_RESTARTS`` restarts. Both the adjoint's operator (zero shift) and the march's
+own shift are probed, because the two rank preconditioners differently on this case -- an incomplete
+factorization gains a diagonal-dominance windfall from a shift that a multigrid does not.
 
 Usage::
 
-    python3 -u validation/bfs3d_openfoam/msimpler_swap_probe.py [checkpoint-name]
+    python3 -u validation/bfs3d_openfoam/simple_type_swap_probe.py [checkpoint-name]
 
 With no argument, probes the most recently written checkpoint in ``checkpoints/``.
 """
@@ -70,8 +73,13 @@ def _load(name: str):
     return state, shift
 
 
-def _msimpler_build(coupled, pc_state, pc_beta, trailing_inverse):
-    """The `block_simple_arms` msimpler construction, verbatim, with the trailing inverse swapped."""
+#: Which SIMPLE-type compositions to sweep. ``"simpler"`` is the pressure-prediction variant, i.e.
+#: the paper's MSIMPLER; ``"triangular"`` is what every measurement before this probe tested.
+COMPOSITIONS = ("triangular", "simple", "simpler")
+
+
+def _block_simple_build(coupled, pc_state, pc_beta, trailing_inverse, composition):
+    """The `block_simple_arms` construction, verbatim, with the composition and trailing inverse set."""
     flow_ref, k_ref, omega_ref = coupled.physical_fields(pc_state)
     closure = coupled.turbulence.closure_fields(
         coupled.momentum.velocity_fields(flow_ref), k_ref, omega_ref
@@ -84,7 +92,8 @@ def _msimpler_build(coupled, pc_state, pc_beta, trailing_inverse):
         momentum,
         velocity="convection",
         reference_state=flow,
-        schur_scaling="msimpler",
+        schur_scaling="msimple",
+        composition=composition,
         strength_threshold=0.25,
     )
     a_p = jax.lax.stop_gradient(block.frozen_momentum_diagonal(flow) * (1.0 + pc_beta))
@@ -166,16 +175,20 @@ def main() -> None:
         gc.collect()
         print(f"  materialized in {time.time() - t0:.0f}s", flush=True)
 
-        for label, build in (
+        arms = [
             (
-                "shipped (hostilu leading + native trailing)",
+                f"shipped ({compare.FLOW_INVERSE} leading + native trailing)",
                 _shipped_build(compare.TRAILING_INVERSE),
-            ),
+            )
+        ]
+        arms += [
             (
-                "msimpler leading + native trailing (all else shipped)",
-                _msimpler_build(coupled, state, pc_beta, compare.TRAILING_INVERSE),
-            ),
-        ):
+                f"msimple/{composition} leading + native trailing (all else shipped)",
+                _block_simple_build(coupled, state, pc_beta, compare.TRAILING_INVERSE, composition),
+            )
+            for composition in COMPOSITIONS
+        ]
+        for label, build in arms:
             fsp.one_arm(
                 label, build, shifted, groups, n_fields, coupled, state, rhs, op_shift, fsp.SOLVER
             )

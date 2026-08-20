@@ -162,14 +162,26 @@ def _built(method, diffusivity_scale, flux_scale, *, reuse=None):
 def test_refreshing_an_air_scalar_preconditioner_preserves_its_structure() -> None:
     """``reuse=`` re-derives an lAIR k/omega preconditioner's values on its frozen coarsening.
 
-    lAIR's C/F split reads operator values, so rebuilding it at a developed state changes the shapes
-    and the refreshed preconditioner would force a recompile of the solve it accelerates. Reusing the
-    frozen coarsening keeps every shape, which is what makes a mid-march refresh affordable; a plain
-    rebuild is checked here to actually differ, so the test cannot pass vacuously.
+    lAIR's C/F split reads operator values, so rebuilding it at a state whose convection/diffusion
+    balance has moved changes the shapes, and the refreshed preconditioner would then force a recompile
+    of the solve it accelerates. Reusing the frozen coarsening keeps every shape, which is what makes a
+    mid-march refresh affordable; a plain rebuild is checked to actually differ, so the test cannot pass
+    vacuously.
+
+    **The two comparisons deliberately use different operating points, and that is the finding rather
+    than a convenience.** Scaling the diffusivity and the flux *together* on a uniform mesh leaves every
+    relative strength where it was, so the C/F split does not move at all and a rebuild is shape-stable
+    — measured identical at level 0 across a 400x swing in both. Only changing the **balance** far
+    enough to reorder an edge's strength against its neighbours re-splits, which is what the
+    diffusion-dominated third arm does. An earlier form of this test read the first pair as
+    structure-changing; it was reading a `scipy` artifact, since the coarse operator's stored entry
+    count then depended on which product entries came out exactly zero. That is fixed
+    (`multigrid._galerkin_coarse`), so the shape difference has to come from the coarsening itself.
     """
     cold = _built("air", 1.0, 1.0)
     refreshed = _built("air", 0.05, 20.0, reuse=cold)
-    rebuilt = _built("air", 0.05, 20.0)
+    # Diffusion-dominated rather than more convective: the balance has to move, not just the magnitudes.
+    rebuilt = _built("air", 1.0, 1e-3)
 
     cold_shapes = [(lv.n, lv.n_coarse, lv.operator.data.shape) for lv in cold.hierarchy.levels]
     refreshed_shapes = [

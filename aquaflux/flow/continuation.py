@@ -241,7 +241,8 @@ def momentum_continuation(
         unchanged from the historical shift. Pass ``LocalCourantBasis(dissipative_weight=0.0)`` for a
         local convective time step.
     **preconditioner_kwargs
-        Forwarded to :meth:`BlockPreconditioner.build` (e.g. ``schur_scaling``, ``velocity``).
+        Forwarded to :meth:`BlockPreconditioner.build` (e.g. ``schur_scaling``, ``composition``,
+        ``velocity``).
 
     Returns
     -------
@@ -297,7 +298,7 @@ def reused_flow_solve(
     max_steps : int
         Maximum Newton/continuation iterations per solve.
     **build_kwargs
-        Forwarded to :func:`momentum_continuation` (e.g. ``schur_scaling="msimpler"``,
+        Forwarded to :func:`momentum_continuation` (e.g. ``schur_scaling="msimple"``,
         ``velocity="convection"``, ``beta0``).
 
     Returns

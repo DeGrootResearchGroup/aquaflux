@@ -24,7 +24,10 @@ cfd/                                  # repo root
 │
 ├── docs/                             # the Sphinx site (MyST Markdown; api.md generated at build)
 │   ├── conf.py                       #   Sphinx config + _write_api_page (API page from each __all__)
-│   ├── index.md  mesh.md  mesh_zones_and_patches.md
+│   ├── index.md                      #   landing page and the guide toctree
+│   ├── mesh.md  mesh_zones_and_patches.md
+│   ├── steady_state_solving.md       #   the nonlinear solve, globalization, and the IFT adjoint
+│   ├── preconditioning.md            #   every preconditioner, how to choose one, and how to keep it current
 │   └── package_structure.md          #   this file (excluded from the built site)
 │
 ├── tools/
@@ -98,7 +101,7 @@ cfd/                                  # repo root
 │   │   ├── rhie_chow.py              #   interior_mass_flux + momentum_diagonal / frozen_momentum_diagonal_parts (viscous + convective)
 │   │   ├── boundary.py               #   FlowBoundary → NoSlipWall, MovingWall, VelocityInlet, PressureOutlet
 │   │   ├── preconditioner.py         #   SIMPLE Schur pieces: pressure_schur_laplacian (a_P-based), damped_jacobi_solve
-│   │   ├── block_preconditioner.py   #   BlockPreconditioner composing injected InnerSchurSolver / VelocityBlockSolver strategies
+│   │   ├── block_preconditioner.py   #   BlockPreconditioner composing injected InnerSchurSolver / VelocityBlockSolver / SaddleComposition strategies
 │   │   ├── continuation.py           #   momentum_continuation / reused_flow_solve: pseudo-transient continuation for the flow Newton solve at high Reynolds number
 │   │   ├── initialization.py         #   cheap initializers: laplace_field, potential_flow, bernoulli_pressure
 │   │   ├── mean_velocity.py          #   bulk_velocity_flow_solve: the driving body force is a solve unknown, not a feedback loop

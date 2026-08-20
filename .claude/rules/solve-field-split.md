@@ -258,6 +258,13 @@ paths:
       the slice carries the distance-3 coupled fill at **91 nnz/row** where the frozen transport stencil
       is ~7 (the leading block's slice is 227), and lAIR's local approximate-ideal-restriction solves run
       over a degree-2 F-neighbourhood whose size grows roughly with the square of the row density.
+      **⚠️ CAUSE FOUND AND FIXED 2026-08-19 — this is no longer a fact about lAIR, and the row-density
+      diagnosis above was right but incomplete.** The neighbourhood walk ran over the operator's full
+      sparsity pattern instead of the strength graph the method specifies, so the fill **compounded**
+      down the hierarchy rather than merely being large at level 0 (measured: 45 → 319 → 856 stored
+      entries per row over three levels). Walking strong connections holds it at 45 → 62 → 78 and builds
+      a six-level hierarchy on a 46080-row operator in ~4 s. See the lAIR-neighbourhood entry in
+      `solve-amg-multigrid.md`. **Re-measure this slice before citing the 50 minutes as a cost.**
     **Neither is a verdict on the method, and this is MEASURED rather than argued.** Both builders assume
     an M-matrix-like operator, and `scalar_transport_preconditioner` never hands them one that isn't:
     `_scalar_operator_pieces` **clamps its reaction diagonal non-negative** for exactly this reason (an
@@ -269,7 +276,12 @@ paths:
     | hierarchy on the transport operator (`bfs3d`, 23040 cells, `state-00069`) | k | ω |
     |---|---|---|
     | `twolevel` (the shipped scalar default) | 5.0 s | 44.3 s |
-    | `air` (lAIR) | 80.0 s | 79.8 s |
+    | `air` (lAIR) — ⚠️ under the pre-2026-08-19 full-pattern walk | 80.0 s | 79.8 s |
+
+    ⚠️ **The lAIR row is a measurement under the superseded neighbourhood walk and is stale as a cost.**
+    The walk it was taken with was replaced on 2026-08-19 (above); the transport operator is sparse
+    (~7 nnz/row) so the two walks differ far less here than on the Jacobian slice, but the number has
+    not been re-taken. The **ratio** claims below rest on it and inherit the caveat.
 
     So lAIR builds in ~80 s where it did not finish in 50 minutes on the slice — a ≥40× gap on the same
     mesh — and is ~3.2× the shipped aggregation's combined build (1.8× on ω alone), which matches the

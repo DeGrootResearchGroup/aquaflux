@@ -86,6 +86,7 @@ from aquaflux.solve import (
     RefreshPolicy,
     RetryPolicy,
     StateCheckpointer,
+    air_inverse,
     combine_metrics,
     combine_observers,
     host_ilu_inverse,
@@ -418,7 +419,7 @@ TRAILING_OPTIONS = _TURBULENCE_SMOOTHERS[_TURBULENCE_SMOOTHER]
 # `dirichlet` number is not a target because it is a different problem (see `K_WALL` below). Leaving
 # "petsc" as the default would have shipped the slowest measured arm. `BFS3D_TURBULENCE_INVERSE=petsc`
 # still selects the host V-cycle for an A/B of the inverse itself.
-_TURBULENCE_INVERSES = ("petsc", "native")
+_TURBULENCE_INVERSES = ("petsc", "native", "air")
 TURBULENCE_INVERSE = os.environ.get("BFS3D_TURBULENCE_INVERSE", "native")
 if TURBULENCE_INVERSE not in _TURBULENCE_INVERSES:
     raise SystemExit(
@@ -523,9 +524,31 @@ def _dumping(factory):
     return build
 
 
-TRAILING_INVERSE = (
-    native_nodal_inverse(**NATIVE_TRAILING) if TURBULENCE_INVERSE == "native" else None
+#: The reduction-based (lAIR) trailing inverse. Same job as the nodal one and the same two structural
+#: requirements met the same way -- it coarsens CELLS and its smoother inverts each cell's own block --
+#: but a different coarse space: an independent restriction approximating the ideal
+#: ``R = [-A_cf A_ff^-1, I]`` instead of an aggregation with ``R = P^T``. Worth measuring here because
+#: the `[k, omega]` block is convection-dominated, which is the regime that construction is for.
+#:
+#: ⚠️ Its cost was unusable until the neighbourhood walk was corrected to run over the strength graph
+#: rather than the operator's full sparsity pattern; before that the coarse operators densified as they
+#: coarsened and the build did not finish on this mesh. A run predating that fix is not comparable.
+#: ⚠️ ``max_coarse`` MATCHES the nodal trailing inverse's (``BFS3D_NATIVE_MAX_COARSE``, default 200),
+#: not the field-split V-cycle's coarse-equation limit. The first lAIR march ran at 2000 -- a ten times
+#: larger coarse grid, inverted densely -- which is a handicap inside the arm rather than a property of
+#: the method, and made a cycle-count comparison against the nodal inverse unfair to lAIR. Keep the two
+#: tied to the same environment variable so they cannot drift apart again.
+AIR_TRAILING = dict(
+    theta=float(os.environ.get("BFS3D_AIR_THETA", "0.25")),
+    degree=int(os.environ.get("BFS3D_AIR_DEGREE", "2")),
+    max_coarse=int(os.environ.get("BFS3D_NATIVE_MAX_COARSE", "200")),
 )
+
+TRAILING_INVERSE = None
+if TURBULENCE_INVERSE == "native":
+    TRAILING_INVERSE = native_nodal_inverse(**NATIVE_TRAILING)
+elif TURBULENCE_INVERSE == "air":
+    TRAILING_INVERSE = air_inverse(**AIR_TRAILING)
 
 
 #: `BFS3D_FLOW_INVERSE=native` selects the LEADING (flow saddle) block's JAX-native SIMPLE-smoothed
@@ -1233,6 +1256,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             "compiled" if ILU0_COMPILED else "PURE PYTHON (fallback -- timings void)",
         ),
         ("turbulence inverse", TURBULENCE_INVERSE),
+        *([("lAIR trailing settings", AIR_TRAILING)] if TURBULENCE_INVERSE == "air" else []),
         # ...and, when a `trailing_inverse` is supplied, it REPLACES the PETSc V-cycle wholesale, so the
         # two smoother settings below are never read. Marking them is the same rule as the note above:
         # a banner that prints a setting the run did not use is worse than one that omits it, because a

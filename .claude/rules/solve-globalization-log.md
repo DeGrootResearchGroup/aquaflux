@@ -283,7 +283,7 @@
       and at *matched* effective damping it is worse still and collapses into the ladder by step 2
       (α → 0.0039 → 0.0020, the 0.001 sentinel again). Three candidate explanations were each proposed
       and each **refuted by measurement** — record them so they are not re-proposed:
-      - *Preconditioner inconsistency* (the MSIMPLER Schur ignores the shift, which for a non-uniform
+      - *Preconditioner inconsistency* (the MSIMPLE Schur ignores the shift, which for a non-uniform
         basis is a spatially-varying error): refuted by the 2×2 below. **Issue #163, closed as
         refuted.**
       - *Damping level / wrong Co calibration* (the convective diagonal is only ~0.61 of `a_P`, so
@@ -309,14 +309,14 @@
       makes the viscous half the **larger** one almost everywhere (share median 0.66). So this is not
       evidence against local timestepping; the default *is* local timestepping and it is what works.
     - **The Schur's blindness to the shift is NOT a defect — measured, do not "fix" it (2026-07-26,
-      #163).** `apply_at` feeds the velocity block the shifted diagonal `a_P + β d`, while the MSIMPLER
+      #163).** `apply_at` feeds the velocity block the shifted diagonal `a_P + β d`, while the MSIMPLE
       Schur uses `Q̂/k` calibrated from the **un-shifted** diagonal, i.e. it ignores the shift entirely.
       That looks like an inconsistency, and for a non-uniform basis the discrepancy is spatially varying
       (`1/(1 + β·share)`, share 0.30–0.97) rather than a global scalar. It costs nothing. A 2×2 at fixed
       β, varying only `schur_scaling` (`simple` uses the shifted `a_p` and is consistent by
       construction):
 
-      | basis | `msimpler` (shift-blind) | `simple` (consistent) | ratio | α (both) | rel (both) |
+      | basis | `msimple` (shift-blind) | `simple` (consistent) | ratio | α (both) | rel (both) |
       |---|---|---|---|---|---|
       | `a_P`, β = 2 | **15** cyc | 36 cyc | 2.4× | 1.000 | 4.8530e-01 |
       | convective, β = 1 | **18** cyc | 34 cyc | 1.9× | 0.125 | 9.2719e-01 |
@@ -326,7 +326,7 @@
       solves genuinely converge. There is **no interaction**: the consistent Schur is uniformly ~2×
       worse, and *less* bad on the convective basis (1.9× vs 2.4×) — the opposite of the hypothesis.
       `Ŝ` is an approximation chosen for **spectral quality**, not a derivation of the true Schur
-      complement; MSIMPLER's whole premise is replacing `a_P` with a velocity-independent mass-matrix
+      complement; MSIMPLE's whole premise is replacing `a_P` with a velocity-independent mass-matrix
       stand-in, so being more faithful to `(A + βD)⁻¹` does not make it a better preconditioner. This
       also confirms the earlier "shift-consistent Schur is strictly worse at every β" finding **does**
       transfer to a non-uniform basis, contrary to what was argued when #163 was filed.
@@ -571,8 +571,8 @@
         inner solve's cycle count, its `‖G‖` reduction and line-search factor. It is forward-only and
         transform-transparent (a no-op under `jax.grad`); `None` (default) elides the call at trace time,
         leaving the step **byte-identical** (do not set it on a differentiated solve). Threaded through
-        `coupled_continuation` / `coupled_amg_continuation` / `coupled_ilut_continuation` /
-        `coupled_lu_continuation`, so a profiling march can pass one straight through. Pinned by
+        `coupled_continuation` / `coupled_amg_continuation` / `coupled_lu_continuation` (the ILUT
+        builder named here no longer exists), so a profiling march can pass one straight through. Pinned by
         `test_dual_time_inner_observer_surfaces_the_trajectory_without_changing_the_step`.
         `DualTimeControl` is the Courant β-ramp (grow the pseudo-timestep while the inner α = 1, shrink
         when it clips), a `StepControl` on the eager march. The step's
@@ -630,18 +630,16 @@
         and stalls Δτ**, taking several-fold more outer steps than the α-based default. Prefer it only where the steady
         residual is a reliable monotone progress signal. Its `next_step` state is `(β, prev ‖R‖)`. Unit-tested
         in `tests/unit/test_step_control.py`.
-      - **THE LOW-β WALL IS THE BLOCK-SIMPLE PRECONDITIONER, AND THE ILUT BREAKS IT.** With
-      `ResidualRatioDualTimeControl` the residual descends cleanly (no runaway) but block-SIMPLE's coupled
-      solve goes **NaN at a low shift** — the low-shift conditioning wall (block-SIMPLE cannot solve the
-      near-unshifted saddle; the same limit as its adjoint stagnation). The monolithic ILUT forms the true
-      coupled inverse, so `coupled_ilut_continuation(inner_steps>1)` (a `DualTimeStep` preconditioned by
-      the ILUT — the branch added alongside the single-step one) drives β **monotonically below that wall
-      with no NaN, at a flat cycle count**, descending the row-scaled residual on the anchor. So the ILUT
-      is what makes the large-Δτ dual-time march reachable at all. *(the β at which block-SIMPLE NaN'd,
-      the β the ILUT reached, the cycle count and the residuals recorded no Re rung, state or refresh
-      setting — and the cycle count was taken on the ILUT path's restart-10 forward solver, so it is not
-      comparable with the restart-15 or restart-120 counts elsewhere in this file. Re-measure before
-      relying on any of them.)*
+      - **DELETED — "the low-β wall is the block-SIMPLE preconditioner, and the ILUT breaks it" was
+      superseded on both halves.** The remedy is gone: the monolithic ILUT was measured **dominated** and
+      removed, and there is no `coupled_ilut_continuation` / `IlutFactors` / `ilut_beta_tracking_refresh`
+      any more (see `solve-direct-preconditioners.md`). The premise is gone too: the shipped AMG
+      preconditioners solve to **adjoint grade at zero shift**, which is the very regime this entry
+      claimed only a complete factorization could reach. The one line worth keeping is the trap: a
+      dual-time march driving β low is where a preconditioner's low-shift behaviour is tested, so measure
+      there and not at the march's floor. ⚠️ And note what the entry never controlled for — the
+      block-SIMPLE path had **no k-positivity limiter at all** until 2026-08-19 (`turbulence.md`), so an
+      unguarded `k` crossing zero produces exactly the NaN it attributed to conditioning.
       - **Residual FLOOR + over-development past the minimum = loose `inner_tol`, NOT the preconditioner.**
       Even with the ILUT (a flat cycle count — the linear solve is fine), the march bottoms out at a
       residual floor and then slowly over-develops. Cause: dual-time's unconditional stability comes from
@@ -963,8 +961,8 @@
       `RowScaledNorm` divides each row by its own diagonal and each block by its field magnitude, so every
       equation is judged comparably. **`per_block` is that measure's reporting view and `__call__` is
       literally `norm(per_block(r))`** — one formula, so the per-equation grid in the march log cannot
-      describe a convergence history the march never had. `coupled_continuation` / `coupled_ilut_continuation` build it by
-      default; `block_scaled_norm=True` selects the coarser one-scale-per-block `BlockScaledNorm`
+      describe a convergence history the march never had. `coupled_continuation` builds it by
+      default (the ILUT builder named here no longer exists); `block_scaled_norm=True` selects the coarser one-scale-per-block `BlockScaledNorm`
       (`_coupled_residual_norm`), and `residual_norm=jnp.linalg.norm` recovers Euclidean.
       (`mass_flow_coupled_continuation` still defaults to Euclidean pending a constraint-aware variant.)
       The row-scaled measure does **not** fix the forward stall (globalization-bound; it plateaus under any
@@ -990,7 +988,7 @@
       diagonal blocks' inversion error it propagates downstream. So the missing cross-coupling is **not**
       the bottleneck.
     - **The real cost is the pressure-Schur *approximation* at high Reynolds number — and strengthening
-      the inner solve CANNOT fix it (measured; do not re-attempt).** The block-diagonal conv+MSIMPLER
+      the inner solve CANNOT fix it (measured; do not re-attempt).** The block-diagonal conv+MSIMPLE
       preconditioner is *excellent* at low Re (4 outer cycles on a Re=2500 channel) and weak only at high
       Re / recirculation (17 cycles on a Re=1e5 channel). The weak block is the **flow saddle**, not the
       k/ω scalars (per-block error operator `E_b = I − A_b·M_b` on a developed Re=1e5 channel: flow
@@ -1005,7 +1003,7 @@
       - **Rebuilding the preconditioner at the developed state (staleness) does not help *the flow
         block*** (ρ 34.0 → 31.6 on the channel; 49.9 → 91.9, i.e. worse, on pitzDaily, with an identical
         one-shot). The frozen *flow* reference is fine — the convective linearization is Peclet-robust and
-        MSIMPLER's Schur is velocity-independent. **Confirmed on the real solve:** refreshing only the flow
+        MSIMPLE's Schur is velocity-independent. **Confirmed on the real solve:** refreshing only the flow
         block at a separated pitzDaily state made it slightly *worse* (31 → 34 outer cycles at β=2).
       - **BUT refreshing the *scalar* k/ω AMGs is a real 2.6× cycle win once the flow separates — the one
         staleness lever that does pay (measured on the real solve, not ρ).** The scalars were noted above
@@ -1066,7 +1064,7 @@
         to converge deep *in the same row-scaled measure* — restructuring it (Python outer loop so it can
         carry the measure + step control) is the tracked follow-up; the lower-Re continuation rungs are
         `stop_gradient`ed seeds and need no adjoint, so the eager path serves them.
-      - **Rescaling the MSIMPLER `k` is a ρ mirage — validate on the real march, never on ρ.** Growing `k`
+      - **Rescaling the MSIMPLE `k` is a ρ mirage — validate on the real march, never on ρ.** Growing `k`
         collapses ρ but barely moves the one-shot error (figures deleted with the rest of the unconfigured ρ
         evidence above), and the ρ-minimizing
         `k` sits ~40× *above the maximum* of the whole per-cell `ρV/a_P` distribution — i.e. the degenerate
@@ -1075,7 +1073,7 @@
         an identical residual trajectory. **The shipped per-apply `mean(ρV/a_P)` calibration is
         near-optimal — do not "fix" it**, and do not make the Schur "shift-consistent" with the
         pseudo-transient `a_P(1+β)` either (that direction is strictly worse at every β).
-      **Root cause:** the MSIMPLER Schur is a *constant-coefficient* (scaled pressure-mass-matrix) Poisson,
+      **Root cause:** the MSIMPLE Schur is a *constant-coefficient* (scaled pressure-mass-matrix) Poisson,
       which is a near-Stokes/low-Re approximation and degrades as convection strengthens — exactly the
       high-Re/recirculating regime here.
       - **⚠️ The "obvious" fix — a better Schur (stabilized LSC) — WAS BUILT AND LOSES BADLY on the
@@ -1088,13 +1086,13 @@
 
         | Schur | cycles | wall |
         |---|---|---|
-        | **msimpler** | **13** | **38.9 s** |
+        | **msimple** | **13** | **38.9 s** |
         | lsc (`v_cycles=4`) | 96 | 526 s |
         | lsc (`v_cycles=8`) | 82 | 662 s |
 
         6–7× the cycles and 13–17× the wall time, with both solves genuinely converged
         (`lin_rel ~2e-9`), plus ~2.9× slower on the coupled channel at an identical residual trajectory.
-        **Why the flow-only win does not transfer:** LSC *does* beat MSIMPLER on the isolated flow block
+        **Why the flow-only win does not transfer:** LSC *does* beat MSIMPLE on the isolated flow block
         (9 vs 15 GMRES at Re=1e4), but on the coupled block-*diagonal* preconditioner under the
         pseudo-transient shift, a better isolated flow-Schur does not reduce *coupled* cycles — the
         coupled iteration is not limited by the flow block's Schur quality. Keep the strategy (it is a
@@ -1104,7 +1102,7 @@
         carries finite-element boundary recipes that do not transfer cleanly to cell-centred FVM.
       - **What a preconditioner can and cannot change — state this precisely, both halves are measured.**
         *While the linear solve actually converges*, swapping the preconditioner changes **cost only**:
-        msimpler vs LSC gave coupled residual trajectories identical to **5 significant figures**, so the
+        msimple vs LSC gave coupled residual trajectories identical to **5 significant figures**, so the
         Newton direction, the accepted step, and whether the march converges are all preconditioner-
         independent. That rules out a whole class of experiment — you cannot precondition your way out
         of a stalled march, only out of an expensive one.

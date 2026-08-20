@@ -76,6 +76,7 @@ from aquaflux.solve import (
     RetryPolicy,
     RowScaledNorm,
     ShiftBasis,
+    ShiftPolicy,
     ShiftTerm,
     StepControl,
     StepReport,
@@ -1113,6 +1114,11 @@ def coupled_continuation(
     reuse: CoupledShiftPolicy | None = None,
     residual_norm: ResidualNorm | None = None,
     inner_observer: Callable[..., None] | None = None,
+    refresh_on_cycles: int | None = None,
+    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
+    cycle_budget: int | None = None,
+    positivity_floor: float = 0.0,
+    positivity_projection: bool = False,
     **preconditioner_kwargs: object,
 ) -> ForwardStep:
     """Build the pseudo-transient continuation step for the coupled Newton solve.
@@ -1178,6 +1184,14 @@ def coupled_continuation(
         ``None`` (default) takes them from the flow assembler's frozen momentum diagonal; pass
         :class:`LiveViscosityVelocityParts` to form them at the current effective viscosity instead.
         Ignored when ``reuse`` is given, which carries the reused policy's own choice.
+    refresh_on_cycles, inner_refresh, cycle_budget, positivity_floor, positivity_projection
+        The per-step guards, previously reachable only through :func:`coupled_amg_continuation` although
+        none of them is a property of the preconditioner. ``positivity_floor`` in particular installs the
+        fraction-to-the-boundary limit that keeps ``k`` positive, without which a step that drives ``k``
+        through zero makes ``sqrt(k)`` — and so the eddy viscosity — non-finite. That guard shipped on
+        the monolithic path only, which is worth knowing when reading any recorded comparison between
+        the two: a low-shift failure attributed to this preconditioner was measured against a march that
+        had no positivity limit at all.
     reuse : CoupledShiftPolicy, optional
         An existing policy to **refresh** at ``reference_state`` instead of building one from scratch:
         the k/omega AMGs are re-derived on their reused coarsening while the flow block is carried over
@@ -1234,56 +1248,32 @@ def coupled_continuation(
         velocity_shift_parts,
         **preconditioner_kwargs,
     )
-    # An explicit `residual_norm` (passed by `solve_coupled` on every refresh) is used as-is, so the
-    # block-scaled measure's per-field reference magnitudes stay fixed at the state the *global*
-    # progress reference was measured against. Rebuilding it at each refresh's developed state would
-    # re-base a self-normalising `BlockScaledNorm` back toward one, making the convergence test
-    # unreachable and mismatching the finishing solve's absolute target (issue #156, seam 4).
-    if residual_norm is None:
-        # The default progress measure is the row-equilibrated norm. The plain Euclidean norm of the
-        # coupled residual is dominated by the omega block (its magnitude dwarfs the flow and k blocks),
-        # so it barely moves while the flow develops and mis-ranks a separating flow -- steering and the
-        # stopping test then judge omega alone. `RowScaledNorm` (:func:`coupled_scaled_norm`) divides
-        # each row by its own diagonal and each block by its field magnitude, reporting a fractional
-        # change per equation, so every block contributes comparably. `block_scaled_norm=True` selects
-        # the coarser per-block variant; pass `residual_norm=jnp.linalg.norm` for the plain Euclidean one.
-        residual_norm = (
-            _coupled_residual_norm(coupled, reference_state)
-            if block_scaled_norm
-            else coupled_scaled_norm(coupled, policy, reference_state)
-        )
-    schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
-    solver = forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER
-    if inner_steps > 1:
-        # Dual-time (backward-Euler) march: an inner Newton loop per outer timestep on the transient
-        # residual, so the measured steady residual is the honest discrete time derivative rather than
-        # beta x travel, and a larger pseudo-timestep (smaller beta, driven by a step control) stays
-        # stable. Reuses the same frozen shift policy, schedule, solver and measure. The inner loop
-        # replaces the escalation ladder, so the escalation/acceptance parameters do not apply.
-        return DualTimeStep(
-            policy,
-            relaxation_schedule=schedule,
-            inner_steps=inner_steps,
-            inner_tol=inner_tol,
-            line_search=line_search,
-            forward_solver=solver,
-            residual_norm=residual_norm,
-            adjoint_preconditioner_factory=policy.adjoint_factory(),
-            inner_observer=inner_observer,
-        )
-    return PseudoTransientStep(
+    return _coupled_step(
+        coupled,
+        reference_state,
         policy,
-        relaxation_schedule=schedule,
+        default_solver=_COUPLED_FORWARD_SOLVER,
+        beta0=beta0,
+        exponent=exponent,
+        beta_floor=beta_floor,
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
-        acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        divergence_cap=divergence_cap,
         line_search=line_search,
+        inner_steps=inner_steps,
+        inner_tol=inner_tol,
         grow=grow,
         descent_backoff=descent_backoff,
         descent_test=descent_test,
-        forward_solver=solver,
+        forward_solver=forward_solver,
+        block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
-        adjoint_preconditioner_factory=policy.adjoint_factory(),
+        inner_observer=inner_observer,
+        refresh_on_cycles=refresh_on_cycles,
+        inner_refresh=inner_refresh,
+        cycle_budget=cycle_budget,
+        step_limit=positive_k_limit(coupled, floor=positivity_floor),
+        step_projection=(positive_k_projection(coupled) if positivity_projection else None),
     )
 
 
@@ -1359,14 +1349,14 @@ def _coupled_shift_policy(
     # diagonal and supplies its own inverse, so the block built here would never be applied.
     #
     # The pressure Schur is left at BlockPreconditioner's own default (a_P-scaled SIMPLE), not the
-    # MSIMPLER scaling this used to hardcode. MSIMPLER was chosen believing it necessary for a
+    # mass-matrix scaling this used to hardcode. That scaling was chosen believing it necessary for a
     # convection-dominated coupled solve; it is not, at the scale this block-diagonal preconditioner is
     # actually used at -- swapping it for the default reaches the identical converged fixed point on
     # every fixture this path is exercised by (residual and fields agree to machine precision). Where a
     # Schur choice genuinely matters (a real, large, separated case), this whole block-diagonal
     # preconditioner is dominated by the field-split / monolithic-AMG preconditioners the flagship
     # validation cases use instead (`coupled_amg_continuation`), so tuning the Schur here buys nothing
-    # a real case would ever see. MSIMPLER remains available (`schur_scaling="msimpler"` via
+    # a real case would ever see. It remains available (`schur_scaling="msimple"` via
     # preconditioner_kwargs, or directly through `BlockPreconditioner`) for the one regime it is not
     # dominated in: a standalone, flow-only, convection-dominated solve, where the plain SIMPLE Schur's
     # inner solve can stall outright.
@@ -1788,6 +1778,137 @@ def _frozen_shift_diagonal(base: CoupledShiftPolicy, beta: float, state: jnp.nda
     return np.asarray(beta * jax.lax.stop_gradient(base.shift_term(state).diagonal))
 
 
+def _coupled_step(
+    coupled: CoupledRANS,
+    reference_state: jnp.ndarray,
+    policy: ShiftPolicy,
+    *,
+    default_solver: lx.AbstractLinearSolver,
+    beta0: float,
+    exponent: float,
+    beta_floor: float,
+    max_escalations: int,
+    escalation_factor: float,
+    divergence_cap: float,
+    line_search: int,
+    inner_steps: int,
+    inner_tol: float,
+    forward_solver: lx.AbstractLinearSolver | None,
+    block_scaled_norm: bool,
+    residual_norm: ResidualNorm | None,
+    grow: int = 0,
+    descent_backoff: int = 0,
+    descent_test: bool = False,
+    inner_observer: Callable[..., None] | None = None,
+    refresh_on_cycles: int | None = None,
+    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
+    cycle_budget: int | None = None,
+    step_limit: Callable[..., jnp.ndarray] | None = None,
+    step_projection: Callable[..., jnp.ndarray] | None = None,
+) -> ForwardStep:
+    """Assemble the pseudo-transient / dual-time step around an already-composed shift policy.
+
+    **The one place the coupled march's globalization is configured**, for every preconditioner. What
+    differs between the block-diagonal and monolithic paths is which policy they hand in and which
+    linear solver they default to; the schedule, the progress measure, the line search, the escalation
+    ladder, the dual-time inner loop and the positivity guard are one implementation.
+
+    That matters more than the duplication it removes. The two builders each grew their own copy of this
+    tail, and the copies drifted in ways that had nothing to do with preconditioning: the monolithic one
+    gained the k-positivity step limit, the cycle budget and the inner refresh, the block-diagonal one
+    gained the growth rungs and the descent backoff, and neither gained the other's. A march's
+    globalization should not depend on which matrix its preconditioner was built from.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The coupled residual assembler, for the default progress measure.
+    reference_state : jnp.ndarray
+        The state the default progress measure takes its reference scales from.
+    policy : ShiftPolicy
+        The composed shift-and-preconditioner policy — a :class:`CoupledShiftPolicy` for the
+        block-diagonal path, a :class:`MonolithicFactorShiftPolicy` for a materialized one.
+    default_solver : lineax.AbstractLinearSolver
+        The solver used when ``forward_solver`` is ``None``. The two families genuinely differ here: a
+        near-exact factorization wants a different tolerance regime from a block-diagonal V-cycle.
+    beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search, inner_steps, inner_tol, grow, descent_backoff, descent_test
+        The globalization: the pseudo-transient schedule, the divergence guard, and the line search.
+        See :class:`~aquaflux.solve.PseudoTransientStep` and :class:`~aquaflux.solve.DualTimeStep`.
+    forward_solver, block_scaled_norm, residual_norm, inner_observer, refresh_on_cycles, inner_refresh, cycle_budget, step_limit, step_projection
+        The linear solve, the progress measure and the per-step guards. See the two step classes.
+
+    Returns
+    -------
+    ForwardStep
+        A :class:`~aquaflux.solve.DualTimeStep` when ``inner_steps > 1``, else a
+        :class:`~aquaflux.solve.PseudoTransientStep`.
+    """
+    # An explicit `residual_norm` (passed by `solve_coupled` on every refresh) is used as-is, so a
+    # self-normalising measure's reference scales stay fixed at the state the *global* progress
+    # reference was measured against. Rebuilding it at each refresh's developed state would re-base it
+    # back toward one, making the convergence test unreachable and mismatching the finishing solve's
+    # absolute target (issue #156, seam 4).
+    if residual_norm is None:
+        # The default is the row-equilibrated norm. The plain Euclidean norm of the coupled residual is
+        # dominated by the omega block (its magnitude dwarfs the flow and k blocks), so it barely moves
+        # while the flow develops and mis-ranks a separating flow -- steering and the stopping test then
+        # judge omega alone. `RowScaledNorm` (:func:`coupled_scaled_norm`) divides each row by its own
+        # diagonal and each block by its field magnitude, reporting a fractional change per equation, so
+        # every block contributes comparably. `block_scaled_norm=True` selects the coarser per-block
+        # variant; pass `residual_norm=jnp.linalg.norm` for the plain Euclidean one.
+        residual_norm = (
+            _coupled_residual_norm(coupled, reference_state)
+            if block_scaled_norm
+            else coupled_scaled_norm(coupled, policy, reference_state)
+        )
+    schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
+    solver = forward_solver if forward_solver is not None else default_solver
+    if inner_steps > 1:
+        # Dual-time (backward-Euler) march: an inner Newton loop per outer timestep on the transient
+        # residual, so the measured steady residual is the honest discrete time derivative rather than
+        # beta x travel, and a larger pseudo-timestep (smaller beta, driven by a step control) stays
+        # stable. The inner loop replaces the escalation ladder, so the escalation/acceptance
+        # parameters do not apply -- nor do the line search's growth and descent-backoff rungs, which
+        # belong to that ladder.
+        return DualTimeStep(
+            policy,
+            relaxation_schedule=schedule,
+            inner_steps=inner_steps,
+            inner_tol=inner_tol,
+            line_search=line_search,
+            forward_solver=solver,
+            residual_norm=residual_norm,
+            adjoint_preconditioner_factory=policy.adjoint_factory(),
+            inner_observer=inner_observer,
+            refresh_on_cycles=refresh_on_cycles,
+            inner_refresh=inner_refresh,
+            cycle_budget=cycle_budget,
+            step_limit=step_limit,
+            step_projection=step_projection,
+        )
+    # The positivity guard is passed on BOTH branches, and the single-step one needs it as much: its
+    # escalation ladder is no substitute, because the divergence guard fires on a non-finite residual,
+    # which is already the poisoned state -- one cell's `k` through zero has by then NaN'd `sqrt(k)` and
+    # the whole eddy viscosity with it. Historically only the monolithic path's dual-time branch carried
+    # it, which is drift rather than design.
+    return PseudoTransientStep(
+        policy,
+        relaxation_schedule=schedule,
+        max_escalations=max_escalations,
+        escalation_factor=escalation_factor,
+        acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        line_search=line_search,
+        grow=grow,
+        descent_backoff=descent_backoff,
+        descent_test=descent_test,
+        forward_solver=solver,
+        residual_norm=residual_norm,
+        adjoint_preconditioner_factory=policy.adjoint_factory(),
+        step_limit=step_limit,
+        step_projection=step_projection,
+    )
+
+
 def _monolithic_factor_step(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
@@ -1812,58 +1933,44 @@ def _monolithic_factor_step(
     cycle_budget: int | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
+    grow: int = 0,
+    descent_backoff: int = 0,
+    descent_test: bool = False,
 ) -> ForwardStep:
-    """Assemble the pseudo-transient / dual-time step around a frozen monolithic preconditioner.
+    """Compose a monolithic preconditioner with the block shift, then build the step.
 
-    The shared tail of :func:`coupled_lu_continuation` and
-    :func:`coupled_amg_continuation`: it glues the already-built ``preconditioner`` (complete-LU
-    or multigrid V-cycle) to the block shift ``base`` via a
-    :class:`MonolithicFactorShiftPolicy`, picks the row-equilibrated progress measure, and returns a
-    :class:`~aquaflux.solve.DualTimeStep` (``inner_steps > 1``) or :class:`~aquaflux.solve.PseudoTransientStep`.
-    The two builders differ only in how they construct ``preconditioner``.
+    The shared seam of :func:`coupled_lu_continuation` and :func:`coupled_amg_continuation`: it glues
+    the already-built ``preconditioner`` (complete-LU or multigrid V-cycle) to the block shift ``base``
+    via a :class:`MonolithicFactorShiftPolicy` and hands the result to :func:`_coupled_step`. The two
+    builders differ only in how they construct ``preconditioner``; everything about the march itself is
+    :func:`_coupled_step`'s.
     """
-    policy = MonolithicFactorShiftPolicy(base, preconditioner)
-    if residual_norm is None:
-        # Row-equilibrated by default, as in `coupled_continuation`: the Euclidean coupled residual is
-        # dominated by the omega block and mis-ranks a separating flow, so steering and the stopping test
-        # would judge omega alone. `block_scaled_norm=True` selects the coarser per-block variant.
-        residual_norm = (
-            _coupled_residual_norm(coupled, reference_state)
-            if block_scaled_norm
-            else coupled_scaled_norm(coupled, policy, reference_state)
-        )
-    schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
-    solver = forward_solver if forward_solver is not None else _COUPLED_FACTORIZATION_FORWARD_SOLVER
-    if inner_steps > 1:
-        # Dual-time (backward-Euler) march: an inner Newton loop per outer pseudo-timestep on the
-        # transient residual, so a larger pseudo-timestep (smaller beta) stays stable. The inner loop
-        # replaces the escalation ladder, so the escalation/acceptance parameters do not apply.
-        return DualTimeStep(
-            policy,
-            relaxation_schedule=schedule,
-            inner_steps=inner_steps,
-            inner_tol=inner_tol,
-            line_search=line_search,
-            forward_solver=solver,
-            residual_norm=residual_norm,
-            adjoint_preconditioner_factory=policy.adjoint_factory(),
-            inner_observer=inner_observer,
-            refresh_on_cycles=refresh_on_cycles,
-            inner_refresh=inner_refresh,
-            cycle_budget=cycle_budget,
-            step_limit=step_limit,
-            step_projection=step_projection,
-        )
-    return PseudoTransientStep(
-        policy,
-        relaxation_schedule=schedule,
+    return _coupled_step(
+        coupled,
+        reference_state,
+        MonolithicFactorShiftPolicy(base, preconditioner),
+        default_solver=_COUPLED_FACTORIZATION_FORWARD_SOLVER,
+        beta0=beta0,
+        exponent=exponent,
+        beta_floor=beta_floor,
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
-        acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        divergence_cap=divergence_cap,
         line_search=line_search,
-        forward_solver=solver,
+        inner_steps=inner_steps,
+        inner_tol=inner_tol,
+        grow=grow,
+        descent_backoff=descent_backoff,
+        descent_test=descent_test,
+        forward_solver=forward_solver,
+        block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
-        adjoint_preconditioner_factory=policy.adjoint_factory(),
+        inner_observer=inner_observer,
+        refresh_on_cycles=refresh_on_cycles,
+        inner_refresh=inner_refresh,
+        cycle_budget=cycle_budget,
+        step_limit=step_limit,
+        step_projection=step_projection,
     )
 
 
@@ -1890,6 +1997,14 @@ def coupled_lu_continuation(
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     residual_norm: ResidualNorm | None = None,
     inner_observer: Callable[..., None] | None = None,
+    refresh_on_cycles: int | None = None,
+    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
+    cycle_budget: int | None = None,
+    positivity_floor: float = 0.0,
+    positivity_projection: bool = False,
+    grow: int = 0,
+    descent_backoff: int = 0,
+    descent_test: bool = False,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **complete** coupled LU.
 
@@ -2009,6 +2124,14 @@ def coupled_lu_continuation(
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
         inner_observer=inner_observer,
+        refresh_on_cycles=refresh_on_cycles,
+        inner_refresh=inner_refresh,
+        cycle_budget=cycle_budget,
+        step_limit=positive_k_limit(coupled, floor=positivity_floor),
+        step_projection=(positive_k_projection(coupled) if positivity_projection else None),
+        grow=grow,
+        descent_backoff=descent_backoff,
+        descent_test=descent_test,
     )
 
 
@@ -2046,6 +2169,9 @@ def coupled_amg_continuation(
     cycle_budget: int | None = None,
     positivity_floor: float = 0.0,
     positivity_projection: bool = False,
+    grow: int = 0,
+    descent_backoff: int = 0,
+    descent_test: bool = False,
     field_split: bool = False,
     trailing_smoother_sweeps: int = 1,
     leading_options: dict | None = None,
@@ -2446,6 +2572,9 @@ def coupled_amg_continuation(
         # set the step length for the other 23039 at all. Applied before the cap, which then finds
         # nothing binding. `None` (default) leaves the cap the only constraint, byte-identically.
         step_projection=(positive_k_projection(coupled) if positivity_projection else None),
+        grow=grow,
+        descent_backoff=descent_backoff,
+        descent_test=descent_test,
     )
 
 
@@ -3750,8 +3879,19 @@ def mass_flow_coupled_continuation(
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     velocity_shift_parts: VelocityShiftParts | None = None,
+    inner_steps: int = 1,
+    inner_tol: float = 0.05,
+    grow: int = 0,
+    descent_backoff: int = 0,
+    descent_test: bool = False,
+    inner_observer: Callable[..., None] | None = None,
+    refresh_on_cycles: int | None = None,
+    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
+    cycle_budget: int | None = None,
+    positivity_floor: float = 0.0,
+    positivity_projection: bool = False,
     **preconditioner_kwargs: object,
-) -> PseudoTransientStep:
+) -> ForwardStep:
     """The pseudo-transient continuation step for the **mass-flow-constrained** coupled Newton solve.
 
     The globalization of :func:`coupled_continuation`, with its :class:`CoupledShiftPolicy` bordered by
@@ -3760,6 +3900,13 @@ def mass_flow_coupled_continuation(
     target``. Parameters are :func:`coupled_continuation`'s (including ``beta_floor`` / ``line_search`` /
     ``forward_solver`` / ``block_scaled_norm`` / ``shift_basis`` / ``velocity_shift_parts``);
     ``flow_direction`` selects the constrained velocity component. ``block_scaled_norm`` here extends the same block-scaled measure with the constraint dof.
+
+    Routes through :func:`_coupled_step` like its siblings, so the globalization is the same one they
+    run. Two things here are genuinely its own and are passed explicitly rather than defaulted: the
+    policy is wrapped in the bordered constraint policy, and the progress measure stays the plain
+    Euclidean norm unless ``block_scaled_norm`` — the row-equilibrated default the other builders take
+    has no constraint-aware form yet, and applying it here would scale the border row by a diagonal it
+    does not have.
     """
     # No `reuse` here: the mass-flow-constrained path has no staged-refresh driver (there is no
     # a refresh on `solve_coupled_mass_flow`), so a policy is always built from scratch. Thread
@@ -3775,21 +3922,37 @@ def mass_flow_coupled_continuation(
     )
     force, average = _coupled_constraint_vectors(coupled, flow_direction)
     bordered = _MassFlowBorderedPolicy(policy, force, average)
-    residual_norm = (
-        _mass_flow_residual_norm(coupled, reference_state) if block_scaled_norm else jnp.linalg.norm
-    )
-    return PseudoTransientStep(
+    return _coupled_step(
+        coupled,
+        reference_state,
         bordered,
-        relaxation_schedule=SwitchedEvolutionRelaxation(
-            beta0=beta0, exponent=exponent, beta_floor=beta_floor
-        ),
+        default_solver=_COUPLED_FORWARD_SOLVER,
+        beta0=beta0,
+        exponent=exponent,
+        beta_floor=beta_floor,
         max_escalations=max_escalations,
         escalation_factor=escalation_factor,
-        acceptance=DivergenceGuard(divergence_cap=divergence_cap),
+        divergence_cap=divergence_cap,
         line_search=line_search,
-        forward_solver=forward_solver if forward_solver is not None else _COUPLED_FORWARD_SOLVER,
-        residual_norm=residual_norm,
-        adjoint_preconditioner_factory=bordered.adjoint_factory(),
+        inner_steps=inner_steps,
+        inner_tol=inner_tol,
+        grow=grow,
+        descent_backoff=descent_backoff,
+        descent_test=descent_test,
+        forward_solver=forward_solver,
+        block_scaled_norm=block_scaled_norm,
+        # Its own, not the shared default -- see the note above.
+        residual_norm=(
+            _mass_flow_residual_norm(coupled, reference_state)
+            if block_scaled_norm
+            else jnp.linalg.norm
+        ),
+        inner_observer=inner_observer,
+        refresh_on_cycles=refresh_on_cycles,
+        inner_refresh=inner_refresh,
+        cycle_budget=cycle_budget,
+        step_limit=positive_k_limit(coupled, floor=positivity_floor),
+        step_projection=(positive_k_projection(coupled) if positivity_projection else None),
     )
 
 
@@ -3807,6 +3970,7 @@ def solve_coupled_mass_flow(
     max_steps: int = 60,
     rtol: float = 1e-10,
     atol: float = 1e-12,
+    adjoint_solver: lx.AbstractLinearSolver | None = None,
     **continuation_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system holding the bulk velocity at ``target``, in one monolithic Newton.
@@ -3852,7 +4016,16 @@ def solve_coupled_mass_flow(
             coupled, reference, flow_direction=flow_direction, method=method, **continuation_kwargs
         )
     solver = ImplicitNewtonSolver(
-        max_steps=max_steps, rtol=rtol, atol=atol, forward_step=continuation
+        max_steps=max_steps,
+        rtol=rtol,
+        atol=atol,
+        forward_step=continuation,
+        # Exposed for the same reason `solve_coupled` exposes it, and this path needs it more: the
+        # transpose solve here runs at zero shift against a block-diagonal preconditioner, which is
+        # where that preconditioner is weakest, and the default solver's stagnation detector sits close
+        # enough to the edge that a perturbation of the warm state in the last few bits decides whether
+        # it fires. `None` keeps `ImplicitNewtonSolver`'s own default.
+        **({} if adjoint_solver is None else {"adjoint_solver": adjoint_solver}),
     )
 
     def constrained_residual(augmented: jnp.ndarray, theta: CoupledRANS) -> jnp.ndarray:

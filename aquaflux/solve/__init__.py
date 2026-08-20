@@ -95,6 +95,7 @@ from .field_split import (
     FieldGroups,
     FieldSplitAmgPreconditioner,
     build_block_triangular_field_split,
+    air_inverse,
     native_nodal_inverse,
 )
 from .host_preconditioner import HostFactors, HostPreconditioner
@@ -255,6 +256,7 @@ __all__ = [
     "SwitchedEvolutionRelaxation",
     "TransposedPreconditioner",
     "VelocityShiftParts",
+    "air_inverse",
     "air_multigrid_solve",
     "block_approximate_inverse",
     "block_stencil_colouring",

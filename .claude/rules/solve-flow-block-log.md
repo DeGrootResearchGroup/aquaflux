@@ -15,14 +15,14 @@ the saddle — fails at `beta = 0` (58-cycle cap):
 
 | arm | TRUE rel |
 |---|---|
-| block-SIMPLE, MSIMPLER Schur | 2.554e-06 |
+| block-SIMPLE, MSIMPLE Schur | 2.554e-06 |
 | block-SIMPLE, `a_P` Schur | 7.812e-03 |
 | algebraic SIMPLE Schur, native sub-block inverses | 1.049e-02 |
 | left block transform (exact) + native multigrid on the transformed operator | 1.473e-02 |
 | left block transform (Schur-only) | 1.395e-03 |
 | multi-step saddle, Frobenius, 1 step | 1.632e-04 |
 
-**The signature is a floor almost insensitive to the shift** — MSIMPLER moves only ~2× between `beta = 0`
+**The signature is a floor almost insensitive to the shift** — MSIMPLE moves only ~2× between `beta = 0`
 and the forward operating point, where ILU(0) goes 11 cycles to 4. That is an *approximation* ceiling, not
 a conditioning one: a flat inverse must get every error component right in one application, and a
 SIMPLE-type Schur is worst precisely on the smooth global pressure mode a coarse grid exists to handle.
@@ -39,9 +39,14 @@ Two sub-results worth keeping:
 path passes none and falls back to a characteristic uniform flow at the fastest patch velocity. They were
 therefore *flattered* relative to the shipped object, and still failed.
 
-### MSIMPLER swapped in for the SHIPPED leading inverse, trailing held fixed — DOMINATED, ~8-9x more cycles (2026-08-18)
+### MSIMPLE swapped in for the SHIPPED leading inverse, trailing held fixed — DOMINATED, ~8-9x more cycles (2026-08-18)
 
-**The table above pairs MSIMPLER with an `ilu0` trailing inverse, which `bfs3d` does not ship — its
+> ⚠️ **Superseded in its headline by the section below: this arm was MSIMPLE, not MSIMPLER — the
+> pressure prediction was missing — and its baseline is a `hostilu` leading inverse the case no
+> longer ships. Re-measured, the family is within 16 % of the shipped inverse at the march's own
+> shift. Read both before quoting either.**
+
+**The table above pairs MSIMPLE with an `ilu0` trailing inverse, which `bfs3d` does not ship — its
 `TURBULENCE_INVERSE` default is `"native"` (`compare.TRAILING_INVERSE = native_nodal_inverse(
 **compare.NATIVE_TRAILING)`), so that comparison changed two things relative to the shipped bundle at
 once. This measurement changes exactly one.** Two arms, same materialized Jacobian, same field-split
@@ -52,9 +57,9 @@ swapped:
   cycles=1, strength_threshold=0.25, avoid_singletons=True, aggressive_levels=0, max_levels=5,
   max_coarse=500, prolongation_smoothing="none"` — the actual shipped default as of this run,
   `BFS3D_FLOW_INVERSE=hostilu`).
-- **msimpler** — `BlockPreconditioner.build(momentum, velocity="convection",
-  schur_scaling="msimpler", strength_threshold=0.25)`, built from the real assembler + eddy viscosity
-  at the probed state, exactly as `field_split_probe.block_simple_arms` constructs its `msimpler` arm.
+- **msimple** — `BlockPreconditioner.build(momentum, velocity="convection",
+  schur_scaling="msimple", strength_threshold=0.25)`, built from the real assembler + eddy viscosity
+  at the probed state, exactly as `field_split_probe.block_simple_arms` constructs its `msimple` arm.
 
 Both paired with the SAME trailing inverse, `compare.TRAILING_INVERSE` (`NodalNativeInverse` at
 `compare.NATIVE_TRAILING`: `max_coarse=COARSE_EQ_LIMIT, equilibrate=False`).
@@ -65,29 +70,85 @@ day (`nervous-tereshkova-bf3a80`, converged: step 20 of the target rung, `|R|` 1
 at zero shift, plus the march's own operating shift for completeness. Field split, column reach
 `(3,3,3,3,2,2)` (the case's shipped default), real right-hand side `-R(state)`, GMRES restart 15 to
 rtol 1e-8 on the TRUE residual, cap 60 restarts. Harness:
-`validation/bfs3d_openfoam/msimpler_swap_probe.py`.
+`validation/bfs3d_openfoam/simple_type_swap_probe.py`.
 
 | operator | arm | cycles | TRUE rel |
 |---|---|---|---|
 | zero shift (adjoint operator) | **shipped (hostilu + native trailing)** | **6** | 1.986e-11 |
-| zero shift (adjoint operator) | msimpler (native trailing, all else shipped) | **53** | 3.250e-09 |
+| zero shift (adjoint operator) | msimple (native trailing, all else shipped) | **53** | 3.250e-09 |
 | march shift β=0.0050 | **shipped** | **5** | 1.186e-11 |
-| march shift β=0.0050 | msimpler | **40** | 3.384e-09 |
+| march shift β=0.0050 | msimple | **40** | 3.384e-09 |
 
 **Both arms converge this time** (unlike the flat-PC table above, which hit the 58-cycle cap under the
-mismatched `ilu0` trailing) — matching MSIMPLER with the trailing inverse the case actually ships is
+mismatched `ilu0` trailing) — matching MSIMPLE with the trailing inverse the case actually ships is
 enough for it to reach a real, if far looser, tolerance. But swapped in for the shipped leading inverse
 with every other setting held fixed, it costs **8.8x the cycles at the adjoint operator and 8x at the
 march's own shift**. This is the controlled, single-variable-changed version of the question
-`field_split_probe.py`'s own `block_simple_arms` docstring poses ("is MSIMPLER worth pursuing on the flow
-block at all") and it answers it: no — not against the current field-split architecture, at the shipped
-trailing inverse, at the case's own hard state. Do not re-propose `schur_scaling="msimpler"` as the
+`field_split_probe.py`'s own `block_simple_arms` docstring poses ("is a block-SIMPLE preconditioner worth
+pursuing on the flow block at all") and it answers it: no — not against the current field-split architecture, at the shipped
+trailing inverse, at the case's own hard state. Do not re-propose `schur_scaling="msimple"` as the
 `bfs3d` leading inverse without a new measurement that changes one of these conditions. **Consequence
 (same day): `_coupled_shift_policy`'s `BlockPreconditioner.build` no longer hardcodes
-`schur_scaling="msimpler"`** — combined with the small-fixture check in `.claude/rules/turbulence.md`
+`schur_scaling="msimple"`** — combined with the small-fixture check in `.claude/rules/turbulence.md`
 (dropping it reaches the identical fixed point on every unit/integration fixture that used to pin it),
 this measurement removed the last reason to keep it as anyone's default; see that file's entry for the
 current, corrected `_coupled_shift_policy`.
+
+### That arm was NOT MSIMPLER — the pressure prediction was missing. Re-measured with it: −29 % cycles, still dominated (2026-08-20)
+
+**Read this before citing the table above, and before re-proposing block-SIMPLE here.**
+`schur_scaling="msimpler"` implemented Klaij & Vuik (2013)'s **MSIMPLE** — and not all of that either:
+the **pressure prediction** that defines their `R` variants was absent, and so was Algorithm 1's
+closing velocity update. Every arm above is therefore the lower block-triangular pass, which is a
+legitimate preconditioner (Murphy--Golub--Wathen) but not the one the name promised, and the paper puts
+the convergence benefit squarely on the axis that was missing. See `.claude/rules/flow.md` for the
+conformance write-up and the taxonomy; the option is now `schur_scaling="msimple"` plus a separate
+`composition` ∈ `{"triangular", "simple", "simpler"}`, and MSIMPLER is the pairing
+`schur_scaling="msimple", composition="simpler"`.
+
+*Configuration:* the same probe, renamed and extended —
+`validation/bfs3d_openfoam/simple_type_swap_probe.py` — at `state-00059`, the converged root of a full
+shipped 3-rung cold march; field split flow-first, **only the leading (flow-saddle) inverse differs**
+(trailing inverse `compare.TRAILING_INVERSE`, wiring, shift and column reach `(3,3,3,3,2,2)` held at the
+shipped bundle); real right-hand side `-R(state)`; one materialization shared by every arm; GMRES restart
+15 to `rtol` 1e-8 on the TRUE residual, cap 60 restarts. **The shipped leading inverse is now `native`**
+(`FLOW_INVERSE="native"` since 2026-08-18), not the `hostilu` the table above was measured against — so
+its baseline is 17 cycles, not 6, and the two runs' *ratios* are not comparable across that change.
+
+| operator | leading inverse | cycles | TRUE rel |
+|---|---|---|---|
+| zero shift (adjoint operator) | **shipped, `native`** | **17** | 6.387e-10 |
+| zero shift (adjoint operator) | `msimple` / `triangular` (what the table above measured) | 45 | 5.384e-09 |
+| zero shift (adjoint operator) | `msimple` / `simple` (Algorithm 1 in full) | **58 — the cap** | 1.977e-08 |
+| zero shift (adjoint operator) | `msimple` / `simpler` (**MSIMPLER**) | **32** | 3.917e-09 |
+| march shift β=0.0050 | **shipped, `native`** | **19** | 2.661e-10 |
+| march shift β=0.0050 | `msimple` / `triangular` | 40 | 2.246e-09 |
+| march shift β=0.0050 | `msimple` / `simple` | 47 | 6.138e-09 |
+| march shift β=0.0050 | `msimple` / `simpler` (**MSIMPLER**) | **22** | 8.655e-10 |
+
+- **The prediction is worth 45 → 32 (−29 %) at zero shift and 40 → 22 (−45 %) at the march's own
+  shift**, bracketing the −33 % measured independently on a flow-only channel
+  (`validation/simple_type_composition.py`; see `.claude/rules/flow.md`). So the missing step was real,
+  and it buys on a flagship-scale operator what the paper says it buys.
+- ⚠️ **THE "~8-9x DOMINATED" HEADLINE DOES NOT SURVIVE AT THE OPERATING POINT. At the march's own shift
+  MSIMPLER is 22 cycles against the shipped inverse's 19 — within 16 %.** It is still behind, and behind
+  by more at zero shift (32 against 17, ~1.9x), but "dominated by an order of magnitude" is no longer a
+  fair description of the family at the shift the forward march actually runs at. Anyone re-opening this
+  should quote *which operator*: the gap is wide at the adjoint's unshifted operator and nearly closed at
+  the march's.
+- **What that does NOT license.** Cycles are not seconds: MSIMPLER runs two Schur solves and four
+  residual linearizations per apply against the triangular pass's one and one, and its per-cycle cost
+  here is ~3.7 s against the shipped ~2.6 s, so at 22 against 19 cycles it is still the slower arm. A
+  whole-march A/B is what would settle it, and none has been run. **Nothing here moves a default.**
+- **Algorithm 1's closing velocity update makes it WORSE here** (45 → the cap at zero shift, 40 → 47 at
+  the march's shift), where on the flow-only channel it was neutral. Every use of the diagonal stand-in
+  `F̃⁻¹` is a liability when `F̃` is a poor stand-in for `F`, and a mass matrix is a poor one on a
+  wall-resolved high-Reynolds 3D mesh — MSIMPLER wins *despite* using it, not because the update is
+  free. So `composition="simple"` is not "triangular plus a free improvement".
+- ⚠️ **Other work shared the machine during this run, so quote the cycles and not the seconds.** Cycle
+  counts on this case are exactly reproducible; the per-cycle ratio quoted above is wide enough to
+  survive the contention and matches the mechanism, but do not treat any individual `solve` time as a
+  measurement.
 
 ### Coarsening rate and depth — measured, and the direction that helps is the wrong one
 
@@ -1679,7 +1740,11 @@ prolongation is closed.
 degrees of freedom, destroying the four-field block structure the SIMPLE smoother needs on every coarse
 level. It calls `_require_positive_diagonal` at every level, and the saddle's pressure rows are the
 Rhie–Chow damping. And on the true Jacobian slice of the `[k, omega]` block on this same mesh it ran
-~50 minutes without finishing at 91 nonzeros per row; the flow block carries 128.
+~50 minutes without finishing at 91 nonzeros per row; the flow block carries 128. ⚠️ **That third
+reason is SPENT as of 2026-08-19** — the run-away was a neighbourhood walked over the full sparsity
+pattern rather than the strength graph, since fixed, and lAIR now builds a comparable hierarchy in
+seconds (see `solve-amg-multigrid.md`). The first two reasons are structural and stand on their own,
+so the verdict does not change; do not cite the 50 minutes.
 
 **Transferring the threshold to the `[k, omega]` block will not buy CYCLES**, and the trailing ablation
 settled that on the right measure: at `state-00067`, β = 0, with the leading inverse held at ILU(0), the

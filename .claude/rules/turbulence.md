@@ -222,6 +222,24 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     `rtol/refresh_rtol` compensation approximated, and why the `refresh_rtol <= rtol` constraint existed;
     both are now gone). The absolute form is available precisely *because* the refresh path is
     forward-only, so `‖R0‖` is concrete rather than traced. The constrained path
+  - **⚠️ THE CONSTRAINED ADJOINT TEST WAS PASSING BY ~1e-11, AND THAT IS A PROPERTY OF THE
+    PRECONDITIONER, NOT OF THE TEST (measured 2026-08-19).**
+    `test_constrained_coupled_adjoint_matches_finite_difference` differentiates at a warm state produced
+    by an `air`-preconditioned solve. Two warm states differing by **6.6e-12 relative / 4e-9 absolute**
+    — the same solve, before and after an unrelated change to the lAIR *setup* — take the transpose
+    solve from converging to raising `EquinoxRuntimeError: A stagnation in an iterative linear solve`,
+    **with the code held identical**. That was verified the only way that settles it: stash the code
+    change out entirely, then feed each saved state to the same binary. So the test was gating on the
+    stagnation detector's threshold rather than on the adjoint.
+    **The underlying fact is the block-diagonal preconditioner's zero-shift limit**, which this path
+    meets head-on: the constrained adjoint is a transpose solve at β = 0 against `BlockPreconditioner`,
+    the regime it is weakest in. The test now passes an explicit
+    `relative_residual_gmres(1e-8, restart=120, stagnation_iters=200)`, so it reports the gradient it
+    claims to. **`solve_coupled_mass_flow` gained `adjoint_solver` to make that possible** — it was the
+    only coupled driver without it, the same capability drift as the four continuation builders.
+    **Consequence for anyone measuring here: a mass-flow adjoint result is not a stable gate.** Any
+    change that perturbs the warm state in its last bits — a preconditioner tweak, a library version,
+    a different accelerator — can flip it, and the flip says nothing about the change.
     (`mass_flow_coupled_continuation` / `solve_coupled_mass_flow`) has **no** staged refresh — thread
     `reuse` through if that driver is added.
     - **The trigger is forward-only — it *raises* under `jax.grad`, and must (binding).** The refresh
@@ -905,9 +923,23 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     cell. The divergence guard cannot catch it: it fires on a non-finite residual, which is already the
     poisoned state. Measured on `bfs3d`: 62 healthy steps, then **two cells of 23040** at
     `k = -3.3e-4`, every field finite, only the derived `nu_t` NaN.
-    `coupled_amg_continuation` therefore wires `positive_k_limit(coupled)` — the fraction-to-the-boundary
-    cap — automatically for a directly-solved `k`, and passes `None` for a log-solved one, where
+    **Every** continuation builder therefore wires `positive_k_limit(coupled)` — the fraction-to-the-
+    boundary cap — automatically for a directly-solved `k`, and passes `None` for a log-solved one, where
     positivity is already structural and a cap would only throttle. See `.claude/rules/solve-march.md`.
+    ⚠️ **Until 2026-08-19 only `coupled_amg_continuation` did, and that is worth knowing before citing
+    any comparison between the builders.** `coupled_continuation` and `coupled_lu_continuation` never set
+    `step_limit`, whose default is `None`, so the block-diagonal and complete-LU paths marched with **no
+    positivity guard at all**. Two consequences. Any recorded block-SIMPLE-versus-monolithic result
+    compared a guarded march against an unguarded one. And the recorded verdict that "the low-β wall is
+    the block-SIMPLE preconditioner — its coupled solve goes NaN at a low shift"
+    (`solve-globalization-log.md`) is now **suspect**: an unguarded `k` crossing zero produces exactly
+    that signature, so the preconditioner may have been blamed for a missing globalization. Not
+    established — the experiment is one flag and has not been run — but that verdict is dead anyway on
+    its own terms: its remedy, the monolithic ILUT, was measured dominated and **deleted**, and the
+    shipped AMG preconditioners reach adjoint grade at zero shift, which is the regime it claimed only a
+    complete factorization could reach (the entry is collapsed to one line in
+    `solve-globalization-log.md`). All **four** builders now route through `_coupled_step`, and
+    `test_every_continuation_builder_installs_the_same_globalization` fails if one loses the guard.
     **`log(k+1)` does not fix this**: `k = e^w − 1` bounds `k > −1`, not `k > 0`, so the failure above is
     still reachable. It is regular at the wall (unlike `log k`) but that solves the other problem, not
     this one.
@@ -979,10 +1011,10 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     (configuration not recorded — re-measure before relying on the size) — the one staleness lever that
     pays; see the staleness bullet in `.claude/rules/solve-globalization-log.md`. Overridable via
     `preconditioner_kwargs`.
-  - **⚠️ THE PRESSURE SCHUR NO LONGER HARDCODES `schur_scaling="msimpler"` (fixed 2026-08-18) — it was
+  - **⚠️ THE PRESSURE SCHUR NO LONGER HARDCODES `schur_scaling="msimple"` (fixed 2026-08-18) — it was
     never necessary at the scale this policy is actually used at, and is dominated where it matters.**
     Superseded finding, kept for the trap: this bullet used to pair `velocity="convection"` with
-    `schur_scaling="msimpler"`, on the belief that a RANS-scale coupled solve needed MSIMPLER's
+    `schur_scaling="msimple"`, on the belief that a RANS-scale coupled solve needed MSIMPLE's
     velocity-independent Schur to avoid the plain SIMPLE `a_P` Schur degrading under convection — cutting
     the shifted solve by roughly an order of magnitude in GMRES cycles on a developed pitzDaily state (no
     β, tolerance or norm recorded — unfalsifiable, and superseded regardless). Two things closed it: (1)
@@ -993,18 +1025,25 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     zero-config fallback and by small (hundreds-of-cells) unit/integration fixtures. (2) On EVERY one of
     those small fixtures (`test_coupled_rans.py`, `test_coupled_mass_flow.py`, `test_coupled_lu.py`,
     `test_coupled_periodic_channel.py`, `test_periodic_channel.py`, `production_cap_activity.py` — Re up
-    to 20000), dropping `schur_scaling="msimpler"` in favour of `BlockPreconditioner`'s own default reaches
+    to 20000), dropping `schur_scaling="msimple"` in favour of `BlockPreconditioner`'s own default reaches
     the identical converged fixed point (fields and residual agree to the arms' own tight tolerances; the
     shift vanishes at the root so a Schur choice cannot move it). And on `bfs3d`'s real coupled Jacobian, a
-    controlled single-variable swap (`validation/bfs3d_openfoam/msimpler_swap_probe.py`, at the converged
-    root, everything but the leading inverse held at the shipped bundle) shows MSIMPLER costs ~8-9x the
+    controlled single-variable swap (`validation/bfs3d_openfoam/simple_type_swap_probe.py`, at the converged
+    root, everything but the leading inverse held at the shipped bundle) shows MSIMPLE costs ~8-9x the
     shipped bundle's Krylov cycles (6→53 at the adjoint operator, 5→40 at the march's own shift) — see
-    `.claude/rules/solve-flow-block-log.md` § "MSIMPLER swapped in for the SHIPPED leading inverse". So
+    `.claude/rules/solve-flow-block-log.md` § "MSIMPLE swapped in for the SHIPPED leading inverse".
+    ⚠️ **That ~8-9x is measured against a `hostilu` leading inverse this case no longer ships, and on a
+    method whose pressure prediction was missing; re-measured 2026-08-20 with Klaij & Vuik's Algorithm 2
+    actually built and against the current `native` default, MSIMPLER is 32 cycles against 17 at the
+    adjoint operator but 22 against 19 at the march's own shift** — still behind, but not by an order of
+    magnitude, and not by the same factor at both operators (same file, the following section). It does
+    not change the conclusion below, since the fixtures that reach this policy converge identically
+    either way. So
     `_coupled_shift_policy` now leaves `schur_scaling` at `BlockPreconditioner`'s own default; `velocity=
-    "convection"` is unaffected and stays. `schur_scaling="msimpler"` remains a real, non-dominated option
+    "convection"` is unaffected and stays. `schur_scaling="msimple"` remains a real, non-dominated option
     of `BlockPreconditioner` for a **standalone, flow-only, convection-dominated** solve — see
-    `tests/integration/test_channel_high_reynolds.py::test_msimpler_schur_reaches_beyond_the_simple_schur`,
-    where plain SIMPLE's inner GMRES genuinely stalls and MSIMPLER converges — just not for a coupled RANS
+    `tests/integration/test_channel_high_reynolds.py::test_mass_scaled_schur_reaches_beyond_the_a_p_schur`,
+    where plain SIMPLE's inner GMRES genuinely stalls and MSIMPLE converges — just not for a coupled RANS
     solve at any scale this project has measured.
   - **`coupled_lu_continuation` / `coupled_lu_refreshing_continuation` — the COMPLETE-LU coupled PC, the
     preferred coupled PC on 2D/moderate meshes (BUILT).** A drop-in for `solve_coupled(continuation=…)`
@@ -1348,7 +1387,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     2026-07-22).** This bullet used to record that past rel ~0.09 the direct-`k` residual grew (rel 1 →
     ~5×) and re-stalled the march, and named high-Reynolds `k` stability as the open follow-up. **It
     does not happen on the current code.** Re-measured on the full ~12k-cell pitzDaily from the cold
-    hybrid IC, second-order (Venkatakrishnan-limited) momentum, log-`ω`, conv+MSIMPLER: the march
+    hybrid IC, second-order (Venkatakrishnan-limited) momentum, log-`ω`, conv+MSIMPLE: the march
     descends **monotonically straight through 0.09** with no plateau —
     rel 9.4e-2 (step 14) → 6.6e-2 (18) → 4.7e-2 (21) → 3.5e-2 (24) → 2.7e-2 (26) —
     while the recirculation keeps growing (110 → 416 cells). **`k` does not diverge**: its peak *falls*

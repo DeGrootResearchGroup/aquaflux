@@ -13,7 +13,12 @@ import jax
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve import NativeHierarchyInverse, NativeSimpleInverse, NodalNativeInverse
+from aquaflux.solve import (
+    NativeHierarchyInverse,
+    NativeSimpleInverse,
+    NodalNativeInverse,
+    air_inverse,
+)
 from aquaflux.solve.field_split import (
     BlockTriangularFieldSplit,
     FieldGroups,
@@ -356,3 +361,48 @@ def test_the_field_split_answers_the_native_solve_question_without_raising(group
     assert preconditioner.is_exact_native is False
     # And the same answer the production call sites take, so the two spellings cannot drift apart.
     assert getattr(preconditioner, "is_exact_native", False) is False
+
+
+def _two_field_transport(n_cells: int = 40, coupling: float = 30.0) -> sp.csr_matrix:
+    """Field-major two-field convection-diffusion block, coupled within each cell."""
+    upwind = sp.diags(
+        [-np.full(n_cells - 1, 4.0), np.full(n_cells, 6.0), -np.full(n_cells - 1, 1.0)],
+        [-1, 0, 1],
+        format="csr",
+    )
+    cross = sp.identity(n_cells, format="csr") * coupling
+    return sp.bmat([[upwind, cross], [cross, upwind]], format="csr")
+
+
+def test_air_block_inverse_applies_transposes_and_refreshes_in_place() -> None:
+    """The lAIR trailing inverse against the three things the field split requires of one.
+
+    ``refactor_block`` is the one a single-state probe never reaches and a march depends on:
+    ``BlockTriangularFieldSplit.refactor`` raises on an inverse without it, because replacing the object
+    would recompile the coupled solve that holds it.
+    """
+    block = _two_field_transport()
+    inverse = air_inverse(max_coarse=8)(block, 2)
+    assert inverse.n_dofs == block.shape[0]
+
+    rng = np.random.default_rng(0)
+    r = rng.standard_normal(block.shape[0])
+    x = inverse.apply(r)
+    assert np.all(np.isfinite(x))
+    # A fixed cycle count makes it a linear map, which the non-flexible outer Krylov requires.
+    r2 = rng.standard_normal(block.shape[0])
+    assert np.allclose(
+        inverse.apply(1.5 * r - 0.5 * r2), 1.5 * x - 0.5 * inverse.apply(r2), atol=1e-9
+    )
+    # <u, M r> == <M^T u, r>, which is what the adjoint's transpose solve needs (R != P^T here).
+    u = rng.standard_normal(block.shape[0])
+    assert np.dot(u, inverse.apply(r)) == pytest.approx(
+        np.dot(inverse.apply(u, transpose=True), r), rel=1e-9
+    )
+
+    # ...and it refreshes in place onto a new operator of the same graph, keeping every shape.
+    developed = _two_field_transport(coupling=45.0)
+    inverse.refactor_block(developed)
+    refreshed = inverse.apply(r)
+    assert np.all(np.isfinite(refreshed))
+    assert not np.allclose(refreshed, x), "the refresh did not change the preconditioner"

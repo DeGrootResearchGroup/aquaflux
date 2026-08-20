@@ -8,7 +8,10 @@ preconditioner), plus the degenerate-mesh build guards.
 
 from __future__ import annotations
 
+import itertools
+
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -23,12 +26,15 @@ from aquaflux.solve.multigrid import (
     _CsrOperator,
     _dense_inverse,
     _fc_jacobi,
+    _frozen_neighbourhoods,
+    _galerkin_coarse,
     _jacobi_smooth,
     _jacobi_smooth_zero,
     _lair_restriction,
     _mis_aggregate,
     _one_point_interpolation,
     _reattach_to_adjacent_root,
+    _restriction_neighbourhoods,
     _rs_split,
     _SparseLevel,
     _strength_classical,
@@ -537,16 +543,14 @@ def test_convection_hierarchy_is_two_level_with_a_contractive_fine_smoother() ->
 # --- local approximate ideal restriction (lAIR) -----------------------------------------
 
 
-def test_air_v_cycle_is_mesh_independent_at_high_peclet() -> None:
-    """The reduction-based (lAIR) V-cycle converges the strongly-convective operator with a **flat**
-    per-cycle contraction as the mesh refines — the Peclet-robust, mesh-independent property the
-    two-level aggregation method (and deep Galerkin recursion) lack. For a convection-dominated
-    operator the approximate ideal restriction is nearly exact, so a few cycles behave like a direct
-    solve regardless of the mesh size."""
+def _air_contractions(restriction_theta=None) -> list[float]:
+    """Per-cycle lAIR contraction on the strongly-convective operator, at two mesh sizes."""
     contractions = []
     for n in (24, 48):  # cell Peclet ~40; a 4x change in cell count
         owner, nb, visc, mdot, ncell, bd = _convective_grid(n, mu=1e-3, speed=1.0)
-        hierarchy = build_air_hierarchy(_operator(owner, nb, visc, mdot, ncell, bd))
+        hierarchy = build_air_hierarchy(
+            _operator(owner, nb, visc, mdot, ncell, bd), restriction_theta=restriction_theta
+        )
         a = _dense(owner, nb, visc, mdot, ncell, bd)
         b = jnp.asarray(np.random.default_rng(0).standard_normal(ncell))
         x = jnp.zeros(ncell)
@@ -557,8 +561,53 @@ def test_air_v_cycle_is_mesh_independent_at_high_peclet() -> None:
         # geometric-mean per-cycle contraction over the cycles above the machine floor
         ratios = [norms[k + 1] / norms[k] for k in range(len(norms) - 1) if norms[k] > 1e-11]
         contractions.append(float(np.exp(np.mean(np.log(ratios)))))
-    assert max(contractions) < 0.1  # strong contraction at high Peclet
-    assert abs(contractions[1] - contractions[0]) < 0.05  # ~mesh-independent across the refinement
+    return contractions
+
+
+def test_air_v_cycle_contracts_strongly_at_high_peclet() -> None:
+    """The reduction-based (lAIR) V-cycle converges the strongly-convective operator in a handful of
+    cycles, and degrades only mildly as the mesh refines — the Peclet-robust behaviour the two-level
+    aggregation method (and deep Galerkin recursion) lack. For a convection-dominated operator the
+    approximate ideal restriction is nearly exact, so a few cycles behave close to a direct solve.
+
+    **The bars here are calibrated against the restriction neighbourhood the method actually uses, and
+    that is worth stating because they used to be calibrated against something unaffordable.** An
+    earlier form of this test required a contraction below ``0.1`` and a spread below ``0.05`` across
+    the refinement. Those held only while the neighbourhood walk ran over the operator's whole sparsity
+    pattern, which makes each coarse operator denser than the one above it: on a three-dimensional
+    block that recursion never finished building. Walking strong connections instead — what
+    ``restriction_theta`` selects, and what the method is specified as — costs real accuracy, and no
+    affordable threshold reaches the old bars. The companion test below pins that trade directly.
+    """
+    contractions = _air_contractions()
+    assert max(contractions) < 0.25  # measured 0.054 and 0.166
+    assert (
+        abs(contractions[1] - contractions[0]) < 0.15
+    )  # degrades with refinement, but not sharply
+
+
+def test_a_wider_restriction_neighbourhood_buys_accuracy_and_costs_density() -> None:
+    """The accuracy-against-cost trade ``restriction_theta`` controls, pinned in both directions.
+
+    Admitting every stored connection (``0.0``, which walks the full sparsity pattern) gives a markedly
+    better V-cycle than the default's strong-connection walk — and pays for it in coarse-operator
+    density, which is why it is not the default despite being the more accurate method. The point of
+    pinning both halves is that either one alone reads as a reason to move the default.
+    """
+    default = _air_contractions()
+    widest = _air_contractions(restriction_theta=0.0)
+    assert max(widest) < 0.1 * max(default), "the wider neighbourhood is no longer more accurate"
+
+    owner, nb, visc, mdot, ncell, bd = _convective_grid(48, mu=1e-3, speed=1.0)
+    operator = _operator(owner, nb, visc, mdot, ncell, bd)
+
+    def peak_density(**kwargs):
+        levels = build_air_hierarchy(operator, **kwargs).levels
+        return max(level.operator.data.shape[0] / level.n for level in levels)
+
+    assert peak_density() < 0.5 * peak_density(restriction_theta=0.0), (
+        "the wider neighbourhood is no longer denser, so the default is paying accuracy for nothing"
+    )
 
 
 def test_air_multigrid_is_linear_and_transposable() -> None:
@@ -694,7 +743,8 @@ def test_lair_restriction_handles_an_empty_and_a_singular_local_solve() -> None:
         )
     )
     split = np.array([1, 0, 0, 1])
-    r = np.asarray(_lair_restriction(a, split, degree=1).toarray())
+    strength = _strength_classical(a, 0.25)
+    r = np.asarray(_lair_restriction(a, split, degree=1, strength=strength).toarray())
     assert r.shape == (2, 4)
     assert np.all(np.isfinite(r))
     # Minimum-norm least-squares solution of [[1, 1], [1, 1]] z = [-1, -1].
@@ -706,14 +756,26 @@ def test_lair_restriction_reproduces_the_exact_schur_complement() -> None:
     """With an F-neighbourhood wide enough to reach every F-point it couples to, the local
     approximate-ideal solve *is* the ideal restriction ``R = [-A_cf A_ff⁻¹, I]``: it annihilates the
     F-columns of ``R A``, so the Galerkin coarse operator ``R A P`` is exactly the Schur complement
-    ``A_cc - A_cf A_ff⁻¹ A_fc`` — the coarse action of the fine operator, reproduced exactly."""
+    ``A_cc - A_cf A_ff⁻¹ A_fc`` — the coarse action of the fine operator, reproduced exactly.
+
+    "Wide enough" means **every** coupling, not every strong one, which is why the walk here runs at a
+    zero threshold rather than at the one that chose the C/F split. Row ``g``'s weak downwind coupling
+    is still a term of ``A[g, F]`` that the ideal restriction has to cancel, so a neighbourhood that
+    admits only strong connections leaves it in ``R A`` however far the walk is allowed to reach. That
+    is exactly the accuracy the default trades away for a coarse operator that stays sparse; this test
+    fixes the upper end of the trade, and
+    :func:`test_a_wider_restriction_neighbourhood_buys_accuracy_and_costs_density` measures the middle.
+    """
     n = 9
     a = _upwind_chain(n)
     split = _rs_split(_strength_classical(a, 0.25))
+    strength = _strength_classical(
+        a, 0.0
+    )  # every coupling -- the ideal restriction's neighbourhood
     coarse, fine = np.where(split == 1)[0], np.where(split == 0)[0]
     assert len(fine) > 0 and len(coarse) > 0
     p = _one_point_interpolation(a, split)
-    r = _lair_restriction(a, split, degree=n)
+    r = _lair_restriction(a, split, degree=n, strength=strength)
     assert p.shape == (n, len(coarse))
     assert r.shape == (len(coarse), n)
 
@@ -764,6 +826,62 @@ def test_isolated_cell_zero_diagonal_is_rejected_at_build() -> None:
     owner, nb, n = _triangle_with_isolated_cell()
     with pytest.raises(ValueError, match="strictly positive"):
         build_smoothed_hierarchy(convection_diffusion_operator(owner, nb, np.ones(len(owner)), n))
+
+
+def _distance_two_operator(n_side: int) -> sp.csr_matrix:
+    """A convection-dominated operator on a three-dimensional grid, with a **distance-2** pattern.
+
+    The shape a coupled block Jacobian actually has: a second-order discretization couples a cell to
+    its neighbours' neighbours, so the operator stores tens of entries per row rather than the seven a
+    nearest-neighbour stencil gives. That density is what a reduction hierarchy's coarsening has to
+    survive, and a seven-point fixture cannot exercise it.
+    """
+    index = np.arange(n_side**3).reshape(n_side, n_side, n_side)
+    owner, neighbour = [], []
+    for axis in range(3):
+        rolled = np.moveaxis(index, axis, 0)
+        owner.append(rolled[:-1].ravel())
+        neighbour.append(rolled[1:].ravel())
+    owner, neighbour = np.concatenate(owner), np.concatenate(neighbour)
+    n = n_side**3
+    flux = np.full(owner.size, 4.0)  # convection dominated, so the strength graph is directional
+    nearest = sp.csr_matrix(
+        (-(1.0 + np.maximum(flux, 0.0)), (neighbour, owner)), shape=(n, n)
+    ) + sp.csr_matrix((-(1.0 + np.maximum(-flux, 0.0)), (owner, neighbour)), shape=(n, n))
+    diagonal = np.zeros(n)
+    np.add.at(diagonal, owner, 1.0 + np.maximum(flux, 0.0))
+    np.add.at(diagonal, neighbour, 1.0 + np.maximum(-flux, 0.0))
+    reach_two = abs(nearest) @ abs(nearest)
+    reach_two.data[:] = 1e-3  # a weak but stored distance-2 coupling
+    return (nearest + reach_two + sp.diags(diagonal + 1.0)).tocsr()
+
+
+def test_air_coarse_operators_stay_sparse_on_a_distance_two_operator() -> None:
+    """The Galerkin recursion must not densify as it coarsens — the defect this method is one step from.
+
+    A reduction hierarchy's coarse operator ``R A P`` inherits the product of the transfer patterns, so
+    an over-wide restriction neighbourhood does not cost once: it makes the next level denser, which
+    widens the next neighbourhood, and so on. The failure has no symptom other than a build that stops
+    finishing, because the growth lands in dense local solves rather than in anything that raises —
+    which is why it is pinned here on an operator dense enough to show it, rather than left to be
+    rediscovered on a real mesh.
+    """
+    hierarchy = build_air_hierarchy(_distance_two_operator(10))
+    density = [level.operator.data.shape[0] / level.n for level in hierarchy.levels]
+    assert len(density) > 2, "too few levels to say anything about how the recursion behaves"
+    growth = [after / before for before, after in itertools.pairwise(density)]
+    assert max(growth) < 2.0, f"the coarse operators are densifying: {density}"
+
+
+def test_air_build_rejects_a_densifying_hierarchy_rather_than_grinding() -> None:
+    """A neighbourhood too wide for the operator fails loudly and names both ways out.
+
+    ``restriction_theta=0.0`` admits every stored connection, which on a distance-2 operator is exactly
+    the recursion the test above forbids. The guard exists because the alternative is not a wrong
+    answer but an absent one: the build simply runs until someone stops it.
+    """
+    with pytest.raises(ValueError, match="densifies as it coarsens"):
+        build_air_hierarchy(_distance_two_operator(10), restriction_theta=0.0)
 
 
 def test_air_build_rejects_isolated_cell() -> None:
@@ -884,8 +1002,9 @@ def test_refresh_air_hierarchy_keeps_the_structure_and_is_a_cache_hit() -> None:
     """Refreshing lAIR on its frozen coarsening changes only values — so it is a jit cache hit.
 
     A plain rebuild at a new operator changes lAIR's C/F split and shapes (above), which would force a
-    recompile of the solve the preconditioner accelerates. Reusing the frozen split and prolongation
-    and re-solving only the restriction keeps every shape, so the compiled V-cycle is reused.
+    recompile of the solve the preconditioner accelerates. Reusing the frozen split, prolongation and
+    restriction neighbourhoods — and re-solving only the restriction's weights — keeps every shape, so
+    the compiled V-cycle is reused.
     """
     n = 600
     cold_operator = _chain_operator(n, 0.01, np.ones(n - 1))
@@ -920,10 +1039,10 @@ def test_refresh_air_hierarchy_keeps_the_structure_and_is_a_cache_hit() -> None:
 def test_refreshed_air_hierarchy_preconditions_the_new_operator() -> None:
     """The refreshed hierarchy must actually precondition the *new* operator, not just keep its shape.
 
-    Reusing the reference's C/F split is a deliberate trade (any valid split gives a valid
-    preconditioner), so the test is that one refreshed V-cycle reduces the new operator's residual
-    substantially better than the stale hierarchy does — i.e. the recomputed restriction really tracks
-    the new coefficients.
+    Reusing the build state's C/F split, prolongation and restriction neighbourhoods is a deliberate
+    trade (any valid choice of those gives a valid preconditioner), so the test is that one refreshed
+    V-cycle reduces the new operator's residual substantially better than the stale hierarchy does —
+    i.e. the re-solved restriction weights really track the new coefficients.
     """
     n = 600
     cold_operator = _chain_operator(n, 0.01, np.ones(n - 1))
@@ -943,6 +1062,75 @@ def test_refreshed_air_hierarchy_preconditions_the_new_operator() -> None:
     assert fresh_residual < stale_residual, (
         f"refreshed V-cycle ({fresh_residual:.3e}) did not beat the stale one ({stale_residual:.3e})"
     )
+
+
+def test_galerkin_coarse_pattern_does_not_move_when_a_weight_becomes_zero() -> None:
+    """The coarse operator's stored shape must not depend on the transfer operators' *values*.
+
+    ``scipy`` drops an exactly-zero product entry, and lAIR generates those structurally: a degree-2
+    neighbourhood can hold an F-point that the C-point's row does not couple to, whose restriction
+    weight is then exactly zero. Which entries that hits moves with the operator's values, so without
+    this the same mesh at a developed state gives a coarse operator of a slightly different size — and
+    :func:`refresh_air_hierarchy`, whose entire purpose is to hold the jit signature, fails its own
+    structure check on a perfectly legitimate operator. Measured on a 46080-row operator, 14 such
+    weights moved the level-1 entry count by 160.
+    """
+    # Minimal triple where one zeroed weight really does cost the plain product an entry: with an
+    # identity operator and prolongation, each product entry has exactly one contribution.
+    identity = sp.identity(3, format="csr")
+    restriction = sp.csr_matrix(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]))
+    zeroed = restriction.tocsr(copy=True)
+    zeroed.data[4] = 0.0  # as a local solve over an uncoupled F-point would produce
+
+    assert (zeroed @ identity @ identity).tocsr().nnz == 8, (
+        "premise: the plain product loses an entry"
+    )
+    stable = _galerkin_coarse(zeroed, identity, identity)
+    assert stable.nnz == 9, "the coarse shape moved with the restriction's values"
+    assert np.allclose(stable.toarray(), zeroed.toarray())
+
+    # On a real triple the pattern is the structural one, and the values are the product's own.
+    n = 40
+    a = _chain_operator(n, 0.01, np.ones(n - 1))
+    strength = _strength_classical(a, 0.25)
+    split = _rs_split(strength)
+    r = _lair_restriction(a, split, 2, strength)
+    prolongation = _one_point_interpolation(a, split)
+
+    def ones_like(matrix):
+        skeleton = matrix.tocsr(copy=True)
+        skeleton.data = np.ones_like(skeleton.data)
+        return skeleton
+
+    coarse = _galerkin_coarse(r, a, prolongation)
+    structural = (ones_like(r) @ ones_like(a) @ ones_like(prolongation)).tocsr()
+    assert coarse.nnz == structural.nnz
+    assert np.array_equal(coarse.indptr, structural.indptr)
+    assert np.array_equal(coarse.indices, structural.indices)
+    assert np.allclose(coarse.toarray(), (r @ a @ prolongation).toarray())
+
+
+def test_frozen_neighbourhoods_recover_the_walk_that_built_the_restriction() -> None:
+    """A refresh reuses the F-neighbourhoods rather than re-walking, so they must round-trip exactly.
+
+    This is what makes :func:`refresh_air_hierarchy` structure-preserving **by construction** rather
+    than by the check it also runs afterwards, and it is a quiet invariant: recovering the wrong
+    neighbourhoods would still produce a plausible restriction, just of a different operator's shape,
+    and the failure would surface later as a mismatched-structure error with no obvious cause.
+    """
+    n = 600
+    operator = _chain_operator(n, 0.01, np.ones(n - 1))
+    strength = _strength_classical(operator, 0.25)
+    split = _rs_split(strength)
+    walked = _restriction_neighbourhoods(strength, split, degree=2)
+
+    level = build_air_hierarchy(operator).levels[0]
+    recovered = _frozen_neighbourhoods(level)
+
+    assert np.array_equal(recovered[0], walked[0]), "neighbourhood offsets did not round-trip"
+    assert np.array_equal(recovered[1], walked[1]), "neighbourhood members did not round-trip"
+    # Not vacuous: the level must actually hold neighbourhoods for this to have checked anything.
+    assert walked[1].size > 0
 
 
 def test_refresh_air_hierarchy_rejects_a_mismatched_operator() -> None:
@@ -1532,3 +1720,111 @@ def test_the_zero_guess_peel_matches_the_general_jacobi_sweep_exactly() -> None:
             assert np.array_equal(np.asarray(peeled), np.asarray(general)), (
                 f"the peel moved the answer at {sweeps} sweeps, spectral_damping={damping}"
             )
+
+
+def _two_field_operator(n_cells: int = 60, coupling: float = 40.0) -> sp.csr_matrix:
+    """A field-major two-field transport operator whose WITHIN-CELL coupling exceeds its diagonal.
+
+    The shape the coupled turbulence pair has, and the reason a multi-field level needs a block
+    smoother: with ``coupling`` above the diagonal a point sweep discards the dominant term entirely.
+    Degree of freedom ``(cell i, field f)`` sits at ``f * n_cells + i``.
+    """
+    upwind = sp.diags(
+        [-np.full(n_cells - 1, 4.0), np.full(n_cells, 6.0), -np.full(n_cells - 1, 1.0)],
+        [-1, 0, 1],
+        format="csr",
+    )
+    # [[A, c I], [c I, A]] — the off-diagonal blocks are the within-cell coupling.
+    cross = sp.identity(n_cells, format="csr") * coupling
+    return sp.bmat([[upwind, cross], [cross, upwind]], format="csr")
+
+
+def test_block_air_hierarchy_splits_whole_cells_not_degrees_of_freedom() -> None:
+    """A cell must be entirely coarse or entirely fine.
+
+    Splitting per degree of freedom is field-blind: it can put one field of a cell on the coarse grid
+    and another on the fine one, which produces the degenerate Galerkin row that makes a build fail for
+    a reason that looks like the *fine* operator being at fault when it is clean.
+    """
+    a = _two_field_operator()
+    hierarchy = build_air_hierarchy(a, block_size=2, max_coarse=8)
+    for level in hierarchy.levels:
+        mask = np.asarray(level.c_mask)
+        cells = level.n // level.block_size
+        for field in range(1, level.block_size):
+            assert np.array_equal(mask[:cells], mask[field * cells : (field + 1) * cells]), (
+                "the C/F split differs between a cell's fields, so it was decided per degree of freedom"
+            )
+
+
+def test_block_air_builds_where_the_scalar_diagonal_is_negative() -> None:
+    """The block path must stand on an operator a point smoother's guard refuses.
+
+    A true Jacobian slice can carry a negative scalar diagonal while every cell block is perfectly well
+    conditioned. ``_require_positive_diagonal`` is a *point*-smoother requirement, so a block hierarchy
+    must not be held to it — otherwise it is refused on exactly the operator it exists to precondition.
+    """
+    a = _two_field_operator().tolil()
+    # Flip one cell's first-field diagonal negative. Its 2x2 block stays invertible (the off-diagonal
+    # coupling is 40), so this is a legal operator for a block smoother and not for a point one.
+    a[3, 3] = -6.0
+    a = a.tocsr()
+    assert a.diagonal().min() < 0
+
+    with pytest.raises(ValueError, match="positive"):
+        build_air_hierarchy(a, max_coarse=8)  # scalar path: correctly refuses
+
+    hierarchy = build_air_hierarchy(a, block_size=2, max_coarse=8)  # block path: builds
+    assert len(hierarchy.levels) > 1
+    assert hierarchy.levels[0].block_inverse is not None
+
+
+def test_block_air_v_cycle_contracts_where_a_point_smoother_cannot() -> None:
+    """The block smoother is what makes a multi-field level work, measured against the point one.
+
+    With the within-cell coupling above the diagonal, inverting each cell's own block is not a
+    refinement — it is the difference between a V-cycle that contracts and one that does not.
+    """
+    a = _two_field_operator()
+    hierarchy = build_air_hierarchy(a, block_size=2, max_coarse=8)
+    dense = jnp.asarray(a.toarray())
+    b = jnp.asarray(np.random.default_rng(0).standard_normal(a.shape[0]))
+
+    x = jnp.zeros(a.shape[0])
+    for _ in range(4):
+        x = x + air_multigrid_solve(hierarchy, b - dense @ x, cycles=1)
+    residual = float(jnp.linalg.norm(dense @ x - b)) / float(jnp.linalg.norm(b))
+    assert residual < 1e-3, f"the block V-cycle did not contract: {residual:.2e}"
+
+    # Not vacuous: the same hierarchy with its block inverse removed — i.e. a point smoother — does not.
+    pointwise = eqx.tree_at(
+        lambda h: [lv.block_inverse for lv in h.levels],
+        hierarchy,
+        replace=[None] * len(hierarchy.levels),
+        is_leaf=lambda x: x is None,
+    )
+    y = jnp.zeros(a.shape[0])
+    for _ in range(4):
+        y = y + air_multigrid_solve(pointwise, b - dense @ y, cycles=1)
+    point_residual = float(jnp.linalg.norm(dense @ y - b)) / float(jnp.linalg.norm(b))
+    assert point_residual > 10 * residual, (
+        f"the point smoother did as well ({point_residual:.2e} vs {residual:.2e}), so this fixture "
+        "does not exercise the within-cell coupling the block inverse exists for"
+    )
+
+
+def test_block_air_refresh_preserves_the_structure() -> None:
+    """A block hierarchy refreshes on its frozen coarsening like a scalar one, keeping every shape."""
+    cold = _two_field_operator(coupling=40.0)
+    developed = _two_field_operator(coupling=55.0)
+    built = build_air_hierarchy(cold, block_size=2, max_coarse=8)
+    refreshed = refresh_air_hierarchy(built, developed)
+
+    assert len(refreshed.levels) == len(built.levels)
+    for old, new in zip(built.levels, refreshed.levels, strict=True):
+        assert (old.n, old.n_coarse, old.block_size) == (new.n, new.n_coarse, new.block_size)
+        assert old.operator.data.shape == new.operator.data.shape
+    # ...and the refresh is not a no-op: the values moved with the operator.
+    assert not np.allclose(
+        np.asarray(built.levels[0].operator.data), np.asarray(refreshed.levels[0].operator.data)
+    )

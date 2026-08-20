@@ -19,6 +19,7 @@ sensitivity analysis, optimization, and parameter calibration first-class.
 mesh
 mesh_zones_and_patches
 steady_state_solving
+preconditioning
 ```
 
 ```{toctree}

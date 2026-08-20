@@ -105,6 +105,43 @@ def test_preconditioned_solve_converges_to_same_flow() -> None:
     assert jnp.allclose(phi_plain, phi_prec, atol=1e-6)
 
 
+def test_the_pressure_prediction_is_a_drop_in_that_costs_fewer_outer_iterations() -> None:
+    """SIMPLER converges the same Newton solve to the same flow, in fewer outer GMRES iterations.
+
+    The pressure prediction changes only how ``M`` is assembled from its two inner solves, so it must
+    leave the converged field alone (a preconditioner never moves the root) while buying iterations --
+    which is the whole claim the prediction exists to make, and which cannot be checked at all while
+    the step is missing. Cross-checked against the mass-scaled Schur, since the prediction's derivation
+    assumes a Schur of the form it assembles.
+    """
+    asm = _cavity(16)
+    triangular = BlockPreconditioner.build(asm, schur_scaling="msimple").factory()
+    simpler = BlockPreconditioner.build(
+        asm, schur_scaling="msimple", composition="simpler"
+    ).factory()
+
+    state = asm.initial_state()
+    r = asm.residual(state)
+
+    def jvp(v):
+        return jax.jvp(asm.residual, (state,), (v,))[1]
+
+    def count(precond):
+        m = precond(state)
+        op = lx.FunctionLinearOperator(lambda x: m(jvp(x)), jax.ShapeDtypeStruct(r.shape, r.dtype))
+        sol = lx.linear_solve(op, m(-r), solver=lx.GMRES(rtol=1e-8, atol=1e-8))
+        return int(sol.stats["num_steps"])
+
+    assert count(simpler) < count(triangular)
+
+    phi_triangular, phi_simpler = asm.initial_state(), asm.initial_state()
+    for _ in range(8):
+        phi_triangular = newton_step(asm.residual, phi_triangular, preconditioner=triangular)
+        phi_simpler = newton_step(asm.residual, phi_simpler, preconditioner=simpler)
+    assert float(jnp.linalg.norm(asm.residual(phi_simpler))) < 1e-8
+    assert jnp.allclose(phi_triangular, phi_simpler, atol=1e-6)
+
+
 def _preconditioned_count(asm):
     return _newton_linear_solve(asm, asm.initial_state(), preconditioned=True)[0]
 
@@ -177,7 +214,7 @@ def _dense_schur_preconditioner(assembler, state, scaling):
     schur_a_p = (
         a_p
         if block.schur_mass_diagonal is None
-        else block.schur_mass_diagonal / block._msimpler_scale(state)
+        else block.schur_mass_diagonal / block._mass_scale(state)
     )
     solve = block.schur.apply(schur_a_p, FlowBlocks.of(assembler, state))
     n_cells = assembler.mesh.n_cells
@@ -220,10 +257,10 @@ def test_stabilized_lsc_beats_the_scaled_laplacian_schur() -> None:
         scaling: np.linalg.norm(
             identity - schur @ _dense_schur_preconditioner(assembler, state, scaling), 2
         )
-        for scaling in ("simple", "msimpler", "lsc")
+        for scaling in ("simple", "msimple", "lsc")
     }
     assert errors["lsc"] < errors["simple"]
-    assert errors["lsc"] < errors["msimpler"]
+    assert errors["lsc"] < errors["msimple"]
 
 
 def test_stabilized_lsc_solves_the_saddle_system() -> None:

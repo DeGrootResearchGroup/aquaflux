@@ -194,6 +194,11 @@ object that is deliberately not differentiated, and the solve then fails with a 
 error.
 ```
 
+That is enough for a flow solve that converges. [Preconditioning](preconditioning.md) covers
+the rest: what to change when it does not, the options on
+{class}`~aquaflux.flow.BlockPreconditioner`, the preconditioners for scalar transport and for
+a coupled flow-plus-turbulence system, and how to keep one from going stale over a long run.
+
 ## Gradients through the converged state
 
 The point of solving in JAX is that the answer is differentiable. It would be ruinous to get

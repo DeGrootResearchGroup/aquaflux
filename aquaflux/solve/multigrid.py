@@ -1772,10 +1772,17 @@ def build_convection_hierarchy(
     )
 
 
-def _apply_block_inverse(level: _SparseLevel, vector: jnp.ndarray) -> jnp.ndarray:
-    """Apply the per-cell block inverse to a field-major vector: reshape, contract per cell, flatten."""
-    per_cell = vector.reshape(level.block_size, -1).T  # (n_cells, block_size)
-    return jnp.einsum("cij,cj->ci", level.block_inverse, per_cell).T.ravel()
+def _apply_block_inverse(
+    block_inverse: jnp.ndarray, block_size: int, vector: jnp.ndarray
+) -> jnp.ndarray:
+    """Apply the per-cell block inverse to a field-major vector: reshape, contract per cell, flatten.
+
+    Takes the two arrays it reads rather than a level, because both level families carry them and a
+    function typed for one of them could not serve the other without pretending an lAIR level were an
+    aggregation level.
+    """
+    per_cell = vector.reshape(block_size, -1).T  # (n_cells, block_size)
+    return jnp.einsum("cij,cj->ci", block_inverse, per_cell).T.ravel()
 
 
 def _jacobi_smooth(
@@ -1817,7 +1824,9 @@ def _jacobi_smooth(
             x = x + alpha * level.inv_diagonal * (b - _operator_matvec(level, x))
         return x
     for _ in range(sweeps):
-        x = x + alpha * _apply_block_inverse(level, b - _operator_matvec(level, x))
+        x = x + alpha * _apply_block_inverse(
+            level.block_inverse, level.block_size, b - _operator_matvec(level, x)
+        )
     return x
 
 
@@ -1851,7 +1860,7 @@ def _jacobi_smooth_zero(
         # than by two separately-evaluated (if mathematically equal) divisions.
         x = alpha * level.inv_diagonal * b
     else:
-        x = alpha * _apply_block_inverse(level, b)
+        x = alpha * _apply_block_inverse(level.block_inverse, level.block_size, b)
     return _jacobi_smooth(level, b, x, sweeps - 1, omega, spectral_damping)
 
 
@@ -1923,7 +1932,9 @@ def convection_multigrid_solve(
 # aggregation is not (Manteuffel, Ruge & Southworth, SISC 2018; Southworth et al.).
 #
 # lAIR (local AIR) approximates ``A_cf A_ff⁻¹`` by a **local** solve per C-point: over the F-neighbours
-# within a few steps, solve ``A_ff[N,N]^T z = -A[g, N]^T`` for the restriction weights. Interpolation is
+# within a few steps **of the strength graph** -- not of the operator's full sparsity pattern, which is
+# what keeps the coarse operators sparse and the local systems small -- solve
+# ``A_ff[N,N]^T z = -A[g, N]^T`` for the restriction weights. Interpolation is
 # the cheap ``one-point`` rule (each F-point takes its strongest C-neighbour); the smoother is FC-Jacobi
 # (a few F-point sweeps then a C-point sweep) — the F-relaxation is what makes it work for advection. The
 # whole setup is integer/sparse graph work done once off the jit path in scipy/numpy; the apply is
@@ -1940,9 +1951,11 @@ class _AirLevel(eqx.Module):
 
     Split static-index / dynamic-value on the same rule as :class:`_SparseLevel` (only the two counts
     that size a matvec are static). Note the **refreshability caveat**: unlike the aggregation path,
-    lAIR's coarsening reads operator *values* (:func:`_strength_classical`), so re-deriving it at a new
-    operator can legitimately change the C/F split and every shape — a reduction hierarchy is therefore
-    **not** guaranteed refreshable on a fixed structure the way an aggregation one is.
+    lAIR's coarsening reads operator *values* (:func:`_strength_classical`, which decides both the C/F
+    split and the restriction's neighbourhoods), so re-deriving it at a new operator can legitimately
+    change every shape — a reduction hierarchy is therefore **not** guaranteed refreshable on a fixed
+    structure the way an aggregation one is. :func:`refresh_air_hierarchy` gets one anyway by reusing
+    the frozen structure rather than re-deriving it.
     """
 
     n: int = eqx.field(static=True)  # cells at this level (sizes the matvec output)
@@ -1958,12 +1971,27 @@ class _AirLevel(eqx.Module):
     p_val: jnp.ndarray | None  # (pnnz,) prolongation value
     coarse_inv: jnp.ndarray | None  # dense inverse (coarsest level only); None otherwise
     n_coarse: int = eqx.field(static=True)  # next-coarser cell count (0 on coarsest)
+    block_size: int = eqx.field(static=True, default=1)  # fields per cell (1 = a scalar level)
+    # (n_cells, b, b) inverse of each cell's own block, or None on a scalar level. A point smoother
+    # discards the within-cell coupling between fields, which on a coupled scalar pair exceeds the
+    # diagonal itself -- so a multi-field level neither smooths nor reliably contracts without this.
+    block_inverse: jnp.ndarray | None = None
     # `1.0 / diagonal`, derived in `__post_init__` rather than at every FC-Jacobi sweep -- see
     # `_SparseLevel.inv_diagonal`, the same reasoning.
     inv_diagonal: jnp.ndarray = None  # (n,) 1.0 / diagonal
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "inv_diagonal", 1.0 / self.diagonal)
+        # On a block level the smoother reads `block_inverse` and never this, and the scalar diagonal it
+        # would invert is not required to be nonzero there (only the cell block must be invertible), so
+        # taking the reciprocal could store an infinity nothing reads. Left at zero instead, which is
+        # inert and does not look like a value.
+        object.__setattr__(
+            self,
+            "inv_diagonal",
+            jnp.zeros_like(self.diagonal)
+            if self.block_inverse is not None
+            else 1.0 / self.diagonal,
+        )
 
 
 class AirHierarchy(eqx.Module):
@@ -2044,56 +2072,200 @@ def _coarse_index(split: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return coarse, index
 
 
-def _one_point_interpolation(a: sp.csr_matrix, split: np.ndarray) -> sp.csr_matrix:
-    """One-point interpolation ``P``: each F-point takes its strongest C-neighbour; C-points injected."""
-    a = a.tocsr()
-    n = a.shape[0]
-    coarse, coarse_index = _coarse_index(split)
-    abs_a = a.copy()
-    abs_a.data = np.abs(abs_a.data)
-    rows: list[int] = []
-    cols: list[int] = []
-    vals: list[float] = []
-    for i in range(n):
-        if split[i] == 1:
-            rows.append(i)
-            cols.append(int(coarse_index[i]))
-            vals.append(1.0)
-            continue
-        s, e = abs_a.indptr[i], abs_a.indptr[i + 1]
-        ci, vi = abs_a.indices[s:e], abs_a.data[s:e]
-        c_neighbour = (split[ci] == 1) & (ci != i)
-        if c_neighbour.any():
-            j = ci[c_neighbour][np.argmax(vi[c_neighbour])]
-            rows.append(i)
-            cols.append(int(coarse_index[j]))
-            vals.append(1.0)  # an F-point with no C-neighbour interpolates nothing (zero row)
-    return sp.csr_matrix((vals, (rows, cols)), shape=(n, len(coarse)))
+def _one_point_interpolation(
+    graph: sp.csr_matrix, split: np.ndarray, block_size: int = 1
+) -> sp.csr_matrix:
+    """One-point interpolation ``P``: each F-point takes its strongest C-neighbour; C-points injected.
 
-
-def _lair_restriction(a: sp.csr_matrix, split: np.ndarray, degree: int) -> sp.csr_matrix:
-    """lAIR restriction ``R``: per C-point, a local approximate-ideal solve over its F-neighbourhood.
-
-    The ideal restriction row for coarse point ``g`` solves ``R_g A_ff = -A[g, F]``; localised to the
-    F-points ``N`` within ``degree`` steps of ``g`` this is the small dense solve ``A_ff[N,N]^T z =
-    -A[g, N]^T``, with the identity entry ``R[g, g] = 1``.
+    With ``block_size > 1`` the decision is per **cell** and ``graph`` is the cell graph
+    (:func:`_cell_graph`), so a cell's whole set of unknowns interpolates from one coarse cell — and each
+    field rides its own coarse unknown, which is what keeps the coarse operator a block operator of the
+    same size and lets the recursion coarsen it again. Choosing per degree of freedom instead is the
+    field-blind failure: it can interpolate one field of a cell from a different field of another.
     """
-    a = a.tocsr()
-    n = a.shape[0]
+    graph = graph.tocsr()
+    n_points = graph.shape[0]
     coarse, coarse_index = _coarse_index(split)
-    fine = split == 0
-    indptr, indices = a.indptr, a.indices
+    n_coarse = len(coarse)
+    magnitude = graph.copy()
+    magnitude.data = np.abs(magnitude.data)
+    fields = np.arange(block_size)
     rows: list[int] = []
     cols: list[int] = []
     vals: list[float] = []
-    for g in coarse:
-        ci = int(coarse_index[g])
-        rows.append(ci)
-        cols.append(int(g))
-        vals.append(1.0)  # identity on the C-point itself
+    for i in range(n_points):
+        if split[i] == 1:
+            target = int(coarse_index[i])
+        else:
+            start, stop = magnitude.indptr[i], magnitude.indptr[i + 1]
+            neighbours, weight = magnitude.indices[start:stop], magnitude.data[start:stop]
+            c_neighbour = (split[neighbours] == 1) & (neighbours != i)
+            if not c_neighbour.any():
+                continue  # no C-neighbour: interpolates nothing (a zero row)
+            target = int(coarse_index[neighbours[c_neighbour][np.argmax(weight[c_neighbour])]])
+        rows.extend((fields * n_points + i).tolist())
+        cols.extend((fields * n_coarse + target).tolist())
+        vals.extend([1.0] * block_size)
+    return sp.csr_matrix((vals, (rows, cols)), shape=(n_points * block_size, n_coarse * block_size))
+
+
+#: Most a Galerkin coarse operator may grow, in stored entries per row, against the level above it.
+#: A reduction hierarchy's coarse operator inherits the product of the restriction and prolongation
+#: patterns, so an over-wide restriction neighbourhood does not cost once -- it compounds down the
+#: hierarchy until the local systems the next level solves are no longer local. Measured on a
+#: convection-dominated operator with a distance-2 pattern, a neighbourhood walked over the full
+#: sparsity pattern grew the entries per row 45 -> 319 -> 856 over three levels (growth factors 7.1
+#: and 2.7), against 45 -> 62 -> 78 for the strong-connection walk (1.4 and 1.3). Anything between is
+#: unclaimed by either, so the threshold does not need to be finely placed.
+_MAX_COARSENING_GROWTH = 4.0
+
+
+def _require_bounded_coarsening(
+    fine: sp.csr_matrix, coarse: sp.csr_matrix, max_coarse: int, where: str
+) -> None:
+    """Reject a Galerkin coarse operator that densified, before the hierarchy pays for it again.
+
+    The failure this catches does not announce itself: the build simply stops finishing, because the
+    cost is in dense local solves whose size grows with the fill rather than in anything that raises.
+    Checked per level and before the next one is coarsened, so a hierarchy that would compound fails in
+    seconds instead of running for as long as anyone is willing to wait.
+
+    A level at or below ``max_coarse`` is solved directly rather than coarsened again, so its density
+    compounds into nothing and is not checked -- a small bottom level is routinely near-dense and that
+    is not a defect.
+
+    Parameters
+    ----------
+    fine, coarse : scipy.sparse.csr_matrix
+        The level operator and the ``R A P`` operator derived from it.
+    max_coarse : int
+        The size at or below which a level is solved directly rather than coarsened further.
+    where : str
+        Caller name (with level index), included in the error message.
+
+    Raises
+    ------
+    ValueError
+        If ``coarse`` stores more than :data:`_MAX_COARSENING_GROWTH` times as many entries per row as
+        ``fine`` while still being large enough to coarsen again.
+    """
+    if coarse.shape[0] <= max_coarse or not fine.shape[0] or not coarse.shape[0]:
+        return
+    before = fine.nnz / fine.shape[0]
+    after = coarse.nnz / coarse.shape[0]
+    if after > _MAX_COARSENING_GROWTH * before:
+        raise ValueError(
+            f"{where}: the coarse operator stores {after:.0f} entries per row against the level "
+            f"above it storing {before:.0f} ({after / before:.1f}x), so this hierarchy densifies as "
+            f"it coarsens and the local restriction solves below here would not stay local. Reduce "
+            f"`degree`, or raise `theta` so fewer connections count as strong."
+        )
+
+
+def _galerkin_coarse(
+    restriction: sp.csr_matrix, a: sp.csr_matrix, prolongation: sp.csr_matrix
+) -> sp.csr_matrix:
+    """``R A P``, stored on a pattern that depends on the three *patterns* and not on their values.
+
+    ``scipy`` drops a product entry that comes out exactly zero, and a reduction hierarchy produces
+    those **structurally**: a degree-``d`` neighbourhood can contain an F-point that row ``g`` does not
+    couple to at all, and the local solve then returns exactly zero for it. Which entries that hits
+    moves with the operator's values, so the same mesh at a developed state yields a coarse operator
+    storing a slightly different number of entries — a different jit signature, on the one path whose
+    entire purpose is to keep the signature fixed (:func:`refresh_air_hierarchy`). Measured on a
+    46080-row convection-dominated operator, 14 exactly-zero restriction weights moved the level-1
+    entry count by 160, which is enough to make a legitimate refresh fail its own structure check.
+
+    The pattern is therefore taken from the same triple product over matrices of **ones**, where no
+    cancellation is possible, and the real values are scattered into it. Entries the real product
+    leaves empty stay as stored zeros, which is what keeps the shape stable.
+
+    Parameters
+    ----------
+    restriction, a, prolongation : scipy.sparse.csr_matrix
+        The restriction ``R``, the level operator ``A`` and the prolongation ``P``.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        The coarse operator, shape ``(R.shape[0], P.shape[1])``.
+    """
+
+    def ones_like(matrix: sp.csr_matrix) -> sp.csr_matrix:
+        skeleton = matrix.tocsr(copy=True)
+        skeleton.data = np.ones_like(skeleton.data)
+        return skeleton
+
+    coarse = (restriction @ a @ prolongation).tocsr()
+    pattern = (ones_like(restriction) @ ones_like(a) @ ones_like(prolongation)).tocsr()
+    coarse.sort_indices()
+    pattern.sort_indices()
+    columns = pattern.shape[1]
+
+    # One ascending key per stored entry on each side, so the (subset) real pattern locates into the
+    # structural one with a single search rather than a per-row merge.
+    def keys(matrix: sp.csr_matrix) -> np.ndarray:
+        rows = np.repeat(np.arange(matrix.shape[0]), np.diff(matrix.indptr))
+        return rows.astype(np.int64) * columns + matrix.indices
+
+    pattern_keys, coarse_keys = keys(pattern), keys(coarse)
+    # Clipped before the lookup: a key past the end of `pattern_keys` would index out of range, and the
+    # comparison below is what turns "not found" into the stated invariant rather than an IndexError.
+    position = np.searchsorted(pattern_keys, coarse_keys).clip(max=max(pattern.nnz - 1, 0))
+    if coarse_keys.size and not np.array_equal(pattern_keys[position], coarse_keys):
+        raise AssertionError(
+            "_galerkin_coarse: the coarse operator holds an entry the structural product does not, "
+            "which cannot happen for a product of the same three patterns."
+        )
+    data = np.zeros(pattern.nnz, dtype=coarse.data.dtype)
+    data[position] = coarse.data
+    return sp.csr_matrix((data, pattern.indices, pattern.indptr), shape=pattern.shape)
+
+
+def _restriction_neighbourhoods(
+    strength: sp.csr_matrix, split: np.ndarray, degree: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """The F-points each C-point's local solve runs over, as a ragged ``(offsets, f_points)`` pair.
+
+    Walked over the **strength graph**, not over the operator's full sparsity pattern, and that
+    distinction decides whether the method is usable at all rather than being a matter of taste. Every
+    F-point admitted here becomes a stored column of that C-point's restriction row, and the Galerkin
+    coarse operator ``R A P`` inherits the product of those patterns — so neighbourhoods taken over the
+    full pattern make each coarse level denser than the one above it, compounding until the local
+    systems hold hundreds of unknowns and their ``O(|N|^3)`` solves are no longer local in any useful
+    sense. Restricting the walk to strong connections bounds that fill instead, which is what
+    :func:`_require_bounded_coarsening` asserts and what Manteuffel, Ruge & Southworth (SISC 2018)
+    specify for this reason.
+
+    A degree-``d`` walk steps from the C-point to a strongly-connected F-point and thereafter only from
+    F-point to F-point, so the paths admitted are ``F-F-…-C``. A path through another C-point is not
+    followed: the quantity being approximated is ``A_cf A_ff^-1``, which contains no such term.
+
+    Parameters
+    ----------
+    strength : scipy.sparse.csr_matrix
+        The strength graph, shape ``(n, n)``: row ``i`` marks the connections ``i`` depends on strongly
+        (:func:`_strength_classical`).
+    split : np.ndarray
+        C/F splitting, shape ``(n,)`` — ``1`` coarse, ``0`` fine.
+    degree : int
+        Neighbourhood radius, in strength-graph steps.
+
+    Returns
+    -------
+    tuple of np.ndarray
+        ``offsets``, shape ``(n_coarse + 1,)``, and ``f_points``, shape ``(offsets[-1],)``: the
+        neighbourhood of the ``k``-th coarse point is ``f_points[offsets[k]:offsets[k + 1]]``, ascending.
+    """
+    coarse, _ = _coarse_index(split)
+    fine = split == 0
+    indptr, indices = strength.indptr, strength.indices
+    counts = np.zeros(len(coarse), dtype=np.int64)
+    found: list[np.ndarray] = []
+    for position, g in enumerate(coarse):
         neighbourhood: set[int] = set()
         frontier = {int(g)}
-        for _ in range(degree):  # F-points within `degree` steps of g
+        for _ in range(degree):
             nxt: set[int] = set()
             for u in frontier:
                 for v in indices[indptr[u] : indptr[u + 1]]:
@@ -2102,23 +2274,143 @@ def _lair_restriction(a: sp.csr_matrix, split: np.ndarray, degree: int) -> sp.cs
                         neighbourhood.add(v)
                         nxt.add(v)
             frontier = nxt
-        if not neighbourhood:
+        found.append(np.array(sorted(neighbourhood), dtype=np.int64))
+        counts[position] = len(neighbourhood)
+    offsets = np.concatenate(([0], np.cumsum(counts)))
+    f_points = np.concatenate(found) if found else np.zeros(0, dtype=np.int64)
+    return offsets, f_points
+
+
+def _restriction_over_neighbourhoods(
+    a: sp.csr_matrix,
+    split: np.ndarray,
+    offsets: np.ndarray,
+    f_points: np.ndarray,
+    block_size: int = 1,
+) -> sp.csr_matrix:
+    """lAIR restriction ``R`` over a **given** neighbourhood per C-point — the local solves alone.
+
+    The ideal restriction row for coarse point ``g`` solves ``R_g A_ff = -A[g, F]``; localised to a
+    neighbourhood ``N`` that is the small dense solve ``A_ff[N,N]^T z = -A[g, N]^T``, with the identity
+    entry ``R[g, g] = 1``.
+
+    Kept separate from the neighbourhood walk because a refresh reuses the pattern it was built with
+    rather than re-deriving it (:func:`refresh_air_hierarchy`): the walk reads operator *values*
+    through the strength graph, so re-walking at a developed operator would move every shape below the
+    first level and force a recompile of the solve the preconditioner accelerates.
+
+    A singular local system is solved in the least-squares sense rather than raised on. Such systems
+    are rare, and generally signal a poor coarsening on the finer level rather than a bad
+    neighbourhood; the minimum-norm solution is a valid restriction row where no exact one exists.
+
+    Parameters
+    ----------
+    a : scipy.sparse matrix
+        The operator whose ideal restriction is approximated, shape ``(n, n)``.
+    split : np.ndarray
+        C/F splitting, shape ``(n,)`` — ``1`` coarse, ``0`` fine.
+    offsets, f_points : np.ndarray
+        Per-C-point neighbourhoods, as returned by :func:`_restriction_neighbourhoods`.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        The restriction ``R``, shape ``(n_coarse, n)``.
+    """
+    a = a.tocsr()
+    n = a.shape[0]
+    n_cells = n // block_size
+    coarse, coarse_index = _coarse_index(split)
+    n_coarse = len(coarse)
+    fields = np.arange(block_size)
+    rows: list[int] = []
+    cols: list[int] = []
+    vals: list[float] = []
+    for position, g in enumerate(coarse):
+        ci = int(coarse_index[g])
+        # Field-major on both sides: a cell's degrees of freedom are strided by the cell count, and a
+        # coarse cell carries one unknown per field so the coarse operator keeps this block size.
+        g_dofs = fields * n_cells + g
+        c_dofs = fields * n_coarse + ci
+        rows.extend(c_dofs.tolist())
+        cols.extend(g_dofs.tolist())
+        vals.extend([1.0] * block_size)  # identity on the C-cell's own unknowns
+        cells = f_points[offsets[position] : offsets[position + 1]]
+        if not cells.size:
             continue
-        f_nbrs = np.array(sorted(neighbourhood))
-        a_ff = a[np.ix_(f_nbrs, f_nbrs)].toarray()
-        rhs = np.asarray(a[g, f_nbrs].todense()).ravel()
+        f_dofs = (fields[:, None] * n_cells + cells[None, :]).ravel()
+        a_ff = a[np.ix_(f_dofs, f_dofs)].toarray()
+        # One right-hand side per field of the C-cell, solved together: the block form of the ideal
+        # restriction row, which is what keeps the k<->omega coupling inside the local solve instead of
+        # approximating it away outside.
+        rhs = np.asarray(a[np.ix_(g_dofs, f_dofs)].todense())
         try:
-            z = np.linalg.solve(a_ff.T, -rhs)
+            z = np.linalg.solve(a_ff.T, -rhs.T)
         except np.linalg.LinAlgError:
-            z = np.linalg.lstsq(a_ff.T, -rhs, rcond=None)[0]
-        rows.extend([ci] * len(f_nbrs))
-        cols.extend(f_nbrs.tolist())
-        vals.extend(z.tolist())
-    return sp.csr_matrix((vals, (rows, cols)), shape=(len(coarse), n))
+            z = np.linalg.lstsq(a_ff.T, -rhs.T, rcond=None)[0]
+        for field in range(block_size):
+            rows.extend([int(c_dofs[field])] * f_dofs.size)
+            cols.extend(f_dofs.tolist())
+            vals.extend(z[:, field].tolist())
+    return sp.csr_matrix((vals, (rows, cols)), shape=(n_coarse * block_size, n))
 
 
-def _air_level(a: sp.csr_matrix, split: np.ndarray, restriction, prolongation) -> _AirLevel:
-    """Freeze a scipy operator, its C/F masks, and (optional) restriction/prolongation into JAX arrays."""
+def _lair_restriction(
+    a: sp.csr_matrix,
+    split: np.ndarray,
+    degree: int,
+    strength: sp.csr_matrix,
+    block_size: int = 1,
+) -> sp.csr_matrix:
+    """lAIR restriction ``R``: per C-point, a local approximate-ideal solve over its F-neighbourhood.
+
+    The walk (:func:`_restriction_neighbourhoods`) followed by the solves
+    (:func:`_restriction_over_neighbourhoods`). ``strength`` is taken as an argument rather than
+    re-derived because the caller has already built it to choose the coarse points, and the two must
+    agree: a restriction walked over a different strength graph than the one that chose the C/F split
+    is not this method.
+    """
+    offsets, f_points = _restriction_neighbourhoods(strength, split, degree)
+    return _restriction_over_neighbourhoods(a, split, offsets, f_points, block_size)
+
+
+def _frozen_neighbourhoods(level: _AirLevel) -> tuple[np.ndarray, np.ndarray]:
+    """Recover a built level's restriction neighbourhoods from its own stored sparsity.
+
+    Row ``k`` of ``R`` stores exactly ``{g} ∪ N`` — the identity entry on its C-point ``g``, plus that
+    point's F-neighbourhood — so dropping the single coarse entry from each row returns the walk's
+    output without repeating it. That is what makes a refresh structure-preserving **by construction**
+    rather than by a check after the fact: the pattern is not re-derived, so it cannot move.
+    """
+    block_size = level.block_size
+    n_cells = level.n // block_size
+    n_coarse_cells = level.n_coarse // block_size
+    row = np.asarray(level.r_row)
+    column = np.asarray(level.r_col)
+    is_fine = np.asarray(level.f_mask)[column] == 1.0
+    # One row per coarse CELL is enough: the block restriction stores the same neighbourhood on each of
+    # a C-cell's field rows, and the walk that produced it decided per cell. Field-major, so the first
+    # `n_coarse_cells` rows are field 0.
+    keep = is_fine & (row < n_coarse_cells)
+    row, cells = row[keep], column[keep] % n_cells
+    counts = np.zeros(n_coarse_cells, dtype=np.int64)
+    found: list[np.ndarray] = []
+    for ci in range(n_coarse_cells):
+        members = np.unique(cells[row == ci])
+        found.append(members)
+        counts[ci] = members.size
+    offsets = np.concatenate(([0], np.cumsum(counts)))
+    return offsets, (np.concatenate(found) if found else np.zeros(0, dtype=np.int64))
+
+
+def _air_level(
+    a: sp.csr_matrix, split: np.ndarray, restriction, prolongation, block_size: int = 1
+) -> _AirLevel:
+    """Freeze a scipy operator, its C/F masks, and (optional) restriction/prolongation into JAX arrays.
+
+    ``split`` is per **cell**; the masks are per degree of freedom, and the layout is field-major, so a
+    cell mask tiles once per field to give the dof mask.
+    """
     coarsest = restriction is None
     r = None if coarsest else restriction.tocoo()
     p = None if coarsest else prolongation.tocoo()
@@ -2126,8 +2418,8 @@ def _air_level(a: sp.csr_matrix, split: np.ndarray, restriction, prolongation) -
         n=a.shape[0],
         operator=_CsrOperator.from_scipy(a),
         diagonal=jnp.asarray(a.diagonal()),
-        f_mask=jnp.asarray((split == 0).astype(np.float64)),
-        c_mask=jnp.asarray((split == 1).astype(np.float64)),
+        f_mask=jnp.asarray(np.tile((split == 0).astype(np.float64), block_size)),
+        c_mask=jnp.asarray(np.tile((split == 1).astype(np.float64), block_size)),
         r_row=None if coarsest else jnp.asarray(r.row),
         r_col=None if coarsest else jnp.asarray(r.col),
         r_val=None if coarsest else jnp.asarray(r.data),
@@ -2136,30 +2428,39 @@ def _air_level(a: sp.csr_matrix, split: np.ndarray, restriction, prolongation) -
         p_val=None if coarsest else jnp.asarray(p.data),
         coarse_inv=jnp.asarray(_dense_inverse(a)) if coarsest else None,
         n_coarse=0 if coarsest else prolongation.shape[1],
+        block_size=block_size,
+        block_inverse=(
+            None
+            if block_size == 1
+            else jnp.asarray(_cell_block_inverse(a, block_size, "build_air_hierarchy"))
+        ),
     )
 
 
-def refresh_air_hierarchy(
-    hierarchy: AirHierarchy, a: sp.csr_matrix, *, degree: int = 2
-) -> AirHierarchy:
+def refresh_air_hierarchy(hierarchy: AirHierarchy, a: sp.csr_matrix) -> AirHierarchy:
     """Re-derive an lAIR hierarchy's **values** at a new operator, reusing its frozen coarsening.
 
     A frozen preconditioner goes stale as the flow develops, and re-freezing it at the current state is
     a large win on the scalar transport blocks. Simply calling :func:`build_air_hierarchy` again would
-    work numerically but is a *different* hierarchy: lAIR's coarsening reads operator **values** (the
-    strength graph in :func:`_strength_classical`, and the strongest-C-neighbour choice in
-    :func:`_one_point_interpolation`), so a rebuild generally changes the C/F split and every shape
-    below the first level or two — a new compilation signature, so the refreshed preconditioner would
-    force a recompile of the solve it accelerates.
+    work numerically but is a *different* hierarchy: lAIR's coarsening reads operator **values** — the
+    strength graph in :func:`_strength_classical`, which decides both the C/F split and the
+    restriction's F-neighbourhoods, and the strongest-C-neighbour choice in
+    :func:`_one_point_interpolation` — so a rebuild generally changes every shape below the first level
+    or two, a new compilation signature, and the refreshed preconditioner would force a recompile of
+    the solve it accelerates.
 
     This instead holds the **structural** decisions fixed and recomputes only the numbers: each level
-    reuses its stored C/F split and its stored prolongation, and re-solves the local approximate-ideal
-    restriction against ``a``. That is legitimate because *any* valid C/F split gives a valid
-    preconditioner — freezing the reference's split trades a possibly better-adapted coarse space for a
-    refresh that costs no recompile. The restriction's sparsity depends only on the split and on ``a``'s
-    *pattern* (the degree-``d`` neighbourhood walk), both unchanged, so every level's shapes — and hence
-    the Galerkin ``R A P`` patterns below it — are invariant by construction; this is checked before
-    returning.
+    reuses its stored C/F split, its stored prolongation, and the F-neighbourhoods its stored
+    restriction was built over (:func:`_frozen_neighbourhoods`), re-solving only the local
+    approximate-ideal systems against ``a``. That is legitimate because *any* valid C/F split and any
+    valid neighbourhood give a valid preconditioner — freezing the choices made at the build state
+    trades a possibly better-adapted coarse space for a refresh that costs no recompile. Because nothing
+    structural is re-derived, every level's shapes — and hence the Galerkin ``R A P`` patterns below
+    them — are invariant by construction; this is checked before returning as well.
+
+    Note the neighbourhood is reused rather than re-walked for the same reason the split is: the walk
+    runs over the strength graph, which reads operator **values**, so re-walking at a developed
+    operator would generally move every shape below the first level.
 
     Parameters
     ----------
@@ -2167,9 +2468,9 @@ def refresh_air_hierarchy(
         The hierarchy whose coarsening is reused (built by :func:`build_air_hierarchy`).
     a : scipy.sparse matrix
         The new fine operator. Must have the same sparsity pattern as the one ``hierarchy`` was built
-        from (same mesh graph), which is what makes the structure invariant.
-    degree : int
-        The restriction neighbourhood degree; must match the one used to build ``hierarchy``.
+        from (same mesh graph), which is what makes the structure invariant. The neighbourhood degree
+        is not a parameter here — it is carried by the frozen restriction pattern, so a refresh cannot
+        disagree with its build about it.
 
     Returns
     -------
@@ -2180,7 +2481,7 @@ def refresh_air_hierarchy(
     ------
     ValueError
         If the refreshed structure does not match ``hierarchy`` — which means the assumption above was
-        violated (a different mesh graph, or a mismatched ``degree``).
+        violated (a different mesh graph).
     """
     a = a.tocsr()
     if a.shape[0] != hierarchy.levels[0].n:
@@ -2191,13 +2492,20 @@ def refresh_air_hierarchy(
         )
     levels: list[_AirLevel] = []
     for index, level in enumerate(hierarchy.levels):
-        _require_positive_diagonal(a.diagonal(), f"refresh_air_hierarchy (level {index})")
+        if level.block_size == 1:
+            _require_positive_diagonal(a.diagonal(), f"refresh_air_hierarchy (level {index})")
+        else:
+            _cell_block_inverse(a, level.block_size, f"refresh_air_hierarchy (level {index})")
         if level.r_row is None:  # coarsest: a direct solve, no transfers to rebuild
-            levels.append(_air_level(a, np.ones(a.shape[0], dtype=np.int64), None, None))
+            cells = a.shape[0] // level.block_size
+            levels.append(
+                _air_level(a, np.ones(cells, dtype=np.int64), None, None, level.block_size)
+            )
             break
         # Reuse the frozen coarsening: the C/F split (from the stored masks) and the prolongation
         # (whose column choice is value-dependent, so it must be carried over rather than re-derived).
-        split = np.asarray(level.c_mask).astype(np.int64)
+        # Per CELL, from the dof mask its own level stores (field-major, so the first n_cells entries).
+        split = np.asarray(level.c_mask).astype(np.int64)[: level.n // level.block_size]
         prolongation = sp.csr_matrix(
             (
                 np.asarray(level.p_val),
@@ -2205,9 +2513,14 @@ def refresh_air_hierarchy(
             ),
             shape=(level.n, level.n_coarse),
         )
-        restriction = _lair_restriction(a, split, degree)  # same pattern, values from `a`
-        levels.append(_air_level(a, split, restriction, prolongation))
-        a = (restriction @ a @ prolongation).tocsr()
+        # The frozen pattern, re-solved at `a` -- see `_frozen_neighbourhoods`. Re-walking would read
+        # `a`'s values through a fresh strength graph and could move every shape below this level.
+        offsets, f_points = _frozen_neighbourhoods(level)
+        restriction = _restriction_over_neighbourhoods(
+            a, split, offsets, f_points, level.block_size
+        )
+        levels.append(_air_level(a, split, restriction, prolongation, level.block_size))
+        a = _galerkin_coarse(restriction, a, prolongation)
 
     refreshed = AirHierarchy(tuple(levels))
     _require_matching_structure(hierarchy, refreshed, "refresh_air_hierarchy")
@@ -2220,7 +2533,7 @@ def _require_matching_structure(original, refreshed, where: str) -> None:
         raise ValueError(
             f"{where}: refreshed hierarchy has {len(refreshed.levels)} levels, not "
             f"{len(original.levels)}. The operator's sparsity pattern must match the one the "
-            "hierarchy was built from (same mesh graph), and `degree` must match the build."
+            "hierarchy was built from (same mesh graph)."
         )
     for i, (old, new) in enumerate(zip(original.levels, refreshed.levels, strict=True)):
         if (old.n, old.n_coarse) != (
@@ -2232,7 +2545,7 @@ def _require_matching_structure(original, refreshed, where: str) -> None:
                 f"{(old.n, old.n_coarse, old.operator.data.shape[0])} -> "
                 f"{(new.n, new.n_coarse, new.operator.data.shape[0])}. The refreshed values would be a new "
                 "compilation signature, defeating the purpose; check that `a` has the same sparsity "
-                "pattern and that `degree` matches the build."
+                "pattern as the operator the hierarchy was built from."
             )
 
 
@@ -2240,9 +2553,11 @@ def build_air_hierarchy(
     a: sp.csr_matrix,
     *,
     theta: float = 0.25,
+    restriction_theta: float | None = None,
     degree: int = 2,
     max_coarse: int = 20,
     max_levels: int = 20,
+    block_size: int = 1,
 ) -> AirHierarchy:
     """Build the lAIR hierarchy — call once, off the jit path (uses ``scipy.sparse`` / ``numpy``).
 
@@ -2252,35 +2567,95 @@ def build_air_hierarchy(
         The (nonsymmetric) fine operator, e.g. a frozen convection-diffusion momentum block.
     theta : float
         Classical strength-of-connection threshold in ``(0, 1)`` for the C/F splitting.
+    restriction_theta : float, optional
+        The threshold for the restriction's F-neighbourhood walk
+        (:func:`_restriction_neighbourhoods`); ``theta`` when omitted.
+
+        **This is the accuracy-against-cost knob of the method, and the trade is monotone**: every
+        connection admitted makes the local solve a better approximation of the ideal restriction and
+        makes the coarse operator denser, and the density compounds down the hierarchy. Measured on a
+        two-dimensional convection-diffusion operator at cell Peclet ~40, lowering it from ``theta`` to
+        ``0.05`` took the per-cycle contraction from ``0.17`` to ``0.09``; on a three-dimensional
+        operator storing 47 entries per row, the same change took the peak coarse-level density from 86
+        entries per row to 296 and the setup from 3.9 s to 5.9 s. Lower still and the hierarchy
+        densifies until :func:`_require_bounded_coarsening` stops it.
+
+        ``0.0`` admits every stored connection, which walks the operator's full sparsity pattern. That
+        is the most accurate restriction available and is affordable only on an operator that is
+        already sparse: on the three-dimensional operator above it does not build at all.
     degree : int
-        The F-neighbourhood radius (in graph steps) of the local approximate-ideal restriction solves.
+        The F-neighbourhood radius (in strength-graph steps) of the local approximate-ideal restriction
+        solves.
     max_coarse : int
         Stop coarsening once a level has at most this many cells (solved directly there).
     max_levels : int
         Hard cap on the number of levels.
+    block_size : int
+        Fields per cell, for a multi-field operator in **field-major** layout (degree of freedom
+        ``(cell i, field f)`` at ``f * n_cells + i``). ``1`` (default) is the scalar hierarchy and is
+        byte-identical to it.
+
+        Above one, three things change together and none suffices alone. The C/F splitting runs on the
+        **cell** graph, so a cell is entirely coarse or entirely fine — splitting per degree of freedom
+        is field-blind and can put one field of a cell on the coarse grid and another on the fine one.
+        The local approximate-ideal solve carries one right-hand side **per field**, so the within-cell
+        coupling stays inside it. And the FC-Jacobi smoother inverts each cell's own block rather than
+        the scalar diagonal, because on a coupled pair that coupling can exceed the diagonal, and a
+        point sweep discards it.
+
+        The third of those also relaxes what the operator must satisfy, which is the point on a true
+        Jacobian block: a scalar level needs a strictly positive diagonal, while a block level needs
+        only each cell block to be **invertible** — a block can be well conditioned with a negative
+        entry on its diagonal.
 
     Returns
     -------
     AirHierarchy
         Frozen finest-to-coarsest reduction-based levels for :func:`air_multigrid_solve`.
+
+    Raises
+    ------
+    ValueError
+        If the Galerkin recursion densifies past :data:`_MAX_COARSENING_GROWTH` — see
+        :func:`_require_bounded_coarsening`.
     """
     a = a.tocsr()
     levels: list[_AirLevel] = []
     while True:
         n = a.shape[0]
-        _require_positive_diagonal(a.diagonal(), f"build_air_hierarchy (level {len(levels)})")
+        n_cells = n // block_size
+        where = f"build_air_hierarchy (level {len(levels)})"
+        if block_size == 1:
+            _require_positive_diagonal(a.diagonal(), where)
+        else:
+            # The block analogue, and deliberately weaker: this needs each cell block invertible, not a
+            # positive scalar diagonal, which is what lets a block hierarchy stand on a true Jacobian
+            # slice that a point smoother's guard refuses.
+            _cell_block_inverse(a, block_size, where)
+        all_coarse = np.ones(n_cells, dtype=np.int64)
         if n <= max_coarse or len(levels) + 1 >= max_levels:
-            levels.append(_air_level(a, np.ones(n, dtype=np.int64), None, None))
+            levels.append(_air_level(a, all_coarse, None, None, block_size))
             break
-        split = _rs_split(_strength_classical(a, theta))
+        graph = a if block_size == 1 else _cell_graph(a, block_size)
+        strength = _strength_classical(graph, theta)
+        split = _rs_split(strength)
         n_coarse = int((split == 1).sum())
-        if n_coarse == 0 or n_coarse == n:  # degenerate coarsening -> solve here
-            levels.append(_air_level(a, np.ones(n, dtype=np.int64), None, None))
+        if n_coarse == 0 or n_coarse == n_cells:  # degenerate coarsening -> solve here
+            levels.append(_air_level(a, all_coarse, None, None, block_size))
             break
-        prolongation = _one_point_interpolation(a, split)
-        restriction = _lair_restriction(a, split, degree)
-        levels.append(_air_level(a, split, restriction, prolongation))
-        a = (restriction @ a @ prolongation).tocsr()  # Galerkin coarse operator R A P
+        prolongation = _one_point_interpolation(graph, split, block_size)
+        walk = (
+            strength
+            if restriction_theta is None or restriction_theta == theta
+            else _strength_classical(graph, restriction_theta)
+        )
+        restriction = _lair_restriction(a, split, degree, walk, block_size)
+        levels.append(_air_level(a, split, restriction, prolongation, block_size))
+        coarse = _galerkin_coarse(restriction, a, prolongation)
+        _require_bounded_coarsening(
+            a, coarse, max_coarse, f"build_air_hierarchy (level {len(levels) - 1})"
+        )
+        a = coarse
     return AirHierarchy(tuple(levels))
 
 
@@ -2293,6 +2668,19 @@ def _fc_jacobi(
     operator. The F-relaxation is the reduction-based smoother that suppresses the F-point error the
     ideal restriction is built to eliminate.
     """
+    if level.block_inverse is not None:
+        # Each cell's own block inverted, not its scalar diagonal: on a multi-field level the coupling
+        # between a cell's fields can exceed the diagonal, and a point sweep throws all of it away.
+        def relax(mask, vector):
+            return (
+                omega * mask * _apply_block_inverse(level.block_inverse, level.block_size, vector)
+            )
+
+        for _ in range(f_iters):
+            x = x + relax(level.f_mask, b - _operator_matvec(level, x))
+        for _ in range(c_iters):
+            x = x + relax(level.c_mask, b - _operator_matvec(level, x))
+        return x
     # `mask * inv_diagonal` is the same product on every sweep of its own loop -- `omega` is a
     # solve-time argument (not baked into the frozen level), so it is folded in here too, once per
     # call, rather than once per sweep.

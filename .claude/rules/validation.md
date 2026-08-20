@@ -83,13 +83,16 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
   safeguard on at all, and a march that meets the ratchet there has no way out of it.
   `pitzdaily_openfoam/compare.py` reaches it only because that case now uses the AMG builder; the
   symbol there is `K_POSITIVITY_FLOOR`, matching the sibling case so a future diff lines up.
-- **⚠️ WORSE THAN A KNOB GAP: the complete-LU builder marches with NO k-positivity
-  limiter AT ALL.** `coupled_amg_continuation` passes `step_limit=positive_k_limit(coupled, floor=…)`
-  **unconditionally**, so that arm always carries the safeguard; `coupled_lu_continuation`
-  calls the same `_monolithic_factor_step` tail without `step_limit` or
-  `step_projection`, which therefore default to `None`. That is a **behavioural** difference between the
-  arms, not a settings one, so an LU-versus-AMG march comparison is confounded until it is fixed — and
-  k positivity in 2 cells of 23040 was the rung-3 wall on the sibling case. The tail already accepts all
+- **✅ FIXED 2026-08-19 — this was a behavioural gap between the arms, and it was wider than recorded
+  here.** It said `coupled_lu_continuation` marched with no k-positivity limiter while
+  `coupled_amg_continuation` always carried it. True, and **three** of the four builders lacked it, not
+  one: `coupled_continuation` and `mass_flow_coupled_continuation` too, and even the AMG builder only
+  wired it on its dual-time branch. All four now route through `_coupled_step`, which passes
+  `step_limit=positive_k_limit(...)` on both branches;
+  `test_every_continuation_builder_installs_the_same_globalization` fails if one loses it. The confound
+  this warned about — an LU-versus-AMG comparison being between a guarded march and an unguarded one —
+  applied to every cross-builder comparison on record, so treat any of them with that in mind. The
+  original text follows, because the confound it names still applies to archived runs. The tail already accepts all
   four parameters (`refresh_on_cycles`, `inner_refresh`, `cycle_budget`, `step_limit`/`step_projection`);
   the LU builder simply does not forward them. `forward_rtol`/`restart`/`max_restarts` ARE reachable, via
   `forward_solver=`.
@@ -177,3 +180,33 @@ inside the process that computed it** — and the adjoint's operator is the Jaco
 the one operator a march never exercises, since the continuation ramps the shift and the preconditioner
 is additionally floored. Without a checkpoint, every question about the zero-shift operator costs a full
 re-march to ask. The `zero_shift_arms.py` / `zero_shift_adjoint.py` harnesses are the consumers.
+
+## ⚠️ THE SLOW TIER FAILS LOCALLY BUT NOT ON CI — an ENVIRONMENT difference (observed 2026-08-19)
+
+Three tests fail here with `ImplicitNewtonSolver did not converge`, **at `dd1ea73` itself** (verified by
+stashing all local work and re-running each one, not inferred) — while `main` is **green on GitHub**:
+
+- `tests/integration/test_coupled_amg.py::test_amg_solve_converges_and_matches_the_block_preconditioned_solve`
+- `tests/integration/test_coupled_amg.py::test_amg_adjoint_matches_finite_difference`
+- `tests/integration/test_coupled_field_split.py::test_the_split_continuation_converges_to_the_monolithic_fixed_point`
+
+So this is not a code defect — it is a **platform-dependent** one, and that is worse in one specific
+way: it makes the local slow tier useless as a gate without telling you. A branch that genuinely breaks
+something in that tier is indistinguishable from this baseline.
+
+**Known environment differences** (local against CI): Python **3.13 on arm64** here versus **3.11/3.12
+on x86_64 Linux** in CI (`.github/workflows/ci.yml` installs `.[test]`, unpinned beyond
+`requires-python >= 3.10`), hence different BLAS and different floating-point summation order.
+
+**The likely mechanism, stated as a hypothesis and NOT yet measured:** these solves are marginal against
+their `max_steps = 40` budget, and a platform-level difference in the last bits tips them over. That is
+the same shape as the constrained mass-flow adjoint, where a **6.6e-12** relative difference in the warm
+state flipped a transpose solve from converging to raising — measured, on this machine, the same day.
+**To settle it, re-run one with `max_steps` raised and read how far past 40 it needs**; a couple of steps
+means fragility to be given headroom and documented, while an order of magnitude means a real
+platform-specific defect.
+
+**Binding until then: run the three at `HEAD` before believing any local slow-tier failure is yours.**
+Not doing so cost real time on 2026-08-19 — the failures were attributed to a local change, a guard was
+reverted on that basis, and a comment was committed claiming the revert was "measured" when the baseline
+had never been run.

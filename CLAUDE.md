@@ -185,9 +185,38 @@ Rules, with FVM-specific teeth:
 - **No copy-paste-modify.** If you are tempted to copy a block and tweak it,
   parameterize the original (or introduce a shared base class / injected
   collaborator) so both call sites share it.
-- **Concrete trigger:** *If a change would require editing the same formula in more
-  than one file, the formula is in the wrong place — consolidate it first, then
-  make the change once.*
+- **Two builders for one object are one builder plus an injected difference.** When two functions
+  construct the **same class** and their parameter lists overlap heavily, the overlap is not a
+  coincidence — it is that object's configuration surface, written twice. Extract the shared tail into
+  one private builder taking the differing collaborator as an argument; each public builder then does
+  only what is genuinely different (construct its strategy, pick its default). **A keyword that exists
+  on one sibling and not the other is a defect the day it is added, not a property of that path.**
+  The surfaces drift because nothing compares them, and **no single commit looks wrong**: each adds one
+  keyword to one builder, so every after-the-fact check scoped to "your change" — including this file's
+  own Post-Change Checklist and Stale-Record Check — is blind to it by construction.
+  *This has now happened four times, and the first three were each fixed and written up subsystem-locally
+  rather than promoted here, which is why the fourth happened a few hundred lines from the third.*
+  `distributed.py` hand-built a second `ResidualAssembler` and a rename broke it with no test failing;
+  every march driver wrote its own `on_step` formatter, so "a gap fixed in one persisted in the others";
+  three `StepControl` classes each carried their own `next_step`, and `carry_beta` was "byte-identical in
+  two controls and *absent* from the third". The fourth cost the most: **four** builders of the coupled
+  march's step each grew their own globalization tail, and the k-positivity fraction-to-the-boundary
+  limit — the fix for a march that went non-finite from `k < 0` in two cells of 23040 — was wired on one
+  of them and reached **none** of the other three.
+  This does **not** ban siblings that merely share a vocabulary. Three multigrid solvers taking
+  `hierarchy, b, cycles, omega` are three different methods with different smoother families; forcing
+  them behind one builder would create the union bundle the Module Review Rubric warns about, needing
+  placeholder defaults for each other's parameters. The test is *same constructed class* **and** a shared
+  surface that is one configuration, not one namespace.
+  And check the other direction before unifying: a parameter present on only one sibling may be
+  **dominated rather than missing** (`descent_backoff` is recorded as counterproductive, `grow` is inert
+  on a non-default measure). Principle 0 says delete those, not promote them onto the shared builder.
+- **Concrete trigger:** *If a change would require editing the same formula — or the same wiring, or the
+  same default — in more than one place, it is in the wrong place: consolidate it first, then make the
+  change once. "More than one place" includes two functions in the same file; a duplicated tail is not
+  excused by proximity. And before adding a keyword argument to a builder, run `tools/sibling_builders.py`
+  (Post-Change Checklist item 2): if a sibling constructs the same class, the argument belongs on a
+  shared builder they both call — put it there, in this change.*
 
 > These two principles reinforce each other: small, single-responsibility, injected
 > classes (Principle 1) are also the natural unit of reuse (Principle 2). Code that
@@ -282,7 +311,9 @@ preserve the old one.**
   Rename/retype/delete in one change and fix the callers and tests in the same change.
 - A **builder function or factory is not a shim** — it constructs and returns the real object (like
   `momentum_continuation` or `reused_flow_solve`). What this bans is the *delegating wrapper* that adds
-  a layer over an object already fit to use directly.
+  a layer over an object already fit to use directly. **A private tail that several public builders
+  delegate into is not that wrapper either** — it is Principle 2's one implementation, and nothing in
+  this principle licenses a second full builder for an object that already has one.
 
 **This principle is a pre-release convenience and must be deleted at the first stable release**, when
 backward compatibility becomes a real constraint and the calculus reverses.
@@ -973,6 +1004,19 @@ After **every code change**, before considering the task complete, review and ac
      ```
      grep -rniE "\.claude|claude\.md" README.md docs --exclude=package_structure.md
      ```
+   - **Sibling-builder check (Principle 2's "two builders for one object").** Two functions that
+     construct the same class from mostly the same parameters are one builder written twice, and the
+     copies drift one keyword at a time — which no diff-scoped check can see, because no single commit
+     looks wrong. Run this whenever you add a parameter to a builder or add a builder:
+     ```
+     tools/sibling_builders.py
+     ```
+     It is a **report, not a gate** (whether a pair is one builder or two genuinely different methods is
+     a judgement) and it always exits `0`, so read it. Each `only here:` list is a capability one sibling
+     has and the other does not; every entry must be a genuine property of that path, or it is drift.
+     It is package-wide rather than diff-scoped — that is why it lives here and not in the Stale-Record
+     Check, which reads `git diff` and cannot see a parameter that was only ever added.
+
    Ruff is pinned via the `lint` extra (`pip install -e ".[lint]"`). Not needed for
    docs/config-only changes touching no `.py` files.
 
