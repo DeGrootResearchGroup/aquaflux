@@ -399,15 +399,50 @@ load-bearing status of the flow block itself is in `solve-flow-block.md`.
 - **Flat block preconditioners (no hierarchy, no coarse-grid correction) — CLOSED on this case.** Every
   arm tried loses to a hierarchy. See `solve-flow-block-log.md` § "FLAT block preconditioners are CLOSED
   on this case".
-- **`schur_scaling="msimpler"` as the `bfs3d` LEADING inverse — DOMINATED even under a controlled,
+- **`schur_scaling="msimple"` as the `bfs3d` LEADING inverse — DOMINATED even under a controlled,
   single-variable swap against the shipped bundle (2026-08-18).** Swapping only the leading inverse for
-  `BlockPreconditioner(schur_scaling="msimpler")`, with the shipped trailing inverse
+  `BlockPreconditioner(schur_scaling="msimple")`, with the shipped trailing inverse
   (`compare.TRAILING_INVERSE`, native nodal) held fixed — unlike the flat-PC arm above, which paired it
-  with an unshipped `ilu0` trailing — both arms converge, but MSIMPLER costs ~8-9x the shipped bundle's
+  with an unshipped `ilu0` trailing — both arms converge, but MSIMPLE costs ~8-9x the shipped bundle's
   Krylov cycles (6→53 at the adjoint operator, 5→40 at the march's own shift) at the case's real
-  converged root. This is also the reachability-scale answer to the "is MSIMPLER worth pursuing on the
-  flow block at all" question `field_split_probe.py`'s `block_simple_arms` docstring poses: no. See
-  `solve-flow-block-log.md` § "MSIMPLER swapped in for the SHIPPED leading inverse, trailing held fixed".
+  converged root. This is also the reachability-scale answer to the "is a block-SIMPLE
+  preconditioner worth pursuing on the flow block at all" question `field_split_probe.py`'s
+  `block_simple_arms` docstring poses: no. See
+  `solve-flow-block-log.md` § "MSIMPLE swapped in for the SHIPPED leading inverse, trailing held fixed".
+  ⚠️ **RE-ADJUDICATED 2026-08-20 after a conformance fix, and the verdict SURVIVES — narrowed, not
+  overturned.** The arm above was not MSIMPLER: `schur_scaling="msimpler"` implemented MSIMPLE, with the
+  pressure prediction that defines the `R` variants absent (#274). With Klaij & Vuik's Algorithm 2
+  actually built (`composition="simpler"`), the same controlled swap at the same state gives **32 cycles
+  against the shipped inverse's 17 at the adjoint's unshifted operator, and 22 against 19 at the march's
+  own shift** — a **−29 %** and **−45 %** on the old arm's 45 and 40, bracketing the −33 % measured on a
+  flow-only channel. So the missing step was real and buys what the paper says.
+  ⚠️ **The "~8-9x" headline above therefore does NOT survive at the operating point** — within 16 % is
+  not domination, and the standing of this family now depends on *which* operator is quoted. It is still
+  behind on both, and behind on wall clock by more than on cycles (two Schur solves and four residual
+  linearizations per apply against one and one), and **no whole-march A/B has been run**, so it does not
+  reopen as a default. What it does close: **do not re-propose block-SIMPLE here on the grounds that the
+  prediction was missing — it has been supplied and measured.** Note also that Algorithm 1 in full
+  (`composition="simple"`, the triangular pass plus its closing velocity update) is *worse* than the
+  triangular pass here (45 → the 58-cycle cap; 40 → 47): every use of the diagonal stand-in `F̃⁻¹` is a
+  liability when a mass matrix is a poor stand-in for the momentum block, which it is on a wall-resolved
+  high-Reynolds 3D mesh.
+- **Plain SIMPLER — the pressure prediction on the `a_P`-scaled Schur (`schur_scaling="simple",
+  composition="simpler"`) — DOES NOT CONVERGE, do not pair them (2026-08-20).** On a Re=2500 channel it
+  ran to 129 restart cycles at a true relative residual of **0.4** where the same Schur under the
+  triangular composition converges in 27 (`validation/simple_type_composition.py`). The prediction
+  inverts `Ŝ` against a *velocity*-derived right-hand side, so it is far more exposed than the
+  correction is to `Ŝ` being a poor match for `-B F̃⁻¹ G` — and the `a_P` Schur is already the worse of
+  the two on that case (27 cycles against the mass-scaled Schur's 9). **Pair `composition="simpler"`
+  with `schur_scaling="msimple"`, which is the pairing Klaij & Vuik promote.** The mechanism is the
+  reading that fits and is *not* separately measured; a Reynolds sweep to test it directly was started
+  and abandoned when its low-Reynolds march would not finish, so do not cite it as established.
+- **`composition="simple"` (Klaij & Vuik Algorithm 1 in full) is DOMINATED on every case measured — and
+  is deliberately KEPT anyway.** It loses to the triangular pass on `bfs3d` (45 → the 58-cycle cap at
+  zero shift, 40 → 47 at the march's shift) and ties or loses on the channel (9 vs 9 mass-scaled, 27 →
+  39 on the `a_P` Schur). Kept because it is the **control that makes the MSIMPLER result readable**:
+  Algorithm 1 is Algorithm 2 minus the prediction and plus nothing else, so it is what separates "the
+  pressure prediction helps" from "any additional step helps" — and it answers the second with a clear
+  no. Delete it only alongside the measurement that needs it.
 - **Smoothed aggregation on the flow saddle, under the SIMPLE smoother — REFUTED.** See
   `solve-flow-block-log.md` § "Smoothed aggregation on the flow saddle — REFUTED under the SIMPLE
   smoother".

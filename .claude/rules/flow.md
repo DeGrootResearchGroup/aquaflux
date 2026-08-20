@@ -426,8 +426,9 @@ Engineering Principles.
   `BlockPreconditioner` — a builder composing two **injected strategy families**: an `InnerSchurSolver`
   (`SmoothedAmgSchur`, the mesh-independent smoothed-aggregation multigrid) for the pressure block and a
   `VelocityBlockSolver` (`SmoothedAmgVelocity` on the viscous operator / `SmoothedAmgConvectionVelocity`
-  on the convection-diffusion operator) for the momentum block, **always** block-triangular (the `D·δu`
-  coupling). Build it with `BlockPreconditioner.build(assembler, velocity=…).factory()` (the factory is
+  on the convection-diffusion operator) for the momentum block, plus — since 2026-08-20 — a third,
+  `SaddleComposition`, saying how those two solves compose (default `BlockTriangularComposition`, the
+  `D·δu` coupling this was hardcoded to). Build it with `BlockPreconditioner.build(assembler, velocity=…).factory()` (the factory is
   the `preconditioner` argument `newton_step` expects). **`strength_threshold=θ` (default `0`) turns on
   strength-of-connection aggregation** for the velocity/Schur AMGs — aggregate along strong connections
   only, the fix that keeps the V-cycle contracting on a high-aspect-ratio / skewed mesh where isotropic
@@ -442,7 +443,7 @@ Engineering Principles.
   preconditioner (the old `MomentumContinuity.simple_preconditioner` convenience wrapper was removed
   precisely because it made `momentum.py` import `block_preconditioner`, a cycle; do not reintroduce it).
   The low-level coefficient/Laplacian kernels stay in `preconditioner.py`. `a_P` comes from
-  `MomentumContinuity.momentum_matrix_diagonal` / `BlockPreconditioner.frozen_momentum_diagonal`. `InnerSchurSolver` / `VelocityBlockSolver` stay abstract
+  `MomentumContinuity.momentum_matrix_diagonal` / `BlockPreconditioner.frozen_momentum_diagonal`. `InnerSchurSolver` / `VelocityBlockSolver` / `SaddleComposition` stay abstract
   as the extension seam — when adding a strategy, add a subclass; do **not** grow an `if … == …` branch.
   - **`frozen_momentum_diagonal_parts(assembler, state)` is a PUBLIC module-level function, not only a
     `BlockPreconditioner` method (2026-08-12).** The convective/dissipative buckets a
@@ -570,56 +571,168 @@ Engineering Principles.
   inverse-volume-Jacobi on the gradient solve; see `solve.md`, do not re-attempt.
 - **Outer block preconditioner — Stage 3: the remaining limit IS the Schur approximation, and no amount
   of inner accuracy reaches it (measured on a developed Re=1e5 SST channel; binding, do not re-attempt).**
-  The `v_cycles` knob and the MSIMPLER scale are both exhausted: **velocity-AMG V-cycles ×2/×4/×8 leave
+  The `v_cycles` knob and the MSIMPLE scale are both exhausted: **velocity-AMG V-cycles ×2/×4/×8 leave
   the flow block's error operator `ρ(I − A_flow·M_flow)` at 34.02 / 33.99 / 34.03 / 34.05 (no effect);
   Schur V-cycles ×2/×4/×8 make it *worse* (41.6 / 48.7 / 48.5)**; both-exact never beats the 1-cycle
   baseline; and **rebuilding the whole block at the developed state does not help** (34.0 → 31.6 on the
   channel, 49.9 → 91.9 on pitzDaily). Inverting `Ŝ` more accurately making the preconditioner worse is
-  the signature that `Ŝ` is the **wrong operator**. **Rescaling MSIMPLER's `k` is a ρ mirage:** it
+  the signature that `Ŝ` is the **wrong operator**. **Rescaling MSIMPLE's `k` is a ρ mirage:** it
   collapses ρ (34.0 → 9.6) while barely moving the one-shot error (24.1 → 22.6) and the ρ-optimal `k`
   sits ~40× above the *maximum* of the per-cell `ρV/a_P` distribution — the degenerate limit that
   switches the pressure correction off — and on the **real march it is slower** (auto-`k` 348 s / 8 steps
   vs `k×4` 447 s, identical trajectory). So the shipped per-apply `mean(ρV/a_P)` calibration is
   near-optimal, and **preconditioner changes must be validated on the real march, not on ρ** (ρ here is
-  dominated by isolated outlier eigenvalues GMRES kills anyway). **Root cause:** the MSIMPLER Schur is a
+  dominated by isolated outlier eigenvalues GMRES kills anyway). **Root cause:** the MSIMPLE Schur is a
   constant-coefficient (scaled pressure-mass-matrix) Poisson — a near-Stokes/low-Re approximation that
   degrades as convection strengthens. **A better Schur was the obvious next move — it is BUILT
   (`schur_scaling="lsc"`, the algebraic nonuniform-mesh stabilized least-squares commutator of Elman,
   Howle, Shadid, Silvester & Tuminaro 2007) and it LOSES BADLY on the coupled solve. Do not re-derive
-  it.** At a developed/separated pitzDaily state, one shifted solve: msimpler **13 cycles / 38.9 s** vs
+  it.** At a developed/separated pitzDaily state, one shifted solve: msimple **13 cycles / 38.9 s** vs
   lsc **96 cycles / 526 s** (`v_cycles=4`) and **82 / 662 s** (`v_cycles=8`) — 6–7× the cycles, 13–17×
   the wall time, both genuinely converged (`lin_rel ~2e-9`); and ~2.9× slower on the coupled channel at
-  an identical residual trajectory. **The flow-only win does not transfer:** LSC beats MSIMPLER on the
+  an identical residual trajectory. **The flow-only win does not transfer:** LSC beats MSIMPLE on the
   *isolated* flow block (9 vs 15 GMRES at Re=1e4), but under the coupled block-**diagonal**
   preconditioner plus the pseudo-transient shift, the coupled iteration is not limited by the flow
   Schur's quality, so improving it buys nothing. The strategy stays available for a flow-only solve;
   it is not the coupled default and is not the cure for coupled cost. PCD remains deprioritized
   independently (finite-element boundary recipes that do not transfer to FVM). Full numbers and the
   matching "what a preconditioner can and cannot change" rule are in `.claude/rules/solve-globalization-log.md`.
-- **⚠️ SCOPE (binding, corrected 2026-08-18): "msimpler beats lsc/SIMPLE" above described
+- **⚠️ SCOPE (binding, corrected 2026-08-18): "msimple beats lsc/SIMPLE" above described
   `coupled_continuation`'s block-diagonal preconditioner, which neither flagship validation case runs and
-  which no longer defaults to MSIMPLER — do not cite it as current evidence for either architecture.**
+  which no longer defaults to MSIMPLE — do not cite it as current evidence for either architecture.**
   Neither `validation/bfs3d_openfoam/compare.py` nor `validation/pitzdaily_openfoam/compare.py` reaches
   `coupled_continuation` at all (both build `coupled_amg_continuation(...)` explicitly, whose
   `_monolithic_shift_source` builds the shift policy with `build_flow_block=False` — no
   `BlockPreconditioner`, hence no `schur_scaling`, regardless of `FIELD_SPLIT`/`FLOW_INVERSE`). And where
-  MSIMPLER was tested directly against a flagship-scale operator, in the field-split leading-inverse role
+  MSIMPLE was tested directly against a flagship-scale operator, in the field-split leading-inverse role
   the current architecture actually uses, it was dominated: `validation/bfs3d_openfoam/field_split_probe.py`'s
-  `split msimpler/ilu0` arm is part of the "FLAT block preconditioners are CLOSED on this case" family in
+  `split msimple/ilu0` arm is part of the "FLAT block preconditioners are CLOSED on this case" family in
   `.claude/rules/solve-flow-block-log.md` (2.554e-06 TRUE relative residual at the 58-restart-cycle cap,
   where the shipped hierarchical leading inverses converge in ~10 cycles), and a tighter,
-  single-variable-changed measurement (`msimpler_swap_probe.py`, same file, "MSIMPLER swapped in for the
+  single-variable-changed measurement (`simple_type_swap_probe.py`, same file, "MSIMPLE swapped in for the
   SHIPPED leading inverse") that holds the shipped trailing inverse fixed instead of pairing it with an
-  unshipped `ilu0` one shows both arms now converge but MSIMPLER costs ~8-9x the cycles (6→53 at the
+  unshipped `ilu0` one shows both arms now converge but MSIMPLE costs ~8-9x the cycles (6→53 at the
   adjoint operator, 5→40 at the march's own shift). **`_coupled_shift_policy` no longer hardcodes
-  `schur_scaling="msimpler"` as of this date** — it was never necessary at the scale that policy is
+  `schur_scaling="msimple"` as of this date** — it was never necessary at the scale that policy is
   actually used at either: dropping it in favour of `BlockPreconditioner`'s own default reaches the
   identical fixed point on every small (hundreds-of-cells) unit/integration fixture that used to pin it,
   up to Re 20000 (see `.claude/rules/turbulence.md`'s matching entry for the full list). What survives
-  unqualified: MSIMPLER as the better of `BlockPreconditioner`'s own `schur_scaling` options for a
+  unqualified: MSIMPLE as the better of `BlockPreconditioner`'s own `schur_scaling` options for a
   *standalone flow-only* solve where plain SIMPLE's inner GMRES genuinely stalls
   (`tests/integration/test_channel_high_reynolds.py`, laminar, 384–3072 cells). It is no longer anyone's
   default.
+- **⚠️⚠️ EVERY MSIMPLE(R) MEASUREMENT IN THESE FILES WAS TAKEN ON A METHOD THE NAME DID NOT DESCRIBE —
+  corrected 2026-08-20 (#274). Read this before citing any of them.** `schur_scaling="msimpler"`
+  implemented Klaij & Vuik (2013)'s **MSIMPLE**, and not even all of that: the **pressure prediction**
+  that defines their `R` variants was absent, and so was Algorithm 1's closing velocity update. What was
+  shipped is the lower block-triangular pass. That is a perfectly good preconditioner with its own
+  justification (Murphy–Golub–Wathen), but it is not the method whose name it carried — and the paper
+  puts the convergence benefit squarely on the `R` axis while saying the `M` axis buys *setup reuse* and
+  is worse alone ("MSIMPLE and MSIMPLER are clearly poor solvers"; "the (M)SIMPLER variants require much
+  less linear iterations per nonlinear iteration"). So the long-standing puzzle — MSIMPLE measuring worse
+  than plain SIMPLE when it "should" be better — was measuring the axis that trades convergence for setup
+  cost, with the axis that buys convergence missing. **There is no `"msimpler"` string any more.**
+  - **The two axes are now separate parameters, because they are separate things.**
+    `schur_scaling` ∈ `{"simple", "msimple", "lsc"}` picks the `InnerSchurSolver`; the new
+    `composition` ∈ `{"triangular", "simple", "simpler"}` picks a `SaddleComposition`, i.e. how many
+    times and in what order the velocity and Schur solves are applied. The paper's **MSIMPLER** is
+    `schur_scaling="msimple", composition="simpler"`; its **SIMPLER** is `schur_scaling="simple",
+    composition="simpler"`. `composition="triangular"` is the default and is byte-identical to every
+    build before this change, so nothing above was invalidated by the *code*, only by the *name*.
+    `msimpler_scale` is now `mass_scale` (it is the `M` variant's `k`, and always was).
+  - **`SimplerComposition` is Algorithm 2 verbatim**, with `Ŝ` the compact pressure Laplacian the paper
+    calls `R`: predict `Ŝ δp'' = −B F̃⁻¹ r_u` (from the momentum row alone — *not* the mass row, which is
+    what keeps the wide-stencil `Ĉ` out of the operator being inverted), solve `F δu' = r_u − G δp''`,
+    correct `Ŝ δp' = r_p − B δu' − Ĉ δp''` (`Ĉ` appears here, on the right, where only its action is
+    needed), then `δu = δu' − F̃⁻¹ G δp'` and `δp = δp'' + δp'`. Their step 4 divides the prediction by
+    the outer relaxation `ω_p`; a Newton–Krylov solve has no outer relaxation, which is the `ω_p = 1`
+    limit, so the two pressures simply add. `F̃` is **the diagonal the Schur was assembled from** in
+    every case (`a_P`, or `ρV/k`), which is what keeps prediction, correction and Schur consistent.
+  - **How it is pinned, and why that test is the point.** `tests/unit/test_preconditioner.py` checks each
+    composition against the property that *defines* it rather than against a transcription of its own
+    code: on the saddle `[[diag(d), G], [B, Ĉ]]` — the real gradient, divergence and coupling blocks,
+    with the momentum block replaced by the very diagonal the compositions correct with — `simple` and
+    `simpler` are **exact inverses**, because both are complete block factorizations once their two
+    approximations are exact. `triangular` comes back exact in pressure and *not* in velocity, which pins
+    which half it deliberately omits. A dropped or mis-signed step fails this outright; it is the check
+    the missing prediction could never have passed. Plus linearity and `<y,Mx> = <Mᵀy,x>` for all three,
+    since a non-flexible outer GMRES and the transposed adjoint both require them.
+  - **✅ THE PREDICTION IS WORTH ~30 % OF THE OUTER CYCLES, ON BOTH CASES IT WAS MEASURED ON — so the
+    paper's claim holds here once the step is actually there (2026-08-20).** Harness:
+    `validation/simple_type_composition.py`, a 64×32 plane channel at `mu = 4e-4` (Reynolds number 2500),
+    2048 cells, marched to a *loose* rel 1e-3 (`|R|` 1.614e-05) — **not** to a root, because at a
+    machine-precision root the right-hand side `-R` is roundoff and every arm ties on noise.
+    **Right**-preconditioned GMRES, restart 30, to `rtol` 1e-8 on the **TRUE** residual, cap 200 cycles:
+
+    | schur | composition | cycles | TRUE rel |
+    |---|---|---|---|
+    | `simple` | `triangular` | 27 | 4.42e-10 |
+    | `simple` | `simple` | 39 | 2.23e-10 |
+    | `simple` | `simpler` | **129** | **3.99e-01** — **did NOT converge** |
+    | `msimple` | `triangular` | 9 | 1.27e-10 |
+    | `msimple` | `simple` | 9 | 1.73e-10 |
+    | `msimple` | **`simpler` (MSIMPLER)** | **6** | **9.21e-12** |
+
+    MSIMPLER is **33 % fewer cycles**, converging two orders deeper. Reproduced at a second state
+    (marched to rel 1e-5): 6 against 9 again, and the whole table reproduced **cycle-for-cycle and
+    residual-for-residual** by an independent re-run of the harness.
+    ⚠️ **No wall column, deliberately.** The two runs put the MSIMPLER arm at 0.26 s and 0.35 s against
+    the triangular arm's 0.27 s and 0.30 s — i.e. marginally faster in one and 17 % slower in the other,
+    which is inside this instrument's own ~15 % spread at sub-second scale. **At this problem size the
+    second Schur solve's cost and the cycles it saves are indistinguishable in wall clock**; the honest
+    claim is the cycle count, and whether the trade pays in seconds has to be measured somewhere the
+    solve is not already a third of a second. On `bfs3d` below the per-cycle cost separation is large
+    enough to read despite the same caveat — MSIMPLER against the triangular pass is ~3.2 s/cycle
+    against ~1.8 s, a 1.8x that matches the mechanism exactly (two Schur solves and four residual
+    linearizations against one and one) rather than resting on the timer.
+  - **⚠️ BUT PLAIN SIMPLER — the prediction on the `a_P`-scaled Schur — DOES NOT CONVERGE, and that
+    asymmetry is the practical rule to take from this.** The prediction inverts `Ŝ` against a
+    *velocity*-derived right-hand side, so it is far more exposed to `Ŝ` being a poor match for
+    `-B F̃⁻¹ G` than the correction is. The `a_P` Schur is already the worse of the two here (27 cycles
+    against 9 for the same composition), and the prediction amplifies that rather than surviving it. So:
+    **pair `composition="simpler"` with `schur_scaling="msimple"`, which is exactly the pairing the paper
+    promotes.** The mechanism is offered as the reading that fits, and is *not* separately measured — a
+    Reynolds sweep to test it directly was started and abandoned (its low-Reynolds march would not
+    finish); do not cite it as established.
+  - **On `bfs3d`'s real coupled Jacobian the prediction buys the same ~29–45 %, and how that leaves the
+    family DEPENDS ON WHICH OPERATOR: ~1.9x behind the shipped inverse at the adjoint's unshifted one,
+    within 16 % at the march's own shift.** Harness:
+    `validation/bfs3d_openfoam/simple_type_swap_probe.py` (the renamed, extended
+    `msimpler_swap_probe.py`) at `state-00059`, the converged root of a full shipped 3-rung cold march;
+    field split, column reach (3,3,3,3,2,2), real right-hand side `-R(state)`, one materialization shared
+    by every arm, GMRES restart 15 to true `rtol` 1e-8, cap 60 restarts; **only the leading (flow-saddle)
+    inverse differs — trailing inverse, wiring and shift held at the shipped bundle throughout**. At the
+    **zero-shift (adjoint) operator**:
+
+    | leading inverse | zero shift (the adjoint's operator) | march shift β=0.0050 |
+    |---|---|---|
+    | **shipped** — `native` SIMPLE-smoothed AMG | **17** | **19** |
+    | `msimple` / `triangular` — what every earlier measurement tested | 45 | 40 |
+    | `msimple` / `simple` — Algorithm 1 in full | **58 (the cap)** | 47 |
+    | `msimple` / `simpler` — **MSIMPLER** | **32** | **22** |
+
+    ⚠️ **Other work shared the machine during this run, so cycles are the evidence and the seconds are
+    not** (cycle counts on this case are exactly reproducible; wall clock is not). For the record the
+    zero-shift solves were 46 / 79 / 124 / 101 s in table order.
+
+    Read four things off it. (1) **The prediction is worth 45 → 32 (−29 %) at zero shift and 40 → 22
+    (−45 %) at the march's shift**, bracketing the channel's −33 % — so the missing step was real and
+    buys what the paper says it buys, on a flagship-scale operator. (2) **Algorithm 1's closing velocity
+    update makes it *worse* here** (45 → the cap; 40 → 47), where on the channel it was neutral; every
+    use of `F̃⁻¹` is a liability when `F̃` is a poor stand-in for `F`, and a mass matrix is a poor
+    stand-in on a wall-resolved high-Reynolds 3D mesh. So `composition="simple"` is *not* "triangular
+    plus a free improvement", and MSIMPLER wins despite that update rather than because of it.
+    (3) ⚠️ **The recorded "MSIMPLE is dominated ~8-9x" headline does not survive at the operating point:
+    at the march's own shift MSIMPLER is 22 against the shipped 19, within 16 %.** The gap is real at the
+    adjoint's unshifted operator (32 against 17) and nearly closed at the march's — so anyone citing this
+    family's standing must say **which operator**. (4) It is nonetheless still behind on both, and
+    **cycles are not seconds**: MSIMPLER costs ~3.7 s/cycle here against the shipped ~2.6 s (two Schur
+    solves and four residual linearizations per apply, against one and one), so at 22 against 19 it
+    remains the slower arm. A whole-march A/B would settle it and none has been run. **Nothing here moves
+    a default.**
+    ⚠️ **The recorded "~8-9x, 6→53" figure was taken when `bfs3d` shipped `hostilu` as its leading
+    inverse; it now ships `native`, whose baseline is 17, not 6.** Both numbers are right under their own
+    bundle — do not compare them across it.
 - **Fully-AD `a_P`** — a possible refinement (the diffusion Gate-C / limiter pattern), not yet needed.
 - **Gradient-scheme cost — largely solved (use `SweptGradientSolve`).** The *per-matvec* and
   *compile* cost of the nested corrected-gradient solve (distinct from the outer iteration count) is
