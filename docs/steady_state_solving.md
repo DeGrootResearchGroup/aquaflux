@@ -272,12 +272,33 @@ If you hit it, the useful responses in order are: start from a better initial fi
 
 ## Choosing the pieces
 
-| Situation | Forward step | Notes |
+| Situation | Use | How it goes in |
 | --- | --- | --- |
-| Linear residual (Stokes, scalar diffusion) | {func}`~aquaflux.solve.newton_step` | Exact in one call; differentiable in both modes. |
-| Nonlinear, moderate Reynolds number | {class}`~aquaflux.solve.DampedNewtonStep` | The default. Add a `preconditioner` for any coupled flow. |
-| Convection-dominated / high Reynolds number | {func}`~aquaflux.flow.momentum_continuation` | Pseudo-transient damping that ramps to zero; pair it with {func}`~aquaflux.flow.potential_flow`. |
-| Repeated solves at varying viscosity | {func}`~aquaflux.flow.reused_flow_solve` | Builds the preconditioned strategy once and reuses the compiled solve across calls. |
+| Linear residual (Stokes, scalar diffusion) | {func}`~aquaflux.solve.newton_step` | Called **directly**, not injected: `phi = newton_step(assembler.residual, phi)`. One correction, exact in one call for a linear residual, and differentiable in both modes. |
+| Nonlinear, moderate Reynolds number | {class}`~aquaflux.solve.DampedNewtonStep` | `forward_step=DampedNewtonStep(preconditioner=precond)` — the default strategy. |
+| Convection-dominated / high Reynolds number | {func}`~aquaflux.flow.momentum_continuation` | `forward_step=momentum_continuation(assembler)` — a builder that returns a configured {class}`~aquaflux.solve.PseudoTransientStep`. Pseudo-transient damping that ramps to zero; pair it with {func}`~aquaflux.flow.potential_flow`. |
+| Repeated solves at varying viscosity | {func}`~aquaflux.flow.reused_flow_solve` | Replaces the solver entirely: returns a `solve_flow(momentum, state)` callable, with the preconditioned strategy built once and the compiled solve reused across calls. |
+
+```{note}
+The three kinds of name in that table are used in three different ways, which is worth
+knowing before the next one surprises you.
+
+A **class** is an injectable strategy. {class}`~aquaflux.solve.DampedNewtonStep` and
+{class}`~aquaflux.solve.PseudoTransientStep` both implement the
+{class}`~aquaflux.solve.ForwardStep` protocol — four methods, not one call — and hold their
+own configuration, which is what `forward_step=` takes.
+
+A **builder function** assembles one of those strategies from a handful of settings and hands
+it back. {func}`~aquaflux.flow.momentum_continuation` returns a
+{class}`~aquaflux.solve.PseudoTransientStep`; the object you end up injecting is still a class
+instance. Builders exist because wiring a strategy together means choosing a preconditioner, a
+shift policy, a relaxation schedule and an acceptance rule, and most callers want to name a few
+scalars instead.
+
+A **plain function** is a standalone operation with no configuration to hold and nothing to
+inject it into. {func}`~aquaflux.solve.newton_step` is one Newton correction; it is not a
+forward step and cannot be passed as one.
+```
 
 The default tolerances (`rtol=1e-10`, `atol=1e-12`) are deliberately tight, since the residual
 norm is what the adjoint's validity rests on. `max_steps` defaults to 50, which suits a
