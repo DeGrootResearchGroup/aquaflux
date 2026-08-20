@@ -44,13 +44,20 @@ import dataclasses
 from collections.abc import Callable
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
 from .amg_preconditioner import MonolithicAmgPreconditioner, build_amg_vcycle
 from .frozen_operator import equilibrate_cell_major
-from .multigrid import SmoothedHierarchy, convection_multigrid_solve
+from .multigrid import (
+    SmoothedHierarchy,
+    air_multigrid_solve,
+    build_air_hierarchy,
+    convection_multigrid_solve,
+    refresh_air_hierarchy,
+)
 from .native_inverse import NativeHierarchyInverse
 from .refresh_timing import PhaseTimer
 
@@ -860,6 +867,123 @@ class NodalNativeInverse(NativeHierarchyInverse):
 
     def cycle(self):
         return _native_nodal_cycle
+
+
+class AirBlockInverse:
+    """A block inverse from a **reduction-based** (lAIR) hierarchy over the whole group.
+
+    The alternative to :class:`NodalNativeInverse` for a transported-scalar block. Both coarsen cells
+    and both smooth with each cell's own block; they differ in the coarse space. Aggregation groups
+    cells and takes ``R = Pᵀ``; lAIR splits them coarse/fine and builds an **independent** restriction
+    approximating the ideal ``R = [-A_cf A_ff⁻¹, I]``, which for a convection-dominated operator makes
+    eliminating the fine points nearly exact — Peclet-robust and mesh-independent where a deep Galerkin
+    recursion is not (Manteuffel, Ruge & Southworth, SISC 2018).
+
+    **It does not subclass** :class:`~aquaflux.solve.native_inverse.NativeHierarchyInverse`: that base
+    owns a :class:`~aquaflux.solve.multigrid.SmoothedHierarchy` and refreshes it by re-fitting the
+    aggregation, while this owns an :class:`~aquaflux.solve.multigrid.AirHierarchy` and refreshes by
+    re-solving the local restriction systems on a frozen C/F split. Widening one class to hold either
+    would make it the union of two coarsening families, needing the settings of each to sit unused on
+    the other.
+
+    Parameters
+    ----------
+    block : scipy.sparse matrix
+        The group's diagonal block, field-major, shape ``(n_group_fields * n_cells,) * 2``.
+    n_group_fields : int
+        Fields per cell in this group.
+    cycles : int
+        V-cycles per application. Fixed, so ``b -> x`` stays a linear map — required by the non-flexible
+        outer Krylov and by the transposed adjoint solve.
+    f_iters, c_iters : int
+        Fine- and coarse-point sweeps in the FC-Jacobi smoother.
+    omega : float
+        Smoother damping.
+    **settings
+        Forwarded to :func:`~aquaflux.solve.multigrid.build_air_hierarchy` (``theta``,
+        ``restriction_theta``, ``degree``, ``max_coarse``, ``max_levels``).
+    """
+
+    def __init__(
+        self,
+        block: sp.spmatrix,
+        n_group_fields: int,
+        *,
+        cycles: int = 1,
+        f_iters: int = 2,
+        c_iters: int = 1,
+        omega: float = 1.0,
+        **settings,
+    ) -> None:
+        self._n_dofs = int(block.shape[0])
+        self._block_size = int(n_group_fields)
+        self._settings = settings
+        self._transpose_fn = None
+        # The hierarchy rides as an ARGUMENT, never a closure. A `jax.jit` built fresh per refresh
+        # starts with an empty compilation cache and recompiles whether or not anything moved --
+        # measured at ~4x on a comparable block, with the control being a sibling that already passed
+        # its hierarchy in and moved 1.01x.
+        self._cycle = jax.jit(
+            lambda hierarchy, b: air_multigrid_solve(
+                hierarchy, b, cycles=cycles, f_iters=f_iters, c_iters=c_iters, omega=omega
+            )
+        )
+        self._hierarchy = build_air_hierarchy(
+            sp.csr_matrix(block), block_size=self._block_size, **settings
+        )
+
+    @property
+    def n_dofs(self) -> int:
+        """Degrees of freedom in this block."""
+        return self._n_dofs
+
+    def _solve(self, vector: jnp.ndarray) -> jnp.ndarray:
+        return self._cycle(self._hierarchy, vector)
+
+    def refactor_block(self, block: sp.spmatrix) -> None:
+        """Re-derive the values on the frozen coarsening, IN PLACE — required to survive a refresh.
+
+        Reuses the C/F split, the prolongation and the restriction's F-neighbourhoods, re-solving only
+        the local systems, so every shape is held and the compiled cycle above is a cache hit rather
+        than a recompile. :func:`~aquaflux.solve.multigrid.refresh_air_hierarchy` raises if any shape
+        moved, which would mean the operator did not come from the same mesh graph.
+        """
+        self._hierarchy = refresh_air_hierarchy(self._hierarchy, sp.csr_matrix(block))
+        self._transpose_fn = None  # the transpose closes over the hierarchy it was built for
+
+    def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
+        """Approximate ``A^-1 r`` (or ``A^-T r``) with a fixed number of lAIR V-cycles.
+
+        ``R != Pᵀ`` on a reduction hierarchy, so the transpose is not the same cycle with the transfers
+        swapped by hand — it is the transpose of the whole linear map, which is what
+        :func:`jax.linear_transpose` gives exactly for a fixed-cycle, fixed-smoothing operator.
+        """
+        vector = jnp.asarray(residual, dtype=jnp.float64)
+        if not transpose:
+            return np.asarray(self._solve(vector), dtype=np.float64)
+        if self._transpose_fn is None:
+            self._transpose_fn = jax.linear_transpose(
+                self._solve, jnp.zeros(self._n_dofs, dtype=jnp.float64)
+            )
+        return np.asarray(self._transpose_fn(vector)[0], dtype=np.float64)
+
+    def destroy(self) -> None:
+        """Nothing to release -- plain arrays, not a host solver's handles."""
+
+
+def air_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
+    """A ``trailing_inverse`` factory using :class:`AirBlockInverse`.
+
+    Every keyword is forwarded, so the defaults live on the class and on
+    :func:`~aquaflux.solve.multigrid.build_air_hierarchy` rather than being restated here.
+    ``restriction_theta`` is the one worth knowing about: it trades the restriction's accuracy against
+    how dense the coarse operators become, and the density compounds down the hierarchy.
+    """
+
+    def build(block: sp.spmatrix, n_group_fields: int) -> object:
+        return AirBlockInverse(block, n_group_fields, **settings)
+
+    return build
 
 
 def native_nodal_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
