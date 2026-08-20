@@ -1532,9 +1532,10 @@ def block_simple_arms(coupled, pc_state, pc_beta):
     accurately makes the preconditioner worse -- was measured with ``k`` and ``omega`` still inside the
     preconditioned block, as a block-*diagonal* coupled preconditioner. Here the transported scalars are
     split off and carry their own hierarchy, so what block-SIMPLE is being asked to precondition is the
-    thing it was designed for and nothing else. MSIMPLER specifically replaces the ``V/a_P`` Schur scaling
-    with a velocity-independent mass-matrix diagonal, which is what stops it degrading as convection
-    strengthens, so it is the variant with a reason to survive the regime that killed the others.
+    thing it was designed for and nothing else. The ``msimple`` scaling specifically replaces the
+    ``V/a_P`` Schur scaling with a velocity-independent mass-matrix diagonal, which is what stops it
+    degrading as convection strengthens, so it is the variant with a reason to survive the regime that
+    killed the others.
 
     **The effective diagonal assumes the shipped shift basis.** The march inverts ``a_P + beta * d``, and
     with the default basis ``d = a_P``, so the shifted diagonal is ``a_P (1 + beta)``. That identity is
@@ -1619,27 +1620,27 @@ def block_simple_arms(coupled, pc_state, pc_beta):
             arm("simple"),
         ),
         (
-            "split msimpler/ilu0",
-            "split flow-first, block-SIMPLE (MSIMPLER Schur) on flow",
-            arm("msimpler"),
+            "split msimple/ilu0",
+            "split flow-first, block-SIMPLE (mass-scaled Schur) on flow",
+            arm("msimple"),
         ),
         # Eq. (39) in the shipped block-SIMPLE: replace the momentum diagonal by the Frobenius-optimal
         # effective one. `-frobdiag` is the control that passes the assembled block's own `F_ii`
         # instead, isolating "the optimal formula" from "a Jacobian-derived diagonal rather than the
         # assembler's lagged one" -- two changes that would otherwise ride together.
         (
-            "split msimpler-frob/ilu0",
-            "split flow-first, block-SIMPLE (MSIMPLER) with the Frobenius-optimal a_P",
-            arm("msimpler", frobenius="optimal"),
+            "split msimple-frob/ilu0",
+            "split flow-first, block-SIMPLE (mass-scaled) with the Frobenius-optimal a_P",
+            arm("msimple", frobenius="optimal"),
         ),
         (
-            "split msimpler-frobdiag/ilu0",
-            "split flow-first, block-SIMPLE (MSIMPLER) with the assembled F_ii as a_P",
-            arm("msimpler", frobenius="diag"),
+            "split msimple-frobdiag/ilu0",
+            "split flow-first, block-SIMPLE (mass-scaled) with the assembled F_ii as a_P",
+            arm("msimple", frobenius="diag"),
         ),
         # The CONSISTENT vehicle. With the `simple` scaling the Schur uses the same `a_p` the velocity
         # block inverts at, so a change to that diagonal reaches both halves -- which is the condition
-        # the optimal inverse is derived under. Under `msimpler` the Schur uses a frozen mass diagonal
+        # the optimal inverse is derived under. Under `msimple` the Schur uses a frozen mass diagonal
         # instead, so changing `a_p` there only over-damps the velocity solve and cannot test it.
         (
             "split simple-frob/ilu0",
@@ -1659,17 +1660,20 @@ def block_simple_arms(coupled, pc_state, pc_beta):
         #
         # That second outcome is what was measured for this preconditioner as the whole COUPLED inverse
         # (velocity cycles inert, Schur cycles strictly worse). Whether it still holds with the
-        # transported scalars split off is the open question, and it is the one that decides whether
-        # MSIMPLER is worth pursuing on the flow block at all.
+        # transported scalars split off is the open question, and it is the one that decides whether a
+        # block-SIMPLE preconditioner is worth pursuing on the flow block at all. Note every arm here
+        # is the lower block-TRIANGULAR composition; `simple_type_swap_probe.py` sweeps the
+        # composition axis, including the pressure-prediction (MSIMPLER) variant, against the shipped
+        # leading inverse.
         (
-            "split msimpler2/ilu0",
-            "split flow-first, block-SIMPLE (MSIMPLER Schur) on flow, 2 V-cycles",
-            arm("msimpler", v_cycles=2),
+            "split msimple2/ilu0",
+            "split flow-first, block-SIMPLE (mass-scaled Schur) on flow, 2 V-cycles",
+            arm("msimple", v_cycles=2),
         ),
         (
-            "split msimpler4/ilu0",
-            "split flow-first, block-SIMPLE (MSIMPLER Schur) on flow, 4 V-cycles",
-            arm("msimpler", v_cycles=4),
+            "split msimple4/ilu0",
+            "split flow-first, block-SIMPLE (mass-scaled Schur) on flow, 4 V-cycles",
+            arm("msimple", v_cycles=4),
         ),
     )
 
