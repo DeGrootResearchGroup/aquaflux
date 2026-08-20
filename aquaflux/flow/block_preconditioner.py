@@ -11,9 +11,11 @@ perturbs the converged solution or its adjoint.
 The inner pressure Schur is a **smoothed-aggregation multigrid** (:class:`SmoothedAmgSchur`,
 mesh-independent V-cycle contraction ~0.25), paired with a velocity-block algebraic multigrid (AMG)
 (:class:`SmoothedAmgVelocity` on the viscous operator, or :class:`SmoothedAmgConvectionVelocity` on
-the convection-diffusion operator) and the block-triangular ``D·δu`` coupling. Both strategy families
-are abstract interfaces (:class:`InnerSchurSolver` / :class:`VelocityBlockSolver`), the seam a new
-inner solver or velocity block plugs into.
+the convection-diffusion operator). How those two solves are then *composed* is a third swappable
+strategy (:class:`SaddleComposition`): a lower block-triangular pass, the full SIMPLE block ``LU``, or
+SIMPLER's pressure-prediction-first sequence. All three strategy families are abstract interfaces
+(:class:`InnerSchurSolver` / :class:`VelocityBlockSolver` / :class:`SaddleComposition`), the seams a new
+inner solver, velocity block or composition plugs into.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from aquaflux.solve import (
     decouple_dof,
     smoothed_multigrid_solve,
 )
+from aquaflux.vectors import scale
 
 from .preconditioner import schur_face_coefficient
 from .rhie_chow import momentum_diagonal
@@ -268,7 +271,7 @@ class SmoothedAmgSchur(InnerSchurSolver):
     for a uniform rescale, and capturing per-cell scale (including convection) otherwise.
 
     Regime limit (measured, and the reason ``v_cycles`` is not a high-Reynolds lever): with the
-    ``"msimpler"`` scaling this is a **constant-coefficient** pressure Poisson — a near-Stokes
+    ``"msimple"`` scaling this is a **constant-coefficient** pressure Poisson — a near-Stokes
     approximation of the true Schur complement that degrades as convection strengthens. Once the flow is
     convection-dominated (high Reynolds number, recirculation) that *approximation* — not its inversion —
     sets the outer Krylov cost: inverting it more accurately does not help and can hurt, and neither
@@ -299,7 +302,7 @@ class SmoothedAmgSchur(InnerSchurSolver):
         # uses a unit-viscosity momentum ``a_P`` (the multigrid is scale-invariant, so a concrete
         # reference keeps the scipy build valid even inside a differentiated region), with the
         # per-iterate convective ``a_P`` restored by the symmetric rescaling in :meth:`apply`.
-        # MSIMPLER instead supplies the velocity mass-matrix diagonal ``rho V`` — a velocity-
+        # The mass-scaled Schur instead supplies the velocity mass-matrix diagonal ``rho V`` — a
         # independent scaling that does not degrade as convection strengthens, so its rescaling is the
         # identity. The isotropic (component-averaged) form is used; the directional per-component
         # ``a_P`` enters only the operator's Rhie--Chow coefficient.
@@ -679,7 +682,7 @@ class StabilizedLscSchur(InnerSchurSolver):
     converged. The reason the isolated win does not carry over: with a
     block-*diagonal* preconditioner and a pseudo-transient shift, the coupled iteration is not limited
     by the quality of the flow block's Schur approximation, so improving it buys nothing while costing
-    several times more per apply. **Prefer ``"msimpler"`` for a coupled solve; reach for this only when
+    several times more per apply. **Prefer ``"msimple"`` for a coupled solve; reach for this only when
     solving the flow block on its own.**
     """
 
@@ -995,6 +998,194 @@ def _build_velocity_block(
     )
 
 
+# --- saddle compositions (strategy family) ---------------------------------------------
+
+
+_SaddleSolve = Callable[[jnp.ndarray, jnp.ndarray], tuple[jnp.ndarray, jnp.ndarray]]
+
+
+class SaddleComposition(eqx.Module):
+    """Strategy: how a velocity solve and a pressure-Schur solve compose into ``M ≈ J⁻¹``.
+
+    The two inner solves — an approximate momentum inverse ``F⁻¹`` and an approximate Schur inverse
+    ``Ŝ⁻¹`` — are chosen independently of *how many times* and *in what order* the composed
+    preconditioner applies them. That choice is this family. All three members are from Klaij & Vuik
+    (2013), whose pressure-correction Schur ``Ŝ ≈ -B F̃⁻¹ G`` (the compact pressure Laplacian, with
+    the wide-stencil pressure coupling ``Ĉ`` dropped from the *left*-hand side only) is what
+    :class:`SmoothedAmgSchur` assembles.
+
+    ``F̃`` is the **diagonal** stand-in for the momentum block that the Schur was assembled from —
+    the momentum diagonal ``a_P`` for the ``a_P``-scaled Schur, the mass diagonal ``Q̂ = ρV/k`` for
+    the mass-scaled one. Members receive its inverse as ``inverse_diagonal``; using the same ``F̃``
+    the Schur was built from is what makes the composition consistent.
+    """
+
+    @abc.abstractmethod
+    def apply(
+        self,
+        blocks: FlowBlocks,
+        velocity_solve: _VelocitySolve,
+        schur_solve: _PressureSolve,
+        inverse_diagonal: jnp.ndarray,
+    ) -> _SaddleSolve:
+        """Return the residual-to-correction map ``(r_u, r_p) -> (δu, δp)``.
+
+        Parameters
+        ----------
+        blocks : FlowBlocks
+            The saddle's matrix-free Jacobian blocks at the current frozen state, supplying the
+            divergence ``B``, gradient ``G`` and pressure-coupling ``Ĉ`` actions.
+        velocity_solve : callable
+            The approximate momentum solve ``r_u -> F⁻¹ r_u``, shape ``(n_cells, dim)`` both ways.
+        schur_solve : callable
+            The approximate Schur solve ``r_p -> Ŝ⁻¹ r_p``, shape ``(n_cells,)`` both ways.
+        inverse_diagonal : jnp.ndarray
+            ``F̃⁻¹`` per cell, shape ``(n_cells,)`` — the reciprocal of the diagonal the Schur was
+            assembled from.
+
+        Returns
+        -------
+        callable
+            ``(r_u, r_p) -> (δu, δp)``, a **fixed linear map**: every member applies a fixed number
+            of fixed-cycle inner solves, so non-flexible GMRES suffices and
+            :func:`jax.linear_transpose` gives the adjoint's transpose exactly.
+        """
+
+    @staticmethod
+    def _correct_velocity(
+        blocks: FlowBlocks,
+        inverse_diagonal: jnp.ndarray,
+        velocity: jnp.ndarray,
+        pressure: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """``δu - F̃⁻¹ G δp`` — the velocity's response to a pressure the Schur has since moved.
+
+        The closing update of both Klaij & Vuik algorithms, shared here because it is the same
+        expression in each.
+        """
+        return velocity - scale(blocks.gradient(pressure), inverse_diagonal)
+
+
+class BlockTriangularComposition(SaddleComposition):
+    """Lower block-triangular: one velocity solve, then the Schur on the predictor's divergence.
+
+    ``δu = F⁻¹ r_u`` and ``δp = Ŝ⁻¹(r_p - B δu)`` — the classical block-triangular saddle
+    preconditioner, which is :class:`SimpleComposition` with its closing velocity update dropped.
+    Dropping it is not a truncation of SIMPLE so much as a different preconditioner with its own
+    justification: with exact inner solves the preconditioned operator becomes the unipotent
+    ``[[I, F⁻¹G], [0, I]]``, the Murphy--Golub--Wathen structure that a Krylov method resolves in two
+    iterations. It is one velocity solve, one Schur solve and one residual linearization — the
+    cheapest member of the family.
+    """
+
+    def apply(
+        self,
+        blocks: FlowBlocks,
+        velocity_solve: _VelocitySolve,
+        schur_solve: _PressureSolve,
+        inverse_diagonal: jnp.ndarray,
+    ) -> _SaddleSolve:
+        def solve(
+            velocity_residual: jnp.ndarray, pressure_residual: jnp.ndarray
+        ) -> tuple[jnp.ndarray, jnp.ndarray]:
+            velocity = velocity_solve(velocity_residual)
+            return velocity, schur_solve(pressure_residual - blocks.divergence(velocity))
+
+        return solve
+
+
+class SimpleComposition(SaddleComposition):
+    """SIMPLE: the block-triangular pass, then the velocity's response to the pressure it found.
+
+    Klaij & Vuik (2013) Algorithm 1 — solve ``F δu' = r_u``, solve ``Ŝ δp = r_p - B δu'``, then
+    update ``δu = δu' - F̃⁻¹ G δp``. That closing update is the second (upper-triangular) factor of
+    the block ``LU``, so with exact inner solves and ``F̃ = F`` this composition is exactly ``J⁻¹``,
+    where :class:`BlockTriangularComposition` still leaves the velocity one Krylov iteration short.
+    It costs one extra residual linearization and no extra inner solve.
+    """
+
+    def apply(
+        self,
+        blocks: FlowBlocks,
+        velocity_solve: _VelocitySolve,
+        schur_solve: _PressureSolve,
+        inverse_diagonal: jnp.ndarray,
+    ) -> _SaddleSolve:
+        def solve(
+            velocity_residual: jnp.ndarray, pressure_residual: jnp.ndarray
+        ) -> tuple[jnp.ndarray, jnp.ndarray]:
+            predictor = velocity_solve(velocity_residual)
+            pressure = schur_solve(pressure_residual - blocks.divergence(predictor))
+            velocity = self._correct_velocity(blocks, inverse_diagonal, predictor, pressure)
+            return velocity, pressure
+
+        return solve
+
+
+class SimplerComposition(SaddleComposition):
+    """SIMPLER: predict the pressure first, solve momentum at it, then correct both.
+
+    Klaij & Vuik (2013) Algorithm 2. The distinguishing step is the **pressure prediction** ``δp''``
+    that runs *before* the velocity solve, so the momentum block is inverted against an already
+    plausible pressure rather than against none:
+
+    1. ``Ŝ δp'' = -B F̃⁻¹ r_u`` — the prediction. It comes from the momentum row alone
+       (``G δp'' = r_u`` at zero velocity, multiplied through by ``-B F̃⁻¹``), deliberately *not*
+       from the mass row, which is what keeps the wide-stencil ``Ĉ`` out of the operator being
+       inverted.
+    2. ``F δu' = r_u - G δp''`` — the velocity solve at the predicted pressure.
+    3. ``Ŝ δp' = r_p - B δu' - Ĉ δp''`` — the pressure correction. ``Ĉ`` appears here, on the
+       right-hand side, where only its *action* is needed.
+    4. ``δu = δu' - F̃⁻¹ G δp'`` and ``δp = δp'' + δp'``.
+
+    The paper's Algorithm 2 divides the prediction by the outer relaxation ``ω_p`` in step 4, so that
+    a stationary iteration's ``ω_p`` relaxes only the correction. There is no outer relaxation in a
+    Newton--Krylov solve, which is the ``ω_p = 1`` limit, so the two pressures simply add.
+
+    It is the dearest member — two Schur solves and four residual linearizations against the
+    triangular pass's one and one — and the one the paper measures as needing far fewer linear
+    iterations per nonlinear iteration.
+    """
+
+    def apply(
+        self,
+        blocks: FlowBlocks,
+        velocity_solve: _VelocitySolve,
+        schur_solve: _PressureSolve,
+        inverse_diagonal: jnp.ndarray,
+    ) -> _SaddleSolve:
+        def solve(
+            velocity_residual: jnp.ndarray, pressure_residual: jnp.ndarray
+        ) -> tuple[jnp.ndarray, jnp.ndarray]:
+            predicted = schur_solve(-blocks.divergence(scale(velocity_residual, inverse_diagonal)))
+            # One linearization yields both halves of the pressure column: the gradient the momentum
+            # solve is driven against, and the coupling the correction's right-hand side needs.
+            gradient, coupling = blocks.pressure_column(predicted)
+            predictor = velocity_solve(velocity_residual - gradient)
+            correction = schur_solve(pressure_residual - blocks.divergence(predictor) - coupling)
+            velocity = self._correct_velocity(blocks, inverse_diagonal, predictor, correction)
+            return velocity, predicted + correction
+
+        return solve
+
+
+_COMPOSITIONS: dict[str, type[SaddleComposition]] = {
+    "triangular": BlockTriangularComposition,
+    "simple": SimpleComposition,
+    "simpler": SimplerComposition,
+}
+
+
+def _build_composition(composition: str) -> SaddleComposition:
+    """The composition strategy :meth:`BlockPreconditioner.build`'s ``composition`` selects."""
+    if composition not in _COMPOSITIONS:
+        raise ValueError(
+            f"unknown composition {composition!r}; use "
+            + ", ".join(repr(name) for name in _COMPOSITIONS)
+        )
+    return _COMPOSITIONS[composition]()
+
+
 # --- the composed preconditioner -------------------------------------------------------
 
 
@@ -1009,13 +1200,13 @@ class BlockPreconditioner(eqx.Module):
 
     The pressure Schur is scaled either by the momentum diagonal ``a_P`` (SIMPLE, ``Ŝ ~ B diag(V/a_P)
     B^T``) or, when ``schur_mass_diagonal`` is set, by a frozen velocity-independent diagonal
-    ``Q̂ = ρ V / k`` (MSIMPLER, a mass-matrix scaling), giving the constant-coefficient pressure Poisson
-    ``Ŝ ~ B diag(k/ρ) B^T``. Because ``Q̂`` does not track the velocity, the MSIMPLER Schur — unlike
+    ``Q̂ = ρ V / k`` (the mass-matrix scaling), giving the constant-coefficient pressure Poisson
+    ``Ŝ ~ B diag(k/ρ) B^T``. Because ``Q̂`` does not track the velocity, the mass-scaled Schur — unlike
     ``V/a_P`` — does not degrade as convection strengthens (Klaij & Vuik 2013, for exactly this
     collocated-FV coupled discretization), which carries the coupled solve past the Reynolds number
     where the ``a_P``-Schur stalls. The hierarchy is frozen at the mass matrix ``ρ V`` (``k = 1``); the
     scale ``k`` is applied per iterate in :meth:`apply_at`, auto-calibrated to ``mean(rho V / a_P)`` from
-    the real momentum diagonal (see :meth:`_msimpler_scale`) so its magnitude matches the SIMPLE Schur
+    the real momentum diagonal (see :meth:`_mass_scale`) so its magnitude matches the ``a_P`` Schur
     at the operating convection with no assumption on the characteristic speed. Only the Schur uses
     ``Q̂``; the velocity block always uses the true ``a_P``.
     """
@@ -1023,8 +1214,9 @@ class BlockPreconditioner(eqx.Module):
     assembler: MomentumContinuity
     schur: InnerSchurSolver
     velocity: VelocityBlockSolver
+    composition: SaddleComposition = BlockTriangularComposition()
     schur_mass_diagonal: jnp.ndarray | None = None
-    msimpler_scale: float | None = eqx.field(static=True, default=None)
+    mass_scale: float | None = eqx.field(static=True, default=None)
 
     @classmethod
     def build(
@@ -1034,7 +1226,8 @@ class BlockPreconditioner(eqx.Module):
         velocity: str = "smoothed",
         reference_state: jnp.ndarray | None = None,
         schur_scaling: str = "simple",
-        msimpler_scale: float | None = None,
+        composition: str = "triangular",
+        mass_scale: float | None = None,
         v_cycles: int = 1,
         strength_threshold: float = 0.0,
     ) -> BlockPreconditioner:
@@ -1061,10 +1254,10 @@ class BlockPreconditioner(eqx.Module):
             the frozen linearization carries the operating cell Peclet with no assumption on the flow
             speed. Pass a state only to pin the linearization to a better-known operating point (for
             instance a previously converged flow).
-        schur_scaling : {"simple", "msimpler", "lsc"}
+        schur_scaling : {"simple", "msimple", "lsc"}
             Which pressure-Schur approximation to use. ``"simple"`` uses the momentum diagonal ``a_P``
             (the classical SIMPLE Schur ``V / a_P``, which degrades as convection strengthens);
-            ``"msimpler"`` uses a **frozen, velocity-independent** diagonal ``Q̂ = ρ V / k`` so the
+            ``"msimple"`` uses a **frozen, velocity-independent** diagonal ``Q̂ = ρ V / k`` so the
             Schur is a constant-coefficient pressure Poisson (coefficient ``k · A/(d·n)``) that stays
             Re-robust — the fix that carries the coupled solve past the ``a_P``-Schur stall. Both are
             *scaled Laplacians*, hence near-Stokes approximations that eventually stop representing the
@@ -1074,9 +1267,20 @@ class BlockPreconditioner(eqx.Module):
             apply (two multigrid solves plus three residual linearizations, against one solve), and
             stronger on an **isolated** flow saddle, but **far worse on a coupled flow--turbulence
             solve** (see :class:`StabilizedLscSchur` for why).
-            **Use ``"msimpler"`` for a coupled solve.**
-        msimpler_scale : float, optional
-            The MSIMPLER scale ``k`` (only for ``schur_scaling="msimpler"``). It sets the Schur
+            **Use ``"msimple"`` for a coupled solve.**
+        composition : {"triangular", "simple", "simpler"}
+            How the velocity and Schur solves compose into ``M`` (see :class:`SaddleComposition`).
+            ``"triangular"`` (default) is the lower block-triangular pass — one of each solve;
+            ``"simple"`` adds the closing velocity update that makes it the full block ``LU``;
+            ``"simpler"`` additionally predicts the pressure *before* the velocity solve, at the cost
+            of a second Schur solve. This axis is independent of ``schur_scaling``: the method Klaij &
+            Vuik call **MSIMPLER** is ``schur_scaling="msimple", composition="simpler"``, and their
+            **SIMPLER** is ``schur_scaling="simple", composition="simpler"``. The prediction is derived
+            for a Schur of the form ``-B F̃⁻¹ G``, which is what both scaled Laplacians are and what
+            ``"lsc"`` is not — pairing it with ``"lsc"`` predicts against an operator the derivation
+            does not assume.
+        mass_scale : float, optional
+            The mass-scaled Schur's ``k`` (only for ``schur_scaling="msimple"``). It sets the Schur
             magnitude to the operating convection, or the block preconditioner is unbalanced and
             stalls. ``None`` (default) calibrates it automatically, per iterate, to ``mean(rho V / a_P)``
             from the **real** momentum diagonal at the current flow — which encodes the true velocity
@@ -1103,29 +1307,30 @@ class BlockPreconditioner(eqx.Module):
             raise ValueError(
                 f"unknown velocity block {velocity!r}; use 'smoothed', 'convection' or 'convection-air'"
             )
-        if schur_scaling not in ("simple", "msimpler", "lsc"):
+        if schur_scaling not in ("simple", "msimple", "lsc"):
             raise ValueError(
-                f"unknown schur_scaling {schur_scaling!r}; use 'simple', 'msimpler' or 'lsc'"
+                f"unknown schur_scaling {schur_scaling!r}; use 'simple', 'msimple' or 'lsc'"
             )
+        composition_strategy = _build_composition(composition)
         geometry = _SchurGeometry.of(assembler)
         n_cells = assembler.mesh.n_cells
         owner_e, nb_e, _ = assembler.mesh.face_cells.interior_edges()
         interior = np.asarray(assembler.mesh.face_cells.interior)
 
-        # MSIMPLER replaces the SIMPLE Schur scaling ``a_P`` with a frozen, velocity-independent
+        # The mass scaling replaces the SIMPLE Schur scaling ``a_P`` with a frozen, velocity-independent
         # diagonal ``Q̂ = ρ V / k``; ``None`` keeps the classical SIMPLE (a_P) Schur. The hierarchy is
         # built at the **mass matrix ``ρ V`` (k = 1)** — the constant-coefficient pressure Poisson
         # ``A/(d·n)``; the operating scale ``k`` is applied per iterate in :meth:`apply_at` (the
         # symmetric rescaling absorbs a scalar exactly). ``k`` is auto-calibrated there to
         # ``mean(ρV / a_P)`` from the **real** momentum diagonal (in the same ``ρV`` units as ``Q̂``, so
         # the density is not divided back out of the Schur coefficient), so it tracks the true velocity /
-        # density / viscosity scale with no unit-speed assumption; ``msimpler_scale`` overrides it.
+        # density / viscosity scale with no unit-speed assumption; ``mass_scale`` overrides it.
         mass_diagonal = jax.lax.stop_gradient(assembler.density * assembler.geometry.cell.volume)
-        # Only MSIMPLER reinterprets the Schur's diagonal as a mass matrix scaled per iterate by `k`.
+        # Only the mass scaling reinterprets the Schur's diagonal as a mass matrix scaled per `k`.
         # The commutator Schur uses the mass diagonal directly (it is `Q̂` in the least-squares
         # commutator, not a stand-in for `a_P`), so it wants no `k` calibration and no per-iterate
         # rescaling — leaving this None keeps `apply_at` from applying either.
-        schur_mass_diagonal = mass_diagonal if schur_scaling == "msimpler" else None
+        schur_mass_diagonal = mass_diagonal if schur_scaling == "msimple" else None
 
         # Both strategy selections below may need a representative flow state; resolve it once, the
         # first time either wants it, rather than each independently re-deriving it from the boundary
@@ -1166,8 +1371,9 @@ class BlockPreconditioner(eqx.Module):
             assembler,
             schur,
             velocity_block,
+            composition=composition_strategy,
             schur_mass_diagonal=schur_mass_diagonal,
-            msimpler_scale=msimpler_scale,
+            mass_scale=mass_scale,
         )
 
     def frozen_momentum_diagonal(self, state: jnp.ndarray) -> jnp.ndarray:
@@ -1191,8 +1397,8 @@ class BlockPreconditioner(eqx.Module):
         """
         return frozen_momentum_diagonal_parts(self.assembler, state)
 
-    def _msimpler_scale(self, state: jnp.ndarray) -> jnp.ndarray:
-        """The MSIMPLER scale ``k`` at ``state`` — ``mean(ρV / a_P)`` from the real momentum diagonal.
+    def _mass_scale(self, state: jnp.ndarray) -> jnp.ndarray:
+        """The mass-scaled Schur's ``k`` at ``state`` — ``mean(ρV / a_P)`` from the real ``a_P``.
 
         ``k`` sets the frozen, velocity-independent Schur diagonal ``schur_a_P = Q̂ / k = ρV / k``, an
         ``a_P``-magnitude stand-in for the real momentum diagonal, so the Schur coefficient
@@ -1204,12 +1410,12 @@ class BlockPreconditioner(eqx.Module):
         density / viscosity scale, so a non-unit-speed problem calibrates itself with **no unit-speed
         assumption**. The **un-shifted** diagonal is used (via :meth:`frozen_momentum_diagonal`, not the
         continuation's shifted ``a_P``): an early large pseudo-transient shift would give a spuriously
-        large ``a_P``, hence a spuriously weak Schur. ``msimpler_scale`` overrides the calibration with a
+        large ``a_P``, hence a spuriously weak Schur. ``mass_scale`` overrides the calibration with a
         fixed value. Frozen (``stop_gradient``) like :meth:`frozen_momentum_diagonal`, so the scale never
         leaks a live cell-volume or density gradient into the adjoint.
         """
-        if self.msimpler_scale is not None:
-            return jnp.asarray(float(self.msimpler_scale))
+        if self.mass_scale is not None:
+            return jnp.asarray(float(self.mass_scale))
         a_p = self.frozen_momentum_diagonal(state)
         return jax.lax.stop_gradient(jnp.mean(self.schur_mass_diagonal / a_p))
 
@@ -1223,26 +1429,29 @@ class BlockPreconditioner(eqx.Module):
         Jacobian it inverts — instead of always the bare diagonal :meth:`frozen_momentum_diagonal`
         returns. ``a_P`` is the isotropic per-cell diagonal, shape ``(n_cells,)``.
 
-        The velocity block always inverts at the supplied ``a_P``; the Schur uses the frozen MSIMPLER
+        The velocity block always inverts at the supplied ``a_P``; the Schur uses the frozen
         mass-matrix diagonal ``Q̂ = ρ V / k`` instead when set (velocity-independent, so it ignores the
         continuation shift), with ``k`` calibrated per iterate from the real un-shifted ``a_P`` (see
-        :meth:`_msimpler_scale`); else it uses the supplied ``a_P`` (classical SIMPLE).
+        :meth:`_mass_scale`); else it uses the supplied ``a_P`` (classical SIMPLE).
+
+        How the two inner solves are then composed into ``M`` is :attr:`composition`; the diagonal it
+        needs for its velocity corrections is the reciprocal of whichever diagonal the Schur was
+        assembled from, so the two stay consistent whatever the scaling.
         """
         if self.schur_mass_diagonal is None:
             schur_a_p = a_p
-        else:  # MSIMPLER: Q̂ = ρ V / k with the operating-scale k
-            schur_a_p = self.schur_mass_diagonal / self._msimpler_scale(state)
+        else:  # the mass-scaled Schur: Q̂ = ρ V / k with the operating-scale k
+            schur_a_p = self.schur_mass_diagonal / self._mass_scale(state)
         blocks = FlowBlocks.of(self.assembler, state)
-        schur_solve = self.schur.apply(schur_a_p, blocks)
-        velocity_solve = self.velocity.apply(a_p)
-        divergence = blocks.divergence
+        solve = self.composition.apply(
+            blocks,
+            self.velocity.apply(a_p),
+            self.schur.apply(schur_a_p, blocks),
+            1.0 / schur_a_p,
+        )
 
         def apply(v: jnp.ndarray) -> jnp.ndarray:
-            velocity_residual, pressure_residual = self.assembler.unpack(v)
-            velocity_correction = velocity_solve(velocity_residual)
-            # Block-triangular: the pressure block sees the velocity predictor's divergence D·δu.
-            pressure_residual = pressure_residual - divergence(velocity_correction)
-            return self.assembler.pack(velocity_correction, schur_solve(pressure_residual))
+            return self.assembler.pack(*solve(*self.assembler.unpack(v)))
 
         return apply
 

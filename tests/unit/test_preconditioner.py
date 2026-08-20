@@ -24,8 +24,10 @@ from aquaflux.flow import (
     pressure_schur_laplacian,
 )
 from aquaflux.flow.block_preconditioner import (
+    FlowBlocks,
     SmoothedAmgConvectionVelocity,
     SmoothedAmgVelocity,
+    _build_composition,
     _characteristic_reference_state,
     _per_component,
     _symmetric_rescaled,
@@ -75,18 +77,18 @@ def _channel(u_in, rho=1.0):
     )
 
 
-def _msimpler_at(asm, u_in):
-    """The MSIMPLER preconditioner for ``asm`` and a uniform inlet-speed flow, and that state."""
-    preconditioner = BlockPreconditioner.build(asm, schur_scaling="msimpler")
+def _mass_scaled_at(asm, u_in):
+    """The mass-scaled-Schur preconditioner for ``asm`` and a uniform inlet-speed flow, and that state."""
+    preconditioner = BlockPreconditioner.build(asm, schur_scaling="msimple")
     velocity = jnp.zeros((asm.mesh.n_cells, asm.mesh.dim)).at[:, 0].set(u_in)
     state = asm.pack(velocity, jnp.zeros(asm.mesh.n_cells))
     return preconditioner, state
 
 
-def test_msimpler_schur_scale_carries_density_like_simple() -> None:
-    """MSIMPLER's Schur coefficient keeps its density factor for rho != 1, matching SIMPLE (issue #40).
+def test_mass_scaled_schur_scale_carries_density_like_a_p_schur() -> None:
+    """The mass-scaled Schur's coefficient keeps its density factor for rho != 1, matching SIMPLE (issue #40).
 
-    ``schur_face_coefficient`` applies ``rho_face`` itself, so the frozen MSIMPLER diagonal
+    ``schur_face_coefficient`` applies ``rho_face`` itself, so the frozen mass-matrix diagonal
     ``schur_a_P = Q_hat / k = rho V / k`` must be calibrated in ``rho V`` units (``k = mean(rho V /
     a_P)``); otherwise the density cancels and the coefficient comes out ``rho`` times too small. At
     water density (rho = 1000) the per-cell effective Schur coefficient ``rho V / schur_a_P`` must
@@ -94,35 +96,33 @@ def test_msimpler_schur_scale_carries_density_like_simple() -> None:
     """
     rho = 1000.0
     asm = _channel(u_in=3.0, rho=rho)
-    preconditioner, state = _msimpler_at(asm, u_in=3.0)
+    preconditioner, state = _mass_scaled_at(asm, u_in=3.0)
 
     a_p = preconditioner.frozen_momentum_diagonal(state)  # the real a_P (SIMPLE's schur diagonal)
-    schur_a_p = preconditioner.schur_mass_diagonal / preconditioner._msimpler_scale(
-        state
-    )  # rho V / k
+    schur_a_p = preconditioner.schur_mass_diagonal / preconditioner._mass_scale(state)  # rho V / k
 
     rho_v = asm.density * asm.geometry.cell.volume
     eff_simple = float(jnp.mean(rho_v / a_p))  # mean(rho V / a_P) = k
-    eff_msimpler = float(
+    eff_mass_scaled = float(
         jnp.mean(rho_v / schur_a_p)
     )  # mean(rho V / (rho V / k)) = k iff k carries rho
-    assert eff_msimpler == pytest.approx(eff_simple, rel=1e-6)
+    assert eff_mass_scaled == pytest.approx(eff_simple, rel=1e-6)
 
 
-def test_msimpler_scale_does_not_leak_a_geometry_gradient() -> None:
-    """The MSIMPLER scale is frozen: no live cell-volume gradient reaches the Schur diagonal (issue #40).
+def test_mass_scale_does_not_leak_a_geometry_gradient() -> None:
+    """The mass-matrix scale is frozen: no live cell-volume gradient reaches the Schur diagonal (issue #40).
 
     ``k`` feeds ``schur_a_P`` (the Schur operator), so a live cell-volume dependence would leak a
     mesh-geometry gradient into the adjoint. The scale must be ``stop_gradient``-ed, like the momentum
     diagonal it is built from -- scaling the cell volumes must not move it.
     """
     asm = _channel(u_in=3.0, rho=1.2)
-    preconditioner, state = _msimpler_at(asm, u_in=3.0)
+    preconditioner, state = _mass_scaled_at(asm, u_in=3.0)
 
     def scale_with_scaled_volumes(s):
         scaled = eqx.tree_at(lambda a: a.geometry.cell.volume, asm, asm.geometry.cell.volume * s)
         moved = eqx.tree_at(lambda p: p.assembler, preconditioner, scaled)
-        return moved._msimpler_scale(state)
+        return moved._mass_scale(state)
 
     assert float(jax.grad(scale_with_scaled_volumes)(1.0)) == 0.0
 
@@ -561,3 +561,186 @@ def test_velocity_block_builds_from_a_narrow_geometry_seam() -> None:
     du = solve(ru)
     assert du.shape == (n_cells, mesh.dim)
     assert bool(jnp.all(jnp.isfinite(du)))
+
+
+# --- saddle compositions ---------------------------------------------------------------
+#
+# The composition family says how many times, and in what order, the velocity and Schur solves are
+# applied. Its members are checked here against the property that *defines* each one, rather than
+# against a transcription of its own code: exactness on a saddle system the composition's own
+# approximations are exact for. That is the check a missing algorithm step cannot pass.
+
+
+def _small_channel():
+    """A 12-cell inlet/outlet channel — small enough to materialize, and *not* pressure-singular.
+
+    A closed all-wall cavity fixes the pressure only up to a constant, so its saddle is singular and
+    no composition could reproduce a state applied through it. The pressure outlet is what makes the
+    exactness checks below well-posed.
+    """
+    mesh = structured_grid_2d(4, 3, lx=2.0, ly=H, named_boundaries=True)
+    return MomentumContinuity.build(
+        mesh,
+        mesh.geometry(),
+        PropertyModel({"viscosity": Constant(1e-2), "density": Constant(1.0)}),
+        CompactGreenGauss(),
+        BoundaryConditions(
+            {
+                "left": VelocityInlet(velocity=(1.0, 0.0)),
+                "right": PressureOutlet(pressure=0.0),
+                "bottom": NoSlipWall(),
+                "top": NoSlipWall(),
+            }
+        ),
+        advection_scheme=FirstOrderUpwind(),
+    )
+
+
+def _materialize(op, shape, out_shape):
+    """Dense matrix of a linear operator, column by column (small meshes only)."""
+    columns = []
+    for i in range(int(np.prod(shape))):
+        basis = jnp.zeros(int(np.prod(shape))).at[i].set(1.0).reshape(shape)
+        columns.append(np.asarray(op(basis)).reshape(-1))
+    return np.array(columns).T.reshape(int(np.prod(out_shape)), int(np.prod(shape)))
+
+
+def _exact_saddle(asm, state, diagonal):
+    """The blocks, and exact inner solves, of the saddle ``[[diag(d), G], [B, Ĉ]]``.
+
+    The *velocity* block is replaced by the very diagonal ``F̃`` the compositions correct with, so
+    the SIMPLE approximation ``F⁻¹ ≈ F̃⁻¹`` is exact for this system and the paper's algorithms must
+    reproduce its inverse to solver tolerance. The gradient, divergence and pressure-coupling blocks
+    are the real ones, so nothing about the saddle's structure is faked away.
+    """
+    blocks = FlowBlocks.of(asm, state)
+    n_cells, dim = asm.mesh.n_cells, asm.mesh.dim
+    gradient = _materialize(blocks.gradient, (n_cells,), (n_cells, dim))
+    divergence = _materialize(blocks.divergence, (n_cells, dim), (n_cells,))
+    coupling = _materialize(blocks.pressure_coupling, (n_cells,), (n_cells,))
+    velocity_diagonal = np.repeat(np.asarray(diagonal), dim)
+    saddle = np.block([[np.diag(velocity_diagonal), gradient], [divergence, coupling]])
+    schur = coupling - divergence @ np.diag(1.0 / velocity_diagonal) @ gradient
+    schur_inverse = np.linalg.inv(schur)
+    return (
+        blocks,
+        saddle,
+        lambda r: r / diagonal[:, None],
+        lambda r: jnp.asarray(schur_inverse @ np.asarray(r)),
+    )
+
+
+def _apply_saddle(asm, saddle, vector):
+    """``[[diag(d), G], [B, Ĉ]] v`` on a packed state vector."""
+    n_cells, dim = asm.mesh.n_cells, asm.mesh.dim
+    velocity, pressure = asm.unpack(vector)
+    flat = np.concatenate([np.asarray(velocity).reshape(-1), np.asarray(pressure)])
+    out = saddle @ flat
+    return asm.pack(
+        jnp.asarray(out[: n_cells * dim].reshape(n_cells, dim)), jnp.asarray(out[n_cells * dim :])
+    )
+
+
+@pytest.mark.parametrize("composition", ["simple", "simpler"])
+def test_a_faithful_composition_inverts_the_saddle_its_approximations_are_exact_for(
+    composition,
+) -> None:
+    """SIMPLE and SIMPLER are exact solvers once their two approximations are.
+
+    Both are block factorizations of the saddle: with the momentum block equal to the diagonal they
+    correct with, and the Schur solved exactly, applying the composition to ``A z`` must return
+    ``z``. A dropped or mis-signed step breaks this outright — it is the property the missing
+    pressure prediction failed.
+    """
+    asm = _small_channel()
+    state = asm.initial_state()
+    diagonal = jnp.asarray(np.linspace(1.0, 3.0, asm.mesh.n_cells))
+    blocks, saddle, velocity_solve, schur_solve = _exact_saddle(asm, state, diagonal)
+    solve = _build_composition(composition).apply(
+        blocks, velocity_solve, schur_solve, 1.0 / diagonal
+    )
+
+    rng = np.random.default_rng(0)
+    expected = jnp.asarray(rng.normal(size=asm.initial_state().shape))
+    recovered = asm.pack(*solve(*asm.unpack(_apply_saddle(asm, saddle, expected))))
+
+    assert np.allclose(np.asarray(recovered), np.asarray(expected), rtol=1e-8, atol=1e-8)
+
+
+def test_the_block_triangular_composition_is_exact_in_pressure_but_not_in_velocity() -> None:
+    """The default composition is deliberately *not* the full factorization, and this pins which half.
+
+    It drops SIMPLE's closing velocity update, which leaves the preconditioned operator unipotent
+    (the Murphy--Golub--Wathen two-iteration structure) rather than the identity. So on the same
+    saddle the pressure comes back exact and the velocity does not — evidence the omission is the
+    documented one and not a second missing step.
+    """
+    asm = _small_channel()
+    state = asm.initial_state()
+    diagonal = jnp.asarray(np.linspace(1.0, 3.0, asm.mesh.n_cells))
+    blocks, saddle, velocity_solve, schur_solve = _exact_saddle(asm, state, diagonal)
+    solve = _build_composition("triangular").apply(
+        blocks, velocity_solve, schur_solve, 1.0 / diagonal
+    )
+
+    rng = np.random.default_rng(0)
+    expected = jnp.asarray(rng.normal(size=asm.initial_state().shape))
+    velocity, pressure = solve(*asm.unpack(_apply_saddle(asm, saddle, expected)))
+    want_velocity, want_pressure = asm.unpack(expected)
+
+    assert np.allclose(np.asarray(pressure), np.asarray(want_pressure), rtol=1e-8, atol=1e-8)
+    assert not np.allclose(np.asarray(velocity), np.asarray(want_velocity), rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("composition", ["triangular", "simple", "simpler"])
+def test_every_composition_is_a_fixed_linear_map(composition) -> None:
+    """``M`` must be linear in its argument, or non-flexible GMRES and the transposed adjoint are both
+    invalid. Every member applies a fixed number of fixed-cycle inner solves, so this holds by
+    construction — pinned because a future member could break it by iterating to a tolerance."""
+    asm = _channel(1.0)
+    preconditioner = BlockPreconditioner.build(asm, composition=composition)
+    state = asm.initial_state()
+    m = preconditioner.factory()(state)
+
+    rng = np.random.default_rng(1)
+    x = jnp.asarray(rng.normal(size=state.shape))
+    y = jnp.asarray(rng.normal(size=state.shape))
+
+    combined = m(2.5 * x - 0.75 * y)
+    separate = 2.5 * m(x) - 0.75 * m(y)
+    assert np.allclose(np.asarray(combined), np.asarray(separate), rtol=1e-10, atol=1e-12)
+
+
+@pytest.mark.parametrize("composition", ["triangular", "simple", "simpler"])
+def test_every_composition_transposes_for_the_adjoint(composition) -> None:
+    """The adjoint applies ``Mᵀ`` via :func:`jax.linear_transpose`, so every member must satisfy
+    ``<y, M x> = <Mᵀ y, x>`` — the identity that makes the preconditioned transpose solve legitimate."""
+    asm = _channel(1.0)
+    preconditioner = BlockPreconditioner.build(asm, composition=composition)
+    state = asm.initial_state()
+    m = preconditioner.factory()(state)
+
+    rng = np.random.default_rng(2)
+    x = jnp.asarray(rng.normal(size=state.shape))
+    y = jnp.asarray(rng.normal(size=state.shape))
+    (transposed,) = jax.linear_transpose(m, x)(y)
+
+    assert float(jnp.vdot(y, m(x))) == pytest.approx(float(jnp.vdot(transposed, x)), rel=1e-9)
+
+
+def test_the_default_composition_leaves_the_preconditioner_byte_identical() -> None:
+    """The shipped default is the lower block-triangular pass the preconditioner has always applied,
+    so introducing the family changed no existing behaviour."""
+    asm = _channel(1.0)
+    state = asm.initial_state()
+    default = BlockPreconditioner.build(asm).factory()(state)
+    triangular = BlockPreconditioner.build(asm, composition="triangular").factory()(state)
+
+    rng = np.random.default_rng(3)
+    v = jnp.asarray(rng.normal(size=state.shape))
+    assert np.array_equal(np.asarray(default(v)), np.asarray(triangular(v)))
+
+
+def test_an_unknown_composition_is_rejected_by_name() -> None:
+    with pytest.raises(ValueError, match="unknown composition"):
+        BlockPreconditioner.build(_channel(1.0), composition="simplest")

@@ -1349,14 +1349,14 @@ def _coupled_shift_policy(
     # diagonal and supplies its own inverse, so the block built here would never be applied.
     #
     # The pressure Schur is left at BlockPreconditioner's own default (a_P-scaled SIMPLE), not the
-    # MSIMPLER scaling this used to hardcode. MSIMPLER was chosen believing it necessary for a
+    # mass-matrix scaling this used to hardcode. That scaling was chosen believing it necessary for a
     # convection-dominated coupled solve; it is not, at the scale this block-diagonal preconditioner is
     # actually used at -- swapping it for the default reaches the identical converged fixed point on
     # every fixture this path is exercised by (residual and fields agree to machine precision). Where a
     # Schur choice genuinely matters (a real, large, separated case), this whole block-diagonal
     # preconditioner is dominated by the field-split / monolithic-AMG preconditioners the flagship
     # validation cases use instead (`coupled_amg_continuation`), so tuning the Schur here buys nothing
-    # a real case would ever see. MSIMPLER remains available (`schur_scaling="msimpler"` via
+    # a real case would ever see. It remains available (`schur_scaling="msimple"` via
     # preconditioner_kwargs, or directly through `BlockPreconditioner`) for the one regime it is not
     # dominated in: a standalone, flow-only, convection-dominated solve, where the plain SIMPLE Schur's
     # inner solve can stall outright.
