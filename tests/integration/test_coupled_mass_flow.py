@@ -40,6 +40,7 @@ from aquaflux.turbulence import SSTModel, SSTTurbulence
 from aquaflux.turbulence.coupled import (
     CoupledRANS,
     mass_flow_coupled_continuation,
+    relative_residual_gmres,
     solve_coupled_mass_flow,
 )
 
@@ -174,6 +175,15 @@ def test_constrained_coupled_adjoint_matches_finite_difference(case) -> None:
     """
     coupled = case["coupled"]
     flow_ws, k_ws, omega_ws, _ = case["solution"]
+    # A LARGER Krylov subspace for the transpose solve than the default, because this test would
+    # otherwise gate on the stagnation detector rather than on the adjoint. The constrained adjoint runs
+    # at zero shift against the block-diagonal preconditioner -- where that preconditioner is weakest --
+    # and the default solve sits close enough to stagnating that the last few bits of the warm state
+    # decide it. Measured: two warm states differing by 6.6e-12 in relative terms, one converging and the
+    # other raising, with identical code. The fragility is real and is the block-diagonal preconditioner's
+    # zero-shift limit, not this test's business; what this test is for is that the gradient is the
+    # implicit-function-theorem one, so it is given a solve strong enough to actually report that.
+    adjoint_solver = relative_residual_gmres(1e-8, restart=120, stagnation_iters=200)
 
     # Build the continuation once, outside jax.grad, on concrete parameters (the block preconditioner
     # and the constraint border must not be traced); differentiate only the converged solve.
@@ -197,6 +207,7 @@ def test_constrained_coupled_adjoint_matches_finite_difference(case) -> None:
             omega=omega_ws,
             continuation=continuation,
             max_steps=40,
+            adjoint_solver=adjoint_solver,
         )
         return jnp.sum(k**2)
 

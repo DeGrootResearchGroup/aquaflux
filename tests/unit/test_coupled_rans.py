@@ -52,6 +52,7 @@ from aquaflux.turbulence.coupled import (
     CoupledRANSLayout,
     LiveViscosityVelocityParts,
     _row_jacobian_scale,
+    coupled_amg_continuation,
     coupled_continuation,
     coupled_lu_continuation,
     coupled_scaled_norm,
@@ -194,6 +195,63 @@ def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None
         coupled, state, backend="scipy", forward_solver=_COUPLED_FORWARD_SOLVER
     )
     assert override.forward_solver.restart == 120
+
+
+def test_every_continuation_builder_installs_the_same_globalization() -> None:
+    """The march's globalization must not depend on which preconditioner it was built around.
+
+    The three builders differ in exactly one thing — the preconditioner they freeze — and they route
+    through one shared step builder for everything else. This pins that, because the alternative is not
+    hypothetical: the block-diagonal and monolithic builders each grew their own copy of the tail and the
+    copies drifted, in both directions and in ways unrelated to preconditioning. The monolithic one
+    gained the k-positivity step limit, the cycle budget and the inner refresh; the block-diagonal one
+    gained the line search's growth and descent-backoff rungs; neither gained the other's.
+
+    The k-positivity limit is the one that mattered. Without it a step that drives ``k`` through zero
+    makes ``sqrt(k)`` — and so the eddy viscosity — non-finite, which is a failure that has actually
+    stopped a march; it shipped on one path only, so any recorded comparison between the two was
+    comparing a guarded march against an unguarded one.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    # Both branches: the single-step one needs the cap as much as the dual-time one, because its
+    # escalation ladder cannot catch `k < 0` -- the divergence guard fires on a residual that is already
+    # non-finite, by which point `sqrt(k)` has poisoned the closure.
+    built = {
+        "block": coupled_continuation(coupled, state, method=None),
+        "lu": coupled_lu_continuation(coupled, state, backend="scipy"),
+        "block dual-time": coupled_continuation(coupled, state, method=None, inner_steps=2),
+    }
+    for name, step in built.items():
+        assert step.step_limit is not None, f"{name} has no k-positivity limit"
+
+    # ...and the surfaces themselves agree on the globalization, so a knob cannot reappear on one side.
+    globalization = {
+        "beta0",
+        "exponent",
+        "beta_floor",
+        "max_escalations",
+        "escalation_factor",
+        "divergence_cap",
+        "line_search",
+        "inner_steps",
+        "inner_tol",
+        "grow",
+        "descent_backoff",
+        "descent_test",
+        "forward_solver",
+        "block_scaled_norm",
+        "residual_norm",
+        "inner_observer",
+        "cycle_budget",
+        "refresh_on_cycles",
+        "inner_refresh",
+        "positivity_floor",
+        "positivity_projection",
+    }
+    for builder in (coupled_continuation, coupled_amg_continuation):
+        missing = globalization - set(inspect.signature(builder).parameters)
+        assert not missing, f"{builder.__name__} cannot be given {sorted(missing)}"
 
 
 def test_coupled_build_resolves_boundaries_so_the_residual_jits() -> None:

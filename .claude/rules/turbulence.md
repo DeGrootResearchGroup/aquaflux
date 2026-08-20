@@ -222,6 +222,24 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     `rtol/refresh_rtol` compensation approximated, and why the `refresh_rtol <= rtol` constraint existed;
     both are now gone). The absolute form is available precisely *because* the refresh path is
     forward-only, so `‖R0‖` is concrete rather than traced. The constrained path
+  - **⚠️ THE CONSTRAINED ADJOINT TEST WAS PASSING BY ~1e-11, AND THAT IS A PROPERTY OF THE
+    PRECONDITIONER, NOT OF THE TEST (measured 2026-08-19).**
+    `test_constrained_coupled_adjoint_matches_finite_difference` differentiates at a warm state produced
+    by an `air`-preconditioned solve. Two warm states differing by **6.6e-12 relative / 4e-9 absolute**
+    — the same solve, before and after an unrelated change to the lAIR *setup* — take the transpose
+    solve from converging to raising `EquinoxRuntimeError: A stagnation in an iterative linear solve`,
+    **with the code held identical**. That was verified the only way that settles it: stash the code
+    change out entirely, then feed each saved state to the same binary. So the test was gating on the
+    stagnation detector's threshold rather than on the adjoint.
+    **The underlying fact is the block-diagonal preconditioner's zero-shift limit**, which this path
+    meets head-on: the constrained adjoint is a transpose solve at β = 0 against `BlockPreconditioner`,
+    the regime it is weakest in. The test now passes an explicit
+    `relative_residual_gmres(1e-8, restart=120, stagnation_iters=200)`, so it reports the gradient it
+    claims to. **`solve_coupled_mass_flow` gained `adjoint_solver` to make that possible** — it was the
+    only coupled driver without it, the same capability drift as the four continuation builders.
+    **Consequence for anyone measuring here: a mass-flow adjoint result is not a stable gate.** Any
+    change that perturbs the warm state in its last bits — a preconditioner tweak, a library version,
+    a different accelerator — can flip it, and the flip says nothing about the change.
     (`mass_flow_coupled_continuation` / `solve_coupled_mass_flow`) has **no** staged refresh — thread
     `reuse` through if that driver is added.
     - **The trigger is forward-only — it *raises* under `jax.grad`, and must (binding).** The refresh
@@ -905,9 +923,23 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     cell. The divergence guard cannot catch it: it fires on a non-finite residual, which is already the
     poisoned state. Measured on `bfs3d`: 62 healthy steps, then **two cells of 23040** at
     `k = -3.3e-4`, every field finite, only the derived `nu_t` NaN.
-    `coupled_amg_continuation` therefore wires `positive_k_limit(coupled)` — the fraction-to-the-boundary
-    cap — automatically for a directly-solved `k`, and passes `None` for a log-solved one, where
+    **Every** continuation builder therefore wires `positive_k_limit(coupled)` — the fraction-to-the-
+    boundary cap — automatically for a directly-solved `k`, and passes `None` for a log-solved one, where
     positivity is already structural and a cap would only throttle. See `.claude/rules/solve-march.md`.
+    ⚠️ **Until 2026-08-19 only `coupled_amg_continuation` did, and that is worth knowing before citing
+    any comparison between the builders.** `coupled_continuation` and `coupled_lu_continuation` never set
+    `step_limit`, whose default is `None`, so the block-diagonal and complete-LU paths marched with **no
+    positivity guard at all**. Two consequences. Any recorded block-SIMPLE-versus-monolithic result
+    compared a guarded march against an unguarded one. And the recorded verdict that "the low-β wall is
+    the block-SIMPLE preconditioner — its coupled solve goes NaN at a low shift"
+    (`solve-globalization-log.md`) is now **suspect**: an unguarded `k` crossing zero produces exactly
+    that signature, so the preconditioner may have been blamed for a missing globalization. Not
+    established — the experiment is one flag and has not been run — but that verdict is dead anyway on
+    its own terms: its remedy, the monolithic ILUT, was measured dominated and **deleted**, and the
+    shipped AMG preconditioners reach adjoint grade at zero shift, which is the regime it claimed only a
+    complete factorization could reach (the entry is collapsed to one line in
+    `solve-globalization-log.md`). All **four** builders now route through `_coupled_step`, and
+    `test_every_continuation_builder_installs_the_same_globalization` fails if one loses the guard.
     **`log(k+1)` does not fix this**: `k = e^w − 1` bounds `k > −1`, not `k > 0`, so the failure above is
     still reachable. It is regular at the wall (unlike `log k`) but that solves the other problem, not
     this one.

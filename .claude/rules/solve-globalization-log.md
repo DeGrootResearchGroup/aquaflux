@@ -571,8 +571,8 @@
         inner solve's cycle count, its `‖G‖` reduction and line-search factor. It is forward-only and
         transform-transparent (a no-op under `jax.grad`); `None` (default) elides the call at trace time,
         leaving the step **byte-identical** (do not set it on a differentiated solve). Threaded through
-        `coupled_continuation` / `coupled_amg_continuation` / `coupled_ilut_continuation` /
-        `coupled_lu_continuation`, so a profiling march can pass one straight through. Pinned by
+        `coupled_continuation` / `coupled_amg_continuation` / `coupled_lu_continuation` (the ILUT
+        builder named here no longer exists), so a profiling march can pass one straight through. Pinned by
         `test_dual_time_inner_observer_surfaces_the_trajectory_without_changing_the_step`.
         `DualTimeControl` is the Courant β-ramp (grow the pseudo-timestep while the inner α = 1, shrink
         when it clips), a `StepControl` on the eager march. The step's
@@ -630,18 +630,16 @@
         and stalls Δτ**, taking several-fold more outer steps than the α-based default. Prefer it only where the steady
         residual is a reliable monotone progress signal. Its `next_step` state is `(β, prev ‖R‖)`. Unit-tested
         in `tests/unit/test_step_control.py`.
-      - **THE LOW-β WALL IS THE BLOCK-SIMPLE PRECONDITIONER, AND THE ILUT BREAKS IT.** With
-      `ResidualRatioDualTimeControl` the residual descends cleanly (no runaway) but block-SIMPLE's coupled
-      solve goes **NaN at a low shift** — the low-shift conditioning wall (block-SIMPLE cannot solve the
-      near-unshifted saddle; the same limit as its adjoint stagnation). The monolithic ILUT forms the true
-      coupled inverse, so `coupled_ilut_continuation(inner_steps>1)` (a `DualTimeStep` preconditioned by
-      the ILUT — the branch added alongside the single-step one) drives β **monotonically below that wall
-      with no NaN, at a flat cycle count**, descending the row-scaled residual on the anchor. So the ILUT
-      is what makes the large-Δτ dual-time march reachable at all. *(the β at which block-SIMPLE NaN'd,
-      the β the ILUT reached, the cycle count and the residuals recorded no Re rung, state or refresh
-      setting — and the cycle count was taken on the ILUT path's restart-10 forward solver, so it is not
-      comparable with the restart-15 or restart-120 counts elsewhere in this file. Re-measure before
-      relying on any of them.)*
+      - **DELETED — "the low-β wall is the block-SIMPLE preconditioner, and the ILUT breaks it" was
+      superseded on both halves.** The remedy is gone: the monolithic ILUT was measured **dominated** and
+      removed, and there is no `coupled_ilut_continuation` / `IlutFactors` / `ilut_beta_tracking_refresh`
+      any more (see `solve-direct-preconditioners.md`). The premise is gone too: the shipped AMG
+      preconditioners solve to **adjoint grade at zero shift**, which is the very regime this entry
+      claimed only a complete factorization could reach. The one line worth keeping is the trap: a
+      dual-time march driving β low is where a preconditioner's low-shift behaviour is tested, so measure
+      there and not at the march's floor. ⚠️ And note what the entry never controlled for — the
+      block-SIMPLE path had **no k-positivity limiter at all** until 2026-08-19 (`turbulence.md`), so an
+      unguarded `k` crossing zero produces exactly the NaN it attributed to conditioning.
       - **Residual FLOOR + over-development past the minimum = loose `inner_tol`, NOT the preconditioner.**
       Even with the ILUT (a flat cycle count — the linear solve is fine), the march bottoms out at a
       residual floor and then slowly over-develops. Cause: dual-time's unconditional stability comes from
@@ -963,8 +961,8 @@
       `RowScaledNorm` divides each row by its own diagonal and each block by its field magnitude, so every
       equation is judged comparably. **`per_block` is that measure's reporting view and `__call__` is
       literally `norm(per_block(r))`** — one formula, so the per-equation grid in the march log cannot
-      describe a convergence history the march never had. `coupled_continuation` / `coupled_ilut_continuation` build it by
-      default; `block_scaled_norm=True` selects the coarser one-scale-per-block `BlockScaledNorm`
+      describe a convergence history the march never had. `coupled_continuation` builds it by
+      default (the ILUT builder named here no longer exists); `block_scaled_norm=True` selects the coarser one-scale-per-block `BlockScaledNorm`
       (`_coupled_residual_norm`), and `residual_norm=jnp.linalg.norm` recovers Euclidean.
       (`mass_flow_coupled_continuation` still defaults to Euclidean pending a constraint-aware variant.)
       The row-scaled measure does **not** fix the forward stall (globalization-bound; it plateaus under any
