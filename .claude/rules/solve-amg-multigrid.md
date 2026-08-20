@@ -2047,8 +2047,10 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   path was invariant at *every* level in the same comparison. **Consequence:** for `method="air"` (and
   `velocity="convection-air"`) a cheap refresh requires **reusing the reference's frozen C/F split and
   prolongation and recomputing only the values on it** — legitimate, since any valid split gives a
-  valid preconditioner. That is **`refresh_air_hierarchy(hierarchy, a_new, degree=…)`** (below),
-  whereas the aggregation path gets it for free by rebuilding.
+  valid preconditioner. That is **`refresh_air_hierarchy(hierarchy, a_new)`** (below),
+  whereas the aggregation path gets it for free by rebuilding. (No `degree=` — that argument was
+  removed 2026-08-19 when the refresh started reusing the frozen neighbourhoods, which carry the
+  degree, so a refresh can no longer disagree with its build about it.)
   - **Strength-of-connection (SoC) aggregation IS available now — opt-in via `strength_threshold`,
     and it makes the aggregation path value-dependent (so it forfeits the free refresh above).**
     `build_smoothed_hierarchy(a, strength_threshold=θ)` / `build_convection_hierarchy(a, …)` (and
@@ -2068,15 +2070,147 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     It does **not** apply to the reduction-based `air`/`lsc` blocks (already strength-based), and the
     refreshed scalar k/ω AMGs stay `θ=0` to keep their refresh cache-hit — a value-refresh (à la
     `refresh_air_hierarchy`) to let them use SoC too is the tracked follow-up.
+- **⚠️⚠️ THE lAIR RESTRICTION WALKED THE OPERATOR'S FULL SPARSITY PATTERN, NOT THE STRENGTH GRAPH —
+  a conformance defect, and it is why lAIR "did not finish" on every real operator (found and FIXED
+  2026-08-19).** `_lair_restriction` grew each C-point's F-neighbourhood by stepping over
+  `a.indices`. Manteuffel, Ruge & Southworth (SISC 40(6), 2018) specify the walk over the
+  **strong-connection graph**, and name this exact failure: a wider neighbourhood "can lead to
+  intractable complexity due to larger local linear systems as a result of coarse-grid operator
+  fill-in". We met it by construction on anything denser than a nearest-neighbour stencil, which is why
+  it looked fine on the 2D unit fixtures and died on a real block.
+  - **The mechanism is compounding fill, not Python overhead — and that distinction was nearly missed.**
+    A profile at level 0 puts only 12 % of the time in the dense local solves and the rest in Python and
+    `scipy` indexing, which reads as "Cythonize this". One level down the ratio inverts completely.
+    Instrumented `build_air_hierarchy` on a convection-dominated distance-2 operator (8192 rows,
+    45 nnz/row, `theta` 0.25, `degree` 2): stored entries per row went **45 → 319 → 856** (a coarse
+    operator 80 % dense) with `R` at **1167 nnz/row** on level 1, and level 1 alone cost 20 s. Changing
+    **only** which graph the walk is given, everything else identical: **45 → 62 → 78**, `R` at 20
+    nnz/row, and the total restriction time **34.9 s → 0.4 s**.
+  - **At a real shape the whole hierarchy now builds in ~4 s.** Six levels on a 46080-row, 2.2M-nnz
+    convection-dominated operator: restriction 3.2 s, splitting 0.7 s, Galerkin 0.07 s, densities
+    47/67/86/83/47/15. The same build under the old walk does not finish. For scale, the native flow
+    hierarchy builds in ~6 s and PETSc GAMG in ~3 s, so lAIR setup is now in normal range and **the
+    method is evaluable on `bfs3d` for the first time**.
+  - **It is a real accuracy-against-cost trade, now a knob: `build_air_hierarchy(restriction_theta=…)`,
+    defaulting to `theta`.** Every admitted connection makes the local solve a better approximation of
+    the ideal restriction and makes the coarse operator denser. Per-cycle contraction on the 2D
+    convection-diffusion fixture at cell Peclet ~40 (n=24, n=48), against peak coarse density on the
+    3D-shaped operator above:
+
+    | `restriction_theta` | contraction n=24 | n=48 | 3D setup | 3D peak nnz/row |
+    |---|---|---|---|---|
+    | `0.0` — the old full-pattern walk | 0.0001 | **0.0030** | **does not finish** | 856+ |
+    | 0.05 | 0.0543 | 0.0867 | 5.9 s | 296 |
+    | 0.10 | 0.0543 | 0.1390 | 5.2 s | 198 |
+    | 0.20 (with `theta` 0.40 — the paper's own pair) | 0.0543 | 0.1523 | — | — |
+    | **`theta` = 0.25 — the default** | 0.0543 | **0.1660** | **3.9 s** | **86** |
+
+    So the old code sat at the accurate/unaffordable extreme, and `restriction_theta=0.0` still
+    reproduces it exactly where an operator is sparse enough to afford it. **`0.0` is also the only
+    setting for which the exact-Schur property holds**, because the ideal restriction must cancel
+    *every* term of `A[g, F]`, including weak ones — pinned by
+    `test_lair_restriction_reproduces_the_exact_schur_complement`, which now walks at zero threshold
+    and says why.
+  - **⚠️ The contraction test's old bars were calibrated against the unaffordable extreme.**
+    `test_air_v_cycle_is_mesh_independent_at_high_peclet` required contraction `< 0.1` and a
+    cross-refinement spread `< 0.05`; **no** paper-conformant configuration meets them, the paper's own
+    (0.40, 0.20) included. It was renamed `test_air_v_cycle_contracts_strongly_at_high_peclet` and
+    recalibrated to `< 0.25` / `< 0.15` against the default, with
+    `test_a_wider_restriction_neighbourhood_buys_accuracy_and_costs_density` pinning both halves of the
+    trade so neither reads alone as a reason to move the default. Note the old arm was also the *least*
+    mesh-independent of the lot (22.5× degradation across the refinement against the default's 3.1×) —
+    it passed the mesh-independence bar on headroom, not on the property the name claimed.
+  - **`_require_bounded_coarsening` (new) refuses a densifying hierarchy at `_MAX_COARSENING_GROWTH`
+    (4× stored entries per row against the level above), skipping levels at or below `max_coarse`
+    since a small bottom level is routinely near-dense and compounds into nothing.** The failure it
+    catches has no symptom other than a build that stops finishing — the growth lands in dense local
+    solves rather than in anything that raises — so it is a guard, not a diagnostic. Pinned in both
+    directions by `test_air_coarse_operators_stay_sparse_on_a_distance_two_operator` and
+    `test_air_build_rejects_a_densifying_hierarchy_rather_than_grinding`.
+  - **⚠️ A SEPARATE, PRE-EXISTING DEFECT SURFACED WHILE VERIFYING THIS, AND IT BLOCKED THE REFRESH ON
+    EVERY REAL OPERATOR — fixed in the same change (`_galerkin_coarse`).** `scipy` **drops an exactly
+    zero entry from a sparse product**, and lAIR generates those *structurally*: a degree-2
+    neighbourhood can hold an F-point that the C-point's row does not couple to, and the local solve
+    then returns exactly zero for it. So the Galerkin coarse operator's stored entry count depended on
+    the operator's **values**, and `refresh_air_hierarchy` — whose whole purpose is to hold the jit
+    signature — failed its own `_require_matching_structure` check on a perfectly legitimate operator,
+    with a message blaming the caller's sparsity pattern. Measured on the 46080-row operator: 14 such
+    weights at the build state, zero at the developed one, moving the level-1 count by 160 of 1.52M.
+    **Not an artifact of a contrived fixture** — it reproduced with generic random values, because the
+    zeros come from the neighbourhood's *pattern* rather than from cancellation. `_galerkin_coarse`
+    takes the pattern from the same triple product over matrices of **ones**, where no cancellation is
+    possible, and scatters the real values into it; the build costs ~11 % more (5.0 s against 4.5 s on
+    that operator) and the refresh then preserves structure and runs in 3.5 s. Pinned by
+    `test_galerkin_coarse_pattern_does_not_move_when_a_weight_becomes_zero`. **This was latent before
+    the neighbourhood fix and would have bitten whoever next ran a refreshing lAIR march** — the old
+    walk was equally value-dependent in `z`; it was simply unreachable because no such hierarchy could
+    be built.
+  - **⚠️ THE lAIR REFRESH'S STRUCTURAL BENEFIT IS SMALLER THAN IT LOOKED, and the old evidence for it
+    was partly the same `scipy` artifact.** `test_refreshing_an_air_scalar_preconditioner_preserves_
+    its_structure` asserted that a plain *rebuild* at a developed state changes the shapes — the
+    non-vacuity half of the test — and that assertion **broke** once `_galerkin_coarse` made the coarse
+    pattern value-independent. Measured on that fixture (a uniform 24x12 transport operator): scaling
+    the diffusivity and the flux *together* over a 400x swing leaves the level-0 C/F split **bit-
+    identical**, because every relative strength is unchanged, so a rebuild really is shape-stable there
+    and the old shape difference was entirely the zero-pruning artifact. Only moving the convection/
+    diffusion **balance** far enough to reorder an edge's strength re-splits (a diffusion-dominated arm
+    takes level 1 from `n_coarse` 72 to 48). The test now uses a diffusion-dominated third arm and says
+    why. **Consequence: on a uniformly-scaled operator, `reuse=` buys nothing structural** — lAIR's
+    value-dependence is real (`test_lair_structure_is_value_dependent_unlike_aggregation` still passes
+    on a chain whose coefficients ramp non-uniformly) but it is a property of the *balance* moving, not
+    of the values moving. Do not cite the refresh as load-bearing without checking which of the two a
+    given march actually does.
+  - **✅ lAIR IS NOW BLOCK-AWARE — `build_air_hierarchy(block_size=…)` — AND THAT DISSOLVES THE
+    RECORDED `[k, ω]` BLOCKER (2026-08-19).** Three things change together above ``block_size = 1`` and
+    none suffices alone, which is the same trio `NodalNativeInverse` needed and for the same measured
+    reasons. The C/F splitting runs on the **cell** graph (`_cell_graph`), so a cell is entirely coarse
+    or entirely fine — a field-blind split can put one field of a cell on the coarse grid and another on
+    the fine one, which is what produces the degenerate Galerkin row. The local approximate-ideal solve
+    carries **one right-hand side per field** (the block form of the paper's eq. 17), so the within-cell
+    coupling stays inside it rather than being approximated away outside. And the FC-Jacobi smoother
+    inverts each cell's own block (`_cell_block_inverse`) rather than the scalar diagonal, because on
+    the coupled scalar pair that coupling exceeds the diagonal.
+    - **The third of those is why the recorded blocker falls.** `solve-field-split.md` records the
+      trailing Jacobian slice going **diagonal-negative at level 1**, with smoothed/convection/lAIR all
+      refusing to build, and names that — not row density — as "the decisive fact". It is a **point**-
+      smoother requirement: `_require_positive_diagonal` demands a positive scalar diagonal, while
+      `_cell_block_inverse` demands only that each cell block be *invertible*, and says so outright
+      ("a block can be perfectly well conditioned with a negative entry on its diagonal"). Pinned
+      directly by `test_block_air_builds_where_the_scalar_diagonal_is_negative`: the **same** operator,
+      scalar build refused, block build succeeding. So that blocker was never a property of the
+      operator.
+    - **`block_size = 1` is byte-identical** — all 63 pre-existing multigrid tests pass unchanged.
+    - **The contraction test carries its own non-vacuity check**, comparing against the *same hierarchy
+      with its block inverse stripped out*. Without that a fixture whose within-cell coupling is weak
+      would pass for the wrong reason and read as evidence for the block smoother.
+    - **Wired for a march as `air_inverse(...)` / `AirBlockInverse` (`solve/field_split.py`)**, a
+      `trailing_inverse` factory satisfying the split's three-method contract (`n_dofs`, `apply`,
+      `refactor_block`). It does **not** subclass `NativeHierarchyInverse`: that base owns a
+      `SmoothedHierarchy` and refreshes by re-fitting the aggregation, this owns an `AirHierarchy` and
+      refreshes via `refresh_air_hierarchy` on a frozen split. The transpose is `jax.linear_transpose`
+      of the whole fixed-cycle map, since `R != Pᵀ` makes swapping the transfers by hand wrong.
+      Selected on `bfs3d` by `BFS3D_TURBULENCE_INVERSE=air`.
+  - **What is NOT yet re-measured: whether lAIR is any good on `bfs3d`.** Everything above is setup
+    cost and a 2D contraction fixture. `method="air"` is opt-in in both consumers
+    (`scalar_transport_preconditioner`, `BlockPreconditioner` via `velocity="convection-air"`) and both
+    default to `twolevel`, so no shipped default moved.
 - **`refresh_air_hierarchy` — the lAIR refresh that keeps the compilation signature (BUILT).** It
   re-derives an lAIR hierarchy's **values** at a new operator while holding the coarsening fixed: each
   level reuses its stored C/F split (recovered from the level's own masks) and its stored
   prolongation, and re-solves only the local approximate-ideal restriction against the new `a`. The
   prolongation must be *carried over*, not re-derived, because `_one_point_interpolation` picks each
-  F-point's strongest C-neighbour by `argmax |a_ij|` — a value-dependent column choice. The
-  restriction's sparsity, by contrast, depends only on the split and on `a`'s *pattern* (the
-  degree-`d` neighbourhood walk), so it is invariant, and the Galerkin `R A P` patterns below follow
-  inductively. The result is verified before returning (`_require_matching_structure`) and a
+  F-point's strongest C-neighbour by `argmax |a_ij|` — a value-dependent column choice.
+  ⚠️ **The restriction's neighbourhoods must now be carried over too, and the reason this entry used to
+  give for not carrying them is FALSE as of 2026-08-19.** It said the restriction's sparsity "depends
+  only on the split and on `a`'s *pattern*", which was true only while the walk ran over the operator's
+  full sparsity pattern — the conformance defect fixed that day (see the lAIR-neighbourhood entry
+  above). The walk now runs over the **strength graph**, which reads values, so it is exactly as
+  value-dependent as the split and the prolongation. `_frozen_neighbourhoods(level)` recovers each
+  level's walk from its own stored `R` (row `k` holds `{g} ∪ N`, so dropping the one coarse entry per
+  row returns `N`), and `_restriction_over_neighbourhoods` re-solves on it. **Structure is therefore
+  preserved by construction rather than by the check** — nothing structural is re-derived at all — and
+  the Galerkin `R A P` patterns below follow inductively. The result is still verified before returning
+  (`_require_matching_structure`) and a
   mismatched operator raises rather than silently returning a hierarchy that would recompile. Pinned
   by `test_refresh_air_hierarchy_keeps_the_structure_and_is_a_cache_hit` (shapes preserved, values
   changed, jitted V-cycle traces once), `test_refreshed_air_hierarchy_preconditions_the_new_operator`

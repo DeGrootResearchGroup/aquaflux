@@ -1679,7 +1679,11 @@ prolongation is closed.
 degrees of freedom, destroying the four-field block structure the SIMPLE smoother needs on every coarse
 level. It calls `_require_positive_diagonal` at every level, and the saddle's pressure rows are the
 Rhie–Chow damping. And on the true Jacobian slice of the `[k, omega]` block on this same mesh it ran
-~50 minutes without finishing at 91 nonzeros per row; the flow block carries 128.
+~50 minutes without finishing at 91 nonzeros per row; the flow block carries 128. ⚠️ **That third
+reason is SPENT as of 2026-08-19** — the run-away was a neighbourhood walked over the full sparsity
+pattern rather than the strength graph, since fixed, and lAIR now builds a comparable hierarchy in
+seconds (see `solve-amg-multigrid.md`). The first two reasons are structural and stand on their own,
+so the verdict does not change; do not cite the 50 minutes.
 
 **Transferring the threshold to the `[k, omega]` block will not buy CYCLES**, and the trailing ablation
 settled that on the right measure: at `state-00067`, β = 0, with the leading inverse held at ILU(0), the

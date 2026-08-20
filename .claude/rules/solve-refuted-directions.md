@@ -415,6 +415,22 @@ load-bearing status of the flow block itself is in `solve-flow-block.md`.
   See `solve-amg-multigrid.md`'s "damped-Jacobi convection hierarchy is TWO-LEVEL by design" binding
   decision — a coarse-of-coarse convection operator acquires eigenvalues no single-factor smoother can
   damp; deep convection coarsening is lAIR's job instead.
+- **⚠️ REOPENED, NOT REFUTED — "lAIR is unusably slow on a real operator" was OUR BUG, fixed
+  2026-08-19.** Recorded here because this ledger is what gets grepped before anyone re-proposes lAIR,
+  and the old cost evidence reads as a closure. `_lair_restriction` grew its F-neighbourhood over the
+  operator's **full sparsity pattern** instead of the strength graph Manteuffel, Ruge & Southworth
+  (SISC 2018) specify, so the Galerkin fill compounded down the hierarchy (measured 45 → 319 → 856
+  stored entries per row over three levels) and the build stopped finishing on anything denser than a
+  nearest-neighbour stencil. With the specified walk a six-level hierarchy on a 46080-row operator
+  builds in **~4 s**. So the "~50 minutes without finishing at 91 nnz/row" figure quoted in
+  `solve-flow-block-log.md` and `solve-field-split.md` is **spent as a cost argument** — both entries
+  are marked in place. Note what does NOT change: the flow-block verdict rested on two *structural*
+  reasons besides cost (`build_air_hierarchy` is scalar, so its C/F splitting destroys the four-field
+  block structure the SIMPLE smoother needs; and it requires a positive diagonal, which the saddle's
+  Rhie–Chow pressure rows are not), and both stand. What reopens is lAIR on the **scalar transport /
+  `[k, ω]`** blocks, where it is opt-in and now affordable enough to evaluate. It is still
+  **unevaluated on quality there** — nothing measured to date is a `bfs3d` convergence number. See
+  `solve-amg-multigrid.md` § "THE lAIR RESTRICTION WALKED THE OPERATOR'S FULL SPARSITY PATTERN".
 - **Block-CSR sparse matvec — REFUTED; JAX's own primitives are already at the limit for this case.** See
   `solve-flow-block-log.md` § "The sparse matvec is at the limit of what JAX's primitives give —
   block-CSR REFUTED".
