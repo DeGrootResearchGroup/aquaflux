@@ -24,7 +24,10 @@ cfd/                                  # repo root
 │
 ├── docs/                             # the Sphinx site (MyST Markdown; api.md generated at build)
 │   ├── conf.py                       #   Sphinx config + _write_api_page (API page from each __all__)
-│   ├── index.md  mesh.md  mesh_zones_and_patches.md
+│   ├── index.md                      #   landing page and the guide toctree
+│   ├── mesh.md  mesh_zones_and_patches.md
+│   ├── steady_state_solving.md       #   the nonlinear solve, globalization, and the IFT adjoint
+│   ├── preconditioning.md            #   every preconditioner, how to choose one, and how to keep it current
 │   └── package_structure.md          #   this file (excluded from the built site)
 │
 ├── tools/
