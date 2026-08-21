@@ -305,7 +305,7 @@ def decouple_dof(a: sp.csr_matrix, index: int) -> sp.csr_matrix:
 # consumer applies the two together -- a factorization or a coarsening wants the matrix both
 # unit-diagonal and grouped by cell, and `equilibrate_cell_major` below is exactly that pair.
 #
-# Consumed by the multigrid V-cycle (`amg_preconditioner.py`, `host_vcycle.py`) and the block field
+# Consumed by the multigrid V-cycle (`amg_preconditioner.py`, `ilu_inverse.py`) and the block field
 # split (`field_split.py`); the complete LU needs neither (its own fill-reducing pivoting and ordering
 # already handle the indefinite saddle).
 

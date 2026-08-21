@@ -13,7 +13,7 @@ is a question about what would REPLACE it:
 * ``lu``      -- the complete LU, re-factored every step. Frozen it mis-preconditions a ramping
                  shift badly (measured: 1 Krylov iteration at the matching shift against 474 two
                  doublings away), so a fair arm gives it the per-step refresh it is designed around.
-* ``hostilu`` -- the field split whose blocks are a native hierarchy smoothed by this package's own
+* ``hostilu`` -- the field split whose blocks are a traced hierarchy smoothed by this package's own
                  zero-fill factorization. No optional dependency at all.
 
 (A threshold incomplete-LU arm, ``ilut``, used to run alongside these two; it was removed once the
@@ -42,8 +42,8 @@ import jax.numpy as jnp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     MarchLogger,
     RefreshPolicy,
-    host_ilu_inverse,
-    native_nodal_inverse,
+    ilu_smoothed_inverse,
+    jacobi_smoothed_inverse,
     restart_cycles,
 )
 from aquaflux.turbulence import (  # noqa: E402
@@ -98,7 +98,7 @@ HOST_FLOW = dict(
 )
 
 #: The trailing block's settings as the three-dimensional case ships them.
-NATIVE_TRAILING = dict(
+JACOBI_TRAILING = dict(
     cycles=1,
     sweeps=4,
     max_coarse=2000,
@@ -143,8 +143,8 @@ def _arms(coupled, reference_state):
                 coupled,
                 reference_state,
                 field_split=True,
-                leading_inverse=host_ilu_inverse(**HOST_FLOW),
-                trailing_inverse=native_nodal_inverse(**NATIVE_TRAILING),
+                leading_inverse=ilu_smoothed_inverse(**HOST_FLOW),
+                trailing_inverse=jacobi_smoothed_inverse(**JACOBI_TRAILING),
                 cycle_budget=CYCLE_BUDGET,
                 forward_rtol=FORWARD_RTOL,
                 forward_restart=FORWARD_RESTART,

@@ -61,7 +61,7 @@ import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     materialize_block_jacobian,
-    native_nodal_inverse,
+    jacobi_smoothed_inverse,
     shifted_jacobian,
 )
 from aquaflux.turbulence import (  # noqa: E402
@@ -129,7 +129,7 @@ def field_split_arm(coupled, state, beta):
         # The case's own selection, imported rather than re-branched here: a second copy of that
         # `petsc | native | hostilu` choice is how two files that must agree stop agreeing.
         leading_inverse=compare.LEADING_INVERSE,
-        trailing_inverse=native_nodal_inverse(**compare.NATIVE_TRAILING),
+        trailing_inverse=jacobi_smoothed_inverse(**compare.JACOBI_TRAILING),
         inner_steps=compare.INNER_STEPS,
         inner_tol=compare.INNER_TOL,
     )

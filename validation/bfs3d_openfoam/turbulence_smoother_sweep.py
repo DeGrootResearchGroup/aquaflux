@@ -75,7 +75,7 @@ from aquaflux.solve import (  # noqa: E402
     MonolithicAmgPreconditioner,
     block_stencil_gather_map,
     build_amg_vcycle,
-    native_nodal_inverse,
+    jacobi_smoothed_inverse,
     relative_residual_gmres,
     solve_linear,
 )
@@ -98,9 +98,9 @@ from field_split_probe import (  # noqa: E402
 )
 
 
-def _is_native(arm: str) -> bool:
-    """Does this arm build the trailing half from the JAX-native multigrid rather than PETSc?"""
-    return arm.startswith(("native", "nodal"))
+def _is_hierarchy_arm(arm: str) -> bool:
+    """Does this arm build the trailing half from the traced multigrid rather than PETSc?"""
+    return arm.startswith(("simplesmooth", "nodal"))
 
 
 def _replaces_hierarchy(arm: str) -> bool:
@@ -108,14 +108,14 @@ def _replaces_hierarchy(arm: str) -> bool:
 
     The two kinds are measured differently: a smoother's setup cost is a hierarchy build, while a
     whole-block inverse has no hierarchy to build at all -- which is most of what makes it interesting.
-    The native arms are neither: they DO build hierarchies, just not PETSc's.
+    The host arms are neither: they DO build hierarchies, just not PETSc's.
     """
-    return arm not in SMOOTHERS and not _is_native(arm)
+    return arm not in SMOOTHERS and not _is_hierarchy_arm(arm)
 
 
 def _known_arm(arm: str) -> bool:
     """The three families this harness can build: a PETSc smoother, a block inverse, or native."""
-    return arm in SMOOTHERS or _is_native(arm) or arm.startswith("blockjacobi")
+    return arm in SMOOTHERS or _is_hierarchy_arm(arm) or arm.startswith("blockjacobi")
 
 
 #: The leading half is held at the shipped incomplete-LU sweep for every arm, so a difference between
@@ -221,8 +221,8 @@ def trailing_setup(shifted, groups, arm: str, coupled=None, state=None) -> float
     """
     block = shifted[groups.trailing, :][:, groups.trailing]
     started = time.perf_counter()
-    if _is_native(arm):
-        inverse = _native_factory(arm)(block, groups.n_trailing_fields)
+    if _is_hierarchy_arm(arm):
+        inverse = _hierarchy_factory(arm)(block, groups.n_trailing_fields)
         elapsed = time.perf_counter() - started
         inverse.destroy()
         return elapsed
@@ -243,10 +243,10 @@ def trailing_setup(shifted, groups, arm: str, coupled=None, state=None) -> float
     return elapsed
 
 
-def _native_factory(arm: str, coupled=None, state=None):
+def _hierarchy_factory(arm: str, coupled=None, state=None):
     """The JAX-native trailing inverse for a ``nodal`` arm, or ``None`` for a PETSc-smoother arm.
 
-    ``nodal[N][cM]`` builds ONE block-aware JAX-native hierarchy over the whole trailing group,
+    ``nodal[N][cM]`` builds ONE block-aware traced hierarchy over the whole trailing group,
     coarsening whole cells under a per-cell block smoother, at ``N`` V-cycles per apply and a coarse
     grid of ``M`` equations. No host solver and no callback out of the traced solve on this half.
 
@@ -259,7 +259,7 @@ def _native_factory(arm: str, coupled=None, state=None):
     is a weaker object than one block-aware hierarchy, so its measurements never transferred to the
     thing that replaced it.
     """
-    if not _is_native(arm):
+    if not _is_hierarchy_arm(arm):
         return None
     # `nodal[N][cM]` is ONE hierarchy over the whole group, coarsening cells with a block smoother:
     # `N` V-cycles per apply (default 1) and a coarse grid of `M` equations (default the builder's own).
@@ -272,7 +272,7 @@ def _native_factory(arm: str, coupled=None, state=None):
             "object than one block-aware hierarchy, so its numbers described a different thing."
         )
     cycles, coarse = spec.groups()
-    return native_nodal_inverse(
+    return jacobi_smoothed_inverse(
         cycles=int(cycles or 1), **({} if coarse is None else {"max_coarse": int(coarse)})
     )
 
@@ -289,7 +289,7 @@ def run(arm, shifted, groups, n_fields, coupled, state, rhs, op_shift, loose, ge
             FLOW_SMOOTHER,
             arm,
             flow_first=True,
-            trailing_inverse=_native_factory(arm),
+            trailing_inverse=_hierarchy_factory(arm),
         )
         setup = time.perf_counter() - started
         alone = trailing_setup(shifted, groups, arm, coupled, state)

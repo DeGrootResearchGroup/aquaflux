@@ -3,7 +3,7 @@
 ``trailing_hierarchy_sweep.py`` already carries ``max_levels``/``max_coarse`` knobs on its native arms,
 but every arm in it is fixed at 2 levels and none of the coarse-size-stopped arms in its ``ARMS`` table
 has ever actually been run. Separately, neither ``avoid_singletons`` nor ``strength_threshold`` is wired
-into that harness's ``native_cycle`` at all, though both are plain
+into that harness's ``smoothed_cycle`` at all, though both are plain
 :func:`~aquaflux.solve.build_convection_hierarchy` parameters and both were the levers that made depth
 pay on the flow saddle's own native hierarchy (a coarsening/singleton-aggregate fix worth ~1.7x there,
 and a strength-of-connection threshold worth ~4x).
@@ -69,7 +69,7 @@ RTOL = 1e-8
 SOLVER = relative_residual_gmres(RTOL, restart=15, stagnation_iters=40, max_restarts=60)
 
 
-def native_cycle(
+def smoothed_cycle(
     block: sp.csr_matrix,
     *,
     sweeps: int = 4,
@@ -81,9 +81,9 @@ def native_cycle(
     avoid_singletons: bool = False,
     strength_threshold: float = 0.0,
 ):
-    """The ``NodalNativeInverse`` class's own bundle, with the two extra levers the flow saddle used.
+    """The ``JacobiSmoothedInverse`` class's own bundle, with the two extra levers the flow saddle used.
 
-    Defaults reproduce ``NodalNativeInverse``'s own constructor defaults exactly (``mis_aggregation=True``,
+    Defaults reproduce ``JacobiSmoothedInverse``'s own constructor defaults exactly (``mis_aggregation=True``,
     ``aggressive_levels=1``, ``prolongation_smoothing="none"``, ``spectral_damping=False`` i.e.
     ``undamped=True`` here, ``equilibrate=True``, 4 sweeps) at its 2-level cap. ``avoid_singletons`` and
     ``strength_threshold`` are the two levers this file is measuring the transfer of.
@@ -163,7 +163,7 @@ ARMS = (
 def run_arm(label: str, build_kwargs: dict, operator, rhs) -> None:
     try:
         started = time.time()
-        apply, shape = native_cycle(operator.block, **build_kwargs)
+        apply, shape = smoothed_cycle(operator.block, **build_kwargs)
         built = time.time() - started
         solving = time.time()
         solution, raw = solve_linear(

@@ -39,7 +39,7 @@ identical across arms whose cycle counts differed five-fold, so it never decides
   construction there, so zero shift is the adjoint's operating point and no march measurement speaks
   to it. It is the **latest** ``checkpoints/state-*.npz`` — a run artifact written by a full march, not
   a checked-in fixture, and ``checkpoints/`` is untracked. Regenerate it by running the case
-  (``PITZ_FLOW_INVERSE=native validation/run_case.sh validation/pitzdaily_openfoam/compare.py``).
+  (``PITZ_FLOW_INVERSE=simplesmooth validation/run_case.sh validation/pitzdaily_openfoam/compare.py``).
   Absent, this reports the self-start half only and says so, rather than quietly measuring something
   else.
 

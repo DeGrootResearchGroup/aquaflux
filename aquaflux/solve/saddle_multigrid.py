@@ -1,4 +1,4 @@
-"""A JAX-native multigrid for a velocity--pressure saddle block, smoothed by SIMPLE relaxation.
+"""A traced multigrid for a velocity--pressure saddle block, smoothed by SIMPLE relaxation.
 
 The coupled preconditioner's leading ``[u, v, w, p]`` block is a *generalized* saddle point: collocated
 Rhie--Chow interpolation leaves a nonzero pressure--pressure block and makes the divergence operator
@@ -36,6 +36,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
+from .hierarchy_inverse import HierarchyBlockInverse
 from .multigrid import (
     _AGGREGATE_STATS,
     SmoothedHierarchy,
@@ -43,9 +44,8 @@ from .multigrid import (
     _operator_matvec,
     _smoothed_ops,
 )
-from .native_inverse import NativeHierarchyInverse
 
-__all__ = ["NativeSimpleInverse", "block_approximate_inverse", "native_saddle_inverse"]
+__all__ = ["SimpleSmoothedInverse", "block_approximate_inverse", "simple_smoothed_inverse"]
 
 
 class _SimplePieces(eqx.Module):
@@ -303,7 +303,7 @@ class _SmootherSettings(NamedTuple):
 
 
 @eqx.filter_jit
-def _native_saddle_cycle(
+def _simple_smoothed_cycle(
     hierarchy: SmoothedHierarchy,
     pieces: dict[int, _SimplePieces],
     residual: jnp.ndarray,
@@ -450,8 +450,8 @@ def _diagonal_approximate_inverse(
     return diagonal / squared
 
 
-class NativeSimpleInverse(NativeHierarchyInverse):
-    """A JAX-native multigrid over the flow saddle whose LEVEL SMOOTHER is a SIMPLE relaxation.
+class SimpleSmoothedInverse(HierarchyBlockInverse):
+    """A traced multigrid over the flow saddle whose LEVEL SMOOTHER is a SIMPLE relaxation.
 
     This is the arm every earlier one was not. Those replaced the flow block's preconditioner outright
     -- a flat block inverse with no hierarchy, no levels and no coarse-grid correction -- so their
@@ -470,7 +470,7 @@ class NativeSimpleInverse(NativeHierarchyInverse):
     Parameters
     ----------
     block, n_fields, strength_threshold, max_levels, max_coarse, frozen_coarsening, shape_headroom, report
-        See :class:`~aquaflux.solve.native_inverse.NativeHierarchyInverse`, which owns the hierarchy,
+        See :class:`~aquaflux.solve.hierarchy_inverse.HierarchyBlockInverse`, which owns the hierarchy,
         the in-place refresh and the host boundary. Only the smoother below belongs to this class.
     cycles, sweeps : int
         V-cycles per application, and SIMPLE sweeps per level. Both fixed, so ``b -> x`` stays linear.
@@ -569,7 +569,7 @@ class NativeSimpleInverse(NativeHierarchyInverse):
         return self._smoother
 
     def cycle(self):
-        return _native_saddle_cycle
+        return _simple_smoothed_cycle
 
     def _after_coarsening(self) -> None:
         """Capture this build's aggregate statistics, then derive the smoother over the hierarchy."""
@@ -643,7 +643,7 @@ class NativeSimpleInverse(NativeHierarchyInverse):
         )
         coarse = hierarchy.levels[-1]
         self._report(
-            f"      native SIMPLE smoother: {len(hierarchy.levels)} levels, "
+            f"      SIMPLE-smoothed hierarchy: {len(hierarchy.levels)} levels, "
             f"fine {self._n_dofs} -> coarse {coarse.n} dofs "
             f"({self._n_dofs / max(coarse.n, 1):.0f}x, direct solve), {sizes}",
         )
@@ -651,8 +651,8 @@ class NativeSimpleInverse(NativeHierarchyInverse):
         return pieces
 
 
-def native_saddle_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
-    """A ``leading_inverse`` factory using :class:`NativeSimpleInverse`.
+def simple_smoothed_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
+    """A ``leading_inverse`` factory using :class:`SimpleSmoothedInverse`.
 
     Every keyword is forwarded, so the defaults — and the reasoning behind them — live on the class
     rather than being restated here. The settings worth knowing about are ``strength_threshold`` (at
@@ -664,16 +664,16 @@ def native_saddle_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
     Parameters
     ----------
     **settings
-        Forwarded to :class:`NativeSimpleInverse`.
+        Forwarded to :class:`SimpleSmoothedInverse`.
 
     Returns
     -------
     callable
-        ``(block, n_group_fields) -> NativeSimpleInverse``, the shape
+        ``(block, n_group_fields) -> SimpleSmoothedInverse``, the shape
         :func:`build_block_triangular_field_split` expects.
     """
 
     def build(block: sp.spmatrix, n_group_fields: int) -> object:
-        return NativeSimpleInverse(block, n_group_fields, **settings)
+        return SimpleSmoothedInverse(block, n_group_fields, **settings)
 
     return build

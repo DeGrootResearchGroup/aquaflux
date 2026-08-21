@@ -39,7 +39,7 @@ paths:
   (`symmetrically_equilibrate`, `equilibration_scale`, `apply_symmetric_scale`, `row_chunks`) was
   already there, and every consumer applies the two together -- a factorization or a coarsening wants
   the matrix both unit-diagonal and grouped by cell. Consumed by the multigrid V-cycle
-  (`amg_preconditioner.py`, `host_vcycle.py`) and the block field split (`field_split.py`); the complete
+  (`amg_preconditioner.py`, `ilu_inverse.py`) and the block field split (`field_split.py`); the complete
   LU needs neither (its own fill-reducing pivoting and ordering already handle the indefinite saddle).
   - **Both are exported from `aquaflux.solve`.** They were internal by `__all__` yet deep-imported
     by study harnesses, i.e. public in practice and unguarded in principle; the harnesses now
@@ -55,15 +55,15 @@ paths:
   deliberately **not** unified behind a signature that would be the union of both.
   - **`HostFactors` is the contract, and it is exactly `n_dofs` + `apply(residual, *, transpose=…)`.**
     That pair is a real structural contract satisfied by **five** classes — the complete-LU factors,
-    `AmgVCycle`, `NativeHierarchyInverse` and both `BlockTriangularFieldSplit`s (two further members, the
+    `AmgVCycle`, `HierarchyBlockInverse` and both `BlockTriangularFieldSplit`s (two further members, the
     monolithic ILUT and the Vanka smoother, have since been deleted, both dominated on every arm
     measured) — and declared by none of them individually, so `matvec` would otherwise be written out
     once per class and
     `FieldSplitAmgPreconditioner` obtained it by subclassing a *concrete sibling*.
   - **⚠️ Anything a base reads off `self.factors` beyond that pair is a requirement on ALL of them
-    (binding).** This is not hypothetical: `has_native_solve` read `self.factors.has_native_solve`,
+    (binding).** This is not hypothetical: `has_exact_solve` read `self.factors.has_exact_solve`,
     which only `AmgVCycle` has, so the property **raised** on the field split — and both call sites ask
-    through `getattr(pc, "is_exact_native", False)`, whose default swallows an `AttributeError` raised
+    through `getattr(pc, "solves_exactly_on_host", False)`, whose default swallows an `AttributeError` raised
     inside a property body exactly as it swallows a missing name. The answer it produced was
     accidentally the correct `False`. If a capability is not in `HostFactors`, answer it on the
     subclass. Pinned by an AST check on the base's own source
@@ -295,7 +295,7 @@ complete LU and the AMG's coloured probe both still depend on it.
       the distance-3 shell with **~1e-30, not exact zero** — precisely what survives the product. That is
       why positions read as causal and values did not.
       It equally explains the p/kω asymmetry: pressure is in the incomplete-LU-smoothed **leading** block,
-      while k/ω are in the trailing block, whose native cell-block inverse has no factorization pattern to
+      while k/ω are in the trailing block, whose traced cell-block inverse has no factorization pattern to
       weaken.
       ⚠️ **It also violated the "full pattern, no `eliminate_zeros`, so the structure is truly fixed"
       invariant the in-place GAMG refactor relies on — for EVERY arm**, since the pruned set is whichever
@@ -462,7 +462,7 @@ complete LU and the AMG's coloured probe both still depend on it.
       - **The family it is FOR is the SIMPLE-smoothed hierarchy, which takes the saving for nothing.**
         The mechanism is which preconditioners inherit the stored *sparsity*: an incomplete factorization
         takes its pattern from it, so a corrupted or narrowed pattern gives a correspondingly different
-        factor, while `native_saddle_inverse` relaxes through diagonal and Schur approximations and takes
+        factor, while `simple_smoothed_inverse` relaxes through diagonal and Schur approximations and takes
         no pattern at all. Measured on pitzDaily, that arm is **reach-insensitive** — the same 71 steps at
         reach 3 and reach 5, cycles within 3 % (395 vs 408), identical final residual — while the Jacobian
         halves and the march is 31 % shorter. **The untested pairing worth running is
@@ -475,7 +475,7 @@ complete LU and the AMG's coloured probe both still depend on it.
         with `FLOW_INVERSE = "petsc"` (its default) the split sends:
         - the **`[u, v, p]` saddle** to the PETSc AMG V-cycle — *this* is the only block `FILL_LEVELS`
           governs, and the only place an incomplete factorization happens at all;
-        - the **`[k, omega]` pair** to `native_nodal_inverse`, **which is not an ILU**.
+        - the **`[k, omega]` pair** to `jacobi_smoothed_inverse`, **which is not an ILU**.
 
         Three consequences, all binding:
         1. **Every arm in the sweeps below — the fill ladder, the orderings, the shifts, the reach arms,
@@ -501,8 +501,8 @@ complete LU and the AMG's coloured probe both still depend on it.
         elsewhere for this reason. **Not measured.**
       - **⚠️ The ILU fill ranking INVERTS between the two cases** — `bfs3d` wants zero fill (its ILU(1)
         diverges at low shift, 303 negative pivots against zero), pitzDaily wants fill 1, where **two
-        independent zero-fill implementations fail identically** (PETSc ILU(0) and the native
-        `HostVCycleInverse`, both α → 0 by step 3–4), putting it on the fill rather than on anything
+        independent zero-fill implementations fail identically** (PETSc ILU(0) and the traced
+        `IluSmoothedInverse`, both α → 0 by step 3–4), putting it on the fill rather than on anything
         PETSc-specific. pitzDaily's converging arms all land `x_r/h` 8.0686, so those are cost
         comparisons, not accuracy ones. ⚠️ Both cases set `field_split=True`, so this comparison is
         between two **flow-block** factorizations — which is the one thing about it the monolithic sweeps

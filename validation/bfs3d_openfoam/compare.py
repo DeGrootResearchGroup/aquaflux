@@ -89,10 +89,10 @@ from aquaflux.solve import (
     air_inverse,
     combine_metrics,
     combine_observers,
-    host_ilu_inverse,
-    native_nodal_inverse,
-    native_saddle_inverse,
+    ilu_smoothed_inverse,
+    jacobi_smoothed_inverse,
     relative_residual_gmres,
+    simple_smoothed_inverse,
 )
 from aquaflux.turbulence import (
     CoupledJacobianProbe,
@@ -395,7 +395,7 @@ if _TURBULENCE_SMOOTHER not in _TURBULENCE_SMOOTHERS:
     )
 TRAILING_OPTIONS = _TURBULENCE_SMOOTHERS[_TURBULENCE_SMOOTHER]
 
-# Which preconditioner the trailing [k, omega] block gets. "native" (default) is the
+# Which preconditioner the trailing [k, omega] block gets. "simplesmooth" (default) is the
 # differentiable-framework nodal hierarchy; "petsc" is the host GAMG V-cycle the case originally ran.
 # Their aggregation and smoother are configured to match -- measured on the block alone they reach the
 # same 2 restart cycles on the same-sized coarse space. Beyond cycles, the native inverse is plain array
@@ -419,13 +419,13 @@ TRAILING_OPTIONS = _TURBULENCE_SMOOTHERS[_TURBULENCE_SMOOTHER]
 # `dirichlet` number is not a target because it is a different problem (see `K_WALL` below). Leaving
 # "petsc" as the default would have shipped the slowest measured arm. `BFS3D_TURBULENCE_INVERSE=petsc`
 # still selects the host V-cycle for an A/B of the inverse itself.
-_TURBULENCE_INVERSES = ("petsc", "native", "air")
-TURBULENCE_INVERSE = os.environ.get("BFS3D_TURBULENCE_INVERSE", "native")
+_TURBULENCE_INVERSES = ("petsc", "jacobi", "air")
+TURBULENCE_INVERSE = os.environ.get("BFS3D_TURBULENCE_INVERSE", "jacobi")
 if TURBULENCE_INVERSE not in _TURBULENCE_INVERSES:
     raise SystemExit(
         f"BFS3D_TURBULENCE_INVERSE={TURBULENCE_INVERSE!r} is not one of {list(_TURBULENCE_INVERSES)}"
     )
-#: The native inverse's own settings, kept here rather than left to the class defaults so the banner can
+#: The host inverse's own settings, kept here rather than left to the class defaults so the banner can
 #: print them and a later reader can tell two runs apart.
 #:
 #: ⚠️ THE DEFAULT COARSENS DEEPER THAN THE CLASS'S OWN TWO LEVELS, AND THE REASON IS SCALING RATHER THAN
@@ -440,7 +440,7 @@ if TURBULENCE_INVERSE not in _TURBULENCE_INVERSES:
 #: here is deliberately independent of `COARSE_EQ_LIMIT` (which also sizes the flow block's own coarse
 #: grid): this arm wants a SMALL coarse grid, since the point is bounding the dense coarse solve at a
 #: much larger mesh, not matching the host V-cycle's global-coupling capacity.
-NATIVE_TRAILING = {
+JACOBI_TRAILING = {
     # Kept off by default, and kept exposed. With NO positivity floor this flag decides whether the case
     # converges at all: an otherwise-identical pair of marches came out opposite, the rescaled one losing
     # its line-search factor on the middle rung and stalling with the residual frozen. But that turned out
@@ -471,7 +471,7 @@ NATIVE_TRAILING = {
     # `BFS3D_FLOW_FROZEN_COARSENING` comment on the flow inverse below names the same mechanism, and the
     # same measurement: without this ON, a full march's refactor cost on this block ran ~50 s per refresh
     # against ~4 s frozen). On by default at the coarse-space-quality cost
-    # `NativeHierarchyInverse.frozen_coarsening` documents; `BFS3D_NATIVE_FROZEN_COARSENING=0` re-coarsens
+    # `HierarchyBlockInverse.frozen_coarsening` documents; `BFS3D_NATIVE_FROZEN_COARSENING=0` re-coarsens
     # every refresh for re-adjudicating that trade.
     "frozen_coarsening": os.environ.get("BFS3D_NATIVE_FROZEN_COARSENING", "1") not in ("", "0"),
 }
@@ -545,13 +545,13 @@ AIR_TRAILING = dict(
 )
 
 TRAILING_INVERSE = None
-if TURBULENCE_INVERSE == "native":
-    TRAILING_INVERSE = native_nodal_inverse(**NATIVE_TRAILING)
+if TURBULENCE_INVERSE == "jacobi":
+    TRAILING_INVERSE = jacobi_smoothed_inverse(**JACOBI_TRAILING)
 elif TURBULENCE_INVERSE == "air":
     TRAILING_INVERSE = air_inverse(**AIR_TRAILING)
 
 
-#: `BFS3D_FLOW_INVERSE=native` selects the LEADING (flow saddle) block's JAX-native SIMPLE-smoothed
+#: `BFS3D_FLOW_INVERSE=simplesmooth` selects the LEADING (flow saddle) block's JAX-native SIMPLE-smoothed
 #: hierarchy in place of the host V-cycle. `petsc`/`hostilu` still select the two PETSc-backed arms for
 #: comparison.
 #:
@@ -578,7 +578,7 @@ def _flush_print(message: str) -> None:
 #: An incomplete-LU factorization is sensitive to the elimination ORDER in a way that has repeatedly
 #: produced arms differing by orders of magnitude on this operator (measured: the same ILU(0) construction
 #: takes 1 cycle under one cell ordering and fails to converge in 38 under another, on the same block).
-#: The native SIMPLE-smoothed hierarchy has no ordering dependence and no sequential triangular solve
+#: The host SIMPLE-smoothed hierarchy has no ordering dependence and no sequential triangular solve
 #: (batched per-cell/per-level dense solves and sparse matvecs only), so it is also the only one of the
 #: three arms with a route to a GPU. A full-march A/B at this default against a matched `hostilu` run
 #: reached the identical root (`x_r/h` 8.3611) at a real wall-clock cost (349 cumulative cycles / 1782 s
@@ -586,8 +586,8 @@ def _flush_print(message: str) -> None:
 #: elimination order this case has already been bitten by, and the one this project's GPU direction needs.
 #: `BFS3D_FLOW_INVERSE=hostilu` / `petsc` restore the two PETSc-backed arms, and both stay measured and
 #: runnable so the comparison can be re-adjudicated.
-FLOW_INVERSE = os.environ.get("BFS3D_FLOW_INVERSE", "native")
-if FLOW_INVERSE not in ("petsc", "native", "hostilu"):
+FLOW_INVERSE = os.environ.get("BFS3D_FLOW_INVERSE", "simplesmooth")
+if FLOW_INVERSE not in ("petsc", "simplesmooth", "hostilu"):
     raise SystemExit(
         f"BFS3D_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'native', 'hostilu']"
     )
@@ -623,8 +623,8 @@ if FLOW_INVERSE == "hostilu":
         prolongation_smoothing="none",
     )
 
-    LEADING_INVERSE = host_ilu_inverse(**_HOST_FLOW)
-if FLOW_INVERSE == "native":
+    LEADING_INVERSE = ilu_smoothed_inverse(**_HOST_FLOW)
+if FLOW_INVERSE == "simplesmooth":
     #: The arm measured best on single states: strength-of-connection aggregation with no singleton
     #: aggregates, five levels, a per-cell block velocity splitting and an undamped correction.
     #:
@@ -645,7 +645,7 @@ if FLOW_INVERSE == "native":
     #: own build cost -- an isolated single build of the same recipe took ~1 s); frozen, it stayed at
     #: ~4 s across every refresh in a full 3-rung march. `BFS3D_FLOW_FROZEN_COARSENING=0` restores the
     #: class default (re-coarsen every refresh) for re-adjudicating the trade against coarse-space quality.
-    _NATIVE_FLOW = dict(
+    _SIMPLE_FLOW = dict(
         sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", "2")),
         pressure_sweeps=2,
         strength_threshold=0.25,
@@ -663,27 +663,27 @@ if FLOW_INVERSE == "native":
         ),
     )
 
-    LEADING_INVERSE = native_saddle_inverse(**_NATIVE_FLOW, report=_flush_print)
+    LEADING_INVERSE = simple_smoothed_inverse(**_SIMPLE_FLOW, report=_flush_print)
 
 
 if TRAILING_INVERSE is not None and DUMP_TRAILING_BLOCK:
     TRAILING_INVERSE = _dumping(TRAILING_INVERSE)
 
 
-def _native_trailing_description() -> str:
+def _jacobi_trailing_description() -> str:
     """Every setting the native trailing hierarchy is actually built with, defaults included.
 
     Reads them off the class signature rather than restating them, so a changed default cannot make the
     banner lie -- which is the one failure a configuration banner must not have.
     """
-    from aquaflux.solve import NodalNativeInverse
+    from aquaflux.solve import JacobiSmoothedInverse
 
     settings = {
         name: parameter.default
-        for name, parameter in inspect.signature(NodalNativeInverse).parameters.items()
+        for name, parameter in inspect.signature(JacobiSmoothedInverse).parameters.items()
         if parameter.default is not inspect.Parameter.empty
     }
-    settings.update(NATIVE_TRAILING)
+    settings.update(JACOBI_TRAILING)
     return ", ".join(f"{k}={v}" for k, v in settings.items())
 
 
@@ -1243,7 +1243,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             "flow inverse",
             FLOW_INVERSE
             if LEADING_INVERSE is None
-            else f"{FLOW_INVERSE} {_NATIVE_FLOW if FLOW_INVERSE == 'native' else _HOST_FLOW}",
+            else f"{FLOW_INVERSE} {_SIMPLE_FLOW if FLOW_INVERSE == 'native' else _HOST_FLOW}",
         ),
         # ⚠️ WHICH incomplete-LU IMPLEMENTATION IS LIVE, because the two differ by orders of magnitude
         # in speed and nothing recorded which one a run used. `Ilu0` ships a pure-Python reference twin
@@ -1267,8 +1267,8 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ),
         ("turbulence smoother sweeps", f"{TRAILING_SWEEPS}{_TRAILING_SMOOTHER_NOTE}"),
         *(
-            [("native trailing settings", _native_trailing_description())]
-            if TURBULENCE_INVERSE == "native"
+            [("native trailing settings", _jacobi_trailing_description())]
+            if TURBULENCE_INVERSE == "jacobi"
             else []
         ),
         (

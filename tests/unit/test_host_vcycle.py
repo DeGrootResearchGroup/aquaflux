@@ -1,4 +1,4 @@
-"""The host V-cycle over the native hierarchy: does it precondition, and is its transpose exact?
+"""The host V-cycle over the traced hierarchy: does it precondition, and is its transpose exact?
 
 The transpose is the reason this file exists. A V-cycle is symmetric only if its smoother is, and an
 incomplete factorization is not — so ``M^T`` had to be built rather than borrowed, and a mistake there
@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve.host_vcycle import HostVCycleInverse, host_ilu_inverse
+from aquaflux.solve.ilu_inverse import IluSmoothedInverse, ilu_smoothed_inverse
 from aquaflux.solve.ordering import (
     AscendingRowLengthCells,
     CellMajor,
@@ -64,7 +64,7 @@ def test_it_actually_preconditions_the_operator() -> None:
     most retracted verdicts on this operator class.
     """
     a = _nonsymmetric_block()
-    inverse = HostVCycleInverse(a, 4, **_SETTINGS)
+    inverse = IluSmoothedInverse(a, 4, **_SETTINGS)
     b = np.asarray(np.random.default_rng(1).normal(size=a.shape[0]))
 
     x = inverse.apply(b)
@@ -81,7 +81,7 @@ def test_the_cycle_is_a_fixed_linear_operator() -> None:
     simply converge to the wrong thing.
     """
     a = _nonsymmetric_block()
-    inverse = HostVCycleInverse(a, 4, **_SETTINGS)
+    inverse = IluSmoothedInverse(a, 4, **_SETTINGS)
     rng = np.random.default_rng(2)
     u = rng.normal(size=a.shape[0])
     v = rng.normal(size=a.shape[0])
@@ -101,7 +101,7 @@ def test_the_transpose_is_exact(cycles: int, sweeps: int) -> None:
     sequence, and an error in the ordering shows up only once there is more than one of something.
     """
     a = _nonsymmetric_block()
-    inverse = HostVCycleInverse(a, 4, max_coarse=40, max_levels=3, sweeps=sweeps, cycles=cycles)
+    inverse = IluSmoothedInverse(a, 4, max_coarse=40, max_levels=3, sweeps=sweeps, cycles=cycles)
     rng = np.random.default_rng(3)
     x = rng.normal(size=a.shape[0])
     y = rng.normal(size=a.shape[0])
@@ -120,7 +120,7 @@ def test_the_transpose_is_not_the_forward_cycle() -> None:
     every other test in this file.
     """
     a = _nonsymmetric_block()
-    inverse = HostVCycleInverse(a, 4, **_SETTINGS)
+    inverse = IluSmoothedInverse(a, 4, **_SETTINGS)
     b = np.asarray(np.random.default_rng(4).normal(size=a.shape[0]))
 
     forward = inverse.apply(b)
@@ -132,7 +132,7 @@ def test_the_transpose_is_not_the_forward_cycle() -> None:
 def test_refactor_refits_in_place_onto_a_new_operator() -> None:
     """A mid-march refresh must mutate the object the solve holds, not replace it."""
     a = _nonsymmetric_block()
-    inverse = HostVCycleInverse(a, 4, **_SETTINGS)
+    inverse = IluSmoothedInverse(a, 4, **_SETTINGS)
     b = np.asarray(np.random.default_rng(5).normal(size=a.shape[0]))
     before = inverse.apply(b)
 
@@ -145,7 +145,7 @@ def test_refactor_refits_in_place_onto_a_new_operator() -> None:
 
 def test_a_mismatched_block_is_rejected() -> None:
     """Refreshing onto a differently-sized block raises rather than building something incoherent."""
-    inverse = HostVCycleInverse(_nonsymmetric_block(n_cells=120), 4, **_SETTINGS)
+    inverse = IluSmoothedInverse(_nonsymmetric_block(n_cells=120), 4, **_SETTINGS)
 
     with pytest.raises(ValueError, match="cannot refactor"):
         inverse.refactor_block(_nonsymmetric_block(n_cells=80))
@@ -215,7 +215,7 @@ def test_more_cycles_reduce_the_residual_further() -> None:
     b = np.asarray(np.random.default_rng(6).normal(size=a.shape[0]))
 
     def true_residual(cycles: int) -> float:
-        inverse = HostVCycleInverse(a, 2, max_coarse=64, max_levels=3, sweeps=1, cycles=cycles)
+        inverse = IluSmoothedInverse(a, 2, max_coarse=64, max_levels=3, sweeps=1, cycles=cycles)
         return float(np.linalg.norm(a @ inverse.apply(b) - b) / np.linalg.norm(b))
 
     one, two = true_residual(1), true_residual(2)
@@ -225,10 +225,10 @@ def test_more_cycles_reduce_the_residual_further() -> None:
 
 
 def test_the_factory_builds_what_a_field_split_expects() -> None:
-    """``host_ilu_inverse`` returns the ``(block, n_fields) -> inverse`` shape the split calls."""
+    """``ilu_smoothed_inverse`` returns the ``(block, n_fields) -> inverse`` shape the split calls."""
     a = _nonsymmetric_block()
 
-    inverse = host_ilu_inverse(**_SETTINGS)(a, 4)
+    inverse = ilu_smoothed_inverse(**_SETTINGS)(a, 4)
 
     assert inverse.n_dofs == a.shape[0]
 
@@ -242,8 +242,8 @@ def test_the_default_ordering_is_unchanged() -> None:
     a = _nonsymmetric_block()
     b = np.asarray(np.random.default_rng(7).normal(size=a.shape[0]))
 
-    implicit = HostVCycleInverse(a, 4, **_SETTINGS).apply(b)
-    explicit = HostVCycleInverse(a, 4, ordering=CellMajor(), **_SETTINGS).apply(b)
+    implicit = IluSmoothedInverse(a, 4, **_SETTINGS).apply(b)
+    explicit = IluSmoothedInverse(a, 4, ordering=CellMajor(), **_SETTINGS).apply(b)
 
     np.testing.assert_array_equal(implicit, explicit)
 
@@ -257,8 +257,8 @@ def test_a_non_default_ordering_changes_the_cycle() -> None:
     a = _lattice_block()
     b = np.asarray(np.random.default_rng(8).normal(size=a.shape[0]))
 
-    default = HostVCycleInverse(a, 2, max_coarse=64, max_levels=3, sweeps=1).apply(b)
-    reordered = HostVCycleInverse(
+    default = IluSmoothedInverse(a, 2, max_coarse=64, max_levels=3, sweeps=1).apply(b)
+    reordered = IluSmoothedInverse(
         a, 2, max_coarse=64, max_levels=3, sweeps=1, ordering=CellMajor(ReverseCuthillMcKeeCells())
     ).apply(b)
 
@@ -278,7 +278,7 @@ def test_the_transpose_is_exact_under_a_reordered_elimination(cells) -> None:
     the default.
     """
     a = _nonsymmetric_block()
-    inverse = HostVCycleInverse(a, 4, ordering=CellMajor(cells), **_SETTINGS)
+    inverse = IluSmoothedInverse(a, 4, ordering=CellMajor(cells), **_SETTINGS)
     rng = np.random.default_rng(9)
     x = rng.normal(size=a.shape[0])
     y = rng.normal(size=a.shape[0])
@@ -294,7 +294,7 @@ def test_a_reordered_smoother_still_preconditions_the_operator() -> None:
     a = _lattice_block()
     b = np.asarray(np.random.default_rng(10).normal(size=a.shape[0]))
 
-    inverse = HostVCycleInverse(
+    inverse = IluSmoothedInverse(
         a, 2, max_coarse=64, max_levels=3, sweeps=1, ordering=CellMajor(ReverseCuthillMcKeeCells())
     )
     x = inverse.apply(b)

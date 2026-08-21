@@ -8,7 +8,7 @@ the comparison.
 
 Reads the same environment the comparison does, so an arm is selected the same way::
 
-    BFS3D_FLOW_INVERSE=native BFS3D_REFRESH_ON_CYCLES=8 \\
+    BFS3D_FLOW_INVERSE=simplesmooth BFS3D_REFRESH_ON_CYCLES=8 \\
         validation/run_case.sh validation/bfs3d_openfoam/march_timing.py
 
 ``BFS3D_FLOW_INVERSE`` selects the leading (flow saddle) block's inverse. **Raise
@@ -36,11 +36,11 @@ def main() -> None:
         f"field split: {compare.FIELD_SPLIT}  |  refresh at {compare.REFRESH_ON_CYCLES} cycles",
         flush=True,
     )
-    # The native arm's own settings, every one of them, because two runs that differ only in a sweep
+    # The host arm's own settings, every one of them, because two runs that differ only in a sweep
     # count or in whether the coarsening is frozen would otherwise produce identical headers -- and a
     # timing comparison between them is then unattributable after the fact.
-    if compare.FLOW_INVERSE == "native":
-        print(f"native flow block: {compare._NATIVE_FLOW}", flush=True)
+    if compare.FLOW_INVERSE == "simplesmooth":
+        print(f"native flow block: {compare._SIMPLE_FLOW}", flush=True)
     log_path = compare._fresh_log(HERE / "march_timing.log")
     started = time.time()
     result = compare.solve_aquaflux(log_path=log_path, checkpoint_dir=HERE / "checkpoints")

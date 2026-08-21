@@ -341,9 +341,9 @@ backward compatibility becomes a real constraint and the calculus reverses.
 | Language | Python | Ecosystem, aquakin parity |
 | Numerical backend | JAX | AD for free, jit, GPU batching |
 | OO modules | **equinox** (`equinox.Module`) | jit/grad-native classes with inheritance — the strategy hierarchies are `Module`s, not bare functions. Already a transitive dep (diffrax/lineax are built on it), so no new footprint. |
-| Linear solves | lineax (fallback `jax.scipy.sparse.linalg`) | JAX-native, implicit differentiation of the solve |
+| Linear solves | lineax (fallback `jax.scipy.sparse.linalg`) | traced, implicit differentiation of the solve |
 | Adjoint of the coupled solve | `custom_vjp` around the linear solve | exact, memory-flat gradient independent of iteration count |
-| Transient integration | Diffrax | JAX-native, shared with aquakin |
+| Transient integration | Diffrax | traced, shared with aquakin |
 | CPU multigrid smoother | **Cython** (`aquaflux/solve/_ilu0.pyx`, built by `tools/build_ext.sh`) | a zero-fill incomplete factorization eliminates a row against every row above it, so it is sequential by nature and cannot be array operations. The package imports without it (a pure-Python twin defines the behaviour and `ilu0.COMPILED` says which is live), so this is a performance dependency, not a hard one. **⚠️ But the fallback is SILENT and the artifact is gitignored, so every fresh worktree starts on the Python twin** — which is why timings must never be compared across checkouts without checking. Run `tools/build_ext.sh` once per checkout (idempotent; it caches one shared build environment under `~/.cache/aquaflux`, so it does not need Cython in the runtime interpreter — a PEP-668 system Python refuses that). `validation/run_case.sh` warns when it is missing, and both cases' banners print the live kernel. |
 | Mesh | static connectivity arrays + `segment_sum` scatter | XLA-friendly graph/message-passing layout |
 | Eventual model format | YAML → AST (deferred) | the DSL is the **last** layer; not a dependency yet |

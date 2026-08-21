@@ -136,7 +136,7 @@ def petsc_cycle(block: sp.csr_matrix, *, smoother: str, sweeps: int):
     return apply, vcycle, f"{vcycle.levels} levels, {vcycle.coarse_size} coarse eq"
 
 
-def native_cycle(
+def smoothed_cycle(
     block: sp.csr_matrix,
     *,
     mis: bool,
@@ -182,7 +182,7 @@ def native_cycle(
 def matched(**overrides):
     """The arm that reproduces PETSc: aggressive level, plain prolongation, undamped smoother."""
     base = dict(mis=True, smoothing="none", equilibrate=False, aggressive=1, undamped=True)
-    return lambda b: native_cycle(b, **(base | overrides))
+    return lambda b: smoothed_cycle(b, **(base | overrides))
 
 
 #: ``key -> (label, build)``.
@@ -215,55 +215,55 @@ ARMS = (
     (
         "rcm-raw",
         f"ours RCM / symmetric-part x{NATIVE_SWEEPS}, raw",
-        lambda b: native_cycle(
+        lambda b: smoothed_cycle(
             b, mis=False, smoothing="symmetric-part", equilibrate=False, sweeps=NATIVE_SWEEPS
         ),
     ),
     (
         "rcm-eq",
         f"ours RCM / symmetric-part x{NATIVE_SWEEPS}, EQUILIBRATED",
-        lambda b: native_cycle(
+        lambda b: smoothed_cycle(
             b, mis=False, smoothing="symmetric-part", equilibrate=True, sweeps=NATIVE_SWEEPS
         ),
     ),
     (
         "mis-plain-raw",
         f"ours MIS / no smoothing x{NATIVE_SWEEPS}, raw",
-        lambda b: native_cycle(
+        lambda b: smoothed_cycle(
             b, mis=True, smoothing="none", equilibrate=False, sweeps=NATIVE_SWEEPS
         ),
     ),
     (
         "mis-plain-eq",
         f"ours MIS / no smoothing x{NATIVE_SWEEPS}, EQUILIBRATED",
-        lambda b: native_cycle(
+        lambda b: smoothed_cycle(
             b, mis=True, smoothing="none", equilibrate=True, sweeps=NATIVE_SWEEPS
         ),
     ),
     (
         "mis-standard-raw",
         f"ours MIS / standard x{NATIVE_SWEEPS}, raw",
-        lambda b: native_cycle(
+        lambda b: smoothed_cycle(
             b, mis=True, smoothing="standard", equilibrate=False, sweeps=NATIVE_SWEEPS
         ),
     ),
     (
         "mis-standard-eq",
         f"ours MIS / standard x{NATIVE_SWEEPS}, EQUILIBRATED",
-        lambda b: native_cycle(
+        lambda b: smoothed_cycle(
             b, mis=True, smoothing="standard", equilibrate=True, sweeps=NATIVE_SWEEPS
         ),
     ),
     (
         "mis-standard-eq-x8",
         "ours MIS / standard x8, EQUILIBRATED",
-        lambda b: native_cycle(b, mis=True, smoothing="standard", equilibrate=True, sweeps=8),
+        lambda b: smoothed_cycle(b, mis=True, smoothing="standard", equilibrate=True, sweeps=8),
     ),
     # The matched pair: PETSc's own default coarsening, which is one aggressive (squared-graph) level.
     (
         "mis-aggressive-raw",
         f"ours MIS aggressive / plain x{NATIVE_SWEEPS}, raw",
-        lambda b: native_cycle(
+        lambda b: smoothed_cycle(
             b,
             mis=True,
             smoothing="none",
@@ -275,21 +275,21 @@ ARMS = (
     (
         "mis-aggressive-eq",
         f"ours MIS aggressive / plain x{NATIVE_SWEEPS}, EQUILIBRATED",
-        lambda b: native_cycle(
+        lambda b: smoothed_cycle(
             b, mis=True, smoothing="none", equilibrate=True, sweeps=NATIVE_SWEEPS, aggressive=1
         ),
     ),
     (
         "mis-aggressive-raw-x8",
         "ours MIS aggressive / plain x8, raw",
-        lambda b: native_cycle(
+        lambda b: smoothed_cycle(
             b, mis=True, smoothing="none", equilibrate=False, sweeps=8, aggressive=1
         ),
     ),
     (
         "mis-aggressive-standard-x8",
         "ours MIS aggressive / standard x8, EQUILIBRATED",
-        lambda b: native_cycle(
+        lambda b: smoothed_cycle(
             b, mis=True, smoothing="standard", equilibrate=True, sweeps=8, aggressive=1
         ),
     ),
@@ -297,14 +297,14 @@ ARMS = (
     (
         "matched-x1",
         "ours MATCHED (aggressive / plain / undamped) x1",
-        lambda b: native_cycle(
+        lambda b: smoothed_cycle(
             b, mis=True, smoothing="none", equilibrate=False, sweeps=1, aggressive=1, undamped=True
         ),
     ),
     (
         "matched-x2",
         "ours MATCHED (aggressive / plain / undamped) x2",
-        lambda b: native_cycle(
+        lambda b: smoothed_cycle(
             b, mis=True, smoothing="none", equilibrate=False, sweeps=2, aggressive=1, undamped=True
         ),
     ),
