@@ -141,12 +141,12 @@ def test_backtracking_line_search_picks_largest_descending_rung() -> None:
 
     # delta = -4: full step x = -3 (|R| = 3, overshoot); alpha = 1/2 -> x = -1 (|R| = 1, not < 1);
     # alpha = 1/4 -> x = 0 (|R| = 0 < 1). Largest descending rung is 1/4.
-    out, alpha = backtracking_line_search(residual, phi, jnp.array([-4.0]), reference, steps=4)
+    out, alpha, _ = backtracking_line_search(residual, phi, jnp.array([-4.0]), reference, steps=4)
     assert jnp.allclose(out, 0.0)
     assert jnp.allclose(alpha, 0.25)  # the kept fraction is reported
 
     # steps = 0 takes the full (overshooting) step unchanged, and reports alpha = 1.
-    full, full_alpha = backtracking_line_search(
+    full, full_alpha, _ = backtracking_line_search(
         residual, phi, jnp.array([-4.0]), reference, steps=0
     )
     assert jnp.allclose(full, -3.0)
@@ -155,7 +155,7 @@ def test_backtracking_line_search_picks_largest_descending_rung() -> None:
     # delta = +4: every rung increases the residual, so none is admissible and the search falls back
     # to the LONGEST finite rung -- the full step. Falling back to the shortest instead would return a
     # near-null step that changes nothing, which is a guaranteed stall rather than a slow step.
-    fallback, fb_alpha = backtracking_line_search(
+    fallback, fb_alpha, _ = backtracking_line_search(
         residual, phi, jnp.array([4.0]), reference, steps=4
     )
     assert jnp.allclose(fallback, 1.0 + 1.0 * 4.0)
@@ -222,7 +222,8 @@ def test_stepper_returns_the_step_and_its_linear_solve_cycle_count() -> None:
     def residual_fn(phi):
         return _residual(phi, theta)
 
-    phi_next, cycles, alpha, *_ = step.stepper()(residual_fn, phi0, residual_norm_0, solver)
+    outcome = step.stepper()(residual_fn, phi0, residual_norm_0, solver)
+    phi_next, cycles, alpha = outcome.phi, outcome.cycles, outcome.alpha
 
     # A real shifted solve was taken: the iterate moved, and stayed finite. Deliberately not a
     # descent assertion -- the pseudo-transient march is non-monotone (which is why its acceptance
@@ -276,7 +277,7 @@ def test_the_line_search_takes_the_longest_admissible_step_not_the_best_one() ->
     phi = jnp.array([1.0])
     delta = jnp.array([-1.0])
     reference = jnp.linalg.norm(residual_fn(phi))
-    _, alpha = backtracking_line_search(residual_fn, phi, delta, reference, 10, growth=2.0)
+    alpha = backtracking_line_search(residual_fn, phi, delta, reference, 10, growth=2.0).alpha
     # alpha = 1 lands at 0.85, outside the 2x tolerance (0.7); alpha = 1/2 lands at 0.35 and is the
     # longest that fits. The MINIMIZER is alpha = 1/4 (0.1) -- a shorter, better step this must not take.
     assert float(alpha) == 0.5
@@ -297,8 +298,8 @@ def test_the_ladder_reaches_step_lengths_longer_than_the_full_step() -> None:
     phi = jnp.array([0.0])
     delta = jnp.array([1.0])
     reference = jnp.linalg.norm(residual_fn(phi))
-    _, without = backtracking_line_search(residual_fn, phi, delta, reference, 6)
-    _, with_growth = backtracking_line_search(residual_fn, phi, delta, reference, 6, grow=3)
+    without = backtracking_line_search(residual_fn, phi, delta, reference, 6).alpha
+    with_growth = backtracking_line_search(residual_fn, phi, delta, reference, 6, grow=3).alpha
     assert float(without) == 1.0  # a one-sided ladder cannot express it
     assert float(with_growth) == 4.0
 
@@ -319,7 +320,7 @@ def test_when_nothing_is_admissible_the_search_moves_as_far_as_it_finitely_can()
     phi = jnp.array([1.0])
     delta = jnp.array([1.0])
     reference = jnp.linalg.norm(residual_fn(phi))
-    _, alpha = backtracking_line_search(residual_fn, phi, delta, reference, 10)
+    alpha = backtracking_line_search(residual_fn, phi, delta, reference, 10).alpha
     assert float(alpha) == 1.0  # the longest finite rung, not 0.5**10
 
 
@@ -338,7 +339,7 @@ def test_the_fallback_skips_step_lengths_that_overflow() -> None:
     phi = jnp.array([1.0])
     delta = jnp.array([4.0])
     reference = jnp.linalg.norm(residual_fn(phi))
-    _, alpha = backtracking_line_search(residual_fn, phi, delta, reference, 6)
+    alpha = backtracking_line_search(residual_fn, phi, delta, reference, 6).alpha
     assert float(alpha) < 1.0  # alpha = 1 would land at phi = 5 and overflow
     assert bool(jnp.isfinite(residual_fn(phi + float(alpha) * delta)).all())
 
@@ -357,8 +358,8 @@ def test_growth_factor_widens_what_the_line_search_accepts() -> None:
     phi = jnp.array([1.0])
     delta = jnp.array([1.0])
     reference = jnp.linalg.norm(residual_fn(phi))
-    _, monotone = backtracking_line_search(residual_fn, phi, delta, reference, 10)
-    _, relaxed = backtracking_line_search(residual_fn, phi, delta, reference, 10, growth=2.5)
+    monotone = backtracking_line_search(residual_fn, phi, delta, reference, 10).alpha
+    relaxed = backtracking_line_search(residual_fn, phi, delta, reference, 10, growth=2.5).alpha
     # Strict descent finds nothing admissible and falls back to the longest finite rung; the relaxed
     # test *accepts* the full step outright. Same alpha here, but one is a fallback and one a choice.
     assert float(monotone) == 1.0
@@ -460,8 +461,10 @@ def test_a_descending_probe_is_reused_rather_than_re_solved() -> None:
 
     r0 = common["residual_norm"](residual_fn(phi))
     solver = without.default_solver()
-    plain, plain_cycles, plain_alpha, *_ = without.stepper()(residual_fn, phi, r0, solver)
-    reused, reused_cycles, reused_alpha, *_ = with_backoff.stepper()(residual_fn, phi, r0, solver)
+    bare = without.stepper()(residual_fn, phi, r0, solver)
+    seeded = with_backoff.stepper()(residual_fn, phi, r0, solver)
+    plain, plain_cycles, plain_alpha = bare.phi, bare.cycles, bare.alpha
+    reused, reused_cycles, reused_alpha = seeded.phi, seeded.cycles, seeded.alpha
 
     assert jnp.allclose(reused, plain, rtol=0, atol=0)
     assert int(reused_cycles) == int(plain_cycles)
@@ -492,21 +495,21 @@ def test_a_growth_rung_is_never_reached_by_falling_back_onto_it() -> None:
     phi = jnp.array([1.0])
     delta = jnp.array([1.0])
     reference = jnp.linalg.norm(residual_fn(phi))
-    _, capped = backtracking_line_search(residual_fn, phi, delta, reference, 6, grow=3)
+    capped = backtracking_line_search(residual_fn, phi, delta, reference, 6, grow=3).alpha
     assert float(capped) == 1.0  # not 8.0, the longest rung on the extended ladder
 
     # ...while a growth rung IS taken when it genuinely passes the acceptance test.
     def improving(phi):
         return jnp.abs(phi - 4.0) + 0.1  # keeps improving out to alpha = 4
 
-    _, taken = backtracking_line_search(
+    taken = backtracking_line_search(
         improving,
         jnp.array([0.0]),
         jnp.array([1.0]),
         jnp.linalg.norm(improving(jnp.array([0.0]))),
         6,
         grow=3,
-    )
+    ).alpha
     assert float(taken) == 4.0
 
 

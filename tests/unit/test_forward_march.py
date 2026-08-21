@@ -33,17 +33,24 @@ from aquaflux.solve import (
     SwitchedEvolutionRelaxation,
     forward_march,
 )
+from aquaflux.solve.implicit import backtracking_line_search
+from aquaflux.solve.march import _march_step
 
 # Incremented on every *trace* of the residual below, so a test can assert that repeated steps
 # reuse a compiled march step instead of retracing it.
 _TRACES: list[int] = []
 
 
-def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False, binding=1.0):
+def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False, binding=1.0, residual_fn=None):
     """A `StepOutcome` for a test double, so a fake step matches the real protocol in one place.
 
     The doubles used to build the tuple inline; when the protocol grew a field every one of them broke
     separately, which is the argument for a single constructor rather than five literal tuples.
+
+    ``residual_fn`` is the double's own residual, used to fill :attr:`StepOutcome.residual_norm` with
+    ``norm(R(phi))`` at the stepped iterate -- what a real step reports, and what the march used to
+    evaluate for itself. A double built outside a step (to be handed straight to a retry policy, which
+    reads only the cost fields) may leave it ``None``; the norm is then a stand-in.
 
     ``reached`` defaults to **False** because these doubles model steps that do not converge -- which
     is what makes them useful for testing the escalation, and what the escalation now requires: a step
@@ -51,8 +58,10 @@ def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False, binding=1.0):
     constraint was in play, so a double models a step whose length the descent test alone decided.
     """
     cycles = jnp.asarray(cycles, dtype=jnp.int32)
+    measured = phi if residual_fn is None else residual_fn(phi)
     return StepOutcome(
         phi,
+        jnp.linalg.norm(measured),
         cycles,
         jnp.asarray(alpha),
         jnp.asarray(inner, dtype=jnp.int32),
@@ -172,8 +181,8 @@ class _PoisonUnlessTight(eqx.Module):
     def stepper(self):
         def step(residual_fn, phi, residual_norm_0, solver):
             if solver == "tight":  # the recovered step lands on the root, at a higher cycle cost
-                return _outcome(jnp.zeros_like(phi), 6, reached=True)  # lands on the root
-            return _outcome(jnp.full_like(phi, jnp.inf), 3)
+                return _outcome(jnp.zeros_like(phi), 6, reached=True, residual_fn=residual_fn)
+            return _outcome(jnp.full_like(phi, jnp.inf), 3, residual_fn=residual_fn)
 
         return step
 
@@ -559,7 +568,7 @@ class _CyclesFromBeta(eqx.Module):
 
         def step(residual_fn, phi, residual_norm_0, solver):
             cyc = jnp.round(base / jnp.maximum(schedule.beta, 1e-6)).astype(jnp.int32)
-            return _outcome(phi, cyc)  # phi held: never converges
+            return _outcome(phi, cyc, residual_fn=residual_fn)  # phi held: never converges
 
         return step
 
@@ -686,9 +695,9 @@ class _NaNUntilDamped(eqx.Module):
             if (
                 solver == "tight"
             ):  # the divergence fallback -- marked so the test can detect it fired
-                return _outcome(jnp.zeros_like(phi), 6, reached=True)
+                return _outcome(jnp.zeros_like(phi), 6, reached=True, residual_fn=residual_fn)
             phi_out = jnp.where(sched.beta >= thr, jnp.zeros_like(phi), jnp.full_like(phi, jnp.inf))
-            return _outcome(phi_out, 3)
+            return _outcome(phi_out, 3, residual_fn=residual_fn)
 
         return step
 
@@ -793,7 +802,9 @@ class _AlphaFromBeta(eqx.Module):
 
         def step(residual_fn, phi, residual_norm_0, solver):
             alpha = jnp.where(schedule.beta >= needed, 1.0, 0.0)
-            return _outcome(phi, 3, alpha=alpha)  # cheap every time; phi held, so never converges
+            return _outcome(
+                phi, 3, alpha=alpha, residual_fn=residual_fn
+            )  # cheap; phi held, never converges
 
         return step
 
@@ -1085,7 +1096,7 @@ class _PinnedOnItsLimit(eqx.Module):
         cap = self.cap
 
         def step(residual_fn, phi, residual_norm_0, solver):
-            return _outcome(phi, 1, alpha=0.0, binding=cap)
+            return _outcome(phi, 1, alpha=0.0, binding=cap, residual_fn=residual_fn)
 
         return step
 
@@ -1220,7 +1231,9 @@ class _UnshiftedStep(eqx.Module):
 
     def stepper(self):
         def step(residual_fn, phi, residual_norm_0, solver):
-            return _outcome(phi, 40)  # held: never converges, so the escalation would fire
+            return _outcome(
+                phi, 40, residual_fn=residual_fn
+            )  # held: never converges, escalation fires
 
         return step
 
@@ -1287,3 +1300,96 @@ def test_the_escalation_guard_still_rejects_a_step_that_can_never_escalate() -> 
             atol=1e-12,
             retry=RetryPolicy(on_alpha=0.5),
         )
+
+
+def test_a_march_step_does_not_re_evaluate_the_residual_it_was_just_handed() -> None:
+    """The step reports its own measure, so the march forms no residual of its own.
+
+    A globalized step ends in a line search that evaluated ``norm(R(phi + alpha delta))`` at every rung
+    it walked, so the value at the rung it kept is in hand when the step returns. The march used to
+    throw it away and evaluate the residual again at that same iterate -- a full residual per step.
+
+    Counted at TRACE time, which is what makes this deterministic: ``_march_step`` is compiled once, so
+    how many times the residual appears in it is a static property of the program rather than a timing.
+    Three is the floor here -- the Newton correction's own ``R(phi)``, its Jacobian--vector product, and
+    the line-search ladder's body -- and a fourth would be the re-evaluation this pins out.
+    """
+    for line_search in (0, 6):
+        _TRACES.clear()
+        step = DampedNewtonStep(line_search=line_search)
+        residual = _Cubic(jnp.array([8.0, 27.0]))
+        _march_step(step, residual, jnp.array([1.5, 2.5]), jnp.asarray(10.0), step.default_solver())
+        assert len(_TRACES) == 3, f"line_search={line_search} traced {len(_TRACES)} residuals"
+
+
+def test_every_forward_step_reports_the_measure_at_the_iterate_it_returns() -> None:
+    """The contract both drivers now rely on, checked on all three shipped strategies.
+
+    ``StepOutcome.residual_norm`` must be ``norm(R(phi))`` at the step's OWN returned iterate. A
+    stepper that reported the measure of a rung it did not keep -- the line search's fallback rung is
+    the one that can differ from the last it evaluated -- would give the march a residual history
+    describing steps it never took, and the convergence test would run on it.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+    residual_fn = _Cubic(theta)
+    phi0 = jnp.array([1.2, 2.2, 3.2])
+
+    for step in (
+        DampedNewtonStep(line_search=0),
+        DampedNewtonStep(line_search=8),
+        PseudoTransientStep(
+            shift_policy=_UnitShiftPolicy(),
+            relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0, exponent=1.0),
+            line_search=8,
+        ),
+    ):
+        r0 = step.norm()(residual_fn(phi0))
+        outcome = step.stepper()(residual_fn, phi0, r0, step.default_solver())
+        expected = step.norm()(residual_fn(outcome.phi))
+        assert jnp.allclose(outcome.residual_norm, expected, rtol=1e-12, atol=0.0), type(step)
+
+
+def test_the_line_search_reports_the_fallback_rungs_own_measure() -> None:
+    """When nothing is admissible the kept rung is not the last one walked -- and the pair must agree.
+
+    The ladder walks longest-first and stops at the first admissible rung; with none, it falls back to
+    the longest FINITE rung, which it passed several evaluations earlier. Carrying the accepted rung's
+    measure alone would then describe a step that was not taken, so the fallback carries its own.
+    """
+    phi, delta, reference = jnp.array([1.0]), jnp.array([4.0]), jnp.asarray(1.0)
+
+    def residual(p):  # every rung increases the residual, so nothing is admissible
+        return p
+
+    step = backtracking_line_search(residual, phi, delta, reference, steps=4)
+
+    assert (
+        float(step.alpha) == 1.0
+    )  # the fallback: the longest finite rung, capped at the full step
+    assert jnp.allclose(step.phi, phi + delta)
+    assert jnp.allclose(step.residual_norm, jnp.linalg.norm(residual(step.phi)))
+
+
+def test_a_search_with_no_finite_rung_reports_a_NON_FINITE_measure() -> None:
+    """The one path that reads the carry's seed, and the one place its value matters.
+
+    When not a single rung is finite the ladder has no measure to report, so the carry's seed is what
+    comes out. It must stay non-finite: every consumer of this number tests it with ``isfinite`` --
+    the divergence guard, the acceptance policy, and the Newton driver's convergence guard -- and a
+    finite seed (``0.0``, say) would present a poisoned step to all three as a converged one.
+
+    The step itself is unchanged either way: ``alpha`` is still the shortest rung, which the ladder
+    evaluated and found non-finite, so the residual a caller would have recomputed there is non-finite
+    too. Only the route to that conclusion changed.
+    """
+    phi, delta, reference = jnp.array([1.0]), jnp.array([1.0]), jnp.asarray(1.0)
+
+    def poisoned(p):
+        return jnp.full_like(p, jnp.nan)
+
+    step = backtracking_line_search(poisoned, phi, delta, reference, steps=4)
+
+    assert not bool(jnp.isfinite(step.residual_norm))
+    assert float(step.alpha) == 0.5**4  # the shortest rung, exactly as before
+    # ...and it agrees with what a caller recomputing at that iterate would have found.
+    assert not bool(jnp.isfinite(jnp.linalg.norm(poisoned(step.phi))))

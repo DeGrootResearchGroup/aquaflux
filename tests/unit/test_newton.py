@@ -37,17 +37,22 @@ def test_damped_newton_stepper_reports_its_linear_solve_cost() -> None:
     step = DampedNewtonStep(line_search=0).stepper()
     phi0 = jnp.array([9.0, -9.0])
     residual_fn = lambda x: A @ x - B  # noqa: E731
-    phi_next, cycles, alpha, inner, *_ = step(
-        residual_fn, phi0, jnp.linalg.norm(residual_fn(phi0)), None
-    )
-    assert int(inner) == 1  # a single Newton step has no inner loop
+    # Read BY NAME, never unpacked positionally: `StepOutcome` is a `NamedTuple`, so a positional
+    # unpack stays legal when the record grows and silently shifts every field one place. This test
+    # used to do that, and when `residual_norm` was inserted it read the norm as its cycle count --
+    # while `inner` read `alpha` and its assertion still PASSED, because both happen to be 1.
+    outcome = step(residual_fn, phi0, jnp.linalg.norm(residual_fn(phi0)), None)
+    assert int(outcome.inner_iterations) == 1  # a single Newton step has no inner loop
 
     # A linear residual: the undamped step is exact in one call, so the step is unchanged by
     # reporting the count and line-search factor alongside it.
-    assert jnp.allclose(phi_next, jnp.linalg.solve(A, B), atol=1e-10)
-    assert int(cycles) > 0
-    assert cycles.dtype == jnp.int32
-    assert jnp.allclose(alpha, 1.0)  # line_search=0 takes the full step
+    assert jnp.allclose(outcome.phi, jnp.linalg.solve(A, B), atol=1e-10)
+    assert int(outcome.cycles) > 0
+    assert outcome.cycles.dtype == jnp.int32
+    assert jnp.allclose(outcome.alpha, 1.0)  # line_search=0 takes the full step
+    # ...and the step reports the measure at the iterate it returns, which for an exact step on a
+    # linear residual is zero to round-off.
+    assert float(outcome.residual_norm) < 1e-10
 
 
 def _solved_sum(k):

@@ -32,6 +32,7 @@ from .relaxation import RelaxationSchedule
 
 __all__ = [
     "ForwardStep",
+    "LineSearchStep",
     "ShiftedForwardStep",
     "StepControl",
     "StepFn",
@@ -41,16 +42,56 @@ __all__ = [
 ]
 
 
+class LineSearchStep(NamedTuple):
+    """What a backtracking line search produced: the iterate, its step fraction, and its measure.
+
+    The third member is the point. A search evaluates ``norm(R(phi + alpha delta))`` at every rung it
+    walks, so the measure at the rung it settles on is already in hand -- and every caller then needed
+    that same number to judge the step by. Returning it turns a full residual evaluation per outer
+    iteration into a scalar carried out of the ladder's loop.
+
+    **The measure is the one the search was handed**, so it is comparable to the ``reference_norm`` it
+    was judged against and to the stopping test only insofar as the caller passes one measure to both.
+    That is an invariant the callers maintain rather than something this record can enforce: a march
+    that rebuilds its measure per outer iteration rebuilds the *step's* measure with it, so the search,
+    the acceptance test and the reported norm are one measure by construction.
+
+    Attributes
+    ----------
+    phi : jnp.ndarray
+        The stepped iterate ``phi + alpha delta``.
+    alpha : jnp.ndarray
+        The step fraction actually taken.
+    residual_norm : jnp.ndarray
+        ``norm(R(phi))`` at :attr:`phi`, in the measure the search was given.
+    """
+
+    phi: jnp.ndarray
+    alpha: jnp.ndarray
+    residual_norm: jnp.ndarray
+
+
 class StepOutcome(NamedTuple):
     """What one forward step produced, what it cost, and how it ended.
 
-    A record rather than a widening tuple: these seven values travel together through every stepper and
-    both consumers, and a positional 7-tuple is where a caller silently mis-unpacks one for another.
+    A record rather than a widening tuple: these eight values travel together through every stepper and
+    both consumers, and a positional 8-tuple is where a caller silently mis-unpacks one for another.
 
     Attributes
     ----------
     phi : jnp.ndarray
         The stepped iterate -- the only part that is the step's *result*; the rest is cost and quality.
+    residual_norm : jnp.ndarray
+        ``norm(R(phi))`` at :attr:`phi`, in the step's own measure (:meth:`ForwardStep.norm`) -- what
+        the driver judges convergence by.
+
+        **It is returned rather than recomputed because the step already knows it.** A globalized step
+        ends in a line search, which evaluates the measure at every rung it walks, so the value at the
+        rung it settles on is in hand when the step returns; both drivers used to throw it away and
+        evaluate the residual again at the same point. A step whose inner loop is judged by a
+        *different* measure (a dual-time inner Newton, which converges the shifted ``G`` rather than
+        ``R``) has to form this itself -- there the field costs what the driver used to pay and saves
+        nothing, but it keeps one contract instead of an optional one.
     cycles : jnp.ndarray
         The **raw** solver count summed over the step's inner iterations (lineax's ``num_steps``, with
         its per-solve offset still in). Total cost, and what a summed cost cap is measured against.
@@ -78,6 +119,7 @@ class StepOutcome(NamedTuple):
     """
 
     phi: jnp.ndarray
+    residual_norm: jnp.ndarray
     cycles: jnp.ndarray
     alpha: jnp.ndarray
     inner_iterations: jnp.ndarray

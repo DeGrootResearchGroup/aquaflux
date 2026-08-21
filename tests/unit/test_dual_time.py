@@ -476,7 +476,7 @@ def test_a_floored_limiter_is_still_a_compilation_cache_hit() -> None:
 def test_a_capped_line_search_never_exceeds_the_cap() -> None:
     """The cap applies to every rung, including the growth rungs above one."""
     phi, delta = jnp.array([1.0]), jnp.array([-1.0])
-    stepped, alpha = backtracking_line_search(
+    stepped, alpha, _ = backtracking_line_search(
         lambda p: p * 0.0, phi, delta, jnp.asarray(1.0), steps=4, grow=2, max_alpha=0.1
     )
 

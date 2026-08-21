@@ -242,8 +242,10 @@ class SweptGradientSolve(GradientSolve):
 
     converges geometrically with rate ``ρ(I − V⁻¹A_g) < 1``. A **fixed** ``sweeps`` count reaches
     machine precision for this well-conditioned operator with no dense matrix and no nested Krylov
-    solve; each sweep is a single operator apply, so the cost is **linear in the mesh** — where a
-    dense LU of ``A_g`` would be ``O((n·dim)²)`` per apply and cross over to a loss on finer meshes.
+    solve; a sweep costs one operator apply (the first needs none — its iterate is zero, so its
+    residual is ``B·φ`` outright, and ``sweeps`` sweeps cost ``sweeps - 1`` applies), so the cost is
+    **linear in the mesh** — where a dense LU of ``A_g`` would be ``O((n·dim)²)`` per apply and cross
+    over to a loss on finer meshes.
     Differentiated by simply unrolling the short, static-length loop, so the gradient's response to
     ``φ`` is carried implicitly into the flow Jacobian **without** an implicit-diff tangent solve.
 
@@ -265,7 +267,8 @@ class SweptGradientSolve(GradientSolve):
     under-resolved — a diagnostic, not a termination.
 
     **The count also sets how far a residual built on this reaches across the cell graph**, because
-    each sweep applies ``A_g`` and ``A_g`` couples a cell to its face neighbours. That is a constraint
+    every sweep after the first applies ``A_g`` and ``A_g`` couples a cell to its face neighbours —
+    so ``sweeps`` sweeps reach ``sweeps - 1`` cells beyond ``B·φ``'s own. That is a constraint
     on anything assembling an operator by coloured probing at a fixed distance, and
     :func:`narrow_gradient_sweeps` is how such a consumer caps it without touching the solve.
 
@@ -298,9 +301,17 @@ class SweptGradientSolve(GradientSolve):
         # hook overwrites them, so the owned rows converge exactly to the serial solution.
         op = operator if operator_hook is None else lambda v: operator(operator_hook(v))
         inv_volume = 1.0 / volume
-        x = jnp.zeros_like(rhs)
-        residual = rhs  # rhs - A·0; overwritten each sweep with the current residual
-        for _ in range(self.sweeps):
+        if self.sweeps <= 0:
+            return jnp.zeros_like(rhs)
+        # THE FIRST SWEEP'S OPERATOR APPLY IS PEELED, and it is exact rather than an approximation.
+        # The iteration starts from a zero iterate, so that sweep's residual is `rhs - A·0`, which is
+        # `rhs` itself -- the apply forming it multiplies a vector known to be zero at full price.
+        # Nothing downstream removes it: the compiler folds the gathers against the zero constant but
+        # not the scatters, so it costs a whole operator apply out of `sweeps` on every reconstruction,
+        # and this one runs inside every residual evaluation and every Jacobian--vector product.
+        residual = rhs
+        x = scale(rhs, inv_volume)
+        for _ in range(self.sweeps - 1):
             residual = rhs - op(x)
             x = x + scale(residual, inv_volume)
         # The convergence diagnostic norms the residual over the whole local vector. Under domain
@@ -310,9 +321,9 @@ class SweptGradientSolve(GradientSolve):
         # drops the (unreliable) diagnostic rather than report a per-partition norm.
         # ...and it is skipped at ONE sweep, where it carries no information rather than a little. The
         # residual below is the one entering the final update, so at a single sweep it is the initial
-        # `rhs - A·0 = rhs` and the ratio is *exactly* 1 whatever the mesh — it fires on a perfectly
-        # orthogonal grid whose answer is exact. A single sweep is `g = V⁻¹Bφ`, the uncorrected
-        # Green–Gauss reconstruction, so there is no correction being under-resolved to report on.
+        # `rhs` and the ratio is *exactly* 1 whatever the mesh — it fires on a perfectly orthogonal
+        # grid whose answer is exact. A single sweep is `g = V⁻¹Bφ`, the uncorrected Green–Gauss
+        # reconstruction, so there is no correction being under-resolved to report on.
         if operator_hook is None and self.warn_tol is not None and self.sweeps > 1:
             # `residual` is rhs - A·x from the last sweep (one apply already spent) — a free,
             # slightly conservative convergence indicator. The host-side warning is gated behind a

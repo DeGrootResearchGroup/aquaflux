@@ -44,10 +44,14 @@ much as in two. `bfs3d` gets 3 for free because its blockMesh is rectilinear to 
 its value as a default. Check with `jacobian_relative_error` on the case's own mesh — it costs a minute
 and the failure it prevents is a preconditioner built on a matrix that is not the Jacobian.
 
-**⚠️ Incidental defect, do not misread it:** `SweptGradientSolve`'s `warn_tol` diagnostic fires
-**unconditionally at `sweeps=1`**, because it measures the residual from before the last update, which
-at one sweep is the right-hand side itself (relative 1.0). It was observed firing on the skew-free mesh
-whose offsets are 1e-12. That warning is not evidence of non-orthogonality.
+**⚠️ THIS ENTRY WAS ALREADY STALE WHEN FOUND (2026-08-20) — the diagnostic is gated, and has been for
+longer than this file said.** It read "`SweptGradientSolve`'s `warn_tol` diagnostic fires
+**unconditionally at `sweeps=1`**"; `solve` in fact skips it entirely when `sweeps <= 1`
+(`... and self.sweeps > 1`), where it would carry no information rather than a little. What remains
+true, and is the reason the entry is kept rather than deleted: the diagnostic measures the residual
+from *before* the last update, so at one sweep that is the right-hand side itself and the ratio is
+exactly 1 whatever the mesh — which is why gating it was the fix. **If you meet that warning in an old
+log from a skew-free mesh, it was never evidence of non-orthogonality.**
 
 ## Responsibility
 - Reconstruction/interpolation/gradient/**limiting** **strategy classes** (each an `equinox.Module`
@@ -137,6 +141,24 @@ whose offsets are 1e-12. That warning is not evidence of non-orthogonality.
   unrolled sparse apply. **The default `GradientSolve` for `CorrectedGreenGauss`** (every flow mesh,
   not only skewed ones) — cheap to differentiate inside a nonlinear Newton, where the `GmresGradientSolve`
   nested Krylov+implicit-diff alternative is impractical (see the `CorrectedGreenGauss` note above).
+  - **The FIRST sweep's operator apply is peeled, exactly — `sweeps` sweeps cost `sweeps - 1` applies
+    (2026-08-20).** The iteration starts at `x = 0`, where `rhs - A·0` is `rhs` outright, so that apply
+    computed a known answer at full price. **Nothing downstream removed it:** the compiler folds the
+    gathers against the zero constant but *not* the scatters, measured on the real scheme as 30 → 24
+    scatter operations at the default `sweeps=4`. Worth ~9–17 % of the reconstruction on a 40 000-cell
+    randomly-graded 2D grid, which is charged on **every residual evaluation and every Jacobian--vector
+    product**, so it is inside every coupled Newton step. Bit-identical (`jnp.array_equal`), pinned two
+    ways in `tests/unit/test_gradient.py` — an apply *count* per sweep count (which fails if the peel is
+    reverted) and an equality against the unpeeled iteration written out (which fails if the arithmetic
+    is ever rearranged). This is the same peel `_VCycleOps.smooth_zero` and `Ilu0.sweep_from_zero`
+    already carry; the gradient solve was the one place in the tree still missing it.
+    ⚠️ **It does NOT move the stencil reach**, which is what makes it safe next to the entry below: the
+    peeled apply is the one against a zero vector, so it contributed no coupling. A `k`-sweep
+    reconstruction still reads `k` cells out (it applies `A_g` `k-1` times on top of `B·φ`'s own ring),
+    and the measured table below is unchanged. **A synthetic operator with random column indices put the
+    same peel at 34 %**, twice the real figure — the locality caution recorded elsewhere in these files,
+    reproduced exactly.
+
   - **⚠️ EACH SWEEP COUPLES ONE FURTHER RING, so the sweep count sets the RESIDUAL's stencil reach —
     and the shipped `sweeps=4` is inconsistent with the shipped `stencil_reach=3` on a skewed mesh
     (measured 2026-08-16, harness `validation/gradient_stencil_reach.py`).** `A_g` couples a cell to its

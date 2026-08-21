@@ -31,7 +31,7 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
-from .forward_step import ForwardStep, StepFn, StepOutcome, within_tolerance
+from .forward_step import ForwardStep, LineSearchStep, StepFn, StepOutcome, within_tolerance
 from .linear import corrected_cycles as _corrected
 from .linear import default_linear_solver, solve_linear
 from .newton import newton_correction
@@ -356,17 +356,22 @@ def backtracking_line_search(
 
     Returns
     -------
-    stepped : jnp.ndarray
-        ``phi + alpha delta`` for the kept ``alpha``.
-    alpha : jnp.ndarray
-        The kept step-length fraction (a scalar): ``1`` when the full step descended, smaller when it
-        had to be shortened. A staleness / step-control signal — ``alpha = 1`` means the shifted step
-        was not clipped, ``alpha < 1`` that it overshot. ``steps == 0`` returns ``alpha = 1`` (the
-        full step is taken unconditionally).
+    LineSearchStep
+        The stepped iterate ``phi + alpha delta``, the kept step-length fraction ``alpha``, and the
+        measure at the iterate. ``alpha`` is ``1`` when the full step descended and smaller when it
+        had to be shortened — a staleness / step-control signal, since ``alpha = 1`` means the shifted
+        step was not clipped and ``alpha < 1`` that it overshot. ``steps == 0`` returns ``alpha = 1``
+        (the full step is taken unconditionally).
+
+        ``residual_norm`` is the measure at the rung actually kept, which the ladder evaluated on its
+        way to choosing it — so a caller judging the step by ``norm`` need not evaluate the residual
+        again at a point already visited. **Only the ``steps == 0`` path has to form it**, having
+        walked no ladder; there it costs exactly what the caller used to pay.
     """
     if steps == 0:
         alpha = jnp.minimum(jnp.asarray(1.0), max_alpha)
-        return phi + alpha * delta, alpha
+        stepped = phi + alpha * delta
+        return LineSearchStep(stepped, alpha, norm(residual_fn(stepped)))
 
     # Walk the ladder from the LONGEST step down and keep the first admissible one -- the largest
     # step the acceptance tolerance allows, not the one that minimizes the residual.
@@ -401,12 +406,16 @@ def backtracking_line_search(
     admissible = growth * reference_norm
     lowest = -grow  # rung index; alpha = 0.5**index, so negative indices are steps longer than one
 
+    # Each rung's measure is carried beside its alpha -- both for the accepted rung and for the
+    # fallback one, which is a DIFFERENT rung and so needs its own. The two travel together or the
+    # returned pair describes two different steps. This is what lets the caller judge the step it
+    # gets without evaluating the residual again at a point the ladder already visited.
     def cond(carry):
-        index, _, found, _, _ = carry
+        index, _, _, found, _, _, _ = carry
         return (~found) & (index <= steps)
 
     def body(carry):
-        index, chosen, _, longest_finite, seen_finite = carry
+        index, chosen, chosen_norm, _, longest_finite, longest_norm, seen_finite = carry
         # Capped, not rejected: the cap makes an admissible step reachable by construction.
         alpha = jnp.minimum(0.5**index, max_alpha)
         value = norm(residual_fn(phi + alpha * delta))
@@ -414,22 +423,36 @@ def backtracking_line_search(
         accepted = finite & (value < admissible)
         # The fallback candidate ignores rungs longer than the full step (index < 0).
         eligible = finite & (index >= 0)
+        first_finite = eligible & ~seen_finite
         return (
             index + 1,
             jnp.where(accepted, alpha, chosen),
+            jnp.where(accepted, value, chosen_norm),
             accepted,
-            jnp.where(eligible & ~seen_finite, alpha, longest_finite),
+            jnp.where(first_finite, alpha, longest_finite),
+            jnp.where(first_finite, value, longest_norm),
             seen_finite | eligible,
         )
 
     shortest = jnp.minimum(jnp.asarray(0.5**steps), max_alpha)
-    _, chosen, found, longest_finite, _ = jax.lax.while_loop(
+    # The seeds are only ever read when the loop found nothing finite at all, in which case every
+    # rung's measure was non-finite and so is this one -- which is what the divergence guard is for.
+    seed_norm = jnp.asarray(jnp.inf, dtype=jnp.asarray(reference_norm).dtype)
+    _, chosen, chosen_norm, found, longest_finite, longest_norm, _ = jax.lax.while_loop(
         cond,
         body,
-        (jnp.asarray(lowest), shortest, jnp.asarray(False), shortest, jnp.asarray(False)),
+        (
+            jnp.asarray(lowest),
+            shortest,
+            seed_norm,
+            jnp.asarray(False),
+            shortest,
+            seed_norm,
+            jnp.asarray(False),
+        ),
     )
-    chosen = jnp.where(found, chosen, longest_finite)
-    return phi + chosen * delta, chosen
+    alpha = jnp.where(found, chosen, longest_finite)
+    return LineSearchStep(phi + alpha * delta, alpha, jnp.where(found, chosen_norm, longest_norm))
 
 
 def _damped_newton_step(
@@ -446,21 +469,30 @@ def _damped_newton_step(
     adjoint depends solely on the converged state, so it stays gradient-transparent. ``norm`` is the
     residual measure the search is judged by (default Euclidean).
 
-    Returns a :class:`~aquaflux.solve.StepOutcome` carrying the stepped iterate, the raw solver count
-    of the one linear solve behind it, the line-search factor, ``inner_iterations = 1`` (a single
-    Newton step has no inner loop), ``reached_target = True``, the offset-corrected cost of that one
-    solve, and an unbinding ``binding_limit`` of ``1``. The line search itself costs only residual
-    evaluations, so the step's linear-solve cost is exactly that single solve's.
+    Returns a :class:`~aquaflux.solve.StepOutcome` carrying the stepped iterate, the measure at it,
+    the raw solver count of the one linear solve behind it, the line-search factor,
+    ``inner_iterations = 1`` (a single Newton step has no inner loop), ``reached_target = True``, the
+    offset-corrected cost of that one solve, and an unbinding ``binding_limit`` of ``1``. The line
+    search itself costs only residual evaluations, so the step's linear-solve cost is exactly that
+    single solve's — and the measure it reports is the one the search already formed at the rung it
+    kept, so the driver judging this step adds no residual evaluation of its own.
     """
     delta, r, cycles = newton_correction(
         residual_fn, phi, solver=solver, preconditioner=preconditioner
     )
-    stepped, alpha = backtracking_line_search(
+    searched = backtracking_line_search(
         residual_fn, phi, delta, norm(r), line_search_steps, norm=norm
     )
     # No inner loop, so nothing could have been cut short and the one solve IS the most expensive one.
     return StepOutcome(
-        stepped, cycles, alpha, 1, jnp.asarray(True), _corrected(cycles), jnp.asarray(1.0)
+        searched.phi,
+        searched.residual_norm,
+        cycles,
+        searched.alpha,
+        1,
+        jnp.asarray(True),
+        _corrected(cycles),
+        jnp.asarray(1.0),
     )
 
 
@@ -576,8 +608,17 @@ def _forward(residual_fn, phi0, theta, rtol, atol, max_steps, solver, forward_st
         # choose which step's value survives (last / max / sum), which is a reporting/control policy
         # the Newton solver has no business owning. A march that wants per-step cost or the line-search
         # factor observes them eagerly instead (`forward_march`).
-        phi = forward_step_fn(residual_theta, phi, residual_norm_0, solver).phi
-        return phi, step + 1, norm_fn(residual_fn(phi, theta))
+        #
+        # The residual norm is the one member that IS kept, because the loop's own stopping test needs
+        # it and it is already in the carry -- there is no float0 question, only which value goes in.
+        # It comes from the step rather than from a fresh `norm_fn(residual_fn(phi))`: a globalized step
+        # ends in a line search that evaluated exactly this at the rung it kept, so re-forming it here
+        # spent a whole residual evaluation per Newton iteration to recompute a number the step was
+        # holding. That is sound only because the step's measure and `norm_fn` are the same object --
+        # `ImplicitNewtonSolver` passes `forward.norm()` as `norm_fn`, which is the invariant to keep if
+        # this ever takes its measure from elsewhere.
+        outcome = forward_step_fn(residual_theta, phi, residual_norm_0, solver)
+        return outcome.phi, step + 1, outcome.residual_norm
 
     phi, _, residual_norm = jax.lax.while_loop(cond, body, (phi0, 0, residual_norm_0))
     converged = jnp.isfinite(residual_norm) & within_tolerance(

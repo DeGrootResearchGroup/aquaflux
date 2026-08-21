@@ -591,3 +591,59 @@ def test_the_underresolved_warning_does_not_fire_at_one_sweep() -> None:
 
     assert warnings_from(1) == []
     assert warnings_from(4) == []  # and a resolved multi-sweep solve is silent, as it always was
+
+
+def test_the_swept_solve_spends_one_apply_fewer_than_its_sweep_count() -> None:
+    """The first sweep's operator apply is against a zero iterate, so it is peeled — exactly.
+
+    ``sweeps`` sweeps cost ``sweeps - 1`` applies, because the iteration starts at ``x = 0`` where
+    ``rhs - A·0`` is ``rhs`` outright. Nothing downstream removes that apply on its own: the compiler
+    folds the gathers against the zero constant but not the scatters, so left in it costs a whole
+    operator apply out of ``sweeps`` on a solve that runs inside every residual evaluation and every
+    Jacobian--vector product.
+
+    Counting applies rather than timing is what makes this a *test*: it fails if the peel is ever
+    reverted or an extra apply creeps back in, where a timing assertion would only wobble.
+    """
+    applies = []
+    volume = jnp.ones(4)
+    rhs = jnp.arange(1.0, 5.0)
+
+    def operator(v):
+        applies.append(1)
+        return 0.25 * v  # contracting, so the iteration is well-posed
+
+    for sweeps in (1, 2, 4, 7):
+        applies.clear()
+        SweptGradientSolve(sweeps=sweeps, warn_tol=None).solve(volume, operator, rhs)
+        assert len(applies) == sweeps - 1
+
+
+def test_peeling_the_zero_apply_leaves_the_answer_BIT_identical() -> None:
+    """Exact, not merely close — the peel replaces ``rhs - A·0`` with ``rhs``, which it equals.
+
+    Checked against the unpeeled iteration written out here rather than against a tolerance, so a
+    change that alters the arithmetic (reordering the update, folding the volume differently) fails
+    even though it would stay well inside any sensible tolerance.
+    """
+    mesh = perturbed_grid_2d(12, 12, perturb=0.2)
+    geometry = mesh.geometry()
+    field = jnp.sin(3.0 * geometry.cell.centroid[:, 0]) * geometry.cell.centroid[:, 1]
+
+    for sweeps in (1, 2, 4, 9):
+        solver = SweptGradientSolve(sweeps=sweeps, warn_tol=None)
+        captured = {}
+
+        def capture(volume, operator, rhs, *, operator_hook=None, _s=solver, _c=captured):
+            # The iteration exactly as it stood before the peel, over the same operator and rhs.
+            x = jnp.zeros_like(rhs)
+            for _ in range(_s.sweeps):
+                x = x + (rhs - operator(x)) / volume[:, None]
+            _c["unpeeled"] = x
+            return _s.solve(volume, operator, rhs, operator_hook=operator_hook)
+
+        peeled = CorrectedGreenGauss(
+            solver=type("_Capture", (), {"solve": staticmethod(capture)})()
+        ).gradients(field, mesh, geometry, jnp.zeros(mesh.n_faces))
+
+        assert jnp.array_equal(peeled, captured["unpeeled"]), f"differs at sweeps={sweeps}"

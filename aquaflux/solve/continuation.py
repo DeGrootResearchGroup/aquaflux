@@ -556,7 +556,7 @@ class PseudoTransientStep(ShiftedStep):
                 if step_projection is not None:
                     delta = step_projection(phi, delta)
                 max_alpha = 1.0 if step_limit is None else step_limit(phi, delta)
-                candidate, alpha = backtracking_line_search(
+                searched = backtracking_line_search(
                     residual_fn,
                     phi,
                     delta,
@@ -579,11 +579,15 @@ class PseudoTransientStep(ShiftedStep):
                 # stiff coupled state, the derivative was negative for beta <= 1 and changed sign
                 # between beta = 1 and beta = 2, exactly where that march had been running.
                 directional = jax.jvp(lambda x: norm(residual_fn(x)), (phi,), (delta,))[1]
+                # The search's own measure at the rung it kept, not a fresh evaluation at the same
+                # point: the ladder computed exactly `norm(residual_fn(candidate))` on its way to
+                # choosing that rung, so re-forming it here cost a whole residual per ATTEMPT -- and
+                # every escalation is another attempt.
                 return _Attempt(
-                    candidate=candidate,
-                    residual_norm=norm(residual_fn(candidate)),
+                    candidate=searched.phi,
+                    residual_norm=searched.residual_norm,
                     cycles=cycles,
-                    alpha=alpha,
+                    alpha=searched.alpha,
                     directional=directional,
                 )
 
@@ -609,15 +613,18 @@ class PseudoTransientStep(ShiftedStep):
             # exits as soon as an attempt is accepted, so a healthy first attempt costs a single solve;
             # only a rejected step pays for extra, more-damped attempts.
             def cond(state: tuple) -> jnp.ndarray:
-                _, _, attempts, accepted, _, _ = state
+                _, _, _, attempts, accepted, _, _ = state
                 return (~accepted) & (attempts <= max_escalations)
 
             def record(state: tuple, trial: _Attempt, accept: jnp.ndarray) -> tuple:
                 """Fold one judged attempt into an escalation carry (the shared accept bookkeeping)."""
-                relaxation, best, attempts, _, best_cycles, best_alpha = state
+                relaxation, best, best_norm, attempts, _, best_cycles, best_alpha = state
                 return (
                     relaxation * escalation_factor,
                     jnp.where(accept, trial.candidate, best),
+                    # The measure travels with the candidate it belongs to. The driver judges this
+                    # step by it, and forms no residual of its own.
+                    jnp.where(accept, trial.residual_norm, best_norm),
                     attempts + 1,
                     accept,
                     # Report the cycles and line-search factor of the attempt actually taken, not the
@@ -627,7 +634,7 @@ class PseudoTransientStep(ShiftedStep):
                 )
 
             def body(state: tuple) -> tuple:
-                relaxation, _, attempts, *_ = state
+                relaxation, _, _, attempts, *_ = state
                 trial = attempt(relaxation)
                 return record(state, trial, admits(trial, attempts))
 
@@ -636,6 +643,9 @@ class PseudoTransientStep(ShiftedStep):
                 return (
                     start,
                     phi,
+                    # A fully-rejected step returns `phi` untouched, so its measure is `phi`'s own --
+                    # which the caller measured before the step and handed in as `residual_norm`.
+                    residual_norm,
                     0,
                     jnp.asarray(False),
                     jnp.asarray(0, dtype=jnp.int32),
@@ -700,13 +710,16 @@ class PseudoTransientStep(ShiftedStep):
             else:
                 start = fresh(start_relaxation)
 
-            _, phi_next, _, _, step_cycles, step_alpha = jax.lax.while_loop(cond, body, start)
+            _, phi_next, next_norm, _, _, step_cycles, step_alpha = jax.lax.while_loop(
+                cond, body, start
+            )
             # A single-step pseudo-transient attempt has no inner Newton loop; report 1 inner iteration
             # so a consumer can offset-correct the raw solver count uniformly with the dual-time path.
             # A single damped step has no inner loop, so nothing could have been cut short and the
             # one solve is trivially the most expensive one.
             return StepOutcome(
                 phi_next,
+                next_norm,
                 step_cycles,
                 step_alpha,
                 1,
@@ -1018,10 +1031,13 @@ class DualTimeStep(ShiftedStep):
                 if step_projection is not None:
                     delta = step_projection(p, delta)
                 max_alpha = 1.0 if step_limit is None else step_limit(p, delta)
-                candidate, alpha = backtracking_line_search(
+                searched = backtracking_line_search(
                     transient_residual, p, delta, gnorm, line_search, norm=norm, max_alpha=max_alpha
                 )
-                new_gnorm = norm(transient_residual(candidate))
+                candidate, alpha = searched.phi, searched.alpha
+                # The search's own measure of `G` at the rung it kept -- the inner loop is judged by
+                # `‖G‖`, which is exactly what it was handed as its measure, so no second evaluation.
+                new_gnorm = searched.residual_norm
                 # An inner step that does NOT reduce ‖G‖ took the line search's non-descent fallback,
                 # which still reports alpha = 1 (the longest finite rung ≤ the full step). Fold that into
                 # the reported min-alpha as 0, so a step control reads it as "struggling" (shrink the
@@ -1105,8 +1121,20 @@ class DualTimeStep(ShiftedStep):
             # `cycle_budget` or `inner_steps`. Without it a march escalating on cost alone discards a step
             # that converged expensively, which is pure waste: it throws away a good iterate AND takes a
             # shorter step than the work already earned.
+            # The one member the inner loop cannot supply. It converges the SHIFTED residual `G` at a
+            # held reference, so every measure it formed is of `G`, while the driver judges this step by
+            # the STEADY `R` -- different quantities, and `G(phi_next) != R(phi_next)` whenever the step
+            # moved. So this path forms the measure the two single-step strategies get for free from
+            # their line search: it costs here exactly what the driver used to pay, and saves nothing.
             return StepOutcome(
-                phi_next, cycles, alpha, inner_iterations, final_gnorm <= target, max_inner, binding
+                phi_next,
+                norm(residual_fn(phi_next)),
+                cycles,
+                alpha,
+                inner_iterations,
+                final_gnorm <= target,
+                max_inner,
+                binding,
             )
 
         return step
