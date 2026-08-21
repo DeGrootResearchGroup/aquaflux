@@ -382,11 +382,16 @@ def _march_step(
       pytree whose arrays ride as dynamic leaves. A freshly-created ``lambda`` is hashed by identity,
       so building one per step misses the cache every time.
 
-    The next residual norm is returned from inside this same compiled call so the march does not pay
-    a second, separate residual evaluation per step.
+    The next residual norm comes from the step itself (:attr:`StepOutcome.residual_norm`) rather than
+    from a fresh evaluation here. A globalized step ends in a line search, which already formed the
+    measure at the rung it kept, so evaluating the residual again at that same point cost a full
+    residual per march step to recompute a number the step was holding. It is the step's own measure,
+    which is this march's measure: when ``norm_builder`` is given, `forward_march` rebuilds the *step's*
+    ``residual_norm`` at each outer iteration, so the search, the acceptance test and the reported norm
+    are one measure by construction -- that is the invariant this relies on.
     """
     outcome = forward_step.stepper()(residual_fn, phi, residual_norm_0, solver)
-    return outcome, forward_step.norm()(residual_fn(outcome.phi))
+    return outcome, outcome.residual_norm
 
 
 def forward_march(

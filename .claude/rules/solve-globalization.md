@@ -108,9 +108,13 @@ paths:
   (`stepper`/`default_solver`/`adjoint_preconditioner`) that runs an **injected**
   `RelaxationSchedule` for the shift strength β, the diagonally-shifted solve `(J + diag(βd))δ = −R`
   (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop`. **`stepper()`
-  returns `(φ_next, cycles, alpha)`** — the accepted attempt's cycle count *and* its line-search
-  factor α (the step-quality signal, ≤1; `_forward` drops both off the `custom_vjp` primal, a march
-  reads them).
+  returns a `StepOutcome`** carrying the accepted attempt's cycle count, its line-search factor α (the
+  step-quality signal, ≤1; `_forward` drops both off the `custom_vjp` primal, a march reads them), and
+  **its `residual_norm`** — the measure at the accepted candidate, which the escalation carry now
+  transports beside the candidate it belongs to (a fully-rejected step returns `phi` untouched, so it
+  reports `phi`'s own measure, the `residual_norm` the caller handed in). The attempt already formed it
+  for the acceptance test, so both drivers read it instead of re-evaluating the residual at the same
+  iterate.
   - **The β schedule is an injected `RelaxationSchedule` (`solve/relaxation.py`), SER extracted as the
     default (binding — do not re-inline the β rule).** The old `beta0`/`exponent`/`beta_floor` fields on
     `PseudoTransientStep` are gone; the field is `relaxation_schedule: RelaxationSchedule`, defaulting to
@@ -221,7 +225,8 @@ paths:
   globalizing the stiff k/omega solves via `scalar_pseudo_transient_solve` — the **only** scalar path
   the SST driver supports (the fixed-count Newton sub-solve was removed). When a new nonlinear residual
   needs pseudo-time globalization, write a `ShiftPolicy` — do **not** re-implement the march.
-  - **`stepper()` returns `(phi_next, cycles, alpha)` — ONE step method on the whole `ForwardStep` protocol,
+  - **`stepper()` returns a `StepOutcome` (`phi_next`, its `residual_norm`, `cycles`, `alpha`, and
+    four more — see `solve-march.md`) — ONE step method on the whole `ForwardStep` protocol,
     counted/uncounted pair deleted (binding).** Every strategy reports its step's restart-cycle count
     (`DampedNewtonStep` gets it from `newton_correction`, which now returns `(delta, r, cycles)`); a
     consumer with no use for it drops it (`phi, _ = step(…)`). A `counted_stepper()` sibling existed

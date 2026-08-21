@@ -39,7 +39,8 @@ paths:
     inside `custom_vjp`, has the root guard, cannot stop early, cannot be observed) and `forward_march`
     (eager Python loop, forward-only, **no guard by design**, stops on an injected trigger, reports every
     step). They are not duplicates: `forward_march` calls the **same** `forward_step.stepper()`, the same
-    `forward_step.norm()`, and the same `_within_tolerance`. The only residue is a ~6-line loop shell,
+    `forward_step.norm()` (for its segment reference — the per-step norm now rides out of the step on
+    `StepOutcome.residual_norm`), and the same `_within_tolerance`. The only residue is a ~6-line loop shell,
     pinned against drift by a test that both marches reach the same state on the same residual.
   - **NOTHING in the refresh machinery reads the line-search α, and on `bfs3d` almost nothing reads
     anything else either (source-verified against the current defaults).** Two independent refresh paths
@@ -517,11 +518,40 @@ paths:
     find any one of them.
     An over-wide value **widens its row rather than being truncated**: a cut-off number is a wrong
     number. Pinned by `tests/unit/test_text_table.py`.
-  - **`StepOutcome` — the forward step's return is a record, not a tuple (BUILT).** It grew to six
-    values (`phi, cycles, alpha, inner_iterations, reached_target, max_inner_cycles, binding_limit`),
-    which is the missing-object smell: a positional tuple is where a consumer silently mis-unpacks one
-    field for another, and every growth broke all five test doubles separately. Three of the fields are
-    there because a march could not otherwise act correctly:
+  - **`StepOutcome` — the forward step's return is a record, not a tuple (BUILT).** It grew to eight
+    values (`phi, residual_norm, cycles, alpha, inner_iterations, reached_target, max_inner_cycles,
+    binding_limit`), which is the missing-object smell: a positional tuple is where a consumer silently
+    mis-unpacks one field for another, and every growth broke all five test doubles separately — which
+    is why they are built by a single `_outcome` helper now. **The growth to eight demonstrated exactly
+    that failure:** `residual_norm` was inserted *second*, and the one test still unpacking positionally
+    (`phi_next, cycles, alpha, *_ = ...`) began reading the norm as its cycle count and failed on the
+    dtype. Four of the fields are there because a march could not otherwise act correctly:
+    - **`residual_norm`** — `norm(R(phi))` at the step's own returned iterate, in the step's own measure.
+      **Both drivers used to evaluate this for themselves** (`_forward`'s loop body, `_march_step`'s
+      return), spending a full residual per outer iteration to recompute a number the step was already
+      holding: a globalized step ends in a line search that evaluated the measure at every rung it
+      walked, so the value at the rung it kept is in hand when the step returns. Measured on
+      `_march_step`, **4 residual traces per compiled step down to 3** — the Newton correction's
+      `R(phi)`, its Jacobian--vector product, and the ladder's body; the fourth was the re-evaluation.
+      Small beside the 15--30 Krylov matvecs a step spends, so this is tidiness with a measurable edge
+      rather than a speed lever, and it should not be quoted as one.
+      **It rests on ONE invariant: the step's measure and the driver's are the same object.**
+      `ImplicitNewtonSolver` passes `forward.norm()` as `norm_fn`, and `forward_march` rebuilds the
+      *step's* `residual_norm` field through `norm_builder`, so the search, the acceptance test and the
+      reported norm are one measure by construction. Break that and the convergence test runs against a
+      residual history measured in a different scale from the reference it is compared with.
+      **The fallback rung is the trap, and it is pinned.** The ladder walks longest-first and stops at
+      the first admissible rung; when *nothing* is admissible it falls back to the longest finite rung,
+      passed several evaluations earlier — so `LineSearchStep` carries that rung's measure alongside the
+      accepted one. Reporting the accepted rung's norm on a fallback describes a step that was not taken
+      (`test_the_line_search_reports_the_fallback_rungs_own_measure`, which fails with `inf` if the
+      fallback carry is dropped).
+      **`DualTimeStep` forms it rather than inheriting it**, which is correct rather than an oversight:
+      its inner loop converges the *shifted* `G` at a held reference, so every measure it formed is of
+      `G`, while the driver judges the step by the steady `R`, and `G(phi_next) != R(phi_next)` whenever
+      the step moved. There it costs exactly what the driver used to pay and saves nothing — the price
+      of one contract instead of an optional one. Its inner loop does collect the saving internally:
+      `new_gnorm` comes from the search rather than from a second `norm(transient_residual(...))`.
     - **`reached_target`** — did the step run to its OWN stopping criterion, or was it cut short? A
       cost-only escalation cannot tell an expensive success from a grind and **discards the success**:
       measured, an inner loop that reached `‖G‖ = 3.0e-6` against a `1.0e-5` target was thrown away for
