@@ -51,7 +51,9 @@ shape of a seam:
 
 1. **Run the static guard** — it is in the fast gate and costs milliseconds:
    `pytest tests/unit/test_validation_api.py`. It checks that every name a case imports still exists
-   and every literal keyword it passes is still accepted.
+   and every literal keyword it passes is still accepted — **including keywords passed to a method on
+   an imported class** (`CoupledRANS.build(...)`, `SSTTurbulence.build(...)`, `MomentumContinuity
+   .build(...)`), which is how every case constructs its assemblers.
 2. **Then use judgement on what the guard cannot see** (below), and if the change plausibly reaches a
    case, *run that case* — `validation/run_case.sh <case>` — before considering the change done.
 3. **When you change the march machinery, ask whether the OTHER case should get it too.** Every
@@ -77,8 +79,20 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
   by name instead of dropped — which is how `precondition_step=` used to vanish on its way to a
   `RefreshPolicy`. What is still unchecked is a keyword that *does* reach the default builder and is
   wrong there; that raises at run time, in the builder, not here.
+- **A call on an object the case built itself.** `Class.method(kw=...)` on an *imported* name is
+  resolvable and is checked (see below); `instance.method(kw=...)` is not, because the instance's type
+  is not knowable statically. Most of what a case does after construction is this shape.
 - **Behaviour.** It cannot tell a converging march from one that crawls, which is how a case can be
   runnable and useless at the same time (the "fallen behind" failure above).
+
+⚠️ **Until 2026-08-21 it was also blind to every constructor call in every case**, because it resolved
+only *bare* imported names and the cases build their assemblers through class methods — so
+`MomentumContinuity.build(...)`, `SSTTurbulence.build(...)` and `CoupledRANS.build(...)` were
+unchecked, and those carry most of the keywords a case passes. Measured at the time: 60 such call
+sites across `validation/`, 28 of them carrying keywords, none of them seen. The guard now resolves
+that form too, and `test_the_checker_reaches_a_call_on_an_imported_CLASS_not_only_a_bare_name` pins
+that it does — the coverage gap sat exactly where the cases spend their configuration, and looked
+identical to coverage that worked.
 
 ## Known API gaps these cases exposed
 

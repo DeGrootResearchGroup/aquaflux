@@ -78,8 +78,15 @@ def test_upwind_matches_exponential_solution() -> None:
     assert err < 2e-2
 
 
-def test_upwind_solve_is_differentiable() -> None:
-    """jax.grad flows through the advection-diffusion solve without NaNs."""
+def test_upwind_solve_adjoint_matches_a_finite_difference() -> None:
+    """The sensitivity to the diffusivity must be the RIGHT number, not merely a finite one.
+
+    A finiteness check cannot fail on a wrong gradient: ``0.0`` is finite, so an adjoint severed
+    anywhere along this path -- a ``stop_gradient`` in an operator, a boundary closure that stopped
+    carrying its dependence -- satisfies it and reports nothing. The problem here is linear, so one
+    Newton step is exact and a central difference is accurate to many digits; there is no reason to
+    settle for the weaker assertion.
+    """
 
     def mean_phi(gamma):
         mesh = structured_grid_2d(40, 1, lx=1.0, ly=1.0 / 40, named_boundaries=True)
@@ -101,8 +108,12 @@ def test_upwind_solve_is_differentiable() -> None:
         )
         return jnp.mean(eqx.filter_jit(newton_step)(assembler.residual, jnp.zeros(mesh.n_cells)))
 
-    grad = jax.grad(mean_phi)(GAMMA)
-    assert np.isfinite(float(grad))
+    analytic = float(jax.grad(mean_phi)(GAMMA))
+    step = 1e-3 * GAMMA
+    finite_difference = float((mean_phi(GAMMA + step) - mean_phi(GAMMA - step)) / (2.0 * step))
+
+    assert analytic != 0.0  # a severed adjoint reports 0.0, which is finite
+    assert analytic == pytest.approx(finite_difference, rel=1e-5)
 
 
 @pytest.mark.validation

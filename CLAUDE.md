@@ -490,7 +490,34 @@ locally, and three tests had been failing on `main` for four days with CI green 
 exit status with the summary line found by pattern. Invoke `pytest` directly if you need something the
 wrapper does not pass through, but never through a pipe: this suite prints library shutdown chatter
 *after* the summary, so `| tail -n` shows the chatter, hides the result, and returns `tail`'s exit
-status — which is `0` however the run went.
+status — which is `0` however the run went. Its own behaviour — that a failing run exits non-zero,
+that the summary survives the chatter, that the skip count is reported, that a mistyped tier is
+refused — is pinned by `tests/unit/test_fastgate.py`, for the same reason `check_hooks.sh` and
+`sibling_builders.py` are: a runner that had stopped propagating a failure looks exactly like a
+passing suite, and every other check in this project is read through it.
+
+### Conditional coverage is DECLARED, not discovered (binding)
+
+**A skip and a pass are the same exit status.** `tests/unit/test_optional_dependency_skips.py` holds
+the census: every module gated behind an optional dependency, and every other file that can skip
+anything, with what the skip is conditional on. Adding a gate without adding its entry fails the fast
+gate — deliberately, because "this coverage is now conditional" is a decision to make and write down,
+not one to arrive at by importing something.
+
+Two consequences worth having in mind rather than rediscovering:
+
+- **`petsc4py` is not installed in CI**, so the four modules gated on it — two of them in the *fast*
+  tier, i.e. inside the required check — have never run there. It has no wheels (it builds PETSc from
+  source), which is why the `petsc` extra is kept out of `test`; that is a cost decision, and the
+  census is where its price is written down.
+- **The workflow runs every tier with `-rs`**, so a skipped test is named with its reason in the job
+  log rather than collapsing into a count nobody reads.
+
+Marker typos are a related silent failure and are handled in `pyproject.toml`: `strict_markers` makes
+an undeclared marker a collection **error**. The tiers are selected with `-m`, so a mistyped marker
+does not fail — it moves a test to a tier that does not run it, or drops a heavy solve into the
+always-on gate. Note the ini form is load-bearing: putting `--strict-markers` in `addopts` parses
+cleanly and does **nothing**, which is the same silent-no-op shape the setting exists to prevent.
 
 ### Canonical tests (must always pass once implemented)
 
@@ -500,6 +527,13 @@ status — which is `0` however the run went.
   solver w.r.t. `Bi` vs the closed-form ∂θ/∂Bi (Gate B). Every integration suite must
   include an explicit test that `grad` flows through `solve()` without error and without
   NaNs.
+  ⚠️ **"Without NaNs" is the floor, not the test.** `0.0` is finite and is not a NaN, so an
+  adjoint severed anywhere along the path — a stray `stop_gradient`, a closure that stopped
+  carrying its dependence — passes a finiteness assertion and reports nothing. Demonstrated:
+  wrapping `nut_wall`'s return in `stop_gradient` left all 28 tests in
+  `tests/unit/test_turbulence_boundary.py` green, including the one named
+  `..._is_differentiable_in_k`. **Compare the gradient against a finite difference wherever the
+  cost allows it; where it does not, at minimum assert it is non-zero.**
 - **AD-exact-linearization (skewed mesh):** on a non-orthogonal mesh, the linear problem
   converges in one Newton step (Gate C) — the concrete improvement over the reference.
 - **Coupled-solve adjoint (iteration-count-independent):** for any iterative / coupled / fixed-point
@@ -509,6 +543,15 @@ status — which is `0` however the run went.
   the adjoint is the implicit-function-theorem solve on the converged coupled residual, not the outer
   loop unrolled onto the tape. An existence/stability smoke test ("stays stable, fields positive")
   does **not** establish this — it must be its own explicit test.
+  ⚠️ **And such a test has to make the two paths genuinely differ, or it compares a configuration
+  against itself.** Raising a `max_steps` **cap** a converged solve never reaches changes nothing:
+  the march is bit-identical, so the gradients agree for a reason that has nothing to do with the
+  adjoint. Vary something that moves the path — `inner_steps` is the lever both
+  `test_dual_time_gradient_is_iteration_count_independent` and
+  `test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count` use — and **assert the
+  step counts differ**, measured in separate undifferentiated runs since the observed march cannot
+  run under a tracer. On the coupled RANS channel that is 17 outer steps against 20, with gradients
+  agreeing to eleven significant figures.
 - **x64:** `assert jax.config.x64_enabled`.
 
 ---

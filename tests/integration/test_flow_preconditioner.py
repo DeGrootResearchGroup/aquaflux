@@ -172,7 +172,14 @@ def test_preconditioned_solve_converges_under_any_ordering() -> None:
 
 
 def test_preconditioned_solve_is_differentiable() -> None:
-    """Reverse-mode gradient through the preconditioned Newton solve is finite."""
+    """Reverse-mode gradient through the preconditioned Newton solve is finite and not severed.
+
+    The non-zero assertion is the load-bearing half. ``0.0`` is finite, so a ``stop_gradient`` left
+    anywhere on this path -- in an operator, a property, a boundary closure -- satisfies a finiteness
+    check and reports nothing at all. It does not make this a check of the gradient's *value*: that
+    needs a finite difference, which costs two more solves of a test that already runs for about a
+    minute, and it is covered against closed forms in the flow-adjoint suite instead.
+    """
 
     def mean_speed(mu):
         asm = _cavity(12, mu=mu)
@@ -185,6 +192,7 @@ def test_preconditioned_solve_is_differentiable() -> None:
 
     grad = float(jax.grad(mean_speed)(MU))
     assert np.isfinite(grad)
+    assert grad != 0.0
 
 
 def _dense_pressure_schur(assembler, state):
