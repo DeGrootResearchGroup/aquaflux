@@ -18,6 +18,7 @@ sensitivity analysis, optimization, and parameter calibration first-class.
 
 mesh
 mesh_zones_and_patches
+gradient_reconstruction
 steady_state_solving
 preconditioning
 ```
