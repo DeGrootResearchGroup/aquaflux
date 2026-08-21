@@ -391,6 +391,71 @@
     second-order collocated Rhie–Chow discretization, so "make the PC pattern local" is not a lever.
 
 
+## `jax.linearize` in place of the per-matvec `jax.jvp` — REFUTED, and it looks obviously right
+
+`solve/continuation.py`'s `shifted_jacobian` builds the Krylov matvec as
+`jax.jvp(residual_fn, (phi,), (tangent,))[1]` with `phi` **fixed for the whole linear solve**, so every
+matvec appears to re-evaluate the primal residual — five gradient reconstructions among it on a 2D
+coupled case — and discard the primal output. `jax.linearize(residual_fn, phi)` evaluates the primal
+once and returns a linear map reusable for every tangent, which is the textbook fix.
+
+**It buys nothing.** Measured on `pitzDaily` (12225 cells, coupled RANS at the hybrid-initialized state,
+`eqx.filter_jit`, warm, min of 5, `vmap` over the tangents):
+
+| matvecs | jvp-each | per mv | linearize-once | per mv | speedup |
+|---|---|---|---|---|---|
+| 1 | 9.1 ms | 9.08 | 9.1 ms | 9.11 | **1.00×** |
+| 8 | 27.3 ms | 3.42 | 28.6 ms | 3.57 | **0.96×** |
+| 32 | 102.9 ms | 3.22 | 103.7 ms | 3.24 | **0.99×** |
+
+**Confirmed in 3D at a real march state**, which is the operating point that matters (this case's own
+record is that step-initial solves are the cheap ones): `bfs3d`, 23040 cells, six fields, checkpoint
+`state-00067` (step 28, `|R|` 3.586e-06, march shift 0.0064) — 0.98× / 0.99× / 1.00× at 1 / 8 / 32
+matvecs, with the two paths agreeing to **2.4e-16**, so the null is a null and not a broken comparison.
+
+Flat, and marginally *slower* at 8. The reason is that the primal work is not actually wasted: XLA
+already eliminates the primal computations that do not feed the tangent, and forward mode genuinely
+needs the ones that do (the tangent of a product needs both primal factors). There is nothing left for
+`linearize` to hoist, and it adds its own bookkeeping.
+
+**Do not "fix" `shifted_jacobian`.** ⚠️ Note the per-matvec cost falls 9.08 → 3.22 ms (2D) and
+33.2 → 16.6 ms (3D) from 1 to 32 matvecs in *both* columns — that is fixed per-call overhead amortising
+under `vmap`, not a linearize effect, and reading it as one would manufacture a win out of a null
+result. Peak RSS likewise grows with the matvec count in both columns (2.2 → 5.2 GB in 3D): that is the
+`vmap` holding the result vectors, not `linearize` holding linearization data.
+
+## Warm-starting the gradient sweep from the previous step's gradient — REFUTED on the ADJOINT
+
+Carrying `G_prev` as the Richardson iterate's initial guess converges faster (the error after `k`
+sweeps becomes `ρᵏ‖G − G_prev‖` rather than `ρᵏ‖G‖`), and the obvious objection — that carrying state
+makes `R(φ)` history-dependent — has an answer: freeze the guess within a Newton step and
+`stop_gradient` it. Measured on the real pitzDaily mesh, that half genuinely holds — with the guess
+frozen, **the AD Jacobian is BIT-IDENTICAL to today's** (`‖J_warm v − J_cold v‖ = 0.000e+00`), because
+`A_g` and `P` are geometry-only so the guess enters only as the additive constant `Mᵏ Ḡ`. The
+warm-started fixed point is also the *exact* reconstruction at any `k ≥ 1`.
+
+**It fails on the adjoint, and the analogy to the pseudo-transient shift is where the reasoning goes
+wrong.** The shift's perturbation vanishes at the fixed point in value **and derivative**, because SER
+drives `β → 0` — so the converged Newton system is the true steady Jacobian and the IFT adjoint is
+exact. The warm start's perturbation vanishes in **value only**: its derivative contribution is
+`−Mᵏ ∂G*/∂φ`, and `Mᵏ` is a fixed property of the sweep count that never goes to zero. At convergence
+the state would solve the *exact-reconstruction* residual while the IFT operator remains the
+*k-sweep* one, so the `ρᵏ` error moves out of the solution and **into the gradient**. Harmless on
+pitzDaily at `k=4` (8e-10); on a mesh skewed enough to want warm-starting (`ρ` = 0.14 at 20 %
+perturbation, 0.26 at 30 %) you would cut `k` to 1–2 and the bias becomes **2–7 %** — not acceptable
+for a project whose sensitivity gate is a machine-precision check. Today there is no such mismatch: the
+state solves `R_k = 0` and the adjoint uses `∂R_k/∂φ`, consistently.
+
+**And the size does not justify the fight.** Measured per march step (pitzDaily, 6 steps of rung 1, by
+host callback rather than a Python counter, which counts traces not executions): **≈76 primal against
+≈594 tangent reconstructions — 11–12 % primal**, and the tangent share *grows* through the march. Warm
+starting reaches only the primal, and forfeits the peeled first sweep (`x₀ ≠ 0`), bounding the whole
+win at **0.25–0.8 % of a march step**.
+
+**Do this instead:** lower the sweep count. `ρ(M) = 0.0053` on pitzDaily, so `sweeps=2` costs one apply
+and leaves 1.4e-05 relative gradient error — the same cost warm-starting could reach, with no carried
+state and no adjoint compromise. See the sweep-calibration entry in `schemes.md`.
+
 ## Flow block (traced `[u, v, w, p]` saddle preconditioning) — refuted attempts
 
 Full detail for all of these is in `solve-flow-block-log.md` (no `paths:`, reference-only); the current,

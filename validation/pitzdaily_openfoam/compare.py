@@ -480,7 +480,7 @@ def read_openfoam_reference():
     )
 
 
-def build_case(model=None):
+def build_case(model=None, gradient_scheme=None):
     """Assemble the benchmark: mesh, momentum, turbulence and the coupled residual -- no solve.
 
     Split out from :func:`solve_aquaflux` so a solver study can re-solve at a saved state (a
@@ -495,6 +495,19 @@ def build_case(model=None):
         that differs only in the near-wall omega blend (``wall_omega_exponent`` /
         ``wall_omega_viscous_coeff``) is how a wall-treatment study compares blend shapes on the same
         case -- e.g. a large exponent to reproduce the ``max(omega_vis, omega_log)`` blend.
+    gradient_scheme : GradientScheme, optional
+        The gradient reconstruction, used by momentum and turbulence alike. Defaults to
+        :class:`~aquaflux.schemes.CorrectedGreenGauss` -- the benchmark's own choice, described below.
+        Injected so a scheme study compares reconstructions on this exact case rather than on a second
+        copy of it. ⚠️ A scheme whose residual reaches further across the cell graph than
+        ``stencil_reach`` needs that raised to match: the coloured probe folds coupling beyond its
+        reach onto near entries instead of dropping it, so an under-reaching probe corrupts the
+        preconditioner rather than approximating it. ``CorrectedGreenGauss`` at the default sweeps
+        carries *exactly zero* mass beyond reach 5, which is what makes this case's default exact;
+        :class:`~aquaflux.schemes.HessianCorrectedGradient` does not have that cut-off at any sweep
+        setting, so a study that swaps it in needs a preconditioner that is not built by probing --
+        which is why that comparison lives in the sibling ``pitzdaily_gradient_ab`` case rather than
+        here, and why this benchmark's own configuration is untouched by it.
 
     Returns
     -------
@@ -514,7 +527,7 @@ def build_case(model=None):
     # converged corrected-gradient to machine precision in the default few sweeps -- and the
     # reconstructed gradient, the coupled residual, and the reattachment length are all unchanged from a
     # much higher sweep count, so paying for more sweeps only enlarges the differentiated residual.
-    grad = CorrectedGreenGauss()
+    grad = CorrectedGreenGauss() if gradient_scheme is None else gradient_scheme
     # Momentum advection: second-order upwind = Venkatakrishnan-limited linear upwind (the upwind cell
     # reconstructed to the face with its corrected-Green-Gauss gradient, slope-limited so the
     # reconstruction is monotonicity-bounded) -- the analogue of OpenFOAM's `Gauss linearUpwind`.
@@ -629,7 +642,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("k positivity floor", K_POSITIVITY_FLOOR),
         ("inner forward rtol (row-scaled) / restart", f"{FORWARD_RTOL} / {FORWARD_RESTART}"),
         ("cycle budget", CYCLE_BUDGET),
-        ("retry on cycles / alpha", f"{RETRY.on_cycles} / {RETRY.on_alpha}"),
+        ("retry on cycles / alpha", f"{RETRY.abort_above_cycles} / {RETRY.on_alpha}"),
         ("step control", f"{type(CONTROL).__name__} (beta_start {BETA_START})"),
         ("Reynolds continuation points", N_POINTS),
         ("k wall BC", K_WALL),

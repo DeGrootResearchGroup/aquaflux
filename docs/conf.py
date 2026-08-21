@@ -29,7 +29,7 @@ version = ".".join(release.split(".")[:2])
 # deliberately no second "which names to document" list here, since a hand-maintained
 # subset would drift from ``__all__``, which is what generating the page prevents. A
 # name that does not belong on the site is a name that does not belong in ``__all__``.
-PUBLIC_SUBPACKAGES = ["mesh", "solve", "flow", "turbulence", "transport"]
+PUBLIC_SUBPACKAGES = ["mesh", "schemes", "solve", "flow", "turbulence", "transport"]
 
 # How the API reference groups each subpackage, keyed on the module a name is DEFINED in.
 # That key is far more stable than the individual names, and it cannot silently lose one: a
@@ -74,6 +74,11 @@ SUBPACKAGE_GROUPS = {
         ("Solving a flow", ["continuation", "mean_velocity"]),
         ("Preconditioners", ["block_preconditioner", "preconditioner"]),
         ("Initialization and flow scales", ["initialization", "scales"]),
+    ],
+    "schemes": [
+        ("Gradient reconstruction", ["gradient"]),
+        ("Face interpolation", ["interpolation"]),
+        ("Slope limiting", ["limiter"]),
     ],
     "transport": [
         ("Scalar transport", ["scalar"]),

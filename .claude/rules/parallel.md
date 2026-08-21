@@ -205,7 +205,8 @@ the owned gradients are serial-exact. The single-pass scheme ignores `operator_h
 identity serially.
 
 **This requires a reduction-free iterative solve — `SweptGradientSolve`.** Its preconditioned-Richardson
-sweeps `g ← g + V⁻¹(B·φ − A_g·g)` form no global inner product, so a per-apply ghost exchange makes the
+sweeps `g ← g + P⁻¹(B·φ − A_g·g)` form no global inner product — for any `GradientPreconditioner` `P`,
+all of which are cell-local by construction — so a per-apply ghost exchange makes the
 owned rows exact. `GmresGradientSolve` forms inner products over the whole local vector (which would
 double-count ghost rows and are not `psum`-reduced across partitions), so it **raises** if handed an
 `operator_hook`; a correct distributed GMRES needs owned-only cross-partition inner products (a

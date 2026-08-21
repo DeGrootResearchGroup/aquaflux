@@ -413,6 +413,23 @@ readable — reach for these helpers instead of open-coding `jnp.sum(a * b, axis
 helper states the intent, and gives one home to change (Principle 2). Rank-3 tensor algebra
 (Hessian outer products, `einsum`) stays explicit — the helpers target rank-2 vector fields.
 
+> **⚠️ AND THAT ONE HOME IS CURRENTLY COSTING ~1.6× ON EVERY RESIDUAL — measured 2026-08-21, not yet
+> fixed.** `dot` is written `jnp.sum(a * b, axis=-1)`, and rooting the fusion at a `reduce` makes
+> XLA:CPU emit a **`kCustom __ynn_fusion`** kernel with an **empty `outer_dimension_partitions`** — i.e.
+> single-threaded — while every neighbouring `kLoop` fusion is partitioned 2–4 ways. In one corrected-
+> gradient reconstruction, 25 kernels are partitioned and exactly 3 are not: the three `dot`s, at
+> **40 % of kernel time**. Rewriting it as an unrolled component sum removes the `kCustom` kernel
+> entirely (verified in the compiled HLO: 1 → 0) and measures **2.0–2.8× on the primitive** and, on the
+> real pitzDaily coupled RANS residual, **4.18 → 2.60 ms (1.61×) and jvp 8.81 → 6.08 ms (1.45×)**, with
+> `|R|` agreeing to 1.2e-14.
+>
+> `dot` is imported by 16 modules — diffusion, advection, Rhie–Chow, momentum, SST, the sources — so
+> this is a package-wide change, which is exactly why it belongs in its own change and not folded into
+> whatever is in flight. ⚠️ **It is NOT bit-identical**: the unrolled form contracts differently under
+> FMA (measured 1.75e-16 relative in isolation, up to ~5.6e-12 chained at dim 9), so any test asserting
+> `jnp.array_equal` against the reduce form has to be re-pinned as part of it. The guidance above
+> stands unchanged — keep calling `dot`; what changes is what `dot` does.
+
 **Frozen preconditioner operators are assembled in one place, `aquaflux/solve/frozen_operator.py`.**
 The AMG preconditioners coarsen a *frozen* linearization of a transport equation — a symmetric
 diffusive edge coupling, optionally plus first-order-upwind convection at a reference flux —

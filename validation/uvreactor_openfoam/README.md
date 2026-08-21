@@ -63,3 +63,11 @@ final mesh's own size.
 - `dpn_diagnostic.py` — a census of the diffusion flux's normal-distance denominator across a
   mesh's faces, by patch and location; the tool that localized the centroid-precision defect fixed
   in `aquaflux/mesh/cell.py`.
+- `gradient_sweep_calibration.py` — how many inner sweeps `HessianCorrectedGradient` needs on a given
+  mesh. That scheme reconstructs the gradient to second order on skewed cells, which is what this
+  mesh has; it applies the eliminated Hessian block's inverse by a *fixed* number of sweeps, and a
+  fixed count carries no convergence test, so a mesh skewed beyond what the default was calibrated
+  against loses the exactness the scheme is chosen for without saying so. The count is set by
+  skewness rather than by mesh size, so it cannot be inferred from a small mesh. This walks a ladder
+  of sweep counts against a converged reference on the real mesh and reports where the ladder
+  flattens, alongside a skewness and face-planarity census.
