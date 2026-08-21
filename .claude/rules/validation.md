@@ -77,12 +77,9 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
 
 ## Known API gaps these cases exposed
 
-- **`positivity_floor` is a parameter of `coupled_amg_continuation` ALONE.** The default builder
-  (`coupled_continuation`) and the complete-LU and threshold-ILU builders expose neither it nor the
-  `step_limit` it would be set on, so a study arm built on one of those cannot switch the k-positivity
-  safeguard on at all, and a march that meets the ratchet there has no way out of it.
-  `pitzdaily_openfoam/compare.py` reaches it only because that case now uses the AMG builder; the
-  symbol there is `K_POSITIVITY_FLOOR`, matching the sibling case so a future diff lines up.
+- **`positivity_floor` was a parameter of `coupled_amg_continuation` ALONE — FIXED, see the entry
+  below; it is now on all four builders.** `pitzdaily_openfoam/compare.py` spells it
+  `K_POSITIVITY_FLOOR`, matching the sibling case so a future diff lines up.
 - **✅ FIXED 2026-08-19 — this was a behavioural gap between the arms, and it was wider than recorded
   here.** It said `coupled_lu_continuation` marched with no k-positivity limiter while
   `coupled_amg_continuation` always carried it. True, and **three** of the four builders lacked it, not
@@ -92,10 +89,18 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
   `test_every_continuation_builder_installs_the_same_globalization` fails if one loses it. The confound
   this warned about — an LU-versus-AMG comparison being between a guarded march and an unguarded one —
   applied to every cross-builder comparison on record, so treat any of them with that in mind. The
-  original text follows, because the confound it names still applies to archived runs. The tail already accepts all
-  four parameters (`refresh_on_cycles`, `inner_refresh`, `cycle_budget`, `step_limit`/`step_projection`);
-  the LU builder simply does not forward them. `forward_rtol`/`restart`/`max_restarts` ARE reachable, via
-  `forward_solver=`.
+  confound still applies to archived runs.
+- **✅ FIXED 2026-08-20 (#282) — the SAME defect recurred TWICE MORE on the same four builders, with the
+  shared tail already extracted.** `forward_rtol` / `forward_restart` / `forward_max_restarts` were on
+  `coupled_amg_continuation` alone, so the *default* path — what `solve_coupled` builds when nothing is
+  passed — stopped its forward solve on the plain 2-norm that same builder's docstring calls effectively
+  blind to the flow block. And `velocity_shift_parts` was on the two block builders only, absent from
+  exactly the monolithic path it was written for. Both are now on all four, and the stopping *measure*
+  belongs to `_coupled_step` rather than to any builder: it is the march's own progress measure, so a
+  solve cannot converge in a quantity the march does not read. ⚠️ The advice recorded here — that
+  `forward_rtol`/`restart`/`max_restarts` were "reachable via `forward_solver=`" — was true and a trap:
+  building a solver to move the tolerance silently replaced the *stopping measure* too, a far larger
+  change. Pass the parameter.
 - **`_mis_aggregate`'s return annotation is stale** — it says `tuple[np.ndarray, int]` and returns
   three values (labels, roots, count). Cost one debugging cycle.
 

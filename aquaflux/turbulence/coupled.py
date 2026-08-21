@@ -33,7 +33,7 @@ import abc
 import dataclasses
 import time
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import equinox as eqx
 import jax
@@ -501,8 +501,22 @@ class LiveViscosityVelocityParts(eqx.Module):
     omega_transform: ScalarVariableTransform
 
     def parts(
-        self, flow: jnp.ndarray, k_solved: jnp.ndarray, omega_solved: jnp.ndarray
+        self,
+        flow: jnp.ndarray,
+        k_solved: jnp.ndarray | None = None,
+        omega_solved: jnp.ndarray | None = None,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        # The defaults are the protocol's, so this satisfies the same call signature its sibling does --
+        # but unlike a frozen-viscosity source this one cannot work without the turbulence context, so
+        # omitting it is an error rather than something to ignore. Saying so is the whole point of
+        # honouring the arity: the alternative is a `TypeError` from deep inside a shift policy.
+        if k_solved is None or omega_solved is None:
+            raise TypeError(
+                "LiveViscosityVelocityParts forms the shift at the CURRENT effective viscosity, so it "
+                "needs the k and omega blocks; the caller passed flow alone. A shift policy that has no "
+                "turbulence state to give (the flow-only MomentumShiftPolicy) wants "
+                "FrozenViscosityVelocityParts instead."
+            )
         k = self.k_transform.to_physical(k_solved)
         omega = self.omega_transform.to_physical(omega_solved)
         closure = self.turbulence.closure_fields(self.momentum.velocity_fields(flow), k, omega)
@@ -803,38 +817,102 @@ def _reparametrized_preconditioner(
     return ScaledScalarPreconditioner(preconditioner, 1.0 / scale)
 
 
-# The shifted forward solve for the coupled march. Two measured choices on the ~12k-cell
-# backward-facing step:
-#  * Restart 120 (vs the shared default 40): the coupled turbulent saddle is stiff enough that a
-#    40-vector restart discards too much Arnoldi history and needs hundreds of restart cycles, while a
-#    120-vector subspace reaches the same solution in far fewer.
-#  * A GLOBAL 2-norm relative-residual stop at ~1% (`relative_residual_gmres`), rather than lineax's
-#    stock componentwise `rtol`/`atol` test. Each pseudo-transient step is an inexact Newton step, so
-#    the linear solve only has to resolve the correction to the accuracy the globalized march actually
-#    uses -- ~1% is ample here, and the converged root and its adjoint are fixed by the nonlinear stop
-#    and the vanishing shift, not by the linear tolerance. The stock test does *not* deliver a genuine
-#    relative stop on this system: it applies the tolerance per row under a max-norm, and the near-wall
-#    omega rows start satisfied -- their right-hand side is ~0 -- so their per-row scale collapses onto
-#    the absolute `atol` floor and a handful of them hold the whole solve to ~1e-10, about nine orders
-#    past the relative tolerance nominally requested. Stopping on the global 2-norm relative residual is
-#    immune to those rows and cuts the solve from ~15 restart cycles to ~3-5 (~3-4x fewer matrix-vector
-#    products) with the march trajectory -- the reattachment length reached per step -- unchanged.
-_COUPLED_FORWARD_SOLVER = relative_residual_gmres(
-    1e-2, restart=120, stagnation_iters=40, max_restarts=15
-)
+# The shifted forward solve for the coupled march. Each preconditioner family gets its own restart
+# regime, and they all share one stopping *measure* -- the two are separate decisions and only the first
+# is a property of the preconditioner.
+#
+# THE MEASURE (shared, and built in `_coupled_step` from the march's own progress measure). Each
+# pseudo-transient step is an inexact Newton step, so the linear solve only has to resolve the
+# correction to the accuracy the globalized march actually uses; the converged root and its adjoint are
+# fixed by the nonlinear stop and the vanishing shift, not by the linear tolerance. What that argument
+# does not say is *which* norm measures "resolved", and the coupled residual makes the choice
+# load-bearing:
+#  * lineax's stock componentwise `rtol`/`atol` test is not a relative stop on this system at all. It
+#    applies the tolerance per row under a max-norm, and the near-wall omega rows start satisfied --
+#    their right-hand side is ~0 -- so their per-row scale collapses onto the absolute `atol` floor and a
+#    handful of them hold the whole solve to ~1e-10, about nine orders past the tolerance requested.
+#  * A global 2-norm relative stop is immune to those rows, but the coupled residual is ~100% omega
+#    (whose residual sits orders above the flow's), so it halts once omega is resolved while the
+#    flow-dominated part of the Newton step is still coarse -- measured ~116% velocity error, i.e.
+#    effectively blind to the block the march is actually trying to develop.
+# So the default stop is the march's OWN row-scaled progress measure (`coupled_scaled_norm`), which
+# weighs every field comparably, at a *loose* tolerance: every block is seen and resolved loosely,
+# rather than one block resolved and the rest unseen. Calibrated on the developed backward-facing step:
+# at `rtol = 0.3` the velocity correction is resolved to ~25% for ~1.5x the plain-2-norm cycle count;
+# `0.1` fully resolves it at ~2.25x. This is a property of the coupled residual, so it belongs to every
+# family: the calibration was taken on the multigrid one, that being where the measure was first built,
+# but nothing in it is about multigrid.
+#
+# ⚠️ The block and complete-LU families stopped on a plain 2-norm at `1e-2` until this was unified, so
+# their `max_restarts` caps below were sized against that arrangement and have NOT been re-measured
+# against the row-scaled stop, which costs ~1.5x the cycles where it was measured. They are left at
+# their previous values rather than adjusted to an invented number; neither flagship validation case
+# runs those builders, so nothing on record is affected, and a cap that binds shows up as a truncated
+# solve rather than as a wrong answer.
+#
+# Steering and judging by one definition is the point: `_coupled_step` passes the very measure object the
+# march reports and accepts steps in, so the solve cannot converge in a quantity the march does not read.
+#
+# THE RESTART LENGTH (per family). A restarted GMRES tests its stop only at each restart boundary, so
+# the subspace should match how many vectors the preconditioner actually needs.
+class _ForwardSolveRegime(NamedTuple):
+    """One preconditioner family's default Krylov regime for the shifted forward solve.
 
-# The complete-LU preconditioner factors the whole coupled saddle exactly, so the preconditioned
-# operator's spectrum collapses to a single point at the state and shift it was factored at -- the
-# Krylov solve reaches the 1% stop in one vector there, a handful once the state has drifted from the
-# frozen factorization -- and the large 120-vector subspace the block-triangular preconditioner needs
-# is pure waste here. A restarted GMRES only tests convergence at each restart boundary, so with
-# `restart = 120` it builds ~120 matrix-vector products (each paying the factorization's triangular
-# back-solve) before it can stop, where a handful already solve it. A small restart lets it stop as
-# soon as it has converged. `max_restarts` is kept generous so a transiently harder (e.g.
-# drifted-reference) solve still completes before the next refactor.
-_COUPLED_FACTORIZATION_FORWARD_SOLVER = relative_residual_gmres(
-    1e-2, restart=10, stagnation_iters=40, max_restarts=40
-)
+    Attributes
+    ----------
+    rtol : float
+        Relative tolerance, **in the march's own progress measure** (see :func:`_coupled_step`) unless
+        that measure is the plain Euclidean norm, in which case it is a Euclidean tolerance. The two are
+        not interchangeable numbers, which is why the regime carries them together.
+    restart : int
+        Arnoldi restart length.
+    max_restarts : int
+        Restart-cycle cap -- the only bound on a single running solve, since ``cycle_budget`` and the
+        march's abort threshold are tested *between* inner iterations.
+    """
+
+    rtol: float
+    restart: int
+    max_restarts: int
+
+
+#: The block-diagonal preconditioner (flow block-SIMPLE + the two scalar AMGs). The coupled turbulent
+#: saddle is stiff enough that a 40-vector restart -- the shared lineax default -- discards too much
+#: Arnoldi history and needs hundreds of restart cycles, while a 120-vector subspace reaches the same
+#: solution in far fewer.
+_BLOCK_FORWARD = _ForwardSolveRegime(rtol=0.3, restart=120, max_restarts=15)
+
+#: A monolithic complete-LU factorization. It factors the whole coupled saddle exactly, so the
+#: preconditioned operator's spectrum collapses to a single point at the state and shift it was factored
+#: at -- the Krylov solve stops within a handful of vectors there, and the large subspace the
+#: block-triangular preconditioner needs is pure waste: with `restart = 120` it would build ~120
+#: matrix-vector products (each paying the factorization's triangular back-solve) before it could stop.
+#: `max_restarts` is kept generous so a transiently harder (e.g. drifted-reference) solve still completes
+#: before the next refactor.
+_FACTORIZATION_FORWARD = _ForwardSolveRegime(rtol=0.3, restart=10, max_restarts=40)
+
+#: A monolithic multigrid V-cycle. Restart 15 is the measured sweet spot for a one-V-cycle
+#: preconditioner: enough Arnoldi history for its convergence while checking the stop often enough not to
+#: overshoot the loose tolerance deep into the next cycle (a larger restart costs ~2x the expensive host
+#: V-cycle applies for the same trajectory).
+#:
+#: ⚠️ Two constraints bind `max_restarts` against the march's retry threshold, and both bite silently.
+#: It is in raw ``lineax`` restarts, which carry a fixed ``+2`` per solve, while
+#: ``retry.abort_above_cycles`` is in corrected cycles (:func:`~aquaflux.solve.restart_cycles`), so a
+#: corrected cap of ``c`` is ``max_restarts = c + 2``. And the corrected count must stay **strictly
+#: above** ``retry.abort_above_cycles``: the march's test is ``max_inner_cycles >
+#: retry.abort_above_cycles``, so a cap landing exactly on the threshold does not trip the redo, and the
+#: step accepts the truncated, non-converged direction instead of re-running it on a fresh
+#: preconditioner.
+_VCYCLE_FORWARD = _ForwardSolveRegime(rtol=0.3, restart=15, max_restarts=60)
+
+#: The mass-flow-constrained (bordered) system. Its restart regime is the block-diagonal one -- it wraps
+#: that preconditioner -- but its **tolerance is a Euclidean one**, because the bordered march has no
+#: row-scaled measure to stop in: the row-equilibrated measure has no constraint-aware form yet, and
+#: applying it would scale the border row by a diagonal it does not have. So this is a genuinely
+#: different path rather than a surface that drifted, and the tolerance differs because the *measure*
+#: does. Re-unify it with :data:`_BLOCK_FORWARD` the day the measure gains a constraint-aware form.
+_CONSTRAINED_FORWARD = _ForwardSolveRegime(rtol=1e-2, restart=120, max_restarts=15)
 
 
 # How many coloured tangents share one vmapped jvp pass when materializing the AMG Jacobian. Larger
@@ -1108,6 +1186,9 @@ def coupled_continuation(
     descent_backoff: int = 0,
     descent_test: bool = False,
     forward_solver: lx.AbstractLinearSolver | None = None,
+    forward_rtol: float = _BLOCK_FORWARD.rtol,
+    forward_restart: int = _BLOCK_FORWARD.restart,
+    forward_max_restarts: int = _BLOCK_FORWARD.max_restarts,
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     velocity_shift_parts: VelocityShiftParts | None = None,
@@ -1161,10 +1242,41 @@ def coupled_continuation(
         The dual-time inner loop stops once ``||G||`` has fallen to this fraction of the anchor residual
         (default ``0.05``); ignored unless ``inner_steps > 1``.
     forward_solver : lineax.AbstractLinearSolver or None
-        The shifted-solve Krylov solver; ``None`` uses :data:`_COUPLED_FORWARD_SOLVER` (a
-        larger-restart GMRES that stops on a global 2-norm relative residual, so each inexact-Newton
-        step is solved to ~1% rather than driven to machine precision by the near-zero-right-hand-side
-        wall rows).
+        The shifted-solve Krylov solver. ``None`` (default) builds one from the three ``forward_*``
+        parameters below, stopping in **the march's own progress measure** -- so the solve is steered
+        by, and judged by, one definition. Passing a solver replaces both the tolerance and that
+        stopping measure, which is a larger change than it looks: vary the tolerance or the restart
+        length through the parameters below instead.
+    forward_rtol : float
+        Relative tolerance of that default stop, **in the progress measure** (``residual_norm``, or the
+        row-equilibrated default), not in the Euclidean norm -- the two are not interchangeable numbers.
+        Each pseudo-transient step is an inexact Newton step, so the linear solve only has to resolve
+        the correction to the accuracy the globalized march uses; the converged root and its adjoint are
+        fixed by the nonlinear stop and the vanishing shift, not by this tolerance. Which *norm* measures
+        "resolved" is load-bearing on the coupled residual, though: a plain 2-norm is ~100% ``omega``
+        (whose residual sits orders above the flow), so it halts once ``omega`` is resolved while the
+        flow-dominated part of the step is still coarse -- measured ~116% velocity error, effectively
+        blind to the block the march is developing. Calibrated on the developed backward-facing step:
+        at ``0.3`` (the default) the velocity correction is resolved to ~25% for ~1.5x the plain-2-norm
+        cycle count; ``0.1`` fully resolves it at ~2.25x.
+    forward_restart : int
+        Arnoldi restart length of that default solver, defaulting to this preconditioner family's own
+        regime (``120``): the coupled turbulent saddle is stiff enough that a
+        40-vector subspace discards too much Arnoldi history and needs hundreds of restart cycles.
+        Worth varying because a restarted GMRES tests convergence only at restart boundaries -- against
+        a tolerance as loose as ``forward_rtol`` a solve can reach its target early in a cycle and go on
+        building vectors, and a restart-*cycle* count cannot see that, since such a solve reports one
+        cycle at any length.
+    forward_max_restarts : int
+        Restart-cycle cap of that default solver (``15`` here), and the **only** bound on a single
+        running solve: ``cycle_budget`` and the march's abort threshold are tested *between* inner
+        iterations, so neither can stop a solve already in progress. ⚠️ It is in raw ``lineax``
+        restarts, which carry a fixed ``+2`` per solve, while ``retry.abort_above_cycles`` is in
+        corrected cycles (:func:`~aquaflux.solve.restart_cycles`), so a corrected cap of ``c`` is
+        ``forward_max_restarts = c + 2``. ⚠️ And the corrected count must stay **strictly above**
+        ``retry.abort_above_cycles``: the march's test is ``max_inner_cycles > retry.abort_above_cycles``,
+        so a cap landing exactly on the threshold does not trip the redo and the step accepts the
+        truncated, non-converged direction instead of re-running it on a fresh preconditioner.
     block_scaled_norm : bool
         Select the coarser :class:`~aquaflux.solve.BlockScaledNorm` (each of ``[flow, k, omega]``
         divided by its own initial magnitude) instead of the default row-equilibrated
@@ -1252,7 +1364,7 @@ def coupled_continuation(
         coupled,
         reference_state,
         policy,
-        default_solver=_COUPLED_FORWARD_SOLVER,
+        regime=_ForwardSolveRegime(forward_rtol, forward_restart, forward_max_restarts),
         beta0=beta0,
         exponent=exponent,
         beta_floor=beta_floor,
@@ -1742,7 +1854,10 @@ def _probed_assembler(coupled: CoupledRANS, gradient_sweeps: int | None) -> Coup
 
 
 def _monolithic_shift_source(
-    coupled: CoupledRANS, reference_state: jnp.ndarray, shift_basis: ShiftBasis
+    coupled: CoupledRANS,
+    reference_state: jnp.ndarray,
+    shift_basis: ShiftBasis,
+    velocity_shift_parts: VelocityShiftParts | None = None,
 ) -> CoupledShiftPolicy:
     """The shift policy a **monolithically** preconditioned step reads its diagonal from.
 
@@ -1762,9 +1877,21 @@ def _monolithic_shift_source(
     in a three-dimensional march. (Turning the aggregation down to graph-only would fix the shapes and is
     inert in everything measured, but it lets the hierarchy refuse to build on a degenerate coarse row --
     a failure mode for something with no consumer.)
+
+    ``velocity_shift_parts`` is threaded through for the same reason it exists on the block path: it is a
+    property of the **shift**, not of the preconditioner, and a :class:`LiveViscosityVelocityParts` needs
+    only momentum + turbulence + the two variable transforms, so building without a flow block does not
+    exclude it. Its motivating configuration -- a dual-time low-shift march whose shift must track the
+    developing eddy viscosity -- is a monolithic one, so omitting it here left it absent from exactly the
+    path it was built for.
     """
     return _coupled_shift_policy(
-        coupled, reference_state, None, shift_basis=shift_basis, build_flow_block=False
+        coupled,
+        reference_state,
+        None,
+        shift_basis=shift_basis,
+        velocity_shift_parts=velocity_shift_parts,
+        build_flow_block=False,
     )
 
 
@@ -1783,7 +1910,7 @@ def _coupled_step(
     reference_state: jnp.ndarray,
     policy: ShiftPolicy,
     *,
-    default_solver: lx.AbstractLinearSolver,
+    regime: _ForwardSolveRegime,
     beta0: float,
     exponent: float,
     beta_floor: float,
@@ -1810,14 +1937,22 @@ def _coupled_step(
 
     **The one place the coupled march's globalization is configured**, for every preconditioner. What
     differs between the block-diagonal and monolithic paths is which policy they hand in and which
-    linear solver they default to; the schedule, the progress measure, the line search, the escalation
-    ladder, the dual-time inner loop and the positivity guard are one implementation.
+    Krylov restart regime they name; the schedule, the progress measure, the forward solve's *stopping
+    measure*, the line search, the escalation ladder, the dual-time inner loop and the positivity guard
+    are one implementation.
 
-    That matters more than the duplication it removes. The two builders each grew their own copy of this
+    That matters more than the duplication it removes. The builders each grew their own copy of this
     tail, and the copies drifted in ways that had nothing to do with preconditioning: the monolithic one
     gained the k-positivity step limit, the cycle budget and the inner refresh, the block-diagonal one
     gained the growth rungs and the descent backoff, and neither gained the other's. A march's
     globalization should not depend on which matrix its preconditioner was built from.
+
+    The forward solve's stopping measure is here for the same reason and is the later instance of the
+    same drift: the argument for stopping on the coupled residual's row-scaled measure rather than a
+    plain 2-norm is about the residual (~100% ``omega``, so a 2-norm halts while the flow-dominated part
+    of the step is still coarse), not about any preconditioner, yet it reached only the builder being
+    worked on at the time. Here it is one decision, and it is the measure the march itself reports and
+    accepts steps in -- so the solve is steered by, and judged by, one definition.
 
     Parameters
     ----------
@@ -1828,9 +1963,11 @@ def _coupled_step(
     policy : ShiftPolicy
         The composed shift-and-preconditioner policy — a :class:`CoupledShiftPolicy` for the
         block-diagonal path, a :class:`MonolithicFactorShiftPolicy` for a materialized one.
-    default_solver : lineax.AbstractLinearSolver
-        The solver used when ``forward_solver`` is ``None``. The two families genuinely differ here: a
-        near-exact factorization wants a different tolerance regime from a block-diagonal V-cycle.
+    regime : _ForwardSolveRegime
+        The Krylov tolerance and restart regime for the default forward solve, used when
+        ``forward_solver`` is ``None``. Only the *regime* is per-family (a near-exact factorization
+        needs a far smaller Arnoldi subspace than a block-diagonal preconditioner); the norm the
+        tolerance is measured in is ``residual_norm``, i.e. the march's own progress measure.
     beta0, exponent, beta_floor, max_escalations, escalation_factor, divergence_cap, line_search, inner_steps, inner_tol, grow, descent_backoff, descent_test
         The globalization: the pseudo-transient schedule, the divergence guard, and the line search.
         See :class:`~aquaflux.solve.PseudoTransientStep` and :class:`~aquaflux.solve.DualTimeStep`.
@@ -1862,7 +1999,20 @@ def _coupled_step(
             else coupled_scaled_norm(coupled, policy, reference_state)
         )
     schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
-    solver = forward_solver if forward_solver is not None else default_solver
+    # The forward solve stops in the SAME measure object the march reports and accepts steps in, so a
+    # solve cannot converge in a quantity the march does not read. That is the shared half of the
+    # decision; only the restart regime differs per preconditioner family (see `_ForwardSolveRegime`).
+    solver = (
+        forward_solver
+        if forward_solver is not None
+        else relative_residual_gmres(
+            regime.rtol,
+            norm=residual_norm,
+            restart=regime.restart,
+            stagnation_iters=40,
+            max_restarts=regime.max_restarts,
+        )
+    )
     if inner_steps > 1:
         # Dual-time (backward-Euler) march: an inner Newton loop per outer timestep on the transient
         # residual, so the measured steady residual is the honest discrete time derivative rather than
@@ -1925,6 +2075,7 @@ def _monolithic_factor_step(
     inner_steps: int,
     inner_tol: float,
     forward_solver: lx.AbstractLinearSolver | None,
+    regime: _ForwardSolveRegime,
     block_scaled_norm: bool,
     residual_norm: ResidualNorm | None,
     inner_observer: Callable[..., None] | None = None,
@@ -1949,7 +2100,7 @@ def _monolithic_factor_step(
         coupled,
         reference_state,
         MonolithicFactorShiftPolicy(base, preconditioner),
-        default_solver=_COUPLED_FACTORIZATION_FORWARD_SOLVER,
+        regime=regime,
         beta0=beta0,
         exponent=exponent,
         beta_floor=beta_floor,
@@ -1993,8 +2144,12 @@ def coupled_lu_continuation(
     inner_steps: int = 1,
     inner_tol: float = 0.05,
     forward_solver: lx.AbstractLinearSolver | None = None,
+    forward_rtol: float = _FACTORIZATION_FORWARD.rtol,
+    forward_restart: int = _FACTORIZATION_FORWARD.restart,
+    forward_max_restarts: int = _FACTORIZATION_FORWARD.max_restarts,
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+    velocity_shift_parts: VelocityShiftParts | None = None,
     residual_norm: ResidualNorm | None = None,
     inner_observer: Callable[..., None] | None = None,
     refresh_on_cycles: int | None = None,
@@ -2008,8 +2163,8 @@ def coupled_lu_continuation(
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **complete** coupled LU.
 
-    It materializes the coupled Jacobian at ``reference_state`` (compressed graph-coloured probing -- one
-    source of truth, no re-derived assembly), adds the pseudo-transient shift at ``lu_beta``, and factors
+    It materializes the coupled Jacobian at ``reference_state`` (compressed graph-coloured probing of the
+    residual itself, no re-derived assembly), adds the pseudo-transient shift at ``lu_beta``, and factors
     the result **completely** with a :class:`~aquaflux.solve.MonolithicLuPreconditioner`, all off the jit
     path. Because the factorization is exact, the preconditioned Krylov solve converges in a single
     iteration; on a moderate two-dimensional mesh a fill-reducing multifrontal LU (UMFPACK) factors the
@@ -2065,11 +2220,13 @@ def coupled_lu_continuation(
     inner_tol : float
         The inner-loop stopping tolerance (fraction of the reference residual), used only when
         ``inner_steps > 1``.
-    forward_solver : lineax.AbstractLinearSolver or None
-        The shifted-solve Krylov solver; ``None`` uses :data:`_COUPLED_FACTORIZATION_FORWARD_SOLVER`, a
-        small-restart GMRES matched to an exact factorization's fast convergence (the solve tests its
-        stop only at each restart boundary, so a large restart would build many more preconditioned
-        matvecs than the factorization needs -- see that constant's note).
+    forward_solver, forward_rtol, forward_restart, forward_max_restarts
+        The shifted forward solve, exactly as in :func:`coupled_continuation` -- the stopping *measure*
+        is shared by every family. What is this family's own is the restart regime it defaults to:
+        a complete factorization collapses the preconditioned
+        spectrum to a point, so the stop is reached within a handful of vectors and the restart is
+        ``10`` rather than ``120`` -- with a large subspace the solve would build ~120 preconditioned
+        matvecs, each paying a triangular back-solve, before it could even test its stop.
     block_scaled_norm : bool
         Select the coarser per-block :class:`~aquaflux.solve.BlockScaledNorm` instead of the default
         row-equilibrated :class:`~aquaflux.solve.RowScaledNorm` (``False``, the default).
@@ -2090,7 +2247,7 @@ def coupled_lu_continuation(
         :class:`~aquaflux.solve.PseudoTransientStep`, or a :class:`~aquaflux.solve.DualTimeStep` when
         ``inner_steps > 1``.
     """
-    base = _monolithic_shift_source(coupled, reference_state, shift_basis)
+    base = _monolithic_shift_source(coupled, reference_state, shift_basis, velocity_shift_parts)
     plan = _coupled_jacobian_plan(coupled, stencil_reach, column_reach)
     # What the coloured probe differentiates -- `coupled` unless a narrower gradient stencil was asked
     # for, so the residual's reach fits inside the colouring's. The solve keeps the exact `coupled`.
@@ -2121,6 +2278,7 @@ def coupled_lu_continuation(
         inner_steps=inner_steps,
         inner_tol=inner_tol,
         forward_solver=forward_solver,
+        regime=_ForwardSolveRegime(forward_rtol, forward_restart, forward_max_restarts),
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
         inner_observer=inner_observer,
@@ -2157,11 +2315,12 @@ def coupled_amg_continuation(
     inner_steps: int = 1,
     inner_tol: float = 0.05,
     forward_solver: lx.AbstractLinearSolver | None = None,
-    forward_rtol: float = 0.3,
-    forward_restart: int = 15,
-    forward_max_restarts: int = 60,
+    forward_rtol: float = _VCYCLE_FORWARD.rtol,
+    forward_restart: int = _VCYCLE_FORWARD.restart,
+    forward_max_restarts: int = _VCYCLE_FORWARD.max_restarts,
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
+    velocity_shift_parts: VelocityShiftParts | None = None,
     residual_norm: ResidualNorm | None = None,
     inner_observer: Callable[..., None] | None = None,
     refresh_on_cycles: int | None = None,
@@ -2184,8 +2343,8 @@ def coupled_amg_continuation(
     """Build a pseudo-transient continuation step preconditioned by a monolithic **algebraic-multigrid** V-cycle.
 
     The multigrid counterpart of :func:`coupled_lu_continuation`: it
-    materializes the coupled Jacobian at ``reference_state`` (compressed graph-coloured probing -- one
-    source of truth, no re-derived assembly), adds the pseudo-transient shift at ``amg_beta``, and builds a
+    materializes the coupled Jacobian at ``reference_state`` (compressed graph-coloured probing of the
+    residual itself, no re-derived assembly), adds the pseudo-transient shift at ``amg_beta``, and builds a
     single plain-aggregation V-cycle for it (:class:`~aquaflux.solve.MonolithicAmgPreconditioner`), all
     off the jit path. Unlike the complete factorization it keeps the heavy fill off the fine grid -- the
     only exact solve is a direct LU on the small coarsest grid -- so its memory stays bounded and its setup
@@ -2254,40 +2413,13 @@ def coupled_amg_continuation(
         :func:`coupled_lu_continuation`.
     inner_steps, inner_tol, block_scaled_norm, shift_basis, residual_norm
         The dual-time and measure parameters, exactly as in :func:`coupled_lu_continuation`.
-    forward_solver : lineax.AbstractLinearSolver or None
-        The shifted-solve Krylov solver; unlike :func:`coupled_lu_continuation`, ``None`` here builds a
-        GMRES matched to the V-cycle's own convergence -- the row-scaled stop of ``forward_rtol`` at an
-        Arnoldi restart of ``forward_restart``, both described below -- rather than a small-restart GMRES
-        tuned for an exact factorization.
-    forward_rtol : float
-        The relative tolerance for the default **row-scaled** forward-solve stop (default ``0.3``). With no
-        explicit ``forward_solver``, the forward solve stops on the march's own row-scaled progress measure
-        (:func:`coupled_scaled_norm`) rather than a plain global 2-norm — the latter is ~100% ``omega``
-        (whose residual is orders above the flow), so it halts once ``omega`` is resolved while the
-        flow-dominated Newton step is still coarse (measured ~116 % velocity error — effectively blind).
-        The row-scaled stop weighs every field comparably; a *loose* ``forward_rtol`` keeps it cheap.
-        Calibrated on the developed backward-facing step: at ``0.3`` the velocity correction is resolved to
-        ~25 % for ~1.5× the plain-2-norm cycle count; ``0.1`` fully resolves it at ~2.25×. Ignored when an
-        explicit ``forward_solver`` is given.
-    forward_restart : int
-        Arnoldi restart length of that default solver (``15``). Exposed on its own rather than left to a
-        caller-built ``forward_solver``, because building one to change the restart also silently drops
-        the row-scaled stop described above — a far larger change than intended. Worth varying because a
-        restarted GMRES tests convergence only at restart boundaries: against a tolerance as loose as
-        ``forward_rtol`` a solve can reach its target early in a cycle and go on building vectors, and a
-        restart-*cycle* count cannot see that, since such a solve reports one cycle at any length. Ignored
-        when an explicit ``forward_solver`` is given.
-    forward_max_restarts : int
-        Restart-cycle cap of that default solver (``60``), and the **only** bound on a single running
-        solve: ``cycle_budget`` and the march's abort threshold are tested between inner iterations, so
-        neither can stop a solve already in progress. Two constraints on any value chosen for it. ⚠️ It
-        is in raw ``lineax`` restarts, which carry a fixed ``+2`` per solve, while ``retry.abort_above_cycles`` is
-        in corrected cycles (:func:`~aquaflux.solve.restart_cycles`), so a corrected cap of ``c`` is
-        ``forward_max_restarts = c + 2``. ⚠️ And the corrected count must stay **strictly above**
-        ``retry.abort_above_cycles``: the march's test is ``max_inner_cycles > retry.abort_above_cycles``, so a cap landing
-        exactly on the threshold does not trip the redo and the step accepts the truncated,
-        non-converged direction instead of re-running it on a fresh preconditioner. Ignored when an explicit ``forward_solver`` is
-        given.
+    forward_solver, forward_rtol, forward_restart, forward_max_restarts
+        The shifted forward solve, exactly as in :func:`coupled_continuation` -- the stopping *measure*
+        is shared by every family. What is this family's own is the restart regime it defaults to:
+        restart ``15`` is the measured sweet spot for a one-V-cycle
+        preconditioner -- enough Arnoldi history for its convergence while checking the stop often
+        enough not to overshoot the loose tolerance deep into the next cycle, a larger restart costing
+        ~2x the expensive host V-cycle applies for the same trajectory -- with a cap of ``60``.
     inner_observer : callable or None
         A per-inner-iteration profiling hook forwarded to the built dual-time step (only used when
         ``inner_steps > 1``); see :class:`~aquaflux.solve.DualTimeStep`. ``None`` (default) leaves the step
@@ -2418,39 +2550,7 @@ def coupled_amg_continuation(
             "is only one hierarchy without field_split=True. Passing them here would silently do "
             "nothing."
         )
-    base = _monolithic_shift_source(coupled, reference_state, shift_basis)
-    # The forward-solve stop. A plain global-2-norm relative stop is ~100% the largest-magnitude field
-    # (``omega``, whose residual is orders above the flow), so a "1%" solve resolves ``omega`` and halts
-    # while the flow-dominated Newton step is still coarse -- leaving the flow correction blind (measured
-    # ~116 % velocity error). The forward solve therefore stops on the march's own row-scaled progress
-    # measure (``coupled_scaled_norm``, a physically row-scaled -- not per-solve -- measure) at a *loose*
-    # ``forward_rtol``: every field block is seen and resolved loosely, so the flow is never left blind
-    # while ``omega`` is not over-resolved. A caller that wants a different stop passes ``forward_solver``.
-    # Restart 15 is the measured sweet spot for the one-V-cycle preconditioner: enough Arnoldi history for
-    # its convergence while checking the stop often enough not to overshoot the loose target deep into the
-    # next cycle (a larger restart costs ~2x the expensive host V-cycle applies for the same trajectory);
-    # ``forward_max_restarts`` is the ONLY bound on a single running solve: ``cycle_budget`` and
-    # ``abort_above_inner_cycles`` are tested between inner iterations, so neither can stop a solve
-    # already in progress. Left generous, a solve whose attempt is already doomed -- one that has passed
-    # the march's ``retry.abort_above_cycles`` without reaching target -- keeps running to the cap, and that work
-    # is discarded when the step is redone at a larger shift.
-    #
-    # ⚠️ It is in RAW ``lineax`` restarts, which carry a fixed +2 per solve, while ``retry.abort_above_cycles`` is
-    # in CORRECTED cycles (:func:`restart_cycles`). So a corrected cap of ``c`` is ``max_restarts = c + 2``.
-    # ⚠️ And it must leave the corrected count STRICTLY ABOVE ``retry.abort_above_cycles``: the march's test is
-    # ``max_inner_cycles > retry.abort_above_cycles``, so a cap landing exactly on it does not trip the
-    # retry and the step ACCEPTS the truncated, non-converged direction instead of escalating.
-    # ``forward_restart``
-    # exists so that length can be varied on its own -- passing a whole ``forward_solver`` to do it would
-    # also drop the loose row-scaled stop above, which is a much larger change than the one intended.
-    if forward_solver is None:
-        forward_solver = relative_residual_gmres(
-            forward_rtol,
-            norm=coupled_scaled_norm(coupled, base, reference_state),
-            restart=forward_restart,
-            stagnation_iters=40,
-            max_restarts=forward_max_restarts,
-        )
+    base = _monolithic_shift_source(coupled, reference_state, shift_basis, velocity_shift_parts)
     # The partition a field split fits, needed here (not only below) because it decides which
     # off-diagonal triangle a probe built for it never has to store -- see `active_rows` just below.
     # Building it costs nothing and is unused when `field_split` is false.
@@ -2557,6 +2657,7 @@ def coupled_amg_continuation(
         inner_steps=inner_steps,
         inner_tol=inner_tol,
         forward_solver=forward_solver,
+        regime=_ForwardSolveRegime(forward_rtol, forward_restart, forward_max_restarts),
         block_scaled_norm=block_scaled_norm,
         residual_norm=residual_norm,
         inner_observer=inner_observer,
@@ -3876,6 +3977,9 @@ def mass_flow_coupled_continuation(
     divergence_cap: float = 10.0,
     line_search: int = _COUPLED_LINE_SEARCH,
     forward_solver: lx.AbstractLinearSolver | None = None,
+    forward_rtol: float = _CONSTRAINED_FORWARD.rtol,
+    forward_restart: int = _CONSTRAINED_FORWARD.restart,
+    forward_max_restarts: int = _CONSTRAINED_FORWARD.max_restarts,
     block_scaled_norm: bool = False,
     shift_basis: ShiftBasis = _DEFAULT_SHIFT_BASIS,
     velocity_shift_parts: VelocityShiftParts | None = None,
@@ -3899,7 +4003,12 @@ def mass_flow_coupled_continuation(
     ``[flow..., k, omega, beta]`` system where ``beta`` is a Lagrange multiplier for ``<U_dir> =
     target``. Parameters are :func:`coupled_continuation`'s (including ``beta_floor`` / ``line_search`` /
     ``forward_solver`` / ``block_scaled_norm`` / ``shift_basis`` / ``velocity_shift_parts``);
-    ``flow_direction`` selects the constrained velocity component. ``block_scaled_norm`` here extends the same block-scaled measure with the constraint dof.
+    ``flow_direction`` selects the constrained velocity component. ``block_scaled_norm`` here extends the
+    same block-scaled measure with the constraint dof. The ``forward_*`` parameters are
+    :func:`coupled_continuation`'s too, but this path defaults to :data:`_CONSTRAINED_FORWARD` rather than
+    :data:`_BLOCK_FORWARD`: the restart regime is the same, and the **tolerance differs because the
+    measure does** -- the forward solve stops in the march's own progress measure, which here is the plain
+    Euclidean norm for the reason given below, so a Euclidean tolerance is what it takes.
 
     Routes through :func:`_coupled_step` like its siblings, so the globalization is the same one they
     run. Two things here are genuinely its own and are passed explicitly rather than defaulted: the
@@ -3926,7 +4035,7 @@ def mass_flow_coupled_continuation(
         coupled,
         reference_state,
         bordered,
-        default_solver=_COUPLED_FORWARD_SOLVER,
+        regime=_ForwardSolveRegime(forward_rtol, forward_restart, forward_max_restarts),
         beta0=beta0,
         exponent=exponent,
         beta_floor=beta_floor,

@@ -194,7 +194,7 @@ Rules, with FVM-specific teeth:
   The surfaces drift because nothing compares them, and **no single commit looks wrong**: each adds one
   keyword to one builder, so every after-the-fact check scoped to "your change" — including this file's
   own Post-Change Checklist and Stale-Record Check — is blind to it by construction.
-  *This has now happened four times, and the first three were each fixed and written up subsystem-locally
+  *This has now happened five times, and the first three were each fixed and written up subsystem-locally
   rather than promoted here, which is why the fourth happened a few hundred lines from the third.*
   `distributed.py` hand-built a second `ResidualAssembler` and a rename broke it with no test failing;
   every march driver wrote its own `on_step` formatter, so "a gap fixed in one persisted in the others";
@@ -203,6 +203,27 @@ Rules, with FVM-specific teeth:
   march's step each grew their own globalization tail, and the k-positivity fraction-to-the-boundary
   limit — the fix for a march that went non-finite from `k < 0` in two cells of 23040 — was wired on one
   of them and reached **none** of the other three.
+  **⚠️ EXTRACTING THE SHARED TAIL FIXES THE BODIES AND HIDES THE SURFACES — that is the fifth instance,
+  and it is the one to internalize, because it is what a *successful* repair leaves behind.** The fourth
+  was fixed exactly as this rule prescribes: the four coupled builders' duplicated tails were pulled into
+  one private `_coupled_step`. Their **public surfaces stayed hand-copied**, and drifted twice more —
+  the forward solve's stopping measure onto one builder of four, the shift's velocity source onto two —
+  while `tools/sibling_builders.py` reported *clean*, because the builders no longer constructed a common
+  class directly and so no longer looked like siblings to it. **A green report from a check that cannot
+  see the case is worse than no check**: it is read as evidence. Two consequences, both binding.
+  *(a)* The tool now follows private delegation transitively and compares public surfaces above a shared
+  tail, so this shape is visible again — but treat any check's silence as informative only once you have
+  confirmed it can see the thing you are asking about (the same reasoning as `tools/check_hooks.sh` and
+  its own unit test). *(b)* **When you extract a shared tail, audit the surfaces above it in the same
+  change**, and keep doing so afterwards: consolidating the bodies is only half the repair, and the half
+  that remains is now invisible to code review, because the duplication a reader would notice is gone.
+  **The discriminator for "does this keyword belong on all of them" is whose property it is.** Both #282
+  instances were parameters of the *problem* — the coupled residual's block scaling, the shift's own
+  time scale — sitting on a builder that names a *strategy* (a preconditioner). If the reason for a
+  parameter can be stated without naming the strategy the builder constructs, it belongs on the shared
+  tail, not on that builder. Where a sibling genuinely must differ, say so *at the difference*: the
+  mass-flow builder's Euclidean forward tolerance carries the reason (its bordered measure has no
+  row-scaled form) at the constant itself, so the next reader sees a decision rather than an omission.
   This does **not** ban siblings that merely share a vocabulary. Three multigrid solvers taking
   `hierarchy, b, cycles, omega` are three different methods with different smoother families; forcing
   them behind one builder would create the union bundle the Module Review Rubric warns about, needing
@@ -1012,10 +1033,18 @@ After **every code change**, before considering the task complete, review and ac
      tools/sibling_builders.py
      ```
      It is a **report, not a gate** (whether a pair is one builder or two genuinely different methods is
-     a judgement) and it always exits `0`, so read it. Each `only here:` list is a capability one sibling
+     a judgement) and it always exits `0`, so read it. **It reports pairs on a healthy tree — that is
+     correct, and "zero pairs" is not the target.** Each `only here:` list is a capability one sibling
      has and the other does not; every entry must be a genuine property of that path, or it is drift.
+     Ask of each one *whose property is this*: if you can justify it without naming the strategy that
+     builder constructs, it is the shared tail's and belongs on every sibling.
      It is package-wide rather than diff-scoped — that is why it lives here and not in the Stale-Record
      Check, which reads `git diff` and cannot see a parameter that was only ever added.
+     ⚠️ **It follows private delegation, so a shared tail no longer hides the surfaces above it** — it
+     did not until 2026-08-20, and in that window it reported `no sibling-builder pairs` while two
+     parameters drifted across four builders that all route through one private step. Its own coverage
+     is pinned by `tests/unit/test_sibling_builders.py`, for the same reason `tools/check_hooks.sh` is:
+     a check that has stopped seeing anything looks exactly like a clean tree.
 
    Ruff is pinned via the `lint` extra (`pip install -e ".[lint]"`). Not needed for
    docs/config-only changes touching no `.py` files.

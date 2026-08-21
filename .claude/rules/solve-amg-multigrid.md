@@ -56,11 +56,14 @@ paths:
     moved; re-measure, and read it with the superseding low-β result below). A Krylov-accelerated (GMRES)
     smoother is a few iterations *faster* but makes the V-cycle **nonlinear** — it
     needs flexible GMRES and has no clean transpose, so it is a deferred forward-only optimization, **not** the
-    adjoint path. ⚠️ **Name the forward solver's PATH — there are two and they differ.**
-    `coupled_amg_continuation` builds its own inline: `forward_rtol = 0.3` in the **row-scaled**
-    `coupled_scaled_norm`, `restart=15`, `max_restarts=60`. (`_COUPLED_FORWARD_SOLVER`, block-SIMPLE 2D:
-    `relative_residual_gmres(1e-2)`, 2-norm, restart 120. `_COUPLED_FACTORIZATION_FORWARD_SOLVER`, the
-    complete-LU path's default: 1e-2 2-norm, restart 10.) There is no `_COUPLED_AMG_FORWARD_SOLVER` symbol.
+    adjoint path. ⚠️ **Name the forward solve's REGIME.** Since #282 every family stops
+    on the same measure — the march's own — and differs only in its restart regime; the multigrid one is
+    `_VCYCLE_FORWARD` (`forward_rtol = 0.3` in the row-scaled `coupled_scaled_norm`, `restart=15`,
+    `max_restarts=60`), built by `_coupled_step`, not inline in `coupled_amg_continuation`. See
+    `solve.md`'s regime table. ⚠️ The symbols `_COUPLED_FORWARD_SOLVER`,
+    `_COUPLED_FACTORIZATION_FORWARD_SOLVER` and `_COUPLED_AMG_FORWARD_SOLVER` do not exist; the first two
+    were the block and complete-LU defaults and were **plain 2-norm stops at 1e-2**, so a cost recorded
+    against either predates the change.
   - **Per-step cost tuning (measured): `smoother_sweeps=2` default and the forward restart 15 (from 40).**
     The restart-15 forward loop stops as soon as the ~1% inexact-Newton tolerance is met instead of running
     out a 40-vector subspace (the dominant per-step saving). The **smoother-sweeps knob is the second lever,
@@ -289,7 +292,8 @@ paths:
     **✅ Done: the ILUT deletion renamed its forward solver.** `_COUPLED_ILUT_FORWARD_SOLVER` was the
     default forward solver on the complete-LU path too (`_monolithic_factor_step` fell back to it for
     both), so deleting the ILUT without renaming it would have left a solver named after a preconditioner
-    that no longer exists. It is now `_COUPLED_FACTORIZATION_FORWARD_SOLVER`.
+    that no longer exists. It became `_COUPLED_FACTORIZATION_FORWARD_SOLVER`, and since #282 it is the
+    `_FACTORIZATION_FORWARD` restart regime — the solver object itself is gone, `_coupled_step` builds it.
 
 ### ⭐ Ordering, not fill, is what fails zero-fill on `pitzDaily` (2026-08-17)
 

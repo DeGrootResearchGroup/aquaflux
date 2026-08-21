@@ -143,18 +143,37 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 | flow (leading) inverse | `AmgVCycle` (PETSc) | **`NativeSimpleInverse`** (`FLOW_INVERSE="native"`) | `compare.py` |
 | trailing hierarchy depth | `NativeHierarchyInverse` class default: `max_levels=2, strength_threshold=0.0, aggressive_levels=1` | **`max_levels=20, max_coarse=200, strength_threshold=0.25, aggressive_levels=0, frozen_coarsening=True`** | `compare.py` `NATIVE_TRAILING` |
 
-**The two coupled forward solvers — always name which path you mean.** There is no
-`_COUPLED_AMG_FORWARD_SOLVER` symbol.
+**The coupled forward solve: one MEASURE, per-family RESTART REGIMES (restructured 2026-08-20, #282).**
+⚠️ There are no `_COUPLED_FORWARD_SOLVER` / `_COUPLED_FACTORIZATION_FORWARD_SOLVER` / `_COUPLED_AMG_FORWARD_SOLVER`
+symbols — every one of those is dead. `_coupled_step` builds the default solver itself, and the two
+halves of the decision are now separated:
 
-| path | stop | norm | restart |
-|---|---|---|---|
-| `coupled_amg_continuation` (3D `bfs3d`) | `forward_rtol = 0.3` | **row-scaled** `coupled_scaled_norm` | 15 |
-| `_COUPLED_FORWARD_SOLVER` (block-SIMPLE 2D) | `1e-2` | global 2-norm | 120 |
+* **The stop is the march's own progress measure**, whatever that is — the row-equilibrated
+  `coupled_scaled_norm` by default, `BlockScaledNorm` under `block_scaled_norm=True`, the plain
+  Euclidean norm on the bordered mass-flow path. Steering and judging therefore come from one
+  definition, and a solve cannot converge in a quantity the march never reads. ⚠️ **A tolerance is
+  therefore only meaningful beside its measure** — `0.3` row-scaled and `1e-2` Euclidean are not
+  comparable numbers.
+* **The restart regime is per preconditioner family**, which is the part that genuinely differs, as
+  `_ForwardSolveRegime` values in `turbulence/coupled.py`:
 
-`_COUPLED_FACTORIZATION_FORWARD_SOLVER` (`1e-2`, global 2-norm, restart 10) is `coupled_lu_continuation`'s
-default — a small-restart GMRES matched to an exact factorization. (It was named
-`_COUPLED_ILUT_FORWARD_SOLVER` while the now-deleted monolithic ILUT was its other consumer; renamed
-when that preconditioner was removed as dominated — see `solve-direct-preconditioners.md`.)
+| regime | builder | rtol | restart | max_restarts |
+|---|---|---|---|---|
+| `_BLOCK_FORWARD` | `coupled_continuation` (block-SIMPLE) | 0.3 | 120 | 15 |
+| `_FACTORIZATION_FORWARD` | `coupled_lu_continuation` | 0.3 | 10 | 40 |
+| `_VCYCLE_FORWARD` | `coupled_amg_continuation` (3D `bfs3d`) | 0.3 | 15 | 60 |
+| `_CONSTRAINED_FORWARD` | `mass_flow_coupled_continuation` | **1e-2, Euclidean** | 120 | 15 |
+
+All four builders take `forward_rtol` / `forward_restart` / `forward_max_restarts`. ⚠️ **Move the
+tolerance or the restart with those, never by passing a whole `forward_solver`** — building one also
+replaces the stopping measure, which is a far larger change than the one intended.
+
+⚠️ **`0.3` on the block and complete-LU families is the multigrid family's CALIBRATION, carried across
+because it is a property of the measure, not of multigrid — it has not been re-measured there.** Those
+two ran `1e-2` in a plain 2-norm before #282, so any recorded cost measured on them predates the change;
+the earlier arrangement is the drift the issue documents, not a calibration.
+(`_FACTORIZATION_FORWARD` was `_COUPLED_ILUT_FORWARD_SOLVER` while the now-deleted monolithic ILUT was
+its other consumer, then `_COUPLED_FACTORIZATION_FORWARD_SOLVER` — see `solve-direct-preconditioners.md`.)
 
 **Preconditioning side: RIGHT** (`solve_linear`'s default, taken by `_shifted_solve`), so the Krylov
 residual is the **true** residual `b − Ax`. No solution-accuracy bound follows from the stop. `left` is
@@ -346,17 +365,15 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
        *sub-floor* operators are — the escalation is what lifts β back above the floor. Until the
        rejected attempts are recorded, read them out of `march.log` (`redo step N (attempt 2): …` plus
        the per-inner table above it) and name the state and β explicitly.
-  5. **A probe driven by the WRONG "march" solver — there are two, and they look interchangeable.**
-     `_COUPLED_FACTORIZATION_FORWARD_SOLVER` (the complete-LU path's default) is 1 % in a plain 2-norm at
-     restart 10; the coupled **AMG** builder's
-     default (what `bfs3d` actually runs) is `forward_rtol` = **0.3** in the **row-scaled**
-     `coupled_scaled_norm` at restart **15**. Reaching for the first while believing it is the second was
-     done twice in one session — once in a sweep's self-check arm, once when adding a `forward_solver`
-     seam, where it would have replaced a loose row-scaled stop with a tight Euclidean one and reported
-     the difference as a restart-length effect. **It does not announce itself:** at a state where both
-     converge in one cycle the self-check still passes and reports a validation it never performed.
-     Build the solver from the same pieces the builder does, or take the restart through
-     `coupled_amg_continuation(forward_restart=...)` rather than by supplying a whole solver.
+  5. **A probe driven by a hand-built "march" solver.** Every family now shares the row-scaled stop and
+     differs only in its restart regime (see the table above), which removes the specific trap recorded
+     here — reaching for the complete-LU path's plain-2-norm solver while believing it was the AMG
+     builder's row-scaled one, done twice in one session, once where it would have replaced a loose
+     row-scaled stop with a tight Euclidean one and reported the difference as a restart-length effect.
+     The general form still bites: **a hand-built `forward_solver` replaces the stopping MEASURE, not
+     just the tolerance**, and **it does not announce itself** — at a state where both converge in one
+     cycle a self-check still passes and reports a validation it never performed. Take the restart or
+     the tolerance through `forward_restart=` / `forward_rtol=`, never by supplying a whole solver.
      Note also what `forward_rtol = 0.3` *is*: an inexact-Newton forcing term on the **linear** residual
      per inner solve, not a solution tolerance — accuracy comes from the inner loop iterating. And the
      **achieved** reduction is routinely tighter than the requested one, because a restarted GMRES tests

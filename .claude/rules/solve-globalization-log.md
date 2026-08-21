@@ -348,7 +348,8 @@
       changes Krylov cycles, since for fixed `J`, `β`, `d`, `R` the shifted step `δ` is unique regardless
       of `M`.
       - **That uniqueness argument is only valid for a CONVERGED linear solve, and the coupled forward
-        solver is deliberately inexact** (`_COUPLED_FORWARD_SOLVER` runs at `rtol = 1e-3`). At a finite
+        solver is deliberately inexact** (the block family's forward solve ran at `rtol = 1e-3` then;
+        that symbol is gone and the default is now `forward_rtol = 0.3` in the row-scaled measure). At a finite
         tolerance `δ` depends on `M`, so a preconditioner *can* change α. Measured directly: refreshing
         the scalar AMGs mid-march on the pitzDaily cold-IC run took α from **0.5 → 1.0** (sustained over
         the following steps) while cutting cycles 53 → 10. So "a preconditioner cannot change α" is false
@@ -1113,7 +1114,7 @@
         different residual trajectories (rel 4.45e-2 vs 4.13e-2 at step 20). So a sufficiently stale
         preconditioner *does* change the step. The mechanism is not isolated — the natural reading is
         that the degraded solve is truncating or stagnating rather than reaching its tolerance, so the
-        returned `δ` is no longer the tolerance-defined one — and `_COUPLED_FORWARD_SOLVER` runs
+        returned `δ` is no longer the tolerance-defined one — and the block family's forward solve then ran
         `rtol=1e-3` with `stagnation_iters=40`, which makes that reachable. **Practical rule:** treat
         "preconditioner ⇒ cost only" as true when solves converge comfortably, and stop trusting it
         once the cycle count is climbing toward the solver's limits.

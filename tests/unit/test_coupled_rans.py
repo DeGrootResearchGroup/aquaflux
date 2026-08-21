@@ -29,6 +29,7 @@ from aquaflux.solve import (
     CycleGrowthTrigger,
     PseudoTransientStep,
     RefreshPolicy,
+    RowScaledNorm,
     ShiftTerm,
 )
 from aquaflux.turbulence import (
@@ -45,8 +46,8 @@ from aquaflux.turbulence import (
     production_cap_active,
 )
 from aquaflux.turbulence.coupled import (
-    _COUPLED_FACTORIZATION_FORWARD_SOLVER,
-    _COUPLED_FORWARD_SOLVER,
+    _BLOCK_FORWARD,
+    _FACTORIZATION_FORWARD,
     CoupledJacobianProbe,
     CoupledRANS,
     CoupledRANSLayout,
@@ -56,6 +57,7 @@ from aquaflux.turbulence.coupled import (
     coupled_continuation,
     coupled_lu_continuation,
     coupled_scaled_norm,
+    mass_flow_coupled_continuation,
     solve_coupled,
 )
 
@@ -180,8 +182,8 @@ def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None
     inverse, so the 1% stop is reached within a handful of vectors and it uses a small restart; the
     block-triangular preconditioner needs a large subspace per cycle. The two must not share a default.
     """
-    assert _COUPLED_FACTORIZATION_FORWARD_SOLVER.restart == 10
-    assert _COUPLED_FORWARD_SOLVER.restart == 120
+    assert _FACTORIZATION_FORWARD.restart == 10
+    assert _BLOCK_FORWARD.restart == 120
 
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
@@ -191,10 +193,13 @@ def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None
     assert lu_step.forward_solver.restart == 10
     assert block_step.forward_solver.restart == 120
     # An explicit forward_solver still overrides the LU default.
-    override = coupled_lu_continuation(
-        coupled, state, backend="scipy", forward_solver=_COUPLED_FORWARD_SOLVER
+    # ...and the restart alone can be moved without also replacing the stopping measure.
+    assert (
+        coupled_lu_continuation(
+            coupled, state, backend="scipy", forward_restart=120
+        ).forward_solver.restart
+        == 120
     )
-    assert override.forward_solver.restart == 120
 
 
 def test_every_continuation_builder_installs_the_same_globalization() -> None:
@@ -225,8 +230,13 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
     for name, step in built.items():
         assert step.step_limit is not None, f"{name} has no k-positivity limit"
 
-    # ...and the surfaces themselves agree on the globalization, so a knob cannot reappear on one side.
-    globalization = {
+    # ...and the surfaces themselves agree, so a knob cannot reappear on one side. Everything here is a
+    # property of the coupled march rather than of any preconditioner, which is the test: a parameter
+    # belongs on all four or on none, and the ones that reached only the builder being worked on at the
+    # time are exactly how this went wrong before -- twice with the tail already extracted, so nothing
+    # in the bodies looked duplicated and no single commit looked wrong.
+    shared = {
+        # The pseudo-transient schedule, the divergence guard and the line search.
         "beta0",
         "exponent",
         "beta_floor",
@@ -239,9 +249,21 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         "grow",
         "descent_backoff",
         "descent_test",
+        # The shifted forward solve. `forward_rtol` / `forward_restart` / `forward_max_restarts` sat on
+        # the multigrid builder alone, although the argument for them is about the *coupled residual*
+        # (~100% omega under a plain 2-norm, so the flow block goes unresolved) and not about multigrid.
         "forward_solver",
+        "forward_rtol",
+        "forward_restart",
+        "forward_max_restarts",
+        # The progress measure and the shift.
         "block_scaled_norm",
-        "residual_norm",
+        "shift_basis",
+        # ...and this one was on two of the four, absent from both monolithic builders although the
+        # configuration it was built for -- a dual-time low-shift march whose shift must track the
+        # developing eddy viscosity -- is a monolithic one.
+        "velocity_shift_parts",
+        # The per-step guards.
         "inner_observer",
         "cycle_budget",
         "refresh_on_cycles",
@@ -249,9 +271,116 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         "positivity_floor",
         "positivity_projection",
     }
-    for builder in (coupled_continuation, coupled_amg_continuation):
-        missing = globalization - set(inspect.signature(builder).parameters)
+    builders = (
+        coupled_continuation,
+        coupled_lu_continuation,
+        coupled_amg_continuation,
+        mass_flow_coupled_continuation,
+    )
+    for builder in builders:
+        missing = shared - set(inspect.signature(builder).parameters)
         assert not missing, f"{builder.__name__} cannot be given {sorted(missing)}"
+
+    # One deliberate carve-out, pinned so it stays deliberate: the mass-flow builder takes no explicit
+    # `residual_norm`, because the constrained path has no staged-refresh driver to inject a frozen
+    # measure, and it supplies its own constraint-aware one. Every other builder takes it.
+    assert "residual_norm" not in inspect.signature(mass_flow_coupled_continuation).parameters
+    for builder in builders[:-1]:
+        assert "residual_norm" in inspect.signature(builder).parameters
+
+
+def test_every_builder_stops_the_forward_solve_in_the_march_s_own_measure() -> None:
+    """The forward solve's stopping measure is the march's progress measure, on every builder.
+
+    Two separate rules meet here. The march must be steered by and judged by one definition, so the
+    linear solve cannot converge in a quantity the march never reads. And the *reason* the coupled
+    residual needs a row-scaled stop is about the residual, not about any preconditioner: a plain
+    2-norm of it is ~100% ``omega``, whose residual sits orders above the flow's, so a solve stops once
+    ``omega`` is resolved while the flow-dominated part of the Newton step is still coarse. That
+    argument reached only the builder being worked on at the time, leaving the default path -- what
+    ``solve_coupled`` builds when nothing is passed -- stopping on the norm its own docstring calls
+    effectively blind.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    for name, step in {
+        "block": coupled_continuation(coupled, state, method=None),
+        "lu": coupled_lu_continuation(coupled, state, backend="scipy"),
+    }.items():
+        assert step.forward_solver.norm is step.residual_norm, (
+            f"{name} steers on one measure and stops its linear solve on another"
+        )
+        # ...and that measure is the row-equilibrated one, not the Euclidean norm it used to be.
+        assert isinstance(step.residual_norm, RowScaledNorm), name
+
+    # An explicit measure is honoured all the way through, so the two cannot come apart there either --
+    # which is what `solve_coupled` relies on when it re-injects the march's initial measure at every
+    # refresh rather than letting a self-normalising one re-base at the developed state.
+    base = coupled_continuation(coupled, state, method=None)
+    explicit = coupled_continuation(coupled, state, method=None, residual_norm=base.residual_norm)
+    assert explicit.forward_solver.norm is explicit.residual_norm is base.residual_norm
+
+
+def test_the_constrained_builder_keeps_a_euclidean_stop_for_a_stated_reason() -> None:
+    """The bordered mass-flow path is the one that genuinely differs, and it differs consistently.
+
+    The row-equilibrated measure has no constraint-aware form: it would scale the border row by a
+    diagonal the constraint does not have. So that march is judged in the Euclidean norm — and its
+    forward solve therefore stops there too, at a Euclidean tolerance, because the tolerance and the
+    norm it is measured in are one decision. This is a property of the path, not a surface that drifted.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    step = mass_flow_coupled_continuation(coupled, state, method=None)
+    assert step.residual_norm is jnp.linalg.norm
+    assert step.forward_solver.norm is step.residual_norm
+
+
+def test_a_monolithic_builder_takes_the_injected_velocity_shift_source() -> None:
+    """``velocity_shift_parts`` reaches the monolithic paths, which is where it was wanted.
+
+    It says where the velocity shift's two diagonal buckets come from — a property of the *shift*, not
+    of the preconditioner — and a live-viscosity source needs only momentum, the closure and the two
+    variable transforms, so nothing about a monolithic build excludes it. It nonetheless existed on the
+    two block builders only, and the configuration it was written for (a dual-time low-shift march whose
+    shift must track the developing eddy viscosity) is a monolithic one.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    live = LiveViscosityVelocityParts(
+        coupled.momentum, coupled.turbulence, coupled.k_transform, coupled.omega_transform
+    )
+    step = coupled_lu_continuation(coupled, state, backend="scipy", velocity_shift_parts=live)
+    assert step.shift_policy.base.velocity_shift_parts is live
+    # ...and it is genuinely live: away from the state the assembler was frozen at, the shift it
+    # produces differs from the frozen one, which is the whole reason the source is injected. At the
+    # freeze state the two coincide by construction, so a check there would pass on a dead wire.
+    frozen = coupled_lu_continuation(coupled, state, backend="scipy")
+    flow_p, k_p, omega_p = coupled.layout.unpack(state)
+    developed = coupled.layout.pack(flow_p, k_p * 4.0, omega_p)
+    assert not np.allclose(
+        np.asarray(step.shift_policy.shift_term(developed).diagonal),
+        np.asarray(frozen.shift_policy.shift_term(developed).diagonal),
+    )
+
+
+def test_the_live_shift_source_honours_its_protocol_arity() -> None:
+    """It must be callable the way the protocol declares, and say so when it cannot do the job.
+
+    The protocol gives the turbulence blocks defaults, because a frozen-viscosity source ignores them.
+    This one declared them required, so it did not satisfy the arity its own protocol promises — latent
+    until something handed it to a policy that calls ``parts(flow)``, and then a ``TypeError`` from deep
+    inside a shift policy. It now accepts the call and refuses it in terms that name the alternative.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    flow, k, omega = coupled.layout.unpack(state)
+    live = LiveViscosityVelocityParts(
+        coupled.momentum, coupled.turbulence, coupled.k_transform, coupled.omega_transform
+    )
+    assert len(live.parts(flow, k, omega)) == 2
+    with pytest.raises(TypeError, match="FrozenViscosityVelocityParts"):
+        live.parts(flow)
 
 
 def test_coupled_build_resolves_boundaries_so_the_residual_jits() -> None:

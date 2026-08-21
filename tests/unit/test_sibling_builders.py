@@ -46,6 +46,33 @@ def air_solve(hierarchy, b, *, cycles=1, f_iters=2, c_iters=1):
     return Result(hierarchy, b, cycles)
 """
 
+#: The same drifted pair, after the duplicated *body* has been extracted into a shared private tail —
+#: which is the right repair for the body and, on its own, hides the surfaces above it. Neither builder
+#: constructs `Step` any more, so a check that looks only at direct construction reports nothing here
+#: while `slow` still sits on one of them. Two levels of delegation, because a real builder reaches the
+#: shared step through a per-family seam.
+_SHARED_TAIL = """
+class Step:
+    def __init__(self, policy, a=0, b=0, c=0, d=0, e=0, f=0, slow=None):
+        pass
+
+
+def _tail(policy, *, a=0, b=0, c=0, d=0, e=0, f=0, slow=None):
+    return Step(policy, a=a, b=b, c=c, d=d, e=e, f=f, slow=slow)
+
+
+def _family_seam(policy, *, a=0, b=0, c=0, d=0, e=0, f=0):
+    return _tail(policy, a=a, b=b, c=c, d=d, e=e, f=f)
+
+
+def build_one(policy, *, a=0, b=0, c=0, d=0, e=0, f=0):
+    return _family_seam(policy, a=a, b=b, c=c, d=d, e=e, f=f)
+
+
+def build_two(policy, *, a=0, b=0, c=0, d=0, e=0, f=0, slow=None):
+    return _tail(policy, a=a, b=b, c=c, d=d, e=e, f=f, slow=slow)
+"""
+
 
 def _run(source: str, tmp_path: Path) -> str:
     package = tmp_path / "pkg"
@@ -72,12 +99,42 @@ def test_it_stays_quiet_for_siblings_that_only_share_a_vocabulary(tmp_path: Path
     assert "no sibling-builder pairs" in _run(_DIFFERENT_METHODS, tmp_path)
 
 
-@pytest.mark.skipif(not TOOL.exists(), reason="the tool is part of the repository, not the package")
-def test_the_package_itself_is_clean(tmp_path: Path) -> None:
-    """The check that would have caught the coupled-continuation split, run where it matters.
+def test_it_sees_through_a_shared_private_tail(tmp_path: Path) -> None:
+    """Extracting the duplicated body must not take the drift signal with it.
 
-    A failure here is not necessarily a defect — two genuinely different methods can trip it — but it is
-    always something to look at, which is why the message says so rather than asserting a bare count.
+    This is the case that went undetected: the shared tail was extracted — the right repair — and the
+    two builders stopped constructing a common class directly, so the report went quiet while their
+    public surfaces stayed hand-copied and one kept a keyword the other never got. The report has to
+    follow the delegation, transitively, and name the same drift it would have named before.
+    """
+    out = _run(_SHARED_TAIL, tmp_path)
+    assert "build_one" in out and "build_two" in out
+    assert "Step" in out, "the tail's constructed class must be credited to its callers"
+    assert "'slow'" in out, "the drifted keyword is the actionable half of the report"
+
+
+def test_it_does_not_pair_a_private_tail_with_its_own_callers(tmp_path: Path) -> None:
+    """A tail shares most of its surface with every builder that delegates to it, by construction.
+
+    Reporting those pairs is the extraction working, not drift, and at four builders and two seams it
+    buries the pairs a reader has to judge. Only public surfaces are compared.
+    """
+    out = _run(_SHARED_TAIL, tmp_path)
+    assert "_tail" not in out and "_family_seam" not in out
+    assert "1 sibling-builder pair" in out
+
+
+@pytest.mark.skipif(not TOOL.exists(), reason="the tool is part of the repository, not the package")
+def test_the_package_report_still_reaches_the_coupled_builders(tmp_path: Path) -> None:
+    """Run it where it matters, and check it has not gone blind to the family it exists for.
+
+    This is deliberately **not** an assertion that the package reports zero pairs. It once was, and that
+    made a report into a gate — which is wrong twice over: whether a pair is one builder or two
+    genuinely different methods is a judgement no script can make, and a green gate here was
+    indistinguishable from a check that had stopped seeing anything at all. What is worth pinning is
+    that the coupled march's builders, which reach their shared step through a private tail, are still
+    *visible* to it. If they are ever genuinely unified into one builder, updating this is part of that
+    change.
     """
     result = subprocess.run(
         [sys.executable, str(TOOL)],
@@ -86,8 +143,10 @@ def test_the_package_itself_is_clean(tmp_path: Path) -> None:
         check=False,
         cwd=TOOL.parent.parent,
     )
-    assert result.returncode == 0
-    assert "no sibling-builder pairs" in result.stdout, (
-        "sibling builders reappeared; each 'only here' entry must be a genuine property of that "
-        f"path, not drift:\n{result.stdout}"
+    assert result.returncode == 0, "the report must always exit 0"
+    assert (
+        "coupled_continuation" in result.stdout and "coupled_amg_continuation" in result.stdout
+    ), (
+        "the coupled builders delegate to a shared private tail; the report must follow it, or it is "
+        f"blind to exactly the drift it was written for:\n{result.stdout}"
     )
