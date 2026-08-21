@@ -115,18 +115,48 @@ def _missing_names(path: Path) -> list[str]:
     ]
 
 
+def _called(node: ast.Call, bound: dict[str, tuple[str, str]]) -> tuple[str, object] | None:
+    """The ``(display name, live callable)`` a call resolves to, or ``None`` if it is out of scope.
+
+    Two forms are in scope. A bare imported name (``RefreshPolicy(...)``) is the obvious one. The
+    second is a call on an imported name -- ``CoupledRANS.build(...)``,
+    ``SSTTurbulence.build(...)`` -- which is how every case constructs its assemblers, and which a
+    check that looked only at bare names could not see at all: those constructors carry most of the
+    keywords a case passes, so the guard's own coverage was the shape of its blind spot.
+
+    A call on anything else (an instance the case built earlier, a module attribute) is not resolvable
+    without knowing that object's type, and is left alone.
+    """
+    if isinstance(node.func, ast.Name):
+        origin = bound.get(node.func.id)
+        return (node.func.id, _resolve(*origin)) if origin else None
+    if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+        origin = bound.get(node.func.value.id)
+        if origin is None:
+            return None
+        owner = _resolve(*origin)
+        name = f"{node.func.value.id}.{node.func.attr}"
+        return (name, getattr(owner, node.func.attr, None)) if owner is not None else (name, None)
+    return None
+
+
 def _rejected_keywords(path: Path) -> list[str]:
     """Literal keyword arguments a case passes that the callable does not accept."""
     tree = ast.parse(path.read_text())
     bound = _aquaflux_imports(tree)
     offenders: list[str] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+        if not isinstance(node, ast.Call):
             continue
-        origin = bound.get(node.func.id)
-        if origin is None or node.func.id in _UNCHECKABLE:
+        resolved = _called(node, bound)
+        if resolved is None:
             continue
-        obj = _resolve(*origin)
+        display, obj = resolved
+        if display in _UNCHECKABLE:
+            continue
+        if obj is None:
+            offenders.append(f"{path.relative_to(_ROOT)}:{node.lineno}: {display} -- no such name")
+            continue
         accepted = _accepted_keywords(obj)
         if accepted is None:
             continue
@@ -134,7 +164,7 @@ def _rejected_keywords(path: Path) -> list[str]:
             # `**something` carries no name and cannot be checked; the literals beside it still can.
             if keyword.arg is not None and keyword.arg not in accepted:
                 offenders.append(
-                    f"{path.relative_to(_ROOT)}:{node.lineno}: {node.func.id}"
+                    f"{path.relative_to(_ROOT)}:{node.lineno}: {display}"
                     f"({keyword.arg}=...) -- accepts {sorted(accepted)}"
                 )
     return offenders
@@ -183,3 +213,33 @@ def test_the_checker_actually_catches_a_break() -> None:
     accepted = _accepted_keywords(_resolve(*bound["RetryPolicy"]))
     assert accepted is not None and "no_such_parameter" not in accepted
     assert "abort_above_cycles" in accepted  # and it reads the real signature, not an empty set
+
+
+def test_the_checker_reaches_a_call_on_an_imported_CLASS_not_only_a_bare_name() -> None:
+    """``CoupledRANS.build(...)`` must be checked, because that is how every case is wired.
+
+    The bare-name form above is the easy half. The cases construct their assemblers through class
+    methods, so a guard that resolved only bare names would report clean over every constructor call
+    in every case -- coverage exactly where the cases spend their keywords, and it would look
+    identical to coverage that worked.
+
+    Both directions are pinned. A wrong keyword and a method that no longer exists are found; a
+    correct call is left alone, so the check cannot be passing by objecting to everything.
+    """
+    module = "from aquaflux.turbulence import CoupledRANS\n"
+    bound = _aquaflux_imports(ast.parse(module))
+
+    def called(source: str):
+        node = next(n for n in ast.walk(ast.parse(module + source)) if isinstance(n, ast.Call))
+        return _called(node, bound)
+
+    display, obj = called("CoupledRANS.build(m, t, omega_transform=None)\n")
+    assert display == "CoupledRANS.build"
+    accepted = _accepted_keywords(obj)
+    assert accepted is not None
+    assert "omega_transform" in accepted  # the real signature, not an empty set
+    assert "no_such_parameter" not in accepted
+
+    assert called("CoupledRANS.no_such_method(x=1)\n") == ("CoupledRANS.no_such_method", None)
+    # A call on something the case built itself is not resolvable and must be left alone.
+    assert called("solver.step(x=1)\n") is None

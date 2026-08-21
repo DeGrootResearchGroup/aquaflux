@@ -160,6 +160,21 @@ markers = [
     "slow: multi-minute solves; excluded from the fast gate, run in full on merge",
 ]
 testpaths = ["tests"]
+# A marker that is not declared above becomes a collection ERROR rather than a warning. The tiers are
+# selected with `-m`, so a mistyped marker does not fail — it silently changes which tier a test
+# belongs to, and the direction that matters is the quiet one: a heavy solve whose `@pytest.mark.slwo`
+# never registers lands in the always-on gate, and a test meant for the fast gate whose marker is
+# mistyped the other way stops running on every pull request. Neither shows up as a failure; both show
+# up as a timing or a coverage surprise weeks later. `strict_config` does the same for an unknown key
+# in this section, so a typo here cannot leave the whole block silently inert.
+#
+# These are the ini forms. The equivalent command-line flags exist too, but putting them in `addopts`
+# does NOT work: the flag only enables the option when it is given on the command line, so an
+# `addopts` entry parses cleanly and has no effect — which is exactly the silent-no-op shape these
+# settings are here to prevent. (Both keys need pytest >= 9; an older pytest warns that it does not
+# recognize them and behaves as before, so this degrades rather than breaks.)
+strict_markers = true
+strict_config = true
 
 [tool.coverage.run]
 source = ["aquaflux"]

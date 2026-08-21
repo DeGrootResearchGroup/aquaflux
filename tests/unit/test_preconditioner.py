@@ -3,6 +3,8 @@ damped-Jacobi inner solve. Both are tested in isolation from the Newton driver."
 
 from __future__ import annotations
 
+import warnings
+
 import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax
@@ -218,6 +220,42 @@ def test_reference_state_is_driven_by_a_moving_wall_too() -> None:
     closed = _cavity(walls)
     velocity, _ = closed.unpack(_characteristic_reference_state(closed))
     assert jnp.allclose(velocity, 0.0)
+
+
+def test_a_convection_block_with_no_reference_flux_says_so_instead_of_degrading_in_silence() -> (
+    None
+):
+    """A closed domain drives no flow, so ``velocity="convection"`` quietly becomes ``"smoothed"``.
+
+    The build stays valid -- a zero convective linearization is still a usable viscous operator -- so
+    this is a warning rather than a refusal. But it is the *only* signal that the Peclet-aware block
+    the caller asked for is not the block they got, and the degradation is otherwise invisible: the
+    preconditioner still applies, the solve still converges, and only the iteration count moves. A
+    guard whose whole job is to be noticed needs a test that it is still emitted, or it can stop
+    firing without anything changing colour.
+
+    The paired silent case is what makes this a test of the *condition* rather than of the warning:
+    the same build over a lid-driven cavity has a reference flux and must say nothing.
+    """
+    mesh = structured_grid_2d(6, 6, lx=1.0, ly=1.0, named_boundaries=True)
+    walls = {side: NoSlipWall() for side in ("top", "bottom", "left", "right")}
+
+    def _built(conditions):
+        assembler = MomentumContinuity.build(
+            mesh,
+            mesh.geometry(),
+            PropertyModel({"viscosity": Constant(1.0), "density": Constant(1.0)}),
+            CompactGreenGauss(),
+            BoundaryConditions(conditions),
+        )
+        return BlockPreconditioner.build(assembler, velocity="convection")
+
+    with pytest.warns(RuntimeWarning, match="no mass flux"):
+        _built(walls)  # every patch a stationary wall: nothing prescribes a velocity anywhere
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # a spurious warning here would fail the build outright
+        _built({**walls, "top": MovingWall(velocity=(2.5, 0.0))})
 
 
 def test_convection_velocity_operator_diagonal_is_the_momentum_diagonal() -> None:

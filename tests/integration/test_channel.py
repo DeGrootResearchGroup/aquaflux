@@ -107,8 +107,13 @@ def test_line_search_is_necessary() -> None:
 
 
 def test_open_channel_solve_is_differentiable() -> None:
-    """Reverse-mode gradient of a scalar objective through the open-channel solve is finite (the IFT
-    adjoint flows through the globalized, preconditioned solve)."""
+    """The gradient through the globalized, preconditioned solve is finite and not severed.
+
+    ``0.0`` is finite, so a finiteness check alone passes on an adjoint that has been cut somewhere
+    along this path; the non-zero assertion is what that cannot survive. Checking the gradient's
+    *value* needs a finite difference, which doubles this test's cost, and the closed-form comparisons
+    live in the flow-adjoint suite.
+    """
 
     # Build the (stop_gradient-ed) preconditioner once from a concrete-viscosity assembler and reuse
     # it across mu, as the cavity adjoint test does — it only accelerates the Krylov iteration.
@@ -122,6 +127,7 @@ def test_open_channel_solve_is_differentiable() -> None:
 
     grad = float(jax.grad(mean_speed)(MU))
     assert np.isfinite(grad)
+    assert grad != 0.0
 
 
 @pytest.mark.validation

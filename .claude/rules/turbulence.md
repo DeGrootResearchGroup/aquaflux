@@ -714,7 +714,17 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     (the interior closure stays `ν_t=k/ω`). Applied in **both** forward paths (coupled residual live, in
     the Jacobian; segregated driver per sweep) so they solve the identical model. Operator-tested in
     `test_turbulence_boundary.py` (sublayer→0, log-law value, velocity-independence/finiteness, `y*_lam`,
-    differentiability); the flow-side seam is in `.claude/rules/flow.md` / `.claude/rules/discretization.md`.
+    and the **derivative in `k` against a central difference**); the flow-side seam is in
+    `.claude/rules/flow.md` / `.claude/rules/discretization.md`.
+    ⚠️ **That last one used to read "differentiability" and was a finiteness check, which cannot fail:**
+    `0.0` is finite, so wrapping `nut_wall`'s return in `stop_gradient` left all 28 tests in that file
+    green (measured 2026-08-21), and nothing anywhere else noticed either — 119 more turbulence/coupled
+    unit tests and the wall-resolved `test_channel_law_of_the_wall` all passed. The derivative is in every
+    Jacobian and every adjoint this closure appears in, so it now has a finite-difference comparison and a
+    non-zero assertion. **Its VALUE in the log branch is still integration-unverified**: doubling that
+    branch kills three unit tests and neither turbulent-channel integration test, because the coupled
+    fixtures are wall-resolved (`y*` = 1.44 at the wall-adjacent cells against `y*_lam` = 11.53), so the
+    `jnp.where` selects the zero branch at every wall face.
   - **The near-wall `k` budget is closed by FOUR pieces that only work together (binding — measured on the
     periodic channel; do not remove or reorder one in isolation).** Wiring `omega_wall` + `nut_wall` alone
     left the wall-function channel predicting **−25%** of the wall-resolved `u_τ`. The full set brings the

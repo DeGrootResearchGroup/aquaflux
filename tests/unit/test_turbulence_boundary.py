@@ -5,6 +5,7 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
+import pytest
 from aquaflux.turbulence import (
     SSTModel,
     inlet_k,
@@ -204,18 +205,38 @@ def test_nut_wall_is_velocity_independent_and_finite_everywhere() -> None:
     assert bool(jnp.all(got >= 0.0))
 
 
-def test_nut_wall_is_differentiable_in_k() -> None:
-    """Gradients flow through the wall function without NaNs (it is live in the coupled residual)."""
-    nu = 1e-5
-    d = jnp.array([3e-3])
-    grad_log = jax.grad(lambda k: jnp.sum(nut_wall(jnp.full_like(d, nu), d, k, MODEL)))(
-        jnp.array([0.3])
-    )
-    grad_sub = jax.grad(lambda k: jnp.sum(nut_wall(jnp.full_like(d, nu), d, k, MODEL)))(
-        jnp.array([1e-4])
-    )
-    assert bool(jnp.all(jnp.isfinite(grad_log)))
-    assert bool(jnp.all(jnp.isfinite(grad_sub)))
+def test_nut_wall_derivative_in_k_matches_a_finite_difference() -> None:
+    """The derivative must be the RIGHT number, not merely a finite one.
+
+    ``nu_t,wall`` is live in the coupled residual, so this derivative is part of every Jacobian and
+    every adjoint the closure appears in -- and it is the only thing about the wall model that a
+    forward-value test cannot see. A finiteness check cannot see it either: ``0.0`` is finite, so a
+    gradient severed anywhere along this path satisfies one and reports nothing.
+
+    Both branches are checked, and they are checked for different reasons. In the log layer the
+    derivative is a real number a central difference can confirm, and it must be nonzero -- that is
+    the assertion a severed gradient fails. In the sublayer ``nu_t,wall`` is identically zero over a
+    neighbourhood, so zero is the correct derivative rather than a missing one; asserting it there
+    pins the branch as flat instead of leaving a passing test that would pass anyway.
+    """
+    nu, d = 1e-5, jnp.array([3e-3])
+
+    def total(k):
+        return jnp.sum(nut_wall(jnp.full_like(d, nu), d, k, MODEL))
+
+    def central_difference(k0, step):
+        return float((total(k0 + step) - total(k0 - step)) / (2.0 * step))
+
+    k_log = jnp.array([0.3])  # y* = 90, well into the log layer
+    assert float(_y_star(k_log[0], d[0], nu, MODEL)) > MODEL.wall_y_star_lam
+    analytic_log = float(jax.grad(total)(k_log)[0])
+    assert analytic_log != 0.0  # a severed gradient reports 0.0, which is finite
+    assert analytic_log == pytest.approx(central_difference(k_log, 1e-6), rel=1e-6)
+
+    k_sub = jnp.array([1e-4])  # y* = 1.6, inside the viscous sublayer
+    assert float(_y_star(k_sub[0], d[0], nu, MODEL)) < MODEL.wall_y_star_lam
+    assert float(jax.grad(total)(k_sub)[0]) == 0.0  # nu_t,wall is flat at zero here, not undefined
+    assert central_difference(k_sub, 1e-6) == 0.0
 
 
 # --- the log-layer crossover and the closures blended over it --------------------------------

@@ -220,6 +220,78 @@ def test_coupled_adjoint_matches_finite_difference(case) -> None:
 
 
 @pytest.mark.slow
+def test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count(case) -> None:
+    """Two marches that reach the same root by different paths must give the SAME gradient.
+
+    This is the property that separates an implicit-function-theorem adjoint from the forward
+    iteration differentiated onto the tape, and matching finite differences does not establish it: a
+    fully unrolled march would also match, at the root it happened to reach, while carrying a
+    gradient that depends on how it got there. The distinguishing experiment is to change the path
+    and leave the destination alone.
+
+    ``inner_steps`` is the lever, as it is for the same property at unit level: ``1`` is a single
+    pseudo-transient step per outer iteration and ``3`` runs a dual-time inner Newton loop, so the two
+    marches take materially different numbers of outer steps through materially different
+    intermediate states, and stop at the same converged residual.
+
+    The step counts are measured -- in separate, undifferentiated runs, since the observed march
+    cannot run under a tracer -- and asserted to differ. Without that, a test that varied only a cap
+    the solve never reaches would compare a configuration against itself and pass no matter what the
+    adjoint did.
+    """
+    coupled = case["coupled"]
+    flow_ws, k_ws, omega_ws = case["coupled_start"]
+    reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
+
+    def continuation(inner_steps):
+        return coupled_continuation(
+            coupled,
+            reference_state,
+            method="twolevel",
+            inner_steps=inner_steps,
+            **PRECONDITIONER,
+        )
+
+    def objective(nu_scale, step):
+        scaled = eqx.tree_at(
+            lambda c: c.turbulence.molecular_viscosity,
+            coupled,
+            coupled.turbulence.molecular_viscosity * nu_scale,
+        )
+        _, k, _ = solve_coupled(scaled, flow_ws, k_ws, omega_ws, continuation=step, max_steps=60)
+        return jnp.sum(k**2)
+
+    single, dual = continuation(1), continuation(3)
+
+    # The paths genuinely differ, so the comparison below is not a configuration against itself.
+    def outer_steps(step):
+        seen = []
+        solve_coupled(
+            coupled,
+            flow_ws,
+            k_ws,
+            omega_ws,
+            continuation=step,
+            max_steps=60,
+            on_step=lambda report: seen.append(report),
+        )
+        return len(seen)
+
+    steps_single, steps_dual = outer_steps(single), outer_steps(dual)
+    assert steps_single != steps_dual, (
+        f"both configurations marched in {steps_single} outer steps, so this test compares one "
+        "path against itself and cannot detect a taped adjoint"
+    )
+
+    # Same root: the two marches stop on the same coupled residual tolerance.
+    assert float(objective(1.0, single)) == pytest.approx(float(objective(1.0, dual)), rel=1e-8)
+
+    grad_single = float(jax.grad(objective)(1.0, single))
+    grad_dual = float(jax.grad(objective)(1.0, dual))
+    assert grad_single == pytest.approx(grad_dual, rel=1e-6)
+
+
+@pytest.mark.slow
 def test_the_injected_adjoint_solver_reaches_the_transpose_solve_and_only_it(case) -> None:
     """``adjoint_solver`` controls the gradient's transpose solve, and leaves the forward march alone.
 

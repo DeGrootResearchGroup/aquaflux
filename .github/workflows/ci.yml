@@ -163,8 +163,12 @@ jobs:
         # belong to the heavier tiers below. --timeout names a deadlocked test
         # instead of hanging; --max-worker-restart=0 fails the run on a crashed
         # (e.g. OOM-killed) worker rather than silently retrying.
+        # `-rs` lists every skipped test WITH ITS REASON. A skip and a pass are the same exit
+        # status, so without it a module that never ran here is indistinguishable from one that
+        # passed -- which is how two modules gated on an optional solver library went four days
+        # without running while every required check stayed green.
         run: >-
-          pytest tests/unit -m "not slow and not validation" -q -n auto
+          pytest tests/unit -m "not slow and not validation" -q -rs -n auto
           --timeout=300 --timeout-method=thread --max-worker-restart=0
 
   # ---- Fast integration tests (always-on, sharded) ----------------------------
@@ -204,8 +208,9 @@ jobs:
         run: pip install -e ".[test]"
 
       - name: Run integration tests shard
+        # `-rs` names what was skipped and why -- see the note on the unit job above.
         run: >-
-          pytest tests/integration -m "not slow and not validation" -q -n 1
+          pytest tests/integration -m "not slow and not validation" -q -rs -n 1
           --splits 6 --group ${{ matrix.group }}
           --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
 
@@ -291,7 +296,7 @@ jobs:
         # aborted part way through the coupled/segregated solves.
         run: |
           set +e
-          pytest -m "slow and not validation" -q -n 1 \
+          pytest -m "slow and not validation" -q -rs -n 1 \
             --splits 3 --group ${{ matrix.group }} \
             --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
           ec=$?
@@ -341,7 +346,7 @@ jobs:
       - name: Run validation suite shard
         run: |
           set +e
-          pytest -m "validation" -q -n 1 \
+          pytest -m "validation" -q -rs -n 1 \
             --splits 5 --group ${{ matrix.group }} \
             --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
           ec=$?
