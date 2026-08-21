@@ -97,7 +97,7 @@ cfd/                                  # repo root
 │   ├── flow/                         # the coupled pressure–velocity (u, v[, w], p) block
 │   │   ├── state.py                  #   BlockStateLayout: the flat [vel_0..vel_{dim-1}, pressure] layout (pack/unpack); FlowFields / VelocityFields
 │   │   ├── momentum.py               #   MomentumContinuity: the coupled residual (each momentum component is a CellBalance over Diffusion/PressureForce/Advection; Rhie–Chow continuity; pressure pin; takes a PropertyModel → viscosity/density) + PressureForce
-│   │   ├── source.py                 #   MomentumSource (vector volume source: source/face_force/diagonal) + UniformBodyForce; where buoyancy, porous drag, rotating-frame terms attach
+│   │   ├── source.py                 #   MomentumSource (vector volume source: source/face_force/diagonal, the diagonal added to a_P) + UniformBodyForce; where buoyancy, porous drag, rotating-frame terms attach
 │   │   ├── rhie_chow.py              #   interior_mass_flux + momentum_diagonal / frozen_momentum_diagonal_parts (viscous + convective)
 │   │   ├── boundary.py               #   FlowBoundary → NoSlipWall, MovingWall, VelocityInlet, PressureOutlet
 │   │   ├── preconditioner.py         #   SIMPLE Schur pieces: pressure_schur_laplacian (a_P-based), damped_jacobi_solve
