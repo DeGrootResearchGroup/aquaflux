@@ -940,6 +940,27 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     complete factorization could reach (the entry is collapsed to one line in
     `solve-globalization-log.md`). All **four** builders now route through `_coupled_step`, and
     `test_every_continuation_builder_installs_the_same_globalization` fails if one loses the guard.
+  - **⚠️ THE FORWARD SOLVE'S STOPPING MEASURE IS `_coupled_step`'s, NOT A BUILDER'S (binding, #282,
+    2026-08-20) — and the surfaces above `_coupled_step` had drifted TWICE MORE after the tail was
+    extracted.** `_coupled_step` builds the default forward solver from `residual_norm` — the march's own
+    progress measure — so the solve is steered by and judged by one definition. What is per-family is a
+    `_ForwardSolveRegime` (rtol, restart, cap), and all four builders take `forward_rtol` /
+    `forward_restart` / `forward_max_restarts`. **Move either through those, never by passing a whole
+    `forward_solver`, which replaces the measure too.**
+    Two things this changed that a reader of an older measurement needs:
+    - **`coupled_continuation` and `coupled_lu_continuation` previously stopped on a plain 2-norm at
+      `1e-2`.** They now stop on the row-scaled measure at `0.3`. The 2-norm of the coupled residual is
+      ~100% `ω`, so it halts once `ω` is resolved while the flow-dominated Newton step is still coarse
+      — a measured ~116 % velocity error, which is what the multigrid builder's own docstring had been
+      calling effectively blind while the *default* path did exactly that.
+    - **`0.3` is the multigrid family's calibration, carried across as a property of the MEASURE and NOT
+      re-measured on those two families.** It is documented as such. The tolerance costs ~1.5× the
+      plain-2-norm cycle count where it was measured; neither flagship case runs those builders (both
+      build `coupled_amg_continuation` explicitly), so nothing on record was taken under it.
+    - **`mass_flow_coupled_continuation` is the one genuine exception and stays Euclidean at `1e-2`**,
+      because the row-equilibrated measure has no constraint-aware form — it would scale the border row
+      by a diagonal the constraint does not have. Its tolerance differs *because its measure does*; the
+      reason is recorded at `_CONSTRAINED_FORWARD` itself so it reads as a decision, not an omission.
     **`log(k+1)` does not fix this**: `k = e^w − 1` bounds `k > −1`, not `k > 0`, so the failure above is
     still reachable. It is regular at the wall (unlike `log k`) but that solves the other problem, not
     this one.
@@ -959,14 +980,18 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     escalation stays the fallback for a bad *direction*, not an overshoot. With it the full-mesh solve
     **descends** (rel 1.0 → 0.48 → 0.44 → 0.31 → 0.20 → ~0.18 over ~6 steps) instead of *stalling at
     rel 1.0* — the case is now solvable at all, a correctness fix, not just speed. **(2) The shifted
-    solve needs a large Krylov subspace:** `_COUPLED_FORWARD_SOLVER` is restart-120 GMRES (the shared
+    solve needs a large Krylov subspace:** the block family's regime (`_BLOCK_FORWARD`, ⚠️ **the symbol
+    `_COUPLED_FORWARD_SOLVER` no longer exists**) is restart-120 GMRES (the shared
     restart-40 default discards too much Arnoldi history on this stiff saddle system; ~1.4× faster to
     the same solution). **The forward-solve TERMINATION, not a tight tolerance, was the dominant coupled
     cost — and the old "tight tolerance is load-bearing under log-`ω` / loosening breaks the march" claim
-    was STALE (corrected 2026-07-28).** `_COUPLED_FORWARD_SOLVER` now stops on a global 2-norm relative
-    residual (`relative_residual_gmres`, ~1% per inexact-Newton step): it reproduces the over-solving
-    march's `x_r/h` trajectory to 3-4 significant figures per step with no log-`ω` divergence, at ~4×
-    fewer matvecs. See the `forward_solver` bullet in `.claude/rules/solve-globalization.md` for the mechanism
+    was STALE (corrected 2026-07-28).** That solve moved from `lineax`'s componentwise stop to a
+    *relative-residual* stop (`relative_residual_gmres`, ~1% per inexact-Newton step): it reproduces the
+    over-solving march's `x_r/h` trajectory to 3-4 significant figures per step with no log-`ω`
+    divergence, at ~4× fewer matvecs. ⚠️ **The norm it stops in has since moved again** — since #282
+    every family stops in the march's own row-scaled measure at `forward_rtol = 0.3`, not a global
+    2-norm at 1e-2, so the "~1%" here describes the arrangement this measurement was taken under and not
+    the current default. See the `forward_solver` bullet in `.claude/rules/solve-globalization.md` for the mechanism
     (`lineax`'s componentwise stop plus the near-zero-right-hand-side ω wall-fixation rows pinned it to
     the absolute `atol=1e-10` floor, ~9 orders past the requested 1e-3) and the two-arm refutation.
   - **The march's default residual measure is the row-equilibrated `RowScaledNorm` (`coupled_scaled_norm`),
@@ -1064,15 +1089,16 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     raises. The factorization is a host object so it rides as a **static**
     field and is applied via `jax.pure_callback`, with the adjoint's `Mᵀ` supplied directly through a
     `TransposedPreconditioner` (the generic `jax.linear_transpose` machinery cannot transpose a callback —
-    `.claude/rules/solve-direct-preconditioners.md`). **Its forward solver is
-    `_COUPLED_FACTORIZATION_FORWARD_SOLVER` (restart-10),
-    NOT the block path's restart-120 `_COUPLED_FORWARD_SOLVER`:** an exact factorization clusters the preconditioned
+    `.claude/rules/solve-direct-preconditioners.md`). **Its forward-solve regime is
+    `_FACTORIZATION_FORWARD` (restart-10),
+    NOT the block path's restart-120 `_BLOCK_FORWARD`:** an exact factorization clusters the preconditioned
     spectrum so tightly that the 1% stop is reached within a handful of vectors, and `lineax` GMRES only tests
     convergence at each restart boundary (its sole mid-cycle exit is exact Arnoldi breakdown, which does
     not fire while the residual is merely small), so a 120-vector restart pays many wasted back-solves per
     cycle where a small restart stops as soon as it has converged. The two
-    solvers are tuned oppositely on purpose — the block PC genuinely needs a large subspace per cycle, the
-    exact factorization needs a small one. Verified: `solve_coupled(continuation=coupled_lu_continuation(...))`
+    regimes are tuned oppositely on purpose — the block PC genuinely needs a large subspace per cycle, the
+    exact factorization needs a small one. That **restart** difference is real; the stopping *measure* is
+    not a per-family choice and is `_coupled_step`'s (#282). Verified: `solve_coupled(continuation=coupled_lu_continuation(...))`
     converges to the **same fixed point** as the block PC and passes the **coupled-adjoint FD gate**
     (`tests/integration/test_coupled_lu.py`, run under the `scipy` backend so CI needs no optional dep —
     the complete factorization is exact regardless of backend). With the UMFPACK backend

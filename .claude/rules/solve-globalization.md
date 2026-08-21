@@ -179,6 +179,21 @@ paths:
         flow-only policy calls `parts(flow)` while the coupled one passes all three. The flow-only path is
         still behaviour-unaffected (constant μ ⇒ frozen and live coincide); the seam exists for symmetry
         and a future variable-viscosity flow, and to delete the byte-for-byte duplicated inline pattern.
+      - **⚠️ `LiveViscosityVelocityParts.parts` declared the two turbulence blocks WITHOUT the protocol's
+        defaults until 2026-08-20 (#282), so it did not satisfy the arity its own protocol promises.**
+        Latent — nothing hands the coupled implementation to the flow-only policy today — but it would
+        have become a `TypeError` from inside a shift policy the moment the monolithic builders started
+        accepting a `velocity_shift_parts`, which is the same change that fixed it. It now takes the
+        call and raises a message naming `FrozenViscosityVelocityParts`, because unlike its sibling it
+        genuinely cannot do the job without the turbulence context. **A `Protocol` is not checked at
+        runtime, so an implementation narrower than its protocol is invisible until the call that needs
+        the wider arity — write the defaults even where the implementation will reject them.**
+      - **`velocity_shift_parts` reaches all FOUR coupled builders since 2026-08-20 (#282).** It was on
+        the two block builders only; `_monolithic_shift_source` now takes and forwards it. Nothing
+        structural had excluded it — a live source needs momentum + turbulence + the transforms, not a
+        flow preconditioner — and the configuration it was built for, a dual-time low-shift march whose
+        shift tracks the developing `ν_t`, is a *monolithic* one. So it was absent from precisely the
+        path it was written for.
     Adding a
     basis (e.g. a Fluent-style global min-physical-time-scale) is a new `ShiftBasis`; do not branch the
     policies.
@@ -245,11 +260,16 @@ paths:
     stays the fallback for a genuinely bad *direction* (an ill-conditioned shifted solve), not an
     overshoot. Like the shift, the search only reshapes the forward path — converged state and IFT
     adjoint unchanged. The flow path leaves `line_search=0`, so it is bit-identical.
-  - **`forward_solver` overrides the shared `_INEXACT_CONTINUATION_SOLVER`; the coupled default now stops
-    on a GLOBAL 2-norm relative residual (`relative_residual_gmres`, `solve/linear.py`).** `default_solver()`
-    returns the injected `forward_solver` when set, else the shared restart-40 GMRES. The coupled path
-    injects restart 120 (the stiff saddle needs hundreds of restart-40 cycles; a 40-vector subspace
-    discards too much Arnoldi history). **The dominant waste was the TERMINATION, not the restart.** The
+  - **`forward_solver` overrides the shared `_INEXACT_CONTINUATION_SOLVER`; the coupled default stops on a
+    relative residual in an INJECTED norm (`relative_residual_gmres`, `solve/linear.py`).**
+    `default_solver()` returns the injected `forward_solver` when set, else the shared restart-40 GMRES.
+    The coupled path injects restart 120 (the stiff saddle needs hundreds of restart-40 cycles; a
+    40-vector subspace discards too much Arnoldi history). ⚠️ **The norm it stops in has MOVED since this
+    was written — the "global 2-norm" below describes the arrangement these measurements were taken
+    under, not the current default.** Since #282 every coupled family stops in the march's own row-scaled
+    measure at `forward_rtol = 0.3`, built by `_coupled_step` rather than by any builder; see
+    `solve.md`'s regime table. The mechanism below is unaffected and is why the componentwise stock stop
+    was abandoned in the first place. **The dominant waste was the TERMINATION, not the restart.** The
     old `GMRES(rtol=1e-3, atol=1e-10)` reached true_rel ~4e-12 in ~15 restart cycles / 1800 matvecs on the
     cold-IC pitzDaily solve although only rtol=1e-3 was asked — because `lineax`'s stock stop is
     **componentwise** (`|r_i| ≤ atol + rtol|b_i|` under max_norm), and the ~470 near-wall ω wall-fixation
