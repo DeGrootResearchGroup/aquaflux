@@ -33,6 +33,26 @@ from aquaflux.turbulence import (
 
 from tests.integration.test_coupled_lu import PRECONDITIONER, _channel
 
+#: One extra level of smoother fill for this fixture, and why it is not the library default.
+#:
+#: The V-cycle's level smoother is a stationary incomplete-LU sweep, and an incomplete factorization
+#: takes its fill pattern from the entries that are **stored**, not from the ones that are nonzero --
+#: which is why ``AmgVCycle._live`` drops exactly-zero entries before handing the operator over.
+#:
+#: This channel starts from ``hybrid_initialize``, whose wall-normal velocity is zero to rounding, so
+#: the wall-normal face mass fluxes are ~0 and the first-order upwind switch on the ``omega`` transport
+#: sits exactly on its kink. At that state ~24 500 of the block-stencil positions carry *identically*
+#: zero coupling, so pruning removes them and the fine-level ILU(1) pattern loses the fill it was
+#: relying on: the V-cycle goes from **1 restart cycle to ~39**, and the Newton march wanders and
+#: stalls instead of converging. One more level of fill restores it (measured on this fixture: fill 1
+#: fails at 39-43 cycles; fill 2 and fill 3 both converge in 24 steps at 1 cycle, and raising the
+#: smoother *sweeps* instead does not help at all -- it is the fill that was lost, not the effort).
+#:
+#: Deliberately set here rather than in the builder: the flagship three-dimensional cases run the
+#: ILU(1) default on operators whose couplings are not degenerate, and moving a shipped default to suit
+#: a small fixture would be a change to them measured on something else entirely.
+SMOOTHER_FILL = 2
+
 
 @pytest.fixture(scope="module")
 def case():
@@ -66,7 +86,7 @@ def test_amg_solve_converges_and_matches_the_block_preconditioned_solve(case) ->
     flow_ws, k_ws, omega_ws = case["start"]
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
 
-    amg = coupled_amg_continuation(coupled, reference_state)
+    amg = coupled_amg_continuation(coupled, reference_state, smoother_fill_levels=SMOOTHER_FILL)
     flow_a, k_a, omega_a = solve_coupled(
         coupled, flow_ws, k_ws, omega_ws, continuation=amg, max_steps=40
     )
@@ -99,7 +119,9 @@ def test_amg_adjoint_matches_finite_difference(case) -> None:
     coupled = case["coupled"]
     flow_ws, k_ws, omega_ws = case["start"]
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
-    continuation = coupled_amg_continuation(coupled, reference_state)
+    continuation = coupled_amg_continuation(
+        coupled, reference_state, smoother_fill_levels=SMOOTHER_FILL
+    )
 
     def objective(nu_scale):
         scaled = eqx.tree_at(

@@ -121,6 +121,25 @@ paths:
     literature: every saddle-point-AMG ILU smoother in the published work we surveyed is **zero-fill**
     (ILUC0 / DILU); the ILU(1) default was ours alone.
 
+    ⚠️ **BUT THE REQUIRED FILL IS A PROPERTY OF THE OPERATOR, AND ON A DEGENERATE ONE IT GOES THE OTHER
+    WAY — measured 2026-08-21 on the 280-cell channel fixture (`tests/integration/test_coupled_amg.py`).**
+    There, ILU(1) **fails** (39–43 restart cycles, the Newton march wanders and stalls) while **ILU(2) and
+    ILU(3) both converge in 24 steps at 1 cycle**, and raising the *sweeps* instead does nothing (39–41).
+    So "zero fill is right" is a `bfs3d` result, not a general one, and the shipped builder default of
+    ILU(1) is not a floor that always works.
+    **What decides it is which entries are STORED, and at a degenerate state that is decided by rounding.**
+    `AmgVCycle._live` drops exactly-zero entries because an incomplete factorization takes its fill pattern
+    from stored entries. That channel starts from `hybrid_initialize`, whose wall-normal velocity is zero
+    to rounding, so the wall-normal face mass fluxes are ~0 and the **first-order upwind switch on the `ω`
+    transport sits exactly on its kink**. ~24 500 block-stencil positions then carry *identically* zero
+    coupling and are pruned, and the ILU(1) pattern loses the fill it was relying on.
+    **How this was found is the cautionary part:** a *correct* mesh-precision fix (`c975c81`, recentring
+    the centroid accumulation) moved the geometry by ~1e-15 and flipped that switch — changing 768
+    `∂R_ω/∂v` and `∂R_ω/∂p` entries of the **true** Jacobian by up to 15 %, and turning those ~24 500
+    couplings from ~1e-12 garbage into exact zeros. Before it, the garbage survived pruning and gave the
+    smoother fill *by accident*, so the V-cycle read as a 1-cycle preconditioner. It was never good there;
+    it was luckily good. Treat a V-cycle measured at a state with near-zero fluxes as unverified.
+
     The bundle members were each measured alone and then together on the same state:
     - `smoother_fill_levels=0` — the table above.
     - `smoother_sweeps=4` — ILU(0) is a *weaker* smoother than ILU(1), so extra sweeps pay more than they

@@ -475,6 +475,17 @@ tools/fastgate.sh slow         # the slow tier
 tools/fastgate.sh all          # everything
 ```
 
+**⚠️ CI IS NOT A SUPERSET OF A LOCAL RUN, AND `importorskip` IS WHY.** CI installs `.[test]`, which does
+**not** include the optional `petsc` extra, so every module guarded by `pytest.importorskip("petsc4py")`
+— `tests/integration/test_coupled_amg.py` and `test_coupled_field_split.py` — is **skipped there and runs
+only on a machine that has PETSc**. A green CI slow tier therefore says nothing about them, and their
+failures surface only locally, which reads as "broken on my machine" when it is the opposite: local is
+the only place they are checked at all. This is the same shape as a check that has stopped seeing
+anything (`tools/check_hooks.sh`, `tools/sibling_builders.py`) — a skip and a pass are indistinguishable
+from the exit status. **When a test fails locally and passes in CI, check the skip counts before assuming
+the difference is your machine**: 2026-08-21 the CI slow tier reported `4 skipped` per shard against zero
+locally, and three tests had been failing on `main` for four days with CI green throughout.
+
 `fastgate.sh` wraps `pytest -q -m <tier>`, writing the run to a file and reporting pytest's **own**
 exit status with the summary line found by pattern. Invoke `pytest` directly if you need something the
 wrapper does not pass through, but never through a pipe: this suite prints library shutdown chatter

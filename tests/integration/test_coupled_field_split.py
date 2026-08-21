@@ -176,6 +176,7 @@ def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
     """
     from aquaflux.turbulence import coupled_amg_continuation, solve_coupled
 
+    from tests.integration.test_coupled_amg import SMOOTHER_FILL
     from tests.integration.test_coupled_lu import _channel
 
     momentum, turbulence = _channel()
@@ -183,11 +184,17 @@ def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
     flow, k, omega = hybrid_initialize(momentum, turbulence)
     reference = coupled.pack_state(flow, k, omega)
 
-    split = coupled_amg_continuation(coupled, reference, field_split=True)
+    # Both arms take the fixture's extra level of smoother fill, for the reason recorded at
+    # `SMOOTHER_FILL`: at this initial condition the operator's degenerate couplings are exactly zero,
+    # so the pruned ILU(1) pattern loses the fill the V-cycle depends on. It is the same operator in
+    # both arms, so the setting cannot be what makes them agree -- only what makes either converge.
+    split = coupled_amg_continuation(
+        coupled, reference, field_split=True, smoother_fill_levels=SMOOTHER_FILL
+    )
     flow_s, k_s, omega_s = solve_coupled(coupled, flow, k, omega, continuation=split, max_steps=40)
     assert float(jnp.linalg.norm(coupled.residual(coupled.pack_state(flow_s, k_s, omega_s)))) < 1e-8
 
-    mono = coupled_amg_continuation(coupled, reference)
+    mono = coupled_amg_continuation(coupled, reference, smoother_fill_levels=SMOOTHER_FILL)
     flow_m, k_m, omega_m = solve_coupled(coupled, flow, k, omega, continuation=mono, max_steps=40)
     assert float(jnp.linalg.norm(flow_s - flow_m) / jnp.linalg.norm(flow_m)) < 1e-4
     assert float(jnp.linalg.norm(k_s - k_m) / jnp.linalg.norm(k_m)) < 1e-3
