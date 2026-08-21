@@ -66,9 +66,39 @@ Engineering Principles.
       would be wrong in exactly the cases that matter. Pin any non-trivial `diagonal` against **AD of
       the source's own `source`** — the `FixationRow.jacobian_scale` pattern
       (`test_momentum_source.py` does this for a velocity-dependent drag).
-    - **`face_force` is DECLARED, not implemented — only the `None` (uniform) case exists.** The
-      balanced-force interpolation a non-uniform force needs is deferred with buoyancy; the seam is
-      declared now so the interface cannot be built in a shape that cannot express it.
+    - **⚠️ `diagonal` was DECLARED LOAD-BEARING AND NEVER CALLED until 2026-08-20 (#279) — WIRED
+      now.** `momentum_matrix_diagonal` adds `Σ_sources source.diagonal(velocity, geometry,
+      properties)` (via the private `_source_diagonal`) on **both** the residual
+      (`boundary_corrected=True`) and frozen (`False`) paths, and `momentum_matrix_diagonal_parts`
+      adds it to the **dissipative** bucket. Nothing was wrong while the only shipped source was
+      `UniformBodyForce`, whose diagonal is zero — so the whole change is byte-identical today, and a
+      test pins that. It was a trap for the first real one: a porous drag contributes `rate·V` to its
+      own momentum row, and `a_P` is **not** preconditioner-only (it is the differentiated Rhie–Chow
+      damping `V/a_P`), so a correctly-implemented `diagonal()` sitting unused would have given a
+      wrong converged answer *and* a wrong adjoint. Two conventions, both deliberate: the total is
+      added **unfloored** (it is the operator coefficient and must stay honest, even if a source
+      genuinely weakens the diagonal), while the bucket contribution is **component-averaged and
+      floored at zero** (those two are a forward-path stabilization scale documented `>= 0` and
+      isotropic, and an anti-dissipative source must not be allowed to cancel the shift's damping).
+      Pinned the operator-consistency way, not by transcription: with a drag injected,
+      `momentum_matrix_diagonal` must still equal `diag(jacfwd(residual))` — plus a **control** that
+      the sourceless `a_P` fails that same comparison by exactly `rate·V`, so the test cannot pass
+      vacuously. The velocity AMG needed no change: it rescales its frozen hierarchy to the current
+      `a_P` by a symmetric congruence, so a diagonal source term is reproduced there exactly.
+    - **`diagonal` narrowed to take the CELL VELOCITY, not `VelocityFields` (#279).** A diagonal is
+      by definition `∂(row)/∂(that cell's own unknown)`; the boundary-face values and the gradient
+      tensor are neighbour couplings and belong to off-diagonal entries. It is also what makes the
+      wiring possible at all: two of the three assembly sites (the frozen preconditioner and the
+      shift) hold a bare velocity and reconstruct no gradient. `source` keeps the full bundle.
+    - **`face_force` is DECLARED, not implemented — only the `None` (uniform) case exists, and a
+      non-`None` return is now REFUSED at build rather than dropped (#279).** The balanced-force
+      interpolation a non-uniform force needs is deferred with buoyancy (see "Not yet built"); the
+      seam is declared now so the interface cannot be built in a shape that cannot express it.
+      `source.reject_unsupported_face_force(sources, geometry, properties, mesh)`, called once from
+      `MomentumContinuity.build`, raises `NotImplementedError` naming the source — because the mass
+      flux carries the pressure-gradient term alone, so a declared face force would be silently
+      dropped, which is the *worst* of the three possible behaviours. Evaluated at build, not per
+      residual: whether a source declares one is a property of the source, not of the state.
   - **⚠️ `body_force` is NOT a `MomentumSource`, and this is deliberate (#58, follow-up filed).** It
     is also the **control variable** of the bulk-velocity-constrained solve: `bulk_velocity_flow_solve`
     treats it as a coupled unknown, writes a traced scalar into that array leaf every residual
@@ -527,12 +557,17 @@ Engineering Principles.
 
 ## Not yet built (follow-ons, in order)
 - **Porous / conjugate interface** (`eps` porosity terms, `addCont` interface branch) — the
-  reference's distinguishing capability. **The drag half now has a home**: a `MomentumSource`
-  returning `−(μ/K)u` with the matching `diagonal` (see `source.py` above), so what remains is the
-  porosity in the continuity/transport terms and the interface branch, not the force.
+  reference's distinguishing capability. **The drag half now has a home *and that home is wired***
+  (#279): a `MomentumSource` returning `−(μ/K)u` with the matching `diagonal`, which since 2026-08-20
+  actually reaches `a_P` (see `source.py` above) instead of being declared and ignored. What remains
+  is the porosity in the continuity/transport terms and the interface branch, not the force.
 - **Buoyancy, and with it the balanced-force face treatment.** `MomentumSource.face_force` is
-  declared and returns `None` everywhere today; a spatially varying force must instead be
-  reconstructed to faces consistently with the pressure gradient and enter the mass flux beside it.
+  declared and returns `None` everywhere today — and anything else is refused at build (#279), so the
+  gap is loud rather than silent; a spatially varying force must instead be reconstructed to faces
+  consistently with the pressure gradient and enter the mass flux beside it. Wiring it needs the
+  force to reach the **boundary** closures too, and `FlowBoundary.mass_flux` already takes **nine**
+  positional arrays — past this project's own ~5-array trigger — so the per-face-state bundle is part
+  of that change, not a separable tidy-up.
   Note this is a *variable-density* regime, so it comes due alongside the conservative
   (non-kinematic) forms the flow and the k/ω transport both currently defer. **It does not implicate
   a species concentration**, whose balance `∂C/∂t + ∇·(uC) = ∇·(D∇C)` carries no density at all and

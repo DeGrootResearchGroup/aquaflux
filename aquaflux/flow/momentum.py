@@ -54,7 +54,7 @@ from .rhie_chow import (
     momentum_diagonal,
     momentum_diagonal_parts,
 )
-from .source import MomentumSource
+from .source import MomentumSource, reject_unsupported_face_force
 from .state import BlockStateLayout
 
 if TYPE_CHECKING:
@@ -260,6 +260,7 @@ class MomentumContinuity(eqx.Module):
         also a solve control variable (see :attr:`body_force`), and the two simply add.
         """
         properties.require("viscosity", "density")
+        reject_unsupported_face_force(sources, geometry, properties, mesh)
         force = jnp.zeros(mesh.dim) if body_force is None else jnp.asarray(body_force)
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells
@@ -622,6 +623,15 @@ class MomentumContinuity(eqx.Module):
         high-Reynolds pseudo-transient march (``test_channel_high_reynolds``). The block preconditioner
         needs ``a_P`` as a *frozen* coefficient; it ``stop_gradient``-s the result itself (and evaluates
         it at a ``stop_gradient``-ed state).
+
+        Any injected :class:`~aquaflux.flow.MomentumSource` adds its own
+        :meth:`~aquaflux.flow.MomentumSource.diagonal` here, which is the whole reason that member
+        exists: a velocity-dependent source (a porous drag) is part of the momentum row's diagonal, and
+        this diagonal is assembled from the face terms rather than read off the residual, so nothing
+        else would pick it up. It is added on **both** the residual and frozen paths -- a drag is real
+        stiffness in the operator being solved and in the one being preconditioned alike -- and it is
+        added **unfloored**, because this is the operator coefficient: the Rhie--Chow damping ``V / a_P``
+        it feeds is differentiated, so a source that genuinely weakens the diagonal must be allowed to.
         """
         mdot_estimate = self._lagged_mdot_estimate(velocity, grad_velocity)
         boundary_owner_coeff = (
@@ -629,13 +639,35 @@ class MomentumContinuity(eqx.Module):
             if boundary_corrected
             else None
         )
-        return momentum_diagonal(
+        a_p = momentum_diagonal(
             self.mesh.face_cells,
             self.geometry,
             self.viscosity,
             mdot_lagged=mdot_estimate,
             boundary_owner_coeff=boundary_owner_coeff,
         )
+        source_diagonal = self._source_diagonal(velocity)
+        return a_p if source_diagonal is None else a_p + source_diagonal
+
+    def _source_diagonal(self, velocity: jnp.ndarray) -> jnp.ndarray | None:
+        """The injected sources' total momentum-diagonal contribution, or ``None`` if there is none.
+
+        Each :meth:`~aquaflux.flow.MomentumSource.diagonal` is ``-d(source_i)/d(u_i)`` integrated over
+        the cell volume, so a dissipative source (a porous drag) adds a positive diagonal. Summed here
+        rather than at each of the two consumers, so the total ``a_P`` and its convective/dissipative
+        split cannot disagree about what the sources contribute.
+
+        ``None`` rather than a zero array when there are no sources: it keeps the sourceless diagonal
+        bit-identical (adding zero is not free in floating point once the array is not exactly zero)
+        and skips the property evaluation entirely.
+        """
+        if not self.sources:
+            return None
+        properties = self.properties.evaluate(self.mesh.cell_zones)
+        total = self.sources[0].diagonal(velocity, self.geometry, properties)
+        for source in self.sources[1:]:
+            total = total + source.diagonal(velocity, self.geometry, properties)
+        return total
 
     def _lagged_mdot_estimate(
         self, velocity: jnp.ndarray, grad_velocity: jnp.ndarray | None = None
@@ -672,6 +704,13 @@ class MomentumContinuity(eqx.Module):
         stabilization scale, only separated into its two parts, so it is likewise not
         operator-consistent at the boundary and never enters the residual or its adjoint.
 
+        An injected source's diagonal joins the **dissipative** bucket, averaged over components and
+        floored at zero -- see the comment at the sum for why each of those is right here and neither
+        is right in :meth:`momentum_matrix_diagonal`. Both are what break the equality above for an
+        *anisotropic* or *anti-dissipative* source: the sum is then the isotropic ``a_P`` only up to
+        that averaging and that floor. A dissipative source (every one this exists for -- a porous
+        drag) is unaffected by either.
+
         Parameters
         ----------
         velocity : jnp.ndarray
@@ -684,12 +723,26 @@ class MomentumContinuity(eqx.Module):
         tuple of jnp.ndarray
             ``(convective, dissipative)``, each shape ``(n_cells,)`` and ``>= 0``.
         """
-        return momentum_diagonal_parts(
+        convective, dissipative = momentum_diagonal_parts(
             self.mesh.face_cells,
             self.geometry,
             self.viscosity,
             mdot_lagged=self._lagged_mdot_estimate(velocity, grad_velocity),
         )
+        source_diagonal = self._source_diagonal(velocity)
+        if source_diagonal is not None:
+            # A source's stiffness is a dissipative bucket, not a flux one: it is a local reaction
+            # coefficient, so a local-time-step shift that damps by it is damping by a real stability
+            # limit. Averaged over components because these buckets are isotropic by contract while a
+            # source diagonal need not be (an anisotropic porous resistance is the case that differs);
+            # the average is what keeps their sum equal to the isotropic `a_P` above.
+            #
+            # Floored at zero because these two are a forward-path stabilization scale documented
+            # non-negative, and a source that *feeds* the velocity (a negative diagonal) would
+            # otherwise cancel the damping the shift exists to provide. The unfloored value stays in
+            # `momentum_matrix_diagonal`, which is the operator coefficient and must stay honest.
+            dissipative = dissipative + jnp.maximum(jnp.mean(source_diagonal, axis=1), 0.0)
+        return convective, dissipative
 
     def _momentum_residual(
         self,

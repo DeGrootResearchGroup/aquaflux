@@ -133,9 +133,12 @@ def momentum_diagonal(
         convective, and transient contributions are the same for every component (isotropic
         viscosity, a component-independent mass flux), so the columns are equal here; the
         per-component shape is the seam a directional momentum source (e.g. anisotropic porous
-        resistance) would fill differently. The Rhie--Chow coefficient projects it onto the face
-        normal as ``sum_i n_i^2 (V / a_P_i)``, which reduces to the scalar ``V / a_P`` for equal
-        components.
+        resistance) fills differently. **This function assembles the face terms only** -- an injected
+        source's contribution is added by
+        :meth:`~aquaflux.flow.MomentumContinuity.momentum_matrix_diagonal`, which is where the sources
+        live -- so what comes back here is the full ``a_P`` only for a sourceless assembler. The
+        Rhie--Chow coefficient projects it onto the face normal as ``sum_i n_i^2 (V / a_P_i)``, which
+        reduces to the scalar ``V / a_P`` for equal components.
     """
     if boundary_owner_coeff is None:
         # The interior-style all-faces form: the isotropic diagonal is exactly the sum of the
