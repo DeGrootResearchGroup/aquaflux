@@ -407,28 +407,53 @@ physical flux as one honest residual term; AD assembles the matrix.
 of small spatial vectors — the per-face/per-cell dot product `dot(a, b)`, squared magnitude
 `norm_squared(a)`, and scaling a vector field by a per-element scalar `scale(vectors, scalars)`
 — are defined once here and imported wherever the geometry, schemes, or flux operators contract
-or scale a `(..., dim)` field (it imports only `jax.numpy`, so any subsystem may use it). **Preference (binding): keep vector math
+or scale a `(..., dim)` field (it imports nothing from `aquaflux` — only `jax.numpy` and the
+standard library — so any subsystem may use it). **Preference (binding): keep vector math
 readable — reach for these helpers instead of open-coding `jnp.sum(a * b, axis=-1)` or
 `s[..., None] * v`.** The raw axis/broadcast bookkeeping obscures the math and drifts; the named
 helper states the intent, and gives one home to change (Principle 2). Rank-3 tensor algebra
 (Hessian outer products, `einsum`) stays explicit — the helpers target rank-2 vector fields.
 
-> **⚠️ AND THAT ONE HOME IS CURRENTLY COSTING ~1.6× ON EVERY RESIDUAL — measured 2026-08-21, not yet
-> fixed.** `dot` is written `jnp.sum(a * b, axis=-1)`, and rooting the fusion at a `reduce` makes
-> XLA:CPU emit a **`kCustom __ynn_fusion`** kernel with an **empty `outer_dimension_partitions`** — i.e.
-> single-threaded — while every neighbouring `kLoop` fusion is partitioned 2–4 ways. In one corrected-
-> gradient reconstruction, 25 kernels are partitioned and exactly 3 are not: the three `dot`s, at
-> **40 % of kernel time**. Rewriting it as an unrolled component sum removes the `kCustom` kernel
-> entirely (verified in the compiled HLO: 1 → 0) and measures **2.0–2.8× on the primitive** and, on the
-> real pitzDaily coupled RANS residual, **4.18 → 2.60 ms (1.61×) and jvp 8.81 → 6.08 ms (1.45×)**, with
-> `|R|` agreeing to 1.2e-14.
->
-> `dot` is imported by 16 modules — diffusion, advection, Rhie–Chow, momentum, SST, the sources — so
-> this is a package-wide change, which is exactly why it belongs in its own change and not folded into
-> whatever is in flight. ⚠️ **It is NOT bit-identical**: the unrolled form contracts differently under
-> FMA (measured 1.75e-16 relative in isolation, up to ~5.6e-12 chained at dim 9), so any test asserting
-> `jnp.array_equal` against the reduce form has to be re-pinned as part of it. The guidance above
-> stands unchanged — keep calling `dot`; what changes is what `dot` does.
+**⚠️ `dot` IS DELIBERATELY NOT SPELLED `jnp.sum(a * b, axis=-1)` — do not "simplify" it back
+(measured 2026-08-21).** It multiplies the operands and then sums the components **explicitly**.
+The two spell the same contraction, but on the CPU backend a fusion rooted at a *reduction* is
+emitted as a `kCustom __ynn_fusion` kernel with an empty `outer_dimension_partitions` — i.e. it
+runs on **one thread** — while the `kLoop` fusions around it are split 2–4 ways. In one
+corrected-gradient reconstruction 25 kernels were thread-partitioned and exactly 3 were not: the
+three `dot`s, at **40 % of kernel time**. Configuration for every number here: jax/jaxlib 0.10.2,
+CPU backend, macOS arm64, 11 cores, x64 on, compiled ILU(0) live. On the primitive the compiled
+`__ynn_fusion` count goes **1 → 0** and the contraction runs **2.9×** faster at `n = 24730,
+dim = 2` and **2.2×** at `n = 400000, dim = 3`. On the pitzDaily coupled RANS residual (12225
+cells, evaluated at the time-accurate OpenFOAM field mapped cell for cell onto that mesh) the
+residual evaluation is worth **1.6–1.8×** and its `jvp` **1.2–1.5×** — five runs spanning two
+bases (before and after the gradient-scheme work of #297), including the independent measurement
+that first found this, with `|R|` agreeing to **6.5e-15** relative every time. **Read the residual
+figure as the solid one and the `jvp` as merely indicative**: the former lands in its band on every
+run, while the latter's spread is wider than this instrument resolves — these are wall-clock on a
+shared desktop, where a per-application timing is already on record as carrying ~15 % spread, and
+the slowest run had both arms ~30 % up on the others. The contention-immune evidence is the kernel
+structure, not the seconds. `norm_squared` delegates to `dot` and inherits it.
+- **Multiply first, unroll only the sum.** `sum(a[..., i] * b[..., i] ...)` off the *unbroadcast*
+  operands breaks broadcasting: an operand with a trailing axis of 1 against the other's `dim` —
+  which the reduction handles silently — runs off the end of that axis. Indexing the already
+  broadcast product preserves it. Pinned by a unit test, as is the empty-`dim` case.
+- **⚠️ Form the product with `jnp.multiply`, not `*`.** Two NumPy operands multiplied with `*` give
+  a NumPy array, so the unrolled sum hands back an `ndarray` where the reduction always returned a
+  JAX array — silently dropping `.at[]` for callers that pass concrete arrays. This is the one way
+  the rewrite can change behaviour rather than just rounding, and no existing test caught it; there
+  is one now.
+- **⚠️ IT IS NOT BIT-IDENTICAL to the reduction.** The explicit sum lets the compiler contract a
+  different pair of the multiply-adds, so results move by a rounding of the summed terms (~2–6e-16
+  of `Σ|aᵢbᵢ|`, which is an unbounded *relative* move on a near-cancelling dot product — judge such
+  a difference against the magnitudes summed, never against the answer). Two categories, not to be
+  conflated when a test goes red: one comparing two paths that **both** route through `dot` still
+  holds exactly, and a break there means the change is wrong; only a value pinned to what the
+  *reduction* computed is legitimately re-pinned. In the event the fast, slow and validation tiers
+  all passed unchanged — no test anywhere was pinned to the reduction's exact bits.
+- **This is what one home buys.** `dot` is imported by 14 modules — geometry, schemes, diffusion,
+  advection, Rhie–Chow, momentum, the SST closure and the sources — so a one-line change reached
+  every residual evaluation at once. Open-coded at each call site it would have reached none of
+  them.
 
 **Frozen preconditioner operators are assembled in one place, `aquaflux/solve/frozen_operator.py`.**
 The AMG preconditioners coarsen a *frozen* linearization of a transport equation — a symmetric
