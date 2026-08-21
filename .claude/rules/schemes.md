@@ -421,11 +421,25 @@ log from a skew-free mesh, it was never evidence of non-orthogonality.**
     `1.4e-05` relative gradient error — three orders below the 1–2 % field difference between the two
     *schemes*. Corroborated independently: `schemes.md`'s own recorded reach-3 Jacobian error of
     1.99e-07 at `sweeps=4` is `ρ³` to one digit.
-  - **It compounds, because the sweep count sets the residual's Jacobian reach** (`sweeps + 1`, and the
-    corrected gradient carries *exactly zero* mass beyond it). `sweeps=2` collapses the required probe
-    reach from 5 to 3 — which this file prices at **~35 % of the standard arm's march wall**. Half of
-    that (the probe side) is already reachable today without touching the residual, via
-    `narrow_gradient_sweeps` / `PITZ_PROBE_GRADIENT_SWEEPS`.
+  - **It compounds, because the sweep count sets the residual's Jacobian reach** — but ⚠️ **NOT by
+    `sweeps + 1` for every column, and a first version of this entry said `sweeps=2` collapses the reach
+    from 5 to 3, which is WRONG.** Measured directly (coloured probe against the true jvp, per column
+    field, at `hybrid_initialize` on pitzDaily):
+
+    | sweeps | reach 3 (165 probes) | reach 4 (265) | reach 5 (380) |
+    |---|---|---|---|
+    | **4 (shipped)** | 2.45e-07 (**p column 4.0e-07**) | 4.66e-10 | **9.5e-16** ← needs reach 5 |
+    | **2** | 1.39e-09 (p column 2.1e-16) | **2.6e-16** ← needs reach 4 | 2.6e-16 |
+    | **1** | **2.6e-16** ← needs reach 3 | 2.6e-16 | 2.6e-16 |
+
+    The **pressure** column does track `sweeps + 1` exactly (float64-exact at reach 5/3/2 for sweeps
+    4/2/1) — it is the gradient-carried column. The **`u`/`v`** columns carry a further ring from the
+    eddy viscosity's strain-rate dependence, which is *not* the gradient's, so they reach `sweeps + 2`.
+    So `sweeps=2` needs reach **4**, worth ~14 % of the march rather than the ~35 % first claimed.
+    (This run also independently reproduces this file's recorded 1.99e-07 at reach 3 — measured
+    2.45e-07 — and its attribution to the pressure column.) At reach 3, `sweeps=2` leaves 1.4e-09 where
+    `sweeps=4` leaves 2.45e-07, and 2e-07 is the value recorded as *breaking* the incomplete-LU bundle
+    — so reach 3 may yet be safe at `sweeps=2`, but that needs a march and has not been run.
   - **The fix is to stop guessing it: estimate `ρ` once at case-build time** (a few power iterations on
     the geometry-only iteration matrix, which is constant) and set `sweeps = ceil(log(tol)/log(ρ))`.
     That gives the adaptivity a runtime convergence test would, at zero per-call cost, with no
@@ -437,6 +451,41 @@ log from a skew-free mesh, it was never evidence of non-orthogonality.**
   - ⚠️ **What this does NOT license:** lowering the shipped default without per-mesh calibration. The
     same count that is wasteful on pitzDaily is *insufficient* at 30 % skew, and a fixed sweep fails
     **silently** — there is no residual test to trip.
+
+- **PROPOSED, NOT BUILT — `GradientScheme.bind(mesh, geometry) -> BoundGradient`, and build-time sweep
+  calibration on the same seam.** Two investigations arrived at the same place from different
+  directions; recording it because the second went looking for the first and could not find it.
+  - **The seam.** `gradients()` takes `mesh` and `geometry` on every call and rebuilds every
+    geometry-only term inside them. `bind` would split the *choice* (the injected, mesh-free
+    `GradientScheme`) from the *derived product* (arrays, no mesh argument), exactly as `mesh.geometry()`
+    already does and as `MomentumContinuity.build` already does for `interp_factor`/`normal_distance` —
+    the gradient scheme is the one thing that opted out. `gradients()` then loses both parameters, which
+    is the real payoff: today you can hand it a different mesh than the assembler holds and get a
+    silently wrong answer. Three call sites change. ⚠️ **Do not sell it as performance** — XLA already
+    CSEs the shared geometry, so it is worth ~2 % of a residual and ~0.4 % of a jvp; the Betchen prologue
+    is the only piece large enough to matter (~4.7 % of a march step).
+  - **⚠️ Binding OUTSIDE the differentiated region silently kills mesh-shape gradients** —
+    `‖d(objective)/d(node_coords)‖ = 0.0`, no error. Binding inside is bit-identical to today. Not a new
+    hazard (the same rule already governs `mesh.geometry()`), but now measured.
+  - **Calibration belongs on that seam**, because `bind` is by construction the one point that is
+    concrete-geometry and once-per-case — which is exactly the boundary a static `sweeps` needs.
+    `bound.calibrate(tol=...) -> SweptGradientSolve(sweeps=<int>)`, with the estimator living beside
+    `GradientSolve` rather than inside `CorrectedGreenGauss` so Betchen's two systems get it unchanged.
+    ⚠️ Its two public factories are **one builder plus an injected difference** (which systems to
+    calibrate) — write them against one private tail and run `tools/sibling_builders.py`, or it is the
+    drift defect on the day it is added.
+  - **Betchen's own calibrated counts, measured:** outer `ρ` = 0.159 (pitzDaily) to 0.238 (30 %
+    perturbed) — **barely moving with mesh quality**, which corroborates that the outer Schur system's
+    difficulty is intra-cell gradient–Hessian coupling rather than skewness, and means the outer count is
+    nearly mesh-independent. Inner `ρ` = 0.0074 to 0.091. At `tol=1e-4` that is outer **6**, inner **2**.
+    ⚠️ Read against the shipped 20/10, which target ~1e-10 (the accuracy the Krylov default delivered),
+    not 1e-4 — the two are answering different questions, and the shipped pair is not "20 against 6".
+  - **The inner truncation sets a floor no number of outer sweeps removes** (pitzDaily: inner 1 → 4.7e-08,
+    2 → 7.2e-11, 3 → 5.1e-13), but it is attenuated into the gradient by 1e-5 to 1e-3, so calibrating both
+    at the same tolerance carries three orders of margin. Measured on two meshes only — check the
+    composition per mesh rather than assuming it.
+  - ⚠️ **Distributed:** the estimator norms the whole local vector, which double-counts ghost rows.
+    Calibrate on the global mesh **before** partitioning, or supply an owned-only reduction.
 
 - **`SweptGradientSolve(sweeps)` — BUILT. The scalable `GradientSolve` strategy**, injected via
   `CorrectedGreenGauss(solver=SweptGradientSolve(n))` — **not a separate scheme** (same
