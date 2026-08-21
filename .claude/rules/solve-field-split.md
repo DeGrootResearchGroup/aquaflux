@@ -13,6 +13,69 @@ paths:
 > frontmatter) and leave a current-status summary here, following the pattern in `solve-flow-block.md` /
 > `solve-flow-block-log.md`. See `solve.md`'s "Where new content goes".
 
+
+## 🔬 PROTOTYPE — `TracedFieldSplit`: the composition on device (2026-08-20)
+
+**Built, tested, bit-identical to the host split, and wired into nothing.** `traced_field_split.py`
+holds `TracedFieldSplit` + `traced_field_split(...)`; it is deliberately **not** in
+`solve/__init__.__all__`, because exporting publishes to the documentation site and an unwired
+prototype should not read as a supported way to build a preconditioner.
+
+**The problem it addresses.** `BlockTriangularFieldSplit.apply` is numpy, and is reached from the
+jitted Krylov solve through a `jax.pure_callback`. When **both** blocks are traced cycles — which the
+shipped `simplesmooth` + `jacobi` bundle is — the composition layer is the only thing on the host, and
+it forces the round trip anyway. One preconditioner application:
+
+| step | direction |
+|---|---|
+| the callback | device → host |
+| leading cycle, via `jnp.asarray` / `np.asarray` | host → device → host |
+| the coupling product, in `scipy` | host |
+| trailing cycle, likewise | host → device → host |
+| the callback returns | host → device |
+
+Six transfers of the whole state vector per apply, each a synchronization point that drains the device
+pipeline. On `bfs3d` (138240 dofs) that is ~6.6 MB per apply and ~29 GB per march. It is paid against
+a cycle a GPU makes *faster*, so it grows as a share of the solve rather than shrinking — the
+structural reason the traced hierarchies cannot pay off on an accelerator today.
+
+**Measured (CPU, banded synthetic at 12000 and 48000 dofs, same two inverse objects on both sides):**
+
+| | agreement | host | traced | ratio |
+|---|---|---|---|---|
+| 12000 dofs | **0.0e+00** | 2.34 ms | 2.47 ms | 1.05× |
+| 48000 dofs | **0.0e+00** | 9.41 ms | 9.57 ms | 1.02× |
+
+Bit-identical, and within this instrument's own ~15 % spread on cost. **That is the result to want
+here** — CPU has nothing to gain from removing a memcpy, so the number to check is that nothing was
+lost. The GPU win is the removed round trip and is *reasoned from the transfer count, not measured*;
+there is no device in this environment.
+
+**It has no `transpose` argument, and that is the design rather than an omission.** The host split
+needs one because it is numpy: transposing a block-triangular inverse means reversing the solve order,
+transposing the coupling **and** transposing each block inverse, each arranged by hand. This map is
+traced and linear, so `jax.linear_transpose` derives `Mᵀ` from the forward code — which is how the
+adjoint already obtains it, and how `HierarchyBlockInverse` obtains its own. A test asserts it agrees
+with the host's hand-arranged transpose to 1e-13, so "one implementation instead of two" is checked
+rather than assumed.
+
+⚠️ **A bound method of an `equinox.Module` cannot be handed to `jax.jit`.** `jit` keys its cache on the
+callable, and a bound method carries the module into that key; this one holds array leaves and is
+deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` from deep inside
+`equinox`'s `__hash__`. `matvec()` returns a plain closure for this reason. Cost an hour the first time.
+
+**What remains before it can carry a march** (the honest boundary of the prototype):
+
+1. `FieldSplitAmgPreconditioner` still builds the host split; nothing constructs this one.
+2. **The refresh shape is the real design question.** `HostPreconditioner` is deliberately *not* an
+   `equinox.Module` so it can be mutated in place while riding as a **static** field of the shift
+   policy — that is what keeps a mid-march refresh a compilation-cache hit. `TracedFieldSplit` is a
+   Module with traced leaves and must ride as a jit **argument** instead. These are different plumbing
+   shapes and the second is not a drop-in for the first.
+3. It reaches the block inverses through the private `_solve`. A declared traced-cycle contract is the
+   right seam — see `solve-refuted-directions.md`'s pointer to the duck-typing issue.
+4. No GPU measurement exists.
+
 ## The field split — a saddle plus two transported scalars
 
 - **⚠️ WE ARE NOT SOLVING A SADDLE-POINT PROBLEM — we are solving a saddle point PLUS two
