@@ -170,6 +170,25 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
   `.claude/rules/solve-globalization.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
   `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output factor — the
   reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a frozen dataclass.
+  - **Which continuation a solve runs is ONE injected source, not two parallel branches (binding, #278,
+    2026-08-20).** `solve_coupled` needs a continuation twice — the initial build and every refresh —
+    and those were written as two independent two-way branches (`refresh.builder` vs the default
+    `coupled_continuation`), one at the build and one inside the refresh loop. `_ContinuationSource`
+    (`build(state)` / `refresh(state, previous, residual_norm)`) makes it one decision, with
+    `_CallerBuiltContinuation`, `_DefaultContinuation` and `_FinishedContinuation` as its three cases.
+    That is the shape #282 had just been fixed for one level down; here it also carried a live defect.
+    - **⚠️ `method` / `reference_state` / `**continuation_kwargs` are REFUSED where they cannot be
+      forwarded, not dropped.** They configure the continuation `solve_coupled` builds. On the two paths
+      where it builds none — an explicit `continuation`, or a `RefreshPolicy(builder=...)` — they reached
+      nothing at all, with no error and no log line, so a march asked for `inner_steps=3` /
+      `positivity_floor=1e-6` and silently ran the library defaults. `**kwargs` is what made it quiet:
+      it accepts every keyword and checks none, and it is the main entry point's door. This had already
+      cost a study harness (`lu_vs_hostilu.py` carried a warning comment about a `precondition_step=`
+      swallowed here instead of reaching its `RefreshPolicy`).
+    - **`method` now defaults to a sentinel (`_UNSET`), resolving to `"twolevel"` when the solve builds
+      the continuation.** Both a real default and an explicit `None` ("no preconditioner method") are
+      meaningful, so neither could stand for "not given" — and without that distinction the guard could
+      not refuse an explicitly-passed `method` without refusing the default nobody asked for.
   - **`solve_coupled(refresh=RefreshPolicy(trigger=…))` segments the march to re-freeze the preconditioner — and a refresh
     must CARRY the shift diagonals, not rebuild them (binding).** With a trigger set, the march runs as a
     sequence of *observed* segments (`aquaflux.solve.forward_march`): each steps until the trigger judges
@@ -1605,6 +1624,21 @@ tuning follow-up noted above.
     in `solve_kwargs` is forwarded to each per-Re solve, so the pseudo-transient march, the dual-time
     march (`inner_steps>1`, whose observed rungs default to the `DualTimeControl` Courant ramp), the
     preconditioner options and the observers all compose unchanged — no coupling to which globalization runs.
+  - **⚠️ EXCEPT the continuation keywords, which are split BOTH WAYS between the ramp and the target
+    (binding, #278, 2026-08-20).** A pre-built `continuation` / `reference_state` is frozen at the
+    *target* viscosity, so it reaches the **final** solve only and each lower-Re point builds its own
+    (`ramp_kwargs`, long-standing). The mirror image is that everything which *configures* a build —
+    `method`, and every keyword bound for `coupled_continuation` — reaches the **ramp** only, because
+    the target is not building one when the caller supplied it (`target_kwargs`, keyed on `_SOLVE_ONLY`,
+    derived from `solve_coupled`'s own signature so the two cannot drift). **Passing both at once is the
+    ordinary case, not a mistake.** Only the ramp half existed, so such a call reached `solve_coupled`
+    with a continuation *and* the settings for one — ignored in silence there until #278 made it a
+    `TypeError`, at which point the missing half surfaced as a failing adjoint test.
+  - **⚠️ A forwarding wrapper hides call sites from an audit scoped to the callee.** An AST scan of
+    `solve_coupled(` sites cleared this change and missed this one entirely, because the offending call
+    is spelled `solve_reynolds_continuation(...)` and the keywords travel through `**solve_kwargs`.
+    When you change a contract on `solve_coupled`, scan its wrappers too — `solve_reynolds_continuation`
+    and `solve_coupled_mass_flow` are the ones that exist.
   - **HOW MANY rungs: `bfs3d` keeps TWO, but the Re/100 anchor is a closer call than it looks
     (measured 2026-08-09).** Configuration for both numbers: field-split AMG preconditioner,
     `refresh_on_cycles=3`, `retry.on_alpha` 0.01, ILU(0)×4, plain aggregation, `coarse_eq_limit` 2000,

@@ -165,7 +165,14 @@ def _record_solves(monkeypatch):
     def fake_solve_coupled(coupled, flow=None, k=None, omega=None, **kwargs):
         # The momentum dynamic viscosity encodes the scale (mu = factor * RHO * NU).
         scale = float(coupled.momentum.properties.properties["viscosity"].value / (RHO * NU))
-        calls.append({"scale": scale, "seed_is_none": flow is None, "rtol": kwargs.get("rtol")})
+        calls.append(
+            {
+                "scale": scale,
+                "seed_is_none": flow is None,
+                "rtol": kwargs.get("rtol"),
+                "kwargs": kwargs,
+            }
+        )
         return result
 
     monkeypatch.setattr(reynolds, "solve_coupled", fake_solve_coupled)
@@ -199,6 +206,55 @@ def test_zero_points_calls_solve_once_at_the_target(monkeypatch) -> None:
     solve_reynolds_continuation(_tiny_coupled(), n_points=0, rtol=1e-8)
     assert len(calls) == 1
     assert calls[0]["scale"] == 1.0 and calls[0]["seed_is_none"] and calls[0]["rtol"] == 1e-8
+
+
+def test_the_ramp_and_the_target_get_opposite_halves_of_the_continuation_settings(
+    monkeypatch,
+) -> None:
+    """A pre-built continuation goes to the target; the settings that build one go to the ramp.
+
+    Passing both at once is the ordinary case rather than a mistake: the pre-built step is frozen at the
+    *target* viscosity, so each lower-Re point has to build its own, from ``method`` and whatever else
+    the caller passes for ``coupled_continuation``. The split therefore runs both ways, and only the
+    ramp half existed — so the target solve was handed a continuation *and* the settings for one, which
+    ``solve_coupled`` used to ignore in silence and now rejects outright.
+    """
+    calls = _record_solves(monkeypatch)
+    step = object()  # `solve_coupled` is patched out, so its type does not matter here
+    solve_reynolds_continuation(
+        _tiny_coupled(),
+        n_points=1,
+        rtol=1e-10,
+        continuation=step,
+        method="twolevel",
+        schur_scaling="msimple",
+    )
+    ramp, target = calls
+    # The ramp builds its own at its own viscosity, so it takes the settings and not the frozen step.
+    assert "continuation" not in ramp["kwargs"]
+    assert ramp["kwargs"]["method"] == "twolevel"
+    assert ramp["kwargs"]["schur_scaling"] == "msimple"
+    # The target takes the frozen step and none of the settings, which describe a build it will not do.
+    assert target["kwargs"]["continuation"] is step
+    assert "method" not in target["kwargs"]
+    assert "schur_scaling" not in target["kwargs"]
+    # ...but the keywords that drive the *solve* rather than a build still reach it.
+    assert target["kwargs"]["rtol"] == 1e-10
+
+
+def test_without_a_continuation_the_target_keeps_every_setting(monkeypatch) -> None:
+    """The strip is conditional: with nothing pre-built, the target builds its own and needs them all.
+
+    Stripping unconditionally would silently drop the target's configuration, which is the same defect
+    one layer down and the reason this is pinned rather than assumed.
+    """
+    calls = _record_solves(monkeypatch)
+    solve_reynolds_continuation(
+        _tiny_coupled(), n_points=1, rtol=1e-10, method="twolevel", schur_scaling="msimple"
+    )
+    target = calls[-1]
+    assert target["kwargs"]["method"] == "twolevel"
+    assert target["kwargs"]["schur_scaling"] == "msimple"
 
 
 def test_point_setup_builds_per_point_kwargs_and_materializes_the_first_seed(monkeypatch) -> None:

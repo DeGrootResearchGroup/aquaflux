@@ -286,11 +286,13 @@ class RetryPolicy:
         Returns
         -------
         str or None
-            ``"diverged"``, ``"alpha"``, or ``None`` to keep the step. There is deliberately no
-            ``"cycles"`` reason: a cycle count is answered by refreshing the preconditioner and by
-            :attr:`abort_above_cycles`, never by stiffening the shift (see the class docstring).
-            ``on_alpha`` unset disables escalation entirely, leaving a diverged step to the
-            tight-Krylov retry.
+            ``"diverged"``, ``"alpha"``, ``"cycles"``, or ``None`` to keep the step. The first two are
+            in :data:`ESCALATING_REASONS`; ``"cycles"`` deliberately is **not**, so a step that merely
+            cost too much is redone at the *same* shift. A cycle count is answered by refreshing the
+            preconditioner, never by stiffening the shift (see the class docstring), and
+            :attr:`abort_above_cycles` is what raises it at all -- with that unset, ``"cycles"`` is
+            never returned. ``on_alpha`` unset disables *escalation* entirely, leaving a diverged step
+            to the tight-Krylov retry.
         """
         if not self.escalates and self.abort_above_cycles is None:
             return None

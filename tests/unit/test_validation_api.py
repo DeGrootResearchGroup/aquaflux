@@ -24,10 +24,14 @@ milliseconds and can live in the always-on gate:
 * every **literal keyword argument** a case passes to an ``aquaflux`` callable is one that callable
   accepts.
 
-⚠️ **The main entry point is inside the blind spot.** ``solve_coupled`` takes ``**continuation_kwargs``
-and forwards them to whichever continuation builder it is given, so *every* keyword is "accepted" there
-and none is checked -- and which builder receives them is not knowable statically. A misspelled or
-retired setting passed through that door reaches the builder and raises at run time, not here.
+⚠️ **The main entry point is partly inside the blind spot.** ``solve_coupled`` takes
+``**continuation_kwargs`` and forwards them to whichever continuation builder it is given, so *every*
+keyword is "accepted" there and none is checked here -- which builder receives them is not knowable
+statically. A misspelled or retired setting passed through that door reaches the builder and raises at
+run time, not here. What ``solve_coupled`` now *does* catch itself is the case where there is no builder
+to reach: given an explicit ``continuation`` or a ``RefreshPolicy(builder=...)``, a continuation setting
+is refused rather than dropped in silence, which is how a ``precondition_step=`` meant for a
+``RefreshPolicy`` used to disappear.
 
 It cannot see a *semantic* break -- a parameter that still exists but now means something else, or a
 type that changed under a name that did not (the ``RefreshPolicy`` case above is exactly this, and

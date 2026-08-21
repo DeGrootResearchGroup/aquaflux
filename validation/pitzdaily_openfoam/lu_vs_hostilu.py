@@ -196,8 +196,9 @@ def run(name, build, coupled, start):
         retry=RETRY,
         on_step=watch,
         on_checkpoint=logger.on_checkpoint,
-        # ⚠️ THROUGH A RefreshPolicy. `solve_coupled` ends in `**continuation_kwargs`, so a bare
-        # `precondition_step=` is SWALLOWED rather than rejected and the refresh never runs.
+        # THROUGH A RefreshPolicy, which is where `precondition_step` lives. A bare `precondition_step=`
+        # used to be swallowed by `solve_coupled`'s `**continuation_kwargs` and the refresh never ran;
+        # it is now rejected, but pass it where it belongs rather than relying on the error.
         **(
             {"refresh": RefreshPolicy(precondition_step=precondition_step)}
             if precondition_step

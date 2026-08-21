@@ -45,6 +45,7 @@ from aquaflux.turbulence import (
     production_and_limit,
     production_cap_active,
 )
+from aquaflux.turbulence import coupled as coupled_module
 from aquaflux.turbulence.coupled import (
     _BLOCK_FORWARD,
     _FACTORIZATION_FORWARD,
@@ -381,6 +382,124 @@ def test_the_live_shift_source_honours_its_protocol_arity() -> None:
     assert len(live.parts(flow, k, omega)) == 2
     with pytest.raises(TypeError, match="FrozenViscosityVelocityParts"):
         live.parts(flow)
+
+
+def test_continuation_settings_are_refused_where_they_would_be_dropped() -> None:
+    """A setting the solve cannot forward is an error, not a silent no-op.
+
+    ``method`` / ``reference_state`` / ``**continuation_kwargs`` configure the continuation
+    ``solve_coupled`` builds. On the two paths where it builds none -- an explicit ``continuation``, or a
+    ``RefreshPolicy(builder=...)`` -- they reached nothing at all: a solve asked for ``inner_steps=3``
+    and ``positivity_floor=1e-6`` ran the library defaults, with no error and no log line. ``**kwargs``
+    is what made it quiet, since it accepts every keyword and checks none, and that door is the main
+    entry point's.
+
+    The message must name the keywords, because the whole failure mode is not knowing they were lost.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    flow, k, omega = coupled.physical_fields(state)
+    step = coupled_continuation(coupled, state, method=None)
+
+    for kwargs in (
+        {"continuation": step, "inner_steps": 3},
+        {"continuation": step, "positivity_floor": 1e-6},
+        {"continuation": step, "method": "twolevel"},
+        {"continuation": step, "reference_state": state},
+        {"refresh": RefreshPolicy(builder=lambda s: step), "inner_steps": 3},
+        {"refresh": RefreshPolicy(builder=lambda s: step), "method": None},
+    ):
+        offender = next(iter(set(kwargs) - {"continuation", "refresh"}))
+        with pytest.raises(TypeError, match=offender):
+            solve_coupled(coupled, flow, k, omega, max_steps=1, **kwargs)
+
+
+def test_the_settings_are_still_accepted_where_the_solve_does_build_the_continuation() -> None:
+    """The guard must not fire on the path the settings are for -- including under a builder-less refresh.
+
+    A ``RefreshPolicy`` with a trigger but no builder still leaves ``solve_coupled`` building the
+    continuation, so it keeps receiving the configuration. Getting that wrong would break every staged
+    march in the suite, which is why it is pinned beside the rejection rather than assumed.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    for refresh in (NO_REFRESH, RefreshPolicy(trigger=CycleGrowthTrigger())):
+        source = coupled_module._continuation_source(
+            coupled=coupled,
+            continuation=None,
+            refresh=refresh,
+            method=None,
+            reference_state=state,
+            kwargs={"inner_steps": 2},
+        )
+        assert isinstance(source, coupled_module._DefaultContinuation)
+        # ...and it carries them, rather than accepting and then dropping them one layer down.
+        assert source.kwargs == {"inner_steps": 2}
+        assert source.reference_state is state
+        assert source.method is None
+
+
+def test_an_unnamed_method_still_defaults_to_the_two_level_scalar_amg() -> None:
+    """`method` grew a sentinel default so "not given" is distinguishable from "given as None".
+
+    Both are meaningful — ``None`` selects no preconditioner method at all — so neither could stand for
+    the other, and without the distinction the guard above could not refuse an explicitly-passed
+    ``method`` without also refusing the default nobody asked for. The resolved default must not move.
+    """
+    assert inspect.signature(solve_coupled).parameters["method"].default is coupled_module._UNSET
+    source = coupled_module._continuation_source(
+        coupled=None,
+        continuation=None,
+        refresh=NO_REFRESH,
+        method=coupled_module._UNSET,
+        reference_state=None,
+        kwargs={},
+    )
+    assert source.method == "twolevel"
+    explicit = coupled_module._continuation_source(
+        coupled=None,
+        continuation=None,
+        refresh=NO_REFRESH,
+        method=None,
+        reference_state=None,
+        kwargs={},
+    )
+    assert explicit.method is None
+
+
+def test_the_continuation_source_is_one_decision_for_the_build_and_every_refresh() -> None:
+    """The initial build and the refresh rebuild come from one object, not two parallel branches.
+
+    They are the same decision -- which continuation this solve runs -- and were written as two
+    independent two-way branches, one at the build and one inside the refresh loop. That is the shape
+    that drifts: a change has to be made twice and nothing fails when it is made once.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    built = []
+
+    def builder(s):
+        built.append(s)
+        return coupled_continuation(coupled, s, method=None)
+
+    source = coupled_module._continuation_source(
+        coupled=coupled,
+        continuation=None,
+        refresh=RefreshPolicy(trigger=CycleGrowthTrigger(), builder=builder),
+        method=coupled_module._UNSET,
+        reference_state=None,
+        kwargs={},
+    )
+    first = source.build(state)
+    assert len(built) == 1
+    # A refresh re-invokes the SAME builder, and re-injects the march's measure rather than rebuilding
+    # it -- a self-normalising measure rebuilt at a developed state would re-base the convergence test.
+    measure = coupled_scaled_norm(coupled, first.shift_policy, state)
+    refreshed = source.refresh(state, first, measure)
+    assert len(built) == 2
+    # Value, not identity: the builder path re-injects the measure with `tree_at`, which rebuilds
+    # the pytree around the substituted leaf. What must hold is that the scales did not move.
+    assert bool(eqx.tree_equal(refreshed.residual_norm, measure))
 
 
 def test_coupled_build_resolves_boundaries_so_the_residual_jits() -> None:

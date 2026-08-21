@@ -33,7 +33,7 @@ import abc
 import dataclasses
 import time
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, Protocol
 
 import equinox as eqx
 import jax
@@ -3483,6 +3483,192 @@ def _reject_a_root_the_frozen_cap_invalidates(
     )
 
 
+class _Unset:
+    """The type of :data:`_UNSET`, so a published signature reads ``method=<default>``.
+
+    A bare ``object()`` would render in the API reference as ``<object object at 0x...>``, which tells a
+    reader nothing and changes on every build.
+    """
+
+    def __repr__(self) -> str:
+        return "<default>"
+
+
+#: Sentinel for "the caller did not name this". ``method`` has a meaningful default *and* a meaningful
+#: ``None`` ("no preconditioner method"), so neither can stand for "not given" -- and telling the two
+#: apart is what lets :func:`_continuation_source` refuse a setting that would be silently dropped,
+#: rather than quietly honouring a default the caller never asked for.
+_UNSET = _Unset()
+
+
+class _ContinuationSource(Protocol):
+    """Where the coupled march's :class:`~aquaflux.solve.ForwardStep` comes from, and how it re-freezes.
+
+    :func:`solve_coupled` needs a continuation twice: once at the start, and again at each refresh, from
+    a developed state. Those are one decision — *which* continuation this solve runs — and they were
+    written as two independent two-way branches, one at the initial build and one inside the refresh
+    loop. That is the shape that drifts: a change to how the continuation is built has to be made in two
+    places and, when it is made in one, nothing fails. Behind this interface it is made once.
+
+    Two implementations, and the difference between them is the whole of it: either the caller supplies
+    the builder (:class:`_CallerBuiltContinuation`) or ``solve_coupled`` builds the default
+    block-diagonal one (:class:`_DefaultContinuation`); :class:`_FinishedContinuation` stands for the
+    third case, a step the caller finished and nothing will rebuild.
+
+    Private because it is a decomposition, not an extension point: nothing injects one, and a caller
+    who wants a different continuation passes the step or a builder. Promote it if that changes.
+    """
+
+    def build(self, state: jnp.ndarray) -> ForwardStep:
+        """The continuation to start the march with, frozen at ``state``."""
+        ...
+
+    def refresh(
+        self, state: jnp.ndarray, previous: ForwardStep, residual_norm: ResidualNorm
+    ) -> ForwardStep:
+        """Re-freeze at the developed ``state``, keeping ``residual_norm`` as the progress measure.
+
+        The measure is re-injected rather than rebuilt: a self-normalising one would re-base at the
+        developed state, making the convergence test unreachable and mismatching the finishing solve's
+        absolute target. ``previous`` is the step being replaced, for an implementation that can reuse
+        part of it.
+        """
+        ...
+
+
+@dataclasses.dataclass(frozen=True)
+class _CallerBuiltContinuation:
+    """A continuation the caller builds from the state, and rebuilds the same way at every refresh.
+
+    The builder constructs it however it likes -- a complete-LU continuation materialized off the jit
+    path, say -- so ``solve_coupled`` never learns how it is built, and an off-jit preconditioner can
+    re-freeze without that knowledge leaking here. It follows that the builder owns the whole
+    configuration: there is no keyword ``solve_coupled`` could forward into a closure it does not
+    construct, which is why passing one alongside is refused rather than dropped.
+    """
+
+    builder: Callable[[jnp.ndarray], ForwardStep]
+
+    def build(self, state: jnp.ndarray) -> ForwardStep:
+        return self.builder(state)
+
+    def refresh(
+        self, state: jnp.ndarray, previous: ForwardStep, residual_norm: ResidualNorm
+    ) -> ForwardStep:
+        del previous  # the builder re-derives everything from the state
+        return eqx.tree_at(lambda c: c.residual_norm, self.builder(state), residual_norm)
+
+
+@dataclasses.dataclass(frozen=True)
+class _FinishedContinuation:
+    """The caller handed over a finished step and no builder, so nothing here can re-freeze it.
+
+    :meth:`~aquaflux.solve.RefreshPolicy.require_rebuildable` already refuses that combination when a
+    refresh would run, so :meth:`refresh` is unreachable through the driver. It exists so the source is
+    never ``None`` -- an optional strategy that three call sites must remember not to dereference is the
+    kind of seam that eventually is -- and so that if it ever *is* reached, it says what is missing
+    rather than raising ``AttributeError`` on ``None``.
+    """
+
+    def build(self, state: jnp.ndarray) -> ForwardStep:
+        raise TypeError(
+            "no continuation to build: `solve_coupled` was given a finished `continuation`. This is a "
+            "driver bug -- the supplied step should have been used directly."
+        )
+
+    def refresh(
+        self, state: jnp.ndarray, previous: ForwardStep, residual_norm: ResidualNorm
+    ) -> ForwardStep:
+        raise TypeError(
+            "a refresh triggered but the explicit `continuation` cannot be rebuilt: pass "
+            "`RefreshPolicy(builder=...)` so the solve can re-freeze it at each developed state."
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class _DefaultContinuation:
+    """The block-diagonal :func:`coupled_continuation`, built and re-frozen by ``solve_coupled`` itself.
+
+    This is the one source that has configuration to receive, so it is the one ``solve_coupled``'s
+    ``method`` / ``reference_state`` / ``**continuation_kwargs`` describe.
+
+    A refresh here re-derives the k/omega multigrid hierarchies on their *reused* coarsening and rebuilds
+    the shift's transport time scale, while carrying the flow block and the shift's coordinate factor
+    over untouched -- which is what ``reuse=`` means and why the previous step is needed rather than
+    discarded.
+    """
+
+    coupled: CoupledRANS
+    method: str | None
+    reference_state: jnp.ndarray | None
+    kwargs: dict
+
+    def build(self, state: jnp.ndarray) -> ForwardStep:
+        reference = state if self.reference_state is None else self.reference_state
+        return coupled_continuation(self.coupled, reference, method=self.method, **self.kwargs)
+
+    def refresh(
+        self, state: jnp.ndarray, previous: ForwardStep, residual_norm: ResidualNorm
+    ) -> ForwardStep:
+        return coupled_continuation(
+            self.coupled,
+            state,
+            method=self.method,
+            reuse=previous.shift_policy,
+            residual_norm=residual_norm,
+            **self.kwargs,
+        )
+
+
+def _continuation_source(
+    coupled: CoupledRANS,
+    continuation: ForwardStep | None,
+    refresh: RefreshPolicy,
+    method: object,
+    reference_state: jnp.ndarray | None,
+    kwargs: dict,
+) -> _ContinuationSource:
+    """Pick the source, after refusing configuration whichever one is chosen cannot receive.
+
+    **Why this refuses rather than ignores.** ``method`` / ``reference_state`` /
+    ``**continuation_kwargs`` configure the continuation ``solve_coupled`` builds. On the two paths where
+    it does not build one -- an explicit ``continuation``, or a ``RefreshPolicy(builder=...)`` -- they
+    reached nothing at all, with no error and no log line: a caller asking for ``inner_steps=3`` or
+    ``positivity_floor=1e-6`` got the library defaults and a march that looked like the one they
+    configured. ``**kwargs`` is what made it silent, since it accepts every keyword and checks none, and
+    that door is the main entry point's. It has already cost a real study harness, which carries a
+    warning comment about a ``precondition_step=`` swallowed here instead of reaching its
+    ``RefreshPolicy``.
+    """
+    given = dict(kwargs)
+    if method is not _UNSET:
+        given["method"] = method
+    if reference_state is not None:
+        given["reference_state"] = reference_state
+    if continuation is not None:
+        _refuse(given, "`continuation`", "the step you passed already carries them")
+        if refresh.builder is None:
+            return _FinishedContinuation()
+        return _CallerBuiltContinuation(refresh.builder)
+    if refresh.builder is not None:
+        _refuse(given, "`RefreshPolicy(builder=...)`", "the builder owns its own configuration")
+        return _CallerBuiltContinuation(refresh.builder)
+    return _DefaultContinuation(
+        coupled, "twolevel" if method is _UNSET else method, reference_state, kwargs
+    )
+
+
+def _refuse(given: dict, owner: str, why: str) -> None:
+    """Raise if any continuation setting was passed to a solve that cannot forward it."""
+    if not given:
+        return
+    raise TypeError(
+        f"{sorted(given)} configure the continuation `solve_coupled` builds, and {owner} was given, so "
+        f"{why}. These would have been dropped silently. Pass them where the continuation is built "
+        f"instead, or drop {owner}."
+    )
+
+
 def solve_coupled(
     coupled: CoupledRANS,
     flow: jnp.ndarray | None = None,
@@ -3491,7 +3677,7 @@ def solve_coupled(
     *,
     continuation: ForwardStep | None = None,
     reference_state: jnp.ndarray | None = None,
-    method: str | None = "twolevel",
+    method: str | None = _UNSET,  # type: ignore[assignment]
     max_steps: int = 60,
     rtol: float = 1e-10,
     atol: float = 1e-12,
@@ -3534,9 +3720,10 @@ def solve_coupled(
         state, which is the convenient forward-only path.
     reference_state : jnp.ndarray or None
         The coupled state to freeze the internally-built preconditioner at; defaults to the initial
-        state. Ignored when ``continuation`` is supplied.
+        state. ⚠️ **Rejected**, not ignored, when the continuation is not built here -- see
+        ``**continuation_kwargs``.
     method : {"twolevel", "air"} or None
-        The scalar-block AMG method for the internally-built continuation.
+        The scalar-block AMG method for the internally-built continuation. Rejected on the same terms.
     max_steps : int
         Newton iteration cap for the continuation march.
     rtol, atol : float
@@ -3726,6 +3913,15 @@ def solve_coupled(
         steady residual is the honest discrete time derivative rather than ``beta x travel``.
         ``inner_steps = 1`` (default) is the unchanged single-step continuation.
 
+        ⚠️ **These, ``method`` and ``reference_state`` configure the continuation this function builds,
+        so they are only accepted when it builds one.** Supply a ``continuation`` or a
+        ``RefreshPolicy(builder=...)`` and that object owns its whole configuration; passing any of them
+        alongside raises :exc:`TypeError` naming which ones. They used to be **dropped in silence** on
+        both of those paths — a solve asked for ``inner_steps=3`` and ``positivity_floor=1e-6`` ran the
+        library defaults, with no error and no log line — and ``**kwargs`` is what made it quiet, since
+        it accepts every keyword and checks none. That door is this function's, which makes it the one
+        place in the package where a misplaced setting cannot be caught by reading a signature.
+
     Returns
     -------
     tuple of jnp.ndarray
@@ -3766,21 +3962,13 @@ def solve_coupled(
     # A refresh rebuilds the step; a caller-supplied step with no builder leaves it nothing to rebuild
     # WITH, so the refresh would silently never happen. The policy owns that check.
     refresh.require_rebuildable(continuation)
+    # One decision -- which continuation this solve runs -- made once, for the initial build and every
+    # refresh alike, and refusing any setting the chosen source cannot receive rather than dropping it.
+    source = _continuation_source(
+        coupled, continuation, refresh, method, reference_state, continuation_kwargs
+    )
     if continuation is None:
-        if refresh.builder is not None:
-            # A caller-supplied builder constructs the continuation from the state (e.g. a complete-LU
-            # continuation, materialized off the jit path); the refresh loop re-invokes it at each
-            # developed state, so an off-jit preconditioner can refresh without solve_coupled knowing
-            # how it is built.
-            continuation = refresh.builder(state)
-        else:
-            reference = state if reference_state is None else reference_state
-            continuation = coupled_continuation(
-                coupled,
-                reference,
-                method=method,
-                **continuation_kwargs,
-            )
+        continuation = source.build(state)
 
     # A dual-time observed march with no caller control defaults to the Courant ramp (see the helper): it
     # grows the pseudo-timestep while the inner loop stays comfortable, carried across the refreshes
@@ -3850,27 +4038,10 @@ def solve_coupled(
             control_state = result.control_state
             if not result.triggered or refresh.is_last_segment(segment):
                 break
-            if refresh.builder is not None:
-                # Re-freeze at the developed state via the caller's builder (re-factors a complete LU,
-                # say), then re-inject the initial-state measure so the progress reference stays fixed
-                # across the refresh (seam 4), just as the block path holds `residual_norm=base_norm`.
-                continuation = eqx.tree_at(
-                    lambda c: c.residual_norm,
-                    refresh.builder(jax.lax.stop_gradient(state)),
-                    base_norm,
-                )
-            else:
-                # Re-freeze at the developed state: the k/omega AMGs are re-derived on their reused
-                # coarsening and the shift's transport time scale is rebuilt, while the flow block and
-                # the shift's coordinate factor are carried over (see `_coupled_shift_policy`).
-                continuation = coupled_continuation(
-                    coupled,
-                    jax.lax.stop_gradient(state),
-                    method=method,
-                    reuse=continuation.shift_policy,
-                    residual_norm=base_norm,  # keep the progress measure fixed (seam 4)
-                    **continuation_kwargs,
-                )
+            # Re-freeze at the developed state, holding the initial-state measure as the progress
+            # reference across the refresh (seam 4) -- how the re-freeze is done is the source's, and
+            # is the same choice made at the initial build above rather than a second one made here.
+            continuation = source.refresh(jax.lax.stop_gradient(state), continuation, base_norm)
         # The observed march is never differentiated -- the refresh, step control and per-step norm
         # rebuild cannot run under a JAX transform (guarded above) -- so its converged state needs no
         # adjoint, and there is no reason to re-march it through the traced finishing solve. When the

@@ -17,6 +17,7 @@ solution seeds the next higher Re), and the final target solve.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -123,6 +124,23 @@ class GeometricReynoldsSchedule(eqx.Module):
         return tuple(float(self.ratio ** (n_points - i)) for i in range(n_points + 1))
 
 
+#: The keywords that drive the *solve* rather than configure a continuation, derived from
+#: :func:`~aquaflux.turbulence.solve_coupled`'s own signature so the two cannot drift apart. Everything
+#: else a caller passes -- ``method``, ``reference_state``, and every keyword bound for
+#: ``coupled_continuation`` behind ``**continuation_kwargs`` -- describes a continuation, and reaches the
+#: target solve only when that solve is the one building it.
+_SOLVE_ONLY = frozenset(inspect.signature(solve_coupled).parameters) - {
+    "coupled",
+    "flow",
+    "k",
+    "omega",
+    "method",
+    "reference_state",
+    # `inspect.signature` names the `**kwargs` parameter itself; it is not a keyword anyone passes.
+    "continuation_kwargs",
+}
+
+
 def solve_reynolds_continuation(
     coupled: CoupledRANS,
     n_points: int,
@@ -190,8 +208,14 @@ def solve_reynolds_continuation(
 
             point_setup=lambda comp, state, point: {
                 "continuation": coupled_lu_continuation(comp, state, inner_steps=..., inner_tol=...),
-                "precondition_step": lu_beta_tracking_refresh(comp),
+                "refresh": RefreshPolicy(precondition_step=lu_beta_tracking_refresh(comp)),
             }
+
+        ⚠️ ``precondition_step`` lives on :class:`~aquaflux.solve.RefreshPolicy`, not on
+        ``solve_coupled``. This example passed it bare until 2026-08-20, where it was absorbed by
+        ``**continuation_kwargs`` and the hook simply never ran; ``solve_coupled`` now rejects it
+        instead. **A key here that is neither a ``solve_coupled`` parameter nor a setting for a
+        continuation it builds is an error, not a no-op.**
 
         **Forward-only** (the ``precondition_step`` it returns raises under ``jax.grad``, like the other
         observed-march hooks), so leave it ``None`` when differentiating and use the ``continuation`` path
@@ -203,7 +227,12 @@ def solve_reynolds_continuation(
         Forwarded to every per-Re :func:`~aquaflux.turbulence.solve_coupled`. ``continuation`` and
         ``reference_state`` are **target-specific** (a preconditioner frozen at the target viscosity),
         so they are applied to the final solve only; each lower-Re point builds its own continuation at
-        its own viscosity.
+        its own viscosity. The split runs the other way too: ``method`` and every keyword bound for
+        :func:`~aquaflux.turbulence.coupled_continuation` describe a continuation *this function builds*,
+        so when ``continuation`` is supplied they reach the **ramp** only — the target is not building
+        one. ⚠️ A ``point_setup`` that returns a ``continuation`` supplies one to **every** point, which
+        leaves such settings dead everywhere; ``solve_coupled`` then rejects them rather than dropping
+        them, so pass them to the builder inside ``point_setup`` instead.
 
     Returns
     -------
@@ -238,13 +267,25 @@ def solve_reynolds_continuation(
     # Build the companions from a stopped copy so the ramp -- which only makes an initial guess --
     # never tapes onto the target-Re adjoint.
     frozen = jax.lax.stop_gradient(coupled)
-    # continuation / reference_state freeze a preconditioner at the target viscosity, so they belong to
-    # the final solve only; each lower-Re point builds its own at its own viscosity.
+    # The split runs BOTH ways, and this is the whole of it. `continuation` / `reference_state` freeze a
+    # preconditioner at the TARGET viscosity, so they belong to the final solve only and each lower-Re
+    # point builds its own at its own viscosity. The mirror image is that everything which *configures*
+    # a continuation this function builds -- `method`, and every keyword bound for `coupled_continuation`
+    # -- belongs to the RAMP only, because the final solve is not building one when the caller supplied
+    # it. Passing both at once is the ordinary case, not a mistake: the ramp needs the settings and the
+    # target needs the pre-built step. Only the ramp strip existed, so a caller who did that reached
+    # `solve_coupled` with a continuation *and* the settings for one -- which used to be silently
+    # ignored there and is now a `TypeError`.
     ramp_kwargs = {
         key: value
         for key, value in solve_kwargs.items()
         if key not in ("continuation", "reference_state")
     }
+    target_kwargs = (
+        solve_kwargs
+        if solve_kwargs.get("continuation") is None
+        else {key: value for key, value in solve_kwargs.items() if key in _SOLVE_ONLY}
+    )
     # The lower-Re points are only seeds for the next Reynolds number, so converge them loosely --
     # over-converging them to the target tolerance is wasted work.
     if intermediate_rtol is not None:
@@ -294,4 +335,4 @@ def solve_reynolds_continuation(
     # The final point is the true target: the live `coupled` (so its adjoint is the direct solve's),
     # seeded by the last converged lower-Re solution, with the full solve_kwargs.
     target = ReynoldsPoint(len(scales), len(scales), float(scales[-1]))
-    return _point_solve(coupled, seed, solve_kwargs, target)
+    return _point_solve(coupled, seed, target_kwargs, target)
