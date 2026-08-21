@@ -40,10 +40,18 @@ case "$TIER" in
   *)          printf 'fastgate: unknown tier %s (fast|slow|validation|all)\n' "$TIER" >&2; exit 2 ;;
 esac
 
+# The log name carries the CHECKOUT it came from, not just the tier and the time. Several worktrees
+# of this repository share one $TMPDIR, so without it two concurrent runs write indistinguishable
+# names into the same directory and `ls -t ... | head -1` returns whichever wrote most recently --
+# which is not necessarily yours. Reading another checkout's log as your own is not a hypothetical:
+# it makes a run look like it restarted, stalled, or died, and every conclusion drawn from it is
+# about someone else's tree. This is the question `validation/run_case.sh` answers with a run-file --
+# "is this run mine, and what is it testing?" -- asked of the test tiers instead.
+CHECKOUT=$(basename "$(cd "$(dirname "$0")/.." && pwd -P)")
 STAMP=$(date +%Y%m%d-%H%M%S)
-LOG="${TMPDIR:-/tmp}/aquaflux-tests-${TIER}-${STAMP}.log"
+LOG="${TMPDIR:-/tmp}/aquaflux-tests-${CHECKOUT}-${TIER}-${STAMP}.log"
 
-printf 'running the %s tier -> %s\n' "$TIER" "$LOG"
+printf 'running the %s tier in %s -> %s\n' "$TIER" "$CHECKOUT" "$LOG"
 
 # Unbuffered and redirected. The point of the file is that a long run can be watched WHILE it runs
 # (`tail -f` on the file is fine -- that is a reader, not the run's own stdout).

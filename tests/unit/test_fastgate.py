@@ -124,6 +124,27 @@ def test_the_reported_summary_carries_the_SKIP_count(tmp_path: Path) -> None:
     assert "1 skipped" in reported
 
 
+def test_the_log_name_says_which_CHECKOUT_the_run_came_from(tmp_path: Path) -> None:
+    """Several worktrees share one temporary directory, so a log name must identify its own tree.
+
+    Without the checkout in the name, two concurrent runs write indistinguishable files into the same
+    directory and the newest one is not necessarily yours. Reading another tree's log as your own
+    makes a run look like it restarted, stalled or died -- and every conclusion drawn from it is about
+    somebody else's code. This is the question the case runner answers with a run-file, asked of the
+    test tiers instead.
+    """
+    tree = _tree(tmp_path, test_ok=_CHATTER)
+
+    result = _run(tree, "fast", str(tree))
+
+    checkout = FASTGATE.resolve().parents[1].name
+    announced = next(line for line in result.stdout.splitlines() if line.startswith("running the"))
+    assert checkout in announced
+    log = Path(announced.rsplit(" ", 1)[-1])
+    assert checkout in log.name and "fast" in log.name
+    assert log.is_file()  # it announces the file it actually wrote
+
+
 def test_an_unknown_tier_is_refused_rather_than_run_as_the_default(tmp_path: Path) -> None:
     """A mistyped tier must not silently run a different one.
 
