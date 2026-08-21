@@ -309,17 +309,17 @@ block between them. Each group then gets an inverse suited to it, injected as
 
 | Factory | Builds | Suited to |
 | --- | --- | --- |
-| {func}`~aquaflux.solve.native_saddle_inverse` | {class}`~aquaflux.solve.NativeSimpleInverse` — a multigrid over the saddle whose *level smoother* is a SIMPLE relaxation | the leading flow group |
-| {func}`~aquaflux.solve.native_nodal_inverse` | {class}`~aquaflux.solve.NodalNativeInverse` — one hierarchy over the whole group, coarsening cells | either group |
+| {func}`~aquaflux.solve.simple_smoothed_inverse` | {class}`~aquaflux.solve.SimpleSmoothedInverse` — a multigrid over the saddle whose *level smoother* is a SIMPLE relaxation | the leading flow group |
+| {func}`~aquaflux.solve.jacobi_smoothed_inverse` | {class}`~aquaflux.solve.JacobiSmoothedInverse` — one hierarchy over the whole group, coarsening cells | either group |
 | {func}`~aquaflux.solve.air_inverse` | a reduction-based (lAIR) hierarchy | the trailing transported group |
-| {func}`~aquaflux.solve.host_ilu_inverse` | {class}`~aquaflux.solve.HostVCycleInverse` — the same coarsening, relaxed by an incomplete factorization | either group |
+| {func}`~aquaflux.solve.ilu_smoothed_inverse` | {class}`~aquaflux.solve.IluSmoothedInverse` — the same coarsening, relaxed by an incomplete factorization | either group |
 
 Note the relationship between the first of these and
 {class}`~aquaflux.flow.BlockPreconditioner`, because it is easy to misread. Both are
 SIMPLE-type. But `BlockPreconditioner` is **flat**: one application solves the velocity
 block and the Schur and combines them, with no hierarchy over the saddle at all — the
 multigrid lives *inside* it, on each sub-block.
-{class}`~aquaflux.solve.NativeSimpleInverse` is the other arrangement: a genuine hierarchy
+{class}`~aquaflux.solve.SimpleSmoothedInverse` is the other arrangement: a genuine hierarchy
 over the whole saddle, in which a SIMPLE relaxation is the smoother at each level and the
 coarse grid carries the smooth global pressure mode. That mode is the one any SIMPLE-type
 Schur approximates worst, which is why the arrangement matters.
@@ -332,16 +332,16 @@ partition falls:
 from aquaflux.solve import (
     FieldGroups,
     build_block_triangular_field_split,
-    native_nodal_inverse,
-    native_saddle_inverse,
+    jacobi_smoothed_inverse,
+    simple_smoothed_inverse,
 )
 
 groups = FieldGroups(n_cells=mesh.n_cells, n_leading_fields=4, n_trailing_fields=2)
 split = build_block_triangular_field_split(
     matrix,          # the assembled six-field Jacobian, as a scipy sparse matrix
     groups,
-    leading_inverse=native_saddle_inverse(strength_threshold=0.25, max_levels=5),
-    trailing_inverse=native_nodal_inverse(max_coarse=200),
+    leading_inverse=simple_smoothed_inverse(strength_threshold=0.25, max_levels=5),
+    trailing_inverse=jacobi_smoothed_inverse(max_coarse=200),
 )
 ```
 

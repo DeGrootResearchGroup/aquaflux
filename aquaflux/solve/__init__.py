@@ -90,17 +90,17 @@ from .frozen_operator import (
 )
 from .amg_preconditioner import AmgVCycle, MonolithicAmgPreconditioner, build_amg_vcycle
 from .field_split import (
-    NodalNativeInverse,
+    JacobiSmoothedInverse,
     BlockTriangularFieldSplit,
     FieldGroups,
     FieldSplitAmgPreconditioner,
     build_block_triangular_field_split,
     air_inverse,
-    native_nodal_inverse,
+    jacobi_smoothed_inverse,
 )
 from .host_preconditioner import HostFactors, HostPreconditioner
-from .native_inverse import NativeHierarchyInverse
-from .host_vcycle import HostVCycleInverse, host_ilu_inverse
+from .hierarchy_inverse import HierarchyBlockInverse
+from .ilu_inverse import IluSmoothedInverse, ilu_smoothed_inverse
 from .ilu0 import COMPILED, Ilu0
 from .refresh_timing import PhaseTimer, RefreshTiming
 from .lu_preconditioner import MonolithicLuPreconditioner
@@ -142,9 +142,9 @@ from .march import (
 )
 from .march_log import MarchLogger, combine_metrics, field_change_metrics
 from .saddle_multigrid import (
-    NativeSimpleInverse,
+    SimpleSmoothedInverse,
     block_approximate_inverse,
-    native_saddle_inverse,
+    simple_smoothed_inverse,
 )
 from .multigrid import (
     AirHierarchy,
@@ -209,12 +209,14 @@ __all__ = [
     "FieldGroups",
     "FieldSplitAmgPreconditioner",
     "ForwardStep",
+    "HierarchyBlockInverse",
     "HostFactors",
     "HostPreconditioner",
-    "HostVCycleInverse",
     "Ilu0",
+    "IluSmoothedInverse",
     "ImplicitNewtonSolver",
     "InnerIterateCheckpointer",
+    "JacobiSmoothedInverse",
     "LineSearchGrowth",
     "LocalCourantBasis",
     "MarchLogger",
@@ -222,10 +224,7 @@ __all__ = [
     "MonolithicAmgPreconditioner",
     "MonolithicLuPreconditioner",
     "MonotoneLineSearch",
-    "NativeHierarchyInverse",
-    "NativeSimpleInverse",
     "NaturalCells",
-    "NodalNativeInverse",
     "PhaseTimer",
     "PositiveBlockLimit",
     "PositiveBlockProjection",
@@ -247,6 +246,7 @@ __all__ = [
     "ShiftStrengthControl",
     "ShiftTerm",
     "ShiftedForwardStep",
+    "SimpleSmoothedInverse",
     "SmoothedHierarchy",
     "StateCheckpointer",
     "StepAcceptance",
@@ -280,11 +280,10 @@ __all__ = [
     "equilibrate_ordered",
     "field_change_metrics",
     "forward_march",
-    "host_ilu_inverse",
+    "ilu_smoothed_inverse",
+    "jacobi_smoothed_inverse",
     "jacobian_relative_error",
     "materialize_block_jacobian",
-    "native_nodal_inverse",
-    "native_saddle_inverse",
     "newton_step",
     "positive_block_limit",
     "positive_block_projection",
@@ -292,6 +291,7 @@ __all__ = [
     "relative_residual_gmres",
     "restart_cycles",
     "shifted_jacobian",
+    "simple_smoothed_inverse",
     "smoothed_multigrid_solve",
     "solve_linear",
     "symmetrically_equilibrate",

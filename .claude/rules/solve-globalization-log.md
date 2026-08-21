@@ -1041,7 +1041,7 @@
         static with `val` / `diagonal` / `lam_max` / `coarse_inv` as **traced leaves** — so a refreshed hierarchy
         passed as a jit argument is a **compilation-cache hit**, pinned by
         `test_refreshing_a_hierarchy_is_a_compilation_cache_hit`. ⚠️ **The value-independence is a property of
-        the threshold, not of the level split**, so it does not carry to the native flow block, which runs at
+        the threshold, not of the level split**, so it does not carry to the traced flow block, which runs at
         0.25 and re-partitions on every refresh; that path keeps the cache hit with
         `SmoothedHierarchy.refit` instead (see the flow-block section). What a refresh still costs is the off-jit scipy
         rebuild plus the one-off retrace of the rebuilt `ForwardStep`, which is why `refresh.limit` still bounds

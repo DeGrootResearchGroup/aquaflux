@@ -1,8 +1,8 @@
-"""The shared body of a JAX-native block inverse: one frozen hierarchy, refreshed in place.
+"""The shared body of a traced block inverse: one frozen hierarchy, refreshed in place.
 
 Two preconditioners in this package wrap a coarsened hierarchy and hand a Krylov solve an approximate
-``A^-1``: :class:`~aquaflux.solve.field_split.NodalNativeInverse` over a transported-scalar group, and
-:class:`~aquaflux.solve.saddle_multigrid.NativeSimpleInverse` over the velocity--pressure saddle. They
+``A^-1``: :class:`~aquaflux.solve.field_split.JacobiSmoothedInverse` over a transported-scalar group, and
+:class:`~aquaflux.solve.saddle_multigrid.SimpleSmoothedInverse` over the velocity--pressure saddle. They
 differ **only** in their level smoother -- a damped/block Jacobi sweep against a SIMPLE relaxation --
 and everything around that smoother is the same problem solved twice: build the hierarchy, re-derive it
 when the march refreshes, keep the jitted cycle a compilation-cache hit across that refresh, marshal a
@@ -40,7 +40,7 @@ import scipy.sparse as sp
 from .multigrid import ShapeBudget, SmoothedHierarchy, build_convection_hierarchy
 
 
-class NativeHierarchyInverse:
+class HierarchyBlockInverse:
     """A block inverse applying a frozen coarsened hierarchy, refreshable without recompiling.
 
     Not instantiated directly: a subclass supplies its smoother through the four hooks below. Held as a

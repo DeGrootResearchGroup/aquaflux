@@ -62,7 +62,7 @@ import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     materialize_block_jacobian,
-    native_nodal_inverse,
+    jacobi_smoothed_inverse,
     shifted_jacobian,
 )
 from aquaflux.turbulence import coupled_amg_continuation, hybrid_initialize  # noqa: E402
@@ -190,7 +190,7 @@ def main() -> None:
             field_split=compare.FIELD_SPLIT,
             trailing_smoother_sweeps=compare.TRAILING_SWEEPS,
             leading_inverse=compare.LEADING_INVERSE,
-            trailing_inverse=native_nodal_inverse(**compare.NATIVE_TRAILING),
+            trailing_inverse=jacobi_smoothed_inverse(**compare.JACOBI_TRAILING),
             inner_steps=compare.INNER_STEPS,
             inner_tol=compare.INNER_TOL,
         )

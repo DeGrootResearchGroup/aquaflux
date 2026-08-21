@@ -14,8 +14,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve import NativeSimpleInverse, block_approximate_inverse, native_saddle_inverse
-from aquaflux.solve.saddle_multigrid import _native_saddle_cycle, _simple_pieces
+from aquaflux.solve import SimpleSmoothedInverse, block_approximate_inverse, simple_smoothed_inverse
+from aquaflux.solve.saddle_multigrid import _simple_pieces, _simple_smoothed_cycle
 
 
 def _saddle(n_cells: int = 240, dim: int = 3, seed: int = 0) -> sp.csr_matrix:
@@ -59,7 +59,7 @@ def test_the_inverse_reduces_the_true_residual() -> None:
     that has produced the most retracted verdicts on this operator.
     """
     a = _saddle()
-    inverse = NativeSimpleInverse(a, 4, **_SETTINGS)
+    inverse = SimpleSmoothedInverse(a, 4, **_SETTINGS)
     b = np.asarray(np.random.default_rng(1).normal(size=a.shape[0]))
 
     x = np.asarray(inverse.apply(b))
@@ -76,7 +76,7 @@ def test_the_cycle_is_a_fixed_linear_operator() -> None:
     and would simply converge to the wrong thing.
     """
     a = _saddle()
-    inverse = NativeSimpleInverse(a, 4, **_SETTINGS)
+    inverse = SimpleSmoothedInverse(a, 4, **_SETTINGS)
     rng = np.random.default_rng(2)
     u = np.asarray(rng.normal(size=a.shape[0]))
     v = np.asarray(rng.normal(size=a.shape[0]))
@@ -94,7 +94,7 @@ def test_the_transpose_is_the_adjoint_of_the_forward_cycle() -> None:
     stays traceable — a host callback or a data-dependent branch inside it would have no transpose rule.
     """
     a = _saddle()
-    inverse = NativeSimpleInverse(a, 4, **_SETTINGS)
+    inverse = SimpleSmoothedInverse(a, 4, **_SETTINGS)
     rng = np.random.default_rng(3)
     x = np.asarray(rng.normal(size=a.shape[0]))
     y = np.asarray(rng.normal(size=a.shape[0]))
@@ -113,7 +113,7 @@ def test_refactor_refits_in_place_onto_a_new_operator() -> None:
     this path, which is why it went missing once already.
     """
     a = _saddle()
-    inverse = NativeSimpleInverse(a, 4, **_SETTINGS)
+    inverse = SimpleSmoothedInverse(a, 4, **_SETTINGS)
     b = np.asarray(np.random.default_rng(4).normal(size=a.shape[0]))
     before = np.asarray(inverse.apply(b))
 
@@ -142,7 +142,7 @@ def test_a_refresh_at_unchanged_shapes_reuses_the_compiled_cycle() -> None:
     this measures the invariant.
     """
     a = _saddle()
-    inverse = NativeSimpleInverse(a, 4, **_SETTINGS)
+    inverse = SimpleSmoothedInverse(a, 4, **_SETTINGS)
     b = np.asarray(np.random.default_rng(11).normal(size=a.shape[0]))
     inverse.apply(b)
 
@@ -167,7 +167,7 @@ def test_a_refresh_at_unchanged_shapes_reuses_the_compiled_cycle() -> None:
     @eqx.filter_jit
     def cycle(hierarchy, pieces, residual):
         traces.append(1)  # appended once per trace, not per call
-        return _native_saddle_cycle(hierarchy, pieces, residual, inverse._smoother)
+        return _simple_smoothed_cycle(hierarchy, pieces, residual, inverse._smoother)
 
     rhs = jnp.asarray(b)
     cycle(inverse._hierarchy, inverse._extras, rhs).block_until_ready()
@@ -185,7 +185,7 @@ def test_the_pieces_carry_no_host_matrix_so_they_can_be_traced() -> None:
     which a caller that wants it in host form takes from the pair.
     """
     a = _saddle()
-    inverse = NativeSimpleInverse(a, 4, **_SETTINGS)
+    inverse = SimpleSmoothedInverse(a, 4, **_SETTINGS)
 
     leaves = jax.tree_util.tree_leaves(inverse._extras)
     assert leaves, "the pieces have no traced leaves at all"
@@ -199,7 +199,7 @@ def test_the_pieces_carry_no_host_matrix_so_they_can_be_traced() -> None:
 
 def test_a_mismatched_block_is_rejected() -> None:
     """Refreshing onto a differently-sized block raises instead of building something incoherent."""
-    inverse = NativeSimpleInverse(_saddle(n_cells=120), 4, **_SETTINGS)
+    inverse = SimpleSmoothedInverse(_saddle(n_cells=120), 4, **_SETTINGS)
 
     with pytest.raises(ValueError, match="cannot refactor"):
         inverse.refactor_block(_saddle(n_cells=80))
@@ -214,18 +214,18 @@ def test_the_object_is_silent_unless_a_report_sink_is_supplied() -> None:
     a = _saddle()
     captured: list[str] = []
 
-    NativeSimpleInverse(a, 4, **_SETTINGS)  # no sink: nothing is emitted
-    NativeSimpleInverse(a, 4, **_SETTINGS, report=captured.append)
+    SimpleSmoothedInverse(a, 4, **_SETTINGS)  # no sink: nothing is emitted
+    SimpleSmoothedInverse(a, 4, **_SETTINGS, report=captured.append)
 
     assert captured, "the report sink received nothing"
-    assert any("native SIMPLE smoother" in line for line in captured)
+    assert any("SIMPLE-smoothed hierarchy" in line for line in captured)
 
 
 def test_the_factory_builds_what_the_field_split_expects() -> None:
-    """``native_saddle_inverse`` returns the ``(block, n_fields) -> inverse`` shape the split calls."""
+    """``simple_smoothed_inverse`` returns the ``(block, n_fields) -> inverse`` shape the split calls."""
     a = _saddle()
 
-    inverse = native_saddle_inverse(**_SETTINGS)(a, 4)
+    inverse = simple_smoothed_inverse(**_SETTINGS)(a, 4)
 
     assert inverse.n_dofs == a.shape[0]
 

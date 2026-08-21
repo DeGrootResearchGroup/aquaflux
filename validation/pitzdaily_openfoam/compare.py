@@ -96,9 +96,9 @@ from aquaflux.solve import (
     ReverseCuthillMcKeeCells,
     StateCheckpointer,
     combine_observers,
-    host_ilu_inverse,
-    native_nodal_inverse,
-    native_saddle_inverse,
+    ilu_smoothed_inverse,
+    jacobi_smoothed_inverse,
+    simple_smoothed_inverse,
     relative_residual_gmres,
 )
 from aquaflux.turbulence import (
@@ -264,7 +264,7 @@ _FLOW_ORDERS = {
 if FLOW_ORDER not in _FLOW_ORDERS:
     raise SystemExit(f"PITZ_FLOW_ORDER={FLOW_ORDER!r} is not one of {sorted(_FLOW_ORDERS)}")
 FLOW_INVERSE = os.environ.get("PITZ_FLOW_INVERSE", "petsc")
-if FLOW_INVERSE not in ("petsc", "native", "hostilu"):
+if FLOW_INVERSE not in ("petsc", "simplesmooth", "hostilu"):
     raise SystemExit(
         f"PITZ_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'native', 'hostilu']"
     )
@@ -307,17 +307,17 @@ HOST_FLOW = dict(
     prolongation_smoothing="none",
 )
 LEADING_INVERSE = (
-    host_ilu_inverse(**HOST_FLOW)
+    ilu_smoothed_inverse(**HOST_FLOW)
     if FLOW_INVERSE == "hostilu"
-    else native_saddle_inverse(**NATIVE_FLOW)
-    if FLOW_INVERSE == "native"
+    else simple_smoothed_inverse(**NATIVE_FLOW)
+    if FLOW_INVERSE == "simplesmooth"
     else None
 )
 
 #: The trailing `[k, omega]` block's inverse: the differentiable-framework nodal hierarchy, which the
 #: sibling case defaults to after a controlled pair measured it ahead of the host V-cycle (67 steps and
 #: 2124 s against 72 and 2893, to the same reattachment length).
-NATIVE_TRAILING = {"max_coarse": COARSE_EQ_LIMIT, "equilibrate": False}
+JACOBI_TRAILING = {"max_coarse": COARSE_EQ_LIMIT, "equilibrate": False}
 
 #: ⚠️ THE PROBED JACOBIAN IS EXACT ONLY AT REACH 5 ON THIS MESH, AND AT REACH 3 ON THE SIBLING'S --
 #: WITH IDENTICAL SCHEMES. The cause is the mesh, not the dimension, and it generalizes.
@@ -726,7 +726,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             field_split=FIELD_SPLIT,
             trailing_smoother_sweeps=TRAILING_SWEEPS,
             leading_inverse=LEADING_INVERSE if FIELD_SPLIT else None,
-            trailing_inverse=native_nodal_inverse(**NATIVE_TRAILING) if FIELD_SPLIT else None,
+            trailing_inverse=jacobi_smoothed_inverse(**JACOBI_TRAILING) if FIELD_SPLIT else None,
             inner_observer=logger.on_inner,
         )
         shared_preconditioner[:] = [engine.shift_policy.preconditioner]

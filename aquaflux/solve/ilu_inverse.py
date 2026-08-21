@@ -1,4 +1,4 @@
-"""A host V-cycle over the JAX-native hierarchy, smoothed by an incomplete factorization.
+"""A host V-cycle over the traced hierarchy, smoothed by an incomplete factorization.
 
 **One aggregation, two applies.** The coarsening in :mod:`~aquaflux.solve.multigrid` is already a host
 computation in ``scipy``; only the *apply* is traced. That leaves room for a second apply over the very
@@ -16,15 +16,15 @@ The two are for different machines, and the reason is the smoother rather than t
 
 Before this, choosing the incomplete-LU smoother meant taking a *second, independent* multigrid: a host
 library's own aggregation, its own coarse space, its own refresh path, tuned by its own options. Two
-hierarchies over one operator is two things to keep true at once, and they drifted -- the native one grew
+hierarchies over one operator is two things to keep true at once, and they drifted -- the traced one grew
 a strength threshold, a level cap and a refit path that the other expressed differently or not at all.
-Here the hierarchy is the native one in both cases, so a coarsening improvement reaches the CPU path and
+Here the hierarchy is the traced one in both cases, so a coarsening improvement reaches the CPU path and
 the accelerator path together, and only the relaxation differs.
 
 **The transpose is built, not borrowed, and that is the delicate part.** A V-cycle is not symmetric
 unless its smoother is, and an incomplete factorization is not: ``M^T`` is the same recursion with the
 operator, the coarse solve and the smoother each transposed, and the pre- and post-smoothing exchanged.
-:meth:`HostVCycleInverse.apply` implements exactly that, and the adjoint identity
+:meth:`IluSmoothedInverse.apply` implements exactly that, and the adjoint identity
 ``<y, M x> == <M^T y, x>`` is asserted in the unit tests rather than argued for here -- it is the one
 property whose failure would leave the forward solve healthy and every gradient wrong.
 """
@@ -41,7 +41,7 @@ from .ilu0 import Ilu0
 from .multigrid import SmoothedHierarchy, build_convection_hierarchy
 from .ordering import CellMajor, EliminationOrdering
 
-__all__ = ["HostVCycleInverse", "host_ilu_inverse"]
+__all__ = ["IluSmoothedInverse", "ilu_smoothed_inverse"]
 
 
 class _HostLevel:
@@ -157,8 +157,8 @@ def _prolongation(level) -> sp.csr_matrix | None:
     ).tocsr()
 
 
-class HostVCycleInverse:
-    """A frozen V-cycle over the native hierarchy, relaxed on the host by an incomplete factorization.
+class IluSmoothedInverse:
+    """A frozen V-cycle over the traced hierarchy, relaxed on the host by an incomplete factorization.
 
     Satisfies the same ``n_dofs`` + ``apply(residual, transpose=…)`` contract as every other frozen
     inverse in this package, so it drops into a field split or a monolithic preconditioner wherever one
@@ -308,11 +308,11 @@ class HostVCycleInverse:
         """Nothing to release — ``scipy`` factors, not a host solver's handles."""
 
 
-def host_ilu_inverse(**settings) -> Callable[[sp.spmatrix, int], HostVCycleInverse]:
-    """A block-inverse factory pairing the native hierarchy with a host incomplete-LU smoother.
+def ilu_smoothed_inverse(**settings) -> Callable[[sp.spmatrix, int], IluSmoothedInverse]:
+    """A block-inverse factory pairing the traced hierarchy with a host incomplete-LU smoother.
 
-    The CPU counterpart of :func:`~aquaflux.solve.saddle_multigrid.native_saddle_inverse` and
-    :func:`~aquaflux.solve.field_split.native_nodal_inverse`: same coarsening surface, same contract,
+    The CPU counterpart of :func:`~aquaflux.solve.saddle_multigrid.simple_smoothed_inverse` and
+    :func:`~aquaflux.solve.field_split.jacobi_smoothed_inverse`: same coarsening surface, same contract,
     a sequential smoother instead of a vectorized one.
 
     Because it smooths a leading flow block the way a host algebraic-multigrid library does — a
@@ -326,11 +326,11 @@ def host_ilu_inverse(**settings) -> Callable[[sp.spmatrix, int], HostVCycleInver
     Returns
     -------
     callable
-        ``(block, n_group_fields) -> HostVCycleInverse``, the shape
+        ``(block, n_group_fields) -> IluSmoothedInverse``, the shape
         :func:`~aquaflux.solve.field_split.build_block_triangular_field_split` expects.
     """
 
-    def build(block: sp.spmatrix, n_group_fields: int) -> HostVCycleInverse:
-        return HostVCycleInverse(block, n_group_fields, **settings)
+    def build(block: sp.spmatrix, n_group_fields: int) -> IluSmoothedInverse:
+        return IluSmoothedInverse(block, n_group_fields, **settings)
 
     return build

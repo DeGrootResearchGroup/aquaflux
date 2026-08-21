@@ -63,16 +63,16 @@ paths:
       (unequilibrated, field-major) space, so the retained coupling block is applied raw between the two
       block solves, with no scaling bookkeeping.
       **⚠️ But `factors.n_dofs` + `factors.apply` is the WHOLE of what the split satisfies, and the base
-      asks for more elsewhere — `has_native_solve` reads `self.factors.has_native_solve`, which only an
+      asks for more elsewhere — `has_exact_solve` reads `self.factors.has_exact_solve`, which only an
       `AmgVCycle` has, so on the split the inherited property RAISED (fixed 2026-08-14 by an explicit
-      `has_native_solve = False` override; a split never forms the whole shifted operator, so there is no
-      native solve to offer).** It went unseen for the reason worth carrying: **both call sites ask
-      through `getattr(pc, "is_exact_native", False)` — the right spelling for the complete LU, which
+      `has_exact_solve = False` override; a split never forms the whole shifted operator, so there is no
+      traced solve to offer).** It went unseen for the reason worth carrying: **both call sites ask
+      through `getattr(pc, "solves_exactly_on_host", False)` — the right spelling for the complete LU, which
       genuinely lacks the attribute — and a `getattr` default swallows an `AttributeError` raised *inside*
       a property body exactly as it swallows a missing name.** The value it produced was accidentally the
       correct `False`, so nothing failed. Two consequences: a test of such a property must read it
       **directly**, never through `getattr` with a default (a `getattr` test passes against the defect —
-      `test_the_field_split_answers_the_native_solve_question_without_raising` reads it both ways for
+      `test_the_field_split_answers_the_exact_solve_question_without_raising` reads it both ways for
       this reason); and the unnamed `factors` contract the family shares is **`n_dofs` + `apply` only**,
       so anything else the base reads off `self.factors` is an inheritance leak, not a contract.
     - **The transpose is closed-form, so the adjoint is served.** The transpose of a
@@ -169,7 +169,7 @@ paths:
       advection-diffusion-reaction pair with a genuine diagonal, and **damped Jacobi on it converges** at
       both states (6 cycles / 2.8e-12 forward, 16 / 5.2e-10 at `β=0`), for a consistent ~1.5× cycle cost
       against ILU(0) on both blocks. At `β=0` it *ties the shipped monolithic* (16) while taking the
-      incomplete factorization off two of six fields. So the k/ω hierarchy could be JAX-native, with
+      incomplete factorization off two of six fields. So the k/ω hierarchy could be traced, with
       PETSc confined to the four-field saddle.
     - **The Chebyshev-vs-Jacobi asymmetry on the SAME block is the mechanistic tell, and it is why
       "Jacobi-class" must not be treated as one arm.** Chebyshev **fails** on `[k,ω]` (58 cap, 2.6e-01 at
@@ -219,7 +219,7 @@ paths:
       reason rather than an inferred one.
     - **Two weak smoothers compound**: Vanka flow + Jacobi k/ω is 1.4e-01, far worse than either
       weakness alone. The two blocks' smoothers are independent *settings* but not independent in effect.
-  - **⚠️ THE JAX-NATIVE HIERARCHIES CANNOT BE BUILT ON THE `[k,ω]` JACOBIAN SLICE AT ALL — and the
+  - **⚠️ THE TRACED HIERARCHIES CANNOT BE BUILT ON THE `[k,ω]` JACOBIAN SLICE AT ALL — and the
     reason is structural, not a cost.** Both were tried as the trailing block's inverse and both failed,
     for **one shared cause** rather than two incidental ones:
     - `build_convection_hierarchy` (aggregation) **refuses**: *"operator diagonal must be finite and
@@ -245,7 +245,7 @@ paths:
       reparametrization scaling, because the Jacobian is already in the solved variable — the log-ω
       chain factor and its wall-fixation trap simply do not arise. Built as
       `solve/field_split.PerFieldNativeInverse` / `native_per_field_inverse` (**both DELETED 2026-08-15**
-      — see the deletion note in the field-split section; the surviving inverse is `NodalNativeInverse`),
+      — see the deletion note in the field-split section; the surviving inverse is `JacobiSmoothedInverse`),
       with the two fields
       composed block-triangularly (k leading).
       **This corrected a real cost: the wrong explanation was taken as an accepted blocker and sent the
@@ -299,11 +299,11 @@ paths:
     last of which is a known trap, since a rescale that ignores the wall-fixation rows' own derivative
     cost 27× on the linear residual once already.
   - **⚠️⚠️ SUPERSEDED (2026-08-10) — EVERY COST NUMBER IN THIS BULLET IS VOID, AND ITS CONCLUSION IS
-    REVERSED. The native trailing inverse is now AT PARITY on cycles (2 restart cycles against 2 on the
+    REVERSED. The host trailing inverse is now AT PARITY on cycles (2 restart cycles against 2 on the
     `[k, ω]` block alone; full configuration below) and at parity on per-apply cost — the pair of timings
     once quoted here carried no sweep count and no state and is deleted.** Both stated blockers are gone.
     The "~2.8× more expensive"
-    figure was the **COO `segment_sum`** matvec, not anything intrinsic to a framework-native
+    figure was the **COO `segment_sum`** matvec, not anything intrinsic to a traced
     V-cycle — a CSR operator took the apply from 117.8 ms to 13.3 ms (8.8×), and the level operator
     is applied ~10× per cycle so that was essentially all of it. The "learn a block size" half was
     built and is what closed the *quality* gap. Read the 2026-08-10 section at the top of this
@@ -319,7 +319,7 @@ paths:
     1e-08, `equilibrate=False`, `refresh_on_cycles` 3, β-mismatch gate off, ILU(0) × 4 on the saddle,
     trailing sweeps 1, `coarse_eq_limit` 2000, restart 15, `forward_rtol` 0.3, two continuation rungs.
 
-    | | native (`march-20260811-132658.log`) | petsc (`march-20260811-161642.log`) |
+    | | traced (`march-20260811-132658.log`) | petsc (`march-20260811-161642.log`) |
     |---|---|---|
     | wall | **2124 s** | 2893 s (+36 %) |
     | steps | **67** | 72 |
@@ -331,14 +331,14 @@ paths:
     **49 steps** — same β, same ‖R‖ to four figures (8.810e-03, 7.274e-03), same α — and part at step
     50. That is the controlled-pair signature the confounded comparison lacked, and it is worth more
     than the totals: it localizes the whole 769 s to the positivity-cap collapse, which each arm meets
-    at a *different* step. Native meets it at 50 (cap 1.01e-02 → 1.44e-05); petsc sails through 50–52
+    at a *different* step. Traced meets it at 50 (cap 1.01e-02 → 1.44e-05); petsc sails through 50–52
     and meets it at 53–55 (α 0.316 / 0.075 / 0.005). Both then pay the cascade, and petsc's is worse —
     β driven to **4.4394** against **0.9364**, hence ten walk-back steps against six by the law below.
     So the arms differ in *when* they hit the cap and *how far* β is driven, **not** in how well either
     inverts its block — and the remaining wall time is in the cascade, not the preconditioner.
 
-    So the native inverse is not merely at parity on a march, it is ahead, and **the case defaults moved
-    to it** (`BFS3D_TURBULENCE_INVERSE` now defaults to `native`, with `K_WALL` `zerogradient` and
+    So the traced inverse is not merely at parity on a march, it is ahead, and **the case defaults moved
+    to it** (`BFS3D_TURBULENCE_INVERSE` now defaults to `jacobi`, with `K_WALL` `zerogradient` and
     `K_POSITIVITY_FLOOR` 1e-08 moved in the same change so the default configuration *is* the arm
     measured above; `compare.py` states all three in its banner).
 
@@ -354,18 +354,18 @@ paths:
 
     **The step-count gap is the positivity limiter, not the inverse** — consistent with the `limit`
     warning further down this file. Minimum step cap over a whole march: **2.02e-01** under `dirichlet`,
-    against **1.44e-05** (native) and **5.41e-03** (petsc) under `zerogradient`. Under `zerogradient`
+    against **1.44e-05** (traced) and **5.41e-03** (petsc) under `zerogradient`. Under `zerogradient`
     near-wall `k` is free to ratchet down until one numerically dead cell (12800, `k ≈ 3e-20`) sets the
     global cap, which is why the `dirichlet` arm looked fast. It is a different discrete problem, not a
     faster solver.
 
-    **The wall condition's own cost, as a controlled pair** (2026-08-11, `march-bc-dirichlet-native.log`
-    against `march-20260811-132658.log`): same code, same native inverse, same 1e-08 floor, only the k
+    **The wall condition's own cost, as a controlled pair** (2026-08-11, `march-bc-dirichlet-traced.log`
+    against `march-20260811-132658.log`): same code, same traced inverse, same 1e-08 floor, only the k
     wall BC differing — `dirichlet` **59 steps / 1911 s / 292 cycles**, `zerogradient` **67 / 2124 /
     329**, both to mid-span `x_r/h` 8.36. So the BC is worth ~11 % of the wall, and the earlier
     cross-version "58 against 67" is superseded by this same-code pair. Note what it does *not* say:
-    under `dirichlet` the two inverses are within one step of each other (native 59, petsc 58 — and the
-    58 is on older code), so **the native inverse's margin is regime-dependent**, clear under
+    under `dirichlet` the two inverses are within one step of each other (traced 59, petsc 58 — and the
+    58 is on older code), so **the traced inverse's margin is regime-dependent**, clear under
     `zerogradient` and inside the noise under `dirichlet`. The default rests on `zerogradient` being the
     selected physics, not on the inverse winning everywhere.
 
@@ -376,7 +376,7 @@ paths:
     across the three marches above, observed ~2 / 6 / 10. Replaying `CflResidualDualTimeControl` over
     each logged (α, ‖R‖) sequence reproduces every logged β to four decimals on **all 22 archived
     marches**, so the law is checkable rather than inferred. The cascade regions are **12.4 %** of wall
-    (native trio) and **24.7 %** (petsc).
+    (traced trio) and **24.7 %** (petsc).
 
     **⚠️ THREE OBVIOUS FIXES ARE REFUTED BY THE ARCHIVED LOGS — do not re-propose them (2026-08-11).**
     Each was proposed here first and killed by a counterexample:
@@ -402,7 +402,7 @@ paths:
     between attempts* (3181 → 22400 → 12800) so consecutive caps do not even measure the same thing.
     This does not reopen gating on `binding_limit == 1` (measured and reverted, below).
 
-    **⚠️ AND THE FUTILITY READING IS CONFOUNDED.** The native trio's step-51 attempts all ran with
+    **⚠️ AND THE FUTILITY READING IS CONFOUNDED.** The host trio's step-51 attempts all ran with
     `pc none 0.0s` — `REFRESH_ON_BETA` defaults to `inf`, so the `precondition_step` the march calls on
     every escalation does nothing, and every escalated attempt was solved against a V-cycle built for
     β = 0.0293. Step 52 escaped only because its inner solve happened to trip the mid-step rebuild. So
@@ -420,7 +420,7 @@ paths:
     β = 16.0 limit cycle for **74 consecutive steps** in `march-20260810-090711.log`.
 
     **⚠️ HISTORICAL — measured 2026-08-09, void since:** taking PETSc off the trailing half is not a
-    win, and the two blockers are now specific (`bfs3d`, three states, arms `native`/`native2` in
+    win, and the two blockers are now specific (`bfs3d`, three states, arms `jacobi`/`jacobi2` in
     `turbulence_smoother_sweep.py`). With the per-field hierarchies above wired in as the trailing
     inverse, against the shipped PETSc V-cycle at `ilu0` on both halves, `refresh_on_cycles` 3, plain
     aggregation, `coarse_eq_limit` 2000, reach 3, restart 15:
@@ -428,8 +428,8 @@ paths:
     | trailing inverse | 00057 | 00058 | hard | blended | apply |
     |---|---|---|---|---|---|
     | PETSc V-cycle (shipped) | 8.66 | 8.83 | 8.88 | **8.76** | 102.0 ms |
-    | native, 1 V-cycle/field | 13.09 | 13.22 | 13.23 | 13.16 (**1.50×**) | 144.3 ms |
-    | native, 2 V-cycles/field | 16.50 | 17.03 | 12.94 | 16.34 (1.87×) | 204.0 ms |
+    | traced, 1 V-cycle/field | 13.09 | 13.22 | 13.23 | 13.16 (**1.50×**) | 144.3 ms |
+    | traced, 2 V-cycles/field | 16.50 | 17.03 | 12.94 | 16.34 (1.87×) | 204.0 ms |
 
     Uniformly 1.50× (spread 1.49–1.51) with apply flat to 0.3 % — a low-variance loss, unlike the
     block-Jacobi arm's. The second row shows the two deficits are separable and neither is free: more
@@ -444,7 +444,7 @@ paths:
     **So the next attempt starts from "the V-cycle must get ~3× faster and learn a block size", not
     from "remove the callback".** The second half is a defined enhancement rather than a research
     problem — teach `_aggregate` a block size so it coarsens *cells* as GAMG does, which would let one
-    two-field native hierarchy replace the per-field pair and close the quality gap without doubling
+    two-field traced hierarchy replace the per-field pair and close the quality gap without doubling
     the cycles. It does nothing about the 2.8×. **`PerFieldNativeInverse` is GONE (deleted 2026-08-15);**
     the paragraph below is why it was kept until then, and it
     is tested, transposable, adjoint-legal, and is what a block-aware aggregation would slot into — it
@@ -453,7 +453,7 @@ paths:
   - **NOT YET BUILT: the production wiring.** There is no `coupled_field_split_continuation` / shift
     policy, deliberately — the forward march is where a continuation builder would be used and the split
     *loses* there. What the measurement argues for is a **`β = 0` adjoint-only** preconditioner seam
-    (`ForwardStep.adjoint_preconditioner()` already exists as the natural home), plus the JAX-native k/ω
+    (`ForwardStep.adjoint_preconditioner()` already exists as the natural home), plus the traced k/ω
     hierarchy the damped-Jacobi result unlocks. Both are unbuilt.
   - **✅ THE MONOLITHIC MATERIALIZE NO LONGER STORES THE BLOCK IT THROWS AWAY — BUILT AND VERIFIED
     (2026-08-18).** `FieldSplitAmgPreconditioner.build`/`refresh_in_place` still call the inherited
@@ -511,20 +511,20 @@ paths:
     block that no longer has to be built would have been on the order of 450M stored entries and, at the
     per-entry transient costs measured for this same gather-map machinery elsewhere in this file
     (65.7–100 B/entry), on the order of 10–30 GB of a single materialize's peak.
-  - **⚠️⚠️ `trailing_smoother_sweeps` DOES NOT REACH AN INJECTED TRAILING INVERSE, SO THE NATIVE ARM
+  - **⚠️⚠️ `trailing_smoother_sweeps` DOES NOT REACH AN INJECTED TRAILING INVERSE, SO THE TRACED ARM
     SHIPS AT FOUR SWEEPS, NOT ONE (verified in source, 2026-08-14).** In
     `build_block_triangular_field_split` the injected inverse is called as
     `trailing_inverse(trailing_block, groups.n_trailing_fields)` — two arguments — while
     `smoother_sweeps=trailing_smoother_sweeps` is passed **only on the `else` branch** that builds its own
-    `build_amg_vcycle`. `native_nodal_inverse`'s own default is `sweeps=4`, and the case's
-    `NATIVE_TRAILING` sets only `max_coarse` and `equilibrate`. **So the entry below, and its measured
+    `build_amg_vcycle`. `jacobi_smoothed_inverse`'s own default is `sweeps=4`, and the case's
+    `JACOBI_TRAILING` sets only `max_coarse` and `equilibrate`. **So the entry below, and its measured
     16.5 % wall saving, describe the PETSc trailing V-cycle — which this case no longer uses.** Cutting
-    the NATIVE trailing sweeps is therefore an untaken lever, not a shipped setting: measured on a
+    the TRACED trailing sweeps is therefore an untaken lever, not a shipped setting: measured on a
     same-shape synthetic, its apply runs 10.7 / 6.9 / 5.3 ms at 4 / 2 / 1 sweeps.
     ⚠️ **Two more shipped-vs-record mismatches found in the same pass:** the case runs
     `equilibrate=False` (the class default is `True`), so every statement here about the *equilibrated*
     `[k, ω]` cell block — unit diagonal, determinant exactly 1, subdiagonal 100–340 — describes an
-    operator the shipped configuration does not build; and `NATIVE_TRAILING`'s `max_coarse=2000` is
+    operator the shipped configuration does not build; and `JACOBI_TRAILING`'s `max_coarse=2000` is
     **inert**, because at `max_levels = _CONVECTION_LEVELS = 2` the level cap fires first regardless
     (`max_coarse=16` builds a bit-identical hierarchy).
 
@@ -600,7 +600,7 @@ paths:
         upper-triangular; Jacobi and block-Jacobi are permutation-invariant, ILU holds both triangles
         either way, and a *forward* sweep (SOR/Gauss-Seidel) is made strictly worse — the current order
         lets it solve k first and use the fresh value in ω. The shipped order is already the good one.
-      - **For a JAX-native smoother this is the cheap prize:** with the equilibrated unit diagonal the
+      - **For a traced smoother this is the cheap prize:** with the equilibrated unit diagonal the
         block solve is one fused multiply-add per cell (`x_ω -= c·x_k`), fully parallel across cells,
         no factorization and no sequential dependency.
     - **⚠️ BLOCK JACOBI CANNOT REPLACE THE TRAILING HIERARCHY — measured, and the reason is
@@ -608,7 +608,7 @@ paths:
       (neighbour coupling ~12 % of same-cell for the diagonal fields, 1.1 % for `∂R_ω/∂k`), and block
       Jacobi's error operator is exactly that neighbour part — so it looks as though a coarse grid has
       nothing to do here, and on a synthetic operator at that neighbour weight it contracts ~10× per
-      sweep. It does not carry over. Measured as the **whole** trailing inverse (a native batched 2×2
+      sweep. It does not carry over. Measured as the **whole** trailing inverse (a traced batched 2×2
       solve, no hierarchy at all) against the shipped V-cycle, on two step-initial states and the hard
       iterate, blended by the march's own solve mix:
 
@@ -626,7 +626,7 @@ paths:
       state changes flip it to two. And more sweeps cannot buy the edge back: by 8 sweeps its apply
       cost (109 ms) exceeds the V-cycle's (102 ms), so it has spent the whole cost advantage
       recovering what the coarse grid gave for free.
-      **This does NOT refute block Jacobi as a SMOOTHER inside a JAX-native hierarchy**, which is the
+      **This does NOT refute block Jacobi as a SMOOTHER inside a traced hierarchy**, which is the
       actual route for taking PETSc off this block and is untested. The implementation
       (`BlockJacobiInverse` in `validation/bfs3d_openfoam/field_split_probe.py`) is verified exact on a
       block-diagonal operator in one sweep, transposable in closed form (⟨y,Mx⟩ = ⟨Mᵀy,x⟩ to 1e-15, so

@@ -391,7 +391,7 @@
     second-order collocated Rhie–Chow discretization, so "make the PC pattern local" is not a lever.
 
 
-## Flow block (native `[u, v, w, p]` saddle preconditioning) — refuted attempts
+## Flow block (traced `[u, v, w, p]` saddle preconditioning) — refuted attempts
 
 Full detail for all of these is in `solve-flow-block-log.md` (no `paths:`, reference-only); the current,
 load-bearing status of the flow block itself is in `solve-flow-block.md`.
@@ -402,7 +402,7 @@ load-bearing status of the flow block itself is in `solve-flow-block.md`.
 - **`schur_scaling="msimple"` as the `bfs3d` LEADING inverse — DOMINATED even under a controlled,
   single-variable swap against the shipped bundle (2026-08-18).** Swapping only the leading inverse for
   `BlockPreconditioner(schur_scaling="msimple")`, with the shipped trailing inverse
-  (`compare.TRAILING_INVERSE`, native nodal) held fixed — unlike the flat-PC arm above, which paired it
+  (`compare.TRAILING_INVERSE`, traced nodal) held fixed — unlike the flat-PC arm above, which paired it
   with an unshipped `ilu0` trailing — both arms converge, but MSIMPLE costs ~8-9x the shipped bundle's
   Krylov cycles (6→53 at the adjoint operator, 5→40 at the march's own shift) at the case's real
   converged root. This is also the reachability-scale answer to the "is a block-SIMPLE
@@ -469,12 +469,12 @@ load-bearing status of the flow block itself is in `solve-flow-block.md`.
 - **Block-CSR sparse matvec — REFUTED; JAX's own primitives are already at the limit for this case.** See
   `solve-flow-block-log.md` § "The sparse matvec is at the limit of what JAX's primitives give —
   block-CSR REFUTED".
-- **The native flow block winning on a real march (on SPEED) — NOT established, and one earlier "10%
+- **The host flow block winning on a real march (on SPEED) — NOT established, and one earlier "10%
   fewer cycles" reading was an unfair A/B (only one arm had received a since-shipped tuning change).**
   ⚠️ The speed verdict stands, but `FLOW_INVERSE` is nonetheless `bfs3d`'s DEFAULT as of 2026-08-18 — the
   case for it moved to robustness (incomplete-LU's elimination-order sensitivity) and GPU-readiness, not
   a reversal of this measurement. The full current verdict is in `solve-flow-block.md` itself, not
-  archived here, because it is the live default, not a dead idea. Read it before re-proposing the native
+  archived here, because it is the live default, not a dead idea. Read it before re-proposing the traced
   block as a *speed* win — that specific claim is still refuted.
 
 ## Globalization (forward step, continuation, line search) — closed investigations

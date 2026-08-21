@@ -14,9 +14,9 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 from aquaflux.solve import (
-    NativeHierarchyInverse,
-    NativeSimpleInverse,
-    NodalNativeInverse,
+    HierarchyBlockInverse,
+    JacobiSmoothedInverse,
+    SimpleSmoothedInverse,
     air_inverse,
 )
 from aquaflux.solve.field_split import (
@@ -277,10 +277,10 @@ def test_the_trailing_inverse_takes_the_hierarchy_knobs_its_sibling_had() -> Non
     not be run at all. Not a decision, just where the code was written.
     """
     a = _nodal_block()
-    plain = NodalNativeInverse(a, 2)
+    plain = JacobiSmoothedInverse(a, 2)
     assert len(plain._hierarchy.levels) == 2, "the two-level default should be unchanged"
 
-    deeper = NodalNativeInverse(a, 2, max_levels=4, max_coarse=40)
+    deeper = JacobiSmoothedInverse(a, 2, max_levels=4, max_coarse=40)
     assert len(deeper._hierarchy.levels) == 4, "max_levels did not reach the coarsening"
 
     # And the value-dependent knobs build, which is what a sweep needs; a single-state probe never
@@ -289,7 +289,7 @@ def test_the_trailing_inverse_takes_the_hierarchy_knobs_its_sibling_had() -> Non
         {"strength_threshold": 0.25},
         {"strength_threshold": 0.25, "shape_headroom": 1.3},
     ):
-        inverse = NodalNativeInverse(a, 2, max_levels=4, max_coarse=40, **extra)
+        inverse = JacobiSmoothedInverse(a, 2, max_levels=4, max_coarse=40, **extra)
         x = np.asarray(inverse.apply(np.random.default_rng(1).normal(size=a.shape[0])))
         assert np.all(np.isfinite(x))
 
@@ -302,7 +302,7 @@ def test_the_trailing_refresh_keeps_the_argument_pytree_at_an_isotropic_coarseni
     base rather than each carrying their own copy of the refresh.
     """
     a = _nodal_block()
-    inverse = NodalNativeInverse(a, 2)
+    inverse = JacobiSmoothedInverse(a, 2)
     inverse.apply(np.asarray(np.random.default_rng(2).normal(size=a.shape[0])))
 
     def signature(inv):
@@ -315,28 +315,28 @@ def test_the_trailing_refresh_keeps_the_argument_pytree_at_an_isotropic_coarseni
     assert signature(inverse) == before, "the refresh moved the argument pytree"
 
 
-def test_both_native_inverses_share_one_refresh_implementation() -> None:
+def test_both_hierarchy_inverses_share_one_refresh_implementation() -> None:
     """The seam itself, asserted: a capability added to the base reaches both smoothers.
 
     Written as a structural check rather than a behavioural one because the failure it guards against is
     a future divergence — someone re-adding a private `refactor_block` or `apply` to one class, which
     would silently take it off the shared path and let the two drift again.
     """
-    for cls in (NodalNativeInverse, NativeSimpleInverse):
-        assert issubclass(cls, NativeHierarchyInverse)
+    for cls in (JacobiSmoothedInverse, SimpleSmoothedInverse):
+        assert issubclass(cls, HierarchyBlockInverse)
         for shared in ("refactor_block", "apply", "destroy", "n_dofs", "_rebuild", "_solve"):
             assert shared not in vars(cls), (
                 f"{cls.__name__} overrides {shared!r}, which the shared base owns"
             )
 
 
-def test_the_field_split_answers_the_native_solve_question_without_raising(groups) -> None:
+def test_the_field_split_answers_the_exact_solve_question_without_raising(groups) -> None:
     """Asked DIRECTLY, not through ``getattr`` -- which is what let this go unnoticed.
 
-    ``FieldSplitAmgPreconditioner`` inherits the monolithic V-cycle's ``has_native_solve``, which asks
+    ``FieldSplitAmgPreconditioner`` inherits the monolithic V-cycle's ``has_exact_solve``, which asks
     its frozen inverse whether it offers a native exact solve. The split's inverse is a
     :class:`BlockTriangularFieldSplit`, which has no such attribute, so the inherited property *raised*.
-    Both production callers ask through ``getattr(pc, "is_exact_native", False)`` -- correct for the
+    Both production callers ask through ``getattr(pc, "solves_exactly_on_host", False)`` -- correct for the
     factorization preconditioners, which genuinely lack the attribute -- and that default swallows an
     ``AttributeError`` raised inside a property body exactly as it swallows a missing name. The value it
     produced was accidentally right, so nothing failed.
@@ -357,10 +357,10 @@ def test_the_field_split_answers_the_native_solve_question_without_raising(group
     split = split_for(operator, groups, flow_first=True)
     preconditioner = FieldSplitAmgPreconditioner(split, groups)
 
-    assert preconditioner.has_native_solve is False
-    assert preconditioner.is_exact_native is False
+    assert preconditioner.has_exact_solve is False
+    assert preconditioner.solves_exactly_on_host is False
     # And the same answer the production call sites take, so the two spellings cannot drift apart.
-    assert getattr(preconditioner, "is_exact_native", False) is False
+    assert getattr(preconditioner, "solves_exactly_on_host", False) is False
 
 
 def _two_field_transport(n_cells: int = 40, coupling: float = 30.0) -> sp.csr_matrix:

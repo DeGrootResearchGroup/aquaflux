@@ -14,6 +14,34 @@ paths:
 Drive the residual to zero and expose an exact, iteration-count-independent adjoint.
 Governed by the root `CLAUDE.md` Engineering Principles.
 
+
+## ⚠️ "native" was renamed away (2026-08-20) — there is no such symbol
+
+The word meant **two opposite things** and neither described a method:
+
+- *ours, not PETSc* — `NativeSimpleInverse`, `NodalNativeInverse`, `NativeHierarchyInverse`,
+  `native_saddle_inverse`, `native_nodal_inverse`, `FLOW_INVERSE="native"`;
+- *run the whole solve natively on the host, **in PETSc*** — `AmgVCycle(native=True)`,
+  `has_native_solve`, `is_exact_native`, `native_forward_solve`.
+
+The family is now named by its **level smoother**, which is the only thing its members differ in:
+
+| was | is |
+|---|---|
+| `NativeHierarchyInverse` | `HierarchyBlockInverse` |
+| `NativeSimpleInverse` / `native_saddle_inverse` | `SimpleSmoothedInverse` / `simple_smoothed_inverse` |
+| `NodalNativeInverse` / `native_nodal_inverse` | `JacobiSmoothedInverse` / `jacobi_smoothed_inverse` |
+| `HostVCycleInverse` / `host_ilu_inverse` | `IluSmoothedInverse` / `ilu_smoothed_inverse` |
+| `AmgVCycle(native=)` / `has_native_solve` / `is_exact_native` / `native_forward_solve` | `host_exact_solve=` / `has_exact_solve` / `solves_exactly_on_host` / `host_exact_forward_solve` |
+| `solve/native_inverse.py` / `solve/host_vcycle.py` | `solve/hierarchy_inverse.py` / `solve/ilu_inverse.py` |
+| `BFS3D_FLOW_INVERSE=native` | `BFS3D_FLOW_INVERSE=simplesmooth` |
+| `BFS3D_TURBULENCE_INVERSE=native` | `BFS3D_TURBULENCE_INVERSE=jacobi` |
+
+Recorded measurements in these files that said "the native arm" now say "the traced arm" — *traced*
+(runs inside JAX, on device) against *host* is the distinction the old word was reaching for, and it
+is the one that matters for a GPU. `hostilu` and `petsc` arm values are unchanged: both already say
+what they are. See the shipped `docs/preconditioning.md` for the user-facing description.
+
 ## Responsibility
 - A Newton driver on `R(state, params) = 0` using the AD Jacobian (JVP/VJP), and a
   linear solve wrapped so its gradient comes from **implicit differentiation**, not by
@@ -54,8 +82,8 @@ testability seam. Everything subsystem-specific moved out:
 | File | `paths:` | Covers |
 |---|---|---|
 | `solve-direct-preconditioners.md` | `lu_preconditioner.py`, `ilu0.py`, `_ilu0.pyx` | The monolithic complete-LU preconditioner (and the now-deleted ILUT it once shared a family with), and the shared frozen-host contract |
-| `solve-amg-multigrid.md` | `amg_preconditioner.py`, `multigrid.py`, `native_inverse.py`, `host_vcycle.py` | The monolithic AMG coupled PC, the JAX-native multigrid, faithful smoothed aggregation, and `multigrid.py`'s own binding decisions |
-| `solve-flow-block.md` | `saddle_multigrid.py`, `shift_basis.py` | Native preconditioning of the `[u, v, w, p]` saddle — current status only |
+| `solve-amg-multigrid.md` | `amg_preconditioner.py`, `multigrid.py`, `hierarchy_inverse.py`, `ilu_inverse.py` | The monolithic AMG coupled PC, the traced multigrid, faithful smoothed aggregation, and `multigrid.py`'s own binding decisions |
+| `solve-flow-block.md` | `saddle_multigrid.py`, `shift_basis.py` | Traced preconditioning of the `[u, v, w, p]` saddle — current status only |
 | `solve-flow-block-log.md` | *(none — reference only)* | The full dated investigation behind the flow block, including qualified/retracted findings |
 | `solve-field-split.md` | `field_split.py` | The block-triangular field split (saddle plus two transported scalars) |
 | `solve-globalization.md` | `forward_step.py`, `continuation.py`, `step_control.py`, `retry.py`, `relaxation.py`, `line_search_growth.py` | Forward-step architecture, pseudo-transient continuation, line search — current status only |
@@ -140,8 +168,8 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 | stencil reach | `stencil_reach=3` | 3 | — |
 | probe column reach | `column_reach=None` (uniform) | **(3,3,3,3,2,2)** | `compare.py` `COLUMN_REACH` |
 | dual-time inner tol | `inner_tol=0.05` | **1e-2** | `compare.py` `INNER_TOL` |
-| flow (leading) inverse | `AmgVCycle` (PETSc) | **`NativeSimpleInverse`** (`FLOW_INVERSE="native"`) | `compare.py` |
-| trailing hierarchy depth | `NativeHierarchyInverse` class default: `max_levels=2, strength_threshold=0.0, aggressive_levels=1` | **`max_levels=20, max_coarse=200, strength_threshold=0.25, aggressive_levels=0, frozen_coarsening=True`** | `compare.py` `NATIVE_TRAILING` |
+| flow (leading) inverse | `AmgVCycle` (PETSc) | **`SimpleSmoothedInverse`** (`FLOW_INVERSE="simplesmooth"`) | `compare.py` |
+| trailing hierarchy depth | `HierarchyBlockInverse` class default: `max_levels=2, strength_threshold=0.0, aggressive_levels=1` | **`max_levels=20, max_coarse=200, strength_threshold=0.25, aggressive_levels=0, frozen_coarsening=True`** | `compare.py` `JACOBI_TRAILING` |
 
 **The two coupled forward solvers — always name which path you mean.** There is no
 `_COUPLED_AMG_FORWARD_SOLVER` symbol.

@@ -1,6 +1,6 @@
 """Can a BLOCK smoother accept the true ``[k, omega]`` Jacobian slice, where a point smoother cannot?
 
-The JAX-native multigrid builders refuse the coupled Jacobian's trailing slice outright: they form
+The traced multigrid builders refuse the coupled Jacobian's trailing slice outright: they form
 ``D^-1`` twice -- once for the Jacobi-class smoother, once for the prolongation-smoothing damping -- so
 ``aquaflux.solve.multigrid`` rejects any operator with a non-positive diagonal rather than bake ``1/0``
 into a frozen preconditioner or silently invert the sign of a correction. The slice violates that (a
@@ -155,7 +155,7 @@ def main() -> None:
         report(cell_blocks(trailing, n_cells), f"[k, omega] slice, {label} (beta {beta:g})")
         # The decisive question is not what the diagonal looks like but whether the builder ACCEPTS it:
         # if the shifted slice is admissible, the transport-operator detour is unnecessary on the
-        # forward path and the native hierarchy could precondition the real operator directly.
+        # forward path and the traced hierarchy could precondition the real operator directly.
         try:
             hierarchy = build_convection_hierarchy(trailing)
             print(

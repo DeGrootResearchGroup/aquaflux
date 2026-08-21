@@ -1,11 +1,11 @@
 # Investigation log — `aquaflux/solve/` the flow block
 
 > Split out of `solve.md` / `solve-flow-block.md` (2026-08-18). **No `paths:` frontmatter — this
-> file never auto-loads.** It holds the full chronological investigation behind the native
+> file never auto-loads.** It holds the full chronological investigation behind the traced
 > `[u, v, w, p]` flow-block preconditioner, including several rounds of "found a win" that a later,
 > tighter measurement qualified or retracted — kept because a wrong-but-plausible finding gets
 > re-derived if the trail that refuted it is deleted rather than archived. See `solve-flow-block.md`
-> for the current, load-bearing status (the native path is built and differentiable but is not the
+> for the current, load-bearing status (the traced path is built and differentiable but is not the
 > shipped march default).
 
 ### FLAT block preconditioners are CLOSED on this case
@@ -17,8 +17,8 @@ the saddle — fails at `beta = 0` (58-cycle cap):
 |---|---|
 | block-SIMPLE, MSIMPLE Schur | 2.554e-06 |
 | block-SIMPLE, `a_P` Schur | 7.812e-03 |
-| algebraic SIMPLE Schur, native sub-block inverses | 1.049e-02 |
-| left block transform (exact) + native multigrid on the transformed operator | 1.473e-02 |
+| algebraic SIMPLE Schur, traced sub-block inverses | 1.049e-02 |
+| left block transform (exact) + traced multigrid on the transformed operator | 1.473e-02 |
 | left block transform (Schur-only) | 1.395e-03 |
 | multi-step saddle, Frobenius, 1 step | 1.632e-04 |
 
@@ -28,8 +28,8 @@ a conditioning one: a flat inverse must get every error component right in one a
 SIMPLE-type Schur is worst precisely on the smooth global pressure mode a coarse grid exists to handle.
 
 Two sub-results worth keeping:
-- **Neither sub-block inverse is the constraint.** A 2×2 over which half is native: PETSc/PETSc 1.707e-02,
-  native/PETSc 1.555e-02, PETSc/native 3.904e-03, native/native 1.049e-02 — a 4.4× spread against an
+- **Neither sub-block inverse is the constraint.** A 2×2 over which half is traced: PETSc/PETSc 1.707e-02,
+  traced/PETSc 1.555e-02, PETSc/traced 3.904e-03, traced/traced 1.049e-02 — a 4.4× spread against an
   eight-order gap to the incumbent.
 - **The raw `(p, p)` block is NOT usable as the pressure operator in a split.** With host V-cycles it
   *diverges* (39 cycles, true relative residual 1.198e+00). That it is already 0.71× the SIMPLE-Schur
@@ -47,13 +47,13 @@ therefore *flattered* relative to the shipped object, and still failed.
 > shift. Read both before quoting either.**
 
 **The table above pairs MSIMPLE with an `ilu0` trailing inverse, which `bfs3d` does not ship — its
-`TURBULENCE_INVERSE` default is `"native"` (`compare.TRAILING_INVERSE = native_nodal_inverse(
-**compare.NATIVE_TRAILING)`), so that comparison changed two things relative to the shipped bundle at
+`TURBULENCE_INVERSE` default is `"jacobi"` (`compare.TRAILING_INVERSE = jacobi_smoothed_inverse(
+**compare.JACOBI_TRAILING)`), so that comparison changed two things relative to the shipped bundle at
 once. This measurement changes exactly one.** Two arms, same materialized Jacobian, same field-split
 wiring, same trailing inverse, same column reach, same state — only the leading (flow-saddle) inverse
 swapped:
 
-- **shipped** — `compare.LEADING_INVERSE` (`host_ilu_inverse` at the case's own settings: `sweeps=1,
+- **shipped** — `compare.LEADING_INVERSE` (`ilu_smoothed_inverse` at the case's own settings: `sweeps=1,
   cycles=1, strength_threshold=0.25, avoid_singletons=True, aggressive_levels=0, max_levels=5,
   max_coarse=500, prolongation_smoothing="none"` — the actual shipped default as of this run,
   `BFS3D_FLOW_INVERSE=hostilu`).
@@ -61,8 +61,8 @@ swapped:
   schur_scaling="msimple", strength_threshold=0.25)`, built from the real assembler + eddy viscosity
   at the probed state, exactly as `field_split_probe.block_simple_arms` constructs its `msimple` arm.
 
-Both paired with the SAME trailing inverse, `compare.TRAILING_INVERSE` (`NodalNativeInverse` at
-`compare.NATIVE_TRAILING`: `max_coarse=COARSE_EQ_LIMIT, equilibrate=False`).
+Both paired with the SAME trailing inverse, `compare.TRAILING_INVERSE` (`JacobiSmoothedInverse` at
+`compare.JACOBI_TRAILING`: `max_coarse=COARSE_EQ_LIMIT, equilibrate=False`).
 
 *Configuration:* `bfs3d`, state `state-00059` from a full shipped 3-rung cold march completed the same
 day (`nervous-tereshkova-bf3a80`, converged: step 20 of the target rung, `|R|` 1.830e-06, march shift
@@ -74,8 +74,8 @@ rtol 1e-8 on the TRUE residual, cap 60 restarts. Harness:
 
 | operator | arm | cycles | TRUE rel |
 |---|---|---|---|
-| zero shift (adjoint operator) | **shipped (hostilu + native trailing)** | **6** | 1.986e-11 |
-| zero shift (adjoint operator) | msimple (native trailing, all else shipped) | **53** | 3.250e-09 |
+| zero shift (adjoint operator) | **shipped (hostilu + traced trailing)** | **6** | 1.986e-11 |
+| zero shift (adjoint operator) | msimple (traced trailing, all else shipped) | **53** | 3.250e-09 |
 | march shift β=0.0050 | **shipped** | **5** | 1.186e-11 |
 | march shift β=0.0050 | msimple | **40** | 3.384e-09 |
 
@@ -111,17 +111,17 @@ conformance write-up and the taxonomy; the option is now `schur_scaling="msimple
 shipped 3-rung cold march; field split flow-first, **only the leading (flow-saddle) inverse differs**
 (trailing inverse `compare.TRAILING_INVERSE`, wiring, shift and column reach `(3,3,3,3,2,2)` held at the
 shipped bundle); real right-hand side `-R(state)`; one materialization shared by every arm; GMRES restart
-15 to `rtol` 1e-8 on the TRUE residual, cap 60 restarts. **The shipped leading inverse is now `native`**
-(`FLOW_INVERSE="native"` since 2026-08-18), not the `hostilu` the table above was measured against — so
+15 to `rtol` 1e-8 on the TRUE residual, cap 60 restarts. **The shipped leading inverse is now `simplesmooth`**
+(`FLOW_INVERSE="simplesmooth"` since 2026-08-18), not the `hostilu` the table above was measured against — so
 its baseline is 17 cycles, not 6, and the two runs' *ratios* are not comparable across that change.
 
 | operator | leading inverse | cycles | TRUE rel |
 |---|---|---|---|
-| zero shift (adjoint operator) | **shipped, `native`** | **17** | 6.387e-10 |
+| zero shift (adjoint operator) | **shipped, `simplesmooth`** | **17** | 6.387e-10 |
 | zero shift (adjoint operator) | `msimple` / `triangular` (what the table above measured) | 45 | 5.384e-09 |
 | zero shift (adjoint operator) | `msimple` / `simple` (Algorithm 1 in full) | **58 — the cap** | 1.977e-08 |
 | zero shift (adjoint operator) | `msimple` / `simpler` (**MSIMPLER**) | **32** | 3.917e-09 |
-| march shift β=0.0050 | **shipped, `native`** | **19** | 2.661e-10 |
+| march shift β=0.0050 | **shipped, `simplesmooth`** | **19** | 2.661e-10 |
 | march shift β=0.0050 | `msimple` / `triangular` | 40 | 2.246e-09 |
 | march shift β=0.0050 | `msimple` / `simple` | 47 | 6.138e-09 |
 | march shift β=0.0050 | `msimple` / `simpler` (**MSIMPLER**) | **22** | 8.655e-10 |
@@ -152,7 +152,7 @@ its baseline is 17 cycles, not 6, and the two runs' *ratios* are not comparable 
 
 ### Coarsening rate and depth — measured, and the direction that helps is the wrong one
 
-Native nodal hierarchy over the flow block, SIMPLE smoother at the settings above, 4 sweeps, 20-cycle cap:
+Traced nodal hierarchy over the flow block, SIMPLE smoother at the settings above, 4 sweeps, 20-cycle cap:
 
 | coarsening | levels | fine → coarse | ratio | TRUE rel | dense coarse solve |
 |---|---|---|---|---|---|
@@ -205,7 +205,7 @@ couple to almost nothing.
 
 **Fixed by attaching such a vertex to an adjacent aggregate instead** (`_mis_aggregate(
 avoid_singletons=True)`; a vertex with genuinely no neighbours is a true isolate and still gets its
-own). Same configuration, 20-cycle cap, native SIMPLE smoother at 4 sweeps:
+own). Same configuration, 20-cycle cap, SIMPLE-smoothed hierarchy at 4 sweeps:
 
 | arm | level-0 aggregates | level-1 aggregates | coarse dofs | TRUE rel |
 |---|---|---|---|---|
@@ -251,7 +251,7 @@ sums. Do not act on this without measuring it.
 
 **The singleton fix helps at TWO levels as well — 1.85×, so it is a property of the aggregation and not
 a repair for depth.** Measured 2026-08-13 on `state-00067` (β = 0 on both operator and preconditioner,
-the adjoint's operator), native SIMPLE smoother at 4 sweeps with the Frobenius diagonal on both halves,
+the adjoint's operator), SIMPLE-smoothed hierarchy at 4 sweeps with the Frobenius diagonal on both halves,
 plain aggregation, restart cap 20 (so every arm below stops at 18 cycles — the cap, not a convergence
 test; only the residual separates them):
 
@@ -290,7 +290,7 @@ level cap. A depth sweep that moves only the level count is measuring one hierar
 
 ### Smoothed aggregation on the flow saddle — REFUTED under the SIMPLE smoother
 
-Every native arm interpolates the coarse correction piecewise-constant over each aggregate, which is the
+Every traced arm interpolates the coarse correction piecewise-constant over each aggregate, which is the
 textbook reason a hierarchy works at two levels and gains nothing deeper. Smoothing the prolongator once
 with the operator is the standard cure, and it had only ever been measured here under a *Jacobi*
 smoother — before the Frobenius diagonal turned the velocity predictor from amplifying to contracting —
@@ -322,7 +322,7 @@ residual gain there is not a like-for-like comparison with a four-sweep arm.
 `strength_threshold = 0`. Do not read "the lever is sweeps, not the hierarchy" out of it; the aggregation
 was the larger lever all along, and these arms simply never varied it. See *Where this stands*.
 
-### Where this stands — the native flow block converges: 1.84x at the adjoint, 2.4x on the march
+### Where this stands — the traced flow block converges: 1.84x at the adjoint, 2.4x on the march
 
 ⚠️ **The tables in THIS subsection predate the two free quality levers** (a per-cell block velocity
 splitting and an undamped correction) and the per-iteration split measurement. They are kept because the
@@ -331,12 +331,12 @@ below: **7 cycles / 57 s against 11 / 31 s at β = 0**, and **6 / 29 s against 2
 
 **The four-to-five-order gap never existed: it was the GMRES restart cap read as a convergence floor.**
 Every earlier reading here was taken at a 20-restart cap, where `restart_cycles` reports 18 for any arm
-whatever its quality. Uncapped, the native hierarchy reaches adjoint grade. Two later corrections then
+whatever its quality. Uncapped, the traced hierarchy reaches adjoint grade. Two later corrections then
 moved the number again, both in the incumbent's favour, so read the table and not the older prose.
 
 Measured 2026-08-13 on `state-00067` (converged, march shift 0.0064, |R| 3.586e-06) with **β = 0 on both
 operator and preconditioner**, real right-hand side `-R(state)`, GMRES restart 15 to rtol 1e-8 on the
-**TRUE** residual, 60-restart cap, uniform column reach, ILU(0) on the trailing half. Native arms are the
+**TRUE** residual, 60-restart cap, uniform column reach, ILU(0) on the trailing half. Traced arms are the
 SIMPLE-smoothed hierarchy with the Frobenius diagonal on both halves, plain aggregation, no singleton
 aggregates, 5 levels, `max_coarse` 500.
 
@@ -344,19 +344,19 @@ aggregates, 5 levels, `max_coarse` 500.
 |---|---|---|---|---|---|
 | **`split flow/ilu0` — the matched incumbent** | — | — | 11 | **29 s** | 2.64 |
 | monolithic ILU(0) — *not* the right bar | — | — | 11 | 42 s | 3.82 |
-| native | 0.10 | 8 x 4 | 11 | 80 s | 7.27 |
-| native | 0.25 | 8 x 4 | 10 | 83 s | 8.30 |
-| **native — best** | **0.25** | **8 x 2** | 11 | **68 s** | 6.18 |
-| native | 0.25 | 8 x 1 | 14 | 70 s | 5.00 |
-| **native — fewest cycles** | 0.25 | **16 x 4** | **6** | 98 s | 16.3 |
+| traced | 0.10 | 8 x 4 | 11 | 80 s | 7.27 |
+| traced | 0.25 | 8 x 4 | 10 | 83 s | 8.30 |
+| **traced — best** | **0.25** | **8 x 2** | 11 | **68 s** | 6.18 |
+| traced | 0.25 | 8 x 1 | 14 | 70 s | 5.00 |
+| **traced — fewest cycles** | 0.25 | **16 x 4** | **6** | 98 s | 16.3 |
 
 **STRENGTH OF CONNECTION IS THE LARGEST LEVER, worth 4x.** At `strength_threshold = 0` — the builder
-default, and what every native arm ran until now — `_aggregation_edges` returns the full cell adjacency,
+default, and what every traced arm ran until now — `_aggregation_edges` returns the full cell adjacency,
 so aggregation ignores the operator's values entirely and coarsens across the stiff direction. Turning it
 on took the arm from 44 cycles / 213 s to 10 / 83 s. The optimum is interior and sits on the standard
 value: 0 → 44 cycles, 0.10 → 11, 0.25 → 10, 0.50 → 11 (and 0.50 costs the most per cycle). **This is not a
 new discovery — `turbulence/coupled.py` already ships `strength_threshold: 0.25` on the frozen
-velocity/Schur AMGs for exactly this reason.** The native hierarchy was simply built without a setting the
+velocity/Schur AMGs for exactly this reason.** The host hierarchy was simply built without a setting the
 production path already used.
 
 **The value-dependence is free HERE and only here.** A threshold makes the coarsening read `|A_ij|`, so a
@@ -392,7 +392,7 @@ single-state probe.
 **TEN CYCLES IS NOT A FLOOR — REFUTED by measurement.** Three structurally unrelated leading inverses all
 landed at 10–11, which raised the real possibility that the count was set by the trailing block or by the
 coupling triangle the split discards, and that the comparison was saturated. It is not: at 16 outer
-sweeps the native arm reaches **6 cycles**, below the incumbent's 11. The native hierarchy can be made
+sweeps the traced arm reaches **6 cycles**, below the incumbent's 11. The host hierarchy can be made
 *stronger* than the incomplete-LU; what it is not yet is cheaper.
 
 **Two structural levers measured and NOT worth taking.** Aggressive (squared-graph) coarsening *combined*
@@ -412,13 +412,13 @@ truncation 57 %) carry the same flaw and must be measured before being believed 
 being the only proposal that would change what `M` is.
 
 **⚠️ SCOPE, BINDING — THE 2.3x IS A ZERO-SHIFT NUMBER. Across the shift range the march runs, the
-native hierarchy is ~4x slower.** Swept 2026-08-13 by overriding the operator shift on the fixed
+traced hierarchy is ~4x slower.** Swept 2026-08-13 by overriding the operator shift on the fixed
 converged state (`BFS3D_PROBE_BETA`, which is the only way to move β without also changing state — the
 other entries in `STATES` are step-initial checkpoints and cost every arm a cycle or two). The
 preconditioner takes the march's own floor, so β = 0.01 reproduces the shipped operator/preconditioner
 mismatch (0.01 against 0.05):
 
-| β | `split flow/ilu0` | native, 8x4 | native, 8x2 | ratio |
+| β | `split flow/ilu0` | traced, 8x4 | traced, 8x2 | ratio |
 |---|---|---|---|---|
 | **0** — the adjoint | 11 cyc, 29 s | 10 cyc, 83 s | 11 cyc, **68 s** | **2.34x** |
 | 0.01 | 4 cyc, 15 s | 9 cyc, 76 s | 11 cyc, 69 s | **4.6x** |
@@ -429,11 +429,11 @@ mismatch (0.01 against 0.05):
 incomplete-LU approaches exactness as diagonal dominance grows — so ILU(0) collapses to its floor (2
 cycles, 11 s) the moment any shift is present and cannot go lower. An aggregation multigrid gets no such
 windfall: its rate is set by smoother/coarse-space complementarity, which the shift barely improves. The
-native arm does improve (68 -> 43 s) but from far behind. **The ratio is therefore bounded below by how
-cheap the native V-cycle can be made, not by anything about convergence** — at β = 0.1 it needs 6 cycles,
+traced arm does improve (68 -> 43 s) but from far behind. **The ratio is therefore bounded below by how
+cheap the traced V-cycle can be made, not by anything about convergence** — at β = 0.1 it needs 6 cycles,
 which is a perfectly healthy preconditioner, and still costs 3.9x.
 
-**So the native path's competitiveness is concentrated at β = 0, which is the ADJOINT and nothing else.**
+**So the traced path's competitiveness is concentrated at β = 0, which is the ADJOINT and nothing else.**
 The forward march floors β at 0.05 and never builds a preconditioner at zero shift; the transpose solve
 behind every `jax.grad` meets exactly the unshifted operator, with no floor to soften it, and must
 converge tightly. That is a real place to win and it is where a differentiable solver spends its gradient
@@ -491,20 +491,20 @@ with the smoothed-aggregation path over the **symmetric pressure Schur** — whi
 literature result was actually measured on, and where it may well hold. What is refuted is the W-cycle on
 the saddle under a SIMPLE smoother, not the W-cycle.
 
-### THE NATIVE FLOW BLOCK IN A REAL MARCH — identical trajectories, but the RATIO GROWS WITH THE RUNG
+### THE TRACED FLOW BLOCK IN A REAL MARCH — identical trajectories, but the RATIO GROWS WITH THE RUNG
 
 **COMPLETED. Final: 60 steps / 3044 s against the incumbent's 67 / 1957 s — 1.56x — and the SAME
-REATTACHMENT LENGTH, `x_r/h` 8.361 mid-span and 12.53 full-span, to four significant figures.** The native
+REATTACHMENT LENGTH, `x_r/h` 8.361 mid-span and 12.53 full-span, to four significant figures.** The host
 preconditioner converges to the same solution, in SEVEN FEWER STEPS, and pays 1.56x in wall clock: it
 produces better Newton directions and pays for them per application. 26 coarsening retraces are inside
 that figure, worth roughly 80 s (~7 % of the gap), so removing them helps without changing the verdict.
 
 ⚠️ **READ THE RATIO AS A TREND, NOT A NUMBER, AND DO NOT QUOTE THE EARLY RUNGS.** Measured through the
 march: **1.32x** (rung 1) → **1.27x** (rung 2) → **1.16x** (target rung, first step) → **1.57x** (target
-rung, step 49, where the native arm is at 2342 s against 1489 s and the incumbent's ENTIRE 67-step march
+rung, step 49, where the traced arm is at 2342 s against 1489 s and the incumbent's ENTIRE 67-step march
 took 1957 s). The early rungs run at high β where both preconditioners are cheap and they flatter the
-native arm; the target rung runs at low β, which is exactly where an incomplete factorization's O(eps^2)
-advantage is largest. At matched β inside the target rung the native needs **~1.35x the cycles** (9 against
+traced arm; the target rung runs at low β, which is exactly where an incomplete factorization's O(eps^2)
+advantage is largest. At matched β inside the target rung the traced arm needs **~1.35x the cycles** (9 against
 6 at β = 0.0439; 17 against 13 at β = 0.0293). A first write-up of this section quoted "1.16-1.32x" as the
 result, which was the most favourable point of a rising sequence.
 
@@ -512,26 +512,26 @@ Everything above is single-state probing. The preconditioner has now been run in
 continuation march, which required three things a probe never reaches, and which are the reason no earlier
 arm could have been marched at all.
 
-**The native flow inverse needed a `refactor_block`.** `BlockTriangularFieldSplit.refactor` RAISES on an
+**The host flow inverse needed a `refactor_block`.** `BlockTriangularFieldSplit.refactor` RAISES on an
 inverse offering neither `refactor_block` nor `refactor`, because a mid-march refresh must mutate the same
 object the compiled Krylov solve holds — replacing it would recompile. A single-state probe exits before
 that path. `leading_inverse` is now threaded through `FieldSplitAmgPreconditioner.build` and the coupled
 march builder (the underlying `build_block_triangular_field_split` already supported it), and `compare.py`
-selects on `BFS3D_FLOW_INVERSE=native`.
+selects on `BFS3D_FLOW_INVERSE=simplesmooth`.
 
 **The result, against an archived march of the incumbent** (`zen-newton-3f1b39`, PETSc ILU(0) on the flow
-block, same trailing native inverse, same continuation schedule, same `refresh_on_cycles` 3):
+block, same trailing traced inverse, same continuation schedule, same `refresh_on_cycles` 3):
 
 | | steps | wall | step-14 `R` | step-38 `R` |
 |---|---|---|---|---|
 | incumbent | 67 total, 1957 s | — | 7.821e-06 | 4.155e-06 |
-| native | in progress | — | **7.822e-06** | **4.155e-06** |
+| traced | in progress | — | **7.822e-06** | **4.155e-06** |
 | ratio | | 1.32x (rung 1), 1.27x (rung 2), **1.16x** (step 39) | | |
 
 **The residuals agree to FOUR SIGNIFICANT FIGURES at every step through both early rungs**, with identical
-step counts, identical β schedules, and identical line-search factors. The native preconditioner is not
+step counts, identical β schedules, and identical line-search factors. The host preconditioner is not
 merely converging — it produces the same Newton steps. It also uses **equal or fewer cycles at most
-steps**. They first separate in the target rung at step 41, where the native takes a full step
+steps**. They first separate in the target rung at step 41, where the traced takes a full step
 (α = 1.000, `R` 3.343e-02) against the incumbent's clipped one (α = 0.328, `R` 3.757e-02).
 
 ⚠️ **The archived march's column reach differs (3/3/3/2/2/2 against the shipped 3/3/3/3/2/2), and it does
@@ -541,7 +541,7 @@ refreshes is 0.6 % of wall. Measure the phase breakdown rather than reasoning fr
 
 **WHERE THE GAP ACTUALLY IS, from the same breakdown at a matched step 28:**
 
-| | native | incumbent |
+| | traced | incumbent |
 |---|---|---|
 | refreshes | 8 | 9 |
 | probe / refresh | 8.3 s | 7.7 s |
@@ -594,9 +594,9 @@ recorded above is a lower bound on how much the partition moved, not an estimate
 
 **❌ AND FREEZING LOSES ON A MARCH — the stale coarse space costs FOUR TIMES what the retraces do
 (measured 2026-08-13). Do not ship it; the case default stays on the rebuild.** Two full `bfs3d` marches
-differing in **one flag**, `BFS3D_FLOW_FROZEN_COARSENING`; otherwise identical (native flow block at
+differing in **one flag**, `BFS3D_FLOW_FROZEN_COARSENING`; otherwise identical (traced flow block at
 4 outer x 2 inner sweeps, strength 0.25, no singletons, 5 levels, `max_coarse` 500, block splitting,
-`omega` 1.0; native trailing inverse; field split; `refresh_on_cycles` 3; three Reynolds rungs):
+`omega` 1.0; traced trailing inverse; field split; `refresh_on_cycles` 3; three Reynolds rungs):
 
 | | steps | wall | **Krylov cycles** | final ‖R‖ | mid-span `x_r/h` |
 |---|---|---|---|---|---|
@@ -640,7 +640,7 @@ the whole retrace prize is ~88 s of a 1087 s gap to the incumbent, so this was n
 ### Sweep count, the zero-vector peel, and the forward solve cap — 2026-08-14
 
 **FEWER SWEEPS WIN ON THIS MARCH: 2 against 4 is −16.8 % wall for +34.6 % cycles.** Full `bfs3d` marches,
-native flow block, everything else identical (strength 0.25, no singletons, 5 levels, `max_coarse` 500,
+traced flow block, everything else identical (strength 0.25, no singletons, 5 levels, `max_coarse` 500,
 block splitting, omega 1.0, 2 inner pressure sweeps, `refresh_on_cycles` 3):
 
 | arm | steps | wall | Krylov cycles | final ‖R‖ | mid-span `x_r/h` |
@@ -737,7 +737,7 @@ variance) where the argument form is 0.005 s with none.
 
 ### The peel and the cap ON A MARCH — the cycles land, the seconds mostly do not (2026-08-14)
 
-Both changes marched at 2 sweeps against the 2-sweep control, native flow block, everything else equal.
+Both changes marched at 2 sweeps against the 2-sweep control, traced flow block, everything else equal.
 The first attempt's wall clock is **void** — pytest tiers, ruff and JAX probes ran on the same machine
 throughout it — so it was re-run on a quiet one. Cycle counts and trajectories from both agree, being
 contention-immune.
@@ -784,7 +784,7 @@ quiet process.**
 | monolithic ILU(0), march solver | 37 ms | **193 ms** | 1 |
 | monolithic ILU(0) | 36 ms | **221 ms** | 2 |
 | `split flow/ilu0` | 36 ms | 118 ms | 2 |
-| `omega10` — the shipped native bundle | 36 ms | 106 ms | 9 |
+| `omega10` — the shipped traced bundle | 36 ms | 106 ms | 9 |
 
 **So a per-application timing from this probe cannot resolve anything below roughly 15 %**, and the
 12.5 % peel is under that floor. The Jacobian product is the clean counter-example: it is the *same*
@@ -796,8 +796,8 @@ reason to keep quoting them: a second identical invocation returned **1 / 2 / 2 
 agreeing to *every digit*, while its timings moved by up to 21 %. Cycles are contention-immune; seconds at
 this granularity are not.
 
-⚠️ **A TRAP THIS ALMOST WALKED INTO, worth more than the number.** Run 1 has the native bundle at 106 ms
-against the incumbent's 118 ms — the native apply looking **cheaper**, which would overturn the recorded
+⚠️ **A TRAP THIS ALMOST WALKED INTO, worth more than the number.** Run 1 has the traced bundle at 106 ms
+against the incumbent's 118 ms — the traced apply looking **cheaper**, which would overturn the recorded
 "~1.45× more expensive per application". The second run has 128 ms against 112 ms, i.e. **the ordering
 reverses**. At 2 sweeps the two are indistinguishable per application and **the sign cannot be called**;
 what can be said is only that the 1.45× figure was measured at **4 sweeps** and does not describe the
@@ -877,13 +877,13 @@ PETSc ILU(0) in every arm**.
 | trailing inverse | cycles |
 |---|---|
 | PETSc ILU(0) (control, reproduces the recorded 11) | **11** |
-| **native nodal, 4 sweeps (SHIPPED)** | **11** |
-| native nodal, 2 sweeps | 16 |
-| native nodal, 1 sweep | 28 |
+| **traced nodal, 4 sweeps (SHIPPED)** | **11** |
+| traced nodal, 2 sweeps | 16 |
+| traced nodal, 1 sweep | 28 |
 | damped Jacobi | 38 |
 | near-exact factorization (diagnostic bound) | **58 cap, 2.5e-05 — WORSE than all of them** |
 
-**Three results.** The shipped native trailing inverse **matches PETSc ILU(0)** in the coupled system,
+**Three results.** The shipped traced trailing inverse **matches PETSc ILU(0)** in the coupled system,
 which nothing on record established (the recorded 11 used ILU(0) on *both* halves). **Cutting its sweeps
 is measured harmful** — 4 → 2 costs +45 % of coupled cycles, 4 → 1 costs +155 % — which settles the
 "4 sweeps is an unexamined default" question in the opposite direction, and is what the record's own
@@ -1024,7 +1024,7 @@ because a march will show it.
 
 **`inner_tol` shipped at 1e-3 where `DualTimeStep`'s own docstring says a loose value is enough ("e.g.
 0.05 -- the outer march re-solves each timestep anyway"). Fifty times tighter than documented, never
-tested, and worth 33 % of the march.** Three full `bfs3d` marches, native flow block at 2 sweeps,
+tested, and worth 33 % of the march.** Three full `bfs3d` marches, traced flow block at 2 sweeps,
 otherwise the case's own settings, on one machine at one commit with only `inner_tol` moved. **Same root,
 same reattachment length (`x_r/h` 8.3611 mid-span, 12.53 full-span) in every arm:**
 
@@ -1062,7 +1062,7 @@ region between them is flat to 4 %, so a finer sweep has little to find. `BFS3D_
 `BFS3D_INNER_STEPS` are exposed for anyone who wants to try.
 
 **✅ AND IT TRANSFERS TO THE SHIPPED PATH, WHICH THE THREE MARCHES ABOVE DID NOT TEST (2026-08-15).** All
-three ran the **native** flow block, which the case does *not* default to — so the default this change
+three ran the **traced** flow block, which the case does *not* default to — so the default this change
 governs (`flow inverse: petsc`) was unmeasured when it was made. It has since been run, on a tree carrying
 this change plus ~20 later merges:
 
@@ -1082,8 +1082,8 @@ is not available from this pair.
 coarsening in `solve/multigrid.py` is already a host computation in `scipy`; only the apply is traced. So
 a host apply over the *same* hierarchy gives a CPU path relaxed by an incomplete factorization beside the
 traced path relaxed by SIMPLE or Jacobi — one aggregation, one refresh path, one coarse space, and only
-the smoother differing by machine. Built as `solve/host_vcycle.py` (`HostVCycleInverse`,
-`host_ilu_inverse`), satisfying the same `n_dofs` + `apply(residual, transpose=…)` contract as every
+the smoother differing by machine. Built as `solve/ilu_inverse.py` (`IluSmoothedInverse`,
+`ilu_smoothed_inverse`), satisfying the same `n_dofs` + `apply(residual, transpose=…)` contract as every
 other frozen inverse, so it needs no new plumbing and does not touch the traced path.
 
 **The transpose is BUILT, not borrowed.** A V-cycle is symmetric only if its smoother is, and an
@@ -1146,7 +1146,7 @@ about — a one-apply contraction, a preconditioned norm, a cycle count at a ben
 an arm whose applied residual is 1e+38. Judge a factorization by what one application does to a real
 residual, never by whether it returned.
 
-**What this left.** The native hierarchy was never implicated — PETSc's ILU(0) is a known-good smoother on
+**What this left.** The host hierarchy was never implicated — PETSc's ILU(0) is a known-good smoother on
 these very levels — so the CPU half needed a zero-fill factorization of its own, for which PETSc's source
 supplies the whole specification: natural ordering, no pivoting, no dropping, pattern = `A`'s pattern, no
 shift. That is now built (`solve/ilu0.py` + the compiled `solve/_ilu0.pyx`), and it is what the section
@@ -1156,7 +1156,7 @@ below measures.
 the host AMG was handed, so it read as that library's property; it is not, and any smoother put behind
 this seam needs it. That survives the change of factorization.
 
-### ✅ THE NATIVE HIERARCHY MARCHES `bfs3d` TO THE SAME ROOT — 10 % FEWER CYCLES, 6 % MORE WALL (2026-08-16)
+### ✅ THE TRACED HIERARCHY MARCHES `bfs3d` TO THE SAME ROOT — 10 % FEWER CYCLES, 6 % MORE WALL (2026-08-16)
 
 **The whole-march measurement, which is the only honest one when the preconditioner's SHAPE changes,
 and the first time the hand-written hierarchy and factorization have carried a march rather than a
@@ -1175,11 +1175,11 @@ elimination order**, and `hostilu` marches that case once given one (`PITZ_FLOW_
 *"Ordering, not fill, is what fails zero-fill on `pitzDaily`"* above. The `pitzDaily` default is still
 `petsc` pending the cost comparison, but not for this reason.
 
-⚠️ **SUPERSEDED 2026-08-18 — `bfs3d`'s default leading inverse moved again, to `native`.** `hostilu` was
+⚠️ **SUPERSEDED 2026-08-18 — `bfs3d`'s default leading inverse moved again, to `traced`.** `hostilu` was
 the default from 2026-08-16 to 2026-08-18; every measurement in this file that says "the incumbent" of
 the `bfs3d` leading block without naming an arm was taken against **PETSc ILU(0)**, as the paragraph
-above already says, and that reading is unaffected. The second flip, to the JAX-native SIMPLE-smoothed
-hierarchy (`NativeSimpleInverse`), was made for robustness — an incomplete-LU factorization's
+above already says, and that reading is unaffected. The second flip, to the traced SIMPLE-smoothed
+hierarchy (`SimpleSmoothedInverse`), was made for robustness — an incomplete-LU factorization's
 sensitivity to elimination order (the same class of issue the `pitzDaily` correction just above is
 about) has repeatedly produced arms differing by orders of magnitude on this operator — and for a route
 to a GPU, not for speed: a full-march A/B against a matched `hostilu` run reached the identical root
@@ -1204,7 +1204,7 @@ does not need Cython in the runtime interpreter — a PEP-668 system Python refu
 `validation/run_case.sh` warns at launch when it is missing; and both cases' banners print the live
 kernel, so every run from this date carries the answer in its own log.
 
-| | `petsc` (incumbent) | `hostilu` (native AMG + our ILU(0)) |
+| | `petsc` (incumbent) | `hostilu` (traced AMG + our ILU(0)) |
 |---|---|---|
 | steps | 59 | 61 |
 | **Krylov cycles** | **232** | **208 (−10.3 %)** |
@@ -1225,13 +1225,13 @@ this run establishes before anything about cost.
 | **target Re (lowest β, hardest)** | 21 / 105 / 527 s | 21 / **89 (−15 %)** / **482 s (−8.5 %)** |
 
 - **Rung 1 is the cleanest controlled comparison available: identical step count AND identical wall
-  (246 s both), with 27 % fewer cycles.** So on that operator the native apply is dearer per cycle by
+  (246 s both), with 27 % fewer cycles.** So on that operator the traced apply is dearer per cycle by
   almost exactly the margin its convergence saves — a wash, measured rather than inferred.
-- **On the TARGET rung the native arm wins BOTH axes**, −15 % cycles and −8.5 % wall. That is the low-β
+- **On the TARGET rung the traced arm wins BOTH axes**, −15 % cycles and −8.5 % wall. That is the low-β
   end where an incomplete factorization's diagonal-dominance windfall is smallest, and it is the rung
   that grows with the mesh — so it is the one that matters for scaling.
 - **The entire wall deficit is rung 2**, +112 s, and it is a **trajectory** difference rather than a
-  cost one: the native arm took **2 extra outer steps** there. The two marches agree to 3–4 figures in
+  cost one: the traced arm took **2 extra outer steps** there. The two marches agree to 3–4 figures in
   β and ‖R‖ through step 10 and part on **α** — `hostilu` takes FULL steps (α = 1.000) where `petsc`
   clips (0.566, 0.803), i.e. it returns the better direction and still ends up needing more steps.
   Nothing here explains that.
@@ -1246,17 +1246,17 @@ number to lean on. The step-count difference (61 against 59) is a trajectory div
 either way under another bundle.
 
 **Consistency with the two single-state measurements is the reassuring part, and it is not automatic.**
-The adjoint put the native arm ~8 % above PETSc in applications while ~14 % cheaper per application (a
+The adjoint put the traced arm ~8 % above PETSc in applications while ~14 % cheaper per application (a
 wash); β = 0.1 tied outright; and the march now says −10 % cycles / +6 % wall (a wash). Three
 independent measurements at three operating points all land on parity. **The `−R` linear probe's 2.75×
 win remains the one outlier, and it is the one measurement that is not of the real thing.**
 
-**So: the AMG *can* go native at no cost, and PETSc is no longer load-bearing for the coarsening on
-this case.** What it does not do is go native at a *profit*, so nothing here moves `FLOW_INVERSE`; the
+**So: the AMG *can* go traced at no cost, and PETSc is no longer load-bearing for the coarsening on
+this case.** What it does not do is go traced at a *profit*, so nothing here moves `FLOW_INVERSE`; the
 case for the direction stays what it was — a GPU where SIMPLE relaxation parallelizes and a sequential
 triangular solve does not, which cannot be measured in this CPU-only environment.
 
-### THE NATIVE AGGREGATION BEATS PETSc GAMG ON A LINEAR PROBE AT β = 0 — AND LOSES ON THE ACTUAL ADJOINT (2026-08-16)
+### THE TRACED AGGREGATION BEATS PETSc GAMG ON A LINEAR PROBE AT β = 0 — AND LOSES ON THE ACTUAL ADJOINT (2026-08-16)
 
 **⚠️⚠️ READ THIS FIRST: the win below is a `−R` LINEAR PROBE and it DOES NOT TRANSFER.** The same two arms
 at the same state and shift, measured on the real gradient, come out **1696 adjoint applications against
@@ -1276,7 +1276,7 @@ equilibrate-and-cell-major preprocessing in place.
 *Configuration:* `bfs3d` `state-00067` (converged, ‖R‖ 3.586e-06), **operator and preconditioner both at
 β = 0** — the adjoint's operator — real right-hand side `−R(state)`, **uniform** column reach, GMRES
 restart 15 to rtol 1e-8 on the **TRUE** residual, 60-restart cap, field split flow-first with PETSc ILU(0)
-on the trailing half in every arm. Native arms: `max_coarse` 500, 5 levels, `strength_threshold` 0.25, no
+on the trailing half in every arm. Traced arms: `max_coarse` 500, 5 levels, `strength_threshold` 0.25, no
 singleton aggregates, plain aggregation, unsmoothed prolongation. Harness
 `validation/bfs3d_openfoam/field_split_probe.py`, arms `split flow/hostilu{1,2,4}`.
 
@@ -1284,20 +1284,20 @@ singleton aggregates, plain aggregation, unsmoothed prolongation. Harness
 |---|---|---|---|---|
 | monolithic ILU(0) — *not* the right bar | 3–4 s | 11 | 8.474e-11 | 42 s |
 | **`split flow/ilu0` — the matched incumbent** | 3 s | 11 | 6.393e-11 | **29 s** |
-| **native hierarchy + our ILU(0) ×1** | 6 s | **4** | **2.449e-13** | **17 s** |
-| native hierarchy + our ILU(0) ×2 | 6 s | 6 | 5.939e-11 | 39 s |
-| native hierarchy + our ILU(0) ×4 — smoother-matched | 6 s | **4** | 1.498e-12 | 47 s |
+| **traced hierarchy + our ILU(0) ×1** | 6 s | **4** | **2.449e-13** | **17 s** |
+| traced hierarchy + our ILU(0) ×2 | 6 s | 6 | 5.939e-11 | 39 s |
+| traced hierarchy + our ILU(0) ×4 — smoother-matched | 6 s | **4** | 1.498e-12 | 47 s |
 
-- **The aggregation is not what PETSc was contributing.** Smoother-matched at four sweeps the native
+- **The aggregation is not what PETSc was contributing.** Smoother-matched at four sweeps the traced
   hierarchy takes **4 restart cycles against 11** — 2.75× — on the same operator, the same right-hand
   side and the same trailing inverse. The one thing that differs is the coarsening, and the coarsening is
   ahead.
 - **At ONE sweep it also wins on wall clock: 17 s against 29 s, 1.7×**, converging **two to four orders
-  deeper** (2.449e-13 against 6.393e-11) while it does so. This is the **first native arm in this campaign
+  deeper** (2.449e-13 against 6.393e-11) while it does so. This is the **first traced arm in this campaign
   to beat the incumbent on time rather than only on cycles**, and it does it at the operating point the
-  native direction's case has always rested on.
-- **Per application the native arm is still the more expensive one** — 4.25 s/cycle against 2.64 — so the
-  standing shape of every native-versus-PETSc result here is unchanged. What changed is that the cycle
+  traced direction's case has always rested on.
+- **Per application the traced arm is still the more expensive one** — 4.25 s/cycle against 2.64 — so the
+  standing shape of every traced-versus-PETSc result here is unchanged. What changed is that the cycle
   advantage finally outruns it.
 - **Four sweeps is STRICTLY DOMINATED by one**: identical cycles, 2.8× the solve. Read that with the
   adjoint's own sweep ladder recorded earlier in this file, which found the same flatness on the SIMPLE
@@ -1318,8 +1318,8 @@ from this arm**, and do not assume the ×1 optimum transfers to another operator
 |---|---|---|---|---|
 | monolithic ILU(0) | 3 s | 2 | 2.605e-14 | 14 s |
 | **`split flow/ilu0` — incumbent** | 3 s | 2 | 3.103e-15 | **11 s** |
-| native + our ILU(0) ×1 | 6 s | 2 | 4.024e-13 | 12 s |
-| native + our ILU(0) ×4 | 5 s | **1** | 2.969e-15 | 22 s |
+| traced + our ILU(0) ×1 | 6 s | 2 | 4.024e-13 | 12 s |
+| traced + our ILU(0) ×4 | 5 s | **1** | 2.969e-15 | 22 s |
 
 **Two cycles against two, and 12 s against 11 s is inside the ~15 % per-application noise floor** measured
 elsewhere in this file (the same preconditioner built twice in one quiet process timed 193 and 221 ms). So
@@ -1328,7 +1328,7 @@ rank preconditioners, and a tie here is *no information*, not evidence of parity
 its recorded 2 cycles / 11 s exactly, so the run is sound — it just cannot answer the question.
 
 **One older claim is refuted in wording and upheld in substance.** "At positive shift no multigrid quality
-catches an incomplete factorization" is false as stated — the ×4 native arm takes **1 cycle**, fewer than
+catches an incomplete factorization" is false as stated — the ×4 traced arm takes **1 cycle**, fewer than
 any PETSc arm at any shift on this state. What holds is the cost half: it pays 22 s for that cycle against
 the incumbent's 11 s for two. Quality catches it; wall clock does not.
 
@@ -1336,7 +1336,7 @@ the incumbent's 11 s for two. Quality catches it; wall clock does not.
 already records that all step-initial solves on this case cost ≤ 2 restart cycles while mid-step inner
 iterates reach 15 — the hard operators live in the inner iterates and in the *rejected* attempts, which no
 checkpoint holds. Ranking these arms for the march needs a captured hard inner iterate
-(`BFS3D_INNER_DUMP_ABOVE`) or a whole march, not another β on this state. The recorded 4.6× / 3.9× native
+(`BFS3D_INNER_DUMP_ABOVE`) or a whole march, not another β on this state. The recorded 4.6× / 3.9× traced
 deficits at β = 0.01 / 0.1 were measured against the *SIMPLE*-smoothed traced hierarchy and do not describe
 this arm either. **Nothing here licenses moving `FLOW_INVERSE`.**
 
@@ -1423,11 +1423,11 @@ So this is a cost and accuracy problem, not a reachability one.
 
 ⚠️ **THE ADJOINT-STAGNATION ENTRY THAT USED TO SIT HERE IS DELETED — every claim in it is now false.**
 It said `jax.grad` had never succeeded, that the transpose solve stagnated even at a loose root, that both
-halves of the adjoint were broken, and that two arms (the Krylov settings, and the native leading inverse)
+halves of the adjoint were broken, and that two arms (the Krylov settings, and the traced leading inverse)
 remained unrun. The stagnation was a **solver-settings artifact reachable only through an API gap that is
 now closed** (`solve_coupled(adjoint_solver=…)`), the gradient runs and is validated to 1.9e-04, and both
 arms have been run. See solve-flow-block.md's *"`jax.grad` RUNS ON THIS CASE, AND IS VALIDATED"* section for the costs and the
-native-versus-PETSc comparison. Three findings from that entry are **not** superseded and are kept here
+traced-versus-PETSc comparison. Three findings from that entry are **not** superseded and are kept here
 because they cost real time to learn:
 
 - **❌ The column reach is not a factor in the transpose solve** — measured, not assumed. At **uniform**
@@ -1463,11 +1463,11 @@ apply, separately, on every arm. At β = 0.1:
 | arm | jacobian product | preconditioner | cycles |
 |---|---|---|---|
 | `split flow/ilu0` (incumbent) | 34 ms | **121 ms** | 2 |
-| native, 4 sweeps x 2 inner | 38 ms | **175 ms** | 8 |
-| native, block splitting | 49 ms | 212 ms | 7 |
-| native, 8 sweeps | 46 ms | 319 ms | 5 |
+| traced, 4 sweeps x 2 inner | 38 ms | **175 ms** | 8 |
+| traced, block splitting | 49 ms | 212 ms | 7 |
+| traced, 8 sweeps | 46 ms | 319 ms | 5 |
 
-**The native preconditioner is only ~1.45x more expensive per application and needs 4x the cycles.** So
+**The host preconditioner is only ~1.45x more expensive per application and needs 4x the cycles.** So
 the wall-clock gap is convergence, and **a lever that buys cycles at no cost is worth about four times an
 equally-sized cost reduction.** Two independent audits had inferred the Jacobian product to be roughly
 half of an iteration and concluded preconditioner work was capped at half the gap; it is **14 %**. That
@@ -1477,7 +1477,7 @@ takes seconds — take it before ranking any cost work.
 ⚠️ **TWO QUALIFICATIONS ON THE 1.45x, added 2026-08-14; the CONCLUSION survives both.**
 - **It is a FOUR-SWEEP number, and the case ships TWO.** Re-measured at the shipped bundle (`omega10`:
   2 sweeps x 2 inner, strength 0.25, no singletons, 5 levels, `max_coarse` 500, block splitting,
-  `omega` 1.0), the native apply came out 106 ms against the incumbent's 118 ms in one run and 128 ms
+  `omega` 1.0), the traced apply came out 106 ms against the incumbent's 118 ms in one run and 128 ms
   against 112 ms in a second — so at two sweeps **the two are indistinguishable per application and the
   ordering is not callable.** Do not quote 1.45x for the shipped configuration.
 - **Every number in the table above carries the ~15 % instrument spread** measured under *The noise floor*
@@ -1508,17 +1508,17 @@ rather than being two routes to the same one. Both are properties of the **veloc
 where the balance measurement pointed (`||S|| = 1.449` against `||E|| = 1.029`) before that reading was
 mistakenly talked down.
 
-**AT β = 0 THE NATIVE PRECONDITIONER NOW CONVERGES IN FEWER ITERATIONS THAN THE INCUMBENT.** The
+**AT β = 0 THE TRACED PRECONDITIONER NOW CONVERGES IN FEWER ITERATIONS THAN THE INCUMBENT.** The
 composition holds at zero shift, so it is not a march-only effect:
 
 | arm at β = 0 | cycles | solve |
 |---|---|---|
 | `split flow/ilu0` | 11 | 31 s |
-| native, 8 sweeps, omega 0.7, diagonal | 11 | 76 s |
-| **native, 8 sweeps, block + undamped** | **7** | **57 s** |
+| traced, 8 sweeps, omega 0.7, diagonal | 11 | 76 s |
+| **traced, 8 sweeps, block + undamped** | **7** | **57 s** |
 
 **1.84x at the adjoint point** (from 2.45x), and **2.4x on the march** (from 3.0x). The asymmetry is the
-structural claim with the native side finally measured at its best: at zero shift the native hierarchy is
+structural claim with the traced side finally measured at its best: at zero shift the traced hierarchy is
 the *better* preconditioner and loses only on arithmetic; once a shift is present an incomplete-LU is
 nearly exact in two triangular passes and no multigrid quality catches it.
 
@@ -1573,7 +1573,7 @@ wall clock, despite tripling the nonzeros in `dg` and hence in the Schur:
 | 8 | scalar diagonal | 6 | 43 s |
 | 8 | **cell block** | **5** | 40 s |
 
-Five cycles is the fewest any native arm has reached at this shift. Everything else measured here trades
+Five cycles is the fewest any traced arm has reached at this shift. Everything else measured here trades
 cost against cycles; this is the one change that improved the smoother's *quality* at fixed price.
 
 ⚠️ **The block form MUST be the Frobenius-optimal one, and the exact inverse of the cell's own block is
@@ -1612,7 +1612,7 @@ is the one place where suspecting a premature closure was itself the error.
 
 **So the marginal-cost optimum is REAL, not an artifact of exploring one axis at a time.** The coarse-grid
 side survived a genuine joint test; the smoother side yielded one small Pareto gain that shifts the
-optimum rather than contradicting it. Best native arm is now **7 cycles / 33 s** against the matched
+optimum rather than contradicting it. Best traced arm is now **7 cycles / 33 s** against the matched
 incumbent's **2 / 11 s** — a threefold wall-clock gap that is structural for this smoother family.
 
 ### The sparse matvec is at the limit of what JAX's primitives give — block-CSR REFUTED
@@ -1723,7 +1723,7 @@ i.e. no convection at all.
 48 s at 0.1), so that tuning is not an artifact of zero shift.
 
 ⚠️ Still measured under a **uniform** column reach the case does not use; at the shipped reach the
-incumbent's cost doubles at β = 0 (22 cycles against 11) and the native arm is unmeasured there.
+incumbent's cost doubles at β = 0 (22 cycles against 11) and the traced arm is unmeasured there.
 
 **Why the gap may still be the right trade.** The incomplete-LU is a sequential triangular solve.
 This smoother is sparse matrix-vector products, diagonal scalings and one small dense coarse solve, and
@@ -1748,7 +1748,7 @@ so the verdict does not change; do not cite the 50 minutes.
 
 **Transferring the threshold to the `[k, omega]` block will not buy CYCLES**, and the trailing ablation
 settled that on the right measure: at `state-00067`, β = 0, with the leading inverse held at ILU(0), the
-shipped native trailing inverse and PETSc ILU(0) both give **11** coupled cycles, and a near-exact
+shipped traced trailing inverse and PETSc ILU(0) both give **11** coupled cycles, and a near-exact
 factorization of that block is **worse than either** (58 cap). Nothing in that ablation supports spending
 on the trailing block's accuracy. ⚠️ **The "2 restart cycles against an absolute floor of 1" figure this
 entry used to rest on is a STANDALONE solve of the block, which production never performs** — one Krylov
@@ -1762,7 +1762,7 @@ it raises outright.
 
 ✅ **The old blocker is gone: the trailing path is no longer capped at 2 levels.** It ran on
 `build_convection_hierarchy`'s `max_levels` default (`_CONVECTION_LEVELS` = 2) because the class exposed
-neither `strength_threshold` nor `max_levels`; the shared `NativeHierarchyInverse` base exposes the whole
+neither `strength_threshold` nor `max_levels`; the shared `HierarchyBlockInverse` base exposes the whole
 coarsening surface (see the shared-base entry above). Two conditions on any sweep that uses it:
 - **Sweep `max_levels` and `strength_threshold` TOGETHER.** A threshold coarsens LESS, so it enlarges the
   coarse grid; testing one at 2 levels reproduces the flow block's original failure and would refute the

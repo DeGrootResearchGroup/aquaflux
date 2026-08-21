@@ -142,9 +142,9 @@ cfd/                                  # repo root
 │   │   ├── amg_preconditioner.py     #   MonolithicAmgPreconditioner for the coupled saddle-point solve
 │   │   ├── lu_preconditioner.py      #   MonolithicLuPreconditioner (complete sparse LU)
 │   │   ├── field_split.py            #   BlockTriangularFieldSplit: block-triangular field-split preconditioning for flow-plus-transport
-│   │   ├── native_inverse.py         #   NativeHierarchyInverse: the shared body of a JAX-native block inverse (hierarchy, in-place refresh, transpose)
-│   │   ├── saddle_multigrid.py       #   NativeSimpleInverse: a JAX-native multigrid over the flow saddle, smoothed by SIMPLE relaxation
-│   │   ├── host_vcycle.py            #   HostVCycleInverse: the same hierarchy applied on the host, smoothed by an incomplete factorization
+│   │   ├── hierarchy_inverse.py      #   HierarchyBlockInverse: the shared body of a traced block inverse (hierarchy, in-place refresh, transpose)
+│   │   ├── saddle_multigrid.py       #   SimpleSmoothedInverse: a traced multigrid over the flow saddle, smoothed by SIMPLE relaxation
+│   │   ├── ilu_inverse.py            #   IluSmoothedInverse: the same hierarchy applied on the host, smoothed by an incomplete factorization
 │   │   ├── ilu0.py                   #   Ilu0: zero-fill incomplete LU on the operator's own pattern, refreshable without repeating the symbolic phase
 │   │   ├── ordering.py               #   CellMajor + cell-order strategies: which order an incomplete factorization eliminates in, which at zero fill decides what it discards
 │   │   ├── _ilu0.pyx                 #   the compiled elimination and triangular solves behind Ilu0 (sequential by nature, so not array operations)

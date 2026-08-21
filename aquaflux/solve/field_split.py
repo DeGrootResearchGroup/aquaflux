@@ -51,6 +51,7 @@ import scipy.sparse as sp
 
 from .amg_preconditioner import MonolithicAmgPreconditioner, build_amg_vcycle
 from .frozen_operator import equilibrate_cell_major
+from .hierarchy_inverse import HierarchyBlockInverse
 from .multigrid import (
     SmoothedHierarchy,
     air_multigrid_solve,
@@ -58,16 +59,15 @@ from .multigrid import (
     convection_multigrid_solve,
     refresh_air_hierarchy,
 )
-from .native_inverse import NativeHierarchyInverse
 from .refresh_timing import PhaseTimer
 
 __all__ = [
     "BlockTriangularFieldSplit",
     "FieldGroups",
     "FieldSplitAmgPreconditioner",
-    "NodalNativeInverse",
+    "JacobiSmoothedInverse",
     "build_block_triangular_field_split",
-    "native_nodal_inverse",
+    "jacobi_smoothed_inverse",
 ]
 
 
@@ -583,15 +583,15 @@ class FieldSplitAmgPreconditioner(MonolithicAmgPreconditioner):
         return self._groups
 
     @property
-    def has_native_solve(self) -> bool:
-        """Always ``False``: a block-triangular split offers no native exact solve.
+    def has_exact_solve(self) -> bool:
+        """Always ``False``: a block-triangular split offers no host exact solve.
 
         The base answers this by asking its frozen inverse, which is sound when that inverse is a single
         :class:`~aquaflux.solve.AmgVCycle` and false here -- the split's is a
-        :class:`BlockTriangularFieldSplit`, which has no such solve to offer, because a native solve
+        :class:`BlockTriangularFieldSplit`, which has no such solve to offer, because a host exact solve
         inverts the whole shifted operator in one host call and a split deliberately never forms it.
         Without this override the base's attribute lookup **raises**, and the raise is then invisible:
-        both callers ask through ``getattr(pc, "is_exact_native", False)`` -- the right spelling for the
+        both callers ask through ``getattr(pc, "solves_exactly_on_host", False)`` -- the right spelling for the
         factorization preconditioners, which genuinely lack the attribute -- and a default swallows an
         ``AttributeError`` coming from inside a property body just as readily as a missing name. The
         answer it produced was accidentally the correct ``False``, which is why this went unnoticed.
@@ -716,7 +716,7 @@ class _NodalSmoother(NamedTuple):
     """The nodal cycle's counts and relaxations -- everything about it that must be concrete.
 
     A plain tuple of Python numbers, so it is hashable and compares by value: it lands wholly on the
-    static side of :func:`_native_nodal_cycle` and two builds at the same settings share one compiled
+    static side of :func:`_jacobi_smoothed_cycle` and two builds at the same settings share one compiled
     cycle.
     """
 
@@ -727,7 +727,7 @@ class _NodalSmoother(NamedTuple):
 
 
 @eqx.filter_jit
-def _native_nodal_cycle(
+def _jacobi_smoothed_cycle(
     hierarchy: SmoothedHierarchy,
     extras: None,
     residual: jnp.ndarray,
@@ -737,7 +737,7 @@ def _native_nodal_cycle(
 
     Module-level and taking the hierarchy as an ARGUMENT, so a refresh at unchanged shapes swaps its
     values into the SAME compiled cycle. ``extras`` is the smoother-specific record the shared
-    :class:`~aquaflux.solve.native_inverse.NativeHierarchyInverse` passes through; this family reads the
+    :class:`~aquaflux.solve.hierarchy_inverse.HierarchyBlockInverse` passes through; this family reads the
     levels alone, so it is always ``None`` and is accepted only to keep the two cycles one shape.
     """
     return convection_multigrid_solve(
@@ -750,8 +750,8 @@ def _native_nodal_cycle(
     )
 
 
-class NodalNativeInverse(NativeHierarchyInverse):
-    """A block inverse from ONE JAX-native hierarchy over the whole group, coarsening cells.
+class JacobiSmoothedInverse(HierarchyBlockInverse):
+    """A block inverse from ONE traced hierarchy over the whole group, coarsening cells.
 
     Given a block size it coarsens **cells**, so one hierarchy spans the whole group and the cross-field
     coupling sits inside the operator being coarsened rather than being approximated away outside it.
@@ -764,12 +764,12 @@ class NodalNativeInverse(NativeHierarchyInverse):
     diagonal, a point smoother discards the dominant term and the sweep does not contract.
 
     Host in, host out: the field split is numpy and the hierarchy is JAX, so each
-    application crosses the boundary. A production native split would keep the whole thing traced.
+    application crosses the boundary. A production traced split would keep the whole thing traced.
 
     Parameters
     ----------
     block, n_fields, strength_threshold, max_levels, max_coarse, frozen_coarsening, shape_headroom, report
-        See :class:`~aquaflux.solve.native_inverse.NativeHierarchyInverse`, which owns the hierarchy,
+        See :class:`~aquaflux.solve.hierarchy_inverse.HierarchyBlockInverse`, which owns the hierarchy,
         the in-place refresh and the host boundary. Only the smoother below belongs to this class.
     cycles : int
         V-cycles per application. Fixed, so ``b -> x`` stays a linear map — required by the
@@ -866,20 +866,20 @@ class NodalNativeInverse(NativeHierarchyInverse):
         return self._smoother
 
     def cycle(self):
-        return _native_nodal_cycle
+        return _jacobi_smoothed_cycle
 
 
 class AirBlockInverse:
     """A block inverse from a **reduction-based** (lAIR) hierarchy over the whole group.
 
-    The alternative to :class:`NodalNativeInverse` for a transported-scalar block. Both coarsen cells
+    The alternative to :class:`JacobiSmoothedInverse` for a transported-scalar block. Both coarsen cells
     and both smooth with each cell's own block; they differ in the coarse space. Aggregation groups
     cells and takes ``R = Pᵀ``; lAIR splits them coarse/fine and builds an **independent** restriction
     approximating the ideal ``R = [-A_cf A_ff⁻¹, I]``, which for a convection-dominated operator makes
     eliminating the fine points nearly exact — Peclet-robust and mesh-independent where a deep Galerkin
     recursion is not (Manteuffel, Ruge & Southworth, SISC 2018).
 
-    **It does not subclass** :class:`~aquaflux.solve.native_inverse.NativeHierarchyInverse`: that base
+    **It does not subclass** :class:`~aquaflux.solve.hierarchy_inverse.HierarchyBlockInverse`: that base
     owns a :class:`~aquaflux.solve.multigrid.SmoothedHierarchy` and refreshes it by re-fitting the
     aggregation, while this owns an :class:`~aquaflux.solve.multigrid.AirHierarchy` and refreshes by
     re-solving the local restriction systems on a frozen C/F split. Widening one class to hold either
@@ -986,8 +986,8 @@ def air_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
     return build
 
 
-def native_nodal_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
-    """A ``leading_inverse``/``trailing_inverse`` factory using :class:`NodalNativeInverse`.
+def jacobi_smoothed_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
+    """A ``leading_inverse``/``trailing_inverse`` factory using :class:`JacobiSmoothedInverse`.
 
     Every keyword is forwarded, so the defaults — and the reasoning behind them — live on the class
     rather than being restated here. ``max_coarse`` is worth knowing about: it is the coarse-grid size
@@ -996,6 +996,6 @@ def native_nodal_inverse(**settings) -> Callable[[sp.spmatrix, int], object]:
     """
 
     def build(block: sp.spmatrix, n_group_fields: int) -> object:
-        return NodalNativeInverse(block, n_group_fields, **settings)
+        return JacobiSmoothedInverse(block, n_group_fields, **settings)
 
     return build

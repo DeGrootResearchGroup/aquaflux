@@ -10,7 +10,7 @@ against a method the name did not describe.
 
 This probe changes exactly one thing per arm. Every arm shares the SAME materialized Jacobian, the
 SAME shift, the SAME field-split wiring, and the SAME trailing inverse (``compare.TRAILING_INVERSE``,
-i.e. ``NodalNativeInverse`` at the case's own settings) -- so only the leading (flow-saddle) inverse
+i.e. ``JacobiSmoothedInverse`` at the case's own settings) -- so only the leading (flow-saddle) inverse
 differs:
 
 * **shipped** -- ``compare.LEADING_INVERSE``, whatever the case ships as of this run.
@@ -107,7 +107,7 @@ def _block_simple_build(coupled, pc_state, pc_beta, trailing_inverse, compositio
             "ilu0",  # unused: leading_inverse below replaces the V-cycle wholesale
             "ilu0",  # unused: trailing_inverse below replaces it too
             flow_first=True,
-            leading_inverse=lambda sub, n_sub: fsp.JaxNativeBlockInverse(matvec, n_flow),
+            leading_inverse=lambda sub, n_sub: fsp.TracedBlockInverse(matvec, n_flow),
             trailing_inverse=trailing_inverse,
         )
 

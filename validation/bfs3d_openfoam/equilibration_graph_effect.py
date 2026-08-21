@@ -157,7 +157,7 @@ def main():
     del jacobian
     gc.collect()
 
-    compare_block("trailing [k, omega]  (the block the native hierarchy coarsens)", a_tt, 2)
+    compare_block("trailing [k, omega]  (the block the traced hierarchy coarsens)", a_tt, 2)
     compare_block("leading  [u,v,w,p]   (control: almost no explicit zeros)", a_ll, n_fields - 2)
 
     print(

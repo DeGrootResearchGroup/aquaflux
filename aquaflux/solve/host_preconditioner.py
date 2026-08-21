@@ -10,13 +10,13 @@ call time so an in-place refresh re-preconditions the already-compiled solve.
 **The contract is real and named.** ``matvec`` needs exactly two things of whatever it wraps -- how
 many degrees of freedom it spans, and how to apply it (or its transpose) to a host vector -- and five
 classes in this package already provide precisely that pair: the two frozen inverses above (the
-complete-LU factors and the V-cycle), the framework-native hierarchy inverse, and both block-triangular
+complete-LU factors and the V-cycle), the traced hierarchy inverse, and both block-triangular
 field splits. :class:`HostFactors` is that pair, written down, rather than each wrapper re-deriving
 ``matvec`` on its own.
 
 **Naming it also closes a class of silent failure.** A base that reads anything off ``self.factors``
 beyond this pair is making an assumption only some factorizations satisfy -- which is how a
-``has_native_solve`` lookup came to raise on the field split while a ``getattr`` default at the call
+``has_exact_solve`` lookup came to raise on the field split while a ``getattr`` default at the call
 site quietly turned the exception into ``False``. If a capability is not in :class:`HostFactors`, do
 not reach for it through ``self.factors``; give the subclass an explicit answer instead.
 """

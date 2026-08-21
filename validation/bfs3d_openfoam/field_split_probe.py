@@ -23,7 +23,7 @@ kinds of state restore the discrimination, and both are configurations something
   ``BFS3D_INNER_DUMP_ABOVE`` set, so a set captured without it has none, and adding one means re-running
   the march rather than reusing an older capture under a bundle whose defaults have since moved.
 
-**The second question, which the same arms answer.** Every smoother the JAX-native multigrid in this
+**The second question, which the same arms answer.** Every smoother the traced multigrid in this
 package has is Jacobi-class; the one thing PETSc supplies that it does not is the incomplete-LU sweep the
 shipped bundle depends on -- which is also the least parallelizable component, being a sequential
 triangular solve. So: is the ``[u, v, w, p]`` block alone smoothable by a Jacobi-class method even though
@@ -50,9 +50,9 @@ the local pressure-velocity coupling outright. On a saddle that coupling is the 
 detail, so their failure indicts point smoothing and says nothing about whether a **cell-block** solve
 would serve. Point-block Jacobi inverts each cell's dense ``[u, v, w, p]`` block and is still a batch of
 independent small dense solves with no sequential dependency, so it has the property the incomplete-LU
-sweep lacks. It is the smoother a JAX-native hierarchy would use, and it had never been paired with this
-block. The native arms then ask the same question of a hierarchy written here rather than in PETSc: if
-the matched PETSc row converges and the native one caps, the deficit is in our coarsening and is a
+sweep lacks. It is the smoother a traced hierarchy would use, and it had never been paired with this
+block. The host arms then ask the same question of a hierarchy written here rather than in PETSc: if
+the matched PETSc row converges and the traced one caps, the deficit is in our coarsening and is a
 defined thing to fix; if both cap, the next candidate has to be globally coupled rather than cell-local.
 
 **And the converse arm, which is the one a split is really for.** Removing the incomplete-LU sweep
@@ -135,10 +135,10 @@ import scipy.sparse as sp  # noqa: E402
 from aquaflux.flow.block_preconditioner import BlockPreconditioner  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     FieldGroups,
-    HostVCycleInverse,
+    IluSmoothedInverse,
+    JacobiSmoothedInverse,
     MonolithicAmgPreconditioner,
-    NativeSimpleInverse,
-    NodalNativeInverse,
+    SimpleSmoothedInverse,
     air_multigrid_solve,
     block_approximate_inverse,
     block_stencil_gather_map,
@@ -256,7 +256,7 @@ STATES = {
 }
 
 #: Level-smoother recipes, as PETSc options layered over the shipped bundle. ``ilu0`` is the shipped
-#: default (an empty override). The other two are the Jacobi-class candidates a JAX-native multigrid could
+#: default (an empty override). The other two are the Jacobi-class candidates a traced multigrid could
 #: actually implement, since neither needs a sequential triangular solve.
 SMOOTHERS = {
     "ilu0": {},
@@ -286,7 +286,7 @@ SMOOTHERS = {
         "mg_levels_pc_type": "pbjacobi",
     },
     # The same smoother UNDAMPED, which is PETSc's own default Richardson scale and is what the
-    # JAX-native hierarchy runs. Carrying both is not thoroughness: on the turbulence block the damping
+    # traced hierarchy runs. Carrying both is not thoroughness: on the turbulence block the damping
     # factor alone was worth 10 restart cycles against 2, so an arm quoted at one damping is not a
     # result about point-block Jacobi. This is the row to compare a native arm against, since a damped
     # PETSc row against an undamped native one measures the damping and gets attributed to the
@@ -474,7 +474,7 @@ def monolithic(shifted, groups, n_fields, smoother):
     )
 
 
-class JaxNativeBlockInverse:
+class TracedBlockInverse:
     """A JAX-native fixed-cycle multigrid, wearing the host ``apply(residual, transpose=...)`` interface.
 
     The hierarchies in :mod:`aquaflux.solve.multigrid` are written in JAX and are the ones this package
@@ -510,7 +510,7 @@ class _HostFactorInverse:
 
     The field split applies each block inverse on the host (the whole preconditioner reaches the solver
     through one ``jax.pure_callback``), so a scipy factorization can serve directly with no JAX in the
-    path at all. That is what makes this simpler than :class:`JaxNativeBlockInverse`, which jits its
+    path at all. That is what makes this simpler than :class:`TracedBlockInverse`, which jits its
     cycle and takes its transpose from :func:`jax.linear_transpose` -- neither of which a host solve
     supports.
 
@@ -1087,11 +1087,11 @@ def _sub_inverse(kind):
     # later -- would have run a native block under an arm labelled PETSc. An arm that measures something
     # other than its label is the worst failure mode a study like this has, because every check
     # downstream of it still passes.
-    if kind != "native":
+    if kind != "simplesmooth":
         raise ValueError(f"unknown sub-block inverse {kind!r}; use 'petsc' or 'native'.")
 
     def build(sub, n_sub_fields):
-        return NodalNativeInverse(
+        return JacobiSmoothedInverse(
             sub,
             n_sub_fields,
             cycles=1,
@@ -1120,7 +1120,7 @@ def _trailing_inverse(spec):
 
         def build(block, n_group_fields):
             hierarchy = build_air_hierarchy(block.tocsr())
-            return JaxNativeBlockInverse(
+            return TracedBlockInverse(
                 lambda b: air_multigrid_solve(hierarchy, b), block.shape[0]
             )
 
@@ -1129,7 +1129,7 @@ def _trailing_inverse(spec):
 
         def build(block, n_group_fields):
             hierarchy = build_convection_hierarchy(block.tocsr())
-            return JaxNativeBlockInverse(
+            return TracedBlockInverse(
                 lambda b: convection_multigrid_solve(hierarchy, b), block.shape[0]
             )
 
@@ -1144,13 +1144,13 @@ def _trailing_inverse(spec):
         # `trailing_smoother_sweeps` NEVER REACHES an injected inverse -- the field split passes it only
         # to the V-cycle it builds itself -- so the native arm runs the class default of 4, and the
         # recorded 16.5% saving for "1 sweep" describes the PETSc V-cycle this case no longer uses.
-        settings = dict(compare.NATIVE_TRAILING)
+        settings = dict(compare.JACOBI_TRAILING)
         tail = spec.removeprefix("nodal")
         if tail:
             settings["sweeps"] = int(tail)
 
         def build(block, n_group_fields):
-            return NodalNativeInverse(block, n_group_fields, **settings)
+            return JacobiSmoothedInverse(block, n_group_fields, **settings)
 
         return build
     if spec == "exact":
@@ -1233,7 +1233,7 @@ def _leading_inverse(spec):
 
     The sibling of :func:`_trailing_inverse`, and the reason it did not exist until now is worth stating.
     Every arm ever run on the flow block has been a PETSc GAMG hierarchy with a smoother swapped in
-    through ``leading_options``; the JAX-native hierarchy has only ever been given ``[k, omega]``. So the
+    through ``leading_options``; the traced hierarchy has only ever been given ``[k, omega]``. So the
     question the whole native-preconditioner effort turns on -- whether a hierarchy this package can
     write itself is viable on the *saddle* -- has never been asked, and it is one dispatcher away.
 
@@ -1276,7 +1276,7 @@ def _leading_inverse(spec):
 
         return build
     if spec.startswith("transform"):
-        # Left block transform, then a native hierarchy on the TRANSFORMED operator.
+        # Left block transform, then a traced hierarchy on the TRANSFORMED operator.
         rest = spec.removeprefix("transform")
         exact = "-schur" not in rest
         undamped = "-undamped" in rest
@@ -1296,7 +1296,7 @@ def _leading_inverse(spec):
 
         return build
     if spec.startswith("simplesmooth"):
-        # The SIMPLE relaxation as a level SMOOTHER inside a native hierarchy, not as a flat inverse.
+        # The SIMPLE relaxation as a level SMOOTHER inside a traced hierarchy, not as a flat inverse.
         rest = spec.removeprefix("simplesmooth")
         frobenius = "-jacobi" not in rest
         schur_frobenius = "-sjacobi" not in rest
@@ -1369,7 +1369,7 @@ def _leading_inverse(spec):
         sweeps = int(rest or 2)
 
         def build(block, n_group_fields):
-            return NativeSimpleInverse(
+            return SimpleSmoothedInverse(
                 block,
                 n_group_fields,
                 sweeps=sweeps,
@@ -1396,7 +1396,7 @@ def _leading_inverse(spec):
         return build
     if spec.startswith("simple-"):
         # The velocity/pressure SIMPLE decomposition, with a Schur complement. The spec names the two
-        # halves independently -- `simple-native-petsc` is a native velocity block against a host
+        # halves independently -- `simple-traced-petsc` is a native velocity block against a host
         # pressure V-cycle -- so a failure can be attributed to one half instead of to the pair.
         halves = spec.removeprefix("simple-").split("-")
         velocity_kind = halves[0]
@@ -1441,12 +1441,12 @@ def _leading_inverse(spec):
         # gradient it costs ~8% MORE preconditioner applications, and over a full march it runs ~10%
         # fewer cycles for ~6% more wall. Three measurements of the real thing say parity; only this
         # probe says otherwise. Judge a preconditioner here, then believe the march.
-        # `hostiluN` sets the sweep count; the coarsening surface is the same one the traced native
+        # `hostiluN` sets the sweep count; the coarsening surface is the same one the traced
         # inverses take, deliberately, so a coarsening choice means the same thing on both paths.
         sweeps = int(spec.removeprefix("hostilu") or 2)
 
         def build(block, n_group_fields):
-            return HostVCycleInverse(
+            return IluSmoothedInverse(
                 block,
                 n_group_fields,
                 cycles=1,
@@ -1460,12 +1460,12 @@ def _leading_inverse(spec):
             )
 
         return build
-    if spec.startswith("native"):
+    if spec.startswith("simplesmooth"):
         damped = spec.endswith("d")
-        sweeps = int(spec.removeprefix("native").removesuffix("d") or 4)
+        sweeps = int(spec.removeprefix("simplesmooth").removesuffix("d") or 4)
 
         def build(block, n_group_fields):
-            return NodalNativeInverse(
+            return JacobiSmoothedInverse(
                 block,
                 n_group_fields,
                 cycles=1,
@@ -1608,7 +1608,7 @@ def block_simple_arms(coupled, pc_state, pc_beta):
                 "ilu0",  # unused: the leading inverse below replaces the V-cycle wholesale
                 "ilu0",
                 flow_first=True,
-                leading_inverse=lambda sub, n_sub: JaxNativeBlockInverse(matvec, n_flow),
+                leading_inverse=lambda sub, n_sub: TracedBlockInverse(matvec, n_flow),
             )
 
         return build
@@ -1654,7 +1654,7 @@ def block_simple_arms(coupled, pc_state, pc_beta):
         ),
         # The V-cycle ladder, which is a DIAGNOSTIC and not a tuning sweep: it separates two causes of a
         # stall that need opposite fixes. If the arm improves with more inner cycles, the sub-solves are
-        # the limit and the fix is to strengthen them -- cheap, and something a native hierarchy can do.
+        # the limit and the fix is to strengthen them -- cheap, and something a traced hierarchy can do.
         # If it plateaus, or worsens, the limit is the Schur APPROXIMATION itself and no amount of inner
         # accuracy reaches it, because inverting the wrong operator more exactly is not progress.
         #
@@ -1822,31 +1822,31 @@ ARMS = (
         lambda m, g, n: field_split(m, g, n, "simple-petsc", "ilu0", flow_first=True),
     ),
     (
-        "split nested-native/ilu0",
-        "split flow-first, nested u/p on flow (raw p-block), native V-cycles",
-        lambda m, g, n: field_split(m, g, n, "nested-native", "ilu0", flow_first=True),
+        "split nested-traced/ilu0",
+        "split flow-first, nested u/p on flow (raw p-block), traced V-cycles",
+        lambda m, g, n: field_split(m, g, n, "nested-traced", "ilu0", flow_first=True),
     ),
     (
-        "split simple-native/ilu0",
-        "split flow-first, SIMPLE Schur on flow, native V-cycles",
-        lambda m, g, n: field_split(m, g, n, "simple-native", "ilu0", flow_first=True),
+        "split simple-traced/ilu0",
+        "split flow-first, SIMPLE Schur on flow, traced V-cycles",
+        lambda m, g, n: field_split(m, g, n, "simple-traced", "ilu0", flow_first=True),
     ),
-    # ONE HALF AT A TIME. `simple-native-petsc` is a native (cell-block-smoothed) velocity block with
+    # ONE HALF AT A TIME. `simple-traced-petsc` is a native (cell-block-smoothed) velocity block with
     # the pressure half held on the known-good host V-cycle, so it asks whether the velocity block can
     # go native without the pressure question confounding the answer; the converse arm asks the other.
-    # Read them against `simple-petsc` (both host) and `simple-native` (both native): if holding
+    # Read them against `simple-petsc` (both host) and `simple-traced` (both native): if holding
     # pressure recovers the host arm, velocity is solved and pressure is the whole remaining problem.
     (
-        "split simple-native-petsc/ilu0",
+        "split simple-traced-petsc/ilu0",
         "split flow-first, SIMPLE on flow: native velocity, PETSc pressure",
-        lambda m, g, n: field_split(m, g, n, "simple-native-petsc", "ilu0", flow_first=True),
+        lambda m, g, n: field_split(m, g, n, "simple-traced-petsc", "ilu0", flow_first=True),
     ),
     (
         "split simple-petsc-native/ilu0",
         "split flow-first, SIMPLE on flow: PETSc velocity, native pressure",
         lambda m, g, n: field_split(m, g, n, "simple-petsc-native", "ilu0", flow_first=True),
     ),
-    # SIMPLE as a level SMOOTHER inside a native hierarchy -- the arm the flat inverses above are not.
+    # SIMPLE as a level SMOOTHER inside a traced hierarchy -- the arm the flat inverses above are not.
     (
         "split simplesmooth2/ilu0",
         "split flow-first, native MG + SIMPLE smoother on flow, 2 sweeps",

@@ -706,7 +706,7 @@ Engineering Principles.
 
     | leading inverse | zero shift (the adjoint's operator) | march shift β=0.0050 |
     |---|---|---|
-    | **shipped** — `native` SIMPLE-smoothed AMG | **17** | **19** |
+    | **shipped** — `simplesmooth` SIMPLE-smoothed AMG | **17** | **19** |
     | `msimple` / `triangular` — what every earlier measurement tested | 45 | 40 |
     | `msimple` / `simple` — Algorithm 1 in full | **58 (the cap)** | 47 |
     | `msimple` / `simpler` — **MSIMPLER** | **32** | **22** |
@@ -731,7 +731,7 @@ Engineering Principles.
     remains the slower arm. A whole-march A/B would settle it and none has been run. **Nothing here moves
     a default.**
     ⚠️ **The recorded "~8-9x, 6→53" figure was taken when `bfs3d` shipped `hostilu` as its leading
-    inverse; it now ships `native`, whose baseline is 17, not 6.** Both numbers are right under their own
+    inverse; it now ships `simplesmooth`, whose baseline is 17, not 6.** Both numbers are right under their own
     bundle — do not compare them across it.
 - **Fully-AD `a_P`** — a possible refinement (the diffusion Gate-C / limiter pattern), not yet needed.
 - **Gradient-scheme cost — largely solved (use `SweptGradientSolve`).** The *per-matvec* and

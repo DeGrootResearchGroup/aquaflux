@@ -1034,7 +1034,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     `.claude/rules/solve-flow-block-log.md` § "MSIMPLE swapped in for the SHIPPED leading inverse".
     ⚠️ **That ~8-9x is measured against a `hostilu` leading inverse this case no longer ships, and on a
     method whose pressure prediction was missing; re-measured 2026-08-20 with Klaij & Vuik's Algorithm 2
-    actually built and against the current `native` default, MSIMPLER is 32 cycles against 17 at the
+    actually built and against the current `simplesmooth` default, MSIMPLER is 32 cycles against 17 at the
     adjoint operator but 22 against 19 at the march's own shift** — still behind, but not by an order of
     magnitude, and not by the same factor at both operators (same file, the following section). It does
     not change the conclusion below, since the fixtures that reach this policy converge identically
@@ -1268,7 +1268,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       consumer), the per-rung `combine_observers` closure (a static field, so a fresh one is its own
       recompile), and the per-rung engine's V-cycle fit itself.
 
-      **MEASURED END TO END on the 3-rung `bfs3d` cold march** (field split, native trailing inverse,
+      **MEASURED END TO END on the 3-rung `bfs3d` cold march** (field split, traced trailing inverse,
       ILU(0)×4, plain aggregation, `coarse_eq_limit` 2000, `refresh_on_cycles` 3, PC β floor 0.05,
       `retry.on_alpha` 0.01, `zerogradient` k wall, positivity floor 1e-08, forward restart 15 —
       **and `BFS3D_COLUMN_REACH=0`, a uniform reach 3** -- the case's default carried `p` at reach 2
@@ -1319,7 +1319,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       object across the ramp means its GAMG coarse space is built at the *anchor* and carried down two
       decades of viscosity by `refactor`'s `pc_gamg_reuse_interpolation`, which was the standing reason
       to re-test rather than assume the reuse was safe. *Configuration:* `bfs3d`, field split, ILU(0)×4,
-      trailing ×1 native, `coarse_eq_limit` 2000, column reach (3,3,3,2,2,2), shift β = 0.5 (a rung's
+      trailing ×1 traced, `coarse_eq_limit` 2000, column reach (3,3,3,2,2,2), shift β = 0.5 (a rung's
       first step, not the low-shift tail), one state throughout (the anchor's cold hybrid
       initialization, so the viscosity is the only variable), GMRES restart 15 to rtol 1e-8 on the
       **true** residual.
@@ -1360,7 +1360,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     the `coupled_amg_continuation` builder) sets the direct-LU coarse-grid size; raising it to 2000 is a
     large cut in the outer cycle count on the hard `bfs3d` state — for the figure with its β and bundle
     use the `coarse_eq_limit` bullet in `.claude/rules/solve-amg-multigrid.md` rather than repeating an unanchored
-    number here. The experimental native-PETSc forward path and the FGMRES-forward
+    number here. The experimental host-exact-solve forward path and the FGMRES-forward
       optimization remain follow-ups (`.claude/rules/solve-amg-multigrid.md`).
   - **`lu_beta_tracking_refresh` — re-factor the LU at the current β EVERY step (the correct LU treatment
     for a dual-time march; BUILT).** A frozen LU is exact only for the β it was factored at; a dual-time

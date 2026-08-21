@@ -2,11 +2,11 @@
 paths:
   - "aquaflux/solve/amg_preconditioner.py"
   - "aquaflux/solve/multigrid.py"
-  - "aquaflux/solve/native_inverse.py"
-  - "aquaflux/solve/host_vcycle.py"
+  - "aquaflux/solve/hierarchy_inverse.py"
+  - "aquaflux/solve/ilu_inverse.py"
 ---
 
-# Rules — `aquaflux/solve/` monolithic AMG and the JAX-native multigrid
+# Rules — `aquaflux/solve/` monolithic AMG and the traced multigrid
 
 > Split out of `solve.md` (2026-08-18) to keep routine `aquaflux/solve/` work from loading the full
 > AMG/multigrid investigation narrative. See `solve.md` for the package-wide contracts, current
@@ -79,14 +79,14 @@ paths:
     coarsening choice (selective vs smoothed-aggregation) is a minor knob by comparison — but do not read that
     as covering `pc_gamg_agg_nsmooths`: plain-vs-smoothed *prolongator* smoothing is measured below as the
     largest preconditioner win found on this case. (The whole-march wall figure that used to sit here
-    predated several march-wide wins and is deleted.) An **experimental, opt-in native-PETSc forward path**
-    (`coupled_amg_continuation(native_forward_solve=True)`) is a far larger per-step lever — a native KSP
-    whose shell matvec calls the eager JAX jvp (true Newton), 1 native GMRES iteration vs the JAX-side
+    predated several march-wide wins and is deleted.) An **experimental, opt-in host-exact-solve forward path**
+    (`coupled_amg_continuation(host_exact_forward_solve=True)`) is a far larger per-step lever — a traced KSP
+    whose shell matvec calls the eager JAX jvp (true Newton), 1 traced GMRES iteration vs the JAX-side
     lineax path's ~90 on the identical system — but it currently under-converges the *march* (the lineax
     path over-solves each step to ~machine zero and the pseudo-transient globalization leans on those
-    near-exact steps; the native honest-tolerance step descends slower and overruns the step budget), so it
+    near-exact steps; the traced honest-tolerance step descends slower and overruns the step budget), so it
     stays off by default. The follow-up to make it the default is a **β-tracking GAMG refresh** (the AMG
-    analogue of `lu_beta_tracking_refresh`), so the frozen V-cycle matches the ramping β and the native
+    analogue of `lu_beta_tracking_refresh`), so the frozen V-cycle matches the ramping β and the traced
     solve stays accurate at low β.
   - **`coarse_eq_limit` — grow the coarsest-grid direct LU (BUILT).** GAMG's default coarsens to a tiny
     (~50-equation) coarse grid, whose direct LU captures only the crudest global mode; the indefinite
@@ -165,7 +165,7 @@ paths:
     | PETSc **ILU(1)** | **fails** (300 matvecs, true 3.36) | converges — 74 steps, 321 cycles, **628 s** |
     | PETSc **ILU(0)** | fails | fails (α 0.000, NaN by step 4) |
     | our **ILU(0)** (`hostilu`) | fails | fails (α 0.000, inf by step 3) |
-    | **native SIMPLE** | **converges — 71 steps, 395 cycles, 550 s** | converges — 71, 408, 799 s |
+    | **SIMPLE-smoothed** | **converges — 71 steps, 395 cycles, 550 s** | converges — 71, 408, 799 s |
 
     **SIMPLE is REACH-INSENSITIVE, and that is the load-bearing observation.** Between reach 3 and
     reach 5 it takes the **same 71 steps**, cycles within 3 % (395 against 408) and a final residual
@@ -189,7 +189,7 @@ paths:
     arm is not at its best here — `PITZ_FLOW_SWEEPS` and the threshold are unexplored.
 
     **✅ CONFIRMED ON A SECOND, INDEPENDENT ZERO-FILL IMPLEMENTATION (2026-08-16).**
-    `HostVCycleInverse` is this package's own hierarchy smoothed by its own `Ilu0`: different
+    `IluSmoothedInverse` is this package's own hierarchy smoothed by its own `Ilu0`: different
     coarsening, different factorization code, different language even. Run as the leading inverse on
     `pitzDaily` it fails identically to PETSc's zero-fill smoother — step 1 alpha 0.000 with the
     residual above its own starting value, step 2 at the shift ceiling, **non-finite by step 3** —
@@ -207,7 +207,7 @@ paths:
     See *"Ordering, not fill, is what fails zero-fill on `pitzDaily`"* below for the measurements.
 
     **⚠️ THEREFORE THE CONSEQUENCE DRAWN FROM IT IS ALSO WITHDRAWN.** It said `Ilu0` is zero-fill by
-    construction with no fill parameter, so `HostVCycleInverse` "cannot serve a case that needs one" —
+    construction with no fill parameter, so `IluSmoothedInverse` "cannot serve a case that needs one" —
     and offered a level-of-fill factorization as the specifiable gap. `pitzDaily` is not shown to need
     fill. It is shown to need a different cell order, which the host V-cycle now takes
     (`aquaflux/solve/ordering.py`). A level-of-fill `Ilu0` may still be wanted some day; this case is
@@ -296,7 +296,7 @@ paths:
 **The correctly-scoped question.** Everything above was measured MONOLITHICALLY — one V-cycle over all
 five fields — and the case is FIELD SPLIT. The split sends `[u, v, p]` to the V-cycle whose level
 smoother is the incomplete factorization (the only block a fill level governs) and `[k, omega]` to
-`native_nodal_inverse`, which is not a factorization at all, **so no `k` or `omega` row is ever
+`jacobi_smoothed_inverse`, which is not a factorization at all, **so no `k` or `omega` row is ever
 eliminated by an ILU in the shipped solver.** Everything in this section is on `[u, v, p]` alone, taken
 from the assembled operator by the same `FieldGroups` the split uses.
 
@@ -313,7 +313,7 @@ fill**, `COMPILED=True`; real right-hand side `-R(state)[leading]`; operator and
 right-preconditioned GMRES, rtol 1e-8, restart 30, ≤ 20 restarts (so 621 applies = hit the cap).
 Two states: the case's **self-start** (`|R|` 2.89e+02 — where the `hostilu` march dies at step 1 *under
 the shipped cell order*) and
-the **converged root** (`R` 5.095e-06; marched with the *native SIMPLE* leading inverse at reach 3,
+the **converged root** (`R` 5.095e-06; marched with the *SIMPLE-smoothed* leading inverse at reach 3,
 which is reach-insensitive — the state is a root of the exact residual either way, and it is re-probed
 here at reach 5 because an ILU inherits the stored pattern).
 Harness: `validation/pitzdaily_openfoam/flow_block_ordering.py`.
@@ -322,7 +322,7 @@ Harness: `validation/pitzdaily_openfoam/flow_block_ordering.py`.
 `validation/pitzdaily_openfoam/checkpoints/state-00071.npz`, written by `StateCheckpointer` during a
 full march; `checkpoints/` is ignored, so that file is not in the repository and will not be in a fresh
 clone. To re-adjudicate the converged-root half of this table, **re-run the case to regenerate it** —
-`PITZ_FLOW_INVERSE=native validation/run_case.sh validation/pitzdaily_openfoam/compare.py`, about nine
+`PITZ_FLOW_INVERSE=simplesmooth validation/run_case.sh validation/pitzdaily_openfoam/compare.py`, about nine
 minutes — and the harness picks it up automatically. Absent one it prints a line saying so and measures
 the self-start only, so a run missing the artifact reports a *smaller* table rather than a wrong one.
 
@@ -483,7 +483,7 @@ escalation is simply accepted, and the march never looks back:
 one on `alpha` and **none on `cycles`** — with the spurious trigger gone, only genuine line-search retries
 remain, and their β escalations stay inside the 0.04–0.16 band this block finds easy.
 
-**The root is the same one.** `x_r/h` 8.0686 matches the native-SIMPLE arm to four decimals
+**The root is the same one.** `x_r/h` 8.0686 matches the SIMPLE-smoothed arm to four decimals
 (`nut_peak` 417.54 against 417.51), so this is a cost and robustness result, not an accuracy one — two
 very different preconditioners landing on one converged state.
 
@@ -491,7 +491,7 @@ very different preconditioners landing on one converged state.
 
 | arm on `pitzDaily` | steps | cycles | wall |
 |---|---|---|---|
-| native SIMPLE, reach 3 | 71 | 395 | **550 s** |
+| SIMPLE-smoothed, reach 3 | 71 | 395 | **550 s** |
 | PETSc ILU(1), reach 5 | 74 | 321 | 628 s |
 | **`hostilu` + `rcm`, reach 5, threshold 25** | 82 | 466 | 743 s |
 
@@ -821,7 +821,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 
 - **Three small clones removed (BUILT 2026-08-15), and one deliberately left.**
   - The SIMPLE smoother's sweep loop is `sweeps_from(level, rhs, guess, count)` in
-    `saddle_multigrid._native_saddle_cycle`. `smooth` and `smooth_zero` each declared the identical
+    `saddle_multigrid._simple_smoothed_cycle`. `smooth` and `smooth_zero` each declared the identical
     10-line `fori_loop` body; they differ only in where they start and how many sweeps that leaves.
     Bit-identical at 1, 2 and 4 sweeps.
   - `block_stencil_colouring` calls `frozen_operator.require_valid_graph` instead of re-inlining three
@@ -840,12 +840,12 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     code slated to go.
 
 
-## The JAX-native multigrid — in progress
+## The traced multigrid — in progress
 
-- **⚠️ IN PROGRESS (2026-08-10): the native trailing V-cycle now MATCHES PETSc on quality AND cost;
+- **⚠️ IN PROGRESS (2026-08-10): the traced trailing V-cycle now MATCHES PETSc on quality AND cost;
   what blocks it is the POSITIVITY LIMITER — read that as the PROXIMATE failure, not the cause.**
   ⚠️ The same limiter, defaults and case run fine under the PETSc ILU(0) control (58 steps to 9.588e-06,
-  recorded below), so the limiter is necessary and not sufficient: the native arm dies at a state the
+  recorded below), so the limiter is necessary and not sufficient: the traced arm dies at a state the
   control never reaches, and what drives that arm's direction into the boundary is **unexplained**. Read this before the
   2026-08-09 section below, which it supersedes in several places.
 
@@ -853,7 +853,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   is load-bearing:** `bfs3d` `state-00057`, PC β 0.05, the `[k, ω]` block **ALONE** (46080 dofs,
   4.20M nnz), GMRES restart 15 to rtol 1e-8 on the TRUE residual, **4 smoother sweeps**, the PETSc
   side on its **matched-smoother** arm (plain aggregation, point-block Jacobi ×4 — against ILU(0) ×4
-  PETSc does 1 cycle, not 2); harness `trailing_hierarchy_sweep.py`. On that arm the JAX-native nodal
+  PETSc does 1 cycle, not 2); harness `trailing_hierarchy_sweep.py`. On that arm the traced nodal
   hierarchy reaches **2 restart cycles against PETSc GAMG's 2**, on a 438-equation coarse space
   against 432. Quality parity, on CPU. Per-apply cost came out at parity too, but that pair of
   timings was recorded with no sweep count and no state and is deleted — measured 2026-08-10,
@@ -894,7 +894,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   - **A capped step is not a bad step.** Two arms differed in α at rung-2 step 16 (1.000 against 0.579)
     and reached an **identical** residual, 1.271e-01. Attributing the α difference to preconditioner
     quality was wrong. ⚠️ **Those two numbers are NOT a raw-vs-equilibrated pair** — they are `march.log`
-    (**petsc** trailing inverse) against `march-20260810-223702.log` (**native + `equilibrate=True`**),
+    (**petsc** trailing inverse) against `march-20260810-223702.log` (**jacobi + `equilibrate=True`**),
     both under the `dirichlet` k wall BC. The genuine `equilibrate` A/B at step 16 is **0.699 against
     1.000**, under `zerogradient` (`march-20260810-221936.log` / `march-20260811-003915.log`, both at
     ‖R‖ 1.382e-01). The point about a capped step survives either way; the labelling did not.
@@ -911,8 +911,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   **⚠️ (2026-08-10, LATER) THE RUNG-2 DEATH IS A FRACTION-TO-THE-BOUNDARY LOCK-UP, AND β ESCALATION
   IS A SYMPTOM RATHER THAN THE CAUSE.** Read this before acting on the two bullets above; it does not
   contradict them but it re-ranks them, and the "~100 dead steps" is now measured rather than
-  estimated. Taken from the archived `march.log` of the native run (banner: `turbulence inverse:
-  native`, `equilibrate=True`, `sweeps=4`, `aggressive_levels=1`, `spectral_damping=False`,
+  estimated. Taken from the archived `march.log` of the traced run (banner: `turbulence inverse:
+  jacobi`, `equilibrate=True`, `sweeps=4`, `aggressive_levels=1`, `spectral_damping=False`,
   `refresh on cycles 3`, `retry on cycles / alpha 10 / 0.01`, `pc beta floor 0.05`, rung 2 of 3):
 
   | step | β | cyc | ‖R‖ | a_min | `limit` |
@@ -1003,11 +1003,11 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   and it is what the converging arms were measured with), but do not describe this flag as deciding
   convergence.
 
-  **⚠️ EQUILIBRATION DECIDES WHETHER THE `bfs3d` NATIVE MARCH CONVERGES — true ONLY at floor 0 (see
+  **⚠️ EQUILIBRATION DECIDES WHETHER THE `bfs3d` TRACED MARCH CONVERGES — true ONLY at floor 0 (see
   above). Measured 2026-08-11.** An A/B differing in **one flag** was run end to end:
 
   *Configuration, both arms:* `bfs3d` (23040 cells), 3-rung Reynolds continuation (`N_POINTS=2` →
-  Re/100, Re/10, target), `BFS3D_TURBULENCE_INVERSE=native`, `field_split=True`; native trailing
+  Re/100, Re/10, target), `BFS3D_TURBULENCE_INVERSE=jacobi`, `field_split=True`; traced trailing
   `cycles=1, sweeps=4, max_coarse=2000, aggressive_levels=1, prolongation_smoothing=none,
   spectral_damping=False`; monolithic smoother **ILU(0) ×4**, `coarse_eq_limit` 2000, plain aggregation,
   reach 3, forward restart 15, `refresh_on_cycles` 3, `retry on cycles / alpha` 10 / 0.01, cycle budget
@@ -1060,7 +1060,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   - **⚠️ ONE RUN EACH, and one instrumentation difference:** the archived equilibrated arm ran with
     `BFS3D_DUMP_STEP_LIMIT=0.05/12`, the converged arm with the dumps off. The dump wrapper returns the
     real cap unchanged by construction, so it *should* be neutral, but it is not a matched pair.
-  - **The stated reason for the `equilibrate=True` default no longer exists.** `native_nodal_inverse`
+  - **The stated reason for the `equilibrate=True` default no longer exists.** `jacobi_smoothed_inverse`
     defaults it on because "the per-cell block solve is not otherwise safe" — raw, 4 of 23040 cell blocks
     were flagged singular. That count came from the **Frobenius** guard (`|det| < 1e-12·‖B‖_F`), which is
     not invariant under row scaling and is **the guard that was found wrong and replaced** by the
@@ -1110,7 +1110,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   `_implicit_solve_bwd` reads only `jax.vjp(residual_fn, phi_star)` and a transpose solve, never
   `forward_step_fn`.
 
-  *Configuration, both arms:* `bfs3d`, native trailing inverse with **`equilibrate=False`**, `k` wall BC
+  *Configuration, both arms:* `bfs3d`, traced trailing inverse with **`equilibrate=False`**, `k` wall BC
   `zerogradient`, 3-rung Reynolds continuation (`N_POINTS=2`), ILU(0) ×4, `coarse_eq_limit` 2000, plain
   aggregation, reach 3, forward restart 15, `refresh_on_cycles` 3, `retry on cycles / alpha` 10 / 0.01,
   PC β floor 0.05, stop `(0.0, 1e-5)`. Floor **1e-8**, calibrated by replaying the recorded clips
@@ -1165,7 +1165,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   only postpones the ratchet — `(k_new + floor) = (1 - tau)(k + floor)` per capped step, whatever the
   floor.
 
-  *Configuration, both arms:* `bfs3d`, native trailing inverse, `zerogradient` k wall, floor 1e-08,
+  *Configuration, both arms:* `bfs3d`, traced trailing inverse, `zerogradient` k wall, floor 1e-08,
   `equilibrate=False`, `refresh_on_cycles` 3, ILU(0) ×4, trailing sweeps 1, `coarse_eq_limit` 2000,
   restart 15, two rungs. **Both predate the probe/memory work merged in #188/#189**, so their wall
   clocks are not comparable to anything measured after it.
@@ -1207,7 +1207,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   and un-scaling inflates the correction in exactly the cells the cap (a **minimum** over cells) is
   decided by. **The first clause is false**, so the rest cannot hold.
 
-  *Configuration:* `bfs3d`, states `step-limit-04`/`-11` (both from `march-20260810-223702.log`: native
+  *Configuration:* `bfs3d`, states `step-limit-04`/`-11` (both from `march-20260810-223702.log`: jacobi
   trailing inverse, `equilibrate=True`, **`k` wall BC `dirichlet`**, rung 2 = Re/10, β 0.468 and 4).
   Exact `∂R_k/∂k` per cell by one-hot Jacobian-vector product — no materialization — 40 cells per decile
   of `k` plus the three cells the limiter is observed to bind on.
@@ -1323,7 +1323,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   2. **Pair the operator with the right β.** Probing state-N with state-N's β when the failing
      refresh uses state-N+1's is the recorded trap; sweep β instead.
   3. **Never quote an arm at one smoother-sweep count.** The standard prolongator was recorded as
-     "void" from its 4-sweep numbers; at 8 it is the best native arm on the scalar problem. The rule
+     "void" from its 4-sweep numbers; at 8 it is the best traced arm on the scalar problem. The rule
      cuts both ways — on the flow saddle it fails at 4 sweeps and fails *worse* at 8, which is what
      distinguishes an under-smoothed arm from an amplified one.
   4. **A block-alone probe ties where a march separates.** Raw and equilibrated are both 2 cycles on
@@ -1331,7 +1331,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 
   **✅ ANSWERED: the cap binds on ONE cell, it is a step-corner cell whose `k` is already numerically
   zero, and it is NOT one of the ill-conditioned ones.** Measured from twelve `BFS3D_DUMP_STEP_LIMIT`
-  dumps taken on the native march at rung 2 (`equilibrate=True`, `sweeps=4`, `aggressive_levels=1`,
+  dumps taken on the traced march at rung 2 (`equilibrate=True`, `sweeps=4`, `aggressive_levels=1`,
   `spectral_damping=False`, `refresh on cycles 3`, `retry on cycles / alpha 10 / 0.01`, PC β floor
   0.05), the operator swept over β 0 … 0.4. The probe reproduces the recorded cap exactly
   (3.761982e-03 both ways), so the capture is reading the quantity the march acted on.
@@ -1450,7 +1450,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     1876 cells (92%) are inherited from it**.
   - **Population is pre-stall, depth is stall-caused**: `#k<1e-6` is 1876 by dump 04 and frozen there for
     all 97 remaining steps, while `k[12800]` falls 3.08e-16 → 3.08e-212 over the same span.
-  - **The stalled arm is `BFS3D_TURBULENCE_INVERSE=native`; the default `petsc` arm walks the same trough
+  - **The stalled arm is `BFS3D_TURBULENCE_INVERSE=jacobi`; the default `petsc` arm walks the same trough
     and recovers** — agreeing with the exact-solve finding that at β ≥ 0.5 there is no binding cell.
   - ❌ **REFUTED — the initialization.** `hybrid_initialize` gives a **uniform** `k = 0.2489585`, zero
     cells below 1e-6.
@@ -1579,7 +1579,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   why that cell's row is hard to satisfy (its root is **positive**, at `+1.99e-14`). Neither is built.
 
   **⚠️ (2026-08-10, LATER STILL) THE `k` WALL BC A/B, RUN AS A CONTROLLED PAIR — and the crash is NOT
-  fixed by any of it.** Two full 3-rung marches from the initial state, `BFS3D_TURBULENCE_INVERSE=native`,
+  fixed by any of it.** Two full 3-rung marches from the initial state, `BFS3D_TURBULENCE_INVERSE=jacobi`,
   everything identical but `BFS3D_K_WALL`, both carrying the four negative-`k` clamps and
   `stop_on_limit_stall=3`:
 
@@ -1614,7 +1614,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     falsifier named against the earlier diagnosis is closed: these dumps can be paired with the linear
     system that produced them.
 
-  **✅ GATES GREEN on all of the above** (CSR level operator, native trailing inverse, and both march
+  **✅ GATES GREEN on all of the above** (CSR level operator, traced trailing inverse, and both march
   changes), with the tiers named because a default-on march guard reaches further than the fast gate:
   - fast gate **967 passed / 1 skipped** (899 unit `-n auto`, 68 integration `-n 1`);
   - `test_coupled_rans` + `test_coupled_amg` + `test_coupled_field_split` + `test_reynolds_continuation`
@@ -1634,7 +1634,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 
 ## Faithful smoothed aggregation — matching PETSc GAMG
 
-- **⚠️ (2026-08-09): making the JAX-native multigrid a FAITHFUL smoothed aggregation, so a
+- **⚠️ (2026-08-09): making the traced multigrid a FAITHFUL smoothed aggregation, so a
   comparison against PETSc GAMG means something. Uncommitted work sits on `claude/block-aware-aggregation`.**
   Read this before touching `solve/multigrid.py`'s aggregation path.
 
@@ -1794,7 +1794,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 
   **What equilibration IS worth (keep it). ⚠️ "Default off" was a scope error — settled from source
   2026-08-10:** `build_convection_hierarchy` and `_build_aggregation_hierarchy` default `equilibrate=False`,
-  so "default off" is true of the **JAX-native builder only**; `native_nodal_inverse` overrides it to `True`
+  so "default off" is true of the **traced builder only**; `jacobi_smoothed_inverse` overrides it to `True`
   (its per-cell block solve is not otherwise safe); and the PETSc `AmgVCycle` path equilibrates
   **unconditionally** via `equilibrate_cell_major`. Three different objects, no contradiction.
 
@@ -1848,22 +1848,22 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     order, single sweep, selector-claims-neighbours, faithful to `MatCoarsenApply_MISK_private`. Worth
     **8 → 5 cycles** over the two-pass RCM scheme. The old scheme only seeded from a fully-free
     neighbourhood, so it seeded few aggregates and left most vertices to a ragged cleanup pass.
-  - `jax.jit` on the native applies (they were dispatching eagerly, ~18 % of apply cost) and
+  - `jax.jit` on the traced applies (they were dispatching eagerly, ~18 % of apply cost) and
     `indices_are_sorted=True` in `_coo_apply` (CSR→COO is row-sorted by construction).
   - **There is no `PerFieldNativeInverse` — deleted 2026-08-15 (binding).** It had no production caller
     (only its own tests and one sweep arm), its own docstring recorded it as superseded by
-    `NodalNativeInverse` wherever that works, and it was never ported onto `NativeHierarchyInverse` — so
+    `JacobiSmoothedInverse` wherever that works, and it was never ported onto `HierarchyBlockInverse` — so
     it had neither `refactor_block` nor `refactor` and `BlockTriangularFieldSplit.refactor` **raised**
     the first time a march refreshed with it, while being exported from `__all__` as public API. It also
     re-committed two costs the shared base was written to remove (eager per-field transposes; a fresh
     closure per apply). Its measurements never transferred to the nodal inverse in any case — a
     per-field pair is a weaker object than one block-aware hierarchy — so the `nativeN` arm in
     `turbulence_smoother_sweep.py` went with it, leaving `nodal[N][cM]`.
-  - `NodalNativeInverse` (`solve/field_split.py`, over the shared
-    `solve/native_inverse.NativeHierarchyInverse` base), both transposable in
+  - `JacobiSmoothedInverse` (`solve/field_split.py`, over the shared
+    `solve/hierarchy_inverse.HierarchyBlockInverse` base), both transposable in
     closed form and fixed linear operators, so adjoint-legal. **⚠️ "Neither is wired into production" was
     wrong — settled from source 2026-08-10.** The nodal inverse is reachable through
-    `native_nodal_inverse` and is the `BFS3D_TURBULENCE_INVERSE=native` arm; what is true is that it is not a
+    `jacobi_smoothed_inverse` and is the `BFS3D_TURBULENCE_INVERSE=jacobi` arm; what is true is that it is not a
     *default*.
 
   - **`prolongation_smoothing` is its own parameter, no longer welded to `mis_aggregation`.** The old
@@ -1879,13 +1879,13 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 
   **What is BUILT and measured BAD (revert or gate):**
   - The **standard prolongator at 4 sweeps** fails outright (44 cycles, true rel 1.0) — raw *and*
-    equilibrated, so this is not the scaling. At **8 sweeps equilibrated it is the best native arm
+    equilibrated, so this is not the scaling. At **8 sweeps equilibrated it is the best traced arm
     (4 cycles)**, so it is under-smoothed rather than wrong: the earlier "VOID / much worse" reading
     conflated a smoothing deficit with a broken formula. Treat sweeps as part of that arm's
     specification, never quote it at a single sweep count.
     ⚠️ **Measured on the 2150-equation scalar problem under a point-block-Jacobi / ILU smoother. It does
     NOT carry to the flow saddle**, where both smoothed prolongators are refuted under the SIMPLE
-    smoother at 4 *and* 8 sweeps — see *Smoothed aggregation on the flow saddle*. "Best native arm"
+    smoother at 4 *and* 8 sweeps — see *Smoothed aggregation on the flow saddle*. "Best traced arm"
     below always means best on the operator it was measured on.
   - **⚠️ GRAPH SQUARING ON THE FIRST LEVEL IS GAMG'S DEFAULT COARSENING, NOT A SIZE KNOB — and
     recording it as harmful was the single thing holding the comparison open.** Squaring the graph on the first level is not a size knob, it is
@@ -1909,7 +1909,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 
   - **A THIRD correction, from this round: an arm quoted at one smoother-sweep count is not a
     result about the method.** The standard prolongator was written down as "much worse" from its
-    4-sweep numbers; at 8 it is the best native arm. Two of the three wrong conclusions in this
+    4-sweep numbers; at 8 it is the best traced arm. Two of the three wrong conclusions in this
     section came from holding one axis fixed while attributing the outcome to another.
 
   **Also established:** block Jacobi is a perfectly good smoother class here given enough sweeps (PETSc
@@ -1938,9 +1938,9 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 
   **NEXT STEPS, in order:**
   1. **Decide whether the matched configuration becomes the DEFAULT, and for which consumers.**
-     ⚠️ **This shipped: `native_nodal_inverse` now defaults to the whole matched bundle**
+     ⚠️ **This shipped: `jacobi_smoothed_inverse` now defaults to the whole matched bundle**
      (`aggressive_levels=1`, `prolongation_smoothing="none"`, `spectral_damping=False`,
-     `equilibrate=True`) and is the `BFS3D_TURBULENCE_INVERSE=native` arm. The open part is whether it
+     `equilibrate=True`) and is the `BFS3D_TURBULENCE_INVERSE=jacobi` arm. The open part is whether it
      transfers to other consumers; the library `build_amg_vcycle` defaults are untouched. The measurement says the matched
      bundle is 5 → 2 cycles on the turbulence block; whether that transfers to the scalar transport
      and velocity blocks is unmeasured, and flipping a default is a march-level decision, not a
@@ -1951,7 +1951,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   3. **✅ SCALABILITY — BUILT AND SHIPPED as `bfs3d`'s trailing-block default (2026-08-18).** The
      convection hierarchy was capped at 2 levels (`_CONVECTION_LEVELS`) with a **dense inverse** coarse
      solve — at a 77× ratio that is ~26k coarse dofs and 5.4 GB to store at 1M cells, infeasible.
-     `compare.py`'s `NATIVE_TRAILING` now defaults `native_nodal_inverse` to `max_levels=20,
+     `compare.py`'s `JACOBI_TRAILING` now defaults `jacobi_smoothed_inverse` to `max_levels=20,
      max_coarse=200, strength_threshold=0.25, aggressive_levels=0, frozen_coarsening=True`. Depth or
      the threshold *alone* did nothing on a block-alone probe of the converged root's zero-shift
      operator (every arm at the old 2-level default shows no real residual reduction after 50+ restart
@@ -2088,7 +2088,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     nnz/row, and the total restriction time **34.9 s → 0.4 s**.
   - **At a real shape the whole hierarchy now builds in ~4 s.** Six levels on a 46080-row, 2.2M-nnz
     convection-dominated operator: restriction 3.2 s, splitting 0.7 s, Galerkin 0.07 s, densities
-    47/67/86/83/47/15. The same build under the old walk does not finish. For scale, the native flow
+    47/67/86/83/47/15. The same build under the old walk does not finish. For scale, the traced flow
     hierarchy builds in ~6 s and PETSc GAMG in ~3 s, so lAIR setup is now in normal range and **the
     method is evaluable on `bfs3d` for the first time**.
   - **It is a real accuracy-against-cost trade, now a knob: `build_air_hierarchy(restriction_theta=…)`,
@@ -2162,7 +2162,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     given march actually does.
   - **✅ lAIR IS NOW BLOCK-AWARE — `build_air_hierarchy(block_size=…)` — AND THAT DISSOLVES THE
     RECORDED `[k, ω]` BLOCKER (2026-08-19).** Three things change together above ``block_size = 1`` and
-    none suffices alone, which is the same trio `NodalNativeInverse` needed and for the same measured
+    none suffices alone, which is the same trio `JacobiSmoothedInverse` needed and for the same measured
     reasons. The C/F splitting runs on the **cell** graph (`_cell_graph`), so a cell is entirely coarse
     or entirely fine — a field-blind split can put one field of a cell on the coarse grid and another on
     the fine one, which is what produces the degenerate Galerkin row. The local approximate-ideal solve
@@ -2185,7 +2185,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
       would pass for the wrong reason and read as evidence for the block smoother.
     - **Wired for a march as `air_inverse(...)` / `AirBlockInverse` (`solve/field_split.py`)**, a
       `trailing_inverse` factory satisfying the split's three-method contract (`n_dofs`, `apply`,
-      `refactor_block`). It does **not** subclass `NativeHierarchyInverse`: that base owns a
+      `refactor_block`). It does **not** subclass `HierarchyBlockInverse`: that base owns a
       `SmoothedHierarchy` and refreshes by re-fitting the aggregation, this owns an `AirHierarchy` and
       refreshes via `refresh_air_hierarchy` on a frozen split. The transpose is `jax.linear_transpose`
       of the whole fixed-cycle map, since `R != Pᵀ` makes swapping the transfers by hand wrong.
@@ -2262,7 +2262,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   unrelated scalar-derived divides that a blanket "no `div` primitive" check would have flagged too).
 - **⚠️ NARROWED (2026-08-18): the defect below is specific to a PLAIN (untresholded) deep coarsening,
   not to depth itself — a strength-thresholded deep hierarchy does not reproduce it.** The prohibition
-  below was against adding a depth knob at all; `NativeHierarchyInverse`'s shared base (#197) exposed
+  below was against adding a depth knob at all; `HierarchyBlockInverse`'s shared base (#197) exposed
   `max_levels`/`strength_threshold` since, and `bfs3d`'s trailing-block bundle now ships
   `max_levels=20, strength_threshold=0.25` (case-level override, library default unchanged — see the
   scalability item earlier in this file). Depth *alone* (`strength_threshold=0`, the untresholded case

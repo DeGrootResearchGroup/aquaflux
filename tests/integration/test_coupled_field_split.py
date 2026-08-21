@@ -333,7 +333,7 @@ def test_the_trailing_block_defaults_to_fewer_sweeps_and_the_count_is_tunable(ca
         pc.destroy()
 
 
-def test_the_nodal_native_inverse_is_a_fixed_linear_map_that_transposes(case):
+def test_the_jacobi_smoothed_inverse_is_a_fixed_linear_map_that_transposes(case):
     """The two properties the coupled solve requires of any block inverse, on the real trailing block.
 
     Both are structural preconditions rather than quality measures, and both fail silently: a
@@ -345,11 +345,11 @@ def test_the_nodal_native_inverse_is_a_fixed_linear_map_that_transposes(case):
     """
     import numpy as np
     import scipy.sparse as sp
-    from aquaflux.solve import NodalNativeInverse
+    from aquaflux.solve import JacobiSmoothedInverse
 
     groups, shifted = case["groups"], case["shifted"]
     block = sp.csr_matrix(shifted[groups.trailing, :][:, groups.trailing])
-    inverse = NodalNativeInverse(block, groups.n_trailing_fields)
+    inverse = JacobiSmoothedInverse(block, groups.n_trailing_fields)
     try:
         rng = np.random.default_rng(0)
         u, v = (rng.standard_normal(inverse.n_dofs) for _ in range(2))

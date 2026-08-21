@@ -1,6 +1,6 @@
-"""Which level of the native hierarchy defeats an incomplete factorization, and why?
+"""Which level of the traced hierarchy defeats an incomplete factorization, and why?
 
-A host V-cycle over the native hierarchy raises ``Factor is exactly singular`` on the ``bfs3d`` flow
+A host V-cycle over the traced hierarchy raises ``Factor is exactly singular`` on the ``bfs3d`` flow
 block, and it does so with the equilibration and cell-major reorder the host AMG path applies -- so the
 preprocessing is not the whole story. Two candidates, which want different fixes:
 
