@@ -70,8 +70,13 @@ a mesh. **A green run there does not mean the cases work.** It is blind to:
   moved, a type that changed under an unchanged name. Break 1 above is exactly this, and the guard
   would **not** have caught it.
 - **Anything behind `**kwargs`.** `solve_coupled` takes `**continuation_kwargs` and forwards them to
-  whichever builder it is given, so every keyword is "accepted" there and none is checked — and this is
-  the main entry point.
+  whichever builder it is given, so every keyword is "accepted" *statically* and none is checked here —
+  and this is the main entry point. ✅ **Narrowed 2026-08-20 (#278): the case where there is no builder
+  to forward to is now a `TypeError` at the call rather than silence.** Given an explicit `continuation`
+  or a `RefreshPolicy(builder=...)`, `method` / `reference_state` / `**continuation_kwargs` are refused
+  by name instead of dropped — which is how `precondition_step=` used to vanish on its way to a
+  `RefreshPolicy`. What is still unchecked is a keyword that *does* reach the default builder and is
+  wrong there; that raises at run time, in the builder, not here.
 - **Behaviour.** It cannot tell a converging march from one that crawls, which is how a case can be
   runnable and useless at the same time (the "fallen behind" failure above).
 

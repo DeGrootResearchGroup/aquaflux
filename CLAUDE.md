@@ -942,6 +942,14 @@ git diff --cached | grep -E "^-" | grep -oE "\b_?[A-Za-z][A-Za-z0-9_]{3,}\b" \
 grep -rnFf /tmp/touched CLAUDE.md .claude/rules/ README.md docs/
 ```
 
+**⚠️ A FORWARDING WRAPPER HIDES CALL SITES FROM AN AUDIT SCOPED TO THE CALLEE.** When you change what a
+function accepts, the callers you must check are not only the ones that name it: a wrapper taking
+`**kwargs` and forwarding them passes a caller's keywords through under its *own* name, so a scan for
+`the_function(` — grep or AST alike — reports clean on a call that breaks. Scan the wrappers too. (This
+has happened: an AST pass over every `solve_coupled(` site cleared a contract change, and the break was
+in a `solve_reynolds_continuation(...)` call whose keywords reached `solve_coupled` through
+`**solve_kwargs`. It surfaced as a failing adjoint test in a tier that only runs on merge.)
+
 The `_|[a-z][A-Z]` filter keeps only words shaped like code (an underscore or an internal capital).
 Without it a prose-heavy diff reports ~70 ordinary English words and the output is too long to read —
 which is not hypothetical: a real orphan (`retry_on_cycles`) survived in `.claude/rules/solve.md`
