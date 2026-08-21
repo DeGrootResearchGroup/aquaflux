@@ -16,6 +16,7 @@ from __future__ import annotations
 import warnings
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -23,14 +24,19 @@ import pytest
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.mesh.quality import face_planarity
 from aquaflux.schemes import (
+    CellBlockJacobi,
     CompactGreenGauss,
     CorrectedGreenGauss,
     GmresGradientSolve,
+    GradientSolve,
     HessianCorrectedGradient,
+    InverseVolume,
     SweptGradientSolve,
+    cell_diagonal_block,
     narrow_gradient_sweeps,
 )
 from aquaflux.schemes import gradient as gradient_module
+from aquaflux.vectors import dot, scale
 
 from tests.support.meshes import columnwise_perturbed_grid_3d, perturbed_grid_2d
 
@@ -284,17 +290,17 @@ def test_swept_operator_hook_is_applied_before_each_apply() -> None:
     hook makes the operator see 0 on every sweep, so the unit-volume Richardson update accumulates
     the right-hand side once per sweep."""
     solver = SweptGradientSolve(sweeps=3, warn_tol=None)
-    volume = jnp.ones(4)
+    unit = InverseVolume(jnp.ones(4))
     rhs = jnp.arange(1.0, 5.0)
 
     def operator(v):
         return 3.0 * v  # a diagonal the bare (un-hooked) iteration would diverge on
 
-    plain = solver.solve(volume, operator, rhs)
-    identity = solver.solve(volume, operator, rhs, operator_hook=lambda x: x)
+    plain = solver.solve(unit, operator, rhs)
+    identity = solver.solve(unit, operator, rhs, operator_hook=lambda x: x)
     assert jnp.allclose(plain, identity)  # an identity hook changes nothing
 
-    zeroed = solver.solve(volume, operator, rhs, operator_hook=lambda x: jnp.zeros_like(x))
+    zeroed = solver.solve(unit, operator, rhs, operator_hook=lambda x: jnp.zeros_like(x))
     assert jnp.allclose(
         zeroed, solver.sweeps * rhs
     )  # operator sees 0 -> x += V^{-1} rhs each sweep
@@ -305,7 +311,9 @@ def test_gmres_gradient_solve_refuses_distributed_operator_hook() -> None:
     must raise rather than silently return a wrong owned gradient."""
     solver = GmresGradientSolve()
     with pytest.raises(NotImplementedError, match="SweptGradientSolve"):
-        solver.solve(jnp.ones(3), lambda v: v, jnp.arange(3.0), operator_hook=lambda x: x)
+        solver.solve(
+            InverseVolume(jnp.ones(3)), lambda v: v, jnp.arange(3.0), operator_hook=lambda x: x
+        )
 
 
 def test_hessian_gradient_refuses_distributed_operator_hook() -> None:
@@ -348,28 +356,37 @@ def test_hessian_schur_matches_coupled_solve() -> None:
     geom = mesh.geometry()
     phi = _trig(geom.cell.centroid)
     bvals = _trig(geom.face.centroid)
-    schur = HessianCorrectedGradient(schur=True).gradients(phi, mesh, geom, bvals)
-    coupled = HessianCorrectedGradient(schur=False).gradients(phi, mesh, geom, bvals)
+    # Both paths pinned to an exact solve: the claim is that ELIMINATING the Hessian changes nothing,
+    # which is a property of the discretization, not of how either system is inverted. The coupled
+    # path is preconditioned by the cell volume, and that system's per-cell block couples the gradient
+    # to the Hessian at leading order — so a fixed sweep does not converge on it, and comparing a
+    # converged Schur solve against an unconverged coupled one would measure the solver.
+    exact = dict(solver=GmresGradientSolve(), hessian_solver=GmresGradientSolve())
+    schur = HessianCorrectedGradient(schur=True, **exact).gradients(phi, mesh, geom, bvals)
+    coupled = HessianCorrectedGradient(schur=False, **exact).gradients(phi, mesh, geom, bvals)
     assert jnp.allclose(schur, coupled, atol=1e-10)
 
 
 def test_hessian_accepts_an_injected_solve_strategy() -> None:
-    """The linear solve is an injected `GradientSolve`, exactly as in `CorrectedGreenGauss`: the
-    default is GMRES, and a (sufficiently-swept) `SweptGradientSolve` reaches the same reconstruction
-    on both the Schur and the full-coupled paths — the solve strategy is orthogonal to the
-    discretization. (The sweep needs many iterations here because the gradient-Hessian coupling is
-    strong; GMRES is the practical default.)"""
+    """The linear solve is an injected `GradientSolve`, exactly as in `CorrectedGreenGauss`: a fixed
+    sweep and a Krylov solve reach the same reconstruction, so the strategy is orthogonal to the
+    discretization.
+
+    The **outer** default is a fixed sweep, because a Krylov solve is differentiated by the implicit
+    function theorem — every Jacobian-vector product then solves a second Schur system — where an
+    unrolled sweep is not. The Krylov path stays available and is what the exactness tests pin.
+    """
     mesh = perturbed_grid_2d(16, 16, perturb=0.2)
     geom = mesh.geometry()
     phi = _quadratic(geom.cell.centroid)
     bvals = _quadratic(geom.face.centroid)
-    assert isinstance(HessianCorrectedGradient().solver, GmresGradientSolve)
-    gmres = HessianCorrectedGradient().gradients(phi, mesh, geom, bvals)
-    for schur in (True, False):
-        swept = HessianCorrectedGradient(
-            solver=SweptGradientSolve(sweeps=80, warn_tol=None), schur=schur
-        ).gradients(phi, mesh, geom, bvals)
-        assert jnp.allclose(gmres, swept, atol=1e-8)
+    default = HessianCorrectedGradient().solver
+    assert isinstance(default, SweptGradientSolve) and default.sweeps == 20
+    gmres = HessianCorrectedGradient(solver=GmresGradientSolve()).gradients(phi, mesh, geom, bvals)
+    swept = HessianCorrectedGradient(solver=SweptGradientSolve(sweeps=80, warn_tol=None)).gradients(
+        phi, mesh, geom, bvals
+    )
+    assert jnp.allclose(gmres, swept, atol=1e-8)
 
 
 def test_hessian_beats_compact_and_corrected_on_irregular() -> None:
@@ -606,7 +623,7 @@ def test_the_swept_solve_spends_one_apply_fewer_than_its_sweep_count() -> None:
     reverted or an extra apply creeps back in, where a timing assertion would only wobble.
     """
     applies = []
-    volume = jnp.ones(4)
+    unit = InverseVolume(jnp.ones(4))
     rhs = jnp.arange(1.0, 5.0)
 
     def operator(v):
@@ -615,7 +632,7 @@ def test_the_swept_solve_spends_one_apply_fewer_than_its_sweep_count() -> None:
 
     for sweeps in (1, 2, 4, 7):
         applies.clear()
-        SweptGradientSolve(sweeps=sweeps, warn_tol=None).solve(volume, operator, rhs)
+        SweptGradientSolve(sweeps=sweeps, warn_tol=None).solve(unit, operator, rhs)
         assert len(applies) == sweeps - 1
 
 
@@ -634,16 +651,254 @@ def test_peeling_the_zero_apply_leaves_the_answer_BIT_identical() -> None:
         solver = SweptGradientSolve(sweeps=sweeps, warn_tol=None)
         captured = {}
 
-        def capture(volume, operator, rhs, *, operator_hook=None, _s=solver, _c=captured):
+        def capture(preconditioner, operator, rhs, *, operator_hook=None, _s=solver, _c=captured):
             # The iteration exactly as it stood before the peel, over the same operator and rhs.
             x = jnp.zeros_like(rhs)
             for _ in range(_s.sweeps):
-                x = x + (rhs - operator(x)) / volume[:, None]
+                x = x + preconditioner.apply(rhs - operator(x))
             _c["unpeeled"] = x
-            return _s.solve(volume, operator, rhs, operator_hook=operator_hook)
+            return _s.solve(preconditioner, operator, rhs, operator_hook=operator_hook)
 
         peeled = CorrectedGreenGauss(
             solver=type("_Capture", (), {"solve": staticmethod(capture)})()
         ).gradients(field, mesh, geometry, jnp.zeros(mesh.n_faces))
 
         assert jnp.array_equal(peeled, captured["unpeeled"]), f"differs at sweeps={sweeps}"
+
+
+# --------------------------------------------------------------------------------------
+# Preconditioning the reconstruction systems
+# --------------------------------------------------------------------------------------
+
+
+def _dense(operator, shape) -> np.ndarray:
+    """Dense matrix of a linear matvec on arrays of ``shape``, flattened row-major."""
+    n = int(np.prod(shape))
+    columns = jax.vmap(operator)(jnp.eye(n).reshape(n, *shape))
+    return np.asarray(columns.reshape(n, n)).T
+
+
+def _per_cell_blocks(dense: np.ndarray, n_cells: int, size: int) -> np.ndarray:
+    """The ``n_cells`` diagonal blocks of a dense operator laid out cell-major."""
+    return np.stack(
+        [dense[i * size : (i + 1) * size, i * size : (i + 1) * size] for i in range(n_cells)]
+    )
+
+
+def test_inverse_volume_and_cell_block_apply_the_inverse_they_are_given() -> None:
+    """Both preconditioners are exactly ``P⁻¹·r``, over whichever component rank the unknown carries.
+
+    The Hessian unknown is rank-3 ``(n_cells, dim, dim)`` where the gradient is rank-2, and the two
+    are preconditioned by the same objects — so the broadcast (``InverseVolume``) and the contraction
+    (``CellBlockJacobi``) are checked against an explicit per-cell reference at both ranks.
+    """
+    rng = np.random.default_rng(0)
+    n_cells, dim = 5, 3
+    volume = jnp.asarray(rng.uniform(0.5, 2.0, n_cells))
+    blocks = jnp.asarray(rng.normal(size=(n_cells, dim, dim)) + 4.0 * np.eye(dim))
+    inverse = jnp.linalg.inv(blocks)
+
+    vector = jnp.asarray(rng.normal(size=(n_cells, dim)))
+    tensor = jnp.asarray(rng.normal(size=(n_cells, dim, dim)))
+
+    scaled = InverseVolume(1.0 / volume).apply(vector)
+    assert jnp.allclose(scaled, vector / volume[:, None])
+    assert jnp.allclose(InverseVolume(1.0 / volume).apply(tensor), tensor / volume[:, None, None])
+
+    # A gradient residual is a per-cell matrix-vector product with the inverse.
+    got = CellBlockJacobi(inverse).apply(vector)
+    want = np.stack([np.asarray(inverse)[c] @ np.asarray(vector)[c] for c in range(n_cells)])
+    assert jnp.allclose(got, want)
+    # A Hessian residual is that same product applied to each of its rows (the `I ⊗ C` structure).
+    got = CellBlockJacobi(inverse).apply(tensor)
+    want = np.stack(
+        [
+            np.stack([np.asarray(inverse)[c] @ np.asarray(tensor)[c, i] for i in range(dim)])
+            for c in range(n_cells)
+        ]
+    )
+    assert jnp.allclose(got, want)
+
+
+def test_cell_diagonal_block_recovers_the_true_diagonal_block_exactly() -> None:
+    """The sided probe is the operator's real per-cell block, not an approximation of it.
+
+    Checked against a densely materialized ``A_g`` on a skewed mesh, so it fails if the two halves
+    of the probe ever stop summing to the whole block (a missed boundary contribution, a scatter
+    half attributed to the wrong side).
+    """
+    mesh = perturbed_grid_2d(6, 6, perturb=0.3, seed=0)
+    geometry = mesh.geometry()
+    terms = CorrectedGreenGauss.terms(mesh, geometry)
+    face_cells = terms.face_cells
+    dim, n_cells = mesh.dim, mesh.n_cells
+    zero_face = jnp.zeros((mesh.n_faces, dim))
+
+    def sided(owner_field, neighbour_field):
+        """``A_g``'s face contribution with each side read from its own field (see its `operator`)."""
+        w = (1.0 - terms.g) * dot(terms.skew, owner_field[face_cells.owner]) + terms.g * dot(
+            terms.skew, neighbour_field[face_cells.safe_neighbour]
+        )
+        return face_cells.combine_face_values(scale(terms.area_vector, w), 0.0)
+
+    block = cell_diagonal_block(
+        lambda probe: face_cells.scatter(sided(probe, jnp.zeros_like(probe)), zero_face),
+        lambda probe: face_cells.scatter(zero_face, -sided(jnp.zeros_like(probe), probe)),
+        terms.volume,
+        n_cells,
+        dim,
+    )
+    truth = _per_cell_blocks(
+        _dense(CorrectedGreenGauss.operator(terms), (n_cells, dim)), n_cells, dim
+    )
+    assert np.abs(np.asarray(block) - truth).max() / np.abs(truth).max() < 1e-13
+
+
+def test_the_hessian_block_is_a_kronecker_product_so_it_is_stored_dim_by_dim() -> None:
+    """``A_HH``'s per-cell block is exactly ``I_dim ⊗ C``, which is why one ``(dim, dim)`` matrix per
+    cell suffices where the block is nominally ``(dim², dim²)``.
+
+    This is a memory claim with teeth at scale — ``dim²×dim²`` would be nine times the storage in 3D
+    — so it is checked as an exact identity rather than assumed. The Hessian enters its own equation
+    only as ``H·a`` for per-face vectors ``a``, which contracts ``H``'s second index and leaves the
+    first untouched; if that ever stops being true this fails.
+    """
+    for mesh in (
+        perturbed_grid_2d(6, 6, perturb=0.3, seed=0),
+        columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.3, seed=0),
+    ):
+        geometry = mesh.geometry()
+        dim, n_cells = mesh.dim, mesh.n_cells
+        operator, preconditioner = _inner_system(mesh, geometry)
+        kronecker_factor = np.linalg.inv(np.asarray(preconditioner.inverse))
+
+        truth = _per_cell_blocks(_dense(operator, (n_cells, dim, dim)), n_cells, dim * dim).reshape(
+            n_cells, dim, dim, dim, dim
+        )
+        rebuilt = np.einsum("ik,cjl->cijkl", np.eye(dim), kronecker_factor)
+        assert np.abs(rebuilt - truth).max() / np.abs(truth).max() < 1e-13
+
+
+class _CaptureSolve(GradientSolve):
+    """A ``GradientSolve`` that records what it was handed and solves nothing.
+
+    The scheme passes its inner operator and preconditioner to the injected ``hessian_solver``, so
+    injecting this recovers exactly the pair the scheme really uses — no second copy of the formula
+    to drift, and no reaching past the interface to get it.
+    """
+
+    seen: list = eqx.field(static=True, default_factory=list)
+
+    def solve(self, preconditioner, operator, rhs, *, operator_hook=None):
+        self.seen.append((operator, preconditioner))
+        return jnp.zeros_like(rhs)
+
+
+def _inner_system(mesh, geometry):
+    """The scheme's inner ``A_HH`` operator and the preconditioner it pairs with it."""
+    capture = _CaptureSolve()
+    HessianCorrectedGradient(hessian_solver=capture).gradients(
+        jnp.zeros(mesh.n_cells), mesh, geometry, jnp.zeros(mesh.n_faces)
+    )
+    return capture.seen[0]
+
+
+def test_the_hessian_system_needs_a_block_preconditioner_not_the_volume() -> None:
+    """The inner system is what forced a Krylov solve, and the per-cell block is why it no longer
+    does — measured as the Richardson contraction rate on the actual operator.
+
+    The decisive part is the **orthogonal** mesh: there the skewness coupling is identically zero, so
+    the inverse-volume iteration's poor rate cannot be blamed on mesh quality. It is the gradient and
+    Hessian coupling to each other inside a cell, which ``1/V`` cannot represent at all and the
+    per-cell block represents exactly.
+    """
+    for perturb, block_bound in ((0.0, 1e-12), (0.3, 0.25)):
+        mesh = perturbed_grid_2d(8, 8, perturb=perturb, seed=0)
+        geometry = mesh.geometry()
+        dim, n_cells = mesh.dim, mesh.n_cells
+        operator, _ = _inner_system(mesh, geometry)
+        dense = _dense(operator, (n_cells, dim, dim))
+        size = dim * dim
+        identity = np.eye(dense.shape[0])
+
+        volume = np.repeat(np.asarray(geometry.cell.volume), size)
+        rate_volume = np.abs(
+            np.linalg.eigvals(identity - np.linalg.solve(np.diag(volume), dense))
+        ).max()
+        blocks = np.zeros_like(dense)
+        for c, block in enumerate(_per_cell_blocks(dense, n_cells, size)):
+            blocks[c * size : (c + 1) * size, c * size : (c + 1) * size] = block
+        rate_block = np.abs(np.linalg.eigvals(identity - np.linalg.solve(blocks, dense))).max()
+
+        assert rate_volume > 0.45, f"inverse-volume rate {rate_volume} at perturb={perturb}"
+        assert rate_block < block_bound, f"block rate {rate_block} at perturb={perturb}"
+
+
+def test_the_default_inner_sweeps_reach_the_exactly_solved_reconstruction() -> None:
+    """The shipped inner sweep count is enough to keep the scheme's defining property — exactness for
+    a quadratic — rather than trading it for speed.
+
+    Pinned against the exactly-solved inner system on the same mesh, so it fails if the default sweep
+    count is lowered without the accuracy consequence being faced.
+    """
+    mesh = columnwise_perturbed_grid_3d(5, 5, 5, perturb=0.25, seed=1)
+    geometry = mesh.geometry()
+    field = _quad_3d(geometry.cell.centroid)
+    bvals = _quad_3d(geometry.face.centroid)
+
+    default = HessianCorrectedGradient().gradients(field, mesh, geometry, bvals)
+    exact = HessianCorrectedGradient(hessian_solver=GmresGradientSolve()).gradients(
+        field, mesh, geometry, bvals
+    )
+    assert float(jnp.max(jnp.abs(default - exact))) < 1e-11
+
+
+def test_a_swept_outer_solve_reaches_the_same_gradient_as_the_krylov_one() -> None:
+    """The outer Schur system is well enough conditioned to be swept rather than Krylov-solved, which
+    is what removes the last inner product (and the last implicit-diff tangent) from the scheme.
+
+    Both outer strategies solve the same system, so given enough sweeps they must agree to machine
+    precision; if they do not, the block-preconditioned outer iteration is not converging to ``S⁻¹``.
+    """
+    mesh = perturbed_grid_2d(8, 8, perturb=0.3, seed=0)
+    geometry = mesh.geometry()
+    field = _quadratic(geometry.cell.centroid)
+    bvals = _quadratic(geometry.face.centroid)
+
+    # Named explicitly rather than taken from the default: this asserts that the two OUTER strategies
+    # agree, so it must keep comparing those two whatever the default later becomes.
+    krylov = HessianCorrectedGradient(solver=GmresGradientSolve()).gradients(
+        field, mesh, geometry, bvals
+    )
+    swept = HessianCorrectedGradient(solver=SweptGradientSolve(sweeps=60, warn_tol=None)).gradients(
+        field, mesh, geometry, bvals
+    )
+    assert float(jnp.max(jnp.abs(krylov - swept))) < 1e-12
+
+
+def test_a_diagnostic_emitting_inner_solver_is_refused_with_an_explanation() -> None:
+    """The inner solver sits inside an operator the outer Krylov solve transposes, and a convergence
+    diagnostic is nonlinear — so the combination cannot work.
+
+    Left alone it fails with a bare ``AssertionError`` from inside the linear solver, which says
+    nothing about the cause; this pins the explanatory error, and pins that the *same* inner solver
+    is fine under a fixed-sweep outer solve, which transposes nothing.
+    """
+    mesh = perturbed_grid_2d(4, 4, perturb=0.2)
+    geometry = mesh.geometry()
+    field = _quadratic(geometry.cell.centroid)
+    bvals = _quadratic(geometry.face.centroid)
+    chatty = SweptGradientSolve(sweeps=6, warn_tol=5e-2)
+
+    # A Krylov OUTER solver is what makes this invalid — it forms its tangent by transposing the
+    # operator the inner solver sits inside. The default outer is a fixed sweep, which transposes
+    # nothing, so the condition has to be asked for explicitly rather than inherited.
+    with pytest.raises(ValueError, match="strictly linear"):
+        HessianCorrectedGradient(solver=GmresGradientSolve(), hessian_solver=chatty).gradients(
+            field, mesh, geometry, bvals
+        )
+
+    swept_outer = HessianCorrectedGradient(
+        solver=SweptGradientSolve(sweeps=40, warn_tol=None), hessian_solver=chatty
+    ).gradients(field, mesh, geometry, bvals)
+    assert not bool(jnp.any(jnp.isnan(swept_outer)))

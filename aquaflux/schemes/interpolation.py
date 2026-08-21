@@ -82,8 +82,44 @@ def interpolate_owner_neighbour(
     jnp.ndarray
         The blended value per face, shape ``(n_faces, ...)`` matching ``cell_field``'s trailing shape.
     """
-    g = factor.reshape(factor.shape + (1,) * (cell_field.ndim - 1))  # broadcast over trailing dims
-    return (1.0 - g) * cell_field[face_cells.owner] + g * cell_field[face_cells.safe_neighbour]
+    return blend_owner_neighbour(cell_field, cell_field, factor, face_cells)
+
+
+def blend_owner_neighbour(
+    owner_field: jnp.ndarray,
+    neighbour_field: jnp.ndarray,
+    factor: jnp.ndarray,
+    face_cells: FaceCellConnectivity,
+) -> jnp.ndarray:
+    """The owner/neighbour blend ``(1 - g)·owner_field_P + g·neighbour_field_N``, each side taken
+    from its **own** cell field.
+
+    The two-field form of :func:`interpolate_owner_neighbour`, which is this function with the same
+    field on both sides. Reading the two sides from different arrays is what lets a caller isolate
+    one side's contribution to a face-assembled operator: evaluating with the neighbour field zeroed
+    leaves only the owner's dependence, and vice versa. That is how the per-cell diagonal block of
+    such an operator is recovered exactly — a few probes with one side zeroed — rather than by a
+    graph colouring or by re-deriving the operator's coefficients a second time.
+
+    Parameters
+    ----------
+    owner_field, neighbour_field : jnp.ndarray
+        Per-cell values, shape ``(n_cells, ...)`` with the same trailing shape — read on the owner
+        and neighbour side of each face respectively.
+    factor : jnp.ndarray
+        The projection factor ``g`` per face, shape ``(n_faces,)`` (from :func:`interpolation_factor`).
+    face_cells : FaceCellConnectivity
+        The face→cell incidence (``mesh.face_cells``).
+
+    Returns
+    -------
+    jnp.ndarray
+        The blended value per face, shape ``(n_faces, ...)`` matching the fields' trailing shape.
+    """
+    g = factor.reshape(factor.shape + (1,) * (owner_field.ndim - 1))  # broadcast over trailing dims
+    return (1.0 - g) * owner_field[face_cells.owner] + g * neighbour_field[
+        face_cells.safe_neighbour
+    ]
 
 
 def interpolate_to_face(

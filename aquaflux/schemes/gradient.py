@@ -33,7 +33,11 @@ import lineax as lx
 
 from aquaflux.vectors import dot, scale
 
-from .interpolation import interpolate_owner_neighbour, interpolation_factor
+from .interpolation import (
+    blend_owner_neighbour,
+    interpolate_owner_neighbour,
+    interpolation_factor,
+)
 
 if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, Mesh, MeshGeometry
@@ -142,23 +146,189 @@ class CompactGreenGauss(GradientScheme):
         return scale(grad_sum, 1.0 / cell_geometry.volume)
 
 
+class GradientPreconditioner(eqx.Module):
+    """Strategy: apply an approximate ``A⁻¹`` to a residual, cell-locally and in one pass.
+
+    The reconstruction systems here are all **volume-dominated** — a per-cell diagonal block plus a
+    weaker coupling to the face neighbours — so what an iterative solve needs is a cheap, exactly
+    parallel approximation of the inverse of that per-cell block. This is that approximation, and it
+    is a strategy rather than a fixed formula because *how good* the per-cell block has to be varies
+    by system: the corrected-gradient system's block is close enough to the cell volume that scaling
+    by ``1/V`` converges, while the gradient--Hessian system's is not (the gradient and the Hessian
+    couple to each other *within* a cell, which ``1/V`` cannot see).
+
+    An implementation is a pure function of the residual with no cross-cell reduction, so it costs
+    one pass over the cells and is correct unchanged under domain decomposition.
+    """
+
+    @abc.abstractmethod
+    def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
+        """Return the preconditioned residual ``P⁻¹·residual`` (the shape of ``residual``).
+
+        Parameters
+        ----------
+        residual : jnp.ndarray
+            The residual to precondition, shape ``(n_cells, ...)`` — the trailing axes carry the
+            unknown's per-cell components (a gradient ``(dim,)``, a Hessian ``(dim, dim)``).
+
+        Returns
+        -------
+        jnp.ndarray
+            The preconditioned residual, the same shape as ``residual``.
+        """
+
+
+class InverseVolume(GradientPreconditioner):
+    """Scale each cell's residual by ``1/V`` — the cell volume as a stand-in for the diagonal.
+
+    The cheapest useful preconditioner, and an accurate one wherever the operator's per-cell block is
+    dominated by the volume that sits on its diagonal: the corrected-gradient operator
+    ``A_g = V ⊙ I − (skewness coupling)`` is of that kind, so ``1/V`` is within the skewness of the
+    true block and the Richardson iteration it drives converges quickly. It is **not** accurate where
+    a cell's own unknowns couple to each other at leading order — see :class:`CellBlockJacobi`.
+
+    Attributes
+    ----------
+    inverse_volume : jnp.ndarray
+        Reciprocal cell volumes, shape ``(n_cells,)``.
+    """
+
+    inverse_volume: jnp.ndarray
+
+    def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
+        # Broadcast over however many component axes the unknown carries (a gradient has one, a
+        # Hessian two), rather than the exactly-one-trailing-axis `vectors.scale` assumes.
+        weight = self.inverse_volume.reshape(self.inverse_volume.shape + (1,) * (residual.ndim - 1))
+        return weight * residual
+
+
+class CellBlockJacobi(GradientPreconditioner):
+    """Apply the exact inverse of each cell's own diagonal block — block Jacobi over the cells.
+
+    Where a cell's unknowns couple to *each other* at leading order, scaling by the volume is not an
+    approximate inverse of the diagonal block, it ignores the block's off-diagonal entries entirely.
+    That is the gradient--Hessian system's situation: the Hessian enters the gradient equation through
+    a face-curvature term and the gradient enters the Hessian equation through a Green--Gauss sum, and
+    both are the same order as the volume term — so an inverse-volume iteration on it converges slowly
+    **even on a perfectly orthogonal mesh**, where the skewness coupling that the corrected-gradient
+    system worries about is identically zero. Inverting the per-cell block instead removes exactly
+    that intra-cell coupling and leaves only the weak inter-cell one.
+
+    The inverse is stored as one small ``(dim, dim)`` matrix per cell and contracted against the
+    residual's **last** axis, which covers both unknowns this serves: a gradient residual
+    ``(n_cells, dim)`` is a plain per-cell matrix--vector product, and a Hessian residual
+    ``(n_cells, dim, dim)`` is the same product applied to each of its rows. The Hessian case is not
+    an approximation — that system's per-cell block is exactly ``I_dim ⊗ C`` for a ``(dim, dim)``
+    matrix ``C``, because the Hessian enters its own equation only as ``H·a`` for a per-face vector
+    ``a``, which contracts ``H``'s second index and leaves its first untouched. So the block that
+    would otherwise be ``(dim², dim²)`` is stored and inverted as ``(dim, dim)``.
+
+    Attributes
+    ----------
+    inverse : jnp.ndarray
+        Per-cell inverse of the diagonal block, shape ``(n_cells, dim, dim)``.
+    """
+
+    inverse: jnp.ndarray
+
+    def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
+        return jnp.einsum("cjl,c...l->c...j", self.inverse, residual)
+
+
+def cell_diagonal_block(
+    owner_column: Callable[[jnp.ndarray], jnp.ndarray],
+    neighbour_column: Callable[[jnp.ndarray], jnp.ndarray],
+    diagonal: jnp.ndarray,
+    n_cells: int,
+    dim: int,
+) -> jnp.ndarray:
+    """Recover a face-assembled operator's per-cell diagonal block **exactly**, by probing each side
+    of the face separately.
+
+    A face-assembled operator ``A u = D ⊙ u − scatter(F(u_owner, u_nb))`` couples a cell only to its
+    face neighbours, so its per-cell diagonal block is the part of that scatter which lands back on
+    the cell the value was gathered from. Reading it off a plain matrix--vector product is not
+    possible — probing with a component set in *every* cell returns the whole row sum, neighbours
+    included — and separating it normally costs a graph colouring, so that no two adjacent cells
+    share a probe.
+
+    Passing the unknown's two sides as separate fields removes that need. Evaluating the face kernel
+    with the neighbour side zeroed and keeping only the owner-side scatter leaves each cell reading
+    exclusively its own value, so **one probe per component** gives that component's column of every
+    cell's block at once, whatever the mesh. The two callables here are those two half-evaluations;
+    summing them gives the full block. This costs ``dim`` operator applies rather than
+    ``n_colours × dim``, needs no adjacency graph, and — because both halves come from the same face
+    kernel the full operator is built from — cannot drift from the operator it preconditions.
+
+    Parameters
+    ----------
+    owner_column, neighbour_column : callable
+        Given a per-cell probe field of shape ``(n_cells, dim)``, return the owner-side / neighbour-side
+        scatter of the face kernel evaluated with only that side live, shape ``(n_cells, dim)``.
+    diagonal : jnp.ndarray
+        The operator's explicit diagonal term (the cell volume), shape ``(n_cells,)``; it enters the
+        block as ``diagonal · I``.
+    n_cells, dim : int
+        Cell count and the block's size.
+
+    Returns
+    -------
+    jnp.ndarray
+        The per-cell diagonal block, shape ``(n_cells, dim, dim)``.
+    """
+    basis = jnp.eye(dim)
+
+    def column(unit: jnp.ndarray) -> jnp.ndarray:
+        probe = jnp.broadcast_to(unit, (n_cells, dim))
+        return scale(probe, diagonal) - (owner_column(probe) + neighbour_column(probe))
+
+    # columns[k] is the k-th column of every cell's block, shape (n_cells, dim); move the probe axis
+    # last so the result indexes as block[cell, row, column].
+    columns = jax.vmap(column)(basis)
+    return jnp.moveaxis(columns, 0, -1)
+
+
 class GradientSolve(eqx.Module):
     """Strategy: apply ``A⁻¹`` to solve a volume-dominated reconstruction system ``A·x = rhs``.
 
     A reconstruction scheme reduces to a sparse linear system whose operator ``A`` is geometry-only
-    and **volume-dominated** — its diagonal is the cell volume ``V``, with the discretization coupling
-    as an off-diagonal correction. *How* that system is inverted — a Krylov solve, a fixed sweep — is
-    orthogonal to the discretization, so it is an injected strategy rather than a separate scheme. The
-    strategy receives only the matrix-free operator ``A``, the right-hand side, and the cell volumes
-    (its diagonal, used as the inverse-volume preconditioner) — nothing scheme-specific — so the same
-    strategy serves both :class:`CorrectedGreenGauss` (the gradient system) and
-    :class:`HessianCorrectedGradient` (the packed gradient–Hessian system).
+    and **volume-dominated** — a per-cell diagonal block, with the discretization coupling to the face
+    neighbours as an off-diagonal correction. *How* that system is inverted — a Krylov solve, a fixed
+    sweep — is orthogonal to the discretization, so it is an injected strategy rather than a separate
+    scheme. The strategy receives only the matrix-free operator ``A``, the right-hand side, and a
+    :class:`GradientPreconditioner` — nothing scheme-specific — so the same strategy serves
+    :class:`CorrectedGreenGauss` (the gradient system) and both of
+    :class:`HessianCorrectedGradient`'s systems (the outer Schur system on the gradient and the inner
+    system on the Hessian).
     """
+
+    @property
+    def requires_linear_operator(self) -> bool:
+        """Whether this strategy needs ``operator`` to be *transposable* — i.e. strictly linear in
+        the unknown, with no host-side effects.
+
+        A Krylov solve differentiated by the implicit function theorem forms its tangent from the
+        transpose of the operator it was given, and ``jax.linear_transpose`` rejects a function
+        containing anything nonlinear. A fixed-sweep strategy differentiates by unrolling and so
+        imposes no such requirement. This matters when one system's solve runs *inside* another's
+        operator, as :class:`HessianCorrectedGradient`'s inner Hessian solve does.
+        """
+        return False
+
+    @property
+    def emits_host_diagnostics(self) -> bool:
+        """Whether :meth:`solve` evaluates a host-side diagnostic alongside the solve.
+
+        Such a diagnostic measures convergence, so it is nonlinear in the unknown — which makes the
+        solve unusable inside an operator handed to a strategy whose
+        :attr:`requires_linear_operator` is set.
+        """
+        return False
 
     @abc.abstractmethod
     def solve(
         self,
-        volume: jnp.ndarray,
+        preconditioner: GradientPreconditioner,
         operator: Callable[[jnp.ndarray], jnp.ndarray],
         rhs: jnp.ndarray,
         *,
@@ -168,13 +338,15 @@ class GradientSolve(eqx.Module):
 
         Parameters
         ----------
-        volume : jnp.ndarray
-            Cell volumes, shape ``(n_cells,)`` — the operator's diagonal, used as the inverse-volume
-            (Jacobi) preconditioner. Ignored by strategies that do not precondition.
+        preconditioner : GradientPreconditioner
+            Approximate inverse of the operator's per-cell diagonal block, supplied by the scheme that
+            owns the system (it knows the block's structure). :class:`InverseVolume` where the volume
+            dominates the block; :class:`CellBlockJacobi` where the cell's own unknowns couple to each
+            other at leading order.
         operator : callable
             The matrix-free operator ``A`` (a matvec ``x -> A·x``). The unknown may carry any trailing
-            shape — a per-cell gradient ``(n_cells, dim)`` or a packed gradient–Hessian state
-            ``(n_cells, dim + dim²)`` — so ``volume`` preconditions by broadcasting over it.
+            shape — a per-cell gradient ``(n_cells, dim)`` or a per-cell Hessian ``(n_cells, dim, dim)``
+            — and the preconditioner broadcasts or contracts over it accordingly.
         rhs : jnp.ndarray
             The right-hand side, matching the shape of the unknown ``x``.
         operator_hook : callable, optional
@@ -201,6 +373,20 @@ class GmresGradientSolve(GradientSolve):
     replaces that with a short unrolled sparse apply; reach for this strategy only when a mesh is
     skewed enough that the swept sweep count would have to grow impractically.
 
+    The injected preconditioner is applied on the **right** — GMRES is run on ``A P⁻¹ y = b`` and the
+    answer recovered as ``x = P⁻¹y``. The solution is the same for any invertible ``P``, so this
+    changes the iteration count and not the answer.
+
+    ⚠️ **It must be the right and not the left, and the difference is not cosmetic.** Left
+    preconditioning solves ``P⁻¹A x = P⁻¹b``, whose residual is measured in ``P⁻¹``'s norm rather than
+    the problem's — and these preconditioners scale by roughly the inverse cell volume, which on a real
+    mesh is a factor of ~1e6. The solver's convergence *and stagnation* tests then operate on a
+    quantity six orders away from the true residual, and lineax's stagnation detector fires on a system
+    it is about to solve: measured on this package's own backward-facing-step benchmark, reconstructing
+    the omega gradient at the initial state, left preconditioning **raised** where the unpreconditioned
+    solve converged in 7 iterations to a true relative residual of 6e-17. Right preconditioning leaves
+    the residual at the problem's own scale, so both tests see exactly what they saw before.
+
     Attributes
     ----------
     rtol, atol : float
@@ -210,9 +396,13 @@ class GmresGradientSolve(GradientSolve):
     rtol: float = eqx.field(static=True, default=1e-10)
     atol: float = eqx.field(static=True, default=1e-10)
 
+    @property
+    def requires_linear_operator(self) -> bool:
+        return True  # the implicit-diff tangent transposes the operator
+
     def solve(
         self,
-        volume: jnp.ndarray,
+        preconditioner: GradientPreconditioner,
         operator: Callable[[jnp.ndarray], jnp.ndarray],
         rhs: jnp.ndarray,
         *,
@@ -227,20 +417,32 @@ class GmresGradientSolve(GradientSolve):
                 "distributed gradient solve (its preconditioned-Richardson sweeps form no global "
                 "inner product, so a per-sweep ghost exchange is exact)."
             )
-        op = lx.FunctionLinearOperator(operator, jax.ShapeDtypeStruct(rhs.shape, rhs.dtype))
-        return lx.linear_solve(op, rhs, solver=lx.GMRES(rtol=self.rtol, atol=self.atol)).value
+        # Right-preconditioned: the Krylov space is built on `A P⁻¹` and the right-hand side is left
+        # alone, so the residual the solver measures IS the true residual. See the class docstring —
+        # preconditioning this on the left instead moves the convergence and stagnation tests into a
+        # norm ~1e6 away from the problem's own, and it breaks solves that otherwise converge.
+        op = lx.FunctionLinearOperator(
+            lambda v: operator(preconditioner.apply(v)),
+            jax.ShapeDtypeStruct(rhs.shape, rhs.dtype),
+        )
+        solution = lx.linear_solve(op, rhs, solver=lx.GMRES(rtol=self.rtol, atol=self.atol)).value
+        return preconditioner.apply(solution)
 
 
 class SweptGradientSolve(GradientSolve):
-    """Solve the corrected-gradient system by a fixed number of matrix-free preconditioned-Richardson
-    sweeps — a sparse, ``O(n)``, scalable way to apply the constant ``A_g⁻¹``.
+    """Solve a reconstruction system by a fixed number of matrix-free preconditioned-Richardson
+    sweeps — a sparse, ``O(n)``, scalable way to apply the constant ``A⁻¹``.
 
-    ``A_g = V ⊙ I − C`` is volume-dominated (``V`` dominates the skewness coupling ``C`` for mild
-    non-orthogonality), so the inverse-volume-preconditioned Richardson iteration
+    These operators are diagonal-block-dominated (the per-cell block dominates the coupling to the
+    face neighbours), so the preconditioned Richardson iteration
 
-        g_{k+1} = g_k + V⁻¹ (B·φ − A_g·g_k)
+        x_{k+1} = x_k + P⁻¹ (b − A·x_k)
 
-    converges geometrically with rate ``ρ(I − V⁻¹A_g) < 1``. A **fixed** ``sweeps`` count reaches
+    converges geometrically with rate ``ρ(I − P⁻¹A) < 1`` for the injected
+    :class:`GradientPreconditioner` ``P``. **The rate is a property of that pairing, not of the
+    sweep**: on the corrected-gradient system ``A_g = V ⊙ I − C``, the cheap :class:`InverseVolume`
+    already gives a small ``ρ``, while on the gradient--Hessian system it does not and
+    :class:`CellBlockJacobi` is what makes the same sweep converge (see those classes). A **fixed** ``sweeps`` count reaches
     machine precision for this well-conditioned operator with no dense matrix and no nested Krylov
     solve; a sweep costs one operator apply (the first needs none — its iterate is zero, so its
     residual is ``B·φ`` outright, and ``sweeps`` sweeps cost ``sweeps - 1`` applies), so the cost is
@@ -287,9 +489,14 @@ class SweptGradientSolve(GradientSolve):
     sweeps: int = eqx.field(static=True, default=4)
     warn_tol: float | None = eqx.field(static=True, default=5e-2)
 
+    @property
+    def emits_host_diagnostics(self) -> bool:
+        # The check norms the residual, which is nonlinear in the unknown; `warn_tol=None` removes it.
+        return self.warn_tol is not None and self.sweeps > 1
+
     def solve(
         self,
-        volume: jnp.ndarray,
+        preconditioner: GradientPreconditioner,
         operator: Callable[[jnp.ndarray], jnp.ndarray],
         rhs: jnp.ndarray,
         *,
@@ -300,7 +507,6 @@ class SweptGradientSolve(GradientSolve):
         # cells. The Richardson update writes garbage into the ghost/null rows, but the next apply's
         # hook overwrites them, so the owned rows converge exactly to the serial solution.
         op = operator if operator_hook is None else lambda v: operator(operator_hook(v))
-        inv_volume = 1.0 / volume
         if self.sweeps <= 0:
             return jnp.zeros_like(rhs)
         # THE FIRST SWEEP'S OPERATOR APPLY IS PEELED, and it is exact rather than an approximation.
@@ -310,10 +516,10 @@ class SweptGradientSolve(GradientSolve):
         # not the scatters, so it costs a whole operator apply out of `sweeps` on every reconstruction,
         # and this one runs inside every residual evaluation and every Jacobian--vector product.
         residual = rhs
-        x = scale(rhs, inv_volume)
+        x = preconditioner.apply(rhs)
         for _ in range(self.sweeps - 1):
             residual = rhs - op(x)
-            x = x + scale(residual, inv_volume)
+            x = x + preconditioner.apply(residual)
         # The convergence diagnostic norms the residual over the whole local vector. Under domain
         # decomposition that vector holds each partition's ghost/null rows too, so a faithful global
         # norm would need an owned-only cross-partition reduction the operator-wrapping seam does not
@@ -367,6 +573,14 @@ def narrow_gradient_sweeps(tree: _Tree, sweeps: int) -> _Tree:
     Jacobian--vector product of the full residual, so neither the converged state nor its adjoint is
     affected — a preconditioner changes how a Krylov solve gets to the answer, never where it lands.
 
+    **On :class:`HessianCorrectedGradient` this reaches both of its solvers, and they are not alike.**
+    Narrowing the outer Schur solve trades reach for accuracy the same way it does for a corrected
+    Green--Gauss gradient. Narrowing the *inner* Hessian solve additionally changes which operator is
+    being solved — the eliminated system's ``A_HH⁻¹`` is what the sweep approximates — so the narrowed
+    copy stops being exact for quadratic fields far sooner than the sweep count alone suggests. That
+    is legitimate in a preconditioner, which is a stated approximation either way, and it is *why* the
+    inner count is worth narrowing: those sweeps carry stencil reach exactly as the outer ones do.
+
     Parameters
     ----------
     tree : Any
@@ -387,8 +601,9 @@ def narrow_gradient_sweeps(tree: _Tree, sweeps: int) -> _Tree:
     Raises
     ------
     ValueError
-        If ``sweeps`` is below one. A single sweep is ``g = V⁻¹ B phi``, the uncorrected
-        Green–Gauss reconstruction, and there is nothing narrower to ask for.
+        If ``sweeps`` is below one. A single sweep is ``g = P⁻¹ B phi`` — the uncorrected
+        Green–Gauss reconstruction under the inverse-volume preconditioner — and there is nothing
+        narrower to ask for.
 
     Examples
     --------
@@ -537,7 +752,7 @@ class CorrectedGreenGauss(GradientScheme):
     ) -> jnp.ndarray:
         t = self.terms(mesh, geometry)
         return self.solver.solve(
-            t.volume,
+            InverseVolume(1.0 / t.volume),
             self.operator(t),
             self.rhs(t, field, boundary_values),
             operator_hook=operator_hook,
@@ -563,13 +778,78 @@ class HessianCorrectedGradient(GradientScheme):
     coefficient matrices — and the ``A_HH⁻¹`` is applied matrix-free by the injected solver.
     Set ``schur=False`` to solve the full ``[g, H]`` system instead (used to check the two agree).
 
-    *How* the system is solved is an injected :class:`GradientSolve` strategy, exactly as in
-    :class:`CorrectedGreenGauss`: the coupled unknown ``[g, H]`` is **packed** into one
-    ``(n_cells, dim + dim²)`` array whose diagonal is the cell volume, so the same volume-preconditioned
-    strategies apply unchanged. The default :class:`GmresGradientSolve` converges in a handful of
-    iterations; the fixed-sweep :class:`SweptGradientSolve` is *not* effective here, because the
-    gradient–Hessian coupling is strong (unlike the corrected gradient's weak skewness coupling), so
-    the inverse-volume iteration is slow to converge — Krylov acceleration is what this system needs.
+    The right-hand side of the eliminated system is ``b_g`` **unreduced**: the Hessian equation is a
+    Green–Gauss sum of gradient components and so carries no term in the reconstructed field at all,
+    making ``b_H`` identically zero for every field and mesh. There is therefore no ``A_gH·A_HH⁻¹·b_H``
+    correction to form, and no inner solve to run for it.
+
+    *How* each system is solved is an injected :class:`GradientSolve`, exactly as in
+    :class:`CorrectedGreenGauss` — but there are **two** systems here and they are not alike, so they
+    take separate strategies rather than sharing one:
+
+    - ``solver`` drives the **outer** Schur system on the gradient. It is well conditioned (the
+      measured condition number of ``S`` is between 1 and 7 across mild-to-heavy skew), so a
+      preconditioned fixed sweep solves it without a Krylov method — which is the default, and the
+      reason is what a *march* pays rather than what one reconstruction costs. A Krylov solve is
+      differentiated by the implicit function theorem, so every Jacobian--vector product solves a
+      second Schur system, each with its own inner solve inside every one of its iterations; a fixed
+      sweep is differentiated by unrolling. Measured per reconstruction against a corrected
+      Green--Gauss baseline of 1.0, at equal accuracy: a Krylov outer costs ``92.9x`` forward and
+      ``158.6x`` as a jvp, this default ``66.5x`` and ``59.9x`` — **2.6x cheaper on the jvp path**,
+      which is the one a Krylov flow solve pays per iteration.
+    - ``hessian_solver`` drives the **inner** ``A_HH`` system on the Hessian, once per outer operator
+      apply. Its cost is multiplied by the outer iteration count, so it is the one that decides
+      whether the scheme is affordable — and it needs **no Krylov solve at all**: paired with the
+      per-cell :class:`CellBlockJacobi` block below, a fixed handful of Richardson sweeps takes it to
+      machine precision. Its accuracy sets how faithfully the applied operator matches ``S``, and
+      hence the reconstruction's exactness for quadratic fields; the outer *rate* is almost
+      independent of it (measured: the outer ``ρ`` moves by 0.3% between one inner sweep and twelve).
+
+    **Choosing the outer sweep count.** Twenty, because that is what preserves the scheme's defining
+    property on a skewed mesh rather than what is cheapest. Departure from an exactly-solved
+    reconstruction of the same system, on a quadratic field:
+
+    ==========================  ========  ========  ========  ========
+    mesh                        outer 5   outer 10  outer 15  outer 20
+    ==========================  ========  ========  ========  ========
+    2D grid, 20% perturbed      4.8e-05   1.2e-08   5.0e-12   1.7e-15
+    2D grid, 30% perturbed      1.2e-04   7.4e-08   6.2e-11   7.9e-14
+    3D hex grid, 25% perturbed  1.3e-04   1.5e-07   1.7e-10   1.9e-13
+    ==========================  ========  ========  ========  ========
+
+    Cost is linear in this count, so a lower one is available and is a reasonable *case* choice where
+    the mesh is mild: five sweeps costs a quarter as much and still reconstructs two orders closer to
+    the exact gradient than a corrected Green--Gauss reconstruction differs from it, which is the
+    comparison that matters when the two schemes are being weighed against each other. What it gives
+    up is exactness for quadratics, so it is not the library default.
+
+    **Choosing the inner sweep count.** The inner iteration contracts geometrically at a rate set by
+    the mesh's skewness alone, so the count is a mesh property and not a size one. Measured on a
+    heavily skewed hexahedral grid, the reconstruction's departure from exactness for a quadratic
+    falls by about two and a half orders per two sweeps — ``4.8e-04`` at two sweeps, ``1.3e-06`` at
+    four, ``3.0e-09`` at six, ``8.6e-12`` at eight — and reaches the exactly-solved answer to machine
+    precision at ten, which is the default. A mesh skewed enough to need more will lose quadratic
+    exactness *quietly*, because the fixed sweep carries no convergence test; the inner solver's own
+    under-resolution warning cannot help here (it is disabled by default for the transposability
+    reason below), so on an unfamiliar mesh check the count directly by comparing against
+    ``hessian_solver=GmresGradientSolve()``, which solves the same system exactly.
+
+    **The inner solver must not emit host diagnostics.** It runs inside the outer Schur operator, and
+    an outer Krylov ``solver`` forms its implicit-diff tangent by transposing that operator — which
+    requires the operator be strictly linear. A convergence diagnostic is not, so the default inner
+    solver sets ``warn_tol=None`` and the combination that would fail is rejected with an explanation
+    rather than left to fail inside the linear solver. A fixed-sweep outer ``solver`` differentiates
+    by unrolling instead and carries no such restriction.
+
+    **Why the inner system needs a block preconditioner and not ``1/V``.** ``A_HH``'s per-cell block
+    is not close to ``V·I``: the Hessian enters its own equation through the gradient it reconstructs,
+    at the same order as the volume term. Inverse-volume Richardson on it has a spectral radius of
+    ``0.5`` — *on an orthogonal mesh*, where there is no skewness at all — which is why an inner
+    Krylov solve looked necessary. Inverting the cell's own block instead drops that to ``0`` on an
+    orthogonal mesh and to ~``0.1`` at heavy skew. The block is stored as one ``(dim, dim)`` matrix per
+    cell rather than ``(dim², dim²)``: ``H`` appears in its own equation only as ``H·a`` for per-face
+    vectors ``a``, which contracts ``H``'s second index and leaves the first alone, so the block is
+    exactly ``I_dim ⊗ C``.
 
     Exact for linear *and* quadratic fields on any mesh (the Hessian captures the exact
     second derivative), and 2nd-order for smooth fields — the reconstruction that removes
@@ -578,14 +858,25 @@ class HessianCorrectedGradient(GradientScheme):
     Attributes
     ----------
     solver : GradientSolve
-        The strategy solving the reconstruction system (default :class:`GmresGradientSolve`).
+        The strategy solving the outer system — the Schur system on the gradient when ``schur``, the
+        full coupled ``[g, H]`` system otherwise (default: twenty :class:`SweptGradientSolve` sweeps;
+        see the note on the outer sweep count above). :class:`GmresGradientSolve` remains the right
+        choice for a mesh skewed enough that the swept count would grow impractically, and is what the
+        calibration compares against.
+    hessian_solver : GradientSolve
+        The strategy solving the inner ``A_HH`` system on the Hessian, run once per outer operator
+        apply (default: ten :class:`SweptGradientSolve` sweeps, which reaches the exact solve to
+        machine precision on the meshes this is tested at — see the note on sweep count below).
+        Unused when ``schur=False``, which has no inner system.
     schur : bool
-        If ``True`` (default) eliminate the Hessian block and solve the gradient-only Schur system
-        (with the injected solver applying both the inner ``A_HH⁻¹`` and the outer ``S``); if
-        ``False`` solve the full packed ``[g, H]`` system directly.
+        If ``True`` (default) eliminate the Hessian block and solve the gradient-only Schur system;
+        if ``False`` solve the full packed ``[g, H]`` system directly.
     """
 
-    solver: GradientSolve = eqx.field(default_factory=GmresGradientSolve)
+    solver: GradientSolve = eqx.field(default_factory=lambda: SweptGradientSolve(sweeps=20))
+    hessian_solver: GradientSolve = eqx.field(
+        default_factory=lambda: SweptGradientSolve(sweeps=10, warn_tol=None)
+    )
     schur: bool = eqx.field(static=True, default=True)
 
     def gradients(
@@ -605,6 +896,21 @@ class HessianCorrectedGradient(GradientScheme):
                 "does not refresh. A correct distributed build would exchange inside each nested "
                 "solve — not yet built. Use CorrectedGreenGauss with SweptGradientSolve for a "
                 "distributed non-orthogonal gradient."
+            )
+        if (
+            self.schur
+            and self.solver.requires_linear_operator
+            and self.hessian_solver.emits_host_diagnostics
+        ):
+            raise ValueError(
+                "hessian_solver runs inside the outer Schur operator, and this outer solver forms "
+                "its implicit-diff tangent by transposing that operator — which requires the "
+                "operator be strictly linear. The inner solver's under-resolution diagnostic norms "
+                "the residual, which is not, so the transpose fails deep inside the linear solver "
+                "with an uninformative error. Pass warn_tol=None on the hessian_solver (e.g. "
+                "SweptGradientSolve(sweeps=6, warn_tol=None)), or use a fixed-sweep outer `solver`, "
+                "which differentiates by unrolling and imposes no such requirement. The outer "
+                "`solver`'s own diagnostic is unaffected."
             )
         dim = mesh.dim
         face_geometry, cell_geometry = geometry.face, geometry.cell
@@ -626,89 +932,142 @@ class HessianCorrectedGradient(GradientScheme):
         d_nb = x_ip - x_nb  # neighbour centroid → face centroid
         vol = cell_geometry.volume
 
+        # The face-curvature tensor the Hessian contracts against in the gradient equation. Geometry
+        # only — no field, no unknown — so it is formed once here rather than inside the face kernel,
+        # which runs once per operator apply and so once per iteration of both solves.
+        curvature = skew[:, :, None] * skew[:, None, :] - (f * (1.0 - f))[:, None, None] * (
+            s[:, :, None] * s[:, None, :]
+        )
+
         def _hessian_moment(h, d):
             # ½ dᵀ H d — the Hessian's correction to the mean of φ over the face, so the Green–Gauss
             # face integral is exact for a quadratic. Written from each cell's centroid-to-face
             # vector d (not an explicit face second-moment tensor), so it is dimension-general.
             return 0.5 * jnp.einsum("fi,fij,fj->f", d, h, d)
 
-        def assemble(g, hess, fld, bvals):
-            """Green–Gauss RHS for the gradient and Hessian equations (linear in g, hess)."""
-            g_o, h_o, h_n = g[owner], hess[owner], hess[nb]  # owner/nb gathers used at boundaries
-            g_face = interpolate_owner_neighbour(g, f, face_cells)
-            h_face = interpolate_owner_neighbour(hess, f, face_cells)
+        # The two equations are kept as separate face kernels because the solve uses them
+        # separately far more often than together: the inner Hessian sweep applies only the Hessian
+        # equation, and it is the innermost loop in the whole scheme. Each takes the unknown's two
+        # sides as separate fields — passing the same pair to both is the operator, and zeroing one
+        # side isolates the other's dependence, which is how the per-cell diagonal blocks below come
+        # out of these same kernels rather than from a second derivation of the coefficients.
+        def gradient_face_terms(g_own, h_own, g_nb, h_nb, fld, bvals):
+            """Owner- and neighbour-side face contributions to the gradient equation.
 
-            # Gradient equation: phi_ip (2nd-order interp) + face-curvature correction.
-            q = skew[:, :, None] * skew[:, None, :] - (f * (1.0 - f))[:, None, None] * (
-                s[:, :, None] * s[:, None, :]
-            )
+            The face value carried to the Green–Gauss sum is the 2nd-order interpolation plus the
+            face-curvature correction, less each side's own Hessian moment about the face.
+            """
+            h_o, h_n = h_own[owner], h_nb[nb]
+            g_face = blend_owner_neighbour(g_own, g_nb, f, face_cells)
+            h_face = blend_owner_neighbour(h_own, h_nb, f, face_cells)
             phi_int = (
                 interpolate_owner_neighbour(fld, f, face_cells)
                 + dot(skew, g_face)
-                + 0.5 * jnp.sum(q * h_face, axis=(1, 2))
+                + 0.5 * jnp.sum(curvature * h_face, axis=(1, 2))
             )
             phi_ip = face_cells.combine_face_values(phi_int, bvals)
-            grad_o = scale(area_vector, phi_ip - _hessian_moment(h_o, d_own))
-            grad_n = -scale(area_vector, phi_ip - _hessian_moment(h_n, d_nb))
-            rhs_g = face_cells.scatter(grad_o, grad_n)
+            return (
+                scale(area_vector, phi_ip - _hessian_moment(h_o, d_own)),
+                -scale(area_vector, phi_ip - _hessian_moment(h_n, d_nb)),
+            )
 
-            # Hessian equation: Green–Gauss of the gradient components. Interior faces use the
-            # 2nd-order interpolation of grad; boundary faces extrapolate grad from the owner.
+        def hessian_face_terms(g_own, h_own, g_nb, h_nb):
+            """Owner- and neighbour-side face contributions to the Hessian equation.
+
+            A Green–Gauss sum of the gradient components: interior faces take the 2nd-order
+            interpolation of the gradient, boundary faces extrapolate it from the owner. It takes no
+            field and no boundary values — the Hessian equation carries no term in the reconstructed
+            field at all, which is why its right-hand side is identically zero and the eliminated
+            system's is ``b_g`` unreduced.
+            """
+            g_face = blend_owner_neighbour(g_own, g_nb, f, face_cells)
+            h_face = blend_owner_neighbour(h_own, h_nb, f, face_cells)
             gi_int = g_face + jnp.einsum("fij,fj->fi", h_face, skew)
-            gi_bnd = g_o + jnp.einsum("fij,fj->fi", h_o, x_ip - x_own)
+            gi_bnd = g_own[owner] + jnp.einsum("fij,fj->fi", h_own[owner], d_own)
             gi = face_cells.combine_face_values(gi_int, gi_bnd)
-            hess_contrib = gi[:, :, None] * area_vector[:, None, :]
-            rhs_h = face_cells.scatter_conservative(hess_contrib)
-            return rhs_g, rhs_h
+            contribution = gi[:, :, None] * area_vector[:, None, :]
+            return contribution, -contribution
 
         zero_g = jnp.zeros((n_cells, dim))
         zero_h = jnp.zeros((n_cells, dim, dim))
         zero_f = jnp.zeros(n_cells)
         zero_b = jnp.zeros(n_faces)
-        b_g, b_h = assemble(zero_g, zero_h, field, boundary_values)  # φ-only RHS; b_h == 0
-
-        # Pack the per-cell Hessian into a flat (n_cells, dim²) block so the injected GradientSolve —
-        # which preconditions by the cell volume broadcast over the trailing axis — applies unchanged.
-        def pack_hessian(h):
-            return h.reshape(n_cells, dim * dim)
-
-        def unpack_hessian(v):
-            return v.reshape(n_cells, dim, dim)
+        no_face_g = jnp.zeros((n_faces, dim))  # a scatter's unused half needs a real zero array
+        no_face_h = jnp.zeros((n_faces, dim, dim))
+        # The φ-only right-hand side. Only the gradient equation has one: `hessian_face_terms` takes
+        # no field, so the Hessian equation's is identically zero for any field and any mesh.
+        b_g = face_cells.scatter(
+            *gradient_face_terms(zero_g, zero_h, zero_g, zero_h, field, boundary_values)
+        )
 
         if not self.schur:
             # Full coupled system on the packed unknown [g, H] of shape (n_cells, dim + dim²); both
-            # diagonal blocks are the cell volume, so one inverse-volume preconditioner covers both.
+            # diagonal blocks carry the cell volume, so one inverse-volume preconditioner covers both.
+            # This path exists to check the elimination against the un-eliminated system, so it is
+            # kept deliberately plain — the block preconditioner below is for the Schur path.
             def pack(g, h):
-                return jnp.concatenate([g, pack_hessian(h)], axis=1)
+                return jnp.concatenate([g, h.reshape(n_cells, dim * dim)], axis=1)
 
             def coupled(u):
-                g, h = u[:, :dim], unpack_hessian(u[:, dim:])
-                rg, rh = assemble(g, h, zero_f, zero_b)
-                return pack(scale(g, vol) - rg, vol[:, None, None] * h - rh)
+                g, h = u[:, :dim], u[:, dim:].reshape(n_cells, dim, dim)
+                rhs_g = face_cells.scatter(*gradient_face_terms(g, h, g, h, zero_f, zero_b))
+                rhs_h = face_cells.scatter(*hessian_face_terms(g, h, g, h))
+                return pack(scale(g, vol) - rhs_g, vol[:, None, None] * h - rhs_h)
 
-            solution = self.solver.solve(vol, coupled, pack(b_g, b_h))
+            # The Hessian equation's right-hand side is zero (see `b_g` above).
+            solution = self.solver.solve(InverseVolume(1.0 / vol), coupled, pack(b_g, zero_h))
             return solution[:, :dim]
 
-        # Schur elimination of the Hessian block: solve S·g = b_g − A_gH·A_HH⁻¹·b_h, with the injected
-        # solver applying both the inner A_HH⁻¹ (on the packed Hessian) and the outer S (on the gradient).
-        def a_hg(g):
-            return -assemble(g, zero_h, zero_f, zero_b)[1]
+        # ---- Schur elimination of the Hessian block.
+        def gradient_and_hessian_rows(g):
+            """``(A_gg·g, A_Hg·g)`` — the outer operator needs both, from one pass over the faces."""
+            rhs_g = face_cells.scatter(*gradient_face_terms(g, zero_h, g, zero_h, zero_f, zero_b))
+            rhs_h = face_cells.scatter(*hessian_face_terms(g, zero_h, g, zero_h))
+            return scale(g, vol) - rhs_g, -rhs_h
 
-        def a_hh(v):
-            h = unpack_hessian(v)
-            return pack_hessian(vol[:, None, None] * h - assemble(zero_g, h, zero_f, zero_b)[1])
-
-        def a_hh_inv(rhs_h):
-            return unpack_hessian(self.solver.solve(vol, a_hh, pack_hessian(rhs_h)))
+        def a_hh(h):
+            # The innermost loop: only the Hessian equation, so the gradient equation's face-curvature
+            # work is not done and then discarded.
+            return vol[:, None, None] * h - face_cells.scatter(
+                *hessian_face_terms(zero_g, h, zero_g, h)
+            )
 
         def a_gh(h):
-            return -assemble(zero_g, h, zero_f, zero_b)[0]
+            return -face_cells.scatter(*gradient_face_terms(zero_g, h, zero_g, h, zero_f, zero_b))
 
-        def a_gg(g):
-            return scale(g, vol) - assemble(g, zero_h, zero_f, zero_b)[0]
+        # Per-cell diagonal blocks, from the same face kernel the operators are built from. Both are
+        # (dim, dim) per cell: A_gg's block acts on the gradient directly, and A_HH's is the `C` of
+        # the `I_dim ⊗ C` structure described in the class docstring, recovered by probing a single
+        # Hessian row (every row gives the same C, which is what that structure means).
+        def gg_owner(probe):
+            owner_side, _ = gradient_face_terms(probe, zero_h, zero_g, zero_h, zero_f, zero_b)
+            return face_cells.scatter(owner_side, no_face_g)
+
+        def gg_neighbour(probe):
+            _, neighbour_side = gradient_face_terms(zero_g, zero_h, probe, zero_h, zero_f, zero_b)
+            return face_cells.scatter(no_face_g, neighbour_side)
+
+        def _hessian_probe(unit_row):
+            """A Hessian field whose first row is ``unit_row`` in every cell, the rest zero."""
+            return jnp.zeros((n_cells, dim, dim)).at[:, 0, :].set(unit_row)
+
+        def hh_owner(probe):
+            owner_side, _ = hessian_face_terms(zero_g, _hessian_probe(probe), zero_g, zero_h)
+            return face_cells.scatter(owner_side, no_face_h)[:, 0, :]
+
+        def hh_neighbour(probe):
+            _, neighbour_side = hessian_face_terms(zero_g, zero_h, zero_g, _hessian_probe(probe))
+            return face_cells.scatter(no_face_h, neighbour_side)[:, 0, :]
+
+        gradient_block = cell_diagonal_block(gg_owner, gg_neighbour, vol, n_cells, dim)
+        hessian_block = cell_diagonal_block(hh_owner, hh_neighbour, vol, n_cells, dim)
+        outer_preconditioner = CellBlockJacobi(jnp.linalg.inv(gradient_block))
+        inner_preconditioner = CellBlockJacobi(jnp.linalg.inv(hessian_block))
 
         def schur(g):
-            return a_gg(g) - a_gh(a_hh_inv(a_hg(g)))
+            a_gg_g, a_hg_g = gradient_and_hessian_rows(g)
+            return a_gg_g - a_gh(self.hessian_solver.solve(inner_preconditioner, a_hh, a_hg_g))
 
-        rhs_g = b_g - a_gh(a_hh_inv(b_h))
-        return self.solver.solve(vol, schur, rhs_g)
+        # b_h is identically zero (the Hessian equation carries no term in the field), so the
+        # eliminated right-hand side is b_g itself — no inner solve is run for it.
+        return self.solver.solve(outer_preconditioner, schur, b_g)

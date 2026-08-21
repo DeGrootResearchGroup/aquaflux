@@ -98,8 +98,8 @@ assert jnp.allclose(r_s, r_d, atol=1e-9), ("value", float(jnp.max(jnp.abs(r_s - 
 # owned gradients converge to the wrong value and the residual must diverge from serial — isolating
 # the per-sweep exchange as load-bearing, distinct from the final one.
 class _NoPerSweep(SweptGradientSolve):
-    def solve(self, volume, operator, rhs, *, operator_hook=None):
-        return super().solve(volume, operator, rhs)
+    def solve(self, preconditioner, operator, rhs, *, operator_hook=None):
+        return super().solve(preconditioner, operator, rhs)
 
 
 def assemble_ctrl(m, g):

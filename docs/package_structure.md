@@ -86,8 +86,8 @@ cfd/                                  # repo root
 │   │   └── residual.py               #   ResidualAssembler (builds the FaceContext: properties, gradients, boundary values) + CellBalance (operators → segment_sum scatter → sources → transient); R = accumulation + Σ outward flux
 │   │
 │   ├── schemes/                      # first-class swappable numerics (physics-free; one-way discretization → schemes)
-│   │   ├── gradient.py               #   GradientScheme → CompactGreenGauss, CorrectedGreenGauss (injected GradientSolve: GmresGradientSolve / SweptGradientSolve fixed-sweep), HessianCorrectedGradient
-│   │   ├── interpolation.py          #   face interpolation in one place: interpolation_factor(g), interpolate_owner_neighbour ((1-g)·a + g·b)
+│   │   ├── gradient.py               #   GradientScheme → CompactGreenGauss, CorrectedGreenGauss (injected GradientSolve: GmresGradientSolve / SweptGradientSolve fixed-sweep; injected GradientPreconditioner: InverseVolume / CellBlockJacobi, extracted by cell_diagonal_block), HessianCorrectedGradient (separate outer + hessian_solver)
+│   │   ├── interpolation.py          #   face interpolation in one place: interpolation_factor(g), interpolate_owner_neighbour ((1-g)·a + g·b), blend_owner_neighbour (the two-field form, each side from its own field)
 │   │   └── limiter.py                #   Limiter → VenkatakrishnanLimiter (per-cell psi for bounded second-order reconstruction; held by LimitedUpwind)
 │   │
 │   ├── boundary/                     # weak boundary-face-value closures (a BC is a special face interpolator)
