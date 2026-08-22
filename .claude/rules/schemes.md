@@ -262,6 +262,17 @@ log from a skew-free mesh, it was never evidence of non-orthogonality.**
       the Hessian-corrected scheme `[2,2]` over the steps it reached — so the long stencil is not
       starving the probe here at all. The far-field mass scales with skewness, and this mesh's median
       skew is `2.2e-09` against the 5–20 % perturbed grids the table above was measured on.
+    - **⚠️⚠️ THE SWEEP BELOW IS VOID — THE HARNESS PRINTED A REACH IT WAS NOT PROBING AT. Do not cite the
+      "bit-identical cycles at 2, 3 and 5" table.** `run_ab.py`'s `solve_arm` derived a local `reach`
+      from its argument, used it in the **banner**, and built the probe from the module-level `REACH`.
+      So the three arms printed 2/3/5 and probed the same value each time — which explains
+      bit-identical cycles far better than "the reach is inert" did. This is the validation rule *a
+      setting the banner prints must be a setting that is in force* violated exactly as written, and it
+      is the second time this same claim has failed for a see-the-variable reason (the first being that
+      it was swept on an arm that could not feel it). **What survives** are the runs driven by the
+      `PITZ_AB_REACH` environment variable, which sets the global the probe really read: the standard
+      arm at reach 3 vs 5 (432 vs 439 cycles, 527 vs 711 s) and the Betchen arm (834 vs 511 cycles).
+      Those are genuine, and they are what the entries below rest on. Fixed 2026-08-21.
     - **On the SIMPLE-smoothed field-split bundle the reach is inert, and the probe is 3.8× oversized.**
       Same case, standard arm, 6 steps of one Reynolds rung, leading inverse `simple_smoothed_inverse`
       (sweeps 2, pressure_sweeps 2, θ=0.25, no singletons, 5 levels, max_coarse 500, block splitting,
@@ -486,6 +497,55 @@ log from a skew-free mesh, it was never evidence of non-orthogonality.**
     composition per mesh rather than assuming it.
   - ⚠️ **Distributed:** the estimator norms the whole local vector, which double-counts ghost rows.
     Calibrate on the global mesh **before** partitioning, or supply an owned-only reduction.
+
+- **✅ NARROWING THE PROBE BEATS LENGTHENING IT — measured 2026-08-21, and it is the largest single
+  saving found on this case.** The long reach a long-stencil reconstruction seems to demand is paying
+  to *tolerate folding*, not to capture coupling the preconditioner needs. Cap the gradient's sweeps
+  **for the probe copy only** (`CoupledJacobianProbe.build(gradient_sweeps=…)` /
+  `narrow_gradient_sweeps`) and the residual's stencil genuinely shortens, so the colouring is
+  collision-free and the recovered matrix is **exact for the narrowed residual** instead of corrupted
+  for the true one. Full `pitzdaily_gradient_ab` marches, Betchen arm at outer/inner swept-5:
+
+  | probe | probes | standard | betchen | betchen/standard |
+  |---|---|---|---|---|
+  | reach 5, full sweeps | 380 | 711 s / 439 cyc | 1604 s / 511 cyc | 2.25× |
+  | reach 3, full sweeps | 165 | 527 s / 432 cyc | 1715 s / 834 cyc | 3.25× |
+  | **reach 3, `gradient_sweeps=1`** | **165** | **473 s / 421 cyc** | **918 s / 451 cyc** | **1.94×** |
+
+  All six marches reach `x_r/h` 8.069.
+
+  - **1.75× faster than the reach-5 arm, at 43 % of its probe cost, with FEWER cycles** (451 against
+    511) and the identical root. The expectation was that narrowing would merely *recover* reach-5
+    quality; it beats it. So the far entries were not helping the aggregation — a sparser, cleanly
+    probed operator is both a better preconditioner and a cheaper one to build and apply.
+  - **It is NOT a Betchen-specific fix — the standard scheme gains 1.50×** (711 → 473 s, cycles 439 →
+    421). The benchmark next door ships reach 5 with full sweeps and is leaving that on the table.
+    ⚠️ But do not assume it transfers: this case runs a SIMPLE-smoothed field split, and the benchmark
+    runs an **incomplete-LU** smoother, which is the family folding hurts most (folded entries become
+    pivots) *and* the family most exposed to the narrowed matrix being a cruder approximation. Both
+    effects point opposite ways; it has to be measured there, not inferred.
+  - **The matched cost of the Betchen scheme is 1.94×, and this is the trustworthy version of that
+    number** — its cycle ratio is **1.07×**, against 1.16× at reach 5 and 1.93× at reach 3 unnarrowed.
+    The figure has now read 3.25× / 2.25× / 1.94× across the session, and every correction came from
+    removing a probe artifact rather than from anything about the reconstruction.
+  - **The middle row is the cleanest demonstration of why the stencil matters.** Same probe, same mesh:
+    the standard arm is untouched by the short reach (432 cycles, essentially its reach-5 value) while
+    the Betchen arm degrades to 834. That is also why this went unnoticed — with the corrected gradient
+    the folded mass on a mesh this mild is negligible, so the probe reach looks like a free parameter.
+  - **The Krylov matvec keeps the exact jvp of the full residual**, so the converged state and its
+    adjoint are untouched — only the preconditioner's materialize sees the narrowed copy. That is what
+    makes this a free lunch rather than a discretization change.
+  - **It is only reachable because the Betchen outer solver is now a fixed sweep.** A Krylov outer
+    cannot be narrowed — `narrow_gradient_sweeps` rewrites `SweptGradientSolve` nodes and would return
+    the tree unchanged, silently. At `sweeps=1` the swept solver returns `P⁻¹b` without ever applying
+    its operator, so *both* Betchen systems collapse to a one-ring stencil.
+  - **The floor is reach 3, not 1**: the coupled `(u,p)` Jacobian is intrinsically distance-2 (Rhie–Chow
+    damping couples pressure to the neighbour-of-neighbour ring), and no narrowing removes that.
+  - ⚠️ **One run per configuration.** Cycle and step counts are contention-immune and carry the verdict;
+    the seconds are single samples. **Not yet measured:** the standard arm with the same narrowing (its
+    reach-3 full-sweep probe already works, folding being negligible at this mesh's skew, so the gain
+    there should be smaller); and whether this holds on a genuinely skewed mesh, where the folded mass
+    is larger and the effect should be *stronger*.
 
 - **`SweptGradientSolve(sweeps)` — BUILT. The scalable `GradientSolve` strategy**, injected via
   `CorrectedGreenGauss(solver=SweptGradientSolve(n))` — **not a separate scheme** (same
