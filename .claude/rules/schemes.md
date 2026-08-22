@@ -445,16 +445,114 @@ log from a skew-free mesh, it was never evidence of non-orthogonality.**
     That gives the adaptivity a runtime convergence test would, at zero per-call cost, with no
     `lax.while_loop` (which JAX cannot reverse-differentiate) and no implicit-diff tangent — and it
     subsumes `validation/uvreactor_openfoam/gradient_sweep_calibration.py`, which answers the same
-    question by hand. ⚠️ Check the *distribution* of the local rate first, not just the global `ρ`: a
-    global estimate sizes the count for the worst cell, which on a mesh with a few bad cells may be far
-    above what the bulk needs.
+    question by hand. ⚠️ **The caution that stood here — that a global `ρ` would size the count for the
+    worst cell and so over-resolve the bulk — is REFUTED, and the error runs the OTHER way; see the
+    measured L2-versus-worst-cell entry below.**
   - ⚠️ **What this does NOT license:** lowering the shipped default without per-mesh calibration. The
     same count that is wasteful on pitzDaily is *insufficient* at 30 % skew, and a fixed sweep fails
     **silently** — there is no residual test to trip.
 
-- **PROPOSED, NOT BUILT — `GradientScheme.bind(mesh, geometry) -> BoundGradient`, and build-time sweep
-  calibration on the same seam.** Two investigations arrived at the same place from different
-  directions; recording it because the second went looking for the first and could not find it.
+- **BUILD-TIME SWEEP CALIBRATION IS BUILT (2026-08-21); `GradientScheme.bind` REMAINS PROPOSED.** The
+  two were recorded together because two investigations arrived at the same place from different
+  directions, but they turned out to be separable: calibration needs a concrete-geometry,
+  once-per-case boundary, and a classmethod factory *is* one — it does not need `bind` to exist. What
+  shipped, in `aquaflux/schemes/gradient.py`:
+  - **`GradientSystem(preconditioner, operator, shape)`** — the triple a solve strategy consumes and
+    the estimator measures, so a count is never calibrated against a different assembly than the one
+    that runs. `CorrectedGreenGauss.system(terms)` returns it (and `gradients` now goes through it,
+    which is where that system's choice of `InverseVolume` lives); `HessianCorrectedGradient._systems`
+    returns its two, with the outer taking its inner solve **injected** so it is measured with the
+    inner solve that will run inside it.
+  - **`contraction_rate(system, *, iters=24, seed, norm) -> ContractionRate`** — the Gelfand estimate
+    `(prod ‖M^k v‖/‖M^(k-1)v‖)^(1/iters)`, `M = I − P⁻¹A`, in ONE jitted `fori_loop` with one host
+    sync. `ContractionRate.settling_ratio` is `rho(iters)/rho(iters/2)`, the settledness self-check;
+    **measured 1.03–1.17** across orthogonal → 40 % perturbed and over both Betchen systems.
+  - **`SweepCalibration(tol=1e-4, iters=24, floor=1, cap=64, seed=0)`** — a frozen dataclass, so
+    `SweepCalibration.tol` at class level IS the default and both factory signatures read it rather
+    than restating a literal. Validated in `__post_init__`, so an inconsistent one cannot exist.
+    `.sweeps_for(rate)` is the pure conversion; `.sweeps(system)` measures then converts.
+  - **`CorrectedGreenGauss.calibrated(mesh, geometry, ...)` and
+    `HessianCorrectedGradient.calibrated(mesh, geometry, ..., schur=True)`**, both written against the
+    one private tail `_calibrated_solver` — which is also the **only** place a calibrated
+    `SweptGradientSolve` is constructed (an earlier draft had `SweepCalibration.solver` doing it too,
+    i.e. two builders of one class, and it was deleted).
+  - ⚠️ **`tools/sibling_builders.py` COULD NOT SEE THIS PAIR, and that was fixed in the same change.**
+    It recognized only `build`/`create`/`make`/`from_*` as factory methods, and credited construction
+    by capitalized-name convention — so a `@classmethod` returning `cls(...)` looked like it
+    constructed *nothing* and dropped out of the report entirely. Not a quiet pair: **no pair at all**,
+    which reads exactly like a clean tree. It now knows `calibrated` and credits `cls(...)` to its
+    owning class, pinned by `test_it_reaches_classmethod_factories_that_return_cls`. With that, the
+    pair reports with `schur` as the only difference — a genuine property of the scheme with two
+    modes. A signature-parity test derives the shared surface from `dataclasses.fields(
+    SweepCalibration)`, so adding a setting and wiring it into one factory fails there.
+  - **Costs `iters` applies once.** A `k`-sweep reconstruction spends `k − 1` applies, so the default
+    budget is about eight four-sweep reconstructions, mesh-size-independent (both sides linear).
+  - ⚠️ **Traced geometry raises a named `ValueError` ("geometry is traced; calibrate outside the
+    differentiated region and pass `sweeps=` explicitly")** rather than surfacing a
+    `ConcretizationTypeError` from inside a logarithm. Checked up front on the preconditioner's
+    leaves *and* caught at the host conversion. Correct rather than a compromise: an integer count has
+    zero derivative almost everywhere, and the state and its adjoint use the same count either way.
+  - **`validation/uvreactor_openfoam/gradient_sweep_calibration.py` is NOT subsumed and stays.** It
+    walks the sweep ladder against a converged reference and measures the *reconstruction's* error;
+    the estimator measures the *operator's* rate. That makes it the independent check on the
+    estimator rather than a duplicate of it — which is what an unfalsifiable estimator would
+    otherwise be missing.
+  - **Not shipped: any change to a default.** `SweptGradientSolve.sweeps` is still 4 and Betchen's
+    still 20/10. The factory is opt-in. Each case's own measured count is recorded in that case's
+    README, beside the mesh it was measured on.
+
+- **⚠️⚠️ THE CALIBRATION TOLERANCE IS AN L2 TOLERANCE AND THE WORST CELL EXCEEDS IT ABOUT HALF THE
+  TIME — measured 2026-08-21, and it REVERSES the caution recorded above.** Configuration: shipped
+  `CorrectedGreenGauss.calibrated(mesh, geometry, tol=1e-4)` (`InverseVolume`, Gelfand estimate at the
+  default 24-apply budget), judged against the same system solved by `GmresGradientSolve`, over 26
+  combinations — pitzDaily's `of_case` mesh plus 2D 20×20 grids at 5/10/20/30/40 % perturbation (two
+  seeds each) and 3D 8³ columnwise grids at 15/30 %, two analytic fields each.
+
+  | quantity | result |
+  |---|---|
+  | L2 relative gradient error ≤ `tol` | **26 of 26** |
+  | worst single cell's relative error ≤ `tol` | **13 of 26** |
+  | worst-cell ÷ L2 ratio | min 5.2× · median 11.8× · max 59.6× |
+
+  The mechanism is that `ρ` is the iteration's dominant eigenvalue, which governs a norm and not the
+  extremes: on pitzDaily the calibrated `k = 2` leaves L2 at 5.4e-06 (eighteen times better than
+  asked) while the worst cell sits at 3.2e-04, i.e. **above** the tolerance. So the recorded worry —
+  that a few bad cells would drag the count up and over-resolve everything else — is exactly backwards:
+  the bulk is over-served and the bad cells are under-served. Ask for an L2 tolerance one to two orders
+  tighter than the per-cell accuracy actually wanted. The docstrings state the norm for this reason.
+
+- **The estimator needs NO safety margin, and it is a cancellation rather than luck — reproduced
+  2026-08-21 on the shipped code.** 195 combinations (thirteen meshes × three fields × five tolerances
+  from 1e-2 to 1e-8), configuration as above: **0 misses in the L2 norm**. The two errors are opposite
+  and comparable — the Gelfand estimate approaches `ρ` from below (a random start's deficiency in the
+  dominant eigendirection contributes `|c|^(1/iters)`, measured as a ~6 % deficit on a synthetic with
+  a clean spectral gap), which alone would under-count, while the iteration's early transient reduces
+  the error faster than `ρ^k`, which over-delivers by about as much. Do not add a margin "to be safe":
+  it would double counts that already hit their target every time. ⚠️ This is the **L2** statement —
+  see the entry above for the per-cell one.
+
+- **Per-case calibrated counts, measured on the meshes in this repository (2026-08-21):**
+
+  | case mesh | cells / dim | `ρ` | `k` at 1e-4 | `k` at 1e-10 | ships |
+  |---|---|---|---|---|---|
+  | `pitzdaily_openfoam/of_case` | 12225 / 2D | 5.07e-03 | **2** | 5 | 4 |
+  | `bfs3d` (read from `bfs3d_species/of_case`) | 23040 / 3D | **5.06e-15** | **1** | **1** | 4 |
+
+  ⚠️ `bfs3d_openfoam/of_case/constant/polyMesh` is generated by running OpenFOAM and is **absent from a
+  fresh checkout**, which is why the row above names the species case's copy — the same geometry (23040
+  cells, 66368 interior faces, matching this file's own reach table), and the one actually in the
+  repository. A harness that reads the flagship path will skip rather than measure.
+
+  `bfs3d`'s mesh is a graded but orthogonal block, so the skewness correction is essentially absent and
+  the first sweep is already at machine precision — the shipped `4` spends three operator applies per
+  reconstruction, on every residual evaluation and every Jacobian--vector product, to no effect. It
+  corroborates the reach table at the top of this file (`0 of 66368` faces above the skewness
+  threshold). **Neither default was changed**: the sweep count sets the residual's Jacobian reach,
+  which each case's probing reach is matched to, so moving it is a change to the discretization that
+  the case's reattachment result would have to be re-validated against. Both numbers are recorded in
+  their case READMEs beside the mesh.
+
+- **PROPOSED, NOT BUILT — `GradientScheme.bind(mesh, geometry) -> BoundGradient`.**
   - **The seam.** `gradients()` takes `mesh` and `geometry` on every call and rebuilds every
     geometry-only term inside them. `bind` would split the *choice* (the injected, mesh-free
     `GradientScheme`) from the *derived product* (arrays, no mesh argument), exactly as `mesh.geometry()`
@@ -467,13 +565,9 @@ log from a skew-free mesh, it was never evidence of non-orthogonality.**
   - **⚠️ Binding OUTSIDE the differentiated region silently kills mesh-shape gradients** —
     `‖d(objective)/d(node_coords)‖ = 0.0`, no error. Binding inside is bit-identical to today. Not a new
     hazard (the same rule already governs `mesh.geometry()`), but now measured.
-  - **Calibration belongs on that seam**, because `bind` is by construction the one point that is
-    concrete-geometry and once-per-case — which is exactly the boundary a static `sweeps` needs.
-    `bound.calibrate(tol=...) -> SweptGradientSolve(sweeps=<int>)`, with the estimator living beside
-    `GradientSolve` rather than inside `CorrectedGreenGauss` so Betchen's two systems get it unchanged.
-    ⚠️ Its two public factories are **one builder plus an injected difference** (which systems to
-    calibrate) — write them against one private tail and run `tools/sibling_builders.py`, or it is the
-    drift defect on the day it is added.
+  - **Calibration was expected to need this seam and did not** — it shipped as a classmethod factory
+    (above). `bind` would still be a natural home for it if it is ever built, but it is no longer a
+    reason to build it.
   - **Betchen's own calibrated counts, measured:** outer `ρ` = 0.159 (pitzDaily) to 0.238 (30 %
     perturbed) — **barely moving with mesh quality**, which corroborates that the outer Schur system's
     difficulty is intra-cell gradient–Hessian coupling rather than skewness, and means the outer count is

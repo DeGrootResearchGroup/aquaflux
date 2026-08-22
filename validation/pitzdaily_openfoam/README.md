@@ -146,8 +146,24 @@ long, deliberately non-terminating study.
 | momentum advection | `Gauss linearUpwind grad(U)` | `LimitedUpwind(VenkatakrishnanLimiter())` (second order, bounded) |
 | k / ω advection | `Gauss limitedLinear 1` | `FirstOrderUpwind()` (bounded) |
 | gradient | `Gauss linear` | `CorrectedGreenGauss()` (swept `A_g⁻¹`) |
+
 | laplacian / surface-normal gradient | `corrected` | `DiffusionFlux` non-orthogonal correction |
 | ω positivity | bounded scalar scheme + clipping | `omega_transform=LogScalars()` (`ω = e^w`) |
+
+### What this mesh needs from the gradient sweep
+
+The corrected-gradient system is solved by a fixed number of preconditioned-Richardson sweeps, and how
+many it takes to reach a given accuracy is a property of the mesh's non-orthogonality, not of its size.
+Measured on **this** mesh (`of_case/constant/polyMesh`, 12225 cells), the sweep contracts at
+`rho = 5.07e-03`, so the count reaching a relative gradient error of `1e-4` in the L2 norm over all
+cells is **2**, and reaching `1e-10` is **5**.
+
+The case ships the library default of **4**, which sits between those and is left alone deliberately:
+the sweep count is part of the discretization — it also sets how far the residual's Jacobian reaches
+across the cell graph, which the case's `STENCIL_REACH` is matched to — so changing it would invalidate
+the reattachment result recorded above until the case were re-validated at the new count. To measure a
+different mesh rather than assume this one's number, build the scheme with
+`CorrectedGreenGauss.calibrated(mesh, geometry)`.
 
 Momentum is second-order (Venkatakrishnan-limited), matching OpenFOAM's `linearUpwind`. The stiff k/ω
 scalars use **first-order** upwind: even a *limited* second-order scalar stencil weakens the ω transport

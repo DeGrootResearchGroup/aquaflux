@@ -36,11 +36,17 @@ import itertools
 import pathlib
 
 #: Methods that build and return something, by convention, alongside module-level functions.
-_FACTORY_METHODS = ("build", "create", "make")
+_FACTORY_METHODS = ("build", "create", "make", "calibrated")
 
 
-def _returned_calls(fn: ast.FunctionDef) -> set[str]:
-    """Every name this function returns a call to — classes by naming convention, and private helpers."""
+def _returned_calls(fn: ast.FunctionDef, owner: str = "") -> set[str]:
+    """Every name this function returns a call to — classes by naming convention, and private helpers.
+
+    ``owner`` is the enclosing class, if any. A classmethod factory builds its own class by writing
+    ``cls(...)``, which no naming convention can spot, so the class is credited by name instead —
+    without it every ``@classmethod`` factory looks like it constructs nothing and drops out of the
+    report entirely, which is the silent-blindness this tool is supposed to be the cure for.
+    """
     called = set()
     for node in ast.walk(fn):
         if not isinstance(node, ast.Return) or node.value is None:
@@ -49,7 +55,9 @@ def _returned_calls(fn: ast.FunctionDef) -> set[str]:
             if isinstance(sub, ast.Call):
                 func = sub.func
                 name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-                if name and (name[0].isupper() or name.startswith("_")):
+                if name == "cls" and owner:
+                    called.add(owner)
+                elif name and (name[0].isupper() or name.startswith("_")):
                     called.add(name)
     return called
 
@@ -120,7 +128,7 @@ def _builders(root: pathlib.Path):
             if isinstance(node, ast.FunctionDef) and node.name.startswith("_")
         }
         for owner, fn in entries():
-            made = _resolve_tails(_returned_calls(fn), tails)
+            made = _resolve_tails(_returned_calls(fn, owner), tails)
             if made:
                 params = {a.arg for a in fn.args.args + fn.args.kwonlyargs} - {"self", "cls"}
                 label = f"{owner}.{fn.name}" if owner else fn.name

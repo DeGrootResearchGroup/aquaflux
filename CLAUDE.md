@@ -1149,6 +1149,14 @@ After **every code change**, before considering the task complete, review and ac
      parameters drifted across four builders that all route through one private step. Its own coverage
      is pinned by `tests/unit/test_sibling_builders.py`, for the same reason `tools/check_hooks.sh` is:
      a check that has stopped seeing anything looks exactly like a clean tree.
+     ⚠️ **Its second blind spot was `@classmethod` factories, closed 2026-08-21.** It recognized only
+     `build`/`create`/`make`/`from_*` by name, and credited construction to *capitalized* callees — so
+     a factory writing `return cls(...)` looked like it built nothing and never entered the report at
+     all. That is worse than the first blind spot: not a quiet pair but **no pair**, indistinguishable
+     from a clean tree. It now also knows `calibrated` and credits `cls(...)` to its owning class.
+     **The general lesson, now twice: this tool sees builders by NAME and construction by CONVENTION,
+     so a new factory naming style is invisible to it until it is taught — check that it can see your
+     pair (its report names both sides) before reading its silence as a clean report.**
 
    Ruff is pinned via the `lint` extra (`pip install -e ".[lint]"`). Not needed for
    docs/config-only changes touching no `.py` files.
