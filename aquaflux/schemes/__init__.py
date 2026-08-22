@@ -11,6 +11,7 @@ from __future__ import annotations
 from .gradient import (
     CellBlockJacobi,
     CompactGreenGauss,
+    ContractionRate,
     CorrectedGreenGauss,
     GmresGradientSolve,
     GradientPreconditioner,
@@ -19,8 +20,10 @@ from .gradient import (
     GradientSystem,
     HessianCorrectedGradient,
     InverseVolume,
+    SweepCalibration,
     SweptGradientSolve,
     cell_diagonal_block,
+    contraction_rate,
     narrow_gradient_sweeps,
 )
 from .interpolation import (
@@ -33,6 +36,7 @@ from .limiter import Limiter, VenkatakrishnanLimiter
 __all__ = [
     "CellBlockJacobi",
     "CompactGreenGauss",
+    "ContractionRate",
     "CorrectedGreenGauss",
     "GmresGradientSolve",
     "GradientPreconditioner",
@@ -42,10 +46,12 @@ __all__ = [
     "HessianCorrectedGradient",
     "InverseVolume",
     "Limiter",
+    "SweepCalibration",
     "SweptGradientSolve",
     "VenkatakrishnanLimiter",
     "blend_owner_neighbour",
     "cell_diagonal_block",
+    "contraction_rate",
     "interpolate_owner_neighbour",
     "interpolation_factor",
     "narrow_gradient_sweeps",

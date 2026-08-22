@@ -13,6 +13,8 @@ lets the gradient — the highest-risk numerics — be de-risked before any solv
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import warnings
 
 import aquaflux  # noqa: F401  (enables x64)
@@ -29,10 +31,13 @@ from aquaflux.schemes import (
     CorrectedGreenGauss,
     GmresGradientSolve,
     GradientSolve,
+    GradientSystem,
     HessianCorrectedGradient,
     InverseVolume,
+    SweepCalibration,
     SweptGradientSolve,
     cell_diagonal_block,
+    contraction_rate,
     narrow_gradient_sweeps,
 )
 from aquaflux.schemes import gradient as gradient_module
@@ -902,3 +907,293 @@ def test_a_diagnostic_emitting_inner_solver_is_refused_with_an_explanation() -> 
         solver=SweptGradientSolve(sweeps=40, warn_tol=None), hessian_solver=chatty
     ).gradients(field, mesh, geometry, bvals)
     assert not bool(jnp.any(jnp.isnan(swept_outer)))
+
+
+# --- build-time sweep calibration ------------------------------------------------------
+#
+# The sweep count is a mesh property spanning some eighty-fold across the meshes this solver runs
+# on, and a fixed count carries no convergence test — so being short of one is silent. These pin the
+# estimator that measures it, on synthetic operators whose rate is known in closed form, and the
+# factories that turn it into a scheme.
+
+
+def _known_rate_system(rate: float, n: int = 12, spread: float = 3.0) -> GradientSystem:
+    """A system whose preconditioned Richardson iteration contracts at exactly ``rate``.
+
+    ``P⁻¹A = I - M`` with ``M`` diagonal, its largest entry ``rate`` and the rest geometrically
+    smaller, so ``rho(I - P⁻¹A) = rate`` exactly and the estimate has a closed-form answer to be
+    checked against. Written through the real :class:`InverseVolume` preconditioner (volumes of one,
+    so it is the identity) rather than a stub, so the estimator is exercised on the interface it
+    consumes in production.
+    """
+    diagonal = rate / spread ** jnp.arange(n, dtype=jnp.float64)
+
+    def operator(v: jnp.ndarray) -> jnp.ndarray:
+        return v - diagonal[:, None] * v
+
+    return GradientSystem(InverseVolume(jnp.ones(n)), operator, (n, 2))
+
+
+@pytest.mark.parametrize("rate", [0.9, 0.5, 0.25, 0.05, 1e-6])
+def test_the_estimator_recovers_a_known_contraction_rate(rate: float) -> None:
+    """On an operator whose rate is known exactly, the estimate must return it — and from below.
+
+    The Gelfand form takes the budget-th root of the accumulated growth, which carries the starting
+    vector's deficiency in the dominant eigendirection: a random start contributes a factor
+    ``|c|^(1/iters)`` slightly under one, so the estimate rises toward the rate rather than
+    overshooting it. That direction is asserted here because the sweep count is built on it — an
+    estimate that could sit *above* the rate would under-count sweeps, while one below over-counts,
+    and only the first is a silent loss of accuracy.
+    """
+    measured = contraction_rate(_known_rate_system(rate))
+    assert measured.rate <= rate * (1.0 + 1e-9), "the estimate must not exceed the true rate"
+    assert measured.rate >= 0.85 * rate, "...nor fall so far short that the count is wrong"
+
+
+def test_the_estimator_survives_a_complex_dominant_pair() -> None:
+    """A rotation-like operator has no dominant *real* eigenvalue, and the root form is why that is fine.
+
+    ``M`` here rotates one plane by a quarter turn while scaling by ``rate``, so its dominant
+    eigenvalues are a complex-conjugate pair. The ratio of successive norms oscillates on such an
+    operator indefinitely and never settles; the budget-th root of the accumulated growth averages
+    the oscillation out, which is the reason the estimate is taken that way rather than as a ratio.
+    """
+    rate = 0.4
+
+    def operator(v: jnp.ndarray) -> jnp.ndarray:
+        # M v = rate * (rotate v by a quarter turn in the component plane); A = I - M.
+        return v - rate * jnp.stack([-v[:, 1], v[:, 0]], axis=1)
+
+    measured = contraction_rate(GradientSystem(InverseVolume(jnp.ones(8)), operator, (8, 2)))
+    assert measured.rate == pytest.approx(rate, rel=0.05)
+
+
+def test_the_settledness_check_reports_a_short_budget() -> None:
+    """The half-budget estimate is the self-check, and it has to move when the budget is too short.
+
+    The estimate rises toward the true rate, so a budget that has not settled reports a ratio well
+    above one. A short budget must show that and the default budget must not — a check that reads
+    the same either way would report nothing.
+    """
+    system = _known_rate_system(0.6)
+    short = contraction_rate(system, iters=2)
+    settled = contraction_rate(system, iters=24)
+
+    assert short.settling_ratio > settled.settling_ratio
+    assert settled.settling_ratio == pytest.approx(1.0, abs=0.2)
+    assert settled.rate > short.rate, "the estimate approaches the true rate from below"
+
+
+def test_an_annihilating_iteration_reports_a_rate_of_zero_not_one() -> None:
+    """An exactly-solved system has rate zero, and reporting one would cap the sweep count.
+
+    Where the skewness correction vanishes the preconditioner is the exact inverse, so the iteration
+    sends its probe to zero outright. Renormalizing that by one would leave every further step
+    contributing no growth at all and report a *perfect* mesh as a non-converging one — the worst
+    possible direction for the error to run in.
+    """
+    system = GradientSystem(InverseVolume(jnp.ones(6)), lambda v: v, (6, 2))
+    assert contraction_rate(system).rate < 1e-100
+    assert SweepCalibration().sweeps(system) == 1
+
+
+def test_calibration_refuses_traced_geometry_by_name() -> None:
+    """Under a trace the count cannot be an int, and the failure has to say so where it happened.
+
+    ``sweeps`` is static configuration, so a tracer can never become one. Left to itself the tracer
+    surfaces as a concretization error from inside a logarithm several frames down, naming neither
+    the geometry nor the way out.
+    """
+    mesh = perturbed_grid_2d(4, 4, perturb=0.2)
+
+    def calibrate(volumes: jnp.ndarray) -> int:
+        geometry = mesh.geometry()
+        scheme = CorrectedGreenGauss()
+        terms = scheme.terms(mesh, geometry)
+        system = GradientSystem(
+            InverseVolume(1.0 / volumes), scheme.operator(terms), (mesh.n_cells, mesh.dim)
+        )
+        return SweepCalibration().sweeps(system)
+
+    with pytest.raises(ValueError, match="geometry is traced"):
+        jax.jit(calibrate)(mesh.geometry().cell.volume)
+
+
+def test_the_floor_and_cap_bound_the_calibrated_count() -> None:
+    """The bounds have to hold at both ends, including where the rate formula gives no answer.
+
+    A rate at or above one does not converge at any count and must return the cap rather than a
+    negative or infinite one; a rate of zero must return the floor rather than zero sweeps, since a
+    solve runs at least once.
+    """
+    calibration = SweepCalibration(tol=1e-4, floor=3, cap=8)
+
+    assert calibration.sweeps_for(0.0) == 3
+    assert calibration.sweeps_for(1e-30) == 3, "one sweep would do; the floor overrides it"
+    assert calibration.sweeps_for(0.5) == 8, "13 sweeps would be needed; the cap holds"
+    assert calibration.sweeps_for(1.0) == 8, "a non-converging iteration returns the cap"
+    assert calibration.sweeps_for(2.0) == 8
+    assert SweepCalibration(tol=1e-4).sweeps_for(0.5) == 14
+
+
+def test_the_calibrated_count_is_the_smallest_reaching_the_tolerance() -> None:
+    """The count is ``ceil(log tol / log rate)`` and must be tight — one sweep fewer must miss."""
+    calibration = SweepCalibration(tol=1e-6)
+    for rate in (0.1, 0.3, 0.55, 0.8):
+        k = calibration.sweeps_for(rate)
+        # `ceil` lands exactly on the tolerance where the logarithms divide evenly, and `0.1 ** 6`
+        # is 1e-6 only to within a rounding error, so the reach is compared with that slack.
+        assert rate**k <= calibration.tol * (1.0 + 1e-9)
+        assert rate ** (k - 1) > calibration.tol, "a smaller count would also have done"
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        ({"tol": 0.0}, "tol must be"),
+        ({"tol": 1.0}, "tol must be"),
+        ({"iters": 1}, "iters must be"),
+        ({"floor": 0}, "floor must be"),
+        ({"cap": 2, "floor": 4}, "must be at least floor"),
+    ],
+)
+def test_an_inconsistent_calibration_cannot_be_constructed(kwargs: dict, match: str) -> None:
+    """Rejected at construction, so no path through it can reach the count with bad settings."""
+    with pytest.raises(ValueError, match=match):
+        SweepCalibration(**kwargs)
+
+
+def test_the_estimator_needs_a_budget_it_can_halve() -> None:
+    with pytest.raises(ValueError, match="iters >= 2"):
+        contraction_rate(_known_rate_system(0.5), iters=1)
+
+
+def test_calibration_gives_an_orthogonal_mesh_a_single_sweep() -> None:
+    """Where the correction vanishes the system is diagonal and one sweep is already exact.
+
+    This is the over-resolved end of the range the fixed count cannot cover: four sweeps here spend
+    three operator applies to refine an answer that was exact after the first.
+    """
+    mesh = structured_grid_2d(6, 6, 1.0, 1.0)
+    scheme = CorrectedGreenGauss.calibrated(mesh, mesh.geometry())
+
+    assert scheme.solver.sweeps == 1
+
+
+@pytest.mark.parametrize("perturb, tol", [(0.2, 1e-4), (0.3, 1e-4), (0.2, 1e-8)])
+def test_a_calibrated_reconstruction_reaches_the_tolerance_it_promises(
+    perturb: float, tol: float
+) -> None:
+    """The whole point: the count returned must actually deliver the accuracy asked for.
+
+    Measured against the same system solved exactly, in the L2 norm over all cells, which is the
+    norm the tolerance is stated in. The estimate approaches the rate from below, which would
+    under-count, while the iteration's early transient reduces the error faster than the asymptotic
+    rate, which over-delivers — this asserts the second is at least as large as the first.
+    """
+    mesh = perturbed_grid_2d(14, 14, perturb=perturb, seed=3)
+    geometry = mesh.geometry()
+    field = _trig(geometry.cell.centroid)
+    bvals = _trig(geometry.face.centroid)
+
+    calibrated = CorrectedGreenGauss.calibrated(mesh, geometry, tol=tol)
+    exact = CorrectedGreenGauss(solver=GmresGradientSolve()).gradients(field, mesh, geometry, bvals)
+    got = calibrated.gradients(field, mesh, geometry, bvals)
+
+    error = float(jnp.linalg.norm(got - exact) / jnp.linalg.norm(exact))
+    assert error <= tol
+    # ...and the count is not simply enormous: one sweep fewer should be the one that misses.
+    fewer = CorrectedGreenGauss(
+        solver=SweptGradientSolve(sweeps=calibrated.solver.sweeps - 1, warn_tol=None)
+    ).gradients(field, mesh, geometry, bvals)
+    assert float(jnp.linalg.norm(fewer - exact) / jnp.linalg.norm(exact)) > 0.1 * tol
+
+
+def test_a_skewer_mesh_calibrates_to_more_sweeps() -> None:
+    """The count has to track the mesh, which is the property a fixed count cannot have."""
+    counts = [
+        CorrectedGreenGauss.calibrated(mesh, mesh.geometry()).solver.sweeps
+        for mesh in (
+            structured_grid_2d(12, 12, 1.0, 1.0),
+            perturbed_grid_2d(12, 12, perturb=0.1, seed=3),
+            perturbed_grid_2d(12, 12, perturb=0.3, seed=3),
+        )
+    ]
+    assert counts == sorted(counts) and counts[0] < counts[-1]
+
+
+def test_a_tighter_tolerance_calibrates_to_more_sweeps() -> None:
+    mesh = perturbed_grid_2d(10, 10, perturb=0.25, seed=1)
+    geometry = mesh.geometry()
+    loose = CorrectedGreenGauss.calibrated(mesh, geometry, tol=1e-3).solver.sweeps
+    tight = CorrectedGreenGauss.calibrated(mesh, geometry, tol=1e-10).solver.sweeps
+    assert loose < tight
+
+
+def test_calibrating_the_hessian_scheme_sizes_both_of_its_systems() -> None:
+    """Both systems are measured, and the inner one keeps the diagnostic its position requires.
+
+    The inner solve runs inside the outer operator, so its convergence diagnostic would make that
+    operator nonlinear — which the scheme rejects outright when an outer Krylov solve would have to
+    transpose it. A calibrated scheme must not walk into that.
+    """
+    mesh = perturbed_grid_2d(8, 8, perturb=0.25, seed=3)
+    geometry = mesh.geometry()
+    scheme = HessianCorrectedGradient.calibrated(mesh, geometry)
+
+    assert scheme.solver.sweeps >= 1 and scheme.hessian_solver.sweeps >= 1
+    assert scheme.hessian_solver.warn_tol is None
+    assert (
+        not scheme.solver.emits_host_diagnostics or not scheme.hessian_solver.emits_host_diagnostics
+    )
+
+    field = _quadratic(geometry.cell.centroid)
+    bvals = _quadratic(geometry.face.centroid)
+    exact = HessianCorrectedGradient(
+        solver=GmresGradientSolve(), hessian_solver=SweptGradientSolve(sweeps=30, warn_tol=None)
+    ).gradients(field, mesh, geometry, bvals)
+    got = scheme.gradients(field, mesh, geometry, bvals)
+    assert float(jnp.linalg.norm(got - exact) / jnp.linalg.norm(exact)) <= 1e-4
+
+
+def test_the_hessian_outer_rate_barely_moves_with_mesh_quality() -> None:
+    """The outer system's difficulty is intra-cell coupling, not skewness — so its count is nearly fixed.
+
+    The gradient and the Hessian couple to each other *within* a cell at the same order as the
+    volume term, and that coupling is there on any mesh. The inner system is the one that tracks
+    skewness in the usual way. Pinned because it is what makes the outer default defensible across
+    meshes while the inner one is not.
+    """
+    rates = {}
+    for perturb in (0.1, 0.3):
+        mesh = perturbed_grid_2d(8, 8, perturb=perturb, seed=3)
+        systems = HessianCorrectedGradient._systems(mesh, mesh.geometry())
+        inner = systems.inner()
+        rates[perturb] = (
+            contraction_rate(inner).rate,
+            contraction_rate(
+                systems.outer(SweptGradientSolve(sweeps=8, warn_tol=None), inner)
+            ).rate,
+        )
+
+    inner_growth = rates[0.3][0] / rates[0.1][0]
+    outer_growth = rates[0.3][1] / rates[0.1][1]
+    assert outer_growth < 1.5, "the outer rate is nearly mesh-independent"
+    assert inner_growth > 2.0, "the inner rate tracks the skewness"
+
+
+def test_the_two_calibrated_factories_expose_one_calibration_surface() -> None:
+    """Two builders of one thing drift a keyword at a time, and no single change to either looks wrong.
+
+    Both factories answer the same question — what sweep count does this mesh need — and differ only
+    in which systems they have to measure. Their calibration keywords are therefore one surface, and
+    this derives what that surface is from the settings object itself, so adding a setting and wiring
+    it into only one of them fails here rather than in whichever case reaches for it first.
+    """
+    expected = {f.name: f.default for f in dataclasses.fields(SweepCalibration)}
+    scheme_specific = {"mesh", "geometry", "schur"}
+
+    for factory in (CorrectedGreenGauss.calibrated, HessianCorrectedGradient.calibrated):
+        parameters = inspect.signature(factory).parameters
+        offered = {name: p.default for name, p in parameters.items() if name not in scheme_specific}
+        assert offered == expected, f"{factory.__qualname__} does not carry the calibration surface"

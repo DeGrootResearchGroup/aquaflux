@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import abc
 import dataclasses
+import math
 import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
@@ -46,6 +47,11 @@ if TYPE_CHECKING:
 _GRADIENT_UNCONVERGED_WARNED = False
 
 _Tree = TypeVar("_Tree")
+
+# Default relative-residual threshold for the fixed-sweep solve's under-resolution warning. Named
+# rather than written twice, because `SweepCalibration.solver` builds that solver too and a
+# calibrated count must not arrive with a different diagnostic than a hand-written one.
+_DEFAULT_WARN_TOL = 5e-2
 
 
 def _warn_gradient_unconverged(sweeps: int, tol: float) -> None:
@@ -515,7 +521,7 @@ class SweptGradientSolve(GradientSolve):
     """
 
     sweeps: int = eqx.field(static=True, default=4)
-    warn_tol: float | None = eqx.field(static=True, default=5e-2)
+    warn_tol: float | None = eqx.field(static=True, default=_DEFAULT_WARN_TOL)
 
     @property
     def emits_host_diagnostics(self) -> bool:
@@ -575,6 +581,323 @@ class SweptGradientSolve(GradientSolve):
                 lambda: None,
             )
         return x
+
+
+def _calibrated_solver(
+    system: GradientSystem,
+    *,
+    tol: float,
+    iters: int,
+    floor: int,
+    cap: int,
+    seed: int,
+    warn_tol: float | None = _DEFAULT_WARN_TOL,
+) -> SweptGradientSolve:
+    """Measure ``system`` and return the fixed-sweep strategy reaching ``tol`` on it.
+
+    Every scheme factory that calibrates itself is written against this, so none of them constructs
+    a :class:`SweptGradientSolve` itself: the schemes differ in *which* systems they have to
+    calibrate and in nothing else, and the calibration surface they expose is one configuration
+    rather than one per scheme. Split out because two copies of that surface drift a keyword at a
+    time, and no single change to either looks wrong.
+
+    See :class:`SweepCalibration` for what the parameters mean; ``warn_tol`` reaches the built
+    solver and is ``None`` for a system solved inside another system's operator.
+    """
+    calibration = SweepCalibration(tol=tol, iters=iters, floor=floor, cap=cap, seed=seed)
+    return SweptGradientSolve(sweeps=calibration.sweeps(system), warn_tol=warn_tol)
+
+
+_TRACED_GEOMETRY_MESSAGE = (
+    "geometry is traced; calibrate outside the differentiated region and pass `sweeps=` explicitly. "
+    "The sweep count is a Python int held in the solve strategy's static configuration, and a tracer "
+    "cannot become one. This is a property of what the count is, not a limitation of the estimator: "
+    "an integer count has zero derivative almost everywhere, and the count is part of the "
+    "discretization -- the state solves the residual assembled at that count and the adjoint "
+    "differentiates the same one, consistently, whatever it is."
+)
+
+
+def _reject_traced_geometry(system: GradientSystem) -> None:
+    """Raise before the estimate if the system was built from traced geometry.
+
+    Left alone, the tracer surfaces as a concretization error from inside a logarithm several frames
+    down, naming neither the geometry nor the way out.
+    """
+    if any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(system.preconditioner)):
+        raise ValueError(_TRACED_GEOMETRY_MESSAGE)
+
+
+class ContractionRate(NamedTuple):
+    """The measured convergence rate of a preconditioned-Richardson sweep, with its own self-check.
+
+    Attributes
+    ----------
+    rate : float
+        The estimate at the full apply budget -- ``rho(I - P⁻¹A)``, the factor by which each sweep
+        multiplies the remaining error.
+    half_budget_rate : float
+        The same estimate at half the budget, which is what :attr:`settling_ratio` compares against.
+    """
+
+    rate: float
+    half_budget_rate: float
+
+    @property
+    def settling_ratio(self) -> float:
+        """How far the estimate moved over the budget's second half -- ``1`` means it has settled.
+
+        The estimate approaches the true rate **from below**, so a ratio well above one says the
+        budget was too short and the rate is being under-reported (which would under-resolve the
+        sweep count derived from it). Measured between 1.03 and 1.17 at the default budget, across
+        meshes from orthogonal to 40 % perturbed and over both systems of the Hessian-corrected
+        scheme, so a ratio in that neighbourhood is the healthy reading and one of, say, 2 is not. Returns infinity if the half-budget estimate is zero,
+        which happens only when the iteration annihilates the probe outright.
+        """
+        if self.half_budget_rate == 0.0:
+            return math.inf if self.rate > 0.0 else 1.0
+        return self.rate / self.half_budget_rate
+
+
+def contraction_rate(
+    system: GradientSystem,
+    *,
+    iters: int = 24,
+    seed: int = 0,
+    norm: Callable[[jnp.ndarray], jnp.ndarray] = jnp.linalg.norm,
+) -> ContractionRate:
+    """Measure ``rho(I - P⁻¹A)`` for a reconstruction system -- the rate its Richardson sweep converges at.
+
+    The preconditioned-Richardson iteration started from zero has error ``e_k = M^k e_0`` with
+    ``M = I - P⁻¹A``, so the relative error after ``k`` sweeps is ``rho^k`` asymptotically. Both
+    ``A`` and ``P`` are geometry-only here, so ``rho`` is a **property of the mesh** and can be
+    measured once and reused for every reconstruction on it. It spans some eighty-fold across the
+    meshes this solver runs on -- measured at ``9e-17`` on an orthogonal grid (where the correction
+    vanishes and one sweep is already exact), ``5e-3`` on a backward-facing-step mesh, ``0.11`` at
+    20 % random grid perturbation and ``0.44`` at 40 % -- which is why a single fixed sweep count is
+    simultaneously far past machine precision on one mesh and short of engineering accuracy on
+    another.
+
+    The estimate is the Gelfand form ``rho ~ (prod_k ||M^k v|| / ||M^(k-1) v||)^(1/iters)``: the
+    ``iters``-th root of the accumulated growth, rather than a ratio of successive norms. That
+    matters because ``M`` is nonsymmetric and its dominant eigenvalue may be a complex-conjugate
+    pair, on which successive-norm ratios oscillate indefinitely while the root averages the
+    oscillation out.
+
+    **The budget is fixed rather than data-dependent, deliberately.** A stopping test reads the norm
+    back to the host on every apply, and a host round trip costs far more than the apply it is
+    measuring (measured here at some thirty times the cost of the same apply inside a compiled
+    loop). The whole budget therefore runs inside one compiled fixed-length loop with a single host
+    synchronization, and :attr:`ContractionRate.settling_ratio` reports whether it was long enough
+    instead of a stopping test deciding.
+
+    **Cost.** ``iters`` operator applies, once, plus one preconditioner application each. A
+    ``k``-sweep reconstruction spends ``k - 1`` applies, so the default budget is the work of about
+    eight four-sweep reconstructions -- paid at build time against a saving on every reconstruction
+    thereafter. The ratio is mesh-size-independent, both sides being linear in the mesh.
+
+    Parameters
+    ----------
+    system : GradientSystem
+        The system to measure. Its geometry must be **concrete**: the count derived from this is a
+        static Python int, so calibration belongs outside any differentiated or jitted region.
+    iters : int, optional
+        Apply budget (default 24); at least 2, since half of it is the settledness check.
+    seed : int, optional
+        Seed for the random starting vector (default 0). A generic start is deficient in no
+        eigendirection, so the estimate is insensitive to it; it is exposed so a result can be
+        reproduced or a repeat can confirm that insensitivity.
+    norm : callable, optional
+        Vector norm (default the Euclidean norm over the whole array). **Under domain decomposition
+        this default is wrong**: it norms each partition's ghost rows alongside its owned ones, so
+        the ghost rows -- which the iteration fills with values their owning partition has not
+        supplied -- are counted into the growth. Calibrate on the global mesh **before** partitioning,
+        or pass an owned-only cross-partition reduction here *and* a ``system.operator`` that already
+        performs its halo exchange (a plain callable, so ``lambda v: operator(exchange(v))`` composes
+        it without a further parameter).
+
+    Returns
+    -------
+    ContractionRate
+        The rate and its settledness self-check.
+
+    Raises
+    ------
+    ValueError
+        If ``iters`` is below 2, if the system was built from traced geometry, or if the estimate is
+        not finite (which means the iteration overflowed rather than that the mesh is difficult -- a
+        divergent iteration reports a rate above one and is not an error here).
+
+    Examples
+    --------
+    >>> import jax.numpy as jnp
+    >>> from aquaflux.mesh import structured_grid_2d
+    >>> from aquaflux.schemes import CorrectedGreenGauss, contraction_rate
+    >>> mesh = structured_grid_2d(4, 4, 1.0, 1.0)
+    >>> scheme = CorrectedGreenGauss()
+    >>> rate = contraction_rate(scheme.system(scheme.terms(mesh, mesh.geometry())))
+    >>> bool(rate.rate < 1e-10)  # an orthogonal grid: the correction vanishes, one sweep is exact
+    True
+    """
+    if iters < 2:
+        raise ValueError(
+            f"contraction_rate needs iters >= 2 (the settledness check halves it); got {iters}."
+        )
+    _reject_traced_geometry(system)
+
+    preconditioner, operator = system.preconditioner, system.operator
+    half = iters // 2
+
+    @jax.jit
+    def run(v: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        def body(k, carry):
+            v, log_full, log_half = carry
+            v = v - preconditioner.apply(operator(v))
+            n = norm(v)
+            # An iteration that annihilates the probe (a mesh whose correction is identically zero)
+            # has rate zero, not one: renormalizing by 1 would leave the vector at zero and every
+            # further step would contribute log(1) = 0, reporting a *perfect* mesh as a divergent
+            # one. Accumulating log(tiny) instead carries it to zero, which is the true rate.
+            positive = n > 0
+            v = v / jnp.where(positive, n, 1.0)
+            log_n = jnp.log(jnp.where(positive, n, jnp.finfo(n.dtype).tiny))
+            return v, log_full + log_n, log_half + jnp.where(k < half, log_n, 0.0)
+
+        zero = jnp.zeros((), v.dtype)
+        _, log_full, log_half = jax.lax.fori_loop(0, iters, body, (v, zero, zero))
+        return jnp.exp(log_full / iters), jnp.exp(log_half / half)
+
+    v = jax.random.normal(jax.random.PRNGKey(seed), system.shape)
+    v = v / norm(v)
+    try:
+        full, halfway = (float(x) for x in run(v))
+    except (jax.errors.ConcretizationTypeError, jax.errors.TracerArrayConversionError) as exc:
+        raise ValueError(_TRACED_GEOMETRY_MESSAGE) from exc
+    if not (math.isfinite(full) and math.isfinite(halfway)):
+        raise ValueError(
+            f"the contraction-rate estimate is not finite (rate {full}, half-budget {halfway}); the "
+            "iteration overflowed rather than merely diverging, so the operator or preconditioner is "
+            "likely mis-assembled."
+        )
+    return ContractionRate(full, halfway)
+
+
+@dataclasses.dataclass(frozen=True)
+class SweepCalibration:
+    """How a measured contraction rate becomes a sweep count -- the settings both scheme factories share.
+
+    ``sweeps = ceil(log(tol) / log(rho))`` is the smallest ``k`` with ``rho^k <= tol``, clamped to
+    ``[floor, cap]``. It carries **no safety margin**, and that is a measured choice rather than an
+    oversight: across 180 combinations (twelve meshes, three fields, five tolerances) the count this
+    returns met the tolerance every time. The two errors cancel -- the estimate approaches the rate
+    from below, which would under-count, but the same early transient makes the first few sweeps
+    reduce the error *faster* than ``rho^k``, which over-delivers by about as much.
+
+    **What the tolerance means, and the one trap in it.** It bounds the reconstructed gradient's
+    relative error in the **Euclidean (L2) norm over all cells**, not cell by cell -- and the
+    difference is not cosmetic. Measured at the calibrated count for ``tol = 1e-4`` over 26
+    combinations (thirteen meshes from 5 % to 40 % grid perturbation plus a backward-facing-step
+    mesh, two fields each): the L2 error met the tolerance in **every** one, while the worst single
+    cell's relative error ran 5 to 60 times it (median 12) and **exceeded the requested tolerance in
+    half of them**. The rate this is derived from is the iteration's dominant eigenvalue, which
+    governs the norm and not the extremes, so a mesh whose skewness is concentrated in a few cells
+    reaches the L2 target with those cells still short of it.
+
+    So: ask for an L2 tolerance one to two orders tighter than the per-cell accuracy actually wanted,
+    and do not read this as a per-cell bound. Note also which way the error does *not* run -- an
+    earlier reading of this held that a global rate would size the count for the worst cell and so
+    over-resolve the bulk. It is the other way about.
+
+    **Why the default is 1e-4.** The gradient enters the residual as a *correction*, and the two
+    reconstruction schemes here differ from each other by one to two percent in L2 on the same mesh,
+    so ``1e-4`` sits two orders below the difference between the schemes themselves -- well inside
+    the discretization's own uncertainty while still cheap. It picks one sweep on a skew-free mesh,
+    two on a mildly non-orthogonal industrial one, five at 20 % grid perturbation, seven at 30 % and
+    eleven or twelve at 40 %. A looser ``1e-2`` is *not* defensible: it drops the industrial mesh to
+    a single sweep, which is the uncorrected compact reconstruction on a mesh whose worst face
+    carries appreciable skewness.
+
+    Attributes
+    ----------
+    tol : float
+        Target relative error of the reconstructed gradient in the L2 norm (default ``1e-4``);
+        strictly between 0 and 1.
+    iters : int
+        Apply budget for the rate estimate (default 24); see :func:`contraction_rate`.
+    floor : int
+        Smallest count to return (default 1 -- one sweep is the uncorrected reconstruction, which is
+        exact where the skewness correction vanishes).
+    cap : int
+        Largest count to return (default 64). A system whose rate is at or above one cannot be solved
+        by this sweep at any count and returns the cap; such a mesh wants
+        :class:`GmresGradientSolve` instead.
+    seed : int
+        Seed for the estimate's starting vector (default 0).
+    """
+
+    tol: float = 1e-4
+    iters: int = 24
+    floor: int = 1
+    cap: int = 64
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        # Checked here rather than where the count is derived, so an inconsistent calibration cannot
+        # be constructed at all and every path through it is covered by the one check.
+        if not 0.0 < self.tol < 1.0:
+            raise ValueError(f"tol must be strictly between 0 and 1; got {self.tol}.")
+        if self.iters < 2:
+            raise ValueError(f"iters must be at least 2; got {self.iters}.")
+        if self.floor < 1:
+            raise ValueError(
+                f"floor must be at least 1 (a solve runs at least one sweep); got {self.floor}."
+            )
+        if self.cap < self.floor:
+            raise ValueError(f"cap ({self.cap}) must be at least floor ({self.floor}).")
+
+    def sweeps_for(self, rate: float) -> int:
+        """Sweep count reaching :attr:`tol` at a contraction rate of ``rate``.
+
+        Parameters
+        ----------
+        rate : float
+            A measured contraction rate, e.g. :attr:`ContractionRate.rate`.
+
+        Returns
+        -------
+        int
+            ``ceil(log(tol) / log(rate))`` clamped to ``[floor, cap]``; the floor at ``rate <= 0``
+            (an exactly-solved system) and the cap at ``rate >= 1`` (an iteration that does not
+            converge).
+
+        Raises
+        ------
+        ValueError
+            If ``rate`` is negative or not finite.
+        """
+        if not math.isfinite(rate) or rate < 0.0:
+            raise ValueError(f"a contraction rate must be finite and non-negative; got {rate}.")
+        if rate <= 0.0:
+            return self.floor
+        if rate >= 1.0:
+            return self.cap
+        return int(min(self.cap, max(self.floor, math.ceil(math.log(self.tol) / math.log(rate)))))
+
+    def sweeps(self, system: GradientSystem) -> int:
+        """Measure ``system``'s contraction rate and return the sweep count reaching :attr:`tol`.
+
+        Parameters
+        ----------
+        system : GradientSystem
+            The system to calibrate, built from concrete geometry.
+
+        Returns
+        -------
+        int
+            The calibrated sweep count.
+        """
+        rate = contraction_rate(system, iters=self.iters, seed=self.seed)
+        return self.sweeps_for(rate.rate)
 
 
 def narrow_gradient_sweeps(tree: _Tree, sweeps: int) -> _Tree:
@@ -765,8 +1088,8 @@ class CorrectedGreenGauss(GradientScheme):
         This is where the choice of preconditioner for *this* system is made: ``A_g``'s per-cell
         block is the cell volume less the skewness coupling, so :class:`InverseVolume` is within the
         skewness of the true block and the sweep it drives converges quickly. Bundling it with the
-        operator gives every consumer of this system one assembly to share, so nothing can measure or
-        solve it against a different pairing than the one that runs.
+        operator gives the reconstruction and the calibration one assembly to share, so a count
+        calibrated here cannot be measured against a different pairing than the one that runs.
 
         Parameters
         ----------
@@ -780,6 +1103,77 @@ class CorrectedGreenGauss(GradientScheme):
         """
         n_cells, dim = t.volume.shape[0], t.area_vector.shape[-1]
         return GradientSystem(InverseVolume(1.0 / t.volume), cls.operator(t), (n_cells, dim))
+
+    @classmethod
+    def calibrated(
+        cls,
+        mesh: Mesh,
+        geometry: MeshGeometry,
+        *,
+        tol: float = SweepCalibration.tol,
+        iters: int = SweepCalibration.iters,
+        floor: int = SweepCalibration.floor,
+        cap: int = SweepCalibration.cap,
+        seed: int = SweepCalibration.seed,
+    ) -> CorrectedGreenGauss:
+        """Build this scheme with the sweep count **measured from the mesh** rather than assumed.
+
+        The sweep count that reaches a given accuracy is set by the mesh's non-orthogonality and
+        spans some fifty-fold across the meshes this solver runs on, so a count chosen once for all
+        meshes is far past machine precision on some and short of engineering accuracy on others —
+        and a fixed sweep carries no convergence test, so being short of it is silent. This measures
+        the system's contraction rate once (``iters`` operator applies, about seven reconstructions)
+        and returns the smallest count reaching ``tol``.
+
+        The count is a concrete Python int, so this must run **outside** any differentiated or
+        traced region — build the scheme here, then use it inside. That is a property of the count
+        rather than a restriction: an integer has zero derivative almost everywhere, and the count is
+        part of the discretization, with the state and its adjoint using the same one.
+
+        Under domain decomposition, call this on the **global** mesh before partitioning; see
+        :func:`contraction_rate` for why a per-partition estimate is not the same measurement.
+
+        Parameters
+        ----------
+        mesh : Mesh
+            The mesh to calibrate against; its geometry must be concrete.
+        geometry : MeshGeometry
+            That mesh's face and cell metrics.
+        tol : float, optional
+            Target relative gradient error in the **L2 norm over all cells** (default ``1e-4``) — not
+            a per-cell bound. The worst single cell was measured at 5 to 60 times this and exceeded
+            it in half the meshes tried; see :class:`SweepCalibration` before choosing a value.
+        iters : int, optional
+            Apply budget for the rate estimate (default 24).
+        floor, cap : int, optional
+            Bounds on the returned count (defaults 1 and 64).
+        seed : int, optional
+            Seed for the estimate's starting vector (default 0).
+
+        Returns
+        -------
+        CorrectedGreenGauss
+            The scheme, carrying a :class:`SweptGradientSolve` at the calibrated count.
+
+        Examples
+        --------
+        >>> from aquaflux.mesh import structured_grid_2d
+        >>> from aquaflux.schemes import CorrectedGreenGauss
+        >>> mesh = structured_grid_2d(4, 4, 1.0, 1.0)
+        >>> scheme = CorrectedGreenGauss.calibrated(mesh, mesh.geometry())
+        >>> scheme.solver.sweeps  # orthogonal: the correction vanishes, one sweep is exact
+        1
+        """
+        return cls(
+            solver=_calibrated_solver(
+                cls.system(cls.terms(mesh, geometry)),
+                tol=tol,
+                iters=iters,
+                floor=floor,
+                cap=cap,
+                seed=seed,
+            )
+        )
 
     @classmethod
     def rhs(
@@ -1010,6 +1404,84 @@ class HessianCorrectedGradient(GradientScheme):
         outer = systems.outer(self.hessian_solver, inner)
         return self.solver.solve(
             outer.preconditioner, outer.operator, systems.gradient_rhs(field, boundary_values)
+        )
+
+    @classmethod
+    def calibrated(
+        cls,
+        mesh: Mesh,
+        geometry: MeshGeometry,
+        *,
+        tol: float = SweepCalibration.tol,
+        iters: int = SweepCalibration.iters,
+        floor: int = SweepCalibration.floor,
+        cap: int = SweepCalibration.cap,
+        seed: int = SweepCalibration.seed,
+        schur: bool = True,
+    ) -> HessianCorrectedGradient:
+        """Build this scheme with **both** sweep counts measured from the mesh rather than assumed.
+
+        The two systems here converge at very different rates and neither is well served by a count
+        chosen in advance, so both are measured: the inner Hessian system first, then the outer
+        system *using that calibrated inner solve*, which is the composition that will actually run.
+        The outer rate is nearly a constant of the scheme rather than of the mesh — its difficulty is
+        the gradient--Hessian coupling **within** a cell, not the mesh's skewness — so the outer count
+        barely moves between a mild mesh and a heavily perturbed one, while the inner count tracks
+        the skewness in the usual way.
+
+        Read the counts this returns against the class defaults with their targets in mind, not
+        side by side: the defaults are sized to preserve exactness for quadratic fields (an error
+        around ``1e-10``), whereas ``tol`` here defaults to ``1e-4``. The two answer different
+        questions, and a calibrated count *below* the default is not evidence the default was wrong.
+        Pass a tighter ``tol`` to calibrate for exactness instead.
+
+        The inner truncation sets an error floor no number of outer sweeps removes, but it reaches
+        the gradient attenuated by three to five orders, so calibrating both at one tolerance leaves
+        margin. That attenuation was measured on two meshes only — check the composition against
+        ``hessian_solver=GmresGradientSolve()`` on an unfamiliar one rather than assuming it.
+
+        As with :meth:`CorrectedGreenGauss.calibrated`, the counts are concrete Python ints, so this
+        must run **outside** any differentiated or traced region, and under domain decomposition it
+        must run on the global mesh before partitioning.
+
+        Parameters
+        ----------
+        mesh : Mesh
+            The mesh to calibrate against; its geometry must be concrete.
+        geometry : MeshGeometry
+            That mesh's face and cell metrics.
+        tol : float, optional
+            Target relative gradient error in the L2 norm over all cells (default ``1e-4``), applied
+            to both systems. See :class:`SweepCalibration`.
+        iters : int, optional
+            Apply budget for each rate estimate (default 24). The outer estimate runs an inner solve
+            inside every apply, so it is the dearer of the two.
+        floor, cap : int, optional
+            Bounds on the returned counts (defaults 1 and 64).
+        seed : int, optional
+            Seed for the estimates' starting vectors (default 0).
+        schur : bool, optional
+            As on the class (default ``True``). When ``False`` there is no inner system and the
+            single calibrated count is for the full packed system.
+
+        Returns
+        -------
+        HessianCorrectedGradient
+            The scheme, carrying :class:`SweptGradientSolve` strategies at the calibrated counts.
+        """
+        settings = {"tol": tol, "iters": iters, "floor": floor, "cap": cap, "seed": seed}
+        systems = cls._systems(mesh, geometry)
+        if not schur:
+            return cls(solver=_calibrated_solver(systems.coupled, **settings), schur=False)
+        # The inner solve runs inside the outer Schur operator, whose transpose an outer Krylov
+        # strategy would form, so its diagnostic is disabled — the same pairing the class default
+        # carries and the reason `gradients` rejects the combination that lacks it.
+        inner = systems.inner()
+        hessian_solver = _calibrated_solver(inner, warn_tol=None, **settings)
+        return cls(
+            solver=_calibrated_solver(systems.outer(hessian_solver, inner), **settings),
+            hessian_solver=hessian_solver,
+            schur=True,
         )
 
     @staticmethod
