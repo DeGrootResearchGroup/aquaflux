@@ -84,12 +84,11 @@ from aquaflux.turbulence import (  # noqa: E402
 #:
 #: **5, and it must not be shortened for this case — the reason is the whole point of the case.**
 #:
-#: A short reach looked safe here and is not. A capped march varying only the reach gave BIT-IDENTICAL
-#: cycles at 2, 3 and 5 while the probe cost scaled steeply (100, 165, 380 residual evaluations per
-#: refresh) -- but that sweep ran the **standard** gradient, whose Jacobian carries *exactly zero* mass
-#: past its own reach. It could not have detected a reach effect on a long-stencil reconstruction, so
-#: reading it as a property of the preconditioner was wrong. Measured on full marches of the Betchen
-#: arm itself:
+#: A short reach looked safe here and is not. ⚠️ An earlier sweep reported bit-identical cycles at
+#: reaches 2, 3 and 5; that sweep is VOID -- `solve_arm` printed its `reach` argument in the banner
+#: while building the probe from the module-level `REACH`, so all three arms probed the same value.
+#: (Fixed; the probe now takes the local `reach`.) The measurements that stand are the ones driven by
+#: `PITZ_AB_REACH`, which sets the global the probe actually read -- full marches of the Betchen arm:
 #:
 #:     probe reach 3   834 cycles / 74 steps   11.27 per step   max 36   1715 s
 #:     probe reach 5   511 cycles / 72 steps    7.10 per step   max 20   1604 s
@@ -107,6 +106,28 @@ REACH = int(os.environ.get("PITZ_AB_REACH", "5"))
 #: on that mesh, those schemes and a SIX-field layout, and the analogous five-field value here is
 #: unmeasured. Uniform costs more probes and is always correct.
 COLUMN_REACH = None
+
+#: Cap the gradient's own sweeps FOR THE PROBE ONLY (``None`` = don't).
+#:
+#: This is the lever that attacks probe cost without lengthening the probe. The reach a probe needs is
+#: set by how far the *residual* reaches, and the gradient's sweeps are what carry it: each sweep
+#: applies the reconstruction operator, which couples a cell to its face neighbours. Narrowing them
+#: genuinely shortens the residual's stencil, so the colouring becomes collision-free and the recovered
+#: matrix is **exact for the narrowed residual** rather than corrupted for the true one -- a stated
+#: approximation instead of far couplings folded onto near entries. Only the preconditioner's
+#: materialize sees the narrowed copy; the Krylov matvec keeps the exact jvp of the full residual, so
+#: the converged state and its adjoint are untouched.
+#:
+#: At 1 the swept solver returns ``P^-1 b`` without ever applying its operator, so the reconstruction
+#: collapses to a one-ring stencil -- for BOTH of the Betchen scheme's systems, which is only reachable
+#: now that its outer solver is a fixed sweep (a Krylov outer cannot be narrowed, and
+#: ``narrow_gradient_sweeps`` would silently return it unchanged).
+#:
+#: ⚠️ The floor is reach 3, not 1: the coupled (u,p) Jacobian is intrinsically distance-2 because
+#: Rhie--Chow damping couples pressure to the neighbour-of-neighbour ring, and no narrowing removes it.
+PROBE_SWEEPS = (
+    int(os.environ["PITZ_AB_PROBE_SWEEPS"]) if os.environ.get("PITZ_AB_PROBE_SWEEPS") else None
+)
 
 #: The leading (flow saddle) inverse, at the 3D case's own measured settings. `sweeps=2` rather than the
 #: 4 that single-state probes prefer: on a march the apply cost dominates enough that buying cheapness
@@ -196,6 +217,7 @@ def solve_arm(gradient_scheme, log_path, *, reach=None, points=None, max_steps=N
         ("gradient scheme", type(gradient_scheme).__name__),
         ("probe stencil reach", reach),
         ("probe column reach", COLUMN_REACH or "uniform"),
+        ("probe gradient sweeps", PROBE_SWEEPS or "full (the scheme's own)"),
         ("leading (flow) inverse", f"simple_smoothed {SIMPLE_FLOW}"),
         ("trailing inverse", f"jacobi_smoothed {JACOBI_TRAILING}"),
         ("host ILU kernel", "compiled" if compare.ILU0_COMPILED else "PURE PYTHON (timings void)"),
@@ -204,7 +226,12 @@ def solve_arm(gradient_scheme, log_path, *, reach=None, points=None, max_steps=N
     ):
         logger.note(f"  {name}: {value}")
 
-    probe = CoupledJacobianProbe.build(coupled, stencil_reach=REACH, column_reach=COLUMN_REACH)
+    # `reach`, not the module-level REACH: a single-arm or sweep run passes it as an argument, and
+    # reading the global here made the banner print a reach the probe was not built at -- which is the
+    # one failure mode that turns a sweep into three identical runs that look like a null result.
+    probe = CoupledJacobianProbe.build(
+        coupled, stencil_reach=reach, column_reach=COLUMN_REACH, gradient_sweeps=PROBE_SWEEPS
+    )
     refresh = amg_beta_tracking_refresh(
         coupled,
         probe=probe,
