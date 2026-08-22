@@ -1483,6 +1483,14 @@ class HessianCorrectedGradient(GradientScheme):
     schur : bool
         If ``True`` (default) eliminate the Hessian block and solve the gradient-only Schur system;
         if ``False`` solve the full packed ``[g, H]`` system directly.
+    local_schur_block : bool
+        Build the outer preconditioner from the Schur complement's own per-cell block rather than
+        from ``A_gg``'s alone. **Default ``True``.** Costs ``dim + dim**2`` extra probes once per
+        reconstruction (~7 % of a reconstruction at the default sweep counts, a fixed prologue whose
+        share falls as they rise) and is better on every mesh measured -- marginally on well-shaped
+        ones, by some four orders on a cell squashed nearly flat. Set ``False`` to recover the
+        historical ``A_gg``-only preconditioner, which is a little cheaper and adequate on a mesh of
+        uniformly good quality.
     """
 
     solver: GradientSolve = eqx.field(default_factory=lambda: SweptGradientSolve(sweeps=20))
@@ -1490,6 +1498,7 @@ class HessianCorrectedGradient(GradientScheme):
         default_factory=lambda: SweptGradientSolve(sweeps=10, warn_tol=None)
     )
     schur: bool = eqx.field(static=True, default=True)
+    local_schur_block: bool = eqx.field(static=True, default=True)
 
     def gradients(
         self,
@@ -1533,7 +1542,7 @@ class HessianCorrectedGradient(GradientScheme):
             )
             return packed[:, : mesh.dim]
         inner = systems.inner()
-        outer = systems.outer(self.hessian_solver, inner)
+        outer = systems.outer(self.hessian_solver, inner, self.local_schur_block)
         return self.solver.solve(
             outer.preconditioner, outer.operator, systems.gradient_rhs(field, boundary_values)
         )
@@ -1550,6 +1559,7 @@ class HessianCorrectedGradient(GradientScheme):
         cap: int = SweepCalibration.cap,
         seed: int = SweepCalibration.seed,
         schur: bool = True,
+        local_schur_block: bool = True,
     ) -> HessianCorrectedGradient:
         """Build this scheme with **both** sweep counts measured from the mesh rather than assumed.
 
@@ -1611,9 +1621,14 @@ class HessianCorrectedGradient(GradientScheme):
         inner = systems.inner()
         hessian_solver = _calibrated_solver(inner, warn_tol=None, **settings)
         return cls(
-            solver=_calibrated_solver(systems.outer(hessian_solver, inner), **settings),
+            solver=_calibrated_solver(
+                systems.outer(hessian_solver, inner, local_schur_block), **settings
+            ),
             hessian_solver=hessian_solver,
             schur=True,
+            # Travels with the count, for the same reason the sweep count and the preconditioner
+            # belong together: it changes which system was measured.
+            local_schur_block=local_schur_block,
         )
 
     @staticmethod
@@ -1839,8 +1854,66 @@ class HessianCorrectedGradient(GradientScheme):
             block = cell_diagonal_block(hh_owner, hh_neighbour, vol, n_cells, dim)
             return GradientSystem(CellBlockJacobi(jnp.linalg.inv(block)), a_hh, (n_cells, dim, dim))
 
-        def outer(hessian_solver, inner_system):
+        def gh_owner(probe_h):
+            side, _ = gradient_face_terms(zero_g, probe_h, zero_g, zero_h, zero_f, zero_b)
+            return -face_cells.scatter(side, no_face_g)
+
+        def gh_neighbour(probe_h):
+            _, side = gradient_face_terms(zero_g, zero_h, zero_g, probe_h, zero_f, zero_b)
+            return -face_cells.scatter(no_face_g, side)
+
+        def hg_owner(probe_g):
+            side, _ = hessian_face_terms(probe_g, zero_h, zero_g, zero_h)
+            return -face_cells.scatter(side, no_face_h)
+
+        def hg_neighbour(probe_g):
+            _, side = hessian_face_terms(zero_g, zero_h, probe_g, zero_h)
+            return -face_cells.scatter(no_face_h, side)
+
+        def local_schur_block(gradient_block, hessian_inverse):
+            """``A_gg``'s block less the elimination term's own, contracted cell by cell.
+
+            **The outer operator is the Schur complement, so its preconditioner should approximate
+            the Schur complement's diagonal block -- not ``A_gg``'s.** The neglected term is
+            ``A_gH A_HH⁻¹ A_Hg``, which on a well-shaped cell is a small perturbation of ``A_gg`` and
+            on a flattened one is not: the cell's volume vanishes while its face couplings do not, so
+            the term it was safe to drop becomes the dominant part of that cell's row.
+
+            Each factor is replaced by its own per-cell block and the three are contracted per cell --
+            the same approximation a pressure Schur usually gets. It is an approximation: the true
+            block also carries paths out to a neighbour and back, which this drops.
+
+            Costs ``dim`` probes for ``A_Hg`` and ``dim**2`` for ``A_gH``. There is no shortcut on the
+            second: the gradient equation contracts BOTH of the Hessian's indices (the face-curvature
+            term, each side's Hessian moment, and the warp moment), so its block is a full rank-three
+            tensor rather than a Kronecker product.
+            """
+
+            def hessian_row_block(unit):  # A_Hg: g_k -> H_ij
+                probe = jnp.broadcast_to(unit, (n_cells, dim))
+                return hg_owner(probe) + hg_neighbour(probe)
+
+            def gradient_row_block(unit):  # A_gH: H_pq -> g_m
+                probe = jnp.broadcast_to(unit, (n_cells, dim, dim))
+                return gh_owner(probe) + gh_neighbour(probe)
+
+            hg = jnp.moveaxis(jax.vmap(hessian_row_block)(jnp.eye(dim)), 0, -1)
+            # Probed one at a time rather than under `vmap`: the two cost the same wall clock here
+            # (248 ms against 247 at 13824 cells) but `vmap` holds all `dim**2` probes' face
+            # intermediates at once, and those are the largest arrays in the scheme. Measured peak
+            # resident memory 1.29 GB sequential against 1.39 GB vmapped, on a 1.10 GB baseline --
+            # a third of the feature's memory cost, for nothing.
+            units = jnp.eye(dim * dim).reshape(dim * dim, dim, dim)
+            gh = jnp.stack([gradient_row_block(u) for u in units], axis=-1)
+            gh = gh.reshape(n_cells, dim, dim, dim)
+            # `g_k -> H_ij` by `hg`, then `A_HH⁻¹` on the Hessian's trailing index (the `I ⊗ C`
+            # structure, exactly as the inner preconditioner applies it), then `H_pq -> g_m` by `gh`.
+            return gradient_block - jnp.einsum("nmil,nlj,nijk->nmk", gh, hessian_inverse, hg)
+
+        def outer(hessian_solver, inner_system, use_local_schur_block=True):
             block = cell_diagonal_block(gg_owner, gg_neighbour, vol, n_cells, dim)
+            if use_local_schur_block:
+                block = local_schur_block(block, inner_system.preconditioner.inverse)
 
             def schur(g):
                 a_gg_g, a_hg_g = gradient_and_hessian_rows(g)

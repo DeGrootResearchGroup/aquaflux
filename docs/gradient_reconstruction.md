@@ -161,6 +161,18 @@ where there is no skewness whatsoever, inverse-volume Richardson on that system 
 spectral radius of `0.5`, while inverting the cell block gives `0`. That is why the scheme
 looked as though it needed a Krylov solve, and why it no longer does.
 
+For the Hessian-corrected scheme there is a second question — *whose* block. After eliminating
+the Hessian, the system being solved is the Schur complement
+`S = A_gg − A_gH A_HH⁻¹ A_Hg`, so a preconditioner built from `A_gg`'s block alone omits the
+elimination term. On a well-shaped cell that term is a small perturbation and omitting it costs
+nothing; on a cell squashed nearly flat the volume vanishes while the face couplings do not, so
+the omitted term becomes the *dominant* part of that cell's row and the sweep stops converging
+there. `local_schur_block` (default `True`) builds the preconditioner from the Schur
+complement's own block instead, which is better on every mesh measured — marginally on
+well-shaped ones, by some four orders on a squashed cell — for roughly 7% of a reconstruction.
+Set it to `False` for the slightly cheaper historical behaviour on a mesh of uniformly good
+quality.
+
 Each scheme supplies a sensible default, so this is not usually something you set — but for
 the corrected Green–Gauss scheme it is worth knowing about, because on a poor-quality mesh the
 default can fail outright.

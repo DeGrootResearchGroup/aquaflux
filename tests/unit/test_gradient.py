@@ -1232,7 +1232,10 @@ def test_the_two_calibrated_factories_expose_one_calibration_surface() -> None:
     # already inverts its exact block on both of its systems and so has no cheaper option to choose
     # between. ⚠️ That reasoning is about today's code: if that scheme ever gains a preconditioner
     # choice of its own, this exemption stops being justified and the keyword belongs on both.
-    scheme_specific = {"mesh", "geometry", "schur", "preconditioner"}
+    # `local_schur_block` is one scheme's property for a different reason, and a structural one:
+    # only the Hessian-corrected scheme eliminates a block, so only it has a Schur complement whose
+    # diagonal its preconditioner can be built from.
+    scheme_specific = {"mesh", "geometry", "schur", "preconditioner", "local_schur_block"}
 
     for factory in (CorrectedGreenGauss.calibrated, HessianCorrectedGradient.calibrated):
         parameters = inspect.signature(factory).parameters
@@ -1418,3 +1421,49 @@ def test_calibration_carries_the_preconditioner_it_measured() -> None:
     mesh = structured_grid_3d(4, 4, 4)
     scheme = CorrectedGreenGauss.calibrated(mesh, mesh.geometry(), preconditioner=ExactCellBlock())
     assert isinstance(scheme.preconditioner, ExactCellBlock)
+
+
+def _hessian_error(mesh, *, local_schur_block: bool):
+    geom = mesh.geometry()
+    grad = HessianCorrectedGradient(local_schur_block=local_schur_block).gradients(
+        _quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid)
+    )
+    exact = _quadratic_3d_grad(geom.cell.centroid)
+    relative = jnp.linalg.norm(grad - exact, axis=-1) / jnp.linalg.norm(exact, axis=-1)
+    return relative, jnp.asarray(geom.cell.volume)
+
+
+def test_the_local_schur_block_rescues_the_sweep_on_a_sliver() -> None:
+    """The outer operator is the Schur complement, so its preconditioner should approximate that.
+
+    Preconditioning with ``A_gg``'s block instead omits the elimination term
+    ``A_gH A_HH⁻¹ A_Hg``. On a well-shaped cell that term is a small perturbation and the omission is
+    harmless; on a flattened one the cell's volume vanishes while its face couplings do not, so the
+    neglected term becomes the dominant part of that row and the sweep stops converging there.
+    Measured at a volume ratio of 1.9e4: the sliver cell goes from 8.1e-01 to 1.4e-05.
+    """
+    error, volume = _hessian_error(_sliver_mesh(1e-4), local_schur_block=False)
+    block_error, _ = _hessian_error(_sliver_mesh(1e-4), local_schur_block=True)
+    sliver = volume < 10 * volume.min()
+    assert float(error[sliver].max()) > 1e-2  # the shipped block really does struggle here
+    assert float(block_error[sliver].max()) < 1e-3  # and the Schur block really does rescue it
+
+
+def test_the_local_schur_block_does_not_regress_a_healthy_mesh() -> None:
+    """It must not cost exactness where the omitted term was harmless — it is slightly better there.
+
+    Pinned because two earlier attempts at this block DID regress clean meshes, both by building
+    something that was not the diagonal block: one summed only the owner-side columns, dropping half
+    of every cell's own diagonal, and one composed the operators rather than the per-cell blocks, so
+    a second scatter reached into neighbouring cells' Hessians. Either way the result was plausible,
+    slightly worse, and easy to mistake for the idea itself failing.
+    """
+    for mesh in (
+        structured_grid_3d(8, 8, 8),
+        columnwise_perturbed_grid_3d(8, 8, 8, perturb=0.3, seed=1),
+        perturbed_grid_3d(8, 8, 8, perturb=0.3, seed=1),
+    ):
+        plain, _ = _hessian_error(mesh, local_schur_block=False)
+        block, _ = _hessian_error(mesh, local_schur_block=True)
+        assert float(jnp.median(block)) < 1e-10
+        assert float(jnp.median(block)) <= 3.0 * float(jnp.median(plain))
