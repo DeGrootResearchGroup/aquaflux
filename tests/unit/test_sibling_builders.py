@@ -74,6 +74,33 @@ def build_two(policy, *, a=0, b=0, c=0, d=0, e=0, f=0, slow=None):
 """
 
 
+#: Two classmethod factories on different classes, each returning ``cls(...)`` over one shared private
+#: tail — the shape a scheme-level factory takes. Nothing here is a call to a capitalized name, so a
+#: check keyed on naming convention alone credits both with constructing nothing and drops them from
+#: the report entirely: not a quiet pair, but no pair at all, which reads identically to a clean tree.
+_CLASSMETHOD_FACTORIES = """
+class Solve:
+    def __init__(self, count, warn=None):
+        pass
+
+
+def _calibrated(system, *, a=0, b=0, c=0, d=0, e=0, warn=None):
+    return Solve(system, warn=warn)
+
+
+class SchemeOne:
+    @classmethod
+    def calibrated(cls, mesh, *, a=0, b=0, c=0, d=0, e=0):
+        return cls(solver=_calibrated(mesh, a=a, b=b, c=c, d=d, e=e))
+
+
+class SchemeTwo:
+    @classmethod
+    def calibrated(cls, mesh, *, a=0, b=0, c=0, d=0, e=0, slow=None):
+        return cls(solver=_calibrated(mesh, a=a, b=b, c=c, d=d, e=e), slow=slow)
+"""
+
+
 def _run(source: str, tmp_path: Path) -> str:
     package = tmp_path / "pkg"
     package.mkdir()
@@ -122,6 +149,19 @@ def test_it_does_not_pair_a_private_tail_with_its_own_callers(tmp_path: Path) ->
     out = _run(_SHARED_TAIL, tmp_path)
     assert "_tail" not in out and "_family_seam" not in out
     assert "1 sibling-builder pair" in out
+
+
+def test_it_reaches_classmethod_factories_that_return_cls(tmp_path: Path) -> None:
+    """A ``@classmethod`` factory building its own class is invisible to a naming convention.
+
+    ``return cls(...)`` names no class, so crediting construction by capitalization alone finds
+    nothing to credit and the factory never enters the report — which looks exactly like a tree with
+    no drift in it. Two schemes calibrating themselves from one shared tail are one configuration
+    surface written twice, and the report has to say so: here ``slow`` sits on one side only.
+    """
+    out = _run(_CLASSMETHOD_FACTORIES, tmp_path)
+    assert "SchemeOne.calibrated" in out and "SchemeTwo.calibrated" in out
+    assert "'slow'" in out, "the drifted keyword is the actionable half of the report"
 
 
 @pytest.mark.skipif(not TOOL.exists(), reason="the tool is part of the repository, not the package")
