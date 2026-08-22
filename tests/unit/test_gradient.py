@@ -43,7 +43,11 @@ from aquaflux.schemes import (
 from aquaflux.schemes import gradient as gradient_module
 from aquaflux.vectors import dot, scale
 
-from tests.support.meshes import columnwise_perturbed_grid_3d, perturbed_grid_2d
+from tests.support.meshes import (
+    columnwise_perturbed_grid_3d,
+    perturbed_grid_2d,
+    perturbed_grid_3d,
+)
 
 # --- analytic fields: (value, gradient) ------------------------------------------------
 
@@ -1197,3 +1201,85 @@ def test_the_two_calibrated_factories_expose_one_calibration_surface() -> None:
         parameters = inspect.signature(factory).parameters
         offered = {name: p.default for name, p in parameters.items() if name not in scheme_specific}
         assert offered == expected, f"{factory.__qualname__} does not carry the calibration surface"
+
+
+def _quadratic_3d(x):
+    return (
+        0.7
+        + 1.3 * x[..., 0]
+        - 0.9 * x[..., 1]
+        + 0.8 * x[..., 2]
+        + 0.5 * x[..., 0] ** 2
+        + 0.4 * x[..., 0] * x[..., 1]
+        - 0.3 * x[..., 1] * x[..., 2]
+    )
+
+
+def _quadratic_3d_grad(x):
+    return jnp.stack(
+        [
+            1.3 + 1.0 * x[..., 0] + 0.4 * x[..., 1],
+            -0.9 + 0.4 * x[..., 0] - 0.3 * x[..., 2],
+            0.8 - 0.3 * x[..., 1],
+        ],
+        axis=1,
+    )
+
+
+def _median_gradient_error(mesh) -> float:
+    """Median per-cell relative gradient error for the Hessian-corrected scheme on a quadratic."""
+    geom = mesh.geometry()
+    grad = HessianCorrectedGradient(
+        solver=GmresGradientSolve(),
+        hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
+    ).gradients(_quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid))
+    exact = _quadratic_3d_grad(geom.cell.centroid)
+    relative = jnp.linalg.norm(grad - exact, axis=-1) / jnp.linalg.norm(exact, axis=-1)
+    return float(jnp.median(relative))
+
+
+def test_hessian_corrected_reconstructs_a_quadratic_on_WARPED_faces() -> None:
+    """The scheme stays exact when the faces are non-planar — the reason it carries a warp term.
+
+    A fully perturbed hex grid warps its quad faces, which breaks the constant-face-normal assumption
+    the second-order Green–Gauss derivation rests on. Without the face's warp moment the
+    reconstruction of a quadratic degrades to ~4e-02 here — no better than the corrected Green–Gauss
+    scheme this one exists to improve on, so the whole cost of solving for a Hessian buys nothing.
+
+    The threshold is a machine-precision one deliberately: with the moment carried in BOTH equations
+    the scheme is exact for a quadratic on a warped mesh exactly as it is on a planar one, so this
+    asserts the defining property rather than a tolerance someone chose.
+    """
+    assert _median_gradient_error(perturbed_grid_3d(8, 8, 8, perturb=0.3, seed=1)) < 1e-10
+
+
+def test_hessian_corrected_is_unaffected_on_PLANAR_faces() -> None:
+    """The warp term is identically zero on planar faces, so this path must stay near-exact.
+
+    Paired with the warped case above deliberately: it is what says the correction is a correction
+    and not a tuning, since a mesh with nothing to correct must be untouched by it.
+    """
+    assert (
+        _median_gradient_error(columnwise_perturbed_grid_3d(8, 8, 8, perturb=0.3, seed=1)) < 1e-10
+    )
+
+
+def test_hessian_corrected_survives_a_sliver_cell_without_going_non_finite() -> None:
+    """A near-degenerate cell degrades accuracy but must not produce NaN or inf.
+
+    An automatic mesher produces slivers, and the per-cell blocks are inverted with an unguarded
+    ``jnp.linalg.inv`` — a single non-finite row would poison the whole Krylov solve rather than the
+    one bad cell, since the reconstruction is a global solve. Measured up to a volume ratio of 3.6e8,
+    the error plateaus instead of diverging and no entry goes non-finite.
+    """
+    base = perturbed_grid_3d(8, 8, 8, perturb=0.2, seed=5)
+    coords = np.asarray(base.node_coords).copy()
+    band = (coords[:, 2] > 0.375) & (coords[:, 2] < 0.5 + 1e-9)
+    coords[band, 2] = 0.375 + (coords[band, 2] - 0.375) * 1e-6
+    mesh = eqx.tree_at(lambda m: m.node_coords, base, jnp.asarray(coords))
+    geom = mesh.geometry()
+    grad = HessianCorrectedGradient(
+        solver=GmresGradientSolve(),
+        hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
+    ).gradients(_quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid))
+    assert bool(jnp.all(jnp.isfinite(grad)))

@@ -157,6 +157,42 @@ class FaceGeometryScheme(eqx.Module):
             The face→node gather/reduce operators (perimeter traversal).
         """
 
+    @abc.abstractmethod
+    def warp_first_moment(
+        self,
+        node_coords: jnp.ndarray,
+        face_nodes: FaceNodeConnectivity,
+        centroid: jnp.ndarray,
+        normal: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Return ``P_jk = integral over the face of (x - x_ip)_j n_k dS``, shape ``(n_faces, dim, dim)``.
+
+        **This is identically zero for a planar face, and it is the exact measure of how much a
+        warped one departs from one.** A planar face has a constant normal and its centroid
+        satisfies ``integral (x - x_ip) dS = 0``, so the two factorize and vanish; on a warped face
+        the normal varies over the surface and the integral does not.
+
+        It exists because a second-order Green--Gauss reconstruction silently assumes this quantity
+        is zero: the standard derivation replaces ``integral x (x) n dS`` with ``x_ip (x) S``, which
+        is the same assumption. Schemes that carry a Hessian need the true value, since the term it
+        multiplies is exactly the curvature correction they exist to apply.
+
+        Parameters
+        ----------
+        node_coords : jnp.ndarray
+            Node coordinates, shape ``(n_nodes, dim)``.
+        face_nodes : FaceNodeConnectivity
+            The face->node gather/reduce operators (perimeter traversal).
+        centroid : jnp.ndarray
+            Face centroids, shape ``(n_faces, dim)`` -- the point the moment is taken about, and
+            the same centroid the face's own geometry was built with.
+        normal : jnp.ndarray
+            The face's **oriented** unit normal, shape ``(n_faces, dim)``. Required because the
+            moment carries the normal's sign, and the triangulation's own winding is not the
+            orientation a caller uses: the result must point the same way as the stored normal, or
+            it is negated on every face whose nodes happen to wind the other way.
+        """
+
     def orient_owner_outward(
         self,
         node_order_normals: jnp.ndarray,
@@ -193,6 +229,21 @@ class EdgeFaceGeometry(FaceGeometryScheme):
         normal = _safe_unit(jnp.stack([d[:, 1], -d[:, 0]], axis=1))
         return area, centroid, normal
 
+    def warp_first_moment(
+        self,
+        node_coords: jnp.ndarray,
+        face_nodes: FaceNodeConnectivity,
+        centroid: jnp.ndarray,
+        normal: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Exactly zero: a 2D face is a straight segment, which cannot be warped.
+
+        Returned as a real array of the right shape rather than as a special case for the caller to
+        branch on, so a scheme applies the same formula in both dimensions and pays only a multiply
+        by zero in 2D (which the compiler folds away against a constant).
+        """
+        return jnp.zeros((face_nodes.n_faces, centroid.shape[-1], centroid.shape[-1]))
+
 
 class PolygonFaceGeometry(FaceGeometryScheme):
     """3D strategy: an arbitrary polygon face, decomposed by a centre fan.
@@ -208,6 +259,35 @@ class PolygonFaceGeometry(FaceGeometryScheme):
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         area, centroid, normal, _ = self.centre_fan(node_coords, face_nodes)
         return area, centroid, normal
+
+    def warp_first_moment(
+        self,
+        node_coords: jnp.ndarray,
+        face_nodes: FaceNodeConnectivity,
+        centroid: jnp.ndarray,
+        normal: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Sum ``(g_t - x_ip) (x) S_t`` over the centre-fan triangles -- exact, with no quadrature.
+
+        The integrand is *linear* in ``x`` over each triangle, and a triangle is planar with a
+        constant normal, so ``integral over t of (x - x_ip) n dS`` is exactly
+        ``(g_t - x_ip) (x) S_t`` for its centroid ``g_t`` and vector area ``S_t``. No quadrature
+        rule is involved and none is approximated: the fan reproduces the polygon exactly, so the
+        sum is the true surface integral over the warped face.
+        """
+        pb = face_nodes.gather_node_coords(node_coords)
+        pc = face_nodes.perimeter_next(pb)
+        apex = face_nodes.vertex_mean(node_coords)[face_nodes.face_of_incidence]
+        directed = 0.5 * jnp.cross(pb - apex, pc - apex, axis=-1)  # S_t = A_t * n_t
+        offset = (apex + pb + pc) / 3.0 - centroid[face_nodes.face_of_incidence]
+        moment = face_nodes.reduce_to_faces(offset[:, :, None] * directed[:, None, :])
+        # ⚠️ ORIENTED TO MATCH THE SUPPLIED NORMAL. The fan's triangle normals follow the node
+        # winding, which is the "unoriented" convention `orient_owner_outward` exists to fix; a
+        # moment left in that convention is sign-flipped on every face whose nodes wind away from
+        # the caller's normal, which is roughly half of them on a real mesh.
+        winding = face_nodes.reduce_to_faces(directed)
+        sign = jnp.where(jnp.sum(winding * normal, axis=-1) < 0.0, -1.0, 1.0)
+        return moment * sign[:, None, None]
 
     def centre_fan(
         self,

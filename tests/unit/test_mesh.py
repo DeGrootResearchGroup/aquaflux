@@ -855,3 +855,75 @@ def test_interface_mask_between_is_orientation_symmetric() -> None:
     reverse = mesh.cell_zones.interface_mask_between(mesh.face_cells, "solid", "fluid")
     assert bool(jnp.all(forward == reverse))
     assert int(jnp.sum(forward)) == 1
+
+
+def _quad_warp_moment(coords, order, normal=None):
+    """The warp first moment of a single polygon face, with its own centroid and normal."""
+    offsets = jnp.array([0, len(order)])
+    indices = jnp.array(order)
+    face_nodes = FaceNodeConnectivity.from_csr(offsets, indices)
+    scheme = PolygonFaceGeometry()
+    _, centroid, node_order_normal = scheme.unoriented_geometry(coords, face_nodes)
+    if normal is None:
+        normal = node_order_normal
+    return scheme.warp_first_moment(coords, face_nodes, centroid, normal)
+
+
+def test_warp_first_moment_vanishes_on_a_planar_face() -> None:
+    """The moment IS the departure from planarity, so a flat face must give exactly zero.
+
+    This is what lets the correction it feeds be added unconditionally: on a planar mesh it
+    contributes nothing, so no scheme that uses it changes behaviour there.
+    """
+    planar = jnp.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]])
+    assert jnp.allclose(_quad_warp_moment(planar, [0, 1, 2, 3]), 0.0, atol=1e-14)
+
+
+def test_warp_first_moment_is_nonzero_on_a_warped_face() -> None:
+    """...and a genuinely warped face must give something, or the test above is vacuous."""
+    moment = _quad_warp_moment(_WARPED_QUAD, [0, 1, 2, 3])
+    assert float(jnp.abs(moment).max()) > 1e-3
+
+
+def test_warp_first_moment_follows_the_supplied_normal() -> None:
+    """Reversing the normal reverses the moment — it carries the normal's sign, not the winding's.
+
+    The regression this pins: the fan's triangle normals follow the node winding, which is the
+    *unoriented* convention, while a consumer adds this moment to owner-outward quantities. Left
+    unoriented it is negated on every face whose nodes happen to wind the other way — about half of
+    a real mesh — and the resulting correction then makes the answer slightly worse rather than
+    obviously wrong, which is far harder to notice.
+    """
+    _, _, normal = _quad_face_geometry(_WARPED_QUAD, [0, 1, 2, 3])
+    forward = _quad_warp_moment(_WARPED_QUAD, [0, 1, 2, 3], normal=normal)
+    reversed_ = _quad_warp_moment(_WARPED_QUAD, [0, 1, 2, 3], normal=-normal)
+    assert jnp.allclose(forward, -reversed_)
+    assert not jnp.allclose(forward, reversed_)  # or the flip is being ignored
+
+
+def test_warp_first_moment_matches_an_independent_triangulation() -> None:
+    """Against a hand-summed fan, built here rather than reusing the implementation's own path."""
+    coords = _WARPED_QUAD
+    order = [0, 1, 2, 3]
+    _, centroid, normal = _quad_face_geometry(coords, order)
+    apex = coords.mean(axis=0)
+    expected = jnp.zeros((3, 3))
+    for i in range(len(order)):
+        pb, pc = coords[order[i]], coords[order[(i + 1) % len(order)]]
+        directed = 0.5 * jnp.cross(pb - apex, pc - apex)
+        offset = (apex + pb + pc) / 3.0 - centroid[0]
+        expected = expected + offset[:, None] * directed[None, :]
+    # The hand-sum needs no reorientation: it is built from the same winding, and the normal handed
+    # to the implementation is that winding's own normal, so the two agree without a flip.
+    assert jnp.allclose(_quad_warp_moment(coords, order, normal=normal)[0], expected)
+
+
+def test_warp_first_moment_is_structurally_zero_in_2d() -> None:
+    """A 2D face is a straight segment, so it cannot be warped and the moment is zero by shape."""
+    mesh = _two_unit_squares()
+    geom = mesh.geometry()
+    moment = face_geometry_scheme(mesh.dim).warp_first_moment(
+        mesh.node_coords, mesh.face_nodes, geom.face.centroid, geom.face.normal
+    )
+    assert moment.shape == (mesh.n_faces, 2, 2)
+    assert jnp.allclose(moment, 0.0)

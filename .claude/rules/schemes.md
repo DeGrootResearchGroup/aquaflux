@@ -106,12 +106,88 @@ log from a skew-free mesh, it was never evidence of non-orthogonality.**
   so the flow's inner block is gradient-sized). **Dimension-general (2D + 3D)**: the gradient's
   Hessian term uses Betchen & Straatman's Eq. (7) form — `−½ H:(x_ip−x_P)⊗(x_ip−x_P)` per face, from
   each cell's centroid-to-face vector (`_hessian_moment`) — so **no explicit face second-moment
-  tensor** is needed; exact for quadratics on any **planar-faced** mesh. (An earlier 2D-only build
-  evaluated it with an explicit edge second moment `(L³/12)(I−n̂n̂)` — the home-grown detour that
-  caused the 2D limit; retired after checking the paper.) A warped-face grid (e.g. a fully-perturbed
-  hex, whose quad faces bend) breaks Green–Gauss exactness for *every* scheme, so the 3D skew test
-  skews a hex grid **in-plane** (`tests/support/meshes.py::columnwise_perturbed_grid_3d`, planar
-  faces): exact-for-quadratic vs `CorrectedGreenGauss`'s ~0.08 error.
+  tensor** is needed. (An earlier 2D-only build evaluated it with an explicit edge second moment
+  `(L³/12)(I−n̂n̂)` — the home-grown detour that caused the 2D limit; retired after checking the paper.)
+  The 3D skew test skews a hex grid **in-plane** (`tests/support/meshes.py::columnwise_perturbed_grid_3d`,
+  planar faces): exact-for-quadratic vs `CorrectedGreenGauss`'s ~0.08 error.
+
+  **⚠️ NON-PLANAR FACES: the derivation drops a term, and restoring it is worth ~1000× on a real
+  automatically-generated mesh (measured 2026-08-21).** Betchen's Eq. (2)→(3) drops the face integral
+  of the linear term by "noting that the planar faces of a polyhedral volume possess a constant
+  normal", i.e. by taking `∫_face (x−x_ip) n̂ dS = 0`. On a warped face that integral is **not** zero,
+  and it is first order in the warp — where the Hessian correction the scheme exists to apply is
+  second. `FaceGeometryScheme.warp_first_moment` computes it exactly from the centre-fan triangles
+  (each planar, so `(g_t−x_ip) ⊗ S_t` per triangle is the exact integral — no quadrature), and the
+  gradient face kernel carries two terms from it: `+∇φ·P` (first order, dominant) and
+  `−½Pᵀ(Hd+Hᵀd)` (second order, from correcting Eq. (5)'s companion assumption).
+  Measured on a quadratic, median per-cell relative gradient error:
+
+  | mesh | planarity | Betchen before | Betchen after | `CorrectedGreenGauss` |
+  |---|---|---|---|---|
+  | orthogonal | 1.0000 | 8.37e-16 | 8.38e-16 | 9.40e-16 |
+  | planar-skew, perturb 0.3 | 1.0000 | 5.91e-13 | 5.91e-13 | 4.65e-03 |
+  | warped, perturb 0.3 | 0.8875 | 4.07e-02 | **8.61e-15** | 3.70e-02 |
+  | warped, perturb 0.4 | 0.6773 | 6.15e-02 | **4.12e-13** | 5.55e-02 |
+  | UV reactor, 1.6M cells | 0.8770 | 1.723e-04 | **1.093e-07** | 1.634e-04 |
+
+  Planar meshes are **bit-identical** (`P ≡ 0` there), so this is a correction and not a tuning.
+  Before it, Betchen was *worse than the scheme it replaces* on a warped mesh — 300× the cost for no
+  gain — which is the state a 1.6M-cell snappyHexMesh reactor was actually in.
+
+  **⚠️ AND THE FIXTURE CHOICE IS WHY THIS HID FOR SO LONG — the entry here used to say a warped grid
+  "breaks Green–Gauss exactness for *every* scheme", and used that to justify testing only in-plane
+  skew.** The premise is true of the *uncorrected* derivation and false of the scheme once the moment
+  is restored, so a statement about a defect was read as a law of nature and became the reason never
+  to test the case that would have exposed it. `perturbed_grid_3d` (which warps its quad faces) is
+  now tested directly, and the test is verified to FAIL without the correction (4.07e-02 against a
+  1e-3 threshold) — a regression test nobody has watched fail is not known to test anything.
+
+  **⚠️ THE MOMENT MUST BE ORIENTED TO THE CALLER'S NORMAL, and getting that wrong looks like the term
+  not mattering.** The centre fan's triangle normals follow the node winding — the *unoriented*
+  convention `orient_owner_outward` exists to fix — so an unoriented moment is sign-flipped on roughly
+  half a real mesh's faces. It does not blow up; it makes the answer slightly *worse* (4.07e-02 →
+  4.53e-02), which reads exactly like "this term is not the problem" and nearly closed the
+  investigation. A magnitude-only check cannot see it: `P` validated perfectly as a warp detector
+  (machine-zero planar, 2.2e-02 warped) while carrying the wrong sign. Pinned by
+  `test_warp_first_moment_follows_the_supplied_normal`.
+
+  **BOTH EQUATIONS NEED IT, and the `Q` second moment does NOT.** Three terms were candidates and only
+  two were real:
+  - **The gradient equation's `+∇φ·P`** — first order in the warp, and the dominant one.
+  - **The Hessian equation's `+H·P`** — it is *itself* a Green–Gauss sum (of the gradient), so it
+    inherits the identical assumption. Worth ~2× on the fixtures and **28× in the max on the reactor
+    mesh** (1.751e+00 → 6.245e-02): the pathological tail was largely this, not solver convergence.
+  - **The `Q` second moment needs no correction at all.** Betchen's Eq. (5)–(6) rewriting of it rests
+    on `Σ_f ∫ x_i x_j n̂_k dS = 0` in cell-centroid coordinates, which is the divergence theorem over
+    the cell and holds for *any* polyhedron. Verified numerically alongside cell closure: both hold to
+    ~1e-15 at planarity 0.83, so the identity is exact on a warped mesh and only the `d_i P_jk` term it
+    generates has to be carried.
+
+  **⚠️ AND THE WARP TERM'S GRADIENT MUST BE THE ONE AT THE FACE CENTROID.** Contracting `P` against the
+  raw interpolated blend instead of the skewness-carried value — and skipping the boundary branch —
+  leaves the reconstruction at 9.3e-05 rather than 8.6e-15. That is *visibly better* than the 4.1e-02
+  it started from, and entirely plausible as "the residual error the method has on a warped mesh", so
+  it is a comfortable place to stop and write up a wrong limit. Both equations now take the value from
+  one `_face_gradient` rather than two spellings of it.
+
+  **Robustness on degenerate cells (measured 2026-08-22).** Squashing a node band to volume ratios up
+  to 3.6e+08 produces **no NaN and no inf**, and the error plateaus rather than diverging — but a
+  single sliver costs the scheme its exactness *globally*, taking far-field cells from 8.61e-15 to
+  9.60e-04. Read that beside the alternatives before treating it as a defect: on the same mesh
+  `CorrectedGreenGauss` gives 2.98e+12 on the sliver itself against this scheme's 2.96e+01, and its
+  far-field median is 2.51e-02 against 9.60e-04. This scheme is the most robust of the three by a wide
+  margin; what it loses is the exactness the others never had. Two guards are nonetheless absent and
+  worth knowing: `jnp.linalg.inv` on the per-cell blocks has no singularity check, and
+  `interpolation_factor` guards `d → 0` on boundary faces only.
+
+  **Boundary treatment: audited and correct.** Boundary cells reconstruct as exactly as interior ones
+  (1.95e-15 vs 2.26e-15 median on a warped mesh). `f = 0` there, `skew` collapses to `d_own`, and the
+  unconditionally-computed neighbour side is discarded *structurally* by `scatter` — its index points
+  one row past the last cell and is sliced off — rather than by a mask. ⚠️ Betchen's own boundary
+  caveat (his Eq. 29, an inverse-distance-averaged Hessian over interior neighbours) is **not**
+  implemented; we use the simpler Eq. (28) form. He raises it for a 3D mesh one cell thick, which the
+  empty-patch collapse turns into a genuine 2D mesh here, so it likely cannot arise — but that has not
+  been proven.
   **Validated inside the solve** (`tests/integration/test_betchen_solve.py`): injected as the
   residual's gradient scheme it nests correctly (the outer Newton `jvp` differentiates through
   Betchen's Schur solve *and* its inner `A_HH` solve), converges in one Newton

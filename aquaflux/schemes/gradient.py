@@ -32,6 +32,7 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
+from aquaflux.mesh.face import face_geometry_scheme
 from aquaflux.vectors import dot, scale
 
 from .interpolation import (
@@ -512,6 +513,11 @@ class SweptGradientSolve(GradientSolve):
     ----------
     sweeps : int
         Number of preconditioned-Richardson sweeps (static).
+    relaxation : float
+        Damping on each sweep's correction, in ``(0, 1]``. ``1.0`` (the default) is the undamped
+        iteration; smaller values trade sweeps for robustness and are required for convergence on a
+        sufficiently skewed mesh. A differentiable leaf, not a static field, so it can be swept or
+        fitted without retracing.
     warn_tol : float or None
         Emit a one-time warning if the relative gradient residual after ``sweeps`` exceeds this
         (default ``5e-2``, i.e. the sweep is clearly stalling — the converged field stays accurate
@@ -522,6 +528,7 @@ class SweptGradientSolve(GradientSolve):
 
     sweeps: int = eqx.field(static=True, default=4)
     warn_tol: float | None = eqx.field(static=True, default=_DEFAULT_WARN_TOL)
+    relaxation: float = 1.0
 
     @property
     def emits_host_diagnostics(self) -> bool:
@@ -549,11 +556,16 @@ class SweptGradientSolve(GradientSolve):
         # Nothing downstream removes it: the compiler folds the gathers against the zero constant but
         # not the scatters, so it costs a whole operator apply out of `sweeps` on every reconstruction,
         # and this one runs inside every residual evaluation and every Jacobian--vector product.
+        # UNDER-RELAXATION IS NOT OPTIONAL ON A SUFFICIENTLY SKEWED MESH. Betchen and Straatman solve
+        # this reconstruction by under-relaxed block-Jacobi and state that on an arbitrary grid a
+        # relaxation strictly inside (0, 1] is required for convergence at all; their experiments run
+        # it at 0.8. Undamped (`relaxation=1`) is the special case, safe only where the iteration's
+        # error operator is already a contraction.
         residual = rhs
-        x = preconditioner.apply(rhs)
+        x = self.relaxation * preconditioner.apply(rhs)
         for _ in range(self.sweeps - 1):
             residual = rhs - op(x)
-            x = x + preconditioner.apply(residual)
+            x = x + self.relaxation * preconditioner.apply(residual)
         # The convergence diagnostic norms the residual over the whole local vector. Under domain
         # decomposition that vector holds each partition's ghost/null rows too, so a faithful global
         # norm would need an owned-only cross-partition reduction the operator-wrapping seam does not
@@ -1519,6 +1531,44 @@ class HessianCorrectedGradient(GradientScheme):
             s[:, :, None] * s[:, None, :]
         )
 
+        # ⚠️ THE FACE'S WARP MOMENT -- zero on a planar face, and the term a second-order
+        # Green–Gauss reconstruction silently drops on one that is not. The derivation replaces the
+        # face integral of `x (x) n` with `x_ip (x) S`, which holds only when the normal is constant
+        # over the face; the residue is exactly this moment. Geometry only, so formed once here.
+        #
+        # It matters far more than "1% of faces are warped" suggests, because the term it corrects is
+        # the curvature correction itself -- the whole reason to run this scheme rather than a
+        # corrected Green–Gauss one. Measured on a warped grid at planarity 0.89, dropping it costs
+        # the reconstruction of a quadratic ~13 orders (8.6e-15 -> 4.1e-02), the entire advantage.
+        warp = face_geometry_scheme(dim).warp_first_moment(
+            mesh.node_coords, mesh.face_nodes, x_ip, nhat
+        )
+
+        def _warp_moment(h, d):
+            # ½ Pᵀ(H d + Hᵀ d) — the Hessian contracted against the face's warp moment. Both `H d`
+            # and `Hᵀ d` appear because the moment enters the cell sum contracted on each of the
+            # Hessian's indices in turn, and this Hessian is not symmetrized (the reconstruction
+            # solves all `dim²` components), so the two differ.
+            hd = jnp.einsum("fij,fj->fi", h, d) + jnp.einsum("fji,fj->fi", h, d)
+            return 0.5 * jnp.einsum("fjk,fj->fk", warp, hd)
+
+        def _face_gradient(g_own, h_own, g_nb, h_nb):
+            """The gradient AT THE FACE CENTROID -- interpolated, then carried across the skewness.
+
+            Exact for a linear gradient field (so, for a quadratic ``phi``): the blend lands on the
+            point ``x_own + f s`` and the Hessian term carries it the remaining ``skew`` to ``x_ip``.
+            Boundary faces have no neighbour to blend with and extrapolate from the owner instead.
+
+            Both equations need this same quantity -- the Hessian equation sums it over faces, and
+            the gradient equation's warp term contracts it against the face's warp moment -- so it is
+            defined once here rather than written out in each.
+            """
+            g_face = blend_owner_neighbour(g_own, g_nb, f, face_cells)
+            h_face = blend_owner_neighbour(h_own, h_nb, f, face_cells)
+            interior = g_face + jnp.einsum("fij,fj->fi", h_face, skew)
+            boundary = g_own[owner] + jnp.einsum("fij,fj->fi", h_own[owner], d_own)
+            return face_cells.combine_face_values(interior, boundary)
+
         def _hessian_moment(h, d):
             # ½ dᵀ H d — the Hessian's correction to the mean of φ over the face, so the Green–Gauss
             # face integral is exact for a quadratic. Written from each cell's centroid-to-face
@@ -1546,10 +1596,25 @@ class HessianCorrectedGradient(GradientScheme):
                 + 0.5 * jnp.sum(curvature * h_face, axis=(1, 2))
             )
             phi_ip = face_cells.combine_face_values(phi_int, bvals)
-            return (
-                scale(area_vector, phi_ip - _hessian_moment(h_o, d_own)),
-                -scale(area_vector, phi_ip - _hessian_moment(h_n, d_nb)),
+            # ⚠️ THE FIRST-ORDER WARP TERM, much the larger of the two. The face integral of `phi n`
+            # expands about the face centroid as `phi_ip S + grad(phi).P + ½ H:Q`, and the middle
+            # term is dropped by any derivation assuming a planar face, since `P` vanishes there. Its
+            # `grad(phi)` is the value AT the face centroid -- the skewness-carried one, and on a
+            # boundary face the owner extrapolation -- not the raw blend.
+            warp_gradient = jnp.einsum("fjk,fj->fk", warp, _face_gradient(g_own, h_own, g_nb, h_nb))
+            owner_side = (
+                scale(area_vector, phi_ip - _hessian_moment(h_o, d_own))
+                + warp_gradient
+                - _warp_moment(h_o, d_own)
             )
+            neighbour_side = (
+                scale(area_vector, phi_ip - _hessian_moment(h_n, d_nb))
+                + warp_gradient
+                - _warp_moment(h_n, d_nb)
+            )
+            # The neighbour's outward normal is the opposite one, which flips the vector area and the
+            # warp moment together — so the whole contribution flips, not just the area term.
+            return owner_side, -neighbour_side
 
         def hessian_face_terms(g_own, h_own, g_nb, h_nb):
             """Owner- and neighbour-side face contributions to the Hessian equation.
@@ -1560,12 +1625,18 @@ class HessianCorrectedGradient(GradientScheme):
             field at all, which is why its right-hand side is identically zero and the eliminated
             system's is ``b_g`` unreduced.
             """
-            g_face = blend_owner_neighbour(g_own, g_nb, f, face_cells)
             h_face = blend_owner_neighbour(h_own, h_nb, f, face_cells)
-            gi_int = g_face + jnp.einsum("fij,fj->fi", h_face, skew)
-            gi_bnd = g_own[owner] + jnp.einsum("fij,fj->fi", h_own[owner], d_own)
-            gi = face_cells.combine_face_values(gi_int, gi_bnd)
-            contribution = gi[:, :, None] * area_vector[:, None, :]
+            gi = _face_gradient(g_own, h_own, g_nb, h_nb)
+            # ⚠️ THE SAME WARP TERM THE GRADIENT EQUATION NEEDS, for the same reason: this equation is
+            # itself a Green–Gauss sum -- of the gradient rather than the field -- so it inherits the
+            # planar-face assumption identically. The exact face integral is
+            # `grad(phi)(x_ip) (x) S + H.P`. Correcting only the gradient equation leaves the Hessian
+            # first-order-wrong on a warped face, and the gradient equation then applies an accurate
+            # correction built from an inaccurate Hessian.
+            h_at_face = face_cells.combine_face_values(h_face, h_own[owner])
+            contribution = gi[:, :, None] * area_vector[:, None, :] + jnp.einsum(
+                "fij,fjk->fik", h_at_face, warp
+            )
             return contribution, -contribution
 
         zero_g = jnp.zeros((n_cells, dim))
