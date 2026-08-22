@@ -256,6 +256,57 @@ property worth checking on any future change here; a drift that grew with depth 
   ⚠️ Flooring `1/V` is **not** an adequate substitute: it converts an unbounded divergence into a
   bounded 3.7e+07, six orders worse than the block.
 
+  **⚠️ THE OUTER PRECONDITIONER IS BUILT FROM THE WRONG BLOCK BY DEFAULT, and `local_schur_block`
+  is the fix (2026-08-22).** The outer operator is the Schur complement
+  `S = A_gg − A_gH A_HH⁻¹ A_Hg`, but the preconditioner takes `A_gg`'s per-cell diagonal block and
+  ignores the elimination term entirely. On a well-shaped cell that term is a ~9 % perturbation and
+  dropping it is harmless; on a flattened one the volume vanishes while the face couplings do not, so
+  the neglected term becomes the **dominant** part of that cell's row and the sweep stops converging
+  there. `local_schur_block=True` replaces each factor by its own per-cell block and contracts the
+  three cell by cell — the approximation a pressure Schur usually gets.
+
+  | mesh | `A_gg` block (default) | local Schur block |
+  |---|---|---|
+  | orthogonal | 8.230e-16 | 8.321e-16 |
+  | planar-skew, perturb 0.3 | 1.344e-14 | **4.468e-15** |
+  | warped, perturb 0.3 | 1.051e-14 | **9.123e-15** |
+  | sliver 1.9e4 — cell / far | 8.05e-01 / 2.72e-07 | **1.42e-05 / 9.76e-11** |
+  | sliver 1.9e6 — cell / far | 1.09e+00 / 4.94e-07 | **1.55e-02 / 1.40e-08** |
+
+  Better on **every** mesh measured — slightly on clean ones, 57000× on a sliver cell — for **~7 %
+  forward time and ~17 % peak memory** (`dim` probes for `A_Hg` plus `dim²` for `A_gH`, a fixed
+  prologue against ~220 applies at the shipped 20/10). Adjoint agrees with a finite difference to
+  2.1e-09. **DEFAULT ON since 2026-08-22**: this scheme is chosen precisely for meshes a
+  corrected Green-Gauss cannot handle, so its default preconditioner should be the one that survives
+  them; `local_schur_block=False` recovers the historical `A_gg`-only block.
+
+  - **`A_gH` genuinely needs `dim²` probes** — no Kronecker shortcut. The gradient equation contracts
+    **both** of the Hessian's indices (face curvature, each side's Hessian moment, the warp moment),
+    so its block is a full rank-three tensor. `A_HH`'s is `I ⊗ C` and needs one.
+  - **Probe sequentially, not under `vmap`.** Same wall clock (248 ms against 247 at 13824 cells), but
+    `vmap` holds all `dim²` probes' face intermediates at once and those are the largest arrays in the
+    scheme: peak 1.29 GB sequential against 1.39 GB vmapped, on a 1.10 GB baseline — a third of the
+    feature's memory cost, for nothing.
+
+  **⚠️⚠️ TWO WRONG BUILDS OF THIS BLOCK BOTH LOOKED LIKE THE IDEA FAILING, and that is the lesson.**
+  Both produced a plausible answer that was *slightly worse* on clean meshes — which reads as "this
+  term does not matter" rather than as a bug, and closed the investigation twice:
+  1. **Owner-side columns only.** `cell_diagonal_block` sums an owner-side *and* a neighbour-side
+     column, because a cell contributes through faces it owns and faces it neighbours. Taking only
+     the owner half drops roughly half of every cell's own diagonal — on every cell, not just bad
+     ones, which is exactly why clean meshes regressed (8.2e-16 → 3.5e-12).
+  2. **Composing the OPERATORS rather than the BLOCKS.** `gh_owner(C⁻¹(hg_owner(e_j)))` applies two
+     scatters, so the second reads *neighbouring* cells' Hessians: the result is not a diagonal block
+     at all but a block plus a ring of off-diagonal coupling. Extract the three blocks independently
+     and contract them per cell.
+
+  **The check that settles it is preconditioner-independent**: light one cell's degree of freedom,
+  apply the outer operator, and read back that cell's own row — no neighbour can contribute, so it is
+  the true `S` block whatever preconditioner is in force. Relative error of the extracted block
+  against it, at a sliver: `A_gg` 1.06 → 8.23 as the cell flattens, local Schur a flat ~1e-3. Run that
+  before trusting any future variant; the end-to-end error alone cannot distinguish a wrong block
+  from a hard mesh.
+
   **Boundary treatment: audited and correct.** Boundary cells reconstruct as exactly as interior ones
   (1.95e-15 vs 2.26e-15 median on a warped mesh). `f = 0` there, `skew` collapses to `d_own`, and the
   unconditionally-computed neighbour side is discarded *structurally* by `scatter` — its index points
