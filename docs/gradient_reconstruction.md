@@ -196,6 +196,51 @@ Because the sweep is fixed, an under-resolved mesh loses that exactness **silent
 is no residual test to fail. Check it once per new mesh rather than assuming.
 ```
 
+### Measuring the count instead of choosing it
+
+The comparison above answers the question for one mesh by hand. The same question can be asked
+of the mesh directly, because the answer is a property of it. The Richardson iteration started
+from zero has error `M^k e_0` with `M = I - P^-1 A`, and both `A` and `P` are built from the
+geometry alone — so its convergence rate `rho(M)` is fixed once the mesh is, and the count
+reaching a relative error of `tol` is `ceil(log(tol) / log(rho))`.
+
+{func}`~aquaflux.schemes.contraction_rate` measures that rate, and each scheme has a factory
+that turns it into a scheme carrying the right count:
+
+```python
+from aquaflux.schemes import CorrectedGreenGauss, HessianCorrectedGradient
+
+scheme = CorrectedGreenGauss.calibrated(mesh, geometry)              # tol=1e-4 by default
+tight = CorrectedGreenGauss.calibrated(mesh, geometry, tol=1e-10)
+betchen = HessianCorrectedGradient.calibrated(mesh, geometry)        # sizes both its systems
+```
+
+How far apart the answers are is the reason to ask. On an orthogonal mesh the skewness
+correction vanishes, the system is diagonal, and **one** sweep is already exact; on a randomly
+perturbed grid at 40 % the same tolerance wants **twelve**. A single count cannot be right for
+both, and the one that is generous on the first is short on the second.
+
+The estimate costs its apply budget once — about eight four-sweep reconstructions at the
+default — against a saving on every reconstruction thereafter, and it reports
+{attr}`~aquaflux.schemes.ContractionRate.settling_ratio` as a self-check that the budget was
+long enough.
+
+```{warning}
+`tol` bounds the gradient's relative error in the **Euclidean norm over all cells**, not cell
+by cell. Measured at the calibrated count across meshes from mildly to heavily non-orthogonal,
+the worst single cell ran five to sixty times the norm figure and exceeded `tol` itself in
+about half of them — the rate governs a norm, not the extremes, so a mesh whose skewness sits
+in a few cells reaches the norm target with those cells still short of it. Ask for one to two
+orders tighter than the per-cell accuracy you need.
+```
+
+```{note}
+The count is a plain Python integer held in the solve strategy, so calibrate **outside** any
+`jax.jit` or differentiated region and use the resulting scheme inside — calibrating under a
+trace raises rather than silently doing something else. Under domain decomposition, calibrate
+on the global mesh before partitioning.
+```
+
 ## Choosing a scheme
 
 | | mesh it suits | exact for | solve cost |
