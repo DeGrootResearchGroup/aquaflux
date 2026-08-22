@@ -170,15 +170,52 @@ log from a skew-free mesh, it was never evidence of non-orthogonality.**
   it is a comfortable place to stop and write up a wrong limit. Both equations now take the value from
   one `_face_gradient` rather than two spellings of it.
 
-  **Robustness on degenerate cells (measured 2026-08-22).** Squashing a node band to volume ratios up
-  to 3.6e+08 produces **no NaN and no inf**, and the error plateaus rather than diverging — but a
-  single sliver costs the scheme its exactness *globally*, taking far-field cells from 8.61e-15 to
-  9.60e-04. Read that beside the alternatives before treating it as a defect: on the same mesh
-  `CorrectedGreenGauss` gives 2.98e+12 on the sliver itself against this scheme's 2.96e+01, and its
-  far-field median is 2.51e-02 against 9.60e-04. This scheme is the most robust of the three by a wide
-  margin; what it loses is the exactness the others never had. Two guards are nonetheless absent and
-  worth knowing: `jnp.linalg.inv` on the per-cell blocks has no singularity check, and
-  `interpolation_factor` guards `d → 0` on boundary faces only.
+  **⚠️⚠️ A SLIVER FIXTURE MADE BY SQUASHING A NODE BAND IS AN INVALID MESH, AND EVERY MEASUREMENT
+  TAKEN ON ONE IS VOID (2026-08-22).** Moving a whole plane of nodes leaves cells whose face
+  area-vectors no longer sum to zero: measured closure residual **6.6e-01** against 1e-16 for a valid
+  mesh, at a planarity of 0.068. Green–Gauss **is** the divergence theorem, so on such a mesh the
+  operator is wrong and no solver recovers it — an exact Krylov solve leaves 3e+01 where the same
+  solve on a valid sliver reaches 1e-11. It is the natural fixture to write, it looks like a sliver,
+  it reports a plausible volume ratio, and it fails silently.
+
+  **Squash ONE cell instead — only its four top nodes — so every cell stays closed**
+  (`tests/unit/test_gradient.py::_sliver_mesh`, pinned valid by
+  `test_the_sliver_fixture_is_a_valid_mesh`). `closed_cell_residual` is the check;
+  **`face_planarity` is NOT a substitute** and does not reliably flag it. This cost a whole line of
+  investigation: a "one sliver contaminates the far field by 11 orders" finding, an "error plateaus
+  rather than diverging" robustness claim, and a three-scheme robustness comparison were all measured
+  on the invalid fixture and are **WITHDRAWN**.
+
+  **Robustness on degenerate cells (measured 2026-08-22, VALID single-cell fixture).** At a volume
+  ratio of 1.9e+06 the shipped swept solve leaves **1.09e+00** on the sliver cell and **4.94e-07** in
+  the far field, against a clean mesh's 8.6e-15 — so a single bad cell does cost the scheme its
+  exactness globally. But this is an **iteration** effect and not a discretization one: an exact
+  Krylov solve on the same mesh gives **1.79e-10** on the sliver and **2.41e-15** far. The assembled
+  system holds the right answer and the fixed-sweep Richardson fails to find it, because the
+  preconditioner is `A_gg`'s diagonal block while the operator is the Schur complement — and on a
+  cell whose volume vanishes the neglected elimination term stops being a perturbation. Two guards
+  are absent and worth knowing: `jnp.linalg.inv` on the per-cell blocks has no singularity check, and
+  `interpolation_factor` guards `d → 0` on boundary faces only; neither has been observed to trigger.
+
+  **`CorrectedGreenGauss` DIVERGES on a sliver under its default preconditioner, and the fix is an
+  opt-in (2026-08-22).** `InverseVolume` is `1/V`, and `A_g`'s neglected coupling scales with face
+  area while the volume does not, so as a cell flattens the preconditioner stops approximating the
+  block at all. Sliver-cell error against a known analytic gradient, valid single-cell fixture:
+
+  | volume ratio | `InverseCellVolume` (default) | `ExactCellBlock` |
+  |---|---|---|
+  | 1.9e+02 | 3.37e-02 | 3.49e-02 |
+  | 1.9e+04 | 2.56e+02 | **1.73e-02** |
+  | 1.9e+06 | 1.69e+10 | **1.74e-02** |
+  | 1.9e+08 | **1.68e+18** | **1.74e-02** |
+
+  Unbounded, against flat at the scheme's own discretization error. Clean meshes agree to four
+  significant figures, so this is robustness and not accuracy. **The default stays
+  `InverseCellVolume`** — ~3× cheaper at four sweeps (0.40 ms against 1.33 ms at 4096 cells) and
+  correct on any mesh of reasonable quality; `ExactCellBlock` is the opt-in for a mesh with slivers or
+  a case that diverges, and is documented for users in `docs/gradient_reconstruction.md`.
+  ⚠️ Flooring `1/V` is **not** an adequate substitute: it converts an unbounded divergence into a
+  bounded 3.7e+07, six orders worse than the block.
 
   **Boundary treatment: audited and correct.** Boundary cells reconstruct as exactly as interior ones
   (1.95e-15 vs 2.26e-15 median on a warped mesh). `f = 0` there, `skew` collapses to `d_own`, and the

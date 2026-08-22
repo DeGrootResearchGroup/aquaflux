@@ -23,16 +23,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.mesh import structured_grid_2d
-from aquaflux.mesh.quality import face_planarity
+from aquaflux.mesh import structured_grid_2d, structured_grid_3d
+from aquaflux.mesh.quality import closed_cell_residual, face_planarity
 from aquaflux.schemes import (
     CellBlockJacobi,
     CompactGreenGauss,
     CorrectedGreenGauss,
+    ExactCellBlock,
     GmresGradientSolve,
     GradientSolve,
     GradientSystem,
     HessianCorrectedGradient,
+    InverseCellVolume,
     InverseVolume,
     SweepCalibration,
     SweptGradientSolve,
@@ -1195,7 +1197,13 @@ def test_the_two_calibrated_factories_expose_one_calibration_surface() -> None:
     it into only one of them fails here rather than in whichever case reaches for it first.
     """
     expected = {f.name: f.default for f in dataclasses.fields(SweepCalibration)}
-    scheme_specific = {"mesh", "geometry", "schur"}
+    # `preconditioner` is genuinely one scheme's property and not drift: the corrected scheme's
+    # default preconditioner is a cheap approximation of its diagonal block, which can fail outright
+    # on a degenerate cell, so it offers the exact block as an escape. The Hessian-corrected scheme
+    # already inverts its exact block on both of its systems and so has no cheaper option to choose
+    # between. ⚠️ That reasoning is about today's code: if that scheme ever gains a preconditioner
+    # choice of its own, this exemption stops being justified and the keyword belongs on both.
+    scheme_specific = {"mesh", "geometry", "schur", "preconditioner"}
 
     for factory in (CorrectedGreenGauss.calibrated, HessianCorrectedGradient.calibrated):
         parameters = inspect.signature(factory).parameters
@@ -1272,14 +1280,112 @@ def test_hessian_corrected_survives_a_sliver_cell_without_going_non_finite() -> 
     one bad cell, since the reconstruction is a global solve. Measured up to a volume ratio of 3.6e8,
     the error plateaus instead of diverging and no entry goes non-finite.
     """
-    base = perturbed_grid_3d(8, 8, 8, perturb=0.2, seed=5)
-    coords = np.asarray(base.node_coords).copy()
-    band = (coords[:, 2] > 0.375) & (coords[:, 2] < 0.5 + 1e-9)
-    coords[band, 2] = 0.375 + (coords[band, 2] - 0.375) * 1e-6
-    mesh = eqx.tree_at(lambda m: m.node_coords, base, jnp.asarray(coords))
+    mesh = _sliver_mesh(1e-6)
     geom = mesh.geometry()
     grad = HessianCorrectedGradient(
         solver=GmresGradientSolve(),
         hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
     ).gradients(_quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid))
     assert bool(jnp.all(jnp.isfinite(grad)))
+
+
+def _sliver_mesh(squash: float, cell: tuple[int, int, int] = (4, 4, 4), n: int = 8):
+    """A warped grid with ONE cell squashed flat -- an automatic mesher's sliver, on purpose.
+
+    ⚠️ Only that cell's four top nodes move, so every cell stays **closed**. Squashing a whole node
+    band instead is much easier to write and produces an INVALID mesh: its face area-vectors stop
+    summing to zero (measured: a closure residual of 6.6e-01 against 1e-16 here). Green–Gauss *is*
+    the divergence theorem, so on such a mesh the operator is wrong and no solver recovers it -- an
+    exact solve leaves 3e+01 where on this fixture it reaches 1e-11. A test built on that mesh is
+    measuring the fixture, not the scheme.
+
+    ``aquaflux.mesh.quality.closed_cell_residual`` is the check; note ``face_planarity`` does not
+    reliably flag it, so planarity is not a substitute.
+    """
+
+    def node(i: int, j: int, k: int) -> int:
+        return (k * (n + 1) + j) * (n + 1) + i
+
+    i, j, k = cell
+    base = perturbed_grid_3d(n, n, n, perturb=0.2, seed=5)
+    coords = np.asarray(base.node_coords).copy()
+    for a in (i, i + 1):
+        for b in (j, j + 1):
+            top, bottom = node(a, b, k + 1), node(a, b, k)
+            coords[top] = coords[bottom] + squash * (coords[top] - coords[bottom])
+    return eqx.tree_at(lambda m: m.node_coords, base, jnp.asarray(coords))
+
+
+def test_the_sliver_fixture_is_a_valid_mesh() -> None:
+    """The fixture must close, or every test built on it measures a broken mesh instead of a scheme.
+
+    Pinned because the invalid variant is the natural thing to write and fails silently: it looks
+    like a sliver, reports a plausible volume ratio, and quietly breaks the divergence theorem the
+    whole discretization rests on.
+    """
+    for squash in (1e-4, 1e-8):
+        assert float(jnp.max(closed_cell_residual(_sliver_mesh(squash)))) < 1e-12
+
+
+def _corrected_error(mesh, preconditioner):
+    geom = mesh.geometry()
+    grad = CorrectedGreenGauss(preconditioner=preconditioner).gradients(
+        _quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid)
+    )
+    exact = _quadratic_3d_grad(geom.cell.centroid)
+    relative = jnp.linalg.norm(grad - exact, axis=-1) / jnp.linalg.norm(exact, axis=-1)
+    return relative, jnp.asarray(geom.cell.volume)
+
+
+def test_inverse_cell_volume_is_the_default() -> None:
+    """The cheap preconditioner stays the default -- this option is opt-in, not a migration."""
+    assert isinstance(CorrectedGreenGauss().preconditioner, InverseCellVolume)
+
+
+def test_exact_cell_block_bounds_the_error_on_a_sliver_that_1_over_V_does_not() -> None:
+    """``1/V`` diverges with the volume ratio on a degenerate cell; the true block does not.
+
+    This is the reason the option exists. ``A_g``'s per-cell block is the volume less a coupling that
+    scales with face area, so as a cell flattens the volume vanishes while the coupling does not and
+    ``1/V`` stops approximating the block at all. The error it leaves grows without bound -- ~1.7e+10
+    at a volume ratio of 1.9e6 and ~1.7e+18 at 1.9e8 -- while the exact block holds ~1.7e-02 at both,
+    which is the scheme's own discretization error on such a cell rather than a diverging iteration
+    stacked on top of it.
+    """
+    for squash, floor in ((1e-6, 1e6), (1e-8, 1e12)):
+        mesh = _sliver_mesh(squash)
+        volume_error, volume = _corrected_error(mesh, InverseCellVolume())
+        block_error, _ = _corrected_error(mesh, ExactCellBlock())
+        sliver = volume < 10 * volume.min()
+        assert float(volume_error[sliver].max()) > floor  # the default really does diverge here
+        assert (
+            float(block_error[sliver].max()) < 1e-1
+        )  # and the block holds it at the scheme's own error
+
+
+def test_exact_cell_block_does_not_change_a_healthy_mesh() -> None:
+    """On a mesh of reasonable quality the two agree, so this buys robustness and not accuracy.
+
+    Pinned because it is what makes the option safe to reach for: a user switching to it on a case
+    that diverges must not find their good cells answered differently.
+    """
+    for mesh in (structured_grid_3d(8, 8, 8), perturbed_grid_3d(8, 8, 8, perturb=0.3, seed=1)):
+        volume_error, _ = _corrected_error(mesh, InverseCellVolume())
+        block_error, _ = _corrected_error(mesh, ExactCellBlock())
+        # Compared in AGGREGATE, not cell by cell. At a finite sweep count the two preconditioners
+        # produce slightly different iterates while converging to the same solution, so a
+        # per-cell equality would pin the iteration path rather than the accuracy, and would fail on
+        # cells whose error is near zero for reasons that say nothing about either choice.
+        for statistic in (jnp.median, lambda a: jnp.percentile(a, 99), jnp.max):
+            assert statistic(block_error) == pytest.approx(statistic(volume_error), rel=0.02)
+
+
+def test_calibration_carries_the_preconditioner_it_measured() -> None:
+    """The sweep count belongs to the (operator, preconditioner) pairing it was measured on.
+
+    Calibrating under one preconditioner and running under another would report a count for a system
+    that never runs, which is the failure the bundled ``GradientSystem`` exists to prevent.
+    """
+    mesh = structured_grid_3d(4, 4, 4)
+    scheme = CorrectedGreenGauss.calibrated(mesh, mesh.geometry(), preconditioner=ExactCellBlock())
+    assert isinstance(scheme.preconditioner, ExactCellBlock)
