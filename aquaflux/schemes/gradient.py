@@ -475,6 +475,48 @@ class ExactCellBlock(CellPreconditioner):
         return CellBlockJacobi(jnp.linalg.inv(block))
 
 
+class CoupledBlockSweep(eqx.Module):
+    """Sweep the gradient and Hessian blocks together, instead of nesting a solve inside each apply.
+
+    The eliminated system is solved today by a sweep on the gradient whose every operator apply runs
+    a *complete* Hessian solve inside it — so the Hessian is re-converged from zero once per outer
+    sweep, discarding what the previous one learned. Sweeping both blocks alternately keeps that
+    work:
+
+    .. code-block:: text
+
+        h <- h + P_H^-1 (A_Hg g  -  A_HH h)
+        g <- g + w P_g^-1 (b_g  -  A_gg g  +  A_gH h)
+
+    **The fixed point is the same Schur solution, and that is provable rather than measured.** At a
+    joint fixed point the first line forces ``A_HH h = A_Hg g``, hence ``h = A_HH^-1 A_Hg g``;
+    substituting into the second gives ``(A_gg - A_gH A_HH^-1 A_Hg) g = b_g``, which is ``S g = b_g``.
+    Both preconditioners are invertible, so each step is an equivalence and not merely an implication.
+
+    **The system stays gradient-sized.** No enlarged unknown is formed and no solve is run on the
+    packed ``[g, H]`` vector; ``h`` is an iterate of this sweep, not an unknown of a larger system.
+
+    ⚠️ **``h`` STARTS AT ZERO ON EVERY CALL, and that is a correctness requirement.** Carried between
+    calls it would make the reconstruction history-dependent -- the same field would give a slightly
+    different gradient depending on what was reconstructed before it -- which breaks the linearity
+    everything downstream assumes and puts bias into the adjoint. It is the distinction between this
+    and warm-starting a solve from a previous *step's* answer, which is a different proposal and a
+    refuted one.
+
+    Attributes
+    ----------
+    sweeps : int
+        Number of coupled sweeps (static). One sweep costs about three face-kernel passes against the
+        nested path's ``1 + inner``, so a given accuracy is reached for far less work -- but the count
+        needed is not the nested path's outer count and has to be calibrated on its own.
+    relaxation : float
+        Damping on the gradient update, in ``(0, 1]``. A differentiable leaf.
+    """
+
+    sweeps: int = eqx.field(static=True, default=20)
+    relaxation: float = 1.0
+
+
 class GmresGradientSolve(GradientSolve):
     """Solve the corrected-gradient system with matrix-free GMRES, differentiated by implicit diff.
 
@@ -1357,6 +1399,9 @@ class _HessianSystems(NamedTuple):
     inner : callable
         ``() -> GradientSystem`` for the Hessian system ``A_HH``. A call builds the per-cell block
         its preconditioner inverts, which is why it is deferred rather than a field.
+    block_sweep : callable
+        ``(sweep, gradient_preconditioner, hessian_preconditioner, b_g) -> g``, the coupled
+        block sweep of :class:`CoupledBlockSweep` over these same operators.
     outer : callable
         ``(hessian_solver, inner_system) -> GradientSystem`` for the Schur system on the gradient.
         The inner solve runs inside its operator, so the strategy solving it is part of the operator
@@ -1369,6 +1414,7 @@ class _HessianSystems(NamedTuple):
     coupled: GradientSystem
     inner: Callable[[], GradientSystem]
     outer: Callable[[GradientSolve, GradientSystem], GradientSystem]
+    block_sweep: Callable[..., jnp.ndarray]
 
 
 class HessianCorrectedGradient(GradientScheme):
@@ -1483,6 +1529,10 @@ class HessianCorrectedGradient(GradientScheme):
     schur : bool
         If ``True`` (default) eliminate the Hessian block and solve the gradient-only Schur system;
         if ``False`` solve the full packed ``[g, H]`` system directly.
+    coupled_sweep : CoupledBlockSweep or None
+        When set, solve by sweeping both blocks together (see :class:`CoupledBlockSweep`) rather than
+        nesting a Hessian solve inside every gradient apply. ``solver`` and ``hessian_solver`` are
+        then unused. ``None`` (the default) keeps the nested solve.
     local_schur_block : bool
         Build the outer preconditioner from the Schur complement's own per-cell block rather than
         from ``A_gg``'s alone. **Default ``True``.** Costs ``dim + dim**2`` extra probes once per
@@ -1499,6 +1549,7 @@ class HessianCorrectedGradient(GradientScheme):
     )
     schur: bool = eqx.field(static=True, default=True)
     local_schur_block: bool = eqx.field(static=True, default=True)
+    coupled_sweep: CoupledBlockSweep | None = None
 
     def gradients(
         self,
@@ -1543,9 +1594,12 @@ class HessianCorrectedGradient(GradientScheme):
             return packed[:, : mesh.dim]
         inner = systems.inner()
         outer = systems.outer(self.hessian_solver, inner, self.local_schur_block)
-        return self.solver.solve(
-            outer.preconditioner, outer.operator, systems.gradient_rhs(field, boundary_values)
-        )
+        rhs = systems.gradient_rhs(field, boundary_values)
+        if self.coupled_sweep is not None:
+            return systems.block_sweep(
+                self.coupled_sweep, outer.preconditioner, inner.preconditioner, rhs
+            )
+        return self.solver.solve(outer.preconditioner, outer.operator, rhs)
 
     @classmethod
     def calibrated(
@@ -1923,10 +1977,40 @@ class HessianCorrectedGradient(GradientScheme):
 
             return GradientSystem(CellBlockJacobi(jnp.linalg.inv(block)), schur, (n_cells, dim))
 
+        def block_sweep(sweep, gradient_preconditioner, hessian_preconditioner, rhs_g):
+            """Run :class:`CoupledBlockSweep` over these systems and return the gradient."""
+
+            # From `(g, h) = (0, 0)` the first sweep reduces to `w P_g^-1 b_g` -- the Hessian update
+            # sees `A_Hg 0 - A_HH 0` and stays at zero, and the gradient update sees `b_g` outright.
+            # Peeled for the same reason the swept solve peels its first apply: those passes multiply
+            # vectors known to be zero.
+            def step(carry, _):
+                g, h = carry
+                # One pass gives both of this iterate's rows -- the gradient equation's and the
+                # Hessian equation's -- so the sweep costs three face-kernel passes, not four.
+                a_gg_g, a_hg_g = gradient_and_hessian_rows(g)
+                h_next = h + hessian_preconditioner.apply(a_hg_g - a_hh(h))
+                # Gauss-Seidel, not Jacobi: the gradient update uses the Hessian just computed. That
+                # is what lets a single Hessian sweep per gradient sweep converge at all.
+                g_next = g + sweep.relaxation * gradient_preconditioner.apply(
+                    rhs_g - a_gg_g + a_gh(h_next)
+                )
+                return (g_next, h_next), None
+
+            start = (
+                sweep.relaxation * gradient_preconditioner.apply(rhs_g),
+                jnp.zeros((n_cells, dim, dim)),
+            )
+            if sweep.sweeps <= 1:
+                return start[0]
+            (g, _), _ = jax.lax.scan(step, start, None, length=sweep.sweeps - 1)
+            return g
+
         return _HessianSystems(
             gradient_rhs=gradient_rhs,
             coupled_rhs=coupled_rhs,
             coupled=GradientSystem(InverseVolume(1.0 / vol), coupled, (n_cells, dim + dim * dim)),
             inner=inner,
             outer=outer,
+            block_sweep=block_sweep,
         )

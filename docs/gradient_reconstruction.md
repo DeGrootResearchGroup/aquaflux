@@ -228,6 +228,40 @@ If you calibrate the sweep count (below), pass the preconditioner to
 given accuracy belongs to the operator–preconditioner pairing it was measured on, and the
 calibrated scheme carries the preconditioner with it for that reason.
 
+### Sweeping both blocks instead of nesting a solve
+
+By default the Hessian-corrected scheme solves its outer system with a sweep whose every operator
+apply runs a *complete* Hessian solve inside it — so the Hessian is re-converged from zero once
+per outer sweep, discarding what the previous one found.
+{class}`~aquaflux.schemes.CoupledBlockSweep` sweeps the two blocks alternately instead, keeping
+that work:
+
+```python
+from aquaflux.schemes import CoupledBlockSweep, HessianCorrectedGradient
+
+scheme = HessianCorrectedGradient(coupled_sweep=CoupledBlockSweep(sweeps=30))
+```
+
+It converges to the same answer — its fixed point is the same Schur system, which follows from the
+two updates rather than being a numerical coincidence — and it is both faster and, at a given
+budget, more accurate. Measured on an 8000-cell warped grid against the default nested solve:
+
+| | forward | tangent (used once per Krylov iteration) |
+| --- | --- | --- |
+| nested, 20 outer × 10 inner | 143 ms | 213 ms |
+| `CoupledBlockSweep(sweeps=30)` | **71 ms** | **68 ms** |
+
+with the reconstruction of a quadratic reaching 2.1 × 10⁻¹⁵ against the nested solve's
+9.2 × 10⁻¹⁵ — i.e. it matches an exactly solved outer system, which the default does not.
+
+The system stays gradient-sized: no enlarged unknown is formed, and the Hessian is an iterate of
+the sweep rather than an unknown of a larger system. It lives for one reconstruction and starts
+from zero on every call, so the reconstruction remains an exactly linear function of the field.
+
+`sweeps` here is **not** the nested solve's outer count and must be calibrated on its own — a
+coupled sweep costs about three face passes where a nested outer sweep costs eleven, so more of
+them buy less each.
+
 ## Choosing the sweep count
 
 A fixed sweep count carries no convergence test, so it is worth knowing what sets it: the

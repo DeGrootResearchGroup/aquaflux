@@ -307,6 +307,37 @@ property worth checking on any future change here; a drift that grew with depth 
   before trusting any future variant; the end-to-end error alone cannot distinguish a wrong block
   from a hard mesh.
 
+  **`CoupledBlockSweep` — sweep BOTH blocks instead of nesting a solve per apply (2026-08-22, opt-in).**
+  The nested path re-converges the Hessian from zero once per outer sweep, throwing away what the
+  previous outer sweep learned. Sweeping alternately keeps it:
+  `h ← h + P_H⁻¹(A_Hg g − A_HH h)` then `g ← g + ω P_g⁻¹(b_g − A_gg g + A_gH h)`, Gauss–Seidel (the
+  gradient update uses the Hessian just computed, which is what lets one Hessian sweep per gradient
+  sweep converge at all). One sweep is ~3 face-kernel passes against the nested `1 + inner` ≈ 11.
+
+  | 8000-cell warped grid | forward | jvp | quadratic, median |
+  |---|---|---|---|
+  | nested 20/10 (default) | 143.0 ms | 213.2 ms | 9.19e-15 |
+  | `CoupledBlockSweep(sweeps=30)` | **71.3 ms** | **67.9 ms** | **2.12e-15** |
+  | exact Krylov outer | — | — | 2.11e-15 |
+
+  **2.0× forward and 3.1× on the tangent, while reaching the accuracy of an exactly solved outer
+  system** — the jvp figure is the one that matters, since that is the path a march spends its time
+  in. **The fixed point is provably the Schur solution**: the `h` update forces `A_HH h = A_Hg g`,
+  and substituting leaves `S g = b_g`; both preconditioners are invertible so each step is an
+  equivalence.
+
+  - **The system stays gradient-sized.** No enlarged unknown, no solve on the packed `[g, H]` vector —
+    `h` is an iterate of this sweep, not an unknown of a larger one. What it gives up against the
+    nested path is `h`'s *transience*: it lives for one reconstruction rather than one apply
+    (~115 MB at 1.6M cells). The reverse-mode tape should get **smaller**, holding one carried
+    Hessian iterate per sweep instead of ten.
+  - **⚠️ `h` STARTS AT ZERO ON EVERY CALL — a correctness requirement, not a style choice.** Carried
+    between calls the reconstruction becomes history-dependent and stops being linear, which is the
+    already-refuted warm-start from a previous step's answer. Verified: superposition 3.3e-16,
+    `grad(0)` exactly zero, repeat calls bit-identical.
+  - **Its `sweeps` is NOT the nested path's outer count** and needs its own calibration; a coupled
+    sweep buys less each because it costs a third as much.
+
   **Boundary treatment: audited and correct.** Boundary cells reconstruct as exactly as interior ones
   (1.95e-15 vs 2.26e-15 median on a warped mesh). `f = 0` there, `skew` collapses to `d_own`, and the
   unconditionally-computed neighbour side is discarded *structurally* by `scatter` — its index points

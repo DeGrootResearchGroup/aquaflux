@@ -29,6 +29,7 @@ from aquaflux.schemes import (
     CellBlockJacobi,
     CompactGreenGauss,
     CorrectedGreenGauss,
+    CoupledBlockSweep,
     ExactCellBlock,
     GmresGradientSolve,
     GradientSolve,
@@ -1467,3 +1468,85 @@ def test_the_local_schur_block_does_not_regress_a_healthy_mesh() -> None:
         block, _ = _hessian_error(mesh, local_schur_block=True)
         assert float(jnp.median(block)) < 1e-10
         assert float(jnp.median(block)) <= 3.0 * float(jnp.median(plain))
+
+
+def _coupled(sweeps: int = 30) -> HessianCorrectedGradient:
+    return HessianCorrectedGradient(coupled_sweep=CoupledBlockSweep(sweeps=sweeps))
+
+
+def test_the_coupled_sweep_reaches_the_same_solution_as_an_exact_solve() -> None:
+    """Its fixed point is the Schur system's, so a converged sweep is a converged solve.
+
+    Proved rather than hoped: at a joint fixed point the Hessian update forces
+    ``A_HH h = A_Hg g``, and substituting into the gradient update leaves
+    ``(A_gg - A_gH A_HH⁻¹ A_Hg) g = b_g``. This checks the arithmetic agrees with the argument —
+    against an exactly solved outer system, which needs no sweep count of its own.
+    """
+    for mesh in (
+        columnwise_perturbed_grid_3d(8, 8, 8, perturb=0.3, seed=1),
+        perturbed_grid_3d(8, 8, 8, perturb=0.3, seed=1),
+    ):
+        geom = mesh.geometry()
+        field, bvals = _quadratic_3d(geom.cell.centroid), _quadratic_3d(geom.face.centroid)
+        exact = HessianCorrectedGradient(
+            solver=GmresGradientSolve(),
+            hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
+        ).gradients(field, mesh, geom, bvals)
+        swept = _coupled(40).gradients(field, mesh, geom, bvals)
+        assert float(jnp.max(jnp.abs(swept - exact))) / float(jnp.max(jnp.abs(exact))) < 1e-9
+
+
+def test_the_coupled_sweep_is_exactly_linear_and_carries_no_history() -> None:
+    """The reconstruction is a linear solve, and everything downstream depends on it being one.
+
+    ⚠️ These three are the whole reason this is safe, and they are what separates it from warm-starting
+    a solve from a PREVIOUS CALL'S answer — a different proposal, and a refuted one, whose bias lands
+    in the derivative rather than the value. The Hessian iterate here starts at zero on every call; if
+    it were ever carried between calls, the same field would reconstruct differently depending on what
+    came before it and all three of these would fail.
+    """
+    mesh = perturbed_grid_3d(8, 8, 8, perturb=0.3, seed=1)
+    geom = mesh.geometry()
+    scheme = _coupled()
+    rng = np.random.default_rng(3)
+    first = jnp.asarray(rng.normal(size=mesh.n_cells))
+    second = jnp.asarray(rng.normal(size=mesh.n_cells))
+    first_b = jnp.asarray(rng.normal(size=mesh.n_faces))
+    second_b = jnp.asarray(rng.normal(size=mesh.n_faces))
+    a, b = 1.7, -0.6
+
+    combined = scheme.gradients(a * first + b * second, mesh, geom, a * first_b + b * second_b)
+    separate = a * scheme.gradients(first, mesh, geom, first_b) + b * scheme.gradients(
+        second, mesh, geom, second_b
+    )
+    assert float(jnp.max(jnp.abs(combined - separate))) / float(jnp.max(jnp.abs(separate))) < 1e-13
+
+    zero = scheme.gradients(jnp.zeros(mesh.n_cells), mesh, geom, jnp.zeros(mesh.n_faces))
+    assert bool(jnp.all(zero == 0.0)), "an affine map would fail here by its constant term"
+
+    repeated = scheme.gradients(first, mesh, geom, first_b)
+    assert jnp.array_equal(repeated, scheme.gradients(first, mesh, geom, first_b))
+
+
+def test_the_coupled_sweep_is_differentiable() -> None:
+    """``jax.grad`` through the sweep matches a finite difference.
+
+    The sweep is a fixed-count iteration, so its derivative is the exact derivative of the map that
+    actually runs — the same contract the nested swept solve has, and the reason a sweep count is a
+    property of the discretization here rather than a solver tolerance.
+    """
+    mesh = perturbed_grid_3d(6, 6, 6, perturb=0.3, seed=1)
+    geom = mesh.geometry()
+    bvals = _quadratic_3d(geom.face.centroid)
+    field = _quadratic_3d(geom.cell.centroid)
+
+    def loss(f):
+        return jnp.sum(_coupled().gradients(f, mesh, geom, bvals) ** 2)
+
+    index, step = 11, 1e-6
+    analytic = float(jax.grad(loss)(field)[index])
+    difference = float(
+        (loss(field.at[index].add(step)) - loss(field.at[index].add(-step))) / (2 * step)
+    )
+    assert analytic == pytest.approx(difference, rel=1e-6)
+    assert abs(analytic) > 1e-6, "a severed adjoint would report zero and pass a finiteness check"
