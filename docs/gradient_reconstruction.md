@@ -161,8 +161,60 @@ where there is no skewness whatsoever, inverse-volume Richardson on that system 
 spectral radius of `0.5`, while inverting the cell block gives `0`. That is why the scheme
 looked as though it needed a Krylov solve, and why it no longer does.
 
-Each scheme supplies the preconditioner its own system needs, so this is not usually something
-you set. It is described here because it explains the sweep counts below.
+Each scheme supplies a sensible default, so this is not usually something you set — but for
+the corrected Green–Gauss scheme it is worth knowing about, because on a poor-quality mesh the
+default can fail outright.
+
+### Choosing a preconditioner for a poor-quality mesh
+
+{class}`~aquaflux.schemes.CorrectedGreenGauss` takes a `preconditioner`, and the choice is
+between speed on a good mesh and robustness on a bad one:
+
+```python
+from aquaflux.schemes import CorrectedGreenGauss, ExactCellBlock
+
+scheme = CorrectedGreenGauss()                                 # 1/V -- the default
+scheme = CorrectedGreenGauss(preconditioner=ExactCellBlock())  # the true per-cell block
+```
+
+{class}`~aquaflux.schemes.InverseCellVolume` (the default) costs a reciprocal per cell and is
+the right choice on a mesh of reasonable quality. Its accuracy rests on the volume being most
+of the operator's diagonal block — and that assumption fails as a cell flattens, because the
+neglected coupling scales with face **area** while the volume does not. On a mesh with a
+near-degenerate cell, `1/V` stops approximating the block at all and the iteration diverges.
+
+{class}`~aquaflux.schemes.ExactCellBlock` recovers the operator's true per-cell block by
+probing it, and inverts that. It is insensitive to cell shape. Measured on a grid with one
+cell progressively squashed flat, reconstructing a field whose gradient is known exactly:
+
+| cell volume ratio | `InverseCellVolume` | `ExactCellBlock` |
+| --- | --- | --- |
+| 1.9 × 10² | 3.4 × 10⁻² | 3.5 × 10⁻² |
+| 1.9 × 10⁴ | 2.6 × 10² | 1.7 × 10⁻² |
+| 1.9 × 10⁶ | 1.7 × 10¹⁰ | 1.7 × 10⁻² |
+| 1.9 × 10⁸ | 1.7 × 10¹⁸ | 1.7 × 10⁻² |
+
+The default's error grows without bound with the volume ratio; the block holds the scheme's
+own discretization error, flat, across six orders of magnitude. On a healthy mesh the two agree
+to four significant figures, so this buys robustness and not accuracy.
+
+It is not free: extracting the block costs a few extra operator applies, and applying it is a
+small matrix product per cell rather than a scalar multiply — together roughly three times the
+default's cost at four sweeps, though the extraction is a fixed prologue whose share falls as
+the sweep count rises.
+
+**When to reach for it.** If your mesh comes from an automatic mesher and has slivers, or if a
+case diverges or produces implausible gradients in a small number of cells, switch to
+`ExactCellBlock`. If your mesh is of good quality, the default is faster and just as accurate.
+{func}`~aquaflux.mesh.quality.closed_cell_residual` and
+{func}`~aquaflux.mesh.quality.face_planarity` will tell you which kind of mesh you have — and
+note that a mesh whose cells do not *close* is invalid outright, which no preconditioner can
+repair, since the whole discretization is the divergence theorem.
+
+If you calibrate the sweep count (below), pass the preconditioner to
+{meth}`~aquaflux.schemes.CorrectedGreenGauss.calibrated` as well: the count that reaches a
+given accuracy belongs to the operator–preconditioner pairing it was measured on, and the
+calibrated scheme carries the preconditioner with it for that reason.
 
 ## Choosing the sweep count
 

@@ -395,6 +395,86 @@ class GradientSolve(eqx.Module):
         """
 
 
+class CellPreconditioner(eqx.Module):
+    """Strategy: which approximate inverse of ``A_g`` drives the corrected-gradient sweep.
+
+    The sweep converges at a rate set by ``rho(I - P^-1 A_g)``, so this choice decides how many
+    sweeps a given accuracy costs -- and, on a mesh with a degenerate cell, whether the iteration
+    converges at all. A strategy rather than a flag because the options differ in what they compute,
+    not merely in a constant: one reads a per-cell scalar already to hand, the other probes the
+    operator.
+    """
+
+    @abc.abstractmethod
+    def build(self, terms: _CorrectedTerms) -> GradientPreconditioner:
+        """Return the preconditioner for the system these ``terms`` describe.
+
+        Parameters
+        ----------
+        terms : _CorrectedTerms
+            The geometry intermediates the operator is built from, so the preconditioner cannot be
+            derived from a different geometry than the operator it preconditions.
+        """
+
+
+class InverseCellVolume(CellPreconditioner):
+    """``1/V`` per cell -- the default, and the right choice on a mesh of reasonable quality.
+
+    ``A_g``'s per-cell block is the cell volume less the skewness coupling, so on a well-shaped cell
+    this is within the skewness of the true block and the sweep it drives converges quickly. It costs
+    a reciprocal and nothing else.
+
+    ⚠️ **It degrades exactly as the cell does.** The neglected coupling scales with face area while
+    the volume does not, so as a cell flattens ``1/V`` stops approximating anything. Measured on a
+    single squashed cell, the reconstruction error there grows without bound with the volume ratio:
+    3.6e+04 at a ratio of 2.5e3, 2.9e+12 at 3.6e4, 2.9e+28 at 3.6e8. Prefer :class:`ExactCellBlock`
+    on a mesh carrying such cells, or on any case that diverges.
+    """
+
+    def build(self, terms: _CorrectedTerms) -> GradientPreconditioner:
+        return InverseVolume(1.0 / terms.volume)
+
+
+class ExactCellBlock(CellPreconditioner):
+    """The operator's **true** per-cell block, recovered by probing and inverted per cell.
+
+    Costs ``dim`` extra operator applies to extract, plus a small dense inverse per cell, and its
+    application is a per-cell matrix product rather than a scalar multiply -- together roughly 3x the
+    default's cost at four sweeps, falling as a share as the sweep count rises since the extraction is
+    a fixed prologue. In exchange the iteration is insensitive to cell shape: on the squashed-cell
+    sweep above, where ``1/V`` reaches 2.9e+28, this holds a flat 1.9e+01 across five orders of volume
+    ratio -- the scheme's own discretization error on a degenerate cell, rather than a diverging
+    iteration on top of it.
+
+    On a healthy mesh the two agree to four significant figures, so this buys robustness and not
+    accuracy: it is the choice for a mesh with poor cells, not a better default.
+    """
+
+    def build(self, terms: _CorrectedTerms) -> GradientPreconditioner:
+        fc = terms.face_cells
+        owner, neighbour = fc.owner, fc.safe_neighbour
+        n_cells, dim = terms.volume.shape[0], terms.area_vector.shape[-1]
+        no_face = jnp.zeros((fc.n_faces, dim))
+
+        # The two half-evaluations `cell_diagonal_block` needs: each returns the part of the
+        # correction scatter that lands back on the cell the probe was gathered from. The correction
+        # is a conservative scatter, so the owner receives it and the neighbour its negation -- and
+        # it is masked to zero on boundary faces, which carry no P-N line for the skewness to be
+        # measured along.
+        def owner_column(probe: jnp.ndarray) -> jnp.ndarray:
+            w = (1.0 - terms.g) * dot(terms.skew, probe[owner])
+            flux = fc.combine_face_values(scale(terms.area_vector, w), 0.0)
+            return fc.scatter(flux, no_face)
+
+        def neighbour_column(probe: jnp.ndarray) -> jnp.ndarray:
+            w = terms.g * dot(terms.skew, probe[neighbour])
+            flux = fc.combine_face_values(scale(terms.area_vector, w), 0.0)
+            return fc.scatter(no_face, -flux)
+
+        block = cell_diagonal_block(owner_column, neighbour_column, terms.volume, n_cells, dim)
+        return CellBlockJacobi(jnp.linalg.inv(block))
+
+
 class GmresGradientSolve(GradientSolve):
     """Solve the corrected-gradient system with matrix-free GMRES, differentiated by implicit diff.
 
@@ -1044,6 +1124,7 @@ class CorrectedGreenGauss(GradientScheme):
     """
 
     solver: GradientSolve = eqx.field(default_factory=SweptGradientSolve)
+    preconditioner: CellPreconditioner = eqx.field(default_factory=InverseCellVolume)
 
     @staticmethod
     def terms(mesh: Mesh, geometry: MeshGeometry) -> _CorrectedTerms:
@@ -1094,7 +1175,9 @@ class CorrectedGreenGauss(GradientScheme):
         return matvec
 
     @classmethod
-    def system(cls, t: _CorrectedTerms) -> GradientSystem:
+    def system(
+        cls, t: _CorrectedTerms, preconditioner: CellPreconditioner | None = None
+    ) -> GradientSystem:
         """The gradient system ``A_g·G = B·φ`` as a solve strategy sees it — operator and preconditioner.
 
         This is where the choice of preconditioner for *this* system is made: ``A_g``'s per-cell
@@ -1114,7 +1197,8 @@ class CorrectedGreenGauss(GradientScheme):
             Operator, preconditioner, and the ``(n_cells, dim)`` shape of the gradient.
         """
         n_cells, dim = t.volume.shape[0], t.area_vector.shape[-1]
-        return GradientSystem(InverseVolume(1.0 / t.volume), cls.operator(t), (n_cells, dim))
+        chosen = InverseCellVolume() if preconditioner is None else preconditioner
+        return GradientSystem(chosen.build(t), cls.operator(t), (n_cells, dim))
 
     @classmethod
     def calibrated(
@@ -1127,6 +1211,7 @@ class CorrectedGreenGauss(GradientScheme):
         floor: int = SweepCalibration.floor,
         cap: int = SweepCalibration.cap,
         seed: int = SweepCalibration.seed,
+        preconditioner: CellPreconditioner | None = None,
     ) -> CorrectedGreenGauss:
         """Build this scheme with the sweep count **measured from the mesh** rather than assumed.
 
@@ -1176,15 +1261,20 @@ class CorrectedGreenGauss(GradientScheme):
         >>> scheme.solver.sweeps  # orthogonal: the correction vanishes, one sweep is exact
         1
         """
+        chosen = InverseCellVolume() if preconditioner is None else preconditioner
         return cls(
             solver=_calibrated_solver(
-                cls.system(cls.terms(mesh, geometry)),
+                cls.system(cls.terms(mesh, geometry), chosen),
                 tol=tol,
                 iters=iters,
                 floor=floor,
                 cap=cap,
                 seed=seed,
-            )
+            ),
+            # The measured count belongs to the pairing it was measured on, so the preconditioner
+            # travels with it: calibrating under one and running under another would report a count
+            # for a system that never runs.
+            preconditioner=chosen,
         )
 
     @classmethod
@@ -1208,7 +1298,7 @@ class CorrectedGreenGauss(GradientScheme):
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         t = self.terms(mesh, geometry)
-        system = self.system(t)
+        system = self.system(t, self.preconditioner)
         return self.solver.solve(
             system.preconditioner,
             system.operator,
