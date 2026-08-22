@@ -288,6 +288,34 @@ def cell_diagonal_block(
     return jnp.moveaxis(columns, 0, -1)
 
 
+class GradientSystem(NamedTuple):
+    """One reconstruction system as a solve strategy sees it: the operator, its preconditioner, and
+    the shape of the unknown.
+
+    A reconstruction scheme assembles its system from the geometry once and then does two different
+    things with it — solves it against a right-hand side (every reconstruction) and *measures* it
+    (:func:`contraction_rate`, once per case). Both need exactly this triple and nothing scheme-
+    specific, which is why it is a value rather than three parameters threaded separately: it is what
+    lets one estimator serve the corrected-gradient system and both of the Hessian-corrected scheme's
+    systems unchanged. The right-hand side is deliberately absent — it is the only field-dependent
+    part, and neither the operator nor its convergence rate depends on it.
+
+    Attributes
+    ----------
+    preconditioner : GradientPreconditioner
+        Approximate inverse of the operator's per-cell diagonal block.
+    operator : callable
+        The matrix-free operator ``A`` (a matvec ``x -> A·x``) on an unknown of shape ``shape``.
+    shape : tuple of int
+        Shape of the unknown — ``(n_cells, dim)`` for a gradient, ``(n_cells, dim, dim)`` for a
+        Hessian.
+    """
+
+    preconditioner: GradientPreconditioner
+    operator: Callable[[jnp.ndarray], jnp.ndarray]
+    shape: tuple[int, ...]
+
+
 class GradientSolve(eqx.Module):
     """Strategy: apply ``A⁻¹`` to solve a volume-dominated reconstruction system ``A·x = rhs``.
 
@@ -731,6 +759,29 @@ class CorrectedGreenGauss(GradientScheme):
         return matvec
 
     @classmethod
+    def system(cls, t: _CorrectedTerms) -> GradientSystem:
+        """The gradient system ``A_g·G = B·φ`` as a solve strategy sees it — operator and preconditioner.
+
+        This is where the choice of preconditioner for *this* system is made: ``A_g``'s per-cell
+        block is the cell volume less the skewness coupling, so :class:`InverseVolume` is within the
+        skewness of the true block and the sweep it drives converges quickly. Bundling it with the
+        operator gives every consumer of this system one assembly to share, so nothing can measure or
+        solve it against a different pairing than the one that runs.
+
+        Parameters
+        ----------
+        t : _CorrectedTerms
+            The geometry intermediates from :meth:`terms`.
+
+        Returns
+        -------
+        GradientSystem
+            Operator, preconditioner, and the ``(n_cells, dim)`` shape of the gradient.
+        """
+        n_cells, dim = t.volume.shape[0], t.area_vector.shape[-1]
+        return GradientSystem(InverseVolume(1.0 / t.volume), cls.operator(t), (n_cells, dim))
+
+    @classmethod
     def rhs(
         cls, t: _CorrectedTerms, field: jnp.ndarray, boundary_values: jnp.ndarray
     ) -> jnp.ndarray:
@@ -751,12 +802,47 @@ class CorrectedGreenGauss(GradientScheme):
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         t = self.terms(mesh, geometry)
+        system = self.system(t)
         return self.solver.solve(
-            InverseVolume(1.0 / t.volume),
-            self.operator(t),
+            system.preconditioner,
+            system.operator,
             self.rhs(t, field, boundary_values),
             operator_hook=operator_hook,
         )
+
+
+class _HessianSystems(NamedTuple):
+    """The linear systems of the Hessian-corrected reconstruction at one geometry.
+
+    Everything here is geometry-only except the two right-hand sides, which take the field. The
+    scheme has two shapes — the Hessian eliminated (an inner system on the Hessian inside an outer
+    system on the gradient) or the two solved together as one packed system — so this carries both,
+    and a consumer takes the pair it needs.
+
+    Attributes
+    ----------
+    gradient_rhs : callable
+        ``(field, boundary_values) -> b_g``, the right-hand side of the gradient equation, which is
+        also the eliminated system's right-hand side unreduced.
+    coupled_rhs : callable
+        ``(field, boundary_values) -> [b_g, 0]``, the same packed for the un-eliminated system.
+    coupled : GradientSystem
+        The un-eliminated system on the packed unknown ``[g, H]``.
+    inner : callable
+        ``() -> GradientSystem`` for the Hessian system ``A_HH``. A call builds the per-cell block
+        its preconditioner inverts, which is why it is deferred rather than a field.
+    outer : callable
+        ``(hessian_solver, inner_system) -> GradientSystem`` for the Schur system on the gradient.
+        The inner solve runs inside its operator, so the strategy solving it is part of the operator
+        and is injected here — which is what lets the operator be measured with the same inner solve
+        that will run inside it.
+    """
+
+    gradient_rhs: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
+    coupled_rhs: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
+    coupled: GradientSystem
+    inner: Callable[[], GradientSystem]
+    outer: Callable[[GradientSolve, GradientSystem], GradientSystem]
 
 
 class HessianCorrectedGradient(GradientScheme):
@@ -912,6 +998,28 @@ class HessianCorrectedGradient(GradientScheme):
                 "which differentiates by unrolling and imposes no such requirement. The outer "
                 "`solver`'s own diagnostic is unaffected."
             )
+        systems = self._systems(mesh, geometry)
+        if not self.schur:
+            packed = self.solver.solve(
+                systems.coupled.preconditioner,
+                systems.coupled.operator,
+                systems.coupled_rhs(field, boundary_values),
+            )
+            return packed[:, : mesh.dim]
+        inner = systems.inner()
+        outer = systems.outer(self.hessian_solver, inner)
+        return self.solver.solve(
+            outer.preconditioner, outer.operator, systems.gradient_rhs(field, boundary_values)
+        )
+
+    @staticmethod
+    def _systems(mesh: Mesh, geometry: MeshGeometry) -> _HessianSystems:
+        """Assemble this scheme's linear systems from the geometry — everything but the field.
+
+        The reconstruction solves these and the calibration measures them, so they are assembled
+        here once for both: a count measured against a different assembly than the one that runs
+        would be calibrating the wrong operator.
+        """
         dim = mesh.dim
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells
@@ -994,29 +1102,31 @@ class HessianCorrectedGradient(GradientScheme):
         zero_b = jnp.zeros(n_faces)
         no_face_g = jnp.zeros((n_faces, dim))  # a scatter's unused half needs a real zero array
         no_face_h = jnp.zeros((n_faces, dim, dim))
+
         # The φ-only right-hand side. Only the gradient equation has one: `hessian_face_terms` takes
-        # no field, so the Hessian equation's is identically zero for any field and any mesh.
-        b_g = face_cells.scatter(
-            *gradient_face_terms(zero_g, zero_h, zero_g, zero_h, field, boundary_values)
-        )
+        # no field, so the Hessian equation's is identically zero for any field and any mesh — which
+        # is also why the eliminated system's right-hand side is this one unreduced.
+        def gradient_rhs(fld, bvals):
+            return face_cells.scatter(
+                *gradient_face_terms(zero_g, zero_h, zero_g, zero_h, fld, bvals)
+            )
 
-        if not self.schur:
-            # Full coupled system on the packed unknown [g, H] of shape (n_cells, dim + dim²); both
-            # diagonal blocks carry the cell volume, so one inverse-volume preconditioner covers both.
-            # This path exists to check the elimination against the un-eliminated system, so it is
-            # kept deliberately plain — the block preconditioner below is for the Schur path.
-            def pack(g, h):
-                return jnp.concatenate([g, h.reshape(n_cells, dim * dim)], axis=1)
+        # Full coupled system on the packed unknown [g, H] of shape (n_cells, dim + dim²); both
+        # diagonal blocks carry the cell volume, so one inverse-volume preconditioner covers both.
+        # This path exists to check the elimination against the un-eliminated system, so it is
+        # kept deliberately plain — the block preconditioner below is for the Schur path.
+        def pack(g, h):
+            return jnp.concatenate([g, h.reshape(n_cells, dim * dim)], axis=1)
 
-            def coupled(u):
-                g, h = u[:, :dim], u[:, dim:].reshape(n_cells, dim, dim)
-                rhs_g = face_cells.scatter(*gradient_face_terms(g, h, g, h, zero_f, zero_b))
-                rhs_h = face_cells.scatter(*hessian_face_terms(g, h, g, h))
-                return pack(scale(g, vol) - rhs_g, vol[:, None, None] * h - rhs_h)
+        def coupled(u):
+            g, h = u[:, :dim], u[:, dim:].reshape(n_cells, dim, dim)
+            rhs_g = face_cells.scatter(*gradient_face_terms(g, h, g, h, zero_f, zero_b))
+            rhs_h = face_cells.scatter(*hessian_face_terms(g, h, g, h))
+            return pack(scale(g, vol) - rhs_g, vol[:, None, None] * h - rhs_h)
 
-            # The Hessian equation's right-hand side is zero (see `b_g` above).
-            solution = self.solver.solve(InverseVolume(1.0 / vol), coupled, pack(b_g, zero_h))
-            return solution[:, :dim]
+        def coupled_rhs(fld, bvals):
+            # The Hessian equation's right-hand side is zero (see `gradient_rhs` above).
+            return pack(gradient_rhs(fld, bvals), zero_h)
 
         # ---- Schur elimination of the Hessian block.
         def gradient_and_hessian_rows(g):
@@ -1059,15 +1169,28 @@ class HessianCorrectedGradient(GradientScheme):
             _, neighbour_side = hessian_face_terms(zero_g, zero_h, zero_g, _hessian_probe(probe))
             return face_cells.scatter(no_face_h, neighbour_side)[:, 0, :]
 
-        gradient_block = cell_diagonal_block(gg_owner, gg_neighbour, vol, n_cells, dim)
-        hessian_block = cell_diagonal_block(hh_owner, hh_neighbour, vol, n_cells, dim)
-        outer_preconditioner = CellBlockJacobi(jnp.linalg.inv(gradient_block))
-        inner_preconditioner = CellBlockJacobi(jnp.linalg.inv(hessian_block))
+        # Both diagonal blocks cost `dim` probes of the face kernel to recover, so they are built on
+        # demand rather than eagerly: the un-eliminated path above needs neither, and charging it for
+        # them would make a check path quietly dearer than the code it checks.
+        def inner():
+            block = cell_diagonal_block(hh_owner, hh_neighbour, vol, n_cells, dim)
+            return GradientSystem(CellBlockJacobi(jnp.linalg.inv(block)), a_hh, (n_cells, dim, dim))
 
-        def schur(g):
-            a_gg_g, a_hg_g = gradient_and_hessian_rows(g)
-            return a_gg_g - a_gh(self.hessian_solver.solve(inner_preconditioner, a_hh, a_hg_g))
+        def outer(hessian_solver, inner_system):
+            block = cell_diagonal_block(gg_owner, gg_neighbour, vol, n_cells, dim)
 
-        # b_h is identically zero (the Hessian equation carries no term in the field), so the
-        # eliminated right-hand side is b_g itself — no inner solve is run for it.
-        return self.solver.solve(outer_preconditioner, schur, b_g)
+            def schur(g):
+                a_gg_g, a_hg_g = gradient_and_hessian_rows(g)
+                return a_gg_g - a_gh(
+                    hessian_solver.solve(inner_system.preconditioner, inner_system.operator, a_hg_g)
+                )
+
+            return GradientSystem(CellBlockJacobi(jnp.linalg.inv(block)), schur, (n_cells, dim))
+
+        return _HessianSystems(
+            gradient_rhs=gradient_rhs,
+            coupled_rhs=coupled_rhs,
+            coupled=GradientSystem(InverseVolume(1.0 / vol), coupled, (n_cells, dim + dim * dim)),
+            inner=inner,
+            outer=outer,
+        )
