@@ -243,16 +243,23 @@ scheme = HessianCorrectedGradient(coupled_sweep=CoupledBlockSweep(sweeps=30))
 ```
 
 It converges to the same answer — its fixed point is the same Schur system, which follows from the
-two updates rather than being a numerical coincidence — and it is both faster and, at a given
-budget, more accurate. Measured on an 8000-cell warped grid against the default nested solve:
+two updates rather than being a numerical coincidence. Measured on an 8000-cell grid with **both**
+solves calibrated to the same tolerance:
 
-| | forward | tangent (used once per Krylov iteration) |
-| --- | --- | --- |
-| nested, 20 outer × 10 inner | 143 ms | 213 ms |
-| `CoupledBlockSweep(sweeps=30)` | **71 ms** | **68 ms** |
+| mesh | | forward | tangent | error |
+| --- | --- | --- | --- | --- |
+| orthogonal | nested, 5 × 1 | **25 ms** | 28 ms | 3.4 × 10⁻⁶ |
+| orthogonal | coupled, 6 sweeps | 28 ms | 28 ms | **5.0 × 10⁻⁷** |
+| 30% perturbed | nested, 6 × 4 | 37 ms | 47 ms | 5.2 × 10⁻⁶ |
+| 30% perturbed | coupled, 7 sweeps | **31 ms** | **31 ms** | **1.1 × 10⁻⁶** |
 
-with the reconstruction of a quadratic reaching 2.1 × 10⁻¹⁵ against the nested solve's
-9.2 × 10⁻¹⁵ — i.e. it matches an exactly solved outer system, which the default does not.
+So on a skewed mesh it is about 1.2× faster to evaluate, 1.5× faster to differentiate, and five
+times more accurate at the same requested tolerance. On a near-orthogonal mesh, where the nested
+outer solve is already nearly trivial, it is slightly *slower* — the advantage grows with
+non-orthogonality, which is the regime this scheme exists for.
+
+It reaches better accuracy than asked because its rate is measured on the gradient and Hessian
+together, and the Hessian's error dominates that estimate while the gradient's falls faster.
 
 The system stays gradient-sized: no enlarged unknown is formed, and the Hessian is an iterate of
 the sweep rather than an unknown of a larger system. It lives for one reconstruction and starts
@@ -260,7 +267,14 @@ from zero on every call, so the reconstruction remains an exactly linear functio
 
 `sweeps` here is **not** the nested solve's outer count and must be calibrated on its own — a
 coupled sweep costs about three face passes where a nested outer sweep costs eleven, so more of
-them buy less each.
+them buy less each. {meth}`~aquaflux.schemes.CoupledBlockSweep.calibrated` measures it from the
+mesh, exactly as the other two schemes' factories do:
+
+```python
+scheme = HessianCorrectedGradient(
+    coupled_sweep=CoupledBlockSweep.calibrated(mesh, mesh.geometry())
+)
+```
 
 ## Choosing the sweep count
 

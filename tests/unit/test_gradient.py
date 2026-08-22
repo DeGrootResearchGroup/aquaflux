@@ -1238,7 +1238,11 @@ def test_the_two_calibrated_factories_expose_one_calibration_surface() -> None:
     # diagonal its preconditioner can be built from.
     scheme_specific = {"mesh", "geometry", "schur", "preconditioner", "local_schur_block"}
 
-    for factory in (CorrectedGreenGauss.calibrated, HessianCorrectedGradient.calibrated):
+    for factory in (
+        CorrectedGreenGauss.calibrated,
+        HessianCorrectedGradient.calibrated,
+        CoupledBlockSweep.calibrated,
+    ):
         parameters = inspect.signature(factory).parameters
         offered = {name: p.default for name, p in parameters.items() if name not in scheme_specific}
         assert offered == expected, f"{factory.__qualname__} does not carry the calibration surface"
@@ -1550,3 +1554,46 @@ def test_the_coupled_sweep_is_differentiable() -> None:
     )
     assert analytic == pytest.approx(difference, rel=1e-6)
     assert abs(analytic) > 1e-6, "a severed adjoint would report zero and pass a finiteness check"
+
+
+def test_the_coupled_sweep_calibrates_its_own_count_from_the_mesh() -> None:
+    """Its count is not the nested path's outer count and cannot be borrowed from it.
+
+    A coupled sweep costs about a third as much as a nested outer sweep and converges at its own
+    rate, so a count that is right for one is wrong for the other. The count should also rise with
+    the mesh's non-orthogonality, which is what makes it a measurement rather than a constant.
+    """
+    counts = [
+        CoupledBlockSweep.calibrated(mesh, mesh.geometry()).sweeps
+        for mesh in (
+            perturbed_grid_3d(8, 8, 8, perturb=0.2, seed=5),
+            perturbed_grid_3d(8, 8, 8, perturb=0.3, seed=1),
+            perturbed_grid_3d(8, 8, 8, perturb=0.4, seed=2),
+        )
+    ]
+    assert counts == sorted(counts), f"the count should not fall as the mesh worsens: {counts}"
+    assert counts[-1] > counts[0], f"and it should rise across this span: {counts}"
+
+
+def test_the_calibrated_coupled_sweep_meets_the_tolerance_it_was_given() -> None:
+    """The calibrated count reaches the requested accuracy — with margin, deliberately.
+
+    The rate is measured on the packed ``[g, h]`` error while only the gradient is returned, and the
+    Hessian's error dominates that estimate, so the reconstruction comes in comfortably better than
+    asked. Pinned as an inequality rather than an equality for exactly that reason: the margin is a
+    property of what is being measured, not a tuning to be preserved.
+    """
+    mesh = perturbed_grid_3d(8, 8, 8, perturb=0.3, seed=1)
+    geom = mesh.geometry()
+    exact = HessianCorrectedGradient(
+        solver=GmresGradientSolve(), hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None)
+    ).gradients(_quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid))
+    tol = 1e-6
+    scheme = HessianCorrectedGradient(
+        coupled_sweep=CoupledBlockSweep.calibrated(mesh, geom, tol=tol)
+    )
+    swept = scheme.gradients(
+        _quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid)
+    )
+    relative = float(jnp.linalg.norm(swept - exact)) / float(jnp.linalg.norm(exact))
+    assert relative < tol
