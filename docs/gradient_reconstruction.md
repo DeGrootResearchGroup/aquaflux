@@ -228,6 +228,54 @@ If you calibrate the sweep count (below), pass the preconditioner to
 given accuracy belongs to the operator–preconditioner pairing it was measured on, and the
 calibrated scheme carries the preconditioner with it for that reason.
 
+### Sweeping both blocks instead of nesting a solve
+
+By default the Hessian-corrected scheme solves its outer system with a sweep whose every operator
+apply runs a *complete* Hessian solve inside it — so the Hessian is re-converged from zero once
+per outer sweep, discarding what the previous one found.
+{class}`~aquaflux.schemes.CoupledBlockSweep` sweeps the two blocks alternately instead, keeping
+that work:
+
+```python
+from aquaflux.schemes import CoupledBlockSweep, HessianCorrectedGradient
+
+scheme = HessianCorrectedGradient(coupled_sweep=CoupledBlockSweep(sweeps=30))
+```
+
+It converges to the same answer — its fixed point is the same Schur system, which follows from the
+two updates rather than being a numerical coincidence. Measured on an 8000-cell grid with **both**
+solves calibrated to the same tolerance:
+
+| mesh | | forward | tangent | error |
+| --- | --- | --- | --- | --- |
+| orthogonal | nested, 5 × 1 | **25 ms** | 28 ms | 3.4 × 10⁻⁶ |
+| orthogonal | coupled, 6 sweeps | 28 ms | 28 ms | **5.0 × 10⁻⁷** |
+| 30% perturbed | nested, 6 × 4 | 37 ms | 47 ms | 5.2 × 10⁻⁶ |
+| 30% perturbed | coupled, 7 sweeps | **31 ms** | **31 ms** | **1.1 × 10⁻⁶** |
+
+So on a skewed mesh it is about 1.2× faster to evaluate, 1.5× faster to differentiate, and five
+times more accurate at the same requested tolerance. On a near-orthogonal mesh, where the nested
+outer solve is already nearly trivial, it is slightly *slower* — the advantage grows with
+non-orthogonality, which is the regime this scheme exists for.
+
+It reaches better accuracy than asked because its rate is measured on the gradient and Hessian
+together, and the Hessian's error dominates that estimate while the gradient's falls faster.
+
+The system stays gradient-sized: no enlarged unknown is formed, and the Hessian is an iterate of
+the sweep rather than an unknown of a larger system. It lives for one reconstruction and starts
+from zero on every call, so the reconstruction remains an exactly linear function of the field.
+
+`sweeps` here is **not** the nested solve's outer count and must be calibrated on its own — a
+coupled sweep costs about three face passes where a nested outer sweep costs eleven, so more of
+them buy less each. {meth}`~aquaflux.schemes.CoupledBlockSweep.calibrated` measures it from the
+mesh, exactly as the other two schemes' factories do:
+
+```python
+scheme = HessianCorrectedGradient(
+    coupled_sweep=CoupledBlockSweep.calibrated(mesh, mesh.geometry())
+)
+```
+
 ## Choosing the sweep count
 
 A fixed sweep count carries no convergence test, so it is worth knowing what sets it: the

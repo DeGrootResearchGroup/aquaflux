@@ -307,6 +307,53 @@ property worth checking on any future change here; a drift that grew with depth 
   before trusting any future variant; the end-to-end error alone cannot distinguish a wrong block
   from a hard mesh.
 
+  **`CoupledBlockSweep` — sweep BOTH blocks instead of nesting a solve per apply (2026-08-22, opt-in).**
+  The nested path re-converges the Hessian from zero once per outer sweep, throwing away what the
+  previous outer sweep learned. Sweeping alternately keeps it:
+  `h ← h + P_H⁻¹(A_Hg g − A_HH h)` then `g ← g + ω P_g⁻¹(b_g − A_gg g + A_gH h)`, Gauss–Seidel (the
+  gradient update uses the Hessian just computed, which is what lets one Hessian sweep per gradient
+  sweep converge at all). One sweep is ~3 face-kernel passes against the nested `1 + inner` ≈ 11.
+
+  **⚠️ MEASURE IT AGAINST A CALIBRATED NESTED SOLVE, NOT THE SHIPPED DEFAULT.** Against `20/10` it
+  looks like 2.0× forward and 3.1× on the tangent — but `20/10` is heavily over-provisioned on the
+  meshes that comparison used, so most of that gap is the baseline's slack rather than this sweep's
+  merit. Both calibrated at the shared default tolerance (8000 cells, wall clock):
+
+  | mesh | arm | forward | jvp | error vs analytic |
+  |---|---|---|---|---|
+  | orthogonal | nested 5×1 | **24.5 ms** | 28.3 ms | 3.42e-06 |
+  | orthogonal | coupled 6 | 27.9 ms | 28.2 ms | **5.04e-07** |
+  | warped p=0.3 | nested 6×4 | 36.6 ms | 46.6 ms | 5.20e-06 |
+  | warped p=0.3 | **coupled 7** | **30.7 ms** | **30.5 ms** | **1.09e-06** |
+
+  So honestly: **1.2× forward and 1.5× on the tangent on a skewed mesh, at 5× the accuracy** — and
+  slightly *slower* forward on an orthogonal one, where the nested outer solve is nearly trivial and
+  there is little to save. In calibrated face-passes: 0.6× on orthogonal, 1.4× at 30 % perturbation,
+  1.8× at 40 %. The advantage grows with non-orthogonality, which is the regime this scheme is for.
+
+  **It beats the tolerance it is given, and that is structural.** The rate is measured on the packed
+  `[g, h]` error because the blocks converge together, but the Hessian's error dominates that
+  estimate while the gradient's falls faster — so the count is conservative for what is returned. A
+  comparison at equal *tolerance* is therefore not a comparison at equal *accuracy*.
+
+  **The fixed point is provably the Schur solution**: the `h` update forces `A_HH h = A_Hg g`, and
+  substituting leaves `S g = b_g`; both preconditioners are invertible so each step is an
+  equivalence.
+
+  - **The system stays gradient-sized.** No enlarged unknown, no solve on the packed `[g, H]` vector —
+    `h` is an iterate of this sweep, not an unknown of a larger one. What it gives up against the
+    nested path is `h`'s *transience*: it lives for one reconstruction rather than one apply
+    (~115 MB at 1.6M cells). The reverse-mode tape should get **smaller**, holding one carried
+    Hessian iterate per sweep instead of ten.
+  - **⚠️ `h` STARTS AT ZERO ON EVERY CALL — a correctness requirement, not a style choice.** Carried
+    between calls the reconstruction becomes history-dependent and stops being linear, which is the
+    already-refuted warm-start from a previous step's answer. Verified: superposition 3.3e-16,
+    `grad(0)` exactly zero, repeat calls bit-identical.
+  - **Its `sweeps` is NOT the nested path's outer count** — `CoupledBlockSweep.calibrated(mesh,
+    geometry)` measures it, sharing the calibration surface exactly (no scheme-specific keyword, so
+    it joins the sibling-surface test rather than needing an exemption). Measured counts: 6 on an
+    orthogonal grid, 7 at 20–30 % perturbation, 8 at 40 %.
+
   **Boundary treatment: audited and correct.** Boundary cells reconstruct as exactly as interior ones
   (1.95e-15 vs 2.26e-15 median on a warped mesh). `f = 0` there, `skew` collapses to `d_own`, and the
   unconditionally-computed neighbour side is discarded *structurally* by `scatter` — its index points
