@@ -53,6 +53,45 @@ from *before* the last update, so at one sweep that is the right-hand side itsel
 exactly 1 whatever the mesh — which is why gating it was the fix. **If you meet that warning in an old
 log from a skew-free mesh, it was never evidence of non-orthogonality.**
 
+## ⚠️ THE SWEEPS ARE A `lax.scan`, AND THAT IS A SCALING DECISION (2026-08-22)
+
+`SweptGradientSolve` ran its sweeps as a Python `for`, which emits one copy of the operator apply per
+sweep — so the **compiled program** grew with the sweep count. That compounds in the Hessian-corrected
+scheme, where the inner solve runs once per outer apply and the program is `outer × inner` applies.
+
+**It is a COMPILE-side limit, not a runtime one.** Runtime memory is flat in the sweep count either
+way (measured: 11.7–11.8 GB from 2 to 12 sweeps on a 1.6M-cell mesh). What fails is compilation: at
+468 applies the scanned form compiles and runs in **230 s at 7.6 GB** while the unrolled one is
+**killed by the operating system during compilation**. On this case that wall sat between 240 and 320
+unrolled applies, which is inside the range a real calibration asks for.
+
+Compile time with the scan is **flat at 0.4 s across 50, 200 and 450 applies** (8000 cells).
+
+- **`sweeps` stays a static field** — that is exactly what `length` wants. It never becomes a tracer,
+  so `narrow_gradient_sweeps` and the calibration keep working on it unchanged.
+- **The peel stays outside the scan**, and a single sweep short-circuits before it. ⚠️ `lax.scan`
+  **traces its body even at `length=0`**, so without that short-circuit a one-sweep solve traces an
+  operator it never applies.
+- **The carry is `(x, residual)`, not just `x`.** The `warn_tol` diagnostic reads the residual that
+  *formed* the final update — free, one apply already spent — and a carry of `x` alone silently drops
+  the only warning a user gets that their sweep count is short for their mesh.
+
+**⚠️ IT IS NOT BIT-IDENTICAL, and do not record it as such.** XLA contracts the multiply-adds
+differently in a scan body than in an unrolled chain — the same mechanism as the `dot` entry in the
+root briefing. Measured: **5.4e-17 relative**, i.e. one unit in the last place, **exactly zero at
+`sweeps=1`**, and **flat from three sweeps onward rather than accumulating**. That flatness is the
+property worth checking on any future change here; a drift that grew with depth would be a defect.
+
+**Two tests had to change lens, and neither was weakened — this is the instructive part.**
+- `test_the_swept_solve_spends_one_apply_fewer_than_its_sweep_count` counted applies with a **Python
+  counter inside the operator**. A scan body is traced **once** however many times it executes, so
+  that counter reads `1` at every sweep count and the test would have passed whatever the peel did.
+  It now reads the scan's **trip count out of the jaxpr**, which is what actually executes.
+- `test_peeling_the_zero_apply_leaves_the_answer_BIT_identical` compared the peeled solve against an
+  unpeeled **Python loop**. With one arm scanned it was comparing loop constructs rather than the
+  peel, and failed by ~1 ulp. The reference is a scan too now, and bit-equality is restored — the peel
+  itself is exact, since `A·0` is exactly zero.
+
 ## Responsibility
 - Reconstruction/interpolation/gradient/**limiting** **strategy classes** (each an `equinox.Module`
   implementing a scheme `Protocol`), each a **small single-responsibility class with a

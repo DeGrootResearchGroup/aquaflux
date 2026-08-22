@@ -550,6 +550,7 @@ class SweptGradientSolve(GradientSolve):
         op = operator if operator_hook is None else lambda v: operator(operator_hook(v))
         if self.sweeps <= 0:
             return jnp.zeros_like(rhs)
+
         # THE FIRST SWEEP'S OPERATOR APPLY IS PEELED, and it is exact rather than an approximation.
         # The iteration starts from a zero iterate, so that sweep's residual is `rhs - A·0`, which is
         # `rhs` itself -- the apply forming it multiplies a vector known to be zero at full price.
@@ -561,11 +562,40 @@ class SweptGradientSolve(GradientSolve):
         # relaxation strictly inside (0, 1] is required for convergence at all; their experiments run
         # it at 0.8. Undamped (`relaxation=1`) is the special case, safe only where the iteration's
         # error operator is already a contraction.
-        residual = rhs
-        x = self.relaxation * preconditioner.apply(rhs)
-        for _ in range(self.sweeps - 1):
+        #
+        # THE SWEEPS ARE A `lax.scan`, NOT A PYTHON LOOP, AND THAT IS A SCALING DECISION. Unrolling
+        # emits one copy of the operator apply per sweep, so the compiled program grows with the sweep
+        # count -- and this reconstruction nests, since the Hessian solve runs once per outer apply,
+        # making the program `outer x inner` applies. Measured on a 1.6M-cell mesh: at 468 applies the
+        # scanned form compiles and runs in 230 s at 7.6 GB while the unrolled one is killed by the
+        # operating system during COMPILATION, not execution -- runtime memory is flat in the sweep
+        # count either way. A scan compiles one body whatever the depth.
+        #
+        # `sweeps` stays a static field, which is exactly what `length` wants: it never becomes a
+        # tracer, so the calibration and `narrow_gradient_sweeps` keep working on it unchanged.
+        peeled = self.relaxation * preconditioner.apply(rhs)
+        if self.sweeps == 1:
+            # A single sweep IS the peel, and returning it here rather than scanning zero times keeps
+            # the operator out of the traced program entirely. `lax.scan` traces its body even at
+            # `length=0`, so without this the operator would be traced for a solve that never applies
+            # it -- harmless at run time, but it costs a trace and makes the peel invisible to
+            # anything reading the program.
+            return peeled
+
+        def sweep(carry, _):
+            x, _previous = carry
             residual = rhs - op(x)
-            x = x + self.relaxation * preconditioner.apply(residual)
+            return (x + self.relaxation * preconditioner.apply(residual), residual), None
+
+        # The carry holds the residual as well as the iterate, purely so the diagnostic below can
+        # still read it: it is the residual that *formed* the final update, so the reported ratio is
+        # the same quantity the unrolled loop reported, one apply already spent and free.
+        (x, residual), _ = jax.lax.scan(
+            sweep,
+            (peeled, rhs),
+            None,
+            length=self.sweeps - 1,
+        )
         # The convergence diagnostic norms the residual over the whole local vector. Under domain
         # decomposition that vector holds each partition's ghost/null rows too, so a faithful global
         # norm would need an owned-only cross-partition reduction the operator-wrapping seam does not
