@@ -632,10 +632,16 @@ def test_the_swept_solve_spends_one_apply_fewer_than_its_sweep_count() -> None:
 
     Counting applies rather than timing is what makes this a *test*: it fails if the peel is ever
     reverted or an extra apply creeps back in, where a timing assertion would only wobble.
+
+    ⚠️ **Counted from the traced program, not with a Python counter.** The sweeps run as a
+    ``lax.scan``, whose body is traced ONCE however many times it executes, so a counter incremented
+    inside the operator reports ``1`` at every sweep count -- it would pass whatever the peel did,
+    which is worse than no test. The trip count and the applies inside one body give the same total
+    and remain visible.
     """
-    applies = []
     unit = InverseVolume(jnp.ones(4))
     rhs = jnp.arange(1.0, 5.0)
+    applies = []
 
     def operator(v):
         applies.append(1)
@@ -643,8 +649,23 @@ def test_the_swept_solve_spends_one_apply_fewer_than_its_sweep_count() -> None:
 
     for sweeps in (1, 2, 4, 7):
         applies.clear()
-        SweptGradientSolve(sweeps=sweeps, warn_tol=None).solve(unit, operator, rhs)
-        assert len(applies) == sweeps - 1
+        solve = SweptGradientSolve(sweeps=sweeps, warn_tol=None)
+        jaxpr = jax.make_jaxpr(lambda r, _s=solve: _s.solve(unit, operator, r))(rhs)
+        scans = [e for e in jaxpr.eqns if e.primitive.name == "scan"]
+        trips = sum(int(e.params["length"]) for e in scans)
+        # One apply per body execution, and the body runs `length` times -- so the total applies are
+        # `length`, which must be one fewer than the sweep count.
+        assert trips == sweeps - 1, f"expected {sweeps - 1} applies, program runs {trips}"
+        # One apply per body, so the trip count IS the apply count. At a single sweep there is no
+        # body at all -- the peel is returned directly, which is what the operator below proves.
+        assert len(applies) == len(scans), "the body should hold exactly one operator apply"
+
+    # AND THE PEEL ITSELF, checked where it is unambiguous: at one sweep the operator must never be
+    # applied at all, which an operator that raises proves outright rather than by counting.
+    def forbidden(_v):
+        raise AssertionError("the peeled first sweep must not apply the operator")
+
+    SweptGradientSolve(sweeps=1, warn_tol=None).solve(unit, forbidden, rhs)
 
 
 def test_peeling_the_zero_apply_leaves_the_answer_BIT_identical() -> None:
@@ -653,6 +674,13 @@ def test_peeling_the_zero_apply_leaves_the_answer_BIT_identical() -> None:
     Checked against the unpeeled iteration written out here rather than against a tolerance, so a
     change that alters the arithmetic (reordering the update, folding the volume differently) fails
     even though it would stay well inside any sensible tolerance.
+
+    ⚠️ **The reference runs the same loop construct as the solve.** Both are a ``lax.scan``, so the
+    only difference between the two arms is the peel, which is what this test is about. Written as a
+    Python loop instead it fails by ~1 unit in the last place -- not because the peel is inexact
+    (``A·0`` is exactly zero, so ``rhs - A·0`` is ``rhs`` bit for bit) but because XLA contracts the
+    multiply-adds differently in an unrolled chain than in a scan body. Comparing across constructs
+    would test the compiler, not the peel.
     """
     mesh = perturbed_grid_2d(12, 12, perturb=0.2)
     geometry = mesh.geometry()
@@ -663,11 +691,12 @@ def test_peeling_the_zero_apply_leaves_the_answer_BIT_identical() -> None:
         captured = {}
 
         def capture(preconditioner, operator, rhs, *, operator_hook=None, _s=solver, _c=captured):
-            # The iteration exactly as it stood before the peel, over the same operator and rhs.
-            x = jnp.zeros_like(rhs)
-            for _ in range(_s.sweeps):
-                x = x + preconditioner.apply(rhs - operator(x))
-            _c["unpeeled"] = x
+            # The iteration exactly as it stood before the peel, over the same operator and rhs, and
+            # in the same loop construct -- so the peel is the only difference between the arms.
+            def sweep(x, _):
+                return x + preconditioner.apply(rhs - operator(x)), None
+
+            _c["unpeeled"], _ = jax.lax.scan(sweep, jnp.zeros_like(rhs), None, length=_s.sweeps)
             return _s.solve(preconditioner, operator, rhs, operator_hook=operator_hook)
 
         peeled = CorrectedGreenGauss(
