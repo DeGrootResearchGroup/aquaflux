@@ -11,6 +11,7 @@ from __future__ import annotations
 from .gradient import (
     CellBlockJacobi,
     CellPreconditioner,
+    CoupledBlockSweep,
     CompactGreenGauss,
     ContractionRate,
     CorrectedGreenGauss,
@@ -42,6 +43,7 @@ __all__ = [
     "CompactGreenGauss",
     "ContractionRate",
     "CorrectedGreenGauss",
+    "CoupledBlockSweep",
     "ExactCellBlock",
     "GmresGradientSolve",
     "GradientPreconditioner",
