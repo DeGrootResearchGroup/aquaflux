@@ -342,37 +342,44 @@ If you calibrate the sweep count (below), pass the preconditioner to
 given accuracy belongs to the operator–preconditioner pairing it was measured on, and the
 calibrated scheme carries the preconditioner with it for that reason.
 
-### Sweeping both blocks, and the nested alternative
+### How the two systems are solved
 
-The Hessian-corrected scheme has two ways to solve its two systems, and it carries **one or the
-other** — never both.
-
-By default it uses {class}`~aquaflux.schemes.CoupledBlockSweep`, which sweeps the two blocks
-alternately, carrying the Hessian from one sweep to the next. The alternative nests a
-*complete* Hessian solve inside every apply of the outer one, re-converging the Hessian from zero
-each time and discarding what the previous apply found:
+The scheme assembles two systems — the Hessian's and the gradient's — and there is more than
+one defensible way to get a gradient out of them. That choice is a single injected strategy, so
+a scheme carries exactly one and the settings that belong to a path travel with the path:
 
 ```python
 from aquaflux.schemes import (
-    CoupledBlockSweep, HessianCorrectedGradient, SweptGradientSolve,
+    CoupledBlockSweep, GmresGradientSolve, HessianCorrectedGradient,
+    NestedHessianSolve, PackedSystemSolve, SweptGradientSolve,
 )
 
-HessianCorrectedGradient()                                      # coupled sweep, the default
-HessianCorrectedGradient(coupled_sweep=CoupledBlockSweep(sweeps=30))   # ... with a chosen count
+HessianCorrectedGradient()                                       # the coupled sweep, by default
+HessianCorrectedGradient(hessian_solve=CoupledBlockSweep(sweeps=30))
 
-# the nested path, which is what `solver` and `hessian_solver` drive
-HessianCorrectedGradient(
+HessianCorrectedGradient(hessian_solve=NestedHessianSolve(
     solver=SweptGradientSolve(sweeps=20),
-    hessian_solver=SweptGradientSolve(sweeps=10, warn_tol=None),
-    coupled_sweep=None,
-)
+    hessian_solver=GmresGradientSolve(),
+))
+
+HessianCorrectedGradient(hessian_solve=PackedSystemSolve())      # the un-eliminated system
 ```
 
-```{warning}
-`coupled_sweep=None` is required to use `solver` and `hessian_solver` — the coupled sweep drives
-both blocks itself, so those strategies would never run. Passing them together raises rather
-than silently ignoring them, because a solver that is quietly discarded is very hard to notice:
-it does not fail, it just answers a question you did not ask.
+{class}`~aquaflux.schemes.CoupledBlockSweep` sweeps the two blocks alternately, carrying the
+Hessian from one sweep to the next. {class}`~aquaflux.schemes.NestedHessianSolve` eliminates the
+Hessian and re-converges it from zero inside every apply of the outer solve, discarding what the
+previous apply found. {class}`~aquaflux.schemes.PackedSystemSolve` solves the un-eliminated
+system whole, which is how the elimination is checked rather than a production path.
+
+The default is the coupled sweep: it matches the nested pair's accuracy at about a third of the
+face-kernel passes, and the gap widens with mesh skewness — 1.4x at 30 % perturbation, 1.8x at
+40 %, and up to 12x under {class}`~aquaflux.schemes.AveragedNeighbourHessian`, whose Hessian
+system is the expensive one to re-converge.
+
+```{note}
+The nested path is *faster* on an orthogonal mesh, where the outer solve is nearly trivial and
+there is nothing to save by carrying the Hessian. That is also a mesh on which this scheme has
+no accuracy advantage worth its cost, so it is not a reason to choose it.
 ```
 
 {meth}`~aquaflux.schemes.HessianCorrectedGradient.calibrated` sizes whichever path it returns —
@@ -408,7 +415,7 @@ mesh, exactly as the other two schemes' factories do:
 
 ```python
 scheme = HessianCorrectedGradient(
-    coupled_sweep=CoupledBlockSweep.calibrated(mesh, mesh.geometry())
+    hessian_solve=CoupledBlockSweep.calibrated(mesh, mesh.geometry())
 )
 ```
 

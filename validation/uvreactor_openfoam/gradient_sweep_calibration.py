@@ -61,6 +61,7 @@ from aquaflux.schemes import (  # noqa: E402
     CorrectedGreenGauss,
     GmresGradientSolve,
     HessianCorrectedGradient,
+    NestedHessianSolve,
     SweptGradientSolve,
 )
 from aquaflux.schemes.interpolation import interpolation_factor  # noqa: E402
@@ -330,7 +331,9 @@ def main() -> None:
     for sweeps in sorted(INNER_LADDER):
         gradient = reconstruct(
             HessianCorrectedGradient(
-                hessian_solver=SweptGradientSolve(sweeps=sweeps, warn_tol=None)
+                hessian_solve=NestedHessianSolve(
+                    hessian_solver=SweptGradientSolve(sweeps=sweeps, warn_tol=None)
+                )
             ),
             field,
             mesh,
@@ -366,11 +369,15 @@ def main() -> None:
 
     print("\n  the reference, and the ladder measured against it", flush=True)
     if args.exact:
-        reference_scheme = HessianCorrectedGradient(hessian_solver=GmresGradientSolve())
+        reference_scheme = HessianCorrectedGradient(
+            hessian_solve=NestedHessianSolve(hessian_solver=GmresGradientSolve())
+        )
         reference_label = "reference: exact Krylov inner"
     else:
         reference_scheme = HessianCorrectedGradient(
-            hessian_solver=SweptGradientSolve(sweeps=REFERENCE_SWEEPS, warn_tol=None)
+            hessian_solve=NestedHessianSolve(
+                hessian_solver=SweptGradientSolve(sweeps=REFERENCE_SWEEPS, warn_tol=None)
+            )
         )
         reference_label = f"reference: {REFERENCE_SWEEPS} inner sweeps"
     reference = reconstruct(reference_scheme, field, mesh, geometry, bvals, reference_label)
@@ -381,7 +388,9 @@ def main() -> None:
         # it is checked against a longer one before anything is measured against it.
         longer = reconstruct(
             HessianCorrectedGradient(
-                hessian_solver=SweptGradientSolve(sweeps=REFERENCE_CHECK_SWEEPS, warn_tol=None)
+                hessian_solve=NestedHessianSolve(
+                    hessian_solver=SweptGradientSolve(sweeps=REFERENCE_CHECK_SWEEPS, warn_tol=None)
+                )
             ),
             field,
             mesh,
@@ -420,7 +429,9 @@ def main() -> None:
         # departure of zero at 20 sweeps -- an arm that grades its own homework.
         inner = SweptGradientSolve(sweeps=OUTER_INNER_SWEEPS, warn_tol=None)
         krylov = reconstruct(
-            HessianCorrectedGradient(solver=GmresGradientSolve(), hessian_solver=inner),
+            HessianCorrectedGradient(
+                hessian_solve=NestedHessianSolve(solver=GmresGradientSolve(), hessian_solver=inner)
+            ),
             field,
             mesh,
             geometry,
@@ -436,8 +447,10 @@ def main() -> None:
         for sweeps, relax in arms:
             gradient = reconstruct(
                 HessianCorrectedGradient(
-                    solver=SweptGradientSolve(sweeps=sweeps, warn_tol=None, relaxation=relax),
-                    hessian_solver=inner,
+                    hessian_solve=NestedHessianSolve(
+                        solver=SweptGradientSolve(sweeps=sweeps, warn_tol=None, relaxation=relax),
+                        hessian_solver=inner,
+                    )
                 ),
                 field,
                 mesh,
@@ -459,8 +472,10 @@ def main() -> None:
     print("\nis the scheme worth it -- both measured against an EXACT gradient", flush=True)
     exact = reconstruct(
         HessianCorrectedGradient(
-            solver=GmresGradientSolve(),
-            hessian_solver=SweptGradientSolve(sweeps=REFERENCE_SWEEPS, warn_tol=None),
+            hessian_solve=NestedHessianSolve(
+                solver=GmresGradientSolve(),
+                hessian_solver=SweptGradientSolve(sweeps=REFERENCE_SWEEPS, warn_tol=None),
+            )
         ),
         field,
         mesh,

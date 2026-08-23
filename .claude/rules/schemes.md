@@ -1143,24 +1143,47 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     Exactly the shape already recorded for a Krylov outer solver, which narrowing genuinely cannot
     touch; this one it can, so it now does — carrying `relaxation` across, and pinned by a test that
     the narrowed copy differs in the count and in nothing else.
-  - **⚠️ THE SILENT OVERRIDE HAD TO BECOME LOUD, and four live call sites proved why.** With the sweep
-    on by default, any `solver` or `hessian_solver` a caller passes never runs. That is not a
-    hypothetical trap: `pitzdaily_gradient_ab/run_ab.py` (three sites, including the Betchen arm whose
-    cost ratios this file quotes) and `uvreactor_openfoam/schur_block_diagnosis.py` (whose numbers
-    were recorded the same day) would all have silently changed meaning. `gradients` now **refuses**
-    the pair with a message naming the fix, and every site says `coupled_sweep=None` explicitly.
+  - **⚠️ THE SILENT OVERRIDE, and four live call sites that proved why it mattered.** With the sweep
+    on by default, any solver a caller passed never ran. That was not a hypothetical trap:
+    `pitzdaily_gradient_ab/run_ab.py` (three sites, including the Betchen arm whose cost ratios this
+    file quotes) and `uvreactor_openfoam/schur_block_diagnosis.py` (whose numbers were recorded the
+    same day) would all have silently changed meaning. It was first patched with a guard that refused
+    the contradictory pair; **the single-strategy field below removed the possibility instead**, which
+    is the form to keep in mind — a guard is what you write when the type still lets the mistake be
+    expressed.
   - **⚠️ `calibrated` WAS SIZING A PATH THE SCHEME WOULD NOT RUN.** It measured the nested pair and
-    returned a scheme that would sweep instead — calibrated in name only. It now sizes whichever path
-    it returns: `coupled=True` (the default) measures the sweep, `coupled=False` the nested pair and
-    sets `coupled_sweep=None`. A scheme carries one path or the other, never both.
+    returned a scheme that would sweep instead — calibrated in name only. It now builds exactly one
+    strategy, the one that will run.
 
-  **⚠️ THE UNDERLYING SHAPE IS STILL WRONG, and the guard is a patch over it.** Three fields of which
-  two are inert at any moment is what makes the conflict representable at all; **15 call sites** now
-  have to state which path they mean. The structurally correct form is one injected strategy —
-  `hessian_solve = CoupledBlockSweep(...)` or `NestedHessianSolve(outer, inner)` — under which the
-  conflict cannot be written down and neither the guard nor the `coupled=` flag needs to exist. Not
-  built: it re-touches every construction site again, and is a larger API change than the default flip
-  it would tidy.
+  **✅ THE THREE SOLVE FIELDS ARE NOW ONE INJECTED STRATEGY (2026-08-23), which makes the conflict
+  unrepresentable instead of guarded.** `HessianCorrectedGradient.hessian_solve: HessianSolve` →
+  `CoupledBlockSweep` (default) / `NestedHessianSolve(solver, hessian_solver)` /
+  `PackedSystemSolve(solver)`. Gone: `solver`, `hessian_solver`, `coupled_sweep`, `schur`, the guard
+  that refused the contradictory pair, and the `_DEFAULT_*_SOLVER` constants the guard needed.
+
+  **The defect it removes is not tidiness.** Held as separate fields, every path's settings were
+  present at once and most were inert, so configuring the wrong one was ignored **in silence** — which
+  is what happened the day the coupled sweep became the default and cost four call sites in this
+  repository their meaning, two of them harnesses whose recorded numbers depend on those settings.
+  A guard caught it afterwards; one field means it cannot be written down. `schur=False` folds in as
+  a third strategy rather than a boolean crossed with a solver, which is what it always was.
+
+  - **`_HessianSystems` gained `outer_preconditioner` and `dim`.** The coupled sweep needs the outer
+    system's *preconditioner* and never applies its operator, whose construction takes an inner solve
+    it would then discard — so reaching it through `outer` meant handing that call a strategy chosen
+    only to be thrown away. Now `outer` is built *from* `outer_preconditioner`, so there is one place
+    the block is formed.
+  - **`narrow_gradient_sweeps` needed no new case for the nested path** — it recurses through
+    `equinox.Module` fields, so the two swept solvers inside `NestedHessianSolve` are found the way
+    they always were. Its explicit `CoupledBlockSweep` branch is still required, that being a count
+    the recursion cannot see as a `SweptGradientSolve`. Both are pinned by one test.
+  - **`calibrated` builds exactly one strategy**, the one that will run: `coupled=True` (default) the
+    sweep, `coupled=False` the nested pair via `NestedHessianSolve.calibrated`, `schur=False` the
+    packed system. There is no longer a second path on the returned scheme carrying counts nobody
+    measured.
+  - **Cost: 19 call sites**, mechanical, and each now states which path it means rather than relying
+    on a default. Every measurement in this file taken on the nested path still describes it, because
+    those sites now name it.
 
   **`CoupledBlockSweep` — sweep BOTH blocks instead of nesting a solve per apply (2026-08-22; the
   DEFAULT since 2026-08-23, see above).**

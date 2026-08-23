@@ -1232,7 +1232,52 @@ def narrow_gradient_sweeps(tree: _Tree, sweeps: int) -> _Tree:
     return rewrite(tree)
 
 
-class CoupledBlockSweep(eqx.Module):
+class HessianSolve(eqx.Module):
+    """Strategy: how the gradient is obtained from the coupled gradient-and-Hessian system.
+
+    The scheme assembles two systems, and there is more than one defensible way to get a gradient out
+    of them — sweep both blocks together, eliminate the Hessian and solve the two separately, or solve
+    the un-eliminated system whole. Each is one of these, and a scheme carries **exactly one**.
+
+    That is the point of the interface rather than a consequence of it. These paths do not share
+    settings: an inner-solve strategy means nothing to a coupled sweep, and a sweep count means
+    nothing to a nested solve. Held as separate fields on the scheme they would all be present at
+    once, most of them inert, and a caller configuring the wrong one would be ignored in silence —
+    which is exactly what happened when the coupled sweep first became the default, and cost four
+    call sites in this repository their meaning. Under one field the mistake cannot be written down.
+    """
+
+    def gradients(
+        self,
+        systems: _HessianSystems,
+        field: jnp.ndarray,
+        boundary_values: jnp.ndarray,
+        *,
+        local_schur_block: bool,
+    ) -> jnp.ndarray:
+        """Reconstruct the cell-centred gradient from the assembled systems.
+
+        Parameters
+        ----------
+        systems : _HessianSystems
+            The scheme's systems at one geometry.
+        field : jnp.ndarray
+            The field being reconstructed, shape ``(n_cells,)``.
+        boundary_values : jnp.ndarray
+            Its values at boundary-face centroids, shape ``(n_faces,)``.
+        local_schur_block : bool
+            Whether the outer preconditioner is built from the Schur complement's own per-cell block
+            rather than from ``A_gg``'s alone.
+
+        Returns
+        -------
+        jnp.ndarray
+            The gradient, shape ``(n_cells, dim)``.
+        """
+        raise NotImplementedError
+
+
+class CoupledBlockSweep(HessianSolve):
     """Sweep the gradient and Hessian blocks together, instead of nesting a solve inside each apply.
 
     The eliminated system is solved today by a sweep on the gradient whose every operator apply runs
@@ -1272,6 +1317,24 @@ class CoupledBlockSweep(eqx.Module):
 
     sweeps: int = eqx.field(static=True, default=20)
     relaxation: float = 1.0
+
+    def gradients(
+        self,
+        systems: _HessianSystems,
+        field: jnp.ndarray,
+        boundary_values: jnp.ndarray,
+        *,
+        local_schur_block: bool,
+    ) -> jnp.ndarray:
+        inner = systems.inner()
+        # The outer PRECONDITIONER, not the outer system: this sweep never applies the Schur
+        # operator, whose construction would want an inner solve it would then discard.
+        return systems.block_sweep(
+            self,
+            systems.outer_preconditioner(inner, local_schur_block),
+            inner.preconditioner,
+            systems.gradient_rhs(field, boundary_values),
+        )
 
     @classmethod
     def calibrated(
@@ -1899,12 +1962,146 @@ class AveragedInteriorHessian(HessianBoundaryClosure):
         )
 
 
-_DEFAULT_OUTER_SOLVER = SweptGradientSolve(sweeps=20)
-"""The nested path's outer solve, named once so the field default and the guard cannot drift apart."""
+class NestedHessianSolve(HessianSolve):
+    """Eliminate the Hessian and solve the two systems separately — the Hessian re-converged from
+    zero inside every apply of the outer one.
 
-_DEFAULT_INNER_SOLVER = SweptGradientSolve(sweeps=10, warn_tol=None)
-"""The nested path's inner solve. ``warn_tol=None`` because it runs inside the outer operator, whose
-transpose an outer Krylov strategy forms, and a host diagnostic would make that operator nonlinear."""
+    The two systems are not alike, so they take separate strategies: ``solver`` drives the outer Schur
+    system on the gradient, ``hessian_solver`` the inner ``A_HH`` system that runs inside every one of
+    its operator applies.
+
+    ⚠️ **This is the slower path on the meshes this scheme exists for**, because it discards what the
+    previous outer apply learned about the Hessian: 1.4x the face-kernel passes of
+    :class:`CoupledBlockSweep` at 30 % grid perturbation, 1.8x at 40 %, and up to 12x under
+    :class:`AveragedNeighbourHessian`, whose Hessian system is the expensive one to re-converge. It is
+    faster only on an orthogonal mesh, where the outer solve is nearly trivial and there is nothing to
+    save — and where this scheme has no advantage worth its cost anyway.
+
+    Kept because it is the arrangement every measurement in this scheme's history was taken on, and
+    the control any comparison against the coupled sweep needs.
+
+    Attributes
+    ----------
+    solver : GradientSolve
+        Drives the outer Schur system.
+    hessian_solver : GradientSolve
+        Drives the inner ``A_HH`` system. Its ``warn_tol`` is ``None`` by default — see below.
+    """
+
+    solver: GradientSolve = eqx.field(default_factory=lambda: SweptGradientSolve(sweeps=20))
+    hessian_solver: GradientSolve = eqx.field(
+        default_factory=lambda: SweptGradientSolve(sweeps=10, warn_tol=None)
+    )
+
+    def gradients(
+        self,
+        systems: _HessianSystems,
+        field: jnp.ndarray,
+        boundary_values: jnp.ndarray,
+        *,
+        local_schur_block: bool,
+    ) -> jnp.ndarray:
+        if self.solver.requires_linear_operator and self.hessian_solver.emits_host_diagnostics:
+            raise ValueError(
+                "hessian_solver runs inside the outer Schur operator, and this outer solver forms "
+                "its implicit-diff tangent by transposing that operator — which requires the "
+                "operator be strictly linear. The inner solver's under-resolution diagnostic norms "
+                "the residual, which is not, so the transpose fails deep inside the linear solver "
+                "with an uninformative error. Pass warn_tol=None on the hessian_solver (e.g. "
+                "SweptGradientSolve(sweeps=6, warn_tol=None)), or use a fixed-sweep outer `solver`, "
+                "which differentiates by unrolling and imposes no such requirement. The outer "
+                "`solver`'s own diagnostic is unaffected."
+            )
+        inner = systems.inner()
+        outer = systems.outer(self.hessian_solver, inner, local_schur_block)
+        return self.solver.solve(
+            outer.preconditioner, outer.operator, systems.gradient_rhs(field, boundary_values)
+        )
+
+    @classmethod
+    def calibrated(
+        cls,
+        mesh: Mesh,
+        geometry: MeshGeometry,
+        *,
+        tol: float = SweepCalibration.tol,
+        iters: int = SweepCalibration.iters,
+        floor: int = SweepCalibration.floor,
+        cap: int = SweepCalibration.cap,
+        seed: int = SweepCalibration.seed,
+        local_schur_block: bool = True,
+        boundary_closure: HessianBoundaryClosure | None = None,
+    ) -> NestedHessianSolve:
+        """Build this path with **both** counts measured from the mesh rather than assumed.
+
+        The two systems converge at very different rates and neither is well served by a count chosen
+        in advance, so both are measured: the inner Hessian system first, then the outer system
+        *using that calibrated inner solve*, which is the composition that will actually run.
+
+        Parameters
+        ----------
+        mesh, geometry
+            The mesh to measure on and its geometry. The geometry must be concrete.
+        tol, iters, floor, cap, seed
+            Calibration settings, as elsewhere.
+        local_schur_block : bool
+            Which outer preconditioner the outer count is measured against — it changes the operator.
+        boundary_closure : HessianBoundaryClosure, optional
+            The closure to measure under; it changes the operator too.
+
+        Returns
+        -------
+        NestedHessianSolve
+            Carrying the two measured counts.
+        """
+        settings = dict(tol=tol, iters=iters, floor=floor, cap=cap, seed=seed)
+        closure = OwnerHessian() if boundary_closure is None else boundary_closure
+        systems = HessianCorrectedGradient._systems(mesh, geometry, closure)
+        inner_system = systems.inner()
+        # The inner solve runs inside the outer operator, whose transpose an outer Krylov strategy
+        # would form, so its diagnostic is disabled — the same pairing the field default carries.
+        hessian_solver = _calibrated_solver(inner_system, warn_tol=None, **settings)
+        return cls(
+            solver=_calibrated_solver(
+                systems.outer(hessian_solver, inner_system, local_schur_block), **settings
+            ),
+            hessian_solver=hessian_solver,
+        )
+
+
+class PackedSystemSolve(HessianSolve):
+    """Solve the un-eliminated ``[g, h]`` system whole, without eliminating the Hessian.
+
+    This exists to check the elimination against the system it eliminates from: the two must agree to
+    machine precision, and that they do is a property of the discretization rather than of either
+    solver. It is not the production path — the whole point of the elimination is that the gradient is
+    the only primary unknown, which is what lets it Schur-couple into a flow solve at gradient size.
+
+    Deliberately plain: the packed system is preconditioned by the cell volume, which serves both
+    blocks because both diagonal blocks carry it.
+
+    Attributes
+    ----------
+    solver : GradientSolve
+        Drives the packed system.
+    """
+
+    solver: GradientSolve = eqx.field(default_factory=lambda: SweptGradientSolve(sweeps=20))
+
+    def gradients(
+        self,
+        systems: _HessianSystems,
+        field: jnp.ndarray,
+        boundary_values: jnp.ndarray,
+        *,
+        local_schur_block: bool,
+    ) -> jnp.ndarray:
+        packed = self.solver.solve(
+            systems.coupled.preconditioner,
+            systems.coupled.operator,
+            systems.coupled_rhs(field, boundary_values),
+        )
+        return packed[:, : systems.dim]
 
 
 class _HessianSystems(NamedTuple):
@@ -1940,11 +2137,13 @@ class _HessianSystems(NamedTuple):
         that will run inside it.
     """
 
+    dim: int
     gradient_rhs: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
     coupled_rhs: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
     coupled: GradientSystem
     inner: Callable[[], GradientSystem]
     outer: Callable[[GradientSolve, GradientSystem], GradientSystem]
+    outer_preconditioner: Callable[..., GradientPreconditioner]
     block_sweep: Callable[..., jnp.ndarray]
     coupled_error: Callable[..., GradientSystem]
 
@@ -1966,7 +2165,8 @@ class HessianCorrectedGradient(GradientScheme):
     well-conditioned). Every block comes from **AD** — the residual is the forward
     reconstruction (a few interpolations and Green–Gauss sums), never hand-derived
     coefficient matrices — and the ``A_HH⁻¹`` is applied matrix-free by the injected solver.
-    Set ``schur=False`` to solve the full ``[g, H]`` system instead (used to check the two agree).
+    Pass ``hessian_solve=PackedSystemSolve()`` to solve the full ``[g, H]`` system instead, which
+    is how the elimination is checked against the system it eliminates from.
 
     The right-hand side of the eliminated system is ``b_g`` **unreduced**: the Hessian equation is a
     Green–Gauss sum of gradient components and so carries no term in the reconstructed field at all,
@@ -1996,7 +2196,7 @@ class HessianCorrectedGradient(GradientScheme):
     :class:`CorrectedGreenGauss` — but there are **two** systems here and they are not alike, so they
     take separate strategies rather than sharing one:
 
-    - ``solver`` drives the **outer** Schur system on the gradient. It is well conditioned (the
+    - :class:`NestedHessianSolve`'s ``solver`` drives the **outer** Schur system on the gradient. It is well conditioned (the
       measured condition number of ``S`` is between 1 and 7 across mild-to-heavy skew), so a
       preconditioned fixed sweep solves it without a Krylov method — which is the default, and the
       reason is what a *march* pays rather than what one reconstruction costs. A Krylov solve is
@@ -2006,7 +2206,7 @@ class HessianCorrectedGradient(GradientScheme):
       Green--Gauss baseline of 1.0, at equal accuracy: a Krylov outer costs ``92.9x`` forward and
       ``158.6x`` as a jvp, this default ``66.5x`` and ``59.9x`` — **2.6x cheaper on the jvp path**,
       which is the one a Krylov flow solve pays per iteration.
-    - ``hessian_solver`` drives the **inner** ``A_HH`` system on the Hessian, once per outer operator
+    - its ``hessian_solver`` drives the **inner** ``A_HH`` system on the Hessian, once per outer operator
       apply. Its cost is multiplied by the outer iteration count, so it is the one that decides
       whether the scheme is affordable — and it needs **no Krylov solve at all**: paired with the
       per-cell :class:`CellBlockJacobi` block below, a fixed handful of Richardson sweeps takes it to
@@ -2065,32 +2265,19 @@ class HessianCorrectedGradient(GradientScheme):
 
     Attributes
     ----------
-    solver : GradientSolve
-        The strategy solving the outer system — the Schur system on the gradient when ``schur``, the
-        full coupled ``[g, H]`` system otherwise (default: twenty :class:`SweptGradientSolve` sweeps;
-        see the note on the outer sweep count above). :class:`GmresGradientSolve` remains the right
-        choice for a mesh skewed enough that the swept count would grow impractically, and is what the
-        calibration compares against.
-    hessian_solver : GradientSolve
-        The strategy solving the inner ``A_HH`` system on the Hessian, run once per outer operator
-        apply (default: ten :class:`SweptGradientSolve` sweeps, which reaches the exact solve to
-        machine precision on the meshes this is tested at — see the note on sweep count below).
-        Unused when ``schur=False``, which has no inner system.
-    schur : bool
-        If ``True`` (default) eliminate the Hessian block and solve the gradient-only Schur system;
-        if ``False`` solve the full packed ``[g, H]`` system directly.
-    coupled_sweep : CoupledBlockSweep or None
-        When set, solve by sweeping both blocks together (see :class:`CoupledBlockSweep`) rather than
-        nesting a Hessian solve inside every gradient apply. ``solver`` and ``hessian_solver`` are
-        then unused. ``None`` (the default) keeps the nested solve.
-    boundary_closure : HessianBoundaryClosure
-        Which first-order Hessian a boundary face's gradient extrapolation carries.
-        :class:`OwnerHessian` (the default) is exact for a quadratic and the cheapest, but can leave
-        the Hessian system under-determined — on a wholly tetrahedral mesh it does.
-        :class:`AveragedNeighbourHessian` is the one to reach for then: also exact, still solvable
-        there, at roughly twice the sweeps. :class:`AveragedInteriorHessian` is Betchen &
-        Straatman's, kept for comparison against the source and not recommended — it gives up the
-        exactness for nothing the wider average does not also provide.
+    hessian_solve : HessianSolve
+        **How** the two systems are solved, as one injected strategy — the scheme carries exactly
+        one, so a path's settings travel with the path. :class:`CoupledBlockSweep` (the default)
+        sweeps both blocks together, carrying the Hessian from one sweep to the next;
+        :class:`NestedHessianSolve` eliminates the Hessian and re-converges it from zero inside every
+        apply of the outer solve; :class:`PackedSystemSolve` solves the un-eliminated ``[g, h]``
+        system whole, which is the check that the elimination changes nothing.
+
+        The default is the coupled sweep because it matches the nested pair's accuracy at a third of
+        the face-kernel passes, and is worth 1.4x at 30 % grid perturbation, 1.8x at 40 %, and up to
+        12x under :class:`AveragedNeighbourHessian`. ⚠️ It is *slower* on an orthogonal mesh, where
+        the nested outer solve is nearly trivial — which is also a mesh on which this scheme has no
+        advantage worth its cost.
     local_schur_block : bool
         Build the outer preconditioner from the Schur complement's own per-cell block rather than
         from ``A_gg``'s alone. **Default ``True``.**
@@ -2123,12 +2310,9 @@ class HessianCorrectedGradient(GradientScheme):
         ``validation/uvreactor_openfoam/schur_block_diagnosis.py`` reproduces all of it.
     """
 
-    solver: GradientSolve = eqx.field(default_factory=lambda: _DEFAULT_OUTER_SOLVER)
-    hessian_solver: GradientSolve = eqx.field(default_factory=lambda: _DEFAULT_INNER_SOLVER)
-    schur: bool = eqx.field(static=True, default=True)
+    hessian_solve: HessianSolve = eqx.field(default_factory=CoupledBlockSweep)
     local_schur_block: bool = eqx.field(static=True, default=True)
     boundary_closure: HessianBoundaryClosure = eqx.field(default_factory=OwnerHessian)
-    coupled_sweep: CoupledBlockSweep | None = eqx.field(default_factory=CoupledBlockSweep)
 
     def gradients(
         self,
@@ -2148,53 +2332,12 @@ class HessianCorrectedGradient(GradientScheme):
                 "solve — not yet built. Use CorrectedGreenGauss with SweptGradientSolve for a "
                 "distributed non-orthogonal gradient."
             )
-        if (
-            self.schur
-            and self.solver.requires_linear_operator
-            and self.hessian_solver.emits_host_diagnostics
-        ):
-            raise ValueError(
-                "hessian_solver runs inside the outer Schur operator, and this outer solver forms "
-                "its implicit-diff tangent by transposing that operator — which requires the "
-                "operator be strictly linear. The inner solver's under-resolution diagnostic norms "
-                "the residual, which is not, so the transpose fails deep inside the linear solver "
-                "with an uninformative error. Pass warn_tol=None on the hessian_solver (e.g. "
-                "SweptGradientSolve(sweeps=6, warn_tol=None)), or use a fixed-sweep outer `solver`, "
-                "which differentiates by unrolling and imposes no such requirement. The outer "
-                "`solver`'s own diagnostic is unaffected."
-            )
-        # ⚠️ THE COUPLED SWEEP REPLACES BOTH SOLVERS, so a scheme carrying it and a solver the caller
-        # chose is a contradiction — and one that would otherwise resolve SILENTLY in the sweep's
-        # favour. That is not hypothetical: when this became the default, four call sites in this
-        # repository were left passing solvers that would no longer run, two of them harnesses whose
-        # published numbers depend on those settings being honoured. Refusing the pair costs a caller
-        # one explicit `coupled_sweep=None` and removes a whole class of measurement that quietly
-        # describes a configuration nobody ran.
-        if self.coupled_sweep is not None and (
-            self.solver != _DEFAULT_OUTER_SOLVER or self.hessian_solver != _DEFAULT_INNER_SOLVER
-        ):
-            raise ValueError(
-                "HessianCorrectedGradient: `coupled_sweep` drives both blocks itself, so the "
-                "`solver` and `hessian_solver` given here would never run. Pass "
-                "`coupled_sweep=None` to solve by the nested path with those strategies, or drop "
-                "them to sweep both blocks together."
-            )
-        systems = self._systems(mesh, geometry, self.boundary_closure)
-        if not self.schur:
-            packed = self.solver.solve(
-                systems.coupled.preconditioner,
-                systems.coupled.operator,
-                systems.coupled_rhs(field, boundary_values),
-            )
-            return packed[:, : mesh.dim]
-        inner = systems.inner()
-        outer = systems.outer(self.hessian_solver, inner, self.local_schur_block)
-        rhs = systems.gradient_rhs(field, boundary_values)
-        if self.coupled_sweep is not None:
-            return systems.block_sweep(
-                self.coupled_sweep, outer.preconditioner, inner.preconditioner, rhs
-            )
-        return self.solver.solve(outer.preconditioner, outer.operator, rhs)
+        return self.hessian_solve.gradients(
+            self._systems(mesh, geometry, self.boundary_closure),
+            field,
+            boundary_values,
+            local_schur_block=self.local_schur_block,
+        )
 
     @classmethod
     def calibrated(
@@ -2267,41 +2410,32 @@ class HessianCorrectedGradient(GradientScheme):
         # -- calibrating one system and running another is the whole failure this factory exists
         # to prevent.
         closure = OwnerHessian() if boundary_closure is None else boundary_closure
-        systems = cls._systems(mesh, geometry, closure)
         if not schur:
             return cls(
-                solver=_calibrated_solver(systems.coupled, **settings),
-                schur=False,
-                coupled_sweep=None,
+                hessian_solve=PackedSystemSolve(
+                    solver=_calibrated_solver(
+                        cls._systems(mesh, geometry, closure).coupled, **settings
+                    )
+                ),
                 boundary_closure=closure,
             )
-        if coupled:
-            # A scheme cannot carry both paths, so this returns the one it measured and leaves the
-            # nested solvers at their defaults, where they are inert. Calibrating both would produce
-            # an object the constructor refuses -- see the guard in `gradients`.
-            return cls(
-                coupled_sweep=CoupledBlockSweep.calibrated(
-                    mesh, geometry, boundary_closure=closure, **settings
-                ),
-                schur=True,
+        # One field, so one strategy is built and it is the one that will run -- there is no second
+        # path left carrying counts nobody measured.
+        solve: HessianSolve = (
+            CoupledBlockSweep.calibrated(mesh, geometry, boundary_closure=closure, **settings)
+            if coupled
+            else NestedHessianSolve.calibrated(
+                mesh,
+                geometry,
                 local_schur_block=local_schur_block,
                 boundary_closure=closure,
+                **settings,
             )
-
-        # The inner solve runs inside the outer Schur operator, whose transpose an outer Krylov
-        # strategy would form, so its diagnostic is disabled — the same pairing the class default
-        # carries and the reason `gradients` rejects the combination that lacks it.
-        inner = systems.inner()
-        hessian_solver = _calibrated_solver(inner, warn_tol=None, **settings)
+        )
         return cls(
-            solver=_calibrated_solver(
-                systems.outer(hessian_solver, inner, local_schur_block), **settings
-            ),
-            hessian_solver=hessian_solver,
-            coupled_sweep=None,
-            schur=True,
-            # Travels with the count, for the same reason the sweep count and the preconditioner
-            # belong together: it changes which system was measured.
+            hessian_solve=solve,
+            # Travels with the counts, for the same reason the counts and the preconditioner belong
+            # together: it changes which system was measured.
             local_schur_block=local_schur_block,
             boundary_closure=closure,
         )
@@ -2705,10 +2839,20 @@ class HessianCorrectedGradient(GradientScheme):
             # `g_k -> u_a` by `hg`, then the reduced `A_HH⁻¹`, then `u_a -> g_m` by `gh`.
             return gradient_block - jnp.einsum("nma,nab,nbk->nmk", gh, hessian_inverse, hg)
 
-        def outer(hessian_solver, inner_system, use_local_schur_block=False):
+        def outer_preconditioner(inner_system, use_local_schur_block=False):
+            """The outer system's per-cell preconditioner, without building its operator.
+
+            The coupled sweep needs this and not the Schur operator, whose construction takes an
+            inner solve it would never run — so reaching it through `outer` would mean handing that
+            call a strategy chosen only to be discarded.
+            """
             block = cell_diagonal_block(gg_owner, gg_neighbour, vol, n_cells, dim)
             if use_local_schur_block:
                 block = local_schur_block(block, inner_system.preconditioner.inverse)
+            return CellBlockJacobi(jnp.linalg.inv(block))
+
+        def outer(hessian_solver, inner_system, use_local_schur_block=False):
+            preconditioner = outer_preconditioner(inner_system, use_local_schur_block)
 
             def schur(g):
                 a_gg_g, a_hg_g = gradient_and_hessian_rows(g)
@@ -2716,7 +2860,7 @@ class HessianCorrectedGradient(GradientScheme):
                     hessian_solver.solve(inner_system.preconditioner, inner_system.operator, a_hg_g)
                 )
 
-            return GradientSystem(CellBlockJacobi(jnp.linalg.inv(block)), schur, (n_cells, dim))
+            return GradientSystem(preconditioner, schur, (n_cells, dim))
 
         def block_sweep(sweep, gradient_preconditioner, hessian_preconditioner, rhs_g):
             """Run :class:`CoupledBlockSweep` over these systems and return the gradient."""
@@ -2777,11 +2921,13 @@ class HessianCorrectedGradient(GradientScheme):
             )
 
         return _HessianSystems(
+            dim=dim,
             gradient_rhs=gradient_rhs,
             coupled_rhs=coupled_rhs,
             coupled=GradientSystem(InverseVolume(1.0 / vol), coupled, (n_cells, dim + n_sym)),
             inner=inner,
             outer=outer,
+            outer_preconditioner=outer_preconditioner,
             block_sweep=block_sweep,
             coupled_error=coupled_error,
         )

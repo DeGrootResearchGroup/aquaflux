@@ -44,7 +44,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from aquaflux.io import read_openfoam  # noqa: E402
 from aquaflux.mesh.quality import closed_cell_residual, face_planarity  # noqa: E402
-from aquaflux.schemes import HessianCorrectedGradient, SweptGradientSolve  # noqa: E402
+from aquaflux.schemes import HessianCorrectedGradient, NestedHessianSolve, SweptGradientSolve  # noqa: E402
 from aquaflux.schemes.gradient import cell_diagonal_block  # noqa: E402,F401
 
 INNER = int(os.environ.get("UV_INNER", "12"))
@@ -206,7 +206,7 @@ def main() -> None:
     for label, flag in (("schur", True), ("a_gg", False)):
         grad = np.asarray(
             HessianCorrectedGradient(
-                hessian_solver=inner, local_schur_block=flag, coupled_sweep=None
+                hessian_solve=NestedHessianSolve(hessian_solver=inner), local_schur_block=flag
             ).gradients(field, mesh, geom, bvals)
         )
         errors[label] = np.linalg.norm(grad - exact, axis=-1) / np.linalg.norm(exact, axis=-1)

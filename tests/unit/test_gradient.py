@@ -39,7 +39,9 @@ from aquaflux.schemes import (
     HessianCorrectedGradient,
     InverseCellVolume,
     InverseVolume,
+    NestedHessianSolve,
     OwnerHessian,
+    PackedSystemSolve,
     SweepCalibration,
     SweptGradientSolve,
     cell_diagonal_block,
@@ -377,13 +379,11 @@ def test_hessian_schur_matches_coupled_solve() -> None:
     # path is preconditioned by the cell volume, and that system's per-cell block couples the gradient
     # to the Hessian at leading order — so a fixed sweep does not converge on it, and comparing a
     # converged Schur solve against an unconverged coupled one would measure the solver.
-    exact = dict(solver=GmresGradientSolve(), hessian_solver=GmresGradientSolve())
-    schur = HessianCorrectedGradient(schur=True, coupled_sweep=None, **exact).gradients(
-        phi, mesh, geom, bvals
-    )
-    coupled = HessianCorrectedGradient(schur=False, coupled_sweep=None, **exact).gradients(
-        phi, mesh, geom, bvals
-    )
+    exact = NestedHessianSolve(solver=GmresGradientSolve(), hessian_solver=GmresGradientSolve())
+    schur = HessianCorrectedGradient(hessian_solve=exact).gradients(phi, mesh, geom, bvals)
+    coupled = HessianCorrectedGradient(
+        hessian_solve=PackedSystemSolve(solver=GmresGradientSolve())
+    ).gradients(phi, mesh, geom, bvals)
     assert jnp.allclose(schur, coupled, atol=1e-10)
 
 
@@ -400,13 +400,14 @@ def test_hessian_accepts_an_injected_solve_strategy() -> None:
     geom = mesh.geometry()
     phi = _quadratic(geom.cell.centroid)
     bvals = _quadratic(geom.face.centroid)
-    default = HessianCorrectedGradient().solver
+    # The NESTED path's outer default; the scheme's own default path is the coupled sweep.
+    default = NestedHessianSolve().solver
     assert isinstance(default, SweptGradientSolve) and default.sweeps == 20
-    gmres = HessianCorrectedGradient(solver=GmresGradientSolve(), coupled_sweep=None).gradients(
-        phi, mesh, geom, bvals
-    )
+    gmres = HessianCorrectedGradient(
+        hessian_solve=NestedHessianSolve(solver=GmresGradientSolve())
+    ).gradients(phi, mesh, geom, bvals)
     swept = HessianCorrectedGradient(
-        solver=SweptGradientSolve(sweeps=80, warn_tol=None), coupled_sweep=None
+        hessian_solve=NestedHessianSolve(solver=SweptGradientSolve(sweeps=80, warn_tol=None))
     ).gradients(phi, mesh, geom, bvals)
     assert jnp.allclose(gmres, swept, atol=1e-8)
 
@@ -895,7 +896,7 @@ def _inner_system(mesh, geometry):
     # an injected solver -- the coupled sweep drives both blocks itself and never calls one, so the
     # capture would come back empty.
     capture = _CaptureSolve()
-    HessianCorrectedGradient(hessian_solver=capture, coupled_sweep=None).gradients(
+    HessianCorrectedGradient(hessian_solve=NestedHessianSolve(hessian_solver=capture)).gradients(
         jnp.zeros(mesh.n_cells), mesh, geometry, jnp.zeros(mesh.n_faces)
     )
     return capture.seen[0]
@@ -946,7 +947,7 @@ def test_the_default_inner_sweeps_reach_the_exactly_solved_reconstruction() -> N
 
     default = HessianCorrectedGradient().gradients(field, mesh, geometry, bvals)
     exact = HessianCorrectedGradient(
-        hessian_solver=GmresGradientSolve(), coupled_sweep=None
+        hessian_solve=NestedHessianSolve(hessian_solver=GmresGradientSolve())
     ).gradients(field, mesh, geometry, bvals)
     assert float(jnp.max(jnp.abs(default - exact))) < 1e-11
 
@@ -965,11 +966,11 @@ def test_a_swept_outer_solve_reaches_the_same_gradient_as_the_krylov_one() -> No
 
     # Named explicitly rather than taken from the default: this asserts that the two OUTER strategies
     # agree, so it must keep comparing those two whatever the default later becomes.
-    krylov = HessianCorrectedGradient(solver=GmresGradientSolve(), coupled_sweep=None).gradients(
-        field, mesh, geometry, bvals
-    )
+    krylov = HessianCorrectedGradient(
+        hessian_solve=NestedHessianSolve(solver=GmresGradientSolve())
+    ).gradients(field, mesh, geometry, bvals)
     swept = HessianCorrectedGradient(
-        solver=SweptGradientSolve(sweeps=60, warn_tol=None), coupled_sweep=None
+        hessian_solve=NestedHessianSolve(solver=SweptGradientSolve(sweeps=60, warn_tol=None))
     ).gradients(field, mesh, geometry, bvals)
     assert float(jnp.max(jnp.abs(krylov - swept))) < 1e-12
 
@@ -993,13 +994,13 @@ def test_a_diagnostic_emitting_inner_solver_is_refused_with_an_explanation() -> 
     # nothing, so the condition has to be asked for explicitly rather than inherited.
     with pytest.raises(ValueError, match="strictly linear"):
         HessianCorrectedGradient(
-            solver=GmresGradientSolve(), hessian_solver=chatty, coupled_sweep=None
+            hessian_solve=NestedHessianSolve(solver=GmresGradientSolve(), hessian_solver=chatty)
         ).gradients(field, mesh, geometry, bvals)
 
     swept_outer = HessianCorrectedGradient(
-        solver=SweptGradientSolve(sweeps=40, warn_tol=None),
-        hessian_solver=chatty,
-        coupled_sweep=None,
+        hessian_solve=NestedHessianSolve(
+            solver=SweptGradientSolve(sweeps=40, warn_tol=None), hessian_solver=chatty
+        )
     ).gradients(field, mesh, geometry, bvals)
     assert not bool(jnp.any(jnp.isnan(swept_outer)))
 
@@ -1240,22 +1241,25 @@ def test_calibrating_the_hessian_scheme_sizes_both_of_its_systems() -> None:
     # a factory that sized a path the scheme does not use would be calibrated in name only -- which
     # is what the constructor's guard now refuses to let happen silently.
     swept = HessianCorrectedGradient.calibrated(mesh, geometry)
-    assert swept.coupled_sweep is not None and swept.coupled_sweep.sweeps >= 1
+    assert isinstance(swept.hessian_solve, CoupledBlockSweep)
+    assert swept.hessian_solve.sweeps >= 1
 
     scheme = HessianCorrectedGradient.calibrated(mesh, geometry, coupled=False)
-    assert scheme.coupled_sweep is None
-    assert scheme.solver.sweeps >= 1 and scheme.hessian_solver.sweeps >= 1
-    assert scheme.hessian_solver.warn_tol is None
+    assert isinstance(scheme.hessian_solve, NestedHessianSolve)
+    assert scheme.hessian_solve.solver.sweeps >= 1
+    assert scheme.hessian_solve.hessian_solver.sweeps >= 1
+    assert scheme.hessian_solve.hessian_solver.warn_tol is None
     assert (
-        not scheme.solver.emits_host_diagnostics or not scheme.hessian_solver.emits_host_diagnostics
+        not scheme.hessian_solve.solver.emits_host_diagnostics
+        or not scheme.hessian_solve.hessian_solver.emits_host_diagnostics
     )
 
     field = _quadratic(geometry.cell.centroid)
     bvals = _quadratic(geometry.face.centroid)
     exact = HessianCorrectedGradient(
-        solver=GmresGradientSolve(),
-        hessian_solver=SweptGradientSolve(sweeps=30, warn_tol=None),
-        coupled_sweep=None,
+        hessian_solve=NestedHessianSolve(
+            solver=GmresGradientSolve(), hessian_solver=SweptGradientSolve(sweeps=30, warn_tol=None)
+        )
     ).gradients(field, mesh, geometry, bvals)
     got = scheme.gradients(field, mesh, geometry, bvals)
     assert float(jnp.linalg.norm(got - exact) / jnp.linalg.norm(exact)) <= 1e-4
@@ -1372,9 +1376,9 @@ def _median_gradient_error(mesh) -> float:
     """Median per-cell relative gradient error for the Hessian-corrected scheme on a quadratic."""
     geom = mesh.geometry()
     grad = HessianCorrectedGradient(
-        solver=GmresGradientSolve(),
-        hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
-        coupled_sweep=None,
+        hessian_solve=NestedHessianSolve(
+            solver=GmresGradientSolve(), hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None)
+        )
     ).gradients(_quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid))
     exact = _quadratic_3d_grad(geom.cell.centroid)
     relative = jnp.linalg.norm(grad - exact, axis=-1) / jnp.linalg.norm(exact, axis=-1)
@@ -1418,9 +1422,9 @@ def test_hessian_corrected_survives_a_sliver_cell_without_going_non_finite() -> 
     mesh = _sliver_mesh(1e-6)
     geom = mesh.geometry()
     grad = HessianCorrectedGradient(
-        solver=GmresGradientSolve(),
-        hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
-        coupled_sweep=None,
+        hessian_solve=NestedHessianSolve(
+            solver=GmresGradientSolve(), hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None)
+        )
     ).gradients(_quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid))
     assert bool(jnp.all(jnp.isfinite(grad)))
 
@@ -1574,7 +1578,7 @@ def test_the_local_schur_block_does_not_regress_a_healthy_mesh() -> None:
 
 
 def _coupled(sweeps: int = 30) -> HessianCorrectedGradient:
-    return HessianCorrectedGradient(coupled_sweep=CoupledBlockSweep(sweeps=sweeps))
+    return HessianCorrectedGradient(hessian_solve=CoupledBlockSweep(sweeps=sweeps))
 
 
 def test_the_coupled_sweep_reaches_the_same_solution_as_an_exact_solve() -> None:
@@ -1592,9 +1596,10 @@ def test_the_coupled_sweep_reaches_the_same_solution_as_an_exact_solve() -> None
         geom = mesh.geometry()
         field, bvals = _quadratic_3d(geom.cell.centroid), _quadratic_3d(geom.face.centroid)
         exact = HessianCorrectedGradient(
-            solver=GmresGradientSolve(),
-            hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
-            coupled_sweep=None,
+            hessian_solve=NestedHessianSolve(
+                solver=GmresGradientSolve(),
+                hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
+            )
         ).gradients(field, mesh, geom, bvals)
         swept = _coupled(40).gradients(field, mesh, geom, bvals)
         assert float(jnp.max(jnp.abs(swept - exact))) / float(jnp.max(jnp.abs(exact))) < 1e-9
@@ -1686,13 +1691,13 @@ def test_the_calibrated_coupled_sweep_meets_the_tolerance_it_was_given() -> None
     mesh = perturbed_grid_3d(8, 8, 8, perturb=0.3, seed=1)
     geom = mesh.geometry()
     exact = HessianCorrectedGradient(
-        solver=GmresGradientSolve(),
-        hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
-        coupled_sweep=None,
+        hessian_solve=NestedHessianSolve(
+            solver=GmresGradientSolve(), hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None)
+        )
     ).gradients(_quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid))
     tol = 1e-6
     scheme = HessianCorrectedGradient(
-        coupled_sweep=CoupledBlockSweep.calibrated(mesh, geom, tol=tol)
+        hessian_solve=CoupledBlockSweep.calibrated(mesh, geom, tol=tol)
     )
     swept = scheme.gradients(
         _quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid)
@@ -1832,7 +1837,9 @@ def test_the_neighbour_average_is_exact_for_a_quadratic_and_solves_on_tetrahedra
     # `coupled_sweep=None` selects the nested path, which is what these two Krylov solvers drive;
     # left at the default the coupled sweep would run instead and ignore them.
     exact = dict(
-        solver=GmresGradientSolve(), hessian_solver=GmresGradientSolve(), coupled_sweep=None
+        hessian_solve=NestedHessianSolve(
+            solver=GmresGradientSolve(), hessian_solver=GmresGradientSolve()
+        )
     )
     for mesh in (
         columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.25, seed=0),
@@ -1958,13 +1965,20 @@ def test_narrowing_reaches_the_coupled_sweep_as_well_as_the_swept_solve() -> Non
     already documented for a Krylov outer solver, which narrowing genuinely cannot touch; this one it
     can, so it must.
     """
-    scheme = HessianCorrectedGradient(coupled_sweep=CoupledBlockSweep(sweeps=30, relaxation=0.8))
+    scheme = HessianCorrectedGradient(hessian_solve=CoupledBlockSweep(sweeps=30, relaxation=0.8))
     narrowed = narrow_gradient_sweeps(scheme, 4)
 
-    assert narrowed.coupled_sweep.sweeps == 4
+    assert narrowed.hessian_solve.sweeps == 4
     # The narrowed copy must differ in the count and in NOTHING else: rebuilding at the class default
     # would silently un-damp an under-relaxed sweep.
-    assert narrowed.coupled_sweep.relaxation == 0.8
+    assert narrowed.hessian_solve.relaxation == 0.8
     # ... and it only ever narrows.
-    assert narrow_gradient_sweeps(scheme, 30).coupled_sweep is scheme.coupled_sweep
-    assert narrow_gradient_sweeps(scheme, 99).coupled_sweep is scheme.coupled_sweep
+    assert narrow_gradient_sweeps(scheme, 30).hessian_solve is scheme.hessian_solve
+    assert narrow_gradient_sweeps(scheme, 99).hessian_solve is scheme.hessian_solve
+
+    # It reaches the nested path's two solvers too, which it finds by recursion rather than by
+    # knowing about this strategy at all.
+    nested = narrow_gradient_sweeps(
+        HessianCorrectedGradient(hessian_solve=NestedHessianSolve()), 3
+    ).hessian_solve
+    assert nested.solver.sweeps == 3 and nested.hessian_solver.sweeps == 3
