@@ -167,11 +167,21 @@ the Hessian, the system being solved is the Schur complement
 elimination term. On a well-shaped cell that term is a small perturbation and omitting it costs
 nothing; on a cell squashed nearly flat the volume vanishes while the face couplings do not, so
 the omitted term becomes the *dominant* part of that cell's row and the sweep stops converging
-there. `local_schur_block` (default `True`) builds the preconditioner from the Schur
-complement's own block instead, which is better on every mesh measured — marginally on
-well-shaped ones, by some four orders on a squashed cell — for roughly 7% of a reconstruction.
-Set it to `False` for the slightly cheaper historical behaviour on a mesh of uniformly good
-quality.
+there. `local_schur_block` (default `False`) builds the preconditioner from the Schur
+complement's own block instead. It is the *better approximation* — within 2.5% of the true
+Schur block on a large reactor mesh, where the default is 33% away.
+
+```{warning}
+It is nonetheless **off by default, because a better approximation is not what a swept solve
+needs**. The correction *subtracts* from the diagonal block, so the diagonal shrinks and the
+sweep can stop contracting. On a 1.6M-cell mesh from an automatic mesher, 4599 cells of
+1,635,909 exceeded 100% error while the median improved — the affected cells being ordinary
+tetrahedra and pyramids, not slivers.
+
+A Krylov outer solve is untroubled by the same preconditioner, spending iterations rather
+than diverging. So enable this with {class}`~aquaflux.schemes.GmresGradientSolve` if you want
+the better block, and leave it off with a fixed sweep count.
+```
 
 Each scheme supplies a sensible default, so this is not usually something you set — but for
 the corrected Green–Gauss scheme it is worth knowing about, because on a poor-quality mesh the

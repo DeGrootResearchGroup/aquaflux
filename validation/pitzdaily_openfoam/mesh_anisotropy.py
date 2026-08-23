@@ -78,11 +78,15 @@ def report(name, path):
 
     print(f"\n{name}: {n} cells, {mesh.dim}D, {int(interior.sum())} interior faces")
     for label, q in (("face-centroid ratio", ratio), ("conductance ratio", cratio)):
-        print(f"  {label:<22} median {np.median(q):8.2f}  p90 {np.quantile(q, 0.90):9.2f}  "
-              f"p99 {np.quantile(q, 0.99):9.2f}  max {q.max():10.2f}  "
-              f"share > 10: {float((q > 10).mean()):.3f}  > 100: {float((q > 100).mean()):.3f}")
-    print(f"  {'skewness |s|/|d|':<22} median {np.median(skew):.3e}  max {skew.max():.3e}  "
-          f"share > 1e-6: {float((skew > 1e-6).mean()):.3f}")
+        print(
+            f"  {label:<22} median {np.median(q):8.2f}  p90 {np.quantile(q, 0.90):9.2f}  "
+            f"p99 {np.quantile(q, 0.99):9.2f}  max {q.max():10.2f}  "
+            f"share > 10: {float((q > 10).mean()):.3f}  > 100: {float((q > 100).mean()):.3f}"
+        )
+    print(
+        f"  {'skewness |s|/|d|':<22} median {np.median(skew):.3e}  max {skew.max():.3e}  "
+        f"share > 1e-6: {float((skew > 1e-6).mean()):.3f}"
+    )
     del mesh, geom
 
 

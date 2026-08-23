@@ -113,13 +113,15 @@ def build_grid(perturb, dim=2, nx=24, ny=16, nz=8, seed=1, gradient="corrected",
     from tests.support.meshes import perturbed_grid_2d, perturbed_grid_3d
 
     if dim == 2:
-        mesh = perturbed_grid_2d(nx, ny, lx=L, ly=H, perturb=perturb, seed=seed,
-                                 named_boundaries=True)
+        mesh = perturbed_grid_2d(
+            nx, ny, lx=L, ly=H, perturb=perturb, seed=seed, named_boundaries=True
+        )
         walls = ["bottom", "top"]
         inlet_velocity = (U_IN, 0.0)
     else:
-        mesh = perturbed_grid_3d(nx, ny, nz, lx=L, ly=H, lz=H, perturb=perturb, seed=seed,
-                                 named_boundaries=True)
+        mesh = perturbed_grid_3d(
+            nx, ny, nz, lx=L, ly=H, lz=H, perturb=perturb, seed=seed, named_boundaries=True
+        )
         walls = ["bottom", "top", "front", "back"]
         inlet_velocity = (U_IN, 0.0, 0.0)
     if growth != 1.0:
@@ -221,8 +223,7 @@ def cell_aspect_ratio(coupled):
     interior = np.asarray(fc.interior)
     lo = np.full(mesh.n_cells, np.inf)
     hi = np.zeros(mesh.n_cells)
-    for cells, faces in ((owner, np.arange(len(owner))),
-                         (nb[interior], np.flatnonzero(interior))):
+    for cells, faces in ((owner, np.arange(len(owner))), (nb[interior], np.flatnonzero(interior))):
         dist = np.linalg.norm(fcentroid[faces] - centroid[cells], axis=-1)
         np.minimum.at(lo, cells, dist)
         np.maximum.at(hi, cells, dist)
@@ -251,8 +252,11 @@ def materialize(coupled, state, reach):
         _PROBE_BATCH_SIZE,
         structure,
     )
-    print(f"    reach {reach}: {jacobian.shape[0]} dofs, {jacobian.nnz / 1e6:.2f}M nnz "
-          f"in {time.time() - started:.0f}s", flush=True)
+    print(
+        f"    reach {reach}: {jacobian.shape[0]} dofs, {jacobian.nnz / 1e6:.2f}M nnz "
+        f"in {time.time() - started:.0f}s",
+        flush=True,
+    )
     return jacobian
 
 
@@ -268,7 +272,7 @@ def block_jacobian_error(coupled, state, jacobian, n_fields, seed=0):
     norms = np.zeros((n_fields, n_fields))
     for col in range(n_fields):
         v = np.zeros(n_fields * n)
-        v[col * n:(col + 1) * n] = rng.standard_normal(n)
+        v[col * n : (col + 1) * n] = rng.standard_normal(n)
         exact = np.asarray(_jacobian_matvec(coupled, state, jnp.asarray(v)))
         got = jacobian @ v
         for row in range(n_fields):
@@ -288,9 +292,11 @@ def ilu_pivots(cell_major, n_fields, levels):
 
     mat = PETSc.Mat().createAIJWithArrays(
         size=cell_major.shape,
-        csr=(cell_major.indptr.astype(PETSc.IntType),
-             cell_major.indices.astype(PETSc.IntType),
-             cell_major.data.astype(PETSc.ScalarType)),
+        csr=(
+            cell_major.indptr.astype(PETSc.IntType),
+            cell_major.indices.astype(PETSc.IntType),
+            cell_major.data.astype(PETSc.ScalarType),
+        ),
     )
     mat.setBlockSize(n_fields)
     mat.assemble()
@@ -330,9 +336,11 @@ def ksp_solve(cell_major, rhs_eq, n_fields, arm, rtol=1e-8, max_it=400):
     prefix = f"probe{abs(hash((arm, cell_major.nnz))) % 10**6}_"
     mat = PETSc.Mat().createAIJWithArrays(
         size=cell_major.shape,
-        csr=(cell_major.indptr.astype(PETSc.IntType),
-             cell_major.indices.astype(PETSc.IntType),
-             cell_major.data.astype(PETSc.ScalarType)),
+        csr=(
+            cell_major.indptr.astype(PETSc.IntType),
+            cell_major.indices.astype(PETSc.IntType),
+            cell_major.data.astype(PETSc.ScalarType),
+        ),
     )
     mat.setBlockSize(n_fields)
     mat.assemble()
@@ -401,9 +409,12 @@ def run_case(name, coupled, betas, reach=3, arms=ARMS, localize=False):
     ratio, interior = skew_metrics(coupled)
     live = ratio[interior]
     print(f"\n{'=' * 96}\nCASE {name}: {n} cells, {dim}D, {n_fields} fields, {n_fields * n} dofs")
-    print(f"  interior-face skewness |x_f-(x_P+g d)|/|d|: median {np.median(live):.3e}  "
-          f"p99 {np.quantile(live, 0.99):.3e}  max {live.max():.3e}  "
-          f"above 1e-6: {int((live > 1e-6).sum())} of {live.size}", flush=True)
+    print(
+        f"  interior-face skewness |x_f-(x_P+g d)|/|d|: median {np.median(live):.3e}  "
+        f"p99 {np.quantile(live, 0.99):.3e}  max {live.max():.3e}  "
+        f"above 1e-6: {int((live > 1e-6).sum())} of {live.size}",
+        flush=True,
+    )
 
     state, residual = seed_state(coupled)
     rhs = -np.asarray(residual, dtype=np.float64)
@@ -412,14 +423,14 @@ def run_case(name, coupled, betas, reach=3, arms=ARMS, localize=False):
     jacobian = materialize(coupled, state, reach)
     err = block_jacobian_error(coupled, state, jacobian, n_fields)
     print("  probe error per (row field, column field), worst per column:")
-    print("    " + "  ".join(f"{names[c]}:{err[:, c].max():.2e}" for c in range(n_fields)),
-          flush=True)
+    print(
+        "    " + "  ".join(f"{names[c]}:{err[:, c].max():.2e}" for c in range(n_fields)), flush=True
+    )
 
     base = _coupled_shift_policy(coupled, state, "twolevel")
     results = {}
     for beta in betas:
-        shift = (_frozen_shift_diagonal(base, beta, state) if beta > 0
-                 else np.zeros(n_fields * n))
+        shift = _frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(n_fields * n)
         cell_major, scaling, perm = assemble(jacobian, np.asarray(shift), n_fields)
         rhs_eq = (np.asarray(scaling) * rhs)[perm]
         print(f"\n  -- beta {beta}: nnz {cell_major.nnz / 1e6:.2f}M", flush=True)
@@ -428,12 +439,16 @@ def run_case(name, coupled, betas, reach=3, arms=ARMS, localize=False):
             if "failed" in census:
                 print(f"     ILU({levels}) census REFUSED  {census['failed']}", flush=True)
                 continue
-            print(f"     ILU({levels}) pivots: min |p| {census['min']:.3e}  negative "
-                  f"{census['negative']:>6}  median {census['median']:.3e}  "
-                  f"factor nnz {census['nnz'] / 1e6:.2f}M", flush=True)
+            print(
+                f"     ILU({levels}) pivots: min |p| {census['min']:.3e}  negative "
+                f"{census['negative']:>6}  median {census['median']:.3e}  "
+                f"factor nnz {census['nnz'] / 1e6:.2f}M",
+                flush=True,
+            )
             if localize and census["negative"]:
-                report_negative(name, beta, levels, census["negative_rows"], coupled, perm,
-                                n_fields, names)
+                report_negative(
+                    name, beta, levels, census["negative_rows"], coupled, perm, n_fields, names
+                )
         for arm in arms:
             out = ksp_solve(cell_major, rhs_eq, n_fields, arm)
             if "failed" in out:
@@ -442,8 +457,11 @@ def run_case(name, coupled, betas, reach=3, arms=ARMS, localize=False):
                 continue
             y = out["x"]
             true_eq = np.linalg.norm(cell_major @ y - rhs_eq) / np.linalg.norm(rhs_eq)
-            print(f"     {arm:<10} its {out['its']:>4}  reason {out['reason']:>3}  "
-                  f"TRUE rel {true_eq:.3e}  {out['seconds']:>5.1f}s", flush=True)
+            print(
+                f"     {arm:<10} its {out['its']:>4}  reason {out['reason']:>3}  "
+                f"TRUE rel {true_eq:.3e}  {out['seconds']:>5.1f}s",
+                flush=True,
+            )
             results[(beta, arm)] = (out["its"], true_eq, out["reason"])
         del cell_major
         gc.collect()
@@ -458,8 +476,11 @@ def report_negative(name, beta, levels, rows, coupled, perm, n_fields, names):
     cells = rows // n_fields
     fields = rows % n_fields
     counts = np.bincount(fields, minlength=n_fields)
-    print("       negative pivots by field: "
-          + "  ".join(f"{names[f]} {counts[f]}" for f in range(n_fields)), flush=True)
+    print(
+        "       negative pivots by field: "
+        + "  ".join(f"{names[f]} {counts[f]}" for f in range(n_fields)),
+        flush=True,
+    )
     unique = np.unique(cells)
     skew = per_cell_skew(coupled)
     walls = boundary_faces_per_cell(coupled)
@@ -467,10 +488,13 @@ def report_negative(name, beta, levels, rows, coupled, perm, n_fields, names):
     n = len(skew)
     for label, quantity in (("skew", skew), ("wall faces", walls), ("aspect ratio", ar)):
         hit = quantity[unique]
-        print(f"       {label:<13} hit median {np.median(hit):.3e}  "
-              f"mesh median {np.median(quantity):.3e}  "
-              f"hit share above mesh p90 {float((hit > np.quantile(quantity, 0.9)).mean()):.2f} "
-              f"(base rate 0.10)", flush=True)
+        print(
+            f"       {label:<13} hit median {np.median(hit):.3e}  "
+            f"mesh median {np.median(quantity):.3e}  "
+            f"hit share above mesh p90 {float((hit > np.quantile(quantity, 0.9)).mean()):.2f} "
+            f"(base rate 0.10)",
+            flush=True,
+        )
     print(f"       {len(unique)} distinct cells of {n}", flush=True)
 
 

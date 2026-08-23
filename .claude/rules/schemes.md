@@ -417,6 +417,68 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   | sliver 1.9e4 — cell / far | 8.05e-01 / 2.72e-07 | **1.42e-05 / 9.76e-11** |
   | sliver 1.9e6 — cell / far | 1.09e+00 / 4.94e-07 | **1.55e-02 / 1.40e-08** |
 
+  **⚠️⚠️ DEFAULT REVERTED TO `False` (2026-08-22, same day it was flipped on) — IT DIVERGES ON A REAL
+  MESH, AND THE REASON INVERTS THE OBVIOUS INTUITION.** On a 1.6M-cell snappyHexMesh reactor,
+  measured in one process against a known analytic gradient
+  (`validation/uvreactor_openfoam/schur_block_diagnosis.py`):
+
+  | | median | p99 | max | cells > 100 % error |
+  |---|---|---|---|---|
+  | `A_gg` block | 1.137e-07 | **4.876e-05** | **7.011e-02** | 0 |
+  | Schur block | **8.957e-08** | 7.398e-05 | **5.599e+18** | **4599 of 1 635 909** |
+
+  A 27 % better median, a worse p99, and 0.28 % of the mesh diverging outright. **A population, not
+  an edge case — no per-cell guard is proportionate to that.**
+
+  **The failing cells are ORDINARY.** Four- and five-faced cells (tetrahedra and pyramids) against
+  the mesh's median of six, volumes 0.24–0.42 of median (one is 9× *larger*), planarity 0.89–0.9996,
+  closure ~1e-22. Not slivers, not warped, not invalid — every geometric hypothesis was refuted.
+
+  **⚠️ AND THE SCHUR BLOCK IS THE MORE ACCURATE ONE. That is the finding.** Against the true local
+  Schur block — obtained preconditioner-independently by lighting one cell's degree of freedom and
+  reading back its own row:
+
+  | cell | faces | `A_gg` vs truth | Schur vs truth | cond Schur | error |
+  |---|---|---|---|---|---|
+  | 1595711 | 4 | 3.284e-01 | **2.452e-02** | 2.6e+03 | 5.6e+18 |
+  | 60355 | 5 | 2.535e-01 | **6.025e-02** | **6.37** | 1.4e+17 |
+
+  **⚠️ THE ANSWER, and it is GLOBAL rather than per-cell: `rho(I - P⁻¹S)` is 6.2679 under the Schur
+  block and 0.7148 under `A_gg`'s.** The sweep is expansive by 6.3 per iteration, so twenty sweeps is
+  `6.27²⁰ ~ 1e+16` -- which is the observed 1e+16--1e+18 exactly. Half-budget estimates 5.42 and 0.58,
+  so both are settled rather than transient.
+
+  **NO PER-CELL FIX EXISTS**, and that is why every local metric failed to correlate: the diverging
+  cells are geometrically ordinary because they are simply where the dominant eigenvector has support.
+  A limiter on the correction was proposed and is refuted before building -- the `sigma_min` collapse
+  it would target affects **8 cells of 1 635 909** (median shrink 1.000, only 3 below 1e-2), while
+  `rho = 6.27` affects the entire solve. A Krylov outer solve does not require `rho < 1`, which is the
+  whole reason it is untroubled.
+
+  The block that diverges is **13× closer to the truth**, and cell 60355 is **well conditioned** as
+  well as accurate. So neither accuracy nor conditioning is the mechanism: **a stationary iteration
+  does not want an accurate preconditioner, it wants a diagonally dominant one.** The correction
+  *subtracts* from `A_gg`'s block, the diagonal shrinks, `P⁻¹` grows, and on a cell whose off-diagonal
+  coupling is already comparable the iteration stops contracting. ⚠️ That reading is
+  **superseded by the global rate above** -- it was the fourth of five hypotheses and, like the three
+  before it, did not survive measurement. Four earlier mechanisms
+  (near-singular `A_HH` from an under-determined Hessian on tetrahedra — refuted, `cond C` is 1.8 on
+  the worst cells; preconditioner/operator mismatch at low inner counts — refuted, invariant across
+  inner 4–20; ill-conditioning generally — refuted by cell 60355) were each proposed and each
+  rejected by measurement.
+
+  **A Krylov outer solve is untroubled by the same preconditioner** (max 2.378e-02), spending
+  iterations rather than diverging — so this is safe with `GmresGradientSolve` and unsafe with the
+  fixed sweep.
+
+  **⚠️ HOW THIS SHIPPED, because the process failure matters more than the bug.** It was defaulted on
+  the strength of measurements taken **entirely on 8³ synthetic meshes**, which cannot contain the
+  cells that break it — while "measure `local_schur_block` at 1.6M cells" was already an open item.
+  A default was changed on evidence that structurally could not see the failure mode. The same run
+  also exposed a probe-scheduling bug (below) whose justification was measured at 13824 cells, where
+  its premise does not hold either. **Two independent faults in one feature, both from measuring on
+  meshes too small to discriminate.**
+
   Better on **every** mesh measured — slightly on clean ones, 57000× on a sliver cell — for **~7 %
   forward time and ~17 % peak memory** (`dim` probes for `A_Hg` plus `dim²` for `A_gH`, a fixed
   prologue against ~220 applies at the shipped 20/10). Adjoint agrees with a finite difference to

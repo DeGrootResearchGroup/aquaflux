@@ -172,7 +172,9 @@ def objective(nu, *, explicit_limiter, seed):
     adjoint requires.
     """
     coupled0 = build_case(NU, explicit_limiter=explicit_limiter)
-    continuation = coupled_continuation(coupled0, coupled0.state_from_physical(*seed), **PRECONDITIONER)
+    continuation = coupled_continuation(
+        coupled0, coupled0.state_from_physical(*seed), **PRECONDITIONER
+    )
 
     def scalar(viscosity):
         coupled = build_case(viscosity, explicit_limiter=explicit_limiter)
@@ -192,17 +194,23 @@ def main() -> None:
     print("\n[1] converging with the limiter ON (the shipped default) ...", flush=True)
     coupled_on, (f_on, k_on, o_on) = solve(NU, explicit_limiter=True)
     act = cap_activity(coupled_on, f_on, k_on, o_on)
-    print(f"    cap ACTIVE in {act['cells_active']}/{act['n_cells']} cells "
-          f"({100 * act['fraction_active']:.1f}%)")
+    print(
+        f"    cap ACTIVE in {act['cells_active']}/{act['n_cells']} cells "
+        f"({100 * act['fraction_active']:.1f}%)"
+    )
     if act["cells_active"]:
-        print(f"    production/limit: max {act['max_production_over_limit']:.3g}, "
-              f"median where active {act['median_over_where_active']:.3g}")
+        print(
+            f"    production/limit: max {act['max_production_over_limit']:.3g}, "
+            f"median where active {act['median_over_where_active']:.3g}"
+        )
         print("    -> the stop_gradient removes a Jacobian term in exactly those cells")
     else:
         print("    -> the stop_gradient removes NOTHING here: the cap binds nowhere at the root")
-    print(f"    S/omega: max {act['max_s_over_omega']:.3f}, p99 {act['p99_s_over_omega']:.3f} "
-          f"| binds above {act['binding_threshold_s_over_omega']:.3f} "
-          f"({act['headroom']:.1f}x headroom)")
+    print(
+        f"    S/omega: max {act['max_s_over_omega']:.3f}, p99 {act['p99_s_over_omega']:.3f} "
+        f"| binds above {act['binding_threshold_s_over_omega']:.3f} "
+        f"({act['headroom']:.1f}x headroom)"
+    )
 
     print("\n[2] converging with the limiter OFF (the exact operator) ...", flush=True)
     coupled_off, (f_off, k_off, o_off) = solve(NU, explicit_limiter=False)
@@ -212,17 +220,25 @@ def main() -> None:
         float(jnp.max(jnp.abs(o_on - o_off))),
     )
     print(f"    converged; max |field difference| vs the limited solve = {same:.3e}")
-    print("    -> the forward path does not need the stabilization on this case"
-          if same < 1e-6 else "    -> the two solves reach DIFFERENT roots")
+    print(
+        "    -> the forward path does not need the stabilization on this case"
+        if same < 1e-6
+        else "    -> the two solves reach DIFFERENT roots"
+    )
 
-    print("\n[3] gradient through the converged solve, against central finite differences ...",
-          flush=True)
+    print(
+        "\n[3] gradient through the converged solve, against central finite differences ...",
+        flush=True,
+    )
     seed = hybrid_initialize(coupled_on.momentum, coupled_on.turbulence)
     h = NU * 1e-3
     exact_fn = objective(NU, explicit_limiter=False, seed=seed)
     fd = (float(exact_fn(NU + h)) - float(exact_fn(NU - h))) / (2 * h)
     print(f"    central finite difference      : {fd:+.8e}")
-    for label, flag in (("limiter OFF (exact operator)", False), ("limiter ON  (shipped default)", True)):
+    for label, flag in (
+        ("limiter OFF (exact operator)", False),
+        ("limiter ON  (shipped default)", True),
+    ):
         g = float(jax.grad(objective(NU, explicit_limiter=flag, seed=seed))(NU))
         rel = abs(g - fd) / max(abs(fd), 1e-300)
         print(f"    jax.grad, {label}: {g:+.8e}   rel. error vs FD = {rel:.3e}")

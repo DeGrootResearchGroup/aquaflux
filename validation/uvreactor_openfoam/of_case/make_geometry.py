@@ -56,6 +56,7 @@ OUTDIR = os.path.join(HERE, "constant", "triSurface")
 # STL emission with coordinate transform
 # ---------------------------------------------------------------------------
 
+
 def transform(p_mm):
     """STEP (x, y, z) [mm] -> case (y/1000, x/1000, z/1000) [m].
 
@@ -63,21 +64,21 @@ def transform(p_mm):
     +x in the case, then scales mm to m.
     """
     x, y, z = p_mm
-    return (y*1e-3, x*1e-3, z*1e-3)
+    return (y * 1e-3, x * 1e-3, z * 1e-3)
 
 
 def _normal(v0, v1, v2):
     e0 = (v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2])
     e1 = (v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2])
     n = (
-        e0[1]*e1[2] - e0[2]*e1[1],
-        e0[2]*e1[0] - e0[0]*e1[2],
-        e0[0]*e1[1] - e0[1]*e1[0],
+        e0[1] * e1[2] - e0[2] * e1[1],
+        e0[2] * e1[0] - e0[0] * e1[2],
+        e0[0] * e1[1] - e0[1] * e1[0],
     )
-    nm = math.sqrt(sum(c*c for c in n))
+    nm = math.sqrt(sum(c * c for c in n))
     if nm == 0:
         return (0.0, 0.0, 0.0)
-    return (n[0]/nm, n[1]/nm, n[2]/nm)
+    return (n[0] / nm, n[1] / nm, n[2] / nm)
 
 
 def write_ascii_stl(path, name, triangles_mm):
@@ -101,6 +102,7 @@ def write_ascii_stl(path, name, triangles_mm):
 # ---------------------------------------------------------------------------
 # Surface classification
 # ---------------------------------------------------------------------------
+
 
 def classify_surface(mesh_size, surface_tag):
     """Return one of {'inlet', 'outlet', 'lampWall', 'bodyWall'}."""
@@ -132,6 +134,7 @@ def classify_surface(mesh_size, surface_tag):
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
+
 
 def main():
     if not os.path.isfile(STEP):
@@ -202,8 +205,8 @@ def main():
         print(f"  {k:10s}  {len(tags):>3d} surface(s)  tags={tags}")
 
     # Mesh the surface, then extract triangles per group and write STLs
-    gmsh.option.setNumber("Mesh.MeshSizeMin", 0.5)   # mm
-    gmsh.option.setNumber("Mesh.MeshSizeMax", 4.0)   # mm
+    gmsh.option.setNumber("Mesh.MeshSizeMin", 0.5)  # mm
+    gmsh.option.setNumber("Mesh.MeshSizeMax", 4.0)  # mm
     gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 12)
     gmsh.model.mesh.generate(2)
 
@@ -220,14 +223,14 @@ def main():
                     continue
                 # node_tags is a flat list: 3 entries per triangle
                 for i in range(0, len(node_tags), 3):
-                    nts = node_tags[i:i + 3]
+                    nts = node_tags[i : i + 3]
                     verts = []
                     for nt in nts:
                         coords = gmsh.model.mesh.getNode(nt)[0]
                         verts.append(tuple(coords))
                     triangles.append(tuple(verts))
         write_ascii_stl(path, name, triangles)
-        size_kib = os.path.getsize(path)/1024
+        size_kib = os.path.getsize(path) / 1024
         print(f"  {name:10s}  {len(triangles):>6d} triangles   {size_kib:>7.1f} KiB")
 
     gmsh.finalize()
@@ -236,11 +239,9 @@ def main():
     print()
     print("Geometry summary (case coords, after STEP transform):")
     print(f"  Body:    x in [0, 0.889] m, OD = 8.9 cm")
-    print(f"  Lamp:    x in [0, 0.810] m physical (free-tip apex at x=0.810);"
-          f" OD = 2.0 cm")
+    print(f"  Lamp:    x in [0, 0.810] m physical (free-tip apex at x=0.810); OD = 2.0 cm")
     print(f"  Inlet:   axial pipe, x in [0.889, 1.739] m,  dia = 1.91 cm")
-    print(f"  Outlet:  perpendicular pipe at x = 0.0477,"
-          f" z in [0.0435, 0.8945] m, dia = 1.91 cm")
+    print(f"  Outlet:  perpendicular pipe at x = 0.0477, z in [0.0435, 0.8945] m, dia = 1.91 cm")
     return 0
 
 

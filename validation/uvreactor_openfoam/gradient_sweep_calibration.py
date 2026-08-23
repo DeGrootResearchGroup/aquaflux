@@ -75,6 +75,9 @@ REFERENCE_SWEEPS = int(os.environ.get("UV_REFERENCE_SWEEPS", "24"))
 # a 1.6M-cell mesh: every rung to 12 fits in 12 GB, 16 is killed outright). Overridable so a run can
 # keep the reference it can afford instead of losing the whole calibration to the check above it.
 REFERENCE_CHECK_SWEEPS = int(os.environ.get("UV_REFERENCE_CHECK", REFERENCE_SWEEPS + 8))
+# Whether the outer preconditioner is built from the Schur complement's block or `A_gg`'s.
+# Exposed because the two differ only on a mesh with cells no small fixture reproduces.
+LOCAL_SCHUR_BLOCK = os.environ.get("UV_LOCAL_SCHUR", "1") != "0"
 OUTER_LADDER = tuple(int(n) for n in os.environ.get("UV_OUTER_LADDER", "3,5,10,20").split(","))
 # The outer arms hold the INNER count fixed, because cost here is the product of the two -- the inner
 # solve runs once per outer operator apply -- so sweeping one with the other at its default measures

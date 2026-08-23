@@ -389,7 +389,9 @@ def run_ordering(ordering, block, n_fields, n_cells, b):
 
     sweeps = stationary_sweeps(factors, block, permutation, scale, b, SWEEP_COUNTS)
     began = time.perf_counter()
-    applies, true = (0, float("nan")) if CENSUS_ONLY else krylov(factors, block, permutation, scale, b)
+    applies, true = (
+        (0, float("nan")) if CENSUS_ONLY else krylov(factors, block, permutation, scale, b)
+    )
     solve = time.perf_counter() - began
 
     # ⚠️ The FACTOR's pivots, not the operator's diagonal. Reading `reordered.diagonal()` here reported

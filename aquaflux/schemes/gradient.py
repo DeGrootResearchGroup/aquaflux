@@ -1613,12 +1613,34 @@ class HessianCorrectedGradient(GradientScheme):
         then unused. ``None`` (the default) keeps the nested solve.
     local_schur_block : bool
         Build the outer preconditioner from the Schur complement's own per-cell block rather than
-        from ``A_gg``'s alone. **Default ``True``.** Costs ``dim + dim**2`` extra probes once per
-        reconstruction (~7 % of a reconstruction at the default sweep counts, a fixed prologue whose
-        share falls as they rise) and is better on every mesh measured -- marginally on well-shaped
-        ones, by some four orders on a cell squashed nearly flat. Set ``False`` to recover the
-        historical ``A_gg``-only preconditioner, which is a little cheaper and adequate on a mesh of
-        uniformly good quality.
+        from ``A_gg``'s alone. **Default ``False``** -- see the warning below before enabling it.
+
+        It is the *better approximation*: on a 1.6M-cell reactor mesh its block sits within 2.5 % of
+        the true Schur block where ``A_gg``'s is 33 % away, and on synthetic meshes it improves the
+        reconstruction everywhere, by some four orders on a cell squashed nearly flat.
+
+        ⚠️ **AND IT MAKES THE SWEEP DIVERGE ON A REAL MESH, precisely because a stationary iteration
+        does not want an accurate preconditioner -- it wants a diagonally dominant one.** The
+        correction *subtracts* from ``A_gg``'s block, so the diagonal shrinks, ``P⁻¹`` grows, and on
+        a cell whose off-diagonal coupling is already comparable the iteration stops contracting.
+        Measured on that reactor mesh: **4599 cells of 1 635 909 exceed 100 % error**, the 99th
+        percentile worsens from 4.9e-05 to 7.4e-05, and the worst cell goes from 7.0e-02 to
+        **5.6e+18** -- while the median improves 27 %. The failing cells are ordinary valid
+        tetrahedra and pyramids (four and five faces against the mesh's median of six), not slivers:
+        their volumes are 0.24--0.42 of the median, their planarity is 0.89--0.9996, and they close
+        to 1e-22.
+
+        **The cause is global, not per-cell**: the sweep's contraction rate ``rho(I - P⁻¹S)`` is
+        **6.27** under this block against **0.71** under ``A_gg``'s, so the iteration is expansive by
+        a factor of six per sweep and twenty sweeps is ``6.27²⁰ ~ 1e+16`` -- the observed magnitude.
+        The failing cells are geometrically ordinary because they are merely where the dominant
+        eigenvector has support, which is why no per-cell property correlates with them and why no
+        per-cell guard would help.
+
+        A Krylov outer solve does not require ``rho < 1`` and is untroubled by the same
+        preconditioner, spending iterations rather than diverging -- so this is safe with
+        :class:`GmresGradientSolve` and unsafe with the fixed sweep.
+        ``validation/uvreactor_openfoam/schur_block_diagnosis.py`` reproduces all of it.
     """
 
     solver: GradientSolve = eqx.field(default_factory=lambda: SweptGradientSolve(sweeps=20))
@@ -1626,7 +1648,7 @@ class HessianCorrectedGradient(GradientScheme):
         default_factory=lambda: SweptGradientSolve(sweeps=10, warn_tol=None)
     )
     schur: bool = eqx.field(static=True, default=True)
-    local_schur_block: bool = eqx.field(static=True, default=True)
+    local_schur_block: bool = eqx.field(static=True, default=False)
     coupled_sweep: CoupledBlockSweep | None = None
 
     def gradients(
@@ -1691,7 +1713,7 @@ class HessianCorrectedGradient(GradientScheme):
         cap: int = SweepCalibration.cap,
         seed: int = SweepCalibration.seed,
         schur: bool = True,
-        local_schur_block: bool = True,
+        local_schur_block: bool = False,
     ) -> HessianCorrectedGradient:
         """Build this scheme with **both** sweep counts measured from the mesh rather than assumed.
 
@@ -2029,20 +2051,36 @@ class HessianCorrectedGradient(GradientScheme):
                 probe = jnp.broadcast_to(unit, (n_cells, dim, dim))
                 return gh_owner(probe) + gh_neighbour(probe)
 
-            hg = jnp.moveaxis(jax.vmap(hessian_row_block)(jnp.eye(dim)), 0, -1)
-            # Probed one at a time rather than under `vmap`: the two cost the same wall clock here
-            # (248 ms against 247 at 13824 cells) but `vmap` holds all `dim**2` probes' face
-            # intermediates at once, and those are the largest arrays in the scheme. Measured peak
-            # resident memory 1.29 GB sequential against 1.39 GB vmapped, on a 1.10 GB baseline --
-            # a third of the feature's memory cost, for nothing.
+            _, hg = jax.lax.scan(
+                lambda carry, unit: (carry, hessian_row_block(unit)), None, jnp.eye(dim)
+            )
+            hg = jnp.moveaxis(hg, 0, -1)
+
+            # ⚠️ PROBED UNDER `lax.scan`, WHICH IS THE ONLY CONSTRUCT THAT ACTUALLY SEQUENCES THEM.
+            # A Python loop over the probes followed by a `stack` does NOT: to the compiler that is
+            # `dim**2` INDEPENDENT computations feeding one consumer, free to be scheduled together,
+            # so every probe's face intermediates can be live at once. Each probe gathers a
+            # `(n_cells, dim, dim)` field to `(n_faces, dim, dim)` -- 376 MB at 1.6M cells, twice per
+            # probe -- so nine of them concurrently is several gigabytes, which on a real mesh is the
+            # difference between fitting in memory and swapping. Measured: a reconstruction went from
+            # ~200 s (swapping, and FLAT in the sweep count because the prologue dominated everything)
+            # to the sweeps mattering again.
+            #
+            # ⚠️ It is invisible on a small mesh, which is how it shipped: at 13824 cells nine live
+            # probes is a few MB, and a Python loop measured 1.29 GB against a `vmap`'s 1.39 GB --
+            # a real difference, for a reason that does not survive to the size that matters.
+            # `scan` bounds the intermediates by construction rather than by the scheduler's choice.
+            def probe_column(carry, unit):
+                return carry, gradient_row_block(unit)
+
             units = jnp.eye(dim * dim).reshape(dim * dim, dim, dim)
-            gh = jnp.stack([gradient_row_block(u) for u in units], axis=-1)
-            gh = gh.reshape(n_cells, dim, dim, dim)
+            _, gh = jax.lax.scan(probe_column, None, units)
+            gh = jnp.moveaxis(gh, 0, -1).reshape(n_cells, dim, dim, dim)
             # `g_k -> H_ij` by `hg`, then `A_HH⁻¹` on the Hessian's trailing index (the `I ⊗ C`
             # structure, exactly as the inner preconditioner applies it), then `H_pq -> g_m` by `gh`.
             return gradient_block - jnp.einsum("nmil,nlj,nijk->nmk", gh, hessian_inverse, hg)
 
-        def outer(hessian_solver, inner_system, use_local_schur_block=True):
+        def outer(hessian_solver, inner_system, use_local_schur_block=False):
             block = cell_diagonal_block(gg_owner, gg_neighbour, vol, n_cells, dim)
             if use_local_schur_block:
                 block = local_schur_block(block, inner_system.preconditioner.inverse)
