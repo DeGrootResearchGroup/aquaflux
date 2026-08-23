@@ -1199,9 +1199,10 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
 
   **⚠️⚠️ WHERE THE TIME ACTUALLY GOES IN A RECONSTRUCTION — profiled 2026-08-23, and it redirects the
   optimization effort this scheme had been attracting.** Configuration, in full: `pitzDaily`
-  (12225 cells, `dim` 2, `n_sym` 3), `CoupledBlockSweep(sweeps=20)`, `AveragedNeighbourHessian` at
-  the shipped weight, `local_schur_block=True` (the shipped default), jitted and warmed, minimum of
-  four to six runs on an otherwise idle machine. Harness:
+  (12225 cells, `dim` 2, `n_sym` 3), `CoupledBlockSweep(sweeps=20)`, **`AveragedNeighbourHessian`**
+  at its default weight — ⚠️ **NOT the shipped closure, which is `OwnerHessian`**; see the rate
+  caveat below before carrying the sweeps ladder anywhere — `local_schur_block=True` (the shipped
+  default), jitted and warmed, minimum of four to six runs on an otherwise idle machine. Harness:
   `validation/gradient_reconstruction_profile.py` — kept in the repository, so this can be re-asked
   when a default moves.
 
@@ -1230,12 +1231,30 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     | 6 | 11.8 ms | 0.44x | 1.07e-05 |
     | 4 | 9.8 ms | 0.36x | 2.99e-04 |
 
-    **Twelve sweeps reproduce twenty to 1e-09 for a third less time**, and the default is not wrong
-    for its stated target — 20 is what `0.3152^n = 1e-10` asks for, i.e. exactness on quadratic
-    fields. It is simply far tighter than a flow solve that stops at ‖R‖ ~ 1e-6 has any use for.
-    ⚠️ Do **not** read this as licence to lower the class default: the count that preserves
-    exactness is the property that default exists to guarantee, and a case wanting less should call
+    **Twelve sweeps reproduce twenty to 1e-09 for a third less time.** The class default of 20 is
+    not wrong — it is the count that preserves exactness on quadratic fields — it is simply far
+    tighter than a flow solve stopping at ‖R‖ ~ 1e-6 has any use for. ⚠️ Do **not** read this as
+    licence to lower the class default; a case wanting less should call
     `CoupledBlockSweep.calibrated(mesh, geometry, tol=...)`.
+
+    **⚠️ THE RATE — AND SO THE WHOLE LADDER — IS A PROPERTY OF THE BOUNDARY CLOSURE, and the table
+    above was taken under the non-default one.** Measured on pitzDaily exactly as
+    `CoupledBlockSweep.calibrated` measures it (relaxation 1.0, `outer(SweptGradientSolve(...))`'s
+    preconditioner, `iters=24`, `seed=0`):
+
+    | closure | rate | sweeps for 1e-4 | for 1e-10 |
+    |---|---|---|---|
+    | **`OwnerHessian` (the shipped default)** | **0.2263** | **7** | **16** |
+    | `AveragedNeighbourHessian` | 0.3152 | 8 | 20 |
+
+    The averaged closure couples each boundary cell to its neighbours, so it contracts more slowly.
+    Note the trap this set: under the averaged closure 1e-10 needs *exactly* 20 sweeps, which matches
+    the class default and made "the default is precisely sized for exactness" look like a clean
+    finding. Under the closure that actually ships it needs **16**, so the default carries margin.
+    `HessianCorrectedGradient.calibrated` returns 7 / 10 / 13 / 16 at 1e-4 / 1e-6 / 1e-8 / 1e-10,
+    which is the `OwnerHessian` row — that disagreement with a hand-computed count is what exposed
+    the closure mismatch, and is why `validation/gradient_reconstruction_profile.py` now measures the
+    rate the way the calibrator does and defaults `PROFILE_CLOSURE` to the shipped one.
   - **The geometry-only prologue is ~18 % of ONE reconstruction — but a residual reconstructs several
     fields on one geometry, and XLA ALREADY SHARES IT ACROSS THEM.** ⚠️ An earlier version of this
     entry said the prologue is "rebuilt on every reconstruction" and sized a geometry cache from that;

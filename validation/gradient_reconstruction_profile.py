@@ -47,6 +47,8 @@ from aquaflux.schemes.gradient import (  # noqa: E402
     AveragedNeighbourHessian,
     CoupledBlockSweep,
     HessianCorrectedGradient,
+    OwnerHessian,
+    SweptGradientSolve,
     contraction_rate,
     symmetric_components,
 )
@@ -54,6 +56,13 @@ from aquaflux.schemes.gradient import (  # noqa: E402
 SWEEPS = int(os.environ.get("PROFILE_SWEEPS", "20"))
 REPEATS = int(os.environ.get("PROFILE_REPEATS", "5"))
 CHAIN = int(os.environ.get("PROFILE_CHAIN", "8"))
+
+#: Which boundary closure to profile under. It is not a detail: the closure changes the operator, so
+#: it changes the sweep's contraction rate and hence the whole sweeps-versus-accuracy ladder below.
+#: On pitzDaily the shipped ``OwnerHessian`` contracts at 0.2263 and ``AveragedNeighbourHessian`` at
+#: 0.3152 -- sixteen sweeps against twenty to reach ``1e-10``. Default to what the marches run.
+CLOSURES = {"owner": OwnerHessian, "averaged": AveragedNeighbourHessian}
+CLOSURE = os.environ.get("PROFILE_CLOSURE", "owner")
 
 
 def timed(fn, *args, repeats=REPEATS):
@@ -75,11 +84,10 @@ def main():
     n_cells = mesh.n_cells
     n_sym = symmetric_components(dim)
 
+    closure = CLOSURES[CLOSURE]()
     scheme = HessianCorrectedGradient(
-        hessian_solve=CoupledBlockSweep(sweeps=SWEEPS),
-        boundary_closure=AveragedNeighbourHessian(),
+        hessian_solve=CoupledBlockSweep(sweeps=SWEEPS), boundary_closure=closure
     )
-    closure = scheme.boundary_closure
 
     key = jax.random.PRNGKey(0)
     field = jax.random.normal(key, (n_cells,))
@@ -88,7 +96,7 @@ def main():
     u0 = jax.random.normal(key, (n_cells, n_sym))
 
     print(f"mesh: {n_cells} cells, {mesh.n_faces} faces, dim {dim}, n_sym {n_sym}")
-    print(f"sweeps {SWEEPS}, repeats {REPEATS}, chain {CHAIN}")
+    print(f"sweeps {SWEEPS}, repeats {REPEATS}, chain {CHAIN}, closure {CLOSURE}")
     print()
 
     def systems():
@@ -190,12 +198,14 @@ def main():
 
     # ---- the sweep COUNT, which is the lever the per-sweep breakdown above says it is: the sweep
     # is most of the reconstruction, and its cost is the count rather than the work inside one.
+    # ⚠️ Measure the rate exactly as `CoupledBlockSweep.calibrated` does -- same relaxation, same
+    # preconditioner pair, same closure -- or this harness recommends a count the library would not
+    # choose, and the disagreement looks like a finding rather than a harness bug.
     built = systems()
     built_inner = built.inner()
+    built_outer = built.outer(SweptGradientSolve(warn_tol=None), built_inner)
     rate = contraction_rate(
-        built.coupled_error(
-            1.0, built.outer_preconditioner(built_inner, False), built_inner.preconditioner
-        )
+        built.coupled_error(1.0, built_outer.preconditioner, built_inner.preconditioner)
     )
     print()
     print(f"coupled-sweep contraction rate on this mesh: {rate.rate:.4f}")
