@@ -26,6 +26,8 @@ import pytest
 from aquaflux.mesh import structured_grid_2d, structured_grid_3d
 from aquaflux.mesh.quality import closed_cell_residual, face_planarity
 from aquaflux.schemes import (
+    AveragedInteriorHessian,
+    AveragedNeighbourHessian,
     CellBlockJacobi,
     CompactGreenGauss,
     CorrectedGreenGauss,
@@ -37,6 +39,7 @@ from aquaflux.schemes import (
     HessianCorrectedGradient,
     InverseCellVolume,
     InverseVolume,
+    OwnerHessian,
     SweepCalibration,
     SweptGradientSolve,
     cell_diagonal_block,
@@ -1281,7 +1284,18 @@ def test_the_two_calibrated_factories_expose_one_calibration_surface() -> None:
     # `local_schur_block` is one scheme's property for a different reason, and a structural one:
     # only the Hessian-corrected scheme eliminates a block, so only it has a Schur complement whose
     # diagonal its preconditioner can be built from.
-    scheme_specific = {"mesh", "geometry", "schur", "preconditioner", "local_schur_block"}
+    # `boundary_closure` is the Hessian's, and only the two factories that build or measure a Hessian
+    # system can carry it -- `CorrectedGreenGauss` reconstructs no Hessian and has no boundary
+    # extrapolation to close. Exempting a name here hides drift BETWEEN the factories that do share
+    # it, so those are checked against each other below rather than left to the exemption.
+    scheme_specific = {
+        "mesh",
+        "geometry",
+        "schur",
+        "preconditioner",
+        "local_schur_block",
+        "boundary_closure",
+    }
 
     for factory in (
         CorrectedGreenGauss.calibrated,
@@ -1291,6 +1305,17 @@ def test_the_two_calibrated_factories_expose_one_calibration_surface() -> None:
         parameters = inspect.signature(factory).parameters
         offered = {name: p.default for name, p in parameters.items() if name not in scheme_specific}
         assert offered == expected, f"{factory.__qualname__} does not carry the calibration surface"
+
+    # Both factories that measure a Hessian system must offer the closure, and offer it the same way:
+    # each calibrates an operator the closure changes, so one of them silently measuring a different
+    # operator than it returns is exactly the drift the exemption above would otherwise conceal.
+    hessian_aware = (HessianCorrectedGradient.calibrated, CoupledBlockSweep.calibrated)
+    closures = {
+        factory.__qualname__: inspect.signature(factory).parameters.get("boundary_closure")
+        for factory in hessian_aware
+    }
+    assert all(p is not None for p in closures.values()), closures
+    assert len({p.default for p in closures.values()}) == 1, closures
 
 
 def _quadratic_3d(x):
@@ -1642,3 +1667,158 @@ def test_the_calibrated_coupled_sweep_meets_the_tolerance_it_was_given() -> None
     )
     relative = float(jnp.linalg.norm(swept - exact)) / float(jnp.linalg.norm(exact))
     assert relative < tol
+
+
+def _hessian_system_condition(mesh, closure):
+    """Condition number of the Hessian system this closure produces, densely."""
+    geometry = mesh.geometry()
+    n_sym = gradient_module.symmetric_components(mesh.dim)
+    inner = HessianCorrectedGradient._systems(mesh, geometry, closure).inner()
+    return np.linalg.cond(_dense(inner.operator, (mesh.n_cells, n_sym)))
+
+
+def test_the_owner_closure_is_exact_for_a_quadratic_and_the_averaged_one_is_not() -> None:
+    """The two boundary closures trade against each other, which is why both are kept.
+
+    ``OwnerHessian`` carries the cell's own Hessian, which for a quadratic is the exact one, so the
+    reconstruction stays exact. ``AveragedInteriorHessian`` averages over neighbours clear of the
+    boundary and is **zero** where a cell has none — a corner, an edge, or any mesh too coarse to
+    have an interior — so those cells lose their curvature term and the exactness with it. That is
+    the documented price of the closure that keeps the system solvable, and a regression here in
+    either direction means one of the two has stopped being what it claims.
+    """
+    mesh = columnwise_perturbed_grid_3d(4, 4, 4, perturb=0.25, seed=0)
+    geometry = mesh.geometry()
+    centroids = np.asarray(geometry.cell.centroid)
+    field = _quadratic_3d(jnp.asarray(centroids))
+    boundary = _quadratic_3d(geometry.face.centroid)
+    exact = np.asarray(_quadratic_3d_grad(jnp.asarray(centroids)))
+
+    def error(closure):
+        reconstructed = np.asarray(
+            HessianCorrectedGradient(boundary_closure=closure).gradients(
+                field, mesh, geometry, boundary
+            )
+        )
+        return float(
+            np.median(
+                np.linalg.norm(reconstructed - exact, axis=-1) / np.linalg.norm(exact, axis=-1)
+            )
+        )
+
+    assert error(OwnerHessian()) < 1e-13
+    assert error(AveragedInteriorHessian()) > 1e-6
+
+
+def test_the_averaged_closure_makes_a_tetrahedral_hessian_system_solvable() -> None:
+    """On a wholly tetrahedral mesh the owner closure leaves ``A_HH`` numerically singular, and the
+    averaged one does not.
+
+    This is the failure Betchen & Straatman's closure exists to prevent, on the cell shape their own
+    experiments use. Double precision carries about sixteen orders, so a condition number of ~1e17 is
+    not "badly conditioned" — it is rank-deficient, and no solver recovers it.
+    """
+    mesh = tetrahedral_grid_3d(2, perturb=0.1, seed=0)
+    assert _hessian_system_condition(mesh, OwnerHessian()) > 1e15
+    assert _hessian_system_condition(mesh, AveragedInteriorHessian()) < 1e3
+
+    # ... and the hexahedral mesh is well conditioned under either, so the tetrahedral result above
+    # is about the cell shape rather than about the closure being generally better.
+    hexes = columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.25, seed=0)
+    assert _hessian_system_condition(hexes, OwnerHessian()) < 1e3
+    assert _hessian_system_condition(hexes, AveragedInteriorHessian()) < 1e3
+
+
+def test_the_averaged_closure_contributes_nothing_to_a_cell_own_diagonal_block() -> None:
+    """A closure reading neighbours' Hessians must declare a zero diagonal contribution, or the
+    probed per-cell block silently counts neighbour coupling as diagonal.
+
+    The probe is uniform across cells, so a gather from neighbours returns the probe's own value and
+    is indistinguishable from a diagonal term unless the closure says otherwise. This pins the two
+    closures' declarations against what their prepared maps actually do.
+    """
+    mesh = columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.25, seed=0)
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    centroid = geometry.cell.centroid
+    separation = face_cells.neighbour_centroid(centroid) - centroid[face_cells.owner]
+    probe = jnp.zeros((mesh.n_cells, mesh.dim, mesh.dim)).at[:, 0, :].set(1.0)
+
+    # The owner closure IS the identity, so its map and its declared diagonal agree exactly.
+    owner = OwnerHessian().prepare(face_cells, separation)
+    assert np.array_equal(np.asarray(owner.apply(probe)), np.asarray(probe))
+    assert np.array_equal(np.asarray(owner.diagonal(probe)), np.asarray(probe))
+
+    # The averaged closure returns a NON-zero map on that same probe -- it gathers the neighbours'
+    # copies of it -- while declaring a zero diagonal, which is the distinction being pinned.
+    averaged = AveragedInteriorHessian().prepare(face_cells, separation)
+    assert np.abs(np.asarray(averaged.apply(probe))).max() > 0.0
+    assert not np.any(np.asarray(averaged.diagonal(probe)))
+
+
+def test_a_closure_reproduces_a_constant_hessian_exactly_iff_its_weights_sum_to_one() -> None:
+    """The mechanism behind quadratic exactness, tested head-on rather than through a reconstruction.
+
+    A quadratic's Hessian is **constant**, so a closure returns it unchanged exactly when its weights
+    are a partition of unity — and any closure that does is exact for a quadratic. This checks that
+    property directly on a constant field, which is far more diagnostic than an end-to-end error:
+    it says *which* cells break it and why, rather than reporting one number that could come from
+    anywhere.
+    """
+    mesh = columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.25, seed=0)
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    centroid = geometry.cell.centroid
+    separation = face_cells.neighbour_centroid(centroid) - centroid[face_cells.owner]
+    constant = jnp.broadcast_to(jnp.eye(mesh.dim) * 2.7, (mesh.n_cells, mesh.dim, mesh.dim))
+
+    for closure in (OwnerHessian(), AveragedNeighbourHessian()):
+        carried = np.asarray(closure.prepare(face_cells, separation).apply(constant))
+        assert np.abs(carried - np.asarray(constant)).max() < 1e-12, type(closure).__name__
+
+    # Betchen's closure restricts the average to neighbours clear of the boundary and returns ZERO
+    # where a cell has none, so on this mesh most cells lose the constant entirely. That is the
+    # discretization error its reconstruction shows, located precisely.
+    narrow = np.asarray(AveragedInteriorHessian().prepare(face_cells, separation).apply(constant))
+    dropped = np.abs(narrow).max(axis=(1, 2)) == 0.0
+    assert dropped.any(), "expected some cells to have no boundary-clear neighbour on this mesh"
+    assert np.abs(narrow - np.asarray(constant)).max() > 1.0
+
+
+def test_the_neighbour_average_is_exact_for_a_quadratic_and_solves_on_tetrahedra() -> None:
+    """The closure that keeps both properties at once, which neither of the other two does.
+
+    ``OwnerHessian`` is exact and cannot solve a tetrahedral mesh; ``AveragedInteriorHessian`` solves
+    it and is not exact. Averaging over *all* face neighbours is exact — every cell has one, so the
+    weights sum to one everywhere — while still never reading the cell's own Hessian, which is what
+    keeps the system solvable.
+
+    Judged under a **converged** solve, because the claim is about the discretization: at the shipped
+    fixed sweep counts this closure has not converged yet and reads ~1e-07, which is a property of
+    the iteration and is documented on the class.
+    """
+    exact = dict(solver=GmresGradientSolve(), hessian_solver=GmresGradientSolve())
+    for mesh in (
+        columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.25, seed=0),
+        tetrahedral_grid_3d(3, perturb=0.1, seed=0),
+    ):
+        geometry = mesh.geometry()
+        centroids = np.asarray(geometry.cell.centroid)
+        reconstructed = np.asarray(
+            HessianCorrectedGradient(
+                boundary_closure=AveragedNeighbourHessian(), **exact
+            ).gradients(
+                _quadratic_3d(jnp.asarray(centroids)),
+                mesh,
+                geometry,
+                _quadratic_3d(geometry.face.centroid),
+            )
+        )
+        truth = np.asarray(_quadratic_3d_grad(jnp.asarray(centroids)))
+        error = np.linalg.norm(reconstructed - truth, axis=-1) / np.linalg.norm(truth, axis=-1)
+        assert float(np.median(error)) < 1e-12
+
+    # ... and the tetrahedral system it just solved is one the default closure cannot.
+    tets = tetrahedral_grid_3d(2, perturb=0.1, seed=0)
+    assert _hessian_system_condition(tets, AveragedNeighbourHessian()) < 1e3
+    assert _hessian_system_condition(tets, OwnerHessian()) > 1e15

@@ -308,8 +308,8 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     `test_the_reduced_hessian_block_is_symmetric_positive_definite`, which checks the block the
     preconditioner actually inverts rather than one computed a second way. This is the structural
     reason to weight the reduction rather than project it unweighted: `A_HH⁻¹` sits at the centre of
-    the elimination term `A_gH A_HH⁻¹ A_Hg`, so a well-signed inverse there is the difference between
-    a Schur correction that can only shrink the block and one that can flip a direction.
+    the elimination term `A_gH A_HH⁻¹ A_Hg`. ⚠️ **That property is NOT what fixes the reactor mesh —
+    measured, see the weighting-versus-symmetry entry below.**
   - **⚠️ STORAGE GOES UP, NOT DOWN — the expectation that motivated this is half wrong, and it is the
     per-cell BLOCK that decides it.** The unknown shrinks by a third (9 → 6 doubles per cell, and
     likewise every Hessian iterate on the reverse-mode tape). But the block **stops factoring**: an
@@ -659,8 +659,149 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   minimum of 7.7e-03 and eight cells below 1e-1 under the unsymmetrized Hessian. The reduction did
   not merely re-rank the arms — it stopped the correction from nearly cancelling the block anywhere.
 
-  **⚠️⚠️ THE SCHEME DOES NOT SOLVE ON AN ALL-TETRAHEDRAL MESH — `A_HH` IS NUMERICALLY SINGULAR THERE,
-  AND THIS PREDATES THE SIX-COMPONENT CHANGE (measured 2026-08-22).** `tests/support/meshes.py::
+  **⚠️ IT IS THE SYMMETRY THAT FIXES THE REACTOR MESH, NOT THE LEAST-SQUARES WEIGHTING — measured
+  2026-08-23, and it retires the SPD mechanism this file offered a day earlier.** The six-component
+  change carried two things at once: solving the symmetric components, and removing the surplus
+  equations by a weighting that makes the reduced block SPD. Separated by swapping the reduction for
+  an unweighted projection (`contract_symmetric(residual)`, no `A_P` contraction, no row scaling) and
+  re-running the same harness on the same 1.6M-cell mesh:
+
+  | reduction | Schur median | p99 | max | Schur diverging | `A_gg` max | `A_gg` diverging |
+  |---|---|---|---|---|---|---|
+  | weighted (least squares) | 8.055e-08 | 4.320e-05 | 5.184e-03 | **0** | 5.787e+05 | — |
+  | unweighted (projection) | 8.139e-08 | 4.467e-05 | 6.137e-03 | **0** | 7.095e+16 | 6680 |
+
+  **Both fix it completely.** The unweighted block carries no definiteness guarantee whatever, so
+  "the reduced block is SPD, therefore the elimination term is well-signed" — offered here as the
+  mechanism — **is not what is doing the work.** What matters is that the Hessian is symmetric. Say
+  that, and stop citing definiteness as the cause.
+
+  **The weighting is kept anyway, and the reason is not the reactor.** It is the source's own
+  formulation, it costs one contraction per apply, and it makes the block SPD — a property worth
+  having even where it is not load-bearing. But its cost is real and shows up elsewhere: on a
+  tetrahedral mesh under the owner boundary closure it squares an already-bad conditioning,
+  `cond(S)` 4.184e+04 unweighted against **4.040e+19** weighted. That difference is moot once the
+  averaged closure is in force (which fixes tetrahedra outright, `cond(S) ~ 6`), but it is the
+  measurement to remember if a mesh ever turns up where the closure alone is not enough.
+
+  ⚠️ **Note what the `A_gg` column also shows:** unweighted, that arm's worst cell is 7.095e+16
+  against the weighted arm's 5.787e+05, and 6680 cells diverge. So the two reductions are not
+  interchangeable for the arm that fails — they are interchangeable only for the one that works.
+
+  **THE HESSIAN'S BOUNDARY CLOSURE IS AN INJECTED STRATEGY, AND THE TWO OPTIONS GENUINELY TRADE
+  (2026-08-23).** A boundary face has no neighbour to interpolate with, so its gradient is
+  extrapolated from the owner and needs a first-order Hessian to carry it. `HessianBoundaryClosure`
+  → `OwnerHessian` (default) / `AveragedInteriorHessian`, on `HessianCorrectedGradient
+  (boundary_closure=…)`.
+
+  | mesh | `OwnerHessian` (default) | `AveragedInteriorHessian` |
+  |---|---|---|
+  | tetrahedral, n=3, perturb 0.1 | **inf** | 1.70e-04 |
+  | hex 3³, perturb 0.25 | **9.25e-16** | 3.28e-03 |
+  | hex 8³, perturb 0.25 | **2.33e-15** | 4.03e-05 |
+  | 2D, perturb 0.3 | **2.62e-15** | 4.70e-05 |
+
+  And on the Hessian system's conditioning, which is the point of the second one:
+
+  | mesh | `cond(A_HH)` owner | averaged | `cond(S)` owner | averaged |
+  |---|---|---|---|---|
+  | tetrahedral n=2 | **2.851e+17** | **8.115** | **4.040e+19** | **5.985** |
+  | hex 3³ | 2.084e+01 | 4.362 | 1.995 | 1.788 |
+
+  - **Neither dominates, which is why both are kept** rather than one being deleted as dominated.
+    `OwnerHessian` carries the cell's own Hessian — for a quadratic that is the *exact* Hessian, so
+    the reconstruction stays exact, which is the property this scheme costs 60× a corrected
+    Green–Gauss reconstruction to have. `AveragedInteriorHessian` is Betchen & Straatman's Eq. (28)–(29)
+    and is the only one that solves on a tetrahedral mesh.
+  - **⚠️ BETCHEN'S AVERAGED CLOSURE GIVES UP EXACTNESS FOR QUADRATICS, and refinement does not
+    recover it — but see the entry below: that is a property of HIS eligible set, not of
+    averaging, and `AveragedNeighbourHessian` keeps the exactness**
+    (3.3e-03 at 3³, 2.0e-03 at 5³, 4.0e-05 at 8³ — falling, but four orders short of the owner
+    closure at any size). The cause is the closure's own empty case: where a cell has **no**
+    boundary-clear neighbour — a corner, an edge, a mesh too coarse to have an interior — the average
+    is zero and the extrapolation drops its curvature term entirely. That is consistent with the
+    source, which reports second-*order* gradients (their `gamma_1` = 1.832) rather than exact ones.
+    **So this is not a strictly better closure that we were simply missing; it is a different point
+    on an accuracy/robustness trade, and defaulting it on would silently cost the scheme its
+    headline property.**
+  - **⚠️ IT MUST BE PASSED INTO THE FACE KERNELS, NOT COMPUTED INSIDE THEM.** The averaged closure
+    reads a cell's *neighbours'* Hessians, and the per-cell blocks are recovered by probing those
+    kernels with a **uniform** field — so a gather from neighbours returns the probe's own value and
+    is indistinguishable from a diagonal term. Computed internally it would report neighbour coupling
+    as diagonal: the "compose the blocks, not the operators" trap, one level further in. Each closure
+    therefore declares its own diagonal contribution (`diagonal_probe`), which is what the
+    extractions pass — `probe` for the owner closure, zeros for the averaged one, since a cell's own
+    Hessian never appears in its own average. Pinned by
+    `test_the_averaged_closure_contributes_nothing_to_a_cell_own_diagonal_block`, which checks that
+    the prepared map really is non-zero on that probe while the declaration is zero — the two being
+    equal is precisely the bug.
+  - **The default is byte-unchanged**: `OwnerHessian.prepare` returns the identity and its
+    `diagonal_probe` returns the probe, which is exactly what the kernels did before the seam existed.
+  **⚠️⚠️ THE ACCURACY LOSS WAS NOT NECESSARY — averaging over ALL face neighbours is exact for a
+  quadratic AND leaves the system solvable, which is better than the published closure on the axis
+  that matters (measured 2026-08-23).** `AveragedNeighbourHessian`.
+
+  **The principle, and it is worth stating because it makes the whole family predictable:
+  a closure is exact for a quadratic exactly when its weights sum to ONE.** A quadratic's Hessian is
+  constant, and any weighted average of a constant whose weights sum to one returns it unchanged. So
+  `OwnerHessian` (weight 1 on self) is exact; Betchen's is exact wherever its eligible set is
+  non-empty and **zero** where it is not, and that zero branch is the entire source of its error.
+  Pinned directly rather than through a reconstruction, on a constant Hessian field, by
+  `test_a_closure_reproduces_a_constant_hessian_exactly_iff_its_weights_sum_to_one`.
+
+  | closure | `cond(A_HH)` tet | quadratic, converged | quadratic, shipped 20/10 |
+  |---|---|---|---|
+  | `OwnerHessian` (default) | **1.01e+18** | 6.65e-16 hex / *unsolvable* tet | 9.25e-16 hex |
+  | **`AveragedNeighbourHessian`** | **8.39** | **5.95e-16 hex · 2.57e-15 tet · 9.36e-16 2D** | 4.48e-07 hex |
+  | `AveragedInteriorHessian` (Betchen) | 8.39 | **3.28e-03 hex · 1.73e-04 tet** | 3.28e-03 hex |
+
+  **Betchen's closure does not improve with a better solve** — 3.28e-03 at 20/10, at 60/20 and under
+  an exact Krylov solve alike — which is what identifies it as a discretization error rather than an
+  unconverged iteration. The neighbour average moves 4.5e-07 → 2.3e-11 → 5.9e-16 across those same
+  three, i.e. it is exact and merely needs the sweeps.
+
+  - **The restriction to boundary-clear neighbours is what costs the exactness, and it is not needed
+    for solvability.** Both averaging closures reach `cond(A_HH)` 8.39 on tetrahedra; the wide one is
+    four orders more accurate. What actually keeps the system solvable is that a cell's **own**
+    Hessian stays out of its own boundary closure — not which neighbours are counted.
+  - **⚠️ THE ELIGIBLE SET AND THE EMPTY CASE CANNOT BE MIXED FREELY.** With the *narrow* set, an
+    owner fallback re-admits enough of the cell's own Hessian to make the tetrahedral system singular
+    again (`cond(A_HH)` **1.7e+18**). So Betchen's zero fallback is load-bearing *for his eligible
+    set*, and the wide set is what makes an owner fallback safe. The four combinations were measured;
+    only two are viable and they are the two that ship.
+  - **⚠️ IT COSTS SWEEPS, and that is why it is not the default.** The closure adds neighbour coupling
+    to the Hessian system, so that system converges more slowly. Calibrated to `tol = 1e-10`: outer
+    falls 15 → 13 while **inner rises 8 → 23** on a perturbed hexahedral grid (9 → 20 in 2D), which is
+    roughly `2.3x` the operator applies. At the shipped 20/10 it has not converged and reads 4.5e-07
+    where the default reads 9.3e-16 — so **switching the default would silently degrade the shipped
+    configuration**, and `calibrated` takes the closure precisely so the counts can follow it.
+  - **What this changes about the earlier entry:** "the averaged closure gives up exactness" is true
+    of *Betchen's* and **not** of the family. The choice on a mesh the default cannot solve is no
+    longer accuracy-versus-solvability — it is sweeps-versus-solvability, which is a far better trade
+    and the one to offer a user.
+  - **Both averaging closures share one implementation** (`_inverse_distance_average`, taking the
+    eligible set and the empty case), so the weighting, the fallback and the diagonal declaration are
+    stated once. That matters here because the two differ in exactly two flags and would otherwise be
+    a copy-paste pair whose difference is invisible.
+
+  - **⚠️ BOTH CALIBRATION FACTORIES HAD TO TAKE IT, and the signature-parity test is what said so.**
+    The closure changes the operator, so a count measured under one closure and returned on a scheme
+    carrying another is calibrating the wrong system — the exact failure that factory exists to
+    prevent. `HessianCorrectedGradient.calibrated` was the obvious one; `CoupledBlockSweep.calibrated`
+    also builds `HessianCorrectedGradient._systems` to measure its coupled error operator, and would
+    quietly have measured the default closure whatever the scheme ran. Measured difference on one
+    mesh: **6 sweeps under the owner closure against 5 under the averaged one**, so this is not
+    theoretical.
+    ⚠️ **Exempting the keyword from the parity test would have hidden the drift it was added to
+    catch**, since that exemption applies to every factory at once. The test now additionally asserts
+    that the two Hessian-aware factories both offer it *and* offer it identically —
+    `CorrectedGreenGauss` reconstructs no Hessian and is the only legitimate abstainer.
+
+  **⚠️⚠️ THE SCHEME DOES NOT SOLVE ON AN ALL-TETRAHEDRAL MESH UNDER THE DEFAULT BOUNDARY CLOSURE —
+  `A_HH` IS NUMERICALLY SINGULAR THERE, AND THIS PREDATES THE SIX-COMPONENT CHANGE (measured
+  2026-08-22). ✅ SOLVED 2026-08-23 by `AveragedInteriorHessian` (above), which takes `cond(A_HH)`
+  from ~1e17 to ~8 — this entry is the diagnosis that led there, and the "not per-cell / not only the
+  boundary" reasoning below is what pointed at the closure rather than at a guard.** `tests/support/meshes.py::
   tetrahedral_grid_3d` builds a conforming Kuhn subdivision of the unit cube (six tetrahedra per
   cube, every cell four-faced, closure ~1e-17, positive volumes, validated by
   `test_the_tetrahedral_fixture_is_a_valid_mesh_of_four_faced_cells`). On it, materialized densely:
@@ -700,11 +841,13 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     reactor measurement above turns on. **Whether the reactor result needs the weighting or only the
     symmetry is UNSEPARATED** — both arrived in one change, and separating them is one more run.
 
-  **Consequence for the test suite, which is the reason the fixture is committed:** the unit tier
-  still contains no case that exercises this scheme on four-faced cells, because the obvious one does
-  not converge. The fixture is shipped as a *mesh* with its validity pinned, and deliberately without
-  a Betchen-on-tets test that would fail. Anyone extending this should treat "the scheme works on
-  tetrahedra" as **untested and currently false**, not as background.
+  **Consequence for the test suite:** the fixture now carries a real test —
+  `test_the_averaged_closure_makes_a_tetrahedral_hessian_system_solvable` pins both halves, that the
+  owner closure leaves `cond(A_HH) > 1e15` there and the averaged one brings it under `1e3`, with a
+  hexahedral control so the result is about the cell shape and not about one closure being generally
+  better. **"The scheme works on tetrahedra" is true only with `AveragedInteriorHessian`, and then
+  only to second order** — the default closure still cannot solve there, which is the trade the entry
+  above describes.
 
   ⚠️ **THE FIXTURE GAP THAT LET THIS SHIP TWICE IS ONLY HALF CLOSED.** Both the original wrong
   default and this reversal were invisible to every synthetic mesh in the test suite, because those

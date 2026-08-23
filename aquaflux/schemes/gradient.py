@@ -1273,6 +1273,7 @@ class CoupledBlockSweep(eqx.Module):
         floor: int = SweepCalibration.floor,
         cap: int = SweepCalibration.cap,
         seed: int = SweepCalibration.seed,
+        boundary_closure: HessianBoundaryClosure | None = None,
     ) -> CoupledBlockSweep:
         """Build this sweep with its count **measured from the mesh** rather than assumed.
 
@@ -1318,7 +1319,11 @@ class CoupledBlockSweep(eqx.Module):
         >>> CoupledBlockSweep.calibrated(mesh, mesh.geometry()).sweeps
         6
         """
-        systems = HessianCorrectedGradient._systems(mesh, geometry)
+        # The closure changes the operator whose rate is being measured, so it has to be the
+        # one the scheme will run with -- the same reason the scheme's own factory takes it.
+        systems = HessianCorrectedGradient._systems(
+            mesh, geometry, OwnerHessian() if boundary_closure is None else boundary_closure
+        )
         inner = systems.inner()
         outer = systems.outer(SweptGradientSolve(warn_tol=None), inner)
         rate = contraction_rate(
@@ -1548,6 +1553,230 @@ class CorrectedGreenGauss(GradientScheme):
         )
 
 
+class PreparedBoundaryClosure(NamedTuple):
+    """A boundary closure with its geometry bound in: what the operator applies, and what the
+    per-cell block probes should see.
+
+    Attributes
+    ----------
+    apply : callable
+        ``(n_cells, dim, dim) -> (n_cells, dim, dim)``, linear in its argument — the Hessian a
+        boundary face's gradient extrapolation carries.
+    diagonal : callable
+        ``probe -> the part of `apply` that lands on each cell's OWN diagonal block``. The blocks are
+        recovered by probing the face kernels with a **uniform** field, and that recovery is exact
+        only because zeroing one side of a face leaves each cell reading its own value. A closure
+        that reads *neighbours'* Hessians breaks that: the gather returns the probe's own value and
+        is indistinguishable from a diagonal term. So each closure states its diagonal contribution
+        rather than letting the probe infer one — and, because that contribution can be per-cell (a
+        closure that falls back to the owner's own Hessian on some cells and not others), it is a
+        callable over the same bound geometry rather than a constant.
+    """
+
+    apply: Callable[[jnp.ndarray], jnp.ndarray]
+    diagonal: Callable[[jnp.ndarray], jnp.ndarray]
+
+
+class HessianBoundaryClosure(eqx.Module):
+    """Strategy: which first-order Hessian a boundary face's gradient extrapolation carries.
+
+    A boundary face has no neighbour to interpolate with, so the gradient there is extrapolated from
+    the owner and needs *some* estimate of the Hessian to carry it the remaining distance. Only
+    first-order accuracy is required of that estimate, which leaves a genuine choice — and the two
+    options here trade against each other rather than one dominating, which is why this is a strategy
+    and not a setting.
+    """
+
+    def prepare(
+        self, face_cells: FaceCellConnectivity, separation: jnp.ndarray
+    ) -> PreparedBoundaryClosure:
+        """Bind the geometry once, returning the pair the operator and the block probes need.
+
+        Both halves come from one call because a closure's diagonal contribution can depend on the
+        same geometry its map does — which cell falls back to its own Hessian, for instance — and
+        deriving them separately is how the two drift apart.
+
+        Parameters
+        ----------
+        face_cells : FaceCellConnectivity
+            The mesh's face-to-cell connectivity.
+        separation : jnp.ndarray
+            Owner-to-neighbour centroid vector per face, shape ``(n_faces, dim)``.
+
+        Returns
+        -------
+        PreparedBoundaryClosure
+            Its ``apply`` and ``diagonal``, both closed over this geometry.
+        """
+        raise NotImplementedError
+
+
+class OwnerHessian(HessianBoundaryClosure):
+    """Carry the cell's **own** Hessian across the boundary extrapolation — the default.
+
+    Exact for a quadratic field on any mesh where the resulting system is solvable, which is the
+    property this whole scheme exists for: the Hessian of a quadratic is what the extrapolation needs
+    and this supplies it without approximation.
+
+    ⚠️ **It can leave the Hessian system under-determined, and on a wholly tetrahedral mesh it
+    does.** The measured condition number of ``A_HH`` there is ~1e17 against ~4 under
+    :class:`AveragedInteriorHessian` — numerically singular, so no solver recovers it. Betchen &
+    Straatman's own illustration is a mesh one cell thick in some direction, where the second
+    derivative across that direction appears in no equation at all and is therefore arbitrary; a
+    tetrahedral mesh is a less obvious instance of the same thing.
+    """
+
+    def prepare(
+        self, face_cells: FaceCellConnectivity, separation: jnp.ndarray
+    ) -> PreparedBoundaryClosure:
+        # The identity, and wholly diagonal: every cell reads its own Hessian and no other.
+        return PreparedBoundaryClosure(apply=lambda h: h, diagonal=lambda probe: probe)
+
+
+def _inverse_distance_average(
+    face_cells: FaceCellConnectivity,
+    separation: jnp.ndarray,
+    eligible_cell: jnp.ndarray,
+    *,
+    fall_back_to_owner: bool,
+) -> PreparedBoundaryClosure:
+    """Average a cell's neighbours' Hessians by inverse distance, over a given eligible set.
+
+    Shared by both averaging closures, which differ **only** in which neighbours they count — so the
+    weighting, the empty case and the diagonal declaration are stated once here rather than twice.
+
+    ``fall_back_to_owner`` decides the empty case, and it is not a detail: falling back to the cell's
+    own Hessian keeps the weights a partition of unity on **every** cell, and with it the exactness
+    for a quadratic — a quadratic's Hessian is constant, and any weighted average of a constant whose
+    weights sum to one returns it unchanged. Falling back to zero drops the curvature term on those
+    cells and loses exactness there. ⚠️ The two cannot be mixed and matched with the eligible set:
+    with the narrow set an owner fallback re-admits the cell's own Hessian to its own closure often
+    enough to make the Hessian system singular again on a tetrahedral mesh (measured ``cond(A_HH)``
+    ``1.7e+18``), which is why the narrow closure keeps the zero fallback and pays for it in accuracy.
+
+    Parameters
+    ----------
+    face_cells : FaceCellConnectivity
+        The mesh's face-to-cell connectivity.
+    separation : jnp.ndarray
+        Owner-to-neighbour centroid vector per face, shape ``(n_faces, dim)``.
+    eligible_cell : jnp.ndarray
+        Per-cell boolean, shape ``(n_cells,)``: may this cell be averaged over?
+    fall_back_to_owner : bool
+        Where a cell has no eligible neighbour, take its own Hessian (``True``) or zero (``False``).
+
+    Returns
+    -------
+    PreparedBoundaryClosure
+        The averaging map and its per-cell diagonal contribution.
+    """
+    owner, nb = face_cells.owner, face_cells.safe_neighbour
+    interior = face_cells.interior
+    inverse_distance = 1.0 / jnp.linalg.norm(separation, axis=-1)
+    # One weight per direction of travel: a cell averages across faces it owns and faces it
+    # neighbours, and the eligibility test applies to whichever cell is on the far side.
+    from_neighbour = jnp.where(interior & eligible_cell[nb], inverse_distance, 0.0)
+    from_owner = jnp.where(interior & eligible_cell[owner], inverse_distance, 0.0)
+    total = face_cells.scatter(from_neighbour, from_owner)
+    found = total > 0.0
+    inverse_total = jnp.where(found, 1.0 / jnp.where(found, total, 1.0), 0.0)
+
+    def apply(h: jnp.ndarray) -> jnp.ndarray:
+        gathered = face_cells.scatter(
+            from_neighbour[:, None, None] * h[nb], from_owner[:, None, None] * h[owner]
+        )
+        averaged = gathered * inverse_total[:, None, None]
+        if not fall_back_to_owner:
+            return averaged
+        return jnp.where(found[:, None, None], averaged, h)
+
+    # A cell's own Hessian appears only on the fallback branch, so only those cells contribute to
+    # their own diagonal block. Declaring the probe everywhere would report the neighbour gather as
+    # diagonal; declaring zero everywhere would drop the fallback cells' real diagonal term.
+    def diagonal(probe: jnp.ndarray) -> jnp.ndarray:
+        if not fall_back_to_owner:
+            return jnp.zeros_like(probe)
+        return jnp.where(found[:, None, None], 0.0, probe)
+
+    return PreparedBoundaryClosure(apply=apply, diagonal=diagonal)
+
+
+class AveragedNeighbourHessian(HessianBoundaryClosure):
+    """Average the Hessian over **all** of the cell's face neighbours — exact *and* solvable.
+
+    This is the closure to reach for when :class:`OwnerHessian` will not solve. It keeps every
+    property that matters:
+
+    * **Exact for a quadratic**, like :class:`OwnerHessian` and unlike
+      :class:`AveragedInteriorHessian`. Every cell on a connected mesh has at least one face
+      neighbour, so the weights sum to one everywhere and a constant Hessian passes through
+      unchanged. Measured under a converged solve: ``2.6e-15`` on a tetrahedral mesh, ``6.0e-16``
+      on a perturbed hexahedral one, ``9.4e-16`` in 2D.
+    * **Leaves the Hessian system solvable**, because a cell's own Hessian never enters its own
+      boundary closure. On a wholly tetrahedral mesh ``cond(A_HH)`` is ``8.4`` here against
+      ``1.0e+18`` under :class:`OwnerHessian`.
+
+    ⚠️ **It converges more slowly than :class:`OwnerHessian` under a FIXED sweep count**, which is
+    the one thing it costs and the reason it is not the default. The discretization is exact; the
+    iteration reaching that exactness is not free. At the shipped 20 outer / 10 inner sweeps it
+    reconstructs a quadratic to ``4.5e-07`` on a perturbed hexahedral grid where the default reaches
+    ``9.3e-16``; at 60/20 it reaches ``2.3e-11``. Calibrate the counts against the closure —
+    :meth:`HessianCorrectedGradient.calibrated` takes it for exactly this reason — rather than
+    assuming the default pair transfers.
+    """
+
+    def prepare(
+        self, face_cells: FaceCellConnectivity, separation: jnp.ndarray
+    ) -> PreparedBoundaryClosure:
+        return _inverse_distance_average(
+            face_cells,
+            separation,
+            jnp.ones(face_cells.n_cells, dtype=bool),
+            fall_back_to_owner=True,
+        )
+
+
+class AveragedInteriorHessian(HessianBoundaryClosure):
+    """Betchen & Straatman's closure: the inverse-distance average of the Hessian over the cell's
+    neighbours that are themselves **clear of the boundary**.
+
+    ⚠️ **Kept for comparison against the source, and not recommended — use
+    :class:`AveragedNeighbourHessian` instead**, which is exact for a quadratic where this is not and
+    keeps the system just as solvable (both reach ``cond(A_HH) ~ 8`` on a tetrahedral mesh).
+
+    Where :class:`OwnerHessian` can leave the system under-determined, this cannot: the boundary
+    extrapolation stops depending on the very Hessian component the boundary fails to constrain, and
+    reaches for neighbours that are constrained instead. On a tetrahedral mesh that is the difference
+    between ``cond(A_HH) ~ 1e17`` and ``~ 8``.
+
+    ⚠️ **It gives up exactness for quadratics, and that is not a small print.** Where a cell has no
+    boundary-clear neighbour at all — a corner, an edge, or any cell on a mesh too coarse to have an
+    interior — the average is empty and the closure is zero, so the extrapolation drops its curvature
+    term entirely and that cell is first-order. Measured on a quadratic over a 25 %-perturbed
+    hexahedral grid: median relative error ``3.3e-03`` at 3³, ``2.0e-03`` at 5³ and ``4.0e-05`` at 8³
+    as the interior grows, against ``~1e-15`` under :class:`OwnerHessian` at every size. That is
+    consistent with the source, which reports second-*order* gradients rather than exact ones.
+
+    ⚠️ **That loss is a property of THIS eligible set, not of averaging.** Restricting to
+    boundary-clear neighbours is what empties the average on some cells; averaging over *all* face
+    neighbours never does, and so stays exact — see :class:`AveragedNeighbourHessian`. The narrow set
+    does need its zero fallback, though: pairing it with an owner fallback re-admits enough of the
+    cell's own Hessian to make the tetrahedral system singular again (``cond(A_HH) ~ 1.7e+18``).
+    """
+
+    def prepare(
+        self, face_cells: FaceCellConnectivity, separation: jnp.ndarray
+    ) -> PreparedBoundaryClosure:
+        # Eligible: a cell owning no boundary face of its own. The zero fallback is load-bearing for
+        # THIS eligible set -- see `_inverse_distance_average`.
+        boundary_faces_per_cell = face_cells.scatter(
+            jnp.where(face_cells.interior, 0.0, 1.0), jnp.zeros(separation.shape[0])
+        )
+        return _inverse_distance_average(
+            face_cells, separation, boundary_faces_per_cell == 0.0, fall_back_to_owner=False
+        )
+
+
 class _HessianSystems(NamedTuple):
     """The linear systems of the Hessian-corrected reconstruction at one geometry.
 
@@ -1623,8 +1852,10 @@ class HessianCorrectedGradient(GradientScheme):
 
     * the unknown, and every Hessian iterate on the reverse-mode tape, is a third smaller;
     * the reduced per-cell block is **symmetric positive definite by construction**, where the
-      unsymmetrized block is neither symmetric nor definite — so ``A_HH⁻¹`` at the centre of the
-      elimination term is a well-signed inverse rather than merely an invertible one; and
+      unsymmetrized block is neither symmetric nor definite. ⚠️ That property is *not* what makes
+      this work: an unweighted projection, whose block carries no such guarantee, fixes the same
+      reactor mesh equally well (0 diverging cells either way). The symmetry is doing the work, and
+      the weighting is kept because it is the source's formulation and costs one contraction; and
     * that block no longer factors. An unsymmetrized ``H`` enters its own equation only as ``H·a``,
       which touches one tensor index and leaves the other alone, making the block ``I ⊗ C`` and
       storable as ``(dim, dim)``. Symmetry couples the two indices, so the block is a dense
@@ -1722,6 +1953,14 @@ class HessianCorrectedGradient(GradientScheme):
         When set, solve by sweeping both blocks together (see :class:`CoupledBlockSweep`) rather than
         nesting a Hessian solve inside every gradient apply. ``solver`` and ``hessian_solver`` are
         then unused. ``None`` (the default) keeps the nested solve.
+    boundary_closure : HessianBoundaryClosure
+        Which first-order Hessian a boundary face's gradient extrapolation carries.
+        :class:`OwnerHessian` (the default) is exact for a quadratic and the cheapest, but can leave
+        the Hessian system under-determined — on a wholly tetrahedral mesh it does.
+        :class:`AveragedNeighbourHessian` is the one to reach for then: also exact, still solvable
+        there, at roughly twice the sweeps. :class:`AveragedInteriorHessian` is Betchen &
+        Straatman's, kept for comparison against the source and not recommended — it gives up the
+        exactness for nothing the wider average does not also provide.
     local_schur_block : bool
         Build the outer preconditioner from the Schur complement's own per-cell block rather than
         from ``A_gg``'s alone. **Default ``True``.**
@@ -1742,10 +1981,10 @@ class HessianCorrectedGradient(GradientScheme):
         this block, which is now both the accurate arm and the convergent one.
 
         The mechanism this is consistent with -- and it is **not** isolated by that measurement -- is
-        that the elimination term is ``A_gH A_HH⁻¹ A_Hg``, and the reduction makes ``A_HH``'s per-cell
-        block symmetric positive definite where the unsymmetrized block was neither, so the
-        correction subtracted from ``A_gg``'s block is well-signed. The reduction also changes ``S``
-        itself, so the two effects are not separated.
+        that the elimination term is ``A_gH A_HH⁻¹ A_Hg`` and the reduction changes ``A_HH``. ⚠️ The
+        definiteness is **not** the mechanism: an unweighted projection, which gives no such
+        guarantee, removes the divergence on the same mesh just as completely, so what matters is
+        that the Hessian is symmetric rather than how the surplus equations are removed.
 
         The cells that remain hardest are four-faced and sit **against a boundary** (all twelve of the
         worst own a boundary face, against 23 % of the mesh doing so), which is where this scheme
@@ -1760,6 +1999,7 @@ class HessianCorrectedGradient(GradientScheme):
     )
     schur: bool = eqx.field(static=True, default=True)
     local_schur_block: bool = eqx.field(static=True, default=True)
+    boundary_closure: HessianBoundaryClosure = eqx.field(default_factory=OwnerHessian)
     coupled_sweep: CoupledBlockSweep | None = None
 
     def gradients(
@@ -1795,7 +2035,7 @@ class HessianCorrectedGradient(GradientScheme):
                 "which differentiates by unrolling and imposes no such requirement. The outer "
                 "`solver`'s own diagnostic is unaffected."
             )
-        systems = self._systems(mesh, geometry)
+        systems = self._systems(mesh, geometry, self.boundary_closure)
         if not self.schur:
             packed = self.solver.solve(
                 systems.coupled.preconditioner,
@@ -1825,6 +2065,7 @@ class HessianCorrectedGradient(GradientScheme):
         seed: int = SweepCalibration.seed,
         schur: bool = True,
         local_schur_block: bool = True,
+        boundary_closure: HessianBoundaryClosure | None = None,
     ) -> HessianCorrectedGradient:
         """Build this scheme with **both** sweep counts measured from the mesh rather than assumed.
 
@@ -1877,9 +2118,17 @@ class HessianCorrectedGradient(GradientScheme):
             The scheme, carrying :class:`SweptGradientSolve` strategies at the calibrated counts.
         """
         settings = {"tol": tol, "iters": iters, "floor": floor, "cap": cap, "seed": seed}
-        systems = cls._systems(mesh, geometry)
+        # The closure changes the operator, so it must be in force while the counts are measured
+        # -- calibrating one system and running another is the whole failure this factory exists
+        # to prevent.
+        closure = OwnerHessian() if boundary_closure is None else boundary_closure
+        systems = cls._systems(mesh, geometry, closure)
         if not schur:
-            return cls(solver=_calibrated_solver(systems.coupled, **settings), schur=False)
+            return cls(
+                solver=_calibrated_solver(systems.coupled, **settings),
+                schur=False,
+                boundary_closure=closure,
+            )
         # The inner solve runs inside the outer Schur operator, whose transpose an outer Krylov
         # strategy would form, so its diagnostic is disabled — the same pairing the class default
         # carries and the reason `gradients` rejects the combination that lacks it.
@@ -1894,16 +2143,22 @@ class HessianCorrectedGradient(GradientScheme):
             # Travels with the count, for the same reason the sweep count and the preconditioner
             # belong together: it changes which system was measured.
             local_schur_block=local_schur_block,
+            boundary_closure=closure,
         )
 
     @staticmethod
-    def _systems(mesh: Mesh, geometry: MeshGeometry) -> _HessianSystems:
+    def _systems(
+        mesh: Mesh,
+        geometry: MeshGeometry,
+        boundary_closure: HessianBoundaryClosure | None = None,
+    ) -> _HessianSystems:
         """Assemble this scheme's linear systems from the geometry — everything but the field.
 
         The reconstruction solves these and the calibration measures them, so they are assembled
         here once for both: a count measured against a different assembly than the one that runs
         would be calibrating the wrong operator.
         """
+        closure = OwnerHessian() if boundary_closure is None else boundary_closure
         dim = mesh.dim
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells
@@ -1952,7 +2207,7 @@ class HessianCorrectedGradient(GradientScheme):
             # two contractions coincide and the half cancels the doubling.
             return jnp.einsum("fjk,fj->fk", warp, jnp.einsum("fij,fj->fi", h, d))
 
-        def _face_gradient(g_own, h_own, g_nb, h_nb):
+        def _face_gradient(g_own, h_own, g_nb, h_nb, h_bnd):
             """The gradient AT THE FACE CENTROID -- interpolated, then carried across the skewness.
 
             Exact for a linear gradient field (so, for a quadratic ``phi``): the blend lands on the
@@ -1966,7 +2221,7 @@ class HessianCorrectedGradient(GradientScheme):
             g_face = blend_owner_neighbour(g_own, g_nb, f, face_cells)
             h_face = blend_owner_neighbour(h_own, h_nb, f, face_cells)
             interior = g_face + jnp.einsum("fij,fj->fi", h_face, skew)
-            boundary = g_own[owner] + jnp.einsum("fij,fj->fi", h_own[owner], d_own)
+            boundary = g_own[owner] + jnp.einsum("fij,fj->fi", h_bnd[owner], d_own)
             return face_cells.combine_face_values(interior, boundary)
 
         def _hessian_moment(h, d):
@@ -1981,7 +2236,7 @@ class HessianCorrectedGradient(GradientScheme):
         # sides as separate fields — passing the same pair to both is the operator, and zeroing one
         # side isolates the other's dependence, which is how the per-cell diagonal blocks below come
         # out of these same kernels rather than from a second derivation of the coefficients.
-        def gradient_face_terms(g_own, h_own, g_nb, h_nb, fld, bvals):
+        def gradient_face_terms(g_own, h_own, g_nb, h_nb, h_bnd, fld, bvals):
             """Owner- and neighbour-side face contributions to the gradient equation.
 
             The face value carried to the Green–Gauss sum is the 2nd-order interpolation plus the
@@ -2001,7 +2256,9 @@ class HessianCorrectedGradient(GradientScheme):
             # term is dropped by any derivation assuming a planar face, since `P` vanishes there. Its
             # `grad(phi)` is the value AT the face centroid -- the skewness-carried one, and on a
             # boundary face the owner extrapolation -- not the raw blend.
-            warp_gradient = jnp.einsum("fjk,fj->fk", warp, _face_gradient(g_own, h_own, g_nb, h_nb))
+            warp_gradient = jnp.einsum(
+                "fjk,fj->fk", warp, _face_gradient(g_own, h_own, g_nb, h_nb, h_bnd)
+            )
             owner_side = (
                 scale(area_vector, phi_ip - _hessian_moment(h_o, d_own))
                 + warp_gradient
@@ -2016,7 +2273,7 @@ class HessianCorrectedGradient(GradientScheme):
             # warp moment together — so the whole contribution flips, not just the area term.
             return owner_side, -neighbour_side
 
-        def hessian_face_terms(g_own, h_own, g_nb, h_nb):
+        def hessian_face_terms(g_own, h_own, g_nb, h_nb, h_bnd):
             """Owner- and neighbour-side face contributions to the Hessian equation.
 
             A Green–Gauss sum of the gradient components: interior faces take the 2nd-order
@@ -2026,7 +2283,7 @@ class HessianCorrectedGradient(GradientScheme):
             system's is ``b_g`` unreduced.
             """
             h_face = blend_owner_neighbour(h_own, h_nb, f, face_cells)
-            gi = _face_gradient(g_own, h_own, g_nb, h_nb)
+            gi = _face_gradient(g_own, h_own, g_nb, h_nb, h_bnd)
             # ⚠️ THE SAME WARP TERM THE GRADIENT EQUATION NEEDS, for the same reason: this equation is
             # itself a Green–Gauss sum -- of the gradient rather than the field -- so it inherits the
             # planar-face assumption identically. The exact face integral is
@@ -2047,12 +2304,23 @@ class HessianCorrectedGradient(GradientScheme):
         no_face_g = jnp.zeros((n_faces, dim))  # a scatter's unused half needs a real zero array
         no_face_h = jnp.zeros((n_faces, dim, dim))
 
+        # ---- THE HESSIAN A BOUNDARY EXTRAPOLATION CARRIES, an injected strategy.
+        #
+        # ⚠️ IT IS PASSED INTO THE FACE KERNELS RATHER THAN COMPUTED INSIDE THEM, and that is a
+        # correctness requirement rather than a style choice. A closure may read the cell's
+        # NEIGHBOURS' Hessians, so a per-cell diagonal block probed through a kernel that computed it
+        # internally would pick up neighbour coupling and report it as diagonal — the "compose the
+        # blocks, not the operators" trap. Each closure states its own diagonal contribution through
+        # `diagonal_probe`, which is what the block extractions below pass.
+        prepared_closure = closure.prepare(face_cells, s)
+        boundary_hessian = prepared_closure.apply
+
         # The φ-only right-hand side. Only the gradient equation has one: `hessian_face_terms` takes
         # no field, so the Hessian equation's is identically zero for any field and any mesh — which
         # is also why the eliminated system's right-hand side is this one unreduced.
         def gradient_rhs(fld, bvals):
             return face_cells.scatter(
-                *gradient_face_terms(zero_g, zero_h, zero_g, zero_h, fld, bvals)
+                *gradient_face_terms(zero_g, zero_h, zero_g, zero_h, zero_h, fld, bvals)
             )
 
         # ---- The Hessian equation's own block, and the reduction onto symmetric components.
@@ -2076,11 +2344,16 @@ class HessianCorrectedGradient(GradientScheme):
             return jnp.zeros((n_cells, dim, dim)).at[:, 0, :].set(unit_row)
 
         def hh_owner(probe):
-            owner_side, _ = hessian_face_terms(zero_g, _hessian_probe(probe), zero_g, zero_h)
+            lit = _hessian_probe(probe)
+            owner_side, _ = hessian_face_terms(
+                zero_g, lit, zero_g, zero_h, prepared_closure.diagonal(lit)
+            )
             return face_cells.scatter(owner_side, no_face_h)[:, 0, :]
 
         def hh_neighbour(probe):
-            _, neighbour_side = hessian_face_terms(zero_g, zero_h, zero_g, _hessian_probe(probe))
+            _, neighbour_side = hessian_face_terms(
+                zero_g, zero_h, zero_g, _hessian_probe(probe), zero_h
+            )
             return face_cells.scatter(no_face_h, neighbour_side)[:, 0, :]
 
         # `A_P`: the UNREDUCED per-cell block, exactly `I_dim ⊗ C` for this `(dim, dim)` `C`, because
@@ -2113,8 +2386,10 @@ class HessianCorrectedGradient(GradientScheme):
         def coupled(packed):
             g, u = packed[:, :dim], packed[:, dim:]
             h = expand_symmetric(u, dim)
-            rhs_g = face_cells.scatter(*gradient_face_terms(g, h, g, h, zero_f, zero_b))
-            rhs_h = face_cells.scatter(*hessian_face_terms(g, h, g, h))
+            rhs_g = face_cells.scatter(
+                *gradient_face_terms(g, h, g, h, boundary_hessian(h), zero_f, zero_b)
+            )
+            rhs_h = face_cells.scatter(*hessian_face_terms(g, h, g, h, boundary_hessian(h)))
             return pack(scale(g, vol) - rhs_g, reduce_hessian(vol[:, None, None] * h - rhs_h))
 
         def coupled_rhs(fld, bvals):
@@ -2124,8 +2399,10 @@ class HessianCorrectedGradient(GradientScheme):
         # ---- Schur elimination of the Hessian block.
         def gradient_and_hessian_rows(g):
             """``(A_gg·g, A_Hg·g)`` — the outer operator needs both, from one pass over the faces."""
-            rhs_g = face_cells.scatter(*gradient_face_terms(g, zero_h, g, zero_h, zero_f, zero_b))
-            rhs_h = face_cells.scatter(*hessian_face_terms(g, zero_h, g, zero_h))
+            rhs_g = face_cells.scatter(
+                *gradient_face_terms(g, zero_h, g, zero_h, zero_h, zero_f, zero_b)
+            )
+            rhs_h = face_cells.scatter(*hessian_face_terms(g, zero_h, g, zero_h, zero_h))
             return scale(g, vol) - rhs_g, reduce_hessian(-rhs_h)
 
         def a_hh(u):
@@ -2134,31 +2411,42 @@ class HessianCorrectedGradient(GradientScheme):
             h = expand_symmetric(u, dim)
             return reduce_hessian(
                 vol[:, None, None] * h
-                - face_cells.scatter(*hessian_face_terms(zero_g, h, zero_g, h))
+                - face_cells.scatter(*hessian_face_terms(zero_g, h, zero_g, h, boundary_hessian(h)))
             )
 
         def a_gh(u):
             h = expand_symmetric(u, dim)
-            return -face_cells.scatter(*gradient_face_terms(zero_g, h, zero_g, h, zero_f, zero_b))
+            return -face_cells.scatter(
+                *gradient_face_terms(zero_g, h, zero_g, h, boundary_hessian(h), zero_f, zero_b)
+            )
 
         # Per-cell diagonal blocks, from the same face kernel the operators are built from. `A_gg`'s
         # is `(dim, dim)` and acts on the gradient directly; the reduced Hessian equation's is
         # `(n_sym, n_sym)` and no longer factors — imposing symmetry couples the two tensor indices
         # that the Kronecker structure above kept apart.
         def gg_owner(probe):
-            owner_side, _ = gradient_face_terms(probe, zero_h, zero_g, zero_h, zero_f, zero_b)
+            owner_side, _ = gradient_face_terms(
+                probe, zero_h, zero_g, zero_h, zero_h, zero_f, zero_b
+            )
             return face_cells.scatter(owner_side, no_face_g)
 
         def gg_neighbour(probe):
-            _, neighbour_side = gradient_face_terms(zero_g, zero_h, probe, zero_h, zero_f, zero_b)
+            _, neighbour_side = gradient_face_terms(
+                zero_g, zero_h, probe, zero_h, zero_h, zero_f, zero_b
+            )
             return face_cells.scatter(no_face_g, neighbour_side)
 
         def hh_reduced_owner(probe):
-            owner_side, _ = hessian_face_terms(zero_g, expand_symmetric(probe, dim), zero_g, zero_h)
+            lit = expand_symmetric(probe, dim)
+            owner_side, _ = hessian_face_terms(
+                zero_g, lit, zero_g, zero_h, prepared_closure.diagonal(lit)
+            )
             return reduce_hessian(face_cells.scatter(owner_side, no_face_h))
 
         def hh_reduced_neighbour(probe):
-            _, side = hessian_face_terms(zero_g, zero_h, zero_g, expand_symmetric(probe, dim))
+            _, side = hessian_face_terms(
+                zero_g, zero_h, zero_g, expand_symmetric(probe, dim), zero_h
+            )
             return reduce_hessian(face_cells.scatter(no_face_h, side))
 
         def inner():
@@ -2177,19 +2465,27 @@ class HessianCorrectedGradient(GradientScheme):
             return GradientSystem(CellBlockJacobi(jnp.linalg.inv(block)), a_hh, (n_cells, n_sym))
 
         def gh_owner(probe_h):
-            side, _ = gradient_face_terms(zero_g, probe_h, zero_g, zero_h, zero_f, zero_b)
+            side, _ = gradient_face_terms(
+                zero_g,
+                probe_h,
+                zero_g,
+                zero_h,
+                prepared_closure.diagonal(probe_h),
+                zero_f,
+                zero_b,
+            )
             return -face_cells.scatter(side, no_face_g)
 
         def gh_neighbour(probe_h):
-            _, side = gradient_face_terms(zero_g, zero_h, zero_g, probe_h, zero_f, zero_b)
+            _, side = gradient_face_terms(zero_g, zero_h, zero_g, probe_h, zero_h, zero_f, zero_b)
             return -face_cells.scatter(no_face_g, side)
 
         def hg_owner(probe_g):
-            side, _ = hessian_face_terms(probe_g, zero_h, zero_g, zero_h)
+            side, _ = hessian_face_terms(probe_g, zero_h, zero_g, zero_h, zero_h)
             return -reduce_hessian(face_cells.scatter(side, no_face_h))
 
         def hg_neighbour(probe_g):
-            _, side = hessian_face_terms(zero_g, zero_h, probe_g, zero_h)
+            _, side = hessian_face_terms(zero_g, zero_h, probe_g, zero_h, zero_h)
             return -reduce_hessian(face_cells.scatter(no_face_h, side))
 
         def local_schur_block(gradient_block, hessian_inverse):

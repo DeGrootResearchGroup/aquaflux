@@ -113,6 +113,51 @@ worth checking on an automatically generated mesh — the other two schemes in t
 **not** carry the correction, so on such a mesh they are limited by the faces rather than by
 their own order of accuracy.
 
+### Choosing the boundary closure
+
+A boundary face has no neighbour to interpolate with, so the gradient there is extrapolated
+from the owning cell and needs some estimate of the Hessian to carry it the remaining
+distance. There are three, and the choice only matters on meshes where the default will not
+solve.
+
+{class}`~aquaflux.schemes.OwnerHessian` (the default) carries the cell's own Hessian. For a
+quadratic that is the exact Hessian, so the reconstruction stays exact, and it is the cheapest
+of the three.
+
+It has one failure mode, and it is not hypothetical: because the cell's own Hessian appears in
+its own boundary closure, that closure can fail to constrain a component of it at all. On a
+wholly tetrahedral mesh the Hessian system is then numerically singular — a measured condition
+number around `1e18` — and no linear solver recovers from that.
+
+{class}`~aquaflux.schemes.AveragedNeighbourHessian` is the closure to reach for when that
+happens. It averages the Hessian over **all** of the cell's face neighbours, so the cell's own
+Hessian never enters its own closure and the system stays solvable — while the weights still
+sum to one on every cell, which is what keeps it **exact for a quadratic**.
+
+```python
+from aquaflux.schemes import AveragedNeighbourHessian, HessianCorrectedGradient
+
+scheme = HessianCorrectedGradient(boundary_closure=AveragedNeighbourHessian())
+```
+
+```{note}
+It costs sweeps rather than accuracy. Averaging couples each cell's Hessian to its
+neighbours', so the Hessian system converges more slowly: calibrated to a tolerance of
+`1e-10` on a perturbed hexahedral grid, the inner sweep count rises from 8 to 23 while the
+outer count falls from 15 to 13 — roughly `2.3x` the work. At the library's fixed default
+counts it has not converged and reconstructs a quadratic to about `4e-07` rather than to
+machine precision, so calibrate the counts against the closure with
+{meth}`~aquaflux.schemes.HessianCorrectedGradient.calibrated`, which takes it for this reason.
+```
+
+{class}`~aquaflux.schemes.AveragedInteriorHessian` is the closure as Betchen & Straatman
+publish it, restricting the average to neighbours that are themselves clear of the boundary.
+It is kept for comparison against the source and is **not** recommended: where a cell has no
+such neighbour the average is empty and the closure returns zero, which drops that cell's
+curvature term. The resulting error is a property of the discretization rather than of the
+solve — `3.3e-03` on a perturbed hexahedral grid whether solved by a fixed sweep or exactly —
+and the wider average above avoids it at no cost in solvability.
+
 ## How the system is solved
 
 Two of the three schemes reduce to a linear system, and *how* that system is inverted is a

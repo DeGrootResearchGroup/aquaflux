@@ -52,6 +52,9 @@ WORST = int(os.environ.get("UV_WORST", "12"))
 OUTER = int(os.environ.get("UV_OUTER", "20"))
 RATE_ITERS = int(os.environ.get("UV_RATE_ITERS", "20"))
 OMEGA = os.environ.get("UV_OMEGA", "1.0,0.8,0.5,0.25,0.1")
+# The reconstruction arms alone, for a question that only needs them — the spectral sections cost
+# several times what they do, and re-running everything to re-ask one thing wastes the machine.
+QUICK = os.environ.get("UV_QUICK", "") not in ("", "0")
 
 
 def quadratic(points, centre, extent):
@@ -227,6 +230,10 @@ def main() -> None:
     # None is the outcome this harness exists to reach, so it must not be the one that crashes it.
     worst_a_gg = f"{errors['a_gg'][bad].max():.3e}" if n_bad else "n/a — none diverge"
     print(f"  the Schur block's diverging cells under the A_gg block: max {worst_a_gg}", flush=True)
+
+    if QUICK:
+        print("\n  UV_QUICK set — stopping after the reconstruction arms.", flush=True)
+        return
 
     worst = np.argsort(errors["schur"])[::-1][:WORST]
     volume = np.asarray(geom.cell.volume)

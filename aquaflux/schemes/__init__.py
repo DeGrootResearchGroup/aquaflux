@@ -9,6 +9,8 @@ touching physics.
 from __future__ import annotations
 
 from .gradient import (
+    AveragedInteriorHessian,
+    AveragedNeighbourHessian,
     CellBlockJacobi,
     CellPreconditioner,
     CoupledBlockSweep,
@@ -20,10 +22,13 @@ from .gradient import (
     GradientScheme,
     GradientSolve,
     GradientSystem,
+    HessianBoundaryClosure,
     HessianCorrectedGradient,
     ExactCellBlock,
     InverseCellVolume,
     InverseVolume,
+    OwnerHessian,
+    PreparedBoundaryClosure,
     SweepCalibration,
     SweptGradientSolve,
     cell_diagonal_block,
@@ -38,6 +43,8 @@ from .interpolation import (
 from .limiter import Limiter, VenkatakrishnanLimiter
 
 __all__ = [
+    "AveragedInteriorHessian",
+    "AveragedNeighbourHessian",
     "CellBlockJacobi",
     "CellPreconditioner",
     "CompactGreenGauss",
@@ -50,10 +57,13 @@ __all__ = [
     "GradientScheme",
     "GradientSolve",
     "GradientSystem",
+    "HessianBoundaryClosure",
     "HessianCorrectedGradient",
     "InverseCellVolume",
     "InverseVolume",
     "Limiter",
+    "OwnerHessian",
+    "PreparedBoundaryClosure",
     "SweepCalibration",
     "SweptGradientSolve",
     "VenkatakrishnanLimiter",
