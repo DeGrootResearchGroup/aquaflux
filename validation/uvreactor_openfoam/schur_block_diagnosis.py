@@ -216,8 +216,11 @@ def main() -> None:
     # HOW MANY cells are bad, not just how bad the worst is -- one pathological cell is a guard, a
     # population is a design fault, and the max alone cannot tell those apart.
     bad = errors["schur"] > 1.0
-    print(f"\n  cells above 100% error under the Schur block: {int(bad.sum())} of {mesh.n_cells}")
-    print(f"  the same cells under the A_gg block: max {errors['a_gg'][bad].max():.3e}", flush=True)
+    n_bad = int(bad.sum())
+    print(f"\n  cells above 100% error under the Schur block: {n_bad} of {mesh.n_cells}")
+    # None is the outcome this harness exists to reach, so it must not be the one that crashes it.
+    worst_a_gg = f"{errors['a_gg'][bad].max():.3e}" if n_bad else "n/a — none diverge"
+    print(f"  the same cells under the A_gg block: max {worst_a_gg}", flush=True)
 
     worst = np.argsort(errors["schur"])[::-1][:WORST]
     volume = np.asarray(geom.cell.volume)
@@ -244,10 +247,16 @@ def main() -> None:
             f"{worst_planarity[c]:10.4f} {closure[c]:10.2e}",
             flush=True,
         )
-    # THE DECISIVE MEASUREMENT. `C` -- the Hessian equation's per-cell block -- is the only new
-    # ingredient the Schur correction brings: `A_gH C^-1 A_Hg`. `A_gg`'s block never forms `C^-1`,
-    # which is why it survives where this does not. A 3x3 Hessian has six independent components, so
-    # a cell with only four faces cannot determine one, and `C` should be near-singular exactly there.
+    # `C` -- the Hessian equation's reduced per-cell block -- is the only new ingredient the Schur
+    # correction brings: `A_gH C^-1 A_Hg`. `A_gg`'s block never forms `C^-1`, which is why it survives
+    # where this does not, so its conditioning is the first thing to rule in or out.
+    #
+    # ⚠️ The hypothesis this was written to test -- that a cell with too few faces cannot determine
+    # every Hessian component, leaving `C` near-singular there -- is REFUTED and the numbers below are
+    # what refuted it: `cond C` is ~1.2 mesh-wide and at worst 3.37 over every four-faced cell, the
+    # best-conditioned group on the mesh. Since the Hessian is now solved as its six independent
+    # symmetric components, `C` is also symmetric positive definite by construction, so it is reported
+    # to confirm that rather than to test it.
     systems = HessianCorrectedGradient._systems(mesh, geom)
     inner_system = systems.inner()
     hessian_block = np.linalg.inv(np.asarray(inner_system.preconditioner.inverse))
@@ -340,7 +349,6 @@ def main() -> None:
     # population far larger than the collapsed one is what a few bad rows look like after 20 sweeps.
     interior = neighbour >= 0
     owner_int, nb_int = owner[interior], neighbour[interior]
-    n_bad = int(bad.sum())
     for tau in (1e-1, 1e-2):
         seed = shrink < tau
         grown = dilate(seed, owner_int, nb_int, OUTER)
@@ -351,6 +359,47 @@ def main() -> None:
             f"({100.0 * caught / max(n_bad, 1):.1f}%)",
             flush=True,
         )
+
+    # ---- IS THE FAILURE A BOUNDARY EFFECT? Betchen & Straatman close the Hessian at a boundary by
+    # taking the owner's, and note that this can leave the system under-determined -- their example
+    # being a mesh one cell thick in some direction, where the second derivative across it is
+    # arbitrary. Their remedy is an inverse-distance average of the Hessian over interior neighbours
+    # not themselves adjacent to a boundary; this scheme implements the simpler closure and not that
+    # remedy, so if the closure is implicated the diverging cells should sit against the boundary.
+    #
+    # Reported as an ENRICHMENT rather than a share: on a refined mesh most cells are interior, so
+    # "80% of the diverging cells are near a boundary" means nothing without the base rate to divide
+    # by. An enrichment near 1 is no association whatever the share looks like.
+    boundary_cell = np.zeros(mesh.n_cells, dtype=bool)
+    boundary_cell[owner[neighbour < 0]] = True
+    base_rate = n_bad / mesh.n_cells
+    print(
+        f"\n  boundary proximity: {int(boundary_cell.sum())} cells own a boundary face "
+        f"({100.0 * boundary_cell.mean():.1f}% of the mesh); diverging base rate "
+        f"{100.0 * base_rate:.4f}%"
+    )
+    print(f"    {'within':>8} {'cells':>10} {'diverging':>10} {'rate':>9} {'enrichment':>11}")
+    near = boundary_cell
+    for hops in range(4):
+        if hops:
+            near = dilate(near, owner_int, nb_int, 1)
+        hit = int((bad & near).sum())
+        rate = hit / max(int(near.sum()), 1)
+        print(
+            f"    {hops:8d} {int(near.sum()):10d} {hit:10d} {100.0 * rate:8.4f}% "
+            f"{rate / max(base_rate, 1e-300):11.2f}x",
+            flush=True,
+        )
+    # The worst cells individually, since an enrichment over thousands of cells can hide the handful
+    # that actually diverge by 1e+18.
+    hop_of = np.full(mesh.n_cells, -1)
+    reach = boundary_cell.copy()
+    hop_of[reach] = 0
+    for hops in range(1, 8):
+        grown = dilate(reach, owner_int, nb_int, 1)
+        hop_of[grown & ~reach] = hops
+        reach = grown
+    print(f"    the {WORST} worst cells sit at boundary hop: {sorted(hop_of[worst].tolist())}")
 
     # ---- THE GLOBAL CONTRACTION RATE, and the two things it cannot tell you on its own.
     # `rho(I - P^-1 S)` decides whether the sweep converges, but it is a whole-mesh number: it

@@ -86,16 +86,25 @@ formed by automatic differentiation of the forward reconstruction rather than fr
 hand-derived coefficient matrices, so there is one statement of the discretization and no
 second copy to drift.
 
-It is exact for linear **and** quadratic fields on any mesh with planar faces. Where the
-gradient enters a face value at leading order — advection, Rhie–Chow — that is the difference
-between a scheme that caps near first order on a skewed mesh and one that does not.
+It is exact for linear **and** quadratic fields, including on a mesh whose faces are not
+planar. Where the gradient enters a face value at leading order — advection, Rhie–Chow —
+that is the difference between a scheme that caps near first order on a skewed mesh and one
+that does not.
 
-```{warning}
-A **warped** face breaks Green–Gauss exactness for a quadratic for every scheme in this
-family, this one included, because the face integral itself is no longer exact. On a mesh
-with badly non-planar faces the reconstruction is limited by the faces, not by the scheme;
-{func}`~aquaflux.mesh.face_planarity` reports how close each face is to planar.
-```
+A non-planar face is worth a word, because it is where the other two schemes in this family
+lose their footing. A Green–Gauss reconstruction integrates over each face by assuming the
+normal is constant across it, which is exact only when the face is planar; on a warped face
+the assumption leaves a residue that is *first* order in the warp, where the curvature term
+this scheme exists to apply is second. This scheme carries that residue explicitly — the
+face's first moment of position about its own centroid, which vanishes identically on a
+planar face — in both the gradient and the Hessian equation. On a warped grid at a planarity
+of 0.89 that is the difference between a median relative error of `4.1e-02` and one of
+`8.6e-15`; on a planar mesh the term is identically zero and costs nothing.
+
+{func}`~aquaflux.mesh.face_planarity` reports how close each face is to planar, which is
+worth checking on an automatically generated mesh — the other two schemes in this family do
+**not** carry the correction, so on such a mesh they are limited by the faces rather than by
+their own order of accuracy.
 
 ## How the system is solved
 

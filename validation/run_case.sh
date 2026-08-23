@@ -215,8 +215,11 @@ PID=$!
   # The case settings, verbatim. Two runs differing only in an environment variable have otherwise
   # produced logs identical to the character, leaving launch order as the only way to tell them apart.
   # Every prefix a case reads its settings from belongs here: one that is missing does not announce
-  # itself, it just silently drops the one line that says what the run was testing.
-  env | grep -E '^(BFS3D|AQUAFLUX|ILU0_SWEEP|PROBE)_' | sort | sed 's/^/env: /' || true
+  # itself, it just silently drops the one line that says what the run was testing. UV_ was missing
+  # until 2026-08-22, and UV_MESH is the path to a gitignored 1.6M-cell mesh that lives outside the
+  # worktree -- so its run-files recorded a case whose input could no longer be identified, and the
+  # mesh had to be hunted for across checkouts before the run could be repeated.
+  env | grep -E '^(BFS3D|PITZ|UV|AQUAFLUX|ILU0_SWEEP|PROBE)_' | sort | sed 's/^/env: /' || true
 } > "$RUN_FILE"
 
 # Appended to the run's OWN log, not only printed, so the warning travels with the artifact it
