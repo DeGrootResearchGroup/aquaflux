@@ -86,6 +86,13 @@ formed by automatic differentiation of the forward reconstruction rather than fr
 hand-derived coefficient matrices, so there is one statement of the discretization and no
 second copy to drift.
 
+`H` above is carried as the independent components of a symmetric tensor — three in two
+dimensions, six in three — since the Hessian of a twice-continuously-differentiable field is
+symmetric. That leaves more equations than unknowns, and the surplus is removed in the
+least-squares sense weighted by each cell's own block, which makes the per-cell block of
+`A_HH` symmetric positive definite. Nothing about this is a knob: it is how the scheme is
+formulated, and the gradient it returns is unaffected.
+
 It is exact for linear **and** quadratic fields, including on a mesh whose faces are not
 planar. Where the gradient enters a face value at leading order — advection, Rhie–Chow —
 that is the difference between a scheme that caps near first order on a skewed mesh and one
@@ -176,20 +183,19 @@ the Hessian, the system being solved is the Schur complement
 elimination term. On a well-shaped cell that term is a small perturbation and omitting it costs
 nothing; on a cell squashed nearly flat the volume vanishes while the face couplings do not, so
 the omitted term becomes the *dominant* part of that cell's row and the sweep stops converging
-there. `local_schur_block` (default `False`) builds the preconditioner from the Schur
-complement's own block instead. It is the *better approximation* — within 2.5% of the true
-Schur block on a large reactor mesh, where the default is 33% away.
+there. `local_schur_block` (default `True`) builds the preconditioner from the Schur
+complement's own block instead. It is both the better approximation — within 3.4% of the true
+Schur block on a large reactor mesh, where `A_gg`'s block is 21% away — and the one that
+converges: on that mesh the sweep's contraction rate is `0.31` with it and `2.04` without,
+and the worst cell's error `5.2e-03` against `5.8e+05`.
 
-```{warning}
-It is nonetheless **off by default, because a better approximation is not what a swept solve
-needs**. The correction *subtracts* from the diagonal block, so the diagonal shrinks and the
-sweep can stop contracting. On a 1.6M-cell mesh from an automatic mesher, 4599 cells of
-1,635,909 exceeded 100% error while the median improved — the affected cells being ordinary
-tetrahedra and pyramids, not slivers.
-
-A Krylov outer solve is untroubled by the same preconditioner, spending iterations rather
-than diverging. So enable this with {class}`~aquaflux.schemes.GmresGradientSolve` if you want
-the better block, and leave it off with a fixed sweep count.
+```{note}
+This default was briefly the other way round, and the history is worth one line because it
+says what the option is really about. While the Hessian was solved as a full tensor rather
+than as its independent symmetric components, the Schur block *diverged* on that same mesh —
+4599 cells of 1,635,909 above 100% error — and `A_gg`'s block was the safe one. Solving the
+six components instead makes `A_HH`'s per-cell block symmetric positive definite, and the two
+swap places. If you are reading an older discussion of this option, that is why it disagrees.
 ```
 
 Each scheme supplies a sensible default, so this is not usually something you set — but for

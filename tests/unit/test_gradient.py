@@ -50,6 +50,7 @@ from tests.support.meshes import (
     columnwise_perturbed_grid_3d,
     perturbed_grid_2d,
     perturbed_grid_3d,
+    tetrahedral_grid_3d,
 )
 
 # --- analytic fields: (value, gradient) ------------------------------------------------
@@ -806,6 +807,32 @@ def test_cell_diagonal_block_recovers_the_true_diagonal_block_exactly() -> None:
         _dense(CorrectedGreenGauss.operator(terms), (n_cells, dim)), n_cells, dim
     )
     assert np.abs(np.asarray(block) - truth).max() / np.abs(truth).max() < 1e-13
+
+
+def test_the_tetrahedral_fixture_is_a_valid_mesh_of_four_faced_cells() -> None:
+    """``tetrahedral_grid_3d`` is the only fixture here whose cells have **four** faces, and the
+    reason it exists is that a preconditioner defect on the Hessian-corrected scheme was found on an
+    automatically generated mesh where every affected cell had four — invisible to every hexahedral
+    fixture, in both directions, on two separate occasions.
+
+    Checked as a *mesh* rather than through a scheme: cells closed to machine precision (Green–Gauss
+    is the divergence theorem, so an unclosed cell makes every operator on it wrong — and a squashed
+    fixture once passed a plausibility glance while carrying a closure residual of 0.66), exactly
+    four faces on every cell, and strictly positive volumes after perturbation.
+    """
+    for n, perturb in ((2, 0.0), (2, 0.15), (3, 0.15)):
+        mesh = tetrahedral_grid_3d(n, perturb=perturb, seed=0)
+        geometry = mesh.geometry()
+        owner = np.asarray(mesh.face_cells.owner)
+        neighbour = np.asarray(mesh.face_cells.neighbour)
+        faces_per_cell = np.bincount(owner, minlength=mesh.n_cells) + np.bincount(
+            neighbour[neighbour >= 0], minlength=mesh.n_cells
+        )
+
+        assert mesh.n_cells == 6 * n**3
+        assert set(faces_per_cell.tolist()) == {4}, "a tetrahedron has four faces"
+        assert float(np.asarray(geometry.cell.volume).min()) > 0.0
+        assert float(np.asarray(closed_cell_residual(mesh)).max()) < 1e-14
 
 
 def test_the_reduced_hessian_block_is_symmetric_positive_definite() -> None:

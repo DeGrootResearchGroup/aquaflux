@@ -1724,33 +1724,33 @@ class HessianCorrectedGradient(GradientScheme):
         then unused. ``None`` (the default) keeps the nested solve.
     local_schur_block : bool
         Build the outer preconditioner from the Schur complement's own per-cell block rather than
-        from ``A_gg``'s alone. **Default ``False``** -- see the warning below before enabling it.
+        from ``A_gg``'s alone. **Default ``True``.**
 
-        It is the *better approximation*: on a 1.6M-cell reactor mesh its block sits within 2.5 % of
-        the true Schur block where ``A_gg``'s is 33 % away, and on synthetic meshes it improves the
-        reconstruction everywhere, by some four orders on a cell squashed nearly flat.
+        It is the better approximation — on a 1.6M-cell reactor mesh its block sits within 3.4 % of
+        the true Schur block where ``A_gg``'s is 21 % away, and on synthetic meshes it improves the
+        reconstruction everywhere, by some four orders on a cell squashed nearly flat — and it is
+        also the convergent one. Setting it ``False`` on that mesh raises the sweep's contraction
+        rate from ``0.31`` to ``2.04`` and the worst cell's error from ``5.2e-03`` to ``5.8e+05``.
 
-        ⚠️ **AND IT MAKES THE SWEEP DIVERGE ON A REAL MESH, precisely because a stationary iteration
-        does not want an accurate preconditioner -- it wants a diagonally dominant one.** The
-        correction *subtracts* from ``A_gg``'s block, so the diagonal shrinks, ``P⁻¹`` grows, and on
-        a cell whose off-diagonal coupling is already comparable the iteration stops contracting.
-        Measured on that reactor mesh: **4599 cells of 1 635 909 exceed 100 % error**, the 99th
-        percentile worsens from 4.9e-05 to 7.4e-05, and the worst cell goes from 7.0e-02 to
-        **5.6e+18** -- while the median improves 27 %. The failing cells are ordinary valid
-        tetrahedra and pyramids (four and five faces against the mesh's median of six), not slivers:
-        their volumes are 0.24--0.42 of the median, their planarity is 0.89--0.9996, and they close
-        to 1e-22.
+        ⚠️ **IT DIVERGED ON A REAL MESH WHILE THE HESSIAN WAS SOLVED UNSYMMETRIZED, and solving the
+        six independent components instead removed that entirely.** On a 1.6M-cell reactor mesh the
+        worst cell went from **5.6e+18** to **5.2e-03** and the count above 100 % error from **4599
+        of 1 635 909** to **none** -- while ``A_gg``'s block, which had been the safe arm, went the
+        other way and now reaches 5.8e+05 on the same mesh. The reading that stood here, that a
+        stationary iteration wants a diagonally dominant preconditioner rather than an accurate one,
+        survives as a description of what an unsymmetrized reduction did; it is not a reason to avoid
+        this block, which is now both the accurate arm and the convergent one.
 
-        **The cause is global, not per-cell**: the sweep's contraction rate ``rho(I - P⁻¹S)`` is
-        **6.27** under this block against **0.71** under ``A_gg``'s, so the iteration is expansive by
-        a factor of six per sweep and twenty sweeps is ``6.27²⁰ ~ 1e+16`` -- the observed magnitude.
-        The failing cells are geometrically ordinary because they are merely where the dominant
-        eigenvector has support, which is why no per-cell property correlates with them and why no
-        per-cell guard would help.
+        The mechanism this is consistent with -- and it is **not** isolated by that measurement -- is
+        that the elimination term is ``A_gH A_HH⁻¹ A_Hg``, and the reduction makes ``A_HH``'s per-cell
+        block symmetric positive definite where the unsymmetrized block was neither, so the
+        correction subtracted from ``A_gg``'s block is well-signed. The reduction also changes ``S``
+        itself, so the two effects are not separated.
 
-        A Krylov outer solve does not require ``rho < 1`` and is untroubled by the same
-        preconditioner, spending iterations rather than diverging -- so this is safe with
-        :class:`GmresGradientSolve` and unsafe with the fixed sweep.
+        The cells that remain hardest are four-faced and sit **against a boundary** (all twelve of the
+        worst own a boundary face, against 23 % of the mesh doing so), which is where this scheme
+        closes the Hessian by the simpler of the two treatments in the literature.
+
         ``validation/uvreactor_openfoam/schur_block_diagnosis.py`` reproduces all of it.
     """
 
@@ -1759,7 +1759,7 @@ class HessianCorrectedGradient(GradientScheme):
         default_factory=lambda: SweptGradientSolve(sweeps=10, warn_tol=None)
     )
     schur: bool = eqx.field(static=True, default=True)
-    local_schur_block: bool = eqx.field(static=True, default=False)
+    local_schur_block: bool = eqx.field(static=True, default=True)
     coupled_sweep: CoupledBlockSweep | None = None
 
     def gradients(
@@ -1824,7 +1824,7 @@ class HessianCorrectedGradient(GradientScheme):
         cap: int = SweepCalibration.cap,
         seed: int = SweepCalibration.seed,
         schur: bool = True,
-        local_schur_block: bool = False,
+        local_schur_block: bool = True,
     ) -> HessianCorrectedGradient:
         """Build this scheme with **both** sweep counts measured from the mesh rather than assumed.
 
@@ -2209,8 +2209,9 @@ class HessianCorrectedGradient(GradientScheme):
             the Hessian is carried as its independent components, so the elimination term is an
             ordinary triple product rather than the rank-three contraction the full tensor needed.
 
-            ⚠️ **This diverges on a real mesh under a fixed-sweep outer solve** and is off by default;
-            see the class docstring.
+            ⚠️ It diverged on a real mesh under a fixed-sweep outer solve while the Hessian was
+            solved unsymmetrized; see the class docstring for what changed and what that does and
+            does not establish.
             """
 
             def hessian_row_block(unit):  # A_Hg: g_k -> u_a

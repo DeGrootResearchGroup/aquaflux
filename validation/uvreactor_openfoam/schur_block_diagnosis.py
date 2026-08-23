@@ -217,10 +217,16 @@ def main() -> None:
     # population is a design fault, and the max alone cannot tell those apart.
     bad = errors["schur"] > 1.0
     n_bad = int(bad.sum())
-    print(f"\n  cells above 100% error under the Schur block: {n_bad} of {mesh.n_cells}")
+    # Counted for BOTH arms, because which one diverges is not a fixed property of the scheme: under
+    # an unsymmetrized Hessian it was the Schur block, and under the symmetric one it is `A_gg`'s.
+    # A count reported for one arm only cannot see that swap, and reads as "fixed" when it is not.
+    print(
+        f"\n  cells above 100% error — Schur block: {n_bad} | A_gg block: "
+        f"{int((errors['a_gg'] > 1.0).sum())} | of {mesh.n_cells}"
+    )
     # None is the outcome this harness exists to reach, so it must not be the one that crashes it.
     worst_a_gg = f"{errors['a_gg'][bad].max():.3e}" if n_bad else "n/a — none diverge"
-    print(f"  the same cells under the A_gg block: max {worst_a_gg}", flush=True)
+    print(f"  the Schur block's diverging cells under the A_gg block: max {worst_a_gg}", flush=True)
 
     worst = np.argsort(errors["schur"])[::-1][:WORST]
     volume = np.asarray(geom.cell.volume)
@@ -411,27 +417,45 @@ def main() -> None:
     shape = (mesh.n_cells, dim)
 
     print("\n  the contraction rate -- rho(I - P^-1 S), which decides whether a sweep converges")
-    modes = {}
+    modes, rho = {}, {}
     for label, sysm in (("A_gg", plain_outer), ("Schur", schur_outer)):
         step = jax.jit(lambda v, s=sysm: v - s.preconditioner.apply(s.operator(v)))
-        rate, half, _, vec = power_iteration(step, shape, RATE_ITERS)
+        rate, half, rq, vec = power_iteration(step, shape, RATE_ITERS)
         verdict = "CONVERGES" if rate < 1.0 else "DIVERGES"
+        # The GOVERNING eigenvalue of `P^-1 S`, with its sign, read off THIS iteration rather than a
+        # separate one over `P^-1 S`. The dominant mode here is the one furthest from 1 -- which is
+        # what the sweep's rate is -- and `I - P^-1 S` acts on it as `1 - lambda`, so the Rayleigh
+        # quotient gives `lambda` directly. A power iteration over `P^-1 S` answers a DIFFERENT
+        # question: it returns the largest-MODULUS eigenvalue, which on this operator is the cluster
+        # near +1 where the preconditioner is nearly exact, and that one says nothing about the rate.
+        lam = 1.0 - rq
+        relax = (
+            "relaxation could stabilize it"
+            if lam > 0
+            else "NO positive relaxation stabilizes it (1 - w*lambda > 1 for every w > 0)"
+        )
         print(
-            f"    {label:6s} block: rho = {rate:.4f}  ({verdict})  half-budget {half:.4f}",
+            f"    {label:6s} block: rho = {rate:.4f}  ({verdict})  half-budget {half:.4f}  "
+            f"| governing lambda = {lam:+.4f} -- {relax}",
             flush=True,
         )
         modes[label] = localization(vec, mesh.n_cells)
+        rho[label] = rate
 
     print("\n  WHERE does that mode live? (participation ratio = effective cells carrying it)")
     for label, loc in modes.items():
         if loc is None:
             print(f"    {label:6s}: eigenvector not finite")
             continue
-        overlap = int(bad[loc["order"][:1000]].sum())
+        # Each arm's mode is checked against ITS OWN diverging set. Against a single shared mask the
+        # statistic reads zero for whichever arm the mask does not describe, which looks like "the
+        # mode misses the failures" when it means "the mask is the other arm's".
+        own = errors["a_gg" if label == "A_gg" else "schur"] > 1.0
+        overlap = int(own[loc["order"][:1000]].sum())
         print(
             f"    {label:6s}: {loc['cells']:12.1f} cells of {mesh.n_cells} | "
             f"top1 {loc['top1']:.3f} top10 {loc['top10']:.3f} top1000 {loc['top1000']:.3f} | "
-            f"of its top 1000 cells, {overlap} are diverging",
+            f"of its top 1000 cells, {overlap} diverge under that same block",
             flush=True,
         )
 
@@ -442,23 +466,34 @@ def main() -> None:
     # a mode whose `lambda` is positive and too large, and can do NOTHING for one whose `lambda` is
     # negative, since `1 - w lambda > 1` for every positive `w`. So the sign is measured first and
     # the ladder second -- the sign says whether the ladder can succeed before it is spent.
-    print("\n  the amplification P^-1 S itself -- its dominant eigenvalue, with its SIGN")
+    # ---- CROSS-CHECK the governing eigenvalue against an independent bound. A power iteration over
+    # `P^-1 S` returns its largest-modulus eigenvalue, which is NOT the governing one -- but it is an
+    # upper bound on every modulus, so it rules out one of the two values consistent with `rho`:
+    # `rho = |1 - lambda|` admits `lambda = 1 - rho` and `lambda = 1 + rho`, and whichever exceeds
+    # this bound is impossible. When the two routes disagree on the survivor, neither is trustworthy.
+    print("\n  cross-check: |lambda|_max over P^-1 S, which bounds the candidates rho admits")
     for label, sysm in (("A_gg", plain_outer), ("Schur", schur_outer)):
         amp = jax.jit(lambda v, s=sysm: s.preconditioner.apply(s.operator(v)))
-        rate, half, rq, _ = power_iteration(amp, shape, RATE_ITERS)
-        reach = "relaxation can stabilize it" if rq > 0 else "NO positive relaxation stabilizes it"
+        rate, half, _, _ = power_iteration(amp, shape, RATE_ITERS)
+        measured = rho.get(label, float("nan"))
+        feasible = [c for c in (1.0 - measured, 1.0 + measured) if abs(c) <= rate * 1.02]
+        survivor = f"{feasible[0]:+.4f}" if len(feasible) == 1 else f"{len(feasible)} candidates"
         print(
-            f"    {label:6s}: |lambda_max| = {rate:.4f} (half {half:.4f})  "
-            f"Rayleigh {rq:+.4f} -- {reach}",
+            f"    {label:6s}: |lambda|_max = {rate:.4f} (half {half:.4f})  "
+            f"| rho admits {1.0 - measured:+.4f} / {1.0 + measured:+.4f} -> {survivor}",
             flush=True,
         )
 
     print("\n  rho(I - w P^-1 S) under the Schur block, over Betchen's relaxation range")
+    # ⚠️ ONE jitted function for the whole ladder, with the relaxation as a traced ARGUMENT. Building
+    # `jax.jit(lambda v: ... w ...)` per rung closes `w` in as a constant, and a fresh `jax.jit` object
+    # starts with an empty cache -- so every rung recompiles a program that captures 2.3 GB of
+    # constants at this mesh size, which costs far more than the twenty applies it then runs.
+    relaxed = jax.jit(
+        lambda v, w: v - w * schur_outer.preconditioner.apply(schur_outer.operator(v))
+    )
     for omega in [float(w) for w in OMEGA.split(",")]:
-        step = jax.jit(
-            lambda v, w=omega: v - w * schur_outer.preconditioner.apply(schur_outer.operator(v))
-        )
-        rate, half, _, _ = power_iteration(step, shape, RATE_ITERS)
+        rate, half, _, _ = power_iteration(lambda v, w=omega: relaxed(v, w), shape, RATE_ITERS)
         verdict = "CONVERGES" if rate < 1.0 else "DIVERGES"
         print(
             f"    w = {omega:4.2f}: rho = {rate:9.4f}  ({verdict})  half-budget {half:9.4f}",
