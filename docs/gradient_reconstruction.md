@@ -163,9 +163,9 @@ count and the accuracy near the default closure's.
 Better than picking a weight, though, is measuring one.
 {meth}`~aquaflux.schemes.AveragedNeighbourHessian.calibrated` does that: it measures the
 Hessian system's convergence rate at each candidate weight and takes the one needing the
-fewest sweeps. That single objective is right at both ends — on a mesh where the cell's own
-Hessian closes the system perfectly well, weight `0` is fastest and is chosen, so the closure
-reduces to the default one and costs nothing at all.
+fewest sweeps — so a mesh needing no decoupling gets the least coupling on offer, and one that
+does gets enough to solve. Ask for *no* coupling by naming
+{class}`~aquaflux.schemes.OwnerHessian` rather than by calibrating to zero.
 
 ```python
 from aquaflux.schemes import AveragedNeighbourHessian, HessianCorrectedGradient

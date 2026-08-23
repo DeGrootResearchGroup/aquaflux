@@ -1797,7 +1797,7 @@ class AveragedNeighbourHessian(HessianBoundaryClosure):
         floor: int = SweepCalibration.floor,
         cap: int = SweepCalibration.cap,
         seed: int = SweepCalibration.seed,
-        weights: tuple[float, ...] = (0.0, 0.05, 0.1, 0.2, 0.4, 1.0),
+        weights: tuple[float, ...] = (0.05, 0.1, 0.2, 0.4, 1.0),
     ) -> AveragedNeighbourHessian:
         """Choose the blend weight **from the mesh** rather than assuming one.
 
@@ -1806,12 +1806,19 @@ class AveragedNeighbourHessian(HessianBoundaryClosure):
         sweep counts use. For each candidate weight this measures the Hessian system's contraction
         rate and converts it to a sweep count, then takes the weight needing the fewest.
 
-        That single objective does the right thing at both ends without a threshold to pick. On a mesh
-        where the cell's own Hessian closes the system perfectly well, weight ``0`` needs the fewest
-        sweeps and is chosen, so the closure costs nothing and reduces to :class:`OwnerHessian`. On a
-        mesh where it does not, weight ``0`` is not merely slow — the iteration is **expansive**, its
-        rate measuring well above one (``15.4`` on a tetrahedral mesh against ``0.53`` at weight
-        ``0.05``) — so its sweep count saturates at ``cap`` and it loses to any weight that works.
+        On a mesh where the cell's own Hessian closes the system perfectly well the ladder's smallest
+        weight is fastest and is chosen, so the closure adds as little coupling as it offers; on a
+        mesh where it does not, the weights that leave the system singular saturate at ``cap`` and
+        lose to any weight that works.
+
+        ⚠️ **The ladder deliberately excludes weight ``0``, and the reason is reproducibility rather
+        than taste.** At zero this closure *is* :class:`OwnerHessian`, which on the meshes that need
+        this closure at all leaves the Hessian system numerically singular — and the rate of a
+        singular system is not a stable measurement. It depends on how the platform's linear algebra
+        inverts a near-singular block: the same mesh measured ``15.4`` (expansive, correctly rejected)
+        on one machine and comfortably below one on another, where it was then chosen as the cheapest
+        option. A calibration must not decide anything from that number. Ask for no coupling by naming
+        :class:`OwnerHessian`, which is a choice rather than a measurement.
 
         Costs ``iters`` operator applies per candidate weight, once, off the differentiated path.
 
@@ -1825,8 +1832,8 @@ class AveragedNeighbourHessian(HessianBoundaryClosure):
             The calibration settings, as elsewhere: ``tol`` is the residual reduction a sweep count is
             sized for, and the rest configure the rate estimate and bound the count.
         weights : tuple of float
-            Candidate weights, in ``[0, 1]``. Ties are broken toward the **smallest**, which prefers
-            the cheaper apply and, at zero, the closure that does no averaging at all.
+            Candidate weights, in ``(0, 1]``. Ties are broken toward the **smallest**, which prefers
+            the weaker coupling and so the cheaper solve. Zero is excluded by default — see above.
 
         Returns
         -------
@@ -1839,7 +1846,7 @@ class AveragedNeighbourHessian(HessianBoundaryClosure):
         >>> from aquaflux.schemes import AveragedNeighbourHessian
         >>> mesh = structured_grid_3d(3, 3, 3)
         >>> AveragedNeighbourHessian.calibrated(mesh, mesh.geometry()).weight
-        0.0
+        0.05
         """
         settings = SweepCalibration(tol=tol, iters=iters, floor=floor, cap=cap, seed=seed)
         best, fewest = weights[0], None

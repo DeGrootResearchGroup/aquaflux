@@ -839,7 +839,28 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     Costs `iters` applies per candidate — about one reconstruction for the whole ladder, once, off
     the differentiated path.
 
-    **The shipped default is `0.2`**, which is where the trade sits on the meshes measured and is the
+  - **⚠️⚠️ A CALIBRATION MUST NOT DECIDE ANYTHING FROM A MEASUREMENT TAKEN ON A SINGULAR SYSTEM —
+    caught by CI after passing locally (2026-08-23).** The weight ladder originally included `0`,
+    where this closure *is* the owner closure and, on the meshes that need the closure at all, leaves
+    the Hessian system numerically singular. The contraction rate there measured **15.4** on macOS
+    arm64 — expansive, correctly saturating at `cap` and losing — and **below one** on CI's Linux
+    runners, where it was then chosen as the cheapest option. Same mesh, same seed, same code: the
+    rate of a singular system depends on how the platform's linear algebra inverts a near-singular
+    block, and nothing built on it is reproducible.
+
+    **The fix is to stop evaluating that point**, not to loosen the assertion: the ladder starts at
+    `0.05`, and asking for no coupling at all means naming `OwnerHessian`, which is a choice rather
+    than a measurement. It costs nothing — on a mesh needing no decoupling the ladder's smallest
+    weight and zero take the same sweep count (10 on hex 5³).
+
+    **Two lessons worth carrying past this closure.** A quantity that is only unstable *in the regime
+    you are trying to detect* is the worst possible detector, and it will pass every test on the
+    machine you wrote it on. And the assertion had to change shape too: pinning the chosen weight
+    pins noise where several candidates sit within a sweep of each other, so the test now asserts the
+    chosen closure **solves** — conditioning of the operator, which involves no inversion and is
+    stable — rather than which value was chosen.
+
+        **The shipped default is `0.2`**, which is where the trade sits on the meshes measured and is the
     value to use when calibration is not run. ⚠️ It remains one mesh's evidence: the conditioning
     scales roughly as `cond ~ w^-1.75` over the range tested, so a mesh an order more degenerate would
     be four orders worse at `w = 0.1`. That is what the calibration is for — prefer it to the

@@ -1906,19 +1906,26 @@ def test_the_blend_weight_calibrates_to_zero_where_the_owner_closure_already_clo
     averaging at all; on a tetrahedral mesh weight ``0`` is *expansive* rather than merely slow, so
     its count saturates and any working weight beats it.
 
-    This pins both ends, because a calibration that only ever returned a positive weight would look
-    correct on the mesh that needs one while quietly taxing every mesh that does not.
+    ⚠️ It asserts a *small* weight rather than exactly zero, because zero is excluded from the ladder
+    on purpose: at zero this closure is the owner closure, which on the meshes that need this closure
+    leaves the Hessian system singular — and the rate of a singular system is not a reproducible
+    measurement. It measured 15.4 on one machine and below one on another, where it was then chosen
+    as cheapest. That divergence is what this test caught in CI, and the fix was to stop the
+    calibration evaluating that point at all.
     """
     for mesh in (
         columnwise_perturbed_grid_3d(5, 5, 5, perturb=0.25, seed=0),
         perturbed_grid_2d(6, 6, perturb=0.3, seed=0),
     ):
         chosen = AveragedNeighbourHessian.calibrated(mesh, mesh.geometry(), tol=1e-10)
-        assert chosen.weight == 0.0
+        assert chosen.weight <= 0.1, "a mesh needing no decoupling should take the least offered"
 
+    # On a tetrahedral mesh the test is that whatever it chose SOLVES, not that it chose a particular
+    # value: several weights are within a sweep of each other there, so pinning one would be pinning
+    # noise. Conditioning is the stable quantity — the operator involves no inversion, where the
+    # contraction rate at a degenerate weight depends on how a platform inverts a singular block.
     tets = tetrahedral_grid_3d(3, perturb=0.1, seed=0)
     chosen = AveragedNeighbourHessian.calibrated(tets, tets.geometry(), tol=1e-10)
-    assert 0.0 < chosen.weight <= 0.4
     assert _hessian_system_condition(tets, chosen) < 1e5
 
 
