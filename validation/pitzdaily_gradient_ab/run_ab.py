@@ -168,9 +168,13 @@ JACOBI_TRAILING = dict(max_coarse=500, equilibrate=False)
 OUTER_SWEEPS = int(os.environ.get("PITZ_AB_OUTER_SWEEPS", "5"))
 INNER_SWEEPS = int(os.environ.get("PITZ_AB_INNER_SWEEPS", "5"))
 
+# `coupled_sweep=None` selects the NESTED path these two counts describe. Every figure this case
+# has published was measured on it, so it is named explicitly rather than inherited from a default
+# that has since moved to sweeping both blocks together.
 BETCHEN = HessianCorrectedGradient(
     solver=SweptGradientSolve(sweeps=OUTER_SWEEPS, warn_tol=None),
     hessian_solver=SweptGradientSolve(sweeps=INNER_SWEEPS, warn_tol=None),
+    coupled_sweep=None,
 )
 
 ARMS = (
@@ -425,7 +429,9 @@ def check_accuracy() -> None:
 
     phi, bv = jnp.asarray(quad(x)), jnp.asarray(quad(xf))
     exact = np.asarray(
-        HessianCorrectedGradient(hessian_solver=GmresGradientSolve()).gradients(phi, mesh, geom, bv)
+        HessianCorrectedGradient(hessian_solver=GmresGradientSolve(), coupled_sweep=None).gradients(
+            phi, mesh, geom, bv
+        )
     )
     scale = max(float(np.abs(exact).max()), 1e-300)
     print("Betchen sweep pair vs an exactly-solved reconstruction (quadratic field):", flush=True)
@@ -434,6 +440,7 @@ def check_accuracy() -> None:
             HessianCorrectedGradient(
                 solver=SweptGradientSolve(sweeps=outer, warn_tol=None),
                 hessian_solver=SweptGradientSolve(sweeps=inner, warn_tol=None),
+                coupled_sweep=None,
             ).gradients(phi, mesh, geom, bv)
         )
         mark = "  <- this run" if (outer, inner) == (OUTER_SWEEPS, INNER_SWEEPS) else ""

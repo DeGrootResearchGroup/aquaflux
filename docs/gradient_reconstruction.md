@@ -140,14 +140,58 @@ from aquaflux.schemes import AveragedNeighbourHessian, HessianCorrectedGradient
 scheme = HessianCorrectedGradient(boundary_closure=AveragedNeighbourHessian())
 ```
 
-```{note}
 It costs sweeps rather than accuracy. Averaging couples each cell's Hessian to its
-neighbours', so the Hessian system converges more slowly: calibrated to a tolerance of
-`1e-10` on a perturbed hexahedral grid, the inner sweep count rises from 8 to 23 while the
-outer count falls from 15 to 13 — roughly `2.3x` the work. At the library's fixed default
-counts it has not converged and reconstructs a quadratic to about `4e-07` rather than to
-machine precision, so calibrate the counts against the closure with
-{meth}`~aquaflux.schemes.HessianCorrectedGradient.calibrated`, which takes it for this reason.
+neighbours', and the per-cell preconditioner cannot represent that coupling, so the Hessian
+system converges more slowly: calibrated to a tolerance of `1e-10`, the inner sweep count
+rises from 8 to 23 — roughly `2.3x` the work, and it does not shrink on a larger mesh.
+
+Its `weight` is what that cost trades against, and it trades well. The closure carries
+`(1 - weight)` of the cell's own Hessian plus `weight` of the neighbour average; both are
+weighted averages summing to one, so the blend is exact for a quadratic at **every** weight,
+and only the strength of the decoupling changes:
+
+| `weight` | condition number, tetrahedral | inner sweeps | quadratic at default sweeps |
+|---|---|---|---|
+| 1.0 (default) | 8.4 | 23 | 5.1e-07 |
+| 0.4 | 35.7 | 15 | 2.1e-09 |
+| 0.2 | 142 | 11 | 9.8e-12 |
+| 0.0 (= the owner closure) | 1.0e+18 | 10 | unsolvable |
+
+A little coupling is enough to break the degeneracy, so a small weight keeps both the sweep
+count and the accuracy near the default closure's.
+
+Better than picking a weight, though, is measuring one.
+{meth}`~aquaflux.schemes.AveragedNeighbourHessian.calibrated` does that: it measures the
+Hessian system's convergence rate at each candidate weight and takes the one needing the
+fewest sweeps. That single objective is right at both ends — on a mesh where the cell's own
+Hessian closes the system perfectly well, weight `0` is fastest and is chosen, so the closure
+reduces to the default one and costs nothing at all.
+
+```python
+from aquaflux.schemes import AveragedNeighbourHessian, HessianCorrectedGradient
+
+closure = AveragedNeighbourHessian.calibrated(mesh, geometry)
+scheme = HessianCorrectedGradient.calibrated(mesh, geometry, boundary_closure=closure)
+```
+
+It costs about one reconstruction, once, and the sweep counts should then be calibrated
+against the closure that was chosen — which is what passing it to
+{meth}`~aquaflux.schemes.HessianCorrectedGradient.calibrated` does.
+
+```{tip}
+If you are using this closure, pair it with {class}`~aquaflux.schemes.CoupledBlockSweep`
+rather than a larger inner sweep count. The nested solve re-converges the Hessian from zero on
+every outer step, which is exactly what this closure makes expensive; sweeping both blocks
+together keeps the Hessian between steps and never pays that. At matched accuracy on a
+tetrahedral mesh it reached the same result for about a twelfth of the work, and a better one
+than the nested solve reached at nine times the cost.
+```
+
+```{warning}
+The default weight is `0.2`, which is where the trade sits on the meshes measured here — but
+the condition numbers above come from **one** tetrahedral mesh, and the right weight is a
+property of your mesh. If the scheme is not converging on a mesh you believe it should,
+calibrate the weight before reaching for anything else.
 ```
 
 {class}`~aquaflux.schemes.AveragedInteriorHessian` is the closure as Betchen & Straatman
@@ -298,19 +342,41 @@ If you calibrate the sweep count (below), pass the preconditioner to
 given accuracy belongs to the operator–preconditioner pairing it was measured on, and the
 calibrated scheme carries the preconditioner with it for that reason.
 
-### Sweeping both blocks instead of nesting a solve
+### Sweeping both blocks, and the nested alternative
 
-By default the Hessian-corrected scheme solves its outer system with a sweep whose every operator
-apply runs a *complete* Hessian solve inside it — so the Hessian is re-converged from zero once
-per outer sweep, discarding what the previous one found.
-{class}`~aquaflux.schemes.CoupledBlockSweep` sweeps the two blocks alternately instead, keeping
-that work:
+The Hessian-corrected scheme has two ways to solve its two systems, and it carries **one or the
+other** — never both.
+
+By default it uses {class}`~aquaflux.schemes.CoupledBlockSweep`, which sweeps the two blocks
+alternately, carrying the Hessian from one sweep to the next. The alternative nests a
+*complete* Hessian solve inside every apply of the outer one, re-converging the Hessian from zero
+each time and discarding what the previous apply found:
 
 ```python
-from aquaflux.schemes import CoupledBlockSweep, HessianCorrectedGradient
+from aquaflux.schemes import (
+    CoupledBlockSweep, HessianCorrectedGradient, SweptGradientSolve,
+)
 
-scheme = HessianCorrectedGradient(coupled_sweep=CoupledBlockSweep(sweeps=30))
+HessianCorrectedGradient()                                      # coupled sweep, the default
+HessianCorrectedGradient(coupled_sweep=CoupledBlockSweep(sweeps=30))   # ... with a chosen count
+
+# the nested path, which is what `solver` and `hessian_solver` drive
+HessianCorrectedGradient(
+    solver=SweptGradientSolve(sweeps=20),
+    hessian_solver=SweptGradientSolve(sweeps=10, warn_tol=None),
+    coupled_sweep=None,
+)
 ```
+
+```{warning}
+`coupled_sweep=None` is required to use `solver` and `hessian_solver` — the coupled sweep drives
+both blocks itself, so those strategies would never run. Passing them together raises rather
+than silently ignoring them, because a solver that is quietly discarded is very hard to notice:
+it does not fail, it just answers a question you did not ask.
+```
+
+{meth}`~aquaflux.schemes.HessianCorrectedGradient.calibrated` sizes whichever path it returns —
+the coupled sweep by default, or the nested pair with `coupled=False`.
 
 It converges to the same answer — its fixed point is the same Schur system, which follows from the
 two updates rather than being a numerical coincidence. Measured on an 8000-cell grid with **both**

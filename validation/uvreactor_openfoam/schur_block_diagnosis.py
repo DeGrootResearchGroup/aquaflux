@@ -205,9 +205,9 @@ def main() -> None:
     errors = {}
     for label, flag in (("schur", True), ("a_gg", False)):
         grad = np.asarray(
-            HessianCorrectedGradient(hessian_solver=inner, local_schur_block=flag).gradients(
-                field, mesh, geom, bvals
-            )
+            HessianCorrectedGradient(
+                hessian_solver=inner, local_schur_block=flag, coupled_sweep=None
+            ).gradients(field, mesh, geom, bvals)
         )
         errors[label] = np.linalg.norm(grad - exact, axis=-1) / np.linalg.norm(exact, axis=-1)
         print(

@@ -769,12 +769,117 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     again (`cond(A_HH)` **1.7e+18**). So Betchen's zero fallback is load-bearing *for his eligible
     set*, and the wide set is what makes an owner fallback safe. The four combinations were measured;
     only two are viable and they are the two that ship.
-  - **⚠️ IT COSTS SWEEPS, and that is why it is not the default.** The closure adds neighbour coupling
+  - **⚠️ IT COSTS SWEEPS AT FULL WEIGHT, and that is why it is not the default — but see the
+    blend-weight entry below, which recovers almost all of it.** The closure adds neighbour coupling
     to the Hessian system, so that system converges more slowly. Calibrated to `tol = 1e-10`: outer
     falls 15 → 13 while **inner rises 8 → 23** on a perturbed hexahedral grid (9 → 20 in 2D), which is
     roughly `2.3x` the operator applies. At the shipped 20/10 it has not converged and reads 4.5e-07
     where the default reads 9.3e-16 — so **switching the default would silently degrade the shipped
     configuration**, and `calibrated` takes the closure precisely so the counts can follow it.
+  - **⚠️ THE INNER SWEEP COST DOES NOT AMORTIZE WITH MESH SIZE — hypothesis raised and REFUTED the
+    same hour.** The closure's value is only *read* at boundary faces, so it only couples
+    boundary-owning cells' rows, and the obvious expectation is that the cost shrinks as that share
+    falls. It does not. Calibrated to `tol = 1e-10` on perturbed hexahedral grids:
+
+    | cells | boundary-owning | owner inner | averaged inner | ratio |
+    |---|---|---|---|---|
+    | 27 | 96 % | 8 | 23 | 2.88 |
+    | 125 | 78 % | 10 | 23 | 2.30 |
+    | 512 | 58 % | 9 | 23 | 2.56 |
+    | 1728 | 42 % | 9 | 23 | 2.56 |
+
+    **Pinned at 23 while the coupled fraction falls by more than half.** A sweep count is set by the
+    operator's slowest mode, and that mode lives in the coupled rows however few of them there are —
+    so "only a few rows are affected" is not an argument about cost, here or anywhere else in this
+    file. **The reason the preconditioner cannot absorb it is structural:** the inner solve is
+    preconditioned Richardson over a *per-cell block*, which is block Jacobi by construction, and
+    neighbour coupling is exactly what such a block cannot represent.
+
+  - **✅ BUT A SMALL BLEND WEIGHT RECOVERS ALMOST ALL OF IT, AND COSTS NO ACCURACY.**
+    `AveragedNeighbourHessian(weight=w)` carries `(1-w)` of the cell's own Hessian plus `w` of the
+    neighbour average. Both parts are partitions of unity, so the blend is one **at every weight** —
+    hence exact for a quadratic at every weight, which is the property that makes the parameter safe
+    to expose at all (measured 2.1e-15 on tetrahedra and 1.0e-15 on hexahedra across `w` from 1.0 to
+    0.1). What the weight actually trades:
+
+    | `weight` | `cond(A_HH)` tet | inner sweeps | quadratic at the shipped 20/10 |
+    |---|---|---|---|
+    | 1.0 | 8.4 | 23 | 5.1e-07 |
+    | 0.4 | 35.7 | 15 | 2.1e-09 |
+    | **0.2** | **142** | **11** | **9.8e-12** |
+    | 0.1 | ~480 | — | **3.7e-14** |
+    | 0.0 | **1.0e+18** | 10 | *unsolvable* |
+
+    **A little coupling is enough to break the degeneracy.** At `w = 0.2` the tetrahedral system is
+    comfortably solvable — 142 against double precision's ~1e16 — at 11 inner sweeps against the
+    owner closure's 10, and the *fixed-sweep* reconstruction is 9.8e-12 rather than 5.1e-07. So the
+    closure's cost is not intrinsic; it is what one pays for maximal decoupling, and most of the
+    decoupling arrives long before `w = 1`.
+
+    **✅ AND THE WEIGHT IS CALIBRATED FROM THE MESH, which removes the guess entirely.**
+    `AveragedNeighbourHessian.calibrated(mesh, geometry)` measures the Hessian system's contraction
+    rate at each candidate weight — the same estimator the sweep counts use — converts each to a
+    sweep count, and takes the weight needing the fewest.
+
+    **One objective, no threshold, and it is right at both ends.** The degeneracy is not a subtle
+    signal: at `w = 0` on a tetrahedral mesh the measured rate is **15.4**, i.e. the iteration is
+    *expansive*, so its count saturates at `cap` and loses to any weight that works. And on a mesh
+    where the owner closure closes the system perfectly well, `w = 0` genuinely needs the fewest
+    sweeps and is chosen — so the closure reduces to `OwnerHessian` and costs **nothing**, the
+    `weight == 0` branch short-circuiting the averaging entirely rather than multiplying it by zero.
+    Measured:
+
+    | mesh | calibrated weight | inner sweeps |
+    |---|---|---|
+    | tetrahedral n=2 | 0.10 | 38 |
+    | tetrahedral n=3 | 0.20 | 36 |
+    | hex 5³, perturb 0.25 | **0.00** | 10 |
+    | 2D, perturb 0.3 | **0.00** | 9 |
+
+    Costs `iters` applies per candidate — about one reconstruction for the whole ladder, once, off
+    the differentiated path.
+
+    **The shipped default is `0.2`**, which is where the trade sits on the meshes measured and is the
+    value to use when calibration is not run. ⚠️ It remains one mesh's evidence: the conditioning
+    scales roughly as `cond ~ w^-1.75` over the range tested, so a mesh an order more degenerate would
+    be four orders worse at `w = 0.1`. That is what the calibration is for — prefer it to the
+    default, and do not lower the default on the strength of that table.
+
+  - **✅ THE WAY TO IMPROVE THE INNER SOLVE IS NOT TO NEST IT — `CoupledBlockSweep` is worth ~12x
+    here, far more than the 1.2--1.5x it was worth before this closure existed (2026-08-23).** The
+    nested path re-converges the Hessian from zero on **every outer apply**, and this closure is
+    precisely what makes that convergence expensive — so the arrangement that keeps the Hessian
+    iterate between sweeps gains exactly where the closure costs. At matched accuracy (~1e-10),
+    counting face-kernel passes as `outer x (1 + inner)` against the coupled sweep's `3 x sweeps`:
+
+    | mesh | nested | coupled sweep | ratio |
+    |---|---|---|---|
+    | tetrahedral n=3, weight 0.2 | 1665 passes → 6.2e-11 | **~120 → 2.2e-10** | **~12x** |
+    | hex 5³, perturb 0.25 | 165 passes → 1.9e-11 | **51 → 8.9e-13** | **~3x** |
+
+    On the tetrahedral mesh the coupled sweep reaches **5.8e-15** at 192 passes, which the nested path
+    does not approach at nine times the work. **So the pairing to recommend with this closure is the
+    coupled sweep, not a bigger inner count.**
+
+  - **⚠️ AND THE INNER COUNT THE CALIBRATION ASKS FOR IS LARGELY WASTED ON A HARD MESH.** Holding the
+    outer count at 20 and sweeping the inner on the tetrahedral mesh, the reconstruction plateaus by
+    **inner 8** (4.06e-06) and 36 buys nothing (3.48e-06) — the *outer* count is what limits the
+    answer there, so 28 of the 36 calibrated inner sweeps are spent for a 13 % improvement. On the
+    hexahedral mesh the same sweep keeps paying to inner 14. **The composition is the thing to
+    calibrate, and calibrating each system separately to the same tolerance does not do it** — this
+    file's older "three orders of margin" note is the same observation, and the margin is now measured
+    at ~7e-4 attenuation on tetrahedra against ~1e-2 on hexahedra. ⚠️ **A blanket loosening factor is
+    therefore NOT safe**: those differ by 14x, and the conservative end would over-resolve one mesh
+    while under-resolving the other.
+
+  - **⚠️ `CoupledBlockSweep.calibrated` SATURATES ITS CAP on the tetrahedral mesh, and over-counts by
+    ~3x when it does not.** It reports 64 at the default cap, 128 at 128, and asks for **193** at 256
+    — while 64 sweeps already reconstruct to **5.8e-15**. That is the conservatism this file already
+    records structurally (the rate is measured on the packed `[g, h]` error, whose Hessian half
+    dominates while the gradient's falls faster), quantified here on a mesh hard enough for it to
+    matter. **A reported count equal to the cap is not a measurement** — raise the cap to find out
+    what it wanted, and judge the sweep on the reconstruction rather than on the count.
+
   - **What this changes about the earlier entry:** "the averaged closure gives up exactness" is true
     of *Betchen's* and **not** of the family. The choice on a mesh the default cannot solve is no
     longer accuracy-versus-solvability — it is sweeps-versus-solvability, which is a far better trade
@@ -992,7 +1097,52 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   before trusting any future variant; the end-to-end error alone cannot distinguish a wrong block
   from a hard mesh.
 
-  **`CoupledBlockSweep` — sweep BOTH blocks instead of nesting a solve per apply (2026-08-22, opt-in).**
+  **⚠️⚠️ `CoupledBlockSweep` IS NOW THE DEFAULT SOLVE PATH (2026-08-23), and the flip cost three
+  things that were not obvious from the measurement that justified it.** At the class count of 20 it
+  matches the nested `20/10` pair's accuracy on every exactness fixture at **60 face passes against
+  220** — 3.7x cheaper for the same answer:
+
+  | fixture | nested 20/10 | coupled 20 |
+  |---|---|---|
+  | 2D perturb 0.2 | 5.20e-15 | 5.15e-15 |
+  | 2D perturb 0.3 | 2.42e-13 | 2.82e-13 |
+  | 3D perturb 0.25 | 2.98e-15 | 2.43e-15 |
+
+  ⚠️ **It is NOT uniformly better and the record should not be read as saying so** — it is 0.6x on an
+  orthogonal mesh (slower, the nested outer solve being nearly trivial there), 1.4x at 30 % skew,
+  1.8x at 40 %, and 3--12x with `AveragedNeighbourHessian`. The case for it is that it is better on
+  the meshes this scheme exists for and a wash on the ones it does not, at consistently better
+  accuracy.
+
+  - **⚠️ `narrow_gradient_sweeps` HAD TO LEARN ABOUT IT FIRST, and missing that would have failed
+    SILENTLY.** It rewrote `SweptGradientSolve` nodes only, and the coupled sweep *replaces* both
+    solvers rather than sitting beside them — so a defaulted scheme has no `SweptGradientSolve` left
+    for it to find, and narrowing would have returned the tree unchanged while a caller believed the
+    stencil was bounded. On `pitzDaily` that is the 1.75x probe-narrowing win, gone without a word.
+    Exactly the shape already recorded for a Krylov outer solver, which narrowing genuinely cannot
+    touch; this one it can, so it now does — carrying `relaxation` across, and pinned by a test that
+    the narrowed copy differs in the count and in nothing else.
+  - **⚠️ THE SILENT OVERRIDE HAD TO BECOME LOUD, and four live call sites proved why.** With the sweep
+    on by default, any `solver` or `hessian_solver` a caller passes never runs. That is not a
+    hypothetical trap: `pitzdaily_gradient_ab/run_ab.py` (three sites, including the Betchen arm whose
+    cost ratios this file quotes) and `uvreactor_openfoam/schur_block_diagnosis.py` (whose numbers
+    were recorded the same day) would all have silently changed meaning. `gradients` now **refuses**
+    the pair with a message naming the fix, and every site says `coupled_sweep=None` explicitly.
+  - **⚠️ `calibrated` WAS SIZING A PATH THE SCHEME WOULD NOT RUN.** It measured the nested pair and
+    returned a scheme that would sweep instead — calibrated in name only. It now sizes whichever path
+    it returns: `coupled=True` (the default) measures the sweep, `coupled=False` the nested pair and
+    sets `coupled_sweep=None`. A scheme carries one path or the other, never both.
+
+  **⚠️ THE UNDERLYING SHAPE IS STILL WRONG, and the guard is a patch over it.** Three fields of which
+  two are inert at any moment is what makes the conflict representable at all; **15 call sites** now
+  have to state which path they mean. The structurally correct form is one injected strategy —
+  `hessian_solve = CoupledBlockSweep(...)` or `NestedHessianSolve(outer, inner)` — under which the
+  conflict cannot be written down and neither the guard nor the `coupled=` flag needs to exist. Not
+  built: it re-touches every construction site again, and is a larger API change than the default flip
+  it would tidy.
+
+  **`CoupledBlockSweep` — sweep BOTH blocks instead of nesting a solve per apply (2026-08-22; the
+  DEFAULT since 2026-08-23, see above).**
   The nested path re-converges the Hessian from zero once per outer sweep, throwing away what the
   previous outer sweep learned. Sweeping alternately keeps it:
   `h ← h + P_H⁻¹(A_Hg g − A_HH h)` then `g ← g + ω P_g⁻¹(b_g − A_gg g + A_gH h)`, Gauss–Seidel (the

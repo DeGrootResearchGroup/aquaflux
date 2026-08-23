@@ -1118,7 +1118,8 @@ class SweepCalibration:
 
 
 def narrow_gradient_sweeps(tree: _Tree, sweeps: int) -> _Tree:
-    """Copy ``tree`` with every :class:`SweptGradientSolve` inside it capped at ``sweeps``.
+    """Copy ``tree`` with every :class:`SweptGradientSolve` and :class:`CoupledBlockSweep` inside it
+    capped at ``sweeps``.
 
     **What this is for: capping how far a residual's Jacobian reaches on the cell graph.** Each
     Richardson sweep applies ``A_g`` once, and ``A_g`` couples a cell to its face neighbours — so an
@@ -1196,6 +1197,16 @@ def narrow_gradient_sweeps(tree: _Tree, sweeps: int) -> _Tree:
             return SweptGradientSolve(
                 sweeps=sweeps, warn_tol=node.warn_tol, relaxation=node.relaxation
             )
+        # ⚠️ THE COUPLED SWEEP MUST BE NARROWED TOO, and missing it would fail SILENTLY. Its count
+        # sets the reconstruction's stencil exactly as the swept solve's does, and it *replaces* the
+        # two swept solvers rather than sitting beside them — so a scheme using it has no
+        # `SweptGradientSolve` left for this to find, and narrowing would return the tree unchanged
+        # while a caller believed the stencil had been bounded. That is the same shape as the trap a
+        # Krylov outer solver already carries here, and the reason to state it at both classes.
+        if isinstance(node, CoupledBlockSweep):
+            if node.sweeps <= sweeps:
+                return node
+            return CoupledBlockSweep(sweeps=sweeps, relaxation=node.relaxation)
         if isinstance(node, eqx.Module):
             # `sweeps` is a static field, so it lives in the pytree's structure rather than among its
             # leaves and `tree_at` cannot reach it; rebuilding each Module along the path is how a
@@ -1716,24 +1727,128 @@ class AveragedNeighbourHessian(HessianBoundaryClosure):
       boundary closure. On a wholly tetrahedral mesh ``cond(A_HH)`` is ``8.4`` here against
       ``1.0e+18`` under :class:`OwnerHessian`.
 
-    ⚠️ **It converges more slowly than :class:`OwnerHessian` under a FIXED sweep count**, which is
-    the one thing it costs and the reason it is not the default. The discretization is exact; the
-    iteration reaching that exactness is not free. At the shipped 20 outer / 10 inner sweeps it
-    reconstructs a quadratic to ``4.5e-07`` on a perturbed hexahedral grid where the default reaches
-    ``9.3e-16``; at 60/20 it reaches ``2.3e-11``. Calibrate the counts against the closure —
-    :meth:`HessianCorrectedGradient.calibrated` takes it for exactly this reason — rather than
-    assuming the default pair transfers.
+    ⚠️ **The coupling it adds is invisible to the per-cell preconditioner, so it costs inner sweeps.**
+    The Hessian system is solved by preconditioned Richardson over a per-cell block — block Jacobi by
+    construction — and the neighbour coupling this introduces is precisely what such a block cannot
+    represent. Calibrated to ``tol = 1e-10``, the inner count rises from 8 to 23 at ``weight = 1``.
+    ⚠️ **That cost does NOT amortize with mesh size**: it is 23 at 27 cells and 23 at 1728, even as
+    the share of cells owning a boundary face falls from 96 % to 42 %, because the slowest mode lives
+    in the coupled rows however few of them there are.
+
+    ``weight`` is what that cost is traded against, and it trades well. The closure is
+    ``(1 - weight)`` of the cell's own Hessian plus ``weight`` of the neighbour average, which is a
+    partition of unity for **any** weight and so exact for a quadratic at all of them — only the
+    strength of the decoupling changes. Measured on a tetrahedral mesh and a 25 %-perturbed
+    hexahedral one:
+
+    ======  ================  ================  =========================
+    weight  ``cond(A_HH)``    inner sweeps      quadratic at 20/10 sweeps
+    ======  ================  ================  =========================
+    1.0     8.4               23                5.1e-07
+    0.4     35.7              15                2.1e-09
+    0.2     142               11                9.8e-12
+    0.1     ~480              —                 3.7e-14
+    0.0     1.0e+18           10                *unsolvable*
+    ======  ================  ================  =========================
+
+    A little coupling is enough to break the degeneracy, and a small weight keeps both the sweep count
+    and the fixed-sweep accuracy near the default closure's. **The default is ``0.2``**, which on the
+    meshes measured is where that trade sits — but the table above is one tetrahedral mesh, and the
+    right weight is a property of the mesh rather than a constant. **Prefer
+    :meth:`calibrated`, which measures it** (and returns ``0.0``, costing nothing at all, on a mesh
+    whose cells close their own boundaries perfectly well).
     """
+
+    weight: float = eqx.field(static=True, default=0.2)
 
     def prepare(
         self, face_cells: FaceCellConnectivity, separation: jnp.ndarray
     ) -> PreparedBoundaryClosure:
-        return _inverse_distance_average(
+        averaged = _inverse_distance_average(
             face_cells,
             separation,
             jnp.ones(face_cells.n_cells, dtype=bool),
             fall_back_to_owner=True,
         )
+        if self.weight == 1.0:
+            return averaged
+        if self.weight == 0.0:
+            # Identical to `OwnerHessian`, and short-circuited so it also costs the same: with no
+            # averaging in the blend there is no reason to pay for the gather and scatter that
+            # builds it. `calibrated` returns this weight on any mesh the owner closure already
+            # closes, so it is a live path rather than a defensive branch.
+            return PreparedBoundaryClosure(apply=lambda h: h, diagonal=lambda probe: probe)
+        # The retained fraction of the cell's own Hessian is diagonal, and the averaged part carries
+        # its own declaration — so the blend's diagonal is the blend of the two.
+        own = self.weight
+        return PreparedBoundaryClosure(
+            apply=lambda h: (1.0 - own) * h + own * averaged.apply(h),
+            diagonal=lambda probe: (1.0 - own) * probe + own * averaged.diagonal(probe),
+        )
+
+    @classmethod
+    def calibrated(
+        cls,
+        mesh: Mesh,
+        geometry: MeshGeometry,
+        *,
+        tol: float = SweepCalibration.tol,
+        iters: int = SweepCalibration.iters,
+        floor: int = SweepCalibration.floor,
+        cap: int = SweepCalibration.cap,
+        seed: int = SweepCalibration.seed,
+        weights: tuple[float, ...] = (0.0, 0.05, 0.1, 0.2, 0.4, 1.0),
+    ) -> AveragedNeighbourHessian:
+        """Choose the blend weight **from the mesh** rather than assuming one.
+
+        The weight trades a well-conditioned Hessian system against the sweeps needed to solve it, and
+        which way that trades is a property of the mesh — so it is measured, by the same estimator the
+        sweep counts use. For each candidate weight this measures the Hessian system's contraction
+        rate and converts it to a sweep count, then takes the weight needing the fewest.
+
+        That single objective does the right thing at both ends without a threshold to pick. On a mesh
+        where the cell's own Hessian closes the system perfectly well, weight ``0`` needs the fewest
+        sweeps and is chosen, so the closure costs nothing and reduces to :class:`OwnerHessian`. On a
+        mesh where it does not, weight ``0`` is not merely slow — the iteration is **expansive**, its
+        rate measuring well above one (``15.4`` on a tetrahedral mesh against ``0.53`` at weight
+        ``0.05``) — so its sweep count saturates at ``cap`` and it loses to any weight that works.
+
+        Costs ``iters`` operator applies per candidate weight, once, off the differentiated path.
+
+        Parameters
+        ----------
+        mesh : Mesh
+            The mesh to measure on.
+        geometry : MeshGeometry
+            Its geometry. Must be concrete — see :meth:`HessianCorrectedGradient.calibrated`.
+        tol, iters, floor, cap, seed
+            The calibration settings, as elsewhere: ``tol`` is the residual reduction a sweep count is
+            sized for, and the rest configure the rate estimate and bound the count.
+        weights : tuple of float
+            Candidate weights, in ``[0, 1]``. Ties are broken toward the **smallest**, which prefers
+            the cheaper apply and, at zero, the closure that does no averaging at all.
+
+        Returns
+        -------
+        AveragedNeighbourHessian
+            The closure carrying the chosen weight.
+
+        Examples
+        --------
+        >>> from aquaflux.mesh import structured_grid_3d
+        >>> from aquaflux.schemes import AveragedNeighbourHessian
+        >>> mesh = structured_grid_3d(3, 3, 3)
+        >>> AveragedNeighbourHessian.calibrated(mesh, mesh.geometry()).weight
+        0.0
+        """
+        settings = SweepCalibration(tol=tol, iters=iters, floor=floor, cap=cap, seed=seed)
+        best, fewest = weights[0], None
+        for weight in weights:
+            system = HessianCorrectedGradient._systems(mesh, geometry, cls(weight=weight)).inner()
+            needed = settings.sweeps(system)
+            if fewest is None or needed < fewest:
+                best, fewest = weight, needed
+        return cls(weight=best)
 
 
 class AveragedInteriorHessian(HessianBoundaryClosure):
@@ -1775,6 +1890,14 @@ class AveragedInteriorHessian(HessianBoundaryClosure):
         return _inverse_distance_average(
             face_cells, separation, boundary_faces_per_cell == 0.0, fall_back_to_owner=False
         )
+
+
+_DEFAULT_OUTER_SOLVER = SweptGradientSolve(sweeps=20)
+"""The nested path's outer solve, named once so the field default and the guard cannot drift apart."""
+
+_DEFAULT_INNER_SOLVER = SweptGradientSolve(sweeps=10, warn_tol=None)
+"""The nested path's inner solve. ``warn_tol=None`` because it runs inside the outer operator, whose
+transpose an outer Krylov strategy forms, and a host diagnostic would make that operator nonlinear."""
 
 
 class _HessianSystems(NamedTuple):
@@ -1993,14 +2116,12 @@ class HessianCorrectedGradient(GradientScheme):
         ``validation/uvreactor_openfoam/schur_block_diagnosis.py`` reproduces all of it.
     """
 
-    solver: GradientSolve = eqx.field(default_factory=lambda: SweptGradientSolve(sweeps=20))
-    hessian_solver: GradientSolve = eqx.field(
-        default_factory=lambda: SweptGradientSolve(sweeps=10, warn_tol=None)
-    )
+    solver: GradientSolve = eqx.field(default_factory=lambda: _DEFAULT_OUTER_SOLVER)
+    hessian_solver: GradientSolve = eqx.field(default_factory=lambda: _DEFAULT_INNER_SOLVER)
     schur: bool = eqx.field(static=True, default=True)
     local_schur_block: bool = eqx.field(static=True, default=True)
     boundary_closure: HessianBoundaryClosure = eqx.field(default_factory=OwnerHessian)
-    coupled_sweep: CoupledBlockSweep | None = None
+    coupled_sweep: CoupledBlockSweep | None = eqx.field(default_factory=CoupledBlockSweep)
 
     def gradients(
         self,
@@ -2035,6 +2156,22 @@ class HessianCorrectedGradient(GradientScheme):
                 "which differentiates by unrolling and imposes no such requirement. The outer "
                 "`solver`'s own diagnostic is unaffected."
             )
+        # ⚠️ THE COUPLED SWEEP REPLACES BOTH SOLVERS, so a scheme carrying it and a solver the caller
+        # chose is a contradiction — and one that would otherwise resolve SILENTLY in the sweep's
+        # favour. That is not hypothetical: when this became the default, four call sites in this
+        # repository were left passing solvers that would no longer run, two of them harnesses whose
+        # published numbers depend on those settings being honoured. Refusing the pair costs a caller
+        # one explicit `coupled_sweep=None` and removes a whole class of measurement that quietly
+        # describes a configuration nobody ran.
+        if self.coupled_sweep is not None and (
+            self.solver != _DEFAULT_OUTER_SOLVER or self.hessian_solver != _DEFAULT_INNER_SOLVER
+        ):
+            raise ValueError(
+                "HessianCorrectedGradient: `coupled_sweep` drives both blocks itself, so the "
+                "`solver` and `hessian_solver` given here would never run. Pass "
+                "`coupled_sweep=None` to solve by the nested path with those strategies, or drop "
+                "them to sweep both blocks together."
+            )
         systems = self._systems(mesh, geometry, self.boundary_closure)
         if not self.schur:
             packed = self.solver.solve(
@@ -2066,6 +2203,7 @@ class HessianCorrectedGradient(GradientScheme):
         schur: bool = True,
         local_schur_block: bool = True,
         boundary_closure: HessianBoundaryClosure | None = None,
+        coupled: bool = True,
     ) -> HessianCorrectedGradient:
         """Build this scheme with **both** sweep counts measured from the mesh rather than assumed.
 
@@ -2127,8 +2265,22 @@ class HessianCorrectedGradient(GradientScheme):
             return cls(
                 solver=_calibrated_solver(systems.coupled, **settings),
                 schur=False,
+                coupled_sweep=None,
                 boundary_closure=closure,
             )
+        if coupled:
+            # A scheme cannot carry both paths, so this returns the one it measured and leaves the
+            # nested solvers at their defaults, where they are inert. Calibrating both would produce
+            # an object the constructor refuses -- see the guard in `gradients`.
+            return cls(
+                coupled_sweep=CoupledBlockSweep.calibrated(
+                    mesh, geometry, boundary_closure=closure, **settings
+                ),
+                schur=True,
+                local_schur_block=local_schur_block,
+                boundary_closure=closure,
+            )
+
         # The inner solve runs inside the outer Schur operator, whose transpose an outer Krylov
         # strategy would form, so its diagnostic is disabled — the same pairing the class default
         # carries and the reason `gradients` rejects the combination that lacks it.
@@ -2139,6 +2291,7 @@ class HessianCorrectedGradient(GradientScheme):
                 systems.outer(hessian_solver, inner, local_schur_block), **settings
             ),
             hessian_solver=hessian_solver,
+            coupled_sweep=None,
             schur=True,
             # Travels with the count, for the same reason the sweep count and the preconditioner
             # belong together: it changes which system was measured.

@@ -378,8 +378,12 @@ def test_hessian_schur_matches_coupled_solve() -> None:
     # to the Hessian at leading order — so a fixed sweep does not converge on it, and comparing a
     # converged Schur solve against an unconverged coupled one would measure the solver.
     exact = dict(solver=GmresGradientSolve(), hessian_solver=GmresGradientSolve())
-    schur = HessianCorrectedGradient(schur=True, **exact).gradients(phi, mesh, geom, bvals)
-    coupled = HessianCorrectedGradient(schur=False, **exact).gradients(phi, mesh, geom, bvals)
+    schur = HessianCorrectedGradient(schur=True, coupled_sweep=None, **exact).gradients(
+        phi, mesh, geom, bvals
+    )
+    coupled = HessianCorrectedGradient(schur=False, coupled_sweep=None, **exact).gradients(
+        phi, mesh, geom, bvals
+    )
     assert jnp.allclose(schur, coupled, atol=1e-10)
 
 
@@ -398,10 +402,12 @@ def test_hessian_accepts_an_injected_solve_strategy() -> None:
     bvals = _quadratic(geom.face.centroid)
     default = HessianCorrectedGradient().solver
     assert isinstance(default, SweptGradientSolve) and default.sweeps == 20
-    gmres = HessianCorrectedGradient(solver=GmresGradientSolve()).gradients(phi, mesh, geom, bvals)
-    swept = HessianCorrectedGradient(solver=SweptGradientSolve(sweeps=80, warn_tol=None)).gradients(
+    gmres = HessianCorrectedGradient(solver=GmresGradientSolve(), coupled_sweep=None).gradients(
         phi, mesh, geom, bvals
     )
+    swept = HessianCorrectedGradient(
+        solver=SweptGradientSolve(sweeps=80, warn_tol=None), coupled_sweep=None
+    ).gradients(phi, mesh, geom, bvals)
     assert jnp.allclose(gmres, swept, atol=1e-8)
 
 
@@ -885,8 +891,11 @@ class _CaptureSolve(GradientSolve):
 
 def _inner_system(mesh, geometry):
     """The scheme's inner ``A_HH`` operator and the preconditioner it pairs with it."""
+    # `coupled_sweep=None` selects the NESTED path, which is the one that hands its inner system to
+    # an injected solver -- the coupled sweep drives both blocks itself and never calls one, so the
+    # capture would come back empty.
     capture = _CaptureSolve()
-    HessianCorrectedGradient(hessian_solver=capture).gradients(
+    HessianCorrectedGradient(hessian_solver=capture, coupled_sweep=None).gradients(
         jnp.zeros(mesh.n_cells), mesh, geometry, jnp.zeros(mesh.n_faces)
     )
     return capture.seen[0]
@@ -936,9 +945,9 @@ def test_the_default_inner_sweeps_reach_the_exactly_solved_reconstruction() -> N
     bvals = _quad_3d(geometry.face.centroid)
 
     default = HessianCorrectedGradient().gradients(field, mesh, geometry, bvals)
-    exact = HessianCorrectedGradient(hessian_solver=GmresGradientSolve()).gradients(
-        field, mesh, geometry, bvals
-    )
+    exact = HessianCorrectedGradient(
+        hessian_solver=GmresGradientSolve(), coupled_sweep=None
+    ).gradients(field, mesh, geometry, bvals)
     assert float(jnp.max(jnp.abs(default - exact))) < 1e-11
 
 
@@ -956,12 +965,12 @@ def test_a_swept_outer_solve_reaches_the_same_gradient_as_the_krylov_one() -> No
 
     # Named explicitly rather than taken from the default: this asserts that the two OUTER strategies
     # agree, so it must keep comparing those two whatever the default later becomes.
-    krylov = HessianCorrectedGradient(solver=GmresGradientSolve()).gradients(
+    krylov = HessianCorrectedGradient(solver=GmresGradientSolve(), coupled_sweep=None).gradients(
         field, mesh, geometry, bvals
     )
-    swept = HessianCorrectedGradient(solver=SweptGradientSolve(sweeps=60, warn_tol=None)).gradients(
-        field, mesh, geometry, bvals
-    )
+    swept = HessianCorrectedGradient(
+        solver=SweptGradientSolve(sweeps=60, warn_tol=None), coupled_sweep=None
+    ).gradients(field, mesh, geometry, bvals)
     assert float(jnp.max(jnp.abs(krylov - swept))) < 1e-12
 
 
@@ -983,12 +992,14 @@ def test_a_diagnostic_emitting_inner_solver_is_refused_with_an_explanation() -> 
     # operator the inner solver sits inside. The default outer is a fixed sweep, which transposes
     # nothing, so the condition has to be asked for explicitly rather than inherited.
     with pytest.raises(ValueError, match="strictly linear"):
-        HessianCorrectedGradient(solver=GmresGradientSolve(), hessian_solver=chatty).gradients(
-            field, mesh, geometry, bvals
-        )
+        HessianCorrectedGradient(
+            solver=GmresGradientSolve(), hessian_solver=chatty, coupled_sweep=None
+        ).gradients(field, mesh, geometry, bvals)
 
     swept_outer = HessianCorrectedGradient(
-        solver=SweptGradientSolve(sweeps=40, warn_tol=None), hessian_solver=chatty
+        solver=SweptGradientSolve(sweeps=40, warn_tol=None),
+        hessian_solver=chatty,
+        coupled_sweep=None,
     ).gradients(field, mesh, geometry, bvals)
     assert not bool(jnp.any(jnp.isnan(swept_outer)))
 
@@ -1223,8 +1234,16 @@ def test_calibrating_the_hessian_scheme_sizes_both_of_its_systems() -> None:
     """
     mesh = perturbed_grid_2d(8, 8, perturb=0.25, seed=3)
     geometry = mesh.geometry()
-    scheme = HessianCorrectedGradient.calibrated(mesh, geometry)
 
+    # A scheme carries ONE solve path, so the factory sizes the one it returns. By default that is
+    # the coupled sweep; `coupled=False` asks for the nested pair instead. Both are checked, because
+    # a factory that sized a path the scheme does not use would be calibrated in name only -- which
+    # is what the constructor's guard now refuses to let happen silently.
+    swept = HessianCorrectedGradient.calibrated(mesh, geometry)
+    assert swept.coupled_sweep is not None and swept.coupled_sweep.sweeps >= 1
+
+    scheme = HessianCorrectedGradient.calibrated(mesh, geometry, coupled=False)
+    assert scheme.coupled_sweep is None
     assert scheme.solver.sweeps >= 1 and scheme.hessian_solver.sweeps >= 1
     assert scheme.hessian_solver.warn_tol is None
     assert (
@@ -1234,7 +1253,9 @@ def test_calibrating_the_hessian_scheme_sizes_both_of_its_systems() -> None:
     field = _quadratic(geometry.cell.centroid)
     bvals = _quadratic(geometry.face.centroid)
     exact = HessianCorrectedGradient(
-        solver=GmresGradientSolve(), hessian_solver=SweptGradientSolve(sweeps=30, warn_tol=None)
+        solver=GmresGradientSolve(),
+        hessian_solver=SweptGradientSolve(sweeps=30, warn_tol=None),
+        coupled_sweep=None,
     ).gradients(field, mesh, geometry, bvals)
     got = scheme.gradients(field, mesh, geometry, bvals)
     assert float(jnp.linalg.norm(got - exact) / jnp.linalg.norm(exact)) <= 1e-4
@@ -1295,12 +1316,18 @@ def test_the_two_calibrated_factories_expose_one_calibration_surface() -> None:
         "preconditioner",
         "local_schur_block",
         "boundary_closure",
+        # Which solve path to size. Only the Hessian-corrected scheme has two to choose between.
+        "coupled",
+        # The closure factory chooses a blend weight rather than a sweep count, so the ladder it
+        # searches is its own parameter; everything else about how it measures is the shared surface.
+        "weights",
     }
 
     for factory in (
         CorrectedGreenGauss.calibrated,
         HessianCorrectedGradient.calibrated,
         CoupledBlockSweep.calibrated,
+        AveragedNeighbourHessian.calibrated,
     ):
         parameters = inspect.signature(factory).parameters
         offered = {name: p.default for name, p in parameters.items() if name not in scheme_specific}
@@ -1347,6 +1374,7 @@ def _median_gradient_error(mesh) -> float:
     grad = HessianCorrectedGradient(
         solver=GmresGradientSolve(),
         hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
+        coupled_sweep=None,
     ).gradients(_quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid))
     exact = _quadratic_3d_grad(geom.cell.centroid)
     relative = jnp.linalg.norm(grad - exact, axis=-1) / jnp.linalg.norm(exact, axis=-1)
@@ -1392,6 +1420,7 @@ def test_hessian_corrected_survives_a_sliver_cell_without_going_non_finite() -> 
     grad = HessianCorrectedGradient(
         solver=GmresGradientSolve(),
         hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
+        coupled_sweep=None,
     ).gradients(_quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid))
     assert bool(jnp.all(jnp.isfinite(grad)))
 
@@ -1565,6 +1594,7 @@ def test_the_coupled_sweep_reaches_the_same_solution_as_an_exact_solve() -> None
         exact = HessianCorrectedGradient(
             solver=GmresGradientSolve(),
             hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
+            coupled_sweep=None,
         ).gradients(field, mesh, geom, bvals)
         swept = _coupled(40).gradients(field, mesh, geom, bvals)
         assert float(jnp.max(jnp.abs(swept - exact))) / float(jnp.max(jnp.abs(exact))) < 1e-9
@@ -1656,7 +1686,9 @@ def test_the_calibrated_coupled_sweep_meets_the_tolerance_it_was_given() -> None
     mesh = perturbed_grid_3d(8, 8, 8, perturb=0.3, seed=1)
     geom = mesh.geometry()
     exact = HessianCorrectedGradient(
-        solver=GmresGradientSolve(), hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None)
+        solver=GmresGradientSolve(),
+        hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
+        coupled_sweep=None,
     ).gradients(_quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid))
     tol = 1e-6
     scheme = HessianCorrectedGradient(
@@ -1797,7 +1829,11 @@ def test_the_neighbour_average_is_exact_for_a_quadratic_and_solves_on_tetrahedra
     fixed sweep counts this closure has not converged yet and reads ~1e-07, which is a property of
     the iteration and is documented on the class.
     """
-    exact = dict(solver=GmresGradientSolve(), hessian_solver=GmresGradientSolve())
+    # `coupled_sweep=None` selects the nested path, which is what these two Krylov solvers drive;
+    # left at the default the coupled sweep would run instead and ignore them.
+    exact = dict(
+        solver=GmresGradientSolve(), hessian_solver=GmresGradientSolve(), coupled_sweep=None
+    )
     for mesh in (
         columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.25, seed=0),
         tetrahedral_grid_3d(3, perturb=0.1, seed=0),
@@ -1822,3 +1858,106 @@ def test_the_neighbour_average_is_exact_for_a_quadratic_and_solves_on_tetrahedra
     tets = tetrahedral_grid_3d(2, perturb=0.1, seed=0)
     assert _hessian_system_condition(tets, AveragedNeighbourHessian()) < 1e3
     assert _hessian_system_condition(tets, OwnerHessian()) > 1e15
+
+
+def test_the_neighbour_average_is_exact_at_every_blend_weight() -> None:
+    """``weight`` trades conditioning against sweeps and must not trade accuracy.
+
+    The closure is ``(1 - weight)`` of the cell's own Hessian plus ``weight`` of the neighbour
+    average. Both parts are partitions of unity, so their blend is one too at any weight — and a
+    quadratic's Hessian is constant, so it passes through unchanged. If a future change breaks that
+    (a fallback returning zero, a normalization dropped) this is where it shows, at every weight
+    rather than only at the default.
+    """
+    mesh = columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.25, seed=0)
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    centroid = geometry.cell.centroid
+    separation = face_cells.neighbour_centroid(centroid) - centroid[face_cells.owner]
+    constant = jnp.broadcast_to(jnp.eye(mesh.dim) * -1.4, (mesh.n_cells, mesh.dim, mesh.dim))
+
+    for weight in (1.0, 0.6, 0.2, 0.0):
+        closure = AveragedNeighbourHessian(weight=weight)
+        carried = np.asarray(closure.prepare(face_cells, separation).apply(constant))
+        assert np.abs(carried - np.asarray(constant)).max() < 1e-12, weight
+
+
+def test_a_small_blend_weight_still_removes_the_tetrahedral_degeneracy() -> None:
+    """A little coupling breaks the degeneracy; it does not take the full average.
+
+    This is what makes the weight worth exposing: the sweep cost the closure adds is what one pays
+    for decoupling, and most of the decoupling arrives well before ``weight = 1``. A regression that
+    made small weights singular again would leave the closure usable only at its most expensive
+    setting, which the numbers on the class no longer describe.
+    """
+    tets = tetrahedral_grid_3d(2, perturb=0.1, seed=0)
+    assert _hessian_system_condition(tets, AveragedNeighbourHessian(weight=1.0)) < 1e2
+    assert _hessian_system_condition(tets, AveragedNeighbourHessian(weight=0.2)) < 1e4
+    # ... and zero weight IS the owner closure, degeneracy included, which is the other end of it.
+    assert _hessian_system_condition(tets, AveragedNeighbourHessian(weight=0.0)) > 1e15
+
+
+def test_the_blend_weight_calibrates_to_zero_where_the_owner_closure_already_closes() -> None:
+    """The weight is a property of the mesh, and measuring it costs nothing where nothing is wrong.
+
+    The calibration minimizes the sweep count over candidate weights, which needs no threshold to do
+    the right thing at both ends: on a mesh whose cells close their own boundaries the owner closure
+    is fastest and weight ``0`` wins, so the closure reduces to :class:`OwnerHessian` and does no
+    averaging at all; on a tetrahedral mesh weight ``0`` is *expansive* rather than merely slow, so
+    its count saturates and any working weight beats it.
+
+    This pins both ends, because a calibration that only ever returned a positive weight would look
+    correct on the mesh that needs one while quietly taxing every mesh that does not.
+    """
+    for mesh in (
+        columnwise_perturbed_grid_3d(5, 5, 5, perturb=0.25, seed=0),
+        perturbed_grid_2d(6, 6, perturb=0.3, seed=0),
+    ):
+        chosen = AveragedNeighbourHessian.calibrated(mesh, mesh.geometry(), tol=1e-10)
+        assert chosen.weight == 0.0
+
+    tets = tetrahedral_grid_3d(3, perturb=0.1, seed=0)
+    chosen = AveragedNeighbourHessian.calibrated(tets, tets.geometry(), tol=1e-10)
+    assert 0.0 < chosen.weight <= 0.4
+    assert _hessian_system_condition(tets, chosen) < 1e5
+
+
+def test_a_zero_blend_weight_is_the_owner_closure_exactly() -> None:
+    """Weight ``0`` is the end of the family, not an approximation of it — and is short-circuited so
+    it costs what the owner closure costs rather than building an average it then multiplies by zero.
+
+    The calibration returns this weight routinely, so it is a live path.
+    """
+    mesh = columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.25, seed=0)
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    centroid = geometry.cell.centroid
+    separation = face_cells.neighbour_centroid(centroid) - centroid[face_cells.owner]
+    probe = jnp.zeros((mesh.n_cells, mesh.dim, mesh.dim)).at[:, 0, :].set(1.0)
+
+    zero = AveragedNeighbourHessian(weight=0.0).prepare(face_cells, separation)
+    owner = OwnerHessian().prepare(face_cells, separation)
+    assert np.array_equal(np.asarray(zero.apply(probe)), np.asarray(owner.apply(probe)))
+    assert np.array_equal(np.asarray(zero.diagonal(probe)), np.asarray(owner.diagonal(probe)))
+
+
+def test_narrowing_reaches_the_coupled_sweep_as_well_as_the_swept_solve() -> None:
+    """A scheme solved by :class:`CoupledBlockSweep` has no :class:`SweptGradientSolve` left to
+    narrow, so narrowing that only knew the latter would return the tree unchanged and report nothing.
+
+    That matters because the count sets the residual's stencil, and the preconditioner probe is
+    matched to it — a caller who believes the stencil has been bounded, and whose scheme quietly
+    ignored the request, gets a probed matrix that is not the Jacobian. The same silent shape is
+    already documented for a Krylov outer solver, which narrowing genuinely cannot touch; this one it
+    can, so it must.
+    """
+    scheme = HessianCorrectedGradient(coupled_sweep=CoupledBlockSweep(sweeps=30, relaxation=0.8))
+    narrowed = narrow_gradient_sweeps(scheme, 4)
+
+    assert narrowed.coupled_sweep.sweeps == 4
+    # The narrowed copy must differ in the count and in NOTHING else: rebuilding at the class default
+    # would silently un-damp an under-relaxed sweep.
+    assert narrowed.coupled_sweep.relaxation == 0.8
+    # ... and it only ever narrows.
+    assert narrow_gradient_sweeps(scheme, 30).coupled_sweep is scheme.coupled_sweep
+    assert narrow_gradient_sweeps(scheme, 99).coupled_sweep is scheme.coupled_sweep
