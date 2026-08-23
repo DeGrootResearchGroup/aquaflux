@@ -44,6 +44,30 @@ def test_skipped():
     pytest.skip("an optional dependency is absent")
 """
 
+#: Records whether the test process was an xdist worker. ``PYTEST_XDIST_WORKER`` is set by xdist in
+#: each worker and absent otherwise, so this reports the gate's *actual* distribution rather than
+#: what its arguments imply.
+_WORKER_PROBE = """
+import os, pathlib
+
+def test_records_its_worker():
+    pathlib.Path(os.environ["FASTGATE_WORKER_PROBE"]).write_text(
+        os.environ.get("PYTEST_XDIST_WORKER", "serial")
+    )
+"""
+
+#: The same probe carrying a tier marker, so a heavy tier selects it rather than deselecting it.
+_MARKED_WORKER_PROBE = """
+import os, pathlib, pytest
+
+@pytest.mark.{marker}
+def test_records_its_worker():
+    pathlib.Path(os.environ["FASTGATE_WORKER_PROBE"]).write_text(
+        os.environ.get("PYTEST_XDIST_WORKER", "serial")
+    )
+"""
+
+
 _FAILING = """
 def test_fails():
     assert 1 == 2, "a deliberate failure"
@@ -59,9 +83,19 @@ def _tree(tmp_path: Path, **modules: str) -> Path:
     return root
 
 
-def _run(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+#: xdist marks each of its workers with these. They must not reach the child: this suite is itself
+#: run under the gate, so when it is, the child inherits the OUTER run's worker name and the probe
+#: below reports that instead of what the inner run did -- which reads as "the gate parallelized"
+#: for a run that was serial. Inheriting an environment is how a check ends up measuring its own
+#: caller.
+_XDIST_MARKERS = ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_WORKER_COUNT", "PYTEST_XDIST_TESTRUNUID")
+
+
+def _run(cwd: Path, *args: str, **overrides: str) -> subprocess.CompletedProcess[str]:
     """Run the gate in ``cwd``. ``CI`` is set so the hooks warning cannot colour the output."""
-    environment = dict(os.environ, CI="1")
+    environment = dict(os.environ, CI="1", **overrides)
+    for marker in _XDIST_MARKERS:
+        environment.pop(marker, None)
     return subprocess.run(
         [str(FASTGATE), *args], cwd=cwd, capture_output=True, text=True, env=environment
     )
@@ -173,3 +207,53 @@ def test_every_tier_name_is_accepted_and_reaches_pytest(tmp_path: Path, tier: st
 
     assert "unknown tier" not in result.stderr
     assert result.returncode == (0 if tier in ("fast", "all") else 5)
+
+
+def _worker_of(tmp_path: Path, tier: str, source: str, *args: str, **overrides: str) -> str:
+    """Run one probe test through the gate and report the worker it landed on."""
+    tree = _tree(tmp_path, test_probe=source)
+    probe = tmp_path / "worker.txt"
+
+    result = _run(tree, tier, str(tree), *args, FASTGATE_WORKER_PROBE=str(probe), **overrides)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    return probe.read_text()
+
+
+def test_the_fast_tier_runs_across_WORKERS_because_that_is_the_tier_that_runs_every_time(
+    tmp_path: Path,
+) -> None:
+    """The fast gate parallelizes by default.
+
+    This is the tier that runs on every change, so its wall clock is the one that decides whether
+    the edit-test loop is usable -- and the parallelism is invisible in the result, since a serial
+    run reports exactly the same passes. Without this, the gate could quietly fall back to running
+    serially (a lost argument, a shell quoting slip) and the only symptom would be that testing got
+    slow again, which nobody attributes to the runner.
+    """
+    assert _worker_of(tmp_path, "fast", _WORKER_PROBE).startswith("gw")
+
+
+@pytest.mark.parametrize("tier", ["slow", "validation"])
+def test_the_HEAVY_tiers_stay_serial_however_the_fast_tier_is_run(
+    tmp_path: Path, tier: str
+) -> None:
+    """The multi-minute tiers are deliberately NOT parallelized, and that is a memory decision.
+
+    Their solves each hold gigabytes of live JAX buffers, so running several at once is how a
+    machine ends up in swap -- which does not fail, it just makes everything on the machine
+    unusable for as long as the run lasts. CI reaches the same conclusion from the other side: it
+    shards those tiers across jobs rather than within one.
+    """
+    assert _worker_of(tmp_path, tier, _MARKED_WORKER_PROBE.format(marker=tier)) == "serial"
+
+
+def test_the_parallelism_can_be_turned_off_for_a_one_off_run(tmp_path: Path) -> None:
+    """Both opt-outs work: the environment variable, and naming your own worker count.
+
+    A developer bisecting a failure needs a serial run -- worker output is interleaved and a
+    crashing worker reports differently -- so the escape hatch is part of the feature, not a
+    nicety.
+    """
+    assert _worker_of(tmp_path, "fast", _WORKER_PROBE, FASTGATE_JOBS="0") == "serial"
+    assert _worker_of(tmp_path, "fast", _WORKER_PROBE, "-n0") == "serial"

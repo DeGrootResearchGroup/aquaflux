@@ -25,6 +25,13 @@ from tests.support.meshes import perturbed_grid_2d
 
 RHO, MU = 1.0, 0.02
 
+# Newton steps to drive a cavity solve to its root. The convergence is quadratic here -- the
+# 12x12 and 16x16 cavities reach |R| ~ 1e-11 by the fourth step -- so this is convergence plus a
+# step of margin. It is deliberately a named constant rather than a literal at each loop: the
+# count is not a property any test here pins, and every step it runs past the root is a full
+# preconditioned GMRES solve (and, in the differentiability check, another step on the tape).
+_NEWTON_STEPS = 5
+
 
 def _build(mesh, mu=MU, pin=0):
     """Build the lid-driven-cavity coupled p--U assembler on a given (possibly renumbered) mesh."""
@@ -98,7 +105,7 @@ def test_preconditioned_solve_converges_to_same_flow() -> None:
     precond = BlockPreconditioner.build(asm).factory()
     phi_plain = asm.initial_state()
     phi_prec = asm.initial_state()
-    for _ in range(8):
+    for _ in range(_NEWTON_STEPS):
         phi_plain = newton_step(asm.residual, phi_plain)
         phi_prec = newton_step(asm.residual, phi_prec, preconditioner=precond)
     assert float(jnp.linalg.norm(asm.residual(phi_prec))) < 1e-8
@@ -135,7 +142,7 @@ def test_the_pressure_prediction_is_a_drop_in_that_costs_fewer_outer_iterations(
     assert count(simpler) < count(triangular)
 
     phi_triangular, phi_simpler = asm.initial_state(), asm.initial_state()
-    for _ in range(8):
+    for _ in range(_NEWTON_STEPS):
         phi_triangular = newton_step(asm.residual, phi_triangular, preconditioner=triangular)
         phi_simpler = newton_step(asm.residual, phi_simpler, preconditioner=simpler)
     assert float(jnp.linalg.norm(asm.residual(phi_simpler))) < 1e-8
@@ -185,7 +192,7 @@ def test_preconditioned_solve_is_differentiable() -> None:
         asm = _cavity(12, mu=mu)
         precond = BlockPreconditioner.build(asm).factory()
         state = asm.initial_state()
-        for _ in range(8):
+        for _ in range(_NEWTON_STEPS):
             state = newton_step(asm.residual, state, preconditioner=precond)
         velocity, _ = asm.unpack(state)
         return jnp.mean(jnp.abs(velocity[:, 0]))
@@ -197,11 +204,11 @@ def test_preconditioned_solve_is_differentiable() -> None:
 
 def _dense_pressure_schur(assembler, state):
     """The true pressure Schur complement ``S = Ĉ - B F⁻¹ G``, densely, on a small problem."""
+    # One batched forward-mode pass, not one dispatch per column: `jacfwd` pushes the whole
+    # identity basis through in a single `vmap`, which is the same matrix an eager column loop
+    # builds and is what keeps this dense construction affordable in the always-on tier.
+    jacobian = np.asarray(jax.jacfwd(assembler.residual)(state))
     ndof = state.shape[0]
-    jacobian = np.zeros((ndof, ndof))
-    for j in range(ndof):
-        tangent = jnp.zeros(ndof).at[j].set(1.0)
-        jacobian[:, j] = np.asarray(jax.jvp(assembler.residual, (state,), (tangent,))[1])
     n_cells = assembler.mesh.n_cells
     marker = assembler.pack(jnp.zeros((n_cells, assembler.mesh.dim)), jnp.arange(1.0, n_cells + 1))
     pressure = np.nonzero(np.asarray(marker))[0]
@@ -226,10 +233,9 @@ def _dense_schur_preconditioner(assembler, state, scaling):
     )
     solve = block.schur.apply(schur_a_p, FlowBlocks.of(assembler, state))
     n_cells = assembler.mesh.n_cells
-    dense = np.zeros((n_cells, n_cells))
-    for j in range(n_cells):
-        dense[:, j] = np.asarray(solve(jnp.zeros(n_cells).at[j].set(1.0)))
-    return dense
+    # `vmap` over the identity basis rather than a column-at-a-time loop. Row j of the batched
+    # result is the strategy's action on e_j, i.e. column j of the operator -- hence the transpose.
+    return np.asarray(jax.vmap(solve)(jnp.eye(n_cells))).T
 
 
 def test_flow_saddle_pressure_block_is_positive_definite() -> None:
