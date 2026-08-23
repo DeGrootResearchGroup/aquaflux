@@ -92,8 +92,11 @@ def run(name, coupled, betas, arms=("ilu0", "ilu1"), reach=3):
     ar = cell_aspect_ratio(coupled)
     print(f"\n{'=' * 96}\nCASE {name}: {n} cells, {dim}D")
     print(f"  skew  median {np.median(live):.3e}  max {live.max():.3e}")
-    print(f"  aspect ratio  median {np.median(ar):.2f}  p99 {np.quantile(ar, 0.99):.2f}  "
-          f"max {ar.max():.2f}", flush=True)
+    print(
+        f"  aspect ratio  median {np.median(ar):.2f}  p99 {np.quantile(ar, 0.99):.2f}  "
+        f"max {ar.max():.2f}",
+        flush=True,
+    )
 
     state, residual = seed_state(coupled)
     rhs = -np.asarray(residual, dtype=np.float64)
@@ -102,8 +105,7 @@ def run(name, coupled, betas, arms=("ilu0", "ilu1"), reach=3):
     order_set = orderings(coupled)
 
     for beta in betas:
-        shift = (_frozen_shift_diagonal(base, beta, state) if beta > 0
-                 else np.zeros(n_fields * n))
+        shift = _frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(n_fields * n)
         cell_major, scaling, perm = assemble(jacobian, np.asarray(shift), n_fields)
         rhs_eq = (np.asarray(scaling) * rhs)[perm]
         print(f"\n  -- beta {beta}", flush=True)
@@ -114,8 +116,10 @@ def run(name, coupled, betas, arms=("ilu0", "ilu1"), reach=3):
             line = [f"     {label:<11} bw {bw:>7}"]
             for levels in (0, 1):
                 census = ilu_pivots(permuted, n_fields, levels)
-                line.append(f"| ILU({levels}) neg {census.get('negative', -1):>5} "
-                            f"min|p| {census.get('min', float('nan')):.2e}")
+                line.append(
+                    f"| ILU({levels}) neg {census.get('negative', -1):>5} "
+                    f"min|p| {census.get('min', float('nan')):.2e}"
+                )
             for arm in arms:
                 out = ksp_solve(permuted, b, n_fields, arm)
                 if "failed" in out:
@@ -132,8 +136,7 @@ def run(name, coupled, betas, arms=("ilu0", "ilu1"), reach=3):
     gc.collect()
 
 
-BETAS = tuple(float(b) for b in
-              __import__("os").environ.get("PROBE_BETAS", "0.05,0.5").split(","))
+BETAS = tuple(float(b) for b in __import__("os").environ.get("PROBE_BETAS", "0.05,0.5").split(","))
 
 if __name__ == "__main__":
     for spec in sys.argv[1:]:

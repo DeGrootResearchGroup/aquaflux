@@ -1120,9 +1120,7 @@ def _trailing_inverse(spec):
 
         def build(block, n_group_fields):
             hierarchy = build_air_hierarchy(block.tocsr())
-            return TracedBlockInverse(
-                lambda b: air_multigrid_solve(hierarchy, b), block.shape[0]
-            )
+            return TracedBlockInverse(lambda b: air_multigrid_solve(hierarchy, b), block.shape[0])
 
         return build
     if spec == "twolevel":

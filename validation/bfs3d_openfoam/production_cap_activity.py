@@ -61,8 +61,10 @@ def main() -> None:
     payload = np.load(path)
     state = jnp.asarray(payload["state"])
     print(f"checkpoint      : {path.name}")
-    print(f"  step {int(payload['step'])}, |R| {float(payload['residual_norm']):.4e}, "
-          f"ratio {float(payload['residual_ratio']):.4e}, shift {float(payload['shift']):.4g}")
+    print(
+        f"  step {int(payload['step'])}, |R| {float(payload['residual_norm']):.4e}, "
+        f"ratio {float(payload['residual_ratio']):.4e}, shift {float(payload['shift']):.4g}"
+    )
 
     case = compare.build_case()  # returns a dict, not a tuple
     coupled = case["coupled"]
@@ -81,17 +83,23 @@ def main() -> None:
 
     print(f"\ncells           : {n}")
     print(f"cap ACTIVE in   : {n_active} cells ({100.0 * n_active / n:.3f}%)")
-    print(f"S/omega         : max {float(jnp.max(s_over_omega)):.4f}, "
-          f"p99 {float(jnp.percentile(s_over_omega, 99)):.4f}, "
-          f"median {float(jnp.median(s_over_omega)):.4f}")
-    print(f"binds above     : {threshold:.4f}   "
-          f"(equilibrium boundary layer sits at {float(jnp.sqrt(beta_star)):.4f})")
+    print(
+        f"S/omega         : max {float(jnp.max(s_over_omega)):.4f}, "
+        f"p99 {float(jnp.percentile(s_over_omega, 99)):.4f}, "
+        f"median {float(jnp.median(s_over_omega)):.4f}"
+    )
+    print(
+        f"binds above     : {threshold:.4f}   "
+        f"(equilibrium boundary layer sits at {float(jnp.sqrt(beta_star)):.4f})"
+    )
 
     if n_active:
         over = production / jnp.maximum(limit, 1e-300)
         where = jnp.where(active, over, jnp.nan)
-        print(f"production/limit: max {float(jnp.max(over)):.4g}, "
-              f"median where active {float(jnp.nanmedian(where)):.4g}")
+        print(
+            f"production/limit: max {float(jnp.max(over)):.4g}, "
+            f"median where active {float(jnp.nanmedian(where)):.4g}"
+        )
         idx = np.asarray(jnp.argsort(-jnp.where(active, over, -jnp.inf))[: min(5, n_active)])
         centroid = np.asarray(case["geom"].cell.centroid)
         print("worst cells (x, y, z):")

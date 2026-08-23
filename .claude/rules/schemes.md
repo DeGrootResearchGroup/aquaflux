@@ -294,6 +294,52 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   The 3D skew test skews a hex grid **in-plane** (`tests/support/meshes.py::columnwise_perturbed_grid_3d`,
   planar faces): exact-for-quadratic vs `CorrectedGreenGauss`'s ~0.08 error.
 
+  **⚠️ THE HESSIAN IS SOLVED AS SIX COMPONENTS, NOT NINE (2026-08-22).** The Hessian of a
+  twice-continuously-differentiable field is symmetric, so `n_sym = dim(dim+1)/2` components carry
+  it — six in 3D. Solving only those leaves `dim²` equations for `n_sym` unknowns, and the surplus is
+  removed **in the least-squares sense weighted by the cell's own block**, which is what Betchen &
+  Straatman (2010) do (their Eq. 16–17): the reduced row is `(A_P E)ᵀ` applied to the full row, `E`
+  the expansion of the packed components. `contract_symmetric`'s adjoint identity
+  `<E u, R> = <u, contract(R)>` turns that into `contract(R A_P)`, so the `(dim², n_sym)` matrix is
+  never formed.
+
+  - **The reduced per-cell block is `(A_P E)ᵀ(A_P E)` — SYMMETRIC POSITIVE DEFINITE by construction**,
+    where the unreduced block is neither symmetric nor definite. Pinned by
+    `test_the_reduced_hessian_block_is_symmetric_positive_definite`, which checks the block the
+    preconditioner actually inverts rather than one computed a second way. This is the structural
+    reason to weight the reduction rather than project it unweighted: `A_HH⁻¹` sits at the centre of
+    the elimination term `A_gH A_HH⁻¹ A_Hg`. ⚠️ **That property is NOT what fixes the reactor mesh —
+    measured, see the weighting-versus-symmetry entry below.**
+  - **⚠️ STORAGE GOES UP, NOT DOWN — the expectation that motivated this is half wrong, and it is the
+    per-cell BLOCK that decides it.** The unknown shrinks by a third (9 → 6 doubles per cell, and
+    likewise every Hessian iterate on the reverse-mode tape). But the block **stops factoring**: an
+    unsymmetrized `H` enters its own equation only as `H·a`, touching one tensor index and leaving
+    the other alone, which is what made the block `I ⊗ C` and storable as `(dim, dim)`. Symmetry
+    couples the two indices, so it is a dense `(n_sym, n_sym)` — **9 → 36 doubles per cell in 3D**,
+    four times the storage. Net at 1.6M cells: about **−38 MB** on the unknown against **+346 MB** on
+    the block. Everything else about the change is favourable; this is not.
+  - **⚠️ THE REDUCTION MUST BE ROW-SCALED BY `1/vol`.** Weighting by `A_P` squares the equation's
+    volume scaling (`A_P ~ vol`, so the reduced block is `~vol²`), and every consumer assuming a
+    volume-scaled Hessian row degrades silently by a factor of the cell volume — the packed system's
+    inverse-volume preconditioner most of all, which on a real mesh means a factor of ~1e-9. A
+    positive per-cell row scaling changes neither the solution nor the block's definiteness, so this
+    costs nothing and is not a tuning.
+  - **The elimination term becomes an ordinary triple product.** `A_gH`'s block was a rank-three
+    tensor `(n, dim, dim, dim)` because the gradient equation contracts *both* of the Hessian's
+    indices; against packed components it is a plain `(n, dim, n_sym)` matrix, and the local Schur
+    block is `einsum("nma,nab,nbk->nmk", ...)`. Its probe count drops from `dim² = 9` to `n_sym = 6`,
+    while the reduced `A_HH` block's rises from `dim = 3` to `n_sym = 6` (the Kronecker shortcut that
+    let one row's probe give every row's is gone with the factorization).
+  - **The warp moment simplifies.** `½Pᵀ(Hd + Hᵀd)` carried both contractions because the tensor was
+    not symmetrized; the two now coincide and the half cancels the doubling.
+  - **`A_P` is now built eagerly rather than inside `inner()`.** The reduction is part of the
+    *equation*, not part of the elimination, so the un-eliminated path needs it too — which costs that
+    check path `dim` probes it did not previously pay.
+  - **Quadratic exactness is unchanged** (median 6.0e-15 at 2D perturb 0.3, 7.6e-15 at 3D perturb
+    0.25), the elimination still agrees with the un-eliminated solve, and the default 20/10 sweep
+    counts still reach the exactly-solved reconstruction — so this is a change of representation, not
+    of accuracy.
+
   **⚠️ NON-PLANAR FACES: the derivation drops a term, and restoring it is worth ~1000× on a real
   automatically-generated mesh (measured 2026-08-21).** Betchen's Eq. (2)→(3) drops the face integral
   of the linear term by "noting that the planar faces of a polyhedral volume possess a constant
@@ -400,8 +446,8 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   ⚠️ Flooring `1/V` is **not** an adequate substitute: it converts an unbounded divergence into a
   bounded 3.7e+07, six orders worse than the block.
 
-  **⚠️ THE OUTER PRECONDITIONER IS BUILT FROM THE WRONG BLOCK BY DEFAULT, and `local_schur_block`
-  is the fix (2026-08-22).** The outer operator is the Schur complement
+  **⚠️ THE OUTER PRECONDITIONER CAN BE BUILT FROM THE WRONG BLOCK, and `local_schur_block` — now the
+  default — is the fix (2026-08-22).** The outer operator is the Schur complement
   `S = A_gg − A_gH A_HH⁻¹ A_Hg`, but the preconditioner takes `A_gg`'s per-cell diagonal block and
   ignores the elimination term entirely. On a well-shaped cell that term is a ~9 % perturbation and
   dropping it is harmless; on a flattened one the volume vanishes while the face couplings do not, so
@@ -417,18 +463,639 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   | sliver 1.9e4 — cell / far | 8.05e-01 / 2.72e-07 | **1.42e-05 / 9.76e-11** |
   | sliver 1.9e6 — cell / far | 1.09e+00 / 4.94e-07 | **1.55e-02 / 1.40e-08** |
 
+  **⚠️⚠️ THE DEFAULT WENT `True` → `False` → `True` IN ONE DAY (2026-08-22). It is `True`. The middle
+  step is kept because what moved it back is a change to the SCHEME, not a re-reading of the same
+  evidence — with the Hessian solved as nine components the divergence below is real and reproducible;
+  with six it is gone and the other arm diverges instead. Read the entries in order.**
+
+  **⚠️⚠️ THE NINE-COMPONENT MEASUREMENT — IT DIVERGED ON A REAL
+  MESH, AND THE REASON INVERTS THE OBVIOUS INTUITION.** On a 1.6M-cell snappyHexMesh reactor,
+  measured in one process against a known analytic gradient
+  (`validation/uvreactor_openfoam/schur_block_diagnosis.py`):
+
+  | | median | p99 | max | cells > 100 % error |
+  |---|---|---|---|---|
+  | `A_gg` block | 1.137e-07 | **4.876e-05** | **7.011e-02** | 0 |
+  | Schur block | **8.957e-08** | 7.398e-05 | **5.599e+18** | **4599 of 1 635 909** |
+
+  A 27 % better median, a worse p99, and 0.28 % of the mesh diverging outright. ⚠️ **"A population,
+  not an edge case, so no per-cell guard is proportionate" was the reading here and it is REFUTED**:
+  the divergent mode's participation ratio is ~1 cell (below), so the population is one bad row's
+  contamination spread by 20 sweeps, and a per-cell guard is exactly the right shape after all.
+
+  **The failing cells are ORDINARY.** Four- and five-faced cells (tetrahedra and pyramids) against
+  the mesh's median of six, volumes 0.24–0.42 of median (one is 9× *larger*), planarity 0.89–0.9996,
+  closure ~1e-22. Not slivers, not warped, not invalid — every geometric hypothesis was refuted.
+
+  **⚠️ AND THE SCHUR BLOCK IS THE MORE ACCURATE ONE. That is the finding.** Against the true local
+  Schur block — obtained preconditioner-independently by lighting one cell's degree of freedom and
+  reading back its own row:
+
+  | cell | faces | `A_gg` vs truth | Schur vs truth | cond Schur | error |
+  |---|---|---|---|---|---|
+  | 1595711 | 4 | 3.284e-01 | **2.452e-02** | 2.6e+03 | 5.6e+18 |
+  | 60355 | 5 | 2.535e-01 | **6.025e-02** | **6.37** | 1.4e+17 |
+
+  **⚠️⚠️ SOLVING THE HESSIAN AS SIX COMPONENTS REMOVES THE DIVERGENCE ENTIRELY — AND SWAPS WHICH ARM
+  DIVERGES (measured 2026-08-22).** Reproduce with
+  `UV_MESH=<polyMesh> validation/run_case.sh validation/uvreactor_openfoam/schur_block_diagnosis.py`
+  — the run logs are gitignored, so the harness and its defaults are the record. Same 1.6M-cell
+  `snappyHexMesh` reactor mesh both times, same analytic quadratic, scheme defaults of 20 outer
+  sweeps and `UV_INNER=12` on the Hessian, both preconditioner arms in one process. Judged against the analytic gradient:
+
+  | Hessian | preconditioner | median | p99 | max | cells > 100 % |
+  |---|---|---|---|---|---|
+  | nine components | `A_gg` block | 1.137e-07 | 4.876e-05 | 7.011e-02 | 0 |
+  | nine components | Schur block | 8.957e-08 | 7.398e-05 | **5.599e+18** | **4599** |
+  | six components | `A_gg` block | 8.147e-08 | 4.918e-05 | **5.787e+05** | — |
+  | **six components** | **Schur block** | **8.055e-08** | **4.320e-05** | **5.184e-03** | **0** |
+
+  **The Schur block improves by twenty-one orders in the max and no longer diverges anywhere**, and
+  the `A_gg` block — which was the safe arm — now blows up instead. Every diverging cell in both
+  regimes is a four-faced cell at ~0.2 of the median volume, so it is the same population changing
+  hands rather than a new one.
+
+  **This is a controlled comparison, and that was checked rather than assumed.** Diffing
+  `aquaflux/schemes/gradient.py` across every commit between the two runs, the only change to the
+  reconstruction other than the symmetry reduction is `outer`'s `use_local_schur_block` default —
+  which the harness passes explicitly on both arms, so it is inert here. The two intervening merges
+  add opt-in paths (`CoupledBlockSweep`, the probe's gradient narrowing) that this harness does not
+  select.
+
+  **Consequence: `local_schur_block=False` is now the DOMINATED option, which inverts the default
+  question rather than settling it.** The reason to prefer `A_gg`'s block was that the Schur block
+  diverged on this mesh; it does not any more, and `A_gg`'s does. Note also that the under-resolution
+  warning fires on the `A_gg` arm at 20 sweeps and not on the Schur arm — the fixed sweep count is
+  visibly short for it, which is the same failure seen from the solver's side.
+
+  **Why the representation should decide this at all**: the elimination term is
+  `A_gH A_HH⁻¹ A_Hg`, and with the unsymmetrized Hessian `A_HH`'s per-cell block was neither symmetric
+  nor definite, so the correction subtracted from `A_gg`'s block could be wrong-signed. The reduction
+  makes that block `(A_P E)ᵀ(A_P E)` — SPD by construction — so the correction is a well-signed one.
+  ⚠️ That is the mechanism the measurement is consistent with, **not** one this run isolates: the
+  reduction also changes `S` itself, since a different reduction of an over-determined system picks a
+  different solution. Do not report it as demonstrated.
+
+  **THE RATE INVERTS WITH THE ARMS, AND PREDICTS BOTH MAGNITUDES.** `rho(I - P⁻¹S)`, 20 power
+  iterations, half-budget estimate beside it:
+
+  | Hessian | `A_gg` block | Schur block |
+  |---|---|---|
+  | nine components | 0.7148 ✓ | **6.2679 ✗** |
+  | six components | **2.0397 ✗** (half 2.0199) | **0.3070 ✓** (half 0.2223) |
+
+  `2.04²⁰ ~ 1.5e+06` against an observed max of 5.8e+05, and `6.27²⁰ ~ 1e+16` against 5.6e+18 — the
+  rate accounts for the error magnitude in both regimes, which is what ties the spectral measurement
+  to the reconstruction one rather than leaving them as two separate observations. The Schur block
+  under six components has the best rate of the four. ⚠️ Its half-budget estimate is the least
+  settled of them (0.2223 against 0.3070, a ratio of 1.38 where the others are within 1 %), so treat
+  **0.31 as approximate** — unambiguously below one, not accurate to two figures.
+
+  **⚠️⚠️ AND THE FAILURE IS LOCAL, NOT GLOBAL — this REFUTES the reading recorded here on
+  2026-08-22, which was mine and which the measurement built to test it overturned.** The dominant
+  mode's participation ratio:
+
+  | block | effective cells | top 1 | top 10 |
+  |---|---|---|---|
+  | `A_gg` (the diverging arm) | **1.1 of 1 635 909** | **0.933** | 0.999 |
+  | Schur | 16.9 | 0.091 | 0.688 |
+
+  **Ninety-three per cent of the divergent mode's energy sits on a single cell.** So `rho > 1` was
+  never evidence of a whole-mesh cause, a per-cell guard would work, and the earlier "the diverging
+  cells are geometrically ordinary because they are merely where the dominant eigenvector has
+  support, which is why no per-cell guard would help" had the inference backwards: a mode on one cell
+  is exactly what a per-cell guard catches. The population of 4599 was the contamination of a tiny
+  set spread by 20 sweeps, which is what the dilation test was added to check.
+
+  **The general lesson, and it is the transferable one: a spectral radius is a whole-mesh scalar and
+  says nothing about whether its cause is whole-mesh.** Reading locality out of it requires the
+  eigenvector, which costs nothing extra once the power iteration is already running.
+
+  **THE RELAXATION LADDER CONFIRMS THE SPECTRAL PICTURE INDEPENDENTLY, and rules relaxation OUT for
+  this arm.** `rho(I - w P⁻¹S)` under the Schur block, against what the two-point model
+  `max|1 - w·lambda|` over `lambda ∈ [0.693, 1.065]` predicts from the governing eigenvalue and the
+  modulus bound:
+
+  | `w` | 1.00 | 0.80 | 0.50 | 0.25 | 0.10 |
+  |---|---|---|---|---|---|
+  | measured | 0.3070 | 0.4597 | 0.6170 | 0.7863 | 0.9089 |
+  | predicted | 0.3070 | 0.4456 | 0.6535 | 0.8267 | 0.9307 |
+
+  Within 6 % at every rung, and **monotone increasing** — every amount of under-relaxation makes this
+  arm strictly worse, which is what an all-positive spectrum requires and is the opposite of what a
+  diverging arm needs. So Betchen & Straatman's relaxation requirement, which is stated for *their*
+  block-Jacobi on an arbitrary grid, is **not** what this configuration wants: it converges undamped
+  and damping only slows it. The prediction is a genuine one — the model was written down from the
+  `w = 1` measurement alone, before the other four rungs were computed.
+
+  The model also says the optimum is *above* one (`w = 2/(lambda_min + lambda_max) = 1.14`, giving
+  `rho ~ 0.21` against 0.31). **Not measured, and not proposed**: a 30 % rate improvement bought by a
+  knob calibrated from a two-point spectral estimate on one mesh is exactly the kind of tuning this
+  project's own record shows sitting one grid step from a cliff.
+
+  ⚠️ **Cost note for anyone re-running the ladder:** it used to build a fresh `jax.jit` per rung,
+  closing `w` in as a constant — so every rung recompiled a program capturing 2.3 GB of constants at
+  this mesh size, which dominated the twenty applies it then ran. `w` is now a traced argument and one
+  compilation serves the whole ladder.
+
+  **⚠️ THE SIGN TEST MEASURED THE WRONG EIGENVALUE, AND ITS PRINTED VERDICT IS THE OPPOSITE OF THE
+  TRUE ONE.** The test was meant to split the two candidate fixes: a positive governing eigenvalue of
+  `P⁻¹S` means some relaxation stabilizes the arm, a negative one means none does. It power-iterated
+  over `P⁻¹S` and reported `|lambda_max| = 1.0612`, `Rayleigh +1.0597`, "relaxation can stabilize it"
+  for `A_gg` — and `1.0649 / +1.0634` for the Schur arm, i.e. **nearly the same answer for an arm that
+  diverges at `rho = 2.04` and one that converges at `rho = 0.31`.** Two arms whose behaviour differs
+  by that much returning the same number is the tell.
+
+  **A power iteration over `P⁻¹S` returns the largest-MODULUS eigenvalue. The sweep is governed by the
+  eigenvalue FURTHEST FROM 1.** Those are different eigenvalues here, and the first is uninformative
+  about the second: on this operator most cells have `P` nearly exact, so there is a large cluster of
+  eigenvalues near `+1` — that cluster is what both iterations found, which is why both arms returned
+  ~1.06.
+
+  **Solved properly, `rho = |1 - lambda|` admits two candidates and the modulus bound kills one:**
+
+  | arm | `rho` | candidates | `\|lambda\|_max` | survivor |
+  |---|---|---|---|---|
+  | `A_gg` | 2.0397 | `-1.0397` or `+3.0397` | 1.0612 | **`-1.0397`** (`+3.04` exceeds the bound) |
+  | Schur | 0.3070 | `+0.6930` or `+1.3070` | 1.0649 | **`+0.6930`** (`+1.307` exceeds the bound) |
+
+  So `A_gg`'s governing eigenvalue is **negative**, and `1 - w·lambda > 1` for every `w > 0`: **no
+  positive relaxation stabilizes that arm** — the exact opposite of what the harness printed. Betchen
+  & Straatman's own under-relaxation prescription would not have rescued it.
+
+  **The instrument is fixed rather than annotated.** The governing eigenvalue is now read from the
+  Rayleigh quotient of the `I - P⁻¹S` iteration already being run for `rho` — whose dominant mode *is*
+  the governing one, and on which `I - P⁻¹S` acts as `1 - lambda` — so `lambda` comes out directly and
+  free. The `P⁻¹S` iteration is kept, relabelled as the modulus bound it actually provides, because it
+  is what discriminates the two candidates; when the two routes disagree, neither is trusted.
+
+  ⚠️ **What made this catchable was a second measurement that had to agree and did not** — the same
+  discipline that caught the `local_schur_block` reversal. A verdict from one power iteration, printed
+  with a confident English gloss, would have been recorded as fact; it was already written into this
+  file once as "relaxation can stabilize it" before the arithmetic was checked.
+
+  None of this affects the six-component result, which needs no relaxation: the Schur block converges
+  undamped at `rho = 0.31` with a governing eigenvalue of `+0.69`.
+
+  **BOUNDARY PROXIMITY: the hardest cells ARE boundary cells — 12 of the 12 worst own a boundary
+  face, against 23.1 % of the mesh doing so (2026-08-22).** Under the six-component Hessian nothing
+  diverges, so the enrichment table over the diverging *set* is vacuous (0 of 0) and says nothing;
+  what carries the finding is the residual ranking. Every one of the twelve worst-reconstructed cells
+  sits at boundary hop **0**, where 2.8 of 12 would be the chance expectation — and every one is also
+  four-faced. This scheme closes the Hessian at a boundary by taking the owner's, which Betchen &
+  Straatman note can leave the system under-determined; their remedy — an inverse-distance average of
+  the Hessian over interior neighbours not themselves adjacent to a boundary — is **not implemented
+  here**, and this is the first evidence on a real mesh that it is the right place to look next.
+
+  ⚠️ **Association, not mechanism.** A four-faced cell at a boundary is unusual in two ways at once
+  and this cannot separate them: the boundary closure could be the cause, or low face count could be,
+  or the two could simply co-occur because that is what `snappyHexMesh` produces where it cuts the
+  geometry. The discriminating arm is to implement the averaged closure and re-measure the same
+  ranking; a face-count-matched comparison of interior against boundary tetrahedra would separate
+  them without writing any new closure, and is cheaper.
+
+  ⚠️ **And the collapse the earlier regime showed is gone too**: `sigma_min` shrink now has a
+  *minimum* of 5.4e-01 across the whole mesh (median 1.000, **zero** cells below 1e-1), against a
+  minimum of 7.7e-03 and eight cells below 1e-1 under the unsymmetrized Hessian. The reduction did
+  not merely re-rank the arms — it stopped the correction from nearly cancelling the block anywhere.
+
+  **⚠️ IT IS THE SYMMETRY THAT FIXES THE REACTOR MESH, NOT THE LEAST-SQUARES WEIGHTING — measured
+  2026-08-23, and it retires the SPD mechanism this file offered a day earlier.** The six-component
+  change carried two things at once: solving the symmetric components, and removing the surplus
+  equations by a weighting that makes the reduced block SPD. Separated by swapping the reduction for
+  an unweighted projection (`contract_symmetric(residual)`, no `A_P` contraction, no row scaling) and
+  re-running the same harness on the same 1.6M-cell mesh:
+
+  | reduction | Schur median | p99 | max | Schur diverging | `A_gg` max | `A_gg` diverging |
+  |---|---|---|---|---|---|---|
+  | weighted (least squares) | 8.055e-08 | 4.320e-05 | 5.184e-03 | **0** | 5.787e+05 | — |
+  | unweighted (projection) | 8.139e-08 | 4.467e-05 | 6.137e-03 | **0** | 7.095e+16 | 6680 |
+
+  **Both fix it completely.** The unweighted block carries no definiteness guarantee whatever, so
+  "the reduced block is SPD, therefore the elimination term is well-signed" — offered here as the
+  mechanism — **is not what is doing the work.** What matters is that the Hessian is symmetric. Say
+  that, and stop citing definiteness as the cause.
+
+  **The weighting is kept anyway, and the reason is not the reactor.** It is the source's own
+  formulation, it costs one contraction per apply, and it makes the block SPD — a property worth
+  having even where it is not load-bearing. But its cost is real and shows up elsewhere: on a
+  tetrahedral mesh under the owner boundary closure it squares an already-bad conditioning,
+  `cond(S)` 4.184e+04 unweighted against **4.040e+19** weighted. That difference is moot once the
+  averaged closure is in force (which fixes tetrahedra outright, `cond(S) ~ 6`), but it is the
+  measurement to remember if a mesh ever turns up where the closure alone is not enough.
+
+  ⚠️ **Note what the `A_gg` column also shows:** unweighted, that arm's worst cell is 7.095e+16
+  against the weighted arm's 5.787e+05, and 6680 cells diverge. So the two reductions are not
+  interchangeable for the arm that fails — they are interchangeable only for the one that works.
+
+  **THE HESSIAN'S BOUNDARY CLOSURE IS AN INJECTED STRATEGY, AND THE TWO OPTIONS GENUINELY TRADE
+  (2026-08-23).** A boundary face has no neighbour to interpolate with, so its gradient is
+  extrapolated from the owner and needs a first-order Hessian to carry it. `HessianBoundaryClosure`
+  → `OwnerHessian` (default) / `AveragedInteriorHessian`, on `HessianCorrectedGradient
+  (boundary_closure=…)`.
+
+  | mesh | `OwnerHessian` (default) | `AveragedInteriorHessian` |
+  |---|---|---|
+  | tetrahedral, n=3, perturb 0.1 | **inf** | 1.70e-04 |
+  | hex 3³, perturb 0.25 | **9.25e-16** | 3.28e-03 |
+  | hex 8³, perturb 0.25 | **2.33e-15** | 4.03e-05 |
+  | 2D, perturb 0.3 | **2.62e-15** | 4.70e-05 |
+
+  And on the Hessian system's conditioning, which is the point of the second one:
+
+  | mesh | `cond(A_HH)` owner | averaged | `cond(S)` owner | averaged |
+  |---|---|---|---|---|
+  | tetrahedral n=2 | **2.851e+17** | **8.115** | **4.040e+19** | **5.985** |
+  | hex 3³ | 2.084e+01 | 4.362 | 1.995 | 1.788 |
+
+  - **Neither dominates, which is why both are kept** rather than one being deleted as dominated.
+    `OwnerHessian` carries the cell's own Hessian — for a quadratic that is the *exact* Hessian, so
+    the reconstruction stays exact, which is the property this scheme costs 60× a corrected
+    Green–Gauss reconstruction to have. `AveragedInteriorHessian` is Betchen & Straatman's Eq. (28)–(29)
+    and is the only one that solves on a tetrahedral mesh.
+  - **⚠️ BETCHEN'S AVERAGED CLOSURE GIVES UP EXACTNESS FOR QUADRATICS, and refinement does not
+    recover it — but see the entry below: that is a property of HIS eligible set, not of
+    averaging, and `AveragedNeighbourHessian` keeps the exactness**
+    (3.3e-03 at 3³, 2.0e-03 at 5³, 4.0e-05 at 8³ — falling, but four orders short of the owner
+    closure at any size). The cause is the closure's own empty case: where a cell has **no**
+    boundary-clear neighbour — a corner, an edge, a mesh too coarse to have an interior — the average
+    is zero and the extrapolation drops its curvature term entirely. That is consistent with the
+    source, which reports second-*order* gradients (their `gamma_1` = 1.832) rather than exact ones.
+    **So this is not a strictly better closure that we were simply missing; it is a different point
+    on an accuracy/robustness trade, and defaulting it on would silently cost the scheme its
+    headline property.**
+  - **⚠️ IT MUST BE PASSED INTO THE FACE KERNELS, NOT COMPUTED INSIDE THEM.** The averaged closure
+    reads a cell's *neighbours'* Hessians, and the per-cell blocks are recovered by probing those
+    kernels with a **uniform** field — so a gather from neighbours returns the probe's own value and
+    is indistinguishable from a diagonal term. Computed internally it would report neighbour coupling
+    as diagonal: the "compose the blocks, not the operators" trap, one level further in. Each closure
+    therefore declares its own diagonal contribution (`diagonal_probe`), which is what the
+    extractions pass — `probe` for the owner closure, zeros for the averaged one, since a cell's own
+    Hessian never appears in its own average. Pinned by
+    `test_the_averaged_closure_contributes_nothing_to_a_cell_own_diagonal_block`, which checks that
+    the prepared map really is non-zero on that probe while the declaration is zero — the two being
+    equal is precisely the bug.
+  - **The default is byte-unchanged**: `OwnerHessian.prepare` returns the identity and its
+    `diagonal_probe` returns the probe, which is exactly what the kernels did before the seam existed.
+  **⚠️⚠️ THE ACCURACY LOSS WAS NOT NECESSARY — averaging over ALL face neighbours is exact for a
+  quadratic AND leaves the system solvable, which is better than the published closure on the axis
+  that matters (measured 2026-08-23).** `AveragedNeighbourHessian`.
+
+  **The principle, and it is worth stating because it makes the whole family predictable:
+  a closure is exact for a quadratic exactly when its weights sum to ONE.** A quadratic's Hessian is
+  constant, and any weighted average of a constant whose weights sum to one returns it unchanged. So
+  `OwnerHessian` (weight 1 on self) is exact; Betchen's is exact wherever its eligible set is
+  non-empty and **zero** where it is not, and that zero branch is the entire source of its error.
+  Pinned directly rather than through a reconstruction, on a constant Hessian field, by
+  `test_a_closure_reproduces_a_constant_hessian_exactly_iff_its_weights_sum_to_one`.
+
+  | closure | `cond(A_HH)` tet | quadratic, converged | quadratic, shipped 20/10 |
+  |---|---|---|---|
+  | `OwnerHessian` (default) | **1.01e+18** | 6.65e-16 hex / *unsolvable* tet | 9.25e-16 hex |
+  | **`AveragedNeighbourHessian`** | **8.39** | **5.95e-16 hex · 2.57e-15 tet · 9.36e-16 2D** | 4.48e-07 hex |
+  | `AveragedInteriorHessian` (Betchen) | 8.39 | **3.28e-03 hex · 1.73e-04 tet** | 3.28e-03 hex |
+
+  **Betchen's closure does not improve with a better solve** — 3.28e-03 at 20/10, at 60/20 and under
+  an exact Krylov solve alike — which is what identifies it as a discretization error rather than an
+  unconverged iteration. The neighbour average moves 4.5e-07 → 2.3e-11 → 5.9e-16 across those same
+  three, i.e. it is exact and merely needs the sweeps.
+
+  - **The restriction to boundary-clear neighbours is what costs the exactness, and it is not needed
+    for solvability.** Both averaging closures reach `cond(A_HH)` 8.39 on tetrahedra; the wide one is
+    four orders more accurate. What actually keeps the system solvable is that a cell's **own**
+    Hessian stays out of its own boundary closure — not which neighbours are counted.
+  - **⚠️ THE ELIGIBLE SET AND THE EMPTY CASE CANNOT BE MIXED FREELY.** With the *narrow* set, an
+    owner fallback re-admits enough of the cell's own Hessian to make the tetrahedral system singular
+    again (`cond(A_HH)` **1.7e+18**). So Betchen's zero fallback is load-bearing *for his eligible
+    set*, and the wide set is what makes an owner fallback safe. The four combinations were measured;
+    only two are viable and they are the two that ship.
+  - **⚠️ IT COSTS SWEEPS AT FULL WEIGHT, and that is why it is not the default — but see the
+    blend-weight entry below, which recovers almost all of it.** The closure adds neighbour coupling
+    to the Hessian system, so that system converges more slowly. Calibrated to `tol = 1e-10`: outer
+    falls 15 → 13 while **inner rises 8 → 23** on a perturbed hexahedral grid (9 → 20 in 2D), which is
+    roughly `2.3x` the operator applies. At the shipped 20/10 it has not converged and reads 4.5e-07
+    where the default reads 9.3e-16 — so **switching the default would silently degrade the shipped
+    configuration**, and `calibrated` takes the closure precisely so the counts can follow it.
+  - **⚠️ THE INNER SWEEP COST DOES NOT AMORTIZE WITH MESH SIZE — hypothesis raised and REFUTED the
+    same hour.** The closure's value is only *read* at boundary faces, so it only couples
+    boundary-owning cells' rows, and the obvious expectation is that the cost shrinks as that share
+    falls. It does not. Calibrated to `tol = 1e-10` on perturbed hexahedral grids:
+
+    | cells | boundary-owning | owner inner | averaged inner | ratio |
+    |---|---|---|---|---|
+    | 27 | 96 % | 8 | 23 | 2.88 |
+    | 125 | 78 % | 10 | 23 | 2.30 |
+    | 512 | 58 % | 9 | 23 | 2.56 |
+    | 1728 | 42 % | 9 | 23 | 2.56 |
+
+    **Pinned at 23 while the coupled fraction falls by more than half.** A sweep count is set by the
+    operator's slowest mode, and that mode lives in the coupled rows however few of them there are —
+    so "only a few rows are affected" is not an argument about cost, here or anywhere else in this
+    file. **The reason the preconditioner cannot absorb it is structural:** the inner solve is
+    preconditioned Richardson over a *per-cell block*, which is block Jacobi by construction, and
+    neighbour coupling is exactly what such a block cannot represent.
+
+  - **✅ BUT A SMALL BLEND WEIGHT RECOVERS ALMOST ALL OF IT, AND COSTS NO ACCURACY.**
+    `AveragedNeighbourHessian(weight=w)` carries `(1-w)` of the cell's own Hessian plus `w` of the
+    neighbour average. Both parts are partitions of unity, so the blend is one **at every weight** —
+    hence exact for a quadratic at every weight, which is the property that makes the parameter safe
+    to expose at all (measured 2.1e-15 on tetrahedra and 1.0e-15 on hexahedra across `w` from 1.0 to
+    0.1). What the weight actually trades:
+
+    | `weight` | `cond(A_HH)` tet | inner sweeps | quadratic at the shipped 20/10 |
+    |---|---|---|---|
+    | 1.0 | 8.4 | 23 | 5.1e-07 |
+    | 0.4 | 35.7 | 15 | 2.1e-09 |
+    | **0.2** | **142** | **11** | **9.8e-12** |
+    | 0.1 | ~480 | — | **3.7e-14** |
+    | 0.0 | **1.0e+18** | 10 | *unsolvable* |
+
+    **A little coupling is enough to break the degeneracy.** At `w = 0.2` the tetrahedral system is
+    comfortably solvable — 142 against double precision's ~1e16 — at 11 inner sweeps against the
+    owner closure's 10, and the *fixed-sweep* reconstruction is 9.8e-12 rather than 5.1e-07. So the
+    closure's cost is not intrinsic; it is what one pays for maximal decoupling, and most of the
+    decoupling arrives long before `w = 1`.
+
+    **✅ AND THE WEIGHT IS CALIBRATED FROM THE MESH, which removes the guess entirely.**
+    `AveragedNeighbourHessian.calibrated(mesh, geometry)` measures the Hessian system's contraction
+    rate at each candidate weight — the same estimator the sweep counts use — converts each to a
+    sweep count, and takes the weight needing the fewest.
+
+    **One objective, no threshold, and it is right at both ends.** The degeneracy is not a subtle
+    signal: at `w = 0` on a tetrahedral mesh the measured rate is **15.4**, i.e. the iteration is
+    *expansive*, so its count saturates at `cap` and loses to any weight that works. And on a mesh
+    where the owner closure closes the system perfectly well, `w = 0` genuinely needs the fewest
+    sweeps and is chosen — so the closure reduces to `OwnerHessian` and costs **nothing**, the
+    `weight == 0` branch short-circuiting the averaging entirely rather than multiplying it by zero.
+    Measured:
+
+    | mesh | calibrated weight | inner sweeps |
+    |---|---|---|
+    | tetrahedral n=2 | 0.10 | 38 |
+    | tetrahedral n=3 | 0.20 | 36 |
+    | hex 5³, perturb 0.25 | **0.00** | 10 |
+    | 2D, perturb 0.3 | **0.00** | 9 |
+
+    Costs `iters` applies per candidate — about one reconstruction for the whole ladder, once, off
+    the differentiated path.
+
+  - **⚠️⚠️ A CALIBRATION MUST NOT DECIDE ANYTHING FROM A MEASUREMENT TAKEN ON A SINGULAR SYSTEM —
+    caught by CI after passing locally (2026-08-23).** The weight ladder originally included `0`,
+    where this closure *is* the owner closure and, on the meshes that need the closure at all, leaves
+    the Hessian system numerically singular. The contraction rate there measured **15.4** on macOS
+    arm64 — expansive, correctly saturating at `cap` and losing — and **below one** on CI's Linux
+    runners, where it was then chosen as the cheapest option. Same mesh, same seed, same code: the
+    rate of a singular system depends on how the platform's linear algebra inverts a near-singular
+    block, and nothing built on it is reproducible.
+
+    **The fix is to stop evaluating that point**, not to loosen the assertion: the ladder starts at
+    `0.05`, and asking for no coupling at all means naming `OwnerHessian`, which is a choice rather
+    than a measurement. It costs nothing — on a mesh needing no decoupling the ladder's smallest
+    weight and zero take the same sweep count (10 on hex 5³).
+
+    **Two lessons worth carrying past this closure.** A quantity that is only unstable *in the regime
+    you are trying to detect* is the worst possible detector, and it will pass every test on the
+    machine you wrote it on. And the assertion had to change shape too: pinning the chosen weight
+    pins noise where several candidates sit within a sweep of each other, so the test now asserts the
+    chosen closure **solves** — conditioning of the operator, which involves no inversion and is
+    stable — rather than which value was chosen.
+
+        **The shipped default is `0.2`**, which is where the trade sits on the meshes measured and is the
+    value to use when calibration is not run. ⚠️ It remains one mesh's evidence: the conditioning
+    scales roughly as `cond ~ w^-1.75` over the range tested, so a mesh an order more degenerate would
+    be four orders worse at `w = 0.1`. That is what the calibration is for — prefer it to the
+    default, and do not lower the default on the strength of that table.
+
+  - **✅ THE WAY TO IMPROVE THE INNER SOLVE IS NOT TO NEST IT — `CoupledBlockSweep` is worth ~12x
+    here, far more than the 1.2--1.5x it was worth before this closure existed (2026-08-23).** The
+    nested path re-converges the Hessian from zero on **every outer apply**, and this closure is
+    precisely what makes that convergence expensive — so the arrangement that keeps the Hessian
+    iterate between sweeps gains exactly where the closure costs. At matched accuracy (~1e-10),
+    counting face-kernel passes as `outer x (1 + inner)` against the coupled sweep's `3 x sweeps`:
+
+    | mesh | nested | coupled sweep | ratio |
+    |---|---|---|---|
+    | tetrahedral n=3, weight 0.2 | 1665 passes → 6.2e-11 | **~120 → 2.2e-10** | **~12x** |
+    | hex 5³, perturb 0.25 | 165 passes → 1.9e-11 | **51 → 8.9e-13** | **~3x** |
+
+    On the tetrahedral mesh the coupled sweep reaches **5.8e-15** at 192 passes, which the nested path
+    does not approach at nine times the work. **So the pairing to recommend with this closure is the
+    coupled sweep, not a bigger inner count.**
+
+  - **⚠️ AND THE INNER COUNT THE CALIBRATION ASKS FOR IS LARGELY WASTED ON A HARD MESH.** Holding the
+    outer count at 20 and sweeping the inner on the tetrahedral mesh, the reconstruction plateaus by
+    **inner 8** (4.06e-06) and 36 buys nothing (3.48e-06) — the *outer* count is what limits the
+    answer there, so 28 of the 36 calibrated inner sweeps are spent for a 13 % improvement. On the
+    hexahedral mesh the same sweep keeps paying to inner 14. **The composition is the thing to
+    calibrate, and calibrating each system separately to the same tolerance does not do it** — this
+    file's older "three orders of margin" note is the same observation, and the margin is now measured
+    at ~7e-4 attenuation on tetrahedra against ~1e-2 on hexahedra. ⚠️ **A blanket loosening factor is
+    therefore NOT safe**: those differ by 14x, and the conservative end would over-resolve one mesh
+    while under-resolving the other.
+
+  - **⚠️ `CoupledBlockSweep.calibrated` SATURATES ITS CAP on the tetrahedral mesh, and over-counts by
+    ~3x when it does not.** It reports 64 at the default cap, 128 at 128, and asks for **193** at 256
+    — while 64 sweeps already reconstruct to **5.8e-15**. That is the conservatism this file already
+    records structurally (the rate is measured on the packed `[g, h]` error, whose Hessian half
+    dominates while the gradient's falls faster), quantified here on a mesh hard enough for it to
+    matter. **A reported count equal to the cap is not a measurement** — raise the cap to find out
+    what it wanted, and judge the sweep on the reconstruction rather than on the count.
+
+  - **What this changes about the earlier entry:** "the averaged closure gives up exactness" is true
+    of *Betchen's* and **not** of the family. The choice on a mesh the default cannot solve is no
+    longer accuracy-versus-solvability — it is sweeps-versus-solvability, which is a far better trade
+    and the one to offer a user.
+  - **Both averaging closures share one implementation** (`_inverse_distance_average`, taking the
+    eligible set and the empty case), so the weighting, the fallback and the diagonal declaration are
+    stated once. That matters here because the two differ in exactly two flags and would otherwise be
+    a copy-paste pair whose difference is invisible.
+
+  - **⚠️ BOTH CALIBRATION FACTORIES HAD TO TAKE IT, and the signature-parity test is what said so.**
+    The closure changes the operator, so a count measured under one closure and returned on a scheme
+    carrying another is calibrating the wrong system — the exact failure that factory exists to
+    prevent. `HessianCorrectedGradient.calibrated` was the obvious one; `CoupledBlockSweep.calibrated`
+    also builds `HessianCorrectedGradient._systems` to measure its coupled error operator, and would
+    quietly have measured the default closure whatever the scheme ran. Measured difference on one
+    mesh: **6 sweeps under the owner closure against 5 under the averaged one**, so this is not
+    theoretical.
+    ⚠️ **Exempting the keyword from the parity test would have hidden the drift it was added to
+    catch**, since that exemption applies to every factory at once. The test now additionally asserts
+    that the two Hessian-aware factories both offer it *and* offer it identically —
+    `CorrectedGreenGauss` reconstructs no Hessian and is the only legitimate abstainer.
+
+  **⚠️⚠️ THE SCHEME DOES NOT SOLVE ON AN ALL-TETRAHEDRAL MESH UNDER THE DEFAULT BOUNDARY CLOSURE —
+  `A_HH` IS NUMERICALLY SINGULAR THERE, AND THIS PREDATES THE SIX-COMPONENT CHANGE (measured
+  2026-08-22). ✅ SOLVED 2026-08-23 by `AveragedInteriorHessian` (above), which takes `cond(A_HH)`
+  from ~1e17 to ~8 — this entry is the diagnosis that led there, and the "not per-cell / not only the
+  boundary" reasoning below is what pointed at the closure rather than at a guard.** `tests/support/meshes.py::
+  tetrahedral_grid_3d` builds a conforming Kuhn subdivision of the unit cube (six tetrahedra per
+  cube, every cell four-faced, closure ~1e-17, positive volumes, validated by
+  `test_the_tetrahedral_fixture_is_a_valid_mesh_of_four_faced_cells`). On it, materialized densely:
+
+  | mesh | formulation | `cond(A_HH)` | `cond(S)` |
+  |---|---|---|---|
+  | tet, 48 cells, perturb 0.1 | nine components | **4.696e+17** | 7.175e+02 |
+  | tet, 48 cells, perturb 0.1 | six components | **2.851e+17** | **4.040e+19** |
+  | hex, 3³, perturb 0.25 | nine components | 4.622e+00 | 1.995e+00 |
+  | hex, 3³, perturb 0.25 | six components | 2.084e+01 | 1.995e+00 |
+
+  Double precision carries ~1e16, so `A_HH` is **singular in both formulations** — the nine-component
+  column is the pre-existing state and was checked by running the diagnostic against the parent
+  commit's `gradient.py`, precisely so this could not be mis-attributed to the same day's change. A
+  Krylov solve raises (lineax stagnation) and a swept solve returns `inf`, at every perturbation from
+  0 to 0.25 and at every size from 48 to 750 cells.
+
+  **What is NOT yet established, and the candidates are not equivalent:**
+  - **It is NOT per-cell.** Every cell's diagonal block inverts; the null space is a property of the
+    assembled operator. So a per-cell guard is the wrong shape here, unlike the `A_gg` divergence
+    above.
+  - **It is not only the boundary closure**, though that is the prime suspect: Betchen & Straatman
+    introduce their averaged Hessian (Eq. 29) *explicitly* to stop the simple closure leaving the
+    system under-determined, and this scheme implements the simple one. But raising the mesh from 75 %
+    to 36 % boundary-touching cells does not rescue it, so if the closure is the cause its effect is
+    not confined to the cells that touch a boundary.
+  - **The six-component `cond(S)` is nine orders worse than the nine-component one** (4.0e+19 against
+    7.2e+02) even though `A_HH` is comparably singular in both. The reading that fits: with the full
+    tensor the null direction lies where `A_gH` cannot see it — the gradient equation contracts `H`
+    against the face-curvature tensor, which is **symmetric**, so an antisymmetric null direction is
+    annihilated and never reaches the Schur complement. Removing the antisymmetric components removes
+    that shelter. ⚠️ Offered as the reading that fits, **not measured** — the null vector was not
+    extracted.
+  - **The least-squares weighting squares the conditioning** (`cond(NᵀN) = cond(N)²`), which is
+    harmless where `C` is well conditioned (2.4 median on the reactor mesh) and is not where it is
+    not. An unweighted projection would avoid the squaring at the cost of the SPD property that the
+    reactor measurement above turns on. **Whether the reactor result needs the weighting or only the
+    symmetry is UNSEPARATED** — both arrived in one change, and separating them is one more run.
+
+  **Consequence for the test suite:** the fixture now carries a real test —
+  `test_the_averaged_closure_makes_a_tetrahedral_hessian_system_solvable` pins both halves, that the
+  owner closure leaves `cond(A_HH) > 1e15` there and the averaged one brings it under `1e3`, with a
+  hexahedral control so the result is about the cell shape and not about one closure being generally
+  better. **"The scheme works on tetrahedra" is true only with `AveragedInteriorHessian`, and then
+  only to second order** — the default closure still cannot solve there, which is the trade the entry
+  above describes.
+
+  ⚠️ **THE FIXTURE GAP THAT LET THIS SHIP TWICE IS ONLY HALF CLOSED.** Both the original wrong
+  default and this reversal were invisible to every synthetic mesh in the test suite, because those
+  are perturbed hexahedral grids and every diverging cell here has **four** faces. A tetrahedral
+  fixture now exists (`tetrahedral_grid_3d`) and is validated as a mesh — but the scheme does not
+  *solve* on it (see the entry above), so it cannot yet carry a reconstruction test. **Until it can,
+  a change to this preconditioner is not tested by a green fast gate — it is tested by this one case
+  and nothing else.**
+
+  **⚠️ THE RATE IS THE MECHANISM: `rho(I - P⁻¹S)` is 6.2679 under the Schur block and 0.7148 under
+  `A_gg`'s.** The sweep is expansive by 6.3 per iteration, so twenty sweeps is `6.27²⁰ ~ 1e+16` --
+  which is the observed 1e+16--1e+18 exactly. Half-budget estimates 5.42 and 0.58, so both are settled
+  rather than transient.
+
+  **⚠️⚠️ BUT `rho` IS A WHOLE-MESH NUMBER AND DOES NOT ESTABLISH A WHOLE-MESH CAUSE — an earlier
+  version of this entry read it as "GLOBAL rather than per-cell" and concluded "NO PER-CELL FIX
+  EXISTS". Neither follows.** A spectral radius above one is equally consistent with a mode spread
+  over the mesh and with one pinned to a handful of rows, and nothing measured distinguishes them: a
+  fixed sweep count propagates a bad row one cell per sweep, so **8 collapsed cells dilated 20 hops is
+  a population of the same order as the 4599 that diverge**. The discriminators are the eigenvector's
+  participation ratio, whether the diverging set is the dilation of the collapsed one, and the SIGN of
+  the dominant eigenvalue of `P⁻¹S`; all three are now in
+  `validation/uvreactor_openfoam/schur_block_diagnosis.py` and **none has been run** — the 1.6M-cell
+  mesh is gitignored, was not kept, and the run-file did not record `UV_MESH`, so re-running needs
+  `of_case/Allmesh` first.
+
+  **⚠️ AND THE HARNESS THAT PRODUCED `rho` WAS DELETED IN THE SAME COMMIT THAT CITED IT.** The
+  `sigma_min` and contraction-rate sections ran at 21:50 and the file committed at 22:05 did not
+  contain them, so the headline finding was citable but not re-runnable — the precise state the
+  measurement rule exists to prevent. Rebuilt 2026-08-22.
+
+  **THE LEADING EXPLANATION IS THAT WE RUN THE ONE RELAXATION THE METHOD'S AUTHORS EXCLUDE.** Betchen
+  and Straatman solve this reconstruction by block-Jacobi over the **coupled** `[g, h]` system, with
+  the full per-cell block `A_P` (their Eq. 20) — and the gradient corner of `A_P⁻¹` **is** the local
+  Schur complement `(A_gg,loc - A_gH,loc A_HH,loc⁻¹ A_Hg,loc)⁻¹`, by the standard block-inverse
+  identity. So `local_schur_block=True` is their preconditioner and `A_gg`'s block is not: the latter
+  is the `(1,1)` block of `A_P` itself rather than the inverse of the `(1,1)` block of `A_P⁻¹`, and
+  the two differ by exactly the elimination term. Of their own iteration they state that **on an
+  arbitrary grid a relaxation strictly below one is required for convergence at all**, and they run it
+  at 0.8 (their `a = 0.2`; see the convention note in `SweptGradientSolve.solve`), converging in 33
+  iterations. **Our outer solver runs undamped.** So the block that diverges is theirs run at a
+  relaxation they exclude, and the block that survives is a weaker, more diagonally dominant stand-in
+  that happens to contract undamped.
+
+  **A SECOND DEVIATION WAS A CANDIDATE FOR THE SAME FAILURE — SINCE CLOSED (2026-08-22).** They solve
+  the **six independent** Hessian components, reducing the over-determined nine-equation system by
+  least squares (their Eq. 16--17), which makes their Hessian block `(A_P E)ᵀ(A_P E)` **symmetric
+  positive definite by construction**; this scheme solved all `dim²` components unsymmetrized, so its
+  block was neither. A non-definite `A_HH` can give the elimination term the wrong sign, and a
+  negative eigenvalue of `P⁻¹S` is precisely the case **no** positive relaxation repairs
+  (`1 - w·lambda > 1` for every `w > 0`), so the two candidate fixes are not interchangeable and the
+  **sign of the dominant eigenvalue of `P⁻¹S`** is what separates them: positive says Betchen's
+  relaxation is the fix, negative implicates the Hessian's representation.
+
+  The representation is now Betchen's — see the six-components entry above — so that arm is settled
+  and the block is SPD. What that change buys **on this failure** is a measurement, not an inference,
+  and it is taken with the same harness on the same mesh.
+
+  **⚠️ BETCHEN'S OWN "UNDER-DETERMINED" REMARK IS ABOUT NEITHER OF THESE — it is a BOUNDARY-closure
+  degeneracy** (their Eq. 28--29): taking the boundary Hessian as the owner's leaves the system
+  under-determined in some cases, their illustration being a grid one cell thick in a direction, where
+  the second derivative across it is arbitrary. Their fix is an inverse-distance-averaged Hessian over
+  interior neighbours not themselves adjacent to a boundary, which this scheme does not implement (see
+  the boundary-treatment note above). It is **not** a statement that the per-cell Hessian block goes
+  rank-deficient on low-face-count cells, and the measurement agrees: `cond C` is 1.17 mesh-wide
+  median and, on four-faced cells, 2.45 median with a **maximum of 3.37** — the best-conditioned group
+  on the mesh. **Whether the failing cells touch a boundary is unchecked**, and is the one route by
+  which their remark could still bear on this.
+
+  A limiter on the correction remains refuted as a *general* fix -- the `sigma_min` collapse it would
+  target affects **8 cells of 1 635 909** (median shrink 1.000, only 3 below 1e-2) — but "8 cells
+  cannot matter" is exactly the inference the dilation test exists to check, so do not treat it as
+  closed either. A Krylov outer solve does not require `rho < 1`, which is the whole reason it is
+  untroubled.
+
+  The block that diverges is **13× closer to the truth**, and cell 60355 is **well conditioned** as
+  well as accurate. So neither accuracy nor conditioning is the mechanism: **a stationary iteration
+  does not want an accurate preconditioner, it wants a diagonally dominant one.** The correction
+  *subtracts* from `A_gg`'s block, the diagonal shrinks, `P⁻¹` grows, and on a cell whose off-diagonal
+  coupling is already comparable the iteration stops contracting. ⚠️ **This reading was marked
+  "superseded by the global rate" and that marking was WRONG — the rate is this mechanism measured,
+  not a competitor to it.** Loss of block diagonal dominance is *how* an iteration comes to have a
+  rate above one, so the two are one finding at two levels of description; and it is corroborated
+  independently by Betchen and Straatman requiring a relaxation below one for their own block-Jacobi
+  on an arbitrary grid, which is what one does to an iteration not dominant enough to contract
+  undamped. Three earlier mechanisms
+  (near-singular `A_HH` from an under-determined Hessian on tetrahedra — refuted, `cond C` is 1.8 on
+  the worst cells and 3.37 at worst over every four-faced cell; preconditioner/operator mismatch at
+  low inner counts — refuted, invariant across inner 4–20; ill-conditioning generally — refuted by
+  cell 60355) were each proposed and each rejected by measurement.
+
+  **A Krylov outer solve is untroubled by the same preconditioner** (max 2.378e-02), spending
+  iterations rather than diverging, because it does not require `rho < 1`. ⚠️ That was the *workaround*
+  while the Hessian was unsymmetrized; under six components the fixed sweep converges too
+  (`rho = 0.31`), so it is no longer a reason to reach for `GmresGradientSolve` here — and the fixed
+  sweep remains far cheaper to differentiate.
+
+  **⚠️ HOW THIS SHIPPED, because the process failure matters more than the bug.** It was defaulted on
+  the strength of measurements taken **entirely on 8³ synthetic meshes**, which cannot contain the
+  cells that break it — while "measure `local_schur_block` at 1.6M cells" was already an open item.
+  A default was changed on evidence that structurally could not see the failure mode. The same run
+  also exposed a probe-scheduling bug (below) whose justification was measured at 13824 cells, where
+  its premise does not hold either. **Two independent faults in one feature, both from measuring on
+  meshes too small to discriminate.**
+
   Better on **every** mesh measured — slightly on clean ones, 57000× on a sliver cell — for **~7 %
   forward time and ~17 % peak memory** (`dim` probes for `A_Hg` plus `dim²` for `A_gH`, a fixed
   prologue against ~220 applies at the shipped 20/10). Adjoint agrees with a finite difference to
-  2.1e-09. **DEFAULT ON since 2026-08-22**: this scheme is chosen precisely for meshes a
-  corrected Green-Gauss cannot handle, so its default preconditioner should be the one that survives
-  them; `local_schur_block=False` recovers the historical `A_gg`-only block.
+  2.1e-09. **DEFAULT ON**: this scheme is chosen precisely for meshes a corrected Green-Gauss cannot
+  handle, so its default preconditioner should be the one that survives them — and under the
+  six-component Hessian it is also the only one of the two that converges there.
+  `local_schur_block=False` recovers the historical `A_gg`-only block, which is now the arm that
+  diverges on that mesh and is kept as the control the comparison needs rather than as a
+  recommendation.
 
-  - **`A_gH` genuinely needs `dim²` probes** — no Kronecker shortcut. The gradient equation contracts
-    **both** of the Hessian's indices (face curvature, each side's Hessian moment, the warp moment),
-    so its block is a full rank-three tensor. `A_HH`'s is `I ⊗ C` and needs one.
+  - **`A_gH` needs one probe per Hessian unknown** — no Kronecker shortcut, because the gradient
+    equation contracts **both** of the Hessian's indices (face curvature, each side's Hessian moment,
+    the warp moment). Against the full tensor that was a rank-three block at `dim²` probes; against the
+    six independent components it is a plain matrix at `n_sym` probes. ⚠️ The count below and the
+    memory figures with it were measured at `dim² = 9`.
   - **Probe sequentially, not under `vmap`.** Same wall clock (248 ms against 247 at 13824 cells), but
-    `vmap` holds all `dim²` probes' face intermediates at once and those are the largest arrays in the
+    `vmap` holds all of the probes' face intermediates at once and those are the largest arrays in the
     scheme: peak 1.29 GB sequential against 1.39 GB vmapped, on a 1.10 GB baseline — a third of the
     feature's memory cost, for nothing.
 
@@ -451,7 +1118,75 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   before trusting any future variant; the end-to-end error alone cannot distinguish a wrong block
   from a hard mesh.
 
-  **`CoupledBlockSweep` — sweep BOTH blocks instead of nesting a solve per apply (2026-08-22, opt-in).**
+  **⚠️⚠️ `CoupledBlockSweep` IS NOW THE DEFAULT SOLVE PATH (2026-08-23), and the flip cost three
+  things that were not obvious from the measurement that justified it.** At the class count of 20 it
+  matches the nested `20/10` pair's accuracy on every exactness fixture at **60 face passes against
+  220** — 3.7x cheaper for the same answer:
+
+  | fixture | nested 20/10 | coupled 20 |
+  |---|---|---|
+  | 2D perturb 0.2 | 5.20e-15 | 5.15e-15 |
+  | 2D perturb 0.3 | 2.42e-13 | 2.82e-13 |
+  | 3D perturb 0.25 | 2.98e-15 | 2.43e-15 |
+
+  ⚠️ **It is NOT uniformly better and the record should not be read as saying so** — it is 0.6x on an
+  orthogonal mesh (slower, the nested outer solve being nearly trivial there), 1.4x at 30 % skew,
+  1.8x at 40 %, and 3--12x with `AveragedNeighbourHessian`. The case for it is that it is better on
+  the meshes this scheme exists for and a wash on the ones it does not, at consistently better
+  accuracy.
+
+  - **⚠️ `narrow_gradient_sweeps` HAD TO LEARN ABOUT IT FIRST, and missing that would have failed
+    SILENTLY.** It rewrote `SweptGradientSolve` nodes only, and the coupled sweep *replaces* both
+    solvers rather than sitting beside them — so a defaulted scheme has no `SweptGradientSolve` left
+    for it to find, and narrowing would have returned the tree unchanged while a caller believed the
+    stencil was bounded. On `pitzDaily` that is the 1.75x probe-narrowing win, gone without a word.
+    Exactly the shape already recorded for a Krylov outer solver, which narrowing genuinely cannot
+    touch; this one it can, so it now does — carrying `relaxation` across, and pinned by a test that
+    the narrowed copy differs in the count and in nothing else.
+  - **⚠️ THE SILENT OVERRIDE, and four live call sites that proved why it mattered.** With the sweep
+    on by default, any solver a caller passed never ran. That was not a hypothetical trap:
+    `pitzdaily_gradient_ab/run_ab.py` (three sites, including the Betchen arm whose cost ratios this
+    file quotes) and `uvreactor_openfoam/schur_block_diagnosis.py` (whose numbers were recorded the
+    same day) would all have silently changed meaning. It was first patched with a guard that refused
+    the contradictory pair; **the single-strategy field below removed the possibility instead**, which
+    is the form to keep in mind — a guard is what you write when the type still lets the mistake be
+    expressed.
+  - **⚠️ `calibrated` WAS SIZING A PATH THE SCHEME WOULD NOT RUN.** It measured the nested pair and
+    returned a scheme that would sweep instead — calibrated in name only. It now builds exactly one
+    strategy, the one that will run.
+
+  **✅ THE THREE SOLVE FIELDS ARE NOW ONE INJECTED STRATEGY (2026-08-23), which makes the conflict
+  unrepresentable instead of guarded.** `HessianCorrectedGradient.hessian_solve: HessianSolve` →
+  `CoupledBlockSweep` (default) / `NestedHessianSolve(solver, hessian_solver)` /
+  `PackedSystemSolve(solver)`. Gone: `solver`, `hessian_solver`, `coupled_sweep`, `schur`, the guard
+  that refused the contradictory pair, and the `_DEFAULT_*_SOLVER` constants the guard needed.
+
+  **The defect it removes is not tidiness.** Held as separate fields, every path's settings were
+  present at once and most were inert, so configuring the wrong one was ignored **in silence** — which
+  is what happened the day the coupled sweep became the default and cost four call sites in this
+  repository their meaning, two of them harnesses whose recorded numbers depend on those settings.
+  A guard caught it afterwards; one field means it cannot be written down. `schur=False` folds in as
+  a third strategy rather than a boolean crossed with a solver, which is what it always was.
+
+  - **`_HessianSystems` gained `outer_preconditioner` and `dim`.** The coupled sweep needs the outer
+    system's *preconditioner* and never applies its operator, whose construction takes an inner solve
+    it would then discard — so reaching it through `outer` meant handing that call a strategy chosen
+    only to be thrown away. Now `outer` is built *from* `outer_preconditioner`, so there is one place
+    the block is formed.
+  - **`narrow_gradient_sweeps` needed no new case for the nested path** — it recurses through
+    `equinox.Module` fields, so the two swept solvers inside `NestedHessianSolve` are found the way
+    they always were. Its explicit `CoupledBlockSweep` branch is still required, that being a count
+    the recursion cannot see as a `SweptGradientSolve`. Both are pinned by one test.
+  - **`calibrated` builds exactly one strategy**, the one that will run: `coupled=True` (default) the
+    sweep, `coupled=False` the nested pair via `NestedHessianSolve.calibrated`, `schur=False` the
+    packed system. There is no longer a second path on the returned scheme carrying counts nobody
+    measured.
+  - **Cost: 19 call sites**, mechanical, and each now states which path it means rather than relying
+    on a default. Every measurement in this file taken on the nested path still describes it, because
+    those sites now name it.
+
+  **`CoupledBlockSweep` — sweep BOTH blocks instead of nesting a solve per apply (2026-08-22; the
+  DEFAULT since 2026-08-23, see above).**
   The nested path re-converges the Hessian from zero once per outer sweep, throwing away what the
   previous outer sweep learned. Sweeping alternately keeps it:
   `h ← h + P_H⁻¹(A_Hg g − A_HH h)` then `g ← g + ω P_g⁻¹(b_g − A_gg g + A_gH h)`, Gauss–Seidel (the
@@ -530,12 +1265,16 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     same order as the volume term, which `1/V` cannot represent at all. Against the exact per-cell block
     the same iteration is ρ = **0.000** (orthogonal), 0.055 (p=0.2), 0.127 (p=0.4) in 2D and 0.103 at
     3D p=0.3 — so a handful of fixed sweeps replaces the inner Krylov solve outright.
-  - **The per-cell `A_HH` block is EXACTLY `I_dim ⊗ C` with `C` only `(dim, dim)`** — measured departure
-    `0.000e+00` in 2D and 3D. `H` enters its own equation only as `H·a` for per-face vectors `a`, which
-    contracts `H`'s second index and leaves the first untouched. So the block is stored and inverted as
-    `dim×dim`, not `dim²×dim²`: **72 B/cell rather than 648 in 3D** (115 MB vs ~1 GB at 1.6M cells),
-    which is the difference between usable and not at that scale. Pinned by
-    `test_the_hessian_block_is_a_kronecker_product_so_it_is_stored_dim_by_dim`.
+  - **⚠️ THE `I_dim ⊗ C` BLOCK STRUCTURE IS GONE — it was a property of the UNSYMMETRIZED Hessian and
+    the scheme now solves the six independent components (2026-08-22).** It held exactly (measured
+    departure `0.000e+00` in 2D and 3D) because `H` entered its own equation only as `H·a` for per-face
+    vectors `a`, contracting one index and leaving the other untouched — so the block stored as
+    `dim×dim` rather than `dim²×dim²`, 72 B/cell against 648 in 3D. Imposing symmetry couples those two
+    indices, so the reduced block is a dense `(n_sym, n_sym)`: **288 B/cell in 3D**, four times the old
+    figure, while the unknown drops from 72 to 48. There is no such test any more; the property now
+    pinned is that the reduced block is symmetric positive definite
+    (`test_the_reduced_hessian_block_is_symmetric_positive_definite`). The unreduced `C` still exists
+    and is still `I ⊗ C` — it is what weights the reduction — so the extraction below is unchanged.
   - **The blocks are extracted EXACTLY with no graph colouring**, by `cell_diagonal_block` +
     `interpolation.blend_owner_neighbour`: reading a face's two sides from separate fields and zeroing
     one leaves each cell reading only its own value, so **one probe per component** (`dim`, not
@@ -771,7 +1510,15 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     it is running one job.
 
 - **WHAT THE BETCHEN GRADIENT ACTUALLY BUYS AND COSTS ON A REAL CASE — first end-to-end A/B,
-  2026-08-21 (`validation/pitzdaily_gradient_ab`).** Matched marches, both arms at probe reach 5,
+  2026-08-21 (`validation/pitzdaily_gradient_ab`).**
+  ⚠️ **EVERY `pitzdaily_gradient_ab` FIGURE IN THIS FILE WAS MEASURED UNDER `local_schur_block=False`,
+  WHICH IS NO LONGER THE DEFAULT (moved 2026-08-22).** The case pins the two sweep counts but not the
+  preconditioner, so it now runs the Schur block instead. On a mild all-hexahedral 2D mesh the two
+  blocks agree closely on synthetic fixtures, so these numbers are **expected** to carry — but that is
+  an expectation, not a measurement, and nothing here has been re-run. Treat the cost ratios and cycle
+  counts below as provisional until one march is repeated, and pin the flag explicitly in any arm that
+  is meant to reproduce them.
+  Matched marches, both arms at probe reach 5,
   Betchen at outer/inner swept-5, everything else `pitzdaily_openfoam`'s own configuration:
 
   | | wall | cycles | steps | max cyc | `x_r/h` |

@@ -26,6 +26,8 @@ import pytest
 from aquaflux.mesh import structured_grid_2d, structured_grid_3d
 from aquaflux.mesh.quality import closed_cell_residual, face_planarity
 from aquaflux.schemes import (
+    AveragedInteriorHessian,
+    AveragedNeighbourHessian,
     CellBlockJacobi,
     CompactGreenGauss,
     CorrectedGreenGauss,
@@ -37,6 +39,9 @@ from aquaflux.schemes import (
     HessianCorrectedGradient,
     InverseCellVolume,
     InverseVolume,
+    NestedHessianSolve,
+    OwnerHessian,
+    PackedSystemSolve,
     SweepCalibration,
     SweptGradientSolve,
     cell_diagonal_block,
@@ -50,6 +55,7 @@ from tests.support.meshes import (
     columnwise_perturbed_grid_3d,
     perturbed_grid_2d,
     perturbed_grid_3d,
+    tetrahedral_grid_3d,
 )
 
 # --- analytic fields: (value, gradient) ------------------------------------------------
@@ -373,9 +379,11 @@ def test_hessian_schur_matches_coupled_solve() -> None:
     # path is preconditioned by the cell volume, and that system's per-cell block couples the gradient
     # to the Hessian at leading order — so a fixed sweep does not converge on it, and comparing a
     # converged Schur solve against an unconverged coupled one would measure the solver.
-    exact = dict(solver=GmresGradientSolve(), hessian_solver=GmresGradientSolve())
-    schur = HessianCorrectedGradient(schur=True, **exact).gradients(phi, mesh, geom, bvals)
-    coupled = HessianCorrectedGradient(schur=False, **exact).gradients(phi, mesh, geom, bvals)
+    exact = NestedHessianSolve(solver=GmresGradientSolve(), hessian_solver=GmresGradientSolve())
+    schur = HessianCorrectedGradient(hessian_solve=exact).gradients(phi, mesh, geom, bvals)
+    coupled = HessianCorrectedGradient(
+        hessian_solve=PackedSystemSolve(solver=GmresGradientSolve())
+    ).gradients(phi, mesh, geom, bvals)
     assert jnp.allclose(schur, coupled, atol=1e-10)
 
 
@@ -392,12 +400,15 @@ def test_hessian_accepts_an_injected_solve_strategy() -> None:
     geom = mesh.geometry()
     phi = _quadratic(geom.cell.centroid)
     bvals = _quadratic(geom.face.centroid)
-    default = HessianCorrectedGradient().solver
+    # The NESTED path's outer default; the scheme's own default path is the coupled sweep.
+    default = NestedHessianSolve().solver
     assert isinstance(default, SweptGradientSolve) and default.sweeps == 20
-    gmres = HessianCorrectedGradient(solver=GmresGradientSolve()).gradients(phi, mesh, geom, bvals)
-    swept = HessianCorrectedGradient(solver=SweptGradientSolve(sweeps=80, warn_tol=None)).gradients(
-        phi, mesh, geom, bvals
-    )
+    gmres = HessianCorrectedGradient(
+        hessian_solve=NestedHessianSolve(solver=GmresGradientSolve())
+    ).gradients(phi, mesh, geom, bvals)
+    swept = HessianCorrectedGradient(
+        hessian_solve=NestedHessianSolve(solver=SweptGradientSolve(sweeps=80, warn_tol=None))
+    ).gradients(phi, mesh, geom, bvals)
     assert jnp.allclose(gmres, swept, atol=1e-8)
 
 
@@ -808,29 +819,60 @@ def test_cell_diagonal_block_recovers_the_true_diagonal_block_exactly() -> None:
     assert np.abs(np.asarray(block) - truth).max() / np.abs(truth).max() < 1e-13
 
 
-def test_the_hessian_block_is_a_kronecker_product_so_it_is_stored_dim_by_dim() -> None:
-    """``A_HH``'s per-cell block is exactly ``I_dim ⊗ C``, which is why one ``(dim, dim)`` matrix per
-    cell suffices where the block is nominally ``(dim², dim²)``.
+def test_the_tetrahedral_fixture_is_a_valid_mesh_of_four_faced_cells() -> None:
+    """``tetrahedral_grid_3d`` is the only fixture here whose cells have **four** faces, and the
+    reason it exists is that a preconditioner defect on the Hessian-corrected scheme was found on an
+    automatically generated mesh where every affected cell had four — invisible to every hexahedral
+    fixture, in both directions, on two separate occasions.
 
-    This is a memory claim with teeth at scale — ``dim²×dim²`` would be nine times the storage in 3D
-    — so it is checked as an exact identity rather than assumed. The Hessian enters its own equation
-    only as ``H·a`` for per-face vectors ``a``, which contracts ``H``'s second index and leaves the
-    first untouched; if that ever stops being true this fails.
+    Checked as a *mesh* rather than through a scheme: cells closed to machine precision (Green–Gauss
+    is the divergence theorem, so an unclosed cell makes every operator on it wrong — and a squashed
+    fixture once passed a plausibility glance while carrying a closure residual of 0.66), exactly
+    four faces on every cell, and strictly positive volumes after perturbation.
+    """
+    for n, perturb in ((2, 0.0), (2, 0.15), (3, 0.15)):
+        mesh = tetrahedral_grid_3d(n, perturb=perturb, seed=0)
+        geometry = mesh.geometry()
+        owner = np.asarray(mesh.face_cells.owner)
+        neighbour = np.asarray(mesh.face_cells.neighbour)
+        faces_per_cell = np.bincount(owner, minlength=mesh.n_cells) + np.bincount(
+            neighbour[neighbour >= 0], minlength=mesh.n_cells
+        )
+
+        assert mesh.n_cells == 6 * n**3
+        assert set(faces_per_cell.tolist()) == {4}, "a tetrahedron has four faces"
+        assert float(np.asarray(geometry.cell.volume).min()) > 0.0
+        assert float(np.asarray(closed_cell_residual(mesh)).max()) < 1e-14
+
+
+def test_the_reduced_hessian_block_is_symmetric_positive_definite() -> None:
+    """The reduced ``A_HH``'s per-cell block is ``(A_P E)ᵀ(A_P E)`` up to a positive row scaling, so
+    it is symmetric positive definite whatever the mesh — where the unreduced block is neither.
+
+    That is the structural reason to reduce in the least-squares sense rather than by an unweighted
+    projection, and it is a property a preconditioner built from this block inherits: the elimination
+    term ``A_gH A_HH⁻¹ A_Hg`` can only be as well-signed as the inverse at its centre. It replaces an
+    earlier claim that the block is ``I_dim ⊗ C`` and so storable as ``(dim, dim)`` — true of the
+    unsymmetrized system, and destroyed by imposing symmetry, which couples the two tensor indices
+    that the Kronecker structure kept apart.
     """
     for mesh in (
         perturbed_grid_2d(6, 6, perturb=0.3, seed=0),
         columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.3, seed=0),
     ):
         geometry = mesh.geometry()
-        dim, n_cells = mesh.dim, mesh.n_cells
+        n_sym, n_cells = gradient_module.symmetric_components(mesh.dim), mesh.n_cells
         operator, preconditioner = _inner_system(mesh, geometry)
-        kronecker_factor = np.linalg.inv(np.asarray(preconditioner.inverse))
 
-        truth = _per_cell_blocks(_dense(operator, (n_cells, dim, dim)), n_cells, dim * dim).reshape(
-            n_cells, dim, dim, dim, dim
-        )
-        rebuilt = np.einsum("ik,cjl->cijkl", np.eye(dim), kronecker_factor)
-        assert np.abs(rebuilt - truth).max() / np.abs(truth).max() < 1e-13
+        blocks = _per_cell_blocks(_dense(operator, (n_cells, n_sym)), n_cells, n_sym)
+        asymmetry = np.abs(blocks - np.swapaxes(blocks, 1, 2)).max() / np.abs(blocks).max()
+        assert asymmetry < 1e-12, f"reduced block is not symmetric ({asymmetry:.2e})"
+        assert np.linalg.eigvalsh(blocks).min() > 0.0, "reduced block is not positive definite"
+
+        # The preconditioner really is that block's inverse, so the property above is the one in
+        # force rather than one of a block computed a second way.
+        rebuilt = np.linalg.inv(np.asarray(preconditioner.inverse))
+        assert np.abs(rebuilt - blocks).max() / np.abs(blocks).max() < 1e-13
 
 
 class _CaptureSolve(GradientSolve):
@@ -850,8 +892,11 @@ class _CaptureSolve(GradientSolve):
 
 def _inner_system(mesh, geometry):
     """The scheme's inner ``A_HH`` operator and the preconditioner it pairs with it."""
+    # `coupled_sweep=None` selects the NESTED path, which is the one that hands its inner system to
+    # an injected solver -- the coupled sweep drives both blocks itself and never calls one, so the
+    # capture would come back empty.
     capture = _CaptureSolve()
-    HessianCorrectedGradient(hessian_solver=capture).gradients(
+    HessianCorrectedGradient(hessian_solve=NestedHessianSolve(hessian_solver=capture)).gradients(
         jnp.zeros(mesh.n_cells), mesh, geometry, jnp.zeros(mesh.n_faces)
     )
     return capture.seen[0]
@@ -869,10 +914,10 @@ def test_the_hessian_system_needs_a_block_preconditioner_not_the_volume() -> Non
     for perturb, block_bound in ((0.0, 1e-12), (0.3, 0.25)):
         mesh = perturbed_grid_2d(8, 8, perturb=perturb, seed=0)
         geometry = mesh.geometry()
-        dim, n_cells = mesh.dim, mesh.n_cells
+        n_cells = mesh.n_cells
         operator, _ = _inner_system(mesh, geometry)
-        dense = _dense(operator, (n_cells, dim, dim))
-        size = dim * dim
+        size = gradient_module.symmetric_components(mesh.dim)
+        dense = _dense(operator, (n_cells, size))
         identity = np.eye(dense.shape[0])
 
         volume = np.repeat(np.asarray(geometry.cell.volume), size)
@@ -901,9 +946,9 @@ def test_the_default_inner_sweeps_reach_the_exactly_solved_reconstruction() -> N
     bvals = _quad_3d(geometry.face.centroid)
 
     default = HessianCorrectedGradient().gradients(field, mesh, geometry, bvals)
-    exact = HessianCorrectedGradient(hessian_solver=GmresGradientSolve()).gradients(
-        field, mesh, geometry, bvals
-    )
+    exact = HessianCorrectedGradient(
+        hessian_solve=NestedHessianSolve(hessian_solver=GmresGradientSolve())
+    ).gradients(field, mesh, geometry, bvals)
     assert float(jnp.max(jnp.abs(default - exact))) < 1e-11
 
 
@@ -921,12 +966,12 @@ def test_a_swept_outer_solve_reaches_the_same_gradient_as_the_krylov_one() -> No
 
     # Named explicitly rather than taken from the default: this asserts that the two OUTER strategies
     # agree, so it must keep comparing those two whatever the default later becomes.
-    krylov = HessianCorrectedGradient(solver=GmresGradientSolve()).gradients(
-        field, mesh, geometry, bvals
-    )
-    swept = HessianCorrectedGradient(solver=SweptGradientSolve(sweeps=60, warn_tol=None)).gradients(
-        field, mesh, geometry, bvals
-    )
+    krylov = HessianCorrectedGradient(
+        hessian_solve=NestedHessianSolve(solver=GmresGradientSolve())
+    ).gradients(field, mesh, geometry, bvals)
+    swept = HessianCorrectedGradient(
+        hessian_solve=NestedHessianSolve(solver=SweptGradientSolve(sweeps=60, warn_tol=None))
+    ).gradients(field, mesh, geometry, bvals)
     assert float(jnp.max(jnp.abs(krylov - swept))) < 1e-12
 
 
@@ -948,12 +993,14 @@ def test_a_diagnostic_emitting_inner_solver_is_refused_with_an_explanation() -> 
     # operator the inner solver sits inside. The default outer is a fixed sweep, which transposes
     # nothing, so the condition has to be asked for explicitly rather than inherited.
     with pytest.raises(ValueError, match="strictly linear"):
-        HessianCorrectedGradient(solver=GmresGradientSolve(), hessian_solver=chatty).gradients(
-            field, mesh, geometry, bvals
-        )
+        HessianCorrectedGradient(
+            hessian_solve=NestedHessianSolve(solver=GmresGradientSolve(), hessian_solver=chatty)
+        ).gradients(field, mesh, geometry, bvals)
 
     swept_outer = HessianCorrectedGradient(
-        solver=SweptGradientSolve(sweeps=40, warn_tol=None), hessian_solver=chatty
+        hessian_solve=NestedHessianSolve(
+            solver=SweptGradientSolve(sweeps=40, warn_tol=None), hessian_solver=chatty
+        )
     ).gradients(field, mesh, geometry, bvals)
     assert not bool(jnp.any(jnp.isnan(swept_outer)))
 
@@ -1188,18 +1235,31 @@ def test_calibrating_the_hessian_scheme_sizes_both_of_its_systems() -> None:
     """
     mesh = perturbed_grid_2d(8, 8, perturb=0.25, seed=3)
     geometry = mesh.geometry()
-    scheme = HessianCorrectedGradient.calibrated(mesh, geometry)
 
-    assert scheme.solver.sweeps >= 1 and scheme.hessian_solver.sweeps >= 1
-    assert scheme.hessian_solver.warn_tol is None
+    # A scheme carries ONE solve path, so the factory sizes the one it returns. By default that is
+    # the coupled sweep; `coupled=False` asks for the nested pair instead. Both are checked, because
+    # a factory that sized a path the scheme does not use would be calibrated in name only -- which
+    # is what the constructor's guard now refuses to let happen silently.
+    swept = HessianCorrectedGradient.calibrated(mesh, geometry)
+    assert isinstance(swept.hessian_solve, CoupledBlockSweep)
+    assert swept.hessian_solve.sweeps >= 1
+
+    scheme = HessianCorrectedGradient.calibrated(mesh, geometry, coupled=False)
+    assert isinstance(scheme.hessian_solve, NestedHessianSolve)
+    assert scheme.hessian_solve.solver.sweeps >= 1
+    assert scheme.hessian_solve.hessian_solver.sweeps >= 1
+    assert scheme.hessian_solve.hessian_solver.warn_tol is None
     assert (
-        not scheme.solver.emits_host_diagnostics or not scheme.hessian_solver.emits_host_diagnostics
+        not scheme.hessian_solve.solver.emits_host_diagnostics
+        or not scheme.hessian_solve.hessian_solver.emits_host_diagnostics
     )
 
     field = _quadratic(geometry.cell.centroid)
     bvals = _quadratic(geometry.face.centroid)
     exact = HessianCorrectedGradient(
-        solver=GmresGradientSolve(), hessian_solver=SweptGradientSolve(sweeps=30, warn_tol=None)
+        hessian_solve=NestedHessianSolve(
+            solver=GmresGradientSolve(), hessian_solver=SweptGradientSolve(sweeps=30, warn_tol=None)
+        )
     ).gradients(field, mesh, geometry, bvals)
     got = scheme.gradients(field, mesh, geometry, bvals)
     assert float(jnp.linalg.norm(got - exact) / jnp.linalg.norm(exact)) <= 1e-4
@@ -1249,16 +1309,44 @@ def test_the_two_calibrated_factories_expose_one_calibration_surface() -> None:
     # `local_schur_block` is one scheme's property for a different reason, and a structural one:
     # only the Hessian-corrected scheme eliminates a block, so only it has a Schur complement whose
     # diagonal its preconditioner can be built from.
-    scheme_specific = {"mesh", "geometry", "schur", "preconditioner", "local_schur_block"}
+    # `boundary_closure` is the Hessian's, and only the two factories that build or measure a Hessian
+    # system can carry it -- `CorrectedGreenGauss` reconstructs no Hessian and has no boundary
+    # extrapolation to close. Exempting a name here hides drift BETWEEN the factories that do share
+    # it, so those are checked against each other below rather than left to the exemption.
+    scheme_specific = {
+        "mesh",
+        "geometry",
+        "schur",
+        "preconditioner",
+        "local_schur_block",
+        "boundary_closure",
+        # Which solve path to size. Only the Hessian-corrected scheme has two to choose between.
+        "coupled",
+        # The closure factory chooses a blend weight rather than a sweep count, so the ladder it
+        # searches is its own parameter; everything else about how it measures is the shared surface.
+        "weights",
+    }
 
     for factory in (
         CorrectedGreenGauss.calibrated,
         HessianCorrectedGradient.calibrated,
         CoupledBlockSweep.calibrated,
+        AveragedNeighbourHessian.calibrated,
     ):
         parameters = inspect.signature(factory).parameters
         offered = {name: p.default for name, p in parameters.items() if name not in scheme_specific}
         assert offered == expected, f"{factory.__qualname__} does not carry the calibration surface"
+
+    # Both factories that measure a Hessian system must offer the closure, and offer it the same way:
+    # each calibrates an operator the closure changes, so one of them silently measuring a different
+    # operator than it returns is exactly the drift the exemption above would otherwise conceal.
+    hessian_aware = (HessianCorrectedGradient.calibrated, CoupledBlockSweep.calibrated)
+    closures = {
+        factory.__qualname__: inspect.signature(factory).parameters.get("boundary_closure")
+        for factory in hessian_aware
+    }
+    assert all(p is not None for p in closures.values()), closures
+    assert len({p.default for p in closures.values()}) == 1, closures
 
 
 def _quadratic_3d(x):
@@ -1288,8 +1376,9 @@ def _median_gradient_error(mesh) -> float:
     """Median per-cell relative gradient error for the Hessian-corrected scheme on a quadratic."""
     geom = mesh.geometry()
     grad = HessianCorrectedGradient(
-        solver=GmresGradientSolve(),
-        hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
+        hessian_solve=NestedHessianSolve(
+            solver=GmresGradientSolve(), hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None)
+        )
     ).gradients(_quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid))
     exact = _quadratic_3d_grad(geom.cell.centroid)
     relative = jnp.linalg.norm(grad - exact, axis=-1) / jnp.linalg.norm(exact, axis=-1)
@@ -1333,8 +1422,9 @@ def test_hessian_corrected_survives_a_sliver_cell_without_going_non_finite() -> 
     mesh = _sliver_mesh(1e-6)
     geom = mesh.geometry()
     grad = HessianCorrectedGradient(
-        solver=GmresGradientSolve(),
-        hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
+        hessian_solve=NestedHessianSolve(
+            solver=GmresGradientSolve(), hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None)
+        )
     ).gradients(_quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid))
     assert bool(jnp.all(jnp.isfinite(grad)))
 
@@ -1488,7 +1578,7 @@ def test_the_local_schur_block_does_not_regress_a_healthy_mesh() -> None:
 
 
 def _coupled(sweeps: int = 30) -> HessianCorrectedGradient:
-    return HessianCorrectedGradient(coupled_sweep=CoupledBlockSweep(sweeps=sweeps))
+    return HessianCorrectedGradient(hessian_solve=CoupledBlockSweep(sweeps=sweeps))
 
 
 def test_the_coupled_sweep_reaches_the_same_solution_as_an_exact_solve() -> None:
@@ -1506,8 +1596,10 @@ def test_the_coupled_sweep_reaches_the_same_solution_as_an_exact_solve() -> None
         geom = mesh.geometry()
         field, bvals = _quadratic_3d(geom.cell.centroid), _quadratic_3d(geom.face.centroid)
         exact = HessianCorrectedGradient(
-            solver=GmresGradientSolve(),
-            hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
+            hessian_solve=NestedHessianSolve(
+                solver=GmresGradientSolve(),
+                hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None),
+            )
         ).gradients(field, mesh, geom, bvals)
         swept = _coupled(40).gradients(field, mesh, geom, bvals)
         assert float(jnp.max(jnp.abs(swept - exact))) / float(jnp.max(jnp.abs(exact))) < 1e-9
@@ -1599,14 +1691,294 @@ def test_the_calibrated_coupled_sweep_meets_the_tolerance_it_was_given() -> None
     mesh = perturbed_grid_3d(8, 8, 8, perturb=0.3, seed=1)
     geom = mesh.geometry()
     exact = HessianCorrectedGradient(
-        solver=GmresGradientSolve(), hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None)
+        hessian_solve=NestedHessianSolve(
+            solver=GmresGradientSolve(), hessian_solver=SweptGradientSolve(sweeps=12, warn_tol=None)
+        )
     ).gradients(_quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid))
     tol = 1e-6
     scheme = HessianCorrectedGradient(
-        coupled_sweep=CoupledBlockSweep.calibrated(mesh, geom, tol=tol)
+        hessian_solve=CoupledBlockSweep.calibrated(mesh, geom, tol=tol)
     )
     swept = scheme.gradients(
         _quadratic_3d(geom.cell.centroid), mesh, geom, _quadratic_3d(geom.face.centroid)
     )
     relative = float(jnp.linalg.norm(swept - exact)) / float(jnp.linalg.norm(exact))
     assert relative < tol
+
+
+def _hessian_system_condition(mesh, closure):
+    """Condition number of the Hessian system this closure produces, densely."""
+    geometry = mesh.geometry()
+    n_sym = gradient_module.symmetric_components(mesh.dim)
+    inner = HessianCorrectedGradient._systems(mesh, geometry, closure).inner()
+    return np.linalg.cond(_dense(inner.operator, (mesh.n_cells, n_sym)))
+
+
+def test_the_owner_closure_is_exact_for_a_quadratic_and_the_averaged_one_is_not() -> None:
+    """The two boundary closures trade against each other, which is why both are kept.
+
+    ``OwnerHessian`` carries the cell's own Hessian, which for a quadratic is the exact one, so the
+    reconstruction stays exact. ``AveragedInteriorHessian`` averages over neighbours clear of the
+    boundary and is **zero** where a cell has none — a corner, an edge, or any mesh too coarse to
+    have an interior — so those cells lose their curvature term and the exactness with it. That is
+    the documented price of the closure that keeps the system solvable, and a regression here in
+    either direction means one of the two has stopped being what it claims.
+    """
+    mesh = columnwise_perturbed_grid_3d(4, 4, 4, perturb=0.25, seed=0)
+    geometry = mesh.geometry()
+    centroids = np.asarray(geometry.cell.centroid)
+    field = _quadratic_3d(jnp.asarray(centroids))
+    boundary = _quadratic_3d(geometry.face.centroid)
+    exact = np.asarray(_quadratic_3d_grad(jnp.asarray(centroids)))
+
+    def error(closure):
+        reconstructed = np.asarray(
+            HessianCorrectedGradient(boundary_closure=closure).gradients(
+                field, mesh, geometry, boundary
+            )
+        )
+        return float(
+            np.median(
+                np.linalg.norm(reconstructed - exact, axis=-1) / np.linalg.norm(exact, axis=-1)
+            )
+        )
+
+    assert error(OwnerHessian()) < 1e-13
+    assert error(AveragedInteriorHessian()) > 1e-6
+
+
+def test_the_averaged_closure_makes_a_tetrahedral_hessian_system_solvable() -> None:
+    """On a wholly tetrahedral mesh the owner closure leaves ``A_HH`` numerically singular, and the
+    averaged one does not.
+
+    This is the failure Betchen & Straatman's closure exists to prevent, on the cell shape their own
+    experiments use. Double precision carries about sixteen orders, so a condition number of ~1e17 is
+    not "badly conditioned" — it is rank-deficient, and no solver recovers it.
+    """
+    mesh = tetrahedral_grid_3d(2, perturb=0.1, seed=0)
+    assert _hessian_system_condition(mesh, OwnerHessian()) > 1e15
+    assert _hessian_system_condition(mesh, AveragedInteriorHessian()) < 1e3
+
+    # ... and the hexahedral mesh is well conditioned under either, so the tetrahedral result above
+    # is about the cell shape rather than about the closure being generally better.
+    hexes = columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.25, seed=0)
+    assert _hessian_system_condition(hexes, OwnerHessian()) < 1e3
+    assert _hessian_system_condition(hexes, AveragedInteriorHessian()) < 1e3
+
+
+def test_the_averaged_closure_contributes_nothing_to_a_cell_own_diagonal_block() -> None:
+    """A closure reading neighbours' Hessians must declare a zero diagonal contribution, or the
+    probed per-cell block silently counts neighbour coupling as diagonal.
+
+    The probe is uniform across cells, so a gather from neighbours returns the probe's own value and
+    is indistinguishable from a diagonal term unless the closure says otherwise. This pins the two
+    closures' declarations against what their prepared maps actually do.
+    """
+    mesh = columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.25, seed=0)
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    centroid = geometry.cell.centroid
+    separation = face_cells.neighbour_centroid(centroid) - centroid[face_cells.owner]
+    probe = jnp.zeros((mesh.n_cells, mesh.dim, mesh.dim)).at[:, 0, :].set(1.0)
+
+    # The owner closure IS the identity, so its map and its declared diagonal agree exactly.
+    owner = OwnerHessian().prepare(face_cells, separation)
+    assert np.array_equal(np.asarray(owner.apply(probe)), np.asarray(probe))
+    assert np.array_equal(np.asarray(owner.diagonal(probe)), np.asarray(probe))
+
+    # The averaged closure returns a NON-zero map on that same probe -- it gathers the neighbours'
+    # copies of it -- while declaring a zero diagonal, which is the distinction being pinned.
+    averaged = AveragedInteriorHessian().prepare(face_cells, separation)
+    assert np.abs(np.asarray(averaged.apply(probe))).max() > 0.0
+    assert not np.any(np.asarray(averaged.diagonal(probe)))
+
+
+def test_a_closure_reproduces_a_constant_hessian_exactly_iff_its_weights_sum_to_one() -> None:
+    """The mechanism behind quadratic exactness, tested head-on rather than through a reconstruction.
+
+    A quadratic's Hessian is **constant**, so a closure returns it unchanged exactly when its weights
+    are a partition of unity — and any closure that does is exact for a quadratic. This checks that
+    property directly on a constant field, which is far more diagnostic than an end-to-end error:
+    it says *which* cells break it and why, rather than reporting one number that could come from
+    anywhere.
+    """
+    mesh = columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.25, seed=0)
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    centroid = geometry.cell.centroid
+    separation = face_cells.neighbour_centroid(centroid) - centroid[face_cells.owner]
+    constant = jnp.broadcast_to(jnp.eye(mesh.dim) * 2.7, (mesh.n_cells, mesh.dim, mesh.dim))
+
+    for closure in (OwnerHessian(), AveragedNeighbourHessian()):
+        carried = np.asarray(closure.prepare(face_cells, separation).apply(constant))
+        assert np.abs(carried - np.asarray(constant)).max() < 1e-12, type(closure).__name__
+
+    # Betchen's closure restricts the average to neighbours clear of the boundary and returns ZERO
+    # where a cell has none, so on this mesh most cells lose the constant entirely. That is the
+    # discretization error its reconstruction shows, located precisely.
+    narrow = np.asarray(AveragedInteriorHessian().prepare(face_cells, separation).apply(constant))
+    dropped = np.abs(narrow).max(axis=(1, 2)) == 0.0
+    assert dropped.any(), "expected some cells to have no boundary-clear neighbour on this mesh"
+    assert np.abs(narrow - np.asarray(constant)).max() > 1.0
+
+
+def test_the_neighbour_average_is_exact_for_a_quadratic_and_solves_on_tetrahedra() -> None:
+    """The closure that keeps both properties at once, which neither of the other two does.
+
+    ``OwnerHessian`` is exact and cannot solve a tetrahedral mesh; ``AveragedInteriorHessian`` solves
+    it and is not exact. Averaging over *all* face neighbours is exact — every cell has one, so the
+    weights sum to one everywhere — while still never reading the cell's own Hessian, which is what
+    keeps the system solvable.
+
+    Judged under a **converged** solve, because the claim is about the discretization: at the shipped
+    fixed sweep counts this closure has not converged yet and reads ~1e-07, which is a property of
+    the iteration and is documented on the class.
+    """
+    # `coupled_sweep=None` selects the nested path, which is what these two Krylov solvers drive;
+    # left at the default the coupled sweep would run instead and ignore them.
+    exact = dict(
+        hessian_solve=NestedHessianSolve(
+            solver=GmresGradientSolve(), hessian_solver=GmresGradientSolve()
+        )
+    )
+    for mesh in (
+        columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.25, seed=0),
+        tetrahedral_grid_3d(3, perturb=0.1, seed=0),
+    ):
+        geometry = mesh.geometry()
+        centroids = np.asarray(geometry.cell.centroid)
+        reconstructed = np.asarray(
+            HessianCorrectedGradient(
+                boundary_closure=AveragedNeighbourHessian(), **exact
+            ).gradients(
+                _quadratic_3d(jnp.asarray(centroids)),
+                mesh,
+                geometry,
+                _quadratic_3d(geometry.face.centroid),
+            )
+        )
+        truth = np.asarray(_quadratic_3d_grad(jnp.asarray(centroids)))
+        error = np.linalg.norm(reconstructed - truth, axis=-1) / np.linalg.norm(truth, axis=-1)
+        assert float(np.median(error)) < 1e-12
+
+    # ... and the tetrahedral system it just solved is one the default closure cannot.
+    tets = tetrahedral_grid_3d(2, perturb=0.1, seed=0)
+    assert _hessian_system_condition(tets, AveragedNeighbourHessian()) < 1e3
+    assert _hessian_system_condition(tets, OwnerHessian()) > 1e15
+
+
+def test_the_neighbour_average_is_exact_at_every_blend_weight() -> None:
+    """``weight`` trades conditioning against sweeps and must not trade accuracy.
+
+    The closure is ``(1 - weight)`` of the cell's own Hessian plus ``weight`` of the neighbour
+    average. Both parts are partitions of unity, so their blend is one too at any weight — and a
+    quadratic's Hessian is constant, so it passes through unchanged. If a future change breaks that
+    (a fallback returning zero, a normalization dropped) this is where it shows, at every weight
+    rather than only at the default.
+    """
+    mesh = columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.25, seed=0)
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    centroid = geometry.cell.centroid
+    separation = face_cells.neighbour_centroid(centroid) - centroid[face_cells.owner]
+    constant = jnp.broadcast_to(jnp.eye(mesh.dim) * -1.4, (mesh.n_cells, mesh.dim, mesh.dim))
+
+    for weight in (1.0, 0.6, 0.2, 0.0):
+        closure = AveragedNeighbourHessian(weight=weight)
+        carried = np.asarray(closure.prepare(face_cells, separation).apply(constant))
+        assert np.abs(carried - np.asarray(constant)).max() < 1e-12, weight
+
+
+def test_a_small_blend_weight_still_removes_the_tetrahedral_degeneracy() -> None:
+    """A little coupling breaks the degeneracy; it does not take the full average.
+
+    This is what makes the weight worth exposing: the sweep cost the closure adds is what one pays
+    for decoupling, and most of the decoupling arrives well before ``weight = 1``. A regression that
+    made small weights singular again would leave the closure usable only at its most expensive
+    setting, which the numbers on the class no longer describe.
+    """
+    tets = tetrahedral_grid_3d(2, perturb=0.1, seed=0)
+    assert _hessian_system_condition(tets, AveragedNeighbourHessian(weight=1.0)) < 1e2
+    assert _hessian_system_condition(tets, AveragedNeighbourHessian(weight=0.2)) < 1e4
+    # ... and zero weight IS the owner closure, degeneracy included, which is the other end of it.
+    assert _hessian_system_condition(tets, AveragedNeighbourHessian(weight=0.0)) > 1e15
+
+
+def test_the_blend_weight_calibrates_to_zero_where_the_owner_closure_already_closes() -> None:
+    """The weight is a property of the mesh, and measuring it costs nothing where nothing is wrong.
+
+    The calibration minimizes the sweep count over candidate weights, which needs no threshold to do
+    the right thing at both ends: on a mesh whose cells close their own boundaries the owner closure
+    is fastest and weight ``0`` wins, so the closure reduces to :class:`OwnerHessian` and does no
+    averaging at all; on a tetrahedral mesh weight ``0`` is *expansive* rather than merely slow, so
+    its count saturates and any working weight beats it.
+
+    ⚠️ It asserts a *small* weight rather than exactly zero, because zero is excluded from the ladder
+    on purpose: at zero this closure is the owner closure, which on the meshes that need this closure
+    leaves the Hessian system singular — and the rate of a singular system is not a reproducible
+    measurement. It measured 15.4 on one machine and below one on another, where it was then chosen
+    as cheapest. That divergence is what this test caught in CI, and the fix was to stop the
+    calibration evaluating that point at all.
+    """
+    for mesh in (
+        columnwise_perturbed_grid_3d(5, 5, 5, perturb=0.25, seed=0),
+        perturbed_grid_2d(6, 6, perturb=0.3, seed=0),
+    ):
+        chosen = AveragedNeighbourHessian.calibrated(mesh, mesh.geometry(), tol=1e-10)
+        assert chosen.weight <= 0.1, "a mesh needing no decoupling should take the least offered"
+
+    # On a tetrahedral mesh the test is that whatever it chose SOLVES, not that it chose a particular
+    # value: several weights are within a sweep of each other there, so pinning one would be pinning
+    # noise. Conditioning is the stable quantity — the operator involves no inversion, where the
+    # contraction rate at a degenerate weight depends on how a platform inverts a singular block.
+    tets = tetrahedral_grid_3d(3, perturb=0.1, seed=0)
+    chosen = AveragedNeighbourHessian.calibrated(tets, tets.geometry(), tol=1e-10)
+    assert _hessian_system_condition(tets, chosen) < 1e5
+
+
+def test_a_zero_blend_weight_is_the_owner_closure_exactly() -> None:
+    """Weight ``0`` is the end of the family, not an approximation of it — and is short-circuited so
+    it costs what the owner closure costs rather than building an average it then multiplies by zero.
+
+    The calibration returns this weight routinely, so it is a live path.
+    """
+    mesh = columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.25, seed=0)
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    centroid = geometry.cell.centroid
+    separation = face_cells.neighbour_centroid(centroid) - centroid[face_cells.owner]
+    probe = jnp.zeros((mesh.n_cells, mesh.dim, mesh.dim)).at[:, 0, :].set(1.0)
+
+    zero = AveragedNeighbourHessian(weight=0.0).prepare(face_cells, separation)
+    owner = OwnerHessian().prepare(face_cells, separation)
+    assert np.array_equal(np.asarray(zero.apply(probe)), np.asarray(owner.apply(probe)))
+    assert np.array_equal(np.asarray(zero.diagonal(probe)), np.asarray(owner.diagonal(probe)))
+
+
+def test_narrowing_reaches_the_coupled_sweep_as_well_as_the_swept_solve() -> None:
+    """A scheme solved by :class:`CoupledBlockSweep` has no :class:`SweptGradientSolve` left to
+    narrow, so narrowing that only knew the latter would return the tree unchanged and report nothing.
+
+    That matters because the count sets the residual's stencil, and the preconditioner probe is
+    matched to it — a caller who believes the stencil has been bounded, and whose scheme quietly
+    ignored the request, gets a probed matrix that is not the Jacobian. The same silent shape is
+    already documented for a Krylov outer solver, which narrowing genuinely cannot touch; this one it
+    can, so it must.
+    """
+    scheme = HessianCorrectedGradient(hessian_solve=CoupledBlockSweep(sweeps=30, relaxation=0.8))
+    narrowed = narrow_gradient_sweeps(scheme, 4)
+
+    assert narrowed.hessian_solve.sweeps == 4
+    # The narrowed copy must differ in the count and in NOTHING else: rebuilding at the class default
+    # would silently un-damp an under-relaxed sweep.
+    assert narrowed.hessian_solve.relaxation == 0.8
+    # ... and it only ever narrows.
+    assert narrow_gradient_sweeps(scheme, 30).hessian_solve is scheme.hessian_solve
+    assert narrow_gradient_sweeps(scheme, 99).hessian_solve is scheme.hessian_solve
+
+    # It reaches the nested path's two solvers too, which it finds by recursion rather than by
+    # knowing about this strategy at all.
+    nested = narrow_gradient_sweeps(
+        HessianCorrectedGradient(hessian_solve=NestedHessianSolve()), 3
+    ).hessian_solve
+    assert nested.solver.sweeps == 3 and nested.hessian_solver.sweeps == 3

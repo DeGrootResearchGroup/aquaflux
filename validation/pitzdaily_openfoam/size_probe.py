@@ -42,16 +42,18 @@ def run(label, coupled, betas, nu):
     n = coupled.layout.n_cells
     ratio, interior = skew_metrics(coupled)
     ar = P.cell_aspect_ratio(coupled)
-    print(f"\n-- {label}: {n} cells, {n_fields * n} dofs, nu {nu:.1e}, "
-          f"Re {P.U_IN * P.H / nu:.0f}, skew max {ratio[interior].max():.1e}, "
-          f"AR median {np.median(ar):.2f} max {ar.max():.1f}", flush=True)
+    print(
+        f"\n-- {label}: {n} cells, {n_fields * n} dofs, nu {nu:.1e}, "
+        f"Re {P.U_IN * P.H / nu:.0f}, skew max {ratio[interior].max():.1e}, "
+        f"AR median {np.median(ar):.2f} max {ar.max():.1f}",
+        flush=True,
+    )
     state, residual = seed_state(coupled)
     rhs = -np.asarray(residual, dtype=np.float64)
     jacobian = materialize(coupled, state, 3)
     base = _coupled_shift_policy(coupled, state, "twolevel")
     for beta in betas:
-        shift = (_frozen_shift_diagonal(base, beta, state) if beta > 0
-                 else np.zeros(n_fields * n))
+        shift = _frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(n_fields * n)
         cell_major, scaling, perm = assemble(jacobian, np.asarray(shift), n_fields)
         rhs_eq = (np.asarray(scaling) * rhs)[perm]
         out = []
@@ -59,7 +61,9 @@ def run(label, coupled, betas, nu):
             census = ilu_pivots(cell_major, n_fields, levels)
             r = ksp_solve(cell_major, rhs_eq, n_fields, arm, max_it=2000)
             true = np.linalg.norm(cell_major @ r["x"] - rhs_eq) / np.linalg.norm(rhs_eq)
-            out.append(f"{arm} its {r['its']:>5} rel {true:.1e} neg {census.get('negative', -1):>4}")
+            out.append(
+                f"{arm} its {r['its']:>5} rel {true:.1e} neg {census.get('negative', -1):>4}"
+            )
         print(f"   beta {beta:<5} | " + " | ".join(out), flush=True)
         del cell_major
         gc.collect()

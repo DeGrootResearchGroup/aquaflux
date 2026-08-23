@@ -193,3 +193,87 @@ def columnwise_perturbed_grid_3d(
         [(xy_interior * dx).ravel(), (xy_interior * dy).ravel(), np.zeros(ix.size)], axis=1
     )
     return eqx.tree_at(lambda m: m.node_coords, mesh, mesh.node_coords + jnp.asarray(offsets))
+
+
+def tetrahedral_grid_3d(n: int, *, perturb: float = 0.0, seed: int = 0) -> Mesh:
+    """A conforming tetrahedral mesh of the unit cube — the fixture with FOUR-faced cells.
+
+    Every other 3D fixture here is hexahedral, so a cell always has six faces. That is not a
+    harmless simplification: a preconditioner defect on this scheme was found on an automatically
+    generated mesh where **every** affected cell had four faces, and it was invisible to the whole
+    unit tier for exactly this reason — twice, once in each direction. This closes that gap.
+
+    Each cube of an ``n x n x n`` grid is split into six tetrahedra by the Kuhn subdivision: from
+    the cube's low corner, walk to its high corner one axis at a time, once per ordering of the
+    three axes. The six paths give six tetrahedra that tile the cube, and because the subdivision
+    depends only on the axis ordering it agrees on every shared cube face — so the mesh is
+    conforming, and its interior faces match up without a search.
+
+    Parameters
+    ----------
+    n : int
+        Cubes per axis. The mesh has ``6 n**3`` cells.
+    perturb : float, optional
+        Random displacement of interior nodes, as a fraction of the cube edge. Boundary nodes are
+        held so the domain stays the unit cube. ``0`` (default) leaves the nodes on the lattice.
+    seed : int, optional
+        Seed for that displacement.
+
+    Returns
+    -------
+    Mesh
+        A mesh of ``6 n**3`` tetrahedra, every cell with exactly four triangular faces.
+    """
+    step, side = 1.0 / n, n + 1
+    coords = np.array(
+        [
+            (i * step, j * step, k * step)
+            for i in range(side)
+            for j in range(side)
+            for k in range(side)
+        ],
+        dtype=float,
+    )
+    if perturb:
+        rng = np.random.default_rng(seed)
+        on_face = np.zeros(len(coords), dtype=bool)
+        for axis in range(3):
+            on_face |= np.isclose(coords[:, axis], 0.0) | np.isclose(coords[:, axis], 1.0)
+        shift = rng.uniform(-perturb, perturb, size=coords.shape) * step
+        coords[~on_face] += shift[~on_face]
+
+    def node(i, j, k):
+        return (i * side + j) * side + k
+
+    # The six axis orderings; each is a monotone path from the cube's low corner to its high one.
+    orderings = [(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)]
+    cells = []
+    for i in range(n):
+        for j in range(n):
+            for k in range(n):
+                for ordering in orderings:
+                    corner, vertices = [i, j, k], [node(i, j, k)]
+                    for axis in ordering:
+                        corner[axis] += 1
+                        vertices.append(node(*corner))
+                    cells.append(vertices)
+
+    # A triangle is shared by at most two tetrahedra, so the first sighting owns it and the second
+    # neighbours it. Keyed on the sorted node triple, which is the face's identity whichever cell
+    # names it; the stored order is the owner's, and any order of three nodes is a valid perimeter.
+    faces, owner, neighbour, seen = [], [], [], {}
+    for index, vertices in enumerate(cells):
+        for corner in range(4):
+            triangle = vertices[:corner] + vertices[corner + 1 :]
+            key = tuple(sorted(triangle))
+            if key in seen:
+                neighbour[seen[key]] = index
+            else:
+                seen[key] = len(faces)
+                faces.append(triangle)
+                owner.append(index)
+                neighbour.append(-1)
+
+    return Mesh.from_faces(
+        jnp.asarray(coords), faces, jnp.asarray(owner), jnp.asarray(neighbour), len(cells)
+    )

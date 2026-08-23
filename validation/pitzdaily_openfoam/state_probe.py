@@ -63,8 +63,7 @@ def run(label, coupled, state, betas, reach=3):
     jacobian = materialize(coupled, state, reach)
     base = _coupled_shift_policy(coupled, state, "twolevel")
     for beta in betas:
-        shift = (_frozen_shift_diagonal(base, beta, state) if beta > 0
-                 else np.zeros(n_fields * n))
+        shift = _frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(n_fields * n)
         cell_major, scaling, perm = assemble(jacobian, np.asarray(shift), n_fields)
         rhs_eq = (np.asarray(scaling) * rhs)[perm]
         out = []
@@ -72,8 +71,10 @@ def run(label, coupled, state, betas, reach=3):
             census = ilu_pivots(cell_major, n_fields, levels)
             r = ksp_solve(cell_major, rhs_eq, n_fields, arm, max_it=600)
             true = np.linalg.norm(cell_major @ r["x"] - rhs_eq) / np.linalg.norm(rhs_eq)
-            out.append(f"{arm} its {r['its']:>4} rel {true:.1e} neg {census.get('negative', -1):>4} "
-                       f"min|p| {census.get('min', float('nan')):.1e}")
+            out.append(
+                f"{arm} its {r['its']:>4} rel {true:.1e} neg {census.get('negative', -1):>4} "
+                f"min|p| {census.get('min', float('nan')):.1e}"
+            )
         print(f"  beta {beta:<6} | " + " | ".join(out), flush=True)
         del cell_major
         gc.collect()
