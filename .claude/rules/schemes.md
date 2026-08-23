@@ -1173,7 +1173,15 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     it is running one job.
 
 - **WHAT THE BETCHEN GRADIENT ACTUALLY BUYS AND COSTS ON A REAL CASE — first end-to-end A/B,
-  2026-08-21 (`validation/pitzdaily_gradient_ab`).** Matched marches, both arms at probe reach 5,
+  2026-08-21 (`validation/pitzdaily_gradient_ab`).**
+  ⚠️ **EVERY `pitzdaily_gradient_ab` FIGURE IN THIS FILE WAS MEASURED UNDER `local_schur_block=False`,
+  WHICH IS NO LONGER THE DEFAULT (moved 2026-08-22).** The case pins the two sweep counts but not the
+  preconditioner, so it now runs the Schur block instead. On a mild all-hexahedral 2D mesh the two
+  blocks agree closely on synthetic fixtures, so these numbers are **expected** to carry — but that is
+  an expectation, not a measurement, and nothing here has been re-run. Treat the cost ratios and cycle
+  counts below as provisional until one march is repeated, and pin the flag explicitly in any arm that
+  is meant to reproduce them.
+  Matched marches, both arms at probe reach 5,
   Betchen at outer/inner swept-5, everything else `pitzdaily_openfoam`'s own configuration:
 
   | | wall | cycles | steps | max cyc | `x_r/h` |
