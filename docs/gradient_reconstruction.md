@@ -353,6 +353,52 @@ trace raises rather than silently doing something else. Under domain decompositi
 on the global mesh before partitioning.
 ```
 
+### The Jacobian's copy can be cheaper than the residual's
+
+Everything above is about the reconstruction inside the **residual**, and its accuracy there is a
+choice about the model: it decides which discrete equations are being solved, so loosening it moves
+the converged answer. Inside the **Jacobian** the same reconstruction decides something much weaker —
+how quickly an inexact-Newton iteration reaches whichever root the residual defines. A steady solve
+already exploits that asymmetry, stopping each linear solve well short of exactness; the
+reconstruction is simply another place it applies.
+
+The two are worth separating because the Jacobian is where the reconstruction is paid most. A
+Jacobian--vector product spends **two** operator applies per sweep — one to carry the primal value the
+tangent linearizes about, one for the tangent itself — against the residual's one, and a Newton step
+evaluates the residual once while spending a matrix-vector product on every Krylov iteration.
+
+The coupled continuation builders take `jacobian_gradient_sweeps` for this. It caps the sweeps in the
+copy of the residual the Krylov operator is differentiated from and leaves the residual itself alone:
+
+```python
+engine = coupled_amg_continuation(coupled, state, jacobian_gradient_sweeps=2)
+```
+
+On a backward-facing step at 12 000 cells, whose sweep contracts at `rho = 5.1e-03`, capping the
+Jacobian at two sweeps against the residual's four ran the case in the identical number of outer steps
+and Krylov cycles, to the same reattachment length and the same fields to seven decimal places, for
+about a tenth less wall clock. Capping at one — the uncorrected Green–Gauss gradient — cost cycles and
+returned nothing further.
+
+Size the cap the same way as the residual's count, from {func}`~aquaflux.schemes.contraction_rate`:
+the Jacobian's relative error is roughly the gradient's, so a cap of `k` leaves about `rho^k`, and
+there is no point taking that far below the tolerance the linear solve stops at.
+
+```{note}
+The gradient this returns is unaffected. Reverse-mode sensitivities come from an implicit-function
+solve that differentiates the residual at the converged state, and it never sees the operator the
+forward march was driven by — so a cheaper Jacobian buys forward speed without costing gradient
+accuracy.
+```
+
+```{warning}
+This is a quasi-Newton step, and the exchange is not free in both directions: an operator far enough
+from the true Jacobian costs more iterations than the cheaper product saves, and further still it
+costs outer steps. Judge a cap on step and iteration counts over a whole solve, never on the cost of
+one matrix-vector product — and walk the ladder one rung past where it stops helping, since the point
+it turns is not visible from the values before it.
+```
+
 ## Choosing a scheme
 
 | | mesh it suits | exact for | solve cost |

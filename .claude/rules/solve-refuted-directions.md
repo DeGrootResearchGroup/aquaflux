@@ -391,6 +391,27 @@
     second-order collocated Rhie–Chow discretization, so "make the PC pattern local" is not a lever.
 
 
+## Incomplete-LU preconditioning of the pitzDaily flow block — CLOSED as a direction (2026-08-22)
+
+`PITZ_FLOW_INVERSE=petsc` (host GAMG smoothed by PETSc's incomplete factorization) was
+`pitzdaily_openfoam`'s shipped leading inverse until this date, and it stopped marching the case:
+collapse at the first step of the second Reynolds rung, `alpha` 0, `beta` escalating through the whole
+ladder, residual to `inf`. Reproduced three times including on a tree with no local change. The
+default is now `simplesmooth`, which marches the same case to the same answer (`x_r/h` 8.0686, 404
+cycles, 711 s against the last good `petsc` run's 8.0686 / 743 s).
+
+**The direction is closed rather than merely the default moved**, and on the general property rather
+than on this failure: an incomplete factorization's behaviour on this saddle depends on the
+**elimination order** and the **fill**, neither predictable in advance — this same case is on record
+going from *amplifying* a residual 5.5x per stationary sweep to contracting it on nothing but a
+reordering. A SIMPLE-smoothed hierarchy never eliminates the matrix, so it has neither sensitivity.
+`petsc` and `hostilu` stay reachable and their recorded measurements stand as measurements; what is
+closed is either of them as a default, and the bisect that would say *when* the collapse entered.
+⚠️ **Consequence for anyone reading an old number: a `petsc`-bundle figure for this case is not
+reproducible on the current tree.** Full detail, including what was ruled out first (the day's four
+merges are inert — `|R|` identical to twelve digits at a fixed state), in `.claude/rules/validation.md`
+§ "pitzDaily's SHIPPED PRECONDITIONER STOPPED MARCHING IT".
+
 ## `jax.linearize` in place of the per-matvec `jax.jvp` — REFUTED, and it looks obviously right
 
 `solve/continuation.py`'s `shifted_jacobian` builds the Krylov matvec as

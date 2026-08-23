@@ -15,10 +15,12 @@ import dataclasses
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import lineax as lx
 import pytest
 from aquaflux.solve import (
     ConstantRelaxation,
     DivergenceGuard,
+    DualTimeStep,
     ImplicitNewtonSolver,
     MonotoneLineSearch,
     PseudoTransientStep,
@@ -29,6 +31,7 @@ from aquaflux.solve import (
     positive_block_limit,
     positive_block_projection,
 )
+from aquaflux.solve.continuation import _shifted_solve
 from aquaflux.solve.implicit import backtracking_line_search
 
 
@@ -82,6 +85,143 @@ def test_pseudo_transient_engine_is_differentiable() -> None:
 
     # d/dtheta cbrt(theta) = (1/3) theta^(-2/3); the IFT adjoint is independent of the shift.
     assert jnp.allclose(grad, (1.0 / 3.0) * theta ** (-2.0 / 3.0), atol=1e-6)
+
+
+#: How far the stand-in below scales :func:`_residual`'s Jacobian.
+#:
+#: ⚠️ **NOT 0.5, and the reason is worth knowing before choosing a factor for a fixture like this.** A
+#: stand-in scaled by ``s`` makes the step ``1/s`` times the Newton step, so the iteration's fixed-point
+#: derivative at the root is ``1 - 1/s`` -- which at ``s = 0.5`` is exactly ``-1``. **A
+#: factor-of-two-wrong Jacobian sits precisely on Newton's stability boundary**: it oscillates without
+#: decaying, forever, once the pseudo-transient shift has eased to zero near the root. That is the
+#: least harmless-looking factor available, not the most, and it made this suite hang against
+#: ``max_steps`` before it was chosen deliberately. At ``0.8`` the derivative is ``-0.25`` and the
+#: iteration converges linearly -- still an unmistakably wrong operator, and one that works.
+_STAND_IN_SLOPE = 0.8
+
+
+def _scaled_slope_residual(phi: jnp.ndarray, theta: jnp.ndarray) -> jnp.ndarray:
+    """A stand-in whose Jacobian is :data:`_STAND_IN_SLOPE` times :func:`_residual`'s, with a different root.
+
+    Deliberately wrong in *both* ways a stand-in can be wrong -- the operator it supplies is off by a
+    fixed factor, and its own root (``cbrt(theta / 0.8)``) is nowhere near the real one -- so a step
+    that accidentally drove this residual to zero, or that quietly kept differentiating the real one,
+    is distinguishable from a step that uses it for the operator alone.
+    """
+    return _STAND_IN_SLOPE * phi**3 - theta
+
+
+def _jacobian_narrowed_step(**kwargs: object) -> PseudoTransientStep:
+    return PseudoTransientStep(
+        UniformShiftPolicy(strength=1.0),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
+        **kwargs,
+    )
+
+
+def test_a_stand_in_jacobian_leaves_the_root_where_the_residual_puts_it() -> None:
+    """``jacobian_residual`` changes the operator and not the answer.
+
+    The whole asymmetry the field exists for: the residual decides *which* equations are solved, the
+    operator decides only how fast they are solved. A stand-in whose own root is ``cbrt(2*theta)``
+    must therefore not move the converged state off ``cbrt(theta)``.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+    solver = ImplicitNewtonSolver(
+        rtol=1e-10,
+        atol=1e-10,
+        max_steps=400,
+        forward_step=_jacobian_narrowed_step(
+            jacobian_residual=lambda p: _scaled_slope_residual(p, theta)
+        ),
+    )
+
+    phi = solver.solve(_residual, jnp.ones_like(theta), theta)
+
+    assert jnp.allclose(phi, jnp.cbrt(theta), atol=1e-6)
+    # ...and emphatically not the stand-in's own root, which a step that solved the wrong residual
+    # would have found instead.
+    assert not jnp.allclose(phi, jnp.cbrt(theta / _STAND_IN_SLOPE), atol=1e-2)
+
+
+def test_a_stand_in_jacobian_genuinely_changes_the_step_it_produces() -> None:
+    """The reachability half: the field must have teeth, or the test above proves nothing.
+
+    An unwired ``jacobian_residual`` would leave the correction bit-identical, and every property
+    asserted of it would then hold for a reason that has nothing to do with the field. So assert the
+    corrections differ by exactly the factor the stand-in's Jacobian differs by: with no shift and an
+    exact solve, ``J delta = -R`` against ``(s J) delta = -R`` scales the step by ``1/s``.
+    """
+    phi = jnp.array([1.4, 1.1, 0.6])
+    theta = jnp.array([8.0, 27.0, 64.0])
+    residual = jax.tree_util.Partial(_residual, theta=theta)
+    solver = lx.GMRES(rtol=1e-12, atol=1e-12)
+    shift = jnp.zeros_like(phi)
+
+    exact, _ = _shifted_solve(residual, phi, residual(phi), shift, None, solver)
+    passthrough, _ = _shifted_solve(
+        residual, phi, residual(phi), shift, None, solver, jacobian_fn=residual
+    )
+    stand_in, _ = _shifted_solve(
+        residual,
+        phi,
+        residual(phi),
+        shift,
+        None,
+        solver,
+        jacobian_fn=jax.tree_util.Partial(_scaled_slope_residual, theta=theta),
+    )
+
+    # Passing the residual itself is the default path exactly, so `None` cannot be a silent special
+    # case that skips the substitution.
+    assert jnp.array_equal(exact, passthrough)
+    assert jnp.allclose(stand_in, exact / _STAND_IN_SLOPE, rtol=1e-8)
+
+
+def test_a_stand_in_jacobian_leaves_the_adjoint_exact() -> None:
+    """The gradient is unchanged, because the adjoint never consults the forward step.
+
+    The implicit-function-theorem reverse rule differentiates the residual it was handed, at the
+    converged state, so an approximate *forward* operator cannot reach it. That is the property that
+    makes a cheaper forward Jacobian legitimate at all -- the sensitivity a user asks for stays exact
+    however loosely the march got to the root.
+    """
+    theta = jnp.array([8.0])
+
+    def solved_sum(t: jnp.ndarray, step: PseudoTransientStep) -> jnp.ndarray:
+        solver = ImplicitNewtonSolver(rtol=1e-10, atol=1e-10, max_steps=400, forward_step=step)
+        return jnp.sum(solver.solve(_residual, jnp.ones_like(t), t))
+
+    exact_step = _jacobian_narrowed_step()
+    stand_in_step = _jacobian_narrowed_step(
+        jacobian_residual=lambda p: _scaled_slope_residual(p, theta)
+    )
+    closed_form = (1.0 / 3.0) * theta ** (-2.0 / 3.0)
+
+    for step in (exact_step, stand_in_step):
+        assert jnp.allclose(jax.grad(solved_sum)(theta, step), closed_form, atol=1e-6)
+
+
+def test_the_dual_time_step_carries_a_stand_in_jacobian_too() -> None:
+    """Both shifted steps read the field, so a march does not lose it by running an inner loop.
+
+    ``DualTimeStep`` is what a coupled march actually runs (``inner_steps > 1``), and it forms its own
+    shifted solve rather than delegating to the single-step one -- so wiring the single-step branch
+    alone would leave the field inert on the path that matters.
+    """
+    theta = jnp.array([8.0, 27.0])
+    step = DualTimeStep(
+        UniformShiftPolicy(strength=1.0),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
+        inner_steps=4,
+        inner_tol=1e-2,
+        jacobian_residual=lambda p: _scaled_slope_residual(p, theta),
+    )
+    solver = ImplicitNewtonSolver(rtol=1e-10, atol=1e-10, max_steps=400, forward_step=step)
+
+    phi = solver.solve(_residual, jnp.ones_like(theta), theta)
+
+    assert jnp.allclose(phi, jnp.cbrt(theta), atol=1e-6)
 
 
 def test_divergence_guard_accepts_below_cap_and_rejects_divergence() -> None:

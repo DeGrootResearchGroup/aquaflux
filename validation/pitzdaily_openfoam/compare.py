@@ -81,7 +81,7 @@ from aquaflux.discretization import FirstOrderUpwind, LimitedUpwind
 from aquaflux.flow import MomentumContinuity, NoSlipWall, PressureOutlet, VelocityInlet
 from aquaflux.io import read_openfoam
 from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CorrectedGreenGauss, VenkatakrishnanLimiter
+from aquaflux.schemes import CorrectedGreenGauss, SweptGradientSolve, VenkatakrishnanLimiter
 from aquaflux.solve import (
     COMPILED as ILU0_COMPILED,
 )
@@ -98,8 +98,8 @@ from aquaflux.solve import (
     combine_observers,
     ilu_smoothed_inverse,
     jacobi_smoothed_inverse,
-    simple_smoothed_inverse,
     relative_residual_gmres,
+    simple_smoothed_inverse,
 )
 from aquaflux.turbulence import (
     CoupledJacobianProbe,
@@ -243,10 +243,31 @@ if K_WALL not in _K_WALL_BCS:
 K_WALL_BC = _K_WALL_BCS[K_WALL]
 
 
-#: ⚠️ WHICH INVERSE THE LEADING `[u, v, p]` BLOCK GETS. `petsc` (default) is the host GAMG V-cycle
-#: smoothed by PETSc's incomplete factorization, at the `FILL_LEVELS` above. `hostilu` is this package's
-#: own hierarchy smoothed by its own factorization -- which is ZERO-FILL by construction and has no fill
-#: parameter at all.
+#: ⚠️ WHICH INVERSE THE LEADING `[u, v, p]` BLOCK GETS. `simplesmooth` (default since 2026-08-22) is a
+#: multigrid hierarchy over the saddle relaxed by SIMPLE sweeps, matching the sibling 3D case's own
+#: default. `petsc` is the host GAMG V-cycle smoothed by PETSc's incomplete factorization, at the
+#: `FILL_LEVELS` above. `hostilu` is this package's own hierarchy smoothed by its own factorization --
+#: which is ZERO-FILL by construction and has no fill parameter at all.
+#:
+#: ⚠️⚠️ **THE DEFAULT MOVED OFF `petsc` BECAUSE `petsc` STOPPED MARCHING THIS CASE, and the failure is
+#: the incomplete factorization's order-and-fill dependence rather than anything about the physics
+#: (2026-08-22).** Under `petsc` the march now collapses at the FIRST step of the second Reynolds rung:
+#: `alpha` 0, `beta` escalating 0.5 -> 2 -> 16 through the whole ladder, the residual rising
+#: 1.674e-01 -> 5.754e-01 -> `inf`. Reproduced three times, including on a tree carrying no local
+#: change at all, with the step tables bit-identical -- so it is a property of this bundle and not of
+#: whatever else was in flight. The same case under `simplesmooth` marches straight through to the
+#: same answer (`x_r/h` 8.0686, `ux` 0.0191, 404 cycles, 711 s) as the last good `petsc` run
+#: (8.0686, 0.0191, 743 s), which is what makes this a swap of preconditioner rather than of result.
+#:
+#: The discretization is NOT what changed, and that was checked rather than assumed: `|R|` at a fixed
+#: saved state is identical to twelve digits across every commit merged that day, and reverting the
+#: one of them that is recorded as not bit-identical reproduces the collapse unchanged. What sits
+#: behind it is the standing property of a zero- or low-fill factorization on this block -- the
+#: elimination ORDER decides which couplings it discards, and this same case is on record going from
+#: amplifying a residual 5.5x per sweep to contracting it on nothing but a reordering. A SIMPLE-smoothed
+#: hierarchy never eliminates the matrix at all; it forms an approximate Schur complement and applies
+#: V-cycles, so it has no order or fill to be sensitive to. `petsc` and `hostilu` both stay reachable
+#: and both stay measured -- what is no longer defensible is either of them as the *default* here.
 #:
 #: ⚠️ **`hostilu` was predicted to fail here because zero fill was measured to amplify on this block,
 #: and it did -- but the diagnosis was incomplete: the amplification is a property of the ELIMINATION
@@ -263,24 +284,23 @@ _FLOW_ORDERS = {
 }
 if FLOW_ORDER not in _FLOW_ORDERS:
     raise SystemExit(f"PITZ_FLOW_ORDER={FLOW_ORDER!r} is not one of {sorted(_FLOW_ORDERS)}")
-FLOW_INVERSE = os.environ.get("PITZ_FLOW_INVERSE", "petsc")
-if FLOW_INVERSE not in ("petsc", "simplesmooth", "hostilu"):
-    raise SystemExit(
-        f"PITZ_FLOW_INVERSE={FLOW_INVERSE!r} is not one of ['petsc', 'native', 'hostilu']"
-    )
+_FLOW_INVERSES = ("simplesmooth", "petsc", "hostilu")
+FLOW_INVERSE = os.environ.get("PITZ_FLOW_INVERSE", "simplesmooth")
+if FLOW_INVERSE not in _FLOW_INVERSES:
+    raise SystemExit(f"PITZ_FLOW_INVERSE={FLOW_INVERSE!r} is not one of {list(_FLOW_INVERSES)}")
 
-#: `native` -- the sibling case's own alternative: a differentiable-framework multigrid over the
-#: `[u, v, p]` saddle relaxed by SIMPLE sweeps rather than by an incomplete factorization. It is the
-#: interesting arm here for two reasons. A SIMPLE sweep relaxes through diagonal and Schur
-#: approximations, so unlike an incomplete factorization it does not take its pattern from the stored
-#: sparsity -- which is why it may answer to the probe's reach quite differently. And the fill that
-#: decides the ILU arms does not apply to it at all.
+#: `simplesmooth` -- a multigrid hierarchy over the `[u, v, p]` saddle relaxed by SIMPLE sweeps rather
+#: than by an incomplete factorization, and this case's default since 2026-08-22 (see above). A SIMPLE
+#: sweep relaxes through diagonal and Schur approximations, so unlike an incomplete factorization it
+#: does not take its pattern from the stored sparsity -- which is why it may answer to the probe's
+#: reach quite differently, and why neither the fill nor the elimination order that decide the ILU
+#: arms applies to it at all.
 #:
 #: ⚠️ The settings are the sibling's and are NOT established here. That case ranks a smoother knob
 #: oppositely (see `FILL_LEVELS`) and coarsens about three times per level where this one manages
 #: seven, so `strength_threshold` and `sweeps` in particular are open questions on this mesh rather
 #: than values to trust. `PITZ_FLOW_SWEEPS` is exposed for that reason.
-NATIVE_FLOW = dict(
+SIMPLE_FLOW = dict(
     sweeps=int(os.environ.get("PITZ_FLOW_SWEEPS", "2")),
     pressure_sweeps=2,
     strength_threshold=0.25,
@@ -309,7 +329,7 @@ HOST_FLOW = dict(
 LEADING_INVERSE = (
     ilu_smoothed_inverse(**HOST_FLOW)
     if FLOW_INVERSE == "hostilu"
-    else simple_smoothed_inverse(**NATIVE_FLOW)
+    else simple_smoothed_inverse(**SIMPLE_FLOW)
     if FLOW_INVERSE == "simplesmooth"
     else None
 )
@@ -365,6 +385,25 @@ PROBE_GRADIENT_SWEEPS = (
     if os.environ.get("PITZ_PROBE_GRADIENT_SWEEPS")
     else None
 )
+
+#: Cap the gradient's Richardson sweeps in the copy of the residual the FORWARD JACOBIAN is
+#: differentiated from -- the Krylov operator of every shifted solve. Not the residual: the march is
+#: still driven to a root of the full-sweep discretization, and the adjoint still differentiates it,
+#: so this moves neither the answer nor the gradient. `None` is byte-identical.
+#:
+#: Distinct from `PROBE_GRADIENT_SWEEPS`, which narrows what the preconditioner MATERIALIZES; this
+#: narrows what the Krylov iteration APPLIES. Both approximate the Jacobian and neither touches R.
+JACOBIAN_GRADIENT_SWEEPS = (
+    int(os.environ["PITZ_JACOBIAN_SWEEPS"]) if os.environ.get("PITZ_JACOBIAN_SWEEPS") else None
+)
+
+#: The gradient reconstruction's own sweep count -- the RESIDUAL's, so this one is a change to the
+#: discretization and moves the root. 4 is the scheme's shipped default; this mesh's calibrated count
+#: at a 1e-4 L2 tolerance is 2 (`rho` = 5.07e-03), so the default is conservative here. Exposed so the
+#: converged field's dependence on it can be measured rather than assumed. ⚠️ Raising it lengthens the
+#: residual's stencil and needs `PITZ_STENCIL_REACH` raised to match, or the coloured probe folds the
+#: far coupling onto near entries instead of capturing it.
+GRADIENT_SWEEPS = int(os.environ.get("PITZ_GRADIENT_SWEEPS", "4"))
 
 #: ⚠️ UNIFORM PROBING REACH, deliberately, where the sibling case shortens two columns. Its
 #: `(3,3,3,3,2,2)` is a SIX-field layout and was measured on that mesh and those schemes; the analogous
@@ -527,7 +566,11 @@ def build_case(model=None, gradient_scheme=None):
     # converged corrected-gradient to machine precision in the default few sweeps -- and the
     # reconstructed gradient, the coupled residual, and the reattachment length are all unchanged from a
     # much higher sweep count, so paying for more sweeps only enlarges the differentiated residual.
-    grad = CorrectedGreenGauss() if gradient_scheme is None else gradient_scheme
+    grad = (
+        CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=GRADIENT_SWEEPS))
+        if gradient_scheme is None
+        else gradient_scheme
+    )
     # Momentum advection: second-order upwind = Venkatakrishnan-limited linear upwind (the upwind cell
     # reconstructed to the face with its corrected-Green-Gauss gradient, slope-limited so the
     # reconstruction is monotonicity-bounded) -- the analogue of OpenFOAM's `Gauss linearUpwind`.
@@ -598,7 +641,29 @@ def build_case(model=None, gradient_scheme=None):
     return dict(coupled=coupled, momentum=momentum, turbulence=turbulence, geom=geom)
 
 
-def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
+def _gradient_scheme_label(scheme):
+    """A one-line description of the reconstruction actually in force, for the run banner.
+
+    Names the sweep count as well as the class, because the count is what sets both the accuracy of
+    the reconstruction and how far the residual reaches across the cell graph -- so a banner naming
+    only the class cannot be read against a recorded measurement.
+    """
+    if scheme is None:
+        return f"CorrectedGreenGauss (swept {GRADIENT_SWEEPS})"
+    solver = getattr(scheme, "solver", None)
+    sweeps = getattr(solver, "sweeps", None)
+    return f"{type(scheme).__name__}" + (f" (swept {sweeps})" if sweeps is not None else "")
+
+
+def solve_aquaflux(
+    *,
+    log_path=None,
+    checkpoint_dir=None,
+    gradient_scheme=None,
+    stencil_reach=None,
+    jacobian_gradient_sweeps=None,
+    **solve_kwargs,
+):
     """Solve the coupled RANS system on the imported OpenFOAM mesh; return fields + geometry.
 
     Parameters
@@ -610,12 +675,31 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         converged state exists only inside the process that computed it, so any later study of the
         converged operator -- the adjoint's, in particular, which is the one the march itself never
         exercises -- has to re-run the whole march to ask its question.
+    gradient_scheme : GradientScheme, optional
+        Overrides :data:`GRADIENT_SWEEPS` for this solve; see :func:`build_case`. ``None`` takes the
+        case's own scheme.
+    stencil_reach : int, optional
+        Overrides :data:`STENCIL_REACH` for this solve. A study that varies the residual's own sweep
+        count has to move this with it -- the sweeps are what carry the residual's stencil, and a
+        probe shorter than that stencil folds the far coupling onto near entries.
+    jacobian_gradient_sweeps : int, optional
+        Overrides :data:`JACOBIAN_GRADIENT_SWEEPS` for this solve.
     **solve_kwargs
         Forwarded to :func:`~aquaflux.turbulence.solve_coupled`, overriding the defaults set here.
         This is the seam a solver study uses to instrument or reconfigure the march -- an ``on_step``
         observer, a ``refresh_trigger``, a different ``method``.
+
+    Notes
+    -----
+    The three overrides above exist so a sweep can run every arm **in one process**, back to back on
+    one machine, rather than as N invocations whose wall clocks are not comparable. They default to the
+    module constants, so an unparameterized call is the case exactly as it ships.
     """
-    case = build_case()
+    if stencil_reach is None:
+        stencil_reach = STENCIL_REACH
+    if jacobian_gradient_sweeps is None:
+        jacobian_gradient_sweeps = JACOBIAN_GRADIENT_SWEEPS
+    case = build_case(gradient_scheme=gradient_scheme)
     coupled, momentum, turbulence, geom = (
         case["coupled"],
         case["momentum"],
@@ -658,7 +742,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             # a banner line that cannot be read against a recorded measurement is not worth printing.
             else f"{FLOW_INVERSE} {HOST_FLOW | {'ordering': f'cell-major/{FLOW_ORDER}'}}"
             if FLOW_INVERSE == "hostilu"
-            else f"{FLOW_INVERSE} {NATIVE_FLOW}",
+            else f"{FLOW_INVERSE} {SIMPLE_FLOW}",
         ),
         # ⚠️ WHICH incomplete-LU IMPLEMENTATION IS LIVE, because the two differ by orders of magnitude
         # in speed and nothing recorded which one a run used. `Ilu0` ships a pure-Python reference twin
@@ -670,9 +754,14 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             "host ILU kernel",
             "compiled" if ILU0_COMPILED else "PURE PYTHON (fallback -- timings void)",
         ),
-        ("trailing inverse", "native nodal" if FIELD_SPLIT else "n/a"),
-        ("probe stencil reach", STENCIL_REACH),
-        ("probe gradient sweeps", PROBE_GRADIENT_SWEEPS or "full (4)"),
+        ("trailing inverse", f"jacobi_smoothed {JACOBI_TRAILING}" if FIELD_SPLIT else "n/a"),
+        ("probe stencil reach", stencil_reach),
+        ("gradient scheme", _gradient_scheme_label(gradient_scheme)),
+        ("probe gradient sweeps", PROBE_GRADIENT_SWEEPS or "full (the scheme's own)"),
+        (
+            "JACOBIAN gradient sweeps",
+            jacobian_gradient_sweeps or "full -- the exact Jacobian of the residual",
+        ),
         ("probe column reach", COLUMN_REACH or "uniform"),
         ("forward restart / max restarts", f"{FORWARD_RESTART} / {FORWARD_MAX_RESTARTS}"),
         ("k positivity projection", POSITIVITY_PROJECTION),
@@ -689,7 +778,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
     # largest allocation this case makes, and building it twice doubles that for nothing.
     probe = CoupledJacobianProbe.build(
         coupled,
-        stencil_reach=STENCIL_REACH,
+        stencil_reach=stencil_reach,
         column_reach=COLUMN_REACH,
         gradient_sweeps=PROBE_GRADIENT_SWEEPS,
     )
@@ -724,6 +813,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             inner_tol=INNER_TOL,
             probe=probe,
             probe_gradient_sweeps=PROBE_GRADIENT_SWEEPS,
+            jacobian_gradient_sweeps=jacobian_gradient_sweeps,
             cycle_budget=CYCLE_BUDGET,
             forward_rtol=FORWARD_RTOL,
             forward_restart=FORWARD_RESTART,

@@ -92,6 +92,150 @@ property worth checking on any future change here; a drift that grew with depth 
   peel, and failed by ~1 ulp. The reference is a scan too now, and bit-equality is restored — the peel
   itself is exact, since `A·0` is exactly zero.
 
+## ⚠️ THE JACOBIAN'S GRADIENT CAN BE CHEAPER THAN THE RESIDUAL'S, AND ON pitzDaily THAT IS ~10 % OF A MARCH FOR NOTHING (measured 2026-08-22)
+
+The coupled march solves each shifted Newton system to `forward_rtol = 0.3` — a deliberately
+30 %-accurate step — while the gradient reconstruction *inside* that residual is solved to near machine
+precision, and `jax.jvp` differentiates through the same sweep count. So the expensive gradient is paid
+again on **every matrix-vector product**, of which a step takes many, to feed a step that is then taken
+inexactly.
+
+**That is only inconsistent if the two accuracies buy the same thing, and they do not.** The
+reconstruction inside `R` decides *which discrete equations are being solved*: loosen it and the root
+moves (with a fixed sweep count `R` is still exactly linear, deterministic and history-free, so Newton
+converges perfectly well — just to the root of a slightly different discretization). The reconstruction
+inside `J` decides only how fast the inexact-Newton iteration reaches whichever root `R` defines, which
+is the same latitude the `0.3` already takes. **`R` determines the answer; `J` determines only the rate.**
+
+**BUILT: `jacobian_gradient_sweeps` on all four coupled builders** (`coupled_continuation`,
+`coupled_lu_continuation`, `coupled_amg_continuation`, `mass_flow_coupled_continuation`) →
+`_coupled_step` → `ShiftedStep.jacobian_residual` → `_shifted_solve(jacobian_fn=…)`. It narrows the
+gradient's sweeps in the copy of the residual the Krylov **operator** is differentiated from, via the
+same `narrow_gradient_sweeps` the probe already uses. `None` everywhere is byte-identical. It is a
+**third** thing to narrow and the three must not be conflated: `sweeps` is the residual's (the
+discretization), `probe_gradient_sweeps` is what the preconditioner *materializes*, and this is what
+the Krylov iteration *applies*.
+
+**Per-matvec headroom, priced first** (pitzDaily 12225 cells, `state-00082`, `eqx.filter_jit`, warm,
+min of 7, x64, compiled ILU(0) live):
+
+| gradient sweeps | operator applies | `R` (ms) | `jvp(R)` (ms) |
+|---|---|---|---|
+| **4 (shipped)** | 3 | 3.85 | **8.27** |
+| 3 | 2 | 2.97 | 6.71 |
+| **2** | 1 | 1.97 | **4.63** |
+| 1 | 0 | 1.33 | **3.72** |
+
+A sweep costs ~0.9 ms in the residual and ~1.6 ms in the tangent, because **`jvp` spends two operator
+applies per sweep — a primal and a tangent — against the residual's one**. (The residual is nonlinear
+in the reconstructed gradient, through `nu_t` and the limiter, so the primal gradient cannot be
+eliminated.) Hence the sweeps weigh nearly twice as much on the differentiated path as on the evaluated
+one, and a march pays a tangent per Krylov iteration against a residual once per step.
+
+**On a whole march (three arms back to back in one process, `simplesmooth` bundle, three Reynolds
+rungs, `forward_rtol` 0.3, probe reach 5, residual held at swept-4):**
+
+| Jacobian | steps | Krylov cycles | worst step | wall | `x_r/h` | field difference vs control |
+|---|---|---|---|---|---|---|
+| **full (exact) — control** | 71 | 404 | 14 | 713.3 s | 8.069 | — |
+| **swept-2** | **71** | **404** | **14** | **644.0 s (−9.7 %)** | 8.069 | ≤ 1.2e-07 L2 |
+| swept-1 | 71 | 410 | 15 | 644.4 s | 8.069 | ≤ 2.3e-06 L2 |
+
+- **swept-2 is free: identical step count, identical cycle count, identical worst step, and the same
+  root.** The step tables are equal column for column — `beta`, inner count, cycles, `alpha`, flags and
+  residual to four figures — with only the wall-clock column moving. The whole 9.7 % is cheaper
+  matrix-vector products.
+- **THE KNEE IS AT 2, AND swept-1 IS PAST IT.** It costs 6 cycles (+1.5 %) and returns nothing in wall
+  clock (644.4 s against 644.0), even though its tangent is a further 20 % cheaper per matvec. That is
+  the exchange rate this idea lives or dies on, seen directly: below some accuracy the extra iterations
+  eat the cheaper product. **Run the ladder one rung past where it stops helping** — the two endpoints
+  alone would have read as "keep going".
+- **Why 2 is exactly right here is predictable in advance, and that is the useful part.** This mesh's
+  measured contraction rate is `rho = 5.07e-03`, so a swept-2 gradient departs from swept-4 by
+  `~1.4e-05` relative and a swept-1 one by `~4.0e-03`. Against a linear solve stopping at 30 %, the
+  first is invisible and the second is at the edge. **Size the cap from `contraction_rate`, not by
+  feel** — and note the residual's own calibrated count on this mesh is also 2, so at `tol=1e-4` the
+  two questions happen to give the same answer here; they will not in general.
+- ⚠️ **One run per arm**, but the wall clock here is better anchored than usual. The **step and cycle
+  counts are contention-immune and carry the verdict** — bit-identical trajectories are not a
+  wall-clock claim — and the three arms ran back to back in one process. Beyond that, the control arm
+  was run **twice**, in two separate invocations on the same machine, at **713.3 s and 720.1 s** with
+  identical steps, cycles and reattachment: a **~1 % march-level repeatability**, which is what puts
+  the 9.7 % comfortably outside it. That is a much finer instrument than this project's recorded ~15 %
+  *per-application* noise floor, and the difference is worth knowing: a whole march averages away the
+  per-application spread that a single-state probe is at the mercy of.
+- ⚠️ **Measured on `simplesmooth`, not on the `petsc` bundle this case shipped until the same day** (see
+  the case comment: `petsc` no longer marches it). Cycle counts do not transfer across preconditioner
+  families.
+- **The adjoint is untouched, by construction rather than by care.** `_implicit_solve_bwd` differentiates
+  the residual it was handed at the converged state and never consults the forward step, so a cheaper
+  forward operator cannot reach a gradient. See `.claude/rules/solve-globalization.md`.
+- **Not measured: a genuinely skewed mesh, where `rho` is 0.14–0.26 rather than 5e-03.** There the
+  residual needs many more sweeps and the *ratio* between the two counts should be much larger — which
+  is where this lever should pay most, and where it is also most likely to start costing steps. Both
+  shipped cases are near-orthogonal (`bfs3d` calibrates to `k = 1`), so neither can answer it.
+  **The UV reactor is the wrong instrument for it** despite being the one skewed mesh in the tree: at
+  1.6M cells a single march is far too expensive to walk a ladder on, and the ladder — not any single
+  arm — is what carries the verdict here (the knee at 2 was only visible because 1 was also run).
+  **What this needs is a SMALL skewed case**, on the order of the two existing ones, and the natural
+  source is an automatically-generated mesh over a simple geometry rather than a perturbed grid: a
+  synthetic perturbation makes `rho` a knob, where the question is what a real mesh generator produces.
+  The strongest form is a **re-mesh of a geometry already validated on a block mesh**, so mesh quality
+  is the only variable against a known answer and the metric stays the judge.
+  **⚠️ BUT THE GEOMETRY MUST NOT BE AXIS-ALIGNED, AND `bfs3d` IS — so re-meshing IT would produce
+  another orthogonal mesh.** An automatic hex mesher distorts cells only where it must **snap** to a
+  surface the background mesh does not already conform to; a box with an axis-aligned step castellates
+  and stops, leaving the background hexes intact. This project's own two meshes are the demonstration:
+  `bfs3d` is a pure box and is skew-free to `1.9e-12`, while `pitzDaily` — the same class of geometry
+  but with an **inclined lower wall and a contraction** — reaches `7.5e-02`. The non-alignment is where
+  the skew comes from. So the candidate geometry needs a genuinely angled or curved surface (and
+  refinement-level transitions, the other source, help), and `pitzDaily`'s own geometry is the better
+  host for the idea than `bfs3d`'s for exactly this reason.
+  **⚠️ Whatever is chosen, MEASURE THE MESH BEFORE BUILDING A CASE ON IT** — generate it, then run
+  `contraction_rate` and a skew census. It costs minutes, and the failure it prevents is a case built
+  around a mesh that turns out orthogonal, which is precisely why `bfs3d` cannot answer this question
+  despite being the newer and better-tuned of the two.
+
+**And the other half of the question, measured on the same case: the RESIDUAL's exactness buys nothing
+here either — because the sweep series has already converged by two.** Same harness, `residual` group,
+each arm's probing reach moved with its sweep count (`sweeps + 2`, so the probe is not the thing
+degrading):
+
+| residual | probe reach | steps | cycles | wall | `x_r/h` | field difference vs swept-4 |
+|---|---|---|---|---|---|---|
+| swept-2 | 4 | 71 | 391 | 545.8 s | 8.069 | ≤ 2.2e-06 L2 |
+| **swept-4 (shipped)** | 5 | 71 | 404 | 720.1 s | 8.069 | — |
+| swept-6 | 7 | 71 | 416 | **1059.1 s** | 8.069 | ≤ 7.1e-07 L2 |
+
+**A 1.9× cost spread across the ladder, for a converged field that moves by ~1e-06 relative and a
+reattachment length that does not move at all.** Read it as the sweep series having converged rather
+than as accuracy being unnecessary: swept-2 and swept-6 each sit ~1e-06 from swept-4 *and from each
+other*, which is what "all three are the same discretization" looks like. The direct answer to "what is
+the exactness buying?" on this mesh is **nothing measurable** — and that is a property of `rho = 5.07e-03`,
+not a general licence.
+⚠️ **Do NOT read this as an argument to lower the shipped `sweeps=4`.** The same count is *insufficient*
+at 30 % skew, the failure is silent (there is no residual test to trip), and the count also sets the
+residual's Jacobian reach, which each case's probing reach is matched to — so moving it is a change to
+the discretization that the case's reattachment result would have to be re-validated against. The
+per-case answer is `CorrectedGreenGauss.calibrated`, which already gives **2** on this mesh.
+⚠️ **The wall-clock column of this group mixes two changes** — the arms differ in probe reach as well as
+in sweep count, deliberately, since a probe shorter than the residual's stencil would fold the far
+coupling onto near entries and degrade the arm for the wrong reason. The **field** comparison is what
+this group is for; the seconds are indicative.
+**Contrast the two groups, because that is the finding.** Both cheapen the reconstruction and both leave
+the answer where it was — but the residual group does it by *changing the discretization and being
+lucky that this mesh does not care*, while the Jacobian group does it *without touching the
+discretization at all*. Only the second is safe on a mesh nobody has calibrated.
+
+- **⚠️ `narrow_gradient_sweeps` SILENTLY DROPPED `relaxation` — fixed 2026-08-22.** It rebuilt the node
+  as `SweptGradientSolve(sweeps=…, warn_tol=…)`, so an under-relaxed solve came back at the class
+  default `1.0`. Latent while both shipped cases run undamped, and a real hazard the moment this
+  function stopped being probe-only: on a mesh skewed enough to need the damping the undamped
+  Richardson iteration **does not converge at all**, so the narrowed copy would diverge where the
+  original was fine, with nothing to say a setting had been lost. A narrowed copy must differ from its
+  original in the sweep count and in nothing else; pinned by
+  `test_narrow_gradient_sweeps_carries_the_relaxation`.
+
 ## Responsibility
 - Reconstruction/interpolation/gradient/**limiting** **strategy classes** (each an `equinox.Module`
   implementing a scheme `Protocol`), each a **small single-responsibility class with a

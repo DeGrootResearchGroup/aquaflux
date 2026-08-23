@@ -35,6 +35,49 @@ paths:
   field against the previous implementation (`DualTimeStep.line_search` stays **10** against the base's
   **0** — it redeclares it, which is why that difference has to be checked rather than assumed).
 
+- **⚠️ THE RESIDUAL AND THE JACOBIAN MAY BE DIFFERENT FUNCTIONS — `ShiftedStep.jacobian_residual`
+  (BUILT 2026-08-22).** An optional `phi -> R~(phi)` whose Jacobian--vector product forms the shifted
+  solve's operator, in place of differentiating the residual the step is driving to zero. `None`
+  (default) differentiates the residual itself and is byte-identical. Threaded through
+  `_shifted_solve(jacobian_fn=…)`, read by **both** steppers (a march runs the dual-time one, so wiring
+  the single-step branch alone would leave it inert on the path that matters).
+
+  **The asymmetry it exists to express: `R` decides the answer, `J` decides only the rate.** The
+  residual defines *which discrete equations are being solved*, so an approximation there moves the
+  root; the Jacobian only decides how fast an inexact-Newton iteration reaches whichever root `R`
+  defines, which is the same latitude `forward_rtol = 0.3` already takes on the linear solve. Holding
+  both to one accuracy because one function serves both is a coincidence of implementation, not a
+  requirement. The concrete consumer is the gradient reconstruction's sweep count — see
+  `.claude/rules/schemes.md` for what it is worth and where the knee is.
+
+  - **The adjoint is exact BY CONSTRUCTION, not by care, and this is the load-bearing property.**
+    `_implicit_solve_bwd` forms `jax.vjp(residual_fn, …)` at the converged state directly and never
+    consults the forward step, so nothing set here can reach a gradient. That is what makes a cheaper
+    forward operator legitimate at all: the sensitivity a user asks for stays exact however loosely the
+    march got to the root. Pinned by
+    `test_a_stand_in_jacobian_leaves_the_adjoint_exact`.
+  - **The descent test still reads the TRUE residual.** `PseudoTransientStep`'s `directional` is
+    `jvp(norm o residual_fn)`, so the merit and its slope are the real ones; only the operator that
+    produced the direction is approximate. Correct — the question a descent test asks is whether the
+    step helps the residual being solved.
+  - **Data, not static.** The natural argument is a bound method of an assembler, which equinox carries
+    as a pytree, so its arrays ride as dynamic leaves and every step stays a compilation-cache hit
+    rather than recompiling against baked-in constants. Same reasoning as `residual_norm`.
+  - **A reachability test is mandatory and is easy to omit.** An unwired field leaves the correction
+    bit-identical, and every property asserted of it then holds for a reason unrelated to the field.
+    `test_a_stand_in_jacobian_genuinely_changes_the_step_it_produces` scales the stand-in's Jacobian by
+    a fixed factor, whose unshifted exact solve must scale the step by its reciprocal.
+  - **⚠️ A FACTOR-OF-TWO-WRONG JACOBIAN IS EXACTLY NEWTON'S STABILITY BOUNDARY — do not reach for it as
+    a harmless test fixture (learnt the hard way, 2026-08-22).** An operator scaled by `s` makes the
+    step `1/s` times the Newton step, so the iteration's fixed-point derivative at the root is
+    `1 - 1/s`, which at `s = 0.5` is `-1`: it oscillates forever without decaying, once the
+    pseudo-transient shift has eased to zero near the root. `0.5` is therefore the *least* harmless
+    factor available rather than an obvious one, and two tests written with it ran to `max_steps` and
+    failed. The fixture is at `0.8` (derivative `-0.25`) — still unmistakably the wrong operator, and
+    one that converges. Note this is also the *quantitative* form of the exchange rate the field
+    trades in: an operator error of order one is not a slower Newton, it is no Newton at all, so a
+    cap's error budget is bounded well below that and not merely "small".
+
 - **`_TrailingFirstFieldSplit` supplies only what differs, and `apply` has ONE body (BUILT 2026-08-15).**
   The two orderings were mirrored copies — 14 lines differing in 5 — and the copy had dropped the base's
   explanation of why the transposed coupling is formed once. The class docstring justified the split as

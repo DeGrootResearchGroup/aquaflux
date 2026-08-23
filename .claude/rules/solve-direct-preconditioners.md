@@ -472,7 +472,10 @@ complete LU and the AMG's coloured probe both still depend on it.
         MONOLITHIC AND THE CASE IS FIELD-SPLIT, SO THEY DO NOT DESCRIBE THE SHIPPED PRECONDITIONER.**
         `validation/pitzdaily_openfoam/ilu0_remedy_sweep.py` and its siblings build **one `AmgVCycle`
         over all five fields interleaved cell-major**. The pitzDaily case runs `field_split=True`, and
-        with `FLOW_INVERSE = "petsc"` (its default) the split sends:
+        with `FLOW_INVERSE = "petsc"` (its default **until 2026-08-22**, when the case moved to
+        `simplesmooth` — see `.claude/rules/validation.md`; under the current default no incomplete
+        factorization runs on this case at all, which makes everything below doubly inapplicable to it)
+        the split sends:
         - the **`[u, v, p]` saddle** to the PETSc AMG V-cycle — *this* is the only block `FILL_LEVELS`
           governs, and the only place an incomplete factorization happens at all;
         - the **`[k, omega]` pair** to `jacobi_smoothed_inverse`, **which is not an ILU**.
