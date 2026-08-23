@@ -1982,3 +1982,115 @@ def test_narrowing_reaches_the_coupled_sweep_as_well_as_the_swept_solve() -> Non
         HessianCorrectedGradient(hessian_solve=NestedHessianSolve()), 3
     ).hessian_solve
     assert nested.solver.sweeps == 3 and nested.hessian_solver.sweeps == 3
+
+
+def test_the_merged_hessian_defect_is_the_difference_of_the_two_rows_it_replaces() -> None:
+    """The coupled sweep evaluates the Hessian equation ONCE where it used to evaluate it twice, and
+    the saving is only legitimate if the kernel is linear in the gradient and the Hessian *jointly*.
+
+    That is the property pinned here, because it is the one an unrelated change could break: a term
+    added to ``hessian_face_terms`` that mixes ``g`` and ``h`` — a product, a limiter, anything not
+    linear in the pair — would leave the sweep silently solving a different system, converging to
+    something plausible and wrong rather than failing.
+
+    Two identities together establish it. The ``h``-only branch must BE the inner operator's row, tying
+    the merged path to the operator the preconditioner was built for; and the merged evaluation must
+    equal the sum of its one-sided parts, which is joint linearity stated directly.
+    """
+    mesh = perturbed_grid_2d(5, 5, perturb=0.25, seed=0)
+    geometry = mesh.geometry()
+    systems = HessianCorrectedGradient._systems(mesh, geometry)
+    n_cells, dim = mesh.n_cells, mesh.dim
+    n_sym = gradient_module.symmetric_components(dim)
+
+    rng = np.random.default_rng(0)
+    g = jnp.asarray(rng.standard_normal((n_cells, dim)))
+    u = jnp.asarray(rng.standard_normal((n_cells, n_sym)))
+    zero_g, zero_u = jnp.zeros((n_cells, dim)), jnp.zeros((n_cells, n_sym))
+
+    # With the gradient zeroed the defect is exactly `-A_HH u`, and exactly rather than nearly: the
+    # merged call reduces to the same arithmetic the operator does.
+    assert np.array_equal(
+        np.asarray(systems.hessian_row_defect(zero_g, u)),
+        -np.asarray(systems.inner().operator(u)),
+    )
+
+    # Joint linearity. Not bit-exact, because evaluating once at `(-g, h)` contracts the multiply-adds
+    # differently from evaluating twice and subtracting -- the same rounding the scanned sweeps and
+    # the `dot` helper carry, and one unit in the last place rather than an approximation.
+    both = np.asarray(systems.hessian_row_defect(g, u))
+    apart = np.asarray(systems.hessian_row_defect(g, zero_u)) + np.asarray(
+        systems.hessian_row_defect(zero_g, u)
+    )
+    assert np.abs(both - apart).max() <= 1e-15 * max(np.abs(apart).max(), 1.0)
+
+
+def test_the_merged_gradient_defect_is_the_difference_of_the_two_rows_it_replaces() -> None:
+    """The sweep's gradient update is the same one-pass merge, on the row that is evaluated twice.
+
+    ``A_gg·g − A_gH·u`` is what the update needs, and evaluating the two blocks separately spends two
+    passes over the faces on something one pass produces. As with the Hessian row, the saving rests on
+    ``gradient_face_terms`` being linear in ``(g, h)`` **jointly**, so that is what is pinned — a term
+    that mixed the two would leave the sweep converging to something plausible and wrong.
+
+    The un-eliminated coupled operator supplies the reference: its gradient block *is* ``A_gg·g +
+    A_gH·u``, so evaluating it at ``−u`` gives the combination the merged call must reproduce, without
+    restating either block here.
+    """
+    mesh = perturbed_grid_2d(5, 5, perturb=0.25, seed=0)
+    systems = HessianCorrectedGradient._systems(mesh, mesh.geometry())
+    n_cells, dim = mesh.n_cells, mesh.dim
+    n_sym = gradient_module.symmetric_components(dim)
+
+    rng = np.random.default_rng(1)
+    g = jnp.asarray(rng.standard_normal((n_cells, dim)))
+    u = jnp.asarray(rng.standard_normal((n_cells, n_sym)))
+    zero_g, zero_u = jnp.zeros((n_cells, dim)), jnp.zeros((n_cells, n_sym))
+
+    packed = jnp.concatenate([g, -u], axis=1)
+    reference = np.asarray(systems.coupled.operator(packed)[:, :dim])
+    merged = np.asarray(systems.gradient_row_defect(g, u))
+    assert np.abs(merged - reference).max() <= 1e-14 * max(np.abs(reference).max(), 1.0)
+
+    # Joint linearity stated directly, as for the Hessian row.
+    apart = np.asarray(systems.gradient_row_defect(g, zero_u)) + np.asarray(
+        systems.gradient_row_defect(zero_g, u)
+    )
+    assert np.abs(merged - apart).max() <= 1e-14 * max(np.abs(apart).max(), 1.0)
+
+
+@pytest.mark.parametrize(
+    "mesh",
+    [
+        perturbed_grid_2d(4, 4, perturb=0.25, seed=3),
+        perturbed_grid_3d(3, 3, 3, perturb=0.2, seed=5),
+    ],
+    ids=["quadrilateral", "hexahedral"],
+)
+def test_the_reduced_hessian_block_matches_the_operator_it_preconditions(mesh) -> None:
+    """The reduced Hessian block is built by algebra rather than by probing the faces, and this is
+    what says the algebra is the same quantity the probes returned.
+
+    The reference is deliberately neither implementation: the inner operator is materialized densely,
+    one cell-component at a time, and each cell's own diagonal block is read straight off it. That is
+    far too expensive for a real mesh and exactly right for a small one — it shares no shortcut with
+    the code under test, so it cannot agree with it for the wrong reason.
+
+    ⚠️ The block's orientation is the trap here, not its values. ``cell_diagonal_block`` probes the
+    Hessian equation through a single tensor row, so what it returns is the **transpose** of the
+    matrix that equation multiplies by; getting that backwards produces a block that is plausible,
+    symmetric on symmetric meshes, and wrong by a few percent on skewed ones.
+    """
+    systems = HessianCorrectedGradient._systems(mesh, mesh.geometry())
+    n_cells = mesh.n_cells
+    n_sym = gradient_module.symmetric_components(mesh.dim)
+    inner = systems.inner()
+
+    def column(index):
+        cell, component = divmod(index, n_sym)
+        return inner.operator(jnp.zeros((n_cells, n_sym)).at[cell, component].set(1.0))
+
+    dense = jax.vmap(column)(jnp.arange(n_cells * n_sym)).reshape(n_cells, n_sym, n_cells, n_sym)
+    reference = np.stack([np.asarray(dense[c, :, c, :]).T for c in range(n_cells)])
+    built = np.asarray(jnp.linalg.inv(inner.preconditioner.inverse))
+    assert np.abs(built - reference).max() <= 1e-12 * np.abs(reference).max()

@@ -1308,9 +1308,18 @@ class CoupledBlockSweep(HessianSolve):
     Attributes
     ----------
     sweeps : int
-        Number of coupled sweeps (static). One sweep costs about three face-kernel passes against the
+        Number of coupled sweeps (static). One sweep costs **two** face-kernel passes against the
         nested path's ``1 + inner``, so a given accuracy is reached for far less work -- but the count
         needed is not the nested path's outer count and has to be calibrated on its own.
+
+        ⚠️ **The count is what this costs, not the work inside one sweep, and the two are easy to
+        confuse.** On a 12225-cell mesh the sweeps are ~82 % of a reconstruction, and *halving* the
+        face-kernel passes per sweep (from four to two, by merging each row into one evaluation) moved
+        the whole reconstruction by only 9 %: the compiler was already folding away most of the
+        redundant work, because the arguments being wasted were literal zeros rather than runtime
+        values. Cutting the count is worth several times as much -- on that mesh the sweep contracts
+        at 0.315, so twelve sweeps reproduce twenty to ``1e-9`` for a third less time. Calibrate the
+        count before optimizing the sweep.
     relaxation : float
         Damping on the gradient update, in ``(0, 1]``. A differentiable leaf.
     """
@@ -1971,9 +1980,10 @@ class NestedHessianSolve(HessianSolve):
     its operator applies.
 
     ⚠️ **This is the slower path on the meshes this scheme exists for**, because it discards what the
-    previous outer apply learned about the Hessian: 1.4x the face-kernel passes of
-    :class:`CoupledBlockSweep` at 30 % grid perturbation, 1.8x at 40 %, and up to 12x under
-    :class:`AveragedNeighbourHessian`, whose Hessian system is the expensive one to re-converge. It is
+    previous outer apply learned about the Hessian: 1.4x the cost of :class:`CoupledBlockSweep` at
+    30 % grid perturbation, 1.8x at 40 %, and up to 12x under :class:`AveragedNeighbourHessian`,
+    whose Hessian system is the expensive one to re-converge. Those ratios were measured while one
+    coupled sweep cost four face-kernel passes rather than today's two, so they understate the gap. It is
     faster only on an orthogonal mesh, where the outer solve is nearly trivial and there is nothing to
     save — and where this scheme has no advantage worth its cost anyway.
 
@@ -2144,6 +2154,8 @@ class _HessianSystems(NamedTuple):
     inner: Callable[[], GradientSystem]
     outer: Callable[[GradientSolve, GradientSystem], GradientSystem]
     outer_preconditioner: Callable[..., GradientPreconditioner]
+    hessian_row_defect: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
+    gradient_row_defect: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
     block_sweep: Callable[..., jnp.ndarray]
     coupled_error: Callable[..., GradientSystem]
 
@@ -2273,9 +2285,13 @@ class HessianCorrectedGradient(GradientScheme):
         apply of the outer solve; :class:`PackedSystemSolve` solves the un-eliminated ``[g, h]``
         system whole, which is the check that the elimination changes nothing.
 
-        The default is the coupled sweep because it matches the nested pair's accuracy at a third of
-        the face-kernel passes, and is worth 1.4x at 30 % grid perturbation, 1.8x at 40 %, and up to
-        12x under :class:`AveragedNeighbourHessian`. ⚠️ It is *slower* on an orthogonal mesh, where
+        The default is the coupled sweep because it matches the nested pair's accuracy at a fraction
+        of the face-kernel passes -- 40 against 220 for the ``20`` / ``20+10`` pair -- and is worth
+        1.4x at 30 % grid perturbation, 1.8x at 40 %, and up to 12x under
+        :class:`AveragedNeighbourHessian`. ⚠️ Those speed ratios were measured while one sweep cost
+        **four** passes rather than today's two, so they understate the coupled path; the pass counts
+        themselves are exact. And read either against the caveat on
+        :attr:`CoupledBlockSweep.sweeps`: a face-pass count is a poor predictor of wall clock here. ⚠️ It is *slower* on an orthogonal mesh, where
         the nested outer solve is nearly trivial — which is also a mesh on which this scheme has no
         advantage worth its cost.
     local_schur_block : bool
@@ -2691,13 +2707,36 @@ class HessianCorrectedGradient(GradientScheme):
             return pack(gradient_rhs(fld, bvals), zero_u)
 
         # ---- Schur elimination of the Hessian block.
-        def gradient_and_hessian_rows(g):
-            """``(A_gg·g, A_Hg·g)`` — the outer operator needs both, from one pass over the faces."""
-            rhs_g = face_cells.scatter(
+        def a_gg(g):
+            """``A_gg·g`` — the gradient equation's own row, with the Hessian held at zero."""
+            return scale(g, vol) - face_cells.scatter(
                 *gradient_face_terms(g, zero_h, g, zero_h, zero_h, zero_f, zero_b)
             )
+
+        def gradient_and_hessian_rows(g):
+            """``(A_gg·g, A_Hg·g)`` — the outer operator needs both, from one pass over the faces."""
             rhs_h = face_cells.scatter(*hessian_face_terms(g, zero_h, g, zero_h, zero_h))
-            return scale(g, vol) - rhs_g, reduce_hessian(-rhs_h)
+            return a_gg(g), reduce_hessian(-rhs_h)
+
+        def hessian_row_defect(g, u):
+            """``A_Hg·g − A_HH·u`` in ONE evaluation of the Hessian equation rather than two.
+
+            This is the quantity the coupled sweep drives to zero, and writing it as a difference of
+            two rows spends two passes over the faces on something one pass produces — over the
+            **largest** field in the scheme, the Hessian equation carrying a tensor per face where
+            the gradient equation carries a vector.
+
+            The saving is exact rather than an approximation: `hessian_face_terms` is linear in the
+            gradient and the Hessian jointly, so evaluating it at ``(-g, h)`` gives
+            ``H(0, h) − H(g, 0)`` — precisely the combination wanted. The boundary closure is linear
+            too and the ``g`` half contributes nothing to it, so ``boundary_hessian(h)`` is the right
+            argument for the merged call.
+            """
+            h = expand_symmetric(u, dim)
+            return reduce_hessian(
+                -vol[:, None, None] * h
+                + face_cells.scatter(*hessian_face_terms(-g, h, -g, h, boundary_hessian(h)))
+            )
 
         def a_hh(u):
             # The innermost loop: only the Hessian equation, so the gradient equation's face-curvature
@@ -2714,10 +2753,28 @@ class HessianCorrectedGradient(GradientScheme):
                 *gradient_face_terms(zero_g, h, zero_g, h, boundary_hessian(h), zero_f, zero_b)
             )
 
-        # Per-cell diagonal blocks, from the same face kernel the operators are built from. `A_gg`'s
-        # is `(dim, dim)` and acts on the gradient directly; the reduced Hessian equation's is
-        # `(n_sym, n_sym)` and no longer factors — imposing symmetry couples the two tensor indices
-        # that the Kronecker structure above kept apart.
+        def gradient_row_defect(g, u):
+            """``A_gg·g − A_gH·u`` in ONE evaluation of the gradient equation rather than two.
+
+            The companion of :func:`hessian_row_defect`, on the other row and for the same reason:
+            `gradient_face_terms` is linear in the gradient and the Hessian jointly, so evaluating it
+            once at ``(g, −h)`` gives ``G(g, 0) − G(0, h)`` — precisely the combination the sweep's
+            gradient update needs. The boundary closure is linear too, so ``boundary_hessian(−h)`` is
+            the right argument for the merged call.
+
+            This is the more valuable of the two merges even though it saves the same one pass, because
+            the gradient equation is evaluated **twice** per sweep against the Hessian equation's once,
+            and it is the pass that carries the face-curvature and warp terms.
+            """
+            h = expand_symmetric(-u, dim)
+            return scale(g, vol) - face_cells.scatter(
+                *gradient_face_terms(g, h, g, h, boundary_hessian(h), zero_f, zero_b)
+            )
+
+        # `A_gg`'s per-cell diagonal block, probed from the same face kernel the operator is built
+        # from, so the two cannot drift. The reduced Hessian equation's block is `(n_sym, n_sym)` and
+        # no longer factors — imposing symmetry couples the two tensor indices that the Kronecker
+        # structure above kept apart — but it needs no probe at all; see `inner()`.
         def gg_owner(probe):
             owner_side, _ = gradient_face_terms(
                 probe, zero_h, zero_g, zero_h, zero_h, zero_f, zero_b
@@ -2730,31 +2787,26 @@ class HessianCorrectedGradient(GradientScheme):
             )
             return face_cells.scatter(no_face_g, neighbour_side)
 
-        def hh_reduced_owner(probe):
-            lit = expand_symmetric(probe, dim)
-            owner_side, _ = hessian_face_terms(
-                zero_g, lit, zero_g, zero_h, prepared_closure.diagonal(lit)
-            )
-            return reduce_hessian(face_cells.scatter(owner_side, no_face_h))
-
-        def hh_reduced_neighbour(probe):
-            _, side = hessian_face_terms(
-                zero_g, zero_h, zero_g, expand_symmetric(probe, dim), zero_h
-            )
-            return reduce_hessian(face_cells.scatter(no_face_h, side))
-
         def inner():
-            # `cell_diagonal_block`'s explicit-diagonal shortcut does not apply after the reduction:
-            # the diagonal term is no longer `vol · I` in the packed coordinates, so it is probed
-            # alongside the two face halves instead of being added as a scalar.
-            def column(unit):
-                probe = jnp.broadcast_to(unit, (n_cells, n_sym))
-                diagonal = reduce_hessian(vol[:, None, None] * expand_symmetric(probe, dim))
-                return diagonal - hh_reduced_owner(probe) - hh_reduced_neighbour(probe)
+            """The reduced Hessian system, whose per-cell block costs NO pass over the faces.
 
-            _, columns = jax.lax.scan(
-                lambda carry, unit: (carry, column(unit)), None, jnp.eye(n_sym)
-            )
+            The unreduced Hessian equation's per-cell action is exactly ``H ↦ H·C`` for the
+            ``(dim, dim)`` block ``C`` built above — that is the Kronecker structure `A_P` already
+            relies on — and the reduction is the fixed linear map ``(A_P E)ᵀ``. So the reduced block's
+            column for the unit component ``e_a`` is ``contract_symmetric(E(e_a)·C·C) / vol``:
+            per-cell arithmetic on a small dense matrix already in hand.
+
+            Probing it instead costs ``n_sym`` evaluations of the face kernel — twelve passes over the
+            faces in three dimensions, each gathering a tensor per face — to recover a block that the
+            algebra gives for nothing. It is the same quantity either way, and a unit test pins the
+            two against each other; this route simply does not pay for it.
+            """
+            # `E(e_a)` for each unit component, cell-independent, so the einsum below contracts a
+            # fixed `(dim, dim)` against the per-cell block rather than broadcasting a tensor field.
+            basis = expand_symmetric(jnp.eye(n_sym), dim)
+            columns = jax.vmap(
+                lambda unit: reduce_hessian(jnp.einsum("ij,nlj->nil", unit, hessian_cell_block))
+            )(basis)
             block = jnp.moveaxis(columns, 0, -1)
             return GradientSystem(CellBlockJacobi(jnp.linalg.inv(block)), a_hh, (n_cells, n_sym))
 
@@ -2871,14 +2923,16 @@ class HessianCorrectedGradient(GradientScheme):
             # vectors known to be zero.
             def step(carry, _):
                 g, h = carry
-                # One pass gives both of this iterate's rows -- the gradient equation's and the
-                # Hessian equation's -- so the sweep costs three face-kernel passes, not four.
-                a_gg_g, a_hg_g = gradient_and_hessian_rows(g)
-                h_next = h + hessian_preconditioner.apply(a_hg_g - a_hh(h))
+                # TWO face-kernel evaluations, not four: each row is evaluated ONCE, at the argument
+                # that yields the defect that row's update needs, rather than once per block and then
+                # subtracted. Both rows are linear in `(g, H)` jointly, which is what makes the
+                # merged argument exact rather than an approximation -- see `hessian_row_defect` and
+                # `gradient_row_defect`.
+                h_next = h + hessian_preconditioner.apply(hessian_row_defect(g, h))
                 # Gauss-Seidel, not Jacobi: the gradient update uses the Hessian just computed. That
                 # is what lets a single Hessian sweep per gradient sweep converge at all.
                 g_next = g + sweep.relaxation * gradient_preconditioner.apply(
-                    rhs_g - a_gg_g + a_gh(h_next)
+                    rhs_g - gradient_row_defect(g, h_next)
                 )
                 return (g_next, h_next), None
 
@@ -2928,6 +2982,8 @@ class HessianCorrectedGradient(GradientScheme):
             inner=inner,
             outer=outer,
             outer_preconditioner=outer_preconditioner,
+            hessian_row_defect=hessian_row_defect,
+            gradient_row_defect=gradient_row_defect,
             block_sweep=block_sweep,
             coupled_error=coupled_error,
         )

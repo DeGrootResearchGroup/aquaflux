@@ -871,12 +871,13 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     nested path re-converges the Hessian from zero on **every outer apply**, and this closure is
     precisely what makes that convergence expensive — so the arrangement that keeps the Hessian
     iterate between sweeps gains exactly where the closure costs. At matched accuracy (~1e-10),
-    counting face-kernel passes as `outer x (1 + inner)` against the coupled sweep's `3 x sweeps`:
+    counting face-kernel passes as `outer x (1 + inner)` against the coupled sweep's `2 x sweeps`
+    (it was `4 x sweeps` when this table was taken, and the counts below are the corrected ones):
 
     | mesh | nested | coupled sweep | ratio |
     |---|---|---|---|
-    | tetrahedral n=3, weight 0.2 | 1665 passes → 6.2e-11 | **~120 → 2.2e-10** | **~12x** |
-    | hex 5³, perturb 0.25 | 165 passes → 1.9e-11 | **51 → 8.9e-13** | **~3x** |
+    | tetrahedral n=3, weight 0.2 | 1665 passes → 6.2e-11 | **~80 → 2.2e-10** | **~21x** |
+    | hex 5³, perturb 0.25 | 165 passes → 1.9e-11 | **34 → 8.9e-13** | **~4.9x** |
 
     On the tetrahedral mesh the coupled sweep reaches **5.8e-15** at 192 passes, which the nested path
     does not approach at nine times the work. **So the pairing to recommend with this closure is the
@@ -1120,8 +1121,9 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
 
   **⚠️⚠️ `CoupledBlockSweep` IS NOW THE DEFAULT SOLVE PATH (2026-08-23), and the flip cost three
   things that were not obvious from the measurement that justified it.** At the class count of 20 it
-  matches the nested `20/10` pair's accuracy on every exactness fixture at **60 face passes against
-  220** — 3.7x cheaper for the same answer:
+  matches the nested `20/10` pair's accuracy on every exactness fixture at **40 face passes against
+  220** — 5.5x cheaper for the same answer (the count was 60 when this was written, at three passes
+  per sweep; it was four then and is two now):
 
   | fixture | nested 20/10 | coupled 20 |
   |---|---|---|
@@ -1191,7 +1193,83 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   previous outer sweep learned. Sweeping alternately keeps it:
   `h ← h + P_H⁻¹(A_Hg g − A_HH h)` then `g ← g + ω P_g⁻¹(b_g − A_gg g + A_gH h)`, Gauss–Seidel (the
   gradient update uses the Hessian just computed, which is what lets one Hessian sweep per gradient
-  sweep converge at all). One sweep is ~3 face-kernel passes against the nested `1 + inner` ≈ 11.
+  sweep converge at all). One sweep is **2** face-kernel passes against the nested `1 + inner` ≈ 11,
+  each row evaluated once at the argument that yields its own defect rather than once per block and
+  then subtracted — exact, because both rows are linear in `(g, H)` jointly.
+
+  **⚠️⚠️ WHERE THE TIME ACTUALLY GOES IN A RECONSTRUCTION — profiled 2026-08-23, and it redirects the
+  optimization effort this scheme had been attracting.** Configuration, in full: `pitzDaily`
+  (12225 cells, `dim` 2, `n_sym` 3), `CoupledBlockSweep(sweeps=20)`, `AveragedNeighbourHessian` at
+  the shipped weight, `local_schur_block=True` (the shipped default), jitted and warmed, minimum of
+  four to six runs on an otherwise idle machine. Harness:
+  `validation/gradient_reconstruction_profile.py` — kept in the repository, so this can be re-asked
+  when a default moves.
+
+  | piece | time | share |
+  |---|---|---|
+  | **whole reconstruction** | **26.9 ms** | 100 % |
+  | 20 sweeps (from differencing 40 against 20) | **22.0 ms** | **~82 %** |
+  | geometry-only prologue | ~4.9 ms | ~18 % |
+  | — of which `local_schur_block` | **3.1 ms** | **~11.5 %** |
+  | one sweep | 1.10 ms | 4.1 % |
+
+  Three consequences, and the first is the one that matters:
+
+  - **THE SWEEP COUNT IS THE COST, NOT THE WORK INSIDE A SWEEP.** Merging each row into a single
+    face-kernel evaluation halved the passes per sweep (four → two) and moved the whole
+    reconstruction **9 %**. The reason is that the wasted arguments were **literal zeros**, so XLA
+    was already folding most of that work away — a redundancy that is obvious in the source and
+    largely absent from the compiled program. Against that, the *count* is worth several times as
+    much: the sweep contracts at **0.3152** on this mesh, so
+
+    | sweeps | time | vs 20 | ‖g − g₂₀‖/‖g₂₀‖ |
+    |---|---|---|---|
+    | 20 (shipped) | 26.9 ms | 1.00x | — |
+    | 12 | 18.4 ms | **0.68x** | **1.06e-09** |
+    | 8 | 13.9 ms | **0.52x** | 4.58e-07 |
+    | 6 | 11.8 ms | 0.44x | 1.07e-05 |
+    | 4 | 9.8 ms | 0.36x | 2.99e-04 |
+
+    **Twelve sweeps reproduce twenty to 1e-09 for a third less time**, and the default is not wrong
+    for its stated target — 20 is what `0.3152^n = 1e-10` asks for, i.e. exactness on quadratic
+    fields. It is simply far tighter than a flow solve that stops at ‖R‖ ~ 1e-6 has any use for.
+    ⚠️ Do **not** read this as licence to lower the class default: the count that preserves
+    exactness is the property that default exists to guarantee, and a case wanting less should call
+    `CoupledBlockSweep.calibrated(mesh, geometry, tol=...)`.
+  - **The geometry-only prologue is ~18 % of ONE reconstruction — but a residual reconstructs several
+    fields on one geometry, and XLA ALREADY SHARES IT ACROSS THEM.** ⚠️ An earlier version of this
+    entry said the prologue is "rebuilt on every reconstruction" and sized a geometry cache from that;
+    it is wrong, and it is the *same* mistake as reading the face-pass count as cost — the redundancy
+    is visible in the source and absent from the compiled program. Measured by reconstructing `N`
+    fields on one mesh inside one jit and fitting `t(N) = P + N·S` (pitzDaily, shipped defaults):
+
+    | sweeps | `N`=1 | `N`=2 | `N`=4 | `N`=6 | marginal per extra field | intercept `P` |
+    |---|---|---|---|---|---|---|
+    | 20 | 27.9 ms | 49.0 ms | 91.5 ms | 133.4 ms | **21.1 ms** (≈ the 20 sweeps) | **6.8 ms** |
+    | 2 | 6.6 ms | 7.6 ms | 8.4 ms | 9.6 ms | **0.60 ms** | ~6.0 ms |
+
+    Six fields cost 9.6 ms against one field's 6.6 ms at two sweeps — common-subexpression
+    elimination collapses the six identical prologues to one. **So the prologue is ~5 % of a
+    six-field residual, not 18 %**, and a `bind`-style cache can only collect it *across separate
+    residual evaluations* (successive Krylov matvecs), never within one.
+  - **`local_schur_block` is 11.5 % of a single reconstruction** (≈3 % of a six-field residual) and is
+    load-bearing on skewed meshes — dropping it raises the sweep's contraction rate on the reactor
+    mesh — so this is not an argument for turning it off. It is also **the one piece that would cost
+    no extra memory to cache**: it modifies the outer block in place before inversion rather than
+    producing an array of its own.
+  - **⚠️ WEIGH ANY CACHE AGAINST ITS RESIDENCY, WHICH AT REACTOR SCALE IS THE BINDING CONSTRAINT.**
+    The three cacheable arrays are `hessian_cell_block` `(n, dim, dim)`, the inner preconditioner's
+    inverse `(n, n_sym, n_sym)` and the outer's `(n, dim, dim)`: 1.6 MB total at pitzDaily, 9.5 MB at
+    `bfs3d`, and **659 MB at a 1.6M-cell 3D mesh, 440 MB of it the 6×6 inner inverse**. Peak memory
+    during a reconstruction is *unchanged* — all three are live through the sweep either way — so a
+    cache buys ~5 % of reconstruction time in exchange for making 659 MB permanently resident rather
+    than transient. On the memory-bound target this scheme exists for, that is the wrong trade;
+    calibrating the sweep count is worth six to ten times as much and costs no memory at all.
+
+  ⚠️ **A FACE-PASS COUNT IS A POOR PREDICTOR OF WALL CLOCK HERE, and this file quotes several.** The
+  counts are exact and are fine for comparing arrangements that do genuinely different work (nested
+  against coupled); they are misleading for judging a change that removes passes the compiler was
+  already eliminating. Where a ratio in this file comes from counting passes, it says so.
 
   **⚠️ MEASURE IT AGAINST A CALIBRATED NESTED SOLVE, NOT THE SHIPPED DEFAULT.** Against `20/10` it
   looks like 2.0× forward and 3.1× on the tangent — but `20/10` is heavily over-provisioned on the

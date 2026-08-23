@@ -371,10 +371,11 @@ Hessian and re-converges it from zero inside every apply of the outer solve, dis
 previous apply found. {class}`~aquaflux.schemes.PackedSystemSolve` solves the un-eliminated
 system whole, which is how the elimination is checked rather than a production path.
 
-The default is the coupled sweep: it matches the nested pair's accuracy at about a third of the
-face-kernel passes, and the gap widens with mesh skewness — 1.4x at 30 % perturbation, 1.8x at
-40 %, and up to 12x under {class}`~aquaflux.schemes.AveragedNeighbourHessian`, whose Hessian
-system is the expensive one to re-converge.
+The default is the coupled sweep: it matches the nested pair's accuracy at a fraction of the
+face-kernel passes — 40 against 220 for the `20` / `20+10` pair — and the gap widens with mesh
+skewness, 1.4x at 30 % perturbation, 1.8x at 40 %, and up to 12x under
+{class}`~aquaflux.schemes.AveragedNeighbourHessian`, whose Hessian system is the expensive one to
+re-converge.
 
 ```{note}
 The nested path is *faster* on an orthogonal mesh, where the outer solve is nearly trivial and
@@ -409,8 +410,10 @@ the sweep rather than an unknown of a larger system. It lives for one reconstruc
 from zero on every call, so the reconstruction remains an exactly linear function of the field.
 
 `sweeps` here is **not** the nested solve's outer count and must be calibrated on its own — a
-coupled sweep costs about three face passes where a nested outer sweep costs eleven, so more of
-them buy less each. {meth}`~aquaflux.schemes.CoupledBlockSweep.calibrated` measures it from the
+coupled sweep costs two face passes where a nested outer sweep costs eleven, so more of them buy
+less each. Calibrating it is also the single largest saving available in this scheme: the sweeps
+are the great majority of a reconstruction's cost, and a count chosen for exactness on quadratic
+fields is far tighter than a flow solve needs. {meth}`~aquaflux.schemes.CoupledBlockSweep.calibrated` measures it from the
 mesh, exactly as the other two schemes' factories do:
 
 ```python

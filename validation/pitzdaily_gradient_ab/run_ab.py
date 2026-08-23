@@ -169,24 +169,90 @@ JACOBI_TRAILING = dict(max_coarse=500, equilibrate=False)
 OUTER_SWEEPS = int(os.environ.get("PITZ_AB_OUTER_SWEEPS", "5"))
 INNER_SWEEPS = int(os.environ.get("PITZ_AB_INNER_SWEEPS", "5"))
 
-# `coupled_sweep=None` selects the NESTED path these two counts describe. Every figure this case
-# has published was measured on it, so it is named explicitly rather than inherited from a default
-# that has since moved to sweeping both blocks together.
-BETCHEN = HessianCorrectedGradient(
-    hessian_solve=NestedHessianSolve(
-        solver=SweptGradientSolve(sweeps=OUTER_SWEEPS, warn_tol=None),
-        hessian_solver=SweptGradientSolve(sweeps=INNER_SWEEPS, warn_tol=None),
+#: The Betchen arm runs the scheme's **shipped defaults**, because the question this case answers is
+#: what a user gets rather than what one historical pairing cost. Since 2026-08-23 that means the
+#: coupled block sweep, the six-component Hessian and the Schur-block preconditioner — none of which
+#: the counts above describe.
+#:
+#: ⚠️ **Every figure published from this case before that date was measured on the NESTED path at
+#: `OUTER_SWEEPS`/`INNER_SWEEPS`**, which `PITZ_AB_NESTED=1` still selects. Quote a number from this
+#: case only alongside which of the two it came from; they are different amounts of work, not two
+#: measurements of one thing.
+NESTED = os.environ.get("PITZ_AB_NESTED", "") not in ("", "0")
+BETCHEN = (
+    HessianCorrectedGradient(
+        hessian_solve=NestedHessianSolve(
+            solver=SweptGradientSolve(sweeps=OUTER_SWEEPS, warn_tol=None),
+            hessian_solver=SweptGradientSolve(sweeps=INNER_SWEEPS, warn_tol=None),
+        )
+    )
+    if NESTED
+    else HessianCorrectedGradient()
+)
+BETCHEN_LABEL = (
+    f"HessianCorrectedGradient (nested, outer swept-{OUTER_SWEEPS} / inner swept-{INNER_SWEEPS})"
+    if NESTED
+    else (
+        "HessianCorrectedGradient (shipped defaults: coupled sweep "
+        f"{BETCHEN.hessian_solve.sweeps}, six-component Hessian, Schur block)"
     )
 )
 
 ARMS = (
     ("standard", "CorrectedGreenGauss", CorrectedGreenGauss()),
-    (
-        "betchen",
-        f"HessianCorrectedGradient (outer swept-{OUTER_SWEEPS} / inner swept-{INNER_SWEEPS})",
-        BETCHEN,
-    ),
+    ("betchen", BETCHEN_LABEL, BETCHEN),
 )
+
+
+#: Size BOTH arms to one tolerance instead of running each at its own defaults.
+#:
+#: A defaults-versus-defaults comparison measures the two schemes' **slack**, not their merit: each
+#: default targets whatever accuracy its author chose, and those need not be the same accuracy. On
+#: this mesh they are not remotely — the corrected-Gauss default of four sweeps is some five orders
+#: over-resolved (its contraction rate here is 0.0053), while the Hessian-corrected default targets
+#: machine precision. Comparing them answers "what do the two shipped configurations cost", which is a
+#: fair question but a different one from "what does this scheme cost to reach a given accuracy".
+#:
+#: Set to a tolerance (e.g. ``PITZ_AB_CALIBRATE=1e-4``) to answer the second. Both arms are then built
+#: by their own ``calibrated`` factory at that tolerance, so each is sized from this mesh rather than
+#: assumed, and the difference left is the scheme.
+#:
+#: ⚠️ The tolerance is an **L2** one, and the worst cell runs 5--60x above it — so a per-cell accuracy
+#: claim needs a tolerance one to two orders tighter than the number passed here.
+CALIBRATE = os.environ.get("PITZ_AB_CALIBRATE")
+
+
+def calibrated_arms(tol: float):
+    """Both arms sized from this mesh to the same tolerance.
+
+    Parameters
+    ----------
+    tol : float
+        The L2 residual reduction each scheme's sweep counts are sized for.
+
+    Returns
+    -------
+    list
+        ``(key, label, scheme)`` triples, as :data:`ARMS`.
+    """
+    case = compare.build_case()
+    mesh, geom = case["momentum"].mesh, case["geom"]
+    standard = CorrectedGreenGauss.calibrated(mesh, geom, tol=tol)
+    betchen = HessianCorrectedGradient.calibrated(mesh, geom, tol=tol)
+    return [
+        (
+            "standard",
+            f"CorrectedGreenGauss (calibrated to {tol:g}: swept-{standard.solver.sweeps})",
+            standard,
+        ),
+        (
+            "betchen",
+            f"HessianCorrectedGradient (calibrated to {tol:g}: coupled sweep "
+            f"{betchen.hessian_solve.sweeps})",
+            betchen,
+        ),
+    ]
+
 
 #: Compared between the arms. `nut` is included because a turbulence case feels a gradient change most
 #: in the eddy viscosity, which is built from velocity gradients.
@@ -485,10 +551,11 @@ def main() -> None:
     #: is the scheme's. Comparing one arm against ITSELF at two reaches is a valid control -- the
     #: standard arm's own reach-independence is already measured (see `reach_sweep`).
     only = os.environ.get("PITZ_AB_ARMS")
-    arms = [a for a in ARMS if only is None or a[0] in only.split(",")]
+    available = calibrated_arms(float(CALIBRATE)) if CALIBRATE else list(ARMS)
+    arms = [a for a in available if only is None or a[0] in only.split(",")]
     if not arms:
         raise SystemExit(
-            f"PITZ_AB_ARMS={only!r} selected no arm; choose from {[a[0] for a in ARMS]}"
+            f"PITZ_AB_ARMS={only!r} selected no arm; choose from {[a[0] for a in available]}"
         )
 
     results = {}
