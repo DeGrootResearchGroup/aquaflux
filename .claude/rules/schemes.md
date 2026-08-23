@@ -181,7 +181,20 @@ rungs, `forward_rtol` 0.3, probe reach 5, residual held at swept-4):**
   source is an automatically-generated mesh over a simple geometry rather than a perturbed grid: a
   synthetic perturbation makes `rho` a knob, where the question is what a real mesh generator produces.
   The strongest form is a **re-mesh of a geometry already validated on a block mesh**, so mesh quality
-  is the only variable against a known answer and the reattachment length stays the judge.
+  is the only variable against a known answer and the metric stays the judge.
+  **⚠️ BUT THE GEOMETRY MUST NOT BE AXIS-ALIGNED, AND `bfs3d` IS — so re-meshing IT would produce
+  another orthogonal mesh.** An automatic hex mesher distorts cells only where it must **snap** to a
+  surface the background mesh does not already conform to; a box with an axis-aligned step castellates
+  and stops, leaving the background hexes intact. This project's own two meshes are the demonstration:
+  `bfs3d` is a pure box and is skew-free to `1.9e-12`, while `pitzDaily` — the same class of geometry
+  but with an **inclined lower wall and a contraction** — reaches `7.5e-02`. The non-alignment is where
+  the skew comes from. So the candidate geometry needs a genuinely angled or curved surface (and
+  refinement-level transitions, the other source, help), and `pitzDaily`'s own geometry is the better
+  host for the idea than `bfs3d`'s for exactly this reason.
+  **⚠️ Whatever is chosen, MEASURE THE MESH BEFORE BUILDING A CASE ON IT** — generate it, then run
+  `contraction_rate` and a skew census. It costs minutes, and the failure it prevents is a case built
+  around a mesh that turns out orthogonal, which is precisely why `bfs3d` cannot answer this question
+  despite being the newer and better-tuned of the two.
 
 **And the other half of the question, measured on the same case: the RESIDUAL's exactness buys nothing
 here either — because the sweep series has already converged by two.** Same harness, `residual` group,
