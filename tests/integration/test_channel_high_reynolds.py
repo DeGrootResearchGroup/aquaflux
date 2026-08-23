@@ -251,11 +251,18 @@ def test_escalation_recovers_an_underdamped_step() -> None:
     """
     assembler = _channel(40, 32, 1e-3, wall_growth=1.2)  # Re = 1000, wall-graded
 
+    # Both arms get the SAME step budget, so the comparison is like-for-like: the escalating arm
+    # is not being handed steps the stalled one was denied. It is set at twice what escalation
+    # actually needs here (that arm converges within 20 steps, and its residual is unchanged at
+    # every larger cap), which is enough headroom to make "the under-damped march does not get
+    # there" a statement about the march rather than about the cap.
+    max_steps = 40
+
     def solve_with(max_escalations):
         continuation = momentum_continuation(
             assembler, schur_scaling="msimple", beta0=0.2, max_escalations=max_escalations
         )
-        return _solve(assembler, continuation=continuation, max_steps=150)
+        return _solve(assembler, continuation=continuation, max_steps=max_steps)
 
     try:
         stalled = solve_with(0)  # under-damped, no escalation

@@ -70,9 +70,20 @@ def test_swept_gradient_matches_iterative_solution() -> None:
     # so a bare CorrectedGreenGauss would compare swept-16 against swept-4, not against the exact solve).
     iterative = _cavity(CorrectedGreenGauss(solver=GmresGradientSolve()))
     phi_s, phi_i = swept.initial_state(), iterative.initial_state()
+    # Step both to their root and stop there. They are compared field-against-field, so they must
+    # take the same number of steps -- hence one loop with a shared stopping test rather than two
+    # independent solves. Both reach ~1e-11 on the fourth step, and iterating a converged Newton
+    # solve past that only pays for another exact gradient solve on the expensive arm.
     for _ in range(10):
         phi_s = newton_step(swept.residual, phi_s)
         phi_i = newton_step(iterative.residual, phi_i)
+        converged = max(
+            float(jnp.linalg.norm(swept.residual(phi_s))),
+            float(jnp.linalg.norm(iterative.residual(phi_i))),
+        )
+        if converged < 1e-8:
+            break
+    assert converged < 1e-8
     assert jnp.allclose(phi_s, phi_i, atol=1e-7)
 
 

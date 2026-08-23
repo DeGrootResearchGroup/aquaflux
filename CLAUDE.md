@@ -534,9 +534,46 @@ wrapper does not pass through, but never through a pipe: this suite prints libra
 *after* the summary, so `| tail -n` shows the chatter, hides the result, and returns `tail`'s exit
 status — which is `0` however the run went. Its own behaviour — that a failing run exits non-zero,
 that the summary survives the chatter, that the skip count is reported, that a mistyped tier is
-refused — is pinned by `tests/unit/test_fastgate.py`, for the same reason `check_hooks.sh` and
-`sibling_builders.py` are: a runner that had stopped propagating a failure looks exactly like a
-passing suite, and every other check in this project is read through it.
+refused, that the fast tier parallelizes while the heavy tiers do not — is pinned by
+`tests/unit/test_fastgate.py`, for the same reason `check_hooks.sh` and `sibling_builders.py` are: a
+runner that had stopped propagating a failure looks exactly like a passing suite, and every other
+check in this project is read through it.
+
+**The fast tier runs across worker processes; the `slow` and `validation` tiers do not.** That split
+is a memory decision, not a preference: the heavy tiers' solves each hold gigabytes of live JAX
+buffers (a materialized 3D coupled Jacobian is ~2 GB per copy), so running several at once drives
+this machine into swap and suspends every application on it — CI reaches the same conclusion from the
+other side, sharding those tiers across jobs at `-n 1` rather than within one. Two details of the
+fast tier's parallelism are load-bearing. It distributes by **file** (`--dist loadfile`), so a
+module-scoped fixture is built once instead of once per worker and each file keeps its recorded test
+order; and it pins **one BLAS/XLA thread per worker**, because otherwise every worker grabs every
+core and N workers × M cores thrashes instead of scaling. `FASTGATE_JOBS=<n>` sets the worker count
+and `FASTGATE_JOBS=0` (or your own `-n`) opts out — do that when bisecting a failure, since worker
+output is interleaved. Measured 2026-08-23 on an 11-core, 19 GB machine with the compiled ILU(0)
+kernel live: **26:13 serial → 8:53** at ~6.4 GB peak, and **6:34** once the handful of heaviest
+tests were cut back — see the cost rule immediately below.
+
+### What a fast-tier test may spend (binding)
+
+The fast gate is read on every change, so a test that runs longer than it needs to is a tax on every
+future change, paid by everyone. Three patterns produced **most** of the tier's wall clock as of
+2026-08-23, and all three are cost with no coverage attached — check for them before adding a solve
+to this tier:
+
+- **A fixed iteration count past convergence.** `for _ in range(8): newton_step(...)` on a cavity
+  that reaches `|R| ~ 1e-11` on its fourth step spends half its time iterating a converged root, and
+  in a differentiability check it puts those extra steps on the reverse-mode tape too. Stop on a
+  convergence test, or name the count a constant and say what it is (convergence plus a margin).
+- **A dense matrix built one column per dispatch.** A Python loop calling `jax.jvp` on each basis
+  vector pays eager dispatch `ndof` times; `jax.jacfwd` / `jax.vmap` push the whole basis through in
+  one batched pass and build the identical matrix (worth 3.6x and 2.9x on the two that did this).
+- **A deliberately-failing arm running out a large step cap.** A march that is *meant* not to
+  converge costs its whole budget. Give both arms of such a comparison the SAME budget, set at a
+  small multiple of what the succeeding arm needs — which is also the fairer test, since it stops the
+  failing arm from being one that was simply given fewer steps.
+
+None of this licenses weakening a check to make it quick. A finite-difference-validated adjoint costs
+three solves and is the point of the project; that is a test spending what it must.
 
 ### Conditional coverage is DECLARED, not discovered (binding)
 
