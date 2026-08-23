@@ -808,29 +808,34 @@ def test_cell_diagonal_block_recovers_the_true_diagonal_block_exactly() -> None:
     assert np.abs(np.asarray(block) - truth).max() / np.abs(truth).max() < 1e-13
 
 
-def test_the_hessian_block_is_a_kronecker_product_so_it_is_stored_dim_by_dim() -> None:
-    """``A_HH``'s per-cell block is exactly ``I_dim ⊗ C``, which is why one ``(dim, dim)`` matrix per
-    cell suffices where the block is nominally ``(dim², dim²)``.
+def test_the_reduced_hessian_block_is_symmetric_positive_definite() -> None:
+    """The reduced ``A_HH``'s per-cell block is ``(A_P E)ᵀ(A_P E)`` up to a positive row scaling, so
+    it is symmetric positive definite whatever the mesh — where the unreduced block is neither.
 
-    This is a memory claim with teeth at scale — ``dim²×dim²`` would be nine times the storage in 3D
-    — so it is checked as an exact identity rather than assumed. The Hessian enters its own equation
-    only as ``H·a`` for per-face vectors ``a``, which contracts ``H``'s second index and leaves the
-    first untouched; if that ever stops being true this fails.
+    That is the structural reason to reduce in the least-squares sense rather than by an unweighted
+    projection, and it is a property a preconditioner built from this block inherits: the elimination
+    term ``A_gH A_HH⁻¹ A_Hg`` can only be as well-signed as the inverse at its centre. It replaces an
+    earlier claim that the block is ``I_dim ⊗ C`` and so storable as ``(dim, dim)`` — true of the
+    unsymmetrized system, and destroyed by imposing symmetry, which couples the two tensor indices
+    that the Kronecker structure kept apart.
     """
     for mesh in (
         perturbed_grid_2d(6, 6, perturb=0.3, seed=0),
         columnwise_perturbed_grid_3d(3, 3, 3, perturb=0.3, seed=0),
     ):
         geometry = mesh.geometry()
-        dim, n_cells = mesh.dim, mesh.n_cells
+        n_sym, n_cells = gradient_module.symmetric_components(mesh.dim), mesh.n_cells
         operator, preconditioner = _inner_system(mesh, geometry)
-        kronecker_factor = np.linalg.inv(np.asarray(preconditioner.inverse))
 
-        truth = _per_cell_blocks(_dense(operator, (n_cells, dim, dim)), n_cells, dim * dim).reshape(
-            n_cells, dim, dim, dim, dim
-        )
-        rebuilt = np.einsum("ik,cjl->cijkl", np.eye(dim), kronecker_factor)
-        assert np.abs(rebuilt - truth).max() / np.abs(truth).max() < 1e-13
+        blocks = _per_cell_blocks(_dense(operator, (n_cells, n_sym)), n_cells, n_sym)
+        asymmetry = np.abs(blocks - np.swapaxes(blocks, 1, 2)).max() / np.abs(blocks).max()
+        assert asymmetry < 1e-12, f"reduced block is not symmetric ({asymmetry:.2e})"
+        assert np.linalg.eigvalsh(blocks).min() > 0.0, "reduced block is not positive definite"
+
+        # The preconditioner really is that block's inverse, so the property above is the one in
+        # force rather than one of a block computed a second way.
+        rebuilt = np.linalg.inv(np.asarray(preconditioner.inverse))
+        assert np.abs(rebuilt - blocks).max() / np.abs(blocks).max() < 1e-13
 
 
 class _CaptureSolve(GradientSolve):
@@ -869,10 +874,10 @@ def test_the_hessian_system_needs_a_block_preconditioner_not_the_volume() -> Non
     for perturb, block_bound in ((0.0, 1e-12), (0.3, 0.25)):
         mesh = perturbed_grid_2d(8, 8, perturb=perturb, seed=0)
         geometry = mesh.geometry()
-        dim, n_cells = mesh.dim, mesh.n_cells
+        n_cells = mesh.n_cells
         operator, _ = _inner_system(mesh, geometry)
-        dense = _dense(operator, (n_cells, dim, dim))
-        size = dim * dim
+        size = gradient_module.symmetric_components(mesh.dim)
+        dense = _dense(operator, (n_cells, size))
         identity = np.eye(dense.shape[0])
 
         volume = np.repeat(np.asarray(geometry.cell.volume), size)

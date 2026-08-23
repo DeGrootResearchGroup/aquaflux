@@ -153,6 +153,97 @@ class CompactGreenGauss(GradientScheme):
         return scale(grad_sum, 1.0 / cell_geometry.volume)
 
 
+def symmetric_components(dim: int) -> int:
+    """Number of independent components of a symmetric ``(dim, dim)`` tensor — 3 in 2D, 6 in 3D.
+
+    Parameters
+    ----------
+    dim : int
+        Spatial dimension.
+
+    Returns
+    -------
+    int
+        ``dim (dim + 1) / 2``.
+    """
+    return dim * (dim + 1) // 2
+
+
+def _symmetric_pairs(dim: int) -> list[tuple[int, int]]:
+    """The ``(i, j)`` index pairs with ``i <= j``, in the order the packed components use."""
+    return [(i, j) for i in range(dim) for j in range(i, dim)]
+
+
+def expand_symmetric(packed: jnp.ndarray, dim: int) -> jnp.ndarray:
+    """Expand packed independent components into a full symmetric tensor field.
+
+    For a field of second derivatives of a twice-continuously-differentiable function the tensor is
+    symmetric, so only ``dim (dim + 1) / 2`` of its ``dim**2`` entries are independent. Carrying only
+    those is what makes the reconstruction's unknown smaller than the tensor it represents; this is
+    the map back, applied wherever a face kernel wants the tensor itself.
+
+    Parameters
+    ----------
+    packed : jnp.ndarray
+        Independent components, shape ``(n_cells, dim (dim + 1) / 2)``, ordered by ``(i, j)`` with
+        ``i <= j``, ``i`` varying slowest.
+    dim : int
+        Spatial dimension.
+
+    Returns
+    -------
+    jnp.ndarray
+        The symmetric tensor field, shape ``(n_cells, dim, dim)``.
+
+    Examples
+    --------
+    >>> import jax.numpy as jnp
+    >>> expand_symmetric(jnp.array([[1.0, 2.0, 3.0]]), 2)
+    Array([[[1., 2.],
+            [2., 3.]]], dtype=float64)
+    """
+    rows = [
+        jnp.stack(
+            [packed[:, _symmetric_pairs(dim).index((min(i, j), max(i, j)))] for j in range(dim)],
+            axis=-1,
+        )
+        for i in range(dim)
+    ]
+    return jnp.stack(rows, axis=-2)
+
+
+def contract_symmetric(tensor: jnp.ndarray, dim: int) -> jnp.ndarray:
+    """Contract a tensor field onto the packed symmetric components — the adjoint of
+    :func:`expand_symmetric`.
+
+    This is the transpose of the expansion, not its inverse: an off-diagonal component appears in the
+    tensor twice, so the entry it receives is the **sum** of the two, which is what makes
+    ``<expand(u), T> == <u, contract(T)>`` hold for every ``T``. That identity is the reason a
+    residual is reduced with this rather than by reading off the upper triangle — the reduced system
+    is then the projection of the full one onto the symmetric subspace, and inherits its structure.
+
+    Parameters
+    ----------
+    tensor : jnp.ndarray
+        A tensor field, shape ``(n_cells, dim, dim)``. It need not be symmetric.
+    dim : int
+        Spatial dimension.
+
+    Returns
+    -------
+    jnp.ndarray
+        Packed components, shape ``(n_cells, dim (dim + 1) / 2)``, in :func:`expand_symmetric`'s
+        order.
+    """
+    return jnp.stack(
+        [
+            tensor[:, i, j] if i == j else tensor[:, i, j] + tensor[:, j, i]
+            for i, j in _symmetric_pairs(dim)
+        ],
+        axis=-1,
+    )
+
+
 class GradientPreconditioner(eqx.Module):
     """Strategy: apply an approximate ``A⁻¹`` to a residual, cell-locally and in one pass.
 
@@ -221,14 +312,11 @@ class CellBlockJacobi(GradientPreconditioner):
     system worries about is identically zero. Inverting the per-cell block instead removes exactly
     that intra-cell coupling and leaves only the weak inter-cell one.
 
-    The inverse is stored as one small ``(dim, dim)`` matrix per cell and contracted against the
-    residual's **last** axis, which covers both unknowns this serves: a gradient residual
-    ``(n_cells, dim)`` is a plain per-cell matrix--vector product, and a Hessian residual
-    ``(n_cells, dim, dim)`` is the same product applied to each of its rows. The Hessian case is not
-    an approximation — that system's per-cell block is exactly ``I_dim ⊗ C`` for a ``(dim, dim)``
-    matrix ``C``, because the Hessian enters its own equation only as ``H·a`` for a per-face vector
-    ``a``, which contracts ``H``'s second index and leaves its first untouched. So the block that
-    would otherwise be ``(dim², dim²)`` is stored and inverted as ``(dim, dim)``.
+    The inverse is stored as one small square matrix per cell and contracted against the residual's
+    **last** axis, which covers both unknowns this serves: a gradient residual ``(n_cells, dim)``
+    takes a ``(dim, dim)`` inverse, and the Hessian system's residual — carried as the independent
+    components of a symmetric tensor — takes a ``(n_sym, n_sym)`` one, ``n_sym`` being
+    ``dim (dim + 1) / 2``. Both are exact per-cell inverses, not approximations.
 
     Attributes
     ----------
@@ -1526,6 +1614,23 @@ class HessianCorrectedGradient(GradientScheme):
     making ``b_H`` identically zero for every field and mesh. There is therefore no ``A_gH·A_HH⁻¹·b_H``
     correction to form, and no inner solve to run for it.
 
+    **The Hessian is carried as its independent components, not as a full tensor.** The Hessian of a
+    twice-continuously-differentiable field is symmetric, so ``dim (dim + 1) / 2`` components carry it
+    — six in three dimensions rather than nine. Solving for those leaves ``dim**2`` equations for
+    fewer unknowns, and the surplus is removed in the least-squares sense weighted by the cell's own
+    block, as Betchen & Straatman (2010) do. Three consequences, of which the second is the one to
+    know:
+
+    * the unknown, and every Hessian iterate on the reverse-mode tape, is a third smaller;
+    * the reduced per-cell block is **symmetric positive definite by construction**, where the
+      unsymmetrized block is neither symmetric nor definite — so ``A_HH⁻¹`` at the centre of the
+      elimination term is a well-signed inverse rather than merely an invertible one; and
+    * that block no longer factors. An unsymmetrized ``H`` enters its own equation only as ``H·a``,
+      which touches one tensor index and leaves the other alone, making the block ``I ⊗ C`` and
+      storable as ``(dim, dim)``. Symmetry couples the two indices, so the block is a dense
+      ``(n_sym, n_sym)`` — four times the storage in three dimensions, against a third less for the
+      unknown itself.
+
     *How* each system is solved is an injected :class:`GradientSolve`, exactly as in
     :class:`CorrectedGreenGauss` — but there are **two** systems here and they are not alike, so they
     take separate strategies rather than sharing one:
@@ -1589,10 +1694,9 @@ class HessianCorrectedGradient(GradientScheme):
     at the same order as the volume term. Inverse-volume Richardson on it has a spectral radius of
     ``0.5`` — *on an orthogonal mesh*, where there is no skewness at all — which is why an inner
     Krylov solve looked necessary. Inverting the cell's own block instead drops that to ``0`` on an
-    orthogonal mesh and to ~``0.1`` at heavy skew. The block is stored as one ``(dim, dim)`` matrix per
-    cell rather than ``(dim², dim²)``: ``H`` appears in its own equation only as ``H·a`` for per-face
-    vectors ``a``, which contracts ``H``'s second index and leaves the first alone, so the block is
-    exactly ``I_dim ⊗ C``.
+    orthogonal mesh and to ~``0.1`` at heavy skew. The block is ``(n_sym, n_sym)`` per cell, where
+    ``n_sym = dim (dim + 1) / 2`` is the number of independent components of the symmetric Hessian
+    this scheme solves for — six in three dimensions rather than nine.
 
     Exact for linear *and* quadratic fields on any mesh (the Hessian captures the exact
     second derivative), and 2nd-order for smooth fields — the reconstruction that removes
@@ -1807,6 +1911,7 @@ class HessianCorrectedGradient(GradientScheme):
         nb = face_cells.safe_neighbour
         n_cells = mesh.n_cells
         n_faces = mesh.n_faces
+        n_sym = symmetric_components(dim)
 
         x_own = cell_geometry.centroid[owner]
         x_ip = face_geometry.centroid
@@ -1841,12 +1946,11 @@ class HessianCorrectedGradient(GradientScheme):
         )
 
         def _warp_moment(h, d):
-            # ½ Pᵀ(H d + Hᵀ d) — the Hessian contracted against the face's warp moment. Both `H d`
-            # and `Hᵀ d` appear because the moment enters the cell sum contracted on each of the
-            # Hessian's indices in turn, and this Hessian is not symmetrized (the reconstruction
-            # solves all `dim²` components), so the two differ.
-            hd = jnp.einsum("fij,fj->fi", h, d) + jnp.einsum("fji,fj->fi", h, d)
-            return 0.5 * jnp.einsum("fjk,fj->fk", warp, hd)
+            # ½ Pᵀ(H d + Hᵀ d) — the Hessian contracted against the face's warp moment, the moment
+            # entering the cell sum contracted on each of the Hessian's indices in turn. The
+            # reconstruction carries only the independent components of a symmetric tensor, so the
+            # two contractions coincide and the half cancels the doubling.
+            return jnp.einsum("fjk,fj->fk", warp, jnp.einsum("fij,fj->fi", h, d))
 
         def _face_gradient(g_own, h_own, g_nb, h_nb):
             """The gradient AT THE FACE CENTROID -- interpolated, then carried across the skewness.
@@ -1937,6 +2041,7 @@ class HessianCorrectedGradient(GradientScheme):
 
         zero_g = jnp.zeros((n_cells, dim))
         zero_h = jnp.zeros((n_cells, dim, dim))
+        zero_u = jnp.zeros((n_cells, n_sym))
         zero_f = jnp.zeros(n_cells)
         zero_b = jnp.zeros(n_faces)
         no_face_g = jnp.zeros((n_faces, dim))  # a scatter's unused half needs a real zero array
@@ -1950,52 +2055,22 @@ class HessianCorrectedGradient(GradientScheme):
                 *gradient_face_terms(zero_g, zero_h, zero_g, zero_h, fld, bvals)
             )
 
-        # Full coupled system on the packed unknown [g, H] of shape (n_cells, dim + dim²); both
-        # diagonal blocks carry the cell volume, so one inverse-volume preconditioner covers both.
-        # This path exists to check the elimination against the un-eliminated system, so it is
-        # kept deliberately plain — the block preconditioner below is for the Schur path.
-        def pack(g, h):
-            return jnp.concatenate([g, h.reshape(n_cells, dim * dim)], axis=1)
-
-        def coupled(u):
-            g, h = u[:, :dim], u[:, dim:].reshape(n_cells, dim, dim)
-            rhs_g = face_cells.scatter(*gradient_face_terms(g, h, g, h, zero_f, zero_b))
-            rhs_h = face_cells.scatter(*hessian_face_terms(g, h, g, h))
-            return pack(scale(g, vol) - rhs_g, vol[:, None, None] * h - rhs_h)
-
-        def coupled_rhs(fld, bvals):
-            # The Hessian equation's right-hand side is zero (see `gradient_rhs` above).
-            return pack(gradient_rhs(fld, bvals), zero_h)
-
-        # ---- Schur elimination of the Hessian block.
-        def gradient_and_hessian_rows(g):
-            """``(A_gg·g, A_Hg·g)`` — the outer operator needs both, from one pass over the faces."""
-            rhs_g = face_cells.scatter(*gradient_face_terms(g, zero_h, g, zero_h, zero_f, zero_b))
-            rhs_h = face_cells.scatter(*hessian_face_terms(g, zero_h, g, zero_h))
-            return scale(g, vol) - rhs_g, -rhs_h
-
-        def a_hh(h):
-            # The innermost loop: only the Hessian equation, so the gradient equation's face-curvature
-            # work is not done and then discarded.
-            return vol[:, None, None] * h - face_cells.scatter(
-                *hessian_face_terms(zero_g, h, zero_g, h)
-            )
-
-        def a_gh(h):
-            return -face_cells.scatter(*gradient_face_terms(zero_g, h, zero_g, h, zero_f, zero_b))
-
-        # Per-cell diagonal blocks, from the same face kernel the operators are built from. Both are
-        # (dim, dim) per cell: A_gg's block acts on the gradient directly, and A_HH's is the `C` of
-        # the `I_dim ⊗ C` structure described in the class docstring, recovered by probing a single
-        # Hessian row (every row gives the same C, which is what that structure means).
-        def gg_owner(probe):
-            owner_side, _ = gradient_face_terms(probe, zero_h, zero_g, zero_h, zero_f, zero_b)
-            return face_cells.scatter(owner_side, no_face_g)
-
-        def gg_neighbour(probe):
-            _, neighbour_side = gradient_face_terms(zero_g, zero_h, probe, zero_h, zero_f, zero_b)
-            return face_cells.scatter(no_face_g, neighbour_side)
-
+        # ---- The Hessian equation's own block, and the reduction onto symmetric components.
+        #
+        # The Hessian of a twice-continuously-differentiable field is symmetric, so only `n_sym` of
+        # its `dim**2` entries are independent and only those are solved for. That leaves `dim**2`
+        # equations for `n_sym` unknowns — over-determined — and they are reduced in the least-squares
+        # sense weighted by the cell's own block: the reduced row is `(A_P E)ᵀ` applied to the full
+        # row, `E` being the expansion of the packed components. Two consequences, the second being
+        # why the weighting earns its cost over an unweighted projection:
+        #
+        #  * it minimizes the residual of the equation as written, rather than of whatever an
+        #    unweighted projection happens to leave; and
+        #  * the reduced per-cell diagonal block is `(A_P E)ᵀ(A_P E)`, **symmetric positive definite
+        #    by construction**, where the unreduced block is neither symmetric nor definite.
+        #
+        # `contract_symmetric`'s adjoint identity `<E u, R> = <u, contract(R)>` turns `(A_P E)ᵀ R`
+        # into `contract(R A_P)`, so the `(dim², n_sym)` matrix is never formed.
         def _hessian_probe(unit_row):
             """A Hessian field whose first row is ``unit_row`` in every cell, the rest zero."""
             return jnp.zeros((n_cells, dim, dim)).at[:, 0, :].set(unit_row)
@@ -2008,12 +2083,98 @@ class HessianCorrectedGradient(GradientScheme):
             _, neighbour_side = hessian_face_terms(zero_g, zero_h, zero_g, _hessian_probe(probe))
             return face_cells.scatter(no_face_h, neighbour_side)[:, 0, :]
 
-        # Both diagonal blocks cost `dim` probes of the face kernel to recover, so they are built on
-        # demand rather than eagerly: the un-eliminated path above needs neither, and charging it for
-        # them would make a check path quietly dearer than the code it checks.
+        # `A_P`: the UNREDUCED per-cell block, exactly `I_dim ⊗ C` for this `(dim, dim)` `C`, because
+        # an unsymmetrized Hessian enters its own equation only as `H·a` for per-face vectors `a` —
+        # which contracts its second index and leaves the first untouched, so one row's probe gives
+        # every row's. Geometry-only, and now needed by the un-eliminated system as well as the
+        # eliminated one (the reduction is part of the equation, not part of the elimination), so it
+        # is built here rather than inside `inner()`.
+        hessian_cell_block = cell_diagonal_block(hh_owner, hh_neighbour, vol, n_cells, dim)
+
+        def reduce_hessian(residual):
+            """`(A_P E)ᵀ` applied to a full ``(n_cells, dim, dim)`` Hessian row, then row-scaled.
+
+            The `1 / vol` is a positive per-cell row scaling: it changes neither the solution nor the
+            block's definiteness, and it restores the volume scaling the unreduced equation carried.
+            Without it the weighting squares that scaling, and every consumer that assumes a
+            volume-scaled Hessian row — the packed system's inverse-volume preconditioner among them
+            — degrades silently by a factor of the cell volume.
+            """
+            weighted = jnp.einsum("nij,njl->nil", residual, hessian_cell_block)
+            return contract_symmetric(weighted, dim) / vol[:, None]
+
+        # Full coupled system on the packed unknown [g, h] of shape (n_cells, dim + n_sym); both
+        # diagonal blocks carry the cell volume, so one inverse-volume preconditioner covers both.
+        # This path exists to check the elimination against the un-eliminated system, so it is
+        # kept deliberately plain — the block preconditioner below is for the Schur path.
+        def pack(g, u):
+            return jnp.concatenate([g, u], axis=1)
+
+        def coupled(packed):
+            g, u = packed[:, :dim], packed[:, dim:]
+            h = expand_symmetric(u, dim)
+            rhs_g = face_cells.scatter(*gradient_face_terms(g, h, g, h, zero_f, zero_b))
+            rhs_h = face_cells.scatter(*hessian_face_terms(g, h, g, h))
+            return pack(scale(g, vol) - rhs_g, reduce_hessian(vol[:, None, None] * h - rhs_h))
+
+        def coupled_rhs(fld, bvals):
+            # The Hessian equation's right-hand side is zero (see `gradient_rhs` above).
+            return pack(gradient_rhs(fld, bvals), zero_u)
+
+        # ---- Schur elimination of the Hessian block.
+        def gradient_and_hessian_rows(g):
+            """``(A_gg·g, A_Hg·g)`` — the outer operator needs both, from one pass over the faces."""
+            rhs_g = face_cells.scatter(*gradient_face_terms(g, zero_h, g, zero_h, zero_f, zero_b))
+            rhs_h = face_cells.scatter(*hessian_face_terms(g, zero_h, g, zero_h))
+            return scale(g, vol) - rhs_g, reduce_hessian(-rhs_h)
+
+        def a_hh(u):
+            # The innermost loop: only the Hessian equation, so the gradient equation's face-curvature
+            # work is not done and then discarded.
+            h = expand_symmetric(u, dim)
+            return reduce_hessian(
+                vol[:, None, None] * h
+                - face_cells.scatter(*hessian_face_terms(zero_g, h, zero_g, h))
+            )
+
+        def a_gh(u):
+            h = expand_symmetric(u, dim)
+            return -face_cells.scatter(*gradient_face_terms(zero_g, h, zero_g, h, zero_f, zero_b))
+
+        # Per-cell diagonal blocks, from the same face kernel the operators are built from. `A_gg`'s
+        # is `(dim, dim)` and acts on the gradient directly; the reduced Hessian equation's is
+        # `(n_sym, n_sym)` and no longer factors — imposing symmetry couples the two tensor indices
+        # that the Kronecker structure above kept apart.
+        def gg_owner(probe):
+            owner_side, _ = gradient_face_terms(probe, zero_h, zero_g, zero_h, zero_f, zero_b)
+            return face_cells.scatter(owner_side, no_face_g)
+
+        def gg_neighbour(probe):
+            _, neighbour_side = gradient_face_terms(zero_g, zero_h, probe, zero_h, zero_f, zero_b)
+            return face_cells.scatter(no_face_g, neighbour_side)
+
+        def hh_reduced_owner(probe):
+            owner_side, _ = hessian_face_terms(zero_g, expand_symmetric(probe, dim), zero_g, zero_h)
+            return reduce_hessian(face_cells.scatter(owner_side, no_face_h))
+
+        def hh_reduced_neighbour(probe):
+            _, side = hessian_face_terms(zero_g, zero_h, zero_g, expand_symmetric(probe, dim))
+            return reduce_hessian(face_cells.scatter(no_face_h, side))
+
         def inner():
-            block = cell_diagonal_block(hh_owner, hh_neighbour, vol, n_cells, dim)
-            return GradientSystem(CellBlockJacobi(jnp.linalg.inv(block)), a_hh, (n_cells, dim, dim))
+            # `cell_diagonal_block`'s explicit-diagonal shortcut does not apply after the reduction:
+            # the diagonal term is no longer `vol · I` in the packed coordinates, so it is probed
+            # alongside the two face halves instead of being added as a scalar.
+            def column(unit):
+                probe = jnp.broadcast_to(unit, (n_cells, n_sym))
+                diagonal = reduce_hessian(vol[:, None, None] * expand_symmetric(probe, dim))
+                return diagonal - hh_reduced_owner(probe) - hh_reduced_neighbour(probe)
+
+            _, columns = jax.lax.scan(
+                lambda carry, unit: (carry, column(unit)), None, jnp.eye(n_sym)
+            )
+            block = jnp.moveaxis(columns, 0, -1)
+            return GradientSystem(CellBlockJacobi(jnp.linalg.inv(block)), a_hh, (n_cells, n_sym))
 
         def gh_owner(probe_h):
             side, _ = gradient_face_terms(zero_g, probe_h, zero_g, zero_h, zero_f, zero_b)
@@ -2025,11 +2186,11 @@ class HessianCorrectedGradient(GradientScheme):
 
         def hg_owner(probe_g):
             side, _ = hessian_face_terms(probe_g, zero_h, zero_g, zero_h)
-            return -face_cells.scatter(side, no_face_h)
+            return -reduce_hessian(face_cells.scatter(side, no_face_h))
 
         def hg_neighbour(probe_g):
             _, side = hessian_face_terms(zero_g, zero_h, probe_g, zero_h)
-            return -face_cells.scatter(no_face_h, side)
+            return -reduce_hessian(face_cells.scatter(no_face_h, side))
 
         def local_schur_block(gradient_block, hessian_inverse):
             """``A_gg``'s block less the elimination term's own, contracted cell by cell.
@@ -2044,18 +2205,20 @@ class HessianCorrectedGradient(GradientScheme):
             the same approximation a pressure Schur usually gets. It is an approximation: the true
             block also carries paths out to a neighbour and back, which this drops.
 
-            Costs ``dim`` probes for ``A_Hg`` and ``dim**2`` for ``A_gH``. There is no shortcut on the
-            second: the gradient equation contracts BOTH of the Hessian's indices (the face-curvature
-            term, each side's Hessian moment, and the warp moment), so its block is a full rank-three
-            tensor rather than a Kronecker product.
+            Costs ``dim`` probes for ``A_Hg`` and ``n_sym`` for ``A_gH``. Both are plain matrices once
+            the Hessian is carried as its independent components, so the elimination term is an
+            ordinary triple product rather than the rank-three contraction the full tensor needed.
+
+            ⚠️ **This diverges on a real mesh under a fixed-sweep outer solve** and is off by default;
+            see the class docstring.
             """
 
-            def hessian_row_block(unit):  # A_Hg: g_k -> H_ij
+            def hessian_row_block(unit):  # A_Hg: g_k -> u_a
                 probe = jnp.broadcast_to(unit, (n_cells, dim))
                 return hg_owner(probe) + hg_neighbour(probe)
 
-            def gradient_row_block(unit):  # A_gH: H_pq -> g_m
-                probe = jnp.broadcast_to(unit, (n_cells, dim, dim))
+            def gradient_row_block(unit):  # A_gH: u_a -> g_m
+                probe = expand_symmetric(jnp.broadcast_to(unit, (n_cells, n_sym)), dim)
                 return gh_owner(probe) + gh_neighbour(probe)
 
             _, hg = jax.lax.scan(
@@ -2065,27 +2228,25 @@ class HessianCorrectedGradient(GradientScheme):
 
             # ⚠️ PROBED UNDER `lax.scan`, WHICH IS THE ONLY CONSTRUCT THAT ACTUALLY SEQUENCES THEM.
             # A Python loop over the probes followed by a `stack` does NOT: to the compiler that is
-            # `dim**2` INDEPENDENT computations feeding one consumer, free to be scheduled together,
+            # `n_sym` INDEPENDENT computations feeding one consumer, free to be scheduled together,
             # so every probe's face intermediates can be live at once. Each probe gathers a
             # `(n_cells, dim, dim)` field to `(n_faces, dim, dim)` -- 376 MB at 1.6M cells, twice per
-            # probe -- so nine of them concurrently is several gigabytes, which on a real mesh is the
+            # probe -- so six of them concurrently is several gigabytes, which on a real mesh is the
             # difference between fitting in memory and swapping. Measured: a reconstruction went from
             # ~200 s (swapping, and FLAT in the sweep count because the prologue dominated everything)
             # to the sweeps mattering again.
             #
-            # ⚠️ It is invisible on a small mesh, which is how it shipped: at 13824 cells nine live
+            # ⚠️ It is invisible on a small mesh, which is how it shipped: at 13824 cells six live
             # probes is a few MB, and a Python loop measured 1.29 GB against a `vmap`'s 1.39 GB --
             # a real difference, for a reason that does not survive to the size that matters.
             # `scan` bounds the intermediates by construction rather than by the scheduler's choice.
             def probe_column(carry, unit):
                 return carry, gradient_row_block(unit)
 
-            units = jnp.eye(dim * dim).reshape(dim * dim, dim, dim)
-            _, gh = jax.lax.scan(probe_column, None, units)
-            gh = jnp.moveaxis(gh, 0, -1).reshape(n_cells, dim, dim, dim)
-            # `g_k -> H_ij` by `hg`, then `A_HH⁻¹` on the Hessian's trailing index (the `I ⊗ C`
-            # structure, exactly as the inner preconditioner applies it), then `H_pq -> g_m` by `gh`.
-            return gradient_block - jnp.einsum("nmil,nlj,nijk->nmk", gh, hessian_inverse, hg)
+            _, gh = jax.lax.scan(probe_column, None, jnp.eye(n_sym))
+            gh = jnp.moveaxis(gh, 0, -1)
+            # `g_k -> u_a` by `hg`, then the reduced `A_HH⁻¹`, then `u_a -> g_m` by `gh`.
+            return gradient_block - jnp.einsum("nma,nab,nbk->nmk", gh, hessian_inverse, hg)
 
         def outer(hessian_solver, inner_system, use_local_schur_block=False):
             block = cell_diagonal_block(gg_owner, gg_neighbour, vol, n_cells, dim)
@@ -2122,7 +2283,7 @@ class HessianCorrectedGradient(GradientScheme):
 
             start = (
                 sweep.relaxation * gradient_preconditioner.apply(rhs_g),
-                jnp.zeros((n_cells, dim, dim)),
+                zero_u,
             )
             if sweep.sweeps <= 1:
                 return start[0]
@@ -2146,22 +2307,22 @@ class HessianCorrectedGradient(GradientScheme):
 
             def error(packed):
                 g = packed[:, :dim]
-                h = packed[:, dim:].reshape(n_cells, dim, dim)
+                h = packed[:, dim:]
                 a_gg_g, a_hg_g = gradient_and_hessian_rows(g)
                 h_next = h + hessian_preconditioner.apply(a_hg_g - a_hh(h))
                 g_next = g + relaxation * gradient_preconditioner.apply(-a_gg_g + a_gh(h_next))
-                return jnp.concatenate([g_next, h_next.reshape(n_cells, -1)], axis=1)
+                return jnp.concatenate([g_next, h_next], axis=1)
 
             return GradientSystem(
                 InverseVolume(jnp.ones(n_cells)),  # identity: `v - I(v - Mv)` is `Mv`
                 lambda v: v - error(v),
-                (n_cells, dim + dim * dim),
+                (n_cells, dim + n_sym),
             )
 
         return _HessianSystems(
             gradient_rhs=gradient_rhs,
             coupled_rhs=coupled_rhs,
-            coupled=GradientSystem(InverseVolume(1.0 / vol), coupled, (n_cells, dim + dim * dim)),
+            coupled=GradientSystem(InverseVolume(1.0 / vol), coupled, (n_cells, dim + n_sym)),
             inner=inner,
             outer=outer,
             block_sweep=block_sweep,

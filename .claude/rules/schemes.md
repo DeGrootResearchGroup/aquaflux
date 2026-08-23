@@ -294,6 +294,52 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   The 3D skew test skews a hex grid **in-plane** (`tests/support/meshes.py::columnwise_perturbed_grid_3d`,
   planar faces): exact-for-quadratic vs `CorrectedGreenGauss`'s ~0.08 error.
 
+  **⚠️ THE HESSIAN IS SOLVED AS SIX COMPONENTS, NOT NINE (2026-08-22).** The Hessian of a
+  twice-continuously-differentiable field is symmetric, so `n_sym = dim(dim+1)/2` components carry
+  it — six in 3D. Solving only those leaves `dim²` equations for `n_sym` unknowns, and the surplus is
+  removed **in the least-squares sense weighted by the cell's own block**, which is what Betchen &
+  Straatman (2010) do (their Eq. 16–17): the reduced row is `(A_P E)ᵀ` applied to the full row, `E`
+  the expansion of the packed components. `contract_symmetric`'s adjoint identity
+  `<E u, R> = <u, contract(R)>` turns that into `contract(R A_P)`, so the `(dim², n_sym)` matrix is
+  never formed.
+
+  - **The reduced per-cell block is `(A_P E)ᵀ(A_P E)` — SYMMETRIC POSITIVE DEFINITE by construction**,
+    where the unreduced block is neither symmetric nor definite. Pinned by
+    `test_the_reduced_hessian_block_is_symmetric_positive_definite`, which checks the block the
+    preconditioner actually inverts rather than one computed a second way. This is the structural
+    reason to weight the reduction rather than project it unweighted: `A_HH⁻¹` sits at the centre of
+    the elimination term `A_gH A_HH⁻¹ A_Hg`, so a well-signed inverse there is the difference between
+    a Schur correction that can only shrink the block and one that can flip a direction.
+  - **⚠️ STORAGE GOES UP, NOT DOWN — the expectation that motivated this is half wrong, and it is the
+    per-cell BLOCK that decides it.** The unknown shrinks by a third (9 → 6 doubles per cell, and
+    likewise every Hessian iterate on the reverse-mode tape). But the block **stops factoring**: an
+    unsymmetrized `H` enters its own equation only as `H·a`, touching one tensor index and leaving
+    the other alone, which is what made the block `I ⊗ C` and storable as `(dim, dim)`. Symmetry
+    couples the two indices, so it is a dense `(n_sym, n_sym)` — **9 → 36 doubles per cell in 3D**,
+    four times the storage. Net at 1.6M cells: about **−38 MB** on the unknown against **+346 MB** on
+    the block. Everything else about the change is favourable; this is not.
+  - **⚠️ THE REDUCTION MUST BE ROW-SCALED BY `1/vol`.** Weighting by `A_P` squares the equation's
+    volume scaling (`A_P ~ vol`, so the reduced block is `~vol²`), and every consumer assuming a
+    volume-scaled Hessian row degrades silently by a factor of the cell volume — the packed system's
+    inverse-volume preconditioner most of all, which on a real mesh means a factor of ~1e-9. A
+    positive per-cell row scaling changes neither the solution nor the block's definiteness, so this
+    costs nothing and is not a tuning.
+  - **The elimination term becomes an ordinary triple product.** `A_gH`'s block was a rank-three
+    tensor `(n, dim, dim, dim)` because the gradient equation contracts *both* of the Hessian's
+    indices; against packed components it is a plain `(n, dim, n_sym)` matrix, and the local Schur
+    block is `einsum("nma,nab,nbk->nmk", ...)`. Its probe count drops from `dim² = 9` to `n_sym = 6`,
+    while the reduced `A_HH` block's rises from `dim = 3` to `n_sym = 6` (the Kronecker shortcut that
+    let one row's probe give every row's is gone with the factorization).
+  - **The warp moment simplifies.** `½Pᵀ(Hd + Hᵀd)` carried both contractions because the tensor was
+    not symmetrized; the two now coincide and the half cancels the doubling.
+  - **`A_P` is now built eagerly rather than inside `inner()`.** The reduction is part of the
+    *equation*, not part of the elimination, so the un-eliminated path needs it too — which costs that
+    check path `dim` probes it did not previously pay.
+  - **Quadratic exactness is unchanged** (median 6.0e-15 at 2D perturb 0.3, 7.6e-15 at 3D perturb
+    0.25), the elimination still agrees with the un-eliminated solve, and the default 20/10 sweep
+    counts still reach the exactly-solved reconstruction — so this is a change of representation, not
+    of accuracy.
+
   **⚠️ NON-PLANAR FACES: the derivation drops a term, and restoring it is worth ~1000× on a real
   automatically-generated mesh (measured 2026-08-21).** Betchen's Eq. (2)→(3) drops the face integral
   of the linear term by "noting that the planar faces of a polyhedral volume possess a constant
@@ -539,9 +585,11 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   corrected Green-Gauss cannot handle, so its default preconditioner should be the one that survives
   them; `local_schur_block=False` recovers the historical `A_gg`-only block.
 
-  - **`A_gH` genuinely needs `dim²` probes** — no Kronecker shortcut. The gradient equation contracts
-    **both** of the Hessian's indices (face curvature, each side's Hessian moment, the warp moment),
-    so its block is a full rank-three tensor. `A_HH`'s is `I ⊗ C` and needs one.
+  - **`A_gH` needs one probe per Hessian unknown** — no Kronecker shortcut, because the gradient
+    equation contracts **both** of the Hessian's indices (face curvature, each side's Hessian moment,
+    the warp moment). Against the full tensor that was a rank-three block at `dim²` probes; against the
+    six independent components it is a plain matrix at `n_sym` probes. ⚠️ The count below and the
+    memory figures with it were measured at `dim² = 9`.
   - **Probe sequentially, not under `vmap`.** Same wall clock (248 ms against 247 at 13824 cells), but
     `vmap` holds all `dim²` probes' face intermediates at once and those are the largest arrays in the
     scheme: peak 1.29 GB sequential against 1.39 GB vmapped, on a 1.10 GB baseline — a third of the
@@ -645,12 +693,16 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     same order as the volume term, which `1/V` cannot represent at all. Against the exact per-cell block
     the same iteration is ρ = **0.000** (orthogonal), 0.055 (p=0.2), 0.127 (p=0.4) in 2D and 0.103 at
     3D p=0.3 — so a handful of fixed sweeps replaces the inner Krylov solve outright.
-  - **The per-cell `A_HH` block is EXACTLY `I_dim ⊗ C` with `C` only `(dim, dim)`** — measured departure
-    `0.000e+00` in 2D and 3D. `H` enters its own equation only as `H·a` for per-face vectors `a`, which
-    contracts `H`'s second index and leaves the first untouched. So the block is stored and inverted as
-    `dim×dim`, not `dim²×dim²`: **72 B/cell rather than 648 in 3D** (115 MB vs ~1 GB at 1.6M cells),
-    which is the difference between usable and not at that scale. Pinned by
-    `test_the_hessian_block_is_a_kronecker_product_so_it_is_stored_dim_by_dim`.
+  - **⚠️ THE `I_dim ⊗ C` BLOCK STRUCTURE IS GONE — it was a property of the UNSYMMETRIZED Hessian and
+    the scheme now solves the six independent components (2026-08-22).** It held exactly (measured
+    departure `0.000e+00` in 2D and 3D) because `H` entered its own equation only as `H·a` for per-face
+    vectors `a`, contracting one index and leaving the other untouched — so the block stored as
+    `dim×dim` rather than `dim²×dim²`, 72 B/cell against 648 in 3D. Imposing symmetry couples those two
+    indices, so the reduced block is a dense `(n_sym, n_sym)`: **288 B/cell in 3D**, four times the old
+    figure, while the unknown drops from 72 to 48. There is no such test any more; the property now
+    pinned is that the reduced block is symmetric positive definite
+    (`test_the_reduced_hessian_block_is_symmetric_positive_definite`). The unreduced `C` still exists
+    and is still `I ⊗ C` — it is what weights the reduction — so the extraction below is unchanged.
   - **The blocks are extracted EXACTLY with no graph colouring**, by `cell_diagonal_block` +
     `interpolation.blend_owner_neighbour`: reading a face's two sides from separate fields and zeroing
     one leaves each cell reading only its own value, so **one probe per component** (`dim`, not
