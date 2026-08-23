@@ -39,6 +39,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1]))
 
 import aquaflux  # noqa: E402,F401  (enables x64)
+import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from aquaflux.io import read_openfoam  # noqa: E402
@@ -48,6 +49,9 @@ from aquaflux.schemes.gradient import cell_diagonal_block  # noqa: E402,F401
 
 INNER = int(os.environ.get("UV_INNER", "12"))
 WORST = int(os.environ.get("UV_WORST", "12"))
+OUTER = int(os.environ.get("UV_OUTER", "20"))
+RATE_ITERS = int(os.environ.get("UV_RATE_ITERS", "20"))
+OMEGA = os.environ.get("UV_OMEGA", "1.0,0.8,0.5,0.25,0.1")
 
 
 def quadratic(points, centre, extent):
@@ -64,6 +68,120 @@ def quadratic_gradient(points, centre, extent):
         )
         / extent
     )
+
+
+def power_iteration(apply_fn, shape, iters, seed=0):
+    """Dominant eigenvalue and eigenvector of a linear map, by normalized power iteration.
+
+    Parameters
+    ----------
+    apply_fn : callable
+        ``(n_cells, dim) -> (n_cells, dim)``, the linear map to iterate.
+    shape : tuple of int
+        Shape of the vector the map acts on.
+    iters : int
+        Iterations to run. The estimate at half the budget is returned beside the final one, because
+        a power iteration that has not settled reports a number that looks just as definite as one
+        that has -- the two agreeing is the only evidence the answer means anything.
+    seed : int
+        Seed for the starting vector.
+
+    Returns
+    -------
+    rate : float
+        Growth factor of the last iteration -- the dominant eigenvalue's modulus.
+    half : float
+        The same estimate at half the budget.
+    rayleigh : float
+        ``v.(A v)`` at the final iterate, which carries the dominant eigenvalue's SIGN. Negative,
+        where ``A`` is the amplification ``P^-1 S``, means the preconditioner is indefinite relative
+        to the operator in that direction -- and then no positive relaxation can stabilize it.
+    vector : ndarray
+        The final iterate, normalized.
+    """
+    rng = np.random.default_rng(seed)
+    v = jnp.asarray(rng.standard_normal(shape))
+    v = v / jnp.linalg.norm(v)
+    rate = half = rayleigh = float("nan")
+    for i in range(iters):
+        w = apply_fn(v)
+        nrm = float(jnp.linalg.norm(w))
+        if not np.isfinite(nrm) or nrm == 0.0:
+            return nrm, half, rayleigh, np.asarray(v)
+        rayleigh = float(jnp.sum(v * w))
+        rate = nrm
+        if i + 1 == max(iters // 2, 1):
+            half = nrm
+        v = w / nrm
+    return rate, half, rayleigh, np.asarray(v)
+
+
+def localization(vector, n_cells):
+    """How many cells carry a mode -- the discriminator between a local and a global failure.
+
+    A spectral radius is a whole-mesh number, and is perfectly compatible with a cause confined to a
+    handful of cells, so ``rho > 1`` on its own cannot tell the two apart. The participation ratio
+    can: it is the effective number of cells the eigenvector occupies, near ``1`` for a mode pinned
+    to one cell and near ``n_cells`` for one spread over the mesh.
+
+    Parameters
+    ----------
+    vector : ndarray
+        A normalized eigenvector, shape ``(n_cells, dim)``.
+    n_cells : int
+        Cell count of the mesh.
+
+    Returns
+    -------
+    dict or None
+        ``cells`` (participation ratio), ``top1`` / ``top10`` / ``top1000`` (share of the mode's
+        energy on that many cells), and ``order`` (cells by descending share). ``None`` if the
+        vector is not finite.
+    """
+    mass = np.linalg.norm(np.asarray(vector).reshape(n_cells, -1), axis=-1) ** 2
+    total = float(mass.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        return None
+    p = mass / total
+    order = np.argsort(p)[::-1]
+    return {
+        "cells": 1.0 / float(np.sum(p**2)),
+        "top1": float(p[order[0]]),
+        "top10": float(p[order[:10]].sum()),
+        "top1000": float(p[order[:1000]].sum()),
+        "order": order,
+    }
+
+
+def dilate(seed_mask, owner_int, nb_int, rounds):
+    """Grow a cell mask outward by ``rounds`` face-neighbour hops.
+
+    A fixed sweep count propagates a bad row outward one cell per sweep, so a blow-up confined to a
+    few cells contaminates its whole ``sweeps``-hop neighbourhood and no further. This is what tests
+    that reading: if the diverging cells are the dilation of a much smaller set, that smaller set is
+    the cause and the population is its shadow.
+
+    Parameters
+    ----------
+    seed_mask : ndarray of bool
+        Per-cell mask to grow, shape ``(n_cells,)``.
+    owner_int, nb_int : ndarray of int
+        Owner and neighbour cell of each interior face.
+    rounds : int
+        Hops to grow.
+
+    Returns
+    -------
+    ndarray of bool
+        The grown mask.
+    """
+    m = seed_mask.copy()
+    for _ in range(rounds):
+        nxt = m.copy()
+        nxt[owner_int] |= m[nb_int]
+        nxt[nb_int] |= m[owner_int]
+        m = nxt
+    return m
 
 
 def main() -> None:
@@ -193,6 +311,110 @@ def main() -> None:
             flush=True,
         )
     _ = basis
+
+    # ---- DOES THE CORRECTION COLLAPSE THE BLOCK? The Schur block is `A_gg`'s block MINUS a
+    # correction, so on a cell where the two nearly cancel its smallest singular value collapses
+    # while `A_gg`'s does not -- and the preconditioner is that block's INVERSE, so a collapse
+    # there amplifies every neighbour coupling on that row. The true global Schur complement need
+    # not be near-singular in that direction: the neighbour paths this per-cell block drops are what
+    # restore it. That is how a block can be closer to the truth and worse to invert.
+    smin_plain = np.linalg.svd(plain_block, compute_uv=False)[:, -1]
+    smin_schur = np.linalg.svd(schur_block, compute_uv=False)[:, -1]
+    shrink = smin_schur / np.maximum(smin_plain, 1e-300)
+    print("\n  does the correction COLLAPSE the block? (sigma_min, and what P^-1 grows by)")
+    print(f"    {'cell':>9} {'faces':>6} {'smin A_gg':>11} {'smin Schur':>11} {'shrink':>10}")
+    for c in worst[:6]:
+        print(
+            f"    {c:9d} {faces_per_cell[c]:6d} {smin_plain[c]:11.3e} {smin_schur[c]:11.3e} "
+            f"{shrink[c]:10.3e}",
+            flush=True,
+        )
+    print(
+        f"    mesh-wide: shrink median {np.median(shrink):.3e} min {shrink.min():.3e} | "
+        f"cells below 1e-1: {int((shrink < 1e-1).sum())} | below 1e-2: {int((shrink < 1e-2).sum())}"
+    )
+
+    # ---- IS THE DIVERGING SET THE NEIGHBOURHOOD OF A MUCH SMALLER ONE? The outer solve runs a
+    # fixed count of sweeps, and one sweep moves information across one face. So a row that
+    # amplifies contaminates its `sweeps`-hop neighbourhood and no further, and a diverging
+    # population far larger than the collapsed one is what a few bad rows look like after 20 sweeps.
+    interior = neighbour >= 0
+    owner_int, nb_int = owner[interior], neighbour[interior]
+    n_bad = int(bad.sum())
+    for tau in (1e-1, 1e-2):
+        seed = shrink < tau
+        grown = dilate(seed, owner_int, nb_int, OUTER)
+        caught = int((bad & grown).sum())
+        print(
+            f"\n  cells with shrink < {tau:.0e}: {int(seed.sum())} -> dilated {OUTER} hops: "
+            f"{int(grown.sum())} cells, covering {caught} of the {n_bad} diverging "
+            f"({100.0 * caught / max(n_bad, 1):.1f}%)",
+            flush=True,
+        )
+
+    # ---- THE GLOBAL CONTRACTION RATE, and the two things it cannot tell you on its own.
+    # `rho(I - P^-1 S)` decides whether the sweep converges, but it is a whole-mesh number: it
+    # cannot say whether the responsible mode sits on ten cells or a million, and it cannot say
+    # whether under-relaxation would fix it. The eigenvector's participation ratio answers the
+    # first; the SIGN of the dominant eigenvalue of the amplification `P^-1 S` answers the second.
+    plain_outer = systems.outer(inner, inner_system, False)
+    schur_outer = outer_system
+    shape = (mesh.n_cells, dim)
+
+    print("\n  the contraction rate -- rho(I - P^-1 S), which decides whether a sweep converges")
+    modes = {}
+    for label, sysm in (("A_gg", plain_outer), ("Schur", schur_outer)):
+        step = jax.jit(lambda v, s=sysm: v - s.preconditioner.apply(s.operator(v)))
+        rate, half, _, vec = power_iteration(step, shape, RATE_ITERS)
+        verdict = "CONVERGES" if rate < 1.0 else "DIVERGES"
+        print(
+            f"    {label:6s} block: rho = {rate:.4f}  ({verdict})  half-budget {half:.4f}",
+            flush=True,
+        )
+        modes[label] = localization(vec, mesh.n_cells)
+
+    print("\n  WHERE does that mode live? (participation ratio = effective cells carrying it)")
+    for label, loc in modes.items():
+        if loc is None:
+            print(f"    {label:6s}: eigenvector not finite")
+            continue
+        overlap = int(bad[loc["order"][:1000]].sum())
+        print(
+            f"    {label:6s}: {loc['cells']:12.1f} cells of {mesh.n_cells} | "
+            f"top1 {loc['top1']:.3f} top10 {loc['top10']:.3f} top1000 {loc['top1000']:.3f} | "
+            f"of its top 1000 cells, {overlap} are diverging",
+            flush=True,
+        )
+
+    # ---- CAN UNDER-RELAXATION FIX IT? Betchen and Straatman solve this reconstruction by
+    # under-relaxed block-Jacobi and state that a relaxation strictly inside (0, 1] is needed for
+    # convergence on an arbitrary grid; the solver here runs undamped. Relaxation scales every
+    # eigenvalue of the amplification, so `rho(I - w P^-1 S) = max|1 - w lambda|`: it can stabilize
+    # a mode whose `lambda` is positive and too large, and can do NOTHING for one whose `lambda` is
+    # negative, since `1 - w lambda > 1` for every positive `w`. So the sign is measured first and
+    # the ladder second -- the sign says whether the ladder can succeed before it is spent.
+    print("\n  the amplification P^-1 S itself -- its dominant eigenvalue, with its SIGN")
+    for label, sysm in (("A_gg", plain_outer), ("Schur", schur_outer)):
+        amp = jax.jit(lambda v, s=sysm: s.preconditioner.apply(s.operator(v)))
+        rate, half, rq, _ = power_iteration(amp, shape, RATE_ITERS)
+        reach = "relaxation can stabilize it" if rq > 0 else "NO positive relaxation stabilizes it"
+        print(
+            f"    {label:6s}: |lambda_max| = {rate:.4f} (half {half:.4f})  "
+            f"Rayleigh {rq:+.4f} -- {reach}",
+            flush=True,
+        )
+
+    print("\n  rho(I - w P^-1 S) under the Schur block, over Betchen's relaxation range")
+    for omega in [float(w) for w in OMEGA.split(",")]:
+        step = jax.jit(
+            lambda v, w=omega: v - w * schur_outer.preconditioner.apply(schur_outer.operator(v))
+        )
+        rate, half, _, _ = power_iteration(step, shape, RATE_ITERS)
+        verdict = "CONVERGES" if rate < 1.0 else "DIVERGES"
+        print(
+            f"    w = {omega:4.2f}: rho = {rate:9.4f}  ({verdict})  half-budget {half:9.4f}",
+            flush=True,
+        )
 
     print(
         f"\n  mesh-wide: volume median {np.median(volume):.2e} min {volume.min():.2e} | "

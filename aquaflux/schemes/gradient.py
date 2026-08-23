@@ -638,10 +638,17 @@ class SweptGradientSolve(GradientSolve):
         # not the scatters, so it costs a whole operator apply out of `sweeps` on every reconstruction,
         # and this one runs inside every residual evaluation and every Jacobian--vector product.
         # UNDER-RELAXATION IS NOT OPTIONAL ON A SUFFICIENTLY SKEWED MESH. Betchen and Straatman solve
-        # this reconstruction by under-relaxed block-Jacobi and state that on an arbitrary grid a
-        # relaxation strictly inside (0, 1] is required for convergence at all; their experiments run
-        # it at 0.8. Undamped (`relaxation=1`) is the special case, safe only where the iteration's
-        # error operator is already a contraction.
+        # this reconstruction by under-relaxed block-Jacobi and state that on an arbitrary grid the
+        # relaxation must be strictly less than one for the iteration to converge at all; their
+        # experiments run it at 0.8, converging in 33 iterations. Undamped (`relaxation=1`) is the
+        # special case, safe only where the iteration's error operator is already a contraction.
+        #
+        # ⚠️ THEIR PAPER'S PARAMETER IS THE COMPLEMENT OF THIS ONE, so the two numbers look unrelated.
+        # They write the update as a blend holding back a fraction `a` of the previous iterate,
+        # `G <- a G + (1 - a) (block-Jacobi update)`, and require `a > 0`; this field is the weight on
+        # the correction, `relaxation = 1 - a`. Their reported `a = 0.2` is `relaxation = 0.8`, and
+        # their `a > 0` requirement is `relaxation < 1`. Read either number without its convention and
+        # it inverts.
         #
         # THE SWEEPS ARE A `lax.scan`, NOT A PYTHON LOOP, AND THAT IS A SCALING DECISION. Unrolling
         # emits one copy of the operator apply per sweep, so the compiled program grows with the sweep

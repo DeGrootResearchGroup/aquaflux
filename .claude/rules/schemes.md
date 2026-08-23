@@ -443,29 +443,82 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   | 1595711 | 4 | 3.284e-01 | **2.452e-02** | 2.6e+03 | 5.6e+18 |
   | 60355 | 5 | 2.535e-01 | **6.025e-02** | **6.37** | 1.4e+17 |
 
-  **⚠️ THE ANSWER, and it is GLOBAL rather than per-cell: `rho(I - P⁻¹S)` is 6.2679 under the Schur
-  block and 0.7148 under `A_gg`'s.** The sweep is expansive by 6.3 per iteration, so twenty sweeps is
-  `6.27²⁰ ~ 1e+16` -- which is the observed 1e+16--1e+18 exactly. Half-budget estimates 5.42 and 0.58,
-  so both are settled rather than transient.
+  **⚠️ THE RATE IS THE MECHANISM: `rho(I - P⁻¹S)` is 6.2679 under the Schur block and 0.7148 under
+  `A_gg`'s.** The sweep is expansive by 6.3 per iteration, so twenty sweeps is `6.27²⁰ ~ 1e+16` --
+  which is the observed 1e+16--1e+18 exactly. Half-budget estimates 5.42 and 0.58, so both are settled
+  rather than transient.
 
-  **NO PER-CELL FIX EXISTS**, and that is why every local metric failed to correlate: the diverging
-  cells are geometrically ordinary because they are simply where the dominant eigenvector has support.
-  A limiter on the correction was proposed and is refuted before building -- the `sigma_min` collapse
-  it would target affects **8 cells of 1 635 909** (median shrink 1.000, only 3 below 1e-2), while
-  `rho = 6.27` affects the entire solve. A Krylov outer solve does not require `rho < 1`, which is the
-  whole reason it is untroubled.
+  **⚠️⚠️ BUT `rho` IS A WHOLE-MESH NUMBER AND DOES NOT ESTABLISH A WHOLE-MESH CAUSE — an earlier
+  version of this entry read it as "GLOBAL rather than per-cell" and concluded "NO PER-CELL FIX
+  EXISTS". Neither follows.** A spectral radius above one is equally consistent with a mode spread
+  over the mesh and with one pinned to a handful of rows, and nothing measured distinguishes them: a
+  fixed sweep count propagates a bad row one cell per sweep, so **8 collapsed cells dilated 20 hops is
+  a population of the same order as the 4599 that diverge**. The discriminators are the eigenvector's
+  participation ratio, whether the diverging set is the dilation of the collapsed one, and the SIGN of
+  the dominant eigenvalue of `P⁻¹S`; all three are now in
+  `validation/uvreactor_openfoam/schur_block_diagnosis.py` and **none has been run** — the 1.6M-cell
+  mesh is gitignored, was not kept, and the run-file did not record `UV_MESH`, so re-running needs
+  `of_case/Allmesh` first.
+
+  **⚠️ AND THE HARNESS THAT PRODUCED `rho` WAS DELETED IN THE SAME COMMIT THAT CITED IT.** The
+  `sigma_min` and contraction-rate sections ran at 21:50 and the file committed at 22:05 did not
+  contain them, so the headline finding was citable but not re-runnable — the precise state the
+  measurement rule exists to prevent. Rebuilt 2026-08-22.
+
+  **THE LEADING EXPLANATION IS THAT WE RUN THE ONE RELAXATION THE METHOD'S AUTHORS EXCLUDE.** Betchen
+  and Straatman solve this reconstruction by block-Jacobi over the **coupled** `[g, h]` system, with
+  the full per-cell block `A_P` (their Eq. 20) — and the gradient corner of `A_P⁻¹` **is** the local
+  Schur complement `(A_gg,loc - A_gH,loc A_HH,loc⁻¹ A_Hg,loc)⁻¹`, by the standard block-inverse
+  identity. So `local_schur_block=True` is their preconditioner and `A_gg`'s block is not: the latter
+  is the `(1,1)` block of `A_P` itself rather than the inverse of the `(1,1)` block of `A_P⁻¹`, and
+  the two differ by exactly the elimination term. Of their own iteration they state that **on an
+  arbitrary grid a relaxation strictly below one is required for convergence at all**, and they run it
+  at 0.8 (their `a = 0.2`; see the convention note in `SweptGradientSolve.solve`), converging in 33
+  iterations. **Our outer solver runs undamped.** So the block that diverges is theirs run at a
+  relaxation they exclude, and the block that survives is a weaker, more diagonally dominant stand-in
+  that happens to contract undamped.
+
+  **A SECOND DEVIATION IS A CANDIDATE FOR THE SAME FAILURE, and it decides whether relaxation can
+  fix it.** They solve the **six independent** Hessian components, reducing the over-determined
+  nine-equation system by least squares (their Eq. 16--17), which makes their Hessian block
+  `(A_P C)^T (A_P C)` **symmetric positive semi-definite by construction**. We solve all `dim²`
+  components unsymmetrized, so ours is neither. A non-definite `A_HH` can give the elimination term
+  the wrong sign, and a negative eigenvalue of `P⁻¹S` is precisely the case **no** positive relaxation
+  repairs — `1 - w*lambda > 1` for every `w > 0`. Hence the sign measurement is the one to take first:
+  positive says Betchen's relaxation is the fix, negative implicates the unsymmetrized Hessian.
+
+  **⚠️ BETCHEN'S OWN "UNDER-DETERMINED" REMARK IS ABOUT NEITHER OF THESE — it is a BOUNDARY-closure
+  degeneracy** (their Eq. 28--29): taking the boundary Hessian as the owner's leaves the system
+  under-determined in some cases, their illustration being a grid one cell thick in a direction, where
+  the second derivative across it is arbitrary. Their fix is an inverse-distance-averaged Hessian over
+  interior neighbours not themselves adjacent to a boundary, which this scheme does not implement (see
+  the boundary-treatment note above). It is **not** a statement that the per-cell Hessian block goes
+  rank-deficient on low-face-count cells, and the measurement agrees: `cond C` is 1.17 mesh-wide
+  median and, on four-faced cells, 2.45 median with a **maximum of 3.37** — the best-conditioned group
+  on the mesh. **Whether the failing cells touch a boundary is unchecked**, and is the one route by
+  which their remark could still bear on this.
+
+  A limiter on the correction remains refuted as a *general* fix -- the `sigma_min` collapse it would
+  target affects **8 cells of 1 635 909** (median shrink 1.000, only 3 below 1e-2) — but "8 cells
+  cannot matter" is exactly the inference the dilation test exists to check, so do not treat it as
+  closed either. A Krylov outer solve does not require `rho < 1`, which is the whole reason it is
+  untroubled.
 
   The block that diverges is **13× closer to the truth**, and cell 60355 is **well conditioned** as
   well as accurate. So neither accuracy nor conditioning is the mechanism: **a stationary iteration
   does not want an accurate preconditioner, it wants a diagonally dominant one.** The correction
   *subtracts* from `A_gg`'s block, the diagonal shrinks, `P⁻¹` grows, and on a cell whose off-diagonal
-  coupling is already comparable the iteration stops contracting. ⚠️ That reading is
-  **superseded by the global rate above** -- it was the fourth of five hypotheses and, like the three
-  before it, did not survive measurement. Four earlier mechanisms
+  coupling is already comparable the iteration stops contracting. ⚠️ **This reading was marked
+  "superseded by the global rate" and that marking was WRONG — the rate is this mechanism measured,
+  not a competitor to it.** Loss of block diagonal dominance is *how* an iteration comes to have a
+  rate above one, so the two are one finding at two levels of description; and it is corroborated
+  independently by Betchen and Straatman requiring a relaxation below one for their own block-Jacobi
+  on an arbitrary grid, which is what one does to an iteration not dominant enough to contract
+  undamped. Three earlier mechanisms
   (near-singular `A_HH` from an under-determined Hessian on tetrahedra — refuted, `cond C` is 1.8 on
-  the worst cells; preconditioner/operator mismatch at low inner counts — refuted, invariant across
-  inner 4–20; ill-conditioning generally — refuted by cell 60355) were each proposed and each
-  rejected by measurement.
+  the worst cells and 3.37 at worst over every four-faced cell; preconditioner/operator mismatch at
+  low inner counts — refuted, invariant across inner 4–20; ill-conditioning generally — refuted by
+  cell 60355) were each proposed and each rejected by measurement.
 
   **A Krylov outer solve is untroubled by the same preconditioner** (max 2.378e-02), spending
   iterations rather than diverging — so this is safe with `GmresGradientSolve` and unsafe with the
