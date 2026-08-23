@@ -27,7 +27,15 @@ import sys
 # distributed counterpart on four simulated devices.
 _SETUP = r"""
 import os
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
+# APPEND, never assign: the test workflow sets `XLA_FLAGS=--xla_cpu_multi_thread_eigen=false` for the
+# whole job so that `-n auto` scales -- without it each JAX process grabs every core and N workers x M
+# cores thrash. A bare assignment here silently drops that flag, and this is a SUBPROCESS spawned from
+# inside an xdist worker, so the process that loses it is exactly the one the flag was set for. The
+# symptom is not a failing assertion but the worker being killed ("node down: Not properly
+# terminated"), intermittently, depending on which tests it happens to be co-scheduled with.
+os.environ["XLA_FLAGS"] = (
+    os.environ.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=4"
+).strip()
 import numpy as np
 import jax, jax.numpy as jnp
 import aquaflux  # x64
