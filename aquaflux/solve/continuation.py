@@ -55,7 +55,7 @@ from .relaxation import RelaxationSchedule, SwitchedEvolutionRelaxation
 _INEXACT_CONTINUATION_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-10, restart=40, stagnation_iters=40)
 
 
-def _shifted_solve(residual_fn, phi, rhs, shift, preconditioner, solver):
+def _shifted_solve(residual_fn, phi, rhs, shift, preconditioner, solver, jacobian_fn=None):
     """Solve the diagonally-shifted Newton system ``(J(phi) + diag(shift)) delta = -rhs``, matrix-free.
 
     The shifted-Newton correction shared by the pseudo-transient and dual-time marches: the true
@@ -71,7 +71,7 @@ def _shifted_solve(residual_fn, phi, rhs, shift, preconditioner, solver):
     ----------
     residual_fn : callable
         The single-argument steady residual ``phi -> R(phi)``; its Jacobian-vector product forms the
-        unshifted part of the operator.
+        unshifted part of the operator when ``jacobian_fn`` is ``None``.
     phi : jnp.ndarray
         The iterate the Jacobian is linearized at, shape ``(n,)``.
     rhs : jnp.ndarray
@@ -90,6 +90,19 @@ def _shifted_solve(residual_fn, phi, rhs, shift, preconditioner, solver):
         the system. Do not read the loose ``forward_rtol`` as a preconditioned-residual stop; it is not.
     solver : lineax.AbstractLinearSolver
         The Krylov solver for the shifted system.
+    jacobian_fn : callable, optional
+        A cheaper stand-in residual ``phi -> R~(phi)`` whose Jacobian-vector product forms the operator
+        in place of ``residual_fn``'s. ``None`` (the default) differentiates ``residual_fn`` itself, so
+        the operator is the exact Jacobian of the residual being driven to zero.
+
+        Supplying one makes this a **quasi-Newton** step: the residual still decides where the march
+        lands, and the operator only decides how fast it gets there. That asymmetry is what makes the
+        substitution safe, and it is the same one the loose ``rtol`` on this solve already exploits --
+        an inexact-Newton iteration converges to the root of ``residual_fn`` for any sufficiently
+        accurate operator, so an approximation costs Krylov iterations rather than correctness.
+        The exchange rate is not free either way: an operator too far from the true Jacobian costs
+        more iterations than the cheaper matrix-vector product saves, and past that it costs outer
+        steps as well.
 
     Returns
     -------
@@ -108,8 +121,10 @@ def _shifted_solve(residual_fn, phi, rhs, shift, preconditioner, solver):
     if getattr(preconditioner, "solves_exactly_on_host", False):
         return preconditioner.exact_solve(phi, -rhs, shift), jnp.asarray(1, dtype=jnp.int32)
 
+    differentiated = residual_fn if jacobian_fn is None else jacobian_fn
+
     def shifted_jacobian(tangent: jnp.ndarray) -> jnp.ndarray:
-        return jax.jvp(residual_fn, (phi,), (tangent,))[1] + shift * tangent
+        return jax.jvp(differentiated, (phi,), (tangent,))[1] + shift * tangent
 
     return solve_linear(
         shifted_jacobian, -rhs, solver=solver, preconditioner=preconditioner, throw=False
@@ -291,6 +306,21 @@ class ShiftedStep(eqx.Module):
     adjoint_preconditioner_factory : callable or None
         The ``state -> M`` factory for the converged transpose solve, or ``None`` (static). At the root
         the operator is the unshifted steady Jacobian, so the adjoint needs no shift.
+    jacobian_residual : callable or None
+        A cheaper stand-in residual ``phi -> R~(phi)`` whose Jacobian-vector product forms this step's
+        linear operator, or ``None`` (the default) to differentiate the residual the step is driving to
+        zero. See :func:`_shifted_solve` for what the substitution costs and why it is safe.
+
+        **The residual decides the answer; the operator decides only the rate**, so the two admit
+        completely different amounts of approximation and there is no reason for one number to serve
+        both. This field is where that asymmetry is expressed. It reaches the *forward* march alone: the
+        implicit-function-theorem adjoint differentiates the residual it was handed, at the converged
+        state, without consulting the forward step at all, so a gradient stays exact whatever is set
+        here.
+
+        Data, not static, for the reason ``residual_norm`` is: the natural thing to pass is a bound
+        method of an assembler, which equinox carries as a pytree, so its arrays ride as dynamic leaves
+        and every step is a compilation-cache hit rather than a recompile against baked-in constants.
     """
 
     shift_policy: ShiftPolicy
@@ -307,6 +337,7 @@ class ShiftedStep(eqx.Module):
     adjoint_preconditioner_factory: (
         Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
     ) = eqx.field(static=True, default=None)
+    jacobian_residual: Callable[[jnp.ndarray], jnp.ndarray] | None = None
 
     def norm(self) -> ResidualNorm:
         """The residual measure the march and the outer stopping test share (:attr:`residual_norm`)."""
@@ -515,6 +546,7 @@ class PseudoTransientStep(ShiftedStep):
         grow = self.grow
         norm = self.residual_norm
         step_limit, step_projection = self.step_limit, self.step_projection
+        jacobian_residual = self.jacobian_residual
 
         def step(
             residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
@@ -544,7 +576,13 @@ class PseudoTransientStep(ShiftedStep):
                 # rejects (triggering more damping), rather than raising.
                 preconditioner = term.make_preconditioner(relaxation)
                 delta, cycles = _shifted_solve(
-                    residual_fn, phi, residual, shift, preconditioner, solver
+                    residual_fn,
+                    phi,
+                    residual,
+                    shift,
+                    preconditioner,
+                    solver,
+                    jacobian_fn=jacobian_residual,
                 )
                 # Backtrack the step length before judging it: when the shifted direction is accurate
                 # but the full step overshoots, a scaled-back step descends from this one solve,
@@ -950,6 +988,7 @@ class DualTimeStep(ShiftedStep):
         step_projection = self.step_projection
         abort_above = self.abort_above_inner_cycles
         abort_below = self.abort_below_alpha
+        jacobian_residual = self.jacobian_residual
 
         def step(
             residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
@@ -1018,7 +1057,13 @@ class DualTimeStep(ShiftedStep):
             def body(carry: tuple) -> tuple:
                 p, inner, gnorm, cycles, min_alpha, max_inner, since_refresh, spent, binding = carry
                 delta, step_cycles = _shifted_solve(
-                    residual_fn, p, transient_residual(p), shift, preconditioner, solver
+                    residual_fn,
+                    p,
+                    transient_residual(p),
+                    shift,
+                    preconditioner,
+                    solver,
+                    jacobian_fn=jacobian_residual,
                 )
                 # Strict-descent (monotone) line search on ‖G‖: G = 0 is a well-posed fixed-φⁿ solve, so
                 # a clipped inner step is a signal the pseudo-timestep is too large, read out via alpha.

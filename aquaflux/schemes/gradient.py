@@ -1093,7 +1093,14 @@ def narrow_gradient_sweeps(tree: _Tree, sweeps: int) -> _Tree:
         if isinstance(node, SweptGradientSolve):
             if node.sweeps <= sweeps:
                 return node
-            return SweptGradientSolve(sweeps=sweeps, warn_tol=node.warn_tol)
+            # Carry `relaxation` as well as `warn_tol`: a narrowed copy must differ from its original
+            # in the sweep count and in nothing else. Rebuilding it at the class default silently
+            # un-damps an under-relaxed solve, and on a mesh skewed enough to need that damping the
+            # undamped iteration does not converge at all -- so the copy would diverge where the
+            # original was fine, with no sign that a setting had been dropped.
+            return SweptGradientSolve(
+                sweeps=sweeps, warn_tol=node.warn_tol, relaxation=node.relaxation
+            )
         if isinstance(node, eqx.Module):
             # `sweeps` is a static field, so it lives in the pytree's structure rather than among its
             # leaves and `tree_at` cannot reach it; rebuilding each Module along the path is how a

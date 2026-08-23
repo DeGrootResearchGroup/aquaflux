@@ -72,12 +72,15 @@ closure.
 ## Status / cost
 
 The OpenFOAM kOmegaSST reference (fields, mesh, SIMPLE residual history) is fully reproducible via
-`run_of.sh`. On the aquaflux side, **log-ω keeps ω strictly positive** and the **per-field relative
-residuals descend** on this case — but the coupled log-ω solve on the full ~12k-cell mesh is
-**compute-heavy** (each Newton step is several minutes; a full run is hours). The log-ω transport is
-validated on a smaller channel (`tests/integration/test_coupled_rans.py`: converges to the direct
-fixed point, ω > 0 by construction, exact coupled adjoint); efficient large-mesh convergence — the
-reparametrized-block preconditioner scaling and the globalization — is a **known tuning follow-up**.
+`run_of.sh`. On the aquaflux side the coupled log-ω solve converges on the full ~12k-cell mesh: three
+Reynolds-continuation rungs, **71 outer steps and ~404 Krylov restart cycles in ~12 minutes**, reaching
+`x_r/h` 8.069 against the transient reference's 7.741. ⚠️ Those figures are the **`simplesmooth`** flow
+inverse, which is this case's default since 2026-08-22 — the PETSc-smoothed bundle it shipped before
+that no longer marches it past the second Reynolds rung, and the reason is the elimination-order and
+fill sensitivity of an incomplete factorization on this saddle rather than anything about the physics.
+Log-ω transport is separately validated on a smaller channel
+(`tests/integration/test_coupled_rans.py`: converges to the direct fixed point, ω > 0 by construction,
+exact coupled adjoint).
 
 When judging convergence, read the **per-field relative** residuals, not the absolute `||R||`: the
 latter is dominated by ω's ~1e5 near-wall scale and looks stalled while the flow is nearly converged.
@@ -97,6 +100,11 @@ latter is dominated by ω's ~1e5 near-wall scale and looks stalled while the flo
   (viscosity ramp Re ≈ 250 → 2500 → 25000) with a **dual-time pseudo-timestep march**; reuses
   `compare.build_case` and the reattachment metric and streams per-step progress. See the variant note
   below.
+- `gradient_jacobian_ab.py` — how accurate the gradient reconstruction has to be, measured separately
+  inside the residual and inside the Jacobian. Two groups of arms: one varies the reconstruction's own
+  sweep count and compares the converged fields (a discretization change, so it moves the answer), the
+  other holds the residual fixed and narrows only the copy the Krylov operator differentiates (a
+  quasi-Newton change, so it may only cost iterations). See the sweep note below.
 - `report.md`, `figures/` — the tracked deliverables, **produced by running `compare.py`**. They are
   not committed yet: that run is the compute-heavy step (see the status/cost note above). The OpenFOAM
   run tree (`runs/`, `of_case/` time dirs, the generated `polyMesh`) is git-ignored.
@@ -164,6 +172,19 @@ across the cell graph, which the case's `STENCIL_REACH` is matched to — so cha
 the reattachment result recorded above until the case were re-validated at the new count. To measure a
 different mesh rather than assume this one's number, build the scheme with
 `CorrectedGreenGauss.calibrated(mesh, geometry)`.
+
+The **Jacobian's** copy of that reconstruction is a separate question, and a cheaper answer. The
+residual decides which discrete equations are being solved, so its sweep count moves the root; the
+Jacobian only decides how fast an inexact-Newton iteration reaches that root, which is the same
+latitude the forward solve's `rtol = 0.3` already takes. Narrowing the Jacobian's copy alone
+(`jacobian_gradient_sweeps=2`, this mesh's own calibrated count) runs this case in **the identical 71
+outer steps and 404 Krylov cycles to the identical reattachment length, at 9.7 % less wall clock** —
+the whole saving being cheaper matrix-vector products, since a Jacobian--vector product spends two
+operator applies per sweep against the residual's one. At 1 it costs six cycles and returns nothing
+further, so 2 is the knee here. The adjoint is unaffected either way: the implicit-function-theorem
+reverse rule differentiates the residual at the converged state and never sees the forward operator.
+`gradient_jacobian_ab.py` is the harness; the ladder is worth re-walking on any mesh whose sweep
+contracts more slowly than this one's.
 
 Momentum is second-order (Venkatakrishnan-limited), matching OpenFOAM's `linearUpwind`. The stiff k/ω
 scalars use **first-order** upwind: even a *limited* second-order scalar stencil weakens the ω transport

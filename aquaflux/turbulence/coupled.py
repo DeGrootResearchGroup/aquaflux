@@ -1200,6 +1200,7 @@ def coupled_continuation(
     cycle_budget: int | None = None,
     positivity_floor: float = 0.0,
     positivity_projection: bool = False,
+    jacobian_gradient_sweeps: int | None = None,
     **preconditioner_kwargs: object,
 ) -> ForwardStep:
     """Build the pseudo-transient continuation step for the coupled Newton solve.
@@ -1344,6 +1345,23 @@ def coupled_continuation(
         ``schur_scaling``, ``velocity``). Ignored when ``reuse`` is given, since the flow block is then
         carried over rather than rebuilt.
 
+    jacobian_gradient_sweeps : int, optional
+        Cap the gradient reconstruction's sweeps in the copy of the residual the **forward Jacobian**
+        is differentiated from, leaving the residual itself untouched -- so the root the march lands on
+        and the gradient the adjoint returns are both unchanged. ``None`` (the default) differentiates
+        the residual as it stands and is byte-identical to not passing it.
+
+        The reconstruction's accuracy inside ``R`` decides *which* discrete equations are being solved;
+        inside ``J`` it decides only how quickly the inexact-Newton iteration reaches their root, which
+        is the same latitude ``forward_rtol`` already takes on the linear solve. A march pays a
+        Jacobian--vector product per Krylov iteration and a residual only once per step, and each sweep
+        costs two operator applies in the tangent against one in the residual, so the sweeps weigh more
+        on the differentiated path than on the evaluated one. Judge a cap on outer steps and cumulative
+        Krylov cycles over a whole march, never on one matrix-vector product's cost.
+
+        Distinct from ``probe_gradient_sweeps``, which narrows the copy the preconditioner's coloured
+        probe materializes; both leave the residual alone, and either may be set without the other.
+
     Returns
     -------
     ForwardStep
@@ -1386,6 +1404,7 @@ def coupled_continuation(
         cycle_budget=cycle_budget,
         step_limit=positive_k_limit(coupled, floor=positivity_floor),
         step_projection=(positive_k_projection(coupled) if positivity_projection else None),
+        jacobian_gradient_sweeps=jacobian_gradient_sweeps,
     )
 
 
@@ -1932,6 +1951,7 @@ def _coupled_step(
     cycle_budget: int | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
+    jacobian_gradient_sweeps: int | None = None,
 ) -> ForwardStep:
     """Assemble the pseudo-transient / dual-time step around an already-composed shift policy.
 
@@ -1973,6 +1993,30 @@ def _coupled_step(
         See :class:`~aquaflux.solve.PseudoTransientStep` and :class:`~aquaflux.solve.DualTimeStep`.
     forward_solver, block_scaled_norm, residual_norm, inner_observer, refresh_on_cycles, inner_refresh, cycle_budget, step_limit, step_projection
         The linear solve, the progress measure and the per-step guards. See the two step classes.
+    jacobian_gradient_sweeps : int, optional
+        Cap the gradient reconstruction's sweeps in the copy of the residual the **forward Jacobian**
+        is differentiated from, leaving the residual itself untouched. ``None`` (the default)
+        differentiates the residual as it stands, which is byte-identical to not passing it.
+
+        The residual and its Jacobian tolerate completely different amounts of approximation, and
+        today they are held to one accuracy for no reason but that one function serves both. The
+        reconstruction's accuracy inside ``R`` decides **which discrete equations are being solved**,
+        so loosening it moves the root; inside ``J`` it decides only how fast the inexact-Newton
+        iteration reaches that root, which is the same latitude ``forward_rtol`` already takes. Each
+        sweep costs an operator apply in the residual and two in the tangent (a primal and a tangent
+        apply), and a march pays a tangent per Krylov iteration and a residual only once per step --
+        so the sweeps are a larger share of the differentiated path than of the evaluated one.
+
+        Choose the cap against the reconstruction's own contraction rate rather than by feel: the
+        Jacobian's relative error is roughly the gradient's, which falls by that rate per sweep
+        (:func:`~aquaflux.schemes.contraction_rate` measures it). Judge it on outer steps and Krylov
+        cycles over a whole march, never on the cost of one matrix-vector product -- an operator too
+        far from the true Jacobian costs more iterations than the cheaper product saves.
+
+        Distinct from ``probe_gradient_sweeps``, which narrows the copy a coloured probe
+        *materializes* to keep the recovered matrix collision-free. Both leave the residual alone;
+        they differ in which approximation of the Jacobian they cheapen -- the preconditioner's or
+        the Krylov operator's -- and either may be set without the other.
 
     Returns
     -------
@@ -1998,6 +2042,13 @@ def _coupled_step(
             if block_scaled_norm
             else coupled_scaled_norm(coupled, policy, reference_state)
         )
+    # The residual whose Jacobian--vector product is the Krylov operator. `None` leaves the step
+    # differentiating the residual it is driving to zero, exactly as before.
+    jacobian_residual = (
+        None
+        if jacobian_gradient_sweeps is None
+        else _probed_assembler(coupled, jacobian_gradient_sweeps).residual
+    )
     schedule = SwitchedEvolutionRelaxation(beta0=beta0, exponent=exponent, beta_floor=beta_floor)
     # The forward solve stops in the SAME measure object the march reports and accepts steps in, so a
     # solve cannot converge in a quantity the march does not read. That is the shared half of the
@@ -2035,6 +2086,7 @@ def _coupled_step(
             cycle_budget=cycle_budget,
             step_limit=step_limit,
             step_projection=step_projection,
+            jacobian_residual=jacobian_residual,
         )
     # The positivity guard is passed on BOTH branches, and the single-step one needs it as much: its
     # escalation ladder is no substitute, because the divergence guard fires on a non-finite residual,
@@ -2056,6 +2108,7 @@ def _coupled_step(
         adjoint_preconditioner_factory=policy.adjoint_factory(),
         step_limit=step_limit,
         step_projection=step_projection,
+        jacobian_residual=jacobian_residual,
     )
 
 
@@ -2084,6 +2137,7 @@ def _monolithic_factor_step(
     cycle_budget: int | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
+    jacobian_gradient_sweeps: int | None = None,
     grow: int = 0,
     descent_backoff: int = 0,
     descent_test: bool = False,
@@ -2122,6 +2176,7 @@ def _monolithic_factor_step(
         cycle_budget=cycle_budget,
         step_limit=step_limit,
         step_projection=step_projection,
+        jacobian_gradient_sweeps=jacobian_gradient_sweeps,
     )
 
 
@@ -2160,6 +2215,7 @@ def coupled_lu_continuation(
     grow: int = 0,
     descent_backoff: int = 0,
     descent_test: bool = False,
+    jacobian_gradient_sweeps: int | None = None,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **complete** coupled LU.
 
@@ -2240,6 +2296,23 @@ def coupled_lu_continuation(
         ``inner_steps > 1``); see :class:`~aquaflux.solve.DualTimeStep`. ``None`` (default) leaves the
         step byte-identical. Forward-only -- do not set it on a differentiated solve.
 
+    jacobian_gradient_sweeps : int, optional
+        Cap the gradient reconstruction's sweeps in the copy of the residual the **forward Jacobian**
+        is differentiated from, leaving the residual itself untouched -- so the root the march lands on
+        and the gradient the adjoint returns are both unchanged. ``None`` (the default) differentiates
+        the residual as it stands and is byte-identical to not passing it.
+
+        The reconstruction's accuracy inside ``R`` decides *which* discrete equations are being solved;
+        inside ``J`` it decides only how quickly the inexact-Newton iteration reaches their root, which
+        is the same latitude ``forward_rtol`` already takes on the linear solve. A march pays a
+        Jacobian--vector product per Krylov iteration and a residual only once per step, and each sweep
+        costs two operator applies in the tangent against one in the residual, so the sweeps weigh more
+        on the differentiated path than on the evaluated one. Judge a cap on outer steps and cumulative
+        Krylov cycles over a whole march, never on one matrix-vector product's cost.
+
+        Distinct from ``probe_gradient_sweeps``, which narrows the copy the preconditioner's coloured
+        probe materializes; both leave the residual alone, and either may be set without the other.
+
     Returns
     -------
     ForwardStep
@@ -2287,6 +2360,7 @@ def coupled_lu_continuation(
         cycle_budget=cycle_budget,
         step_limit=positive_k_limit(coupled, floor=positivity_floor),
         step_projection=(positive_k_projection(coupled) if positivity_projection else None),
+        jacobian_gradient_sweeps=jacobian_gradient_sweeps,
         grow=grow,
         descent_backoff=descent_backoff,
         descent_test=descent_test,
@@ -2339,6 +2413,7 @@ def coupled_amg_continuation(
     trailing_inverse: Callable | None = None,
     probe: CoupledJacobianProbe | None = None,
     preconditioner: MonolithicAmgPreconditioner | None = None,
+    jacobian_gradient_sweeps: int | None = None,
 ) -> ForwardStep:
     """Build a pseudo-transient continuation step preconditioned by a monolithic **algebraic-multigrid** V-cycle.
 
@@ -2521,6 +2596,23 @@ def coupled_amg_continuation(
         the root either way, so a stale V-cycle can only ever cost Krylov cycles — never the converged
         state or its adjoint.
 
+    jacobian_gradient_sweeps : int, optional
+        Cap the gradient reconstruction's sweeps in the copy of the residual the **forward Jacobian**
+        is differentiated from, leaving the residual itself untouched -- so the root the march lands on
+        and the gradient the adjoint returns are both unchanged. ``None`` (the default) differentiates
+        the residual as it stands and is byte-identical to not passing it.
+
+        The reconstruction's accuracy inside ``R`` decides *which* discrete equations are being solved;
+        inside ``J`` it decides only how quickly the inexact-Newton iteration reaches their root, which
+        is the same latitude ``forward_rtol`` already takes on the linear solve. A march pays a
+        Jacobian--vector product per Krylov iteration and a residual only once per step, and each sweep
+        costs two operator applies in the tangent against one in the residual, so the sweeps weigh more
+        on the differentiated path than on the evaluated one. Judge a cap on outer steps and cumulative
+        Krylov cycles over a whole march, never on one matrix-vector product's cost.
+
+        Distinct from ``probe_gradient_sweeps``, which narrows the copy the preconditioner's coloured
+        probe materializes; both leave the residual alone, and either may be set without the other.
+
     Returns
     -------
     ForwardStep
@@ -2673,6 +2765,7 @@ def coupled_amg_continuation(
         # set the step length for the other 23039 at all. Applied before the cap, which then finds
         # nothing binding. `None` (default) leaves the cap the only constraint, byte-identically.
         step_projection=(positive_k_projection(coupled) if positivity_projection else None),
+        jacobian_gradient_sweeps=jacobian_gradient_sweeps,
         grow=grow,
         descent_backoff=descent_backoff,
         descent_test=descent_test,
@@ -4165,6 +4258,7 @@ def mass_flow_coupled_continuation(
     cycle_budget: int | None = None,
     positivity_floor: float = 0.0,
     positivity_projection: bool = False,
+    jacobian_gradient_sweeps: int | None = None,
     **preconditioner_kwargs: object,
 ) -> ForwardStep:
     """The pseudo-transient continuation step for the **mass-flow-constrained** coupled Newton solve.
@@ -4233,6 +4327,7 @@ def mass_flow_coupled_continuation(
         cycle_budget=cycle_budget,
         step_limit=positive_k_limit(coupled, floor=positivity_floor),
         step_projection=(positive_k_projection(coupled) if positivity_projection else None),
+        jacobian_gradient_sweeps=jacobian_gradient_sweeps,
     )
 
 

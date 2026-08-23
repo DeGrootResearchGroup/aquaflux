@@ -43,6 +43,50 @@ configuration this case is a documented reachability crawl — on the order of e
 to develop the recirculation, against a two-hundred step cap — so it could not converge however long
 it was left, and any timing taken from it measured the globalization rather than the thing under study.
 
+## ⚠️ pitzDaily's SHIPPED PRECONDITIONER STOPPED MARCHING IT — the default moved to `simplesmooth` (2026-08-22)
+
+Under `PITZ_FLOW_INVERSE=petsc` (the case's default until this date) `pitzdaily_openfoam/compare.py`
+collapses at the **first step of the second Reynolds rung**: `alpha` 0, `beta` escalating 0.5 → 2 → 16
+through the whole ladder, the residual rising 1.674e-01 → 5.754e-01 → `inf`. Reproduced three times,
+including on a tree carrying **no local change at all**, with the step tables bit-identical.
+
+**The default is now `simplesmooth`** — the same leading inverse the 3D sibling defaults to, and for
+the same reason: an incomplete factorization's behaviour on this saddle depends on the elimination
+**order** and the **fill**, neither of which is predictable in advance, while a SIMPLE-smoothed
+hierarchy never eliminates the matrix at all. This case's own record already carries the extreme
+version of that sensitivity — a zero-fill factorization going from *amplifying* a residual 5.5× per
+sweep to contracting it, on nothing but a reordering. `petsc` and `hostilu` both remain reachable and
+both remain measured; what is no longer defensible is either as the default.
+
+**What was ruled out before reaching for a preconditioner swap**, because "the case broke" invites
+blaming whatever merged most recently:
+
+- **Not the four merges of that day.** `|R|` at a fixed saved state is identical to **twelve digits**
+  across `1c3c874 → 2829965 → eeb5c60 → f05eafb → 2c6ffae`, the last digit moving only at the
+  `lax.scan` change that is recorded as not bit-identical. The discretization did not move.
+- **Not the scan specifically.** Reverting it to the Python loop reproduces the collapse unchanged
+  (1.679e-01 against 1.674e-01).
+- **`simplesmooth` marches the same case to the same answer** — `x_r/h` 8.0686, `ux` 0.0191, 404
+  cycles, 711 s — against the last good `petsc` run's 8.0686, 0.0191, 743 s. That agreement is what
+  makes this a swap of preconditioner rather than of result.
+
+⚠️ **WHEN it started is NOT going to be chased, and that is a decision rather than a gap.** The last
+good `petsc` run is 2026-08-17 and the failure is present at every commit from 2026-08-21 onward, so it
+entered somewhere in the ~30 commits between — a bisect of march-hours. **Incomplete-LU preconditioning
+is no longer a direction this project is taking** (2026-08-22, project owner), precisely because its
+behaviour depends on the elimination order and the fill in ways that are hard to predict, so the bisect
+would buy a diagnosis of an arm nothing selects. What the reader needs instead is the consequence:
+**any `petsc`-bundle number recorded for this case is unreproducible on the current tree** — do not
+re-measure against one, and do not read the collapse as evidence about anything other than that
+preconditioner family.
+
+⚠️ **The trailing `[k, omega]` inverse was NOT aligned with the sibling in the same change.** This case
+runs `{max_coarse: 2000, equilibrate: False}` where the 3D one runs `{max_levels: 20, max_coarse: 200,
+strength_threshold: 0.25, aggressive_levels: 0, frozen_coarsening: True}`. That is a genuine open
+question rather than an oversight — the two meshes coarsen at very different rates and this case has
+never been measured at the sibling's settings — but it is the next thing to try if the alignment is
+carried further.
+
 ## The obligation (binding)
 
 **A change to the library's public surface is not complete until it has been checked against the cases

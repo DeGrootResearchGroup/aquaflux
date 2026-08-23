@@ -532,6 +532,19 @@ def test_narrow_gradient_sweeps_only_ever_narrows() -> None:
     assert narrow_gradient_sweeps(scheme, 8) is scheme
 
 
+def test_narrow_gradient_sweeps_carries_the_relaxation() -> None:
+    """A narrowed copy differs from its original in the sweep count and in nothing else.
+
+    Rebuilding it at the class default silently un-damps an under-relaxed solve -- and on a mesh
+    skewed enough to need that damping the undamped Richardson iteration does not converge at all, so
+    the copy would diverge where the original was fine, with nothing to say a setting had been lost.
+    """
+    scheme = CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=8, warn_tol=None, relaxation=0.8))
+    narrowed = narrow_gradient_sweeps(scheme, 2).solver
+    assert narrowed.sweeps == 2
+    assert narrowed.relaxation == 0.8
+
+
 def test_narrow_gradient_sweeps_leaves_other_solves_untouched() -> None:
     """Only the swept solve has a sweep count; a Krylov or one-shot reconstruction is returned as is."""
     gmres = CorrectedGreenGauss(solver=GmresGradientSolve())
