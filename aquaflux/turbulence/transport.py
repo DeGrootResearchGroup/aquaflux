@@ -37,6 +37,7 @@ from aquaflux.discretization import (
 from aquaflux.flow import volume_flux
 from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import FieldProperty, PropertyModel
+from aquaflux.schemes import ImposedGradient
 from aquaflux.solve import LocalCourantBasis, ShiftBasis
 from aquaflux.vectors import norm_squared
 
@@ -457,12 +458,19 @@ class SSTTurbulence(eqx.Module):
         )
         return jnp.zeros(self.mesh.n_faces).at[self.wall_faces].set(values)
 
-    def _field_gradient(self, field: jnp.ndarray, boundary: BoundaryConditions) -> jnp.ndarray:
+    def _field_gradient(
+        self,
+        field: jnp.ndarray,
+        boundary: BoundaryConditions,
+        *,
+        imposed: ImposedGradient | None = None,
+    ) -> jnp.ndarray:
         """Reconstruct the cell gradient of a turbulence field with its boundary closures.
 
         Reuses the residual assembler's leading-order gradient reconstruction (the injected gradient
         scheme evaluated with the field's boundary values), so the boundary handling is not
-        re-implemented here.
+        re-implemented here. ``imposed`` names cells whose gradient is a model quantity and is passed
+        through to the scheme rather than applied to what it returns.
         """
         assembler = ResidualAssembler.build(
             self.mesh,
@@ -472,12 +480,10 @@ class SSTTurbulence(eqx.Module):
             boundary,
             gradient_scheme=self.gradient_scheme,
         )
-        return assembler.gradient(field)
+        return assembler.gradient(field, imposed=imposed)
 
-    def _imposed_wall_omega_gradient(
-        self, reconstructed: jnp.ndarray, k: jnp.ndarray, grad_k: jnp.ndarray
-    ) -> jnp.ndarray:
-        """Replace the wall-adjacent cells' ``omega`` gradient with the analytical one.
+    def _wall_omega_gradient(self, k: jnp.ndarray, grad_k: jnp.ndarray) -> ImposedGradient:
+        """The wall-adjacent cells' ``omega`` gradient, analytical rather than reconstructed.
 
         Those cells do not solve a transport balance -- their ``omega`` is *imposed*
         (:func:`~aquaflux.turbulence.omega_wall`) -- so their gradient is a model quantity too, and
@@ -487,23 +493,46 @@ class SSTTurbulence(eqx.Module):
         even though the true profile diverges there. Measured on a backward-facing step, the
         reconstructed magnitude is ~0.26x the analytical one in these cells.
 
-        The imposed gradient is exact and cheap (:func:`~aquaflux.turbulence.omega_wall_gradient`);
-        only the wall-adjacent rows are replaced, every other cell keeps its reconstruction.
-        Overwriting is safe because ``omega`` needs no wall-normal flux at these cells -- the row is a
-        value fixation and the wall closure is zero-gradient -- so the only consumers are inward: the
-        cross-diffusion and ``F1`` blend that read ``grad(k).grad(omega)``, and the diffusion's
-        non-orthogonal correction on faces to interior neighbours.
+        The analytical gradient is exact and cheap
+        (:func:`~aquaflux.turbulence.omega_wall_gradient`); only the wall-adjacent rows are given,
+        every other cell keeps its reconstruction. Replacing them is safe because ``omega`` needs no
+        wall-normal flux at these cells -- the row is a value fixation and the wall closure is
+        zero-gradient -- so the only consumers are inward: the cross-diffusion and ``F1`` blend that
+        read ``grad(k).grad(omega)``, and the diffusion's non-orthogonal correction on faces to
+        interior neighbours.
+
+        Returned as an :class:`~aquaflux.schemes.ImposedGradient` and handed **to** the
+        reconstruction rather than applied to its result, because a scheme that differentiates its
+        own first estimate -- which is how
+        :class:`~aquaflux.schemes.MultipleCorrectionGradient` forms a Hessian -- would otherwise
+        build on the estimate this replaces and receive the correction only afterwards. It also
+        settles the wall faces' *gradient*, which a closure would otherwise have to invent from a
+        boundary ``omega`` that is not data.
+
+        Parameters
+        ----------
+        k : jnp.ndarray
+            The turbulent kinetic energy per cell, shape ``(n_cells,)``.
+        grad_k : jnp.ndarray
+            Its reconstructed cell gradient, shape ``(n_cells, dim)``.
+
+        Returns
+        -------
+        ImposedGradient
+            The wall-adjacent cells and the ``omega`` gradient to impose there.
         """
         wall = self.wall_cells
-        imposed = omega_wall_gradient(
-            self.molecular_viscosity[wall],
-            self.wall_distance[wall],
-            k[wall],
-            self.wall_distance_gradient[wall],
-            grad_k[wall],
-            self.model,
+        return ImposedGradient(
+            wall,
+            omega_wall_gradient(
+                self.molecular_viscosity[wall],
+                self.wall_distance[wall],
+                k[wall],
+                self.wall_distance_gradient[wall],
+                grad_k[wall],
+                self.model,
+            ),
         )
-        return reconstructed.at[wall].set(imposed)
 
     def wall_shear_rate(self, velocity: VelocityFields) -> jnp.ndarray:
         """Wall-face normal velocity gradient at the wall-adjacent cells, shape ``(n_wall,)``.
@@ -565,8 +594,8 @@ class SSTTurbulence(eqx.Module):
         """
         strain = self.strain_rate(velocity.gradient, k)
         grad_k = self._field_gradient(k, self.k_boundary)
-        grad_omega = self._imposed_wall_omega_gradient(
-            self._field_gradient(omega, self.omega_boundary), k, grad_k
+        grad_omega = self._field_gradient(
+            omega, self.omega_boundary, imposed=self._wall_omega_gradient(k, grad_k)
         )
         f1 = self.model.f1(
             k, omega, self.molecular_viscosity, self.wall_distance, grad_k, grad_omega
