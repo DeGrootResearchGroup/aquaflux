@@ -401,9 +401,21 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       **automatic differentiation of `omega_wall` itself**, so it cannot drift from whatever blend that
       function implements. `∇d` is reconstructed **once at build** (`wall_distance_gradient`, pure
       geometry) with the exact boundary closure `d = 0` on the wall patches; the distance field is
-      smooth and O(geometry), so unlike ω it reconstructs well. `closure_fields` overwrites only the
-      wall-adjacent rows. Safe because ω needs **no wall-normal flux** there (the row is a value
-      fixation, the wall closure is zero-gradient), so the only consumers are inward.
+      smooth and O(geometry), so unlike ω it reconstructs well. Only the wall-adjacent rows are
+      replaced. Safe because ω needs **no wall-normal flux** there (the row is a value fixation, the
+      wall closure is zero-gradient), so the only consumers are inward.
+    - **⚠️ IT IS PASSED *INTO* THE RECONSTRUCTION, NOT APPLIED TO WHAT IT RETURNS (changed
+      2026-08-24).** `closure_fields` used to overwrite the array `gradients()` handed back
+      (`_imposed_wall_omega_gradient`, **gone**); `_wall_omega_gradient` now returns a
+      `schemes.ImposedGradient` that rides through `_field_gradient` →
+      `ResidualAssembler.gradient(imposed=…)` → the scheme. The difference only shows for a scheme
+      that **consumes its own reconstructed gradient** — `MultipleCorrectionGradient` differentiates
+      its first estimate to build the Hessian that corrects what it returns, so a patch applied
+      afterwards left that Hessian built on the 0.256× estimate. It also settles the **wall faces'**
+      gradient, which a boundary closure would otherwise invent from an ω boundary value that is not
+      data. The shipped `CorrectedGreenGauss` reconstructs nothing from its own output, so its
+      result is unchanged — this is the same latent-trap removal as the entry above, one layer down.
+      See `.claude/rules/schemes.md`'s multiple-correction entry for the seam.
     - **MEASURED INERT ON pitzDaily — the fix is right, its effect here is nil (2026-07-25).** After the
       fix the imposed gradient at the fixed cells is **5.85×** the reconstruction (and off-wall cells are
       untouched, max diff exactly `0`), yet the coupled residual at the clean OpenFOAM field is

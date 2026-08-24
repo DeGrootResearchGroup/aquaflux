@@ -14,7 +14,7 @@ from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import VelocityFields
 from aquaflux.mesh import structured_grid_2d
-from aquaflux.schemes import CorrectedGreenGauss, GradientScheme
+from aquaflux.schemes import CorrectedGreenGauss, GradientScheme, ImposedGradient
 from aquaflux.solve import ImplicitNewtonSolver
 from aquaflux.turbulence import (
     SSTClosureFields,
@@ -73,6 +73,11 @@ def _closure(turb):
         omega=jnp.full(n, 1.0),
         k=jnp.full(n, 1.0),
         wall_shear_rate=jnp.full(turb.wall_cells.shape, 1.0),
+        # A prescribed closure needs a prescribed imposition too; zero keeps this fixture's omega
+        # gradient the flat field the rest of it is, without leaving the wall cells reconstructed.
+        imposed_omega_gradient=ImposedGradient(
+            turb.wall_cells, jnp.zeros((turb.wall_cells.shape[0], turb.mesh.dim))
+        ),
     )
 
 

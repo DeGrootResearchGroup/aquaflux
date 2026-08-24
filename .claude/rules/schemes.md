@@ -1726,30 +1726,130 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   α = 0.001 immediately, β escalated to its 16.0 cap, residual frozen at 1.074e-01 for every
   subsequent step. Not a degradation — no descent direction at all.
 
-  The cause is that **at a wall, `omega`'s boundary face value is a ZERO-GRADIENT closure (face value
-  = cell value), not data.** Differencing against it makes `rise = −corr`, so the closure *imposes* a
-  spurious near-zero normal derivative exactly where the true `omega` profile diverges like `1/d²`.
-  `OwnerGradient` never reads the boundary value and marches. ⚠️ An earlier reading of this — that
-  the wall value is huge and gets amplified by `1/(d·n)` — is **wrong**; the value is the cell's own.
+  **⚠️⚠️ THE CAUSE IS NOW MEASURED, AND IT IS NEITHER OF THE TWO ACCOUNTS PREVIOUSLY RECORDED HERE:
+  `SkewCorrectedGradient` CORRECTS TWICE ON EVERY GRADIENT-TYPE PATCH (2026-08-24).** A
+  reconstruction is fed **leading-order** boundary values — the closures evaluated at *zero*
+  gradient, deliberately, so the residual stays a single-pass function of the field
+  (`residual.py::_gradient`). A Dirichlet value does not depend on the gradient and is unaffected. A
+  gradient-type one is: `ZeroGradient.face_value` is `phi_owner + tangential_correction(...)`, whose
+  correction is evaluated away — so the boundary value handed in is **exactly** `phi_owner`. The
+  closure then forms `rise = bval − phi_owner − non_orthogonal_correction(...)` = `−corr`, and
+  divides it by `d·n`, the smallest length in the mesh at a wall. **The entire normal derivative it
+  reports on such a patch is an artifact of subtracting a correction the boundary value never
+  added.**
 
-  **CONSEQUENCE (unresolved, and it is a design gap rather than a bug):** the right face gradient
-  depends on what the boundary value *means for that field* — a velocity wall value is a genuine
-  Dirichlet, a wall `omega` is a modelling device whose correct face gradient is neither the owner's
-  (which keeps a normal component the closure denies) nor a difference against the value. A
-  `GradientScheme` receives only `boundary_values`, an array with no boundary-condition type
-  attached, so there is currently **no seam to tell them apart**, and one scheme instance
-  reconstructs every field.
+  Measured on pitzDaily (`validation/multiple_correction/boundary_closure_probe.py`,
+  MultipleCorrection + skew, analytical near-wall omega, leading-order boundary values):
 
-  Two further things this exposed, both pre-existing and neither introduced by this scheme:
-  - `turbulence/transport.py`'s `_imposed_wall_omega_gradient` replaces the wall cells' `omega`
-    gradient with the analytical `omega_wall_gradient`, but it patches the gradient **returned** by
-    `gradients()`. The multiple-correction scheme builds its Hessian from its *internal* `g1` and
-    returns `g2 = g1 − H2·h`, so the correction arrives **after** the quantity it should have
-    informed. Any scheme whose output depends on an internally reconstructed derivative has this
-    problem.
-  - That function's own docstring records the error nothing corrects: the reconstruction is ~0.26x
-    the analytical magnitude in the fixed cells, and **the first interior ring is roughly twice too
-    large** — and that ring is overridden by nothing, in any scheme.
+  | patch | kind | max \|bval − phi_P\| | med \|d·n\| | med \|rise/d·n\| | max |
+  |---|---|---|---|---|---|
+  | inlet | Dirichlet | **3.225e+04** | 7.9e-04 | 3.3e+05 | 4.1e+07 |
+  | outlet | ZeroGradient | **0.000e+00** | 2.6e-03 | 1.7e+03 | **3.0e+07** |
+  | upperWall | ZeroGradient | **0.000e+00** | 1.8e-04 | 1.1e+02 | **1.4e+05** |
+  | lowerWall | ZeroGradient | **0.000e+00** | 5.1e-04 | 8.0e-01 | 1.5e+04 |
+
+  **Exactly zero on every gradient-type patch, and only there** — the Dirichlet inlet carries a real
+  difference, which is what the correction exists for. `OwnerGradient` never reads a boundary value
+  and marches.
+
+  ⚠️ **Two earlier accounts are SUPERSEDED and should not be repeated.** "The wall value is huge and
+  gets amplified by `1/(d·n)`" is wrong — the value is the cell's own. "The wall `omega` value is a
+  modelling device rather than data, so the closure imposes a spurious near-zero normal derivative"
+  is the right *neighbourhood* but the wrong mechanism, and it mis-predicts: it says the problem is
+  `omega`-specific and would yield to imposing that field's gradient. It does not (below), because
+  the defect is in the closure's arithmetic and applies to every field on every gradient-type patch
+  — the outlet included, where `d·n` is not even small and the artifact still reaches `3e7`.
+
+  **⚠️⚠️ MEASURED: THE `ImposedGradient` SEAM DOES NOT RESCUE THIS CLOSURE — two cold marches,
+  2026-08-24.** With the analytical wall-`omega` gradient imposed on the wall cells *and* their
+  boundary faces, and (second run) also threaded into the omega equation's own assembler so the
+  residual and the closure fields impose the same derivative, the march reproduces the stall
+  **exactly**: first step of the target rung, α = 0.001, β at its 2.0 start, `|R|` 1.079e-01 and
+  1.082e-01 against the pre-fix 1.074e-01. Both runs cleared Re/100 and Re/10 at α = 1.000
+  throughout. That is the direct evidence for the paragraph above: fixing `omega` cannot fix a defect
+  that is not about `omega`.
+
+  Two sub-mechanisms were tested and **refuted** on the way, both worth not re-proposing:
+  - **Not the correction matrices.** On this mesh `cond(M2⁻¹)` is median 2 / max **2.14** under skew
+    against median 2 / max **3.49** under owner, and `|gradient_defect|` is identical to three
+    figures. Skew is the *better*-conditioned of the two here.
+  - **Not "the Hessian correction is negligible so the closure cannot matter".** It is not
+    negligible: `|defect·hessian|` reaches **41 %** of `|first|`, and skew's Hessian tail is **2.8×**
+    owner's (1.94e12 against 6.96e11). The closure does reach the returned gradient — through the
+    Hessian, which is the only route, since the first pass reads no face gradient.
+
+  **The fix is NOT in this seam and is not built.** A closure cannot tell a prescribed boundary value
+  from a leading-order gradient-type one — it receives an array. Either the reconstruction must be
+  able to re-evaluate the boundary values at its own first-pass gradient (which gives up the
+  single-pass property `_gradient` keeps on purpose), or a closure must be told the patch kinds. Both
+  are real design work. Until then **`SkewCorrectedGradient` is sound only where every patch
+  prescribes a value**, and ⚠️ **it is nonetheless `MultipleCorrectionGradient`'s class default** —
+  which should probably move to `OwnerGradient`, a shipped-default change deliberately not made here.
+
+  **✅ RESOLVED (2026-08-24) BY PASSING THE GRADIENT IN, NOT BY A BETTER CLOSURE — `ImposedGradient`
+  (`schemes/gradient.py`).** The diagnosis above is exactly right and the fix follows from it: a
+  closure exists to supply a derivative nobody knows, and at a wall `omega` somebody does. It cannot
+  be baked into a closure, because `omega_wall_gradient` reads `k` and `grad k` and so changes every
+  residual evaluation.
+
+  `ImposedGradient(cells, gradient)` is handed **to** `gradients()`. `GradientScheme.gradients` is
+  now a template method that applies it to whatever `_reconstruct_gradient` returns — so every
+  scheme honours it — and passes it down, so a scheme with somewhere earlier to put it can use it
+  there. The multiple-correction scheme imposes at three points: on the first-order-exact gradient
+  **before** the second pass differentiates it, on the boundary faces those cells own (in place of
+  the closure), and on the returned gradient, since the second-order defect is a defect of the
+  *reconstruction* and subtracting it from an imposed value would corrupt what was imposed.
+  `turbulence/transport.py::_wall_omega_gradient` builds it; `closure_fields` passes it through
+  `_field_gradient` → `ResidualAssembler.gradient(imposed=…)`.
+
+  **This fixes both of the pre-existing problems the stall exposed** (neither introduced by this
+  scheme, both affecting the shipped schemes equally):
+  - `_imposed_wall_omega_gradient` (**gone — it is now `_wall_omega_gradient`, which RETURNS an
+    `ImposedGradient` instead of applying one**) patched the gradient **returned** by `gradients()`, while
+    the multiple-correction scheme builds its Hessian from its *internal* `g1` and returns
+    `g2 = g1 − H2·h` — so the correction arrived **after** the quantity it should have informed. It
+    now arrives before. Any scheme whose output depends on an internally reconstructed derivative had
+    this problem.
+  - `omega_wall_gradient`'s docstring records the magnitude nothing corrected: the reconstruction is
+    ~0.26x the analytical one in the fixed cells. The imposed value is now what the Hessian pass and
+    the wall faces see, rather than that quarter-sized estimate.
+
+  ⚠️ **What it does NOT fix, and this is a real remaining gap:** the same docstring records that
+  **the first interior ring reconstructs roughly twice too large**, and that ring is still overridden
+  by nothing. Imposing a *gradient* cannot reach it — the ring's own first pass is a Green–Gauss sum
+  over `omega` **values**, and the wall cells' values are unchanged. Fixing that would mean changing
+  what `omega`'s wall boundary *value* means, which is a turbulence-model decision and not a gradient
+  seam.
+
+  ⚠️ **It reaches `ResidualAssembler.gradient` and NOT `ResidualAssembler.residual`** — the gradient
+  a residual reconstructs for its own non-orthogonal correction is still unimposed, exactly as
+  before. Deliberate, and pre-existing: the ω rows at those cells are the *fixation*, and the one
+  path that reads their gradient is the diffusion `corr` on faces to interior neighbours, measured at
+  **0.03 %** on pitzDaily (`.claude/rules/turbulence.md`). Threading it there is a bigger change (the
+  imposition would have to be a property of the assembler, not an argument to one accessor) for a
+  measured-negligible return.
+
+  ⚠️ **Imposing a gradient puts the reconstruction off its own exactness contract at those cells and
+  the cells that read them**, deliberately: the correction matrices are probed against the operator
+  the scheme would otherwise apply (`_build_corrections` runs the closure, and knows nothing of a
+  state-dependent imposition), and an imposed value is by construction not what that operator
+  returns. The trade is the one the post-hoc wall-omega patch already took — a consistent operator
+  around a value four times too small is worse than an inconsistent one around the right value.
+
+  **`HessianCorrectedGradient` takes the same argument and applies it ONLY to its converged answer —
+  a deliberate decision, not an omission.** Projecting the imposition onto the coupled sweep's
+  gradient iterate would change the **fixed point** rather than the path to it, and that fixed point
+  being the Schur solution of the gradient–Hessian system is the scheme's whole justification (see
+  the `CoupledBlockSweep` entry). An imposed gradient would have to enter as a *constraint on that
+  system*, which is real work and not something this seam licenses.
+
+  **With nothing imposed every scheme is byte-identical**, pinned by
+  `test_imposing_nothing_is_byte_identical_to_never_having_been_asked`. **With something imposed the
+  reconstruction is AFFINE in the field, not linear** — the imposed values are an added constant, so
+  `f(0) ≠ 0`. Its tangent is still the same unrolled apply and not an implicit-function solve, which
+  is the half a differentiated solve depends on;
+  `test_an_imposed_reconstruction_is_affine_with_the_same_linear_part` pins both halves, against the
+  unimposed linearity test that pins the default path.
 
   **⚠️ MEASURE IT AGAINST A CALIBRATED NESTED SOLVE, NOT THE SHIPPED DEFAULT.** Against `20/10` it
   looks like 2.0× forward and 3.1× on the tangent — but `20/10` is heavily over-provisioned on the

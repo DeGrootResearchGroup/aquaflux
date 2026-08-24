@@ -649,6 +649,74 @@ derivative to the same place. {class}`~aquaflux.schemes.OwnerGradient` is cheape
 hexahedra, but leaves the Hessian underdetermined on boundary tetrahedra, whose four faces do not
 supply the six independent directions its Hessian components need.
 
+### A one-sided closure needs a prescribed boundary value
+
+```{warning}
+{class}`~aquaflux.schemes.SkewCorrectedGradient` is sound only where every patch prescribes a
+**value**. On a gradient-type patch it corrects twice, and the whole normal derivative it reports is
+an artifact.
+```
+
+A reconstruction is fed boundary values evaluated at **zero** gradient, so that the residual stays a
+single-pass function of the field. A prescribed value does not depend on the gradient and is
+unaffected. A gradient-type condition is: `ZeroGradient` returns `phi_owner + tangential correction`,
+whose correction is evaluated away, leaving the boundary value exactly `phi_owner`. The closure then
+subtracts the non-orthogonal correction that the boundary value never added, and divides the residue
+by `d.n` -- the smallest distance in the mesh at a wall.
+
+Measured on the pitzDaily benchmark, `boundary_value - phi_owner` is identically zero on every such
+patch, and the spurious derivative reaches `3e7` at the outlet and `1e5` at a wall. On a coupled RANS
+march that costs the solve its descent direction outright rather than degrading it. Prefer
+{class}`~aquaflux.schemes.OwnerGradient`, which never reads a boundary value, unless the boundary
+conditions are all Dirichlet -- the trade against its weaker conditioning on boundary tetrahedra.
+
+### When the gradient is known rather than closed
+
+Separately from that: some cells' gradient is not something to estimate at all. The near-wall `omega`
+of a k--omega closure is the standing case -- those cells do not solve a transport balance, their
+value being fixed by a profile going like `1/d^2`, so the honest gradient there is that profile's
+analytical derivative. Reconstructing it instead returns about a quarter of the right magnitude.
+
+Where the gradient is *known*, say so:
+
+```python
+from aquaflux.schemes import ImposedGradient
+
+imposed = ImposedGradient(wall_cells, analytical_gradient)
+gradient = scheme.gradients(field, mesh, geometry, boundary_values, imposed=imposed)
+```
+
+An imposed gradient is used in place of both the reconstruction at those cells and the closure on
+the boundary faces they own. Every scheme honours it; a scheme that consumes its own reconstructed
+gradient -- which is how the multiple-correction scheme forms its Hessian -- imposes it *before*
+that consumer reads it, which is why this is an argument to the reconstruction rather than a
+correction applied to its result. Give it to a
+{class}`~aquaflux.discretization.ResidualAssembler` at build time and every reconstruction that
+assembler makes honours it, so an equation's residual and its closure fields cannot disagree about
+the same derivative.
+
+This is not a remedy for the closure warning above: it settles the one field whose gradient is
+genuinely known, and does nothing for the patches and fields where nobody knows it.
+
+```{note}
+Imposing a gradient substitutes a model for a reconstruction, so a scheme's exactness contract stops
+at the imposed cells and the cells that read them: the correction matrices are calibrated against
+the operator the scheme would otherwise apply, and an imposed value is by construction not what that
+operator returns. That is the trade taken deliberately -- a consistent operator around a value
+measured four times too small is worse than an inconsistent one around the right value.
+
+It also makes the reconstruction **affine** in the field rather than linear, the imposed values
+being an added constant. The tangent is still the same fixed sequence of fixed linear maps applied
+to the tangent, with no implicit-function solve, which is the property a differentiated solve
+depends on.
+```
+
+{class}`~aquaflux.schemes.HessianCorrectedGradient` takes the same argument but applies it only to
+its converged answer. Projecting it onto the coupled sweep's iterate would change the fixed point
+rather than the path to it, and that fixed point being the Schur solution of the gradient--Hessian
+system is the scheme's whole justification; imposing a gradient there would have to enter as a
+constraint on that system.
+
 
 ## Choosing a scheme
 

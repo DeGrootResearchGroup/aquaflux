@@ -137,6 +137,11 @@ class SSTClosureFields(NamedTuple):
         Wall-face normal velocity gradient magnitude at the wall-adjacent cells, shape ``(n_wall,)``
         (see :meth:`SSTTurbulence.wall_shear_rate`) -- what the adaptive near-wall k production
         measures the wall stress from.
+    imposed_omega_gradient : ImposedGradient
+        The wall-adjacent cells' analytical ``omega`` gradient (see
+        :meth:`SSTTurbulence._wall_omega_gradient`), carried so that every reconstruction of
+        ``omega`` in this sweep -- ``grad_omega`` above, and the omega equation's own -- imposes the
+        same one. It is a closure field like the rest: computed once from the frozen ``k``.
     """
 
     nu_t: jnp.ndarray
@@ -147,6 +152,7 @@ class SSTClosureFields(NamedTuple):
     omega: jnp.ndarray
     k: jnp.ndarray
     wall_shear_rate: jnp.ndarray
+    imposed_omega_gradient: ImposedGradient
 
 
 class WallFixedResidual(eqx.Module):
@@ -479,8 +485,9 @@ class SSTTurbulence(eqx.Module):
             (),
             boundary,
             gradient_scheme=self.gradient_scheme,
+            imposed_gradient=imposed,
         )
-        return assembler.gradient(field, imposed=imposed)
+        return assembler.gradient(field)
 
     def _wall_omega_gradient(self, k: jnp.ndarray, grad_k: jnp.ndarray) -> ImposedGradient:
         """The wall-adjacent cells' ``omega`` gradient, analytical rather than reconstructed.
@@ -594,9 +601,8 @@ class SSTTurbulence(eqx.Module):
         """
         strain = self.strain_rate(velocity.gradient, k)
         grad_k = self._field_gradient(k, self.k_boundary)
-        grad_omega = self._field_gradient(
-            omega, self.omega_boundary, imposed=self._wall_omega_gradient(k, grad_k)
-        )
+        imposed_omega = self._wall_omega_gradient(k, grad_k)
+        grad_omega = self._field_gradient(omega, self.omega_boundary, imposed=imposed_omega)
         f1 = self.model.f1(
             k, omega, self.molecular_viscosity, self.wall_distance, grad_k, grad_omega
         )
@@ -604,7 +610,15 @@ class SSTTurbulence(eqx.Module):
             k, omega, strain, self.molecular_viscosity, self.wall_distance
         )
         return SSTClosureFields(
-            nu_t, strain, f1, grad_k, grad_omega, omega, k, self.wall_shear_rate(velocity)
+            nu_t,
+            strain,
+            f1,
+            grad_k,
+            grad_omega,
+            omega,
+            k,
+            self.wall_shear_rate(velocity),
+            imposed_omega,
         )
 
     def k_residual(
@@ -733,6 +747,11 @@ class SSTTurbulence(eqx.Module):
                 ),
             ),
             gradient_scheme=self.gradient_scheme,
+            # The same imposition the closure fields were built with. This equation reconstructs
+            # `omega`'s gradient again for the diffusion's non-orthogonal correction, and a
+            # reconstruction that is a model quantity in the wall cells is one wherever it is made --
+            # otherwise the residual and the closure disagree about the same derivative.
+            imposed_gradient=closure.imposed_omega_gradient,
         )
         wall_fix = FixedValueCells(
             self.wall_cells,

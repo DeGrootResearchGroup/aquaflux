@@ -50,15 +50,20 @@ costs the whole reconstruction its accuracy; the non-orthogonal correction that 
 :func:`~aquaflux.schemes.non_orthogonal_correction`, shared with the diffusion flux that has always
 needed the same term for the same reason.
 
-⚠️ **A closure is also the wrong instrument where the boundary value is not data.** Every closure
-here reads the field on the boundary face, and a *zero-gradient* boundary condition does not supply
-one -- it returns the owner cell's own value. Differencing against that does not estimate the normal
-derivative, it *imposes* a near-zero one, which on the near-wall ``omega`` of a k--omega closure
-contradicts a modelled profile that diverges like ``1 / d**2``. Measured on a backward-facing step
-this leaves the march with no descent direction at all rather than a degraded one. The seam for such
-a field is :class:`~aquaflux.schemes.ImposedGradient`: the caller states the gradient it knows, and
-it is used in place of both the reconstruction and the closure. Where a gradient is genuinely
-unknown a closure is still the answer -- the two solve different problems.
+⚠️ **A closure that differences the boundary value needs that value to be a PRESCRIBED one.** A
+reconstruction is fed boundary values evaluated at *zero* gradient, so the residual stays a
+single-pass function of the field. A prescribed value is unaffected by that; a gradient-type
+condition is not, since its whole content is a correction term which is then evaluated away --
+leaving the boundary value equal to the owner cell's own. A one-sided closure that subtracts the
+non-orthogonal correction anyway has corrected twice, and dividing the residue by the wall-normal
+distance turns it into a large spurious derivative. See :class:`SkewCorrectedGradient`, which is why
+:class:`OwnerGradient` is the safe choice on any mesh whose patches are not all Dirichlet.
+
+Separately: some cells' gradient is not to be closed at all but *known*, the near-wall ``omega`` of a
+k--omega closure being the standing case. The seam for that is
+:class:`~aquaflux.schemes.ImposedGradient`, which supersedes both the reconstruction at those cells
+and the closure on the boundary faces they own. It is not a remedy for the paragraph above -- it
+settles one field, where that defect is in the closure's arithmetic and reaches every field.
 """
 
 from __future__ import annotations
@@ -106,11 +111,11 @@ class GradientBoundaryClosure(eqx.Module):
     being linear-inexact is not.
 
     ⚠️ **A closure receives the boundary field values as an array, with no boundary condition
-    attached, so it cannot tell data from a closure of its own.** A zero-gradient condition returns
-    the owner cell's value, and any closure that reads it is then differencing a number that carries
-    no information. Where that matters the answer is not a cleverer closure but
-    :class:`~aquaflux.schemes.ImposedGradient`, through which a caller states the gradient it
-    knows; a closure's job is the case where nobody knows it.
+    attached, so it cannot tell a prescribed value from a gradient-type one evaluated at leading
+    order.** The two need different treatment and look identical here: see
+    :class:`SkewCorrectedGradient`, where differencing the second kind corrects twice. Until a
+    closure can be told the patch kinds, an implementation that reads the boundary value is
+    restricted to problems whose patches all prescribe values.
     """
 
     @abc.abstractmethod
@@ -177,13 +182,24 @@ class SkewCorrectedGradient(GradientBoundaryClosure):
     owner closure it was meant to improve on. It is shared with the diffusion flux, which has always
     needed the same term to extrapolate the same derivative to the same place.
 
-    ⚠️ **It is only as good as the boundary value, and a zero-gradient condition supplies none.**
-    Such a condition returns the owner cell's own value, so the difference this closure takes is
-    ``-correction`` rather than a rise, and the normal derivative it produces is near zero by
-    construction. On a field whose modelled profile diverges at the wall -- the near-wall ``omega``
-    of a k--omega closure -- that is not an approximation but a contradiction, and it is measured to
-    cost a march its descent direction outright. Give such a field an
-    :class:`~aquaflux.schemes.ImposedGradient`, which overrides this closure on the faces it covers.
+    ⚠️⚠️ **IT IS ONLY SOUND WHERE THE BOUNDARY VALUE IS A PRESCRIBED VALUE. On a gradient-type
+    patch it corrects twice, and the whole normal derivative it reports is an artifact.** A
+    reconstruction is fed boundary values evaluated at **zero** gradient, so that the residual stays
+    a single-pass function of the field. A prescribed value does not depend on the gradient and is
+    therefore unaffected. A gradient-type condition is: ``ZeroGradient`` returns
+    ``phi_owner + tangential correction``, whose correction is evaluated away, leaving the boundary
+    value exactly ``phi_owner``. This closure then subtracts the non-orthogonal correction that the
+    boundary value never added, and divides the residue by ``d.n`` -- the smallest distance in the
+    mesh at a wall. Measured on pitzDaily, ``boundary_value - phi_owner`` is identically zero on
+    every such patch, and the spurious normal derivative reaches ``3e7`` at the outlet and ``1e5`` at
+    a wall (``validation/multiple_correction/boundary_closure_probe.py``). On a coupled RANS march
+    that costs the solve its descent direction outright rather than degrading it.
+
+    So: use it where every patch prescribes a value, and prefer :class:`OwnerGradient` otherwise --
+    which is the trade against its better conditioning on boundary tetrahedra, not a free choice. An
+    :class:`~aquaflux.schemes.ImposedGradient` overrides this closure on the faces it covers, which
+    settles the field whose gradient is genuinely known, but it is not a general remedy: it does
+    nothing for the patches and fields where nobody knows the gradient.
     """
 
     def face_gradient(self, gradient, field, boundary_values, face_cells, geometry):
