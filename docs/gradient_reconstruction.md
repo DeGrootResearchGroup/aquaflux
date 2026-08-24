@@ -680,9 +680,18 @@ the stall also appears on a mesh with boundary tetrahedra is untested. Prefer th
 your mesh forces this closure, watch convergence.
 ```
 
-**You do not have to work out which case you are in.** The scheme measures its own correction when it
-binds to a geometry and warns if the mesh and closure together leave the Hessian underdetermined,
-naming the alternative. A healthy correction is order unity; a singular one runs to `1e16`.
+**You do not have to work out which case you are in, and you do not have to choose one closure for
+the whole mesh.** When the scheme binds to a geometry it measures its own correction per cell, and
+wherever the closure you asked for leaves the Hessian singular it uses
+{class}`~aquaflux.schemes.SkewCorrectedGradient` on *those cells'* boundary faces only
+({class}`~aquaflux.schemes.CellwiseFallback`), leaving every other cell on the default. It says so
+once, naming how many cells were repaired.
+
+That is what keeps the accurate answer from costing anything elsewhere: on a mesh with nothing to
+repair -- quadrilateral, hexahedral, and the 12225-cell pitzDaily benchmark among them -- the repair
+fires on **zero** cells and the reconstruction is bit-identical to the plain default, so a case that
+does not need the second closure never pays for it. Pass `fallback=None` to switch the repair off and
+get a warning instead.
 
 #### Boundary values, and reading them at the right gradient
 
