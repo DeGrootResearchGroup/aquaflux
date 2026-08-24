@@ -73,9 +73,9 @@ from support.meshes import (  # noqa: E402
 class Operators:
     """The multiple-correction operators for one geometry, built once."""
 
-    def __init__(self, mesh, geometry, *, corrected=True, exact_boundary=True):
+    def __init__(self, mesh, geometry, *, corrected=True, boundary="exact", blend=0.5):
         self.mesh, self.geometry = mesh, geometry
-        self.exact_boundary = exact_boundary
+        self.boundary, self.blend = boundary, blend
         self.dim = mesh.dim
         self.n_cells = mesh.n_cells
         self.n_sym = symmetric_components(self.dim)
@@ -115,6 +115,47 @@ class Operators:
             self.m2_inv = np.broadcast_to(
                 np.eye(self.n_sym), (self.n_cells, self.n_sym, self.n_sym)
             ).copy()
+
+    def neighbour_average(self, cell_values):
+        """Mean of a cell field over each cell's face neighbours."""
+        total = np.zeros_like(cell_values)
+        count = np.zeros(self.n_cells)
+        live = self.interior
+        np.add.at(total, self.owner[live], cell_values[self.neighbour[live]])
+        np.add.at(total, self.neighbour[live], cell_values[self.owner[live]])
+        np.add.at(count, self.owner[live], 1.0)
+        np.add.at(count, self.neighbour[live], 1.0)
+        shape = (-1,) + (1,) * (cell_values.ndim - 1)
+        return total / np.maximum(count, 1.0).reshape(shape)
+
+    def boundary_gradient(self, gradient, exact):
+        """Boundary-face values for the GRADIENT, which no boundary condition supplies.
+
+        ``exact`` is analytic and is the reference arm only. ``owner`` takes the owner cell's own
+        value -- the zeroth-order closure a solver can always form. ``averaged`` blends that with the
+        owner's face-neighbour mean, which is the shape that rescued this scheme's own ``A_HH`` from
+        singularity on tetrahedra.
+        """
+        if self.boundary == "exact":
+            return exact
+        owner_value = gradient[self.owner]
+        if self.boundary == "owner":
+            return owner_value
+        if self.boundary == "dirichlet":
+            # A Dirichlet patch fixes phi over the whole boundary surface, so the face gradient's
+            # TANGENTIAL components are known there and only the normal one is not. The owner
+            # closure discards that, which is what leaves a boundary tetrahedron short of the
+            # independent directions its six Hessian components need. This arm supplies the
+            # tangential part exactly and the normal part from the owner, to ask whether the
+            # information a real boundary condition carries is enough.
+            normal = np.asarray(self.geometry.face.normal)
+            owner_normal = (owner_value * normal).sum(-1)[:, None] * normal
+            exact_normal = (exact * normal).sum(-1)[:, None] * normal
+            return exact - exact_normal + owner_normal
+        if self.boundary == "averaged":
+            averaged = self.neighbour_average(gradient)[self.owner]
+            return (1.0 - self.blend) * owner_value + self.blend * averaged
+        raise ValueError(f"unknown boundary closure {self.boundary!r}")
 
     def raw(self, cell_values, face_values=None):
         """The uncorrected Green--Gauss sum: ``(1/V) sum_f interp(u) A_f``.
@@ -171,16 +212,25 @@ class Operators:
             g1 = self.d1(psi, psi_face)
             h2_cols.append(g1 - grad_exact_cell)  # the O(h) error, per unit Hessian
 
-            raw_hessian = self.d1(g1, grad_exact_face)  # (n_cells, dim, dim)
+            # ⚠️ Probe through the SAME closure the operator will run with. Building the
+            # correction with exact data and applying it with a real closure corrects an
+            # operator nobody evaluates, and the mismatch reads as the closure destroying
+            # exactness -- which is what it looked like until this line was checked.
+            raw_hessian = self.d1(g1, self.boundary_gradient(g1, grad_exact_face))
             m2_cols.append(_to_symmetric(0.5 * (raw_hessian + np.swapaxes(raw_hessian, 1, 2))))
         h2 = np.stack(h2_cols, axis=-1)  # (n_cells, dim, n_sym)
         m2 = np.stack(m2_cols, axis=-1)  # (n_cells, n_sym, n_sym)
-        return h2, np.linalg.inv(m2)
+        # A singular M2 is a RESULT, not a crash: it is how a boundary closure fails here, and it
+        # is the same failure this scheme's own A_HH shows on tetrahedra under the owner closure.
+        # Record it and fall back to a pseudo-inverse so the run still reports the other meshes.
+        self.singular = int((np.abs(np.linalg.det(m2)) < 1e-30).sum())
+        self.m2_worst_cond = float(np.linalg.cond(m2).max())
+        return h2, np.linalg.pinv(m2)
 
     def reconstruct(self, phi_cell, phi_face, grad_face):
         """Return the 2-exact gradient and the Hessian, in symmetric components."""
         g1 = self.d1(phi_cell, phi_face)
-        raw_hessian = self.d1(g1, grad_face if self.exact_boundary else None)
+        raw_hessian = self.d1(g1, self.boundary_gradient(g1, grad_face))
         symmetric = _to_symmetric(0.5 * (raw_hessian + np.swapaxes(raw_hessian, 1, 2)))
         hessian = np.einsum("nab,nb->na", self.m2_inv, symmetric)
         gradient = g1 - np.einsum("nia,na->ni", self.h2, hessian)
@@ -244,7 +294,7 @@ class SmoothField:
         return out
 
 
-def order_study(label, build, sizes, exact_boundary):
+def order_study(label, build, sizes, boundary):
     """L2 error of the reconstruction on a smooth field, against mesh size.
 
     Reported over all cells and over the interior alone, because the two answer different
@@ -253,7 +303,7 @@ def order_study(label, build, sizes, exact_boundary):
     scales as ``sqrt(h * h^2a)`` -- and a global norm therefore cannot distinguish "the method
     degraded" from "the closure degraded, on exactly the cells a closure touches".
     """
-    print(f"\n{label}   (boundary: {'exact' if exact_boundary else 'owner-value closure'})")
+    print(f"\n{label}   (boundary closure: {boundary})")
     print(
         f"  {'cells':>7} {'h':>9} {'grad all':>11} {'ord':>5} {'hess all':>11} {'ord':>5}"
         f" {'grad interior':>14} {'ord':>5} {'hess interior':>14} {'ord':>5}"
@@ -261,7 +311,7 @@ def order_study(label, build, sizes, exact_boundary):
     previous = None
     for n in sizes:
         mesh = build(n)
-        ops = Operators(mesh, mesh.geometry(), exact_boundary=exact_boundary)
+        ops = Operators(mesh, mesh.geometry(), boundary=boundary)
         dim = mesh.dim
         field = SmoothField(dim)
 
@@ -298,10 +348,10 @@ def order_study(label, build, sizes, exact_boundary):
         previous = current
 
 
-def check(label, mesh, seed=0):
+def check(label, mesh, seed=0, boundary="exact", blend=0.5):
     geometry = mesh.geometry()
-    ops = Operators(mesh, geometry)
-    control = Operators(mesh, geometry, corrected=False)
+    ops = Operators(mesh, geometry, boundary=boundary, blend=blend)
+    control = Operators(mesh, geometry, corrected=False, boundary=boundary, blend=blend)
     rng = np.random.default_rng(seed)
     dim = mesh.dim
 
@@ -336,13 +386,13 @@ def check(label, mesh, seed=0):
     def worst(computed, exact):
         return np.abs(computed - exact).max() / np.abs(exact).max()
 
-    m2_cond = np.linalg.cond(np.linalg.inv(ops.m2_inv))
-    m1_cond = np.linalg.cond(np.linalg.inv(ops.m1_inv))
+    m2_cond = np.array([ops.m2_worst_cond])
+    m1_cond = np.linalg.cond(ops.m1_inv)
     print(
         f"{label:<26} {mesh.n_cells:>5} "
         f"{worst(gradient, exact_gradient):>9.2e} {worst(hessian_tensor, exact_tensor):>9.2e} "
         f"{worst(raw_gradient, exact_gradient):>9.2e} {worst(raw_tensor, exact_tensor):>9.2e} "
-        f"{m1_cond.max():>8.1e} {m2_cond.max():>8.1e}"
+        f"{m1_cond.max():>8.1e} {m2_cond.max():>8.1e} {ops.singular:>5d}"
     )
 
 
@@ -353,7 +403,7 @@ def main():
     print("exact boundary values are carrying the result and this probe measures nothing.\n")
     print(
         f"{'mesh':<26} {'cells':>5} {'grad':>9} {'hess':>9} "
-        f"{'grad raw':>9} {'hess raw':>9} {'cond M1':>8} {'cond M2':>8}"
+        f"{'grad raw':>9} {'hess raw':>9} {'cond M1':>8} {'cond M2':>8} {'sing':>5}"
     )
     check("2D perturbed 0.25", perturbed_grid_2d(8, 8, perturb=0.25, seed=1))
     check("2D perturbed 0.40", perturbed_grid_2d(8, 8, perturb=0.40, seed=2))
@@ -362,16 +412,47 @@ def main():
     check("3D tetrahedra 0.15", tetrahedral_grid_3d(3, perturb=0.15, seed=5))
     check("3D tetrahedra 0.25", tetrahedral_grid_3d(3, perturb=0.25, seed=6))
 
+    # The correction matrices are probed THROUGH the closure, so they should absorb a crude one for
+    # the very polynomials they are built from. If exactness survives here, the closure costs only
+    # the higher-order terms -- a quite different problem from losing the accuracy contract.
+    for boundary, blend in (("owner", 0.0), ("averaged", 0.5), ("dirichlet", 0.0)):
+        tag = boundary if boundary == "owner" else f"{boundary} w={blend}"
+        print(f"\ngradient boundary faces closed by: {tag}")
+        check(
+            "2D perturbed 0.40",
+            perturbed_grid_2d(8, 8, perturb=0.40, seed=2),
+            boundary=boundary,
+            blend=blend,
+        )
+        check(
+            "3D perturbed 0.35",
+            perturbed_grid_3d(5, 5, 5, perturb=0.35, seed=4),
+            boundary=boundary,
+            blend=blend,
+        )
+        check(
+            "3D tetrahedra 0.15",
+            tetrahedral_grid_3d(3, perturb=0.15, seed=5),
+            boundary=boundary,
+            blend=blend,
+        )
+        check(
+            "3D tetrahedra 0.25",
+            tetrahedral_grid_3d(3, perturb=0.25, seed=6),
+            boundary=boundary,
+            blend=blend,
+        )
+
     print("\n\nOrder of accuracy on a smooth NON-polynomial field")
     print(
         "(a 2-exact operator is machine-zero on a quadratic at every h, so only this shows the rate)"
     )
-    for exact in (True, False):
+    for boundary in ("exact", "owner", "dirichlet"):
         order_study(
             "3D perturbed hex 0.30",
             lambda n: perturbed_grid_3d(n, n, n, perturb=0.30, seed=7),
             (6, 9, 13, 18),
-            exact_boundary=exact,
+            boundary=boundary,
         )
 
 
