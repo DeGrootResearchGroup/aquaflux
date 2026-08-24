@@ -125,7 +125,7 @@ class Operators:
         contribution = interpolated[..., None] * self.area.reshape(
             (-1,) + (1,) * len(trailing) + (self.dim,)
         )
-        out = np.zeros((self.n_cells,) + trailing + (self.dim,))
+        out = np.zeros((self.n_cells, *trailing, self.dim))
         np.add.at(out, self.owner, contribution)
         np.add.at(
             out,
