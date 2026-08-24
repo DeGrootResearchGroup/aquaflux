@@ -1457,6 +1457,91 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     cost. Calibrate per mesh; the class default of 20 is neither safe (it is below what the tet mesh
     needs) nor economical (it is above what pitzDaily needs).
 
+  **⚠️ REPLACING THE COUPLED RECONSTRUCTION WITH A LOCAL LEAST-SQUARES FIT IS A POOR BET ON A SKEWED
+  MESH — and the evidence is in the source paper, so check there before re-proposing it (2026-08-23).**
+  The reasoning that leads here is sound and will recur: the sweeps are ~82 % of a reconstruction, the
+  count is set by a contraction rate of 0.54 on the reactor, and information propagates one cell-ring
+  per sweep — so ~15 rings of propagation are being spent to produce what is intrinsically a local
+  quadratic fit. A k-exact least-squares reconstruction gets exactness for quadratics *directly*, at
+  roughly one pass, stays exactly linear in the field (so the cheap tangent survives), and is a far
+  better shape for a GPU than fifteen sequential global sweeps with reductions.
+
+  **What kills it is the MAXIMUM error in poor cells, which is the regime this scheme exists for.**
+  Betchen & Straatman (2010) benchmark against Baserinia & Stubley's **second-order** least-squares
+  reconstruction — a quadratic fit, so the comparison is close to this proposal rather than to the
+  ordinary linear-LSQ gradient — and report its maximum gradient and Hessian errors as "of the order
+  of those observed in the first-order Gauss' theorem approach", i.e. the second-order advantage is
+  lost entirely in the worst cells. The worst error sat one layer of tetrahedra off a curved
+  boundary, where the local aspect ratios and the Hessian components were both large, on a grid whose
+  **mean** aspect ratio was only 1.23 (max 3.44) — a good grid. They attribute it to Mavriplis (1993,
+  *Revisiting the least squares procedure for gradient reconstruction on unstructured meshes*), who
+  found that even inverse-distance-weighted least squares fails near highly skewed volumes on
+  tetrahedral grids. The UV reactor is exactly that regime: skewness p99 0.20, face planarity down to
+  0.877, with the worst cells in the boundary layers.
+
+  ⚠️ **One distinction to keep, because it decides what the evidence does and does not cover.**
+  Baserinia & Stubley's scheme is **coupled**, not a local fit: the same paper reports it *diverging*
+  under block-Jacobi and needing "a stabilized, pre-conditioned conjugate gradient procedure". So the
+  head-to-head in that paper is not against a purely local k-exact fit. The Mavriplis result it rests
+  on **is** about local weighted least squares, so the max-error objection still reaches the local
+  version — but do not cite Betchen's table as a direct measurement of it.
+
+  **THE SURVIVING DIRECTION IS LEAST SQUARES AS A PRECONDITIONER, NOT AS THE ANSWER.** Use a local
+  fit to precondition the existing coupled system. The fixed point stays Betchen's, so accuracy and
+  poor-cell robustness are unchanged **by construction**; a preconditioner that is bad in a skewed
+  cell costs convergence *rate* there and never accuracy, which neutralizes precisely the documented
+  failure. It attacks the only quantity that sets the cost — the rate — which neither relaxation
+  (refuted on the reactor, both directions) nor Krylov acceleration (forfeits the exact linearity
+  that keeps the tangent cheap) can touch. Unbuilt and unmeasured.
+
+  **Two calibration points from the same paper, worth having before judging our own numbers:**
+  - **They report 33 block-Jacobi iterations** to converge the reconstruction on their tetrahedral
+    grid. Our 12–15 sweeps on the reactor — Gauss–Seidel with a Schur-block preconditioner rather
+    than block-Jacobi — is **this method's cost, not an inefficiency in this implementation.**
+  - **They exclude building the coefficient matrices from their reported timings**, treating them as
+    precomputed per geometry. That is our prologue, and it is independent support for `bind`: the
+    same split, and the same judgement about which side of it that work belongs on.
+
+  **❌ SUB-SOLVING EITHER BLOCK OF THE COUPLED SWEEP IS REFUTED (2026-08-23) — the rate is set by the
+  INTER-CELL coupling, and no cell-local preconditioner can reach it.** The proposal is a natural one
+  and will recur: the gradient block `A_gg` is essentially the corrected Green--Gauss operator, so
+  replace the per-cell block-Jacobi inverse in the sweep's gradient update with `k` fixed sweeps of
+  that block (a truncated Neumann series -- fixed count, so still exactly linear in the field). The
+  same for the Hessian block, and for both. Measured as the coupled sweep's contraction rate, at
+  `local_schur_block=True`, `iters=24`:
+
+  | arm | inner=1 | 2 | 3 | 4 |
+  |---|---|---|---|---|
+  | pitzDaily, gradient block | **0.1978** | 0.2285 | 0.2254 | 0.2256 |
+  | pitzDaily, Hessian block | **0.1978** | 0.1980 | 0.1980 | — |
+  | pitzDaily, both | **0.1978** | 0.2287 | 0.2255 | — |
+  | hex 3D p=0.35, gradient block | **0.2701** | 0.2698 | 0.2685 | 0.2686 |
+  | hex 3D p=0.35, Hessian block | 0.2701 | **0.2489** | 0.2484 | — |
+  | hex 3D p=0.35, both | 0.2701 | 0.2350 | 0.2349 | — |
+
+  Every arm **saturates by two or three inner sweeps** — so the limit is what an *exact* block inverse
+  would give — and none pays for its cost. Counting kernel passes (one Hessian pass plus `k` gradient
+  passes per outer sweep), the best arm is 3D Hessian sub-solve at 21 passes against the baseline's
+  16. On pitzDaily the gradient arm is **worse than the per-cell block**, which is the recorded
+  "inverting the wrong operator more accurately" signature: block Gauss--Seidel's gradient update
+  wants the Schur complement, not `A_gg`, and the per-cell local Schur block approximates the former
+  while an exact `A_gg` sub-solve converges to the latter.
+
+  **The three results together say where the rate actually lives, which is the durable finding.**
+  `local_schur_block` is worth everything on the reactor (2.0145 → 0.4385, divergence to convergence),
+  yet sub-solving either block is worth nothing. That is consistent, because the local Schur block
+  **is** the exact per-cell Schur complement of the joint `[g, H]` block — so the sweep already
+  inverts each cell's coupled block essentially exactly, and the intra-cell coupling is exhausted.
+  What remains in a 0.44--0.54 rate is **inter-cell**, which is why a preconditioner that cannot see
+  past one cell moves it not at all.
+
+  **CONSEQUENCE FOR WHAT TO TRY NEXT: any real gain needs REACH, not accuracy.** A better cell-local
+  inverse is closed. What is not closed is a preconditioner spanning more than one cell — a local
+  least-squares operator over a two-ring stencil is the obvious candidate, and its documented weakness
+  (large maximum error in skewed cells) is harmless in a preconditioner, where a bad cell costs
+  convergence rate and never accuracy. See the least-squares entry above for why that weakness rules
+  it out as a *replacement* and not as a preconditioner.
+
   **⚠️ MEASURE IT AGAINST A CALIBRATED NESTED SOLVE, NOT THE SHIPPED DEFAULT.** Against `20/10` it
   looks like 2.0× forward and 3.1× on the tangent — but `20/10` is heavily over-provisioned on the
   meshes that comparison used, so most of that gap is the baseline's slack rather than this sweep's
