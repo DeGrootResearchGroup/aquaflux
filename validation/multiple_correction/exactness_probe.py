@@ -73,8 +73,9 @@ from support.meshes import (  # noqa: E402
 class Operators:
     """The multiple-correction operators for one geometry, built once."""
 
-    def __init__(self, mesh, geometry, *, corrected=True):
+    def __init__(self, mesh, geometry, *, corrected=True, exact_boundary=True):
         self.mesh, self.geometry = mesh, geometry
+        self.exact_boundary = exact_boundary
         self.dim = mesh.dim
         self.n_cells = mesh.n_cells
         self.n_sym = symmetric_components(self.dim)
@@ -88,6 +89,15 @@ class Operators:
         self.volume = np.asarray(geometry.cell.volume)
         # Centre the coordinates. `R` annihilates constants, so this cannot change any operator --
         # it only keeps the monomial magnitudes comparable to the cell size.
+        # Cells owning no boundary face. The distinction is load-bearing: a boundary closure that
+        # loses one order on the boundary layer alone still shows up in a global L2 as a HALF-order
+        # loss, because that layer is an O(h) fraction of the volume -- so a global norm cannot tell
+        # "the method degraded" from "the closure degraded, on the cells a closure touches".
+        touches_boundary = np.zeros(mesh.n_cells, dtype=bool)
+        exterior = ~self.interior
+        touches_boundary[self.owner[exterior]] = True
+        self.interior_cells = ~touches_boundary
+
         centroid = np.asarray(geometry.cell.centroid)
         self.origin = centroid.mean(axis=0)
         self.x = centroid - self.origin
@@ -106,12 +116,17 @@ class Operators:
                 np.eye(self.n_sym), (self.n_cells, self.n_sym, self.n_sym)
             ).copy()
 
-    def raw(self, cell_values, face_values):
+    def raw(self, cell_values, face_values=None):
         """The uncorrected Green--Gauss sum: ``(1/V) sum_f interp(u) A_f``.
 
-        ``cell_values`` is ``(n_cells, ...)`` and ``face_values`` supplies the boundary faces (the
-        interior entries are ignored, being interpolated from the cells).
+        ``cell_values`` is ``(n_cells, ...)``. ``face_values`` supplies the boundary faces (interior
+        entries are ignored, being interpolated from the cells); ``None`` means **close the boundary
+        with the owner cell's own value**, which is the zeroth-order closure available to a solver
+        that has no analytic data -- and the only option for the gradient field, since a boundary
+        condition supplies the field there but not its derivative.
         """
+        if face_values is None:
+            face_values = cell_values[self.owner]
         trailing = cell_values.shape[1:]
         own = cell_values[self.owner]
         nb = cell_values[self.neighbour]
@@ -165,7 +180,7 @@ class Operators:
     def reconstruct(self, phi_cell, phi_face, grad_face):
         """Return the 2-exact gradient and the Hessian, in symmetric components."""
         g1 = self.d1(phi_cell, phi_face)
-        raw_hessian = self.d1(g1, grad_face)
+        raw_hessian = self.d1(g1, grad_face if self.exact_boundary else None)
         symmetric = _to_symmetric(0.5 * (raw_hessian + np.swapaxes(raw_hessian, 1, 2)))
         hessian = np.einsum("nab,nb->na", self.m2_inv, symmetric)
         gradient = g1 - np.einsum("nia,na->ni", self.h2, hessian)
@@ -184,6 +199,103 @@ def _sym_basis(dim):
 def _to_symmetric(tensor):
     """Contract a symmetric ``(n, dim, dim)`` tensor to its independent components."""
     return np.asarray(contract_symmetric(jnp.asarray(tensor), tensor.shape[-1]))
+
+
+class SmoothField:
+    """A smooth non-polynomial field, with analytic gradient and Hessian.
+
+    Exactness on a quadratic says the operators reproduce the polynomials they are built for; it
+    says nothing about the ORDER at which they converge on a general field, because a 2-exact
+    operator is machine-zero on a quadratic at every mesh size. Only a non-polynomial field reveals
+    the rate, which is the quantity Pont measures (his Figs. 10 and 11) and the one that decides
+    whether a fixed-cost reconstruction keeps its accuracy under refinement.
+    """
+
+    def __init__(self, dim, wavenumbers=(1.3, 1.7, 0.9)):
+        self.k = np.asarray(wavenumbers[:dim])
+
+    def value(self, points):
+        return np.prod(np.sin(points * self.k), axis=-1)
+
+    def gradient(self, points):
+        sines = np.sin(points * self.k)
+        cosines = np.cos(points * self.k)
+        out = np.empty_like(points)
+        for i in range(points.shape[-1]):
+            factors = sines.copy()
+            factors[:, i] = cosines[:, i] * self.k[i]
+            out[:, i] = np.prod(factors, axis=-1)
+        return out
+
+    def hessian(self, points):
+        dim = points.shape[-1]
+        sines = np.sin(points * self.k)
+        cosines = np.cos(points * self.k)
+        out = np.empty((points.shape[0], dim, dim))
+        for i in range(dim):
+            for j in range(dim):
+                factors = sines.copy()
+                if i == j:
+                    factors[:, i] = -sines[:, i] * self.k[i] ** 2
+                else:
+                    factors[:, i] = cosines[:, i] * self.k[i]
+                    factors[:, j] = cosines[:, j] * self.k[j]
+                out[:, i, j] = np.prod(factors, axis=-1)
+        return out
+
+
+def order_study(label, build, sizes, exact_boundary):
+    """L2 error of the reconstruction on a smooth field, against mesh size.
+
+    Reported over all cells and over the interior alone, because the two answer different
+    questions. A closure that loses one order on the boundary-adjacent cells shows up in a global
+    L2 as a HALF-order loss -- that layer is an O(h) fraction of the volume, so its contribution
+    scales as ``sqrt(h * h^2a)`` -- and a global norm therefore cannot distinguish "the method
+    degraded" from "the closure degraded, on exactly the cells a closure touches".
+    """
+    print(f"\n{label}   (boundary: {'exact' if exact_boundary else 'owner-value closure'})")
+    print(
+        f"  {'cells':>7} {'h':>9} {'grad all':>11} {'ord':>5} {'hess all':>11} {'ord':>5}"
+        f" {'grad interior':>14} {'ord':>5} {'hess interior':>14} {'ord':>5}"
+    )
+    previous = None
+    for n in sizes:
+        mesh = build(n)
+        ops = Operators(mesh, mesh.geometry(), exact_boundary=exact_boundary)
+        dim = mesh.dim
+        field = SmoothField(dim)
+
+        gradient, packed = ops.reconstruct(
+            field.value(ops.x), field.value(ops.face_x), field.gradient(ops.face_x)
+        )
+        hessian = np.asarray(expand_symmetric(jnp.asarray(packed), dim))
+
+        def weighted_l2(diff, axes, mask, ops=ops):
+            weight = ops.volume[mask]
+            return float(np.sqrt((weight * (diff[mask] ** 2).sum(axes)).sum() / weight.sum()))
+
+        every = np.ones(mesh.n_cells, dtype=bool)
+        inner = ops.interior_cells
+        g_diff = gradient - field.gradient(ops.x)
+        h_diff = hessian - field.hessian(ops.x)
+        current = (
+            float(ops.volume.mean() ** (1.0 / dim)),
+            weighted_l2(g_diff, -1, every),
+            weighted_l2(h_diff, (-1, -2), every),
+            weighted_l2(g_diff, -1, inner),
+            weighted_l2(h_diff, (-1, -2), inner),
+        )
+        h, g_all, h_all, g_in, h_in = current
+        if previous is None:
+            orders = ["--"] * 4
+        else:
+            ratio = np.log(previous[0] / h)
+            orders = [f"{np.log(previous[i] / current[i]) / ratio:.2f}" for i in range(1, 5)]
+        print(
+            f"  {mesh.n_cells:>7} {h:>9.4f} {g_all:>11.3e} {orders[0]:>5} {h_all:>11.3e}"
+            f" {orders[1]:>5} {g_in:>14.3e} {orders[2]:>5} {h_in:>14.3e} {orders[3]:>5}"
+        )
+        previous = current
 
 
 def check(label, mesh, seed=0):
@@ -249,6 +361,18 @@ def main():
     check("3D perturbed 0.35", perturbed_grid_3d(5, 5, 5, perturb=0.35, seed=4))
     check("3D tetrahedra 0.15", tetrahedral_grid_3d(3, perturb=0.15, seed=5))
     check("3D tetrahedra 0.25", tetrahedral_grid_3d(3, perturb=0.25, seed=6))
+
+    print("\n\nOrder of accuracy on a smooth NON-polynomial field")
+    print(
+        "(a 2-exact operator is machine-zero on a quadratic at every h, so only this shows the rate)"
+    )
+    for exact in (True, False):
+        order_study(
+            "3D perturbed hex 0.30",
+            lambda n: perturbed_grid_3d(n, n, n, perturb=0.30, seed=7),
+            (6, 9, 13, 18),
+            exact_boundary=exact,
+        )
 
 
 if __name__ == "__main__":
