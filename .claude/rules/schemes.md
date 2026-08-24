@@ -1555,6 +1555,89 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   convergence rate and never accuracy. See the least-squares entry above for why that weakness rules
   it out as a *replacement* and not as a preconditioner.
 
+  **❌ POLYNOMIAL ACCELERATION AND EVERY PER-SWEEP RELAXATION SCHEDULE ARE BOUNDED AT ~1 SWEEP —
+  measured on the reactor 2026-08-23, and the bound covers more than it looks like.** The proposal
+  recurs in several disguises: Chebyshev on the error operator, fourth-kind Chebyshev, "cascading"
+  smoothers with an escalating per-sweep ω, or simply a schedule `ω₁…ω_N` instead of one ω. **They are
+  all the same object.** Starting from zero, `N` steps of `x ← x + ωₖ P⁻¹(b − A x)` leave the residual
+  `Π(I − ωₖ P⁻¹A) r₀` — a degree-`N` polynomial with `q(0) = 1` — and GMRES minimizes over exactly
+  that class. So **one GMRES run bounds the entire family**, and a fixed-coefficient member does
+  strictly worse because it cannot adapt to the right-hand side.
+
+  Measured on the reactor (`AveragedNeighbourHessian`, `local_schur_block=True`, ω = 1, residuals of
+  the same system on the same right-hand side):
+
+  | k | sweep residual | best possible polynomial | headroom |
+  |---|---|---|---|
+  | 5 | 1.579e+00 | 5.967e-01 | 2.65x |
+  | 7 | 1.154e-01 | 6.013e-02 | 1.92x |
+  | 10 | 3.051e-03 | 1.451e-03 | **2.10x** |
+
+  The headroom **collapses** from 552x at k=1 to ~2x in the operating range, and 2x in residual at a
+  per-step factor of ~0.3 is **one sweep of thirteen**. Harness:
+  `validation/uvreactor_openfoam/gradient_sweep_calibration.py --spectrum`.
+
+  ⚠️ **DO NOT COMPARE EITHER AGAINST `rate^k` — that compares an ERROR with a RESIDUAL and is
+  meaningless on an operator this nonnormal.** A first version of this measurement did exactly that
+  and reported GMRES as *worse* than the sweep, which is impossible for a minimizer over the class the
+  sweep belongs to; that impossibility is what caught it. On pitzDaily the sweep's residual **grows to
+  ~650 before it contracts at all**, so the asymptotic rate is nowhere near achievable early — which is
+  also why rate-based projections of Chebyshev gains (1.5–2x) are far too optimistic here.
+
+  **❌ COARSE-GRID AND MULTIGRID METHODS ARE CLOSED.** An *ideal* two-level cycle — geometric
+  aggregation, exact Galerkin coarse operator, exact coarse solve, the existing exact per-cell block as
+  smoother — measured **0.1–1.4 %, and 0.0 % at ν = 2**, across meshes bracketing the reactor's rate
+  from both sides, on a harness first shown to find the textbook 1.5x on a Poisson control. Two-level
+  with an exact coarse solve **bounds every deeper hierarchy**, so this closes deep AMG, W-cycles and
+  every coarsening rate at once. The mechanism: this operator is **second kind** — a bounded
+  perturbation of the identity, spectrum measured in [0.71, 1.18] — so its rate is set by mesh
+  *quality*, not mesh *size* (0.151 at 4³ falling to 0.151 at 10³, while a Poisson control climbs
+  0.919 → 0.969). Multigrid removes h-dependence; there is none here to remove.
+  ⚠️ **Those two-level numbers were measured on synthetic fixtures with a scratchpad harness and are
+  NOT re-adjudicable as recorded** — treat them as strong but unreproducible. What *is* re-adjudicable,
+  and corroborates them independently on the real mesh, is the mode locality below: a coarse space
+  represents smooth error, and this error is not smooth.
+
+  **✅ THE SLOW MODE IS EXTREMELY LOCALIZED, WHICH IS THE POSITIVE RESULT OF THE CAMPAIGN.** Dominant
+  eigenvector of the error operator, same probe:
+
+  | mesh | worst 0.1 % of cells hold | worst 1 % hold | roughness `\|v − avg v\|/\|v\|` |
+  |---|---|---|---|
+  | pitzDaily | 34.3 % | **95.4 %** | 0.49 |
+  | **UV reactor** | **100.0 %** (1000x population share) | 100.0 % | **1.15** |
+
+  On the reactor the entire slow mode lives on ~1600 cells of 1.6M, at cell-scale roughness. That
+  closes the coarse-grid family from the other direction and **opens the one candidate the memory
+  arithmetic previously killed**: a Schwarz/patch correction costed over *all* cells is 7.4 GB and is
+  dominated, but over the worst 0.1 % it is ~1600 × 9 × 63 doubles ≈ **7 MB**, at ~0.1 % of a sweep.
+  The selection is legal under the linearity constraint because the eigenvector is a property of the
+  **geometry-only** operator, so the patch set is a mesh constant chosen once — not a field-dependent
+  branch. ⚠️ Unmeasured and decisive before building: **the sub-dominant rate.** If a cluster of
+  similarly-slow modes sits on *different* cells, the patch set grows and the memory argument returns.
+
+  **From the literature, two items that bear directly on this scheme:**
+  - **Betchen & Straatman measured the failure mode of a fixed sweep count in the source paper**:
+    terminating after four sweeps gave **22 % error in a Hessian component** where 33 were needed for
+    1e-4, on a tetrahedral mesh of *mean* aspect ratio 1.23 and max 3.44. Syrakos et al. (2017)
+    measure the same effect from the other side — a fixed corrector count buys a pre-asymptotic window
+    of apparent higher order that a fine enough mesh destroys. **Validate any reduced count against an
+    accuracy fixture, not only against a residual rate.**
+  - **Nishikawa (2018) uses a skewness-dependent diagonal boost**, geometry-only, introduced because
+    "a serious convergence difficulty may be encountered in the case that cells have all skewed faces".
+    That lands exactly on the localized mode measured above, preserves exact linearity, and is cheap.
+    Unbuilt.
+
+  **The structural alternative, if the sweep is ever to be removed rather than accelerated:**
+  Setzwein, Ess & Gerlinger (JCP 446, 2021) apply the Green–Gauss operator to the 1-exact gradient and
+  correct the result with a **per-cell 6×6 matrix depending solely on mesh geometry, inverted before
+  the simulation** — an O(h) Hessian and a 2-exact gradient in two face passes plus one precomputed
+  matvec, with **no global system, no iteration and no convergence test**. Against 13 sweeps × 2 passes
+  that is ~3 passes; memory is `(n, n_sym, n_sym)` = 440 MB at 1.6M cells, and the matrix reduces to
+  the identity on Cartesian grids. ⚠️ **Its accuracy claim is derived by Taylor analysis and never
+  measured** — the paper carries no error-versus-`h` table for the Hessian, and the authors' own flux
+  benchmark found the correction had "only minor effects". Closing that gap is the prerequisite, and
+  would itself be a contribution.
+
   **⚠️ MEASURE IT AGAINST A CALIBRATED NESTED SOLVE, NOT THE SHIPPED DEFAULT.** Against `20/10` it
   looks like 2.0× forward and 3.1× on the tangent — but `20/10` is heavily over-provisioned on the
   meshes that comparison used, so most of that gap is the baseline's slack rather than this sweep's
