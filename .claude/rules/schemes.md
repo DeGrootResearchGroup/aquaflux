@@ -1830,10 +1830,19 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   - `_undetermined_cells` selected with `worst > limit`, so a NaN correction would **not** be
     detected and the repair would silently decline to fire on exactly the cells that need it. Now
     `~(worst <= limit)`.
-  - `fastest_boundary_closure` compared `rate < best_rate`, so a closure whose rate came back NaN
-    lost *by accident* rather than on its merits, and two broken closures were ranked by their order
-    in the candidate list. A non-finite rate is now mapped to infinity, which makes the ordering
-    total.
+  - `fastest_boundary_closure` compared `rate < best_rate`, so a closure whose rate came back
+    non-finite lost *by accident* rather than on its merits. Non-finite now maps to infinity, making
+    the ordering total.
+  - ⚠️⚠️ **And the worse half, which the first CI fix did not catch: the singular closure's rate came
+    back as `2.2e-308`, not as NaN.** `contraction_rate` deliberately maps an annihilated probe to
+    `finfo.tiny` (a correction identically zero on the mesh genuinely has rate zero), and on a
+    **singular** system the probe is annihilated by arithmetic instead — so the broken closure was
+    reported as a **perfect** contraction and won. Same mesh, same closure: **8.64** under macOS
+    Accelerate, **2.2e-308** under CI's BLAS. `ContractionRate` now reports `annihilated`, and the
+    selector treats an annihilated candidate as unusable; neither shipped candidate can annihilate
+    the probe legitimately, and the one case where that would be genuine makes them equivalent
+    anyway. Pinned by simulating the floor rather than waiting for the platform that produces it —
+    which is why it went unnoticed in the first place.
 
   **Consequence for tests on degenerate meshes (binding):** assert the property that survives the
   platform — "does not contract", "is not exact" — never the magnitude of a singular result. The

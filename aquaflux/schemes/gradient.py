@@ -1030,10 +1030,25 @@ class ContractionRate(NamedTuple):
         multiplies the remaining error.
     half_budget_rate : float
         The same estimate at half the budget, which is what :attr:`settling_ratio` compares against.
+    annihilated : bool
+        Whether some iterate's norm reached zero, which makes :attr:`rate` a floor rather than a
+        measurement. It is reported instead of being folded into the rate because the two causes
+        cannot be told apart from the number alone: a correction that is identically zero on the mesh
+        really does have rate zero, while a **singular** system annihilates the probe through
+        arithmetic and has no rate at all. A caller comparing candidates must reject the second --
+        see :func:`fastest_boundary_closure` -- and one measuring a single known-good system can
+        ignore this.
+
+        ⚠️ Which of the two happens is platform-dependent, so a caller that ignores this on a
+        degenerate mesh is making a platform-dependent decision. Measured on the same perturbed
+        tetrahedral mesh under an owner Hessian closure: a rate of **8.64** under macOS Accelerate
+        against **2.2e-308** (the smallest normal double, this floor) under the BLAS on the CI
+        runners -- a diverging closure reported as a perfect one.
     """
 
     rate: float
     half_budget_rate: float
+    annihilated: bool = False
 
     @property
     def settling_ratio(self) -> float:
@@ -1143,7 +1158,7 @@ def contraction_rate(
     @jax.jit
     def run(v: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         def body(k, carry):
-            v, log_full, log_half = carry
+            v, log_full, log_half, annihilated = carry
             v = v - preconditioner.apply(operator(v))
             n = norm(v)
             # An iteration that annihilates the probe (a mesh whose correction is identically zero)
@@ -1153,16 +1168,25 @@ def contraction_rate(
             positive = n > 0
             v = v / jnp.where(positive, n, 1.0)
             log_n = jnp.log(jnp.where(positive, n, jnp.finfo(n.dtype).tiny))
-            return v, log_full + log_n, log_half + jnp.where(k < half, log_n, 0.0)
+            return (
+                v,
+                log_full + log_n,
+                log_half + jnp.where(k < half, log_n, 0.0),
+                annihilated | ~positive,
+            )
 
         zero = jnp.zeros((), v.dtype)
-        _, log_full, log_half = jax.lax.fori_loop(0, iters, body, (v, zero, zero))
-        return jnp.exp(log_full / iters), jnp.exp(log_half / half)
+        _, log_full, log_half, annihilated = jax.lax.fori_loop(
+            0, iters, body, (v, zero, zero, jnp.zeros((), bool))
+        )
+        return jnp.exp(log_full / iters), jnp.exp(log_half / half), annihilated
 
     v = jax.random.normal(jax.random.PRNGKey(seed), system.shape)
     v = v / norm(v)
     try:
-        full, halfway = (float(x) for x in run(v))
+        full_a, half_a, annihilated_a = run(v)
+        full, halfway = float(full_a), float(half_a)
+        annihilated = bool(annihilated_a)
     except (jax.errors.ConcretizationTypeError, jax.errors.TracerArrayConversionError) as exc:
         raise ValueError(_TRACED_GEOMETRY_MESSAGE) from exc
     if not (math.isfinite(full) and math.isfinite(halfway)):
@@ -1171,7 +1195,7 @@ def contraction_rate(
             "iteration overflowed rather than merely diverging, so the operator or preconditioner is "
             "likely mis-assembled."
         )
-    return ContractionRate(full, halfway)
+    return ContractionRate(full, halfway, annihilated)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1364,7 +1388,7 @@ def fastest_boundary_closure(
     for closure in candidates:
         systems = HessianCorrectedGradient._systems(mesh, geometry, closure)
         inner = systems.inner()
-        rate = contraction_rate(
+        measured = contraction_rate(
             systems.coupled_error(
                 relaxation,
                 systems.outer_preconditioner(inner, local_schur_block),
@@ -1372,9 +1396,15 @@ def fastest_boundary_closure(
             ),
             iters=iters,
             seed=seed,
-        ).rate
-        rate = float(rate)
-        if not math.isfinite(rate):
+        )
+        rate = float(measured.rate)
+        # A candidate whose probe was annihilated has no measured rate, only the floor the estimator
+        # reports in its place -- and on a closure that leaves a cell's Hessian block singular that
+        # floor reads as a PERFECT contraction, which would make the broken closure win. Both
+        # candidates here are approximations, so neither can annihilate the probe legitimately; the
+        # one case where that would be genuine (a correction identically zero on the mesh) makes the
+        # closures equivalent anyway, so ranking them both unusable loses nothing.
+        if measured.annihilated or not math.isfinite(rate):
             rate = math.inf
         if best is None or rate < best_rate:
             best, best_rate = closure, rate

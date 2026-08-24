@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-import math
 import warnings
 
 import aquaflux  # noqa: F401  (enables x64)
@@ -31,6 +30,7 @@ from aquaflux.schemes import (
     AveragedNeighbourHessian,
     CellBlockJacobi,
     CompactGreenGauss,
+    ContractionRate,
     CorrectedGreenGauss,
     CoupledBlockSweep,
     ExactCellBlock,
@@ -2267,50 +2267,51 @@ def test_the_coupled_sweep_calibrates_against_the_preconditioner_it_will_run_wit
 
 
 def test_the_fastest_boundary_closure_is_the_mesh_s_choice_not_a_global_ranking() -> None:
-    """The owner closure is the faster one where it works and cannot contract where it does not.
+    """The two shipped closures swap places with mesh quality, which is the reason to measure.
 
-    That is the reason to measure rather than rank the closures once: which is fastest is a property
-    of the mesh. Both regimes are checked, because a selector that always returned one closure would
-    pass either half alone.
-
-    ⚠️ On the degenerate mesh this asserts that the owner closure **cannot contract**, not which
-    closure is picked. Its Hessian block is singular there, so the rate is whatever the platform's
-    linear algebra makes of a singular inverse -- a large finite number under macOS Accelerate, and
-    non-finite under the BLAS on the CI runners, which is a real difference and not a tolerance to
-    widen. "It does not contract" is true either way; "the other one wins" is not.
+    On well-shaped cells the owner closure contracts faster; on cells bad enough to leave its Hessian
+    block singular it cannot contract at all and the neighbour-averaged closure wins. Both regimes are
+    checked, because a selector that always returned one of them would pass either test alone.
     """
     good = perturbed_grid_2d(6, 6, perturb=0.2, seed=1)
     assert isinstance(fastest_boundary_closure(good, good.geometry()), OwnerHessian)
-    assert _closure_rate(good, OwnerHessian()) < 1.0  # and it genuinely contracts there
 
     degenerate = tetrahedral_grid_3d(4, perturb=0.15, seed=3)
-    owner_rate = _closure_rate(degenerate, OwnerHessian())
-    assert not (owner_rate < 1.0), (
-        f"owner closure unexpectedly contracts on tetrahedra: {owner_rate}"
-    )
-
-    # The selector's own contract, which holds whatever the platform makes of the rates: it returns
-    # the candidate with the lowest one, and never a candidate it was not given.
-    candidates = (OwnerHessian(), AveragedNeighbourHessian())
-    rates = [_closure_rate(degenerate, c) for c in candidates]
     picked = fastest_boundary_closure(degenerate, degenerate.geometry())
-    assert type(picked) is type(candidates[int(np.argmin(rates))])
+    assert isinstance(picked, AveragedNeighbourHessian)
 
 
-def _closure_rate(mesh, closure, *, relaxation=1.0, local_schur_block=True) -> float:
-    """The contraction rate the selector would measure for ``closure``, non-finite mapped to inf."""
-    systems = HessianCorrectedGradient._systems(mesh, mesh.geometry(), closure)
-    inner = systems.inner()
-    rate = float(
-        contraction_rate(
-            systems.coupled_error(
-                relaxation,
-                systems.outer_preconditioner(inner, local_schur_block),
-                inner.preconditioner,
-            )
-        ).rate
-    )
-    return rate if math.isfinite(rate) else math.inf
+def test_the_selector_rejects_a_candidate_whose_probe_was_annihilated() -> None:
+    """The singular closure must lose, whether its rate comes back huge or as the estimator's floor.
+
+    Which of the two happens is PLATFORM-DEPENDENT and cost a CI run to find: the same mesh and
+    closure measure 8.64 under macOS Accelerate and 2.2e-308 -- the smallest normal double, the floor
+    `contraction_rate` reports for an annihilated probe -- under the BLAS on the CI runners. The
+    second reads as a *perfect* contraction, so a selector comparing rates alone hands the singular
+    closure the win precisely where it is broken.
+
+    The floor is simulated rather than waited for, since the platform that produces it is not the one
+    this test usually runs on -- which is the whole reason it went unnoticed.
+    """
+    mesh = tetrahedral_grid_3d(4, perturb=0.15, seed=3)
+    measured = []
+    real = gradient_module.contraction_rate
+
+    def annihilate_the_first(system, **kwargs):
+        """Report the first candidate as annihilated, exactly as the CI platform does."""
+        measured.append(system)
+        if len(measured) == 1:
+            return ContractionRate(np.finfo(np.float64).tiny, np.finfo(np.float64).tiny, True)
+        return real(system, **kwargs)
+
+    gradient_module.contraction_rate = annihilate_the_first
+    try:
+        picked = fastest_boundary_closure(mesh, mesh.geometry())
+    finally:
+        gradient_module.contraction_rate = real
+
+    assert len(measured) == 2  # it did not stop at the apparently-perfect first candidate
+    assert isinstance(picked, AveragedNeighbourHessian)
 
 
 def test_the_closure_selector_compares_only_what_it_is_given() -> None:
