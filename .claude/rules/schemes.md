@@ -1390,6 +1390,34 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   failing — differentiation with respect to the *field*, which is what a flow solve does, is
   unaffected and is pinned by a test comparing the bound and unbound gradients.
 
+  **⚠️⚠️ THE CALIBRATOR MEASURED A PRECONDITIONER THE SCHEME DOES NOT RUN — fixed 2026-08-23, and it
+  was worth 2.8x the sweep count on a skewed mesh.** `HessianCorrectedGradient.calibrated` took
+  `local_schur_block`, forwarded it to `NestedHessianSolve.calibrated`, and **did not forward it to
+  `CoupledBlockSweep.calibrated`** — which then measured the rate through `outer(...)`, whose
+  `use_local_schur_block` defaults to `False`. So the count was derived from the cheaper
+  preconditioner and spent under the shipped one. Measured, rate and the sweeps it implies at 1e-4:
+
+  | mesh / closure | `local_schur_block=False` (what was measured) | `=True` (what runs) |
+  |---|---|---|
+  | pitzDaily 2D, `OwnerHessian` | 0.2263 → 7 | **0.1978 → 6** |
+  | perturbed hex 3D, 35 % | 0.2570 → 7 | 0.2551 → 7 |
+  | **perturbed tetrahedra, `AveragedNeighbourHessian`** | **0.8980 → 64** | **0.6620 → 23** |
+
+  **It hides on well-shaped meshes and bites on exactly the ones this scheme exists for** — the two
+  preconditioners are indistinguishable at 35 % hex perturbation and differ by 2.8x in cost on
+  tetrahedra, which is why no fixture caught it. Pinned now by
+  `test_the_coupled_sweep_calibrates_against_the_preconditioner_it_will_run_with`, on a tet mesh for
+  that reason, asserting **both** directions so that forwarding a constant would not satisfy it.
+
+  ⚠️ **`tools/sibling_builders.py` CANNOT SEE THIS PAIR, and that is its third blind spot.** The two
+  factories are siblings by **contract** — both are `HessianSolve.calibrated` implementations reached
+  from the same branch of one caller — but they construct *different* classes (`CoupledBlockSweep`
+  against `SweptGradientSolve`), and the tool pairs builders by the class they construct. It reports
+  `NestedHessianSolve.calibrated`'s `local_schur_block` as "only here" against an unrelated builder
+  and never compares the pair that actually drifted. **A polymorphic factory family is invisible to
+  it**, on top of the naming and `@classmethod` blind spots already recorded — so when the thing you
+  are checking is one interface's factory implemented several ways, read the surfaces by hand.
+
   **⚠️ MEASURE IT AGAINST A CALIBRATED NESTED SOLVE, NOT THE SHIPPED DEFAULT.** Against `20/10` it
   looks like 2.0× forward and 3.1× on the tangent — but `20/10` is heavily over-provisioned on the
   meshes that comparison used, so most of that gap is the baseline's slack rather than this sweep's

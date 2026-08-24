@@ -1385,6 +1385,7 @@ class CoupledBlockSweep(HessianSolve):
         floor: int = SweepCalibration.floor,
         cap: int = SweepCalibration.cap,
         seed: int = SweepCalibration.seed,
+        local_schur_block: bool = True,
         boundary_closure: HessianBoundaryClosure | None = None,
     ) -> CoupledBlockSweep:
         """Build this sweep with its count **measured from the mesh** rather than assumed.
@@ -1403,6 +1404,14 @@ class CoupledBlockSweep(HessianSolve):
             region.
         tol, iters, floor, cap, seed
             The shared calibration settings; see :class:`SweepCalibration`.
+        local_schur_block : bool, optional
+            As on :class:`HessianCorrectedGradient` (default ``True``). ⚠️ **It must match the value
+            the scheme will run with, because it selects the preconditioner and so the rate.** It is
+            not a detail on a skewed mesh: on perturbed tetrahedra under
+            :class:`AveragedNeighbourHessian` the two preconditioners contract at 0.6620 and 0.8980,
+            which is 23 sweeps against 86 for the same tolerance. Where the cell shapes are good it
+            barely registers (0.2551 against 0.2570 at 35 % hex perturbation), which is why a
+            mismatch here hides on easy meshes and surfaces on the ones this scheme exists for.
 
         Returns
         -------
@@ -1431,15 +1440,20 @@ class CoupledBlockSweep(HessianSolve):
         >>> CoupledBlockSweep.calibrated(mesh, mesh.geometry()).sweeps
         6
         """
-        # The closure changes the operator whose rate is being measured, so it has to be the
-        # one the scheme will run with -- the same reason the scheme's own factory takes it.
+        # The closure and the preconditioner both change the operator whose rate is being measured,
+        # so both have to be the ones the scheme will run with -- the same reason the scheme's own
+        # factory takes them. Reached through `outer_preconditioner` rather than `outer`, which would
+        # additionally build the Schur operator this sweep never applies.
         systems = HessianCorrectedGradient._systems(
             mesh, geometry, OwnerHessian() if boundary_closure is None else boundary_closure
         )
         inner = systems.inner()
-        outer = systems.outer(SweptGradientSolve(warn_tol=None), inner)
         rate = contraction_rate(
-            systems.coupled_error(cls.relaxation, outer.preconditioner, inner.preconditioner),
+            systems.coupled_error(
+                cls.relaxation,
+                systems.outer_preconditioner(inner, local_schur_block),
+                inner.preconditioner,
+            ),
             iters=iters,
             seed=seed,
         )
@@ -2536,7 +2550,13 @@ class HessianCorrectedGradient(GradientScheme):
         # One field, so one strategy is built and it is the one that will run -- there is no second
         # path left carrying counts nobody measured.
         solve: HessianSolve = (
-            CoupledBlockSweep.calibrated(mesh, geometry, boundary_closure=closure, **settings)
+            CoupledBlockSweep.calibrated(
+                mesh,
+                geometry,
+                local_schur_block=local_schur_block,
+                boundary_closure=closure,
+                **settings,
+            )
             if coupled
             else NestedHessianSolve.calibrated(
                 mesh,

@@ -2227,3 +2227,38 @@ def test_a_scheme_with_nothing_to_prepare_is_returned_unchanged() -> None:
     mesh = perturbed_grid_2d(4, 4, perturb=0.2, seed=10)
     scheme = CorrectedGreenGauss()
     assert scheme.bind(mesh, mesh.geometry()) is scheme
+
+
+def test_the_coupled_sweep_calibrates_against_the_preconditioner_it_will_run_with() -> None:
+    """A sweep count measured under one preconditioner and spent under another is the wrong count.
+
+    ``local_schur_block`` selects the outer preconditioner, so it sets the sweep's contraction rate
+    and therefore the count. The factory took the parameter and did not forward it, so the count came
+    from the cheaper preconditioner while the scheme ran the other one.
+
+    ⚠️ **This hides on well-shaped meshes and bites on the ones the scheme exists for.** At 35 % hex
+    perturbation the two preconditioners contract at 0.2551 and 0.2570 — indistinguishable, and any
+    test built on such a mesh would have passed throughout. On perturbed tetrahedra they are 0.6620
+    and 0.8980, which is 23 sweeps against 64 for the same tolerance, so that is the mesh used here.
+
+    Both directions are pinned, because forwarding a *constant* would satisfy either one alone.
+    """
+    mesh = tetrahedral_grid_3d(4, perturb=0.15, seed=3)
+    geometry = mesh.geometry()
+    closure = AveragedNeighbourHessian()
+
+    with_block = CoupledBlockSweep.calibrated(
+        mesh, geometry, boundary_closure=closure, local_schur_block=True
+    ).sweeps
+    without_block = CoupledBlockSweep.calibrated(
+        mesh, geometry, boundary_closure=closure, local_schur_block=False
+    ).sweeps
+    assert with_block < without_block
+
+    # The scheme's own factory must hand its field down rather than letting the default stand in.
+    for local_schur_block, expected in ((True, with_block), (False, without_block)):
+        scheme = HessianCorrectedGradient.calibrated(
+            mesh, geometry, boundary_closure=closure, local_schur_block=local_schur_block
+        )
+        assert scheme.local_schur_block is local_schur_block
+        assert scheme.hessian_solve.sweeps == expected
