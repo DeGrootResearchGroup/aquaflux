@@ -1418,6 +1418,45 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   it**, on top of the naming and `@classmethod` blind spots already recorded — so when the thing you
   are checking is one interface's factory implemented several ways, read the surfaces by hand.
 
+  **⚠️⚠️ MEASURED ON THE UV REACTOR (2026-08-23) — the mesh this scheme exists for, and the numbers
+  do NOT resemble pitzDaily's.** 1 635 909 cells, 5 249 365 faces, `dim` 3, snappyHexMesh; interior
+  face skewness median 0.0022 / p99 0.2013 / max 0.3505, face planarity min 0.877 (pitzDaily is
+  planar to 1.000000 and p99-skewed 0.0158). Contraction rate of the coupled sweep, measured as
+  `CoupledBlockSweep.calibrated` measures it, `iters=24`, peak RSS 9.3–10.8 GB.
+  Harness: `validation/uvreactor_openfoam/gradient_sweep_calibration.py --rate` (or `UV_RATE=1`).
+
+  | closure | `local_schur_block` | ω | rate | sweeps @1e-4 | @1e-6 |
+  |---|---|---|---|---|---|
+  | `OwnerHessian` (shipped) | **True** | **1.00** | **0.5378** | **15** | 23 |
+  | `OwnerHessian` | True | 1.05 | 0.5585 | 16 | 24 |
+  | `OwnerHessian` | True | 1.10 | 0.5894 | 18 | 27 |
+  | `OwnerHessian` | **False** | 1.00 | **2.0145** | **DIVERGES** | — |
+  | **`AveragedNeighbourHessian`** | **True** | **1.00** | **0.4385** | **12** | 17 |
+  | `AveragedNeighbourHessian` | True | 1.10 | 0.4913 | 13 | 20 |
+  | `AveragedNeighbourHessian` | **False** | 1.00 | **4.9196** | **DIVERGES** | — |
+
+  Four things, and the first two are binding.
+
+  - **`local_schur_block=False` DIVERGES on this mesh** — 2.01 and 4.92, not merely slower. So it is
+    not an optimization to be traded off here; it is required. This also sets the true price of the
+    calibrator defect fixed the same day: measuring the `False` preconditioner would have returned a
+    rate above one, which `sweeps_for` clamps to `cap` — **64 sweeps where 15 are needed**, on the
+    target mesh, silently.
+  - **OVER-RELAXATION IS REFUTED HERE.** Monotonically worse from 1.00 upward under both closures,
+    which is the "the optimum migrates back to 1.0 as cells degrade" trend at its endpoint. A
+    relaxation tuned on pitzDaily (1.05–1.10, worth a sweep there) costs 1–3 sweeps here. **Do not
+    ship a non-unit relaxation.**
+  - **`AveragedNeighbourHessian` is the FASTER closure on this mesh** (0.4385 against 0.5378, 12
+    sweeps against 15) where on pitzDaily it is the slower one (0.3038 against 0.1978). It was
+    adopted for exactness on cells whose `A_HH` the owner closure leaves singular; that it also
+    converges faster here is a second, independent reason to prefer it on skewed meshes — and a
+    reminder that closure choice is a per-mesh question, not a global ranking.
+  - **The sweep count does not transfer between meshes and the spread is wide**: 6 sweeps on
+    pitzDaily, 12–15 here, 23 on synthetic tetrahedra. Any cost projection for this scheme taken from
+    pitzDaily understates the reactor by 2–2.5x on the sweeps alone, before 3D's dearer per-sweep
+    cost. Calibrate per mesh; the class default of 20 is neither safe (it is below what the tet mesh
+    needs) nor economical (it is above what pitzDaily needs).
+
   **⚠️ MEASURE IT AGAINST A CALIBRATED NESTED SOLVE, NOT THE SHIPPED DEFAULT.** Against `20/10` it
   looks like 2.0× forward and 3.1× on the tangent — but `20/10` is heavily over-provisioned on the
   meshes that comparison used, so most of that gap is the baseline's slack rather than this sweep's

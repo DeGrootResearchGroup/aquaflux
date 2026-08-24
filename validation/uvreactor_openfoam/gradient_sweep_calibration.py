@@ -102,6 +102,12 @@ OUTER_RELAXATIONS = tuple(float(x) for x in os.environ.get("UV_OUTER_RELAX", "1.
 RATE_RELAXATIONS = tuple(
     float(x) for x in os.environ.get("UV_RATE_RELAX", "1.0,1.05,1.1").split(",")
 )
+#: Which ``local_schur_block`` settings ``--rate`` measures (default both). Worth restricting once a
+#: mesh has answered the question: on the UV reactor the cheap preconditioner does not merely
+#: converge more slowly, it DIVERGES (rate 2.01 against 0.54), so measuring it again spends half the
+#: run re-establishing a known result. Keep both on an unfamiliar mesh -- which of the two is usable
+#: is exactly what a first run is for.
+RATE_SCHUR_BLOCKS = tuple(x != "0" for x in os.environ.get("UV_RATE_SCHUR", "1,0").split(","))
 
 
 def peak_rss_gb() -> float:
@@ -302,7 +308,7 @@ def coupled_sweep_rates(mesh, geometry) -> None:
     ):
         systems = HessianCorrectedGradient._systems(mesh, geometry, closure)
         inner = systems.inner()
-        for local_schur_block in (True, False):
+        for local_schur_block in RATE_SCHUR_BLOCKS:
             preconditioner = systems.outer_preconditioner(inner, local_schur_block)
             for relaxation in RATE_RELAXATIONS:
                 measured = contraction_rate(
