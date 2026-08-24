@@ -203,13 +203,18 @@ BETCHEN_LABEL = (
 
 #: Which boundary closure the multiple-correction arm uses for the GRADIENT on boundary faces.
 #:
-#: ⚠️ Not a tuning knob on a wall-function RANS case. `SkewCorrectedGradient` forms a one-sided
-#: difference against the boundary value, which for omega at a wall is a MODELLING device
-#: (``6 nu / (beta1 y^2)`` or a blend of it) rather than a physical face value -- and the difference
-#: divides it by the near-wall half-height, the smallest distance in the mesh. `OwnerGradient` never
-#: reads the boundary value at all, and on a quadrilateral mesh it is exact and better conditioned.
+#: ⚠️ Not a tuning knob on this case: `skew` STALLS it dead, and `owner` is the scheme's default for
+#: that reason. `SkewCorrectedGradient` forms a one-sided difference against the boundary value and
+#: divides by the near-wall half-height, the smallest distance in the mesh; `OwnerGradient` never
+#: reads a boundary value at all, and on a quadrilateral mesh it is exact and better conditioned.
+#:
+#: ⚠️ Three mechanisms for the stall have been proposed and REFUTED by measurement -- the wall omega
+#: gradient (imposed analytically, still stalls), the correction matrices' conditioning (skew is the
+#: better of the two here), and the closure's double correction on gradient-type patches (a real
+#: defect, fixed, artifact down 18 orders, still stalls). Keep the arm so the next hypothesis has
+#: something to run against, and do not re-propose any of those three.
 MULTICORR_CLOSURES = {"owner": OwnerGradient, "skew": SkewCorrectedGradient}
-MULTICORR_CLOSURE = os.environ.get("PITZ_AB_MULTICORR_CLOSURE", "skew")
+MULTICORR_CLOSURE = os.environ.get("PITZ_AB_MULTICORR_CLOSURE", "owner")
 
 ARMS = (
     ("standard", "CorrectedGreenGauss", CorrectedGreenGauss()),
@@ -602,39 +607,51 @@ def main() -> None:
         )
         return
 
-    standard, betchen = results["standard"], results["betchen"]
+    # Whichever arms ran, compared against the first -- `standard` when it is among them, since
+    # that is the incumbent. Hardcoding a pair here used to crash the whole summary when any other
+    # selection was made, AFTER both arms had been marched: the measurements were printed but the
+    # comparison was lost, which is an expensive way to learn a KeyError.
+    names = list(results)
+    baseline_name = "standard" if "standard" in results else names[0]
+    baseline = results[baseline_name]
+    others = [n for n in names if n != baseline_name]
     of = compare.read_openfoam_reference()
     xr_of = compare.reattachment_length(of["centroid"], of["U"][:, 0])
 
     print("\n=== cost ===", flush=True)
     print(f"  {'arm':<10} {'wall (s)':>10} {'cycles':>8} {'wall ratio':>11}", flush=True)
-    for name in ("standard", "betchen"):
+    for name in names:
         r = results[name]
         print(
             f"  {name:<10} {r['wall']:>10.1f} {r['cycles']:>8} "
-            f"{r['wall'] / standard['wall']:>10.2f}x",
+            f"{r['wall'] / baseline['wall']:>10.2f}x",
             flush=True,
         )
 
-    print("\n=== solution difference (betchen vs standard) ===", flush=True)
-    print(f"  {'field':<8} {'rel L2':>12} {'rel max':>12}", flush=True)
-    for field in FIELDS:
-        l2, mx = relative_difference(betchen["fields"][field], standard["fields"][field])
-        print(f"  {field:<8} {l2:>12.3e} {mx:>12.3e}", flush=True)
+    for name in others:
+        print(f"\n=== solution difference ({name} vs {baseline_name}) ===", flush=True)
+        print(f"  {'field':<8} {'rel L2':>12} {'rel max':>12}", flush=True)
+        for field in FIELDS:
+            l2, mx = relative_difference(results[name]["fields"][field], baseline["fields"][field])
+            print(f"  {field:<8} {l2:>12.3e} {mx:>12.3e}", flush=True)
 
     print("\n=== reattachment length x_r/h (lower wall) ===", flush=True)
-    for name in ("standard", "betchen"):
+    for name in names:
         print(f"  {name:<14} {results[name]['xr']:.3f}", flush=True)
     print(f"  OpenFOAM ref   {xr_of:.3f}", flush=True)
-    print(f"  betchen - standard = {betchen['xr'] - standard['xr']:+.3f}", flush=True)
+    for name in others:
+        print(
+            f"  {name} - {baseline_name} = {results[name]['xr'] - baseline['xr']:+.3f}", flush=True
+        )
 
-    ratio = betchen["cycles"] / max(standard["cycles"], 1)
-    print(
-        f"\ncycle ratio betchen/standard = {ratio:.2f}x. Close to 1 means the preconditioner sees "
-        f"both arms equally well and the wall-clock difference above is the reconstruction; much "
-        f"above 1 means raise PITZ_AB_REACH for both arms and re-run.",
-        flush=True,
-    )
+    for name in others:
+        ratio = results[name]["cycles"] / max(baseline["cycles"], 1)
+        print(
+            f"\ncycle ratio {name}/{baseline_name} = {ratio:.2f}x. Close to 1 means the "
+            f"preconditioner sees both arms equally well and the wall-clock difference above is the "
+            f"reconstruction; much above 1 means raise PITZ_AB_REACH for both arms and re-run.",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

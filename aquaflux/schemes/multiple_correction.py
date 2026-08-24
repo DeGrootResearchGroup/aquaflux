@@ -118,6 +118,12 @@ class GradientBoundaryClosure(eqx.Module):
     restricted to problems whose patches all prescribe values.
     """
 
+    #: Whether :meth:`face_gradient` reads ``boundary_values`` at all. A closure that does needs them
+    #: **corrected** -- re-evaluated at the reconstruction's own gradient -- and a reconstruction then
+    #: pays one boundary-value evaluation to supply them. A closure that does not is spared that, and
+    #: is also immune to the leading-order trap the correction exists to route around.
+    reads_boundary_values: bool = eqx.field(static=True, default=True)
+
     @abc.abstractmethod
     def face_gradient(
         self,
@@ -162,6 +168,8 @@ class OwnerGradient(GradientBoundaryClosure):
     at a boundary.
     """
 
+    reads_boundary_values: bool = eqx.field(static=True, default=False)
+
     def face_gradient(self, gradient, field, boundary_values, face_cells, geometry):
         return gradient[face_cells.owner]
 
@@ -182,24 +190,34 @@ class SkewCorrectedGradient(GradientBoundaryClosure):
     owner closure it was meant to improve on. It is shared with the diffusion flux, which has always
     needed the same term to extrapolate the same derivative to the same place.
 
-    ⚠️⚠️ **IT IS ONLY SOUND WHERE THE BOUNDARY VALUE IS A PRESCRIBED VALUE. On a gradient-type
-    patch it corrects twice, and the whole normal derivative it reports is an artifact.** A
-    reconstruction is fed boundary values evaluated at **zero** gradient, so that the residual stays
-    a single-pass function of the field. A prescribed value does not depend on the gradient and is
-    therefore unaffected. A gradient-type condition is: ``ZeroGradient`` returns
-    ``phi_owner + tangential correction``, whose correction is evaluated away, leaving the boundary
-    value exactly ``phi_owner``. This closure then subtracts the non-orthogonal correction that the
-    boundary value never added, and divides the residue by ``d.n`` -- the smallest distance in the
-    mesh at a wall. Measured on pitzDaily, ``boundary_value - phi_owner`` is identically zero on
-    every such patch, and the spurious normal derivative reaches ``3e7`` at the outlet and ``1e5`` at
-    a wall (``validation/multiple_correction/boundary_closure_probe.py``). On a coupled RANS march
-    that costs the solve its descent direction outright rather than degrading it.
+    ⚠️⚠️ **IT STALLS A COUPLED RANS MARCH DEAD, AND WHY IS NOT KNOWN.** On the pitzDaily benchmark it
+    clears two Reynolds rungs at a full step and then, on the first step of the target rung, finds no
+    descent direction at all -- the step length collapses to the smallest rung of the ladder and the
+    residual freezes. This is not a degradation that a tolerance would absorb. Use
+    :class:`OwnerGradient`, which is the default, unless the mesh has boundary **tetrahedra**, where
+    the owner closure leaves the Hessian underdetermined and this is the only shipped alternative.
 
-    So: use it where every patch prescribes a value, and prefer :class:`OwnerGradient` otherwise --
-    which is the trade against its better conditioning on boundary tetrahedra, not a free choice. An
-    :class:`~aquaflux.schemes.ImposedGradient` overrides this closure on the faces it covers, which
-    settles the field whose gradient is genuinely known, but it is not a general remedy: it does
-    nothing for the patches and fields where nobody knows the gradient.
+    **Three mechanisms have been proposed and refuted by measurement**; do not re-propose them:
+
+    * *The near-wall* ``omega`` *gradient.* Imposing the analytical one on the wall cells and their
+      boundary faces, and again inside the omega equation's own assembler, reproduces the stall to
+      three figures.
+    * *The correction matrices' conditioning.* On that mesh ``cond(M2^-1)`` is 2.14 under this
+      closure against 3.49 under the owner one -- this is the better-conditioned of the two.
+    * *Correcting twice on a gradient-type patch.* That was a real defect and it is now fixed (see
+      below); the artifact it produced fell by eighteen orders and the march is unchanged.
+
+    ⚠️ **The double correction, since fixed, is still worth understanding, because a closure that
+    reads a boundary value inherits it.** A reconstruction is fed boundary values evaluated at
+    **zero** gradient, so the residual stays a single-pass function of the field. A prescribed value
+    does not depend on the gradient and is unaffected. A gradient-type condition is: ``ZeroGradient``
+    returns ``phi_owner + tangential correction``, whose correction is evaluated away, leaving the
+    boundary value exactly ``phi_owner``. Differencing that subtracts a correction nothing added, and
+    dividing by ``d.n`` -- the smallest distance in the mesh at a wall -- turns the residue into a
+    large spurious derivative: measured at ``3e7`` on an outlet and ``1e5`` at a wall. Declaring
+    :attr:`~GradientBoundaryClosure.reads_boundary_values` is what asks the reconstruction for the
+    **corrected** values instead, which collapses those to roundoff while leaving a Dirichlet patch
+    untouched (``validation/multiple_correction/boundary_closure_probe.py`` measures both).
     """
 
     def face_gradient(self, gradient, field, boundary_values, face_cells, geometry):
@@ -258,16 +276,17 @@ class MultipleCorrectionGradient(GradientScheme):
     ----------
     boundary_closure : GradientBoundaryClosure
         How the gradient is closed on boundary faces, where a boundary condition gives the field but
-        not its derivative. Defaults to :class:`SkewCorrectedGradient`, which is the only shipped
-        closure that holds up on boundary tetrahedra; :class:`OwnerGradient` is cheaper and adequate
-        where cells are hexahedral.
+        not its derivative. Defaults to :class:`OwnerGradient`, which never reads a boundary value
+        and is the one that marches a coupled RANS case (measured; see :class:`SkewCorrectedGradient`
+        for what happens otherwise, and for the caveat that it is the closure to reach for on a mesh
+        with boundary **tetrahedra**, where the owner closure leaves the Hessian underdetermined).
     prepared : Corrections or None
         The geometry-only correction matrices, present once :meth:`bind` has been called. ``None``
         rebuilds them on every reconstruction, which is correct but wasteful — an assembler binds
         the scheme it is handed, so ordinary use never pays that.
     """
 
-    boundary_closure: GradientBoundaryClosure = eqx.field(default_factory=SkewCorrectedGradient)
+    boundary_closure: GradientBoundaryClosure = eqx.field(default_factory=OwnerGradient)
     prepared: Corrections | None = None
 
     def bind(self, mesh: Mesh, geometry: MeshGeometry) -> MultipleCorrectionGradient:
@@ -293,6 +312,7 @@ class MultipleCorrectionGradient(GradientScheme):
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         imposed: ImposedGradient | None = None,
+        boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         if operator_hook is not None:
             raise NotImplementedError(
@@ -302,7 +322,14 @@ class MultipleCorrectionGradient(GradientScheme):
                 "halo-exchanged once between the two passes. `operator_hook` is the wrong seam for "
                 "that: it refreshes a solve's unknown, and there is no solve here."
             )
-        return self.reconstruct(field, mesh, geometry, boundary_values, imposed=imposed)[0]
+        return self.reconstruct(
+            field,
+            mesh,
+            geometry,
+            boundary_values,
+            imposed=imposed,
+            boundary_values_at=boundary_values_at,
+        )[0]
 
     def reconstruct(
         self,
@@ -312,6 +339,7 @@ class MultipleCorrectionGradient(GradientScheme):
         boundary_values: jnp.ndarray,
         *,
         imposed: ImposedGradient | None = None,
+        boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Both reconstructed quantities: the gradient and the Hessian.
 
@@ -334,6 +362,14 @@ class MultipleCorrectionGradient(GradientScheme):
             and on the boundary faces those cells own -- so the Hessian is built from the imposed
             gradient rather than from the estimate it replaces. That ordering is the whole reason
             this is an argument to the reconstruction and not a correction applied to its result.
+        boundary_values_at : callable, optional
+            ``gradient -> boundary_values``: the caller's boundary closures re-evaluated at a
+            reconstructed gradient. **Supply this whenever the boundary values passed in were
+            evaluated at zero gradient**, which is what a residual assembler does. The correction
+            matrices are probed against *exact* face values, so a closure fed anything else is
+            correcting an operator the probes never saw -- and on a gradient-type patch the
+            difference is precisely the term :class:`SkewCorrectedGradient` then divides by the
+            wall-normal distance. ``None`` uses ``boundary_values`` as given.
 
         Returns
         -------
@@ -364,8 +400,16 @@ class MultipleCorrectionGradient(GradientScheme):
         first = _one_exact(
             field, boundary_values, prepared.m1_inverse, factor, face_cells, area, geometry
         )
+        # The closure DIFFERENTIATES a boundary value, so it needs the corrected one: a
+        # gradient-type condition carries its whole content in a correction that a zero-gradient
+        # evaluation throws away, leaving the face value equal to the owner's and the closure
+        # subtracting a term nothing added. The first pass above deliberately keeps the values as
+        # given -- there the error is a value of order the correction, not one divided by `d.n`.
+        closure_values = (
+            boundary_values if boundary_values_at is None else boundary_values_at(first)
+        )
         face_gradient = self.boundary_closure.face_gradient(
-            first, field, boundary_values, face_cells, geometry
+            first, field, closure_values, face_cells, geometry
         )
         if imposed is not None:
             # Before the second pass, not after it. That pass differentiates `first` and closes the

@@ -1778,13 +1778,38 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     owner's (1.94e12 against 6.96e11). The closure does reach the returned gradient — through the
     Hessian, which is the only route, since the first pass reads no face gradient.
 
-  **The fix is NOT in this seam and is not built.** A closure cannot tell a prescribed boundary value
-  from a leading-order gradient-type one — it receives an array. Either the reconstruction must be
-  able to re-evaluate the boundary values at its own first-pass gradient (which gives up the
-  single-pass property `_gradient` keeps on purpose), or a closure must be told the patch kinds. Both
-  are real design work. Until then **`SkewCorrectedGradient` is sound only where every patch
-  prescribes a value**, and ⚠️ **it is nonetheless `MultipleCorrectionGradient`'s class default** —
-  which should probably move to `OwnerGradient`, a shipped-default change deliberately not made here.
+  **✅ THE DOUBLE CORRECTION IS FIXED — `boundary_values_at` — AND ⚠️ IT DOES NOT FIX THE MARCH.** A
+  scheme that *differentiates* a boundary value now asks the caller to re-evaluate its closures at
+  the reconstruction's own gradient (`GradientScheme.gradients(boundary_values_at=…)`, supplied by
+  `ResidualAssembler._gradient`); a closure declares whether it needs them
+  (`GradientBoundaryClosure.reads_boundary_values`, `False` on `OwnerGradient`, so that path pays
+  nothing). Measured on the same patches, with the Dirichlet arm as the control that makes it
+  readable — a fix that merely suppressed the term would have flattened that one too:
+
+  | patch | kind | leading order | corrected |
+  |---|---|---|---|
+  | inlet | Dirichlet | 4.075e+07 | **4.075e+07** |
+  | outlet | ZeroGradient | 3.023e+07 | **8.841e-11** |
+  | upperWall | ZeroGradient | 1.434e+05 | **7.946e-08** |
+  | lowerWall | ZeroGradient | 1.523e+04 | **1.070e-08** |
+
+  **Eighteen orders down on the gradient-type patches, and the march is BIT-FOR-BIT AS STALLED** —
+  step 50 of the target rung, α = 0.001, `|R|` 1.082e-01, identical to the two runs before it. So the
+  double correction was a genuine defect worth fixing on its own terms, and it is **not** the cause.
+
+  ⚠️⚠️ **THREE MECHANISMS PROPOSED, THREE REFUTED BY MEASUREMENT. The cause of this stall is
+  UNKNOWN, and that is the honest state.** Do not re-propose: (i) the wall `omega` gradient, (ii) the
+  correction matrices' conditioning, (iii) the closure's double correction. Each was measured, not
+  argued, and each left the stall unchanged to three figures. What is *not* in doubt: `OwnerGradient`
+  never reads a boundary value and marches the case; `SkewCorrectedGradient` does and does not.
+
+  **✅ CONSEQUENCE — `MultipleCorrectionGradient.boundary_closure` NOW DEFAULTS TO `OwnerGradient`
+  (changed 2026-08-24).** The scheme is new and unreleased, so the default is set by what works:
+  the owner closure marches every case here and is exact and better conditioned on quad/hex meshes.
+  `SkewCorrectedGradient` remains the choice for a mesh with boundary **tetrahedra**, where the owner
+  closure leaves the six Hessian components underdetermined (`cond(M2)` 9e17) — the trade is now
+  explicit rather than hidden in a default. `tests/unit/test_multiple_correction.py` pairs each mesh
+  with the closure that suits it, and `PITZ_AB_MULTICORR_CLOSURE` defaults to `owner`.
 
   **✅ RESOLVED (2026-08-24) BY PASSING THE GRADIENT IN, NOT BY A BETTER CLOSURE — `ImposedGradient`
   (`schemes/gradient.py`).** The diagnosis above is exactly right and the fix follows from it: a

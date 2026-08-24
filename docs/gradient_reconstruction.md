@@ -642,33 +642,46 @@ one-sided difference `(phi_face - phi_owner) / (d.n)` is not linear-exact on a s
 using one costs the reconstruction its accuracy outright.
 ```
 
-{class}`~aquaflux.schemes.SkewCorrectedGradient` is the default: the owner's gradient tangentially,
-and a one-sided difference to the boundary value normally, with the non-orthogonal correction that
-makes it linear-exact -- the same term the diffusion flux has always used to extrapolate the same
-derivative to the same place. {class}`~aquaflux.schemes.OwnerGradient` is cheaper and adequate on
-hexahedra, but leaves the Hessian underdetermined on boundary tetrahedra, whose four faces do not
-supply the six independent directions its Hessian components need.
+{class}`~aquaflux.schemes.SkewCorrectedGradient` takes the owner's gradient tangentially and a
+one-sided difference to the boundary value normally, with the non-orthogonal correction that makes it
+linear-exact -- the same term the diffusion flux has always used to extrapolate the same derivative
+to the same place. {class}`~aquaflux.schemes.OwnerGradient` reads no boundary value at all. Which to
+use is not a free choice; see below.
 
-### A one-sided closure needs a prescribed boundary value
+### Choosing the gradient's boundary closure
+
+{class}`~aquaflux.schemes.OwnerGradient` is the default: it takes the owner cell's own gradient and
+never reads a boundary value. On quadrilateral and hexahedral meshes it is exact and the
+better-conditioned of the two, and it is the one that marches a coupled RANS case.
+
+{class}`~aquaflux.schemes.SkewCorrectedGradient` adds the field's boundary value as an extra
+direction, which is what a boundary **tetrahedron** is short of -- four faces cannot supply the six
+independent directions a Hessian needs, and the owner closure leaves it underdetermined
+(`cond(M2)` of `9e17`, and no exactness). Reach for it there.
 
 ```{warning}
-{class}`~aquaflux.schemes.SkewCorrectedGradient` is sound only where every patch prescribes a
-**value**. On a gradient-type patch it corrects twice, and the whole normal derivative it reports is
-an artifact.
+`SkewCorrectedGradient` stalls a coupled RANS march on the pitzDaily benchmark: it clears two
+Reynolds rungs at a full step and then finds no descent direction at all on the target rung. Why is
+not known -- three candidate mechanisms have been measured and refuted. Prefer the default unless
+your mesh has boundary tetrahedra, and check convergence carefully if you use it.
 ```
 
-A reconstruction is fed boundary values evaluated at **zero** gradient, so that the residual stays a
+#### Boundary values, and reading them at the right gradient
+
+A closure that *differences* a boundary value has a trap under it, worth knowing if you write one. A
+reconstruction is fed boundary values evaluated at **zero** gradient, so that the residual stays a
 single-pass function of the field. A prescribed value does not depend on the gradient and is
 unaffected. A gradient-type condition is: `ZeroGradient` returns `phi_owner + tangential correction`,
-whose correction is evaluated away, leaving the boundary value exactly `phi_owner`. The closure then
-subtracts the non-orthogonal correction that the boundary value never added, and divides the residue
-by `d.n` -- the smallest distance in the mesh at a wall.
+whose correction is evaluated away, leaving the boundary value exactly `phi_owner`. Differencing that
+subtracts a correction nothing added, and dividing by `d.n` -- the smallest distance in the mesh at a
+wall -- turns the residue into a large spurious derivative.
 
-Measured on the pitzDaily benchmark, `boundary_value - phi_owner` is identically zero on every such
-patch, and the spurious derivative reaches `3e7` at the outlet and `1e5` at a wall. On a coupled RANS
-march that costs the solve its descent direction outright rather than degrading it. Prefer
-{class}`~aquaflux.schemes.OwnerGradient`, which never reads a boundary value, unless the boundary
-conditions are all Dirichlet -- the trade against its weaker conditioning on boundary tetrahedra.
+A closure declares
+{attr}`~aquaflux.schemes.GradientBoundaryClosure.reads_boundary_values`, and a reconstruction then
+supplies the **corrected** values, re-evaluated at its own gradient. Measured on pitzDaily, that
+collapses the artifact from `3e7` to `9e-11` on a gradient-type patch while leaving a Dirichlet patch
+exactly unchanged -- which is the control, since a fix that merely suppressed the term would flatten
+both.
 
 ### When the gradient is known rather than closed
 

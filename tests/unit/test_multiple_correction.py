@@ -17,6 +17,8 @@ from aquaflux.schemes import (
     SkewCorrectedGradient,
 )
 from aquaflux.schemes.gradient import expand_symmetric
+from aquaflux.schemes.interpolation import non_orthogonal_correction
+from aquaflux.vectors import dot
 
 from tests.support.meshes import (
     perturbed_grid_2d,
@@ -24,12 +26,24 @@ from tests.support.meshes import (
     tetrahedral_grid_3d,
 )
 
+#: Each mesh with the boundary closure that suits it. The default `OwnerGradient` never reads a
+#: boundary value, which is what makes it usable on a real case, but a boundary TETRAHEDRON then has
+#: too few independent face directions to determine six Hessian components -- so that mesh, and only
+#: that mesh, is reconstructed with `SkewCorrectedGradient`. Pinned the other way round by
+#: `test_the_owner_closure_fails_on_boundary_tetrahedra`.
 QUADRATIC_MESHES = [
     perturbed_grid_2d(6, 6, perturb=0.40, seed=2),
     perturbed_grid_3d(4, 4, 4, perturb=0.35, seed=4),
     tetrahedral_grid_3d(3, perturb=0.25, seed=6),
 ]
 MESH_IDS = ["quadrilateral", "hexahedral", "tetrahedral"]
+QUADRATIC_CASES = list(
+    zip(
+        QUADRATIC_MESHES,
+        [OwnerGradient(), OwnerGradient(), SkewCorrectedGradient()],
+        strict=True,
+    )
+)
 
 
 def _quadratic(mesh, seed=0):
@@ -55,8 +69,8 @@ def _quadratic(mesh, seed=0):
     }
 
 
-@pytest.mark.parametrize("mesh", QUADRATIC_MESHES, ids=MESH_IDS)
-def test_the_reconstruction_is_exact_for_a_quadratic_field(mesh) -> None:
+@pytest.mark.parametrize("mesh, closure", QUADRATIC_CASES, ids=MESH_IDS)
+def test_the_reconstruction_is_exact_for_a_quadratic_field(mesh, closure) -> None:
     """The scheme's whole reason to exist, on the mesh shapes that make it hard.
 
     Exactness rather than an order of accuracy: the operators are built to reproduce quadratics, so
@@ -64,7 +78,7 @@ def test_the_reconstruction_is_exact_for_a_quadratic_field(mesh) -> None:
     merely second-order scheme would not test the property.
     """
     case = _quadratic(mesh)
-    scheme = MultipleCorrectionGradient().bind(mesh, case["geometry"])
+    scheme = MultipleCorrectionGradient(boundary_closure=closure).bind(mesh, case["geometry"])
     gradient, packed = scheme.reconstruct(
         case["cell_values"], mesh, case["geometry"], case["face_values"]
     )
@@ -159,9 +173,13 @@ def test_the_gradient_is_differentiable_in_the_field() -> None:
     # A CENTRAL difference: the forward one carries an O(step) truncation error, which on this
     # loss is ~2e-5 relative and would be measuring the differencing scheme rather than the
     # derivative.
+    # The tolerance is set by the DIFFERENCE, not by the derivative: a central difference at this
+    # step carries a cancellation error of order eps * |loss| / step, which is ~1e-7 relative here.
+    # It is still four orders inside anything that would catch a wrong adjoint, and a severed one
+    # returns zero, which the assertion above already rejects.
     index, step = 11, 1e-6
     difference = (loss(field.at[index].add(step)) - loss(field.at[index].add(-step))) / (2.0 * step)
-    assert np.isclose(float(gradient[index]), float(difference), rtol=1e-8)
+    assert np.isclose(float(gradient[index]), float(difference), rtol=1e-6)
 
 
 def test_binding_changes_the_cost_and_not_the_answer() -> None:
@@ -332,3 +350,66 @@ def test_every_scheme_honours_an_imposed_gradient_whether_or_not_it_can_use_it_e
             assert np.array_equal(
                 np.asarray(given.at[cells].set(plain[cells])), np.asarray(plain)
             ), type(scheme)
+
+
+def test_a_differentiating_closure_gets_boundary_values_at_its_own_gradient() -> None:
+    """The seam that makes a one-sided closure legal on a gradient-type patch.
+
+    A residual assembler evaluates its boundary closures at *zero* gradient, so a gradient-type
+    condition -- whose whole content is a correction -- comes back equal to the owner cell's value.
+    A closure that then differences it subtracts a correction nothing added, and divides the residue
+    by the wall-normal distance. Re-evaluating the closures at the reconstruction's own gradient
+    returns the correction, and the difference collapses to the zero normal derivative the condition
+    asserts.
+
+    The Dirichlet arm is the control: a prescribed value does not depend on the gradient, so it must
+    come back unchanged. A fix that merely suppressed the term would flatten that one too.
+    """
+    mesh = perturbed_grid_2d(6, 6, perturb=0.30, seed=11)
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    scheme = MultipleCorrectionGradient(boundary_closure=SkewCorrectedGradient()).bind(
+        mesh, geometry
+    )
+    owner = np.asarray(face_cells.owner)
+    boundary = np.where(~np.asarray(face_cells.interior))[0]
+    field = jax.random.normal(jax.random.PRNGKey(12), (mesh.n_cells,))
+
+    displacement = geometry.face.centroid - geometry.cell.centroid[face_cells.owner]
+    normal = geometry.face.normal
+    along = np.asarray(dot(displacement, normal))
+
+    def zero_gradient(cell_gradient):
+        """A zero-gradient patch: the owner value plus the correction the cell gradient supplies."""
+        return field[face_cells.owner] + non_orthogonal_correction(
+            cell_gradient[face_cells.owner], displacement, normal
+        )
+
+    def normal_derivative(boundary_values, boundary_values_at):
+        gradient = scheme.reconstruct(
+            field, mesh, geometry, boundary_values, boundary_values_at=boundary_values_at
+        )[0]
+        values = boundary_values if boundary_values_at is None else boundary_values_at(gradient)
+        rise = (
+            np.asarray(values)
+            - np.asarray(field)[owner]
+            - np.asarray(
+                non_orthogonal_correction(gradient[face_cells.owner], displacement, normal)
+            )
+        )
+        return np.abs(rise[boundary] / along[boundary]).max()
+
+    leading = zero_gradient(jnp.zeros((mesh.n_cells, mesh.dim)))
+    uncorrected = normal_derivative(leading, None)
+    corrected = normal_derivative(leading, zero_gradient)
+    assert corrected < 1e-8 * max(uncorrected, 1.0)  # collapses to roundoff
+    assert uncorrected > 1.0  # and was not small to begin with
+
+    # The control: a prescribed value does not depend on the gradient, so re-evaluating changes
+    # nothing, and the closure's difference against it must survive untouched.
+    prescribed = jax.random.normal(jax.random.PRNGKey(13), (mesh.n_faces,))
+    assert np.isclose(
+        normal_derivative(prescribed, None),
+        normal_derivative(prescribed, lambda _g: prescribed),
+        rtol=1e-12,
+    )

@@ -20,8 +20,14 @@ On a **Dirichlet** patch there is no such problem: the leading-order and full bo
 coincide (a prescribed value does not depend on the gradient), so the subtraction is exactly the
 term that makes the one-sided difference linear-exact on a skewed mesh, which is what it is for.
 
-This probe measures both halves on the pitzDaily mesh: that ``boundary_value - phi_owner`` is
-identically zero on every gradient-type patch, and how large the resulting spurious derivative is.
+The fix is ``boundary_values_at``: a scheme that differentiates a boundary value asks the caller to
+re-evaluate its closures at the reconstruction's own gradient. A prescribed value is unchanged by
+that; a gradient-type one comes back carrying its correction, so the difference is zero and the
+closure reports the zero normal derivative the condition asserts.
+
+This probe measures both halves on the pitzDaily mesh -- that ``boundary_value - phi_owner`` is
+identically zero on every gradient-type patch at leading order, and how large the resulting spurious
+derivative is -- and then both arms of the fix side by side.
 
 Run
 ---
@@ -106,6 +112,29 @@ def main() -> None:
         "\nEvery gradient-type patch reports max |bval - phi_P| of exactly zero, so its whole\n"
         "reported normal derivative is -correction/(d.n): an artifact of correcting twice.\n"
         "The Dirichlet inlet carries a real difference, which is what the correction is for."
+    )
+
+    # The fix, and the control that makes it readable: the Dirichlet patch must NOT move.
+    corrected = lambda g: assembler.boundary_values(omega, g, {})  # noqa: E731
+    print(f"\n{'patch':12s} {'leading order':>15s} {'corrected':>15s}")
+    for name in mesh.face_patches.names:
+        faces = np.asarray(mesh.face_patches.indices(name))
+        if faces.size == 0 or name == "interior":
+            continue
+        row = []
+        for values_at in (None, corrected):
+            reconstructed = bound.reconstruct(
+                omega, mesh, geometry, boundary_values, boundary_values_at=values_at
+            )[0]
+            values = boundary_values if values_at is None else values_at(reconstructed)
+            corr = np.asarray(non_orthogonal_correction(reconstructed[owner], displacement, normal))
+            r = np.asarray(values) - owner_value - corr
+            row.append(np.abs(r[faces] / along[faces]).max())
+        print(f"{name:12s} {row[0]:15.3e} {row[1]:15.3e}")
+    print(
+        "\nThe gradient-type patches collapse to roundoff -- the zero normal derivative the\n"
+        "condition asserts -- while the Dirichlet inlet is unchanged, which is the control: a fix\n"
+        "that merely suppressed the term would have flattened that one too."
     )
 
 

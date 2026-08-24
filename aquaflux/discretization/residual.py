@@ -364,6 +364,11 @@ class ResidualAssembler(eqx.Module):
             leading_bvals,
             operator_hook=gradient_hook,
             imposed=self.imposed_gradient,
+            # A scheme that DIFFERENTIATES a boundary value cannot use the leading-order one: a
+            # gradient-type closure's whole content is a correction, which evaluating at zero
+            # gradient throws away. This lets such a scheme ask for the corrected values at its own
+            # reconstructed gradient; the ones passed above stay leading-order for everything else.
+            boundary_values_at=lambda g: self.boundary_values(phi, g, properties),
         )
         return gradient, self.boundary_values(phi, gradient, properties)
 

@@ -223,6 +223,7 @@ class GradientScheme(eqx.Module):
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         imposed: ImposedGradient | None = None,
+        boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         """Cell gradients of ``field``, shape ``(n_cells, dim)``.
 
@@ -251,6 +252,13 @@ class GradientScheme(eqx.Module):
             Cells whose gradient the caller knows analytically and wants used instead of a
             reconstruction. ``None`` (the default) reconstructs everywhere, and leaves every scheme
             here byte-identical to one that had never heard of the argument.
+        boundary_values_at : callable, optional
+            ``gradient -> boundary_values``: the caller's boundary closures re-evaluated at a
+            reconstructed gradient. ``boundary_values`` above is those closures evaluated at *zero*
+            gradient, which keeps the residual a single pass over the field but leaves a
+            gradient-type condition carrying none of its own correction. A scheme that
+            **differentiates** a boundary value needs the corrected one, and this is how it asks.
+            ``None`` (the default) leaves every scheme reconstructing exactly as before.
 
         Returns
         -------
@@ -265,6 +273,7 @@ class GradientScheme(eqx.Module):
             boundary_values,
             operator_hook=operator_hook,
             imposed=imposed,
+            boundary_values_at=boundary_values_at,
         )
         return gradient if imposed is None else imposed.impose(gradient)
 
@@ -278,6 +287,7 @@ class GradientScheme(eqx.Module):
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         imposed: ImposedGradient | None = None,
+        boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         """The reconstruction itself; see :meth:`gradients` for the arguments.
 
@@ -301,11 +311,12 @@ class CompactGreenGauss(GradientScheme):
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         imposed: ImposedGradient | None = None,
+        boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         # No iterative solve: an owned cell's one-shot gradient is exact once its `field` halo is
         # filled, so the per-apply ghost exchange (`operator_hook`) has nothing to correct here. The
         # distributed residual still exchanges the *final* gradient for the flux (its `gradient_hook`).
-        del operator_hook, imposed
+        del operator_hook, imposed, boundary_values_at
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells
         g = interpolation_factor(face_cells, geometry)
@@ -1885,10 +1896,12 @@ class CorrectedGreenGauss(GradientScheme):
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         imposed: ImposedGradient | None = None,
+        boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         # No internal consumer: this scheme solves for the gradient and returns it, so an imposed
-        # row is applied by `gradients` and nothing here reads the row it replaces.
-        del imposed
+        # row is applied by `gradients` and nothing here reads the row it replaces. It never
+        # differentiates a boundary value either, so the corrected ones are of no use to it.
+        del imposed, boundary_values_at
         t = self.terms(mesh, geometry)
         system = self.system(t, self.preconditioner)
         return self.solver.solve(
@@ -2603,6 +2616,7 @@ class HessianCorrectedGradient(GradientScheme):
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         imposed: ImposedGradient | None = None,
+        boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ) -> jnp.ndarray:
         if operator_hook is not None:
             raise NotImplementedError(
@@ -2620,7 +2634,7 @@ class HessianCorrectedGradient(GradientScheme):
         # solution of the gradient--Hessian system, and a projected sweep converges to a different
         # system's answer. Imposing a gradient here would have to enter as a constraint on that
         # system -- a real piece of work, and not one this seam licenses.
-        del imposed
+        del imposed, boundary_values_at
         if self.prepared_outer is not None and self.prepared_outer.inverse.shape[0] != mesh.n_cells:
             raise ValueError(
                 "this gradient scheme was bound to a geometry of "

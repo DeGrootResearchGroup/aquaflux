@@ -50,7 +50,15 @@ class _LaggedGradient(GradientScheme):
     inner: GradientScheme
 
     def _reconstruct_gradient(
-        self, field, mesh, geometry, boundary_values, *, operator_hook=None, imposed=None
+        self,
+        field,
+        mesh,
+        geometry,
+        boundary_values,
+        *,
+        operator_hook=None,
+        imposed=None,
+        boundary_values_at=None,
     ):
         return jax.lax.stop_gradient(
             self.inner.gradients(
