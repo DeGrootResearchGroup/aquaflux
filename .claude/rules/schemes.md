@@ -1803,6 +1803,39 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   argued, and each left the stall unchanged to three figures. What is *not* in doubt: `OwnerGradient`
   never reads a boundary value and marches the case; `SkewCorrectedGradient` does and does not.
 
+  **⚠️⚠️ THE UV REACTOR MESH IS THE CASE THIS DEFAULT IS WRONG FOR, AND IT IS MEASURED (2026-08-24).**
+  `validation/uvreactor_openfoam` is snappyHexMesh, not tetrahedral — but its cut cells include
+  **3,063 four-faced cells, and every one of them owns a boundary face** (counted from the polyMesh
+  connectivity: 1,635,909 cells, 5,249,365 faces, 378,096 boundary faces). Boundary tetrahedra are
+  exactly the shape `OwnerGradient` is measured to fail on, so on that mesh the default closure
+  leaves the Hessian singular in those cells and `SkewCorrectedGradient` is required — the closure
+  that stalls the pitzDaily march. **The two shipped closures each fail on one of the two meshes that
+  matter, and no single default fixes both.** Whoever runs the reactor must set the closure
+  explicitly and watch the march.
+  ⚠️ **A counting argument does NOT identify the affected cells, and one was nearly written up here.**
+  "Boundary cells with fewer than `n_sym` interior faces" gives 377,410 (23 %) on that mesh, and is
+  **wrong**: each face carries a whole gradient *vector*, not one number, so a boundary hexahedron has
+  five interior faces against six components and is perfectly determined. Count **tetrahedra at a
+  boundary**, or better, measure the correction directly (below).
+
+  **✅ THE SCHEME NOW DETECTS THIS ITSELF AT BIND TIME — `_warn_if_underdetermined`.** `M2⁻¹` is
+  already built there, and a healthy one is order unity (measured 2–7 across quadrilateral,
+  hexahedral, and tetrahedral-under-skew); an underdetermined one runs to `1e16`. So the check is on
+  the real quantity rather than on a cell-shape heuristic, and it discriminates on the **pair**:
+  silent for quad/owner, hex/owner and tet/skew, and warns only for tet/owner — naming
+  `SkewCorrectedGradient` as the way out. Once per process, and skipped under a tracer. Pinned by all
+  four combinations, because a detector that fired on every tetrahedral mesh, or on every owner
+  closure, would be useless.
+
+  ⚠️ **WHETHER `SkewCorrectedGradient` STALLS A MARCH ON A MESH WITH BOUNDARY TETRAHEDRA IS UNTESTED,
+  and there is currently no way to test it.** The stall is measured only on pitzDaily, which is 2D
+  quadrilateral and contains **no tetrahedra at all** — so it says nothing about the regime the skew
+  closure exists for. The reactor has the cell shapes but **no march**: that directory ships a smoke
+  test and diagnostics, no `compare.py`, no reference solve, and the mesh needs OpenFOAM to
+  regenerate. Building a marchable case with boundary tetrahedra is the prerequisite for answering
+  it, and until then the honest statement is that the skew closure is unproven on a march *anywhere*
+  and broken on the one march that exists.
+
   **✅ CONSEQUENCE — `MultipleCorrectionGradient.boundary_closure` NOW DEFAULTS TO `OwnerGradient`
   (changed 2026-08-24).** The scheme is new and unreleased, so the default is set by what works:
   the owner closure marches every case here and is exact and better conditioned on quad/hex meshes.

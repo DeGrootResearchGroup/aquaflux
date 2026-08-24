@@ -662,9 +662,15 @@ independent directions a Hessian needs, and the owner closure leaves it underdet
 ```{warning}
 `SkewCorrectedGradient` stalls a coupled RANS march on the pitzDaily benchmark: it clears two
 Reynolds rungs at a full step and then finds no descent direction at all on the target rung. Why is
-not known -- three candidate mechanisms have been measured and refuted. Prefer the default unless
-your mesh has boundary tetrahedra, and check convergence carefully if you use it.
+not known -- three candidate mechanisms have been measured and refuted. That benchmark is
+quadrilateral and has no tetrahedra, so it does not test the regime this closure exists for; whether
+the stall also appears on a mesh with boundary tetrahedra is untested. Prefer the default, and if
+your mesh forces this closure, watch convergence.
 ```
+
+**You do not have to work out which case you are in.** The scheme measures its own correction when it
+binds to a geometry and warns if the mesh and closure together leave the Hessian underdetermined,
+naming the alternative. A healthy correction is order unity; a singular one runs to `1e16`.
 
 #### Boundary values, and reading them at the right gradient
 

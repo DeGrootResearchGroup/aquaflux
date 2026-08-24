@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
@@ -15,6 +17,7 @@ from aquaflux.schemes import (
     MultipleCorrectionGradient,
     OwnerGradient,
     SkewCorrectedGradient,
+    multiple_correction,
 )
 from aquaflux.schemes.gradient import expand_symmetric
 from aquaflux.schemes.interpolation import non_orthogonal_correction
@@ -413,3 +416,47 @@ def test_a_differentiating_closure_gets_boundary_values_at_its_own_gradient() ->
         normal_derivative(prescribed, lambda _g: prescribed),
         rtol=1e-12,
     )
+
+
+@pytest.mark.parametrize(
+    "label, mesh, closure, warns",
+    [
+        ("quadrilateral-owner", QUADRATIC_MESHES[0], OwnerGradient(), False),
+        ("hexahedral-owner", QUADRATIC_MESHES[1], OwnerGradient(), False),
+        ("tetrahedral-owner", QUADRATIC_MESHES[2], OwnerGradient(), True),
+        ("tetrahedral-skew", QUADRATIC_MESHES[2], SkewCorrectedGradient(), False),
+    ],
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_it_warns_when_the_mesh_and_closure_leave_the_hessian_underdetermined(
+    label, mesh, closure, warns
+) -> None:
+    """A silently-singular correction is the failure this scheme can produce without saying so.
+
+    The reconstruction stops being exact for quadratics and starts amplifying, which looks like a
+    solver problem rather than a closure one. All four combinations are checked together because
+    only the pair discriminates: a detector that fired on every tetrahedral mesh, or on every owner
+    closure, would be useless -- it is the combination that is broken.
+    """
+    multiple_correction._CORRECTION_WARNED = False
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        MultipleCorrectionGradient(boundary_closure=closure).bind(mesh, mesh.geometry())
+    fired = [w for w in caught if "Hessian correction is singular" in str(w.message)]
+    assert bool(fired) is warns, label
+    if warns:
+        assert "SkewCorrectedGradient" in str(fired[0].message)  # names the way out
+
+
+def test_the_underdetermined_warning_is_emitted_once_per_process() -> None:
+    """It reports a fixed property of the geometry, and a scheme is bound on every assembler."""
+    mesh = QUADRATIC_MESHES[2]
+    multiple_correction._CORRECTION_WARNED = False
+    scheme = MultipleCorrectionGradient(boundary_closure=OwnerGradient())
+    counts = []
+    for _ in range(2):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            scheme.bind(mesh, mesh.geometry())
+        counts.append(len([w for w in caught if "singular" in str(w.message)]))
+    assert counts == [1, 0]

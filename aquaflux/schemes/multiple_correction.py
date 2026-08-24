@@ -69,9 +69,11 @@ settles one field, where that defect is in the closure's arithmetic and reaches 
 from __future__ import annotations
 
 import abc
+import warnings
 from typing import TYPE_CHECKING
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 
 from aquaflux.vectors import dot, scale
@@ -474,6 +476,60 @@ def _one_exact(
     return jnp.einsum("nij,n...j->n...i", m1_inverse, raw)
 
 
+#: Above this, a cell's Hessian correction is amplifying rather than repairing. The matrices are
+#: probed on quadratic monomials of order the cell size, so a healthy inverse is order one --
+#: measured at 2--7 across quadrilateral, hexahedral and (under a boundary-value closure)
+#: tetrahedral meshes. A cell whose boundary faces leave the six components underdetermined runs to
+#: 1e17 instead, so anything in between is a wide margin rather than a tuned threshold.
+_UNDERDETERMINED_CORRECTION = 1e8
+
+_CORRECTION_WARNED = False
+
+
+def _warn_if_underdetermined(m2_inverse: jnp.ndarray, closure: GradientBoundaryClosure) -> None:
+    """Warn once if the Hessian correction is singular enough to amplify rather than repair.
+
+    A boundary cell is reconstructed with whatever its closure supplies on the boundary faces, and a
+    closure that returns the owner's own gradient there supplies no direction the cell did not
+    already have. On a boundary **tetrahedron** that leaves the six independent Hessian components
+    underdetermined, and ``M2`` is then singular to working precision -- the reconstruction stops
+    being exact for quadratics and starts amplifying instead. It is a property of the mesh and the
+    closure together, which is why it is detected here rather than assumed from a cell-shape count:
+    a boundary hexahedron has fewer interior faces than components too, and is perfectly determined,
+    because each face carries a whole gradient vector rather than one number.
+
+    Emitted once per process -- the geometry is fixed, so one warning is the whole message -- and
+    only when the values are concrete, since a traced build cannot be inspected without forcing it.
+
+    Parameters
+    ----------
+    m2_inverse : jnp.ndarray
+        The Hessian correction's inverse, shape ``(n_cells, n_sym, n_sym)``.
+    closure : GradientBoundaryClosure
+        The closure it was probed through, named in the warning.
+    """
+    global _CORRECTION_WARNED
+    if _CORRECTION_WARNED or isinstance(jnp.asarray(m2_inverse), jax.core.Tracer):
+        return
+    worst = float(jnp.max(jnp.abs(m2_inverse)))
+    if not worst > _UNDERDETERMINED_CORRECTION:
+        return
+    _CORRECTION_WARNED = True
+    name = type(closure).__name__
+    remedy = (
+        "Try SkewCorrectedGradient, which supplies the missing direction from the boundary value"
+        if name == "OwnerGradient"
+        else "Check the mesh at its boundary cells"
+    )
+    warnings.warn(
+        f"MultipleCorrectionGradient: the Hessian correction is singular on this mesh under "
+        f"{name} (largest entry {worst:.2e}, against order one on a well-posed mesh). Some boundary "
+        f"cell's faces leave the six components underdetermined -- a boundary tetrahedron is the "
+        f"usual cause -- and the reconstruction there amplifies instead of repairing. {remedy}.",
+        stacklevel=2,
+    )
+
+
 def _build_corrections(
     mesh: Mesh, geometry: MeshGeometry, closure: GradientBoundaryClosure
 ) -> Corrections:
@@ -527,8 +583,10 @@ def _build_corrections(
         second = one_exact(first, face_gradient)
         m2_columns.append(contract_symmetric(_symmetrize(second), dim))
 
+    m2_inverse = jnp.linalg.inv(jnp.stack(m2_columns, axis=-1))
+    _warn_if_underdetermined(m2_inverse, closure)
     return Corrections(
         m1_inverse=m1_inverse,
-        m2_inverse=jnp.linalg.inv(jnp.stack(m2_columns, axis=-1)),
+        m2_inverse=m2_inverse,
         gradient_defect=jnp.stack(defect_columns, axis=-1),
     )
