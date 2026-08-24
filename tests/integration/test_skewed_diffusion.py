@@ -49,10 +49,12 @@ class _LaggedGradient(GradientScheme):
 
     inner: GradientScheme
 
-    def gradients(self, field, mesh, geometry, boundary_values, *, operator_hook=None):
+    def _reconstruct_gradient(
+        self, field, mesh, geometry, boundary_values, *, operator_hook=None, imposed=None
+    ):
         return jax.lax.stop_gradient(
             self.inner.gradients(
-                field, mesh, geometry, boundary_values, operator_hook=operator_hook
+                field, mesh, geometry, boundary_values, operator_hook=operator_hook, imposed=imposed
             )
         )
 

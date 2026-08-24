@@ -91,6 +91,97 @@ class _CorrectedTerms(NamedTuple):
     volume: jnp.ndarray  # (n_cells,) cell volumes
 
 
+class ImposedGradient(eqx.Module):
+    """A gradient that is *known* on some cells, imposed on a reconstruction rather than reconstructed.
+
+    Some cells' gradient is a model quantity rather than something a stencil should estimate. The
+    near-wall ``omega`` of a k--omega closure is the standing example: those cells do not solve a
+    transport balance at all, their value being fixed by a profile going like ``1 / d**2``, so the
+    honest gradient there is that profile's analytical derivative. Reconstructing it instead is not
+    merely imprecise -- a linear fit over cells whose wall distance varies sharply returns about a
+    quarter of the analytical magnitude, and the neighbouring ring roughly twice too much.
+
+    Overwriting the gradient a scheme *returns* is not enough for every scheme, which is why this is
+    passed **in** rather than applied **after**. A reconstruction that consumes its own first
+    estimate -- to build a Hessian by differentiating it, say -- would consume the value being
+    replaced and correct it only once the damage was done.
+
+    ⚠️ **Imposing a gradient substitutes a model for a reconstruction, so a scheme's exactness
+    contract stops at the imposed cells and the cells that read them.** Correction matrices are
+    calibrated against the operator a scheme would otherwise apply, and an imposed value is by
+    construction not what that operator returns. That is the trade taken deliberately: a consistent
+    operator around a value measured four times too small is worse than an inconsistent one around
+    the right value.
+
+    Attributes
+    ----------
+    cells : jnp.ndarray
+        Indices of the cells whose gradient is imposed, shape ``(n_imposed,)``.
+    gradient : jnp.ndarray
+        The gradient imposed there, shape ``(n_imposed, dim)``.
+
+    Examples
+    --------
+    >>> import jax.numpy as jnp
+    >>> imposed = ImposedGradient(jnp.array([1]), jnp.array([[3.0, 4.0]]))
+    >>> imposed.impose(jnp.zeros((3, 2)))
+    Array([[0., 0.],
+           [3., 4.],
+           [0., 0.]], dtype=float64)
+    """
+
+    cells: jnp.ndarray
+    gradient: jnp.ndarray
+
+    def impose(self, gradient: jnp.ndarray) -> jnp.ndarray:
+        """``gradient`` with the imposed rows overwritten.
+
+        Parameters
+        ----------
+        gradient : jnp.ndarray
+            A cell gradient, shape ``(n_cells, dim)``.
+
+        Returns
+        -------
+        jnp.ndarray
+            The same array with rows :attr:`cells` set to :attr:`gradient`; shape unchanged.
+        """
+        return gradient.at[self.cells].set(self.gradient)
+
+    def impose_on_faces(
+        self, face_gradient: jnp.ndarray, face_cells: FaceCellConnectivity
+    ) -> jnp.ndarray:
+        """``face_gradient`` with every boundary face of an imposed cell carrying that cell's gradient.
+
+        A boundary closure exists to supply a derivative a boundary condition does not carry. Where
+        a caller has imposed one it is not missing, and closing it from the field values there
+        contradicts the model that imposed it: on a wall ``omega`` face the boundary value is itself
+        a zero-gradient closure, so differencing against it imposes a near-zero normal derivative
+        exactly where the modelled profile diverges.
+
+        Interior faces are untouched -- they interpolate from two cells, both of which already carry
+        the imposition.
+
+        Parameters
+        ----------
+        face_gradient : jnp.ndarray
+            The gradient on every face as a closure left it, shape ``(n_faces, dim)``.
+        face_cells : FaceCellConnectivity
+            The face->cell incidence.
+
+        Returns
+        -------
+        jnp.ndarray
+            The same array with the imposed cells' boundary faces overwritten.
+        """
+        owner = face_cells.owner
+        shape = (face_cells.n_cells, face_gradient.shape[-1])
+        values = jnp.zeros(shape, dtype=face_gradient.dtype).at[self.cells].set(self.gradient)
+        flagged = jnp.zeros(face_cells.n_cells, dtype=bool).at[self.cells].set(True)
+        take = flagged[owner] & ~face_cells.interior
+        return jnp.where(take[:, None], values[owner], face_gradient)
+
+
 class GradientScheme(eqx.Module):
     """Strategy interface: reconstruct cell gradients from a cell field."""
 
@@ -123,7 +214,6 @@ class GradientScheme(eqx.Module):
         """
         return self
 
-    @abc.abstractmethod
     def gradients(
         self,
         field: jnp.ndarray,
@@ -132,8 +222,13 @@ class GradientScheme(eqx.Module):
         boundary_values: jnp.ndarray,
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        imposed: ImposedGradient | None = None,
     ) -> jnp.ndarray:
         """Cell gradients of ``field``, shape ``(n_cells, dim)``.
+
+        The reconstruction itself is :meth:`_reconstruct_gradient`; this wrapper is where an
+        imposed gradient is guaranteed to reach the answer, so that every scheme honours it whether
+        or not it has anywhere earlier to put it.
 
         Parameters
         ----------
@@ -152,13 +247,29 @@ class GradientScheme(eqx.Module):
             the already-exchanged ``field`` and so ignores it; a scheme whose reconstruction couples
             across partitions in a way this per-apply exchange cannot make serial-exact must raise
             when it is not ``None``, never silently return a wrong owned gradient.
+        imposed : ImposedGradient, optional
+            Cells whose gradient the caller knows analytically and wants used instead of a
+            reconstruction. ``None`` (the default) reconstructs everywhere, and leaves every scheme
+            here byte-identical to one that had never heard of the argument.
+
+        Returns
+        -------
+        jnp.ndarray
+            Cell gradients, shape ``(n_cells, dim)``; the imposed rows carry exactly what was
+            imposed.
         """
+        gradient = self._reconstruct_gradient(
+            field,
+            mesh,
+            geometry,
+            boundary_values,
+            operator_hook=operator_hook,
+            imposed=imposed,
+        )
+        return gradient if imposed is None else imposed.impose(gradient)
 
-
-class CompactGreenGauss(GradientScheme):
-    """One-shot Green–Gauss with linearly-interpolated interior face values."""
-
-    def gradients(
+    @abc.abstractmethod
+    def _reconstruct_gradient(
         self,
         field: jnp.ndarray,
         mesh: Mesh,
@@ -166,11 +277,35 @@ class CompactGreenGauss(GradientScheme):
         boundary_values: jnp.ndarray,
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        imposed: ImposedGradient | None = None,
+    ) -> jnp.ndarray:
+        """The reconstruction itself; see :meth:`gradients` for the arguments.
+
+        The extension point every scheme implements. ``imposed`` is passed down rather than left to
+        :meth:`gradients` because a scheme that *consumes* its own reconstructed gradient -- to
+        differentiate it into a Hessian, say -- must impose before that consumer reads it, not after.
+        A scheme with no such internal consumer may ignore the argument entirely: :meth:`gradients`
+        applies it to whatever comes back either way.
+        """
+
+
+class CompactGreenGauss(GradientScheme):
+    """One-shot Green–Gauss with linearly-interpolated interior face values."""
+
+    def _reconstruct_gradient(
+        self,
+        field: jnp.ndarray,
+        mesh: Mesh,
+        geometry: MeshGeometry,
+        boundary_values: jnp.ndarray,
+        *,
+        operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        imposed: ImposedGradient | None = None,
     ) -> jnp.ndarray:
         # No iterative solve: an owned cell's one-shot gradient is exact once its `field` halo is
         # filled, so the per-apply ghost exchange (`operator_hook`) has nothing to correct here. The
         # distributed residual still exchanges the *final* gradient for the flux (its `gradient_hook`).
-        del operator_hook
+        del operator_hook, imposed
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells
         g = interpolation_factor(face_cells, geometry)
@@ -1741,7 +1876,7 @@ class CorrectedGreenGauss(GradientScheme):
         )
         return fc.scatter_conservative(scale(t.area_vector, phi_base))
 
-    def gradients(
+    def _reconstruct_gradient(
         self,
         field: jnp.ndarray,
         mesh: Mesh,
@@ -1749,7 +1884,11 @@ class CorrectedGreenGauss(GradientScheme):
         boundary_values: jnp.ndarray,
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        imposed: ImposedGradient | None = None,
     ) -> jnp.ndarray:
+        # No internal consumer: this scheme solves for the gradient and returns it, so an imposed
+        # row is applied by `gradients` and nothing here reads the row it replaces.
+        del imposed
         t = self.terms(mesh, geometry)
         system = self.system(t, self.preconditioner)
         return self.solver.solve(
@@ -2455,7 +2594,7 @@ class HessianCorrectedGradient(GradientScheme):
     boundary_closure: HessianBoundaryClosure = eqx.field(default_factory=OwnerHessian)
     prepared_outer: GradientPreconditioner | None = None
 
-    def gradients(
+    def _reconstruct_gradient(
         self,
         field: jnp.ndarray,
         mesh: Mesh,
@@ -2463,6 +2602,7 @@ class HessianCorrectedGradient(GradientScheme):
         boundary_values: jnp.ndarray,
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        imposed: ImposedGradient | None = None,
     ) -> jnp.ndarray:
         if operator_hook is not None:
             raise NotImplementedError(
@@ -2473,6 +2613,14 @@ class HessianCorrectedGradient(GradientScheme):
                 "solve — not yet built. Use CorrectedGreenGauss with SweptGradientSolve for a "
                 "distributed non-orthogonal gradient."
             )
+        # ⚠️ Deliberately applied by `gradients` to the converged answer, and NOT projected onto the
+        # sweep's gradient iterate, which would be the analogue of what the multiple-correction
+        # scheme does. Overwriting rows of an iterate changes the fixed point rather than the path
+        # to it: the coupled sweep's whole justification is that its fixed point is the Schur
+        # solution of the gradient--Hessian system, and a projected sweep converges to a different
+        # system's answer. Imposing a gradient here would have to enter as a constraint on that
+        # system -- a real piece of work, and not one this seam licenses.
+        del imposed
         if self.prepared_outer is not None and self.prepared_outer.inverse.shape[0] != mesh.n_cells:
             raise ValueError(
                 "this gradient scheme was bound to a geometry of "

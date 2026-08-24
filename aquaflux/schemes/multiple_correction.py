@@ -30,7 +30,10 @@ merely fast:
 
 * **It is exactly linear in the field.** A fixed sequence of fixed linear maps, with no convergence
   test and no data-dependent branching, so the tangent is the same sequence applied to the tangent
-  — an unrolled apply, not an implicit-function solve.
+  — an unrolled apply, not an implicit-function solve. Handed an
+  :class:`~aquaflux.schemes.ImposedGradient` it becomes *affine* rather than linear, the imposed
+  values being an added constant; the tangent is still that same unrolled apply, which is the half
+  of the property a differentiated solve depends on.
 * **The matrices it inverts are small, local and well conditioned.** Measured on perturbed
   tetrahedra, ``cond(M1) <= 4.8`` and ``cond(M2) <= 10``, where the coupled scheme's own per-cell
   Hessian block under an owner boundary closure is ``1e18``. That is why no iteration is needed:
@@ -46,6 +49,16 @@ one-sided difference ``(phi_face - phi_owner) / (d.n)`` does not, on a skewed me
 costs the whole reconstruction its accuracy; the non-orthogonal correction that repairs it is
 :func:`~aquaflux.schemes.non_orthogonal_correction`, shared with the diffusion flux that has always
 needed the same term for the same reason.
+
+⚠️ **A closure is also the wrong instrument where the boundary value is not data.** Every closure
+here reads the field on the boundary face, and a *zero-gradient* boundary condition does not supply
+one -- it returns the owner cell's own value. Differencing against that does not estimate the normal
+derivative, it *imposes* a near-zero one, which on the near-wall ``omega`` of a k--omega closure
+contradicts a modelled profile that diverges like ``1 / d**2``. Measured on a backward-facing step
+this leaves the march with no descent direction at all rather than a degraded one. The seam for such
+a field is :class:`~aquaflux.schemes.ImposedGradient`: the caller states the gradient it knows, and
+it is used in place of both the reconstruction and the closure. Where a gradient is genuinely
+unknown a closure is still the answer -- the two solve different problems.
 """
 
 from __future__ import annotations
@@ -60,6 +73,7 @@ from aquaflux.vectors import dot, scale
 
 from .gradient import (
     GradientScheme,
+    ImposedGradient,
     contract_symmetric,
     expand_symmetric,
     symmetric_components,
@@ -90,6 +104,13 @@ class GradientBoundaryClosure(eqx.Module):
     injects an error at linear order — and the correction matrices, calibrated on quadratics, cannot
     remove it. This is the one hard requirement on an implementation; being crude is survivable,
     being linear-inexact is not.
+
+    ⚠️ **A closure receives the boundary field values as an array, with no boundary condition
+    attached, so it cannot tell data from a closure of its own.** A zero-gradient condition returns
+    the owner cell's value, and any closure that reads it is then differencing a number that carries
+    no information. Where that matters the answer is not a cleverer closure but
+    :class:`~aquaflux.schemes.ImposedGradient`, through which a caller states the gradient it
+    knows; a closure's job is the case where nobody knows it.
     """
 
     @abc.abstractmethod
@@ -155,6 +176,14 @@ class SkewCorrectedGradient(GradientBoundaryClosure):
     then destroys the reconstruction outright rather than degrading it — measured worse than the
     owner closure it was meant to improve on. It is shared with the diffusion flux, which has always
     needed the same term to extrapolate the same derivative to the same place.
+
+    ⚠️ **It is only as good as the boundary value, and a zero-gradient condition supplies none.**
+    Such a condition returns the owner cell's own value, so the difference this closure takes is
+    ``-correction`` rather than a rise, and the normal derivative it produces is near zero by
+    construction. On a field whose modelled profile diverges at the wall -- the near-wall ``omega``
+    of a k--omega closure -- that is not an approximation but a contradiction, and it is measured to
+    cost a march its descent direction outright. Give such a field an
+    :class:`~aquaflux.schemes.ImposedGradient`, which overrides this closure on the faces it covers.
     """
 
     def face_gradient(self, gradient, field, boundary_values, face_cells, geometry):
@@ -239,7 +268,7 @@ class MultipleCorrectionGradient(GradientScheme):
             prepared=_build_corrections(mesh, geometry, self.boundary_closure),
         )
 
-    def gradients(
+    def _reconstruct_gradient(
         self,
         field: jnp.ndarray,
         mesh: Mesh,
@@ -247,6 +276,7 @@ class MultipleCorrectionGradient(GradientScheme):
         boundary_values: jnp.ndarray,
         *,
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        imposed: ImposedGradient | None = None,
     ) -> jnp.ndarray:
         if operator_hook is not None:
             raise NotImplementedError(
@@ -256,7 +286,7 @@ class MultipleCorrectionGradient(GradientScheme):
                 "halo-exchanged once between the two passes. `operator_hook` is the wrong seam for "
                 "that: it refreshes a solve's unknown, and there is no solve here."
             )
-        return self.reconstruct(field, mesh, geometry, boundary_values)[0]
+        return self.reconstruct(field, mesh, geometry, boundary_values, imposed=imposed)[0]
 
     def reconstruct(
         self,
@@ -264,20 +294,49 @@ class MultipleCorrectionGradient(GradientScheme):
         mesh: Mesh,
         geometry: MeshGeometry,
         boundary_values: jnp.ndarray,
+        *,
+        imposed: ImposedGradient | None = None,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Both reconstructed quantities: the gradient and the Hessian.
 
         The Hessian is a genuine output here rather than an eliminated intermediate, and it costs
         nothing extra — the gradient's own second-order correction is built from it.
 
+        Parameters
+        ----------
+        field : jnp.ndarray
+            Cell values, shape ``(n_cells,)``.
+        mesh : Mesh
+            Provides owner/neighbour connectivity.
+        geometry : MeshGeometry
+            Face and cell metrics.
+        boundary_values : jnp.ndarray
+            Face values of the field, shape ``(n_faces,)``; interior entries are ignored.
+        imposed : ImposedGradient, optional
+            Cells whose gradient is a model quantity rather than something to reconstruct. It is
+            imposed on the first-order-exact gradient **before** the second pass differentiates it,
+            and on the boundary faces those cells own -- so the Hessian is built from the imposed
+            gradient rather than from the estimate it replaces. That ordering is the whole reason
+            this is an argument to the reconstruction and not a correction applied to its result.
+
         Returns
         -------
         gradient : jnp.ndarray
-            Cell gradients, shape ``(n_cells, dim)``; exact for quadratic fields.
+            Cell gradients, shape ``(n_cells, dim)``; exact for quadratic fields where nothing is
+            imposed, and exactly the imposed value where something is.
         hessian : jnp.ndarray
             Cell Hessians in independent components, shape ``(n_cells, n_sym)``, in
             :func:`~aquaflux.schemes.expand_symmetric`'s order; exact for quadratic fields and
             first-order accurate in general.
+
+        Notes
+        -----
+        With ``imposed`` given the reconstruction is **affine** in ``field`` rather than linear: the
+        imposed values are an added constant, so the map no longer sends zero to zero. Its tangent
+        is still the same fixed sequence of fixed linear maps applied to the tangent, with no
+        implicit-function solve -- which is the property that matters inside a differentiated solve.
+        What is given up is only that the map can no longer be recovered by evaluating it on a
+        tangent.
         """
         prepared = self.prepared
         if prepared is None:
@@ -292,6 +351,12 @@ class MultipleCorrectionGradient(GradientScheme):
         face_gradient = self.boundary_closure.face_gradient(
             first, field, boundary_values, face_cells, geometry
         )
+        if imposed is not None:
+            # Before the second pass, not after it. That pass differentiates `first` and closes the
+            # boundary from it, so an imposition applied to the returned gradient would arrive after
+            # both of its consumers had already read the estimate it replaces.
+            first = imposed.impose(first)
+            face_gradient = imposed.impose_on_faces(face_gradient, face_cells)
         raw = _one_exact(
             first, face_gradient, prepared.m1_inverse, factor, face_cells, area, geometry
         )
@@ -299,7 +364,9 @@ class MultipleCorrectionGradient(GradientScheme):
             "nab,nb->na", prepared.m2_inverse, contract_symmetric(_symmetrize(raw), dim)
         )
         gradient = first - jnp.einsum("nia,na->ni", prepared.gradient_defect, hessian)
-        return gradient, hessian
+        # Again at the end: the second-order correction is a defect of the *reconstruction*, and
+        # subtracting it from an imposed value would corrupt the very number the caller imposed.
+        return (gradient if imposed is None else imposed.impose(gradient)), hessian
 
 
 def _symmetrize(tensor: jnp.ndarray) -> jnp.ndarray:

@@ -8,6 +8,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.schemes import (
+    CompactGreenGauss,
+    CorrectedGreenGauss,
+    HessianCorrectedGradient,
+    ImposedGradient,
     MultipleCorrectionGradient,
     OwnerGradient,
     SkewCorrectedGradient,
@@ -190,3 +194,141 @@ def test_it_refuses_a_domain_decomposed_solve_rather_than_silently_misreconstruc
             jnp.zeros((mesh.n_faces,)),
             operator_hook=lambda x: x,
         )
+
+
+def _boundary_owner(mesh):
+    """A cell that owns at least one boundary face, and the faces it owns there."""
+    face_cells = mesh.face_cells
+    boundary = np.where(~np.asarray(face_cells.interior))[0]
+    owner = int(np.asarray(face_cells.owner)[boundary[0]])
+    return owner, [f for f in boundary if int(np.asarray(face_cells.owner)[f]) == owner]
+
+
+def test_an_imposed_gradient_is_returned_exactly_and_leaves_the_rest_reconstructed() -> None:
+    """The contract a caller relies on: what was imposed comes back, and only that."""
+    mesh = perturbed_grid_3d(4, 4, 4, perturb=0.30, seed=5)
+    geometry = mesh.geometry()
+    scheme = MultipleCorrectionGradient().bind(mesh, geometry)
+    field = jax.random.normal(jax.random.PRNGKey(0), (mesh.n_cells,))
+    boundary = jnp.zeros((mesh.n_faces,))
+    cells = jnp.array([0, 3, 7])
+    imposed = ImposedGradient(
+        cells, jnp.array([[1.0, 2.0, 3.0], [-1.0, 0.5, 0.0], [4.0, 4.0, 4.0]])
+    )
+
+    gradient = scheme.gradients(field, mesh, geometry, boundary, imposed=imposed)
+    assert np.array_equal(np.asarray(gradient[cells]), np.asarray(imposed.gradient))
+    # Not merely overwritten at the end: the second-order defect correction is a defect of the
+    # *reconstruction*, and subtracting it from an imposed value would corrupt what was imposed.
+
+
+def test_an_imposed_gradient_reaches_the_hessian_rather_than_correcting_it_afterwards() -> None:
+    """The reason this is an argument to the reconstruction and not a patch on its result.
+
+    The scheme differentiates its own first estimate to build the Hessian, so an imposition that
+    arrived after the reconstruction would leave that Hessian built on the value it replaces. The
+    Hessian moving is the observable proof that it arrived in time -- a post-hoc patch could not
+    move it at all.
+    """
+    mesh = perturbed_grid_3d(4, 4, 4, perturb=0.30, seed=5)
+    geometry = mesh.geometry()
+    scheme = MultipleCorrectionGradient().bind(mesh, geometry)
+    field = jax.random.normal(jax.random.PRNGKey(2), (mesh.n_cells,))
+    boundary = jnp.zeros((mesh.n_faces,))
+    owner, _ = _boundary_owner(mesh)
+    imposed = ImposedGradient(jnp.array([owner]), jnp.array([[5.0, -2.0, 1.0]]))
+
+    _, plain_hessian = scheme.reconstruct(field, mesh, geometry, boundary)
+    _, hessian = scheme.reconstruct(field, mesh, geometry, boundary, imposed=imposed)
+    assert not np.array_equal(np.asarray(plain_hessian), np.asarray(hessian))
+
+
+def test_imposing_nothing_is_byte_identical_to_never_having_been_asked() -> None:
+    """The default path must not move, on the gradient or the Hessian."""
+    mesh = perturbed_grid_2d(5, 5, perturb=0.25, seed=8)
+    case = _quadratic(mesh, seed=2)
+    scheme = MultipleCorrectionGradient().bind(mesh, case["geometry"])
+    args = (case["cell_values"], mesh, case["geometry"], case["face_values"])
+
+    for plain, given in zip(
+        scheme.reconstruct(*args), scheme.reconstruct(*args, imposed=None), strict=True
+    ):
+        assert np.array_equal(np.asarray(plain), np.asarray(given))
+
+
+def test_an_imposed_cells_boundary_faces_take_its_gradient_instead_of_the_closure() -> None:
+    """A closure guesses what a boundary condition does not carry; an imposed gradient is not a guess.
+
+    This is what unblocks :class:`SkewCorrectedGradient` on a wall ``omega``, whose boundary value is
+    itself a zero-gradient closure rather than data -- differencing against it imposes a near-zero
+    normal derivative exactly where the modelled profile diverges.
+    """
+    mesh = perturbed_grid_2d(4, 4, perturb=0.2, seed=9)
+    face_cells = mesh.face_cells
+    owner, owned_faces = _boundary_owner(mesh)
+    imposed = ImposedGradient(jnp.array([owner]), jnp.array([[7.0, 9.0]]))
+
+    closed = imposed.impose_on_faces(jnp.zeros((mesh.n_faces, mesh.dim)), face_cells)
+    assert np.array_equal(np.asarray(closed[np.asarray(owned_faces)]), np.tile([7.0, 9.0], (2, 1)))
+    untouched = np.array([f for f in range(mesh.n_faces) if f not in owned_faces])
+    assert not np.any(np.asarray(closed)[untouched])
+
+
+def test_an_imposed_reconstruction_is_affine_with_the_same_linear_part() -> None:
+    """Imposition adds a constant; it does not make the tangent an implicit solve.
+
+    The linearity test above pins the unimposed map. With something imposed the map is affine -- it
+    no longer sends zero to zero -- but its tangent is still the same fixed sequence of fixed linear
+    maps, which is the property a differentiated solve depends on. Evaluated by comparing the
+    forward-mode tangent against the map run with the imposed values zeroed, which is exactly its
+    linear part.
+    """
+    mesh = perturbed_grid_3d(4, 4, 4, perturb=0.30, seed=5)
+    geometry = mesh.geometry()
+    scheme = MultipleCorrectionGradient().bind(mesh, geometry)
+    boundary = jnp.zeros((mesh.n_faces,))
+    field = jax.random.normal(jax.random.PRNGKey(0), (mesh.n_cells,))
+    tangent = jax.random.normal(jax.random.PRNGKey(1), (mesh.n_cells,))
+    cells = jnp.array([0, 3, 7])
+    values = jnp.array([[1.0, 2.0, 3.0], [-1.0, 0.5, 0.0], [4.0, 4.0, 4.0]])
+
+    def reconstruct(phi, gradient):
+        return scheme.gradients(
+            phi, mesh, geometry, boundary, imposed=ImposedGradient(cells, gradient)
+        )
+
+    assert np.any(np.asarray(reconstruct(jnp.zeros_like(field), values)))  # affine, not linear
+    _, tangent_out = jax.jvp(lambda phi: reconstruct(phi, values), (field,), (tangent,))
+    assert np.array_equal(
+        np.asarray(tangent_out), np.asarray(reconstruct(tangent, jnp.zeros_like(values)))
+    )
+
+
+def test_every_scheme_honours_an_imposed_gradient_whether_or_not_it_can_use_it_early() -> None:
+    """The base class guarantees the contract, so a scheme with no internal consumer still honours it.
+
+    :class:`~aquaflux.schemes.HessianCorrectedGradient` deliberately does *not* project the
+    imposition onto its sweep's iterate -- that would change the fixed point rather than the path to
+    it -- so this is the whole of what it does with one, and it must still do it.
+    """
+    mesh = perturbed_grid_2d(5, 5, perturb=0.25, seed=8)
+    geometry = mesh.geometry()
+    field = jax.random.normal(jax.random.PRNGKey(4), (mesh.n_cells,))
+    boundary = jnp.zeros((mesh.n_faces,))
+    cells = jnp.array([2, 6])
+    imposed = ImposedGradient(cells, jnp.array([[1.5, -0.5], [0.25, 3.0]]))
+
+    for scheme in (
+        CompactGreenGauss(),
+        CorrectedGreenGauss(),
+        HessianCorrectedGradient().bind(mesh, geometry),
+        MultipleCorrectionGradient().bind(mesh, geometry),
+    ):
+        plain = scheme.gradients(field, mesh, geometry, boundary)
+        given = scheme.gradients(field, mesh, geometry, boundary, imposed=imposed)
+        assert np.array_equal(np.asarray(given[cells]), np.asarray(imposed.gradient)), type(scheme)
+        # Nothing else moves in a scheme that consumes no gradient of its own.
+        if not isinstance(scheme, MultipleCorrectionGradient):
+            assert np.array_equal(
+                np.asarray(given.at[cells].set(plain[cells])), np.asarray(plain)
+            ), type(scheme)

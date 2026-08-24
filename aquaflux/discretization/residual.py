@@ -59,7 +59,7 @@ from .face_flux import FaceContext
 if TYPE_CHECKING:
     from aquaflux.mesh import Mesh, MeshGeometry
     from aquaflux.properties import PropertyModel
-    from aquaflux.schemes import GradientScheme
+    from aquaflux.schemes import GradientScheme, ImposedGradient
 
     from .face_flux import FaceFluxOperator
     from .source import VolumeSource
@@ -317,6 +317,7 @@ class ResidualAssembler(eqx.Module):
         properties: dict[str, jnp.ndarray],
         *,
         gradient_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        imposed: ImposedGradient | None = None,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Cell gradients and the boundary values consistent with them.
 
@@ -331,6 +332,11 @@ class ResidualAssembler(eqx.Module):
         threaded into an iterative reconstruction's own linear solve so a partition-coupled gradient
         scheme refreshes its ghost rows each sweep, and is applied again to the returned gradient in
         :meth:`residual` so the flux reads exchanged ghost gradients.
+
+        ``imposed`` names cells whose gradient the caller knows analytically and wants used in place
+        of a reconstruction; it is handed to the scheme rather than applied afterwards, because a
+        scheme that consumes its own reconstructed gradient must impose before that consumer reads
+        it. ``None`` leaves the reconstruction untouched.
         """
         dim = self.mesh.dim
         n_cells = self.mesh.n_cells
@@ -340,11 +346,16 @@ class ResidualAssembler(eqx.Module):
         zero_grad = jnp.zeros((n_cells, dim), dtype=phi.dtype)
         leading_bvals = self.boundary_values(phi, zero_grad, properties)
         gradient = self.gradient_scheme.gradients(
-            phi, self.mesh, self.geometry, leading_bvals, operator_hook=gradient_hook
+            phi,
+            self.mesh,
+            self.geometry,
+            leading_bvals,
+            operator_hook=gradient_hook,
+            imposed=imposed,
         )
         return gradient, self.boundary_values(phi, gradient, properties)
 
-    def gradient(self, phi: jnp.ndarray) -> jnp.ndarray:
+    def gradient(self, phi: jnp.ndarray, *, imposed: ImposedGradient | None = None) -> jnp.ndarray:
         """Reconstructed cell gradients of ``phi``, shape ``(n_cells, dim)``.
 
         The post-processing accessor for the injected gradient scheme — e.g. to form the
@@ -357,9 +368,14 @@ class ResidualAssembler(eqx.Module):
         ----------
         phi : jnp.ndarray
             Cell field, shape ``(n_cells,)``.
+        imposed : ImposedGradient, optional
+            Cells whose gradient is a model quantity rather than something to reconstruct -- a
+            near-wall ``omega``, whose value is itself imposed, is the standing case. Reaches the
+            scheme, so a reconstruction that differentiates its own first estimate builds on the
+            imposed gradient rather than correcting it afterwards.
         """
         properties = self.properties.evaluate(self.mesh.cell_zones)
-        return self._gradient(phi, properties)[0]
+        return self._gradient(phi, properties, imposed=imposed)[0]
 
     def residual(
         self,
