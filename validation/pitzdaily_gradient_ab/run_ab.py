@@ -64,6 +64,7 @@ from aquaflux.schemes import (  # noqa: E402
     CorrectedGreenGauss,
     GmresGradientSolve,
     HessianCorrectedGradient,
+    MultipleCorrectionGradient,
     NestedHessianSolve,
     SweptGradientSolve,
 )
@@ -201,6 +202,11 @@ BETCHEN_LABEL = (
 ARMS = (
     ("standard", "CorrectedGreenGauss", CorrectedGreenGauss()),
     ("betchen", BETCHEN_LABEL, BETCHEN),
+    (
+        "multicorr",
+        "MultipleCorrectionGradient (two face passes, no system)",
+        MultipleCorrectionGradient(),
+    ),
 )
 
 
