@@ -42,6 +42,7 @@ scale; prefer the default reference unless its own self-check reports it unconve
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import resource
 import sys
@@ -58,12 +59,15 @@ import numpy as np  # noqa: E402
 from aquaflux.io import read_openfoam  # noqa: E402
 from aquaflux.mesh.quality import face_planarity  # noqa: E402
 from aquaflux.schemes import (  # noqa: E402
+    AveragedNeighbourHessian,
     CorrectedGreenGauss,
     GmresGradientSolve,
     HessianCorrectedGradient,
     NestedHessianSolve,
+    OwnerHessian,
     SweptGradientSolve,
 )
+from aquaflux.schemes.gradient import contraction_rate  # noqa: E402
 from aquaflux.schemes.interpolation import interpolation_factor  # noqa: E402
 from aquaflux.vectors import norm_squared  # noqa: E402
 
@@ -90,6 +94,14 @@ OUTER_INNER_SWEEPS = int(os.environ.get("UV_OUTER_INNER", "6"))
 # So the relaxation is part of what has to be calibrated per mesh, not a constant: swept alongside the
 # sweep count, because the two trade against each other (heavier damping needs more sweeps).
 OUTER_RELAXATIONS = tuple(float(x) for x in os.environ.get("UV_OUTER_RELAX", "1.0").split(","))
+#: Relaxations to measure the COUPLED sweep's contraction rate at, under ``--rate``. A rate is one
+#: cheap measurement where an accuracy rung is a full reconstruction, so a ladder here is affordable
+#: on a mesh where the ladder above is not. Over-relaxation has an interior optimum on well-shaped
+#: cells and moves back toward 1.0 as they degrade, so the point of measuring it here is to find out
+#: which regime this mesh is in -- not to confirm a value found on a synthetic one.
+RATE_RELAXATIONS = tuple(
+    float(x) for x in os.environ.get("UV_RATE_RELAX", "1.0,1.05,1.1").split(",")
+)
 
 
 def peak_rss_gb() -> float:
@@ -267,6 +279,51 @@ def reconstruct(scheme, field, mesh, geometry, bvals, label):
     return gradient
 
 
+def coupled_sweep_rates(mesh, geometry) -> None:
+    """Measure the coupled block sweep's contraction rate on this mesh, and what it implies.
+
+    The rate is what sets the sweep count: `ceil(log(tol) / log(rate))`. It is one estimate rather
+    than a ladder of reconstructions, so this fits where the accuracy ladder does not -- and it is
+    the quantity that says whether a mesh sits in the regime the defaults were calibrated for.
+
+    Three things are varied, because each has been measured to matter on some mesh and not on
+    others: the boundary closure (it changes the operator), ``local_schur_block`` (it selects the
+    outer preconditioner, and the two differ only where cells are bad), and the relaxation.
+    """
+    print("\ncoupled block sweep -- contraction rate", flush=True)
+    print(
+        f"  {'closure':<26} {'schur blk':>9} {'relax':>6} {'rate':>8} "
+        f"{'sweeps@1e-4':>12} {'@1e-6':>7}",
+        flush=True,
+    )
+    for closure_name, closure in (
+        ("OwnerHessian (shipped)", OwnerHessian()),
+        ("AveragedNeighbourHessian", AveragedNeighbourHessian()),
+    ):
+        systems = HessianCorrectedGradient._systems(mesh, geometry, closure)
+        inner = systems.inner()
+        for local_schur_block in (True, False):
+            preconditioner = systems.outer_preconditioner(inner, local_schur_block)
+            for relaxation in RATE_RELAXATIONS:
+                measured = contraction_rate(
+                    systems.coupled_error(relaxation, preconditioner, inner.preconditioner)
+                ).rate
+                if measured < 1.0:
+                    counts = tuple(
+                        math.ceil(math.log(tol) / math.log(measured)) for tol in (1e-4, 1e-6)
+                    )
+                    shown = f"{counts[0]:>12} {counts[1]:>7}"
+                else:
+                    shown = f"{'DIVERGES':>12} {'--':>7}"
+                print(
+                    f"  {closure_name:<26} {local_schur_block!s:>9} {relaxation:>6.2f} "
+                    f"{measured:>8.4f} {shown}   (peak {peak_rss_gb():.2f} GB)",
+                    flush=True,
+                )
+            del preconditioner
+        del systems, inner
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     # Optional, with a ``UV_MESH`` fallback: this is written for a mesh large enough to need
@@ -279,6 +336,14 @@ def main() -> None:
         nargs="?",
         default=os.environ.get("UV_MESH"),
         help="path to a polyMesh directory (or set UV_MESH)",
+    )
+    parser.add_argument(
+        # `UV_RATE` for the same reason `UV_MESH` exists: `validation/run_case.sh` invokes a script
+        # with no arguments, and this is the mode most likely to be run through it.
+        "--rate",
+        action="store_true",
+        default=os.environ.get("UV_RATE", "") not in ("", "0"),
+        help="measure the coupled sweep's contraction rate and stop (cheap; skips the ladders)",
     )
     parser.add_argument(
         "--exact",
@@ -315,6 +380,10 @@ def main() -> None:
     print(f"  peak RSS after import + geometry: {peak_rss_gb():.2f} GB", flush=True)
     skewness_census(mesh, geometry)
 
+    if args.rate:
+        coupled_sweep_rates(mesh, geometry)
+        return
+
     field, bvals, analytic = probe_field(geometry)
 
     # ORDER: the ladder runs CHEAPEST-FIRST and the reference runs LAST, which is the opposite of
@@ -326,7 +395,10 @@ def main() -> None:
     # them all to compare at the end is free next to one more reconstruction.
     print("\ninner (Hessian) solve -- reconstruction vs a converged reference", flush=True)
     print("  inner sweeps (cheapest first; the reference runs last)", flush=True)
-    default_sweeps = HessianCorrectedGradient().hessian_solver.sweeps
+    # The ladder below calibrates the NESTED arrangement's inner solve, so the count to mark is that
+    # arrangement's own default -- not the scheme's, whose default is now the coupled sweep and whose
+    # count means something different.
+    default_sweeps = NestedHessianSolve().hessian_solver.sweeps
     measured: list[tuple[int, np.ndarray]] = []
     for sweeps in sorted(INNER_LADDER):
         gradient = reconstruct(
