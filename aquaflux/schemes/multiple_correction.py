@@ -163,11 +163,19 @@ class OwnerGradient(GradientBoundaryClosure):
     the cell gradient *is* the face gradient — and on hexahedral meshes it costs nothing measurable:
     exactness holds and ``cond(M2)`` runs 4.8--5.3 against an exact-boundary reference's 2.5--2.9.
 
-    ⚠️ **It fails on boundary tetrahedra.** Such a cell has four faces and one or two of them then
-    carry no direction the owner's own gradient has not already supplied, which leaves the six
-    Hessian components underdetermined: measured ``cond(M2)`` of ``9e17`` and a reconstruction no
-    longer exact for quadratics. Prefer :class:`SkewCorrectedGradient` on any mesh with tetrahedra
-    at a boundary.
+    ⚠️ **It fails on a tetrahedron with TWO OR MORE boundary faces** -- a corner or edge tet, not
+    merely a tet at a boundary. A boundary face closed with the owner's own gradient carries no
+    direction the cell did not already have, so such a cell is left with two informative faces
+    against six Hessian components and ``M2`` is singular to working precision. Measured on a
+    perturbed tetrahedral mesh, resolved by boundary-face count: cells with **0 or 1** boundary face
+    reconstruct a quadratic to ``7e-15`` with ``max |M2^-1|`` of 2--4.5; the eighteen cells with
+    **2** are wrong by **173 %** at ``1.6e16``. No other cell is affected.
+
+    That distinction is worth keeping, because the common case is on the safe side of it: on the
+    1.6M-cell snappyHexMesh reactor **all 3,063 four-faced cells have exactly one boundary face**,
+    and this closure reconstructs a quadratic there to ``4.9e-12`` -- as well as
+    :class:`SkewCorrectedGradient` does, and better conditioned. :meth:`MultipleCorrectionGradient.bind`
+    measures ``M2`` and warns rather than leaving this to be inferred from cell shapes.
     """
 
     reads_boundary_values: bool = eqx.field(static=True, default=False)

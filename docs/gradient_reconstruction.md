@@ -655,9 +655,21 @@ never reads a boundary value. On quadrilateral and hexahedral meshes it is exact
 better-conditioned of the two, and it is the one that marches a coupled RANS case.
 
 {class}`~aquaflux.schemes.SkewCorrectedGradient` adds the field's boundary value as an extra
-direction, which is what a boundary **tetrahedron** is short of -- four faces cannot supply the six
-independent directions a Hessian needs, and the owner closure leaves it underdetermined
-(`cond(M2)` of `9e17`, and no exactness). Reach for it there.
+direction, which is what a **corner or edge tetrahedron** is short of. The distinction matters: a
+boundary face closed with the owner's own gradient carries no new direction, so a tetrahedron with
+*one* boundary face still has three informative faces and reconstructs exactly, while one with *two
+or more* is left underdetermined and its correction goes singular. Measured on a perturbed
+tetrahedral mesh under the owner closure, resolved by boundary-face count:
+
+| boundary faces | cells | `max abs(M2^-1)` | max relative error |
+|---|---|---|---|
+| 0 | 72 | 1.97e+00 | 4.46e-15 |
+| 1 | 72 | 4.48e+00 | 7.20e-15 |
+| **2** | **18** | **1.61e+16** | **1.73e+00** |
+
+In practice most meshes sit on the safe side. On a 1.6-million-cell `snappyHexMesh` reactor, all
+3,063 four-faced cells have exactly one boundary face, and the default closure reconstructs a
+quadratic there to `4.9e-12` -- as well as the skew closure, and better conditioned.
 
 ```{warning}
 `SkewCorrectedGradient` stalls a coupled RANS march on the pitzDaily benchmark: it clears two

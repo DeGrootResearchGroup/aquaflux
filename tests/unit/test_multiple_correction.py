@@ -460,3 +460,38 @@ def test_the_underdetermined_warning_is_emitted_once_per_process() -> None:
             scheme.bind(mesh, mesh.geometry())
         counts.append(len([w for w in caught if "singular" in str(w.message)]))
     assert counts == [1, 0]
+
+
+def test_the_owner_closure_fails_only_where_a_cell_has_two_boundary_faces() -> None:
+    """Which cells the owner closure cannot determine, resolved rather than asserted in the aggregate.
+
+    "It fails on boundary tetrahedra" is too coarse, and predicts failure on meshes where there is
+    none: a tetrahedron with ONE boundary face still has three informative faces and reconstructs a
+    quadratic to roundoff. It is the corner and edge tets -- two or more boundary faces, hence two
+    informative faces against six Hessian components -- that go singular. That distinction is what
+    makes a real snappyHexMesh mesh usable under the default closure, so it is pinned here rather
+    than left as a remark.
+    """
+    mesh = tetrahedral_grid_3d(3, perturb=0.25, seed=6)
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    boundary_faces = np.bincount(
+        np.asarray(face_cells.owner)[~np.asarray(face_cells.interior)], minlength=mesh.n_cells
+    )
+    case = _quadratic(mesh)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        scheme = MultipleCorrectionGradient(boundary_closure=OwnerGradient()).bind(mesh, geometry)
+
+    gradient = np.asarray(
+        scheme.gradients(case["cell_values"], mesh, geometry, case["face_values"])
+    )
+    magnitude = np.linalg.norm(case["gradient"], axis=-1)
+    relative = np.linalg.norm(gradient - case["gradient"], axis=-1) / magnitude
+
+    determined = boundary_faces < 2
+    assert (
+        determined.sum() and (~determined).sum()
+    )  # the mesh has both kinds, or this proves nothing
+    assert relative[determined].max() < 1e-12
+    assert relative[~determined].min() > 1e-3

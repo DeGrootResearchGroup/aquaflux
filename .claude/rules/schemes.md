@@ -1803,20 +1803,35 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   argued, and each left the stall unchanged to three figures. What is *not* in doubt: `OwnerGradient`
   never reads a boundary value and marches the case; `SkewCorrectedGradient` does and does not.
 
-  **⚠️⚠️ THE UV REACTOR MESH IS THE CASE THIS DEFAULT IS WRONG FOR, AND IT IS MEASURED (2026-08-24).**
-  `validation/uvreactor_openfoam` is snappyHexMesh, not tetrahedral — but its cut cells include
-  **3,063 four-faced cells, and every one of them owns a boundary face** (counted from the polyMesh
-  connectivity: 1,635,909 cells, 5,249,365 faces, 378,096 boundary faces). Boundary tetrahedra are
-  exactly the shape `OwnerGradient` is measured to fail on, so on that mesh the default closure
-  leaves the Hessian singular in those cells and `SkewCorrectedGradient` is required — the closure
-  that stalls the pitzDaily march. **The two shipped closures each fail on one of the two meshes that
-  matter, and no single default fixes both.** Whoever runs the reactor must set the closure
-  explicitly and watch the march.
-  ⚠️ **A counting argument does NOT identify the affected cells, and one was nearly written up here.**
-  "Boundary cells with fewer than `n_sym` interior faces" gives 377,410 (23 %) on that mesh, and is
-  **wrong**: each face carries a whole gradient *vector*, not one number, so a boundary hexahedron has
-  five interior faces against six components and is perfectly determined. Count **tetrahedra at a
-  boundary**, or better, measure the correction directly (below).
+  **⚠️⚠️ MEASURED ON THE REACTOR MESH (2026-08-24), AND IT REFUTES THE OBVIOUS INFERENCE: BOTH
+  CLOSURES RECONSTRUCT A QUADRATIC EXACTLY THERE.** The reasoning that "the reactor has boundary
+  tetrahedra, therefore `OwnerGradient` fails there" was written into this file and is **wrong**.
+  Measured with `validation/uvreactor_openfoam/multiple_correction_closures.py` on the full 1,635,909-cell
+  snappyHexMesh mesh (5,249,365 faces, 377,421 cells owning a boundary face), reusing
+  `gradient_sweep_calibration.probe_field`'s quadratic and its median/p99/max error:
+
+  | closure | gradient error median / p99 / max | `max \|M2⁻¹\|` |
+  |---|---|---|
+  | **`OwnerGradient`** (the default) | 1.317e-13 / 7.006e-13 / **4.906e-12** | **1.86e+01** |
+  | `SkewCorrectedGradient` | 1.305e-13 / 6.987e-13 / 2.056e-11 | 9.35e+00 |
+
+  Both exact; the default is *better* on the max. **So the default is right for the reactor, and no
+  closure conflict exists between it and pitzDaily.**
+
+  **⚠️ THE FAILING SHAPE IS A TETRAHEDRON WITH *TWO OR MORE* BOUNDARY FACES — a corner or edge tet,
+  not a tet at a boundary.** Resolved by boundary-face count on the synthetic tetrahedral fixture
+  under `OwnerGradient`, which is what makes the reactor result explicable rather than surprising:
+
+  | boundary faces | cells | `max \|M2⁻¹\|` | max relative error |
+  |---|---|---|---|
+  | 0 | 72 | 1.97e+00 | 4.46e-15 |
+  | 1 | 72 | 4.48e+00 | 7.20e-15 |
+  | **2** | **18** | **1.61e+16** | **1.73e+00** |
+
+  Exactly those 18 cells exceed 1e-6, and no others. The reactor has **3,063 four-faced cells and
+  every one has exactly ONE boundary face**, which is why it is unaffected; the synthetic fixture has
+  18 with two, which is why it is the harsher test. A count of *boundary tetrahedra* therefore does
+  not predict failure — the count of boundary faces *per* tetrahedron does.
 
   **✅ THE SCHEME NOW DETECTS THIS ITSELF AT BIND TIME — `_warn_if_underdetermined`.** `M2⁻¹` is
   already built there, and a healthy one is order unity (measured 2–7 across quadrilateral,
@@ -1827,14 +1842,24 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   four combinations, because a detector that fired on every tetrahedral mesh, or on every owner
   closure, would be useless.
 
-  ⚠️ **WHETHER `SkewCorrectedGradient` STALLS A MARCH ON A MESH WITH BOUNDARY TETRAHEDRA IS UNTESTED,
-  and there is currently no way to test it.** The stall is measured only on pitzDaily, which is 2D
-  quadrilateral and contains **no tetrahedra at all** — so it says nothing about the regime the skew
-  closure exists for. The reactor has the cell shapes but **no march**: that directory ships a smoke
-  test and diagnostics, no `compare.py`, no reference solve, and the mesh needs OpenFOAM to
-  regenerate. Building a marchable case with boundary tetrahedra is the prerequisite for answering
-  it, and until then the honest statement is that the skew closure is unproven on a march *anywhere*
-  and broken on the one march that exists.
+  ⚠️ **WHETHER `SkewCorrectedGradient` STALLS A MARCH ON A MESH THAT NEEDS IT IS STILL UNTESTED, but
+  the reason is narrower than it first looked.** The stall is measured only on pitzDaily, which is 2D
+  quadrilateral with **no tetrahedra at all** — so it says nothing about the regime the skew closure
+  exists for. Two corrections to earlier statements here:
+  - **A reactor march does exist** (`validation/uvreactor_openfoam/march.py` + `case.py`, on the
+    `claude/uv-reactor-gpu-test-52eea5` branch — Reynolds continuation, dual-time, refreshed
+    preconditioner). "No march for the reactor" was wrong. It is GPU-scale, and this case's own README
+    records case assembly plus `hybrid_initialize` being OOM-killed at full scale on a shared
+    development machine, so it is not a run to start here.
+  - **But the reactor would not test the question anyway**, because its four-faced cells all have one
+    boundary face and `OwnerGradient` reconstructs it exactly (above). A reactor march under skew
+    would answer the *weaker* and still-useful question — is the stall pitzDaily-specific or general
+    on a 3D polyhedral mesh — not whether skew is safe where it is *required*.
+
+  What would settle the original question is a marchable case containing tetrahedra with **two or
+  more boundary faces**, which no case here has. Until then: the skew closure is unproven on a march
+  anywhere, broken on the one march that exists, and needed only on a cell shape none of the shipped
+  cases contain.
 
   **✅ CONSEQUENCE — `MultipleCorrectionGradient.boundary_closure` NOW DEFAULTS TO `OwnerGradient`
   (changed 2026-08-24).** The scheme is new and unreleased, so the default is set by what works:
