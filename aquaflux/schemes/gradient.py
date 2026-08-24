@@ -94,6 +94,35 @@ class _CorrectedTerms(NamedTuple):
 class GradientScheme(eqx.Module):
     """Strategy interface: reconstruct cell gradients from a cell field."""
 
+    def bind(self, mesh: Mesh, geometry: MeshGeometry) -> GradientScheme:
+        """Return this scheme prepared for one geometry, ready to reconstruct on it repeatedly.
+
+        A reconstruction may do work that depends only on the geometry, and a solver calls it over
+        and over on the same mesh — once per field, and once per Krylov matvec, since a matvec
+        re-evaluates the residual. This is where a scheme hoists that work out of the per-call path.
+
+        The default returns the scheme unchanged, which is the honest answer for a reconstruction
+        that has nothing geometry-only worth holding: a single-pass Green--Gauss sum, or a swept
+        solve whose preconditioner is a per-cell scalar it is cheaper to recompute than to carry.
+        Assemblers call this when they are built, so a scheme that overrides it is prepared once by
+        every consumer without any of them knowing which schemes benefit.
+
+        Parameters
+        ----------
+        mesh : Mesh
+            The mesh to prepare for.
+        geometry : MeshGeometry
+            That mesh's face and cell metrics.
+
+        Returns
+        -------
+        GradientScheme
+            A scheme equivalent to this one on that geometry. Implementations must return the *same*
+            reconstruction, not an approximation of it -- preparing is a cost change, never an
+            accuracy one.
+        """
+        return self
+
     @abc.abstractmethod
     def gradients(
         self,

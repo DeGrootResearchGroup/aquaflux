@@ -417,8 +417,14 @@ reconstruction — and a Krylov matvec re-executes the residual, so it is rebuil
 too. Within one compiled residual the compiler already shares it across the fields being
 reconstructed, so what is left to collect is the repetition *across* residual evaluations.
 
-{meth}`~aquaflux.schemes.HessianCorrectedGradient.bind` returns the same scheme carrying the outer
-preconditioner already built:
+{meth}`~aquaflux.schemes.GradientScheme.bind` returns the same scheme prepared for one geometry.
+**Assemblers call it for you** — {meth}`~aquaflux.discretization.ResidualAssembler.build` and
+{meth}`~aquaflux.flow.MomentumContinuity.build` bind whatever scheme they are handed, alongside the
+face interpolation factors they already precompute, so an ordinary solve gets this without asking.
+The default implementation returns the scheme unchanged, so schemes with no geometry-only work pay
+nothing.
+
+You only need to call it yourself when you reconstruct gradients outside an assembler:
 
 ```python
 scheme = HessianCorrectedGradient().bind(mesh, mesh.geometry())
@@ -430,7 +436,9 @@ than in two: on a 3D mesh at a calibrated seven sweeps it removes about 13 % of 
 six-field reconstruction, against 8 % in 2D.
 
 ```{warning}
-A bound scheme is valid only for the geometry it was bound to. Because the sweep runs a fixed
+A bound scheme is valid only for the geometry it was bound to. Binding inside the assemblers is what
+makes this safe in normal use: an assembler owns the geometry and the scheme together, so it cannot
+pair a binding with a mesh it was not built for. Because the sweep runs a fixed
 number of times, the preconditioner shapes the answer rather than only the rate at which the sweep
 reaches it, so a stale binding returns a subtly wrong gradient instead of a slower one. A
 cell-count mismatch is refused; a different geometry with the same cell count cannot be detected.

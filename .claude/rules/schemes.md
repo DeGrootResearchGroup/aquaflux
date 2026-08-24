@@ -1334,11 +1334,25 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   cost-share table is only valid at the configuration it was taken at — and the largest item at the
   default configuration was not the largest item after the largest lever was spent.
 
-  **✅ `HessianCorrectedGradient.bind(mesh, geometry)` IS BUILT (2026-08-23) — the outer
-  preconditioner held across reconstructions, bit-for-bit identical answers.** It is threaded at the
-  single place the preconditioner is constructed (`_systems(..., prepared_outer=...)`), so all three
-  `HessianSolve` strategies pick it up and none of them changed shape. Opt-in; unbound behaviour is
-  untouched.
+  **✅ `GradientScheme.bind(mesh, geometry)` IS BUILT (2026-08-23) — geometry-only reconstruction
+  work hoisted out of the per-call path, bit-for-bit identical answers.** The base implementation is
+  the **identity**, which is the honest answer for a single-pass sum or a swept solve whose
+  preconditioner is a per-cell scalar; `HessianCorrectedGradient` overrides it to carry the outer
+  preconditioner, threaded at the single place that is constructed (`_systems(..., prepared_outer=...)`)
+  so all three `HessianSolve` strategies pick it up and none of them changed shape.
+
+  **⚠️ THE ASSEMBLERS CALL IT, AND THAT PLACEMENT IS THE SAFETY PROPERTY, NOT A CONVENIENCE.**
+  `ResidualAssembler.build` and `MomentumContinuity.build` bind the scheme they are handed, beside the
+  face interpolation factors they already precompute. Binding at a *call site* instead would leave a
+  bound scheme and a mesh as two separate things a caller could mispair — and a mispairing is silently
+  wrong rather than slow (below). An assembler owns the geometry and the scheme together, so it cannot
+  create that pairing. It also must **not** go in `__post_init__`: pytree unflattening runs at every
+  jit boundary crossing, so the prologue would be rebuilt there rather than hoisted.
+  ⚠️ Nothing about the numbers fails if the `bind` call is dropped from a factory — the residual just
+  quietly goes back to rebuilding it per matvec — so it is pinned by
+  `test_an_assembler_prepares_its_gradient_scheme_for_its_own_geometry`, and the identity default by
+  `test_a_scheme_with_nothing_to_prepare_is_returned_unchanged` (asserting **identity**, since a
+  scheme returning an equal copy would pass an equality check while defeating the point).
 
   **⚠️ MEASURE THE SAVING AT THE FIELD COUNT A RESIDUAL ACTUALLY USES, NOT AT ONE FIELD.** The
   prologue is built **once** per compiled residual (the compiler shares it across fields), so binding

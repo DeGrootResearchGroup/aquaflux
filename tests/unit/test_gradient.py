@@ -2172,3 +2172,58 @@ def test_binding_leaves_the_gradient_differentiable_in_the_field() -> None:
     cached = jax.grad(lambda phi: total(bound, phi))(field)
     assert np.abs(np.asarray(plain)).max() > 0.0
     assert np.array_equal(np.asarray(plain), np.asarray(cached))
+
+
+def test_an_assembler_prepares_its_gradient_scheme_for_its_own_geometry() -> None:
+    """Assemblers bind the scheme they are given, and this is what keeps that true.
+
+    Binding is a pure cost change, so nothing about the numbers would fail if the call were dropped
+    — the residual would simply go back to rebuilding geometry-only work on every evaluation, once
+    per field per Krylov matvec, and no test would notice. That is the failure this pins.
+
+    Binding belongs here rather than at the call site for a reason worth stating: the assembler owns
+    the geometry and the scheme *together*, so it cannot pair a binding with a mesh it was not built
+    for — the mismatch a caller doing this by hand could create.
+    """
+    from aquaflux.boundary import BoundaryConditions, ZeroGradient
+    from aquaflux.discretization import DiffusionFlux, ResidualAssembler
+    from aquaflux.properties import Constant, PropertyModel
+
+    mesh = perturbed_grid_2d(5, 5, perturb=0.2, seed=8)
+    geometry = mesh.geometry()
+    scheme = HessianCorrectedGradient(hessian_solve=CoupledBlockSweep(sweeps=6))
+
+    def assembler_with(gradient_scheme):
+        return ResidualAssembler.build(
+            mesh,
+            geometry,
+            PropertyModel({"diffusivity": Constant(1.0)}),
+            (DiffusionFlux(),),
+            BoundaryConditions({"boundary": ZeroGradient()}),
+            gradient_scheme=gradient_scheme,
+        )
+
+    assembler = assembler_with(scheme)
+    assert assembler.gradient_scheme.prepared_outer is not None
+
+    # Preparing must not have moved the answer. Compare against the same assembler holding the
+    # unprepared scheme, which is what the residual was before this became automatic.
+    unbound = eqx.tree_at(
+        lambda a: a.gradient_scheme, assembler, scheme, is_leaf=lambda x: x is None
+    )
+    rng = np.random.default_rng(9)
+    phi = jnp.asarray(rng.standard_normal((mesh.n_cells,)))
+    assert np.array_equal(np.asarray(assembler.residual(phi)), np.asarray(unbound.residual(phi)))
+
+
+def test_a_scheme_with_nothing_to_prepare_is_returned_unchanged() -> None:
+    """The interface default is an identity, not a placeholder that quietly copies.
+
+    Most reconstructions have no geometry-only work worth holding, and for those ``bind`` must be
+    free — an assembler calls it on every scheme it is handed, without knowing which ones benefit.
+    Identity is asserted rather than equality, since a scheme that rebuilt an equal copy on every
+    assembler construction would pass an equality check while defeating the point.
+    """
+    mesh = perturbed_grid_2d(4, 4, perturb=0.2, seed=10)
+    scheme = CorrectedGreenGauss()
+    assert scheme.bind(mesh, mesh.geometry()) is scheme

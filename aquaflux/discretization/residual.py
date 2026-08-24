@@ -244,7 +244,13 @@ class ResidualAssembler(eqx.Module):
                 source_operators=source_operators,
                 transient=transient,
             ),
-            gradient_scheme=gradient_scheme,
+            # Prepared for this geometry: geometry-only reconstruction work hoisted out of the
+            # per-call path, since the residual is evaluated once per field per Krylov matvec. This
+            # assembler owns the geometry and the scheme together, so binding here -- rather than
+            # leaving it to a call site -- is what stops the two being paired with a mismatched mesh.
+            gradient_scheme=(
+                None if gradient_scheme is None else gradient_scheme.bind(mesh, geometry)
+            ),
             coefficient=coefficient,
             boundary=boundary.resolve(mesh.face_patches),
         )
