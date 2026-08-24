@@ -66,6 +66,8 @@ from aquaflux.schemes import (  # noqa: E402
     HessianCorrectedGradient,
     MultipleCorrectionGradient,
     NestedHessianSolve,
+    OwnerGradient,
+    SkewCorrectedGradient,
     SweptGradientSolve,
 )
 from aquaflux.solve import (  # noqa: E402
@@ -199,13 +201,23 @@ BETCHEN_LABEL = (
     )
 )
 
+#: Which boundary closure the multiple-correction arm uses for the GRADIENT on boundary faces.
+#:
+#: ⚠️ Not a tuning knob on a wall-function RANS case. `SkewCorrectedGradient` forms a one-sided
+#: difference against the boundary value, which for omega at a wall is a MODELLING device
+#: (``6 nu / (beta1 y^2)`` or a blend of it) rather than a physical face value -- and the difference
+#: divides it by the near-wall half-height, the smallest distance in the mesh. `OwnerGradient` never
+#: reads the boundary value at all, and on a quadrilateral mesh it is exact and better conditioned.
+MULTICORR_CLOSURES = {"owner": OwnerGradient, "skew": SkewCorrectedGradient}
+MULTICORR_CLOSURE = os.environ.get("PITZ_AB_MULTICORR_CLOSURE", "skew")
+
 ARMS = (
     ("standard", "CorrectedGreenGauss", CorrectedGreenGauss()),
     ("betchen", BETCHEN_LABEL, BETCHEN),
     (
         "multicorr",
-        "MultipleCorrectionGradient (two face passes, no system)",
-        MultipleCorrectionGradient(),
+        f"MultipleCorrectionGradient (two face passes, no system; {MULTICORR_CLOSURE} closure)",
+        MultipleCorrectionGradient(boundary_closure=MULTICORR_CLOSURES[MULTICORR_CLOSURE]()),
     ),
 )
 
