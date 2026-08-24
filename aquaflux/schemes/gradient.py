@@ -2329,6 +2329,7 @@ class HessianCorrectedGradient(GradientScheme):
     hessian_solve: HessianSolve = eqx.field(default_factory=CoupledBlockSweep)
     local_schur_block: bool = eqx.field(static=True, default=True)
     boundary_closure: HessianBoundaryClosure = eqx.field(default_factory=OwnerHessian)
+    prepared_outer: GradientPreconditioner | None = None
 
     def gradients(
         self,
@@ -2348,11 +2349,79 @@ class HessianCorrectedGradient(GradientScheme):
                 "solve — not yet built. Use CorrectedGreenGauss with SweptGradientSolve for a "
                 "distributed non-orthogonal gradient."
             )
+        if self.prepared_outer is not None and self.prepared_outer.inverse.shape[0] != mesh.n_cells:
+            raise ValueError(
+                "this gradient scheme was bound to a geometry of "
+                f"{self.prepared_outer.inverse.shape[0]} cells and is being asked to reconstruct on "
+                f"one of {mesh.n_cells}. A bound scheme carries that geometry's outer preconditioner, "
+                "which with a fixed sweep count changes the reconstructed gradient and not merely "
+                "how fast it converges -- so it cannot be reused across meshes. Call bind() again "
+                "for this geometry, or drop the binding."
+            )
         return self.hessian_solve.gradients(
-            self._systems(mesh, geometry, self.boundary_closure),
+            self._systems(mesh, geometry, self.boundary_closure, self.prepared_outer),
             field,
             boundary_values,
             local_schur_block=self.local_schur_block,
+        )
+
+    def bind(self, mesh: Mesh, geometry: MeshGeometry) -> HessianCorrectedGradient:
+        """This scheme carrying the outer preconditioner it would otherwise rebuild every call.
+
+        The outer preconditioner is geometry-only, yet it is rebuilt on every reconstruction --
+        every field, and every Krylov matvec, since a matvec re-executes the residual. Within one
+        compiled residual the compiler already shares it across the fields, so what binding
+        collects is the repetition *across* residual evaluations.
+
+        It is worth most where the sweep count is lowest, because the sweeps are what it is
+        competing with: on pitzDaily the whole geometry prologue is ~18 % of a reconstruction at
+        twenty sweeps and ~48 % at the seven a 1e-4 calibration asks for, of which this
+        preconditioner is over half. It is also the cheapest part of that prologue to hold --
+        ``(n_cells, dim, dim)``, against the ``(n_cells, n_sym, n_sym)`` inner inverse that is four
+        times larger in three dimensions and that this scheme now rebuilds by algebra anyway.
+
+        Parameters
+        ----------
+        mesh : Mesh
+            The mesh to bind to; its geometry must be concrete.
+        geometry : MeshGeometry
+            That mesh's face and cell metrics.
+
+        Returns
+        -------
+        HessianCorrectedGradient
+            The same scheme carrying this geometry's outer preconditioner.
+
+        Notes
+        -----
+        ⚠️ **A bound scheme is valid for the geometry it was bound to and no other.** With a fixed
+        sweep count the preconditioner determines the answer, not merely the rate at which the sweep
+        reaches it, so a stale binding returns a subtly wrong gradient rather than a slower one. A
+        cell-count mismatch is refused outright; a *different* geometry with the same cell count
+        cannot be detected and is the caller's responsibility.
+
+        For the same reason, do not bind outside a region being differentiated with respect to the
+        **geometry** (node positions, say): the bound preconditioner is then a constant that the
+        differentiation cannot see through, and the shape derivative comes back wrong rather than
+        failing. Binding is transparent to differentiation with respect to the *field*, which is
+        what a flow solve differentiates.
+
+        Examples
+        --------
+        >>> from aquaflux.schemes import HessianCorrectedGradient
+        >>> from aquaflux.mesh import structured_grid_2d
+        >>> mesh = structured_grid_2d(4, 4, 1.0, 1.0)
+        >>> scheme = HessianCorrectedGradient().bind(mesh, mesh.geometry())
+        >>> scheme.prepared_outer is None
+        False
+        """
+        systems = self._systems(mesh, geometry, self.boundary_closure)
+        prepared = systems.outer_preconditioner(systems.inner(), self.local_schur_block)
+        return HessianCorrectedGradient(
+            hessian_solve=self.hessian_solve,
+            local_schur_block=self.local_schur_block,
+            boundary_closure=self.boundary_closure,
+            prepared_outer=prepared,
         )
 
     @classmethod
@@ -2461,12 +2530,23 @@ class HessianCorrectedGradient(GradientScheme):
         mesh: Mesh,
         geometry: MeshGeometry,
         boundary_closure: HessianBoundaryClosure | None = None,
+        prepared_outer: GradientPreconditioner | None = None,
     ) -> _HessianSystems:
         """Assemble this scheme's linear systems from the geometry — everything but the field.
 
         The reconstruction solves these and the calibration measures them, so they are assembled
         here once for both: a count measured against a different assembly than the one that runs
         would be calibrating the wrong operator.
+
+        Parameters
+        ----------
+        prepared_outer : GradientPreconditioner, optional
+            The outer system's preconditioner, already built for this geometry by
+            :meth:`HessianCorrectedGradient.bind`. Supplied, ``outer_preconditioner`` returns it
+            instead of rebuilding it, which is the point of binding — it is geometry-only and is
+            otherwise rebuilt on every reconstruction. It is threaded here, at the one place the
+            preconditioner is constructed, so every :class:`HessianSolve` strategy picks it up
+            without any of them changing shape.
         """
         closure = OwnerHessian() if boundary_closure is None else boundary_closure
         dim = mesh.dim
@@ -2898,6 +2978,8 @@ class HessianCorrectedGradient(GradientScheme):
             inner solve it would never run — so reaching it through `outer` would mean handing that
             call a strategy chosen only to be discarded.
             """
+            if prepared_outer is not None:
+                return prepared_outer
             block = cell_diagonal_block(gg_owner, gg_neighbour, vol, n_cells, dim)
             if use_local_schur_block:
                 block = local_schur_block(block, inner_system.preconditioner.inverse)

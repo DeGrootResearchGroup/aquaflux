@@ -1334,6 +1334,48 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   cost-share table is only valid at the configuration it was taken at — and the largest item at the
   default configuration was not the largest item after the largest lever was spent.
 
+  **✅ `HessianCorrectedGradient.bind(mesh, geometry)` IS BUILT (2026-08-23) — the outer
+  preconditioner held across reconstructions, bit-for-bit identical answers.** It is threaded at the
+  single place the preconditioner is constructed (`_systems(..., prepared_outer=...)`), so all three
+  `HessianSolve` strategies pick it up and none of them changed shape. Opt-in; unbound behaviour is
+  untouched.
+
+  **⚠️ MEASURE THE SAVING AT THE FIELD COUNT A RESIDUAL ACTUALLY USES, NOT AT ONE FIELD.** The
+  prologue is built **once** per compiled residual (the compiler shares it across fields), so binding
+  removes a fixed amount of work whatever the field count — which reads as a huge saving on a
+  one-field probe and a modest one on the six-field residual that is the real consumer. Measured at a
+  calibrated seven sweeps, arms interleaved so machine drift hits both equally, minimum of seven to
+  nine runs:
+
+  | mesh | `N`=1 | `N`=6 | absolute saving |
+  |---|---|---|---|
+  | pitzDaily, 2D, 12225 cells | 38.5 % | **7.8 %** | 4.3 ms → 2.9 ms |
+  | perturbed hex, 3D, 21952 cells | 37.2 % | **13.0 %** | **26.1 ms → 26.2 ms** |
+
+  Read the last column: in **3D the absolute saving is unchanged between one field and six**
+  (26.1 against 26.2 ms), which is what "built once per residual, removed entirely" predicts. In 2D
+  it falls (4.3 → 2.9 ms), so some of the prologue there is being hidden behind the independent
+  per-field sweeps rather than costing wall clock. **3D is the case that matters and it is the
+  better one**, ~1.7x the 2D share, as `local_schur_block` probing `dim + n_sym` = 9 columns against
+  5 predicts.
+
+  ⚠️ **A ~17 % projection from the serial cost share was too high** — the honest figure is 13 % in
+  3D and 8 % in 2D, because a cost share assumes the work is on the critical path and some of it is
+  not. Project from a share only as an upper bound.
+
+  **Memory, which is the whole reason this is the outer inverse and not the prologue:** `(n, dim, dim)`
+  is **110 MB at 1.6M cells**, against 659 MB for all three geometry arrays — the bulk of which is the
+  `(n, n_sym, n_sym)` inner inverse this scheme now rebuilds by algebra anyway. Peak memory during a
+  reconstruction is unchanged either way; binding converts a transient allocation into a resident one.
+
+  **⚠️ A STALE BINDING IS SILENTLY WRONG, NOT SLOW — this is why it is opt-in and not automatic.** The
+  sweep runs a **fixed** count rather than to a tolerance, so the preconditioner determines the answer
+  and not merely the rate. A cell-count mismatch raises; a *different* geometry at the same cell count
+  cannot be detected. And binding outside a region differentiated with respect to **node positions**
+  freezes the preconditioner into a constant, so the shape derivative comes back wrong rather than
+  failing — differentiation with respect to the *field*, which is what a flow solve does, is
+  unaffected and is pinned by a test comparing the bound and unbound gradients.
+
   **⚠️ MEASURE IT AGAINST A CALIBRATED NESTED SOLVE, NOT THE SHIPPED DEFAULT.** Against `20/10` it
   looks like 2.0× forward and 3.1× on the tangent — but `20/10` is heavily over-provisioned on the
   meshes that comparison used, so most of that gap is the baseline's slack rather than this sweep's

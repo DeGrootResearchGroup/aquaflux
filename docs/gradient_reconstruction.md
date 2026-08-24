@@ -409,6 +409,35 @@ The system stays gradient-sized: no enlarged unknown is formed, and the Hessian 
 the sweep rather than an unknown of a larger system. It lives for one reconstruction and starts
 from zero on every call, so the reconstruction remains an exactly linear function of the field.
 
+### Binding a scheme to its geometry
+
+Most of what this scheme does before it sweeps depends only on the geometry: the per-cell blocks
+the two preconditioners invert. Nothing there changes with the field, yet it is rebuilt on every
+reconstruction — and a Krylov matvec re-executes the residual, so it is rebuilt on every matvec
+too. Within one compiled residual the compiler already shares it across the fields being
+reconstructed, so what is left to collect is the repetition *across* residual evaluations.
+
+{meth}`~aquaflux.schemes.HessianCorrectedGradient.bind` returns the same scheme carrying the outer
+preconditioner already built:
+
+```python
+scheme = HessianCorrectedGradient().bind(mesh, mesh.geometry())
+```
+
+The gradient it returns is bit-for-bit the one the unbound scheme returns. It is worth most where
+the sweep count is lowest, since the sweeps are what it competes with, and more in three dimensions
+than in two: on a 3D mesh at a calibrated seven sweeps it removes about 13 % of the work of a
+six-field reconstruction, against 8 % in 2D.
+
+```{warning}
+A bound scheme is valid only for the geometry it was bound to. Because the sweep runs a fixed
+number of times, the preconditioner shapes the answer rather than only the rate at which the sweep
+reaches it, so a stale binding returns a subtly wrong gradient instead of a slower one. A
+cell-count mismatch is refused; a different geometry with the same cell count cannot be detected.
+For the same reason, do not bind outside a region being differentiated with respect to node
+positions — differentiation with respect to the *field* is unaffected.
+```
+
 `sweeps` here is **not** the nested solve's outer count and must be calibrated on its own — a
 coupled sweep costs two face passes where a nested outer sweep costs eleven, so more of them buy
 less each. Calibrating it is also the single largest saving available in this scheme: the sweeps

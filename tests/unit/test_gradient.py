@@ -2094,3 +2094,81 @@ def test_the_reduced_hessian_block_matches_the_operator_it_preconditions(mesh) -
     reference = np.stack([np.asarray(dense[c, :, c, :]).T for c in range(n_cells)])
     built = np.asarray(jnp.linalg.inv(inner.preconditioner.inverse))
     assert np.abs(built - reference).max() <= 1e-12 * np.abs(reference).max()
+
+
+@pytest.mark.parametrize(
+    "mesh",
+    [
+        perturbed_grid_2d(6, 6, perturb=0.25, seed=1),
+        perturbed_grid_3d(4, 4, 4, perturb=0.2, seed=2),
+    ],
+    ids=["quadrilateral", "hexahedral"],
+)
+def test_binding_the_outer_preconditioner_changes_the_cost_and_not_the_answer(mesh) -> None:
+    """A bound scheme must return the SAME gradient, bit for bit, not merely a close one.
+
+    The outer preconditioner is geometry-only, so binding it is meant to be pure bookkeeping. But
+    the sweep runs a fixed number of times rather than to a tolerance, which means the
+    preconditioner determines the answer and not just how fast the sweep reaches it — so anything
+    that disturbs it shows up as a wrong gradient rather than a slower one, and equality to a
+    tolerance would not catch a subtly different preconditioner.
+    """
+    geometry = mesh.geometry()
+    scheme = HessianCorrectedGradient(hessian_solve=CoupledBlockSweep(sweeps=7))
+    bound = scheme.bind(mesh, geometry)
+    assert bound.prepared_outer is not None
+
+    rng = np.random.default_rng(4)
+    field = jnp.asarray(rng.standard_normal((mesh.n_cells,)))
+    boundary_values = jnp.zeros((mesh.n_faces,))
+
+    plain = scheme.gradients(field, mesh, geometry, boundary_values)
+    cached = bound.gradients(field, mesh, geometry, boundary_values)
+    assert np.array_equal(np.asarray(plain), np.asarray(cached))
+
+
+def test_a_bound_scheme_refuses_a_geometry_it_was_not_bound_to() -> None:
+    """Reusing a binding across meshes is silently wrong, so it is refused.
+
+    The failure this prevents is not a crash but a plausible answer: the preconditioner belongs to
+    one geometry, and with a fixed sweep count it shapes the result. A cell-count mismatch is the
+    detectable half and is rejected here; a different geometry at the same cell count cannot be
+    detected and is documented as the caller's responsibility.
+    """
+    bound_to = perturbed_grid_2d(6, 6, perturb=0.25, seed=1)
+    other = perturbed_grid_2d(5, 5, perturb=0.25, seed=1)
+    scheme = HessianCorrectedGradient().bind(bound_to, bound_to.geometry())
+
+    with pytest.raises(ValueError, match="bound to a geometry of"):
+        scheme.gradients(
+            jnp.zeros((other.n_cells,)),
+            other,
+            other.geometry(),
+            jnp.zeros((other.n_faces,)),
+        )
+
+
+def test_binding_leaves_the_gradient_differentiable_in_the_field() -> None:
+    """Binding must be transparent to the differentiation a flow solve actually performs.
+
+    The bound preconditioner is a constant with respect to the field, which is correct and is the
+    whole point — but a constant that accidentally severed the field's own path would still return
+    finite numbers, so this compares the derivative against the unbound scheme's rather than merely
+    asserting it is finite.
+    """
+    mesh = perturbed_grid_2d(5, 5, perturb=0.2, seed=6)
+    geometry = mesh.geometry()
+    scheme = HessianCorrectedGradient(hessian_solve=CoupledBlockSweep(sweeps=6))
+    bound = scheme.bind(mesh, geometry)
+
+    rng = np.random.default_rng(7)
+    field = jnp.asarray(rng.standard_normal((mesh.n_cells,)))
+    boundary_values = jnp.zeros((mesh.n_faces,))
+
+    def total(sch, phi):
+        return jnp.sum(sch.gradients(phi, mesh, geometry, boundary_values) ** 2)
+
+    plain = jax.grad(lambda phi: total(scheme, phi))(field)
+    cached = jax.grad(lambda phi: total(bound, phi))(field)
+    assert np.abs(np.asarray(plain)).max() > 0.0
+    assert np.array_equal(np.asarray(plain), np.asarray(cached))
