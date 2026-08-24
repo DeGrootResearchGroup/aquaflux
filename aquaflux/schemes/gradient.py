@@ -1355,6 +1355,11 @@ def fastest_boundary_closure(
     if not candidates:
         raise ValueError("fastest_boundary_closure needs at least one candidate closure.")
 
+    # ⚠️ Seeded with NaN-safety in mind: a closure that leaves a cell's Hessian block singular can
+    # produce a NON-FINITE rate rather than a large one, and `NaN < best` is False -- so a plain
+    # comparison would let such a closure lose *by accident* rather than on its merits, and would
+    # rank two broken closures by their order in the list. A non-finite rate is mapped to infinity
+    # below, which makes the ordering total and the choice independent of that order.
     best, best_rate = None, math.inf
     for closure in candidates:
         systems = HessianCorrectedGradient._systems(mesh, geometry, closure)
@@ -1368,7 +1373,10 @@ def fastest_boundary_closure(
             iters=iters,
             seed=seed,
         ).rate
-        if rate < best_rate:
+        rate = float(rate)
+        if not math.isfinite(rate):
+            rate = math.inf
+        if best is None or rate < best_rate:
             best, best_rate = closure, rate
     return best
 

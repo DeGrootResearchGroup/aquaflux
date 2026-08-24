@@ -577,7 +577,11 @@ def _undetermined_cells(m2_inverse: jnp.ndarray) -> jnp.ndarray | None:
     if isinstance(jnp.asarray(m2_inverse), jax.core.Tracer):
         return None
     worst = jnp.max(jnp.abs(m2_inverse), axis=(1, 2))
-    cells = jnp.flatnonzero(worst > _UNDETERMINED_CORRECTION)
+    # ⚠️ NOT `worst > limit`: a singular inverse is large on one platform and NON-FINITE on another
+    # (measured -- the same tetrahedral mesh gives 1e16 under macOS Accelerate and NaN under the
+    # BLAS on CI), and `NaN > limit` is False. Testing the negation catches both, where the obvious
+    # comparison would silently decline to repair exactly the cells that need it most.
+    cells = jnp.flatnonzero(~(worst <= _UNDETERMINED_CORRECTION))
     return cells if cells.size else None
 
 

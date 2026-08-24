@@ -1818,6 +1818,28 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   Both exact; the default is *better* on the max. **So the default is right for the reactor, and no
   closure conflict exists between it and pitzDaily.**
 
+  **⚠️⚠️ A SINGULAR CORRECTION IS PLATFORM-DEPENDENT IN MAGNITUDE — large and finite on one machine,
+  NON-FINITE on another (found by CI, 2026-08-24).** The same tetrahedral mesh gives `max |M2⁻¹|` of
+  **1.61e16** under macOS Accelerate and **NaN** under the BLAS on the GitHub runners, and the
+  reconstruction there is a 173 % error locally against NaN on CI. Neither is wrong — inverting a
+  singular matrix has no defined answer — but it makes every `x > threshold` test of a *failure*
+  wrong, because **every comparison against NaN is False**. Three tests here asserted the failure
+  that way and passed locally while failing on CI; they now negate the success condition instead.
+
+  **Two live comparisons had the same defect and are fixed:**
+  - `_undetermined_cells` selected with `worst > limit`, so a NaN correction would **not** be
+    detected and the repair would silently decline to fire on exactly the cells that need it. Now
+    `~(worst <= limit)`.
+  - `fastest_boundary_closure` compared `rate < best_rate`, so a closure whose rate came back NaN
+    lost *by accident* rather than on its merits, and two broken closures were ranked by their order
+    in the candidate list. A non-finite rate is now mapped to infinity, which makes the ordering
+    total.
+
+  **Consequence for tests on degenerate meshes (binding):** assert the property that survives the
+  platform — "does not contract", "is not exact" — never the magnitude of a singular result. The
+  numbers quoted in this file for singular cases are macOS numbers and are illustrative of *scale*
+  only.
+
   **⚠️ THE FAILING SHAPE IS A TETRAHEDRON WITH *TWO OR MORE* BOUNDARY FACES — a corner or edge tet,
   not a tet at a boundary.** Resolved by boundary-face count on the synthetic tetrahedral fixture
   under `OwnerGradient`, which is what makes the reactor result explicable rather than surprising:

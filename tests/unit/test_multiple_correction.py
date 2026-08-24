@@ -116,7 +116,9 @@ def test_the_owner_closure_fails_on_boundary_tetrahedra() -> None:
     relative = (
         np.abs(np.asarray(gradient) - case["gradient"]).max() / np.abs(case["gradient"]).max()
     )
-    assert relative > 1e-3, "owner closure unexpectedly exact on tetrahedra -- check the mesh"
+    assert _is_not_exact(relative), (
+        "owner closure unexpectedly exact on tetrahedra -- check the mesh"
+    )
 
     corrected = MultipleCorrectionGradient(boundary_closure=SkewCorrectedGradient()).bind(
         mesh, case["geometry"]
@@ -216,6 +218,17 @@ def test_it_refuses_a_domain_decomposed_solve_rather_than_silently_misreconstruc
             jnp.zeros((mesh.n_faces,)),
             operator_hook=lambda x: x,
         )
+
+
+def _is_not_exact(error, tol=1e-3):
+    """Did the reconstruction fail, allowing for a failure that is NaN rather than large?
+
+    ⚠️ `error > tol` is the wrong test and it cost a CI run to learn. A singular correction is a
+    large finite number under macOS Accelerate and NON-FINITE under the BLAS on the CI runners, and
+    every comparison against NaN is False -- so `> tol` reports a broken reconstruction as fine.
+    Negating the success condition catches both, which is what "not exact" means anyway.
+    """
+    return not (np.all(np.isfinite(error)) and np.all(np.asarray(error) < tol))
 
 
 def _boundary_owner(mesh):
@@ -498,8 +511,8 @@ def test_the_owner_closure_fails_only_where_a_cell_has_two_boundary_faces() -> N
     assert (
         determined.sum() and (~determined).sum()
     )  # the mesh has both kinds, or this proves nothing
-    assert relative[determined].max() < 1e-12
-    assert relative[~determined].min() > 1e-3
+    assert np.all(np.isfinite(relative[determined])) and relative[determined].max() < 1e-12
+    assert _is_not_exact(relative[~determined].min())
 
 
 def test_the_repair_is_exact_where_it_fires_and_absent_where_it_need_not() -> None:
@@ -524,7 +537,7 @@ def test_the_repair_is_exact_where_it_fires_and_absent_where_it_need_not() -> No
     args = (case["cell_values"], tetrahedral, geometry, case["face_values"])
     error = np.abs(np.asarray(repaired.gradients(*args)) - case["gradient"]).max()
     assert error < 1e-12 * np.abs(case["gradient"]).max()
-    assert np.abs(np.asarray(raw.gradients(*args)) - case["gradient"]).max() > 1e-3
+    assert _is_not_exact(np.abs(np.asarray(raw.gradients(*args)) - case["gradient"]).max())
 
     # Nothing to repair: the repair must not have happened, and must cost the answer nothing.
     case = _quadratic(hexahedral)
