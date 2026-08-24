@@ -128,6 +128,9 @@ class Operators:
         shape = (-1,) + (1,) * (cell_values.ndim - 1)
         return total / np.maximum(count, 1.0).reshape(shape)
 
+    phi_cell_boundary = None
+    phi_face_boundary = None
+
     def boundary_gradient(self, gradient, exact):
         """Boundary-face values for the GRADIENT, which no boundary condition supplies.
 
@@ -152,6 +155,36 @@ class Operators:
             owner_normal = (owner_value * normal).sum(-1)[:, None] * normal
             exact_normal = (exact * normal).sum(-1)[:, None] * normal
             return exact - exact_normal + owner_normal
+        if self.boundary == "normal-difference":
+            # The closure a solver can ACTUALLY form without boundary-face adjacency: the normal
+            # derivative from a one-sided difference between the Dirichlet face value and the owner
+            # centroid, the tangential part from the owner's own gradient. This is the reverse split
+            # of "dirichlet" above, which needs the surface gradient across a patch.
+            normal = np.asarray(self.geometry.face.normal)
+            offset = self.face_x - self.x[self.owner]
+            distance = (offset * normal).sum(-1)
+            safe = np.where(np.abs(distance) < 1e-30, 1.0, distance)
+            normal_derivative = (self.phi_face_boundary - self.phi_cell_boundary) / safe
+            tangential = owner_value - (owner_value * normal).sum(-1)[:, None] * normal
+            return tangential + normal_derivative[:, None] * normal
+        if self.boundary == "normal-corrected":
+            # As above, but with the tangential part of the owner->face offset removed using the
+            # owner's own gradient before the one-sided difference is taken. That restores exactness
+            # for LINEAR fields, which the raw difference loses on a skewed mesh -- and a closure
+            # that is not linear-exact cannot be absorbed by corrections probed on the quadratic
+            # basis alone, because the error it makes appears at an order those probes never see.
+            normal = np.asarray(self.geometry.face.normal)
+            offset = self.face_x - self.x[self.owner]
+            along = (offset * normal).sum(-1)
+            safe = np.where(np.abs(along) < 1e-30, 1.0, along)
+            tangential_offset = offset - along[:, None] * normal
+            rise = (
+                self.phi_face_boundary
+                - self.phi_cell_boundary
+                - (owner_value * tangential_offset).sum(-1)
+            )
+            tangential = owner_value - (owner_value * normal).sum(-1)[:, None] * normal
+            return tangential + (rise / safe)[:, None] * normal
         if self.boundary == "averaged":
             averaged = self.neighbour_average(gradient)[self.owner]
             return (1.0 - self.blend) * owner_value + self.blend * averaged
@@ -209,6 +242,8 @@ class Operators:
             grad_exact_cell = self.x @ basis.T
             grad_exact_face = self.face_x @ basis.T
 
+            self.phi_cell_boundary = psi[self.owner]
+            self.phi_face_boundary = psi_face
             g1 = self.d1(psi, psi_face)
             h2_cols.append(g1 - grad_exact_cell)  # the O(h) error, per unit Hessian
 
@@ -229,6 +264,8 @@ class Operators:
 
     def reconstruct(self, phi_cell, phi_face, grad_face):
         """Return the 2-exact gradient and the Hessian, in symmetric components."""
+        self.phi_cell_boundary = phi_cell[self.owner]
+        self.phi_face_boundary = phi_face
         g1 = self.d1(phi_cell, phi_face)
         raw_hessian = self.d1(g1, self.boundary_gradient(g1, grad_face))
         symmetric = _to_symmetric(0.5 * (raw_hessian + np.swapaxes(raw_hessian, 1, 2)))
@@ -415,7 +452,7 @@ def main():
     # The correction matrices are probed THROUGH the closure, so they should absorb a crude one for
     # the very polynomials they are built from. If exactness survives here, the closure costs only
     # the higher-order terms -- a quite different problem from losing the accuracy contract.
-    for boundary, blend in (("owner", 0.0), ("averaged", 0.5), ("dirichlet", 0.0)):
+    for boundary, blend in (("owner", 0.0), ("dirichlet", 0.0), ("normal-corrected", 0.0)):
         tag = boundary if boundary == "owner" else f"{boundary} w={blend}"
         print(f"\ngradient boundary faces closed by: {tag}")
         check(
