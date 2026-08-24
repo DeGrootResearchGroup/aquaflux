@@ -124,7 +124,11 @@ class GradientBoundaryClosure(eqx.Module):
     #: **corrected** -- re-evaluated at the reconstruction's own gradient -- and a reconstruction then
     #: pays one boundary-value evaluation to supply them. A closure that does not is spared that, and
     #: is also immune to the leading-order trap the correction exists to route around.
-    reads_boundary_values: bool = eqx.field(static=True, default=True)
+    #:
+    #: A plain class attribute rather than a dataclass field, deliberately: a defaulted field here
+    #: would force every field of every subclass to carry a default too, so a closure that needs
+    #: required state -- a set of cells, say -- could not be written at all.
+    reads_boundary_values = True
 
     @abc.abstractmethod
     def face_gradient(
@@ -178,7 +182,7 @@ class OwnerGradient(GradientBoundaryClosure):
     measures ``M2`` and warns rather than leaving this to be inferred from cell shapes.
     """
 
-    reads_boundary_values: bool = eqx.field(static=True, default=False)
+    reads_boundary_values = False
 
     def face_gradient(self, gradient, field, boundary_values, face_cells, geometry):
         return gradient[face_cells.owner]
@@ -249,6 +253,48 @@ class SkewCorrectedGradient(GradientBoundaryClosure):
         return tangential + scale(normal, rise / safe)
 
 
+class CellwiseFallback(GradientBoundaryClosure):
+    """One closure everywhere, another on named cells.
+
+    The two shipped closures fail in opposite regimes, and the regimes are *local*:
+    :class:`OwnerGradient` is undetermined on a tetrahedron with two or more boundary faces and
+    exact everywhere else, while :class:`SkewCorrectedGradient` supplies the missing direction but
+    reads a boundary value, which is the thing a coupled RANS march is measured to stall under.
+    Since the cells that need the second one can be identified -- by measuring the correction the
+    first produces, not by counting faces -- neither has to be chosen for the whole mesh.
+
+    Built by :meth:`MultipleCorrectionGradient.bind` when it finds cells its closure cannot
+    determine, so it is not usually constructed directly. On a mesh with no such cells nothing is
+    built and the reconstruction is byte-identical to the primary alone.
+
+    Attributes
+    ----------
+    cells : jnp.ndarray
+        Cells whose boundary faces take :attr:`secondary`, shape ``(n_fallback,)``.
+    primary : GradientBoundaryClosure
+        Used on every other boundary face.
+    secondary : GradientBoundaryClosure
+        Used on the boundary faces of :attr:`cells`.
+    """
+
+    cells: jnp.ndarray
+    primary: GradientBoundaryClosure
+    secondary: GradientBoundaryClosure
+
+    @property
+    def reads_boundary_values(self) -> bool:
+        """``True`` if either side reads them -- the corrected values are then needed for that side."""
+        return self.primary.reads_boundary_values or self.secondary.reads_boundary_values
+
+    def face_gradient(self, gradient, field, boundary_values, face_cells, geometry):
+        primary = self.primary.face_gradient(gradient, field, boundary_values, face_cells, geometry)
+        secondary = self.secondary.face_gradient(
+            gradient, field, boundary_values, face_cells, geometry
+        )
+        take = jnp.zeros(face_cells.n_cells, dtype=bool).at[self.cells].set(True)
+        return jnp.where(take[face_cells.owner][:, None], secondary, primary)
+
+
 class Corrections(eqx.Module):
     """The per-cell correction matrices, built once for one geometry.
 
@@ -266,11 +312,17 @@ class Corrections(eqx.Module):
     gradient_defect : jnp.ndarray
         The 1-exact gradient's first-order error per unit Hessian, shape ``(n_cells, dim, n_sym)``;
         subtracting it lifts that gradient to second order.
+    closure : GradientBoundaryClosure
+        The closure these were probed through, and therefore the one the reconstruction must apply --
+        which is not always the one that was asked for, since a mesh with cells the requested closure
+        cannot determine is repaired with a :class:`CellwiseFallback`. Carrying it here is what keeps
+        the correction and the operator it corrects from ever disagreeing.
     """
 
     m1_inverse: jnp.ndarray
     m2_inverse: jnp.ndarray
     gradient_defect: jnp.ndarray
+    closure: GradientBoundaryClosure
 
 
 class MultipleCorrectionGradient(GradientScheme):
@@ -290,13 +342,23 @@ class MultipleCorrectionGradient(GradientScheme):
         and is the one that marches a coupled RANS case (measured; see :class:`SkewCorrectedGradient`
         for what happens otherwise, and for the caveat that it is the closure to reach for on a mesh
         with boundary **tetrahedra**, where the owner closure leaves the Hessian underdetermined).
+    fallback : GradientBoundaryClosure or None
+        Used on the boundary faces of any cell :attr:`boundary_closure` cannot determine, leaving
+        every other cell alone (:class:`CellwiseFallback`). Defaults to
+        :class:`SkewCorrectedGradient`, which supplies the direction a corner tetrahedron is short
+        of. ``None`` disables the repair and warns instead. On a mesh with no such cells nothing is
+        rebuilt and the reconstruction is byte-identical either way — measured on quadrilateral and
+        hexahedral meshes, and on a 1.6M-cell snappyHexMesh mesh.
     prepared : Corrections or None
         The geometry-only correction matrices, present once :meth:`bind` has been called. ``None``
         rebuilds them on every reconstruction, which is correct but wasteful — an assembler binds
-        the scheme it is handed, so ordinary use never pays that.
+        the scheme it is handed, so ordinary use never pays that. It also carries the closure they
+        were probed through, which is what the reconstruction applies — not always the one asked
+        for, since a repaired mesh gets a :class:`CellwiseFallback`.
     """
 
     boundary_closure: GradientBoundaryClosure = eqx.field(default_factory=OwnerGradient)
+    fallback: GradientBoundaryClosure | None = eqx.field(default_factory=SkewCorrectedGradient)
     prepared: Corrections | None = None
 
     def bind(self, mesh: Mesh, geometry: MeshGeometry) -> MultipleCorrectionGradient:
@@ -310,7 +372,8 @@ class MultipleCorrectionGradient(GradientScheme):
         """
         return MultipleCorrectionGradient(
             boundary_closure=self.boundary_closure,
-            prepared=_build_corrections(mesh, geometry, self.boundary_closure),
+            fallback=self.fallback,
+            prepared=_build_corrections(mesh, geometry, self.boundary_closure, self.fallback),
         )
 
     def _reconstruct_gradient(
@@ -402,7 +465,11 @@ class MultipleCorrectionGradient(GradientScheme):
         """
         prepared = self.prepared
         if prepared is None:
-            prepared = _build_corrections(mesh, geometry, self.boundary_closure)
+            prepared = _build_corrections(mesh, geometry, self.boundary_closure, self.fallback)
+        # The closure the corrections were PROBED through, which a repaired mesh makes different
+        # from the one asked for. Applying the requested one here would correct an operator nobody
+        # evaluates -- the exact mistake this module warns about elsewhere.
+        closure = prepared.closure
         face_cells, dim = mesh.face_cells, mesh.dim
         factor = interpolation_factor(face_cells, geometry)
         area = scale(geometry.face.normal, geometry.face.area)
@@ -415,12 +482,11 @@ class MultipleCorrectionGradient(GradientScheme):
         # evaluation throws away, leaving the face value equal to the owner's and the closure
         # subtracting a term nothing added. The first pass above deliberately keeps the values as
         # given -- there the error is a value of order the correction, not one divided by `d.n`.
-        closure_values = (
-            boundary_values if boundary_values_at is None else boundary_values_at(first)
-        )
-        face_gradient = self.boundary_closure.face_gradient(
-            first, field, closure_values, face_cells, geometry
-        )
+        # Skipped entirely for a closure that reads no boundary value: the re-evaluation is a
+        # scatter over every boundary face, and `OwnerGradient` would discard the result.
+        needs_correcting = boundary_values_at is not None and closure.reads_boundary_values
+        closure_values = boundary_values_at(first) if needs_correcting else boundary_values
+        face_gradient = closure.face_gradient(first, field, closure_values, face_cells, geometry)
         if imposed is not None:
             # Before the second pass, not after it. That pass differentiates `first` and closes the
             # boundary from it, so an imposition applied to the returned gradient would arrive after
@@ -486,60 +552,71 @@ def _one_exact(
 
 #: Above this, a cell's Hessian correction is amplifying rather than repairing. The matrices are
 #: probed on quadratic monomials of order the cell size, so a healthy inverse is order one --
-#: measured at 2--7 across quadrilateral, hexahedral and (under a boundary-value closure)
-#: tetrahedral meshes. A cell whose boundary faces leave the six components underdetermined runs to
-#: 1e17 instead, so anything in between is a wide margin rather than a tuned threshold.
-_UNDERDETERMINED_CORRECTION = 1e8
+#: measured at 2--19 across quadrilateral, hexahedral and tetrahedral meshes, and 1.86e+01 on a
+#: 1.6M-cell snappyHexMesh mesh. A cell left underdetermined runs to 1e16 instead, so anything in
+#: between is a wide margin rather than a tuned threshold.
+_UNDETERMINED_CORRECTION = 1e8
 
-_CORRECTION_WARNED = False
+_FALLBACK_WARNED = False
 
 
-def _warn_if_underdetermined(m2_inverse: jnp.ndarray, closure: GradientBoundaryClosure) -> None:
-    """Warn once if the Hessian correction is singular enough to amplify rather than repair.
+def _undetermined_cells(m2_inverse: jnp.ndarray) -> jnp.ndarray | None:
+    """Which cells' Hessian correction is singular enough to amplify, or ``None`` if none are.
 
-    A boundary cell is reconstructed with whatever its closure supplies on the boundary faces, and a
-    closure that returns the owner's own gradient there supplies no direction the cell did not
-    already have. On a boundary **tetrahedron** that leaves the six independent Hessian components
-    underdetermined, and ``M2`` is then singular to working precision -- the reconstruction stops
-    being exact for quadratics and starts amplifying instead. It is a property of the mesh and the
-    closure together, which is why it is detected here rather than assumed from a cell-shape count:
-    a boundary hexahedron has fewer interior faces than components too, and is perfectly determined,
-    because each face carries a whole gradient vector rather than one number.
+    Measured on the correction itself rather than inferred from cell shape, which is the distinction
+    that matters: "a boundary tetrahedron" over-predicts badly. Resolved by boundary-face count on a
+    perturbed tetrahedral mesh, cells with **one** boundary face reconstruct a quadratic to 7.2e-15
+    while those with **two** are wrong by 173 %, and on a real snappyHexMesh mesh every four-faced
+    cell has exactly one -- so a shape count would repair thousands of cells that are already exact
+    and miss nothing in return.
 
-    Emitted once per process -- the geometry is fixed, so one warning is the whole message -- and
-    only when the values are concrete, since a traced build cannot be inspected without forcing it.
-
-    Parameters
-    ----------
-    m2_inverse : jnp.ndarray
-        The Hessian correction's inverse, shape ``(n_cells, n_sym, n_sym)``.
-    closure : GradientBoundaryClosure
-        The closure it was probed through, named in the warning.
+    Returns ``None`` when the values are traced, since a traced build cannot be inspected without
+    forcing it, and when nothing is wrong -- which is the common case and the one that must cost
+    nothing.
     """
-    global _CORRECTION_WARNED
-    if _CORRECTION_WARNED or isinstance(jnp.asarray(m2_inverse), jax.core.Tracer):
+    if isinstance(jnp.asarray(m2_inverse), jax.core.Tracer):
+        return None
+    worst = jnp.max(jnp.abs(m2_inverse), axis=(1, 2))
+    cells = jnp.flatnonzero(worst > _UNDETERMINED_CORRECTION)
+    return cells if cells.size else None
+
+
+def _warn_repaired(cells: jnp.ndarray, primary, secondary, total: int) -> None:
+    """Say once that the closure was repaired, since it is not what the caller asked for."""
+    global _FALLBACK_WARNED
+    if _FALLBACK_WARNED:
         return
-    worst = float(jnp.max(jnp.abs(m2_inverse)))
-    if not worst > _UNDERDETERMINED_CORRECTION:
-        return
-    _CORRECTION_WARNED = True
-    name = type(closure).__name__
-    remedy = (
-        "Try SkewCorrectedGradient, which supplies the missing direction from the boundary value"
-        if name == "OwnerGradient"
-        else "Check the mesh at its boundary cells"
-    )
+    _FALLBACK_WARNED = True
     warnings.warn(
-        f"MultipleCorrectionGradient: the Hessian correction is singular on this mesh under "
-        f"{name} (largest entry {worst:.2e}, against order one on a well-posed mesh). Some boundary "
-        f"cell's faces leave the six components underdetermined -- a boundary tetrahedron is the "
-        f"usual cause -- and the reconstruction there amplifies instead of repairing. {remedy}.",
+        f"MultipleCorrectionGradient: {cells.size} of {total} cells leave the Hessian "
+        f"underdetermined under {type(primary).__name__} -- a tetrahedron with two or more boundary "
+        f"faces is the usual cause -- so {type(secondary).__name__} is used on those cells' boundary "
+        f"faces and the correction rebuilt. Every other cell is unchanged. Pass `fallback=None` to "
+        f"get the unrepaired reconstruction and this warning instead.",
+        stacklevel=2,
+    )
+
+
+def _warn_unrepairable(cells: jnp.ndarray, closure, total: int) -> None:
+    """Say once that the correction is singular and nothing here can repair it."""
+    global _FALLBACK_WARNED
+    if _FALLBACK_WARNED:
+        return
+    _FALLBACK_WARNED = True
+    warnings.warn(
+        f"MultipleCorrectionGradient: {cells.size} of {total} cells leave the Hessian "
+        f"underdetermined under {type(closure).__name__}, and no fallback closure was given (or the "
+        f"fallback is the same closure). The reconstruction amplifies in those cells instead of "
+        f"being exact for quadratics there.",
         stacklevel=2,
     )
 
 
 def _build_corrections(
-    mesh: Mesh, geometry: MeshGeometry, closure: GradientBoundaryClosure
+    mesh: Mesh,
+    geometry: MeshGeometry,
+    closure: GradientBoundaryClosure,
+    fallback: GradientBoundaryClosure | None = None,
 ) -> Corrections:
     """Recover the three correction matrices by running the operators on coordinate monomials.
 
@@ -592,9 +669,23 @@ def _build_corrections(
         m2_columns.append(contract_symmetric(_symmetrize(second), dim))
 
     m2_inverse = jnp.linalg.inv(jnp.stack(m2_columns, axis=-1))
-    _warn_if_underdetermined(m2_inverse, closure)
+
+    # Repair, rather than merely report: the cells a closure cannot determine are identifiable, so
+    # neither closure has to be chosen for the whole mesh. Nothing is rebuilt when nothing is wrong,
+    # which is the common case -- so a healthy mesh pays one comparison, not a second build.
+    undetermined = _undetermined_cells(m2_inverse)
+    if undetermined is not None:
+        if fallback is None or type(fallback) is type(closure):
+            _warn_unrepairable(undetermined, closure, mesh.n_cells)
+        else:
+            _warn_repaired(undetermined, closure, fallback, mesh.n_cells)
+            return _build_corrections(
+                mesh, geometry, CellwiseFallback(undetermined, closure, fallback)
+            )
+
     return Corrections(
         m1_inverse=m1_inverse,
         m2_inverse=m2_inverse,
         gradient_defect=jnp.stack(defect_columns, axis=-1),
+        closure=closure,
     )

@@ -1861,6 +1861,45 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   anywhere, broken on the one march that exists, and needed only on a cell shape none of the shipped
   cases contain.
 
+  **✅✅ THE ACCURATE CLOSURE NO LONGER HAS TO BE CHOSEN FOR THE WHOLE MESH — `CellwiseFallback`
+  (2026-08-24).** The two closures fail in opposite regimes and both regimes are **local**, so
+  neither has to be global. `MultipleCorrectionGradient.bind` measures `M2⁻¹` per cell, and where the
+  requested closure leaves it singular it rebuilds through
+  `CellwiseFallback(cells, primary, secondary)` — the fallback on those cells' boundary faces, the
+  primary everywhere else. `fallback` defaults to `SkewCorrectedGradient`; `None` restores the
+  warn-and-be-wrong behaviour. `Corrections` now carries the **effective** closure, and
+  `reconstruct` applies *that* rather than the requested one — otherwise the correction would be
+  probed through one operator and applied through another, which is this module's own recorded trap.
+
+  | mesh | cells repaired | gradient error | `max \|M2⁻¹\|` |
+  |---|---|---|---|
+  | tetrahedral | **18** | 1.31e-15 / 1.87e-14 / **3.91e-14** | 1.88e+01 |
+  | hexahedral | 0 | — **bit-identical to owner** | 2.69e+00 |
+  | quadrilateral | 0 | — **bit-identical to owner** | 2.53e+00 |
+  | **pitzDaily (12225)** | **0** | — **bit-identical to owner**, no warning | 2.31e+00 |
+
+  **This is what keeps the accurate answer from stalling the march.** On pitzDaily the repair fires on
+  **zero** cells and the reconstruction is bit-identical to the `OwnerGradient` arm measured at
+  689.8 s / 437 cycles / `x_r/h` 8.069 — so the default configuration never applies the stalling
+  closure there at all, and the march result transfers without re-running. Nothing is rebuilt when
+  nothing is wrong, so a healthy mesh pays one comparison rather than a second correction build.
+
+  ⚠️ **What this does NOT do is explain the stall of GLOBAL skew, which is still unknown.** The
+  fallback removes the need to apply it globally; it does not make it safe to. On a mesh that *does*
+  need repair the closure runs on those few cells, and whether that is safe on a march is untested —
+  no case here has both the cell shape and a march. A fourth candidate difference was measured and is
+  recorded as unquantified rather than as a cause: at a developed near-wall `omega` field the two
+  closures' reconstructed `|grad omega|` differs by up to **16.6 % on 490 of 12225 cells** (median
+  0), which persists *after* the `boundary_values_at` fix. At the cold initial condition the coupled
+  residual agrees to 0.9–14 % per block and the Jacobian action to **2 %**, so whatever it is, it is
+  a developed-state effect.
+
+  ⚠️ **A design defect found by writing the fallback, and worth remembering: a defaulted `eqx.field`
+  on an abstract base makes every subclass field defaulted too.** `reads_boundary_values` was
+  declared that way and `CellwiseFallback` — the first closure needing *required* state — could not
+  be written at all (`non-default argument 'cells' follows default argument`). It is a plain class
+  attribute now, which subclasses override by assignment.
+
   **✅ CONSEQUENCE — `MultipleCorrectionGradient.boundary_closure` NOW DEFAULTS TO `OwnerGradient`
   (changed 2026-08-24).** The scheme is new and unreleased, so the default is set by what works:
   the owner closure marches every case here and is exact and better conditioned on quad/hex meshes.

@@ -42,6 +42,7 @@ from .gradient import (
 )
 from .multiple_correction import (
     Corrections,
+    CellwiseFallback,
     GradientBoundaryClosure,
     MultipleCorrectionGradient,
     OwnerGradient,
@@ -60,6 +61,7 @@ __all__ = [
     "AveragedNeighbourHessian",
     "CellBlockJacobi",
     "CellPreconditioner",
+    "CellwiseFallback",
     "CompactGreenGauss",
     "ContractionRate",
     "CorrectedGreenGauss",

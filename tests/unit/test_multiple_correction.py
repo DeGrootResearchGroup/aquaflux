@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.schemes import (
+    CellwiseFallback,
     CompactGreenGauss,
     CorrectedGreenGauss,
     HessianCorrectedGradient,
@@ -106,7 +107,7 @@ def test_the_owner_closure_fails_on_boundary_tetrahedra() -> None:
     mesh = tetrahedral_grid_3d(3, perturb=0.25, seed=6)
     case = _quadratic(mesh)
 
-    owner = MultipleCorrectionGradient(boundary_closure=OwnerGradient()).bind(
+    owner = MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None).bind(
         mesh, case["geometry"]
     )
     gradient, _ = owner.reconstruct(
@@ -438,27 +439,29 @@ def test_it_warns_when_the_mesh_and_closure_leave_the_hessian_underdetermined(
     only the pair discriminates: a detector that fired on every tetrahedral mesh, or on every owner
     closure, would be useless -- it is the combination that is broken.
     """
-    multiple_correction._CORRECTION_WARNED = False
+    multiple_correction._FALLBACK_WARNED = False
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        MultipleCorrectionGradient(boundary_closure=closure).bind(mesh, mesh.geometry())
-    fired = [w for w in caught if "Hessian correction is singular" in str(w.message)]
+        MultipleCorrectionGradient(boundary_closure=closure, fallback=None).bind(
+            mesh, mesh.geometry()
+        )
+    fired = [w for w in caught if "underdetermined" in str(w.message)]
     assert bool(fired) is warns, label
     if warns:
-        assert "SkewCorrectedGradient" in str(fired[0].message)  # names the way out
+        assert "no fallback closure was given" in str(fired[0].message)
 
 
 def test_the_underdetermined_warning_is_emitted_once_per_process() -> None:
     """It reports a fixed property of the geometry, and a scheme is bound on every assembler."""
     mesh = QUADRATIC_MESHES[2]
-    multiple_correction._CORRECTION_WARNED = False
-    scheme = MultipleCorrectionGradient(boundary_closure=OwnerGradient())
+    multiple_correction._FALLBACK_WARNED = False
+    scheme = MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None)
     counts = []
     for _ in range(2):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             scheme.bind(mesh, mesh.geometry())
-        counts.append(len([w for w in caught if "singular" in str(w.message)]))
+        counts.append(len([w for w in caught if "underdetermined" in str(w.message)]))
     assert counts == [1, 0]
 
 
@@ -481,7 +484,9 @@ def test_the_owner_closure_fails_only_where_a_cell_has_two_boundary_faces() -> N
     case = _quadratic(mesh)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        scheme = MultipleCorrectionGradient(boundary_closure=OwnerGradient()).bind(mesh, geometry)
+        scheme = MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None).bind(
+            mesh, geometry
+        )
 
     gradient = np.asarray(
         scheme.gradients(case["cell_values"], mesh, geometry, case["face_values"])
@@ -495,3 +500,54 @@ def test_the_owner_closure_fails_only_where_a_cell_has_two_boundary_faces() -> N
     )  # the mesh has both kinds, or this proves nothing
     assert relative[determined].max() < 1e-12
     assert relative[~determined].min() > 1e-3
+
+
+def test_the_repair_is_exact_where_it_fires_and_absent_where_it_need_not() -> None:
+    """The point of repairing per cell rather than choosing a closure for the whole mesh.
+
+    The two shipped closures fail in opposite regimes, so choosing one globally means accepting one
+    of the two failures everywhere. Choosing per cell -- by measuring the correction, not by counting
+    faces -- gives the accurate one where it is needed and leaves the rest of the mesh on a closure
+    that reads no boundary value at all. The second assertion is the load-bearing one: on a mesh with
+    nothing to repair the result must be *bit-identical*, or the repair is a change to every case
+    rather than to the cases that need it.
+    """
+    tetrahedral, hexahedral = QUADRATIC_MESHES[2], QUADRATIC_MESHES[1]
+
+    case = _quadratic(tetrahedral)
+    geometry = case["geometry"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        repaired = MultipleCorrectionGradient().bind(tetrahedral, geometry)
+        raw = MultipleCorrectionGradient(fallback=None).bind(tetrahedral, geometry)
+    assert isinstance(repaired.prepared.closure, CellwiseFallback)
+    args = (case["cell_values"], tetrahedral, geometry, case["face_values"])
+    error = np.abs(np.asarray(repaired.gradients(*args)) - case["gradient"]).max()
+    assert error < 1e-12 * np.abs(case["gradient"]).max()
+    assert np.abs(np.asarray(raw.gradients(*args)) - case["gradient"]).max() > 1e-3
+
+    # Nothing to repair: the repair must not have happened, and must cost the answer nothing.
+    case = _quadratic(hexahedral)
+    geometry = case["geometry"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        default = MultipleCorrectionGradient().bind(hexahedral, geometry)
+        disabled = MultipleCorrectionGradient(fallback=None).bind(hexahedral, geometry)
+    assert not isinstance(default.prepared.closure, CellwiseFallback)
+    args = (case["cell_values"], hexahedral, geometry, case["face_values"])
+    assert np.array_equal(
+        np.asarray(default.gradients(*args)), np.asarray(disabled.gradients(*args))
+    )
+
+
+def test_the_repair_says_so_rather_than_silently_changing_the_closure() -> None:
+    """A caller asked for one closure and got another on some cells; that has to be visible."""
+    multiple_correction._FALLBACK_WARNED = False
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        MultipleCorrectionGradient().bind(QUADRATIC_MESHES[2], QUADRATIC_MESHES[2].geometry())
+    fired = [w for w in caught if "underdetermined" in str(w.message)]
+    assert len(fired) == 1
+    message = str(fired[0].message)
+    assert "OwnerGradient" in message and "SkewCorrectedGradient" in message
+    assert "18 of 162" in message  # how many cells, so the reader can judge the scale
