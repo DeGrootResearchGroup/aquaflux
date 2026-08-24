@@ -46,6 +46,7 @@ from aquaflux.schemes import (
     SweptGradientSolve,
     cell_diagonal_block,
     contraction_rate,
+    fastest_boundary_closure,
     narrow_gradient_sweeps,
 )
 from aquaflux.schemes import gradient as gradient_module
@@ -2262,3 +2263,34 @@ def test_the_coupled_sweep_calibrates_against_the_preconditioner_it_will_run_wit
         )
         assert scheme.local_schur_block is local_schur_block
         assert scheme.hessian_solve.sweeps == expected
+
+
+def test_the_fastest_boundary_closure_is_the_mesh_s_choice_not_a_global_ranking() -> None:
+    """The two shipped closures swap places with mesh quality, which is the reason to measure.
+
+    On well-shaped cells the owner closure contracts faster; on cells bad enough to leave its Hessian
+    block singular it cannot contract at all and the neighbour-averaged closure wins. Both regimes are
+    checked, because a selector that always returned one of them would pass either test alone.
+    """
+    good = perturbed_grid_2d(6, 6, perturb=0.2, seed=1)
+    assert isinstance(fastest_boundary_closure(good, good.geometry()), OwnerHessian)
+
+    degenerate = tetrahedral_grid_3d(4, perturb=0.15, seed=3)
+    picked = fastest_boundary_closure(degenerate, degenerate.geometry())
+    assert isinstance(picked, AveragedNeighbourHessian)
+
+
+def test_the_closure_selector_compares_only_what_it_is_given() -> None:
+    """The candidate list is the whole search, so a single candidate comes back unchanged.
+
+    This is what lets a caller compare a calibrated blend weight, or a closure of their own, rather
+    than only the two defaults -- and it pins that the selector is not quietly consulting a fixed
+    list of its own.
+    """
+    mesh = perturbed_grid_2d(5, 5, perturb=0.2, seed=4)
+    only = AveragedNeighbourHessian(weight=0.4)
+    picked = fastest_boundary_closure(mesh, mesh.geometry(), candidates=(only,))
+    assert picked is only
+
+    with pytest.raises(ValueError, match="at least one candidate"):
+        fastest_boundary_closure(mesh, mesh.geometry(), candidates=())

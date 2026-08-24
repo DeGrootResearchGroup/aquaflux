@@ -1442,10 +1442,23 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     calibrator defect fixed the same day: measuring the `False` preconditioner would have returned a
     rate above one, which `sweeps_for` clamps to `cap` — **64 sweeps where 15 are needed**, on the
     target mesh, silently.
-  - **OVER-RELAXATION IS REFUTED HERE.** Monotonically worse from 1.00 upward under both closures,
-    which is the "the optimum migrates back to 1.0 as cells degrade" trend at its endpoint. A
-    relaxation tuned on pitzDaily (1.05–1.10, worth a sweep there) costs 1–3 sweeps here. **Do not
-    ship a non-unit relaxation.**
+  - **OVER-RELAXATION IS REFUTED HERE, AND THE OPTIMUM IS AT OR JUST BELOW 1.0 — closure-dependent.**
+    ⚠️ An earlier version of this entry said "do not ship a non-unit relaxation", which is broader
+    than the data: it was written from the over-relaxed half of the ladder before the under-relaxed
+    half had run. The full sweep (`local_schur_block=True`):
+
+    | ω | 0.60 | 0.70 | 0.80 | 0.90 | 1.00 | 1.05 | 1.10 |
+    |---|---|---|---|---|---|---|---|
+    | `OwnerHessian` | 0.7078 | 0.6203 | 0.5347 | **0.4946** | 0.5378 | 0.5585 | 0.5894 |
+    | `AveragedNeighbourHessian` | 0.7101 | 0.6238 | 0.5419 | 0.4666 | **0.4385** | 0.4715 | 0.4913 |
+
+    The owner closure has a genuine interior optimum at **0.90** (14 sweeps against 15); the averaged
+    closure — the one to prefer on this mesh — is optimal at **1.00**, with both sides worse. So the
+    correct statement is that *over*-relaxation is refuted and the optimum sits at or just below
+    unity, not that unity is always right. Note the consequence for polynomial acceleration: under
+    the preferred closure the degree-one polynomial is **already at its optimum**, so any gain from
+    that family has to come from degree two or higher. A relaxation tuned on pitzDaily (1.05–1.10,
+    worth a sweep there) costs 1–3 sweeps here, which is the transferable warning.
   - **`AveragedNeighbourHessian` is the FASTER closure on this mesh** (0.4385 against 0.5378, 12
     sweeps against 15) where on pitzDaily it is the slower one (0.3038 against 0.1978). It was
     adopted for exactness on cells whose `A_HH` the owner closure leaves singular; that it also

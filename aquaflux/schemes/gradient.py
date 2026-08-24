@@ -1146,6 +1146,87 @@ class SweepCalibration:
         return self.sweeps_for(rate.rate)
 
 
+def fastest_boundary_closure(
+    mesh: Mesh,
+    geometry: MeshGeometry,
+    *,
+    candidates: tuple[HessianBoundaryClosure, ...] | None = None,
+    local_schur_block: bool = True,
+    relaxation: float = 1.0,
+    iters: int = SweepCalibration.iters,
+    seed: int = SweepCalibration.seed,
+) -> HessianBoundaryClosure:
+    """The Hessian boundary closure whose coupled sweep converges fastest **on this mesh**.
+
+    The closure is not a global ranking — it is a property of the mesh, and the two shipped choices
+    swap places. On a well-shaped mesh the owner closure is the faster (a contraction rate of 0.198
+    against 0.304 on the pitzDaily benchmark, six sweeps against eight); on a heavily warped one the
+    neighbour-averaged closure is (0.4385 against 0.5378 on a 1.6M-cell reactor mesh with interior
+    face skewness p99 0.20 and face planarity down to 0.877, twelve sweeps against fifteen). Picking
+    one in advance is therefore wrong on half the meshes it will meet, which is what this measures
+    away — the same argument, and the same instrument, as calibrating the sweep count rather than
+    assuming it.
+
+    **The contraction rate subsumes solvability, which is why it is the only criterion here.** Both
+    shipped closures reproduce a constant Hessian exactly, so neither trades accuracy for speed; what
+    separates them on bad cells is that the owner closure can leave a cell's Hessian block singular,
+    and a closure whose block is singular does not merely reconstruct badly — it fails to contract at
+    all, and so loses on rate by a wide margin rather than winning on it.
+
+    Parameters
+    ----------
+    mesh : Mesh
+        The mesh to measure against; its geometry must be concrete, since the comparison is made
+        outside any traced or differentiated region.
+    geometry : MeshGeometry
+        That mesh's face and cell metrics.
+    candidates : tuple of HessianBoundaryClosure, optional
+        The closures to compare (default: :class:`OwnerHessian` and
+        :class:`AveragedNeighbourHessian`, the two that are exact for a quadratic). Pass a tuple to
+        compare a calibrated blend weight, or to add a closure of your own.
+    local_schur_block, relaxation : optional
+        The configuration the scheme will run with; both change the rate, so both must match what
+        will run or this measures a system nobody solves. Defaults are the shipped ones.
+    iters, seed : int, optional
+        Passed to :func:`contraction_rate`.
+
+    Returns
+    -------
+    HessianBoundaryClosure
+        The candidate with the lowest measured rate. Ties go to the earlier candidate, so the default
+        order prefers the cheaper owner closure when the two are indistinguishable.
+
+    Examples
+    --------
+    >>> from aquaflux.mesh import structured_grid_2d
+    >>> from aquaflux.schemes import OwnerHessian, fastest_boundary_closure
+    >>> mesh = structured_grid_2d(4, 4, 1.0, 1.0)
+    >>> isinstance(fastest_boundary_closure(mesh, mesh.geometry()), OwnerHessian)
+    True
+    """
+    if candidates is None:
+        candidates = (OwnerHessian(), AveragedNeighbourHessian())
+    if not candidates:
+        raise ValueError("fastest_boundary_closure needs at least one candidate closure.")
+
+    best, best_rate = None, math.inf
+    for closure in candidates:
+        systems = HessianCorrectedGradient._systems(mesh, geometry, closure)
+        inner = systems.inner()
+        rate = contraction_rate(
+            systems.coupled_error(
+                relaxation,
+                systems.outer_preconditioner(inner, local_schur_block),
+                inner.preconditioner,
+            ),
+            iters=iters,
+            seed=seed,
+        ).rate
+        if rate < best_rate:
+            best, best_rate = closure, rate
+    return best
+
+
 def narrow_gradient_sweeps(tree: _Tree, sweeps: int) -> _Tree:
     """Copy ``tree`` with every :class:`SweptGradientSolve` and :class:`CoupledBlockSweep` inside it
     capped at ``sweeps``.

@@ -409,6 +409,25 @@ The system stays gradient-sized: no enlarged unknown is formed, and the Hessian 
 the sweep rather than an unknown of a larger system. It lives for one reconstruction and starts
 from zero on every call, so the reconstruction remains an exactly linear function of the field.
 
+### Choosing the boundary closure
+
+The Hessian boundary closure is a **property of the mesh**, not a ranking. On well-shaped cells
+{class}`~aquaflux.schemes.OwnerHessian` converges faster; on badly warped ones
+{class}`~aquaflux.schemes.AveragedNeighbourHessian` does — and on cells degenerate enough to leave
+the owner closure's Hessian block singular, it is the only one that converges at all. Both reproduce
+a constant Hessian exactly, so this is a cost choice rather than an accuracy one.
+
+{func}`~aquaflux.schemes.fastest_boundary_closure` measures it, the same way the sweep count is
+measured rather than assumed:
+
+```python
+closure = fastest_boundary_closure(mesh, mesh.geometry())
+scheme = HessianCorrectedGradient.calibrated(mesh, mesh.geometry(), boundary_closure=closure)
+```
+
+The contraction rate is the only criterion, and it is sufficient: a closure whose per-cell block is
+singular does not reconstruct badly, it fails to contract, so it loses on rate by a wide margin.
+
 ### Binding a scheme to its geometry
 
 Most of what this scheme does before it sweeps depends only on the geometry: the per-cell blocks

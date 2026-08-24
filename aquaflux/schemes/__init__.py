@@ -36,6 +36,7 @@ from .gradient import (
     SweptGradientSolve,
     cell_diagonal_block,
     contraction_rate,
+    fastest_boundary_closure,
     narrow_gradient_sweeps,
 )
 from .interpolation import (
@@ -76,6 +77,7 @@ __all__ = [
     "blend_owner_neighbour",
     "cell_diagonal_block",
     "contraction_rate",
+    "fastest_boundary_closure",
     "interpolate_owner_neighbour",
     "interpolation_factor",
     "narrow_gradient_sweeps",
