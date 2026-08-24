@@ -48,7 +48,8 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax.numpy as jnp
 
-from aquaflux.vectors import dot, scale
+from aquaflux.schemes.interpolation import non_orthogonal_correction
+from aquaflux.vectors import dot
 
 from .face_flux import FaceContext, FaceFluxOperator
 
@@ -177,8 +178,8 @@ class DiffusionFlux(FaceFluxOperator):
         dpn = dot(d_p, n)  # D_P . n  (> 0)
         dnn = dot(d_n, n)  # D_N . n  (< 0 on interior faces)
 
-        corr_p = dot(grad_owner, d_p - scale(n, dpn))
-        corr_n = dot(grad_neighbour, d_n - scale(n, dnn))
+        corr_p = non_orthogonal_correction(grad_owner, d_p, n)
+        corr_n = non_orthogonal_correction(grad_neighbour, d_n, n)
 
         # Interior: two-sided, flux-continuous normal derivative (Gamma-jump in denom).
         denom = flux_continuous_denominator(dpn, dnn, gamma_owner, gamma_neighbour)

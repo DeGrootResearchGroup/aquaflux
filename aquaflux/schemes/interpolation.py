@@ -174,3 +174,47 @@ def interpolate_to_face(
     skewness = geometry.face.centroid - (x_p + scale(d, factor))  # x_ip − x_g, shape (n_faces, dim)
     correction = jnp.einsum("f...j,fj->f...", grad_face, skewness)
     return blend + correction
+
+
+def non_orthogonal_correction(
+    cell_gradient: jnp.ndarray,
+    displacement: jnp.ndarray,
+    normal: jnp.ndarray,
+) -> jnp.ndarray:
+    """The tangential part of a centroid→face displacement, contracted with a cell gradient.
+
+    Extrapolating a normal derivative from a cell centroid to a face along the face normal is only
+    exact when the centroid sits directly beneath the face. Where it does not, the displacement
+    ``d = x_ip − x_cell`` carries a tangential part, and the field's variation along that part is
+    not a normal derivative at all. This is that variation,
+
+        ``corr = grad phi . (d − (d.n) n)``,
+
+    which is subtracted before the one-sided difference is taken:
+
+        ``grad phi . n = (phi_ip − phi_cell − corr) / (d.n)``.
+
+    It vanishes on an orthogonal grid, where ``d`` is parallel to ``n``.
+
+    **This is the one home for that correction.** It is the difference between a boundary
+    extrapolation that reproduces a linear field exactly and one that does not, which matters well
+    beyond the flux it was first written for: a reconstruction whose corrections are calibrated on
+    quadratic fields cannot absorb an error made at linear order, so a closure built without this
+    term degrades the reconstruction rather than merely blurring a flux.
+
+    Parameters
+    ----------
+    cell_gradient : jnp.ndarray
+        The gradient at the cell being extrapolated from, shape ``(n_faces, dim)`` (already gathered
+        to faces).
+    displacement : jnp.ndarray
+        ``x_ip − x_cell``, that cell's centroid→face-centroid offset, shape ``(n_faces, dim)``.
+    normal : jnp.ndarray
+        Unit face normal, shape ``(n_faces, dim)``.
+
+    Returns
+    -------
+    jnp.ndarray
+        The correction per face, shape ``(n_faces,)``.
+    """
+    return dot(cell_gradient, displacement - scale(normal, dot(displacement, normal)))

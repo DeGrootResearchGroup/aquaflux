@@ -601,6 +601,55 @@ one matrix-vector product — and walk the ladder one rung past where it stops h
 it turns is not visible from the values before it.
 ```
 
+## Reconstruction without a solve
+
+{class}`~aquaflux.schemes.HessianCorrectedGradient` reaches exactness for quadratic fields by
+solving a coupled gradient--Hessian system: the gradient needs the Hessian through the
+face-curvature term, the Hessian needs the gradient, and the cycle is closed by sweeping until it
+converges. {class}`~aquaflux.schemes.MultipleCorrectionGradient` reaches the same exactness with no
+cycle at all, following Pont et al. (2017).
+
+It rests on one observation about the Green--Gauss sum: handed a linear field of gradient `a`, the
+raw sum does not return `a` -- it returns `M1 a` for a per-cell matrix that depends only on the
+mesh. Recover `M1` by applying the sum to the coordinate fields, and `M1^-1 R` is exact for linear
+fields by construction. Apply that twice and the argument repeats one order up, giving the Hessian;
+the gradient's remaining first-order error is a fixed linear function of that Hessian, and
+subtracting it lifts the gradient to second order.
+
+The result is **two passes over the faces and three per-cell matrix products**, with no system to
+solve, no sweep count, and no per-mesh calibration:
+
+```python
+scheme = MultipleCorrectionGradient().bind(mesh, geometry)
+gradient, hessian = scheme.reconstruct(field, mesh, geometry, boundary_values)
+```
+
+Every correction matrix is obtained by running the operators on coordinate monomials, so there are
+no derived geometric formulas and no volume moments to compute. The reconstruction stays exactly
+linear in the field -- a fixed sequence of fixed linear maps -- so its tangent is that same sequence
+applied to the tangent, with no implicit-function solve.
+
+### The boundary closure matters more than it looks
+
+A boundary condition supplies the field on a boundary face, never its gradient, and this scheme
+differentiates a gradient. {class}`~aquaflux.schemes.GradientBoundaryClosure` fills that gap.
+
+```{warning}
+A closure **must reproduce linear fields exactly**. The correction matrices are calibrated on
+quadratic fields, so they absorb whatever a closure does to a quadratic -- but an error made at
+*linear* order lands in a term those probes never see, and nothing downstream removes it. A raw
+one-sided difference `(phi_face - phi_owner) / (d.n)` is not linear-exact on a skewed mesh, and
+using one costs the reconstruction its accuracy outright.
+```
+
+{class}`~aquaflux.schemes.SkewCorrectedGradient` is the default: the owner's gradient tangentially,
+and a one-sided difference to the boundary value normally, with the non-orthogonal correction that
+makes it linear-exact -- the same term the diffusion flux has always used to extrapolate the same
+derivative to the same place. {class}`~aquaflux.schemes.OwnerGradient` is cheaper and adequate on
+hexahedra, but leaves the Hessian underdetermined on boundary tetrahedra, whose four faces do not
+supply the six independent directions its Hessian components need.
+
+
 ## Choosing a scheme
 
 | | mesh it suits | exact for | solve cost |
@@ -608,6 +657,7 @@ it turns is not visible from the values before it.
 | {class}`~aquaflux.schemes.CompactGreenGauss` | near-orthogonal | linear, on orthogonal grids | one pass, no system |
 | {class}`~aquaflux.schemes.CorrectedGreenGauss` | any | linear, on any mesh | a few sparse sweeps |
 | {class}`~aquaflux.schemes.HessianCorrectedGradient` | skewed, where the gradient leads | linear and quadratic | an inner and an outer solve |
+| {class}`~aquaflux.schemes.MultipleCorrectionGradient` | skewed, including tetrahedra | linear and quadratic | **no system: two face passes** |
 
 Two practical points beyond accuracy.
 

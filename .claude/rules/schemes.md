@@ -1638,6 +1638,71 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   benchmark found the correction had "only minor effects". Closing that gap is the prerequisite, and
   would itself be a contribution.
 
+  **✅ `MultipleCorrectionGradient` IS BUILT (2026-08-24) — the same exactness contract with NO
+  system to solve.** `aquaflux/schemes/multiple_correction.py`, following Pont, Brenner, Cinnella,
+  Maugars & Robinet (JCP 350, 2017); Setzwein, Ess & Gerlinger (JCP 446, 2021) is the vertex-centred
+  adaptation and points back to Pont for the cell-centred correction matrices. Both papers are in
+  the reference folder.
+
+  **The construction.** The raw Green--Gauss sum handed a linear field of gradient `a` returns
+  `M1 a`, not `a`. Recover `M1` by applying the sum to the coordinate fields; `D1 = M1⁻¹R` is then
+  linear-exact. Apply `D1` twice for an inconsistent Hessian, recover `M2` as what that returns for
+  each quadratic basis field, and `M2⁻¹` repairs it. `D1`'s own first-order error on a quadratic is
+  a fixed linear function of the Hessian, so subtracting it lifts the gradient to second order.
+  **Two face passes and three per-cell matrix products**, against the coupled sweep's 12--15 sweeps
+  of two passes on the reactor.
+
+  **Every correction matrix is PROBED, not derived** — the operators run on coordinate monomials,
+  the same device `cell_diagonal_block` uses. So there are no geometric formulas to port, no volume
+  moments, and the corrections cannot drift from the operators they correct.
+
+  Measured (`validation/multiple_correction/exactness_probe.py`, and the JAX path reproduces it):
+
+  | | quadrilateral | hexahedral | tetrahedral |
+  |---|---|---|---|
+  | gradient error on a quadratic | 1.9e-15 | 1.3e-15 | 2.2e-14 |
+  | Hessian error | 3.8e-14 | 1.2e-14 | 3.0e-13 |
+  | `cond(M1)` / `cond(M2)` | 2.2 / 2.9 | 2.0 / 2.9 | 4.8 / 6.9e2 |
+
+  Compare `cond(A_HH)` = **1.01e18** for the coupled scheme on tetrahedra under `OwnerHessian`. The
+  matrices this scheme inverts are small, local and well conditioned, which is *why* it needs no
+  iteration. Order of accuracy on a smooth non-polynomial field reproduces Pont's Figs. 10 and 11 —
+  gradient → 2, Hessian → 1 — and an uncorrected control fails by 12--97 % and 1.4--8.5x, which is
+  what makes the exactness result mean something.
+
+  **Exactly linear in the field, verified rather than assumed**: `jvp(t)` equals the map applied to
+  `t` **bit for bit** (`0.0` difference), `f(0) = 0`, reverse mode matches a central difference to
+  1e-8. So the tangent is an unrolled apply, not an implicit-function solve.
+
+  **⚠️⚠️ THE BOUNDARY CLOSURE MUST REPRODUCE LINEAR FIELDS EXACTLY, and this is the non-obvious
+  rule the whole scheme turns on.** The corrections are probed on the *quadratic* basis, so they
+  absorb whatever a closure does to a quadratic — but an error made at *linear* order lands in a
+  term those probes never see and nothing removes it. Measured, on tetrahedra:
+
+  | closure | linear-exact | quadratic exactness | `cond(M2)` |
+  |---|---|---|---|
+  | `OwnerGradient` | yes | **fails** (7e-2) | 9.1e17 |
+  | neighbour-averaged | yes | fails (8.7e-2) | 2.4e17 |
+  | raw one-sided difference | **no** | fails (1.1e0, worse than owner) | — |
+  | **`SkewCorrectedGradient`** | yes | **5.2e-14** | 6.9e2 |
+
+  Two separate lessons there. `OwnerGradient` is linear-exact and still fails on tetrahedra, for a
+  *dimensional* reason — four faces, one or two carrying no direction the owner's gradient has not
+  already supplied, against six Hessian components. And the raw one-sided difference fails for the
+  *other* reason, being linear-inexact on a skewed mesh; it uses more information than the owner
+  closure and does worse. ⚠️ Note also that neighbour-averaging, the fix that rescued this scheme's
+  own `A_HH`, makes things *worse* here — do not reason by analogy between the two schemes.
+
+  **`non_orthogonal_correction` (`schemes/interpolation.py`) is the shared term that makes the
+  default closure legal**, and `discretization/diffusion.py` now calls it too — it had the same
+  formula inline, having always needed it to extrapolate the same derivative to the same place.
+  ⚠️ That is the one home; a second copy in either caller is the defect.
+
+  **Not yet done**: no A/B against the coupled scheme on a march, nothing measured at 1.6M cells or
+  through snappyHexMesh's hanging-node interfaces, and the distributed path raises (it needs the
+  reconstructed gradient halo-exchanged once between the two passes — a real gap, but not the
+  structural bar the coupled scheme has).
+
   **⚠️ MEASURE IT AGAINST A CALIBRATED NESTED SOLVE, NOT THE SHIPPED DEFAULT.** Against `20/10` it
   looks like 2.0× forward and 3.1× on the tangent — but `20/10` is heavily over-provisioned on the
   meshes that comparison used, so most of that gap is the baseline's slack rather than this sweep's

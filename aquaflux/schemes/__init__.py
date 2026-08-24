@@ -39,10 +39,18 @@ from .gradient import (
     fastest_boundary_closure,
     narrow_gradient_sweeps,
 )
+from .multiple_correction import (
+    Corrections,
+    GradientBoundaryClosure,
+    MultipleCorrectionGradient,
+    OwnerGradient,
+    SkewCorrectedGradient,
+)
 from .interpolation import (
     blend_owner_neighbour,
     interpolate_owner_neighbour,
     interpolation_factor,
+    non_orthogonal_correction,
 )
 from .limiter import Limiter, VenkatakrishnanLimiter
 
@@ -54,9 +62,11 @@ __all__ = [
     "CompactGreenGauss",
     "ContractionRate",
     "CorrectedGreenGauss",
+    "Corrections",
     "CoupledBlockSweep",
     "ExactCellBlock",
     "GmresGradientSolve",
+    "GradientBoundaryClosure",
     "GradientPreconditioner",
     "GradientScheme",
     "GradientSolve",
@@ -67,10 +77,13 @@ __all__ = [
     "InverseCellVolume",
     "InverseVolume",
     "Limiter",
+    "MultipleCorrectionGradient",
     "NestedHessianSolve",
+    "OwnerGradient",
     "OwnerHessian",
     "PackedSystemSolve",
     "PreparedBoundaryClosure",
+    "SkewCorrectedGradient",
     "SweepCalibration",
     "SweptGradientSolve",
     "VenkatakrishnanLimiter",
@@ -81,4 +94,5 @@ __all__ = [
     "interpolate_owner_neighbour",
     "interpolation_factor",
     "narrow_gradient_sweeps",
+    "non_orthogonal_correction",
 ]
