@@ -1290,6 +1290,50 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   against coupled); they are misleading for judging a change that removes passes the compiler was
   already eliminating. Where a ratio in this file comes from counting passes, it says so.
 
+  **✅ THE SWEEP COUNT IS THE LEVER, CONFIRMED ON A FULL MARCH — 2.61x, BIT-IDENTICAL (2026-08-23).**
+  `pitzDaily` gradient A/B, both arms calibrated to an L2 tolerance of 1e-4 by their own factories
+  (`PITZ_AB_CALIBRATE=1e-4`), against the same case at each scheme's shipped defaults:
+
+  | arm | sweeps | wall | cycles | steps | `x_r/h` |
+  |---|---|---|---|---|---|
+  | corrected Green--Gauss, default | 5 | 736.2 s | 439 | 71 | 8.069 |
+  | corrected Green--Gauss, calibrated | **2** | **605.1 s** | 431 | 71 | **8.069** |
+  | Hessian-corrected, default | 20 | 6690.0 s | 510 | 72 | 8.069 |
+  | Hessian-corrected, calibrated | **7** | **2565.3 s** | **510** | **72** | **8.069** |
+
+  **Read the cycle and step columns: 510 and 72 in BOTH Hessian-corrected arms.** Seven sweeps
+  produce Newton directions the coupled solver cannot distinguish from twenty — not merely a similar
+  trajectory but the same one — and the scheme-versus-scheme field differences are unchanged to four
+  significant figures (`U` 6.665e-03 in both runs). So this is a 2.61x saving for no change in the
+  answer whatsoever, and the identical trajectory is evidence of headroom *below* seven rather than
+  at it. The matched-tolerance cost ratio between the schemes is **4.24x**, against 9.09x at defaults
+  — most of that gap was the two schemes' differing slack, which is the reason this case has a
+  calibrated mode at all. ⚠️ The 2565 s arm also carries the two row merges, worth ~9 % of a
+  reconstruction, so the calibration alone is nearer 2.4x than 2.61x.
+
+  **⚠️⚠️ AND SPENDING THE SWEEP LEVER PROMOTES THE PROLOGUE, WHICH INVERTS THE CACHING VERDICT
+  ABOVE.** The prologue is geometry-only, so it is near-constant while the sweeps shrink around it.
+  Measured by the same `t(N) = P + N·S` fit, shipped closure:
+
+  | sweeps | shared prologue `P` | marginal per field `S` | `P` share of a six-field residual |
+  |---|---|---|---|
+  | 20 | 7.42 ms | 17.61 ms | **6.6 %** |
+  | **7 (calibrated)** | 6.82 ms | 5.64 ms | **16.8 %** |
+
+  At one reconstruction it is starker still: **48 % at seven sweeps against 18 % at twenty**, of which
+  `local_schur_block` alone is ~3.5 ms. So the "~5 % for 659 MB, do not cache" reading recorded above
+  was taken at the *un*-calibrated operating point and does not survive calibration. At the calibrated
+  point the best-ratio cache is the **outer preconditioner's inverse alone**: it carries
+  `local_schur_block`, costs ~4.2 ms of the 6.82 ms prologue, and is `(n, dim, dim)` — **110 MB at
+  1.6M cells against 659 MB for the whole prologue**, whose bulk is the `(n, n_sym, n_sym)` inner
+  inverse that this scheme now rebuilds by algebra anyway. Expect the share to be **higher again in
+  3D**, where `local_schur_block` probes `dim + n_sym = 9` columns rather than 5.
+
+  **The general lesson, and it is the one to carry: optimize in the order that keeps the ranking
+  honest.** Every share here is a fraction of a total that the previous lever changed, so a
+  cost-share table is only valid at the configuration it was taken at — and the largest item at the
+  default configuration was not the largest item after the largest lever was spent.
+
   **⚠️ MEASURE IT AGAINST A CALIBRATED NESTED SOLVE, NOT THE SHIPPED DEFAULT.** Against `20/10` it
   looks like 2.0× forward and 3.1× on the tangent — but `20/10` is heavily over-provisioned on the
   meshes that comparison used, so most of that gap is the baseline's slack rather than this sweep's
