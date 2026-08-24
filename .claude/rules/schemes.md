@@ -1703,6 +1703,54 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   reconstructed gradient halo-exchanged once between the two passes — a real gap, but not the
   structural bar the coupled scheme has).
 
+  **✅✅ `MultipleCorrectionGradient` IS FASTER THAN CORRECTED GREEN--GAUSS ON A REAL MARCH
+  (pitzDaily, 2026-08-24)** — a quadratic-exact reconstruction for less than the linear-exact one.
+  Same case, same field-split preconditioner, same probe reach 5, same continuation, same commit:
+
+  | arm | wall | cycles | steps | `x_r/h` |
+  |---|---|---|---|---|
+  | `CorrectedGreenGauss` (default sweeps) | 739.5 s | 439 | 71 | 8.069 |
+  | **`MultipleCorrectionGradient`** (`OwnerGradient`) | **703.7 s** | **437** | 73 | **8.069** |
+  | `HessianCorrectedGradient`, calibrated 7 sweeps | 2565.3 s | 510 | 72 | 8.069 |
+  | `HessianCorrectedGradient`, 20 sweeps | 6690.0 s | 510 | 72 | 8.069 |
+
+  **Read the cycle column first: 437 against 439.** The preconditioner sees the two arms identically,
+  so the wall clock is the reconstruction and not a preconditioning artifact — the check this case
+  exists to make. ⚠️ The two Betchen rows predate `bind` and the row merges and are stale in its
+  favour, but not by a factor that reaches this conclusion.
+
+  **⚠️⚠️ `SkewCorrectedGradient` STALLS THIS CASE DEAD, and the reason is about what a boundary value
+  MEANS — not about the closure's accuracy.** It converges the first two Reynolds rungs to the
+  standard arm's residual to three significant figures (7.277e-06 against 7.255e-06 at step 28, and a
+  step-for-step identical rung-2 transition) and then fails on the **first step of the target rung**:
+  α = 0.001 immediately, β escalated to its 16.0 cap, residual frozen at 1.074e-01 for every
+  subsequent step. Not a degradation — no descent direction at all.
+
+  The cause is that **at a wall, `omega`'s boundary face value is a ZERO-GRADIENT closure (face value
+  = cell value), not data.** Differencing against it makes `rise = −corr`, so the closure *imposes* a
+  spurious near-zero normal derivative exactly where the true `omega` profile diverges like `1/d²`.
+  `OwnerGradient` never reads the boundary value and marches. ⚠️ An earlier reading of this — that
+  the wall value is huge and gets amplified by `1/(d·n)` — is **wrong**; the value is the cell's own.
+
+  **CONSEQUENCE (unresolved, and it is a design gap rather than a bug):** the right face gradient
+  depends on what the boundary value *means for that field* — a velocity wall value is a genuine
+  Dirichlet, a wall `omega` is a modelling device whose correct face gradient is neither the owner's
+  (which keeps a normal component the closure denies) nor a difference against the value. A
+  `GradientScheme` receives only `boundary_values`, an array with no boundary-condition type
+  attached, so there is currently **no seam to tell them apart**, and one scheme instance
+  reconstructs every field.
+
+  Two further things this exposed, both pre-existing and neither introduced by this scheme:
+  - `turbulence/transport.py`'s `_imposed_wall_omega_gradient` replaces the wall cells' `omega`
+    gradient with the analytical `omega_wall_gradient`, but it patches the gradient **returned** by
+    `gradients()`. The multiple-correction scheme builds its Hessian from its *internal* `g1` and
+    returns `g2 = g1 − H2·h`, so the correction arrives **after** the quantity it should have
+    informed. Any scheme whose output depends on an internally reconstructed derivative has this
+    problem.
+  - That function's own docstring records the error nothing corrects: the reconstruction is ~0.26x
+    the analytical magnitude in the fixed cells, and **the first interior ring is roughly twice too
+    large** — and that ring is overridden by nothing, in any scheme.
+
   **⚠️ MEASURE IT AGAINST A CALIBRATED NESTED SOLVE, NOT THE SHIPPED DEFAULT.** Against `20/10` it
   looks like 2.0× forward and 3.1× on the tangent — but `20/10` is heavily over-provisioned on the
   meshes that comparison used, so most of that gap is the baseline's slack rather than this sweep's
