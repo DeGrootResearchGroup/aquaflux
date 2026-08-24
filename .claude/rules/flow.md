@@ -631,7 +631,7 @@ Engineering Principles.
   Schur's quality, so improving it buys nothing. The strategy stays available for a flow-only solve;
   it is not the coupled default and is not the cure for coupled cost. PCD remains deprioritized
   independently (finite-element boundary recipes that do not transfer to FVM). Full numbers and the
-  matching "what a preconditioner can and cannot change" rule are in `.claude/rules/solve-globalization-log.md`.
+  matching "what a preconditioner can and cannot change" rule are in `.claude/notes/solve-globalization-log.md`.
 - **⚠️ SCOPE (binding, corrected 2026-08-18): "msimple beats lsc/SIMPLE" above described
   `coupled_continuation`'s block-diagonal preconditioner, which neither flagship validation case runs and
   which no longer defaults to MSIMPLE — do not cite it as current evidence for either architecture.**
@@ -642,7 +642,7 @@ Engineering Principles.
   MSIMPLE was tested directly against a flagship-scale operator, in the field-split leading-inverse role
   the current architecture actually uses, it was dominated: `validation/bfs3d_openfoam/field_split_probe.py`'s
   `split msimple/ilu0` arm is part of the "FLAT block preconditioners are CLOSED on this case" family in
-  `.claude/rules/solve-flow-block-log.md` (2.554e-06 TRUE relative residual at the 58-restart-cycle cap,
+  `.claude/notes/solve-flow-block-log.md` (2.554e-06 TRUE relative residual at the 58-restart-cycle cap,
   where the shipped hierarchical leading inverses converge in ~10 cycles), and a tighter,
   single-variable-changed measurement (`simple_type_swap_probe.py`, same file, "MSIMPLE swapped in for the
   SHIPPED leading inverse") that holds the shipped trailing inverse fixed instead of pairing it with an

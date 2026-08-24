@@ -1,19 +1,20 @@
 # Refuted / closed directions — `aquaflux/solve/`
 
-> Split out of `solve.md` (2026-08-18). **No `paths:` frontmatter — this file never auto-loads.**
-> It is tracked so a refuted idea can be re-adjudicated later (per the root `CLAUDE.md` rule that
-> findings belong in tracked files, not memory), but it is deliberately kept out of the
-> auto-loaded path so routine solver work does not pay for the full negative-results ledger.
-> Read this before proposing a preconditioner/globalization idea that sounds like it should already
-> have been tried on `bfs3d` — check here first. Each entry below states what was tried, on what
-> case/state, and why it lost; full investigation detail is via the parent-file link at the top of
-> the corresponding topic entry.
+> Split out of `solve.md` (2026-08-18). **Lives in `.claude/notes/`, outside the auto-loaded
+> `.claude/rules/` tree, so it never auto-loads.** It is tracked so a refuted idea can be
+> re-adjudicated later (per the root `CLAUDE.md` rule that findings belong in tracked files, not
+> memory), but it is deliberately kept out of the auto-loaded path so routine solver work does not
+> pay for the full negative-results ledger. Read this before proposing a
+> preconditioner/globalization idea that sounds like it should already have been tried on `bfs3d` —
+> check here first. Each entry below states what was tried, on what case/state, and why it lost;
+> full investigation detail is via the parent-file link at the top of the corresponding topic entry.
 >
-> **Write, don't just read: add an entry here in the SAME change that refutes or closes a direction.**
-> One short paragraph — what was tried, on what case/state, and why it lost — plus a pointer to the
-> full detail wherever it lives (a topic file, a `-log.md` file, or inline here if it is short enough
-> to need no pointer). This ledger is what a future contributor actually greps before re-proposing an
-> idea; a refutation that lives only in a `-log.md` file's prose will not be found by that search.
+> **Write, don't just read: add an entry here in the SAME change that refutes or closes a
+> direction.** One short paragraph — what was tried, on what case/state, and why it lost — plus a
+> pointer to the full detail wherever it lives (a topic file, a `-log.md` file, or inline here if it
+> is short enough to need no pointer). This ledger is what a future contributor actually greps
+> before re-proposing an idea; a refutation that lives only in a `-log.md` file's prose will not be
+> found by that search.
 
 ## Low-β directions already measured out — CLOSED, do not re-litigate
 

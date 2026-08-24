@@ -1,12 +1,12 @@
 # Investigation log — `aquaflux/solve/` the flow block
 
-> Split out of `solve.md` / `solve-flow-block.md` (2026-08-18). **No `paths:` frontmatter — this
-> file never auto-loads.** It holds the full chronological investigation behind the traced
-> `[u, v, w, p]` flow-block preconditioner, including several rounds of "found a win" that a later,
-> tighter measurement qualified or retracted — kept because a wrong-but-plausible finding gets
-> re-derived if the trail that refuted it is deleted rather than archived. See `solve-flow-block.md`
-> for the current, load-bearing status (the traced path is built and differentiable but is not the
-> shipped march default).
+> Split out of `solve.md` / `solve-flow-block.md` (2026-08-18). **Lives in `.claude/notes/`, outside
+> the auto-loaded `.claude/rules/` tree, so it never auto-loads.** It holds the full chronological
+> investigation behind the traced `[u, v, w, p]` flow-block preconditioner, including several rounds
+> of "found a win" that a later, tighter measurement qualified or retracted — kept because a
+> wrong-but-plausible finding gets re-derived if the trail that refuted it is deleted rather than
+> archived. See `solve-flow-block.md` for the current, load-bearing status (the traced path is built
+> and differentiable but is not the shipped march default).
 
 ### FLAT block preconditioners are CLOSED on this case
 

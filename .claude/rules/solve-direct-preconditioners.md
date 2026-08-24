@@ -24,7 +24,8 @@ paths:
 >
 > **This file has no `-log.md` sibling yet — current facts and dated investigation entries sit
 > together.** If you are about to push it past ~1,800 lines, split it first: peel the dated/historical
-> content into a new `solve-direct-preconditioners-log.md` (no `paths:` frontmatter) and leave a
+> content into a new `.claude/notes/solve-direct-preconditioners-log.md` (outside the auto-loaded tree
+> — never a `paths:`-less file in `.claude/rules/`, which loads always) and leave a
 > current-status summary here, following the pattern in `solve-flow-block.md` /
 > `solve-flow-block-log.md`. See `solve.md`'s "Where new content goes".
 
