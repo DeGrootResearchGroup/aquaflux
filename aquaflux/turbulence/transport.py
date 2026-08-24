@@ -464,6 +464,53 @@ class SSTTurbulence(eqx.Module):
         )
         return jnp.zeros(self.mesh.n_faces).at[self.wall_faces].set(values)
 
+    def _assembler(
+        self,
+        properties: PropertyModel,
+        flux_operators: tuple,
+        boundary: BoundaryConditions,
+        *,
+        source_operators: tuple = (),
+        imposed_gradient: ImposedGradient | None = None,
+    ) -> ResidualAssembler:
+        """An assembler on this turbulence model's mesh, geometry and gradient scheme.
+
+        Every equation assembled here -- ``k``, ``omega``, and the bare reconstruction
+        :meth:`_field_gradient` uses -- differs only in its properties, operators, boundary closures
+        and imposition; the mesh, the geometry and the injected gradient scheme are this object's and
+        are the same for all of them. Written once so an assembler-level choice cannot be wired into
+        one equation and missed in another.
+
+        Parameters
+        ----------
+        properties : PropertyModel
+            The named per-cell properties this equation reads.
+        flux_operators : tuple of FaceFluxOperator
+            Its face-flux operators, in the order they are summed.
+        boundary : BoundaryConditions
+            Its boundary closures.
+        source_operators : tuple of VolumeSource, optional
+            Its volume sources (default none).
+        imposed_gradient : ImposedGradient, optional
+            Cells whose gradient of this equation's field is a model quantity rather than something
+            to reconstruct (default none).
+
+        Returns
+        -------
+        ResidualAssembler
+            The assembler for that equation.
+        """
+        return ResidualAssembler.build(
+            self.mesh,
+            self.geometry,
+            properties,
+            flux_operators,
+            boundary,
+            source_operators=source_operators,
+            gradient_scheme=self.gradient_scheme,
+            imposed_gradient=imposed_gradient,
+        )
+
     def _field_gradient(
         self,
         field: jnp.ndarray,
@@ -478,15 +525,7 @@ class SSTTurbulence(eqx.Module):
         re-implemented here. ``imposed`` names cells whose gradient is a model quantity and is passed
         through to the scheme rather than applied to what it returns.
         """
-        assembler = ResidualAssembler.build(
-            self.mesh,
-            self.geometry,
-            PropertyModel({}),
-            (),
-            boundary,
-            gradient_scheme=self.gradient_scheme,
-            imposed_gradient=imposed,
-        )
+        assembler = self._assembler(PropertyModel({}), (), boundary, imposed_gradient=imposed)
         return assembler.gradient(field)
 
     def _wall_omega_gradient(self, k: jnp.ndarray, grad_k: jnp.ndarray) -> ImposedGradient:
@@ -639,9 +678,7 @@ class SSTTurbulence(eqx.Module):
             closure.nu_t, closure.f1, self.model.sigma_k1, self.model.sigma_k2
         )
         near_wall = self._near_wall_closure(closure.wall_shear_rate)
-        assembler = ResidualAssembler.build(
-            self.mesh,
-            self.geometry,
+        assembler = self._assembler(
             PropertyModel({"diffusivity": diffusivity}),
             (
                 AdvectionFlux(self._volume_flux(mdot), self.advection_scheme),
@@ -661,7 +698,6 @@ class SSTTurbulence(eqx.Module):
                 ),
                 KDestruction(closure.omega, self.model, near_wall=near_wall),
             ),
-            gradient_scheme=self.gradient_scheme,
         )
         return assembler.residual
 
@@ -723,9 +759,7 @@ class SSTTurbulence(eqx.Module):
         diffusivity = self._diffusivity(
             closure.nu_t, closure.f1, self.model.sigma_omega1, self.model.sigma_omega2
         )
-        assembler = ResidualAssembler.build(
-            self.mesh,
-            self.geometry,
+        assembler = self._assembler(
             PropertyModel({"diffusivity": diffusivity}),
             (
                 AdvectionFlux(self._volume_flux(mdot), self.advection_scheme),
@@ -746,7 +780,6 @@ class SSTTurbulence(eqx.Module):
                     closure.omega, closure.grad_k, closure.grad_omega, closure.f1, self.model
                 ),
             ),
-            gradient_scheme=self.gradient_scheme,
             # The same imposition the closure fields were built with. This equation reconstructs
             # `omega`'s gradient again for the diffusion's non-orthogonal correction, and a
             # reconstruction that is a model quantity in the wall cells is one wherever it is made --
