@@ -1,10 +1,11 @@
 # Investigation log — `aquaflux/solve/` globalization
 
-> Split out of `solve.md` / `solve-globalization.md` (2026-08-18). **No `paths:` frontmatter — this
-> file never auto-loads.** It holds the dated investigation behind the current globalization
-> architecture — the residual-measure choice, the shift-basis probing, the SER schedule reversal, and
-> the line-search behaviour — including entries that a later measurement corrected or superseded in
-> place. See `solve-globalization.md` for the current, load-bearing architecture and defaults.
+> Split out of `solve.md` / `solve-globalization.md` (2026-08-18). **Lives in `.claude/notes/`,
+> outside the auto-loaded `.claude/rules/` tree, so it never auto-loads.** It holds the dated
+> investigation behind the current globalization architecture — the residual-measure choice, the
+> shift-basis probing, the SER schedule reversal, and the line-search behaviour — including entries
+> that a later measurement corrected or superseded in place. See `solve-globalization.md` for the
+> current, load-bearing architecture and defaults.
 
     - **First measurement of the convective basis: WORSE at a weakly-separated state, but NOT yet a fair
       test of its regime (`local_ts_ab.py`, 2026-07-24).** Probing both bases on pitzDaily checkpoints at

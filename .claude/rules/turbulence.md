@@ -307,7 +307,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
       reshaped β toward the α=1 boundary that SER misses, but it never converged standalone (stalled rel
       ~0.03), its gains were hand-set placeholders and it had no production caller. The α signal is kept
       where it is measured to work: in the two *dual-time* controls above. Full analysis: the "SER β
-      schedule runs backwards" bullet in `.claude/rules/solve-globalization-log.md`.
+      schedule runs backwards" bullet in `.claude/notes/solve-globalization-log.md`.
   - **`reuse=` refreshes a stale k/ω preconditioner without changing the compilation signature.**
     `scalar_transport_preconditioner(..., reuse=old)` (threaded through
     `SSTTurbulence.k_preconditioner` / `omega_preconditioner`) re-derives the *values* at a new state on
@@ -703,7 +703,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     verified three ways: (1) the closure reproduces OF's `ν_t = 422` *exactly* when fed OF's own converged
     `k`,`ω`; (2) the "flat ν_t ≈ 85" is the **inlet** value `k_in/ω_in`, not a cap (interior ν_t is *below*
     inlet — under-developed); (3) `x_r`,`k` climb *monotonically* toward OF as the march progresses, stalling
-    only at rel ~0.05 (the SER-schedule convergence problem — see `.claude/rules/solve-globalization-log.md`). On the clean field
+    only at rel ~0.05 (the SER-schedule convergence problem — see `.claude/notes/solve-globalization-log.md`). On the clean field
     aquaflux accepts the **bulk** to `|R|/ω ~2e-6`; the only residual is the near-wall fixed-cell blend
     difference above. (`compare.py` was also silently broken — it called the renamed `momentum.velocity_gradient`;
     fixed to `turbulence.closure_fields(...).nu_t`, so the cell-for-cell profile comparison had *never actually
@@ -1039,7 +1039,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     NOT the plain Euclidean ‖R‖.** The Euclidean coupled residual is dominated by the `ω` block (`ω` O(1e5),
     `k` O(1e-3)), so it barely moves while the flow develops and *mis-ranks* states — a converged field can
     score worse than a badly wrong one, and a step collapsing `k` is accepted (see the mis-ranking warning
-    in `.claude/rules/solve-globalization-log.md`). `RowScaledNorm` divides each row by its own diagonal and each block by its
+    in `.claude/notes/solve-globalization-log.md`). `RowScaledNorm` divides each row by its own diagonal and each block by its
     field magnitude, reporting a fractional change per equation, so steering and the stopping test judge
     every block comparably. `coupled_continuation` / `coupled_lu_continuation` build it by default;
     `block_scaled_norm=True` selects the coarser one-scale-per-block `BlockScaledNorm` (`_coupled_residual_norm`),
@@ -1051,7 +1051,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     is REQUIRED for the case to be judged correctly. **When a march refreshes, the measure is held fixed at
     the initial state** — `solve_coupled` passes `coupled_continuation(residual_norm=base_norm)` on every
     refresh rather than rebuilding it at the developed state, or the self-normalising scales would re-base and
-    the convergence test become unreachable (#156 seam 4; see `.claude/rules/solve-globalization-log.md`). `scaled_norm=True`
+    the convergence test become unreachable (#156 seam 4; see `.claude/notes/solve-globalization-log.md`). `scaled_norm=True`
     opts the *observed* march into rebuilding the row scales per outer step (finer, more expensive).
   - **`beta_floor` (SER lower bound) is available but off by default (a measured wash).** Bounding
     `β = max(beta_floor, β₀(‖R‖/‖R₀‖)^p)` keeps each late shifted solve out of the ill-conditioned low-`β`
@@ -1060,7 +1060,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     Newton steps), so it defaults to `0`; wired through `coupled_continuation` for further evaluation. The
     settled coupled-solve cost is the diagonal-block-preconditioner weakness at high Reynolds number, **not**
     the residual measure, `β` floor, or missing cross-coupling (a block-triangular preconditioner was worse
-    — non-convergent on recirculating pitzDaily). See `.claude/rules/solve-globalization-log.md`.
+    — non-convergent on recirculating pitzDaily). See `.claude/notes/solve-globalization-log.md`.
   - **The coupled flow block uses the convection-aware velocity AMG, not the viscous-smoothed default
     (`_coupled_shift_policy`).** A RANS case is high-Reynolds, and the default `BlockPreconditioner.build`
     velocity config (viscous-**smoothed** AMG, which is Peclet-blind) produces a poor momentum-block
@@ -1072,10 +1072,10 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     refreshing the flow block alone at a separated pitzDaily state is if anything slightly *worse*. It is
     **not** the flow↔turbulence cross-coupling (the block-*diagonal* preconditioner with the right config
     is already nearly aligned on its own — a block-triangular coupling was built, measured, and is worse;
-    see `.claude/rules/solve-globalization-log.md`). **The k/ω *scalar* AMGs are the exception: they do go
+    see `.claude/notes/solve-globalization-log.md`). **The k/ω *scalar* AMGs are the exception: they do go
     stale, and refreshing them alone once the flow separates cuts the outer cycle count materially**
     (configuration not recorded — re-measure before relying on the size) — the one staleness lever that
-    pays; see the staleness bullet in `.claude/rules/solve-globalization-log.md`. Overridable via
+    pays; see the staleness bullet in `.claude/notes/solve-globalization-log.md`. Overridable via
     `preconditioner_kwargs`.
   - **⚠️ THE PRESSURE SCHUR NO LONGER HARDCODES `schur_scaling="msimple"` (fixed 2026-08-18) — it was
     never necessary at the scale this policy is actually used at, and is dominated where it matters.**
@@ -1097,7 +1097,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     controlled single-variable swap (`validation/bfs3d_openfoam/simple_type_swap_probe.py`, at the converged
     root, everything but the leading inverse held at the shipped bundle) shows MSIMPLE costs ~8-9x the
     shipped bundle's Krylov cycles (6→53 at the adjoint operator, 5→40 at the march's own shift) — see
-    `.claude/rules/solve-flow-block-log.md` § "MSIMPLE swapped in for the SHIPPED leading inverse".
+    `.claude/notes/solve-flow-block-log.md` § "MSIMPLE swapped in for the SHIPPED leading inverse".
     ⚠️ **That ~8-9x is measured against a `hostilu` leading inverse this case no longer ships, and on a
     method whose pressure prediction was missing; re-measured 2026-08-20 with Klaij & Vuik's Algorithm 2
     actually built and against the current `simplesmooth` default, MSIMPLER is 32 cycles against 17 at the
@@ -1471,14 +1471,14 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
     efficiency-optimal β *rises* (≈2 at rel 0.38, ≥5 at rel 0.05), so in the tail SER runs at β ~50× too
     low, where the full Newton step overshoots ~33× and the line search claws back ~0.4%/step (diagnosed
     directly via the step-length factor α — the full analysis and data are the "SER β schedule runs
-    backwards" bullet in `.claude/rules/solve-globalization-log.md`). **A ~1.9× preconditioner refresh cannot rescue a march
+    backwards" bullet in `.claude/notes/solve-globalization-log.md`). **A ~1.9× preconditioner refresh cannot rescue a march
     the schedule is grinding to a halt** — this reorders the priorities: fixing the β schedule (an
     α-driven pseudo-transient step control — the dual-time controls are where that direction survives)
     is ahead of calibrating the refresh.
   - **Preconditioner staleness is the SECONDARY cost, and it is coupled to the β schedule (measured).**
     Over the march the wall time per step also grows several-fold as the recirculation develops and the
     frozen scalar preconditioner degrades — the same post-separation regime where refreshing the k/ω AMGs
-    cuts the outer cycle count (staleness bullet in `.claude/rules/solve-globalization-log.md`). Neither figure was recorded
+    cuts the outer cycle count (staleness bullet in `.claude/notes/solve-globalization-log.md`). Neither figure was recorded
     with its state or its preconditioner bundle, so re-measure before relying on either.
     Driving a refresh **from the march** is BUILT:
     `solve_coupled(refresh=RefreshPolicy(trigger=CoefficientDriftTrigger(…)))`. **The β coupling that motivated it:** a

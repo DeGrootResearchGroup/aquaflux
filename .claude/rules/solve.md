@@ -84,18 +84,26 @@ testability seam. Everything subsystem-specific moved out:
 | `solve-direct-preconditioners.md` | `lu_preconditioner.py`, `ilu0.py`, `_ilu0.pyx` | The monolithic complete-LU preconditioner (and the now-deleted ILUT it once shared a family with), and the shared frozen-host contract |
 | `solve-amg-multigrid.md` | `amg_preconditioner.py`, `multigrid.py`, `hierarchy_inverse.py`, `ilu_inverse.py` | The monolithic AMG coupled PC, the traced multigrid, faithful smoothed aggregation, and `multigrid.py`'s own binding decisions |
 | `solve-flow-block.md` | `saddle_multigrid.py`, `shift_basis.py` | Traced preconditioning of the `[u, v, w, p]` saddle — current status only |
-| `solve-flow-block-log.md` | *(none — reference only)* | The full dated investigation behind the flow block, including qualified/retracted findings |
+| `.claude/notes/solve-flow-block-log.md` | *(never auto-loads)* | The full dated investigation behind the flow block, including qualified/retracted findings |
 | `solve-field-split.md` | `field_split.py` | The block-triangular field split (saddle plus two transported scalars) |
 | `solve-globalization.md` | `forward_step.py`, `continuation.py`, `step_control.py`, `retry.py`, `relaxation.py`, `line_search_growth.py` | Forward-step architecture, pseudo-transient continuation, line search — current status only |
-| `solve-globalization-log.md` | *(none — reference only)* | The dated investigation behind the globalization architecture |
+| `.claude/notes/solve-globalization-log.md` | *(never auto-loads)* | The dated investigation behind the globalization architecture |
 | `solve-march.md` | `march.py`, `march_log.py`, `checkpoint.py` | The observed march: `forward_march`, triggers, controls, logging |
-| `solve-refuted-directions.md` | *(none — reference only)* | A cross-cutting ledger of closed/refuted ideas — check here before proposing something that sounds already tried |
+| `.claude/notes/solve-refuted-directions.md` | *(never auto-loads)* | A cross-cutting ledger of closed/refuted ideas — check here before proposing something that sounds already tried |
 
-The two `-log.md` files and `solve-refuted-directions.md` carry **no `paths:` frontmatter and never
-auto-load** — they are tracked (so a finding can be re-adjudicated later, per the root `CLAUDE.md` rule
-that findings belong in tracked files, not memory) but deliberately kept out of the auto-loaded path so
-routine solver work does not pay for the full investigation history. Read them deliberately: before
-re-investigating a subsystem, or before proposing an idea that might already be closed.
+The two `-log.md` files and `solve-refuted-directions.md` live in **`.claude/notes/`, outside the
+auto-loaded `.claude/rules/` tree, and never auto-load** — they are tracked (so a finding can be
+re-adjudicated later, per the root `CLAUDE.md` rule that findings belong in tracked files, not memory)
+but deliberately kept out of the auto-loaded path so routine solver work does not pay for the full
+investigation history. Read them deliberately: before re-investigating a subsystem, or before
+proposing an idea that might already be closed.
+
+⚠️ **They used to sit in `.claude/rules/` with no `paths:` frontmatter, and that did NOT keep them out
+— it did the opposite.** A rules file without `paths:` is not scoped to nothing, it is scoped to
+everything: all three loaded into **every** session in the repository, whatever was being worked on,
+at ~285 KB (roughly 70k tokens, over a third of the context window) before the first tool call. Moving
+them out of `.claude/rules/` is what makes the "never auto-loads" claim true. **A file under
+`.claude/rules/` must carry `paths:`; reference-only material belongs in `.claude/notes/`.**
 
 ## Where new content goes (binding — read before adding a finding)
 
@@ -120,7 +128,8 @@ silently regrow into another 8,500-line file. Four rules:
    history together. **The moment one of them is next edited after crossing ~1,800 lines** (roughly
    `turbulence.md`'s 1,779 — the largest still-unsplit rule file in the project, and a reasonable outer
    bound not to exceed), split it the same way as part of that change: peel its dated/historical content
-   into a new `<name>-log.md` sibling with no `paths:` frontmatter, add it to the table above, and leave
+   into a new `.claude/notes/<name>-log.md` (outside the auto-loaded tree — NOT a `paths:`-less file
+   in `.claude/rules/`, which loads always rather than never), add it to the table above, and leave
    a synthesized current-status paragraph behind, mirroring rule 2. Do not wait for someone to notice
    the file is huge — that is what happened to this file the first time. **`solve-amg-multigrid.md` is
    already past this bound (2,088 lines as of 2026-08-18)** — it is the one candidate that should be

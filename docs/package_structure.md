@@ -18,9 +18,10 @@ cfd/                                  # repo root
 ├── .github/workflows/ci.yml          # ruff + codespell gate, sharded unit/integration tiers
 ├── .githooks/pre-push                # local ruff + spelling gate (enable: git config core.hooksPath .githooks)
 ├── .githooks/pre-commit              # non-blocking documentation-sync reminder
-├── .claude/rules/                    # path-scoped subsystem rules (auto-load on edit)
+├── .claude/rules/                    # path-scoped subsystem rules (auto-load on edit; each declares `paths:`)
 │   ├── mesh.md  discretization.md  schemes.md  boundary.md  properties.md
 │   └── solve.md  flow.md  turbulence.md  io.md  parallel.md
+├── .claude/notes/                    # reference-only investigation logs; never auto-load, read on demand
 │
 ├── docs/                             # the Sphinx site (MyST Markdown; api.md generated at build)
 │   ├── conf.py                       #   Sphinx config + _write_api_page (API page from each __all__)

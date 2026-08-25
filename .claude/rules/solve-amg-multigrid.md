@@ -14,7 +14,8 @@ paths:
 >
 > **⚠️ This file is already past this project's ~1,800-line outer bound (2,088 lines as of 2026-08-18)
 > and has no `-log.md` sibling.** Split it on its next substantial edit: peel the dated/historical
-> content into a new `solve-amg-multigrid-log.md` (no `paths:` frontmatter) and leave a current-status
+> content into a new `.claude/notes/solve-amg-multigrid-log.md` (outside the auto-loaded tree — never
+> a `paths:`-less file in `.claude/rules/`, which loads always) and leave a current-status
 > summary here, following the pattern in `solve-flow-block.md` / `solve-flow-block-log.md`. See
 > `solve.md`'s "Where new content goes".
 

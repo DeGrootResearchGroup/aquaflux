@@ -19,6 +19,17 @@ subsystem and must **stand on their own** (a contributor has the `.claude/` tree
 author's private working notes). When a rule would otherwise point at an external note, inline
 the fact instead.
 
+⚠️ **`paths:` is MANDATORY on every file under `.claude/rules/`, and an absent one is the opposite of
+"scoped to nothing" — it is scoped to EVERYTHING.** Three reference-only files sat there without it,
+each opening with the words "this file never auto-loads", and all three loaded into **every** session
+in the repository regardless of what was being worked on: ~285 KB, roughly 70k tokens — over a third
+of the context window — spent before the first tool call, on top of this file's own ~24k. Nothing
+reports this; a session simply starts near its limit and the budget is gone by the first edit. So
+**reference-only material goes in `.claude/notes/`** (tracked, greppable, read on demand), never in
+`.claude/rules/` with the frontmatter left off. `tools/check_rules.sh` reports any rules file missing
+`paths:`, and `tests/unit/test_check_rules.py` runs it over this repository in the fast tier, so an
+unscoped file fails the always-on gate rather than quietly costing every future session.
+
 When you change a subsystem, the matching rule below is the authoritative
 guidance for it — keep it updated as part of the change (this file's Post-Change
 Checklist still governs).
@@ -34,7 +45,7 @@ Checklist still governs).
 | `.claude/rules/schemes.md` | `aquaflux/schemes/**` | first-class swappable numerics: face interpolation, gradient reconstruction, non-orthogonal correction |
 | `.claude/rules/boundary.md` | `aquaflux/boundary/**` | weak boundary-face-value closures (BC = special face interpolator); the shared per-patch fold |
 | `.claude/rules/properties.md` | `aquaflux/properties/**` | physical property model (density/viscosity/conductivity): `Property` (constant / per-zone / calculated) collected in a `PropertyModel`, decoupled from the numerics |
-| `.claude/rules/solve.md` | `aquaflux/solve/**` | Newton on the residual, linear solve with implicit differentiation / `custom_vjp`, the preconditioner risk. Split by subsystem into narrower-scoped siblings (`solve-direct-preconditioners.md`, `solve-amg-multigrid.md`, `solve-flow-block.md`, `solve-field-split.md`, `solve-globalization.md`, `solve-march.md`, plus reference-only `-log.md`/`solve-refuted-directions.md` files with no `paths:`) — see `solve.md`'s own "Index — where the detail lives" |
+| `.claude/rules/solve.md` | `aquaflux/solve/**` | Newton on the residual, linear solve with implicit differentiation / `custom_vjp`, the preconditioner risk. Split by subsystem into narrower-scoped siblings (`solve-direct-preconditioners.md`, `solve-amg-multigrid.md`, `solve-flow-block.md`, `solve-field-split.md`, `solve-globalization.md`, `solve-march.md`, plus reference-only `-log.md`/`solve-refuted-directions.md` files in `.claude/notes/`) — see `solve.md`'s own "Index — where the detail lives" |
 | `.claude/rules/flow.md` | `aquaflux/flow/**` | coupled p–U block: momentum (reusing advection/diffusion) + Rhie–Chow continuity, differentiated `a_P` (frozen only in the preconditioner), monolithic AD-Jacobian solve |
 | `.claude/rules/turbulence.md` | `aquaflux/turbulence/**` | k–ω SST closure + the segregated flow–turbulence loop: segregated forward / coupled adjoint, outer-loop globalization, positivity-floor adjoint honesty |
 | `.claude/rules/transport.md` | `aquaflux/transport/**` | scalar transport by a converged flow (species, temperature, tracers): why a concentration rides the *volumetric* flux, the effective-diffusivity convention, sub-patch injection without a mesh change — the aquakin reaction seam |
