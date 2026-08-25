@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 
 from aquaflux.boundary import BoundaryConditions
@@ -527,11 +528,45 @@ class MomentumContinuity(eqx.Module):
         """
         columns = [
             self.gradient_scheme.gradients(
-                velocity[:, i], self.mesh, self.geometry, boundary_velocity[:, i]
+                velocity[:, i],
+                self.mesh,
+                self.geometry,
+                boundary_velocity[:, i],
+                boundary_chain=self._velocity_boundary_chain(velocity, i),
             )
             for i in range(self.mesh.dim)
         ]
         return jnp.stack(columns, axis=1)
+
+    def _velocity_boundary_chain(self, velocity: jnp.ndarray, component: int) -> jnp.ndarray:
+        """``d(boundary velocity_i)/d(velocity_i)`` per face, shape ``(n_faces,)``.
+
+        Per **component**, and one directional derivative each: a no-slip wall prescribes all of them
+        while a pressure outlet leaves all of them following the owner, but a patch may treat them
+        differently, and a single tangent of ones would sum the components rather than resolve one.
+
+        Differentiated from the closures rather than declared, so it cannot disagree with them: a
+        prescribed value does not move with the owner and gives zero, a zero-gradient one follows it
+        exactly and gives one.
+
+        ⚠️ This is the one boundary-consistency repair the flow block **can** take. Its closures accept
+        no gradient, so they cannot be re-evaluated at a reconstructed one -- but this derivative needs
+        no gradient at all.
+        """
+        seed = jnp.zeros_like(velocity).at[:, component].set(1.0)
+        return jax.jvp(
+            lambda u: self._boundary_fields(u, jnp.zeros(self.mesh.n_cells))[0][:, component],
+            (velocity,),
+            (seed,),
+        )[1]
+
+    def _pressure_boundary_chain(self, velocity: jnp.ndarray, pressure: jnp.ndarray) -> jnp.ndarray:
+        """``d(boundary pressure)/d(pressure)`` per face, shape ``(n_faces,)`` -- see the velocity twin."""
+        return jax.jvp(
+            lambda q: self._boundary_fields(velocity, q)[1],
+            (pressure,),
+            (jnp.ones_like(pressure),),
+        )[1]
 
     def _mass_flux(
         self,
@@ -846,7 +881,11 @@ class MomentumContinuity(eqx.Module):
         # Rhie--Chow coupling: the pressure gradient, the momentum diagonal a_P, and the mass flux
         # mdot that couples pressure implicitly into both continuity and advection.
         grad_pressure = self.gradient_scheme.gradients(
-            pressure, self.mesh, self.geometry, boundary_pressure
+            pressure,
+            self.mesh,
+            self.geometry,
+            boundary_pressure,
+            boundary_chain=self._pressure_boundary_chain(velocity, pressure),
         )
         a_p = self.momentum_matrix_diagonal(
             velocity, grad_velocity

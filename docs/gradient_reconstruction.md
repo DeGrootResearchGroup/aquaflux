@@ -672,13 +672,71 @@ In practice most meshes sit on the safe side. On a 1.6-million-cell `snappyHexMe
 quadratic there to `4.9e-12` -- as well as the skew closure, and better conditioned.
 
 ```{warning}
-`SkewCorrectedGradient` stalls a coupled RANS march on the pitzDaily benchmark: it clears two
-Reynolds rungs at a full step and then finds no descent direction at all on the target rung. Why is
-not known -- three candidate mechanisms have been measured and refuted. That benchmark is
-quadrilateral and has no tetrahedra, so it does not test the regime this closure exists for; whether
-the stall also appears on a mesh with boundary tetrahedra is untested. Prefer the default, and if
-your mesh forces this closure, watch convergence.
+`SkewCorrectedGradient` loses a coupled RANS march on the pitzDaily benchmark that three other
+reconstructions complete -- corrected Green--Gauss, the Hessian-corrected scheme, and this scheme
+under the default closure. Measured at the iterate where that happens, with all four at the same
+state and the same pseudo-time shift, the largest correction to `log omega` splits sharply by whether
+a cell owns a boundary face:
+
+| reconstruction | interior cells | one boundary face | corner cells | step length kept |
+|---|---|---|---|---|
+| corrected Green--Gauss | 0.456 | 1.36 | 1.91 | 1 |
+| Hessian-corrected | 0.438 | 4.71 | 9.83 | 1/2 |
+| this scheme, default closure | 0.454 | 6.64 | 15.6 | 1/4 |
+| this scheme, one-sided closure | 0.454 | 16.1 | 58.4 | 1/16 |
+
+The interior column is the control and it is flat across all four; the boundary columns span
+thirtyfold, and the step length the line search can keep orders the same way. `omega` is transported
+in log form, so an entry of 58 means that cell's `omega` is multiplied by `e**58` -- and halving the
+step only takes the square root of that factor, so a search can reach an admissible step without
+reaching one long enough to be worth taking.
+
+The wall-adjacent `omega` rows are not the `omega` equation: they hold the algebraic near-wall
+fixation `log omega = log omega_wall(k)`, whose log-layer branch carries `sqrt(k)`. Measured on that
+benchmark, the `k` term of that row reproduces the whole `omega` correction to within `1e-5` in every
+arm. So what a reconstruction changes is the velocity gradient the wall cells see, hence their `k`
+production, hence the `k` correction -- which the fixation row then hands to `omega`.
+
+**Resolved.** Two things were wrong, neither of them the closure. The step length was being set by a
+**global** positivity cap that scaled the whole step by the worst cell's `k` correction, so one
+numerically-dead cell throttled every degree of freedom and then ratcheted; clipping each cell's own
+correction instead (now the default) lets this closure march the case to the same answer, and makes
+the default closure faster too. And the reconstruction was reading a boundary value that asserts a
+normal derivative an unconverged iterate does not have — see the note below, which restores linear
+exactness at those patches for both closures.
+
+Prefer the default closure anyway; it is the better-tested one on the cases this project runs.
 ```
+
+### Boundary values on a patch that follows the owner cell
+
+A reconstruction is handed the field's boundary values, and on a patch whose value is derived from the
+owner cell — zero-gradient, and any Neumann or Robin condition — that value asserts a normal derivative
+the **iterate does not have**, because a field does not satisfy its own boundary conditions until it has
+converged. The Green–Gauss sum then averages the interior field against a boundary that contradicts it,
+and the error is at **linear** order, which is exactly what a correction calibrated on quadratics cannot
+remove. Measured on a linear field, whose true Hessian is identically zero:
+
+| boundary values | cells across | spurious Hessian | boundary-cell gradient error |
+|---|---|---|---|
+| prescribed (Dirichlet) | 8 → 32 | ~1e-15 | **0.00%** |
+| the condition's own value | 8 | 7.77 | 57% |
+| | 16 | 15.5 | 57% |
+| | 32 | 31.1 | 57% |
+
+The Hessian **doubles with every refinement** and the gradient error does not move at all — the sum is
+faithfully reporting an ever-sharper kink the field does not have. The prescribed row is the control:
+where the value does not contradict the field, the reconstruction is exact.
+
+{class}`~aquaflux.schemes.MultipleCorrectionGradient` therefore reads the value consistent with the
+cell's own field, `phi_P + grad phi . d`, on exactly those patches, and leaves a prescribed value
+alone. The condition is still imposed — by the flux, which is where it belongs — and the two agree at
+convergence. Both closures then reconstruct a linear field to roundoff. It costs nothing: the value
+depends on the gradient being reconstructed, but only linearly, so it folds into the same per-cell
+matrix the scheme already inverts rather than needing an iteration.
+
+Which patches those are is read off your boundary conditions by differentiating them, so nothing needs
+declaring and it cannot disagree with the conditions themselves.
 
 **You do not have to work out which case you are in, and you do not have to choose one closure for
 the whole mesh.** When the scheme binds to a geometry it measures its own correction per cell, and

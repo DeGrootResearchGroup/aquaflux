@@ -59,6 +59,7 @@ class _LaggedGradient(GradientScheme):
         operator_hook=None,
         imposed=None,
         boundary_values_at=None,
+        boundary_chain=None,
     ):
         return jax.lax.stop_gradient(
             self.inner.gradients(

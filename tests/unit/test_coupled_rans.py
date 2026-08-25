@@ -58,6 +58,7 @@ from aquaflux.turbulence.coupled import (
     coupled_continuation,
     coupled_lu_continuation,
     coupled_scaled_norm,
+    frozen_production_viscosity,
     mass_flow_coupled_continuation,
     solve_coupled,
 )
@@ -1602,6 +1603,102 @@ def test_the_production_limiter_defaults_to_the_exact_operator() -> None:
         inspect.signature(SSTTurbulence.build).parameters["explicit_production_limiter"].default
         is False
     )
+
+
+def test_freezing_the_production_viscosity_changes_the_operator_and_not_the_residual() -> None:
+    """The two properties that make ``explicit_production_viscosity`` a legal Jacobian stand-in.
+
+    It exists because ``nu_t`` is proportional to ``k``, so the production is too, and differentiating
+    that puts a negative term on the k row's own Jacobian diagonal which the pseudo-time shift then
+    has to cancel. Freezing it is only sound if it changes the **derivative** and nothing else, so
+    both halves are pinned here:
+
+    * the residual is **bit-identical**, which is what leaves the converged root and the
+      implicit-function-theorem adjoint untouched when the copy is used as an operator; and
+    * the Jacobian genuinely moves, which is the guard against a freeze that silently does nothing --
+      a flag that had stopped taking effect would pass a residual check alone.
+
+    Off by default, and byte-identical off.
+    """
+    _, exact = _cavity(4)
+    assert exact.turbulence.explicit_production_viscosity is False
+    assert (
+        inspect.signature(SSTTurbulence.build).parameters["explicit_production_viscosity"].default
+        is False
+    )
+
+    frozen = frozen_production_viscosity(exact)
+    assert frozen.turbulence.explicit_production_viscosity is True
+    assert exact.turbulence.explicit_production_viscosity is False  # the original is not mutated
+
+    flow, k, omega = hybrid_initialize(exact.momentum, exact.turbulence)
+    state = exact.state_from_physical(flow, k, omega)
+    tangent = jax.random.normal(jax.random.PRNGKey(3), state.shape, dtype=state.dtype)
+
+    assert jnp.array_equal(frozen.residual(state), exact.residual(state))
+    exact_action = jax.jvp(exact.residual, (state,), (tangent,))[1]
+    frozen_action = jax.jvp(frozen.residual, (state,), (tangent,))[1]
+    assert not jnp.allclose(frozen_action, exact_action)
+
+    # And the difference is confined to the k block: the momentum closure, the omega equation and the
+    # k diffusivity all keep the live eddy viscosity, so only the production's own derivative moved.
+    layout = exact.layout
+    assert jnp.array_equal(frozen_action[: layout.flow_size], exact_action[: layout.flow_size])
+    n = layout.n_cells
+    assert jnp.array_equal(
+        frozen_action[layout.flow_size + n :], exact_action[layout.flow_size + n :]
+    )
+
+
+def test_every_continuation_builder_defaults_to_the_per_entry_positivity_projection() -> None:
+    """The default is a value, pinned, because the global cap it replaces loses a march.
+
+    The plain fraction-to-the-boundary cap scales the whole step by the worst entry of the
+    smallest-magnitude block, so one numerically-dead cell sets the step length for every degree of
+    freedom -- and then ratchets, the capped entry decaying by ``1 - tau`` per step whatever the floor
+    is. Measured on a separating coupled-RANS benchmark, that loses the march outright while the
+    per-entry projection completes it *and* speeds up the arm that already worked.
+
+    Pinned on all four builders together: a default that reverts on one of them reverts silently, and
+    the failure it re-arms shows up as a step length rather than as an error.
+    """
+    for builder in (
+        coupled_continuation,
+        coupled_amg_continuation,
+        coupled_lu_continuation,
+        mass_flow_coupled_continuation,
+    ):
+        got = inspect.signature(builder).parameters["positivity_projection"].default
+        assert got is True, f"{builder.__name__} defaults positivity_projection to {got!r}"
+
+
+def test_the_probe_materializes_the_operator_the_solve_applies() -> None:
+    """A preconditioner must be assembled from the matrix the Krylov iteration applies, not another.
+
+    ``CoupledJacobianProbe.narrow`` is the single place that decides which assembler gets
+    materialized, and every consumer routes through it -- the initial build, the refresh hook, and the
+    rebind across a Reynolds-continuation rung. So the stand-in belongs on the probe, and this pins
+    that it lands there rather than on the colouring plan.
+
+    That distinction is the whole point: the plan is a graph pass over the cell adjacency and is
+    **identical** whichever assembler it is derived from, so deriving it from the stand-in changes
+    nothing at all. Getting that wrong leaves a preconditioner built for a matrix nobody is solving,
+    which is invisible except as a cycle count.
+    """
+    _, coupled = _cavity(4)
+    plain = CoupledJacobianProbe.build(coupled, 3)
+    frozen = CoupledJacobianProbe.build(coupled, 3, production_viscosity_frozen=True)
+
+    # The colouring and its de-compression are untouched -- this axis is about values, not structure.
+    assert np.array_equal(np.asarray(plain.structure.indices), np.asarray(frozen.structure.indices))
+
+    assert plain.narrow(coupled).turbulence.explicit_production_viscosity is False
+    assert frozen.narrow(coupled).turbulence.explicit_production_viscosity is True
+    # And it survives being pointed at another companion of the same case, which is what a Reynolds
+    # rung boundary does -- the failure would otherwise appear only after the first rung.
+    companion = coupled.with_scaled_molecular_viscosity(10.0)
+    assert frozen.narrow(companion).turbulence.explicit_production_viscosity is True
+    assert plain.narrow(companion).turbulence.explicit_production_viscosity is False
 
 
 def test_a_root_the_frozen_cap_invalidates_is_refused() -> None:

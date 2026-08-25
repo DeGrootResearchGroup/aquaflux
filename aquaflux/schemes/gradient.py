@@ -224,6 +224,7 @@ class GradientScheme(eqx.Module):
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         imposed: ImposedGradient | None = None,
         boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        boundary_chain: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Cell gradients of ``field``, shape ``(n_cells, dim)``.
 
@@ -259,6 +260,13 @@ class GradientScheme(eqx.Module):
             gradient-type condition carrying none of its own correction. A scheme that
             **differentiates** a boundary value needs the corrected one, and this is how it asks.
             ``None`` (the default) leaves every scheme reconstructing exactly as before.
+        boundary_chain : jnp.ndarray, optional
+            ``d(boundary value)/d(phi_owner)`` per face, shape ``(n_faces,)`` -- one where the boundary
+            value is derived from the owner cell, zero where it is prescribed. A scheme may use it to
+            read the value consistent with the cell's own field on the first kind of patch, rather than
+            one asserting a normal derivative an unconverged iterate does not have. ``None`` (the
+            default) leaves every scheme reconstructing exactly as before, and a scheme that has no use
+            for it ignores it.
 
         Returns
         -------
@@ -274,6 +282,7 @@ class GradientScheme(eqx.Module):
             operator_hook=operator_hook,
             imposed=imposed,
             boundary_values_at=boundary_values_at,
+            boundary_chain=boundary_chain,
         )
         return gradient if imposed is None else imposed.impose(gradient)
 
@@ -288,6 +297,7 @@ class GradientScheme(eqx.Module):
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         imposed: ImposedGradient | None = None,
         boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        boundary_chain: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """The reconstruction itself; see :meth:`gradients` for the arguments.
 
@@ -312,6 +322,7 @@ class CompactGreenGauss(GradientScheme):
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         imposed: ImposedGradient | None = None,
         boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        boundary_chain: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         # No iterative solve: an owned cell's one-shot gradient is exact once its `field` halo is
         # filled, so the per-apply ghost exchange (`operator_hook`) has nothing to correct here. The
@@ -1935,6 +1946,7 @@ class CorrectedGreenGauss(GradientScheme):
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         imposed: ImposedGradient | None = None,
         boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        boundary_chain: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         # No internal consumer: this scheme solves for the gradient and returns it, so an imposed
         # row is applied by `gradients` and nothing here reads the row it replaces. It never
@@ -2655,6 +2667,7 @@ class HessianCorrectedGradient(GradientScheme):
         operator_hook: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         imposed: ImposedGradient | None = None,
         boundary_values_at: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        boundary_chain: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         if operator_hook is not None:
             raise NotImplementedError(

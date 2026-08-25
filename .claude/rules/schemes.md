@@ -1724,7 +1724,7 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   standard arm's residual to three significant figures (7.277e-06 against 7.255e-06 at step 28, and a
   step-for-step identical rung-2 transition) and then fails on the **first step of the target rung**:
   α = 0.001 immediately, β escalated to its 16.0 cap, residual frozen at 1.074e-01 for every
-  subsequent step. Not a degradation — no descent direction at all.
+  subsequent step. Not a degradation — and **not, as this line read until the cause was found, "no descent direction at all": the direction descends, and it is the finite-step curvature that is inadmissible.** See below.
 
   **⚠️⚠️ THE CAUSE IS NOW MEASURED, AND IT IS NEITHER OF THE TWO ACCOUNTS PREVIOUSLY RECORDED HERE:
   `SkewCorrectedGradient` CORRECTS TWICE ON EVERY GRADIENT-TYPE PATCH (2026-08-24).** A
@@ -1797,11 +1797,444 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   step 50 of the target rung, α = 0.001, `|R|` 1.082e-01, identical to the two runs before it. So the
   double correction was a genuine defect worth fixing on its own terms, and it is **not** the cause.
 
-  ⚠️⚠️ **THREE MECHANISMS PROPOSED, THREE REFUTED BY MEASUREMENT. The cause of this stall is
-  UNKNOWN, and that is the honest state.** Do not re-propose: (i) the wall `omega` gradient, (ii) the
-  correction matrices' conditioning, (iii) the closure's double correction. Each was measured, not
-  argued, and each left the stall unchanged to three figures. What is *not* in doubt: `OwnerGradient`
-  never reads a boundary value and marches the case; `SkewCorrectedGradient` does and does not.
+  ⚠️ **Three mechanisms were proposed and refuted before the cause was found; do not re-propose
+  them.** (i) the wall `omega` gradient, (ii) the correction matrices' conditioning, (iii) the
+  closure's double correction. Each was measured, not argued, and each left the stall unchanged to
+  three figures. **The reason all three missed is the same and is worth more than any of them: every
+  one was measured at the cold initial condition or on a single reconstruction, and the arms are
+  IDENTICAL at every state either of those reaches.** The cause is below.
+
+  **✅✅ FOUND (2026-08-24): A LOW-SHIFT WALL AT BOUNDARY CELLS THAT **BOTH** CLOSURES HIT, WITH
+  `beta_start` SITTING ON ITS EDGE — and the arms part at the SECOND INNER NEWTON ITERATION of the
+  target rung's first step, not at its anchor.**
+  `validation/pitzdaily_gradient_ab/closure_stall_probe.py` captures the rung's seed from a real ramp
+  (`capture`), drives the real `DualTimeStep` from it with one line per inner iteration (`march`), and
+  compares the two closures at any saved state (`analyze`). Configuration for everything below:
+  pitzDaily, 12225 cells, `MultipleCorrectionGradient(fallback=None)` so the closure is global,
+  `CflResidualDualTimeControl(beta_start=0.5, beta_min=0.005)`, `inner_steps` 5 / `inner_tol` 1e-2,
+  field-split SIMPLE-smoothed leading inverse + Jacobi trailing at `run_ab.py`'s own settings, probe
+  reach 5 uniform, `forward_rtol` 0.3, compiled ILU(0) live, measure `coupled_scaled_norm`.
+
+  **The fork, from the march's own inner trajectory** (`|G|` before → after, restart cycles, `alpha`):
+
+  | inner | `OwnerGradient` | `SkewCorrectedGradient` |
+  |---|---|---|
+  | 0 | 1.17395e-01 → 3.62639e-03, 3 cyc, **α = 1** | 1.17415e-01 → 3.65210e-03, 3 cyc, **α = 1** |
+  | 1 | 3.62639e-03 → 2.96989e-03, **3 cyc**, α = 0.5 | 3.65210e-03 → 3.64112e-03, **14 cyc**, α = **0.003108** |
+
+  **The first inner iteration is the same step in both arms to three figures.** The second is where
+  they separate, and the attempt is then rejected, `beta` escalates 0.5 → 2 → 16, every retry restarts
+  from the anchor, and the march freezes at `|R|` 1.06479e-01 with `alpha` underflowing to 0. So the
+  reported "α = 0.001 on the first step" is a step's **minimum inner** `alpha`: the anchor state says
+  nothing, which is why no measurement taken at one ever found this.
+
+  **At that iterate, at the march's own β = 0.5, BOTH arms overshoot — and the difference is entirely
+  the `omega` block.** The full step, per block, `|delta|` and the scaled `|G|` it lands at:
+
+  | arm | `|delta|` | u | v | p | k | **omega** | whole step `|G|/|G0|` |
+  |---|---|---|---|---|---|---|---|
+  | owner | 1.97e+02 | 6.79e-04 | 8.07e-05 | 2.34e-04 | 6.79e-03 | **2.04e+02** | **7.6e+03** |
+  | skew | 3.80e+02 | 2.17e-03 | 2.49e-04 | 5.45e-04 | 2.98e-02 | **3.75e+21** | **1.4e+23** |
+
+  Every other block lands at 1e-4 to 3e-2. **The descent slope is the same in both arms and negative**
+  (−2.6831e-02 against −2.6830e-02), so this is not a direction problem — it is the finite-step
+  curvature, which is the shape `.claude/notes/solve-globalization-log.md` already records as
+  "descent is necessary but not sufficient".
+
+  **Why twenty orders: `omega` is transported as `log omega`, so the correction is a LOG increment and
+  the residual after the step is its exponential.** Where that increment sits, at the same iterate and
+  shift, resolved by how many boundary faces a cell owns:
+
+  | boundary faces owned | cells | max `|d log omega|` owner | max `|d log omega|` skew |
+  |---|---|---|---|
+  | 0 (interior) | 11670 | 4.5416e-01 | **4.5391e-01 — identical** |
+  | 1 | 550 | 6.6361e+00 | 1.6066e+01 |
+  | **2 or more (corners)** | **5** | **1.5611e+01** | **5.8363e+01** |
+
+  Monotone in boundary-face count in both arms, with the skew/owner ratio rising 1.00 → 2.4 → 3.7. The
+  single worst cell is **10824 at the `lowerWall`/`outlet` corner** (`omega` 8.75e+03), at 15.61 under
+  owner and **58.36** under skew, decaying into its two wall neighbours (6.64/16.07, 2.52/4.38).
+  `exp(58.36 − 15.61) = 3.7e+18` against the measured `omega`-block ratio of 1.8e+19 — the same order,
+  so the whole gap between the arms is the exponential of that one extra log increment.
+
+  **✅✅ SETTLED BY A FOUR-WAY COMPARISON: THE RECONSTRUCTION DECIDES THIS, THROUGH BOUNDARY-OWNING
+  CELLS, AND THE FOUR SCHEMES ORDER THE SAME WAY ON BOTH SIDES OF THE CHAIN.** Two arms of one scheme
+  could never have answered it — three *other* reconstructions march this benchmark to `x_r/h` 8.069
+  and only this one loses it, which is the fact any account has to fit. All four at the **same**
+  iterate and the **same** β = 0.5, `max |d log omega|` by boundary-face count, beside the rung the
+  ladder then keeps:
+
+  | reconstruction | interior (11670) | 1 boundary face (550) | corners (5) | kept α → ratio | marches? |
+  |---|---|---|---|---|---|
+  | `CorrectedGreenGauss` | 4.5562e-01 | 1.3581e+00 | **1.9120e+00** | **1 → 0.128** | yes |
+  | `HessianCorrectedGradient` | 4.3789e-01 | 4.7132e+00 | **9.8349e+00** | 0.5 → 0.605 | yes |
+  | multiple-correction, `OwnerGradient` | 4.5416e-01 | 6.6361e+00 | **1.5611e+01** | 0.25 → 0.783 | yes |
+  | multiple-correction, `SkewCorrectedGradient` | 4.5391e-01 | 1.6066e+01 | **5.8363e+01** | 0.0625 → 0.955 | **no** |
+
+  **The interior column is the control and it is flat — 0.438 to 0.456, a 4 % spread over four
+  structurally different reconstructions.** The boundary columns span **30×** and the corner column
+  **30×**, and the kept step orders identically: 0.128 < 0.605 < 0.783 < 0.955. The acceptance
+  threshold the march applies sits between 0.783 and 0.955, which is exactly where the fourth arm
+  falls off. Nothing about the state, the shift, the preconditioner or the measure varies across that
+  table; only the reconstruction does.
+
+  **✅✅ THE CHAIN IS NOW CLOSED, AND THE WALL CELLS' `omega` CORRECTION IS NOT THE `omega` EQUATION'S
+  AT ALL — IT IS THE `k` EQUATION'S, TRANSMITTED BY THE FIXATION ROW.** The 472 near-wall `omega` rows
+  are replaced by the algebraic fixation `log omega - log omega_wall(k)`
+  (`FixedValueCells` + `LogRatioRow`), and `omega_wall`'s log-layer branch carries `sqrt(k)`. So such
+  a row has exactly two entries — **1** on its own unknown and `-d(log omega_target)/dk` on `k` — and
+  `coupled_scaled_norm` records that the shift leaves it alone. The correction there is therefore an
+  identity, not something to be inferred:
+
+      d log omega  =  -R_row  +  (d log omega_target / dk) * dk
+
+  Measured at the stall iterate, β = 0.5, all four arms — `-R_row` contributes essentially nothing and
+  the `k` term reproduces the whole thing:
+
+  | reconstruction | max `|d log omega|` at a wall cell | the `k` term alone | identity residual | max `dk/k` at a wall cell |
+  |---|---|---|---|---|
+  | `CorrectedGreenGauss` | 1.9120e+00 | **1.9136e+00** | 1.3e-06 | +6.8719e+02 |
+  | `HessianCorrectedGradient` | 9.8349e+00 | **9.8365e+00** | 3.9e-06 | +1.7674e+03 |
+  | multiple-correction, owner | 1.5611e+01 | **1.5612e+01** | 1.5e-05 | +2.1362e+03 |
+  | multiple-correction, skew | 5.8363e+01 | **5.8364e+01** | 3.6e-05 | +4.1737e+03 |
+
+  **⚠️ AND THE `k` CORRECTION THAT DRIVES IT IS UNBOUNDED IN THE DIRECTION NOTHING GUARDS.** The
+  *decrease* side is `min dk/k = -0.270` in **all four arms** — identical to three figures, and nowhere
+  near `-1`, which is exactly why `positive_k_limit` reports a cap of 1 at every shift measured. The
+  **increase** side is where the arms differ, and `positive_block_limit` is one-sided by construction:
+  it bounds only entries with `delta < 0`, the ones that could cross zero. A Newton step asking to
+  raise a near-wall `k` by **four thousand times** passes it untouched. At the worst cell
+  (`k` = 3.998e-02) the four arms ask for `dk` of +1.43, +7.34, +11.65, **+43.55**.
+
+  So the causal chain, every link measured: **reconstruction → velocity gradient at boundary-owning
+  cells → near-wall `k` production → an unbounded upward `dk` there → the `omega` fixation row slaves
+  `omega` to `k` → log transport exponentiates it → the line search cannot find a step that is both
+  admissible and worth taking.** The chain factor itself is modest (median 0.683, max 4.93, since the
+  viscous branch dominates `omega_wall` on this mesh and the log branch's share is small); the size
+  comes from `dk/k`, not from the chain.
+
+  **✅✅ AND ONE LEVEL FURTHER UP — WHY `dk` IS THAT LARGE: THE `k` ROW'S OWN JACOBIAN DIAGONAL IS
+  NEGATIVE, AND THE SHIFT ONLY JUST OUTWEIGHS IT.** Measured term by term at the worst cell (10824),
+  same state, same β = 0.5, all four arms:
+
+  | arm | `\|grad u\|_F` | `P_k` | cap | `R_k` | **`J_kk`** | **`beta d_k`** | **sum** | `-R/(J+bd)` | actual `dk` |
+  |---|---|---|---|---|---|---|---|---|---|
+  | gauss | 6.0085e+03 | 73.95 | 314.96 | -1.9491e-04 | **-1.2240e-03** | +2.3242e-03 | **1.100e-03** | 0.177 | 1.43 |
+  | betchen | 6.4569e+03 | 79.46 | 314.96 | -2.1611e-04 | **-1.6588e-03** | +2.3192e-03 | **6.604e-04** | 0.327 | 7.34 |
+  | owner | 6.5384e+03 | 80.47 | 314.96 | -2.2014e-04 | **-1.7403e-03** | +2.3172e-03 | **5.769e-04** | 0.382 | 11.65 |
+  | skew | 6.7402e+03 | 82.96 | 314.96 | -2.2787e-04 | **-1.9482e-03** | +2.3098e-03 | **3.616e-04** | 0.630 | 43.55 |
+
+  **Read the first three columns and the last together, because the disproportion is the point.** The
+  velocity gradient — the one thing the reconstructions actually differ in — differs by **12 %**;
+  the production tracks it at 12 % and the residual at 17 %; and `dk` differs by **30×**. The
+  production is well under its Menter cap (83 against 315), so the cap is not masking anything: it is
+  strain-driven, and the reconstruction does feed it.
+
+  **What turns 12 % into 30× is that `J_kk` is negative and `beta d_k` is nearly identical across the
+  arms, so their sum is a difference of two similar numbers.** The net diagonal keeps only **47 % of
+  the shift under `CorrectedGreenGauss` and 16 % under the skew closure**; a 12 % move in `J_kk` is a
+  **3×** move in the effective diagonal, and `-R/(J + beta d)` goes 0.177 → 0.630 on it. (The actual
+  `dk` is 8–69× that one-row estimate, so off-diagonal coupling amplifies further — but the ordering
+  is set here.)
+
+  **`J_kk < 0` is the `k` equation's own positive feedback, and it is the textbook Patankar case.**
+  `nu_t = a_1 k / max(a_1 omega, S F_2)` is proportional to `k`, so `P_k` is proportional to `k`, and
+  subtracting a source that grows with the variable puts a negative term on that row's diagonal. This
+  case already half-treats it: `explicit_production_limiter=True` freezes the **cap's** derivative for
+  exactly this reason ("the Jacobian carries the k-production cap's own derivative, which is
+  destabilizing; freezing it is the Patankar treatment"), but the **production's own** `k`-derivative
+  is still differentiated, and that is what makes the diagonal negative here.
+
+  **So the ordering of the four reconstructions is real and the chain is real, but the reconstruction
+  is not the fault — it is the perturbation that a near-cancelling diagonal amplifies thirtyfold.**
+  Any of the four could be on the wrong side of it; on this case, at this shift, the skew closure is.
+
+  **✅✅ THE PATANKAR TREATMENT WAS BUILT AND TESTED AT THAT STATE, AND IT WORKS — 2026-08-24.**
+  `closure_stall_probe.frozen_production_residual` rebuilds the coupled residual exactly as the
+  library assembles it, changing one thing: the eddy viscosity handed to the `k` equation is evaluated
+  at a `stop_gradient`-ed `k`. It is used as the **operator only** (`_shifted_solve`'s `jacobian_fn`),
+  so the residual, the root and the IFT adjoint are untouched — the `|R|` column below is identical
+  between each pair, which is the control. Same state, same β = 0.5, same cell (10824):
+
+  | arm | operator | `J_kk` | `J_kk + beta d` | max `\|dk/k\|` | max `\|d log omega\|` | kept α | `\|G\|/\|G0\|` |
+  |---|---|---|---|---|---|---|---|
+  | owner | exact | **-1.7403e-03** | 5.7698e-04 | 2136 | 15.61 | 0.25 | 0.7827 |
+  | owner | **frozen** | **+4.7985e-03** | 7.1158e-03 | **6.43** | **0.119** | **1** | **0.1029** |
+  | skew | exact | **-1.9482e-03** | 3.6159e-04 | 4174 | 58.36 | 0.0625 | 0.9547 |
+  | skew | **frozen** | **+4.7892e-03** | 7.0990e-03 | **6.68** | **0.124** | **1** | **0.1032** |
+  | gauss | exact | **-1.2240e-03** | 1.1002e-03 | 687 | 1.912 | 1 | 0.1276 |
+  | gauss | **frozen** | **+4.7958e-03** | 7.1200e-03 | **6.01** | **0.110** | **1** | **0.1020** |
+
+  **The unforeseen result is the strongest evidence, and it retro-confirms the whole chain: after the
+  freeze the three reconstructions become INDISTINGUISHABLE.** `J_kk` goes from -1.22e-03 / -1.74e-03
+  / -1.95e-03 — a 60 % spread that orders the arms exactly as their step quality does — to
+  **+4.7892e-03 / +4.7958e-03 / +4.7985e-03, identical to 0.2 %**. So the reconstruction-dependence of
+  that diagonal *was* the production's `k`-derivative and nothing else. Everything downstream follows:
+  `dk/k` collapses three orders to ~6 in every arm, `d log omega` to ~0.12, and all three take a
+  **full step** to `|G|/|G0|` ≈ 0.102 — better than the best exact-operator arm (gauss at 0.128).
+
+  ⚠️ **What this does NOT yet establish.** One state, one shift, no march. A quasi-Newton operator can
+  cost convergence rate near the root, where this iterate is not. The probe freezes `nu_t` throughout
+  the **`k` equation** (it replaces `closure.nu_t`, which reaches the `k` diffusivity as well as the
+  production), so it is not surgically the production term alone. And the production's other `k`
+  paths — the adaptive near-wall blend's own `k`, and the Menter cap unless
+  `explicit_production_limiter` is set — are untouched. **The march A/B is the test that matters and
+  has not been run.**
+
+  ⚠️ **This SUPERSEDES the earlier fix proposed here (freezing the `omega` fixation row's `k`
+  column).** That would have stopped the `omega` rows from *learning* about a `dk` which is itself the defect —
+  treating the symptom one link downstream of the cause. The live candidates are now, in order:
+  1. **Patankar-treat the `k` production** — freeze `nu_t`'s `k`-dependence in the production term's
+     Jacobian contribution, so the diagonal is not driven negative by the very feedback the shift is
+     then asked to cancel. Precedent and seam both exist (`explicit_production_limiter`, and
+     `_shifted_solve`'s `jacobian_fn`). **Unmeasured.**
+  2. **Keep the shift above the cancellation.** The recorded β sweep already shows β ≥ 0.6 fixing every
+     arm at this state, which is the same statement from the other side: `beta d_k` at 0.6 is 2.79e-3
+     against `J_kk` of -1.95e-3, restoring the margin. A floor is cruder than (1) but is a
+     step-control setting.
+  3. Not a step-length cap, and not the closure. See the checks above.
+
+  ⚠️ **A cap is the wrong instrument, and this is now checkable rather than arguable.** Capping
+  `d log omega` at 3 would give α = 1.57 (uncapped) for `CorrectedGreenGauss`, 0.305 for the
+  Hessian-corrected arm, 0.192 for owner and 0.051 for skew — i.e. *approximately what the ladder
+  already picks in each case*, because the ladder is already shortening the step until `omega` is
+  sane. The same is true of a relative cap on `dk`: the arms that **work** also carry `dk/k` of 687
+  and 1767 at a wall cell and take full steps happily. **The problem is the direction, not the
+  length** — skew's correction requires a 4000× near-wall `k` increase in order to reduce the
+  residual, and any step short enough to keep that sane makes negligible progress everywhere else.
+
+  **The lever is therefore upstream of the step, and there is a precedent in this very case.** The
+  fixation row's `k` column is what converts a `k` overshoot into an `omega` overshoot; dropping it
+  from the **operator only** — via `_shifted_solve`'s existing `jacobian_fn` seam, which takes a
+  stand-in residual for the Jacobian while the true residual still decides where the march lands —
+  would leave the root and the adjoint untouched and remove the amplifier from the direction. That is
+  the same trade `explicit_production_limiter=True` already makes on this case for the `k`-production
+  cap ("the Jacobian carries the cap's own derivative, which is destabilizing; freezing it is the
+  Patankar treatment"). **Proposed, NOT measured.**
+
+  **The mechanism this supports, offered as a reading of the ordering and NOT separately isolated:**
+  the four differ in how much of the returned gradient comes from a **boundary face's gradient**.
+  `CorrectedGreenGauss` builds no Hessian, so a boundary face contributes its *value* and nothing
+  else — the smallest boundary term and the best-behaved arm. The other three form a Hessian by a
+  second pass over the gradient field, in which a boundary face contributes `face_gradient · A/V`, and
+  at a wall cell `A/V` is `~1/(d·n)` ≈ 5.5e+03 per metre; the second-order correction built from that
+  Hessian is separately measured at up to **41 %** of the first-order gradient. What the two closures
+  then differ in is precisely the boundary face gradient they supply: `OwnerGradient` hands over the
+  full cell gradient, while `SkewCorrectedGradient` on a gradient-type patch zeroes the normal
+  component and keeps only the tangential part. A cell owning **two** boundary faces has two
+  independent normal directions so replaced, which is why the corner column is the extreme in every
+  arm (4.2×, 22×, 34×, 128× that arm's own interior maximum).
+
+  ⚠️⚠️ **THIS ENTRY WAS WRITTEN WRONG TWICE, AND BOTH ERRORS ARE WORTH MORE THAN THE RESULT.**
+  1. **First it attributed the whole thing to the closure's corner behaviour, from a single shift.**
+     That was under-determined: two arms at one β cannot separate "the closure does this" from "this
+     state is fragile and the closure nudged it".
+  2. **Then a β sweep was read as refuting the closure entirely, and that was worse.** The sweep
+     showed both closures producing `d log omega` of order 10–70 below β ≈ 0.55, with *which arm is
+     worse alternating* — owner 5.5× worse than skew at β = 0.45 — and that was written up as "a
+     low-shift wall both closures hit, `beta_start` sits on its edge, the closure is not the cause".
+     **The alternation is between two configurations that have BOTH already failed**: every ratio at
+     β ≤ 0.45 is 0.983–0.998, i.e. no usable step in either arm. Ranking two dead configurations is
+     not evidence, and reading a ranking out of one is the same error as reading a tie at a benign
+     operating point as parity — this file's own recorded trap, arrived at from the other end.
+     At every β where a usable step exists the ordering is stable, and the four-way table settles it.
+
+  **What survives of the low-shift observation, correctly scoped:** below β ≈ 0.45 *every* arm
+  measured fails at this state, the linear solve degrades monotonically (3.4e-07 at β = 0.7 to
+  3.4e-03 at β = 0.3), and the k-positivity cap starts to bind (0.0022–0.0040, against exactly 1 at
+  every β ≥ 0.5). That is a real background fragility of this state and a reason not to let a control
+  drive β far down here — but it is **not** what separates the arms, since at the operating β = 0.5
+  `CorrectedGreenGauss` takes a full step with room to spare.
+
+  ⚠️ **What log-`omega` does and does not do, since the first write-up blurred it.** It does **not**
+  corrupt the reconstruction — the interior column above is flat across all four schemes. It is the
+  amplifier at the *end* of the chain: the correction is an increment to `log omega`, so an entry of
+  58 means "multiply this cell's `omega` by `e**58`", and the residual at the trial point is that
+  exponential. Its real cost is to the **line search**, since halving α only takes the square root of
+  the `omega` factor — recovering from 58 needs six halvings, and a step that short makes no progress
+  even once it is admissible. That is the whole failure: not "no admissible step", but "no step that
+  is both admissible and worth taking". Direct `omega` would be worse, not better — the same
+  correction would drive it far negative, which is what log transport exists to prevent and what
+  `positive_k_limit` prevents for `k`.
+
+  **✅✅✅ RESOLVED (2026-08-25): THE STALL IS THE k-POSITIVITY CAP, AND THE PER-ENTRY PROJECTION FIXES
+  IT. `SkewCorrectedGradient` MARCHES THIS CASE.**
+
+  | arm | wall | cycles | steps | `x_r/h` |
+  |---|---|---|---|---|---|
+  | `OwnerGradient`, as shipped (no projection) | 703.7 s | 437 | 73 | 8.069 |
+  | **`OwnerGradient` + `positivity_projection`** | **664.0 s** | 459 | **67** | 8.069 |
+  | **`SkewCorrectedGradient` + `positivity_projection`** | **660.4 s** | 467 | **67** | 8.069 |
+  | `SkewCorrectedGradient`, as shipped | — | — | **stalls at the target rung** | — |
+
+  Both projection arms on the **exact** operator (`frozen production viscosity: False`), final `|R|`
+  5.77e-06 against a 1e-05 target, `alpha` = 1.000 into the tail. The projection **also improves the
+  arm that already worked** (−5.6 % wall, −8 % steps, +5 % cycles, same answer) and collapses the two
+  arms onto each other — 660.4 s against 664.0 s, 67 steps both. At march level the reconstruction
+  sensitivity this whole entry is about is *gone*.
+
+  ⚠️⚠️ **AND THE MECHANISM RECORDED ABOVE IS WRONG WHERE IT NAMES THE LINE SEARCH.** The tables above
+  are correct about `dk`, `d log omega` and the four-way ordering — but they were measured in a probe
+  that builds a **fresh preconditioner at the state it measures** and reaches linear residuals of
+  1e-05 to 1e-10. **The march is never in that configuration** (`forward_rtol = 0.3`, a carried
+  preconditioner), and in the march the step length was set by `positive_k_limit`, not by the ladder:
+
+  - `_COUPLED_LINE_SEARCH = 10`, so a rung is `0.5**k` down to **9.766e-04**. The failing march
+    `alpha`s are **0.003108, 0.154, 0.03744, 0.0004484, 0.1149, 0.001161** — not one is a rung, and
+    **0.0004484 is BELOW the shortest**, which only `max_alpha` can produce.
+  - The terminal freeze is the **fraction-to-the-boundary ratchet** `positive_block_projection`'s own
+    docstring derives: the inner block runs `8.462e-06 → 8.353e-08 → 8.353e-10 → 8.353e-12`, ratios
+    `9.871e-03, 1.000e-02, 1.000e-02` — exactly `1 - tau` at `tau = 0.99`.
+  - So this entry's bullet "the k-positivity limiter is **not** binding — its cap reports exactly 1 for
+    both arms at every shift measured" is **true of the probe and false of the march**, and the reading
+    "the ladder reaches an admissible step but not one worth taking" describes the probe only.
+
+  **The lesson, and it is the third time in this entry:** a probe that rebuilds a self-consistent
+  (state, shift, preconditioner) triple measures a configuration the march never occupies — which is
+  the trap `solve-globalization-log.md` already records as "THE CARRIED PROTOCOL", arrived at here
+  from a new direction. The α values being non-rungs was visible in the march log the whole time.
+
+  **What the reconstruction difference actually did:** it produced a wildly different near-wall `dk` in
+  both arms (the four-way ordering is real), and the **global** cap then let that one entry set the
+  step length for all 61125 degrees of freedom. `positive_block_projection` clips each entry's own
+  correction instead, so a bad entry costs only itself.
+
+  **WHERE TO LOOK NEXT:**
+  - **A cap on the log-`omega` increment does NOT work — checked against the measured ladders, not
+    assumed.** A fraction-to-the-boundary analogue limiting `omega` to a factor `e**2` per step gives
+    α = 2/58.4 = 0.034 for the skew arm (ratio ≈ 0.96, still not worth taking) and α = 2/15.6 = 0.128
+    for the owner arm, **worse than the 0.25 its ladder already finds**. It penalizes the arms that
+    work. The step is not too long; the boundary-cell correction it is made of is too large.
+  - **The lever is the boundary-face gradient a Hessian-forming scheme is fed**, since that is the one
+    thing the four arms vary. Whether the right move is to damp its contribution at cells owning two
+    or more boundary faces, or to keep the normal component there as `OwnerGradient` does, is
+    unmeasured — but `_undetermined_cells` already identifies such cells and `CellwiseFallback`
+    already applies a per-cell closure, so the machinery exists.
+  - **Separately, the escalation does not rescue the march even though β = 2 is comfortable at this
+    iterate, and that is unexplained.** The retry **from the anchor** at β = 2 keeps α = 0.154 and a
+    ratio of 0.846, while a solve built fresh at that same anchor and shift keeps **α = 1 and 0.027**.
+    The measure is not the explanation (both are the anchor's). The candidate is the preconditioner:
+    the 14-cycle solve trips `refresh_on_cycles = 3`, so the rebuild happens at the *bad* iterate and
+    the retry then runs on a preconditioner built elsewhere — and at `forward_rtol = 0.3` a worse
+    preconditioner returns a materially worse `delta` at the same reported cycle count. **Candidate,
+    not measured.** It is what makes the failure permanent rather than a one-step stumble.
+
+  **✅✅ BUILT (2026-08-25): `boundary_chain` — THE FIRST PASS AND THE CLOSURE READ THE CELL'S OWN
+  EXTRAPOLATION ON A PATCH WHOSE VALUE FOLLOWS THE OWNER. Both closures become LINEAR-EXACT there.**
+
+  The defect it repairs is upstream of every closure and was missed by every probe in this entry. A
+  reconstruction is handed the field's boundary values, and on a gradient-type patch that value
+  asserts a normal derivative the **iterate does not have** -- an iterate does not satisfy its own
+  boundary conditions until it converges. The Green--Gauss sum then averages the interior field
+  against a boundary that contradicts it, and the result is wrong at **linear** order, which is
+  exactly the error the correction matrices (calibrated on quadratics) cannot remove.
+
+  Measured on a linear field over an all-zero-gradient boundary, true Hessian identically zero:
+
+  | rule | N | owner `\|H\|` | owner err | skew `\|H\|` | skew err |
+  |---|---|---|---|---|---|
+  | **Dirichlet control** | 4→32 | ~1e-15…1e-13 | **0.00 %** | ~1e-15…1e-13 | **0.00 %** |
+  | boundary-condition values | 8 | 7.771e+00 | 57.14 % | 1.255e+01 | 61.54 % |
+  | boundary-condition values | 16 | 1.554e+01 | 57.14 % | 2.511e+01 | 61.54 % |
+  | boundary-condition values | 32 | 3.109e+01 | 57.14 % | 5.022e+01 | 61.54 % |
+
+  **The Hessian DOUBLES with every refinement and the gradient error does not move at all.** The
+  Dirichlet row is the control: with a prescribed value the reconstruction is exact, so this is the
+  boundary *rule*, not the scheme. And note it is **not closure-specific** — the owner closure fails
+  too, because the *first pass* reads boundary values before any closure is consulted.
+
+  **The repair** (proposed by the project owner): feed the reconstruction `phi_P + grad phi . d` on
+  those patches — the value consistent with the cell's own field — and leave a prescribed value alone.
+  The condition is still imposed, by the flux, which is where it belongs; the two agree at
+  convergence. Through the real assembler, same field and meshes:
+
+  | N | owner | skew |
+  |---|---|---|
+  | 8 | **1.864e-15** | **1.716e-15** |
+  | 16 | **3.931e-15** | **3.483e-15** |
+  | 32 | **7.617e-15** | **7.019e-15** |
+
+  **It costs nothing.** Read literally the value is a fixed point (it needs the gradient it is
+  reconstructing), and iterating it converges at a **mesh-independent 0.571 per pass** — eight or ten
+  passes. But it is *linear* in the gradient: each such face contributes `(grad phi_P . d) A_f` to the
+  sum, i.e. `B_P grad phi_P` for a per-cell matrix, so it moves to the other side and the pass is
+  `(M1 - B) grad phi = raw` — one per-cell inverse, which is what `M1` already was. Verified against
+  the 40-pass iteration: `1.6e-15` direct against `9.1e-13` iterated.
+
+  **The seam is `boundary_chain`** = `d(boundary value)/d(phi_owner)` per face, **differentiated from
+  the closures rather than declared**, so it cannot disagree with them and needs nothing new from a
+  boundary condition: one on an owner-derived patch, zero on a prescribed one, and the fraction a
+  Robin condition actually carries, with the value blended in the same proportion. Supplied by
+  `ResidualAssembler._gradient` and by `MomentumContinuity` (per velocity **component** — a patch may
+  treat them differently, and a single tangent of ones would sum them). ⚠️ **This is the one
+  boundary-consistency repair the flow block CAN take**: its closures accept no gradient, so
+  `boundary_values_at` is unavailable there, but this derivative needs no gradient at all.
+
+  **Marched end to end on pitzDaily, and the answer does not move** -- which is the acceptance
+  criterion for a discretisation change at a boundary:
+
+  | configuration | wall | cycles | steps | `x_r/h` |
+  |---|---|---|---|---|
+  | skew closure, before either change | — | — | **stalls at the target rung** | — |
+  | skew + positivity projection | 660.4 s | 467 | 67 | 8.069 |
+  | **skew + projection + `boundary_chain`** | **707.6 s** | **456** | **68** | **8.069** |
+
+  Same reattachment length to four figures, 2 % fewer Krylov cycles, one more outer step. ⚠️ The +7 %
+  wall is **one run**, and this case has no measured march-level noise floor -- read it as neutral,
+  not as a cost, until a repeat says otherwise.
+
+  ⚠️ **Scope, stated because "standard treatment" over-describes what is built.** Only
+  `MultipleCorrectionGradient` acts on `boundary_chain`; `CorrectedGreenGauss` and
+  `HessianCorrectedGradient` accept and ignore it. Since pitzDaily's shipped scheme is corrected
+  Green--Gauss, **the main validation case is unaffected by this change today.** Extending it to the
+  other two means folding `B` into an iterated operator rather than a per-cell matrix — a bigger
+  change, not attempted.
+
+  ⚠️ **It reaches the first pass and the closure, not `M2`.** The correction matrices are still probed
+  against exact face values, so a quadratic keeps a second-order inconsistency — measured at 1.6 % of
+  the boundary-cell gradient at 8 cells across and falling as `h` (0.76 %, 0.37 % at 16 and 32),
+  against the 58 % that does *not* fall without this.
+
+  **⚠️ SEPARATELY, AND FOUND ON THE WAY: THE `boundary_values_at` FIX NEVER REACHED THE FLOW BLOCK.
+  It is not this stall's cause, and it is a live defect.** Three call sites in the library reconstruct
+  a gradient — `ResidualAssembler._gradient` and `MomentumContinuity`'s velocity and pressure
+  reconstructions — and **only the first passes `boundary_values_at`**. The flow block cannot pass it
+  as things stand: `FlowBoundary.pressure_face` / `velocity_face` take **no gradient argument at all**
+  (`_pressure_face` evaluates its closure at a zero gradient by construction), so a zero-gradient flow
+  face value is the owner cell's own value permanently, whatever gradient is reconstructed. The double
+  correction is therefore fully live there for any closure that reads a boundary value.
+
+  Measured at the divergence iterate, on the flow block's own faces (`closure_stall_probe.py`'s census
+  mirrors `boundary_closure_probe.py`, which only ever reached the scalar equations):
+
+  | field | patch | kind | faces | max `|bval − phi_P|` | med `|d.n|` | max `|rise/(d.n)|` | med `|grad phi|` |
+  |---|---|---|---|---|---|---|---|
+  | p | inlet | ZeroGradient | 30 | **0.000e+00** | 7.9e-04 | 1.1e-13 | 8.1e+01 |
+  | p | upperWall | ZeroGradient | 223 | **0.000e+00** | 1.8e-04 | 1.7e+01 | 7.1e+01 |
+  | p | lowerWall | ZeroGradient | 250 | **0.000e+00** | 5.1e-04 | 2.4e+01 | 2.0e+01 |
+  | p | outlet | Dirichlet | 57 | 1.918e+00 | 2.6e-03 | 7.5e+02 | 3.8e+02 |
+  | U0 | outlet | ZeroGradient | 57 | **0.000e+00** | 2.6e-03 | 8.7e+02 | 2.1e+02 |
+
+  Exactly zero on every gradient-type flow patch and only there — 503 of 560 boundary faces for
+  pressure — so the normal derivative reported on them is entirely the artifact. **But on this mesh it
+  does not matter**: supplying the corrected value (`p_face + chain * non_orthogonal_correction`, with
+  `chain = d(p_face)/d(p_owner)` read off the case's own closures by differentiating them) moves the
+  reconstructed pressure gradient by **1e-4 relative** — 2.577e-02 against 2.578e-02 as a difference
+  from the owner arm. pitzDaily's worst face angle is ~6°, so the non-orthogonal correction is ~0.1 %
+  of the local variation and the double correction is negligible here. **Record it as a latent defect
+  measured not to bite on a nearly-orthogonal mesh, not as a fixed one** — it is the same defect the
+  scalar path was repaired for, and a skewed mesh would feel it.
+
+  Worth keeping beside that: the two closures' reconstructed flow gradients differ **only on the 555
+  boundary-owning cells** (relative L2 6.7e-02 for `grad p`, 4.5e-02 and 1.9e-02 for the velocity
+  components) and are **bit-identical on all 11670 interior cells** — 0.000e+00, not "small". A closure
+  can only reach a cell that owns a boundary face, and it does not reach any other.
+
+  ⚠️ **Caveat on the `alpha` values, which is the one place the probe is not the march.** The probe
+  rebuilds `coupled_scaled_norm` at the state it measures, where the march holds the anchor's measure
+  fixed across a step — so the *rung the ladder keeps* differs (probe 0.25 against the march's 0.5 for
+  owner). Every per-block and per-cell figure above is unaffected, and the ratios within one arm are
+  taken in one fixed measure; do not quote the probe's `alpha` as the march's.
 
   **⚠️⚠️ MEASURED ON THE REACTOR MESH (2026-08-24), AND IT REFUTES THE OBVIOUS INFERENCE: BOTH
   CLOSURES RECONSTRUCT A QUADRATIC EXACTLY THERE.** The reasoning that "the reactor has boundary

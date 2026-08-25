@@ -208,13 +208,34 @@ BETCHEN_LABEL = (
 #: divides by the near-wall half-height, the smallest distance in the mesh; `OwnerGradient` never
 #: reads a boundary value at all, and on a quadrilateral mesh it is exact and better conditioned.
 #:
-#: ⚠️ Three mechanisms for the stall have been proposed and REFUTED by measurement -- the wall omega
-#: gradient (imposed analytically, still stalls), the correction matrices' conditioning (skew is the
-#: better of the two here), and the closure's double correction on gradient-type patches (a real
-#: defect, fixed, artifact down 18 orders, still stalls). Keep the arm so the next hypothesis has
-#: something to run against, and do not re-propose any of those three.
+#: ⚠️ What goes wrong is measured, and the reconstruction decides it -- at boundary-owning cells, and
+#: worst at the five owning two. All four arms of this case at one state and one shift give a maximum
+#: `log omega` correction of 0.44-0.46 on the 11670 INTERIOR cells (a 4% spread) and 1.9 / 9.8 / 15.6
+#: / 58.4 on the corners for gauss / betchen / owner / skew -- and the step length the search keeps
+#: orders identically, 1 / 1/2 / 1/4 / 1/16. log-omega then exponentiates it. The arms are identical
+#: at every rung anchor and part at the second inner Newton iteration of the target rung's first step,
+#: so a per-step alpha -- a MINIMUM over inner iterations -- is what hid it. Run
+#: `closure_stall_probe.py` beside this file to re-ask any of it. Three earlier mechanisms were
+#: refuted on the way and should not be re-proposed -- the wall omega gradient, the correction
+#: matrices' conditioning, and the closure's double correction on gradient-type patches.
 MULTICORR_CLOSURES = {"owner": OwnerGradient, "skew": SkewCorrectedGradient}
 MULTICORR_CLOSURE = os.environ.get("PITZ_AB_MULTICORR_CLOSURE", "owner")
+
+#: Freeze `k` inside the k-production's eddy viscosity in the OPERATOR the shifted solve
+#: differentiates, leaving the residual exact. Off by default; `PITZ_AB_FROZEN_PRODUCTION=1` enables it.
+#:
+#: Why this case carries the switch: the closure comparison above is what measured the term's cost.
+#: `nu_t` is proportional to `k`, so the production is too, and differentiating that puts a NEGATIVE
+#: term on the k row's Jacobian diagonal -- at this case's target-rung iterate, -1.2e-03 to -1.9e-03
+#: against a pseudo-time shift of +2.3e-03, leaving 16-47% of the shift as effective diagonal. A 12%
+#: difference in the velocity gradient between reconstructions then becomes a 3x difference in that
+#: near-cancelling sum and a 30x difference in the k correction, which the near-wall omega fixation
+#: exponentiates. Frozen, the diagonal is +4.8e-03 and IDENTICAL across reconstructions to 0.2%.
+#:
+#: ⚠️ Operator only. This term is active everywhere, not merely where some cap bites, so a residual
+#: carrying it would make every sensitivity wrong -- which is why it is a Jacobian stand-in and why
+#: the sibling `explicit_production_limiter` flag is not the same trade.
+FROZEN_PRODUCTION = os.environ.get("PITZ_AB_FROZEN_PRODUCTION", "") not in ("", "0")
 
 ARMS = (
     ("standard", "CorrectedGreenGauss", CorrectedGreenGauss()),
@@ -317,6 +338,7 @@ def solve_arm(gradient_scheme, log_path, *, reach=None, points=None, max_steps=N
         ("trailing inverse", f"jacobi_smoothed {JACOBI_TRAILING}"),
         ("host ILU kernel", "compiled" if compare.ILU0_COMPILED else "PURE PYTHON (timings void)"),
         ("Reynolds continuation points", points),
+        ("frozen production viscosity (operator)", FROZEN_PRODUCTION),
         ("stop (rtol, atol)", f"{compare.RTOL}, {compare.ATOL}"),
     ):
         logger.note(f"  {name}: {value}")
@@ -324,8 +346,17 @@ def solve_arm(gradient_scheme, log_path, *, reach=None, points=None, max_steps=N
     # `reach`, not the module-level REACH: a single-arm or sweep run passes it as an argument, and
     # reading the global here made the banner print a reach the probe was not built at -- which is the
     # one failure mode that turns a sweep into three identical runs that look like a null result.
+    # `production_viscosity_frozen` is what makes the preconditioner follow the operator: the probe
+    # materializes whatever the Krylov iteration APPLIES, and `narrow` carries that to the initial
+    # build, the refresh hook and every rebind across a Reynolds rung. Passing the frozen assembler
+    # here instead would change only the colouring PLAN, which is structural and identical either way
+    # -- a fix that measurably does nothing, which is how this was got wrong the first time.
     probe = CoupledJacobianProbe.build(
-        coupled, stencil_reach=reach, column_reach=COLUMN_REACH, gradient_sweeps=PROBE_SWEEPS
+        coupled,
+        stencil_reach=reach,
+        column_reach=COLUMN_REACH,
+        gradient_sweeps=PROBE_SWEEPS,
+        production_viscosity_frozen=FROZEN_PRODUCTION,
     )
     refresh = amg_beta_tracking_refresh(
         coupled,
@@ -361,6 +392,7 @@ def solve_arm(gradient_scheme, log_path, *, reach=None, points=None, max_steps=N
             field_split=True,
             leading_inverse=simple_smoothed_inverse(**SIMPLE_FLOW),
             trailing_inverse=jacobi_smoothed_inverse(**JACOBI_TRAILING),
+            jacobian_production_viscosity=FROZEN_PRODUCTION,
             inner_observer=logger.on_inner,
         )
         shared[:] = [engine.shift_policy.preconditioner]

@@ -9,6 +9,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from aquaflux.boundary import BoundaryConditions, ZeroGradient
+from aquaflux.discretization import ResidualAssembler
+from aquaflux.properties import PropertyModel
 from aquaflux.schemes import (
     CellwiseFallback,
     CompactGreenGauss,
@@ -367,6 +370,75 @@ def test_every_scheme_honours_an_imposed_gradient_whether_or_not_it_can_use_it_e
             assert np.array_equal(
                 np.asarray(given.at[cells].set(plain[cells])), np.asarray(plain)
             ), type(scheme)
+
+
+def test_a_gradient_type_patch_reconstructs_a_linear_field_exactly() -> None:
+    """Linear exactness on a patch whose value follows the owner cell -- for BOTH closures.
+
+    This module's one hard requirement on a closure is that it reproduce linear fields, because an
+    error at linear order lands in a term the correction matrices -- calibrated on quadratics -- can
+    never remove. Until the boundary extrapolation was added, **neither** closure met it on a
+    gradient-type patch, and not because of the closure: the *first pass* reads boundary VALUES, and a
+    zero-gradient value asserts a normal derivative an unconverged iterate does not have. The
+    Green--Gauss sum then averages a field against a boundary that contradicts it.
+
+    Two properties are pinned, and the second is what makes the first meaningful:
+
+    * the reconstructed gradient of a linear field is exact to roundoff, both closures; and
+    * the error it replaces did **not** shrink with the mesh -- so a test at one resolution could not
+      have told a converging scheme from a stalled one. Measured before the fix: 57 % under
+      ``OwnerGradient`` and 62 % under ``SkewCorrectedGradient`` at every resolution, with a Hessian
+      that *doubled* on each refinement.
+    """
+    a = jnp.array([1.7, -1.1])
+    for n in (6, 12):
+        mesh = perturbed_grid_2d(n, n, perturb=0.0, seed=1)
+        geometry = mesh.geometry()
+        field = geometry.cell.centroid @ a
+        boundary = BoundaryConditions({name: ZeroGradient() for name in mesh.face_patches.names})
+        for closure in (OwnerGradient(), SkewCorrectedGradient()):
+            assembler = ResidualAssembler.build(
+                mesh,
+                geometry,
+                PropertyModel({}),
+                (),
+                boundary,
+                gradient_scheme=MultipleCorrectionGradient(boundary_closure=closure, fallback=None),
+            )
+            error = jnp.max(jnp.linalg.norm(assembler.gradient(field) - a, axis=-1))
+            assert float(error) / float(jnp.linalg.norm(a)) < 1e-12, type(closure).__name__
+
+
+def test_a_prescribed_patch_is_left_alone_by_the_extrapolation() -> None:
+    """The control: where the boundary value does not follow the owner, nothing changes.
+
+    ``boundary_chain`` is zero on a prescribed patch, so the blend keeps the value the caller gave and
+    the reconstruction is bit-identical to one built without the argument. Without this, a repair that
+    simply overwrote every boundary value would pass the exactness test above and quietly discard
+    every Dirichlet datum in the problem.
+    """
+    mesh = perturbed_grid_2d(6, 6, perturb=0.25, seed=5)
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    field = jax.random.normal(jax.random.PRNGKey(4), (mesh.n_cells,))
+    values = jax.random.normal(jax.random.PRNGKey(5), (mesh.n_faces,))
+    scheme = MultipleCorrectionGradient(boundary_closure=SkewCorrectedGradient()).bind(
+        mesh, geometry
+    )
+    plain = scheme.reconstruct(field, mesh, geometry, values)[0]
+    prescribed = scheme.reconstruct(
+        field, mesh, geometry, values, boundary_chain=jnp.zeros(mesh.n_faces)
+    )[0]
+    assert jnp.array_equal(prescribed, plain)
+    # ...and an owner-derived patch genuinely moves, so the argument is not being ignored.
+    derived = scheme.reconstruct(
+        field,
+        mesh,
+        geometry,
+        values,
+        boundary_chain=jnp.where(face_cells.interior, 0.0, 1.0),
+    )[0]
+    assert not jnp.allclose(derived, plain)
 
 
 def test_a_differentiating_closure_gets_boundary_values_at_its_own_gradient() -> None:

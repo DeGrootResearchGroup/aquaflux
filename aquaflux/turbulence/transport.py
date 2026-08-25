@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
@@ -225,6 +226,19 @@ class SSTTurbulence(eqx.Module):
         Freeze the k-production cap's ``k`` in the **linearization** (a Patankar / deferred-correction
         treatment): production keeps its exact value, but the term is dropped from the Jacobian
         wherever the cap is active. ``False`` (default) is the exact operator.
+    explicit_production_viscosity : bool
+        Freeze ``k`` inside the production's **eddy viscosity** for the linearization; static.
+        ``nu_t`` is proportional to ``k``, so the production is too, and differentiating that puts a
+        **negative** term on the k row's own Jacobian diagonal -- measured on a separating benchmark
+        at ``-1.2e-03`` to ``-1.9e-03`` against a pseudo-time shift of ``+2.3e-03``, i.e. a
+        near-cancellation that leaves the effective diagonal at 16--47 % of the shift and amplifies
+        anything upstream of it thirtyfold. Freezing it takes that diagonal to ``+4.8e-03``.
+
+        ⚠️ **For a Jacobian stand-in, never for the residual a sensitivity is taken through.** The
+        limiter above is safe to freeze in the residual wherever its cap is inactive at the root; this
+        term is active *everywhere*, so a residual carrying it would make the adjoint wrong
+        everywhere. Build a copy with it set and hand that copy's residual to the solve as its
+        **operator**, leaving the true residual to decide where the march lands.
 
         **Opt in only for a forward solve, and only knowingly.** Where the cap is active at the
         converged state, the implicit-function-theorem adjoint linearizes a residual different from
@@ -261,6 +275,7 @@ class SSTTurbulence(eqx.Module):
     k_boundary: BoundaryConditions
     omega_boundary: BoundaryConditions
     explicit_production_limiter: bool = eqx.field(static=True, default=False)
+    explicit_production_viscosity: bool = eqx.field(static=True, default=False)
 
     @classmethod
     def build(
@@ -277,6 +292,7 @@ class SSTTurbulence(eqx.Module):
         omega_boundary: BoundaryConditions,
         *,
         explicit_production_limiter: bool = False,
+        explicit_production_viscosity: bool = False,
     ) -> SSTTurbulence:
         """Build the assembler, deriving the wall distance and wall-adjacent cell set.
 
@@ -290,6 +306,11 @@ class SSTTurbulence(eqx.Module):
             attribute); ``False`` (default) is the exact operator. ``True`` is the robust choice for a
             bare or weakly preconditioned segregated scalar solve, and only for one -- it makes the
             adjoint wrong wherever the cap is active at the root.
+        explicit_production_viscosity : bool
+            Freeze ``k`` inside the production's **eddy viscosity** for the linearization (see the
+            class attribute); ``False`` (default) is the exact operator. ⚠️ Unlike the limiter above
+            this term is active *everywhere*, never only where a cap bites, so a copy carrying it is
+            for a **Jacobian stand-in** and never for the residual a sensitivity is taken through.
 
         The remaining arguments are stored directly (see the class attributes).
         """
@@ -317,6 +338,7 @@ class SSTTurbulence(eqx.Module):
             k_boundary=k_boundary,
             omega_boundary=omega_boundary,
             explicit_production_limiter=explicit_production_limiter,
+            explicit_production_viscosity=explicit_production_viscosity,
         )
 
     def resolve_boundaries(self) -> SSTTurbulence:
@@ -689,7 +711,7 @@ class SSTTurbulence(eqx.Module):
             self.k_boundary,
             source_operators=(
                 KProduction(
-                    closure.nu_t,
+                    self._production_viscosity(closure),
                     closure.strain_rate,
                     closure.omega,
                     self.model,
@@ -700,6 +722,28 @@ class SSTTurbulence(eqx.Module):
             ),
         )
         return assembler.residual
+
+    def _production_viscosity(self, closure: SSTClosureFields) -> jnp.ndarray:
+        """The eddy viscosity the k-production reads, shape ``(n_cells,)``.
+
+        :attr:`explicit_production_viscosity` freezes ``k`` **here and only here** -- in the
+        ``a_1 k / max(a_1 omega, S F_2)`` that makes production proportional to ``k``. Everything else
+        stays live: ``omega``, the strain rate (including its own near-wall ``k`` blend), the k
+        diffusivity's ``nu_t``, the destruction, and the momentum closure. So what is removed is the
+        single derivative that makes the k row's Jacobian diagonal negative, and nothing else.
+
+        The strain rate is taken from the closure rather than recomputed, so the frozen viscosity is
+        the same function of the same inputs as the live one but for that one argument.
+        """
+        if not self.explicit_production_viscosity:
+            return closure.nu_t
+        return self.model.eddy_viscosity(
+            jax.lax.stop_gradient(closure.k),
+            closure.omega,
+            closure.strain_rate,
+            self.molecular_viscosity,
+            self.wall_distance,
+        )
 
     def _near_wall_closure(self, wall_shear_rate: jnp.ndarray) -> NearWallKClosure:
         """The adaptive near-wall k-budget collaborator for this sweep's wall shear rate."""
