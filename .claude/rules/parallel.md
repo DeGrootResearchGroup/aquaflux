@@ -252,7 +252,36 @@ distributed-advection path yet); it reuses the identical hook mechanism.
   `HessianCorrectedGradient` **raise** when asked to run distributed rather than misconverge.
 
 The device tests simulate 4 CPU devices via `--xla_force_host_platform_device_count=4`, which must
-be set **before JAX initializes** — hence the subprocess.
+be set **before JAX initializes** — hence the subprocess. Spawning it has exactly one home,
+`tests/support/devices.py` (`run_on_simulated_devices`), and that is not tidiness: `XLA_FLAGS` is a
+single string of several entries, so the device count must be **appended**, and a child that assigns
+it instead drops the test workflow's `--xla_cpu_multi_thread_eigen=false`. The child then starves a
+*different* worker, so nothing about the failure names the file that did it. Which is how it came to
+be fixed in one of five copies (2026-08-22) and left in the other four for three days: the fix was
+made where the symptom appeared, and the copies had no reason to be looked at. Whether a clobbering
+child was co-running at either CI crash below is **not** established — the demonstrated cause there is
+the timeout — but a job-wide flag that four of five children silently discarded is a defect on its own
+terms. `tests/unit/test_simulated_devices.py` pins the append, and fails if the assignment comes back.
+
+⚠️ **These are the most expensive tests in the fast tier, and what they cost is set by the machine,
+not by the test.** Each pays a full `shard_map` compile. Measured 2026-08-25 on macOS arm64, 11 cores,
+jax/jaxlib 0.10.2, x64, `OMP_NUM_THREADS=1` and Eigen multi-threading off, running the file alone at
+system load ~5: **42 s** for `test_distributed_gradient`'s forward check and **17 s** for its control.
+The same two tests on the same commit took **901 s** and **521 s** at system load ~65 (another session
+was saturating the machine) — a run that is void for cost, but the *ratio* is the point: an order of
+magnitude, with no assertion and no log line to say the machine was the cause.
+
+That is what puts these tests near the per-test timeout on a hosted runner, where four xdist workers
+and their spawned children share four cores. Six of them (collection indices 216–221) land in **one**
+worker's initial `--dist load` chunk, so they also run back to back rather than spread out. At the
+300 s timeout the workflow used until 2026-08-25, one crossed it **twice in three days** — and
+`--timeout-method=thread` cannot interrupt a test, so it *kills the worker*, which xdist reports as
+`node down: Not properly terminated` and `worker 'gwN' crashed while running <test>`, indistinguishable
+from an OOM kill and with no mention of a timeout anywhere. The timeout is now 900 s, a deadlock guard
+under the job's own cap, and the job reports `--durations=15` so the next incident has a number in it.
+
+Before adding another device test, account for its cost. The cheapest lever is fewer subprocesses, but
+each one's peak memory is why the existing checks were split across them in the first place.
 
 ## Not yet built
 

@@ -28,14 +28,11 @@ small mesh and few sweeps keep every compile and the grad tape small.
 
 from __future__ import annotations
 
-import subprocess
-import sys
+from tests.support.devices import run_on_simulated_devices
 
 # Shared setup: a skewed mesh, a diffusion assembler whose gradient is the iterative
 # CorrectedGreenGauss with a fixed-sweep solve, and its distributed counterpart on four devices.
 _SETUP = r"""
-import os
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 import numpy as np
 import jax, jax.numpy as jnp
 import aquaflux  # x64
@@ -165,19 +162,13 @@ print("ok")
 )
 
 
-def _run(source: str) -> None:
-    result = subprocess.run([sys.executable, "-c", source], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip().splitlines()[-1] == "ok"
-
-
 def test_distributed_swept_gradient_forward_matches_serial_via_per_sweep_exchange() -> None:
     """The sharded corrected-gradient residual is serial-exact, and the per-sweep exchange is why:
     dropping only it makes the skewed-mesh residual diverge from serial."""
-    _run(_FORWARD)
+    run_on_simulated_devices(_FORWARD)
 
 
 def test_distributed_swept_gradient_adjoint_matches_and_unsupported_solves_refuse() -> None:
     """The adjoint through the per-sweep exchange matches the serial parameter gradient, and the
     GMRES gradient solve and Hessian scheme raise when asked to run distributed."""
-    _run(_ADJOINT)
+    run_on_simulated_devices(_ADJOINT)
