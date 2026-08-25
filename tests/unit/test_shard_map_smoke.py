@@ -15,12 +15,9 @@ process has already initialized JAX — the same reason `test_x64_import` uses a
 
 from __future__ import annotations
 
-import subprocess
-import sys
+from tests.support.devices import run_on_simulated_devices
 
 _SUBPROCESS = r"""
-import os
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 import numpy as np
 import jax, jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec as P
@@ -55,6 +52,4 @@ print("ok")
 
 def test_shard_map_all_gather_is_differentiable_on_multiple_devices() -> None:
     """A `shard_map` + `all_gather` halo pattern matches serial in value and gradient on 4 devices."""
-    result = subprocess.run([sys.executable, "-c", _SUBPROCESS], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip().splitlines()[-1] == "ok"
+    run_on_simulated_devices(_SUBPROCESS)

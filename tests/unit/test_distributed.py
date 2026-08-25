@@ -16,12 +16,9 @@ Runs in a subprocess so multiple CPU devices can be simulated
 
 from __future__ import annotations
 
-import subprocess
-import sys
+from tests.support.devices import run_on_simulated_devices
 
 _SUBPROCESS = r"""
-import os
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 import numpy as np
 import jax, jax.numpy as jnp
 import aquaflux  # x64
@@ -77,8 +74,6 @@ print("ok")
 
 
 _HALO_VECTOR_SUBPROCESS = r"""
-import os
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 import numpy as np
 import jax, jax.numpy as jnp
 from jax.sharding import Mesh as DeviceMesh, PartitionSpec as Pspec
@@ -122,15 +117,9 @@ print("ok")
 """
 
 
-def _run(source: str) -> None:
-    result = subprocess.run([sys.executable, "-c", source], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip().splitlines()[-1] == "ok"
-
-
 def test_distributed_residual_matches_serial_value_and_gradient() -> None:
     """The `shard_map` residual and its gradient match serial on 4 simulated devices."""
-    _run(_SUBPROCESS)
+    run_on_simulated_devices(_SUBPROCESS)
 
 
 def test_halo_exchange_carries_a_vector_field() -> None:
@@ -139,4 +128,4 @@ def test_halo_exchange_carries_a_vector_field() -> None:
     Pins the property the derived-field halo depends on: exchanging a reconstructed gradient
     (shape ``(n_cells, dim)``) rather than only a scalar needs no new code path.
     """
-    _run(_HALO_VECTOR_SUBPROCESS)
+    run_on_simulated_devices(_HALO_VECTOR_SUBPROCESS)

@@ -141,7 +141,8 @@ jobs:
       github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
       && github.event.action != 'labeled'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Observed 13-20 min; the cap is headroom over that, not a target.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -163,13 +164,30 @@ jobs:
         # belong to the heavier tiers below. --timeout names a deadlocked test
         # instead of hanging; --max-worker-restart=0 fails the run on a crashed
         # (e.g. OOM-killed) worker rather than silently retrying.
+        #
+        # THE PER-TEST TIMEOUT IS A DEADLOCK GUARD, NOT A COST BUDGET, and it must be set
+        # accordingly: `--timeout-method=thread` cannot interrupt a test, so when it fires it
+        # KILLS THE WORKER. xdist then reports `node down: Not properly terminated` and
+        # `worker 'gwN' crashed while running <test>` -- the same output an OOM kill produces,
+        # with no mention of a timeout anywhere in the log, so a too-tight value does not read as
+        # a too-tight value. At 300s it fired twice in three days on the sharded-residual tests,
+        # which spawn a fresh interpreter to compile a `shard_map` program. Those cost ~42s each
+        # measured alone on an idle fast development core, and what they actually cost is set by
+        # how loaded the machine is -- an order of magnitude more under saturation -- which here
+        # means four workers and their spawned children sharing four runner cores. 900s still
+        # names a hung test ahead of the job cap above, with margin for a loaded runner.
+        #
+        # `--durations=15` is what makes the next such incident diagnosable: without it nothing
+        # anywhere records how long a test took, so "did it exceed the timeout" cannot be answered
+        # from the log at all.
+        #
         # `-rs` lists every skipped test WITH ITS REASON. A skip and a pass are the same exit
         # status, so without it a module that never ran here is indistinguishable from one that
         # passed -- which is how two modules gated on an optional solver library went four days
         # without running while every required check stayed green.
         run: >-
           pytest tests/unit -m "not slow and not validation" -q -rs -n auto
-          --timeout=300 --timeout-method=thread --max-worker-restart=0
+          --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
 
   # ---- Fast integration tests (always-on, sharded) ----------------------------
   # The differentiable flow-solve integration tests each build and adjoint a

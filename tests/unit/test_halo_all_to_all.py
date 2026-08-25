@@ -12,12 +12,9 @@ Runs in a subprocess so 4 CPU devices can be simulated, which must be configured
 
 from __future__ import annotations
 
-import subprocess
-import sys
+from tests.support.devices import run_on_simulated_devices
 
 _FILLS_AGREE = r"""
-import os
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 import numpy as np
 import jax, jax.numpy as jnp
 from jax.sharding import Mesh as DeviceMesh, PartitionSpec as Pspec
@@ -62,8 +59,6 @@ print("ok")
 """
 
 _RESIDUAL_MATCHES = r"""
-import os
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 import numpy as np
 import jax, jax.numpy as jnp
 import aquaflux  # x64
@@ -108,17 +103,11 @@ print("ok")
 """
 
 
-def _run(source: str) -> None:
-    result = subprocess.run([sys.executable, "-c", source], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip().splitlines()[-1] == "ok"
-
-
 def test_all_to_all_fills_match_all_gather() -> None:
     """The `all_to_all` halo fills every real owned+ghost row to the all-gather values (scalar+vector)."""
-    _run(_FILLS_AGREE)
+    run_on_simulated_devices(_FILLS_AGREE)
 
 
 def test_distributed_residual_with_all_to_all_matches_serial() -> None:
     """A distributed residual on the `all_to_all` halo matches serial in value and gradient."""
-    _run(_RESIDUAL_MATCHES)
+    run_on_simulated_devices(_RESIDUAL_MATCHES)
